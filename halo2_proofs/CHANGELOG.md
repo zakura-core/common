@@ -12,6 +12,9 @@ and this project adheres to Rust's notion of
   generator vector, using GLV for Pasta curves because the Fiat-Shamir
   challenges are public.
 - Apple AArch64 builds now enable the vendored Pasta assembly field backend.
+- `halo2_proofs::plonk::verify_proof` now computes instance commitments
+  directly from their supplied Lagrange coefficients, without zero-padding to
+  the evaluation domain.
 - MSRV is now 1.88.
 
 ## [0.3.5] - 2026-08-02

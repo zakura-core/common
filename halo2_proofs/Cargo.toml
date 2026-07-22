@@ -138,6 +138,11 @@ name = "plonk"
 path = "benches/plonk.rs"
 harness = false
 
+[[bench]]
+name = "plonk_verifier"
+path = "benches/plonk_verifier.rs"
+harness = false
+
 [dependencies.backtrace]
 version = "0.3"
 optional = true
