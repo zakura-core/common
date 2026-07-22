@@ -15,6 +15,8 @@ and this project adheres to Rust's notion of
 - `halo2_proofs::plonk::verify_proof` now computes instance commitments
   directly from their supplied Lagrange coefficients, without zero-padding to
   the evaluation domain.
+- `halo2_proofs::arithmetic::best_multiexp` now computes each scalar's
+  canonical representation once per MSM instead of once per window.
 - MSRV is now 1.88.
 
 ## [0.3.5] - 2026-08-02
