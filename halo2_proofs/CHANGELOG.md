@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 ### Changed
+- The IPA prover now batches the scalar multiplications used to collapse its
+  generator vector, using GLV for Pasta curves because the Fiat-Shamir
+  challenges are public.
 - MSRV is now 1.88.
 
 ## [0.3.5] - 2026-08-02
