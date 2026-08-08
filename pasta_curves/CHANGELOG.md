@@ -12,7 +12,8 @@ and this project adheres to Rust's notion of
   multiplication of affine points by the same public scalar. Pallas and Vesta
   use batched GLV multiplication when the `glv` feature is enabled.
 - `aarch64-asm` feature flag, which enables an assembly backend for runtime
-  `Fp` and `Fq` multiplication and squaring on Apple AArch64 targets.
+  `Fp` and `Fq` multiplication, squaring, and canonical-representation
+  conversion on Apple AArch64 targets.
 
 ### Changed
 - MSRV is now 1.88.
