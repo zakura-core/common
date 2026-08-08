@@ -9,6 +9,9 @@ and this project adheres to Rust's notion of
 
 ### Changed
 - MSRV is now 1.88.
+- `halo2_gadgets::ecc`: Speed up fixed-base scalar-multiplication witness
+  generation without changing the circuit constraints or proving and verifying
+  keys.
 
 ## [0.5.0] - 2026-06-02
 
