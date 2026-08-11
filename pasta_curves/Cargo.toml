@@ -151,8 +151,7 @@ version = "2.3"
 default-features = false
 
 [build-dependencies.cc]
-# Latest release compatible with the workspace MSRV.
-version = "=1.4.0"
+version = "1.0.83"
 optional = true
 
 [dev-dependencies.bincode]
