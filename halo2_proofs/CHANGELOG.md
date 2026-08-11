@@ -21,6 +21,7 @@ and this project adheres to Rust's notion of
   canonical representation once per MSM instead of once per window.
 - `halo2_proofs::plonk::create_proof` now commits directly to the supplied
   instance values instead of zero-padding them to the evaluation domain first.
+- Zero-padded FFTs now skip stages that only combine known-zero coefficients.
 - MSRV is now 1.88.
 
 ## [0.3.5] - 2026-08-02
