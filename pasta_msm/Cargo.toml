@@ -1,0 +1,38 @@
+[package]
+name = "zakura-pasta-msm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Caller-thread CPU multiscalar multiplication for the Pasta curves"
+documentation = "https://docs.rs/zakura-pasta-msm"
+repository = "https://github.com/zakura-core/libraries"
+readme = "README.md"
+keywords = ["cryptography", "msm", "pasta"]
+categories = ["cryptography"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/native/**",
+    "/Cargo.toml",
+    "/build.rs",
+    "/build_selection.rs",
+    "/CHANGELOG.md",
+    "/LICENSE-APACHE",
+    "/README.md",
+    "/THIRD_PARTY_NOTICES.md",
+    "/UPSTREAM.md",
+]
+
+[lib]
+name = "pasta_msm"
+
+[dependencies]
+pasta_curves = { version = "0.5.2", path = "../pasta_curves", features = ["repr-c"] }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+rand = "0.8"
+rand_chacha = "0.3"

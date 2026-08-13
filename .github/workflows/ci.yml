@@ -33,6 +33,7 @@ jobs:
       halo2: ${{ steps.filter.outputs.halo2 }}
       halo2_legacy_pdqsort: ${{ steps.filter.outputs.halo2_legacy_pdqsort }}
       orchard: ${{ steps.filter.outputs.orchard }}
+      pasta_msm: ${{ steps.filter.outputs.pasta_msm }}
       pasta_curves: ${{ steps.filter.outputs.pasta_curves }}
       reddsa: ${{ steps.filter.outputs.reddsa }}
       redjubjub: ${{ steps.filter.outputs.redjubjub }}
@@ -89,6 +90,7 @@ jobs:
           halo2=false
           halo2_legacy_pdqsort=false
           orchard=false
+          pasta_msm=false
           pasta_curves=false
           reddsa=false
           redjubjub=false
@@ -106,6 +108,7 @@ jobs:
             halo2_poseidon
             halo2_proofs
             orchard
+            pasta_msm
             pasta_curves
             reddsa
             redjubjub
@@ -138,6 +141,9 @@ jobs:
               orchard/*)
                 orchard=true
                 ;;
+              pasta_msm/*)
+                pasta_msm=true
+                ;;
               pasta_curves/*)
                 pasta_curves=true
                 ;;
@@ -166,6 +172,7 @@ jobs:
             halo2=true
             halo2_legacy_pdqsort=true
             orchard=true
+            pasta_msm=true
             pasta_curves=true
             reddsa=true
             redjubjub=true
@@ -180,6 +187,7 @@ jobs:
           # member check above catches new crates; update this graph when a
           # workspace path-dependency edge changes.
           if [[ "$pasta_curves" == true ]]; then
+            pasta_msm=true
             halo2=true
             reddsa=true
             sinsemilla=true
@@ -212,6 +220,7 @@ jobs:
           if [[ "$halo2" == true ||
             "$halo2_legacy_pdqsort" == true ||
             "$orchard" == true ||
+            "$pasta_msm" == true ||
             "$pasta_curves" == true ||
             "$reddsa" == true ||
             "$redjubjub" == true ||
@@ -225,6 +234,7 @@ jobs:
             echo "halo2=$halo2"
             echo "halo2_legacy_pdqsort=$halo2_legacy_pdqsort"
             echo "orchard=$orchard"
+            echo "pasta_msm=$pasta_msm"
             echo "pasta_curves=$pasta_curves"
             echo "reddsa=$reddsa"
             echo "redjubjub=$redjubjub"
@@ -263,6 +273,11 @@ jobs:
       - name: orchard / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.orchard == 'true' }}
         run: bash .github/scripts/check_rust_group.sh orchard true false
+      - name: zakura-pasta-msm / Stable and MSRV checks
+        if: ${{ !cancelled() && needs.changes.outputs.pasta_msm == 'true' }}
+        run: >-
+          bash .github/scripts/check_rust_group.sh
+          zakura-pasta-msm true false
       - name: pasta_curves / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.pasta_curves == 'true' }}
         run: bash .github/scripts/check_rust_group.sh pasta_curves false false
@@ -299,6 +314,34 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
+
+  pasta-msm-test:
+    name: zakura-pasta-msm / Test on ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.pasta_msm == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
+      - name: Run focused tests
+        run: cargo +1.88.0 test --locked --package zakura-pasta-msm
+      - name: Compile-check x86_64 ADX assembly selection
+        if: runner.os == 'Windows'
+        env:
+          CARGO_TARGET_DIR: target/zakura-pasta-msm-adx
+          RUSTFLAGS: -C target-feature=+adx
+        run: cargo +1.88.0 test --locked --package zakura-pasta-msm --no-run
+      - name: Verify generated assembly
+        if: runner.os == 'Linux'
+        shell: bash
+        run: pasta_msm/native/asm/regenerate.sh --check
 
   # zcash/halo2 .github/workflows/ci.yml @
   # 723a90bc598d986bdf59941a8011c60a0819d6b9
@@ -964,6 +1007,7 @@ jobs:
       - changes
       - rust-checks
       - formatting
+      - pasta-msm-test
       - halo2-test
       - halo2-platform-smoke
       - halo2-test-32-bit
@@ -997,6 +1041,7 @@ jobs:
           allowed-skips: >-
             rust-checks,
             formatting,
+            pasta-msm-test,
             halo2-test,
             halo2-platform-smoke,
             halo2-test-32-bit,

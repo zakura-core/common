@@ -12,7 +12,8 @@
 # crates.io, that crate must either be added here or have its edge rewritten,
 # or a registry copy will silently coexist with the forks.
 #
-# - pasta_curves, halo2_proofs, halo2_gadgets, halo2_poseidon,
+# - pasta_curves, zakura-pasta-msm, halo2_proofs, halo2_gadgets,
+#   halo2_poseidon,
 #   halo2_legacy_pdqsort, orchard: the proving stack itself.
 # - sinsemilla, reddsa, redjubjub, sapling-crypto, zcash_proofs: the middle
 #   layer between Zakura and the proving stack (reddsa carries the
@@ -28,6 +29,7 @@ members = [
     "halo2_poseidon",
     "halo2_proofs",
     "orchard",
+    "pasta_msm",
     "pasta_curves",
     "reddsa",
     "redjubjub",
