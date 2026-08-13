@@ -21,5 +21,9 @@ mod helpers;
 
 #[cfg(feature = "prover-fixed-msm-table")]
 const PROVER_FIXED_MSM_TABLE_K: u32 = 11;
+// Ten bases cap each full subset block at 1,023 points. For Pasta's 64-byte
+// affine representation, this keeps the k = 11 table near 12.8 MiB; a wider
+// block doubles storage per added base, while a narrower block adds more
+// per-bit table lookups and additions.
 #[cfg(feature = "prover-fixed-msm-table")]
 const PROVER_FIXED_MSM_TABLE_BLOCK_BASES: usize = 10;

@@ -18,9 +18,9 @@ on `std`.
 
 The non-default `"prover-fixed-msm-table"` feature forwards Halo 2's
 proving-only fixed-base MSM table when the `"circuit"` feature is also active.
-Orchard shares one approximately 12.8 MiB table across its proving and
-verifying parameter clones. Parameter serialization and proof encoding are
-unchanged.
+For Pasta curves' 64-byte affine representation, Orchard shares one
+approximately 12.8 MiB table across its proving and verifying parameter
+clones. Parameter serialization and proof encoding are unchanged.
 
 ## License
 

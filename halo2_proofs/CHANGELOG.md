@@ -7,10 +7,12 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
-### Changed
-- The non-default `prover-fixed-msm-table` feature now uses a proving-only
+### Added
+- The non-default `prover-fixed-msm-table` feature uses a proving-only
   fixed-base table for dense `k = 11` polynomial commitments and the first IPA
   round.
+
+### Changed
 - The IPA prover now batches the scalar multiplications used to collapse its
   generator vector, using GLV for Pasta curves because the Fiat-Shamir
   challenges are public.

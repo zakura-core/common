@@ -22,9 +22,10 @@ This will significantly degrade performance.
 ## Fixed-base prover table
 
 The non-default `"prover-fixed-msm-table"` feature builds a proving-only
-fixed-base MSM table for parameters with `k = 11`. It retains approximately
-12.8 MiB per parameter generator set and moves table construction into
-parameter setup. Parameter serialization and proof encoding are unchanged.
+fixed-base MSM table for parameters with `k = 11`. For Pasta curves' 64-byte
+affine representation, it retains approximately 12.8 MiB per parameter
+generator set and moves table construction into parameter setup. Parameter
+serialization and proof encoding are unchanged.
 
 ## License
 

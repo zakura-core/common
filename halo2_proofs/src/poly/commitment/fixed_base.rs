@@ -152,8 +152,18 @@ mod tests {
 
     use super::{
         FixedBaseMsmTable, PROVER_FIXED_MSM_TABLE_BASES, PROVER_FIXED_MSM_TABLE_BLOCKS,
-        PROVER_FIXED_MSM_TABLE_POINTS,
+        PROVER_FIXED_MSM_TABLE_BLOCK_BASES, PROVER_FIXED_MSM_TABLE_POINTS,
     };
+
+    const IPA_HALF_BASE: usize = (PROVER_FIXED_MSM_TABLE_BASES - 1) / 2;
+    const IPA_HALF_BLOCK_START: usize =
+        (IPA_HALF_BASE / PROVER_FIXED_MSM_TABLE_BLOCK_BASES) * PROVER_FIXED_MSM_TABLE_BLOCK_BASES;
+    const IPA_HALF_BLOCK_END: usize = IPA_HALF_BLOCK_START + PROVER_FIXED_MSM_TABLE_BLOCK_BASES;
+    const FINAL_BLOCK_START: usize = ((PROVER_FIXED_MSM_TABLE_BASES - 1)
+        / PROVER_FIXED_MSM_TABLE_BLOCK_BASES)
+        * PROVER_FIXED_MSM_TABLE_BLOCK_BASES;
+    const LAST_GENERATOR_BASE: usize = PROVER_FIXED_MSM_TABLE_BASES - 2;
+    const BLINDING_BASE: usize = PROVER_FIXED_MSM_TABLE_BASES - 1;
 
     fn power_of_two<F: Field>(bit: usize) -> F {
         (0..bit).fold(F::ONE, |value, _| value.double())
@@ -176,19 +186,19 @@ mod tests {
 
         let ranges = [
             0..PROVER_FIXED_MSM_TABLE_BASES,
-            1020..1021,
-            1020..1024,
-            1024..1025,
-            1020..1030,
-            1024..1030,
-            1029..1030,
-            2040..2041,
-            2040..2047,
-            2047..2048,
-            2040..2048,
-            2040..PROVER_FIXED_MSM_TABLE_BASES,
-            2047..PROVER_FIXED_MSM_TABLE_BASES,
-            2048..PROVER_FIXED_MSM_TABLE_BASES,
+            IPA_HALF_BLOCK_START..IPA_HALF_BLOCK_START + 1,
+            IPA_HALF_BLOCK_START..IPA_HALF_BASE,
+            IPA_HALF_BASE..IPA_HALF_BASE + 1,
+            IPA_HALF_BLOCK_START..IPA_HALF_BLOCK_END,
+            IPA_HALF_BASE..IPA_HALF_BLOCK_END,
+            IPA_HALF_BLOCK_END - 1..IPA_HALF_BLOCK_END,
+            FINAL_BLOCK_START..FINAL_BLOCK_START + 1,
+            FINAL_BLOCK_START..LAST_GENERATOR_BASE,
+            LAST_GENERATOR_BASE..BLINDING_BASE,
+            FINAL_BLOCK_START..BLINDING_BASE,
+            FINAL_BLOCK_START..PROVER_FIXED_MSM_TABLE_BASES,
+            LAST_GENERATOR_BASE..PROVER_FIXED_MSM_TABLE_BASES,
+            BLINDING_BASE..PROVER_FIXED_MSM_TABLE_BASES,
         ];
 
         for range in ranges {

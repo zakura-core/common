@@ -38,9 +38,12 @@ const PROVER_FIXED_MSM_TABLE_BASES: usize = (1 << PROVER_FIXED_MSM_TABLE_K) + 1;
 const PROVER_FIXED_MSM_TABLE_BLOCKS: usize =
     PROVER_FIXED_MSM_TABLE_BASES.div_ceil(PROVER_FIXED_MSM_TABLE_BLOCK_BASES);
 #[cfg(feature = "prover-fixed-msm-table")]
+const PROVER_FIXED_MSM_TABLE_LAST_BLOCK_BASES: usize =
+    ((PROVER_FIXED_MSM_TABLE_BASES - 1) % PROVER_FIXED_MSM_TABLE_BLOCK_BASES) + 1;
+#[cfg(feature = "prover-fixed-msm-table")]
 const PROVER_FIXED_MSM_TABLE_POINTS: usize = (PROVER_FIXED_MSM_TABLE_BLOCKS - 1)
     * ((1 << PROVER_FIXED_MSM_TABLE_BLOCK_BASES) - 1)
-    + ((1 << (PROVER_FIXED_MSM_TABLE_BASES % PROVER_FIXED_MSM_TABLE_BLOCK_BASES)) - 1);
+    + ((1 << PROVER_FIXED_MSM_TABLE_LAST_BLOCK_BASES) - 1);
 
 /// These are the public parameters for the polynomial commitment scheme.
 #[cfg_attr(not(feature = "prover-fixed-msm-table"), derive(Debug))]
