@@ -12,6 +12,7 @@ and this library adheres to Rust's notion of
 
 - Imported the crate into the Zakura libraries workspace.
 - Raised the minimum supported Rust version to 1.88.
+- Updated parameter checks for current stable Clippy.
 
 ## [0.3.0] - 2026-04-23
 
