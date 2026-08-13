@@ -170,7 +170,7 @@ default-features = false
 [dependencies.pasta_curves]
 path = "../pasta_curves"
 version = "1.0.0-rc.1"
-features = ["glv"]
+features = ["deferred", "glv"]
 package = "zakura-pasta-curves"
 
 [target.'cfg(all(target_arch = "aarch64", target_vendor = "apple"))'.dependencies.pasta_curves]

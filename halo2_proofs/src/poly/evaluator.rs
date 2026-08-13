@@ -1,4 +1,5 @@
 use std::{
+    any::{Any, TypeId},
     fmt,
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -8,6 +9,7 @@ use std::{
 
 use ff::WithSmallOrderMulGroup;
 use group::ff::Field;
+use pasta_curves::{deferred::DeferredField, pallas, vesta};
 
 use super::{
     Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
@@ -368,6 +370,133 @@ struct SelectorFamilyRun<E, F: Field, B: Basis> {
     power: F,
 }
 
+// Accumulates a polynomial expression against precomputed powers. Pasta
+// fields use their wide product accumulator. Other fields retain ordinary
+// field arithmetic, without adding a bound to the public prover API.
+enum PowerFold<'a, F: Field> {
+    Eager {
+        accumulators: Vec<F>,
+        terms: &'a mut [F],
+    },
+    Pallas {
+        accumulators: Vec<<pallas::Base as DeferredField>::Accumulator>,
+        terms: Vec<F>,
+        output: &'a mut [F],
+    },
+    Vesta {
+        accumulators: Vec<<vesta::Base as DeferredField>::Accumulator>,
+        terms: Vec<F>,
+        output: &'a mut [F],
+    },
+}
+
+impl<'a, F: Field> PowerFold<'a, F> {
+    fn new(output: &'a mut [F]) -> Self {
+        if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
+            Self::Pallas {
+                accumulators: vec![Default::default(); output.len()],
+                terms: vec![F::ZERO; output.len()],
+                output,
+            }
+        } else if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
+            Self::Vesta {
+                accumulators: vec![Default::default(); output.len()],
+                terms: vec![F::ZERO; output.len()],
+                output,
+            }
+        } else {
+            Self::Eager {
+                accumulators: vec![F::ZERO; output.len()],
+                terms: output,
+            }
+        }
+    }
+
+    fn terms(&mut self) -> &mut [F] {
+        match self {
+            Self::Eager { terms, .. } => terms,
+            Self::Pallas { terms, .. } => terms,
+            Self::Vesta { terms, .. } => terms,
+        }
+    }
+
+    fn accumulate(&mut self, power: F) {
+        match self {
+            Self::Eager {
+                accumulators,
+                terms,
+            } => {
+                for (accumulator, term) in accumulators.iter_mut().zip(terms.iter()) {
+                    *accumulator += *term * power;
+                }
+            }
+            Self::Pallas {
+                accumulators,
+                terms,
+                ..
+            } => accumulate_deferred::<pallas::Base>(accumulators, &*terms, &power),
+            Self::Vesta {
+                accumulators,
+                terms,
+                ..
+            } => accumulate_deferred::<vesta::Base>(accumulators, &*terms, &power),
+        }
+    }
+
+    fn finish(self) {
+        match self {
+            Self::Eager {
+                accumulators,
+                terms,
+            } => terms.copy_from_slice(&accumulators),
+            Self::Pallas {
+                accumulators,
+                output,
+                ..
+            } => {
+                let result = reduce_deferred::<pallas::Base, _>(accumulators);
+                output.copy_from_slice(&result);
+            }
+            Self::Vesta {
+                accumulators,
+                output,
+                ..
+            } => {
+                let result = reduce_deferred::<vesta::Base, _>(accumulators);
+                output.copy_from_slice(&result);
+            }
+        }
+    }
+}
+
+fn accumulate_deferred<T: DeferredField + 'static>(
+    accumulators: &mut [T::Accumulator],
+    terms: &dyn Any,
+    power: &dyn Any,
+) {
+    let terms = terms
+        .downcast_ref::<Vec<T>>()
+        .expect("term buffer matches the deferred field")
+        .as_slice();
+    let power = power
+        .downcast_ref::<T>()
+        .expect("power matches the deferred field");
+    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+        T::mul_accumulate(accumulator, term, power);
+    }
+}
+
+fn reduce_deferred<T: DeferredField + 'static, F: Field>(
+    accumulators: Vec<T::Accumulator>,
+) -> Vec<F> {
+    let values: Box<dyn Any> =
+        Box::new(accumulators.into_iter().map(T::reduce).collect::<Vec<_>>());
+    match values.downcast::<Vec<F>>() {
+        Ok(values) => *values,
+        Err(_) => unreachable!("field type was checked before accumulation"),
+    }
+}
+
 impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
     fn compile(ast: &Ast<E, F, B>) -> Self {
         match ast {
@@ -599,11 +728,10 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             runs: &[SelectorFamilyRun<E, F, B>],
             base: F,
             ctx: &AstContext<'_, F, B>,
-            output: &mut [F],
             scratch: &mut [F],
-            accumulators: &mut [F],
+            fold: &mut PowerFold<'_, F>,
         ) {
-            let chunk_len = output.len();
+            let chunk_len = fold.terms().len();
             let selector_slots = runs.len() + 1;
             let (selector_scratch, body_scratch) = scratch.split_at_mut(selector_slots * chunk_len);
             let (prefixes, suffix) = selector_scratch.split_at_mut(runs.len() * chunk_len);
@@ -641,14 +769,14 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                         }
                     }
 
-                    recurse_factor_body(&run.bodies, base, ctx, output, body_scratch);
-                    for ((accumulator, selector), body) in accumulators
-                        .iter_mut()
-                        .zip(selector.iter())
-                        .zip(output.iter())
                     {
-                        *accumulator += *selector * body * run.power;
+                        let terms = fold.terms();
+                        recurse_factor_body(&run.bodies, base, ctx, terms, body_scratch);
+                        for (term, selector) in terms.iter_mut().zip(selector.iter()) {
+                            *term *= selector;
+                        }
                     }
+                    fold.accumulate(run.power);
                 }
 
                 if index > 0 {
@@ -737,16 +865,13 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     }
                 }
                 EvaluationPlan::DistributePowers { work, base } => {
-                    let mut accumulators = vec![F::ZERO; output.len()];
+                    let output_len = output.len();
+                    let mut fold = PowerFold::new(output);
                     for work in work {
                         match work {
                             DistributionWork::Term { term, power } => {
-                                recurse_into(term, ctx, output, scratch);
-                                for (accumulator, term) in
-                                    accumulators.iter_mut().zip(output.iter())
-                                {
-                                    *accumulator += *term * *power;
-                                }
+                                recurse_into(term, ctx, fold.terms(), scratch);
+                                fold.accumulate(*power);
                             }
                             DistributionWork::SharedFactor {
                                 factor,
@@ -754,33 +879,27 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                                 power,
                             } => {
                                 let (factor_values, body_scratch) =
-                                    scratch.split_at_mut(output.len());
+                                    scratch.split_at_mut(output_len);
                                 recurse_into(factor, ctx, factor_values, body_scratch);
-                                recurse_factor_body(bodies, *base, ctx, output, body_scratch);
-
-                                for ((accumulator, factor), group) in accumulators
-                                    .iter_mut()
-                                    .zip(factor_values.iter())
-                                    .zip(output.iter())
                                 {
-                                    *accumulator += *factor * group * *power;
+                                    let terms = fold.terms();
+                                    recurse_factor_body(bodies, *base, ctx, terms, body_scratch);
+                                    for (term, factor) in terms.iter_mut().zip(factor_values.iter())
+                                    {
+                                        *term *= factor;
+                                    }
                                 }
+                                fold.accumulate(*power);
                             }
                             DistributionWork::SelectorFamily { query, runs } => {
                                 accumulate_selector_family(
-                                    query,
-                                    runs,
-                                    *base,
-                                    ctx,
-                                    output,
-                                    scratch,
-                                    &mut accumulators,
+                                    query, runs, *base, ctx, scratch, &mut fold,
                                 );
                             }
                         }
                     }
 
-                    output.copy_from_slice(&accumulators);
+                    fold.finish();
                 }
                 EvaluationPlan::LinearTerm(scalar) => {
                     B::fill_linear(ctx.domain, ctx.chunk_size, ctx.chunk_index, *scalar, output)
