@@ -273,27 +273,6 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         poly
     }
 
-    /// Gets the specified chunk of the rotated version of this polynomial.
-    ///
-    /// Equivalent to:
-    /// ```ignore
-    /// self.rotate_extended(poly, rotation)
-    ///     .chunks(chunk_size)
-    ///     .nth(chunk_index)
-    ///     .unwrap()
-    ///     .to_vec()
-    /// ```
-    pub(crate) fn get_chunk_of_rotated_extended(
-        &self,
-        poly: &Polynomial<F, ExtendedLagrangeCoeff>,
-        rotation: Rotation,
-        chunk_size: usize,
-        chunk_index: usize,
-    ) -> Vec<F> {
-        let new_rotation = ((1 << (self.extended_k - self.k)) * rotation.0.abs()) as usize;
-        poly.get_chunk_of_rotated_helper(rotation.0 < 0, new_rotation, chunk_size, chunk_index)
-    }
-
     /// This takes us from the extended evaluation domain and gets us the
     /// quotient polynomial coefficients.
     ///
@@ -753,7 +732,7 @@ fn test_l_i() {
 }
 
 #[test]
-fn test_get_chunk_of_rotated_extended() {
+fn test_copy_rotated_chunk_extended() {
     use pasta_curves::pallas;
     use rand_core::OsRng;
 
@@ -782,10 +761,17 @@ fn test_get_chunk_of_rotated_extended() {
             .chunks(chunk_size)
             .enumerate()
         {
-            assert_eq!(
-                domain.get_chunk_of_rotated_extended(&poly, rotation, chunk_size, chunk_index),
-                chunk
+            let mut actual = vec![pallas::Base::ZERO; chunk.len()];
+            let rotation_abs = (rotation.0.unsigned_abs() as usize)
+                * domain.get_quotient_poly_degree().next_power_of_two();
+            poly.copy_rotated_chunk_helper(
+                rotation.0 < 0,
+                rotation_abs,
+                chunk_size,
+                chunk_index,
+                &mut actual,
             );
+            assert_eq!(actual, chunk);
         }
     }
 }

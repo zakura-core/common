@@ -194,7 +194,7 @@ impl<'a, F: Field, B: Basis> Add<&'a Polynomial<F, B>> for Polynomial<F, B> {
 }
 
 impl<F: Field> Polynomial<F, LagrangeCoeff> {
-    /// Rotates the values in a Lagrange basis polynomial by `Rotation`
+    /// Rotates the values in a Lagrange basis polynomial by [`Rotation`].
     pub fn rotate(&self, rotation: Rotation) -> Polynomial<F, LagrangeCoeff> {
         let mut values = self.values.clone();
         if rotation.0 < 0 {
@@ -208,80 +208,63 @@ impl<F: Field> Polynomial<F, LagrangeCoeff> {
         }
     }
 
-    /// Gets the specified chunk of the rotated version of this polynomial.
+    /// Copies the specified chunk of the rotated polynomial into `output`.
     ///
     /// Equivalent to:
     /// ```ignore
-    /// self.rotate(rotation)
-    ///     .chunks(chunk_size)
-    ///     .nth(chunk_index)
-    ///     .unwrap()
-    ///     .to_vec()
+    /// output.copy_from_slice(
+    ///     self.rotate(rotation)
+    ///         .chunks(chunk_size)
+    ///         .nth(chunk_index)
+    ///         .unwrap(),
+    /// )
     /// ```
-    pub(crate) fn get_chunk_of_rotated(
+    fn copy_rotated_chunk(
         &self,
         rotation: Rotation,
         chunk_size: usize,
         chunk_index: usize,
-    ) -> Vec<F> {
-        self.get_chunk_of_rotated_helper(
+        output: &mut [F],
+    ) {
+        self.copy_rotated_chunk_helper(
             rotation.0 < 0,
             rotation.0.unsigned_abs() as usize,
             chunk_size,
             chunk_index,
+            output,
         )
     }
 }
 
 impl<F: Clone + Copy, B> Polynomial<F, B> {
-    pub(crate) fn get_chunk_of_rotated_helper(
+    fn copy_rotated_chunk_helper(
         &self,
         rotation_is_negative: bool,
         rotation_abs: usize,
         chunk_size: usize,
         chunk_index: usize,
-    ) -> Vec<F> {
-        // Compute the lengths such that when applying the rotation, the first `mid`
-        // coefficients move to the end, and the last `k` coefficients move to the front.
-        // The coefficient previously at `mid` will be the first coefficient in the
-        // rotated polynomial, and the position from which chunk indexing begins.
-        #[allow(clippy::branches_sharing_code)]
-        let (mid, k) = if rotation_is_negative {
-            let k = rotation_abs;
-            assert!(k <= self.len());
-            let mid = self.len() - k;
-            (mid, k)
+        output: &mut [F],
+    ) {
+        assert!(rotation_abs <= self.len());
+
+        // A positive rotation starts at `rotation_abs`; a negative rotation
+        // starts that far before the end.
+        let mid = if rotation_is_negative {
+            self.len() - rotation_abs
         } else {
-            let mid = rotation_abs;
-            assert!(mid <= self.len());
-            let k = self.len() - mid;
-            (mid, k)
+            rotation_abs
+        };
+        let unwrapped_start = mid + chunk_size * chunk_index;
+        let source_start = if unwrapped_start >= self.len() {
+            unwrapped_start - self.len()
+        } else {
+            unwrapped_start
         };
 
-        // Compute [chunk_start..chunk_end], the range of the chunk within the rotated
-        // polynomial.
-        let chunk_start = chunk_size * chunk_index;
-        let chunk_end = self.len().min(chunk_size * (chunk_index + 1));
-
-        if chunk_end < k {
-            // The chunk is entirely in the last `k` coefficients of the unrotated
-            // polynomial.
-            self.values[mid + chunk_start..mid + chunk_end].to_vec()
-        } else if chunk_start >= k {
-            // The chunk is entirely in the first `mid` coefficients of the unrotated
-            // polynomial.
-            self.values[chunk_start - k..chunk_end - k].to_vec()
-        } else {
-            // The chunk falls across the boundary between the last `k` and first `mid`
-            // coefficients of the unrotated polynomial. Splice the halves together.
-            let chunk = self.values[mid + chunk_start..]
-                .iter()
-                .chain(&self.values[..chunk_end - k])
-                .copied()
-                .collect::<Vec<_>>();
-            assert!(chunk.len() <= chunk_size);
-            chunk
-        }
+        let first_len = output.len().min(self.len() - source_start);
+        output[..first_len].copy_from_slice(&self.values[source_start..][..first_len]);
+        let remaining = output.len() - first_len;
+        output[first_len..].copy_from_slice(&self.values[..remaining]);
     }
 }
 
@@ -331,7 +314,7 @@ mod tests {
     use super::{EvaluationDomain, Rotation};
 
     #[test]
-    fn test_get_chunk_of_rotated() {
+    fn test_copy_rotated_chunk() {
         let k = 11;
         let domain = EvaluationDomain::<pallas::Base>::new(1, k);
 
@@ -353,10 +336,9 @@ mod tests {
             Rotation(12),
         ] {
             for (chunk_index, chunk) in poly.rotate(rotation).chunks(chunk_size).enumerate() {
-                assert_eq!(
-                    poly.get_chunk_of_rotated(rotation, chunk_size, chunk_index),
-                    chunk
-                );
+                let mut actual = vec![pallas::Base::ZERO; chunk.len()];
+                poly.copy_rotated_chunk(rotation, chunk_size, chunk_index, &mut actual);
+                assert_eq!(actual, chunk);
             }
         }
     }
