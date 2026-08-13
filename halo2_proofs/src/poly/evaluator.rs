@@ -341,6 +341,10 @@ enum EvaluationPlan<E, F: Field, B: Basis> {
     Mul(Box<Self>, Box<Self>),
     Square(Box<Self>),
     Scale(Box<Self>, F),
+    Horner {
+        base: Box<Self>,
+        coefficients: Box<[AstLeaf<E, B>]>,
+    },
     DistributePowers {
         work: Vec<DistributionWork<E, F, B>>,
         base: F,
@@ -368,6 +372,76 @@ enum DistributionWork<E, F: Field, B: Basis> {
 struct SelectorFamilyRun<E, F: Field, B: Basis> {
     bodies: Vec<EvaluationPlan<E, F, B>>,
     power: F,
+}
+
+const MIN_HORNER_COEFFICIENTS: usize = 4;
+
+struct ExpandedPolynomial<'a, E, F: Field, B: Basis> {
+    base: &'a Ast<E, F, B>,
+    coefficients: Box<[AstLeaf<E, B>]>,
+}
+
+// Recognizes a polynomial assembled from independently constructed powers:
+//
+// `0 + 1 * c_0 + (1 * x) * c_1 + ((1 * x) * x) * c_2 + ...`.
+//
+// This exact shape is emitted by fixed-base coordinate interpolation
+// constraints. The compiled plan evaluates it with Horner's method while the
+// constraint expression remains unchanged.
+fn expanded_polynomial<E: Copy, F: Field, B: Basis>(
+    ast: &Ast<E, F, B>,
+) -> Option<ExpandedPolynomial<'_, E, F, B>> {
+    let mut terms = vec![];
+    let mut prefix = ast;
+    while let Ast::Add(lhs, rhs) = prefix {
+        terms.push(rhs.as_ref());
+        prefix = lhs.as_ref();
+    }
+    if !matches!(prefix, Ast::ConstantTerm(constant) if *constant == F::ZERO) {
+        return None;
+    }
+    terms.reverse();
+
+    // Small polynomials do not recover the recognition and evaluation
+    // overhead.
+    if terms.len() < MIN_HORNER_COEFFICIENTS {
+        return None;
+    }
+
+    let mut base = None;
+    let mut previous_power = None;
+    let mut coefficients = Vec::with_capacity(terms.len());
+    for (degree, term) in terms.into_iter().enumerate() {
+        let (power, coefficient) = mul_terms(term)?;
+        let coefficient = match coefficient {
+            Ast::Poly(coefficient) => *coefficient,
+            _ => return None,
+        };
+
+        if degree == 0 {
+            if !matches!(power, Ast::ConstantTerm(constant) if *constant == F::ONE) {
+                return None;
+            }
+        } else {
+            let (power_prefix, candidate_base) = mul_terms(power)?;
+            if !same_ast(power_prefix, previous_power?) {
+                return None;
+            }
+            match base {
+                Some(base) if !same_ast(base, candidate_base) => return None,
+                Some(_) => {}
+                None => base = Some(candidate_base),
+            }
+        }
+
+        previous_power = Some(power);
+        coefficients.push(coefficient);
+    }
+
+    Some(ExpandedPolynomial {
+        base: base?,
+        coefficients: coefficients.into_boxed_slice(),
+    })
 }
 
 // Accumulates a polynomial expression against precomputed powers. Pasta
@@ -499,6 +573,15 @@ fn reduce_deferred<T: DeferredField + 'static, F: Field>(
 
 impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
     fn compile(ast: &Ast<E, F, B>) -> Self {
+        if let Ast::Add(_, _) = ast {
+            if let Some(polynomial) = expanded_polynomial(ast) {
+                return Self::Horner {
+                    base: Box::new(Self::compile(polynomial.base)),
+                    coefficients: polynomial.coefficients,
+                };
+            }
+        }
+
         match ast {
             Ast::Poly(leaf) => Self::Poly(*leaf),
             Ast::Add(lhs, rhs) => {
@@ -614,6 +697,7 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
                 .required_scratch_slots()
                 .max(1 + rhs.required_scratch_slots()),
             Self::Square(inner) | Self::Scale(inner, _) => inner.required_scratch_slots(),
+            Self::Horner { base, .. } => 1 + base.required_scratch_slots().max(1),
             Self::DistributePowers { work, .. } => work
                 .iter()
                 .map(DistributionWork::required_scratch_slots)
@@ -861,6 +945,40 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                         recurse_into(a, ctx, output, scratch);
                         for lhs in output.iter_mut() {
                             *lhs *= scalar;
+                        }
+                    }
+                }
+                EvaluationPlan::Horner { base, coefficients } => {
+                    let (highest, remaining) = coefficients
+                        .split_last()
+                        .expect("a Horner plan has at least four coefficients");
+                    B::copy_rotated_chunk(
+                        ctx.domain,
+                        ctx.chunk_size,
+                        ctx.chunk_index,
+                        &ctx.polys[highest.index],
+                        highest.rotation,
+                        output,
+                    );
+
+                    let (base_values, scratch) = scratch.split_at_mut(output.len());
+                    recurse_into(base, ctx, base_values, scratch);
+                    let (coefficient_values, _) = scratch.split_at_mut(output.len());
+                    for coefficient in remaining.iter().rev() {
+                        for (value, base) in output.iter_mut().zip(base_values.iter()) {
+                            *value *= base;
+                        }
+                        B::copy_rotated_chunk(
+                            ctx.domain,
+                            ctx.chunk_size,
+                            ctx.chunk_index,
+                            &ctx.polys[coefficient.index],
+                            coefficient.rotation,
+                            coefficient_values,
+                        );
+                        for (value, coefficient) in output.iter_mut().zip(coefficient_values.iter())
+                        {
+                            *value += coefficient;
                         }
                     }
                 }
@@ -1683,6 +1801,184 @@ mod tests {
             let expected = (product * base + scaled) * base + pallas::Base::from(7);
             assert_eq!(actual[index], expected);
         }
+    }
+
+    fn expanded_polynomial_expression<E: Copy, F: Field>(
+        base: Ast<E, F, ExtendedLagrangeCoeff>,
+        coefficients: &[AstLeaf<E, ExtendedLagrangeCoeff>],
+        prefix: F,
+    ) -> Ast<E, F, ExtendedLagrangeCoeff> {
+        let mut polynomial = Ast::ConstantTerm(prefix);
+        let mut power = Ast::ConstantTerm(F::ONE);
+        for coefficient in coefficients {
+            polynomial = polynomial + power.clone() * Ast::from(*coefficient);
+            power = power * base.clone();
+        }
+        polynomial
+    }
+
+    fn polynomial_expression_from_powers<E: Copy, F: Field>(
+        powers: &[Ast<E, F, ExtendedLagrangeCoeff>],
+        coefficients: &[AstLeaf<E, ExtendedLagrangeCoeff>],
+    ) -> Ast<E, F, ExtendedLagrangeCoeff> {
+        powers.iter().zip(coefficients).fold(
+            Ast::ConstantTerm(F::ZERO),
+            |polynomial, (power, coefficient)| polynomial + power.clone() * Ast::from(*coefficient),
+        )
+    }
+
+    fn check_expanded_polynomials_use_horner<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        const INTERPOLATION_WIDTH: u64 = 8;
+
+        fn context() {}
+
+        let domain = EvaluationDomain::new(3, 3);
+        let to_extended = |values| {
+            domain.coeff_to_extended(domain.lagrange_to_coeff(domain.lagrange_from_vec(values)))
+        };
+
+        let direct_base_values = (0..INTERPOLATION_WIDTH)
+            .map(|row| F::from(row + 3))
+            .collect::<Vec<_>>();
+        let left_base_values = (0..INTERPOLATION_WIDTH)
+            .map(|row| F::from(2 * row + 5))
+            .collect::<Vec<_>>();
+        let right_base_values = (0..INTERPOLATION_WIDTH)
+            .map(|row| F::from(3 * row + 1))
+            .collect::<Vec<_>>();
+        let coefficient_values = (0..INTERPOLATION_WIDTH)
+            .map(|degree| {
+                (0..INTERPOLATION_WIDTH)
+                    .map(|row| F::from((degree + 2) * (row + 7) + 1))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let direct_target_values = (0..INTERPOLATION_WIDTH)
+            .map(|row| F::from(5 * row + 11))
+            .collect::<Vec<_>>();
+        let compound_target_values = (0..INTERPOLATION_WIDTH)
+            .map(|row| F::from(7 * row + 13))
+            .collect::<Vec<_>>();
+        let selector_values = (0..INTERPOLATION_WIDTH)
+            .map(|row| F::from(row + 17))
+            .collect::<Vec<_>>();
+
+        let direct_base = to_extended(direct_base_values);
+        let left_base = to_extended(left_base_values);
+        let right_base = to_extended(right_base_values);
+        let coefficient_polys = coefficient_values
+            .into_iter()
+            .map(to_extended)
+            .collect::<Vec<_>>();
+        let direct_target = to_extended(direct_target_values);
+        let compound_target = to_extended(compound_target_values);
+        let selector = to_extended(selector_values);
+
+        let direct_base_values = direct_base.to_vec();
+        let left_base_values = left_base.to_vec();
+        let right_base_values = right_base.to_vec();
+        let coefficient_values = coefficient_polys
+            .iter()
+            .map(|coefficient| coefficient.to_vec())
+            .collect::<Vec<_>>();
+        let direct_target_values = direct_target.to_vec();
+        let compound_target_values = compound_target.to_vec();
+        let selector_values = selector.to_vec();
+
+        let mut evaluator = new_evaluator::<fn(), F, ExtendedLagrangeCoeff>(context);
+        let direct_base = evaluator.register_poly(direct_base);
+        let left_base = evaluator.register_poly(left_base);
+        let right_base = evaluator.register_poly(right_base);
+        let coefficients = coefficient_polys
+            .into_iter()
+            .map(|coefficient| evaluator.register_poly(coefficient))
+            .collect::<Vec<_>>();
+        let direct_target = evaluator.register_poly(direct_target);
+        let compound_target = evaluator.register_poly(compound_target);
+        let selector = evaluator.register_poly(selector);
+
+        let direct_base = Ast::from(direct_base);
+        let scale = F::from(INTERPOLATION_WIDTH);
+        let compound_base = Ast::from(left_base) - Ast::from(right_base) * scale;
+        let direct = expanded_polynomial_expression(direct_base.clone(), &coefficients, F::ZERO)
+            - direct_target;
+        let compound =
+            expanded_polynomial_expression(compound_base.clone(), &coefficients, F::ZERO)
+                - compound_target;
+
+        let challenge = F::from(19);
+        let selector = Ast::from(selector);
+        let expression =
+            Ast::distribute_powers([selector.clone() * direct, selector * compound], challenge);
+        let actual = evaluator.evaluate(&expression, &domain);
+        for row in 0..actual.len() {
+            let evaluate = |base| {
+                coefficient_values
+                    .iter()
+                    .rev()
+                    .fold(F::ZERO, |accumulator, coefficient| {
+                        accumulator * base + coefficient[row]
+                    })
+            };
+            let direct = evaluate(direct_base_values[row]) - direct_target_values[row];
+            let compound_base = left_base_values[row] - right_base_values[row] * scale;
+            let compound = evaluate(compound_base) - compound_target_values[row];
+            let expected = selector_values[row] * (direct * challenge + compound);
+            assert_eq!(actual[row], expected);
+        }
+
+        let direct_polynomial =
+            expanded_polynomial_expression(direct_base.clone(), &coefficients, F::ZERO);
+        assert!(matches!(
+            EvaluationPlan::compile(&direct_polynomial),
+            EvaluationPlan::Horner { .. }
+        ));
+
+        let nonzero_prefix =
+            expanded_polynomial_expression(direct_base.clone(), &coefficients, F::ONE);
+        assert!(super::expanded_polynomial(&nonzero_prefix).is_none());
+        assert!(super::expanded_polynomial(&expanded_polynomial_expression(
+            direct_base.clone(),
+            &coefficients[..3],
+            F::ZERO,
+        ))
+        .is_none());
+
+        let mut powers = vec![];
+        let mut power = Ast::ConstantTerm(F::ONE);
+        for _ in &coefficients {
+            powers.push(power.clone());
+            power = power * compound_base.clone();
+        }
+
+        let mut broken_powers = powers.clone();
+        broken_powers[4] = powers[2].clone();
+        assert!(
+            super::expanded_polynomial(&polynomial_expression_from_powers(
+                &broken_powers,
+                &coefficients,
+            ))
+            .is_none()
+        );
+
+        let mut changed_base = powers;
+        changed_base[4] = changed_base[3].clone() * direct_base;
+        assert!(
+            super::expanded_polynomial(&polynomial_expression_from_powers(
+                &changed_base,
+                &coefficients,
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn expanded_polynomials_use_horner() {
+        check_expanded_polynomials_use_horner::<pallas::Base>();
+        check_expanded_polynomials_use_horner::<vesta::Base>();
     }
 
     fn check_repeated_subexpressions_use_squares<F, B>()

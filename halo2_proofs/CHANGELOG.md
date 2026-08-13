@@ -20,5 +20,7 @@ and this project adheres to Rust's notion of
   compressed-selector families.
 - Polynomial evaluation now uses field squaring for structurally repeated
   multiplication operands.
+- Polynomial evaluation now uses Horner's method for expanded fixed-base
+  interpolation polynomials.
 - Polynomial evaluation now uses wide product accumulators when folding
   expressions over Pasta fields.
