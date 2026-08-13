@@ -519,15 +519,18 @@ enum PowerFold<'a, F: Field> {
     Eager {
         accumulators: Vec<F>,
         terms: &'a mut [F],
+        factors: Option<Vec<F>>,
     },
     Pallas {
         accumulators: Vec<<pallas::Base as DeferredField>::Accumulator>,
         terms: Vec<F>,
+        factors: Option<Vec<F>>,
         output: &'a mut [F],
     },
     Vesta {
         accumulators: Vec<<vesta::Base as DeferredField>::Accumulator>,
         terms: Vec<F>,
+        factors: Option<Vec<F>>,
         output: &'a mut [F],
     },
 }
@@ -538,18 +541,21 @@ impl<'a, F: Field> PowerFold<'a, F> {
             Self::Pallas {
                 accumulators: vec![Default::default(); output.len()],
                 terms: vec![F::ZERO; output.len()],
+                factors: None,
                 output,
             }
         } else if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
             Self::Vesta {
                 accumulators: vec![Default::default(); output.len()],
                 terms: vec![F::ZERO; output.len()],
+                factors: None,
                 output,
             }
         } else {
             Self::Eager {
                 accumulators: vec![F::ZERO; output.len()],
                 terms: output,
+                factors: None,
             }
         }
     }
@@ -562,11 +568,23 @@ impl<'a, F: Field> PowerFold<'a, F> {
         }
     }
 
+    fn factors(&mut self) -> &mut [F] {
+        let (factors, len) = match self {
+            Self::Eager { terms, factors, .. } => (factors, terms.len()),
+            Self::Pallas { terms, factors, .. } => (factors, terms.len()),
+            Self::Vesta { terms, factors, .. } => (factors, terms.len()),
+        };
+        factors
+            .get_or_insert_with(|| vec![F::ZERO; len])
+            .as_mut_slice()
+    }
+
     fn accumulate(&mut self, power: F) {
         match self {
             Self::Eager {
                 accumulators,
                 terms,
+                ..
             } => {
                 for (accumulator, term) in accumulators.iter_mut().zip(terms.iter()) {
                     *accumulator += *term * power;
@@ -585,11 +603,55 @@ impl<'a, F: Field> PowerFold<'a, F> {
         }
     }
 
+    fn accumulate_products(&mut self) {
+        match self {
+            Self::Eager {
+                accumulators,
+                terms,
+                factors,
+            } => {
+                let factors = factors
+                    .as_ref()
+                    .expect("factor values are evaluated before accumulation");
+                for ((accumulator, term), factor) in
+                    accumulators.iter_mut().zip(terms.iter()).zip(factors)
+                {
+                    *accumulator += *term * factor;
+                }
+            }
+            Self::Pallas {
+                accumulators,
+                terms,
+                factors,
+                ..
+            } => accumulate_deferred_products::<pallas::Base>(
+                accumulators,
+                &*terms,
+                factors
+                    .as_ref()
+                    .expect("factor values are evaluated before accumulation"),
+            ),
+            Self::Vesta {
+                accumulators,
+                terms,
+                factors,
+                ..
+            } => accumulate_deferred_products::<vesta::Base>(
+                accumulators,
+                &*terms,
+                factors
+                    .as_ref()
+                    .expect("factor values are evaluated before accumulation"),
+            ),
+        }
+    }
+
     fn finish(self) {
         match self {
             Self::Eager {
                 accumulators,
                 terms,
+                ..
             } => terms.copy_from_slice(&accumulators),
             Self::Pallas {
                 accumulators,
@@ -625,6 +687,22 @@ fn accumulate_deferred<T: DeferredField + 'static>(
         .expect("power matches the deferred field");
     for (accumulator, term) in accumulators.iter_mut().zip(terms) {
         T::mul_accumulate(accumulator, term, power);
+    }
+}
+
+fn accumulate_deferred_products<T: DeferredField + 'static>(
+    accumulators: &mut [T::Accumulator],
+    terms: &dyn Any,
+    factors: &dyn Any,
+) {
+    let terms = terms
+        .downcast_ref::<Vec<T>>()
+        .expect("term buffer matches the deferred field");
+    let factors = factors
+        .downcast_ref::<Vec<T>>()
+        .expect("factor buffer matches the deferred field");
+    for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
+        T::mul_accumulate(accumulator, term, factor);
     }
 }
 
@@ -849,15 +927,13 @@ impl<E: Copy, F: Field, B: Basis> FactorBodyWork<E, F, B> {
     fn required_scratch_slots(&self) -> usize {
         match self {
             Self::Term(term) => term.term.required_scratch_slots(),
-            Self::SharedFactor { factor, terms } => {
-                1 + factor.required_scratch_slots().max(
-                    terms
-                        .iter()
-                        .map(|term| term.term.required_scratch_slots())
-                        .max()
-                        .unwrap_or(0),
-                )
-            }
+            Self::SharedFactor { factor, terms } => factor.required_scratch_slots().max(
+                terms
+                    .iter()
+                    .map(|term| term.term.required_scratch_slots())
+                    .max()
+                    .unwrap_or(0),
+            ),
         }
     }
 }
@@ -969,7 +1045,6 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     }
                 }
                 FactorBodyPlan::Factored(work) => {
-                    let output_len = output.len();
                     let mut fold = PowerFold::new(output);
                     for work in work {
                         match work {
@@ -978,24 +1053,12 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                                 fold.accumulate(term.power);
                             }
                             FactorBodyWork::SharedFactor { factor, terms } => {
-                                let (factor_values, recurse_scratch) =
-                                    scratch.split_at_mut(output_len);
-                                recurse_into(factor, ctx, factor_values, recurse_scratch);
+                                recurse_into(factor, ctx, fold.factors(), scratch);
                                 {
                                     let body_values = fold.terms();
-                                    recurse_weighted_terms(
-                                        terms,
-                                        ctx,
-                                        body_values,
-                                        recurse_scratch,
-                                    );
-                                    for (body, factor) in
-                                        body_values.iter_mut().zip(factor_values.iter())
-                                    {
-                                        *body *= factor;
-                                    }
+                                    recurse_weighted_terms(terms, ctx, body_values, scratch);
                                 }
-                                fold.accumulate(F::ONE);
+                                fold.accumulate_products();
                             }
                         }
                     }
