@@ -4,8 +4,9 @@ This workspace contains libraries used in [zakura](https://github.com/zakura-cor
 
 ## From librustzcash
 
-The [librustzcash](https://github.com/zcash/librustzcash) members consumed by Zakura that depend on the proving stack:
+The [librustzcash](https://github.com/zcash/librustzcash) members consumed by Zakura:
 
+- `equihash` — proof-of-work verification and an optional Tromp CPU solver
 - `zcash_primitives` — transaction structure, builders, txids, and sighashes
 - `zcash_keys` — key derivation and address encoding
 - `zcash_proofs` — the Sapling Groth16 prover and proving-parameter handling

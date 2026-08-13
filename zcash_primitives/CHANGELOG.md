@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+
+- Switched Equihash verification to the workspace fork.
+
 ## [0.30.0] - 2026-07-23
 
 ### Added
