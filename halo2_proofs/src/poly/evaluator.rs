@@ -827,9 +827,13 @@ impl BasisOps for ExtendedLagrangeCoeff {
         rotation: Rotation,
         output: &mut [F],
     ) {
-        let rotation_abs = (rotation.0.unsigned_abs() as usize)
-            .checked_mul(domain.get_quotient_poly_degree().next_power_of_two())
-            .expect("scaled rotation fits in usize");
+        let rotation_scale = domain.get_quotient_poly_degree().next_power_of_two();
+        debug_assert_eq!(poly.len() % rotation_scale, 0);
+        let rotation_period = poly.len() / rotation_scale;
+        let rotation_abs = (usize::try_from(rotation.0.unsigned_abs())
+            .expect("rotation magnitude fits in usize")
+            % rotation_period)
+            * rotation_scale;
         poly.copy_rotated_chunk_helper(
             rotation.0 < 0,
             rotation_abs,
@@ -1072,6 +1076,50 @@ mod tests {
                     assert_eq!(actual, expected);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn large_extended_rotations_are_cyclic() {
+        let domain = EvaluationDomain::new(5, 4);
+        let mut extended = domain.empty_extended();
+        for (index, value) in extended.iter_mut().enumerate() {
+            *value = pallas::Base::from(index as u64);
+        }
+
+        let rotation_scale = domain.get_quotient_poly_degree().next_power_of_two();
+        assert_eq!(rotation_scale, 4);
+        assert_eq!(extended.len(), 64);
+        let rotation_period = i32::try_from(extended.len() / rotation_scale)
+            .expect("test rotation period fits in i32");
+
+        for rotation in [
+            Rotation(1_073_741_825),
+            Rotation(-1_073_741_825),
+            Rotation(i32::MIN),
+            Rotation(i32::MAX),
+        ] {
+            let offset = usize::try_from(rotation.0.rem_euclid(rotation_period))
+                .expect("non-negative rotation fits in usize")
+                * rotation_scale;
+            let extended_values = &extended[..];
+            let expected = extended_values[offset..]
+                .iter()
+                .chain(&extended_values[..offset])
+                .copied()
+                .collect::<Vec<_>>();
+            let mut actual = vec![pallas::Base::ZERO; extended.len()];
+            for (chunk_index, output) in actual.chunks_mut(7).enumerate() {
+                ExtendedLagrangeCoeff::copy_rotated_chunk(
+                    &domain,
+                    7,
+                    chunk_index,
+                    &extended,
+                    rotation,
+                    output,
+                );
+            }
+            assert_eq!(actual, expected);
         }
     }
 
