@@ -11,6 +11,52 @@ pub use pasta_curves::arithmetic::*;
 
 use crate::multicore::{self, TheBestReduce};
 
+#[cfg(feature = "pasta-msm")]
+// Keep small MSMs on the Rust path, where native dispatch overhead dominates.
+const PASTA_MSM_MIN_POINTS: usize = 256;
+
+#[cfg(feature = "pasta-msm")]
+#[allow(unsafe_code)]
+fn same_type_slice<T: 'static, U: 'static>(values: &[T]) -> Option<&[U]> {
+    use core::{any::TypeId, slice};
+
+    (TypeId::of::<T>() == TypeId::of::<U>()).then(|| {
+        // SAFETY: Equal `TypeId`s mean that `T` and `U` are the same
+        // concrete `'static` type. They therefore have identical layouts and
+        // validity requirements. The returned shared slice retains the input
+        // slice's length and lifetime.
+        unsafe { slice::from_raw_parts(values.as_ptr().cast(), values.len()) }
+    })
+}
+
+#[cfg(feature = "pasta-msm")]
+fn pasta_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> Option<C::Curve> {
+    use core::any::Any;
+    use pasta_curves::{pallas, vesta};
+
+    if bases.len() < PASTA_MSM_MIN_POINTS {
+        return None;
+    }
+
+    if let (Some(bases), Some(coeffs)) = (
+        same_type_slice::<C, pallas::Affine>(bases),
+        same_type_slice::<C::Scalar, pallas::Scalar>(coeffs),
+    ) {
+        let result = pasta_msm::pallas_vartime(bases, coeffs);
+        return (&result as &dyn Any).downcast_ref::<C::Curve>().copied();
+    }
+
+    if let (Some(bases), Some(coeffs)) = (
+        same_type_slice::<C, vesta::Affine>(bases),
+        same_type_slice::<C::Scalar, vesta::Scalar>(coeffs),
+    ) {
+        let result = pasta_msm::vesta_vartime(bases, coeffs);
+        return (&result as &dyn Any).downcast_ref::<C::Curve>().copied();
+    }
+
+    None
+}
+
 /// This represents an element of a group with basic operations that can be
 /// performed. This allows an FFT implementation (for example) to operate
 /// generically over either a field or elliptic curve group.
@@ -142,11 +188,19 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 
 /// Performs a multi-exponentiation operation.
 ///
+/// This operation is variable-time with respect to `coeffs` and `bases`. Do
+/// not use it with secret scalars.
+///
 /// This function will panic if coeffs and bases have a different length.
 ///
 /// This will use multithreading if beneficial.
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     assert_eq!(coeffs.len(), bases.len());
+
+    #[cfg(feature = "pasta-msm")]
+    if let Some(result) = pasta_multiexp(coeffs, bases) {
+        return result;
+    }
 
     // Convert to canonical representations once instead of once per window.
     let coeffs = coeffs.iter().map(PrimeField::to_repr).collect::<Vec<_>>();
@@ -476,6 +530,63 @@ fn test_multiexp_algorithm_selection() {
     assert!(!should_parallelize_multiexp(usize::MAX, 1));
     assert!(!should_parallelize_multiexp(2, 2));
     assert!(should_parallelize_multiexp(3, 2));
+}
+
+#[cfg(all(test, feature = "pasta-msm"))]
+fn assert_multiexp_matches_reference<C: CurveAffine>(
+    coeffs: &[C::Scalar],
+    bases: &[C],
+    uses_pasta_msm: bool,
+) {
+    let expected = coeffs
+        .iter()
+        .zip(bases)
+        .map(|(coeff, base)| *base * coeff)
+        .fold(C::Curve::identity(), |acc, value| acc + value);
+
+    assert_eq!(
+        pasta_multiexp(coeffs, bases),
+        uses_pasta_msm.then_some(expected)
+    );
+    assert_eq!(best_multiexp(coeffs, bases), expected);
+}
+
+#[cfg(all(test, feature = "pasta-msm"))]
+fn check_pasta_multiexp_boundaries<C: CurveAffine>() {
+    for num_points in [
+        PASTA_MSM_MIN_POINTS - 1,
+        PASTA_MSM_MIN_POINTS,
+        PASTA_MSM_MIN_POINTS + 1,
+    ] {
+        let mut rng = OsRng;
+        let mut coeffs = (0..num_points)
+            .map(|_| C::Scalar::random(&mut rng))
+            .collect::<Vec<_>>();
+        let mut bases = (0..num_points)
+            .map(|_| C::from(C::Curve::random(&mut rng)))
+            .collect::<Vec<_>>();
+
+        coeffs[0] = C::Scalar::ZERO;
+        bases[1] = C::identity();
+        assert_multiexp_matches_reference(&coeffs, &bases, num_points >= PASTA_MSM_MIN_POINTS);
+
+        if num_points == PASTA_MSM_MIN_POINTS {
+            assert_multiexp_matches_reference(&vec![C::Scalar::ZERO; num_points], &bases, true);
+            assert_multiexp_matches_reference(&coeffs, &vec![C::identity(); num_points], true);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "pasta-msm"))]
+#[test]
+fn test_pallas_multiexp_backend_boundaries() {
+    check_pasta_multiexp_boundaries::<pasta_curves::pallas::Affine>();
+}
+
+#[cfg(all(test, feature = "pasta-msm"))]
+#[test]
+fn test_vesta_multiexp_backend_boundaries() {
+    check_pasta_multiexp_boundaries::<pasta_curves::vesta::Affine>();
 }
 
 #[test]

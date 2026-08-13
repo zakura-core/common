@@ -69,6 +69,7 @@ nightly = [
     "beta",
     "unstable-verifier-fingerprint",
 ]
+pasta-msm = ["dep:pasta-msm"]
 sanity-checks = []
 test-dev-graph = [
     "dev-graph",
@@ -167,6 +168,12 @@ version = "1"
 [dependencies.maybe-rayon]
 version = "0.1.0"
 default-features = false
+
+[dependencies.pasta-msm]
+path = "../pasta_msm"
+version = "0.1.0"
+package = "zakura-pasta-msm"
+optional = true
 
 [dependencies.pasta_curves]
 path = "../pasta_curves"

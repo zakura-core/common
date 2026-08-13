@@ -1545,6 +1545,7 @@ dependencies = [
  "tabbycat",
  "tempfile",
  "tracing",
+ "zakura-pasta-msm",
 ]
 
 [[package]]

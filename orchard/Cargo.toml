@@ -61,6 +61,7 @@ dev-graph = [
     "plotters",
 ]
 multicore = ["halo2_proofs?/multicore"]
+pasta-msm = ["halo2_proofs?/pasta-msm"]
 std = [
     "corez/std",
     "group/wnaf-memuse",

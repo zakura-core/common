@@ -7,6 +7,12 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+- A non-default `pasta-msm` feature that routes large Pallas and Vesta
+  multiscalar multiplications through the caller-thread, variable-time
+  `zakura-pasta-msm` backend. Other curves and smaller inputs retain the
+  existing Rust implementation.
+
 ### Changed
 - The IPA prover now batches the scalar multiplications used to collapse its
   generator vector, using GLV for Pasta curves because the Fiat-Shamir

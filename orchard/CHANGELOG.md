@@ -7,6 +7,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+- A non-default `pasta-msm` feature that forwards to the corresponding
+  `halo2_proofs` backend when its optional circuit dependency is enabled.
+
 ### Changed
 
 - CI now runs a focused proof-creation, individual-verification, and
