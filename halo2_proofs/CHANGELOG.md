@@ -22,5 +22,7 @@ and this project adheres to Rust's notion of
   multiplication operands.
 - Polynomial evaluation now uses Horner's method for expanded fixed-base
   interpolation polynomials.
+- Polynomial evaluation now shares repeated factors inside weighted constraint
+  groups.
 - Polynomial evaluation now uses wide product accumulators when folding
   expressions over Pasta fields.

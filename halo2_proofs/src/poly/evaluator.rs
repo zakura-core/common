@@ -185,6 +185,56 @@ fn shared_factor_run<E, F: Field, B: Basis>(
     None
 }
 
+struct FactorGroup<'a, E, F: Field, B: Basis> {
+    factor: &'a Ast<E, F, B>,
+    terms: Vec<(usize, &'a Ast<E, F, B>)>,
+}
+
+// Partitions product terms into repeated left factors, followed by repeated
+// right factors among terms that were not claimed by a left-factor group.
+fn factor_groups<'a, E, F: Field, B: Basis>(
+    terms: &[&'a Ast<E, F, B>],
+) -> Vec<FactorGroup<'a, E, F, B>> {
+    let mut claimed = vec![false; terms.len()];
+    let mut groups = vec![];
+
+    for side in [FactorSide::Left, FactorSide::Right] {
+        for index in 0..terms.len() {
+            if claimed[index] {
+                continue;
+            }
+            let factor = match factor_terms(terms[index], side) {
+                Some((factor, _)) => factor,
+                None => continue,
+            };
+
+            let matching = (index..terms.len())
+                .filter(|candidate| !claimed[*candidate])
+                .filter(|candidate| {
+                    factor_terms(terms[*candidate], side)
+                        .is_some_and(|(candidate, _)| same_ast(factor, candidate))
+                })
+                .collect::<Vec<_>>();
+            if matching.len() < 2 {
+                continue;
+            }
+
+            let terms = matching
+                .into_iter()
+                .map(|position| {
+                    claimed[position] = true;
+                    let (_, term) = factor_terms(terms[position], side)
+                        .expect("a factor group only contains product terms");
+                    (position, term)
+                })
+                .collect();
+            groups.push(FactorGroup { factor, terms });
+        }
+    }
+
+    groups
+}
+
 const MIN_SELECTOR_FAMILY_LEN: usize = 4;
 
 struct SelectorRunMatch {
@@ -360,7 +410,7 @@ enum DistributionWork<E, F: Field, B: Basis> {
     },
     SharedFactor {
         factor: EvaluationPlan<E, F, B>,
-        bodies: Vec<EvaluationPlan<E, F, B>>,
+        bodies: FactorBodyPlan<E, F, B>,
         power: F,
     },
     SelectorFamily {
@@ -370,7 +420,25 @@ enum DistributionWork<E, F: Field, B: Basis> {
 }
 
 struct SelectorFamilyRun<E, F: Field, B: Basis> {
-    bodies: Vec<EvaluationPlan<E, F, B>>,
+    bodies: FactorBodyPlan<E, F, B>,
+    power: F,
+}
+
+enum FactorBodyPlan<E, F: Field, B: Basis> {
+    Sequential(Vec<EvaluationPlan<E, F, B>>),
+    Factored(Vec<FactorBodyWork<E, F, B>>),
+}
+
+enum FactorBodyWork<E, F: Field, B: Basis> {
+    Term(WeightedTerm<E, F, B>),
+    SharedFactor {
+        factor: EvaluationPlan<E, F, B>,
+        terms: Vec<WeightedTerm<E, F, B>>,
+    },
+}
+
+struct WeightedTerm<E, F: Field, B: Basis> {
+    term: EvaluationPlan<E, F, B>,
     power: F,
 }
 
@@ -627,11 +695,11 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
                                 .map(|term| {
                                     let (_, body) = factor_terms(term, run.side)
                                         .expect("a selector-family run only contains products");
-                                    Self::compile(body)
+                                    body
                                 })
-                                .collect();
+                                .collect::<Vec<_>>();
                             SelectorFamilyRun {
-                                bodies,
+                                bodies: FactorBodyPlan::compile(&bodies, base),
                                 power: powers[terms.len() - run.end],
                             }
                         })
@@ -666,13 +734,13 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
                             .map(|term| {
                                 let (_, body) = factor_terms(term, side)
                                     .expect("a shared-factor run only contains products");
-                                Self::compile(body)
+                                body
                             })
                             .collect::<Vec<_>>();
                         debug_assert!(bodies.len() > 1);
                         work.push(DistributionWork::SharedFactor {
                             factor: Self::compile(factor),
-                            bodies,
+                            bodies: FactorBodyPlan::compile(&bodies, base),
                             power: powers[terms.len() - end],
                         });
                         end = start;
@@ -707,31 +775,111 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
     }
 }
 
+impl<E: Copy, F: Field, B: Basis> FactorBodyPlan<E, F, B> {
+    fn compile(terms: &[&Ast<E, F, B>], base: F) -> Self {
+        let groups = factor_groups(terms);
+        if groups.is_empty() {
+            return Self::Sequential(
+                terms
+                    .iter()
+                    .map(|term| EvaluationPlan::compile(term))
+                    .collect(),
+            );
+        }
+
+        // Retain each body's original challenge power even when a factor
+        // group spans non-consecutive terms.
+        let mut powers = vec![F::ONE; terms.len()];
+        let mut power = F::ONE;
+        for term_power in powers.iter_mut().rev() {
+            *term_power = power;
+            power *= base;
+        }
+
+        let mut claimed = vec![false; terms.len()];
+        let mut work = Vec::with_capacity(groups.len() + terms.len());
+        for group in groups {
+            let terms = group
+                .terms
+                .into_iter()
+                .map(|(position, term)| {
+                    claimed[position] = true;
+                    WeightedTerm {
+                        term: EvaluationPlan::compile(term),
+                        power: powers[position],
+                    }
+                })
+                .collect();
+            work.push(FactorBodyWork::SharedFactor {
+                factor: EvaluationPlan::compile(group.factor),
+                terms,
+            });
+        }
+        for (position, term) in terms.iter().enumerate() {
+            if !claimed[position] {
+                work.push(FactorBodyWork::Term(WeightedTerm {
+                    term: EvaluationPlan::compile(term),
+                    power: powers[position],
+                }));
+            }
+        }
+
+        Self::Factored(work)
+    }
+
+    fn required_scratch_slots(&self) -> usize {
+        match self {
+            Self::Sequential(bodies) => {
+                1 + bodies
+                    .iter()
+                    .map(EvaluationPlan::required_scratch_slots)
+                    .max()
+                    .unwrap_or(0)
+            }
+            Self::Factored(work) => work
+                .iter()
+                .map(FactorBodyWork::required_scratch_slots)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+impl<E: Copy, F: Field, B: Basis> FactorBodyWork<E, F, B> {
+    fn required_scratch_slots(&self) -> usize {
+        match self {
+            Self::Term(term) => term.term.required_scratch_slots(),
+            Self::SharedFactor { factor, terms } => {
+                1 + factor.required_scratch_slots().max(
+                    terms
+                        .iter()
+                        .map(|term| term.term.required_scratch_slots())
+                        .max()
+                        .unwrap_or(0),
+                )
+            }
+        }
+    }
+}
+
 impl<E: Copy, F: Field, B: Basis> DistributionWork<E, F, B> {
     fn required_scratch_slots(&self) -> usize {
         match self {
             Self::Term { term, .. } => term.required_scratch_slots(),
             Self::SharedFactor { factor, bodies, .. } => {
-                // One slot retains the factor, and another evaluates
-                // subsequent bodies while the first stays in the evaluator
-                // output.
-                2 + factor.required_scratch_slots().max(
-                    bodies
-                        .iter()
-                        .map(EvaluationPlan::required_scratch_slots)
-                        .max()
-                        .unwrap_or(0),
-                )
+                // One slot retains the factor while the body plan is
+                // evaluated into the output.
+                1 + factor
+                    .required_scratch_slots()
+                    .max(bodies.required_scratch_slots())
             }
             Self::SelectorFamily { runs, .. } => {
-                // Prefixes and a suffix occupy `runs.len() + 1` slots. One
-                // additional slot evaluates subsequent bodies.
+                // Prefixes and a suffix occupy `runs.len() + 1` slots.
                 runs.len()
-                    + 2
+                    + 1
                     + runs
                         .iter()
-                        .flat_map(|run| &run.bodies)
-                        .map(EvaluationPlan::required_scratch_slots)
+                        .map(|run| run.bodies.required_scratch_slots())
                         .max()
                         .unwrap_or(0)
             }
@@ -779,30 +927,79 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             two: F,
         }
 
+        fn recurse_weighted_terms<E, F: WithSmallOrderMulGroup<3>, B: BasisOps>(
+            terms: &[WeightedTerm<E, F, B>],
+            ctx: &AstContext<'_, F, B>,
+            output: &mut [F],
+            scratch: &mut [F],
+        ) {
+            let mut fold = PowerFold::new(output);
+            for term in terms {
+                recurse_into(&term.term, ctx, fold.terms(), scratch);
+                fold.accumulate(term.power);
+            }
+            fold.finish();
+        }
+
         // `scratch` is preallocated per-chunk workspace whose size is derived
-        // from the compiled plan. The first body can use the entire slice. For
-        // each remaining body, one output-sized region holds its values while
-        // the rest is available to that body's recursive evaluation.
+        // from the compiled plan.
         fn recurse_factor_body<E, F: WithSmallOrderMulGroup<3>, B: BasisOps>(
-            bodies: &[EvaluationPlan<E, F, B>],
+            plan: &FactorBodyPlan<E, F, B>,
             base: F,
             ctx: &AstContext<'_, F, B>,
             output: &mut [F],
             scratch: &mut [F],
         ) {
-            let (first, remaining) = bodies
-                .split_first()
-                .expect("a compiled shared-factor run has multiple bodies");
-            recurse_into(first, ctx, output, scratch);
+            match plan {
+                FactorBodyPlan::Sequential(bodies) => {
+                    let (first, remaining) = bodies
+                        .split_first()
+                        .expect("a compiled factor body has at least one term");
+                    recurse_into(first, ctx, output, scratch);
 
-            if !remaining.is_empty() {
-                let (term_values, recurse_scratch) = scratch.split_at_mut(output.len());
-                for body in remaining {
-                    recurse_into(body, ctx, term_values, recurse_scratch);
-                    for (group, term) in output.iter_mut().zip(term_values.iter()) {
-                        *group *= base;
-                        *group += term;
+                    if !remaining.is_empty() {
+                        let (term_values, recurse_scratch) = scratch.split_at_mut(output.len());
+                        for body in remaining {
+                            recurse_into(body, ctx, term_values, recurse_scratch);
+                            for (group, term) in output.iter_mut().zip(term_values.iter()) {
+                                *group *= base;
+                                *group += term;
+                            }
+                        }
                     }
+                }
+                FactorBodyPlan::Factored(work) => {
+                    let output_len = output.len();
+                    let mut fold = PowerFold::new(output);
+                    for work in work {
+                        match work {
+                            FactorBodyWork::Term(term) => {
+                                recurse_into(&term.term, ctx, fold.terms(), scratch);
+                                fold.accumulate(term.power);
+                            }
+                            FactorBodyWork::SharedFactor { factor, terms } => {
+                                let (factor_values, recurse_scratch) =
+                                    scratch.split_at_mut(output_len);
+                                recurse_into(factor, ctx, factor_values, recurse_scratch);
+                                {
+                                    let body_values = fold.terms();
+                                    recurse_weighted_terms(
+                                        terms,
+                                        ctx,
+                                        body_values,
+                                        recurse_scratch,
+                                    );
+                                    for (body, factor) in
+                                        body_values.iter_mut().zip(factor_values.iter())
+                                    {
+                                        *body *= factor;
+                                    }
+                                }
+                                fold.accumulate(F::ONE);
+                            }
+                        }
+                    }
+                    fold.finish();
                 }
             }
         }
@@ -1466,7 +1663,8 @@ mod tests {
 
     use super::{
         compressed_selector, get_chunk_params, new_evaluator, selector_family_matches, Ast,
-        AstLeaf, BasisOps, DistributionWork, EvaluationPlan, Evaluator, FactorSide,
+        AstLeaf, BasisOps, DistributionWork, EvaluationPlan, Evaluator, FactorBodyPlan,
+        FactorBodyWork, FactorSide,
     };
     use crate::poly::{Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Rotation};
 
@@ -2184,8 +2382,14 @@ mod tests {
                 power: high_power,
                 ..
             }] => {
-                assert_eq!(low_bodies.len(), 3);
-                assert_eq!(high_bodies.len(), 2);
+                assert!(matches!(
+                    low_bodies,
+                    FactorBodyPlan::Sequential(bodies) if bodies.len() == 3
+                ));
+                assert!(matches!(
+                    high_bodies,
+                    FactorBodyPlan::Sequential(bodies) if bodies.len() == 2
+                ));
                 assert_eq!(*low_power, F::ONE);
                 assert_eq!(*middle_power, base * base * base);
                 assert_eq!(*high_power, base * base * base * base);
@@ -2227,6 +2431,108 @@ mod tests {
     fn shared_factor_runs_match_generic_evaluation() {
         check_shared_factor_runs::<pallas::Base>();
         check_shared_factor_runs::<vesta::Base>();
+    }
+
+    fn check_nested_shared_factor_groups<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(1, 3);
+        let raw_values = (0..10)
+            .map(|column| {
+                (0..8)
+                    .map(|row| F::from((column + 2) * (row + 3) + 1))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut evaluator = new_evaluator::<_, F, LagrangeCoeff>(|| {});
+        let leaves = raw_values
+            .iter()
+            .map(|values| evaluator.register_poly(domain.lagrange_from_vec(values.clone())))
+            .collect::<Vec<_>>();
+
+        let selector = Ast::from(leaves[0]);
+        let left_factor = (Ast::from(leaves[1]) + Ast::from(leaves[2])) * Ast::from(leaves[3]);
+        let right_factor = Ast::from(leaves[8]) * (Ast::from(leaves[9]) + Ast::from(leaves[7]));
+        let bodies = vec![
+            left_factor.clone() * Ast::from(leaves[5]),
+            left_factor.clone() * Ast::from(leaves[6]),
+            Ast::from(leaves[2]) * Ast::from(leaves[7]),
+            left_factor * Ast::from(leaves[8]),
+            Ast::from(leaves[3]) * right_factor.clone(),
+            Ast::from(leaves[4]) * right_factor,
+        ];
+        let terms = bodies
+            .iter()
+            .map(|body| selector.clone() * body.clone())
+            .collect::<Vec<_>>();
+
+        let base = F::from(13);
+        let plan = EvaluationPlan::compile(&Ast::distribute_powers(terms.clone(), base));
+        let body_work = match &plan {
+            EvaluationPlan::DistributePowers { work, .. } => match work.as_slice() {
+                [DistributionWork::SharedFactor { bodies, .. }] => match bodies {
+                    FactorBodyPlan::Factored(work) => work,
+                    FactorBodyPlan::Sequential(_) => {
+                        panic!("nested repeated factors should be planned")
+                    }
+                },
+                _ => panic!("the common outer factor should be planned"),
+            },
+            _ => panic!("multiple terms compile to distributed work"),
+        };
+        assert_eq!(body_work.len(), 3);
+        match &body_work[0] {
+            FactorBodyWork::SharedFactor { terms, .. } => {
+                assert_eq!(terms.len(), 3);
+                assert_eq!(terms[0].power, base.pow_vartime([5]));
+                assert_eq!(terms[1].power, base.pow_vartime([4]));
+                assert_eq!(terms[2].power, base.square());
+            }
+            FactorBodyWork::Term(_) => panic!("the repeated left factor should be planned"),
+        }
+        match &body_work[1] {
+            FactorBodyWork::SharedFactor { terms, .. } => {
+                assert_eq!(terms.len(), 2);
+                assert_eq!(terms[0].power, base);
+                assert_eq!(terms[1].power, F::ONE);
+            }
+            FactorBodyWork::Term(_) => panic!("the repeated right factor should be planned"),
+        }
+        match &body_work[2] {
+            FactorBodyWork::Term(term) => assert_eq!(term.power, base.pow_vartime([3])),
+            FactorBodyWork::SharedFactor { .. } => {
+                panic!("the unrelated body should remain independent")
+            }
+        }
+
+        for base in [F::ZERO, F::ONE, F::from(13)] {
+            let actual = evaluator.evaluate(&Ast::distribute_powers(terms.clone(), base), &domain);
+            for row in 0..actual.len() {
+                let left_factor_value =
+                    (raw_values[1][row] + raw_values[2][row]) * raw_values[3][row];
+                let right_factor_value =
+                    raw_values[8][row] * (raw_values[9][row] + raw_values[7][row]);
+                let body_values = [
+                    left_factor_value * raw_values[5][row],
+                    left_factor_value * raw_values[6][row],
+                    raw_values[2][row] * raw_values[7][row],
+                    left_factor_value * raw_values[8][row],
+                    raw_values[3][row] * right_factor_value,
+                    raw_values[4][row] * right_factor_value,
+                ];
+                let expected = body_values.iter().fold(F::ZERO, |accumulator, body| {
+                    accumulator * base + raw_values[0][row] * *body
+                });
+                assert_eq!(actual[row], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_shared_factor_groups_preserve_challenge_powers() {
+        check_nested_shared_factor_groups::<pallas::Base>();
+        check_nested_shared_factor_groups::<vesta::Base>();
     }
 
     fn compressed_selector_expression<E: Copy, F: Field>(
@@ -2362,8 +2668,13 @@ mod tests {
             })
             .expect("the complete selector family is planned");
         assert_eq!(runs.len(), COMBINATION_LEN);
-        assert_eq!(runs[1].bodies.len(), 2);
-        assert!(matches!(&runs[1].bodies[1], EvaluationPlan::Square(_)));
+        match &runs[1].bodies {
+            FactorBodyPlan::Sequential(bodies) => {
+                assert_eq!(bodies.len(), 2);
+                assert!(matches!(&bodies[1], EvaluationPlan::Square(_)));
+            }
+            FactorBodyPlan::Factored(_) => panic!("unrelated bodies remain sequential"),
+        }
         assert_eq!(runs[4].power, base);
 
         for base in [F::ZERO, F::ONE, F::from(19)] {
@@ -2426,6 +2737,10 @@ mod tests {
                 })
                 .expect("the outer shared factor is planned"),
             _ => panic!("the outer terms compile to distributed work"),
+        };
+        let shared_bodies = match shared_bodies {
+            FactorBodyPlan::Sequential(bodies) => bodies,
+            FactorBodyPlan::Factored(_) => panic!("unrelated bodies remain sequential"),
         };
         let nested_work = match &shared_bodies[0] {
             EvaluationPlan::DistributePowers { work, .. } => work,
