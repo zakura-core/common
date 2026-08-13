@@ -180,12 +180,11 @@ struct htalloc {
 };
 typedef struct htalloc htalloc;
   htalloc htalloc_new() {
-    htalloc hta;
-    hta.alloced = 0;
+    htalloc hta = {0};
     return hta;
   }
   void *htalloc_alloc(htalloc *hta, const u32 n, const u32 sz);
-  void alloctrees(htalloc *hta) {
+  bool alloctrees(htalloc *hta) {
 // optimize xenoncat's fixed memory layout, avoiding any waste
 // digit  trees  hashes  trees hashes
 // 0      0 A A A A A A   . . . . . .
@@ -199,12 +198,17 @@ typedef struct htalloc htalloc;
 // 8      0 2 4 6 8 . I   1 3 5 7 H H
     assert(DIGITBITS >= 16); // ensures hashes shorten by 1 unit every 2 digits
     hta->heap0 = (u32 *)htalloc_alloc(hta, 1, sizeof(digit0));
+    if (hta->heap0 == NULL)
+      return false;
     hta->heap1 = (u32 *)htalloc_alloc(hta, 1, sizeof(digit1));
+    if (hta->heap1 == NULL)
+      return false;
     for (int r=0; r<WK; r++)
       if ((r&1) == 0)
         hta->trees0[r/2]  = (bucket0 *)(hta->heap0 + r/2);
       else
         hta->trees1[r/2]  = (bucket1 *)(hta->heap1 + r/2);
+    return true;
   }
   void dealloctrees(htalloc *hta) {
     if (hta == NULL) {
@@ -226,8 +230,8 @@ typedef struct htalloc htalloc;
   }
   void *htalloc_alloc(htalloc *hta, const u32 n, const u32 sz) {
     void *mem  = calloc(n, sz);
-    assert(mem);
-    hta->alloced += n * sz;
+    if (mem != NULL)
+      hta->alloced += n * sz;
     return mem;
   }
 
@@ -253,6 +257,7 @@ struct equi {
 };
 typedef struct equi equi;
   void equi_clearslots(equi *eq);
+  void equi_free(equi *eq);
   equi *equi_new(
     blake2b_clone blake2b_clone,
     blake2b_free blake2b_free,
@@ -260,15 +265,32 @@ typedef struct equi equi;
     blake2b_finalize blake2b_finalize
   ) {
     assert(sizeof(hashunit) == 4);
-    equi *eq = malloc(sizeof(equi));
+    equi *eq = calloc(1, sizeof(equi));
+    if (eq == NULL)
+      return NULL;
+
     eq->blake2b_clone = blake2b_clone;
     eq->blake2b_free = blake2b_free;
     eq->blake2b_update = blake2b_update;
     eq->blake2b_finalize = blake2b_finalize;
 
-    alloctrees(&eq->hta);
+    eq->hta = htalloc_new();
+    if (!alloctrees(&eq->hta)) {
+      equi_free(eq);
+      return NULL;
+    }
+
     eq->nslots = (bsizes *)htalloc_alloc(&eq->hta, 2 * NBUCKETS, sizeof(au32));
+    if (eq->nslots == NULL) {
+      equi_free(eq);
+      return NULL;
+    }
+
     eq->sols   =  (proof *)htalloc_alloc(&eq->hta, MAXSOLS, sizeof(proof));
+    if (eq->sols == NULL) {
+      equi_free(eq);
+      return NULL;
+    }
 
     // C malloc() does not guarantee zero-initialized memory (but calloc() does)
     eq->blake_ctx = NULL;
@@ -300,7 +322,7 @@ typedef struct equi equi;
     }
 
     eq->blake_ctx = eq->blake2b_clone(ctx);
-    memset(eq->nslots, 0, NBUCKETS * sizeof(au32)); // only nslots[0] needs zeroing
+    memset(eq->nslots, 0, 2 * NBUCKETS * sizeof(au32));
     equi_clearslots(eq);
     eq->nsols = 0;
   }
@@ -687,7 +709,10 @@ typedef struct equi equi;
   }
 
   size_t equi_nsols(const equi *eq) {
-    return eq->nsols;
+    return minu32(eq->nsols, MAXSOLS);
+  }
+  size_t equi_solution_capacity(void) {
+    return MAXSOLS;
   }
   proof *equi_sols(const equi *eq) {
     return eq->sols;
