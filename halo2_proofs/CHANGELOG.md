@@ -15,6 +15,8 @@ and this project adheres to Rust's notion of
 - Zero-padded FFTs now skip stages that only combine known-zero coefficients.
 - Polynomial evaluation now reuses per-chunk scratch space and evaluates
   consecutive shared factors once.
+- Polynomial evaluation now shares missing-root products across complete
+  compressed-selector families.
 - `halo2_proofs::plonk::verify_proof` now computes instance commitments
   directly from their supplied Lagrange coefficients, without zero-padding to
   the evaluation domain.
