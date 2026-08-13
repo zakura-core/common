@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
+      equihash: ${{ steps.filter.outputs.equihash }}
       halo2: ${{ steps.filter.outputs.halo2 }}
       halo2_legacy_pdqsort: ${{ steps.filter.outputs.halo2_legacy_pdqsort }}
       orchard: ${{ steps.filter.outputs.orchard }}
@@ -89,6 +90,7 @@ jobs:
           fi
           changed=$(git diff --name-only --no-renames "$base_sha" "$head_sha")
 
+          equihash=false
           halo2=false
           halo2_legacy_pdqsort=false
           orchard=false
@@ -106,6 +108,7 @@ jobs:
           handled_members=(
             crates/bellman
             crates/bls12_381
+            crates/equihash
             crates/halo2_gadgets
             crates/halo2_legacy_pdqsort
             crates/halo2_poseidon
@@ -140,6 +143,9 @@ jobs:
 
           while IFS= read -r path; do
             case "$path" in
+              crates/equihash/*)
+                equihash=true
+                ;;
               crates/halo2_gadgets/*|crates/halo2_poseidon/*|crates/halo2_proofs/*|.github/fixtures/ironwood-circuits.sha256)
                 halo2=true
                 ;;
@@ -181,6 +187,7 @@ jobs:
           done <<< "$changed"
 
           if [[ "$shared" == true ]]; then
+            equihash=true
             halo2=true
             halo2_legacy_pdqsort=true
             orchard=true
@@ -222,12 +229,16 @@ jobs:
           if [[ "$orchard" == true ]]; then
             librustzcash=true
           fi
+          if [[ "$equihash" == true ]]; then
+            librustzcash=true
+          fi
           if [[ "$sapling_crypto" == true ]]; then
             librustzcash=true
           fi
 
           rust_checks=false
-          if [[ "$halo2" == true ||
+          if [[ "$equihash" == true ||
+            "$halo2" == true ||
             "$halo2_legacy_pdqsort" == true ||
             "$orchard" == true ||
             "$pasta_curves" == true ||
@@ -240,6 +251,7 @@ jobs:
           fi
 
           {
+            echo "equihash=$equihash"
             echo "halo2=$halo2"
             echo "halo2_legacy_pdqsort=$halo2_legacy_pdqsort"
             echo "orchard=$orchard"
@@ -271,6 +283,9 @@ jobs:
       # One package per invocation: a grouped invocation lets Cargo unify
       # features across the group, masking a package that cannot build
       # against its own manifest alone.
+      - name: zakura-equihash / Stable and MSRV checks
+        if: ${{ !cancelled() && needs.changes.outputs.equihash == 'true' }}
+        run: bash .github/scripts/check_rust_group.sh zakura-equihash true false
       - name: halo2 / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.halo2 == 'true' }}
         run: |
@@ -1214,6 +1229,24 @@ jobs:
 
   # zcash/librustzcash .github/workflows/ci.yml @
   # 82fa052a06e3af0058a73f320538f9b93193439c
+  equihash-test:
+    name: zakura-equihash / Test all features
+    needs: changes
+    if: needs.changes.outputs.equihash == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
+      - name: Run tests
+        run: cargo +1.91.0 test -p zakura-equihash --all-features --locked
+      - name: Check no-default-features
+        run: cargo +1.91.0 check -p zakura-equihash --no-default-features --locked
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
   librustzcash-test:
     name: librustzcash subset / Test all features (${{ matrix.configuration }})
     needs: changes
@@ -1451,6 +1484,7 @@ jobs:
       - sapling-platform-smoke
       - sapling-no-std
       - sinsemilla-weighted-test
+      - equihash-test
       - librustzcash-test
       - librustzcash-configurations
       - librustzcash-no-std
@@ -1494,6 +1528,7 @@ jobs:
             sapling-platform-smoke,
             sapling-no-std,
             sinsemilla-weighted-test,
+            equihash-test,
             librustzcash-test,
             librustzcash-configurations,
             librustzcash-no-std

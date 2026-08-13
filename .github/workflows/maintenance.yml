@@ -86,6 +86,7 @@ jobs:
       - name: Build with latest dependencies
         run: >-
           cargo +stable build
+          -p zakura-equihash
           -p zakura-address
           -p zakura-keys
           -p zakura-primitives

@@ -34,6 +34,9 @@ audit-as-crates-io = false
 [policy.zakura-bls12-381]
 audit-as-crates-io = false
 
+[policy.zakura-equihash]
+audit-as-crates-io = false
+
 [policy.zakura-halo2-gadgets]
 audit-as-crates-io = false
 

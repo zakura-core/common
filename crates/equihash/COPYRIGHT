@@ -1,0 +1,24 @@
+Copyright (c) The Zakura Contributors
+
+Copyrights in the "zakura-equihash" library are retained by their contributors. No
+copyright assignment is required to contribute to the "zakura-equihash"
+library.
+
+The "zakura-equihash" library is licensed under either of
+
+ * Apache License, Version 2.0, (see ./LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
+ * MIT license (see ./LICENSE-MIT or http://opensource.org/licenses/MIT)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
+
+==============================================================================
+
+This library began as a fork of the "equihash" crate. The original copyright
+notices are preserved below:
+
+  Copyright (c) 2020-2022 The Zcash developers

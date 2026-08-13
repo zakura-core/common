@@ -9,6 +9,10 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 - [`zakura-transparent`](crates/zcash_transparent) (forked from [`zcash_transparent 0.10.0`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/zcash_transparent))
 - [`zakura-zip321`](crates/zip321) (forked from [`zip321 0.9.0`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/components/zip321))
 
+## Proof of work
+
+- [`zakura-equihash`](crates/equihash) (forked from [`equihash 0.3.0`](https://github.com/zcash/librustzcash/tree/3f231c7ac172ca333487f5ee5ea8379b59598130/components/equihash))
+
 ## Transactions and keys
 
 - [`zakura-primitives`](crates/zcash_primitives) (forked from [`zcash_primitives 0.30.0`](https://github.com/zcash/librustzcash/tree/57b844dc00bf1f25254b5859b8d5faa8e5730f98/zcash_primitives))

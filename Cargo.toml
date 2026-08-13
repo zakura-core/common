@@ -14,12 +14,14 @@
 # unchanged, and intra-workspace edges keep their upstream dependency keys via
 # the `package = "zakura-*"` renames declared once in [workspace.dependencies].
 #
-# Membership rule: the Orchard/halo2/Pallas proving stack, plus every crate in
-# Zakura's dependency graph that (transitively) depends on it. The closure must
-# stay closed: if a future dependency of Zakura pulls any of these names from
-# crates.io, that crate must either be added here or have its edge rewritten,
+# Membership includes the Orchard/halo2/Pallas proving stack, its downstream
+# consumers in Zakura, and standalone cryptographic components maintained here.
+# The proving-stack closure must stay closed: if a future dependency of Zakura
+# pulls any of these names from crates.io, that crate must either be added here
+# or have its edge rewritten,
 # or a registry copy will silently coexist with the workspace crates.
 #
+# - equihash: proof-of-work verification and the optional Tromp CPU solver.
 # - pasta_curves, halo2_proofs, halo2_gadgets, halo2_poseidon,
 #   halo2_legacy_pdqsort, orchard: the proving stack itself.
 # - pairing, bls12_381, jubjub, bellman: the shared pairing and Groth16
@@ -44,6 +46,7 @@ resolver = "3"
 members = [
     "crates/bellman",
     "crates/bls12_381",
+    "crates/equihash",
     "crates/halo2_gadgets",
     "crates/halo2_legacy_pdqsort",
     "crates/halo2_poseidon",
@@ -92,6 +95,7 @@ readme = "crates/README.md"
 [workspace.dependencies]
 bellman = { package = "zakura-bellman", version = "2.0.0", path = "crates/bellman", default-features = false }
 bls12_381 = { package = "zakura-bls12-381", version = "2.0.0", path = "crates/bls12_381", default-features = false }
+equihash = { package = "zakura-equihash", version = "2.0.0", path = "crates/equihash", default-features = false }
 halo2_gadgets = { package = "zakura-halo2-gadgets", version = "2.0.0", path = "crates/halo2_gadgets", default-features = false }
 halo2_legacy_pdqsort = { package = "zakura-halo2-legacy-pdqsort", version = "2.0.0", path = "crates/halo2_legacy_pdqsort", default-features = false }
 halo2_poseidon = { package = "zakura-halo2-poseidon", version = "2.0.0", path = "crates/halo2_poseidon", default-features = false }
