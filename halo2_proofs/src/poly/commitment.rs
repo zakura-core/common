@@ -7,13 +7,24 @@ use super::{Coeff, LagrangeCoeff, Polynomial};
 use crate::arithmetic::{best_fft, best_multiexp, parallelize, CurveAffine, CurveExt};
 use crate::helpers::CurveRead;
 
+#[cfg(feature = "prover-fixed-msm-table")]
+use crate::{PROVER_FIXED_MSM_TABLE_BLOCK_BASES, PROVER_FIXED_MSM_TABLE_K};
+
 use ff::{Field, PrimeField};
 use group::{prime::PrimeCurveAffine, Curve, Group};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 
+#[cfg(feature = "prover-fixed-msm-table")]
+use std::{fmt, sync::Arc};
+
+#[cfg(feature = "prover-fixed-msm-table")]
+mod fixed_base;
 mod msm;
 mod prover;
 mod verifier;
+
+#[cfg(feature = "prover-fixed-msm-table")]
+use fixed_base::FixedBaseMsmTable;
 
 pub use msm::MSM;
 pub use prover::create_proof;
@@ -21,8 +32,19 @@ pub use verifier::{verify_proof, Accumulator, Guard};
 
 use std::io;
 
+#[cfg(feature = "prover-fixed-msm-table")]
+const PROVER_FIXED_MSM_TABLE_BASES: usize = (1 << PROVER_FIXED_MSM_TABLE_K) + 1;
+#[cfg(feature = "prover-fixed-msm-table")]
+const PROVER_FIXED_MSM_TABLE_BLOCKS: usize =
+    PROVER_FIXED_MSM_TABLE_BASES.div_ceil(PROVER_FIXED_MSM_TABLE_BLOCK_BASES);
+#[cfg(feature = "prover-fixed-msm-table")]
+const PROVER_FIXED_MSM_TABLE_POINTS: usize = (PROVER_FIXED_MSM_TABLE_BLOCKS - 1)
+    * ((1 << PROVER_FIXED_MSM_TABLE_BLOCK_BASES) - 1)
+    + ((1 << (PROVER_FIXED_MSM_TABLE_BASES % PROVER_FIXED_MSM_TABLE_BLOCK_BASES)) - 1);
+
 /// These are the public parameters for the polynomial commitment scheme.
-#[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "prover-fixed-msm-table"), derive(Debug))]
+#[derive(Clone)]
 pub struct Params<C: CurveAffine> {
     pub(crate) k: u32,
     pub(crate) n: u64,
@@ -30,6 +52,26 @@ pub struct Params<C: CurveAffine> {
     pub(crate) g_lagrange: Vec<C>,
     pub(crate) w: C,
     pub(crate) u: C,
+    #[cfg(feature = "prover-fixed-msm-table")]
+    prover_fixed_msm_table: Option<Arc<FixedBaseMsmTable<C>>>,
+}
+
+#[cfg(feature = "prover-fixed-msm-table")]
+impl<C: CurveAffine> fmt::Debug for Params<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut params = f.debug_struct("Params");
+        params
+            .field("k", &self.k)
+            .field("n", &self.n)
+            .field("g", &format_args!("{} points", self.g.len()))
+            .field(
+                "g_lagrange",
+                &format_args!("{} points", self.g_lagrange.len()),
+            );
+        #[cfg(feature = "prover-fixed-msm-table")]
+        params.field("prover_fixed_msm_table", &self.prover_fixed_msm_table);
+        params.finish_non_exhaustive()
+    }
 }
 
 impl<C: CurveAffine> Params<C> {
@@ -103,13 +145,25 @@ impl<C: CurveAffine> Params<C> {
         let w = hasher(&[1]).to_affine();
         let u = hasher(&[2]).to_affine();
 
-        Params {
+        let params = Params {
             k,
             n,
             g,
             g_lagrange,
             w,
             u,
+            #[cfg(feature = "prover-fixed-msm-table")]
+            prover_fixed_msm_table: None,
+        };
+        #[cfg(feature = "prover-fixed-msm-table")]
+        {
+            let mut params = params;
+            params.initialize_prover_fixed_msm_table();
+            params
+        }
+        #[cfg(not(feature = "prover-fixed-msm-table"))]
+        {
+            params
         }
     }
 
@@ -117,6 +171,18 @@ impl<C: CurveAffine> Params<C> {
     /// slice of coefficients. The commitment will be blinded by the blinding
     /// factor `r`.
     pub fn commit(&self, poly: &Polynomial<C::Scalar, Coeff>, r: Blind<C::Scalar>) -> C::Curve {
+        #[cfg(feature = "prover-fixed-msm-table")]
+        if let Some(table) = self.prover_fixed_msm_table.as_ref().filter(|_| {
+            poly.len() == self.n as usize
+                && poly.iter().all(|scalar| !bool::from(scalar.is_zero()))
+                && !bool::from(r.0.is_zero())
+        }) {
+            let mut scalars = Vec::with_capacity(PROVER_FIXED_MSM_TABLE_BASES);
+            scalars.extend(poly.iter());
+            scalars.push(r.0);
+            return table.multiply(&scalars);
+        }
+
         let mut tmp_scalars = Vec::with_capacity(poly.len() + 1);
         let mut tmp_bases = Vec::with_capacity(poly.len() + 1);
 
@@ -194,14 +260,47 @@ impl<C: CurveAffine> Params<C> {
         let w = C::read(reader)?;
         let u = C::read(reader)?;
 
-        Ok(Params {
+        let params = Params {
             k,
             n,
             g,
             g_lagrange,
             w,
             u,
-        })
+            #[cfg(feature = "prover-fixed-msm-table")]
+            prover_fixed_msm_table: None,
+        };
+        #[cfg(feature = "prover-fixed-msm-table")]
+        {
+            let mut params = params;
+            params.initialize_prover_fixed_msm_table();
+            Ok(params)
+        }
+        #[cfg(not(feature = "prover-fixed-msm-table"))]
+        {
+            Ok(params)
+        }
+    }
+
+    #[cfg(feature = "prover-fixed-msm-table")]
+    fn initialize_prover_fixed_msm_table(&mut self) {
+        if self.k == PROVER_FIXED_MSM_TABLE_K {
+            self.prover_fixed_msm_table = Some(Arc::new(FixedBaseMsmTable::new(&self.g, self.w)));
+        }
+    }
+
+    fn commit_fixed_range(&self, base_start: usize, scalars: &[C::Scalar]) -> Option<C::Curve> {
+        #[cfg(feature = "prover-fixed-msm-table")]
+        {
+            self.prover_fixed_msm_table
+                .as_ref()
+                .map(|table| table.multiply_range(base_start, scalars))
+        }
+        #[cfg(not(feature = "prover-fixed-msm-table"))]
+        {
+            let _ = (base_start, scalars);
+            None
+        }
     }
 }
 
@@ -299,6 +398,59 @@ fn test_commit_lagrange_eqaffine() {
     let alpha = Blind(Fp::random(OsRng));
 
     assert_eq!(params.commit(&b, alpha), params.commit_lagrange(&a, alpha));
+}
+
+#[cfg(all(test, feature = "prover-fixed-msm-table"))]
+fn check_fixed_msm_table_params_lifecycle<C: CurveAffine>() {
+    use std::sync::Arc;
+
+    let params = Params::<C>::new(PROVER_FIXED_MSM_TABLE_K);
+    let table = params
+        .prover_fixed_msm_table
+        .as_ref()
+        .expect("protocol parameters have a fixed-base table");
+    assert_eq!(Arc::strong_count(table), 1);
+
+    let cloned = params.clone();
+    let cloned_table = cloned
+        .prover_fixed_msm_table
+        .as_ref()
+        .expect("cloning preserves the fixed-base table");
+    assert!(Arc::ptr_eq(table, cloned_table));
+    assert_eq!(Arc::strong_count(table), 2);
+    drop(cloned);
+    assert_eq!(Arc::strong_count(table), 1);
+
+    let mut encoded = Vec::new();
+    params.write(&mut encoded).unwrap();
+
+    let mut without_table = params.clone();
+    without_table.prover_fixed_msm_table = None;
+    let mut encoded_without_table = Vec::new();
+    without_table.write(&mut encoded_without_table).unwrap();
+    assert_eq!(encoded, encoded_without_table);
+
+    let decoded = Params::<C>::read(&mut encoded.as_slice()).unwrap();
+    let decoded_table = decoded
+        .prover_fixed_msm_table
+        .as_ref()
+        .expect("reading k = 11 parameters eagerly builds the table");
+    assert!(!Arc::ptr_eq(table, decoded_table));
+
+    let other_k = Params::<C>::new(PROVER_FIXED_MSM_TABLE_K - 1);
+    assert!(other_k.prover_fixed_msm_table.is_none());
+}
+
+#[cfg(feature = "prover-fixed-msm-table")]
+#[test]
+fn pallas_fixed_msm_table_params_lifecycle() {
+    check_fixed_msm_table_params_lifecycle::<crate::pasta::pallas::Affine>();
+}
+
+#[cfg(feature = "prover-fixed-msm-table")]
+#[test]
+fn vesta_fixed_msm_table_params_lifecycle() {
+    check_fixed_msm_table_params_lifecycle::<crate::pasta::vesta::Affine>();
 }
 
 #[test]

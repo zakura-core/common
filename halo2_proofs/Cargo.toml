@@ -69,6 +69,7 @@ nightly = [
     "beta",
     "unstable-verifier-fingerprint",
 ]
+prover-fixed-msm-table = []
 sanity-checks = []
 test-dev-graph = [
     "dev-graph",

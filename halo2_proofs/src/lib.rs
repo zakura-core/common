@@ -18,3 +18,8 @@ pub mod transcript;
 
 pub mod dev;
 mod helpers;
+
+#[cfg(feature = "prover-fixed-msm-table")]
+const PROVER_FIXED_MSM_TABLE_K: u32 = 11;
+#[cfg(feature = "prover-fixed-msm-table")]
+const PROVER_FIXED_MSM_TABLE_BLOCK_BASES: usize = 10;

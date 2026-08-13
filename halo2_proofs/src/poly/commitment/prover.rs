@@ -104,8 +104,14 @@ pub fn create_proof<
         //
         // TODO: If we modify multiexp to take "extra" bases, we could speed
         // this piece up a bit by combining the multiexps.
-        let l_j = best_multiexp(&p_prime[half..], &g_prime[0..half]);
-        let r_j = best_multiexp(&p_prime[0..half], &g_prime[half..]);
+        let l_j = (j == 0)
+            .then(|| params.commit_fixed_range(0, &p_prime[half..]))
+            .flatten()
+            .unwrap_or_else(|| best_multiexp(&p_prime[half..], &g_prime[0..half]));
+        let r_j = (j == 0)
+            .then(|| params.commit_fixed_range(half, &p_prime[0..half]))
+            .flatten()
+            .unwrap_or_else(|| best_multiexp(&p_prime[0..half], &g_prime[half..]));
         let value_l_j = compute_inner_product(&p_prime[half..], &b[0..half]);
         let value_r_j = compute_inner_product(&p_prime[0..half], &b[half..]);
         let l_j_randomness = C::Scalar::random(&mut rng);
