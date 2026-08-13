@@ -17,6 +17,8 @@ and this project adheres to Rust's notion of
   consecutive shared factors once.
 - Polynomial evaluation now shares missing-root products across complete
   compressed-selector families.
+- Polynomial evaluation now uses field squaring for structurally repeated
+  multiplication operands.
 - `halo2_proofs::plonk::verify_proof` now computes instance commitments
   directly from their supplied Lagrange coefficients, without zero-padding to
   the evaluation domain.

@@ -366,6 +366,32 @@ fn selector_family_plans<'a, E, F: Field, B: Basis>(
     families
 }
 
+fn collect_square_nodes<E, F: Field, B: Basis>(ast: &Ast<E, F, B>, square_nodes: &mut Vec<usize>) {
+    match ast {
+        Ast::Poly(_) | Ast::LinearTerm(_) | Ast::ConstantTerm(_) => {}
+        Ast::Add(lhs, rhs) => {
+            collect_square_nodes(lhs, square_nodes);
+            collect_square_nodes(rhs, square_nodes);
+        }
+        Ast::Mul(AstMul(lhs, rhs)) => {
+            if same_ast(lhs, rhs) {
+                square_nodes.push(ast as *const Ast<E, F, B> as usize);
+                // Only `lhs` is evaluated for a recognized square.
+                collect_square_nodes(lhs, square_nodes);
+            } else {
+                collect_square_nodes(lhs, square_nodes);
+                collect_square_nodes(rhs, square_nodes);
+            }
+        }
+        Ast::Scale(inner, _) => collect_square_nodes(inner, square_nodes),
+        Ast::DistributePowers(terms, _) => {
+            for term in terms.iter() {
+                collect_square_nodes(term, square_nodes);
+            }
+        }
+    }
+}
+
 impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
     /// Registers the given polynomial for use in this evaluation context.
     ///
@@ -404,6 +430,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             polys: &'a [Polynomial<F, B>],
             selector_family_root: &'a Ast<E, F, B>,
             selector_families: &'a [SelectorFamilyPlan<'a, E, B>],
+            square_nodes: &'a [usize],
             minus_one: F,
             two: F,
         }
@@ -578,6 +605,15 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                         }
                     }
 
+                    let node = ast as *const Ast<E, F, B> as usize;
+                    if ctx.square_nodes.binary_search(&node).is_ok() {
+                        recurse_into(a, ctx, output, scratch);
+                        for value in output.iter_mut() {
+                            *value = value.square();
+                        }
+                        return;
+                    }
+
                     recurse_into(a, ctx, output, scratch);
                     let (rhs, rhs_scratch) = scratch.split_at_mut(output.len());
                     recurse_into(b, ctx, rhs, rhs_scratch);
@@ -748,8 +784,13 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             Ast::DistributePowers(terms, _) => selector_family_plans(terms, minus_one),
             _ => vec![],
         };
+        let mut square_nodes = vec![];
+        collect_square_nodes(ast, &mut square_nodes);
+        square_nodes.sort_unstable();
+        square_nodes.dedup();
         multicore::scope(|scope| {
             let selector_families = &selector_families;
+            let square_nodes = &square_nodes;
             for (chunk_index, out) in result.chunks_mut(chunk_size).enumerate() {
                 scope.spawn(move |_| {
                     let ctx = AstContext {
@@ -759,6 +800,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                         polys: &self.polys,
                         selector_family_root: ast,
                         selector_families,
+                        square_nodes,
                         minus_one,
                         two,
                     };
@@ -1149,8 +1191,8 @@ mod tests {
     use pasta_curves::{pallas, vesta};
 
     use super::{
-        compressed_selector, get_chunk_params, new_evaluator, selector_family_plans, Ast, AstLeaf,
-        BasisOps, Evaluator, FactorSide,
+        collect_square_nodes, compressed_selector, get_chunk_params, new_evaluator,
+        selector_family_plans, Ast, AstLeaf, BasisOps, Evaluator, FactorSide,
     };
     use crate::poly::{Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Rotation};
 
@@ -1414,6 +1456,61 @@ mod tests {
             let expected = (product * base + scaled) * base + pallas::Base::from(7);
             assert_eq!(actual[index], expected);
         }
+    }
+
+    fn check_repeated_subexpressions_use_squares<F, B>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+        B: BasisOps,
+        Ast<fn(), F, B>: std::ops::Mul<Output = Ast<fn(), F, B>>,
+    {
+        fn context() {}
+
+        let domain = EvaluationDomain::new(3, 4);
+        let mut values = B::empty_poly(&domain);
+        for (index, value) in values.iter_mut().enumerate() {
+            *value = F::from(index as u64 + 3);
+        }
+
+        let mut evaluator = new_evaluator::<fn(), _, B>(context);
+        let leaf = evaluator.register_poly(values);
+        let repeated =
+            Ast::from(leaf.with_rotation(Rotation::prev())) + Ast::ConstantTerm(F::from(7));
+        let inner_square = repeated.clone() * repeated.clone();
+        let nested_square = inner_square.clone() * inner_square;
+        let mut square_nodes = vec![];
+        collect_square_nodes(&nested_square, &mut square_nodes);
+        assert_eq!(square_nodes.len(), 2);
+
+        let expected = evaluator.evaluate(&repeated, &domain);
+        let actual = evaluator.evaluate(&nested_square, &domain);
+        assert!(actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| *actual == expected.square().square()));
+
+        let lhs = Ast::from(leaf.with_rotation(Rotation::prev()));
+        let rhs = Ast::from(leaf.with_rotation(Rotation::next()));
+        let product = lhs.clone() * rhs.clone();
+        square_nodes.clear();
+        collect_square_nodes(&product, &mut square_nodes);
+        assert!(square_nodes.is_empty());
+
+        let expected_lhs = evaluator.evaluate(&lhs, &domain);
+        let expected_rhs = evaluator.evaluate(&rhs, &domain);
+        let actual = evaluator.evaluate(&product, &domain);
+        assert!(actual
+            .iter()
+            .zip(expected_lhs.iter().zip(expected_rhs.iter()))
+            .all(|(actual, (lhs, rhs))| *actual == *lhs * rhs));
+    }
+
+    #[test]
+    fn repeated_subexpressions_use_squares() {
+        check_repeated_subexpressions_use_squares::<pallas::Base, LagrangeCoeff>();
+        check_repeated_subexpressions_use_squares::<pallas::Base, ExtendedLagrangeCoeff>();
+        check_repeated_subexpressions_use_squares::<vesta::Base, LagrangeCoeff>();
+        check_repeated_subexpressions_use_squares::<vesta::Base, ExtendedLagrangeCoeff>();
     }
 
     #[test]
