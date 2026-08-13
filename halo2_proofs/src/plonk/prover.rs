@@ -302,10 +302,18 @@ pub fn create_proof<
                 .iter()
                 .map(|_| Blind(C::Scalar::random(&mut rng)))
                 .collect();
+            let advice_polys: Vec<_> = advice
+                .iter()
+                .cloned()
+                .map(|poly| domain.lagrange_to_coeff(poly))
+                .collect();
             let advice_commitments_projective: Vec<_> = advice
                 .iter()
+                .zip(advice_polys.iter())
                 .zip(advice_blinds.iter())
-                .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                .map(|((values, poly), blind)| {
+                    super::commit_lagrange_with_coeff(params, values, poly, *blind)
+                })
                 .collect();
             let mut advice_commitments = vec![C::identity(); advice_commitments_projective.len()];
             C::Curve::batch_normalize(&advice_commitments_projective, &mut advice_commitments);
@@ -315,12 +323,6 @@ pub fn create_proof<
             for commitment in &advice_commitments {
                 transcript.write_point(*commitment)?;
             }
-
-            let advice_polys: Vec<_> = advice
-                .clone()
-                .into_iter()
-                .map(|poly| domain.lagrange_to_coeff(poly))
-                .collect();
 
             let advice_cosets: Vec<_> = advice_polys
                 .iter()

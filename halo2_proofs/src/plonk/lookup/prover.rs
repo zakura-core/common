@@ -204,7 +204,8 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         let mut commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>| {
             let poly = pk.vk.domain.lagrange_to_coeff(values.clone());
             let blind = Blind(C::Scalar::random(&mut rng));
-            let commitment = params.commit_lagrange(values, blind).to_affine();
+            let commitment =
+                super::super::commit_lagrange_with_coeff(params, values, &poly, blind).to_affine();
             (poly, blind, commitment)
         };
 
@@ -377,8 +378,11 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         }
 
         let product_blind = Blind(C::Scalar::random(rng));
-        let product_commitment = params.commit_lagrange(&z, product_blind).to_affine();
-        let z = pk.vk.domain.lagrange_to_coeff(z);
+        let product_poly = pk.vk.domain.lagrange_to_coeff(z.clone());
+        let product_commitment =
+            super::super::commit_lagrange_with_coeff(params, &z, &product_poly, product_blind)
+                .to_affine();
+        let z = product_poly;
         let product_coset = evaluator.register_poly(pk.vk.domain.coeff_to_extended(z.clone()));
 
         // Hash product commitment

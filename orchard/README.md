@@ -14,6 +14,14 @@ must enable the `spin_no_std` feature of the `lazy_static` crate. This is
 needed because the `--no-default-features` build of `lazy_static` still relies
 on `std`.
 
+## Fixed-base prover table
+
+The non-default `"prover-fixed-msm-table"` feature forwards Halo 2's
+proving-only fixed-base MSM table when the `"circuit"` feature is also active.
+Orchard shares one approximately 12.8 MiB table across its proving and
+verifying parameter clones. Parameter serialization and proof encoding are
+unchanged.
+
 ## License
 
 Copyright 2020-2023 The Electric Coin Company.

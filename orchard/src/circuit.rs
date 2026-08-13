@@ -75,6 +75,21 @@ pub use crate::Proof;
 /// Size of the Orchard circuit.
 const K: u32 = 11;
 
+#[cfg(feature = "prover-fixed-msm-table")]
+fn build_params() -> halo2_proofs::poly::commitment::Params<vesta::Affine> {
+    static PARAMS: std::sync::OnceLock<halo2_proofs::poly::commitment::Params<vesta::Affine>> =
+        std::sync::OnceLock::new();
+
+    PARAMS
+        .get_or_init(|| halo2_proofs::poly::commitment::Params::new(K))
+        .clone()
+}
+
+#[cfg(not(feature = "prover-fixed-msm-table"))]
+fn build_params() -> halo2_proofs::poly::commitment::Params<vesta::Affine> {
+    halo2_proofs::poly::commitment::Params::new(K)
+}
+
 // Absolute offsets for public inputs.
 const ANCHOR: usize = 0;
 const CV_NET_X: usize = 1;
@@ -1087,7 +1102,7 @@ impl VerifyingKey {
     ///
     /// See [`OrchardCircuitVersion`] for which version to use.
     pub fn build(circuit_version: OrchardCircuitVersion) -> Self {
-        let params = halo2_proofs::poly::commitment::Params::new(K);
+        let params = build_params();
         let circuit = Circuit::empty(circuit_version);
 
         let vk = plonk::keygen_vk(&params, &circuit).unwrap();
@@ -1126,7 +1141,7 @@ impl ProvingKey {
     ///
     /// See [`OrchardCircuitVersion`] for which version to use.
     pub fn build(circuit_version: OrchardCircuitVersion) -> Self {
-        let params = halo2_proofs::poly::commitment::Params::new(K);
+        let params = build_params();
         let circuit = Circuit::empty(circuit_version);
 
         let vk = plonk::keygen_vk(&params, &circuit).unwrap();
@@ -1832,6 +1847,26 @@ mod tests {
             include_str!("circuit_data/circuit_description_fixed"),
         );
         round_trip_for_version(OrchardCircuitVersion::FixedPostNu6_2, vk);
+    }
+
+    #[cfg(feature = "prover-fixed-msm-table")]
+    #[test]
+    fn fixed_msm_table_proof_round_trip() {
+        let mut rng = OsRng;
+        let circuit_version = OrchardCircuitVersion::FixedPostNu6_2;
+        let (circuit, instance) = generate_circuit_instance(&mut rng, circuit_version);
+        let keys = crate::cached_test_keys(circuit_version);
+
+        let proof = Proof::create(
+            keys.proving_key(),
+            core::slice::from_ref(&circuit),
+            core::slice::from_ref(&instance),
+            &mut rng,
+        )
+        .unwrap();
+        assert!(proof
+            .verify(keys.verifying_key(), core::slice::from_ref(&instance))
+            .is_ok());
     }
 
     #[test]

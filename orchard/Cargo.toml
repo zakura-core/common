@@ -61,6 +61,7 @@ dev-graph = [
     "plotters",
 ]
 multicore = ["halo2_proofs?/multicore"]
+prover-fixed-msm-table = ["halo2_proofs?/prover-fixed-msm-table"]
 std = [
     "corez/std",
     "group/wnaf-memuse",

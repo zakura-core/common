@@ -52,6 +52,30 @@ fn commit_instance<C: CurveAffine>(params: &Params<C>, instance: &[C::Scalar]) -
     best_multiexp::<C>(&scalars, &bases)
 }
 
+fn commit_lagrange_with_coeff<C: CurveAffine>(
+    params: &Params<C>,
+    lagrange: &Polynomial<C::Scalar, LagrangeCoeff>,
+    coeff: &Polynomial<C::Scalar, Coeff>,
+    blind: Blind<C::Scalar>,
+) -> C::Curve {
+    assert_eq!(lagrange.len(), coeff.len());
+
+    // The prover already needs these coefficient forms. Checking the source
+    // evaluations keeps sparse Lagrange commitments on their existing MSM
+    // path instead of destroying their zeros through conversion.
+    #[cfg(feature = "prover-fixed-msm-table")]
+    if params.k() == crate::PROVER_FIXED_MSM_TABLE_K
+        && lagrange.iter().all(|scalar| !bool::from(scalar.is_zero()))
+    {
+        return params.commit(coeff, blind);
+    }
+
+    #[cfg(not(feature = "prover-fixed-msm-table"))]
+    let _ = coeff;
+
+    params.commit_lagrange(lagrange, blind)
+}
+
 /// This is a verifying key which allows for the verification of proofs for a
 /// particular circuit.
 #[derive(Clone, Debug)]

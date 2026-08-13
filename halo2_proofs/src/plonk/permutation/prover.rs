@@ -169,13 +169,18 @@ impl Argument {
 
             let blind = Blind(C::Scalar::random(&mut rng));
 
-            let permutation_product_commitment_projective = params.commit_lagrange(&z, blind);
+            let permutation_product_poly = domain.lagrange_to_coeff(z.clone());
+            let permutation_product_commitment_projective =
+                super::super::commit_lagrange_with_coeff(
+                    params,
+                    &z,
+                    &permutation_product_poly,
+                    blind,
+                );
             let permutation_product_blind = blind;
-            let z = domain.lagrange_to_coeff(z);
-            let permutation_product_poly = z.clone();
 
             let permutation_product_coset =
-                evaluator.register_poly(domain.coeff_to_extended(z.clone()));
+                evaluator.register_poly(domain.coeff_to_extended(permutation_product_poly.clone()));
 
             let permutation_product_commitment =
                 permutation_product_commitment_projective.to_affine();
