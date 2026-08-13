@@ -18,12 +18,16 @@ fn main() {
     }
     let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
     let use_adx = target_uses_adx(&target_arch, &target_features);
+    let release = env::var("PROFILE").as_deref() == Ok("release");
 
     let semolina = PathBuf::from("native/semolina");
     let mut field = cc::Build::new();
     field.include(&semolina).file(semolina.join("pasta.c"));
     if use_adx {
         field.define("__ADX__", None);
+    }
+    if release {
+        field.define("NDEBUG", None);
     }
 
     if target_env == "msvc" {
@@ -61,6 +65,11 @@ fn main() {
         .flag_if_supported("-Wno-unused-command-line-argument");
     if use_adx {
         bridge.define("__ADX__", None);
+    }
+    if release {
+        // The checked GLV path asserts its invariant in debug builds and
+        // reaches the unsplit signed-Booth fallback in release builds.
+        bridge.define("NDEBUG", None);
     }
     bridge.compile("zakura_pasta_msm_bridge");
 }

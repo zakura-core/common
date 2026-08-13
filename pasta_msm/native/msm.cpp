@@ -8,9 +8,9 @@
 #include <new>
 #include <type_traits>
 
+#include <glv.hpp>
 #include <sppark/curve.hpp>
 #include <sppark/pasta.hpp>
-#include <sppark/pippenger.hpp>
 
 namespace {
 
@@ -69,7 +69,8 @@ static_assert(
 
 template<class base_t, class scalar_t>
 int multiscalar(void* output, const void* points, const void* scalars,
-                size_t len) noexcept
+                size_t len, const zakura_pasta_msm::glv_params_t& params,
+                const base_t& zeta) noexcept
 {
     if (output == nullptr ||
         (len != 0 && (points == nullptr || scalars == nullptr))) {
@@ -80,9 +81,9 @@ int multiscalar(void* output, const void* points, const void* scalars,
         using point_t = xyzz_t<base_t>;
         using affine_type = typename point_t::affine_type;
         point_t result;
-        mult_pippenger_signed_serial(
+        zakura_pasta_msm::mult_pippenger_glv_signed_serial(
             result, static_cast<const affine_type*>(points), len,
-            static_cast<const scalar_t*>(scalars));
+            static_cast<const scalar_t*>(scalars), params, zeta);
 
         affine_type affine = result.to_affine();
         auto* rust_output =
@@ -107,11 +108,15 @@ int multiscalar(void* output, const void* points, const void* scalars,
 extern "C" int zakura_pasta_msm_pallas_vartime(
     void* output, const void* points, const void* scalars, size_t len) noexcept
 {
-    return multiscalar<pallas_t, vesta_t>(output, points, scalars, len);
+    return multiscalar<pallas_t, vesta_t>(
+        output, points, scalars, len, zakura_pasta_msm::PALLAS_GLV,
+        zakura_pasta_msm::pallas_zeta());
 }
 
 extern "C" int zakura_pasta_msm_vesta_vartime(
     void* output, const void* points, const void* scalars, size_t len) noexcept
 {
-    return multiscalar<vesta_t, pallas_t>(output, points, scalars, len);
+    return multiscalar<vesta_t, pallas_t>(
+        output, points, scalars, len, zakura_pasta_msm::VESTA_GLV,
+        zakura_pasta_msm::vesta_zeta());
 }

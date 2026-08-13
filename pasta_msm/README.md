@@ -2,7 +2,9 @@
 
 `zakura-pasta-msm` provides caller-thread, variable-time multiscalar
 multiplication for the Pallas and Vesta curves. It is a CPU-only, attributed
-Zakura fork of Supranational's `pasta-msm`, Semolina, and Sppark projects.
+Zakura fork of Supranational's `pasta-msm`, Semolina, and Sppark projects. Its
+checked GLV decomposition is derived from Zcash's `pasta_curves`
+implementation.
 
 The public API consists of `pallas_vartime` and `vesta_vartime`. Both require
 equal-length slices and return the identity for empty inputs. They provide no

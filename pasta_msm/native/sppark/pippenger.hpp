@@ -115,6 +115,36 @@ static void tile_signed(point_t& output, const affine_t points[],
     integrate_buckets(output, buckets, window - 1);
 }
 
+template<class point_t, class affine_t = typename point_t::affine_type>
+static void mult_pippenger_signed_serial_raw(point_t& output,
+                                             const affine_t points[],
+                                             size_t npoints,
+                                             const unsigned char* scalars,
+                                             size_t nbits)
+{
+    if (npoints == 0) {
+        output.inf();
+        return;
+    }
+
+    size_t window = window_size(npoints);
+    size_t windows = nbits / window + 1;
+    std::vector<point_t> buckets(
+        static_cast<size_t>(1) << (window - 1));
+
+    point_t partial;
+    output.inf();
+    for (size_t index = windows; index-- > 0;) {
+        tile_signed(partial, points, npoints, scalars, nbits,
+                    buckets.data(), index * window, window);
+        output.add(partial);
+        if (index != 0) {
+            for (size_t i = 0; i < window; i++)
+                output.dbl();
+        }
+    }
+}
+
 template<class point_t, class scalar_t,
          class affine_t = typename point_t::affine_type>
 static void mult_pippenger_signed_serial(point_t& output,
@@ -140,22 +170,8 @@ static void mult_pippenger_signed_serial(point_t& output,
         return;
     }
 
-    size_t window = window_size(npoints);
-    size_t windows = nbits / window + 1;
-    std::vector<point_t> buckets(
-        static_cast<size_t>(1) << (window - 1));
-
-    point_t partial;
-    output.inf();
-    for (size_t index = windows; index-- > 0;) {
-        tile_signed(partial, points, npoints, scalars[0], nbits,
-                    buckets.data(), index * window, window);
-        output.add(partial);
-        if (index != 0) {
-            for (size_t i = 0; i < window; i++)
-                output.dbl();
-        }
-    }
+    mult_pippenger_signed_serial_raw(
+        output, points, npoints, scalars[0], nbits);
 }
 
 #endif

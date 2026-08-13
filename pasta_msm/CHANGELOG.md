@@ -4,6 +4,11 @@ All notable changes to `zakura-pasta-msm` will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Changed the native backend to use checked GLV scalar decomposition before
+  signed-Booth Pippenger, with an unsplit fallback if validation fails.
+
 ### Added
 
 - Added the `pallas_vartime` and `vesta_vartime` caller-thread CPU

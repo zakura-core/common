@@ -58,6 +58,14 @@ fn scalar_with_bits<F: PrimeField>(bits: &[usize]) -> F {
     Option::from(F::from_repr(repr)).expect("test scalar must be canonical")
 }
 
+fn scalar_from_limbs<F: PrimeField>(limbs: [u64; 4]) -> F {
+    let mut repr = F::Repr::default();
+    for (chunk, limb) in repr.as_mut().chunks_exact_mut(8).zip(limbs) {
+        chunk.copy_from_slice(&limb.to_le_bytes());
+    }
+    Option::from(F::from_repr(repr)).expect("test scalar must be canonical")
+}
+
 #[test]
 fn pallas_matches_reference_at_window_boundaries() {
     for (case, size) in [0, 1, 2, 16, 31, 32, 33, 255, 2_048]
@@ -168,6 +176,76 @@ fn signed_booth_scalar_boundaries_match_reference() {
         pasta_msm::vesta_vartime(&vesta_points, &vesta_scalars),
         vesta_reference(&vesta_points, &vesta_scalars)
     );
+}
+
+#[test]
+fn glv_babai_boundaries_match_reference() {
+    // Generated and verified by zcash/pasta_curves at the revision recorded
+    // in UPSTREAM.md. These exercise a narrow Babai rounding boundary that
+    // ordinary randomized inputs are unlikely to reach.
+    const PALLAS_BOUNDARY: [u64; 4] = [
+        0xf1616cb5a3632910,
+        0xa487c2df3b0d145f,
+        0xd70a3d98c2549413,
+        0x3d70a3d70a3d70a3,
+    ];
+    const VESTA_BOUNDARY: [u64; 4] = [
+        0x17b30ff8ae506c98,
+        0xecc8ab77c7c0d84f,
+        0xd70a3d86799d8e38,
+        0x3d70a3d70a3d70a3,
+    ];
+
+    let pallas_boundary = scalar_from_limbs::<pallas::Scalar>(PALLAS_BOUNDARY);
+    let pallas_scalars = [
+        pallas_boundary - pallas::Scalar::ONE,
+        pallas_boundary,
+        pallas_boundary + pallas::Scalar::ONE,
+    ];
+    let pallas_points = [
+        pallas::Point::generator().to_affine(),
+        (pallas::Point::generator() * pallas_boundary).to_affine(),
+        (-pallas::Point::generator()).to_affine(),
+    ];
+    assert_eq!(
+        pasta_msm::pallas_vartime(&pallas_points, &pallas_scalars),
+        pallas_reference(&pallas_points, &pallas_scalars)
+    );
+
+    let vesta_boundary = scalar_from_limbs::<vesta::Scalar>(VESTA_BOUNDARY);
+    let vesta_scalars = [
+        vesta_boundary - vesta::Scalar::ONE,
+        vesta_boundary,
+        vesta_boundary + vesta::Scalar::ONE,
+    ];
+    let vesta_points = [
+        vesta::Point::generator().to_affine(),
+        (vesta::Point::generator() * vesta_boundary).to_affine(),
+        (-vesta::Point::generator()).to_affine(),
+    ];
+    assert_eq!(
+        pasta_msm::vesta_vartime(&vesta_points, &vesta_scalars),
+        vesta_reference(&vesta_points, &vesta_scalars)
+    );
+}
+
+#[test]
+fn randomized_glv_inputs_match_reference() {
+    for seed in 96..104 {
+        let (pallas_points, pallas_scalars) = pallas_fixture(127, seed);
+        assert_eq!(
+            pasta_msm::pallas_vartime(&pallas_points, &pallas_scalars),
+            pallas_reference(&pallas_points, &pallas_scalars),
+            "Pallas seed {seed}"
+        );
+
+        let (vesta_points, vesta_scalars) = vesta_fixture(127, seed);
+        assert_eq!(
+            pasta_msm::vesta_vartime(&vesta_points, &vesta_scalars),
+            vesta_reference(&vesta_points, &vesta_scalars),
+            "Vesta seed {seed}"
+        );
+    }
 }
 
 #[test]
