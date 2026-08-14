@@ -86,6 +86,7 @@ jobs:
       - name: Build with latest dependencies
         run: >-
           cargo +stable build
+          -p equihash
           -p zcash_keys
           -p zcash_primitives
           -p zcash_proofs
