@@ -76,11 +76,13 @@ jobs:
           esac
 
           unreleased_body() {
-            git show "$1:$2" 2>/dev/null | awk '
+            local changelog
+            changelog=$(git show "$1:$2" 2>/dev/null)
+            awk '
               /^## \[?Unreleased\]?$/ { inside = 1; next }
               inside && /^## / { exit }
               inside { print }
-            '
+            ' <<< "$changelog"
           }
 
           for member in "${members[@]}"; do
