@@ -16,6 +16,19 @@ and this library adheres to Rust's notion of
 - Raised the minimum supported Rust version to 1.88.
 - Updated parameter checks for current stable Clippy.
 
+### Added
+
+- Added a cancellable Tromp solver API with digit-boundary cancellation and
+  pass counts.
+
+### Fixed
+
+- Reset all Tromp bucket counters before each pass so a cancelled pass cannot
+  corrupt the next pass.
+- Bounded Tromp solution reads to their native allocation.
+- Released native solver memory when a callback panics.
+- Handled native solver allocation failures.
+
 ## [0.3.0] - 2026-04-23
 
 ### Changed
