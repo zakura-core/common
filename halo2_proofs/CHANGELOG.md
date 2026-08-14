@@ -24,5 +24,7 @@ and this project adheres to Rust's notion of
   interpolation polynomials.
 - Polynomial evaluation now shares repeated factors inside weighted constraint
   groups.
+- Polynomial evaluation now caches repeated compiled subexpressions when doing
+  so avoids at least three field multiplications.
 - Polynomial evaluation now uses wide product accumulators when folding
   expressions over Pasta fields.
