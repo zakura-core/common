@@ -1111,17 +1111,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "equihash"
-version = "0.3.0"
-dependencies = [
- "blake2b_simd",
- "cc",
- "corez",
- "document-features",
- "hex",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3970,6 +3959,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-equihash"
+version = "0.3.0"
+dependencies = [
+ "blake2b_simd",
+ "cc",
+ "corez",
+ "document-features",
+ "hex",
+]
+
+[[package]]
 name = "zcash_address"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4060,7 +4060,6 @@ dependencies = [
  "criterion 0.5.1",
  "crypto-common 0.2.0-rc.1",
  "document-features",
- "equihash",
  "ff",
  "hex",
  "incrementalmerkletree",
@@ -4076,6 +4075,7 @@ dependencies = [
  "sapling-crypto",
  "secp256k1",
  "sha2 0.10.9",
+ "zakura-equihash",
  "zcash_encoding",
  "zcash_note_encryption",
  "zcash_protocol",

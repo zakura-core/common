@@ -13,7 +13,8 @@
 # names from crates.io, that crate must either be added here or have its edge
 # rewritten, or a registry copy will silently coexist with the forks.
 #
-# - equihash: proof-of-work verification and the optional Tromp CPU solver.
+# - zakura-equihash: proof-of-work verification and the optional Tromp CPU
+#   solver.
 # - pasta_curves, halo2_proofs, halo2_gadgets, halo2_poseidon,
 #   halo2_legacy_pdqsort, orchard: the proving stack itself.
 # - sinsemilla, reddsa, redjubjub, sapling-crypto, zcash_proofs: the middle

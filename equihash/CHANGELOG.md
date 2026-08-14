@@ -11,6 +11,8 @@ and this library adheres to Rust's notion of
 ### Changed
 
 - Imported the crate into the Zakura libraries workspace.
+- Renamed the package to `zakura-equihash`.
+- Marked the fork-only package as non-publishable.
 - Raised the minimum supported Rust version to 1.88.
 - Updated parameter checks for current stable Clippy.
 

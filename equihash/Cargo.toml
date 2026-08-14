@@ -1,7 +1,8 @@
 [package]
-name = "equihash"
+name = "zakura-equihash"
 description = "The Equihash Proof-of-Work function"
 version = "0.3.0"
+publish = false
 authors = ["Jack Grigg <jack@z.cash>"]
 homepage = "https://github.com/zcash/librustzcash"
 repository = "https://github.com/zcash/librustzcash"

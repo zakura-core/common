@@ -112,6 +112,7 @@ optional = true
 
 [dependencies.equihash]
 path = "../equihash"
+package = "zakura-equihash"
 version = "0.3"
 default-features = false
 

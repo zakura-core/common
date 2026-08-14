@@ -259,9 +259,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - name: equihash / Stable and MSRV checks
+      - name: zakura-equihash / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.equihash == 'true' }}
-        run: bash .github/scripts/check_rust_group.sh equihash true false
+        run: bash .github/scripts/check_rust_group.sh zakura-equihash true false
       - name: halo2 / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.halo2 == 'true' }}
         run: >-
@@ -809,7 +809,7 @@ jobs:
   # zcash/librustzcash .github/workflows/ci.yml @
   # 82fa052a06e3af0058a73f320538f9b93193439c
   equihash-test:
-    name: equihash / Test all features
+    name: zakura-equihash / Test all features
     needs: changes
     if: needs.changes.outputs.equihash == 'true'
     runs-on: ubuntu-latest
@@ -820,9 +820,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
       - name: Run tests
-        run: cargo +1.88.0 test -p equihash --all-features --locked
+        run: cargo +1.88.0 test -p zakura-equihash --all-features --locked
       - name: Check no-default-features
-        run: cargo +1.88.0 check -p equihash --no-default-features --locked
+        run: cargo +1.88.0 check -p zakura-equihash --no-default-features --locked
       - name: Verify working directory is clean
         run: git diff --exit-code
 
