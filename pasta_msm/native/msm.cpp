@@ -105,7 +105,25 @@ int multiscalar(void* output, const void* points, const void* scalars,
 
 } // namespace
 
-extern "C" int zakura_pasta_msm_pallas_vartime(
+#ifndef ZAKURA_PASTA_MSM_PALLAS_ENTRY
+# define ZAKURA_PASTA_MSM_PALLAS_ENTRY zakura_pasta_msm_pallas_vartime
+# define ZAKURA_PASTA_MSM_VESTA_ENTRY zakura_pasta_msm_vesta_vartime
+#endif
+
+#if defined(ZAKURA_PASTA_MSM_PRIVATE_BACKEND) && \
+    (defined(__GNUC__) || defined(__clang__))
+# define ZAKURA_PASTA_MSM_VISIBILITY __attribute__((visibility("hidden")))
+#else
+# define ZAKURA_PASTA_MSM_VISIBILITY
+#endif
+
+#if defined(ZAKURA_PASTA_MSM_PRIVATE_BACKEND)
+# define ZAKURA_PASTA_MSM_LINKAGE ZAKURA_PASTA_MSM_VISIBILITY
+#else
+# define ZAKURA_PASTA_MSM_LINKAGE extern "C"
+#endif
+
+ZAKURA_PASTA_MSM_LINKAGE int ZAKURA_PASTA_MSM_PALLAS_ENTRY(
     void* output, const void* points, const void* scalars, size_t len) noexcept
 {
     return multiscalar<pallas_t, vesta_t>(
@@ -113,7 +131,7 @@ extern "C" int zakura_pasta_msm_pallas_vartime(
         zakura_pasta_msm::pallas_zeta());
 }
 
-extern "C" int zakura_pasta_msm_vesta_vartime(
+ZAKURA_PASTA_MSM_LINKAGE int ZAKURA_PASTA_MSM_VESTA_ENTRY(
     void* output, const void* points, const void* scalars, size_t len) noexcept
 {
     return multiscalar<vesta_t, pallas_t>(

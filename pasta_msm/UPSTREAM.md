@@ -28,14 +28,19 @@ project.
 | Local file | Upstream reference | Modification |
 | --- | --- | --- |
 | `Cargo.toml` | `pasta-msm` [`Cargo.toml`][pm-manifest] | Renamed the package to `zakura-pasta-msm` while retaining the `pasta_msm` Rust library name; replaced the standalone package graph with one exact workspace `pasta_curves` dependency and `cc`; removed every feature and CUDA, Semolina, Sppark, `which`, Rayon, and benchmark dependency. |
-| `build.rs` | Semolina [`build.rs`][sem-build] and `pasta-msm` [`build.rs`][pm-build] | Uses Cargo target variables to select checked-in baseline or ADX CPU assembly and define release assertion behavior, with no host probing, CUDA discovery, or external include paths. |
-| `build_selection.rs` | None | New private target-feature and MSVC assembly-source selection shared by the build script and its regression test. |
+| `build.rs` | Semolina [`build.rs`][sem-build] and `pasta-msm` [`build.rs`][pm-build] | Uses Cargo target variables to select checked-in CPU assembly and define release assertion behavior. Baseline x86_64 builds compile both field backends for one-time runtime selection; explicit ADX and non-x86_64 builds compile one direct backend. It performs no host probing, CUDA discovery, or external include-path lookup. |
+| `build_selection.rs` | None | New private target-feature, runtime-dispatch, and MSVC assembly-source selection shared by the build script and its regression test. |
 | `src/lib.rs` | `pasta-msm` [`src/lib.rs`][pm-lib] | Renamed the two functions to make variable-time behavior explicit; added empty-input handling and kept only the typed safe API. |
 | `src/ffi.rs` | `pasta-msm` [`src/lib.rs`][pm-lib] | New private FFI layer with compile-time layout checks, status handling, and documented unsafe blocks. |
-| `tests/build_selection.rs` | None | Includes the private build selector to verify that MSVC x86_64 baseline and ADX targets select their matching checked-in assembly. |
+| `tests/build_selection.rs` | None | Includes the private build selector to verify that MSVC baseline x86_64 builds include both checked-in multiplication backends, while explicit ADX and AArch64 targets keep one backend. |
 | `tests/differential.rs` | `pasta-msm` [`src/tests.rs`][pm-tests] and Zcash `pasta_curves` [`src/glv.rs`][zcash-glv], [`sage/glv_boundary_scalars.sage`][zcash-glv-boundaries] | Replaced the upstream fixtures with deterministic two-curve differential cases covering empty inputs, signed-window and checked Babai boundaries, randomized inputs, identities, zero scalars, and Orchard-sized inputs. |
 | `tests/concurrency.rs` | `pasta-msm` [`src/tests.rs`][pm-tests] | Added independent concurrent calls to enforce the removal of shared native state. |
-| `native/msm.cpp` | `pasta-msm` [`src/pippenger.cpp`][pm-bridge] | Removed CUDA and the global thread pool; added exactly two Zakura-prefixed, status-returning, `noexcept` entrypoints with catch-all exception containment; delegates privately to the checked GLV backend. |
+| `native/msm.cpp` | `pasta-msm` [`src/pippenger.cpp`][pm-bridge] | Removed CUDA and the global thread pool; added status-returning, `noexcept` entrypoints with catch-all exception containment; delegates privately to the checked GLV backend. It can be instantiated as the two public bridge entrypoints or as a uniquely named private baseline/ADX backend. |
+| `native/msm_baseline.cpp` | `native/msm.cpp` above | New Zakura-authored wrapper that instantiates the private baseline MSM backend with a unique field type and private symbols. |
+| `native/msm_adx.cpp` | `native/msm.cpp` above | New Zakura-authored wrapper that instantiates the private BMI2/ADX MSM backend with a unique field type and private symbols. |
+| `native/runtime_dispatch.cpp` | None | New Zakura-authored x86_64 dispatcher. It checks CPUID leaf 7 once using C++11 thread-safe static initialization and selects the private BMI2/ADX backend only when both required feature bits are present. The existing two public C entrypoints and their signatures are unchanged. |
+| `native/semolina/pasta_baseline.c` | Semolina [`src/pasta.c`][sem-pasta-c] | New Zakura-authored wrapper that instantiates the pinned Semolina C source with private baseline symbol names. |
+| `native/semolina/pasta_adx.c` | Semolina [`src/pasta.c`][sem-pasta-c] | New Zakura-authored wrapper that instantiates the pinned Semolina C source with private BMI2/ADX symbol names. |
 | `native/asm/regenerate.sh` | Semolina [`src/refresh.sh`][sem-refresh] | Regenerates every checked-in target in one pass, adds attribution notices, and supports clean-diff verification. |
 | `LICENSE-APACHE` | `pasta-msm` [`LICENSE`][pm-license] | Renamed only. |
 
@@ -86,9 +91,10 @@ by the pinned `src/glv.rs` tests.
 
 Every file in this table retains its upstream copyright and SPDX header and
 adds a `Modified by Zakura` notice. The arithmetic source and generator bodies
-are otherwise unchanged apart from whitespace normalization, except that
+are otherwise unchanged apart from whitespace normalization. `assembly.S`
+can include both x86_64 multiplication backends for runtime dispatch, while
 `vect.h` drops its unused CUDA limb definition and CUDA-specific compiler
-guard.
+guard and can rename the private C wrapper symbols.
 
 | Local path below `native/semolina/` | Exact Semolina blob |
 | --- | --- |

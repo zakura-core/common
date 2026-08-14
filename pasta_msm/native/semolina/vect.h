@@ -79,6 +79,22 @@ void ct_inverse_pasta(vec512 ret, const vec256 inp, const vec256 mod,
 /*
  * C subroutines
  */
+#if defined(ZAKURA_PASTA_MSM_BASELINE_BACKEND)
+# define pasta_from_scalar pasta_from_scalar_baseline
+# define pasta_to_scalar pasta_to_scalar_baseline
+# define pasta_mul pasta_mul_baseline
+# define pasta_sqr pasta_sqr_baseline
+# define pasta_from pasta_from_baseline
+# define pasta_reciprocal pasta_reciprocal_baseline
+#elif defined(ZAKURA_PASTA_MSM_ADX_BACKEND)
+# define pasta_from_scalar pasta_from_scalar_adx
+# define pasta_to_scalar pasta_to_scalar_adx
+# define pasta_mul pasta_mul_adx
+# define pasta_sqr pasta_sqr_adx
+# define pasta_from pasta_from_adx
+# define pasta_reciprocal pasta_reciprocal_adx
+#endif
+
 void pasta_reciprocal(vec256 ret, const vec256 a, const vec256 p, limb_t n0);
 void pasta_mul(vec256 out, const vec256 a, const vec256 b,
                            const vec256 p, limb_t n0);

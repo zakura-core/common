@@ -5,11 +5,21 @@ fn target_uses_adx(target_arch: &str, target_features: &str) -> bool {
             .any(|feature| feature == "adx")
 }
 
-fn msvc_multiplication_assembly(target_arch: &str, use_adx: bool) -> &'static str {
+fn uses_runtime_adx(target_arch: &str, use_adx: bool) -> bool {
+    target_arch == "x86_64" && !use_adx
+}
+
+fn msvc_multiplication_assemblies(
+    target_arch: &str,
+    use_adx: bool,
+) -> &'static [&'static str] {
     match (target_arch, use_adx) {
-        ("x86_64", true) => "win64/pasta_mulx-x86_64.asm",
-        ("x86_64", false) => "win64/pasta_mulq-x86_64.asm",
-        ("aarch64", _) => "win64/pasta_mul-armv8.asm",
+        ("x86_64", true) => &["win64/pasta_mulx-x86_64.asm"],
+        ("x86_64", false) => &[
+            "win64/pasta_mulq-x86_64.asm",
+            "win64/pasta_mulx-x86_64.asm",
+        ],
+        ("aarch64", _) => &["win64/pasta_mul-armv8.asm"],
         _ => unreachable!("unsupported pasta-msm target architecture"),
     }
 }
@@ -18,26 +28,32 @@ fn msvc_multiplication_assembly(target_arch: &str, use_adx: bool) -> &'static st
 mod tests {
     use std::path::Path;
 
-    use super::{msvc_multiplication_assembly, target_uses_adx};
+    use super::{msvc_multiplication_assemblies, target_uses_adx, uses_runtime_adx};
 
-    fn assert_checked_in(source: &str) {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("native/semolina")
-            .join(source);
+    fn assert_checked_in(sources: &[&str]) {
+        for source in sources {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("native/semolina")
+                .join(source);
 
-        assert!(source.is_file(), "missing {}", source.display());
+            assert!(source.is_file(), "missing {}", source.display());
+        }
     }
 
     #[test]
-    fn msvc_x86_64_baseline_selects_mulq() {
+    fn msvc_x86_64_baseline_selects_runtime_dispatch() {
         let use_adx = target_uses_adx("x86_64", "sse,sse2");
 
         assert!(!use_adx);
+        assert!(uses_runtime_adx("x86_64", use_adx));
         assert_eq!(
-            msvc_multiplication_assembly("x86_64", use_adx),
-            "win64/pasta_mulq-x86_64.asm"
+            msvc_multiplication_assemblies("x86_64", use_adx),
+            &[
+                "win64/pasta_mulq-x86_64.asm",
+                "win64/pasta_mulx-x86_64.asm"
+            ]
         );
-        assert_checked_in(msvc_multiplication_assembly("x86_64", use_adx));
+        assert_checked_in(msvc_multiplication_assemblies("x86_64", use_adx));
     }
 
     #[test]
@@ -45,10 +61,24 @@ mod tests {
         let use_adx = target_uses_adx("x86_64", "adx,sse,sse2");
 
         assert!(use_adx);
+        assert!(!uses_runtime_adx("x86_64", use_adx));
         assert_eq!(
-            msvc_multiplication_assembly("x86_64", use_adx),
-            "win64/pasta_mulx-x86_64.asm"
+            msvc_multiplication_assemblies("x86_64", use_adx),
+            &["win64/pasta_mulx-x86_64.asm"]
         );
-        assert_checked_in(msvc_multiplication_assembly("x86_64", use_adx));
+        assert_checked_in(msvc_multiplication_assemblies("x86_64", use_adx));
+    }
+
+    #[test]
+    fn msvc_aarch64_keeps_single_backend() {
+        let use_adx = target_uses_adx("aarch64", "");
+
+        assert!(!use_adx);
+        assert!(!uses_runtime_adx("aarch64", use_adx));
+        assert_eq!(
+            msvc_multiplication_assemblies("aarch64", use_adx),
+            &["win64/pasta_mul-armv8.asm"]
+        );
+        assert_checked_in(msvc_multiplication_assemblies("aarch64", use_adx));
     }
 }

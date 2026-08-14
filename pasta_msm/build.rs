@@ -18,12 +18,22 @@ fn main() {
     }
     let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
     let use_adx = target_uses_adx(&target_arch, &target_features);
+    let runtime_adx = uses_runtime_adx(&target_arch, use_adx);
     let release = env::var("PROFILE").as_deref() == Ok("release");
 
     let semolina = PathBuf::from("native/semolina");
     let mut field = cc::Build::new();
-    field.include(&semolina).file(semolina.join("pasta.c"));
-    if use_adx {
+    field.include(&semolina);
+    if runtime_adx {
+        field
+            .file(semolina.join("pasta_baseline.c"))
+            .file(semolina.join("pasta_adx.c"))
+            .define("ZAKURA_PASTA_MSM_RUNTIME_ADX", None)
+            .flag_if_supported("-fvisibility=hidden");
+    } else {
+        field.file(semolina.join("pasta.c"));
+    }
+    if use_adx && !runtime_adx {
         field.define("__ADX__", None);
     }
     if release {
@@ -39,8 +49,10 @@ fn main() {
         let win64 = semolina.join("win64");
         field
             .file(win64.join(format!("ct_inverse_mod_256-{suffix}.asm")))
-            .file(win64.join(format!("pasta_add-{suffix}.asm")))
-            .file(semolina.join(msvc_multiplication_assembly(&target_arch, use_adx)));
+            .file(win64.join(format!("pasta_add-{suffix}.asm")));
+        for source in msvc_multiplication_assemblies(&target_arch, use_adx) {
+            field.file(semolina.join(source));
+        }
     } else {
         field.file(semolina.join("assembly.S"));
     }
@@ -57,13 +69,20 @@ fn main() {
         .cpp(true)
         .include("native")
         .include(&semolina)
-        .file("native/msm.cpp")
         .flag_if_supported("-mno-avx")
         .flag_if_supported("-fno-builtin")
         .flag_if_supported("-std=c++11")
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-command-line-argument");
-    if use_adx {
+    if runtime_adx {
+        bridge
+            .file("native/msm_baseline.cpp")
+            .file("native/msm_adx.cpp")
+            .file("native/runtime_dispatch.cpp");
+    } else {
+        bridge.file("native/msm.cpp");
+    }
+    if use_adx && !runtime_adx {
         bridge.define("__ADX__", None);
     }
     if release {
