@@ -30,3 +30,6 @@ and this project adheres to Rust's notion of
   expressions over Pasta fields.
 - Clarified internal vanishing-prover phase names to distinguish the random
   masking-polynomial commitment from quotient construction.
+- **Breaking:** The public `ConstraintSystem::lookup` method now panics when its
+  input-to-table map is empty; such calls previously constructed lookup
+  arguments that constrained no circuit cells.
