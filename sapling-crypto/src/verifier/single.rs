@@ -39,7 +39,10 @@ impl SaplingVerificationContext {
         zkproof: Proof<Bls12>,
         verifying_key: &PreparedSpendVerifyingKey,
     ) -> bool {
-        let rk_affine = jubjub::AffinePoint::from_bytes(rk.into()).unwrap();
+        let Some(rk_affine) = Option::from(jubjub::AffinePoint::from_bytes(<[u8; 32]>::from(rk)))
+        else {
+            return false;
+        };
 
         self.inner.check_spend(
             cv,
@@ -52,7 +55,7 @@ impl SaplingVerificationContext {
             &mut (),
             |_, rk| rk.verify(sighash_value, &spend_auth_sig).is_ok(),
             |_, proof, public_inputs| {
-                verify_proof(&verifying_key.0, &proof, &public_inputs[..]).is_ok()
+                verify_proof(verifying_key.as_inner(), &proof, &public_inputs[..]).is_ok()
             },
         )
     }
@@ -74,7 +77,7 @@ impl SaplingVerificationContext {
             epk.to_affine(),
             zkproof,
             |proof, public_inputs| {
-                verify_proof(&verifying_key.0, &proof, &public_inputs[..]).is_ok()
+                verify_proof(verifying_key.as_inner(), &proof, &public_inputs[..]).is_ok()
             },
         )
     }

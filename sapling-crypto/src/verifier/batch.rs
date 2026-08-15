@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use bellman::groth16;
+use bellman::{groth16, VerificationError};
 use bls12_381::Bls12;
 use group::Curve;
 use rand_core::{CryptoRng, RngCore};
@@ -18,9 +18,37 @@ use crate::{
 /// Signatures are verified assuming ZIP 216 is active.
 pub struct BatchValidator {
     bundles_added: bool,
-    spend_proofs: groth16::batch::Verifier<Bls12>,
-    output_proofs: groth16::batch::Verifier<Bls12>,
+    spend_proofs: ProofBatch,
+    output_proofs: ProofBatch,
     signatures: redjubjub::batch::Verifier,
+}
+
+type ProofBatch = Vec<groth16::batch::Item<Bls12>>;
+
+fn verify_proofs<R: RngCore + CryptoRng>(
+    proofs: ProofBatch,
+    verifying_key: &groth16::VerifyingKey<Bls12>,
+    prepared_verifying_key: &groth16::PreparedVerifyingKey<Bls12>,
+    rng: &mut R,
+) -> Result<(), VerificationError> {
+    let proofs = match <[groth16::batch::Item<Bls12>; 1]>::try_from(proofs) {
+        Ok([proof]) => return proof.verify_single(prepared_verifying_key),
+        Err(proofs) => proofs,
+    };
+
+    let mut batch = groth16::batch::Verifier::new();
+    for proof in proofs {
+        batch.queue(proof);
+    }
+
+    #[cfg(feature = "multicore")]
+    {
+        let _ = rng;
+        batch.verify_multicore(verifying_key)
+    }
+
+    #[cfg(not(feature = "multicore"))]
+    batch.verify(rng, verifying_key)
 }
 
 impl Default for BatchValidator {
@@ -34,8 +62,8 @@ impl BatchValidator {
     pub fn new() -> Self {
         BatchValidator {
             bundles_added: false,
-            spend_proofs: groth16::batch::Verifier::new(),
-            output_proofs: groth16::batch::Verifier::new(),
+            spend_proofs: Vec::new(),
+            output_proofs: Vec::new(),
             signatures: redjubjub::batch::Verifier::new(),
         }
     }
@@ -64,9 +92,11 @@ impl BatchValidator {
         let decoded_points_storage;
         let decoded_points = if point_count == 1 {
             let encoding = if let Some(spend) = bundle.shielded_spends().first() {
-                (*spend.rk()).into()
+                <[u8; 32]>::from(*spend.rk())
+            } else if let Some(output) = bundle.shielded_outputs().first() {
+                output.ephemeral_key().0
             } else {
-                bundle.shielded_outputs()[0].ephemeral_key().0
+                return false;
             };
             single_decoded_point = [jubjub::AffinePoint::from_bytes(encoding)];
             &single_decoded_point[..]
@@ -75,7 +105,7 @@ impl BatchValidator {
                 bundle
                     .shielded_spends()
                     .iter()
-                    .map(|spend| (*spend.rk()).into())
+                    .map(|spend| <[u8; 32]>::from(*spend.rk()))
                     .chain(
                         bundle
                             .shielded_outputs()
@@ -102,8 +132,10 @@ impl BatchValidator {
         let value_commitments_affine = if point_count == 1 {
             let value_commitment = if let Some(spend) = bundle.shielded_spends().first() {
                 spend.cv().as_inner()
+            } else if let Some(output) = bundle.shielded_outputs().first() {
+                output.cv().as_inner()
             } else {
-                bundle.shielded_outputs()[0].cv().as_inner()
+                return false;
             };
             single_value_commitment_affine = [value_commitment.to_affine()];
             &single_value_commitment_affine[..]
@@ -128,6 +160,10 @@ impl BatchValidator {
             value_commitments_affine.split_at(bundle.shielded_spends().len());
 
         for ((spend, rk), cv) in bundle.shielded_spends().iter().zip(rks).zip(spend_cvs) {
+            let Some(rk) = Option::from(*rk) else {
+                return false;
+            };
+
             // Deserialize the proof
             let zkproof = match groth16::Proof::read(&spend.zkproof()[..]) {
                 Ok(p) => p,
@@ -142,7 +178,7 @@ impl BatchValidator {
                 *spend.anchor(),
                 &spend.nullifier().0,
                 spend.rk(),
-                rk.unwrap(),
+                rk,
                 zkproof,
                 self,
                 |this, rk| {
@@ -151,7 +187,8 @@ impl BatchValidator {
                     true
                 },
                 |this, proof, public_inputs| {
-                    this.spend_proofs.queue((proof, public_inputs.to_vec()));
+                    this.spend_proofs
+                        .push(groth16::batch::Item::from((proof, public_inputs.to_vec())));
                     true
                 },
             );
@@ -161,6 +198,10 @@ impl BatchValidator {
         }
 
         for ((output, epk), cv) in bundle.shielded_outputs().iter().zip(epks).zip(output_cvs) {
+            let Some(epk) = Option::from(*epk) else {
+                return false;
+            };
+
             // Deserialize the proof
             let zkproof = match groth16::Proof::read(&output.zkproof()[..]) {
                 Ok(p) => p,
@@ -172,10 +213,11 @@ impl BatchValidator {
                 output.cv(),
                 *cv,
                 *output.cmu(),
-                epk.unwrap(),
+                epk,
                 zkproof,
                 |proof, public_inputs| {
-                    self.output_proofs.queue((proof, public_inputs.to_vec()));
+                    self.output_proofs
+                        .push(groth16::batch::Item::from((proof, public_inputs.to_vec())));
                     true
                 },
             );
@@ -219,19 +261,26 @@ impl BatchValidator {
             return false;
         }
 
-        #[cfg(feature = "multicore")]
-        let verify_proofs = |batch: groth16::batch::Verifier<Bls12>, vk| batch.verify_multicore(vk);
-
-        #[cfg(not(feature = "multicore"))]
-        let mut verify_proofs =
-            |batch: groth16::batch::Verifier<Bls12>, vk| batch.verify(&mut rng, vk);
-
-        if verify_proofs(self.spend_proofs, &spend_vk.0).is_err() {
+        if verify_proofs(
+            self.spend_proofs,
+            spend_vk.batch_verifying_key(),
+            spend_vk.prepared_verifying_key(),
+            &mut rng,
+        )
+        .is_err()
+        {
             tracing::debug!("Spend proof batch validation failed");
             return false;
         }
 
-        if verify_proofs(self.output_proofs, &output_vk.0).is_err() {
+        if verify_proofs(
+            self.output_proofs,
+            output_vk.batch_verifying_key(),
+            output_vk.prepared_verifying_key(),
+            &mut rng,
+        )
+        .is_err()
+        {
             tracing::debug!("Output proof batch validation failed");
             return false;
         }
@@ -244,14 +293,17 @@ impl BatchValidator {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use bellman::groth16::Proof;
+    use bellman::{
+        groth16::{self, Proof},
+        Circuit, ConstraintSystem, SynthesisError,
+    };
     use bls12_381::{Bls12, G1Affine, G2Affine, Scalar};
     use group::{Group, GroupEncoding};
-    use rand_core::SeedableRng;
+    use rand_core::{OsRng, SeedableRng};
     use rand_xorshift::XorShiftRng;
-    use zcash_note_encryption::{ENC_CIPHERTEXT_SIZE, OUT_CIPHERTEXT_SIZE};
+    use zcash_note_encryption::{EphemeralKeyBytes, ENC_CIPHERTEXT_SIZE, OUT_CIPHERTEXT_SIZE};
 
-    use super::BatchValidator;
+    use super::{verify_proofs, BatchValidator};
     use crate::{
         bundle::{Authorized, Bundle, GrothProofBytes, OutputDescription},
         note::ExtractedNoteCommitment,
@@ -259,6 +311,39 @@ mod tests {
     };
 
     const TEST_SIGHASH: [u8; 32] = [0; 32];
+
+    struct MultiplicationCircuit {
+        a: Option<Scalar>,
+        b: Option<Scalar>,
+    }
+
+    impl Circuit<Scalar> for MultiplicationCircuit {
+        fn synthesize<CS: ConstraintSystem<Scalar>>(
+            self,
+            cs: &mut CS,
+        ) -> Result<(), SynthesisError> {
+            let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
+            let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
+            let product = cs.alloc_input(
+                || "product",
+                || {
+                    self.a
+                        .zip(self.b)
+                        .map(|(a, b)| a * b)
+                        .ok_or(SynthesisError::AssignmentMissing)
+                },
+            )?;
+
+            cs.enforce(
+                || "a * b = product",
+                |lc| lc + a,
+                |lc| lc + b,
+                |lc| lc + product,
+            );
+
+            Ok(())
+        }
+    }
 
     fn bundle_with_epks(epks: Vec<[u8; 32]>) -> Bundle<Authorized, i64> {
         let mut rng = XorShiftRng::from_seed([0x5a; 16]);
@@ -281,7 +366,7 @@ mod tests {
                         ValueCommitTrapdoor::random(&mut rng),
                     ),
                     ExtractedNoteCommitment::from_bytes(&Scalar::from(1).to_bytes()).unwrap(),
-                    epk.into(),
+                    EphemeralKeyBytes::from(epk),
                     [0; ENC_CIPHERTEXT_SIZE],
                     [0; OUT_CIPHERTEXT_SIZE],
                     proof,
@@ -321,5 +406,53 @@ mod tests {
             let mut validator = BatchValidator::new();
             assert!(!validator.check_bundle(bundle_with_epks(epks), TEST_SIGHASH));
         }
+    }
+
+    #[test]
+    fn proof_verification_handles_single_and_batched_proofs() {
+        let mut rng = OsRng;
+        let parameters = groth16::generate_random_parameters::<Bls12, _, _>(
+            MultiplicationCircuit { a: None, b: None },
+            &mut rng,
+        )
+        .unwrap();
+        let prepared_verifying_key = groth16::prepare_verifying_key(&parameters.vk);
+
+        let a = Scalar::from(3);
+        let b = Scalar::from(4);
+        let product = a * b;
+        let proof = groth16::create_random_proof(
+            MultiplicationCircuit {
+                a: Some(a),
+                b: Some(b),
+            },
+            &parameters,
+            &mut rng,
+        )
+        .unwrap();
+
+        let item = |proof, public_input| groth16::batch::Item::from((proof, vec![public_input]));
+
+        assert!(verify_proofs(
+            vec![item(proof.clone(), product)],
+            &parameters.vk,
+            &prepared_verifying_key,
+            &mut rng,
+        )
+        .is_ok());
+        assert!(verify_proofs(
+            vec![item(proof.clone(), product + Scalar::from(1))],
+            &parameters.vk,
+            &prepared_verifying_key,
+            &mut rng,
+        )
+        .is_err());
+        assert!(verify_proofs(
+            vec![item(proof.clone(), product), item(proof, product)],
+            &parameters.vk,
+            &prepared_verifying_key,
+            &mut rng,
+        )
+        .is_ok());
     }
 }
