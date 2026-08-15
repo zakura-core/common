@@ -69,9 +69,9 @@ fn compute_window_points(base: pallas::Affine, windows: &[usize]) -> Vec<pallas:
     affine_points
 }
 
-/// Selects the `window`th point of the length-`H` sequence starting at
-/// `start` and advancing by `step`, in constant time with respect to
-/// `window`.
+/// Selects the `window`th point of the length-`H` sequence by visiting and
+/// conditionally selecting from every candidate, starting at `start` and
+/// advancing by `step`.
 fn select_window_point(start: pallas::Point, step: pallas::Point, window: usize) -> pallas::Point {
     let mut candidate = start;
     let mut selected = start;
