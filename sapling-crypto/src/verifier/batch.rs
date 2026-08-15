@@ -1,6 +1,8 @@
+use alloc::vec::Vec;
+
 use bellman::groth16;
 use bls12_381::Bls12;
-use group::GroupEncoding;
+use group::Curve;
 use rand_core::{CryptoRng, RngCore};
 
 use super::SaplingVerificationContextInner;
@@ -38,13 +40,13 @@ impl BatchValidator {
         }
     }
 
-    /// Checks the bundle against Sapling-specific consensus rules, and adds its proof and
-    /// signatures to the validator.
+    /// Checks the bundle against Sapling-specific consensus rules, and adds its
+    /// proof and signatures to the validator.
     ///
-    /// Returns `false` if the bundle doesn't satisfy all of the consensus rules. This
-    /// `BatchValidator` can continue to be used regardless, but some or all of the proofs
-    /// and signatures from this bundle may have already been added to the batch even if
-    /// it fails other consensus rules.
+    /// Returns `false` if the bundle doesn't satisfy all of the consensus
+    /// rules. This `BatchValidator` can continue to be used regardless, but
+    /// some or all of the proofs and signatures from this bundle may have
+    /// already been added to the batch even if it fails other consensus rules.
     pub fn check_bundle<V: Copy + Into<i64>>(
         &mut self,
         bundle: Bundle<Authorized, V>,
@@ -53,8 +55,79 @@ impl BatchValidator {
         self.bundles_added = true;
 
         let mut ctx = SaplingVerificationContextInner::new();
+        let point_count = bundle.shielded_spends().len() + bundle.shielded_outputs().len();
 
-        for spend in bundle.shielded_spends() {
+        // Batch the inversions needed to decode the randomized verification
+        // keys and ephemeral keys. Avoid batch-allocation overhead when there
+        // is only one point.
+        let single_decoded_point;
+        let decoded_points_storage;
+        let decoded_points = if point_count == 1 {
+            let encoding = if let Some(spend) = bundle.shielded_spends().first() {
+                (*spend.rk()).into()
+            } else {
+                bundle.shielded_outputs()[0].ephemeral_key().0
+            };
+            single_decoded_point = [jubjub::AffinePoint::from_bytes(encoding)];
+            &single_decoded_point[..]
+        } else {
+            decoded_points_storage = jubjub::AffinePoint::batch_from_bytes(
+                bundle
+                    .shielded_spends()
+                    .iter()
+                    .map(|spend| (*spend.rk()).into())
+                    .chain(
+                        bundle
+                            .shielded_outputs()
+                            .iter()
+                            .map(|output| output.ephemeral_key().0),
+                    ),
+            );
+            &decoded_points_storage
+        };
+
+        let (rks, epks) = decoded_points.split_at(bundle.shielded_spends().len());
+        if decoded_points
+            .iter()
+            .any(|point| !bool::from(point.is_some()))
+        {
+            return false;
+        }
+
+        // Batch the inversions needed to obtain the affine value-commitment
+        // coordinates used as public inputs. Again, avoid allocation overhead
+        // for a single point.
+        let single_value_commitment_affine;
+        let value_commitments_affine_storage;
+        let value_commitments_affine = if point_count == 1 {
+            let value_commitment = if let Some(spend) = bundle.shielded_spends().first() {
+                spend.cv().as_inner()
+            } else {
+                bundle.shielded_outputs()[0].cv().as_inner()
+            };
+            single_value_commitment_affine = [value_commitment.to_affine()];
+            &single_value_commitment_affine[..]
+        } else {
+            let value_commitments = bundle
+                .shielded_spends()
+                .iter()
+                .map(|spend| *spend.cv().as_inner())
+                .chain(
+                    bundle
+                        .shielded_outputs()
+                        .iter()
+                        .map(|output| *output.cv().as_inner()),
+                )
+                .collect::<Vec<_>>();
+            let mut normalized = vec![jubjub::AffinePoint::identity(); value_commitments.len()];
+            jubjub::ExtendedPoint::batch_normalize(&value_commitments, &mut normalized);
+            value_commitments_affine_storage = normalized;
+            &value_commitments_affine_storage
+        };
+        let (spend_cvs, output_cvs) =
+            value_commitments_affine.split_at(bundle.shielded_spends().len());
+
+        for ((spend, rk), cv) in bundle.shielded_spends().iter().zip(rks).zip(spend_cvs) {
             // Deserialize the proof
             let zkproof = match groth16::Proof::read(&spend.zkproof()[..]) {
                 Ok(p) => p,
@@ -65,9 +138,11 @@ impl BatchValidator {
             // authorization signature.
             let consensus_rules_passed = ctx.check_spend(
                 spend.cv(),
+                *cv,
                 *spend.anchor(),
                 &spend.nullifier().0,
                 spend.rk(),
+                rk.unwrap(),
                 zkproof,
                 self,
                 |this, rk| {
@@ -85,13 +160,7 @@ impl BatchValidator {
             }
         }
 
-        for output in bundle.shielded_outputs() {
-            // Deserialize the ephemeral key
-            let epk = match jubjub::ExtendedPoint::from_bytes(&output.ephemeral_key().0).into() {
-                Some(p) => p,
-                None => return false,
-            };
-
+        for ((output, epk), cv) in bundle.shielded_outputs().iter().zip(epks).zip(output_cvs) {
             // Deserialize the proof
             let zkproof = match groth16::Proof::read(&output.zkproof()[..]) {
                 Ok(p) => p,
@@ -101,8 +170,9 @@ impl BatchValidator {
             // Check the Output consensus rules, and batch its proof.
             let consensus_rules_passed = ctx.check_output(
                 output.cv(),
+                *cv,
                 *output.cmu(),
-                epk,
+                epk.unwrap(),
                 zkproof,
                 |proof, public_inputs| {
                     self.output_proofs.queue((proof, public_inputs.to_vec()));
@@ -114,7 +184,8 @@ impl BatchValidator {
             }
         }
 
-        // Check the whole-bundle consensus rules, and batch the binding signature.
+        // Check the whole-bundle consensus rules, and batch the binding
+        // signature.
         ctx.final_check(*bundle.value_balance(), |bvk| {
             self.signatures
                 .queue((bvk.into(), bundle.authorization().binding_sig, &sighash));
@@ -124,10 +195,11 @@ impl BatchValidator {
 
     /// Batch-validates the accumulated bundles.
     ///
-    /// Returns `true` if every proof and signature in every bundle added to the batch
-    /// validator is valid, or `false` if one or more are invalid. No attempt is made to
-    /// figure out which of the accumulated bundles might be invalid; if that information
-    /// is desired, construct separate [`BatchValidator`]s for sub-batches of the bundles.
+    /// Returns `true` if every proof and signature in every bundle added to the
+    /// batch validator is valid, or `false` if one or more are invalid. No
+    /// attempt is made to figure out which of the accumulated bundles might be
+    /// invalid; if that information is desired, construct separate
+    /// [`BatchValidator`]s for sub-batches of the bundles.
     pub fn validate<R: RngCore + CryptoRng>(
         self,
         spend_vk: &SpendVerifyingKey,
@@ -165,5 +237,89 @@ impl BatchValidator {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{vec, vec::Vec};
+
+    use bellman::groth16::Proof;
+    use bls12_381::{Bls12, G1Affine, G2Affine, Scalar};
+    use group::{Group, GroupEncoding};
+    use rand_core::SeedableRng;
+    use rand_xorshift::XorShiftRng;
+    use zcash_note_encryption::{ENC_CIPHERTEXT_SIZE, OUT_CIPHERTEXT_SIZE};
+
+    use super::BatchValidator;
+    use crate::{
+        bundle::{Authorized, Bundle, GrothProofBytes, OutputDescription},
+        note::ExtractedNoteCommitment,
+        value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
+    };
+
+    const TEST_SIGHASH: [u8; 32] = [0; 32];
+
+    fn bundle_with_epks(epks: Vec<[u8; 32]>) -> Bundle<Authorized, i64> {
+        let mut rng = XorShiftRng::from_seed([0x5a; 16]);
+        let mut proof = Vec::new();
+        Proof::<Bls12> {
+            a: G1Affine::generator(),
+            b: G2Affine::generator(),
+            c: G1Affine::generator(),
+        }
+        .write(&mut proof)
+        .unwrap();
+        let proof = GrothProofBytes::try_from(proof).unwrap();
+
+        let outputs = epks
+            .into_iter()
+            .map(|epk| {
+                OutputDescription::from_parts(
+                    ValueCommitment::derive(
+                        NoteValue::from_raw(1),
+                        ValueCommitTrapdoor::random(&mut rng),
+                    ),
+                    ExtractedNoteCommitment::from_bytes(&Scalar::from(1).to_bytes()).unwrap(),
+                    epk.into(),
+                    [0; ENC_CIPHERTEXT_SIZE],
+                    [0; OUT_CIPHERTEXT_SIZE],
+                    proof,
+                )
+            })
+            .collect();
+
+        Bundle::from_parts(
+            vec![],
+            outputs,
+            0,
+            Authorized {
+                binding_sig: redjubjub::Signature::from([0; 64]),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn batch_point_preparation_preserves_consensus_checks() {
+        let valid_epk = jubjub::SubgroupPoint::generator().to_bytes();
+        let identity_epk = jubjub::ExtendedPoint::identity().to_bytes();
+        let mut noncanonical_identity_epk = identity_epk;
+        noncanonical_identity_epk[31] |= 0x80;
+
+        let mut validator = BatchValidator::new();
+        assert!(validator.check_bundle(bundle_with_epks(vec![valid_epk]), TEST_SIGHASH));
+
+        let mut validator = BatchValidator::new();
+        assert!(validator.check_bundle(bundle_with_epks(vec![valid_epk, valid_epk]), TEST_SIGHASH));
+
+        for epks in [
+            vec![identity_epk],
+            vec![noncanonical_identity_epk],
+            vec![valid_epk, [0xff; 32]],
+        ] {
+            let mut validator = BatchValidator::new();
+            assert!(!validator.check_bundle(bundle_with_epks(epks), TEST_SIGHASH));
+        }
     }
 }

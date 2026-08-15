@@ -9,6 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Changed
 - MSRV is now 1.88.
+- Sapling batch validation now batches point preparation.
 
 ## [0.7.0] - 2026-04-21
 

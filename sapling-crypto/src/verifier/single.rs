@@ -1,5 +1,6 @@
 use bellman::groth16::{verify_proof, Proof};
 use bls12_381::Bls12;
+use group::Curve;
 use redjubjub::{Binding, SpendAuth};
 
 use super::SaplingVerificationContextInner;
@@ -9,7 +10,8 @@ use crate::{
     value::ValueCommitment,
 };
 
-/// A context object for verifying the Sapling components of a single Zcash transaction.
+/// A context object for verifying the Sapling components of a single Zcash
+/// transaction.
 pub struct SaplingVerificationContext {
     inner: SaplingVerificationContextInner,
 }
@@ -37,11 +39,15 @@ impl SaplingVerificationContext {
         zkproof: Proof<Bls12>,
         verifying_key: &PreparedSpendVerifyingKey,
     ) -> bool {
+        let rk_affine = jubjub::AffinePoint::from_bytes(rk.into()).unwrap();
+
         self.inner.check_spend(
             cv,
+            cv.as_inner().to_affine(),
             anchor,
             nullifier,
             &rk,
+            rk_affine,
             zkproof,
             &mut (),
             |_, rk| rk.verify(sighash_value, &spend_auth_sig).is_ok(),
@@ -61,10 +67,16 @@ impl SaplingVerificationContext {
         zkproof: Proof<Bls12>,
         verifying_key: &PreparedOutputVerifyingKey,
     ) -> bool {
-        self.inner
-            .check_output(cv, cmu, epk, zkproof, |proof, public_inputs| {
+        self.inner.check_output(
+            cv,
+            cv.as_inner().to_affine(),
+            cmu,
+            epk.to_affine(),
+            zkproof,
+            |proof, public_inputs| {
                 verify_proof(&verifying_key.0, &proof, &public_inputs[..]).is_ok()
-            })
+            },
+        )
     }
 
     /// Perform consensus checks on the valueBalance and bindingSig parts of a

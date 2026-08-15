@@ -79,6 +79,11 @@ name = "pedersen_hash"
 path = "benches/pedersen_hash.rs"
 harness = false
 
+[[bench]]
+name = "verification"
+path = "benches/verification.rs"
+harness = false
+
 [dependencies.aes]
 version = "0.8"
 
