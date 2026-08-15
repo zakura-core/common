@@ -46,6 +46,7 @@ rustdoc-args = [
 
 [features]
 aarch64-asm = ["dep:cc"]
+x86_64-asm = ["dep:cc"]
 alloc = [
     "group/alloc",
     "blake2b_simd",

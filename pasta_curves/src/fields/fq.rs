@@ -380,10 +380,20 @@ impl Fq {
             Fq(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple"
+        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64", any(unix, windows)))]
+        {
+            super::x86_64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV)
+                .map(Fq)
+                .unwrap_or_else(|| self.mul(rhs))
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ),
+            all(feature = "x86_64-asm", target_arch = "x86_64", any(unix, windows))
         )))]
         {
             self.mul(rhs)
@@ -401,10 +411,20 @@ impl Fq {
             Fq(super::aarch64_asm::square(&self.0, &MODULUS.0, INV))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple"
+        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64", any(unix, windows)))]
+        {
+            super::x86_64_asm::square(&self.0, &MODULUS.0, INV)
+                .map(Fq)
+                .unwrap_or_else(|| self.square())
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ),
+            all(feature = "x86_64-asm", target_arch = "x86_64", any(unix, windows))
         )))]
         {
             self.square()
@@ -1031,6 +1051,73 @@ fn aarch64_asm_matches_portable_arithmetic() {
                 portable_sqr_n_mul(lhs, n, rhs)
             );
         }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "x86_64-asm",
+    target_arch = "x86_64",
+    any(unix, windows)
+))]
+fn x86_64_asm_check(lhs: Fq, rhs: Fq) {
+    let available = super::x86_64_asm::is_available();
+    let portable_product = Fq::mul(&lhs, &rhs);
+    let portable_square = Fq::square(&lhs);
+
+    assert_eq!(&lhs * &rhs, portable_product);
+    assert_eq!(<Fq as Field>::square(&lhs), portable_square);
+    assert_eq!(
+        super::x86_64_asm::mul(&lhs.0, &rhs.0, &MODULUS.0, INV).map(Fq),
+        available.then_some(portable_product),
+    );
+    assert_eq!(
+        super::x86_64_asm::square(&lhs.0, &MODULUS.0, INV).map(Fq),
+        available.then_some(portable_square),
+    );
+}
+
+#[cfg(all(
+    test,
+    feature = "x86_64-asm",
+    target_arch = "x86_64",
+    any(unix, windows)
+))]
+#[test]
+fn x86_64_asm_matches_portable_arithmetic() {
+    use rand::SeedableRng;
+
+    let max_montgomery_residue = Fq([MODULUS.0[0] - 1, MODULUS.0[1], MODULUS.0[2], MODULUS.0[3]]);
+    let boundaries = [
+        Fq::zero(),
+        Fq::one(),
+        -Fq::one(),
+        Fq::from_raw([1, 0, 0, 0]),
+        max_montgomery_residue,
+        Fq::from_raw([u64::MAX; 4]),
+    ];
+
+    for lhs in boundaries {
+        for rhs in boundaries {
+            x86_64_asm_check(lhs, rhs);
+        }
+    }
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0xc9; 16]);
+    for _ in 0..1024 {
+        let lhs = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+        let rhs = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+        x86_64_asm_check(lhs, rhs);
     }
 }
 

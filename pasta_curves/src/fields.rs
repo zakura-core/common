@@ -14,6 +14,12 @@ mod fq;
 ))]
 mod aarch64_asm;
 
+// Keep the assembly and CPUID exceptions inside a private module whose public
+// interface consists only of safe wrappers.
+#[allow(unsafe_code)]
+#[cfg(all(feature = "x86_64-asm", target_arch = "x86_64", any(unix, windows)))]
+mod x86_64_asm;
+
 pub use fp::*;
 pub use fq::*;
 
