@@ -19,7 +19,7 @@ You can disable `rayon` by disabling the `"multicore"` feature.
 Warning! Halo2 will lose access to parallelism if you disable the `"multicore"` feature.
 This will significantly degrade performance.
 
-## Fixed-base prover table
+## Fixed-base prover table ##
 
 The non-default `"prover-fixed-msm-table"` feature builds a proving-only
 fixed-base MSM table for parameters with `k = 11`. For Pasta curves' 64-byte

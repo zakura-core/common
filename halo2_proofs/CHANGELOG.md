@@ -8,6 +8,7 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 ### Added
+
 - The non-default `prover-fixed-msm-table` feature uses a proving-only
   fixed-base table for dense `k = 11` polynomial commitments and the first IPA
   round.
