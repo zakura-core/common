@@ -32,3 +32,6 @@ and this project adheres to Rust's notion of
   the following multiplication. The sequence of field operations (and thus
   the variable-time profile, which depends only on the exponent) is
   unchanged.
+- The `x86_64-asm` backend now uses a dedicated squaring schedule for `Fp` and
+  `Fq`, instead of passing identical operands to the general multiplication
+  routine.

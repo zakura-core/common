@@ -6,8 +6,9 @@
 # 13ffc78074a6fbec44a4fd12b7f585a0bc1dc154:
 # https://github.com/supranational/semolina
 #
-# Generated from pasta_mulx-x86_64.pl with only Montgomery multiplication,
-# squaring, and their shared helper retained. Symbols are crate-prefixed.
+# Montgomery multiplication and its helper are generated from
+# pasta_mulx-x86_64.pl. The specialized square is a direct x86-64 translation
+# of pasta_mul-armv8.S. Symbols are crate-prefixed.
 # The routines have no secret-dependent branches or memory accesses. Their
 # reduction specializes the shared high limbs of the two Pasta moduli.
 
@@ -109,37 +110,198 @@ pasta_curves_sqrx_mont:
 
 	pushq	%r15
 
-	subq	$8,%rsp
+	subq	$40,%rsp
 
 .LSEH_body_pasta_curves_sqrx_mont:
 
+	movq	%rdi,%rbx
+	movq	%rdx,%rbp
 
-	movq	%rsi,%rbx
-	movq	%rcx,%r8
-	movq	%rdx,%rcx
+	# Form the six off-diagonal products once.
 	movq	0(%rsi),%rdx
-	movq	8(%rsi),%r15
-	movq	16(%rsi),%rbp
-	movq	24(%rsi),%r9
-	leaq	-128(%rbx),%rsi
-	leaq	-128(%rcx),%rcx
+	mulxq	8(%rsi),%r9,%rax
+	mulxq	16(%rsi),%r10,%rdi
+	addq	%rax,%r10
+	adcq	$0,%rdi
+	mulxq	24(%rsi),%r11,%r12
+	addq	%rdi,%r11
+	adcq	$0,%r12
 
-	mulxq	%rdx,%rax,%r11
-	call	__pasta_curves_mulx_mont
+	movq	8(%rsi),%rdx
+	mulxq	16(%rsi),%rax,%rdi
+	addq	%rax,%r11
+	adcq	$0,%rdi
+	mulxq	24(%rsi),%rax,%r13
+	addq	%r12,%rax
+	adcq	$0,%r13
+	addq	%rdi,%rax
+	adcq	$0,%r13
+	movq	%rax,%r12
 
-	movq	8(%rsp),%r15
+	movq	16(%rsi),%rdx
+	mulxq	24(%rsi),%rax,%r14
+	addq	%r13,%rax
+	adcq	$0,%r14
+	movq	%rax,%r13
 
-	movq	16(%rsp),%r14
+	# Double the off-diagonal half of the square.
+	xorq	%r15,%r15
+	addq	%r9,%r9
+	adcq	%r10,%r10
+	adcq	%r11,%r11
+	adcq	%r12,%r12
+	adcq	%r13,%r13
+	adcq	%r14,%r14
+	adcq	%r15,%r15
 
-	movq	24(%rsp),%r13
+	# Add the four diagonal products.
+	movq	0(%rsi),%rdx
+	mulxq	%rdx,%r8,%rax
+	addq	%rax,%r9
+	movq	8(%rsi),%rdx
+	mulxq	%rdx,%rax,%rdi
+	adcq	%r10,%rax
+	adcq	$0,%rdi
+	movq	%rax,%r10
+	addq	%rdi,%r11
+	movq	16(%rsi),%rdx
+	mulxq	%rdx,%rax,%rdi
+	adcq	%r12,%rax
+	adcq	$0,%rdi
+	movq	%rax,%r12
+	addq	%rdi,%r13
+	movq	24(%rsi),%rdx
+	mulxq	%rdx,%rax,%rdi
+	adcq	%r14,%rax
+	adcq	$0,%rdi
+	movq	%rax,%r14
+	addq	%rdi,%r15
 
-	movq	32(%rsp),%r12
+	# Preserve the upper half while reducing the lower half by R.
+	movq	%r12,0(%rsp)
+	movq	%r13,8(%rsp)
+	movq	%r14,16(%rsp)
+	movq	%r15,24(%rsp)
+	movq	0(%rbp),%r12
+	movq	8(%rbp),%r13
 
-	movq	40(%rsp),%rbx
+	# Montgomery cancellation 0. The p[2] product is zero and the
+	# p[3] = 2^62 product is formed with shifts.
+	movq	%r8,%rdx
+	imulq	%rcx,%rdx
+	mulxq	%r13,%r15,%rdi
+	mulxq	%r12,%rax,%r14
+	movq	%rdx,%rax
+	shlq	$62,%rax
+	shrq	$2,%rdx
+	negq	%r8
+	adcq	%r15,%r9
+	adcq	$0,%r10
+	adcq	%rax,%r11
+	movq	$0,%r8
+	adcq	$0,%r8
+	addq	%r14,%r9
+	adcq	%rdi,%r10
+	adcq	$0,%r11
+	adcq	%rdx,%r8
 
-	movq	48(%rsp),%rbp
+	# Montgomery cancellation 1.
+	movq	%r9,%rdx
+	imulq	%rcx,%rdx
+	mulxq	%r13,%r15,%rdi
+	mulxq	%r12,%rax,%r14
+	movq	%rdx,%rax
+	shlq	$62,%rax
+	shrq	$2,%rdx
+	negq	%r9
+	adcq	%r15,%r10
+	adcq	$0,%r11
+	adcq	%rax,%r8
+	movq	$0,%r9
+	adcq	$0,%r9
+	addq	%r14,%r10
+	adcq	%rdi,%r11
+	adcq	$0,%r8
+	adcq	%rdx,%r9
 
-	leaq	56(%rsp),%rsp
+	# Montgomery cancellation 2.
+	movq	%r10,%rdx
+	imulq	%rcx,%rdx
+	mulxq	%r13,%r15,%rdi
+	mulxq	%r12,%rax,%r14
+	movq	%rdx,%rax
+	shlq	$62,%rax
+	shrq	$2,%rdx
+	negq	%r10
+	adcq	%r15,%r11
+	adcq	$0,%r8
+	adcq	%rax,%r9
+	movq	$0,%r10
+	adcq	$0,%r10
+	addq	%r14,%r11
+	adcq	%rdi,%r8
+	adcq	$0,%r9
+	adcq	%rdx,%r10
+
+	# Montgomery cancellation 3.
+	movq	%r11,%rdx
+	imulq	%rcx,%rdx
+	mulxq	%r13,%r15,%rdi
+	mulxq	%r12,%rax,%r14
+	movq	%rdx,%rax
+	shlq	$62,%rax
+	shrq	$2,%rdx
+	negq	%r11
+	adcq	%r15,%r8
+	adcq	$0,%r9
+	adcq	%rax,%r10
+	movq	$0,%r11
+	adcq	$0,%r11
+	addq	%r14,%r8
+	adcq	%rdi,%r9
+	adcq	$0,%r10
+	adcq	%rdx,%r11
+
+	# Add the untouched upper half and capture a possible 257th bit.
+	addq	0(%rsp),%r8
+	adcq	8(%rsp),%r9
+	adcq	16(%rsp),%r10
+	adcq	24(%rsp),%r11
+	movq	$0,%rsi
+	adcq	$0,%rsi
+
+	# Canonicalize with one constant-time conditional subtraction.
+	movq	%r8,%r14
+	movq	%r9,%r15
+	movq	%r10,%rax
+	movq	%r11,%rdi
+	subq	%r12,%r8
+	sbbq	%r13,%r9
+	sbbq	$0,%r10
+	sbbq	24(%rbp),%r11
+	sbbq	$0,%rsi
+	cmovcq	%r14,%r8
+	cmovcq	%r15,%r9
+	cmovcq	%rax,%r10
+	cmovcq	%rdi,%r11
+	movq	%r8,0(%rbx)
+	movq	%r9,8(%rbx)
+	movq	%r10,16(%rbx)
+	movq	%r11,24(%rbx)
+
+	movq	40(%rsp),%r15
+
+	movq	48(%rsp),%r14
+
+	movq	56(%rsp),%r13
+
+	movq	64(%rsp),%r12
+
+	movq	72(%rsp),%rbx
+
+	movq	80(%rsp),%rbp
+
+	leaq	88(%rsp),%rsp
 
 .LSEH_epilogue_pasta_curves_sqrx_mont:
 	mov	8(%rsp),%rdi
@@ -395,15 +557,15 @@ __pasta_curves_mulx_mont:
 .byte	0,0
 .LSEH_info_pasta_curves_sqrx_mont_body:
 .byte	1,0,17,0
-.byte	0x00,0xf4,0x01,0x00
-.byte	0x00,0xe4,0x02,0x00
-.byte	0x00,0xd4,0x03,0x00
-.byte	0x00,0xc4,0x04,0x00
-.byte	0x00,0x34,0x05,0x00
-.byte	0x00,0x54,0x06,0x00
-.byte	0x00,0x74,0x08,0x00
-.byte	0x00,0x64,0x09,0x00
-.byte	0x00,0x62
+.byte	0x00,0xf4,0x05,0x00
+.byte	0x00,0xe4,0x06,0x00
+.byte	0x00,0xd4,0x07,0x00
+.byte	0x00,0xc4,0x08,0x00
+.byte	0x00,0x34,0x09,0x00
+.byte	0x00,0x54,0x0a,0x00
+.byte	0x00,0x74,0x0c,0x00
+.byte	0x00,0x64,0x0d,0x00
+.byte	0x00,0xa2
 .byte	0x00,0x00
 .LSEH_info_pasta_curves_sqrx_mont_epilogue:
 .byte	1,0,4,0

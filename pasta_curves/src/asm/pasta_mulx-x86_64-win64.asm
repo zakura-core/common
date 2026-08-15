@@ -6,8 +6,9 @@
 ; 13ffc78074a6fbec44a4fd12b7f585a0bc1dc154:
 ; https://github.com/supranational/semolina
 ;
-; Generated from pasta_mulx-x86_64.pl with only Montgomery multiplication,
-; squaring, and their shared helper retained. Symbols are crate-prefixed.
+; Montgomery multiplication and its helper are generated from
+; pasta_mulx-x86_64.pl. The specialized square is a direct x86-64 translation
+; of pasta_mul-armv8.S. Symbols are crate-prefixed.
 ; The routines have no secret-dependent branches or memory accesses. Their
 ; reduction specializes the shared high limbs of the two Pasta moduli.
 
@@ -113,37 +114,198 @@ $L$SEH_begin_pasta_curves_sqrx_mont::
 
 	push	r15
 
-	sub	rsp,8
+	sub	rsp,40
 
 $L$SEH_body_pasta_curves_sqrx_mont::
 
+	mov	rbx,rdi
+	mov	rbp,rdx
 
-	mov	rbx,rsi
-	mov	r8,rcx
-	mov	rcx,rdx
+	; Form the six off-diagonal products once.
 	mov	rdx,QWORD PTR[rsi]
-	mov	r15,QWORD PTR[8+rsi]
-	mov	rbp,QWORD PTR[16+rsi]
-	mov	r9,QWORD PTR[24+rsi]
-	lea	rsi,QWORD PTR[((-128))+rbx]
-	lea	rcx,QWORD PTR[((-128))+rcx]
+	mulx	rax,r9,QWORD PTR[8+rsi]
+	mulx	rdi,r10,QWORD PTR[16+rsi]
+	add	r10,rax
+	adc	rdi,0
+	mulx	r12,r11,QWORD PTR[24+rsi]
+	add	r11,rdi
+	adc	r12,0
 
-	mulx	r11,rax,rdx
-	call	__pasta_curves_mulx_mont
+	mov	rdx,QWORD PTR[8+rsi]
+	mulx	rdi,rax,QWORD PTR[16+rsi]
+	add	r11,rax
+	adc	rdi,0
+	mulx	r13,rax,QWORD PTR[24+rsi]
+	add	rax,r12
+	adc	r13,0
+	add	rax,rdi
+	adc	r13,0
+	mov	r12,rax
 
-	mov	r15,QWORD PTR[8+rsp]
+	mov	rdx,QWORD PTR[16+rsi]
+	mulx	r14,rax,QWORD PTR[24+rsi]
+	add	rax,r13
+	adc	r14,0
+	mov	r13,rax
 
-	mov	r14,QWORD PTR[16+rsp]
+	; Double the off-diagonal half of the square.
+	xor	r15,r15
+	add	r9,r9
+	adc	r10,r10
+	adc	r11,r11
+	adc	r12,r12
+	adc	r13,r13
+	adc	r14,r14
+	adc	r15,r15
 
-	mov	r13,QWORD PTR[24+rsp]
+	; Add the four diagonal products.
+	mov	rdx,QWORD PTR[rsi]
+	mulx	rax,r8,rdx
+	add	r9,rax
+	mov	rdx,QWORD PTR[8+rsi]
+	mulx	rdi,rax,rdx
+	adc	rax,r10
+	adc	rdi,0
+	mov	r10,rax
+	add	r11,rdi
+	mov	rdx,QWORD PTR[16+rsi]
+	mulx	rdi,rax,rdx
+	adc	rax,r12
+	adc	rdi,0
+	mov	r12,rax
+	add	r13,rdi
+	mov	rdx,QWORD PTR[24+rsi]
+	mulx	rdi,rax,rdx
+	adc	rax,r14
+	adc	rdi,0
+	mov	r14,rax
+	add	r15,rdi
 
-	mov	r12,QWORD PTR[32+rsp]
+	; Preserve the upper half while reducing the lower half by R.
+	mov	QWORD PTR[rsp],r12
+	mov	QWORD PTR[8+rsp],r13
+	mov	QWORD PTR[16+rsp],r14
+	mov	QWORD PTR[24+rsp],r15
+	mov	r12,QWORD PTR[rbp]
+	mov	r13,QWORD PTR[8+rbp]
 
-	mov	rbx,QWORD PTR[40+rsp]
+	; Montgomery cancellation 0. The p[2] product is zero and the
+	; p[3] = 2^62 product is formed with shifts.
+	mov	rdx,r8
+	imul	rdx,rcx
+	mulx	rdi,r15,r13
+	mulx	r14,rax,r12
+	mov	rax,rdx
+	shl	rax,62
+	shr	rdx,2
+	neg	r8
+	adc	r9,r15
+	adc	r10,0
+	adc	r11,rax
+	mov	r8,0
+	adc	r8,0
+	add	r9,r14
+	adc	r10,rdi
+	adc	r11,0
+	adc	r8,rdx
 
-	mov	rbp,QWORD PTR[48+rsp]
+	; Montgomery cancellation 1.
+	mov	rdx,r9
+	imul	rdx,rcx
+	mulx	rdi,r15,r13
+	mulx	r14,rax,r12
+	mov	rax,rdx
+	shl	rax,62
+	shr	rdx,2
+	neg	r9
+	adc	r10,r15
+	adc	r11,0
+	adc	r8,rax
+	mov	r9,0
+	adc	r9,0
+	add	r10,r14
+	adc	r11,rdi
+	adc	r8,0
+	adc	r9,rdx
 
-	lea	rsp,QWORD PTR[56+rsp]
+	; Montgomery cancellation 2.
+	mov	rdx,r10
+	imul	rdx,rcx
+	mulx	rdi,r15,r13
+	mulx	r14,rax,r12
+	mov	rax,rdx
+	shl	rax,62
+	shr	rdx,2
+	neg	r10
+	adc	r11,r15
+	adc	r8,0
+	adc	r9,rax
+	mov	r10,0
+	adc	r10,0
+	add	r11,r14
+	adc	r8,rdi
+	adc	r9,0
+	adc	r10,rdx
+
+	; Montgomery cancellation 3.
+	mov	rdx,r11
+	imul	rdx,rcx
+	mulx	rdi,r15,r13
+	mulx	r14,rax,r12
+	mov	rax,rdx
+	shl	rax,62
+	shr	rdx,2
+	neg	r11
+	adc	r8,r15
+	adc	r9,0
+	adc	r10,rax
+	mov	r11,0
+	adc	r11,0
+	add	r8,r14
+	adc	r9,rdi
+	adc	r10,0
+	adc	r11,rdx
+
+	; Add the untouched upper half and capture a possible 257th bit.
+	add	r8,QWORD PTR[rsp]
+	adc	r9,QWORD PTR[8+rsp]
+	adc	r10,QWORD PTR[16+rsp]
+	adc	r11,QWORD PTR[24+rsp]
+	mov	rsi,0
+	adc	rsi,0
+
+	; Canonicalize with one constant-time conditional subtraction.
+	mov	r14,r8
+	mov	r15,r9
+	mov	rax,r10
+	mov	rdi,r11
+	sub	r8,r12
+	sbb	r9,r13
+	sbb	r10,0
+	sbb	r11,QWORD PTR[24+rbp]
+	sbb	rsi,0
+	cmovc	r8,r14
+	cmovc	r9,r15
+	cmovc	r10,rax
+	cmovc	r11,rdi
+	mov	QWORD PTR[rbx],r8
+	mov	QWORD PTR[8+rbx],r9
+	mov	QWORD PTR[16+rbx],r10
+	mov	QWORD PTR[24+rbx],r11
+
+	mov	r15,QWORD PTR[40+rsp]
+
+	mov	r14,QWORD PTR[48+rsp]
+
+	mov	r13,QWORD PTR[56+rsp]
+
+	mov	r12,QWORD PTR[64+rsp]
+
+	mov	rbx,QWORD PTR[72+rsp]
+
+	mov	rbp,QWORD PTR[80+rsp]
+
+	lea	rsp,QWORD PTR[88+rsp]
 
 $L$SEH_epilogue_pasta_curves_sqrx_mont::
 	mov	rdi,QWORD PTR[8+rsp]	;WIN64 epilogue
@@ -401,15 +563,15 @@ DB	0,003h
 DB	0,0
 $L$SEH_info_pasta_curves_sqrx_mont_body::
 DB	1,0,17,0
-DB	000h,0f4h,001h,000h
-DB	000h,0e4h,002h,000h
-DB	000h,0d4h,003h,000h
-DB	000h,0c4h,004h,000h
-DB	000h,034h,005h,000h
-DB	000h,054h,006h,000h
-DB	000h,074h,008h,000h
-DB	000h,064h,009h,000h
-DB	000h,062h
+DB	000h,0f4h,005h,000h
+DB	000h,0e4h,006h,000h
+DB	000h,0d4h,007h,000h
+DB	000h,0c4h,008h,000h
+DB	000h,034h,009h,000h
+DB	000h,054h,00ah,000h
+DB	000h,074h,00ch,000h
+DB	000h,064h,00dh,000h
+DB	000h,0a2h
 DB	000h,000h
 $L$SEH_info_pasta_curves_sqrx_mont_epilogue::
 DB	1,0,4,0
