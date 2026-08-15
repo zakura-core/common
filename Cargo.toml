@@ -6,12 +6,15 @@
 # repository — no `[patch]` indirection, so every edge into these crates is an
 # explicit declaration and the crates.io originals never enter the graph.
 #
-# Membership rule: the Orchard/halo2/Pallas proving stack, plus every crate in
-# Zakura's dependency graph that (transitively) depends on it. The closure must
-# stay closed: if a future dependency of Zakura pulls any of these names from
-# crates.io, that crate must either be added here or have its edge rewritten,
-# or a registry copy will silently coexist with the forks.
+# Membership includes the Orchard/halo2/Pallas proving stack and every crate in
+# Zakura's dependency graph that transitively depends on it, plus standalone
+# cryptographic components maintained here for Zakura. The proving-stack
+# closure must stay closed: if a future dependency of Zakura pulls any of these
+# names from crates.io, that crate must either be added here or have its edge
+# rewritten, or a registry copy will silently coexist with the forks.
 #
+# - zakura-equihash: proof-of-work verification and the optional Tromp CPU
+#   solver.
 # - pasta_curves, halo2_proofs, halo2_gadgets, halo2_poseidon,
 #   halo2_legacy_pdqsort, orchard: the proving stack itself.
 # - sinsemilla, reddsa, redjubjub, sapling-crypto, zcash_proofs: the middle
@@ -23,6 +26,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "equihash",
     "halo2_gadgets",
     "halo2_legacy_pdqsort",
     "halo2_poseidon",

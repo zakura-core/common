@@ -76,17 +76,19 @@ jobs:
           esac
 
           unreleased_body() {
-            git show "$1:$2" 2>/dev/null | awk '
+            local changelog
+            changelog=$(git show "$1:$2" 2>/dev/null)
+            awk '
               /^## \[?Unreleased\]?$/ { inside = 1; next }
               inside && /^## / { exit }
               inside { print }
-            '
+            ' <<< "$changelog"
           }
 
           for member in "${members[@]}"; do
             git cat-file -e "$head_sha:$member/Cargo.toml" 2>/dev/null || continue
-            if ! git show "$head_sha:$member/CHANGELOG.md" |
-              grep -Eq '^## \[?Unreleased\]?$'; then
+            changelog=$(git show "$head_sha:$member/CHANGELOG.md")
+            if ! grep -Eq '^## \[?Unreleased\]?$' <<< "$changelog"; then
               echo "$member/CHANGELOG.md has no Unreleased section" >&2
               exit 1
             fi

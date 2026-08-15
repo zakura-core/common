@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+
+- Switched Equihash verification to the workspace's `zakura-equihash`
+  package.
+
 ## [0.30.0] - 2026-07-23
 
 ### Added

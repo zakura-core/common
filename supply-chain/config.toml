@@ -58,6 +58,9 @@ audit-as-crates-io = false
 [policy.sinsemilla]
 audit-as-crates-io = false
 
+[policy.zakura-equihash]
+audit-as-crates-io = false
+
 [policy.zcash_keys]
 audit-as-crates-io = false
 
