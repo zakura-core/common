@@ -72,14 +72,15 @@ fn extract_p_bottom(point: CtOption<pallas::Point>) -> CtOption<pallas::Base> {
     })
 }
 
-/// Pads the given iterator (which MUST have length $\leq K * C$) with zero-bits to a
-/// multiple of $K$ bits.
+/// Pads the given iterator (which MUST have length $\leq K * C$) with zero-bits
+/// to a multiple of $K$ bits.
 struct Pad<I: Iterator<Item = bool>> {
     /// The iterator we are padding.
     inner: I,
     /// The measured length of the inner iterator.
     ///
-    /// This starts as a lower bound, and will be accurate once `padding_left.is_some()`.
+    /// This starts as a lower bound, and will be accurate once
+    /// `padding_left.is_some()`.
     len: usize,
     /// The amount of padding that remains to be emitted.
     padding_left: Option<usize>,
@@ -100,12 +101,12 @@ impl<I: Iterator<Item = bool>> Iterator for Pad<I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // If we have identified the required padding, the inner iterator has ended,
-            // and we will never poll it again.
+            // If we have identified the required padding, the inner iterator
+            // has ended, and we will never poll it again.
             if let Some(n) = self.padding_left.as_mut() {
                 if *n == 0 {
-                    // Either we already emitted all necessary padding, or there was no
-                    // padding required.
+                    // Either we already emitted all necessary padding, or there
+                    // was no padding required.
                     break None;
                 } else {
                     // Emit the next padding bit.
@@ -129,6 +130,50 @@ impl<I: Iterator<Item = bool>> Iterator for Pad<I> {
                 }
             }
         }
+    }
+}
+
+/// Converts a bit iterator into zero-padded [`K`]-bit words.
+struct MessageWords<I: Iterator<Item = bool>> {
+    inner: I,
+    bits_read: usize,
+    finished: bool,
+}
+
+impl<I: Iterator<Item = bool>> MessageWords<I> {
+    fn new(inner: I) -> Self {
+        Self {
+            inner,
+            bits_read: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<I: Iterator<Item = bool>> Iterator for MessageWords<I> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        let mut word = 0;
+        for bit_index in 0..K {
+            match self.inner.next() {
+                Some(bit) => {
+                    self.bits_read += 1;
+                    assert!(self.bits_read <= K * C);
+                    word |= u32::from(bit) << bit_index;
+                }
+                None => {
+                    self.finished = true;
+                    return (bit_index > 0).then_some(word);
+                }
+            }
+        }
+
+        Some(word)
     }
 }
 
@@ -157,16 +202,11 @@ impl HashDomain {
 
     #[allow(non_snake_case)]
     fn hash_to_point_inner(&self, msg: impl Iterator<Item = bool>) -> IncompletePoint {
-        let padded: Vec<_> = Pad::new(msg).collect();
         let generators = &*SINSEMILLA_S_AFFINE;
-
-        padded
-            .chunks(K)
-            .fold(IncompletePoint::from(self.Q), |acc, chunk| {
-                let word = lebs2ip_k(chunk.try_into().expect("correct length"));
-                let S_chunk = generators[word as usize];
-                acc.double_and_add(S_chunk)
-            })
+        MessageWords::new(msg).fold(IncompletePoint::from(self.Q), |acc, word| {
+            let S_chunk = generators[word as usize];
+            acc.double_and_add(S_chunk)
+        })
     }
 
     /// $\mathsf{SinsemillaHash}$ from [§ 5.4.1.9][concretesinsemillahash].
@@ -266,7 +306,7 @@ impl CommitDomain {
 mod tests {
     use alloc::vec::Vec;
 
-    use super::{HashDomain, IncompletePoint, Pad, C, K};
+    use super::{HashDomain, IncompletePoint, MessageWords, C, K};
     use group::Curve;
     use pasta_curves::{arithmetic::CurveExt, pallas};
     use subtle::CtOption;
@@ -275,12 +315,8 @@ mod tests {
         domain: &HashDomain,
         msg: impl Iterator<Item = bool>,
     ) -> CtOption<pallas::Point> {
-        let padded: Vec<_> = Pad::new(msg).collect();
-
-        padded
-            .chunks(K)
-            .fold(IncompletePoint::from(domain.Q), |acc, chunk| {
-                let word = super::lebs2ip_k(chunk.try_into().expect("correct length"));
+        MessageWords::new(msg)
+            .fold(IncompletePoint::from(domain.Q), |acc, word| {
                 let generator = super::SINSEMILLA_S_AFFINE[word as usize];
                 (acc + generator) + acc
             })
@@ -296,44 +332,73 @@ mod tests {
     }
 
     #[test]
-    fn pad() {
+    fn message_words_zero_pad_the_final_word() {
         assert_eq!(
-            Pad::new([].iter().cloned()).collect::<Vec<_>>(),
-            vec![false; 0]
+            MessageWords::new([].into_iter()).collect::<Vec<_>>(),
+            vec![]
         );
         assert_eq!(
-            Pad::new([true].iter().cloned()).collect::<Vec<_>>(),
-            vec![true, false, false, false, false, false, false, false, false, false]
+            MessageWords::new([true].into_iter()).collect::<Vec<_>>(),
+            vec![1]
         );
         assert_eq!(
-            Pad::new([true, true].iter().cloned()).collect::<Vec<_>>(),
-            vec![true, true, false, false, false, false, false, false, false, false]
+            MessageWords::new([true, true].into_iter()).collect::<Vec<_>>(),
+            vec![3]
         );
         assert_eq!(
-            Pad::new([true, true, true].iter().cloned()).collect::<Vec<_>>(),
-            vec![true, true, true, false, false, false, false, false, false, false]
+            MessageWords::new([true, true, true].into_iter()).collect::<Vec<_>>(),
+            vec![7]
         );
         assert_eq!(
-            Pad::new(
-                [true, true, false, true, false, true, false, true, false, true]
-                    .iter()
-                    .cloned()
+            MessageWords::new(
+                [true, true, false, true, false, true, false, true, false, true].into_iter()
             )
             .collect::<Vec<_>>(),
-            vec![true, true, false, true, false, true, false, true, false, true]
+            vec![683]
         );
         assert_eq!(
-            Pad::new(
-                [true, true, false, true, false, true, false, true, false, true, true]
-                    .iter()
-                    .cloned()
+            MessageWords::new(
+                [true, true, false, true, false, true, false, true, false, true, true].into_iter()
             )
             .collect::<Vec<_>>(),
-            vec![
-                true, true, false, true, false, true, false, true, false, true, true, false, false,
-                false, false, false, false, false, false, false
-            ]
+            vec![683, 1]
         );
+    }
+
+    #[test]
+    fn message_words_match_padded_bit_chunks_at_every_valid_length() {
+        for bit_len in 0..=K * super::C {
+            let bits = (0..bit_len)
+                .map(|index| index % 5 == 2 || index % 11 == 7)
+                .collect::<Vec<_>>();
+            let expected = bits
+                .chunks(K)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .fold(0, |word, (index, bit)| word | (u32::from(*bit) << index))
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                MessageWords::new(bits.into_iter()).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn message_words_accept_the_maximum_message_length() {
+        let words =
+            MessageWords::new((0..K * super::C).map(|index| index % 5 == 2)).collect::<Vec<_>>();
+        assert_eq!(words.len(), super::C);
+    }
+
+    #[test]
+    #[should_panic]
+    fn message_words_reject_messages_past_the_maximum_length() {
+        MessageWords::new(core::iter::repeat_n(false, K * super::C + 1)).for_each(drop);
     }
 
     #[test]

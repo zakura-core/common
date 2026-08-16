@@ -18,6 +18,8 @@ and this project adheres to Rust's notion of
   projective addition while preserving incomplete-addition failures.
 - The precomputed Sinsemilla $S$ generators are decoded once and reused across
   hashes instead of validating their coordinates for every message word.
+- Sinsemilla hashing now converts messages directly into words instead of
+  allocating an intermediate padded bit vector.
 - Forked from upstream `sinsemilla` and renamed to `zakura-sinsemilla`; this changelog starts
   fresh for the Zakura fork's initial release.
 - Restarted the version lineage at 1.0.0, leaving behind the inherited upstream
