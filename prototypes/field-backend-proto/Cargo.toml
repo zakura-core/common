@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [features]
-default = ["v1", "v2", "v3"]
+default = ["v3"]
 v1 = []
 v2 = []
 v3 = []
