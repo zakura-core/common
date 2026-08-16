@@ -22,6 +22,12 @@ and this project adheres to Rust's notion of
   assembly routine that keeps the accumulator in registers for the whole run.
 
 ### Changed
+
+- The `aarch64-asm` backend now implements runtime multiplication and
+  squaring as inline assembly with register operands instead of calls into
+  the assembly file. This removes the per-operation call and memory
+  round-trip, which speeds up all composed arithmetic — notably curve point
+  operations (`double`, mixed addition) and everything built on them.
 - `Fp::pow_vartime` and `Fq::pow_vartime` now fuse each run of squarings with
   the following multiplication. The sequence of field operations (and thus
   the variable-time profile, which depends only on the exponent) is
