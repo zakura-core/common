@@ -373,13 +373,7 @@ impl<P: DomainPolicy> BatchDomain for NoteEncryptionDomain<P> {
     where
         Self::PreparedEphemeralPublicKey: 'a,
     {
-        // One GLV decomposition and digit recoding of the viewing key for the
-        // whole batch; each ephemeral key's window is then consumed by a
-        // shared-doubling ladder.
-        let decomposed =
-            pasta_curves::glv::Decomposed::<pasta_curves::pallas::Point>::new(&ivk.raw_scalar());
-        epks.map(|epk| epk.map(|epk| epk.agree_with(ivk, &decomposed)))
-            .collect()
+        PreparedEphemeralPublicKey::batch_agree(ivk, epks)
     }
 }
 
@@ -967,8 +961,9 @@ mod tests {
         .map(|(fvk, scope)| PreparedIncomingViewingKey::new(&fvk.to_ivk(scope)))
         .collect();
 
-        // Real ephemeral keys from real encryptions, plus an undecodable lane.
-        let mut keys: Vec<EphemeralKeyBytes> = (0..12u32)
+        // Real ephemeral keys from real encryptions, with undecodable lanes at
+        // the beginning, middle, and end.
+        let mut keys: Vec<EphemeralKeyBytes> = (0..13u32)
             .map(|i| {
                 encrypted_compact_action::<OrchardVersion>(
                     &mut rng,
@@ -977,17 +972,45 @@ mod tests {
                 .ephemeral_key
             })
             .collect();
+        keys.insert(0, EphemeralKeyBytes([0u8; 32]));
+        keys.insert(7, EphemeralKeyBytes([0u8; 32]));
         keys.push(EphemeralKeyBytes([0u8; 32]));
 
         let batch_prepared = <OrchardDomain as BatchDomain>::batch_epk(keys.iter().cloned());
-        // The undecodable lane passes through preparation as `None`.
+        // Undecodable lanes pass through preparation as `None`.
+        assert!(batch_prepared.first().unwrap().0.is_none());
+        assert!(batch_prepared[7].0.is_none());
         assert!(batch_prepared.last().unwrap().0.is_none());
-        assert!(batch_prepared[..12].iter().all(|(p, _)| p.is_some()));
+        assert_eq!(
+            batch_prepared.iter().filter(|(p, _)| p.is_some()).count(),
+            13
+        );
 
         let wnaf_prepared: Vec<Option<crate::keys::PreparedEphemeralPublicKey>> = keys
             .iter()
             .map(|key| OrchardDomain::epk(key).map(OrchardDomain::prepare_epk))
             .collect();
+        let mixed_prepared: Vec<Option<crate::keys::PreparedEphemeralPublicKey>> = batch_prepared
+            .iter()
+            .zip(&wnaf_prepared)
+            .enumerate()
+            .map(|(index, ((tabled, _), wnaf))| {
+                if index % 2 == 0 {
+                    tabled.clone()
+                } else {
+                    wnaf.clone()
+                }
+            })
+            .collect();
+
+        let empty =
+            <OrchardDomain as BatchDomain>::batch_ka_agree_dec(&ivks[0], core::iter::empty());
+        assert!(empty.is_empty());
+        let invalid = <OrchardDomain as BatchDomain>::batch_ka_agree_dec(
+            &ivks[0],
+            [None, None, None].into_iter(),
+        );
+        assert!(invalid.iter().all(Option::is_none));
 
         for ivk in &ivks {
             let expected: Vec<Option<[u8; 32]>> = keys
@@ -1009,6 +1032,17 @@ mod tests {
                 .collect();
             assert_eq!(batched, expected);
 
+            // A prefix with twelve valid tables exercises an even live count.
+            let even_batched: Vec<Option<[u8; 32]>> =
+                <OrchardDomain as BatchDomain>::batch_ka_agree_dec(
+                    ivk,
+                    batch_prepared[..14].iter().map(|(p, _)| p.as_ref()),
+                )
+                .into_iter()
+                .map(|s| s.map(|s| s.to_bytes()))
+                .collect();
+            assert_eq!(even_batched, expected[..14]);
+
             // The batched agreement's fallback arm (individually-prepared
             // inputs) must also match.
             let batched_wnaf: Vec<Option<[u8; 32]>> =
@@ -1020,6 +1054,18 @@ mod tests {
                 .map(|s| s.map(|s| s.to_bytes()))
                 .collect();
             assert_eq!(batched_wnaf, expected);
+
+            // Interspersed tabled, invalid, and wNAF lanes must preserve exact
+            // input positions; the tabled subset has an odd live count.
+            let batched_mixed: Vec<Option<[u8; 32]>> =
+                <OrchardDomain as BatchDomain>::batch_ka_agree_dec(
+                    ivk,
+                    mixed_prepared.iter().map(Option::as_ref),
+                )
+                .into_iter()
+                .map(|s| s.map(|s| s.to_bytes()))
+                .collect();
+            assert_eq!(batched_mixed, expected);
         }
     }
 }

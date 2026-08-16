@@ -344,16 +344,57 @@ impl<C: GlvParams> Table<C> {
         acc
     }
 
+    /// Multiplies the points encoded by two tables by the same decomposed
+    /// scalar, interleaving the independent ladders.
+    ///
+    /// The returned points correspond to `self` and `other`, respectively.
+    ///
+    /// # Security
+    ///
+    /// This is variable-time in `k`, like [`Table::mul_decomposed`]. Its loop
+    /// length, additions, signs, and table accesses depend on the scalar's
+    /// wNAF representation. Do not use it with secret scalars unless the
+    /// caller explicitly accepts this side channel.
+    pub fn mul_decomposed_pair(&self, other: &Self, k: &Decomposed<C>) -> (C, C) {
+        let mut acc_self = C::identity();
+        let mut acc_other = C::identity();
+        for i in (0..k.len).rev() {
+            if i + 1 < k.len {
+                acc_self = acc_self.double();
+                acc_other = acc_other.double();
+            }
+
+            let d1 = k.digits1[i];
+            if d1 != 0 {
+                Self::add_nonzero_digit(&mut acc_self, &self.t1, d1);
+                Self::add_nonzero_digit(&mut acc_other, &other.t1, d1);
+            }
+
+            let d2 = k.digits2[i];
+            if d2 != 0 {
+                Self::add_nonzero_digit(&mut acc_self, &self.t2, d2);
+                Self::add_nonzero_digit(&mut acc_other, &other.t2, d2);
+            }
+        }
+        (acc_self, acc_other)
+    }
+
     /// Adds `d * B` to `acc`, where `table` holds `{1, 3, 5, 7} * B` and `d`
     /// is a signed odd wNAF digit (zero adds nothing).
     fn add_digit(acc: &mut C, table: &[C::AffineExt; 4], d: i8) {
         if d != 0 {
-            let mut a = table[(d.unsigned_abs() / 2) as usize];
-            if d < 0 {
-                a = -a;
-            }
-            *acc += a;
+            Self::add_nonzero_digit(acc, table, d);
         }
+    }
+
+    /// Adds a nonzero signed odd wNAF digit times the table's base to `acc`.
+    fn add_nonzero_digit(acc: &mut C, table: &[C::AffineExt; 4], d: i8) {
+        debug_assert_ne!(d, 0);
+        let mut a = table[(d.unsigned_abs() / 2) as usize];
+        if d < 0 {
+            a = -a;
+        }
+        *acc += a;
     }
 }
 
@@ -657,6 +698,49 @@ mod tests {
         }
     }
 
+    /// Pairwise multiplication preserves both results and their order for
+    /// distinct, identical, and identity tables across scalar edge cases.
+    fn decomposed_pair_matches_individual<C: GlvParams>() {
+        let g = C::generator();
+        let other = g * C::ScalarExt::from(0xDEAD_BEEFu64);
+        let identity = C::identity();
+        let point_pairs = [
+            (g, other),
+            (other, g),
+            (g, g),
+            (identity, g),
+            (g, identity),
+            (identity, identity),
+        ];
+        let mut scalar_cases = alloc::vec![
+            C::ScalarExt::ZERO,
+            C::ScalarExt::ONE,
+            -C::ScalarExt::ONE,
+            C::ScalarExt::ZETA,
+            -C::ScalarExt::ZETA,
+        ];
+        scalar_cases.extend(scalars::<C::ScalarExt>(8));
+
+        for (first_point, second_point) in point_pairs {
+            let first_table = Table::new(&first_point);
+            let second_table = Table::new(&second_point);
+            for scalar in &scalar_cases {
+                let decomposed = Decomposed::<C>::new(scalar);
+                let (first, second) = first_table.mul_decomposed_pair(&second_table, &decomposed);
+                assert_eq!(
+                    first,
+                    first_table.mul_decomposed(&decomposed),
+                    "first pair result must retain its input position"
+                );
+                assert_eq!(
+                    second,
+                    second_table.mul_decomposed(&decomposed),
+                    "second pair result must retain its input position"
+                );
+            }
+        }
+    }
+
     macro_rules! glv_tests {
         ($mod_name:ident, $curve:ty) => {
             mod $mod_name {
@@ -693,6 +777,10 @@ mod tests {
                 #[test]
                 fn decomposed_reuse() {
                     decomposed_reuse_matches_fresh::<$curve>();
+                }
+                #[test]
+                fn decomposed_pair() {
+                    decomposed_pair_matches_individual::<$curve>();
                 }
             }
         };
@@ -870,7 +958,8 @@ mod tests {
 
     /// Property-based tests: scalars are drawn as four uniform u64 limbs
     /// widened through `from_uniform_bytes` (so the whole field is reachable
-    /// without modular bias), and points as `G*(s+1)`.
+    /// without modular bias), and points are generator multiples derived from
+    /// those scalars.
     mod pbt {
         use group::Group;
         use proptest::prelude::*;
@@ -945,6 +1034,31 @@ mod tests {
                             let table = Table::new(&p);
                             let hoisted = Decomposed::<$curve>::new(&k);
                             prop_assert_eq!(table.mul_decomposed(&hoisted), table.mul(&k));
+                        }
+
+                        /// Pairwise ladders equal separate ladders for
+                        /// arbitrary points.
+                        #[test]
+                        fn decomposed_pair(
+                            first_scalar in scalar_strategy::<Scalar>(),
+                            second_scalar in scalar_strategy::<Scalar>(),
+                            k in scalar_strategy::<Scalar>(),
+                        ) {
+                            let first = <$curve>::generator() * first_scalar;
+                            let second = <$curve>::generator() * second_scalar;
+                            let first_table = Table::new(&first);
+                            let second_table = Table::new(&second);
+                            let decomposed = Decomposed::<$curve>::new(&k);
+                            let (first_pair, second_pair) = first_table
+                                .mul_decomposed_pair(&second_table, &decomposed);
+                            prop_assert_eq!(
+                                first_pair,
+                                first_table.mul_decomposed(&decomposed)
+                            );
+                            prop_assert_eq!(
+                                second_pair,
+                                second_table.mul_decomposed(&decomposed)
+                            );
                         }
                     }
                 }

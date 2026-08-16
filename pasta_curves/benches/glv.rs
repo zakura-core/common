@@ -12,6 +12,7 @@ use rand_xorshift::XorShiftRng;
 const SAME_SCALAR_BATCH_SIZES: [usize; 13] =
     [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 const SAME_SCALAR_CORPUS_SIZE: usize = 8;
+const PREBUILT_TABLE_BATCH_SIZES: [usize; 5] = [1, 2, 3, 100, 101];
 
 fn same_scalar_corpus<C: GlvParams>() -> Vec<C::ScalarExt> {
     let mut rng = XorShiftRng::from_seed([0x42; 16]);
@@ -52,6 +53,36 @@ fn glv_bench<C: GlvParams>(c: &mut Criterion, name: &str) {
         b.iter(|| table.mul_decomposed(&decomposed));
     });
 
+    group.finish();
+
+    let mut group = c.benchmark_group(format!("{name}/prebuilt-table batch"));
+    group.sample_size(10);
+    let points: Vec<C> = (1..=*PREBUILT_TABLE_BATCH_SIZES.last().unwrap())
+        .map(|i| C::generator() * (k + C::ScalarExt::from(i as u64)))
+        .collect();
+    let tables = Table::batch(&points);
+    for size in PREBUILT_TABLE_BATCH_SIZES {
+        let tables = &tables[..size];
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input(BenchmarkId::new("serial", size), &size, |b, _| {
+            b.iter(|| {
+                for table in black_box(tables) {
+                    black_box(table.mul_decomposed(black_box(&decomposed)));
+                }
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("paired", size), &size, |b, _| {
+            b.iter(|| {
+                let mut pairs = black_box(tables).chunks_exact(2);
+                for pair in &mut pairs {
+                    black_box(pair[0].mul_decomposed_pair(&pair[1], black_box(&decomposed)));
+                }
+                if let [table] = pairs.remainder() {
+                    black_box(table.mul_decomposed(black_box(&decomposed)));
+                }
+            });
+        });
+    }
     group.finish();
 
     let mut group = c.benchmark_group(format!("{name}/same-scalar batch"));

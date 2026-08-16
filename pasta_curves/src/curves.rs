@@ -44,8 +44,16 @@ macro_rules! impl_batch_mul_same_scalar_vartime {
             }
             let scalar = crate::glv::Decomposed::<$name>::new(scalar);
             let tables = crate::glv::Table::batch(output);
-            for (output, table) in output.iter_mut().zip(tables) {
-                *output = table.mul_decomposed(&scalar);
+            let mut pair_start = 0;
+            while pair_start + 1 < tables.len() {
+                let (first, second) =
+                    tables[pair_start].mul_decomposed_pair(&tables[pair_start + 1], &scalar);
+                output[pair_start] = first;
+                output[pair_start + 1] = second;
+                pair_start += 2;
+            }
+            if pair_start < tables.len() {
+                output[pair_start] = tables[pair_start].mul_decomposed(&scalar);
             }
         }
     };

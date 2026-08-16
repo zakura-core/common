@@ -716,12 +716,6 @@ impl PreparedIncomingViewingKey {
     fn new_inner(ivk: &KeyAgreementPrivateKey) -> Self {
         Self(PreparedNonZeroScalar::new(&ivk.0))
     }
-
-    /// The raw ivk scalar, for the GLV ladder in `pasta_curves::glv` (which
-    /// decomposes the scalar rather than consuming the prepared wNAF form).
-    pub(crate) fn raw_scalar(&self) -> pallas::Scalar {
-        self.0.raw_scalar()
-    }
 }
 
 /// A key that provides the capability to recover outgoing transaction information from
@@ -916,25 +910,58 @@ impl PreparedEphemeralPublicKey {
             // The product of a non-zero scalar and a non-identity point in the
             // prime-order Pallas group is non-identity.
             PreparedEpkInner::Tabled(table) => SharedSecret(
-                NonIdentityPallasPoint::expect_non_identity(table.mul(&ivk.raw_scalar())),
+                NonIdentityPallasPoint::expect_non_identity(table.mul(&ivk.0.raw_scalar())),
             ),
         }
     }
 
-    /// Like `agree`, but with the viewing key's GLV decomposition
-    /// precomputed. Used by the batched agreement path, which hoists the
-    /// decomposition and digit recoding out of the per-output loop.
-    pub(crate) fn agree_with(
-        &self,
+    /// Agrees with a batch of prepared ephemeral keys, interleaving pairs of
+    /// GLV ladders while preserving invalid lanes and input order.
+    ///
+    /// # Security
+    ///
+    /// This remains variable-time in `ivk`; pairing changes scheduling and
+    /// does not make key agreement constant-time.
+    pub(super) fn batch_agree<'a>(
         ivk: &PreparedIncomingViewingKey,
-        decomposed: &Decomposed<pallas::Point>,
-    ) -> SharedSecret {
-        match &self.0 {
-            PreparedEpkInner::Wnaf(base) => SharedSecret(ka_orchard_prepared(&ivk.0, base)),
-            PreparedEpkInner::Tabled(table) => SharedSecret(
-                NonIdentityPallasPoint::expect_non_identity(table.mul_decomposed(decomposed)),
-            ),
+        epks: impl Iterator<Item = Option<&'a Self>>,
+    ) -> Vec<Option<SharedSecret>> {
+        let decomposed = Decomposed::<pallas::Point>::new(&ivk.0.raw_scalar());
+        let mut shared_secrets = Vec::with_capacity(epks.size_hint().0);
+        let mut pending_table: Option<(usize, &'a Table<pallas::Point>)> = None;
+
+        for epk in epks {
+            match epk {
+                None => shared_secrets.push(None),
+                Some(PreparedEphemeralPublicKey(PreparedEpkInner::Wnaf(base))) => {
+                    shared_secrets.push(Some(SharedSecret(ka_orchard_prepared(&ivk.0, base))));
+                }
+                Some(PreparedEphemeralPublicKey(PreparedEpkInner::Tabled(table))) => {
+                    let output_index = shared_secrets.len();
+                    shared_secrets.push(None);
+                    if let Some((pending_index, pending)) = pending_table.take() {
+                        let (first, second) =
+                            pending.mul_decomposed_pair(table.as_ref(), &decomposed);
+                        shared_secrets[pending_index] = Some(SharedSecret(
+                            NonIdentityPallasPoint::expect_non_identity(first),
+                        ));
+                        shared_secrets[output_index] = Some(SharedSecret(
+                            NonIdentityPallasPoint::expect_non_identity(second),
+                        ));
+                    } else {
+                        pending_table = Some((output_index, table.as_ref()));
+                    }
+                }
+            }
         }
+
+        if let Some((output_index, table)) = pending_table {
+            shared_secrets[output_index] = Some(SharedSecret(
+                NonIdentityPallasPoint::expect_non_identity(table.mul_decomposed(&decomposed)),
+            ));
+        }
+
+        shared_secrets
     }
 }
 
