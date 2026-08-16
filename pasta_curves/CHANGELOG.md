@@ -13,3 +13,14 @@ and this project adheres to Rust's notion of
 - Restarted the version lineage at 1.0.0, leaving behind the inherited upstream
   version (0.5.2); the initial Zakura release will be preceded by `1.0.0-rc` release
   candidates.
+
+### Added
+- The `aarch64-asm` backend's exponentiation chains (`invert`, `pow_vartime`,
+  and the square-root chains) use a fused "square `n` times, then multiply"
+  assembly routine that keeps the accumulator in registers for the whole run.
+
+### Changed
+- `Fp::pow_vartime` and `Fq::pow_vartime` now fuse each run of squarings with
+  the following multiplication. The sequence of field operations (and thus
+  the variable-time profile, which depends only on the exponent) is
+  unchanged.
