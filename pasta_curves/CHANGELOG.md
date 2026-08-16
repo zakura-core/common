@@ -13,10 +13,17 @@ and this project adheres to Rust's notion of
   use batched GLV multiplication when the `glv` feature is enabled.
 - `aarch64-asm` feature flag, which enables an assembly backend for runtime
   `Fp` and `Fq` multiplication, squaring, and canonical-representation
-  conversion on Apple AArch64 targets.
+  conversion on Apple AArch64 targets. Exponentiation chains (`invert`,
+  `pow_vartime`, and the square-root chains) additionally use a fused
+  "square `n` times, then multiply" routine that keeps the accumulator in
+  registers for the whole run.
 
 ### Changed
 - MSRV is now 1.88.
+- `Fp::pow_vartime` and `Fq::pow_vartime` now fuse each run of squarings with
+  the following multiplication. The sequence of field operations (and thus
+  the variable-time profile, which depends only on the exponent) is
+  unchanged.
 
 ## [0.5.2] - 2026-07-23
 ### Added
