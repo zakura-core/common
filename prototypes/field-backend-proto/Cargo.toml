@@ -1,0 +1,39 @@
+[package]
+name = "field-backend-proto"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: not a member of the parent workspace.
+[workspace]
+
+[features]
+default = ["v1", "v2", "v3"]
+v1 = []
+v2 = []
+v3 = []
+
+[dependencies]
+pasta_curves = { path = "../../pasta_curves", features = ["aarch64-asm"] }
+ff = "0.13"
+group = "0.13"
+rand = "0.8"
+rand_xorshift = "0.3"
+
+[dev-dependencies]
+criterion = "0.4"
+
+[build-dependencies]
+cc = "1"
+
+[[bench]]
+name = "compare"
+harness = false
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
