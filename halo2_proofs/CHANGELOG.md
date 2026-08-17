@@ -16,6 +16,8 @@ and this project adheres to Rust's notion of
 - Removed the unused `tempfile` dev-dependency inherited from upstream. Its
   `<3.7.0` cap held the workspace's `tempfile` at 3.6.0, whose `rustix 0.37`
   dependency no longer compiles on current Rust nightlies.
+- The multi-opening prover and verifier now construct intermediate query sets
+  in one pass.
 - Polynomial evaluation now shares missing-root products across complete
   compressed-selector families.
 - Polynomial evaluation now uses field squaring for structurally repeated
