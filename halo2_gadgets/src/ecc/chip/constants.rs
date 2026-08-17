@@ -280,9 +280,16 @@ mod tests {
     // test circuits against a fresh search. Regenerate the fixtures by
     // running this test with CIRCUIT_TEST_GENERATE_NEW_DATA set.
     //
-    // The test name deliberately starts with `zs_and_us` so that CI
-    // configurations which skip the expensive search on slow targets skip
-    // this test along with it.
+    // This test is the correctness guarantor for those fixtures, and it
+    // relies on the default `cargo test` run being unfiltered on 64-bit CI
+    // (which it is: the x86_64 jobs run the whole suite). Slow 32-bit CI
+    // targets are permitted to skip the recomputation and trust the
+    // fixtures instead; the test name deliberately starts with `zs_and_us`
+    // so the i686 job's substring skip excludes exactly this recheck and
+    // nothing else. Even where it is skipped, wrong fixtures cannot pass
+    // silently: they alter the circuits' fixed columns, so the stored-vk
+    // comparison and proof verification in `test_against_stored_circuit`
+    // fail.
     #[test]
     fn zs_and_us_fixtures_match_search() {
         use crate::ecc::chip::NUM_WINDOWS_SHORT;
