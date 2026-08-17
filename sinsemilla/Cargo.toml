@@ -54,5 +54,13 @@ package = "zakura-pasta-curves"
 version = "2.3"
 default-features = false
 
+[dev-dependencies.criterion]
+version = "0.4"
+
+[[bench]]
+name = "primitives"
+path = "benches/primitives.rs"
+harness = false
+
 [features]
 test-dependencies = []

@@ -3972,6 +3972,7 @@ dependencies = [
 name = "zakura-sinsemilla"
 version = "1.0.0-rc.1"
 dependencies = [
+ "criterion 0.4.0",
  "group",
  "lazy_static",
  "subtle",

@@ -164,7 +164,7 @@ impl HashDomain {
             .fold(IncompletePoint::from(self.Q), |acc, chunk| {
                 let word = lebs2ip_k(chunk.try_into().expect("correct length"));
                 let S_chunk = generators[word as usize];
-                (acc + S_chunk) + acc
+                acc.double_and_add(S_chunk)
             })
     }
 
@@ -265,8 +265,34 @@ impl CommitDomain {
 mod tests {
     use alloc::vec::Vec;
 
-    use super::{Pad, K};
+    use super::{HashDomain, IncompletePoint, Pad, C, K};
+    use group::Curve;
     use pasta_curves::{arithmetic::CurveExt, pallas};
+    use subtle::CtOption;
+
+    fn hash_to_point_with_two_additions(
+        domain: &HashDomain,
+        msg: impl Iterator<Item = bool>,
+    ) -> CtOption<pallas::Point> {
+        let padded: Vec<_> = Pad::new(msg).collect();
+
+        padded
+            .chunks(K)
+            .fold(IncompletePoint::from(domain.Q), |acc, chunk| {
+                let word = super::lebs2ip_k(chunk.try_into().expect("correct length"));
+                let generator = super::SINSEMILLA_S_AFFINE[word as usize];
+                (acc + generator) + acc
+            })
+            .into()
+    }
+
+    fn assert_same_point(expected: CtOption<pallas::Point>, actual: CtOption<pallas::Point>) {
+        let expected_is_some = bool::from(expected.is_some());
+        assert_eq!(bool::from(actual.is_some()), expected_is_some);
+        if expected_is_some {
+            assert_eq!(actual.unwrap(), expected.unwrap());
+        }
+    }
 
     #[test]
     fn pad() {
@@ -312,7 +338,6 @@ mod tests {
     #[test]
     fn sinsemilla_s() {
         use super::sinsemilla_s::SINSEMILLA_S;
-        use group::Curve;
         use pasta_curves::arithmetic::CurveAffine;
 
         let hasher = pallas::Point::hash_to_curve(super::S_PERSONALIZATION);
@@ -329,6 +354,37 @@ mod tests {
                 .coordinates()
                 .unwrap();
             assert_eq!((*decoded.x(), *decoded.y()), actual);
+        }
+    }
+
+    #[test]
+    fn hash_to_point_matches_two_additions() {
+        const ORCHARD_COMMIT_IVK_BITS: usize = 510;
+        const ORCHARD_MERKLE_CRH_BITS: usize = 520;
+        const ORCHARD_NOTE_COMMITMENT_BITS: usize = 1_086;
+        const MESSAGE_LENGTHS: [usize; 12] = [
+            0,
+            1,
+            K - 1,
+            K,
+            K + 1,
+            ORCHARD_COMMIT_IVK_BITS - 1,
+            ORCHARD_COMMIT_IVK_BITS,
+            ORCHARD_COMMIT_IVK_BITS + 1,
+            ORCHARD_MERKLE_CRH_BITS,
+            ORCHARD_NOTE_COMMITMENT_BITS,
+            K * C - 1,
+            K * C,
+        ];
+
+        let domain = HashDomain::new("sinsemilla-fused-step-test");
+        for message_len in MESSAGE_LENGTHS {
+            let message: Vec<_> = (0..message_len)
+                .map(|index| (index + message_len) % 5 < 2)
+                .collect();
+            let expected = hash_to_point_with_two_additions(&domain, message.iter().copied());
+            let actual = domain.hash_to_point(message.iter().copied());
+            assert_same_point(expected, actual);
         }
     }
 }
