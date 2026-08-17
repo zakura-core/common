@@ -1,4 +1,4 @@
-use ff::Field;
+use ff::{BatchInvert, Field};
 
 use super::super::{
     commitment::{Guard, Params, MSM},
@@ -8,8 +8,92 @@ use super::{
     construct_intermediate_sets, ChallengeX1, ChallengeX2, ChallengeX3, ChallengeX4,
     CommitmentReference, Query, VerifierQuery,
 };
-use crate::arithmetic::{eval_polynomial, lagrange_interpolate, CurveAffine};
+use crate::arithmetic::CurveAffine;
 use crate::transcript::{EncodedChallenge, TranscriptRead};
+
+/// Computes the expected evaluation of the multi-point quotient at `x_3`.
+///
+/// Each point set contributes one Lagrange denominator per point and one
+/// vanishing denominator. Inverting all of them together reduces this phase to
+/// a single field inversion.
+fn compute_msm_eval<F: Field>(
+    point_sets: &[Vec<F>],
+    q_eval_sets: &[Vec<F>],
+    proof_evals: &[F],
+    x_2: F,
+    x_3: F,
+) -> F {
+    assert_eq!(point_sets.len(), q_eval_sets.len());
+    assert_eq!(point_sets.len(), proof_evals.len());
+
+    let denominator_count = point_sets.iter().map(|points| points.len() + 1).sum();
+    let mut denominators = Vec::with_capacity(denominator_count);
+
+    for points in point_sets {
+        for (j, x_j) in points.iter().enumerate() {
+            let denominator = points
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| *k != j)
+                .fold(F::ONE, |denominator, (_, x_k)| denominator * (*x_j - x_k));
+            assert!(
+                !bool::from(denominator.is_zero()),
+                "point sets must contain distinct points"
+            );
+            denominators.push(denominator);
+        }
+
+        let vanishing_denominator = points
+            .iter()
+            .fold(F::ONE, |denominator, point| denominator * (x_3 - point));
+        assert!(
+            !bool::from(vanishing_denominator.is_zero()),
+            "challenge point must not be in a query point set"
+        );
+        denominators.push(vanishing_denominator);
+    }
+
+    if denominators.is_empty() {
+        return F::ZERO;
+    }
+
+    denominators.iter_mut().batch_invert();
+    let mut inverse_denominators = denominators.into_iter();
+
+    let msm_eval = point_sets.iter().zip(q_eval_sets).zip(proof_evals).fold(
+        F::ZERO,
+        |msm_eval, ((points, evals), proof_eval)| {
+            assert_eq!(points.len(), evals.len());
+
+            let r_eval =
+                points
+                    .iter()
+                    .enumerate()
+                    .zip(evals)
+                    .fold(F::ZERO, |r_eval, ((j, _), eval)| {
+                        let numerator = points
+                            .iter()
+                            .enumerate()
+                            .filter(|(k, _)| *k != j)
+                            .fold(F::ONE, |numerator, (_, point)| numerator * (x_3 - point));
+                        let denominator_inv = inverse_denominators
+                            .next()
+                            .expect("one inverse denominator per interpolation point");
+
+                        r_eval + *eval * numerator * denominator_inv
+                    });
+            let vanishing_denominator_inv = inverse_denominators
+                .next()
+                .expect("one inverse vanishing denominator per point set");
+            let eval = (*proof_eval - r_eval) * vanishing_denominator_inv;
+
+            msm_eval * x_2 + eval
+        },
+    );
+
+    debug_assert!(inverse_denominators.next().is_none());
+    msm_eval
+}
 
 /// Verify a multi-opening proof
 pub fn verify_proof<
@@ -98,21 +182,7 @@ where
 
     // We can compute the expected msm_eval at x_3 using the u provided
     // by the prover and from x_2
-    let msm_eval = point_sets
-        .iter()
-        .zip(q_eval_sets.iter())
-        .zip(u.iter())
-        .fold(
-            C::Scalar::ZERO,
-            |msm_eval, ((points, evals), proof_eval)| {
-                let r_poly = lagrange_interpolate(points, evals);
-                let r_eval = eval_polynomial(&r_poly, *x_3);
-                let eval = points.iter().fold(*proof_eval - &r_eval, |eval, point| {
-                    eval * &(*x_3 - point).invert().unwrap()
-                });
-                msm_eval * &(*x_2) + &eval
-            },
-        );
+    let msm_eval = compute_msm_eval(&point_sets, &q_eval_sets, &u, *x_2, *x_3);
 
     // Sample a challenge x_4 that we will use to collapse the openings of
     // the various remaining polynomials at x_3 together.
@@ -145,5 +215,90 @@ impl<'a, 'b, C: CurveAffine> Query<C::Scalar> for VerifierQuery<'a, 'b, C> {
     }
     fn get_commitment(&self) -> Self::Commitment {
         self.commitment
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ff::Field;
+
+    use super::compute_msm_eval;
+    use crate::{
+        arithmetic::{eval_polynomial, lagrange_interpolate},
+        pasta::Fp,
+    };
+
+    fn reference_msm_eval(
+        point_sets: &[Vec<Fp>],
+        q_eval_sets: &[Vec<Fp>],
+        proof_evals: &[Fp],
+        x_2: Fp,
+        x_3: Fp,
+    ) -> Fp {
+        point_sets.iter().zip(q_eval_sets).zip(proof_evals).fold(
+            Fp::ZERO,
+            |msm_eval, ((points, evals), proof_eval)| {
+                let r_poly = lagrange_interpolate(points, evals);
+                let r_eval = eval_polynomial(&r_poly, x_3);
+                let eval = points.iter().fold(*proof_eval - r_eval, |eval, point| {
+                    eval * (x_3 - point).invert().unwrap()
+                });
+
+                msm_eval * x_2 + eval
+            },
+        )
+    }
+
+    #[test]
+    fn batched_msm_eval_matches_reference_for_orchard_shapes() {
+        assert_eq!(
+            compute_msm_eval(&[], &[], &[], Fp::from(2), Fp::from(3)),
+            reference_msm_eval(&[], &[], &[], Fp::from(2), Fp::from(3)),
+        );
+
+        for offset in 0_u64..16 {
+            let points = [
+                Fp::from(11 + offset),
+                Fp::from(37 + 2 * offset),
+                Fp::from(83 + 3 * offset),
+                Fp::from(151 + 5 * offset),
+            ];
+            // These are the point-set sizes used by the Orchard verifier.
+            let point_sets = vec![
+                vec![points[0]],
+                vec![points[0], points[1]],
+                vec![points[0], points[2]],
+                vec![points[0], points[1], points[2]],
+                vec![points[0], points[1], points[3]],
+            ];
+            let q_eval_sets: Vec<Vec<_>> = point_sets
+                .iter()
+                .enumerate()
+                .map(|(set, points)| {
+                    points
+                        .iter()
+                        .enumerate()
+                        .map(|(point, _)| Fp::from(100 + offset * 20 + set as u64 + point as u64))
+                        .collect()
+                })
+                .collect();
+            let proof_evals: Vec<_> = (0..point_sets.len())
+                .map(|i| Fp::from(1_000 + offset * 10 + i as u64))
+                .collect();
+            let x_2 = Fp::from(2_000 + offset);
+            let x_3 = Fp::from(3_000 + offset);
+
+            assert_eq!(
+                compute_msm_eval(&point_sets, &q_eval_sets, &proof_evals, x_2, x_3),
+                reference_msm_eval(&point_sets, &q_eval_sets, &proof_evals, x_2, x_3),
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "challenge point must not be in a query point set")]
+    fn batched_msm_eval_rejects_challenge_in_point_set() {
+        let point = Fp::from(7);
+        compute_msm_eval(&[vec![point]], &[vec![Fp::ONE]], &[Fp::ONE], Fp::ONE, point);
     }
 }
