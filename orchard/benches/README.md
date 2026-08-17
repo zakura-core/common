@@ -4,6 +4,19 @@ These harnesses exercise the complete one-Action Orchard proving and
 verification paths. They are intended for controlled comparisons between two
 already-built revisions, not for microbenchmarking isolated arithmetic.
 
+## Merkle hashing
+
+The Merkle harness measures one parent hash and construction of a complete
+1,024-leaf subtree:
+
+```console
+cargo +1.88 bench --locked -p zakura-orchard --bench merkle
+```
+
+The deterministic leaves are generated outside the timed routines. Criterion
+also excludes the per-sample clone of the leaf vector from the whole-tree
+measurement.
+
 ## One-Action prover
 
 Build or run the Criterion target with one Rayon worker:

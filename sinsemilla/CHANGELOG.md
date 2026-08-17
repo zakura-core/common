@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added a fixed-length, position-weighted hash evaluator that moves per-word
+  doublings into a reusable precomputed generator table.
 - Sinsemilla hashing now evaluates each message-word step with an
   algebraically equivalent doubling and mixed addition, avoiding a full
   projective addition while preserving incomplete-addition failures.

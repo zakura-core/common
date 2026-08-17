@@ -1,7 +1,7 @@
-//! Experimental fixed-length, position-weighted Sinsemilla evaluation.
+//! Fixed-length, position-weighted Sinsemilla evaluation.
 //!
-//! This module is exposed only for testing and benchmarking. It moves the
-//! powers of two in the Sinsemilla recurrence into a precomputed table:
+//! This moves the powers of two in the Sinsemilla recurrence into a
+//! precomputed table:
 //!
 //! `B_i = [2^(N-i)] A_i`, so `B_(i+1) = B_i + [2^(N-i-1)] S[m_i]`.
 
@@ -82,6 +82,12 @@ impl<const N: usize> FixedLengthHashDomain<N> {
             u16::try_from(lebs2ip_k(chunk.try_into().expect("correct length")))
                 .expect("a Sinsemilla word fits into u16")
         }))
+    }
+
+    /// Evaluates the Sinsemilla hash of a bit iterator whose padded
+    /// representation is exactly `N` words.
+    pub fn hash(&self, msg: impl Iterator<Item = bool>) -> CtOption<pallas::Base> {
+        super::extract_p_bottom(self.hash_to_point(msg))
     }
 
     /// Returns the heap size occupied by the weighted affine table.
