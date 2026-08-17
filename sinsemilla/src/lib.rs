@@ -19,6 +19,9 @@ mod addition;
 use self::addition::IncompletePoint;
 mod sinsemilla_s;
 pub use sinsemilla_s::SINSEMILLA_S;
+#[cfg(any(test, feature = "test-dependencies"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
+pub mod weighted;
 
 lazy_static! {
     static ref SINSEMILLA_S_AFFINE: Vec<pallas::Affine> = SINSEMILLA_S

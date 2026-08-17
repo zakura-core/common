@@ -62,5 +62,11 @@ name = "primitives"
 path = "benches/primitives.rs"
 harness = false
 
+[[bench]]
+name = "weighted"
+path = "benches/weighted.rs"
+harness = false
+required-features = ["test-dependencies"]
+
 [features]
 test-dependencies = []
