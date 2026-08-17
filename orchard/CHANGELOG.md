@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The Sinsemilla Merkle CRH domain is now initialized once and reused for
+  Orchard and Ironwood commitment-tree hashing instead of deriving the same
+  generator for every node.
 - The Sinsemilla note-commitment domain is now initialized once and reused
   instead of deriving the same generators for every commitment.
 - Forked from upstream `orchard` and renamed to `zakura-orchard`; this changelog starts
