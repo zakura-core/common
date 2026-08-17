@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Sinsemilla hashing now evaluates each message-word step with an
+  algebraically equivalent doubling and mixed addition, avoiding a full
+  projective addition while preserving incomplete-addition failures.
 - The precomputed Sinsemilla $S$ generators are decoded once and reused across
   hashes instead of validating their coordinates for every message word.
 - Forked from upstream `sinsemilla` and renamed to `zakura-sinsemilla`; this changelog starts
