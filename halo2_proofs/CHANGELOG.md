@@ -28,3 +28,5 @@ and this project adheres to Rust's notion of
   so avoids at least three field multiplications.
 - Polynomial evaluation now uses wide product accumulators when folding
   expressions over Pasta fields.
+- Clarified internal vanishing-prover phase names to distinguish the random
+  masking-polynomial commitment from quotient construction.
