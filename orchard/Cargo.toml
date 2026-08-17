@@ -276,6 +276,12 @@ version = "0.3"
 [dev-dependencies.shardtree]
 version = "0.6"
 
+[dev-dependencies.sinsemilla]
+path = "../sinsemilla"
+version = "1.0.0-rc.1"
+features = ["test-dependencies"]
+package = "zakura-sinsemilla"
+
 [dev-dependencies.zcash_note_encryption]
 version = "0.4.2"
 features = ["pre-zip-212"]
