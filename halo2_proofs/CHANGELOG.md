@@ -18,6 +18,8 @@ and this project adheres to Rust's notion of
   dependency no longer compiles on current Rust nightlies.
 - The multi-opening prover and verifier now construct intermediate query sets
   in one pass.
+- The multi-opening verifier now batch-inverts its Lagrange and vanishing
+  denominators together, and rejects challenge collisions without panicking.
 - Polynomial evaluation now shares missing-root products across complete
   compressed-selector families.
 - Polynomial evaluation now uses field squaring for structurally repeated
