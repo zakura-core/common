@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added reproducible one-Action prover and validated-corpus batch-verifier
+  benchmark harnesses.
 - The Sinsemilla note-commitment domain is now initialized once and reused
   instead of deriving the same generators for every commitment.
 - Forked from upstream `orchard` and renamed to `zakura-orchard`; this changelog starts
