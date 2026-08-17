@@ -275,4 +275,35 @@ mod tests {
             }
         }
     }
+
+    // Checks the stored zs-and-us fixtures used by the ecc and sinsemilla
+    // test circuits against a fresh search. Regenerate the fixtures by
+    // running this test with CIRCUIT_TEST_GENERATE_NEW_DATA set.
+    //
+    // The test name deliberately starts with `zs_and_us` so that CI
+    // configurations which skip the expensive search on slow targets skip
+    // this test along with it.
+    #[test]
+    fn zs_and_us_fixtures_match_search() {
+        use crate::ecc::chip::NUM_WINDOWS_SHORT;
+        use crate::sinsemilla::primitives::CommitDomain;
+        use crate::test_circuits::test_utils::test_zs_and_us;
+
+        let base = pallas::Point::generator().to_affine();
+        assert_eq!(
+            test_zs_and_us(base, NUM_WINDOWS, "test_base_full_width"),
+            find_zs_and_us(base, NUM_WINDOWS).unwrap()
+        );
+        assert_eq!(
+            test_zs_and_us(base, NUM_WINDOWS_SHORT, "test_base_short"),
+            find_zs_and_us(base, NUM_WINDOWS_SHORT).unwrap()
+        );
+
+        // Matches `PERSONALIZATION` in the sinsemilla gadget tests.
+        let r = CommitDomain::new("MerkleCRH").R().to_affine();
+        assert_eq!(
+            test_zs_and_us(r, NUM_WINDOWS, "sinsemilla_test_merklecrh_r"),
+            find_zs_and_us(r, NUM_WINDOWS).unwrap()
+        );
+    }
 }
