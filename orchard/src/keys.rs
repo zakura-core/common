@@ -871,8 +871,9 @@ impl EphemeralPublicKey {
 enum PreparedEpkInner {
     /// A `group::Wnaf` window table.
     Wnaf(PreparedNonIdentityBase),
-    /// A GLV odd-multiples window, boxed to keep the enum small (512 bytes,
-    /// the same heap-allocation shape as the wNAF table it replaces).
+    /// A GLV Eisenstein digit-orbit window, boxed to keep the enum small
+    /// (1 KiB on the heap: eight orbit points with the x-coordinates stored
+    /// in all three endomorphism rotations).
     Tabled(Box<Table<pallas::Point>>),
 }
 
@@ -920,20 +921,50 @@ impl PreparedEphemeralPublicKey {
         }
     }
 
-    /// Like `agree`, but with the viewing key's GLV decomposition
-    /// precomputed. Used by the batched agreement path, which hoists the
-    /// decomposition and digit recoding out of the per-output loop.
-    pub(crate) fn agree_with(
-        &self,
+    /// The GLV window table, if this key was batch-prepared.
+    fn table(&self) -> Option<&Table<pallas::Point>> {
+        match &self.0 {
+            PreparedEpkInner::Wnaf(_) => None,
+            PreparedEpkInner::Tabled(table) => Some(table),
+        }
+    }
+
+    /// Key agreement between one viewing key — with its GLV decomposition
+    /// precomputed, hoisting the digit recoding out of the per-output loop —
+    /// and a whole batch of prepared ephemeral keys.
+    ///
+    /// All GLV-tabled keys in the batch are multiplied by one synchronized
+    /// ladder ([`Table::mul_decomposed_batch`]): the batch shares the
+    /// viewing key's column schedule, so for large batches every ladder
+    /// column's field inversions are batched across the whole set (and
+    /// smaller batches run the same per-point ladders as before).
+    /// Individually-prepared (wNAF) keys fall back to the per-item
+    /// multiplication; `None` lanes (undecodable ephemeral keys) pass
+    /// through as `None`.
+    pub(crate) fn batch_agree(
         ivk: &PreparedIncomingViewingKey,
         decomposed: &Decomposed<pallas::Point>,
-    ) -> SharedSecret {
-        match &self.0 {
-            PreparedEpkInner::Wnaf(base) => SharedSecret(ka_orchard_prepared(&ivk.0, base)),
-            PreparedEpkInner::Tabled(table) => SharedSecret(
-                NonIdentityPallasPoint::expect_non_identity(table.mul_decomposed(decomposed)),
-            ),
-        }
+        epks: &[Option<&PreparedEphemeralPublicKey>],
+    ) -> Vec<Option<SharedSecret>> {
+        let tables: Vec<&Table<pallas::Point>> = epks
+            .iter()
+            .filter_map(|epk| epk.and_then(|epk| epk.table()))
+            .collect();
+        let mut products = Table::mul_decomposed_batch(&tables, decomposed).into_iter();
+        epks.iter()
+            .map(|epk| {
+                epk.map(|epk| match &epk.0 {
+                    PreparedEpkInner::Wnaf(base) => SharedSecret(ka_orchard_prepared(&ivk.0, base)),
+                    // The product of a non-zero scalar and a non-identity
+                    // point in the prime-order Pallas group is non-identity.
+                    PreparedEpkInner::Tabled(_) => {
+                        SharedSecret(NonIdentityPallasPoint::expect_non_identity(
+                            products.next().expect("one product per tabled epk"),
+                        ))
+                    }
+                })
+            })
+            .collect()
     }
 }
 

@@ -373,13 +373,13 @@ impl<P: DomainPolicy> BatchDomain for NoteEncryptionDomain<P> {
     where
         Self::PreparedEphemeralPublicKey: 'a,
     {
-        // One GLV decomposition and digit recoding of the viewing key for the
-        // whole batch; each ephemeral key's window is then consumed by a
-        // shared-doubling ladder.
+        // One GLV decomposition and digit recoding of the viewing key for
+        // the whole batch, then one synchronized ladder over every prepared
+        // ephemeral key (see `PreparedEphemeralPublicKey::batch_agree`).
         let decomposed =
             pasta_curves::glv::Decomposed::<pasta_curves::pallas::Point>::new(&ivk.raw_scalar());
-        epks.map(|epk| epk.map(|epk| epk.agree_with(ivk, &decomposed)))
-            .collect()
+        let epks: Vec<_> = epks.collect();
+        PreparedEphemeralPublicKey::batch_agree(ivk, &decomposed, &epks)
     }
 }
 
@@ -1025,5 +1025,50 @@ mod tests {
                 .collect();
             assert_eq!(batched_wnaf, expected);
         }
+    }
+
+    #[test]
+    fn batched_agreement_matches_per_item_large_batch() {
+        // Enough ephemeral keys to cross the GLV batch-affine threshold in
+        // `pasta_curves` (512 live points), so the synchronized
+        // batched-inversion ladder — not just its small-batch fallback — is
+        // exercised through the public batch API. The ephemeral keys are
+        // synthesized as arbitrary non-identity Pallas points; only their
+        // group structure matters to key agreement.
+        use group::{Group, GroupEncoding};
+
+        let mut rng = OsRng;
+        let fvk = FullViewingKey::from(&SpendingKey::random(&mut rng));
+        let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
+
+        let mut keys: Vec<EphemeralKeyBytes> = (1..=520u64)
+            .map(|i| {
+                EphemeralKeyBytes(
+                    (pasta_curves::pallas::Point::generator()
+                        * pasta_curves::pallas::Scalar::from(i))
+                    .to_bytes(),
+                )
+            })
+            .collect();
+        // One undecodable lane threaded through the middle of the batch.
+        keys.insert(260, EphemeralKeyBytes([0u8; 32]));
+
+        let batch_prepared = <OrchardDomain as BatchDomain>::batch_epk(keys.iter().cloned());
+        let expected: Vec<Option<[u8; 32]>> = keys
+            .iter()
+            .map(|key| {
+                OrchardDomain::epk(key)
+                    .map(OrchardDomain::prepare_epk)
+                    .map(|epk| OrchardDomain::ka_agree_dec(&ivk, &epk).to_bytes())
+            })
+            .collect();
+        let batched: Vec<Option<[u8; 32]>> = <OrchardDomain as BatchDomain>::batch_ka_agree_dec(
+            &ivk,
+            batch_prepared.iter().map(|(p, _)| p.as_ref()),
+        )
+        .into_iter()
+        .map(|s| s.map(|s| s.to_bytes()))
+        .collect();
+        assert_eq!(batched, expected);
     }
 }
