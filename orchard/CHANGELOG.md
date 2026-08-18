@@ -30,6 +30,11 @@ and this project adheres to Rust's notion of
   are assumed infeasible under the discrete-logarithm relation (DLR)
   assumption. The default remains the lower-memory generic fused Sinsemilla
   evaluator with exact partial-function semantics.
+- Batch trial-decryption key agreement now multiplies all of a batch's prepared
+  ephemeral keys by each viewing key in one synchronized GLV call, picking up the
+  batched-inversion affine ladder in `pasta_curves` for large scans. Trial
+  decryption of undecryptable outputs (the wallet-scanning hot case) is about 9%
+  faster end to end from the accompanying `pasta_curves` recoding change.
 - Added reproducible one-Action prover and validated-corpus batch-verifier
   benchmark harnesses.
 - The Sinsemilla note-commitment domain is now initialized once and reused
