@@ -728,23 +728,54 @@ pub fn create_proof<
 
 #[test]
 fn test_commit_instance() {
-    use pasta_curves::{EqAffine, Fp};
+    use ff::FromUniformBytes;
+    use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
 
-    let params: Params<EqAffine> = Params::new(3);
-    let domain = crate::poly::EvaluationDomain::new(1, 3);
-    let instance = [Fp::from(3), Fp::ZERO, Fp::from(5)];
+    macro_rules! check_curve {
+        ($curve:ty, $scalar:ty) => {{
+            const K: u32 = 6;
 
-    for instance in [&[][..], &instance[..]] {
-        let mut poly = domain.empty_lagrange();
-        for (coefficient, value) in poly.iter_mut().zip(instance.iter()) {
-            *coefficient = *value;
-        }
+            let params: Params<$curve> = Params::new(K);
+            let domain = crate::poly::EvaluationDomain::new(1, K);
 
-        assert_eq!(
-            commit_instance(&params, instance),
-            params.commit_lagrange(&poly, Blind::default())
-        );
+            for len in [0, 1, 10, 17, 63] {
+                let mut instance = (0..len)
+                    .map(|index| {
+                        let mut bytes = [0; 64];
+                        for (offset, byte) in bytes.iter_mut().enumerate() {
+                            *byte = (index as u8)
+                                .wrapping_mul(73)
+                                .wrapping_add((offset as u8).wrapping_mul(29))
+                                .wrapping_add(17);
+                        }
+                        <$scalar as FromUniformBytes<64>>::from_uniform_bytes(&bytes)
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(value) = instance.get_mut(0) {
+                    *value = <$scalar>::ZERO;
+                }
+                if let Some(value) = instance.get_mut(1) {
+                    *value = <$scalar>::ONE;
+                }
+                if let Some(value) = instance.get_mut(2) {
+                    *value = -<$scalar>::ONE;
+                }
+
+                let mut poly = domain.empty_lagrange();
+                for (coefficient, value) in poly.iter_mut().zip(&instance) {
+                    *coefficient = *value;
+                }
+
+                assert_eq!(
+                    commit_instance(&params, &instance),
+                    params.commit_lagrange(&poly, Blind::default())
+                );
+            }
+        }};
     }
+
+    check_curve!(EqAffine, Fp);
+    check_curve!(EpAffine, Fq);
 }
 
 #[test]

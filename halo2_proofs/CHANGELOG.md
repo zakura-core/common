@@ -23,6 +23,9 @@ and this project adheres to Rust's notion of
 - Batch verification now folds each proof's random batching scalar into its
   inner-product coefficient expansion.
 - Common evaluation-domain rotations now bypass general exponentiation.
+- Batch verification now reuses bounded per-parameter fixed-window tables when
+  constructing instance commitments, with longer columns using the generic
+  multiscalar multiplication path.
 - Polynomial evaluation now shares missing-root products across complete
   compressed-selector families.
 - Polynomial evaluation now uses field squaring for structurally repeated

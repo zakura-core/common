@@ -1,13 +1,19 @@
-use group::ff::{Field, FromUniformBytes};
+use group::{
+    ff::{Field, FromUniformBytes, PrimeField},
+    Curve, Group,
+};
 use pasta_curves::arithmetic::CurveAffine;
 use rand_core::OsRng;
+use std::sync::Arc;
 
-use super::{verify_proof, VerificationStrategy};
+use super::{validate_instances, verify_proof_with_instance_commitments, VerificationStrategy};
 use crate::{
     multicore::{IntoParallelIterator, TryFoldAndReduce},
-    plonk::{Error, VerifyingKey},
+    plonk::{commit_instance, Error, VerifyingKey},
     poly::commitment::{Guard, Params, MSM},
     transcript::{Blake2bRead, EncodedChallenge},
+    InstanceWindowTable, INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE,
+    MAX_CACHED_INSTANCE_ROWS,
 };
 
 #[cfg(feature = "multicore")]
@@ -56,6 +62,131 @@ struct BatchItem<C: CurveAffine> {
     proof: Vec<u8>,
 }
 
+struct InstanceFixedWindowTable<C: CurveAffine> {
+    base_count: usize,
+    multiples: Arc<Vec<C>>,
+}
+
+impl<C: CurveAffine> InstanceFixedWindowTable<C> {
+    fn new(params: &Params<C>, base_count: usize) -> Self {
+        Self {
+            base_count,
+            multiples: params.instance_window_table(base_count),
+        }
+    }
+
+    fn commit(&self, params: &Params<C>, scalars: &[C::Scalar]) -> C::Curve {
+        assert!(scalars.len() <= self.base_count);
+
+        let window_count = (C::Scalar::NUM_BITS as usize).div_ceil(INSTANCE_WINDOW_BITS);
+        let scalar_reprs = scalars.iter().map(PrimeField::to_repr).collect::<Vec<_>>();
+        let mut variable = C::Curve::identity();
+
+        for window in (0..window_count).rev() {
+            if window + 1 != window_count {
+                for _ in 0..INSTANCE_WINDOW_BITS {
+                    variable = variable.double();
+                }
+            }
+
+            for (base_index, scalar) in scalar_reprs.iter().enumerate() {
+                let digit = fixed_window_digit(scalar.as_ref(), window, INSTANCE_WINDOW_BITS);
+                if digit != 0 {
+                    variable +=
+                        self.multiples[base_index * INSTANCE_WINDOW_ENTRIES_PER_BASE + digit - 1];
+                }
+            }
+        }
+
+        let mut commitment = C::Curve::from(params.w);
+        commitment += variable;
+        commitment
+    }
+
+    #[cfg(test)]
+    fn retained_bytes(&self) -> usize {
+        self.multiples.len() * core::mem::size_of::<C>()
+    }
+}
+
+fn commit_instance_with_table<C: CurveAffine>(
+    params: &Params<C>,
+    table: &InstanceFixedWindowTable<C>,
+    instance: &[C::Scalar],
+) -> C::Curve {
+    if instance.len() <= table.base_count {
+        table.commit(params, instance)
+    } else {
+        commit_instance(params, instance)
+    }
+}
+
+fn fixed_window_digit(bytes: &[u8], window: usize, window_bits: usize) -> usize {
+    let bit_start = window * window_bits;
+    let byte_start = bit_start / u8::BITS as usize;
+    let bit_offset = bit_start % u8::BITS as usize;
+    let low = bytes.get(byte_start).copied().unwrap_or(0);
+    let high = bytes.get(byte_start + 1).copied().unwrap_or(0);
+    let encoded = u16::from(low) | (u16::from(high) << u8::BITS);
+    usize::from((encoded >> bit_offset) & ((1 << window_bits) - 1))
+}
+
+fn compute_batch_instance_commitments<C: CurveAffine>(
+    params: &Params<C>,
+    vk: &VerifyingKey<C>,
+    items: &[BatchItem<C>],
+) -> Result<Vec<Vec<Vec<C>>>, Error> {
+    let mut item_column_counts = Vec::with_capacity(items.len());
+    let mut max_cached_instance_len = 0;
+
+    for item in items {
+        let instance_columns = item
+            .instances
+            .iter()
+            .map(|instances| instances.iter().map(Vec::as_slice).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let instances = instance_columns
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        validate_instances(params, vk, &instances)?;
+
+        // Table construction costs 255 points per row. Longer, caller-sized
+        // columns remain valid but use the generic MSM below.
+        max_cached_instance_len = item
+            .instances
+            .iter()
+            .flat_map(|instances| instances.iter())
+            .map(Vec::len)
+            .filter(|instance_len| *instance_len <= MAX_CACHED_INSTANCE_ROWS)
+            .fold(max_cached_instance_len, usize::max);
+        item_column_counts.push(item.instances.iter().map(Vec::len).collect::<Vec<_>>());
+    }
+
+    let table = InstanceFixedWindowTable::new(params, max_cached_instance_len);
+    let projective = items
+        .iter()
+        .flat_map(|item| item.instances.iter())
+        .flat_map(|instances| instances.iter())
+        .map(|instance| commit_instance_with_table(params, &table, instance))
+        .collect::<Vec<_>>();
+    let mut affine = vec![C::identity(); projective.len()];
+    C::Curve::batch_normalize(&projective, &mut affine);
+    let mut affine = affine.into_iter();
+    let commitments = item_column_counts
+        .into_iter()
+        .map(|proof_column_counts| {
+            proof_column_counts
+                .into_iter()
+                .map(|column_count| affine.by_ref().take(column_count).collect())
+                .collect()
+        })
+        .collect();
+    assert!(affine.next().is_none());
+
+    Ok(commitments)
+}
+
 /// A verifier that checks multiple proofs in a batch. **This requires the
 /// `batch` crate feature to be enabled.**
 #[derive(Debug, Default)]
@@ -96,11 +227,20 @@ where
             acc
         }
 
-        let final_msm = self
-            .items
+        let items = self.items;
+        let instance_commitments = match compute_batch_instance_commitments(params, vk, &items) {
+            Ok(instance_commitments) => instance_commitments,
+            Err(_) => return false,
+        };
+        let items = items
+            .into_iter()
+            .zip(instance_commitments)
+            .collect::<Vec<_>>();
+
+        let final_msm = items
             .into_par_iter()
             .enumerate()
-            .map(|(i, item)| {
+            .map(|(i, (item, instance_commitments))| {
                 let instances: Vec<Vec<_>> = item
                     .instances
                     .iter()
@@ -121,7 +261,15 @@ where
                 };
                 let strategy = BatchStrategy::new(params, rho_i);
                 let mut transcript = Blake2bRead::init(&item.proof[..]);
-                verify_proof(params, vk, strategy, &instances, &mut transcript).map_err(|e| {
+                verify_proof_with_instance_commitments(
+                    params,
+                    vk,
+                    strategy,
+                    &instances,
+                    instance_commitments,
+                    &mut transcript,
+                )
+                .map_err(|e| {
                     tracing::debug!("Batch item {} failed verification: {}", i, e);
                     e
                 })
@@ -135,5 +283,67 @@ where
             Ok(msm) => msm.eval(),
             Err(_) => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ff::{Field, FromUniformBytes};
+    use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
+
+    use super::{commit_instance_with_table, InstanceFixedWindowTable};
+    use crate::{
+        plonk::commit_instance, poly::commitment::Params, INSTANCE_WINDOW_ENTRIES_PER_BASE,
+        MAX_CACHED_INSTANCE_ROWS,
+    };
+
+    #[test]
+    fn fixed_window_instance_commitments_match_signed_booth() {
+        macro_rules! check_curve {
+            ($curve:ty, $scalar:ty) => {{
+                const K: u32 = 7;
+
+                let params = Params::<$curve>::new(K);
+                let table = InstanceFixedWindowTable::new(&params, MAX_CACHED_INSTANCE_ROWS);
+                assert_eq!(
+                    table.retained_bytes(),
+                    MAX_CACHED_INSTANCE_ROWS
+                        * INSTANCE_WINDOW_ENTRIES_PER_BASE
+                        * core::mem::size_of::<$curve>(),
+                );
+
+                for len in [0, 1, 10, 17, 63, 64, 65, 127] {
+                    let mut instance = (0..len)
+                        .map(|index| {
+                            let mut bytes = [0; 64];
+                            for (offset, byte) in bytes.iter_mut().enumerate() {
+                                *byte = (index as u8)
+                                    .wrapping_mul(73)
+                                    .wrapping_add((offset as u8).wrapping_mul(29))
+                                    .wrapping_add(17);
+                            }
+                            <$scalar as FromUniformBytes<64>>::from_uniform_bytes(&bytes)
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(value) = instance.get_mut(0) {
+                        *value = <$scalar>::ZERO;
+                    }
+                    if let Some(value) = instance.get_mut(1) {
+                        *value = <$scalar>::ONE;
+                    }
+                    if let Some(value) = instance.get_mut(2) {
+                        *value = -<$scalar>::ONE;
+                    }
+
+                    assert_eq!(
+                        commit_instance_with_table(&params, &table, &instance),
+                        commit_instance(&params, &instance),
+                    );
+                }
+            }};
+        }
+
+        check_curve!(EqAffine, Fp);
+        check_curve!(EpAffine, Fq);
     }
 }
