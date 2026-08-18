@@ -26,7 +26,7 @@ must enable the `spin_no_std` feature of the `lazy_static` crate. This is
 needed because the `--no-default-features` build of `lazy_static` still relies
 on `std`.
 
-## Orchard Merkle hashing
+## Orchard Merkle hashing ##
 
 The optional `weighted-merkle` feature caches a roughly 4.88 MiB table to speed
 up Orchard Merkle hashing. It is opt-in so that full-node applications can
