@@ -64,7 +64,7 @@
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use ff::{BatchInverter, Field, PrimeField, WithSmallOrderMulGroup};
+use ff::{Field, PrimeField, WithSmallOrderMulGroup};
 use group::prime::PrimeCurveAffine;
 
 use crate::arithmetic::{mac, sbb, CurveExt};
@@ -423,14 +423,40 @@ fn joint_digits(mut a: i128, mut b: i128) -> ([u8; MAX_JOINT_DIGITS], usize) {
 /// With this crate's divstep inversion (measured `I/M ≈ 77`, `S/M ≈ 0.86`
 /// on Apple aarch64 with the assembly backend) the operation-count model
 /// that put break-even at `n ≈ 365` under the old Fermat inversion
-/// (`I/M ≈ 440`) scales linearly in `I` to `n ≈ 64`, and the *measured*
-/// curve (same-scalar batch benches in `benches/glv.rs`, kernel forced on
-/// at every size) agrees: a tie at 64 (−0.2%/−1.5% across the two curves,
-/// inside the ±1% run-to-run noise), −5% to −6% at 128, −7% to −8% at
-/// 256. The threshold sits on that measured break-even, so smaller
-/// batches keep the plain per-point ladders. (The Fermat-era gate was
-/// 512; the cheaper inversion pulled it down 8×.)
-const BATCH_AFFINE_MIN_POINTS: usize = 64;
+/// (`I/M ≈ 440`) scales linearly in `I` to `n ≈ 64`; the ladder's lean
+/// nonzero-only batched inversions (see [`batch_invert_nonzero`]) shave a
+/// further few multiplications' worth per point per column, and the
+/// *measured* curve (same-scalar batch benches in `benches/glv.rs`,
+/// kernel forced on at every size) ties the per-point Jacobian ladders at
+/// 32 points (−0.1% on both curves), and wins ~5% per point at 64 and
+/// ~10% at 128. The threshold sits on that measured break-even, so
+/// smaller batches keep the plain per-point ladders. (The Fermat-era gate
+/// was 512: the cheaper inversion moved break-even to 64, and dropping
+/// `ff::BatchInverter`'s per-element zero handling moved it to 32.)
+const BATCH_AFFINE_MIN_POINTS: usize = 32;
+
+/// Montgomery-batched inversion for a nonempty slice of provably nonzero
+/// values: prefix products into `scratch`, one shared field inversion,
+/// back-substitution. The ladder's denominators are guaranteed nonzero by
+/// [`affine_ladder_safe`], so unlike `ff::BatchInverter` this skips the
+/// per-element zero handling (one extra multiplication and two conditional
+/// selects per element), which is a measurable share of each ladder column.
+fn batch_invert_nonzero<F: Field>(values: &mut [F], scratch: &mut [F]) {
+    assert_eq!(values.len(), scratch.len());
+    let mut acc = F::ONE;
+    for (value, scratch) in values.iter().zip(scratch.iter_mut()) {
+        debug_assert!(!value.is_zero_vartime());
+        *scratch = acc;
+        acc *= value;
+    }
+    // A product of nonzero field elements is nonzero, so this cannot fail.
+    acc = acc.invert().unwrap();
+    for (value, scratch) in values.iter_mut().zip(scratch.iter()).rev() {
+        let inverse = acc * scratch;
+        acc *= *value;
+        *value = inverse;
+    }
+}
 
 /// The GLV digit window for one base point: the eight Eisenstein orbit
 /// representatives $[\Delta_i]P$ in affine coordinates, with each
@@ -660,7 +686,7 @@ impl<C: GlvParams> Table<C> {
                 for (den, y) in den.iter_mut().zip(&ys) {
                     *den = y.double();
                 }
-                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                batch_invert_nonzero(&mut den, &mut scratch);
                 for i in 0..n {
                     let xx = xs[i].square();
                     let m = (xx.double() + xx) * den[i];
@@ -679,7 +705,7 @@ impl<C: GlvParams> Table<C> {
                 for (den, (x, t)) in den.iter_mut().zip(xs.iter().zip(live)) {
                     *den = t.xs[e][orbit] - x;
                 }
-                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                batch_invert_nonzero(&mut den, &mut scratch);
                 for i in 0..n {
                     let u = live[i].xs[e][orbit];
                     let v = if negate {
@@ -696,7 +722,7 @@ impl<C: GlvParams> Table<C> {
                 for (den, (x, x1)) in den.iter_mut().zip(xs.iter().zip(&x1s)) {
                     *den = *x1 - x;
                 }
-                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                batch_invert_nonzero(&mut den, &mut scratch);
                 for i in 0..n {
                     let t = -(slopes[i] + ys[i].double() * den[i]);
                     let x2 = t.square() - xs[i] - x1s[i];

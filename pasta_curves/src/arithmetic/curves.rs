@@ -214,11 +214,11 @@ mod tests {
     use crate::{pallas, vesta};
     use ff::{Field, PrimeField, WithSmallOrderMulGroup};
 
-    // Sizes 65 and up cross the GLV batch-affine threshold of 64 live points
-    // (the identity injected at size/2 keeps one lane inert, so size 64 stays
+    // Sizes 33 and up cross the GLV batch-affine threshold of 32 live points
+    // (the identity injected at size/2 keeps one lane inert, so size 32 stays
     // just below it), exercising the batched kernel end-to-end through this
     // entry point at several sizes up to 513.
-    const BATCH_SIZES: [usize; 16] = [0, 1, 2, 3, 7, 8, 15, 16, 17, 63, 64, 65, 127, 128, 129, 513];
+    const BATCH_SIZES: [usize; 16] = [0, 1, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 127, 128, 129, 513];
 
     fn batch_mul_same_scalar_matches_native<C: CurveExt>() {
         let full_width = (C::ScalarExt::from(0x9E37_79B9_7F4A_7C15u64).square()
