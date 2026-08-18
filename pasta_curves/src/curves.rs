@@ -97,9 +97,9 @@ macro_rules! new_curve_impl {
             }
         }
 
-        /// Raw-coordinate plumbing for the GLV module (see
-        /// `GlvParams::affine_unchecked` / `affine_xy`), which needs to move
-        /// between affine points and their coordinates without per-use
+        /// Raw-coordinate plumbing for the GLV module, reached through the
+        /// private trait sealing `crate::glv::GlvParams`, which needs to
+        /// move between affine points and their coordinates without per-use
         /// on-curve checks; its table and ladder arithmetic stays on the
         /// curve by construction.
         #[cfg(feature = "glv")]

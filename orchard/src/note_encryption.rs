@@ -1030,9 +1030,10 @@ mod tests {
     #[test]
     fn batched_agreement_matches_per_item_large_batch() {
         // Enough ephemeral keys to cross the GLV batch-affine threshold in
-        // `pasta_curves` (512 live points), so the synchronized
-        // batched-inversion ladder — not just its small-batch fallback — is
-        // exercised through the public batch API. The ephemeral keys are
+        // `pasta_curves` (32 live points) with wide margin, so the
+        // synchronized batched-inversion ladder — not just its small-batch
+        // fallback — stays exercised through the public batch API even if
+        // the threshold is retuned upward. The ephemeral keys are
         // synthesized as arbitrary non-identity Pallas points; only their
         // group structure matters to key agreement.
         use group::{Group, GroupEncoding};

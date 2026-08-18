@@ -72,11 +72,52 @@ use crate::arithmetic::{mac, sbb, CurveExt};
 use crate::{pallas, vesta};
 
 mod private {
+    use crate::arithmetic::CurveExt;
+
+    /// Proof-of-crate argument for [`Sealed::affine_unchecked`]: unnameable
+    /// outside this crate, with a `pub(super)` field, so downstream code
+    /// cannot construct one — not even through a `C: GlvParams` bound, which
+    /// does expose supertrait items to generic code.
+    #[derive(Debug)]
+    pub struct CrateToken(pub(super) ());
+
     /// Seals [`super::GlvParams`]: the lattice constants are curve-specific
     /// and verified in-crate; external implementations are not supported.
-    pub trait Sealed {}
-    impl Sealed for crate::pallas::Point {}
-    impl Sealed for crate::vesta::Point {}
+    ///
+    /// Also hosts the raw-coordinate plumbing for the digit tables and the
+    /// batch-affine ladder, which move between affine points and their
+    /// coordinates without per-use on-curve checks (the table and ladder
+    /// arithmetic stays on the curve by construction). Keeping the unchecked
+    /// constructor here, behind a [`CrateToken`], keeps it out of the
+    /// crate's externally callable surface.
+    pub trait Sealed: CurveExt {
+        /// Constructs an affine point directly from raw coordinates, with no
+        /// on-curve check; `(0, 0)` is the affine identity encoding.
+        fn affine_unchecked(x: Self::Base, y: Self::Base, token: CrateToken) -> Self::AffineExt;
+
+        /// The raw affine coordinates of `p` (`(0, 0)` for the identity).
+        fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base);
+    }
+
+    impl Sealed for crate::pallas::Point {
+        fn affine_unchecked(x: Self::Base, y: Self::Base, _: CrateToken) -> Self::AffineExt {
+            crate::pallas::Affine::from_xy_unchecked(x, y)
+        }
+
+        fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
+            p.raw_xy()
+        }
+    }
+
+    impl Sealed for crate::vesta::Point {
+        fn affine_unchecked(x: Self::Base, y: Self::Base, _: CrateToken) -> Self::AffineExt {
+            crate::vesta::Affine::from_xy_unchecked(x, y)
+        }
+
+        fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
+            p.raw_xy()
+        }
+    }
 }
 
 /// Per-curve GLV constants: a short basis for the lattice
@@ -85,7 +126,9 @@ mod private {
 /// — together with the Babai rounding coefficients derived from that basis.
 ///
 /// This trait is sealed; it is implemented for [`pallas::Point`] and
-/// [`vesta::Point`].
+/// [`vesta::Point`]. (The private seal also hosts the raw-coordinate
+/// plumbing used by the digit tables and the batch-affine ladder, keeping
+/// its unchecked affine constructor uncallable outside the crate.)
 pub trait GlvParams: CurveExt + private::Sealed {
     /// First short lattice vector `v1 = (V1A, -V1B_NEG)`.
     const V1A: u128;
@@ -99,17 +142,6 @@ pub trait GlvParams: CurveExt + private::Sealed {
     const G1: [u64; 5];
     /// Babai coefficient `round(2^384 * V1B_NEG / n)`, little-endian limbs.
     const G2: [u64; 5];
-
-    /// Constructs an affine point directly from raw coordinates, with no
-    /// on-curve check; `(0, 0)` is the affine identity encoding. Internal
-    /// plumbing for the digit tables and the batch-affine ladder, whose
-    /// arithmetic stays on the curve by construction.
-    #[doc(hidden)]
-    fn affine_unchecked(x: Self::Base, y: Self::Base) -> Self::AffineExt;
-
-    /// The raw affine coordinates of `p` (`(0, 0)` for the identity).
-    #[doc(hidden)]
-    fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base);
 
     /// One-shot `k * self` via the GLV split — variable-time in `k` (see the
     /// module docs), identical in value to `self * k` (including `self` =
@@ -129,7 +161,7 @@ pub trait GlvParams: CurveExt + private::Sealed {
 }
 
 /// These constants are computed by `sage/glv_constants.sage`, which prints
-/// this impl body verbatim (the affine plumbing methods aside).
+/// this impl body verbatim.
 ///
 /// The `constants` test (see the module's test suite) re-verifies the short
 /// basis against Pallas's own $\lambda$ = `Scalar::ZETA` using field
@@ -155,14 +187,6 @@ impl GlvParams for pallas::Point {
         0x279a745902a2654e,
         0x1,
     ];
-
-    fn affine_unchecked(x: Self::Base, y: Self::Base) -> Self::AffineExt {
-        pallas::Affine::from_xy_unchecked(x, y)
-    }
-
-    fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
-        p.raw_xy()
-    }
 }
 
 /// As for Pallas, these constants are computed by `sage/glv_constants.sage`,
@@ -188,14 +212,6 @@ impl GlvParams for vesta::Point {
         0x279a745902a2654e,
         0x1,
     ];
-
-    fn affine_unchecked(x: Self::Base, y: Self::Base) -> Self::AffineExt {
-        vesta::Affine::from_xy_unchecked(x, y)
-    }
-
-    fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
-        p.raw_xy()
-    }
 }
 
 /// Schoolbook multiply of `a` by `b` into `prod`, which must be zeroed and
@@ -584,13 +600,17 @@ impl<C: GlvParams> Table<C> {
     /// The affine point contributed by a nonzero digit.
     fn digit_point(&self, code: u8) -> C::AffineExt {
         let (x, y) = self.digit_coords(code);
-        C::affine_unchecked(x, y)
+        C::affine_unchecked(x, y, private::CrateToken(()))
     }
 
     /// The base point P (= the Δ0 orbit entry) back as a projective point.
     #[cfg(test)]
     fn point(&self) -> C {
-        C::from(C::affine_unchecked(self.xs[0][0], self.ys[0]))
+        C::from(C::affine_unchecked(
+            self.xs[0][0],
+            self.ys[0],
+            private::CrateToken(()),
+        ))
     }
 
     /// `k * P` for the P encoded by this table, decomposing `k` on the spot.
@@ -735,7 +755,7 @@ impl<C: GlvParams> Table<C> {
 
         xs.into_iter()
             .zip(ys)
-            .map(|(x, y)| C::from(C::affine_unchecked(x, y)))
+            .map(|(x, y)| C::from(C::affine_unchecked(x, y, private::CrateToken(()))))
             .collect()
     }
 }
