@@ -217,7 +217,10 @@ mod tests {
     use ff::{Field, PrimeField, WithSmallOrderMulGroup};
     use group::CurveAffine as _;
 
-    const BATCH_SIZES: [usize; 15] = [0, 1, 2, 3, 7, 8, 15, 16, 17, 63, 64, 65, 127, 128, 129];
+    // 513 crosses the GLV batch-affine threshold (with the identity injected
+    // at size/2 keeping one lane inert), so the batched kernel is exercised
+    // end-to-end through this entry point too.
+    const BATCH_SIZES: [usize; 16] = [0, 1, 2, 3, 7, 8, 15, 16, 17, 63, 64, 65, 127, 128, 129, 513];
 
     fn batch_mul_same_scalar_matches_native<C: CurveExt>() {
         let full_width = (C::ScalarExt::from(0x9E37_79B9_7F4A_7C15u64).square()

@@ -2,12 +2,35 @@
 //!
 //! Both Pasta curves carry a cube-root endomorphism
 //! $\phi(x, y) = (\zeta x, y)$ (exposed as [`CurveExt::endo`]), for which
-//! $\phi(P) = \lambda P$ with $\lambda$ = `Scalar::ZETA`. This module uses that
-//! structure to split a full-width scalar multiplication $k P$ into two
-//! half-width multiplications evaluated against a shared table of odd multiples
-//! of $P$ and $\phi(P)$.
+//! $\phi(P) = \lambda P$ with $\lambda$ = `Scalar::ZETA`. This module uses
+//! that structure twice:
 //!
-//! This path is variable-time in the scalar (GLV decomposition plus wNAF
+//! - The scalar is split as $k = k_1 + k_2\lambda \pmod n$ with
+//!   $|k_1|, |k_2| < 2^{127}$ (Babai rounding against a precomputed short
+//!   lattice basis), and the pair is recoded as **one** width-3 NAF digit
+//!   string over the Eisenstein integers $\mathbf{Z}[\omega]$
+//!   ($\omega^2 + \omega + 1 = 0$, $\omega \mapsto \phi$). Digits are drawn
+//!   from $\{0\} \cup U\Delta$, where $U = \{\pm1, \pm\omega, \pm\omega^2\}$
+//!   are the units and $\Delta$ eight orbit representatives tiling the 48
+//!   odd residue classes mod $8\mathbf{Z}[\omega]$; every nonzero digit is
+//!   followed by at least two zeros. The ~127-column shared ladder then
+//!   averages ~38–39 digit additions (at most 44), versus ~51 for two
+//!   independent width-4 wNAFs over the halves.
+//! - A digit $\pm\omega^e\delta$ acts on a stored point by an x-coordinate
+//!   rotation (multiplication by $\zeta^e$, precomputed in the [`Table`])
+//!   and a y negation, so one 8-orbit table serves all 48 nonzero digits.
+//!
+//! [`Table::mul_decomposed_batch`] additionally runs one scalar against many
+//! points on *affine* accumulators: the digit schedule is shared by the
+//! whole batch, so each ladder column batch-inverts its denominators with
+//! Montgomery's trick, and every nonzero-digit column is evaluated as a
+//! fused affine $2P + D$ (eliminating the intermediate y-coordinate and one
+//! multiplication/squaring pair relative to double-then-add). Exceptional
+//! column schedules — those that would hand an affine formula a zero
+//! denominator — depend only on the scalar, are checked exactly per batch,
+//! and fall back to the per-point ladder.
+//!
+//! This path is variable-time in the scalar (GLV decomposition plus digit
 //! recoding); the `_glv` naming distinguishes it from the native `Mul`
 //! implementations, which are unchanged.
 //!
@@ -18,6 +41,9 @@
 //!   <https://www.iacr.org/archive/crypto2001/21390189.pdf>
 //! - S. Bowe, J. Grigg, D. Hopwood, "Halo: Recursive Proof Composition without
 //!   a Trusted Setup", <https://eprint.iacr.org/2019/1021> (see the GLV section).
+//! - K. Eisenträger, K. Lauter, P. L. Montgomery, "Fast Elliptic Curve
+//!   Arithmetic and Improved Weil Pairing Evaluation", CT-RSA 2003.
+//!   <https://arxiv.org/abs/math/0208038> (the fused affine $2P + Q$).
 //!
 //! # Amortization
 //!
@@ -26,18 +52,20 @@
 //! - [`Table`]: per *point*. [`Table::batch`] builds many tables with one
 //!   shared batch normalization (a single field inversion for the whole
 //!   batch).
-//! - [`Decomposed`]: per *scalar*. Decomposition and wNAF recoding are
-//!   hoisted so one scalar can be multiplied against many tables.
-//! - [`Table::mul_decomposed`]: the remaining per-(point, scalar) work — a
-//!   shared-doubling Straus ladder over the two half-width digit strings.
+//! - [`Decomposed`]: per *scalar*. Decomposition and joint digit recoding
+//!   are hoisted so one scalar can be multiplied against many tables.
+//! - [`Table::mul_decomposed`] / [`Table::mul_decomposed_batch`]: the
+//!   remaining per-(point, scalar) work — a shared-doubling ladder over the
+//!   joint digit string, batched across points where the batch is large
+//!   enough to amortize its per-column inversions.
 //!
 //! One-shot use is [`GlvParams::mul_glv`].
 
 use alloc::vec::Vec;
+use core::marker::PhantomData;
 
-use ff::PrimeField;
-#[cfg(test)]
-use ff::WithSmallOrderMulGroup;
+use ff::{BatchInverter, Field, PrimeField, WithSmallOrderMulGroup};
+use group::prime::PrimeCurveAffine;
 use group::CurveAffine as _;
 
 use crate::arithmetic::{mac, sbb, CurveExt};
@@ -72,6 +100,17 @@ pub trait GlvParams: CurveExt + private::Sealed {
     /// Babai coefficient `round(2^384 * V1B_NEG / n)`, little-endian limbs.
     const G2: [u64; 5];
 
+    /// Constructs an affine point directly from raw coordinates, with no
+    /// on-curve check; `(0, 0)` is the affine identity encoding. Internal
+    /// plumbing for the digit tables and the batch-affine ladder, whose
+    /// arithmetic stays on the curve by construction.
+    #[doc(hidden)]
+    fn affine_unchecked(x: Self::Base, y: Self::Base) -> Self::AffineExt;
+
+    /// The raw affine coordinates of `p` (`(0, 0)` for the identity).
+    #[doc(hidden)]
+    fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base);
+
     /// One-shot `k * self` via the GLV split — variable-time in `k` (see the
     /// module docs), identical in value to `self * k` (including `self` =
     /// identity).
@@ -90,7 +129,7 @@ pub trait GlvParams: CurveExt + private::Sealed {
 }
 
 /// These constants are computed by `sage/glv_constants.sage`, which prints
-/// this impl body verbatim.
+/// this impl body verbatim (the affine plumbing methods aside).
 ///
 /// The `constants` test (see the module's test suite) re-verifies the short
 /// basis against Pallas's own $\lambda$ = `Scalar::ZETA` using field
@@ -116,6 +155,14 @@ impl GlvParams for pallas::Point {
         0x279a745902a2654e,
         0x1,
     ];
+
+    fn affine_unchecked(x: Self::Base, y: Self::Base) -> Self::AffineExt {
+        pallas::Affine::from_xy_unchecked(x, y)
+    }
+
+    fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
+        p.raw_xy()
+    }
 }
 
 /// As for Pallas, these constants are computed by `sage/glv_constants.sage`,
@@ -141,6 +188,14 @@ impl GlvParams for vesta::Point {
         0x279a745902a2654e,
         0x1,
     ];
+
+    fn affine_unchecked(x: Self::Base, y: Self::Base) -> Self::AffineExt {
+        vesta::Affine::from_xy_unchecked(x, y)
+    }
+
+    fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
+        p.raw_xy()
+    }
 }
 
 /// Schoolbook multiply of `a` by `b` into `prod`, which must be zeroed and
@@ -194,13 +249,13 @@ fn sub256(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 /// taking the low 128 bits of the magnitude.
 ///
 /// GLV decomposition guarantees `|x| < 2^127` for the values reached here
-/// (asserted in debug builds, here and in [`wnaf_digits`], and checked by the
-/// `decompose` tests), so the high limbs of the magnitude are always zero and
-/// no information is lost.
+/// (asserted in debug builds here, in every profile by [`Decomposed::new`],
+/// and checked by the `decompose` tests), so the high limbs of the magnitude
+/// are always zero and no information is lost.
 fn signed_halves(x: [u64; 4]) -> (bool, u128) {
     // Guard the truncation itself: the discarded limbs must be the sign
     // extension of bit 127. Values of 2^128 or more would otherwise be
-    // silently truncated before `wnaf_digits`' magnitude assertion could
+    // silently truncated before the recoder's magnitude assertion could
     // observe them.
     let ext = if x[1] >> 63 == 0 { 0 } else { u64::MAX };
     debug_assert!(
@@ -243,17 +298,154 @@ fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
     (signed_halves(k1), signed_halves(k2))
 }
 
-/// The GLV window for one base point: the odd multiples `{1, 3, 5, 7} * P` and
-/// `{1, 3, 5, 7} * phi(P)` in affine coordinates. 512 bytes per table.
+/// The eight Eisenstein digit-orbit representatives $\Delta$, as coefficient
+/// pairs $(a, b)$ of $a + b\omega$ (norms 1, 3, 7, 7, 9, 13, 13, 19). The
+/// 48 nonzero digits are $U\Delta$ for the six units
+/// $U = \{\pm1, \pm\omega, \pm\omega^2\}$, and tile the odd residue classes
+/// mod $8\mathbf{Z}[\omega]$ exactly (64 classes, minus the 16 divisible by
+/// 2, each hit once) — re-derived by the
+/// `joint_digit_table_matches_first_principles` test.
+const DELTA: [(i8, i8); 8] = [
+    (1, 0),
+    (1, -1),
+    (2, -1),
+    (1, -2),
+    (3, 0),
+    (3, -1),
+    (1, -3),
+    (2, -3),
+];
+
+/// Digit lookup for the joint recoding, indexed by
+/// `((a mod 8) << 3) | (b mod 8)`: entry `(da, db, code)` is the unique
+/// element $d_a + d_b\omega$ of $U\Delta$ congruent to $a + b\omega$ mod
+/// $8\mathbf{Z}[\omega]$, or `(0, 0, 0)` for the 16 classes divisible by 2
+/// (where the recoder emits a zero digit). `code` packs
+/// `1 + 6*orbit + unit`, with units ordered
+/// `[+1, -1, +ω, -ω, +ω², -ω²]` (so `unit >> 1` is the rotation exponent and
+/// `unit & 1` the negation); the
+/// `joint_digit_table_matches_first_principles` test rebuilds every entry
+/// from those definitions.
+#[rustfmt::skip]
+const JOINT_DIGITS: [(i8, i8, u8); 64] = [
+    (0, 0, 0), (0, 1, 3), (0, 0, 0), (0, 3, 27), (0, 0, 0), (0, -3, 28), (0, 0, 0), (0, -1, 4),
+    (1, 0, 1), (1, 1, 6), (1, 2, 9), (1, 3, 15), (1, 4, 33), (1, -3, 37), (1, -2, 19), (1, -1, 7),
+    (0, 0, 0), (2, 1, 12), (0, 0, 0), (2, 3, 21), (0, 0, 0), (2, -3, 43), (0, 0, 0), (2, -1, 13),
+    (3, 0, 25), (3, 1, 24), (3, 2, 18), (3, 3, 30), (3, 4, 39), (3, 5, 45), (-5, -2, 47), (3, -1, 31),
+    (0, 0, 0), (4, 1, 42), (0, 0, 0), (4, 3, 36), (0, 0, 0), (-4, -3, 35), (0, 0, 0), (-4, -1, 41),
+    (-3, 0, 26), (-3, 1, 32), (5, 2, 48), (-3, -5, 46), (-3, -4, 40), (-3, -3, 29), (-3, -2, 17), (-3, -1, 23),
+    (0, 0, 0), (-2, 1, 14), (0, 0, 0), (-2, 3, 44), (0, 0, 0), (-2, -3, 22), (0, 0, 0), (-2, -1, 11),
+    (-1, 0, 2), (-1, 1, 8), (-1, 2, 20), (-1, 3, 38), (-1, -4, 34), (-1, -3, 16), (-1, -2, 10), (-1, -1, 5),
+];
+
+/// Upper bound on the number of joint digit positions. The recoding
+/// coefficients start below `2^127` and each step at least halves them up
+/// to a coefficient-5 digit (`r' <= (r + 5)/2`), so 127 steps reach the box
+/// `max(|a|, |b|) <= 5`; exhaustive search over that box (the
+/// `tail_bound_exhaustive` test) shows at most 5 further positions.
+const MAX_JOINT_DIGITS: usize = 132;
+
+/// Splits a nonzero digit code into `(orbit, rotation, negate)`.
+fn decode_digit(code: u8) -> (usize, usize, bool) {
+    debug_assert!((1..=48).contains(&code), "invalid digit code");
+    let v = usize::from(code - 1);
+    (v / 6, (v % 6) >> 1, (v % 6) & 1 == 1)
+}
+
+/// The Eisenstein coefficients `(a, b)` of a nonzero digit code, i.e. the
+/// digit as $a + b\omega$. Both are at most 5 in magnitude.
+fn digit_coeffs(code: u8) -> (i8, i8) {
+    let (orbit, e, negate) = decode_digit(code);
+    let (mut a, mut b) = DELTA[orbit];
+    // Multiplication by omega: (a + b*omega)*omega = -b + (a - b)*omega.
+    for _ in 0..e {
+        let (ra, rb) = (-b, a - b);
+        a = ra;
+        b = rb;
+    }
+    if negate {
+        a = -a;
+        b = -b;
+    }
+    (a, b)
+}
+
+/// The scalar a nonzero digit multiplies the base point by:
+/// $a + b\lambda \pmod n$. Never zero — the digit's Eisenstein norm
+/// $a^2 - ab + b^2$ is a nonzero integer of at most 75, far below $n$.
+fn digit_scalar<F: WithSmallOrderMulGroup<3>>(code: u8) -> F {
+    let (da, db) = digit_coeffs(code);
+    let signed = |v: i8| {
+        let m = F::from(u64::from(v.unsigned_abs()));
+        if v < 0 {
+            -m
+        } else {
+            m
+        }
+    };
+    signed(da) + signed(db) * F::ZETA
+}
+
+/// Joint width-3 NAF recoding of $a + b\omega$ over the Eisenstein integers,
+/// lowest position first: while the value is nonzero, emit 0 if it is
+/// divisible by 2 (both coefficients even), else the unique $U\Delta$ digit
+/// congruent to it mod $8\mathbf{Z}[\omega]$; then subtract and halve. A
+/// nonzero digit leaves a multiple of 8, so the following two digits are
+/// forced zeros.
+///
+/// The subtract-and-halve is computed as `(a >> 1) - (da >> 1)`, exact
+/// because `a ≡ da (mod 2)` in every case (zero digits are only emitted when
+/// both coefficients are even, and nonzero digits match the value's residue
+/// class); the naive `(a - da) / 2` could overflow `i128` by up to 4 when
+/// `|a|` starts at its `2^127 - 1` bound.
+fn joint_digits(mut a: i128, mut b: i128) -> ([u8; MAX_JOINT_DIGITS], usize) {
+    let mut digits = [0u8; MAX_JOINT_DIGITS];
+    let mut n = 0;
+    while a != 0 || b != 0 {
+        let idx = (((a & 7) << 3) | (b & 7)) as usize;
+        let (da, db, code) = JOINT_DIGITS[idx];
+        digits[n] = code;
+        a = (a >> 1) - (i128::from(da) >> 1);
+        b = (b >> 1) - (i128::from(db) >> 1);
+        n += 1;
+    }
+    (digits, n)
+}
+
+/// Batches of at least this many live (non-identity) points take the
+/// batch-affine ladder in [`Table::mul_decomposed_batch`]; smaller ones fall
+/// back to per-point Jacobian ladders.
+///
+/// Per point, the affine ladder replaces the Jacobian ladder's
+/// `127·(2M + 5S) + H·(7M + 4S)` with `(5D + 4H)M + 2D·S` plus a
+/// `(D + H)/n` share of one field inversion per ladder column phase
+/// (`D ≈ 127` doublings, `H ≈ 39` active columns): it eliminates ~585
+/// squarings but adds ~264 multiplications and the shared inversions.
+/// With this crate's Fermat inversion (measured `I/M ≈ 440`, `S/M ≈ 0.86`
+/// on Apple aarch64 with the assembly backend) the operation-count model
+/// puts break-even against the Jacobian ladder at `n ≈ 365` — far above
+/// the `n ≈ 50` a textbook `I = 100M` would suggest — and the *measured*
+/// curve (same-scalar batch benches in `benches/glv.rs`, kernel forced on
+/// at every size) crosses at `n ≈ 512`: −0.8% there, −4% to −5% at
+/// 1024–4096, +7% at 256. The threshold sits on that measured break-even,
+/// so smaller batches keep the plain per-point ladders. A cheaper
+/// variable-time inversion would pull this down substantially.
+const BATCH_AFFINE_MIN_POINTS: usize = 512;
+
+/// The GLV digit window for one base point: the eight Eisenstein orbit
+/// representatives $[\Delta_i]P$ in affine coordinates, with each
+/// x-coordinate stored in all three $\zeta$-rotations (so applying the
+/// endomorphism part of a digit is a lookup, not a multiplication) alongside
+/// the shared y-coordinates. 1 KiB per table.
 ///
 /// Build one with [`Table::new`], or many with one shared normalization via
 /// [`Table::batch`].
 #[derive(Clone, Copy, Debug)]
 pub struct Table<C: GlvParams> {
-    /// `{1, 3, 5, 7} * P`
-    t1: [C::AffineExt; 4],
-    /// `{1, 3, 5, 7} * phi(P)`
-    t2: [C::AffineExt; 4],
+    /// `xs[e][i]` = $\zeta^e \cdot x([\Delta_i]P)$.
+    xs: [[C::Base; 8]; 3],
+    /// `ys[i]` = $y([\Delta_i]P)$.
+    ys: [C::Base; 8],
 }
 
 impl<C: GlvParams> Table<C> {
@@ -288,134 +480,317 @@ impl<C: GlvParams> Table<C> {
         affine.chunks_exact(8).map(Self::from_window).collect()
     }
 
-    /// The eight projective window entries for one point:
-    /// `[1P, 3P, 5P, 7P, 1phi(P), 3phi(P), 5phi(P), 7phi(P)]`. Projective
-    /// group operations only (cheap additions and endomorphism, no
-    /// inversions); the endomorphism multiples are taken via
-    /// [`CurveExt::endo`] so they ride along in the caller's normalization.
+    /// The eight projective orbit representatives $[\Delta_i]P$, in orbit
+    /// order. Seven full additions plus endomorphism applications (one
+    /// base-field multiplication each) and negations; no inversions, so the
+    /// entries ride along in the caller's shared normalization.
+    ///
+    /// The chain reaches every orbit through intermediate multiples (the
+    /// Eisenstein multiplier of `p` is annotated); conjugate pairs like
+    /// `phi_p ± m3` share their intermediates, and the trailing unit of
+    /// each chain output is stripped with endomorphism rotations and
+    /// negations, which cost one multiplication at most each. The
+    /// `orbit_points` test checks every entry (and every stored rotation)
+    /// against the native scalar multiplication.
     fn window_proj(p: &C) -> [C; 8] {
-        let two_p = p.double();
-        let mut w = [*p; 8];
-        for i in 1..4 {
-            w[i] = w[i - 1] + two_p;
-        }
-        for i in 0..4 {
-            w[i + 4] = w[i].endo();
-        }
-        w
+        let phi_p = p.endo(); // ω
+        let d1 = *p - phi_p; // 1 - ω
+        let b = d1 - d1.endo(); // (1 - ω)² = -3ω
+        let b_endo = b.endo(); // -3ω²
+        let m3 = b_endo.endo(); // -3
+        let t3a = phi_p + m3; // -3 + ω
+        let t3b = phi_p - m3; // 3 + ω
+        let r3 = -b_endo; // 3ω²
+        let t4a = phi_p + r3; // -3 - 2ω
+        let t4b = phi_p - r3; // 3 + 4ω
+        let t19 = phi_p + t4b; // 3 + 5ω
+        [
+            *p,                // Δ0 = 1
+            d1,                // Δ1 = 1 - ω
+            t4a.endo(),        // Δ2 = 2 - ω   = ω(-3 - 2ω)
+            -t3b.endo(),       // Δ3 = 1 - 2ω  = -ω(3 + ω)
+            -m3,               // Δ4 = 3
+            -t3a,              // Δ5 = 3 - ω
+            t4b.endo().endo(), // Δ6 = 1 - 3ω  = ω²(3 + 4ω)
+            t19.endo().endo(), // Δ7 = 2 - 3ω  = ω²(3 + 5ω)
+        ]
     }
 
-    /// Assembles a table from one normalized 8-entry window.
+    /// Assembles a table from one normalized 8-entry window of orbit
+    /// representatives, materializing the $\zeta$-rotations of each
+    /// x-coordinate (16 multiplications per table).
     fn from_window(w: &[C::AffineExt]) -> Self {
-        Table {
-            t1: w[..4].try_into().expect("four P multiples"),
-            t2: w[4..8].try_into().expect("four phi(P) multiples"),
+        let mut xs = [[C::Base::ZERO; 8]; 3];
+        let mut ys = [C::Base::ZERO; 8];
+        for (i, p) in w.iter().enumerate() {
+            let (x, y) = C::affine_xy(p);
+            let xz = x * C::Base::ZETA;
+            xs[0][i] = x;
+            xs[1][i] = xz;
+            xs[2][i] = xz * C::Base::ZETA;
+            ys[i] = y;
         }
+        Table { xs, ys }
     }
 
-    /// The base point P (= t1\[0\]) back as a projective point.
+    /// Whether this is the table of the identity point. Identity windows
+    /// are all-`(0, 0)`, and no valid point has `y = 0` (the group has odd
+    /// prime order, hence no 2-torsion), so `y` is a reliable sentinel.
+    fn is_identity(&self) -> bool {
+        self.ys[0].is_zero().into()
+    }
+
+    /// The affine coordinates contributed by a nonzero digit:
+    /// $\pm\phi^e([\Delta_i]P)$, one table lookup and at most one field
+    /// negation.
+    fn digit_coords(&self, code: u8) -> (C::Base, C::Base) {
+        let (orbit, e, negate) = decode_digit(code);
+        let x = self.xs[e][orbit];
+        let y = if negate {
+            -self.ys[orbit]
+        } else {
+            self.ys[orbit]
+        };
+        (x, y)
+    }
+
+    /// The affine point contributed by a nonzero digit.
+    fn digit_point(&self, code: u8) -> C::AffineExt {
+        let (x, y) = self.digit_coords(code);
+        C::affine_unchecked(x, y)
+    }
+
+    /// The base point P (= the Δ0 orbit entry) back as a projective point.
     #[cfg(test)]
     fn point(&self) -> C {
-        C::from(self.t1[0])
+        C::from(C::affine_unchecked(self.xs[0][0], self.ys[0]))
     }
 
     /// `k * P` for the P encoded by this table, decomposing `k` on the spot.
     ///
     /// When one scalar meets many tables, decompose once with
-    /// [`Decomposed::new`] and use [`Table::mul_decomposed`] instead.
+    /// [`Decomposed::new`] and use [`Table::mul_decomposed`] (or
+    /// [`Table::mul_decomposed_batch`]) instead.
     pub fn mul(&self, k: &C::ScalarExt) -> C {
         self.mul_decomposed(&Decomposed::new(k))
     }
 
-    /// `k * P` for the P encoded by this table, via the Straus
-    /// shared-doubling ladder over the GLV split. Identical to `P * k`
+    /// `k * P` for the P encoded by this table, via the shared-doubling
+    /// ladder over the joint Eisenstein digit string. Identical to `P * k`
     /// (tested).
     pub fn mul_decomposed(&self, k: &Decomposed<C>) -> C {
         let mut acc = C::identity();
-        for i in (0..k.len).rev() {
+        for (i, &code) in k.digits[..k.len].iter().enumerate().rev() {
             // `acc` is still the identity on the first iteration; skip the
             // wasted doubling.
             if i + 1 < k.len {
                 acc = acc.double();
             }
-            Self::add_digit(&mut acc, &self.t1, k.digits1[i]);
-            Self::add_digit(&mut acc, &self.t2, k.digits2[i]);
+            if code != 0 {
+                acc += self.digit_point(code);
+            }
         }
         acc
     }
 
-    /// Adds `d * B` to `acc`, where `table` holds `{1, 3, 5, 7} * B` and `d`
-    /// is a signed odd wNAF digit (zero adds nothing).
-    fn add_digit(acc: &mut C, table: &[C::AffineExt; 4], d: i8) {
-        if d != 0 {
-            let mut a = table[(d.unsigned_abs() / 2) as usize];
-            if d < 0 {
-                a = -a;
-            }
-            *acc += a;
+    /// One `k * P` per table, sharing the whole column schedule across the
+    /// batch. Identical, table by table, to [`Table::mul_decomposed`]
+    /// (tested).
+    ///
+    /// With at least [`BATCH_AFFINE_MIN_POINTS`] live (non-identity) tables,
+    /// and for every scalar whose column schedule avoids the affine
+    /// formulas' exceptional cases (checked exactly per call; random scalars
+    /// fail the check with probability ~2^-124), the ladder runs on affine
+    /// accumulators: each column batch-inverts its denominators via
+    /// Montgomery's trick and each nonzero-digit column is a fused affine
+    /// $2P + D$. Otherwise every table falls back to its own per-point
+    /// ladder.
+    pub fn mul_decomposed_batch(tables: &[&Self], k: &Decomposed<C>) -> Vec<C> {
+        if k.len == 0 {
+            // k = 0: every product is the identity.
+            return alloc::vec![C::identity(); tables.len()];
         }
+        let live: Vec<&Self> = tables
+            .iter()
+            .copied()
+            .filter(|t| !t.is_identity())
+            .collect();
+        if live.len() < BATCH_AFFINE_MIN_POINTS || !affine_ladder_safe::<C>(k) {
+            return tables.iter().map(|t| t.mul_decomposed(k)).collect();
+        }
+        let mut products = Self::batch_affine_ladder(&live, k).into_iter();
+        tables
+            .iter()
+            .map(|t| {
+                if t.is_identity() {
+                    C::identity()
+                } else {
+                    products.next().expect("one product per live table")
+                }
+            })
+            .collect()
+    }
+
+    /// The synchronized batch-affine ladder. Callers guarantee: `k.len > 0`,
+    /// every table is non-identity, and the schedule passed
+    /// [`affine_ladder_safe`] (so no denominator below is zero and no
+    /// accumulator is ever the identity).
+    #[allow(clippy::needless_range_loop)]
+    fn batch_affine_ladder(live: &[&Self], k: &Decomposed<C>) -> Vec<C> {
+        let n = live.len();
+        // Affine accumulators (structure-of-arrays), initialized from the
+        // top digit — the ladder's first column is the digit itself.
+        let mut xs = Vec::with_capacity(n);
+        let mut ys = Vec::with_capacity(n);
+        for t in live {
+            let (x, y) = t.digit_coords(k.digits[k.len - 1]);
+            xs.push(x);
+            ys.push(y);
+        }
+        let mut den = alloc::vec![C::Base::ZERO; n];
+        let mut scratch = alloc::vec![C::Base::ZERO; n];
+        let mut slopes = alloc::vec![C::Base::ZERO; n];
+        let mut x1s = alloc::vec![C::Base::ZERO; n];
+
+        for &code in k.digits[..k.len - 1].iter().rev() {
+            if code == 0 {
+                // Batched affine doubling: m = 3x²/(2y), x' = m² - 2x,
+                // y' = m(x - x') - y. Asymptotically 5M + 2S per point
+                // (2M + 2S here, 3M inside the shared inversion).
+                for (den, y) in den.iter_mut().zip(&ys) {
+                    *den = y.double();
+                }
+                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                for i in 0..n {
+                    let xx = xs[i].square();
+                    let m = (xx.double() + xx) * den[i];
+                    let x2 = m.square() - xs[i].double();
+                    ys[i] = m * (xs[i] - x2) - ys[i];
+                    xs[i] = x2;
+                }
+            } else {
+                let (orbit, e, negate) = decode_digit(code);
+                // Fused affine 2P + D (Eisenträger–Lauter–Montgomery): the
+                // y-coordinate of the intermediate P + D is never
+                // materialized. Asymptotically 9M + 2S per point, versus
+                // 10M + 3S for a separate doubling and addition.
+                //
+                // Phase 1: s = (v - y)/(u - x), x1 = x(P + D) = s² - x - u.
+                for (den, (x, t)) in den.iter_mut().zip(xs.iter().zip(live)) {
+                    *den = t.xs[e][orbit] - x;
+                }
+                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                for i in 0..n {
+                    let u = live[i].xs[e][orbit];
+                    let v = if negate {
+                        -live[i].ys[orbit]
+                    } else {
+                        live[i].ys[orbit]
+                    };
+                    let s = (v - ys[i]) * den[i];
+                    x1s[i] = s.square() - xs[i] - u;
+                    slopes[i] = s;
+                }
+                // Phase 2: t = -s - 2y/(x1 - x), x2 = t² - x - x1,
+                // y2 = t(x - x2) - y.
+                for (den, (x, x1)) in den.iter_mut().zip(xs.iter().zip(&x1s)) {
+                    *den = *x1 - x;
+                }
+                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                for i in 0..n {
+                    let t = -(slopes[i] + ys[i].double() * den[i]);
+                    let x2 = t.square() - xs[i] - x1s[i];
+                    ys[i] = t * (xs[i] - x2) - ys[i];
+                    xs[i] = x2;
+                }
+            }
+        }
+
+        xs.into_iter()
+            .zip(ys)
+            .map(|(x, y)| C::from(C::affine_unchecked(x, y)))
+            .collect()
     }
 }
 
-/// A scalar in GLV-decomposed, wNAF-recoded form, ready for
-/// [`Table::mul_decomposed`].
+/// Whether the column schedule of `k` avoids every exceptional case of the
+/// batch-affine ladder, by tracking the scalar `s` that multiplies the base
+/// point in the shared accumulator.
+///
+/// The top digit makes `s` nonzero (digit values are never zero: their
+/// Eisenstein norms are nonzero integers of at most 75, far below the group
+/// order), doubling `s` in an odd-order field preserves nonzeroness, and the
+/// active-column check rules out `2s + d = 0`, so accumulators are never the
+/// identity and doubling columns are always safe (no 2-torsion means
+/// `2y != 0`). An active column computing `2P + D` with `P = [s]B`,
+/// `D = [d]B` is exceptional iff
+///
+/// - `d = ±s`: the first denominator `x(D) - x(P)` vanishes (this includes
+///   `D = -P`, where `P + D` is the identity), or
+/// - `d = -2s`: the second denominator `x(P + D) - x(P)` vanishes
+///   (`D = -2P`), which is also exactly when the column's output would be
+///   the identity.
+///
+/// The conditions depend only on the scalar schedule, never on the points,
+/// so one exact check covers the entire batch. For the `ivk`-shaped scalars
+/// this path serves the conditions require a ladder prefix to collide with
+/// a GLV lattice vector — probability ~2^-124 per random scalar — but
+/// adversarial scalars can be constructed, hence the fallback.
+fn affine_ladder_safe<C: GlvParams>(k: &Decomposed<C>) -> bool {
+    debug_assert!(k.len > 0);
+    let mut s = digit_scalar::<C::ScalarExt>(k.digits[k.len - 1]);
+    for &code in k.digits[..k.len - 1].iter().rev() {
+        if code == 0 {
+            s = s.double();
+        } else {
+            let d = digit_scalar::<C::ScalarExt>(code);
+            let s2 = s.double();
+            if d == s || d == -s || d == -s2 {
+                return false;
+            }
+            s = s2 + d;
+        }
+    }
+    true
+}
+
+/// A scalar in GLV-decomposed, jointly recoded form, ready for
+/// [`Table::mul_decomposed`] and [`Table::mul_decomposed_batch`].
 ///
 /// Building this once per scalar hoists the decomposition and digit
 /// recoding out of a loop that multiplies the same scalar against many
 /// tables (e.g. one viewing key against a batch of ephemeral keys).
 #[derive(Clone, Debug)]
 pub struct Decomposed<C: GlvParams> {
-    digits1: [i8; MAX_WNAF_DIGITS],
-    digits2: [i8; MAX_WNAF_DIGITS],
-    /// Digit positions in use: the longer of the two halves' wNAF lengths.
-    /// Both arrays are zero beyond their own half's length.
+    /// Joint digit codes, lowest position first (see [`JOINT_DIGITS`]);
+    /// zero at position `len` and beyond, nonzero at `len - 1` (when
+    /// `len > 0`).
+    digits: [u8; MAX_JOINT_DIGITS],
+    /// Digit positions in use.
     len: usize,
-    _curve: core::marker::PhantomData<C>,
+    _curve: PhantomData<C>,
 }
 
 impl<C: GlvParams> Decomposed<C> {
-    /// Decomposes `k` and recodes both halves as width-4 wNAF digits, with
-    /// each half's sign folded into its digits.
+    /// Decomposes `k` and recodes the halves as one joint width-3 NAF digit
+    /// string over the Eisenstein integers.
     pub fn new(k: &C::ScalarExt) -> Self {
         let ((neg1, a1), (neg2, a2)) = decompose::<C>(k);
-        let (digits1, len1) = wnaf_digits(a1, neg1);
-        let (digits2, len2) = wnaf_digits(a2, neg2);
+        // The i128 recoding coefficients and the digit-array bound rely on
+        // the half-width guarantee; enforce it in every build profile.
+        assert!(
+            a1 >> 127 == 0 && a2 >> 127 == 0,
+            "GLV half exceeds 127 bits"
+        );
+        let a = if neg1 { -(a1 as i128) } else { a1 as i128 };
+        let b = if neg2 { -(a2 as i128) } else { a2 as i128 };
+        let (digits, len) = joint_digits(a, b);
         Decomposed {
-            digits1,
-            digits2,
-            len: len1.max(len2),
-            _curve: core::marker::PhantomData,
+            digits,
+            len,
+            _curve: PhantomData,
         }
     }
-}
-
-/// Upper bound on the number of width-4 wNAF digits of a decomposition half:
-/// an n-bit magnitude yields at most n + 1 digits, and [`decompose`] bounds
-/// the halves below `2^127`.
-const MAX_WNAF_DIGITS: usize = 128;
-
-/// Width-4 wNAF digits of a u128 magnitude, lowest position first, with the
-/// half's overall sign folded into the digits when `negate` is set.
-fn wnaf_digits(a: u128, negate: bool) -> ([i8; MAX_WNAF_DIGITS], usize) {
-    debug_assert!(a >> 127 == 0, "magnitude must be at most 127 bits");
-    let mut digits = [0i8; MAX_WNAF_DIGITS];
-    let mut n = 0;
-    let mut k = a;
-    while k != 0 {
-        if k & 1 == 1 {
-            let low = (k & 0xF) as i8;
-            let d = if low >= 8 { low - 16 } else { low };
-            digits[n] = if negate { -d } else { d };
-            if d >= 0 {
-                k -= d as u128;
-            } else {
-                k += (-d) as u128;
-            }
-        }
-        n += 1;
-        k >>= 1;
-    }
-    (digits, n)
 }
 
 #[cfg(test)]
@@ -460,6 +835,151 @@ mod tests {
             round_mul_shift(&vesta::Point::G2, &vesta_scalar_max),
             0x49e69d1640a899538cb1279300000001
         );
+    }
+
+    #[test]
+    fn joint_digit_table_matches_first_principles() {
+        // Eisenstein multiplication on coefficient pairs:
+        // (a + bω)(c + dω) = (ac - bd) + (ad + bc - bd)ω.
+        fn emul(x: (i32, i32), y: (i32, i32)) -> (i32, i32) {
+            (x.0 * y.0 - x.1 * y.1, x.0 * y.1 + x.1 * y.0 - x.1 * y.1)
+        }
+        // The units in code order [+1, -1, +ω, -ω, +ω², -ω²]
+        // (ω² = -1 - ω).
+        let units = [(1, 0), (-1, 0), (0, 1), (0, -1), (-1, -1), (1, 1)];
+        let mut rebuilt = [(0i8, 0i8, 0u8); 64];
+        let mut seen = [false; 64];
+        for (orbit, &(da, db)) in DELTA.iter().enumerate() {
+            for (unit, &u) in units.iter().enumerate() {
+                let d = emul(u, (i32::from(da), i32::from(db)));
+                assert!(d.0.abs() <= 5 && d.1.abs() <= 5, "digit coefficient > 5");
+                assert!(
+                    d.0.rem_euclid(2) == 1 || d.1.rem_euclid(2) == 1,
+                    "digit divisible by 2"
+                );
+                let idx = ((d.0.rem_euclid(8) << 3) | d.1.rem_euclid(8)) as usize;
+                assert!(!seen[idx], "digit classes must be distinct");
+                seen[idx] = true;
+                let code = (1 + 6 * orbit + unit) as u8;
+                rebuilt[idx] = (d.0 as i8, d.1 as i8, code);
+                // Decode and coefficient reconstruction round-trip.
+                assert_eq!(decode_digit(code), (orbit, unit >> 1, unit & 1 == 1));
+                assert_eq!(digit_coeffs(code), (d.0 as i8, d.1 as i8));
+            }
+        }
+        // U·Δ covers exactly the 48 residue classes not divisible by 2.
+        assert_eq!(seen.iter().filter(|&&s| s).count(), 48);
+        for (idx, &entry) in JOINT_DIGITS.iter().enumerate() {
+            if seen[idx] {
+                assert_eq!(entry, rebuilt[idx], "table entry {idx}");
+            } else {
+                assert_eq!(entry, (0, 0, 0), "class {idx} must be a zero digit");
+                assert!(
+                    (idx >> 3) & 1 == 0 && idx & 1 == 0,
+                    "only even classes may hold zero digits"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tail_bound_exhaustive() {
+        // The recoding coefficients reach max(|a|, |b|) <= 5 within 127
+        // steps (each step maps r to at most (r + 5)/2 <= r for r >= 5, and
+        // below 2^(127-j) + 5 after j steps); this exhaustively bounds the
+        // remaining tail over the closed box |a|, |b| <= 6, proving both
+        // MAX_JOINT_DIGITS and termination.
+        use alloc::collections::BTreeMap;
+        fn tail(a: i128, b: i128, memo: &mut BTreeMap<(i128, i128), Option<usize>>) -> usize {
+            if a == 0 && b == 0 {
+                return 0;
+            }
+            match memo.get(&(a, b)) {
+                Some(Some(t)) => return *t,
+                Some(None) => panic!("recoding cycle at ({a}, {b})"),
+                None => {}
+            }
+            memo.insert((a, b), None);
+            let (da, db, _) = JOINT_DIGITS[(((a & 7) << 3) | (b & 7)) as usize];
+            let t = 1 + tail(
+                (a >> 1) - (i128::from(da) >> 1),
+                (b >> 1) - (i128::from(db) >> 1),
+                memo,
+            );
+            memo.insert((a, b), Some(t));
+            t
+        }
+        let mut memo = BTreeMap::new();
+        let mut max_tail = 0;
+        for a in -6..=6 {
+            for b in -6..=6 {
+                max_tail = max_tail.max(tail(a, b, &mut memo));
+            }
+        }
+        assert_eq!(max_tail, MAX_JOINT_DIGITS - 127);
+        // The box is closed under recoding: every reached state stays in it.
+        for &(a, b) in memo.keys() {
+            assert!(a.abs() <= 6 && b.abs() <= 6, "recoding escaped the box");
+        }
+    }
+
+    #[test]
+    fn joint_recoding_small_reconstruction() {
+        // Componentwise exactness on i128-safe magnitudes plus structure;
+        // full-width inputs are covered by the per-curve `joint_recoding`
+        // tests, which fold the digits in the scalar field instead.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u128;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut cases: Vec<(i128, i128)> = alloc::vec![
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (-1, -1),
+            (5, -5),
+            ((1 << 119) - 1, -((1 << 119) - 1)),
+        ];
+        for _ in 0..200 {
+            let a = (next() & ((1 << 119) - 1)) as i128 - (1i128 << 118);
+            let b = (next() & ((1 << 119) - 1)) as i128 - (1i128 << 118);
+            cases.push((a, b));
+        }
+        for (a, b) in cases {
+            let (digits, len) = joint_digits(a, b);
+            assert!(len <= MAX_JOINT_DIGITS);
+            let (mut ra, mut rb) = (0i128, 0i128);
+            for &code in digits[..len].iter().rev() {
+                ra *= 2;
+                rb *= 2;
+                if code != 0 {
+                    let (da, db) = digit_coeffs(code);
+                    ra += i128::from(da);
+                    rb += i128::from(db);
+                }
+            }
+            assert_eq!((ra, rb), (a, b), "digits must reconstruct the input");
+            if len > 0 {
+                assert_ne!(digits[len - 1], 0, "top digit must be nonzero");
+            }
+            for &tail in digits[len..].iter() {
+                assert_eq!(tail, 0, "digits beyond len must be zero");
+            }
+        }
+        // Full-magnitude structural checks (componentwise reconstruction of
+        // these would overflow i128).
+        for (a, b) in [
+            (i128::MAX, -i128::MAX),
+            (i128::MAX, i128::MAX),
+            (-i128::MAX, 1),
+        ] {
+            let (digits, len) = joint_digits(a, b);
+            assert!(len <= MAX_JOINT_DIGITS);
+            assert_ne!(digits[len - 1], 0);
+        }
     }
 
     /// Deterministic full-width scalars for the known-answer tests.
@@ -581,6 +1101,66 @@ mod tests {
         }
     }
 
+    /// The joint Eisenstein recoding folds back to `k` in the scalar field
+    /// (mirroring, digit for digit, what the ladder does in the group), has
+    /// a nonzero top digit, respects the width-3 zero-run property, and
+    /// stays within the length and density bounds.
+    fn joint_recoding_reconstructs<C: GlvParams>() {
+        let lambda = C::ScalarExt::ZETA;
+        let check = |k: C::ScalarExt| {
+            let d = Decomposed::<C>::new(&k);
+            let mut acc = C::ScalarExt::ZERO;
+            for &code in d.digits[..d.len].iter().rev() {
+                acc = acc.double();
+                if code != 0 {
+                    acc += digit_scalar::<C::ScalarExt>(code);
+                }
+            }
+            assert_eq!(acc, k, "joint digits must reconstruct k");
+            assert!(d.len <= MAX_JOINT_DIGITS);
+            if d.len > 0 {
+                assert_ne!(d.digits[d.len - 1], 0, "top digit must be nonzero");
+            }
+            for (i, &code) in d.digits[..d.len].iter().enumerate() {
+                if code != 0 {
+                    for j in i + 1..(i + 3).min(d.len) {
+                        assert_eq!(d.digits[j], 0, "width-3 property violated");
+                    }
+                }
+            }
+            assert!(
+                d.digits[..d.len].iter().filter(|&&c| c != 0).count() <= 44,
+                "more than ceil(132/3) nonzero digits"
+            );
+        };
+        check(C::ScalarExt::ZERO);
+        check(C::ScalarExt::ONE);
+        check(-C::ScalarExt::ONE);
+        check(lambda);
+        check(-lambda);
+        check(lambda + C::ScalarExt::ONE);
+        for k in scalars::<C::ScalarExt>(500) {
+            check(k);
+        }
+    }
+
+    /// Every stored digit orbit (and every ζ-rotation and negation of it)
+    /// equals the native scalar multiplication by its digit value.
+    fn orbit_points_match_native<C: GlvParams>() {
+        let g = C::generator();
+        for k in scalars::<C::ScalarExt>(8) {
+            let p = g * (k + C::ScalarExt::ONE);
+            let table = Table::new(&p);
+            for code in 1..=48u8 {
+                assert_eq!(
+                    C::from(table.digit_point(code)),
+                    p * digit_scalar::<C::ScalarExt>(code),
+                    "digit {code} must equal [a + b*lambda]P"
+                );
+            }
+        }
+    }
+
     /// Table-based multiplication matches the group's native `Mul`.
     fn table_mul_matches_group_mul<C: GlvParams>() {
         let g = C::generator();
@@ -657,6 +1237,113 @@ mod tests {
         }
     }
 
+    /// The batched ladder equals the per-table ladder and the native `Mul`,
+    /// across batch sizes straddling the affine crossover, with an identity
+    /// point mixed in, for edge-case and full-width scalars. Sizes at or
+    /// above [`BATCH_AFFINE_MIN_POINTS`] exercise the batch-affine kernel;
+    /// the rest exercise the fallback.
+    fn batch_mul_matches_per_table<C: GlvParams>() {
+        let g = C::generator();
+        let lambda = C::ScalarExt::ZETA;
+        // At BATCH_AFFINE_MIN_POINTS the injected identity drops the live
+        // count just below the threshold, exercising the live-counting
+        // boundary of the fallback; the +33 size runs the kernel with the
+        // identity mixed in.
+        let sizes = [1, 3, BATCH_AFFINE_MIN_POINTS, BATCH_AFFINE_MIN_POINTS + 33];
+        let ks = [
+            C::ScalarExt::ZERO,
+            C::ScalarExt::ONE,
+            -C::ScalarExt::ONE,
+            C::ScalarExt::from(2),
+            lambda,
+            -lambda,
+            lambda + C::ScalarExt::ONE,
+            C::ScalarExt::from_u128((1u128 << 127) - 1),
+            scalars::<C::ScalarExt>(1).next().unwrap(),
+        ];
+        for size in sizes {
+            let points: Vec<C> = (0..size)
+                .map(|i| {
+                    if size > 2 && i == size / 2 {
+                        C::identity()
+                    } else {
+                        g * (C::ScalarExt::from(i as u64 + 1) + lambda)
+                    }
+                })
+                .collect();
+            let tables = Table::batch(&points);
+            let refs: Vec<&Table<C>> = tables.iter().collect();
+            for k in ks {
+                let d = Decomposed::<C>::new(&k);
+                let batched = Table::mul_decomposed_batch(&refs, &d);
+                assert_eq!(batched.len(), points.len());
+                for ((p, t), out) in points.iter().zip(&tables).zip(&batched) {
+                    assert_eq!(*out, t.mul_decomposed(&d), "batch != per-table");
+                    assert_eq!(*out, *p * k, "batch != native");
+                }
+            }
+        }
+    }
+
+    /// Hand-crafted digit strings whose column schedules hit the affine
+    /// ladder's exceptional cases: the batch entry must detect them and take
+    /// the per-point fallback, keeping results exact. (Real recodings reach
+    /// these states only through ~2^-124 lattice collisions, so the strings
+    /// are constructed directly; a same-shape safe schedule keeps the kernel
+    /// itself covered.)
+    fn exceptional_schedules_fall_back<C: GlvParams>() {
+        let craft = |positions: &[u8]| {
+            let mut digits = [0u8; MAX_JOINT_DIGITS];
+            digits[..positions.len()].copy_from_slice(positions);
+            let mut value = C::ScalarExt::ZERO;
+            for &code in positions.iter().rev() {
+                value = value.double();
+                if code != 0 {
+                    value += digit_scalar::<C::ScalarExt>(code);
+                }
+            }
+            (
+                Decomposed::<C> {
+                    digits,
+                    len: positions.len(),
+                    _curve: PhantomData,
+                },
+                value,
+            )
+        };
+
+        // Digit strings are lowest position first; code 1 = +1, code 2 = -1.
+        // d == s: top digit +1 (s = 1), then an active column with d = +1,
+        // i.e. 2P + P — the first affine denominator x(D) - x(P) vanishes.
+        let d_eq_s = craft(&[1, 1]);
+        // d == -s: 2P + (-P) — the intermediate P + D is the identity.
+        let d_eq_neg_s = craft(&[2, 1]);
+        // Same shape, but safe (s = 2, d = -1): the kernel must handle it.
+        // (The remaining exceptional case d = -2s is unreachable by short
+        // crafted schedules: componentwise it would need an even digit, and
+        // the digit set is odd by construction; it only occurs via mod-n
+        // wraparound at lattice-sized prefixes, which the check also
+        // covers.)
+        let safe = craft(&[2, 0, 1]);
+
+        assert!(!affine_ladder_safe::<C>(&d_eq_s.0));
+        assert!(!affine_ladder_safe::<C>(&d_eq_neg_s.0));
+        assert!(affine_ladder_safe::<C>(&safe.0));
+
+        let g = C::generator();
+        let points: Vec<C> = (0..BATCH_AFFINE_MIN_POINTS + 3)
+            .map(|i| g * C::ScalarExt::from(i as u64 + 1))
+            .collect();
+        let tables = Table::batch(&points);
+        let refs: Vec<&Table<C>> = tables.iter().collect();
+        for (d, value) in [d_eq_s, d_eq_neg_s, safe] {
+            let batched = Table::mul_decomposed_batch(&refs, &d);
+            for (p, out) in points.iter().zip(&batched) {
+                assert_eq!(*out, *p * value, "crafted schedule must stay exact");
+            }
+        }
+    }
+
     macro_rules! glv_tests {
         ($mod_name:ident, $curve:ty) => {
             mod $mod_name {
@@ -673,6 +1360,14 @@ mod tests {
                 #[test]
                 fn decompose() {
                     decompose_reconstructs::<$curve>();
+                }
+                #[test]
+                fn joint_recoding() {
+                    joint_recoding_reconstructs::<$curve>();
+                }
+                #[test]
+                fn orbit_points() {
+                    orbit_points_match_native::<$curve>();
                 }
                 #[test]
                 fn table_mul() {
@@ -693,6 +1388,14 @@ mod tests {
                 #[test]
                 fn decomposed_reuse() {
                     decomposed_reuse_matches_fresh::<$curve>();
+                }
+                #[test]
+                fn batch_mul() {
+                    batch_mul_matches_per_table::<$curve>();
+                }
+                #[test]
+                fn exceptional_fallback() {
+                    exceptional_schedules_fall_back::<$curve>();
                 }
             }
         };
@@ -777,8 +1480,8 @@ mod tests {
     /// predating `babai_coefficient_verify` provably accepted, since it
     /// leaves the `round_mul_shift` known-answer test unmoved and shifts
     /// `c2` for only ~2^-16 of random scalars — moves `c2` by one *here*
-    /// and pushes `|k2|` past the half-width bound that `wnaf_digits` and
-    /// `MAX_WNAF_DIGITS` rely on.
+    /// and pushes `|k2|` past the half-width bound that the joint
+    /// recoding's i128 coefficients and `MAX_JOINT_DIGITS` rely on.
     ///
     /// With the shipped constants the witness must behave like any other
     /// scalar; the second half of the test pins its boundary geometry.
@@ -845,13 +1548,11 @@ mod tests {
     /// only diverge if the GLV path regresses, and at these scalars it
     /// does so for exactly the suite-invisible corruption identified
     /// above (`G2[1] ^= 1 << 63`): the decomposition half leaves its
-    /// 2^127 bound and the pipeline panics on a bound assertion in debug
-    /// builds — how tests run. (Any corruption small enough to evade the
-    /// known-answer tests keeps `|k2| < 2^128`, which the wNAF ladder
-    /// still multiplies correctly, so release products stay numerically
-    /// right; the broken invariant is the observable, not a wrong point.)
-    /// On the pre-`babai_coefficient_verify` code, this test alone
-    /// detects the flip; nothing else in that suite did.
+    /// 2^127 bound and the pipeline rejects it on [`Decomposed::new`]'s
+    /// bound assertion — in every build profile, since the joint recoding's
+    /// i128 coefficients make the bound load-bearing. On the
+    /// pre-`babai_coefficient_verify` code, this test alone detects the
+    /// flip; nothing else in that suite did.
     fn native_vs_glv_boundary<C: GlvParams>(limbs: [u64; 4]) {
         let k = scalar_from_limbs::<C::ScalarExt>(limbs);
         let p = C::generator() * (k + C::ScalarExt::ONE);
@@ -916,6 +1617,21 @@ mod tests {
                             let s2 = Scalar::from_u128(a2);
                             let s2 = if neg2 { -s2 } else { s2 };
                             prop_assert_eq!(s1 + s2 * Scalar::ZETA, k);
+                        }
+
+                        /// For all k: the joint digits fold back to k in the
+                        /// scalar field.
+                        #[test]
+                        fn joint_recoding_reconstructs(k in scalar_strategy::<Scalar>()) {
+                            let d = Decomposed::<$curve>::new(&k);
+                            let mut acc = Scalar::ZERO;
+                            for &code in d.digits[..d.len].iter().rev() {
+                                acc = acc.double();
+                                if code != 0 {
+                                    acc += digit_scalar::<Scalar>(code);
+                                }
+                            }
+                            prop_assert_eq!(acc, k);
                         }
 
                         /// For all points: batched tables act identically to solo tables.

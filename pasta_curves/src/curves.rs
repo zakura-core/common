@@ -44,8 +44,12 @@ macro_rules! impl_batch_mul_same_scalar_vartime {
             }
             let scalar = crate::glv::Decomposed::<$name>::new(scalar);
             let tables = crate::glv::Table::batch(output);
-            for (output, table) in output.iter_mut().zip(tables) {
-                *output = table.mul_decomposed(&scalar);
+            let tables: alloc::vec::Vec<&crate::glv::Table<$name>> = tables.iter().collect();
+            for (output, product) in output
+                .iter_mut()
+                .zip(crate::glv::Table::mul_decomposed_batch(&tables, &scalar))
+            {
+                *output = product;
             }
         }
     };
@@ -90,6 +94,27 @@ macro_rules! new_curve_impl {
                 } else {
                     write!(f, "({:?}, {:?})", self.x, self.y)
                 }
+            }
+        }
+
+        /// Raw-coordinate plumbing for the GLV module (see
+        /// `GlvParams::affine_unchecked` / `affine_xy`), which needs to move
+        /// between affine points and their coordinates without per-use
+        /// on-curve checks; its table and ladder arithmetic stays on the
+        /// curve by construction.
+        #[cfg(feature = "glv")]
+        impl $name_affine {
+            /// Constructs a point from raw affine coordinates with no
+            /// on-curve check; `(0, 0)` is the affine identity encoding.
+            #[allow(dead_code)] // used only for the curves with GLV parameters
+            pub(crate) const fn from_xy_unchecked(x: $base, y: $base) -> Self {
+                Self { x, y }
+            }
+
+            /// The raw affine coordinates (`(0, 0)` for the identity).
+            #[allow(dead_code)]
+            pub(crate) const fn raw_xy(&self) -> ($base, $base) {
+                (self.x, self.y)
             }
         }
 
