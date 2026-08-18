@@ -536,12 +536,12 @@ pub(crate) mod tests {
 
     use crate::{
         ecc::{
-            chip::{find_zs_and_us, EccChip, EccConfig, H, NUM_WINDOWS},
+            chip::{EccChip, EccConfig, H, NUM_WINDOWS},
             tests::{FullWidth, TestFixedBases},
             CircuitVersion, NonIdentityPoint, ScalarFixed,
         },
         sinsemilla::primitives::{self as sinsemilla, K},
-        test_circuits::test_utils::test_against_stored_circuit,
+        test_circuits::test_utils::{test_against_stored_circuit, test_zs_and_us},
         utilities::lookup_range_check::{
             PallasLookupRangeCheck, PallasLookupRangeCheck4_5BConfig, PallasLookupRangeCheckConfig,
         },
@@ -562,7 +562,7 @@ pub(crate) mod tests {
         static ref Q: pallas::Affine = COMMIT_DOMAIN.Q().to_affine();
         static ref R: pallas::Affine = COMMIT_DOMAIN.R().to_affine();
         static ref R_ZS_AND_US: Vec<(u64, [pallas::Base; H])> =
-            find_zs_and_us(*R, NUM_WINDOWS).unwrap();
+            test_zs_and_us(*R, NUM_WINDOWS, "sinsemilla_test_merklecrh_r");
     }
 
     #[derive(Debug, Clone, Eq, PartialEq)]
