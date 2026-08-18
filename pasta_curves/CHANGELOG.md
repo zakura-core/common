@@ -8,6 +8,15 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- `Fp`/`Fq` field inversion is now a variable-time 62-divstep safegcd (a
+  Montgomery-native port of libsecp256k1's `modinv64`, exploiting both Pasta moduli's
+  sparse `[m0, m1, 2, 0, 64]` radix-2^62 shape), replacing the Fermat exponentiation:
+  measured 7.2x faster (4.83 µs → 0.67 µs, I/M ≈ 572 → ≈ 77 on Apple aarch64 with the
+  assembly backend). **`Field::invert` is no longer constant-time in its input**: every
+  inversion-bearing path (`to_affine`, `batch_normalize`, `ff` batch inversions, the
+  GLV ladder, downstream Orchard/halo2 users) inherits variable-time inversion. This
+  fork's inversion call sites operate on values whose timing is acceptable to leak;
+  the previous data-oblivious behavior remains expressible via `pow_vartime(m - 2)`.
 - The GLV path now recodes the two halves of the scalar decomposition as a single
   width-3 NAF over the Eisenstein integers instead of two independent width-4 wNAFs,
   cutting the shared-doubling ladder from ~51 to ~39 mixed additions. `glv::Table`
