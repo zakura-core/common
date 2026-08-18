@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `Fp::invert_vartime` and `Fq::invert_vartime` for faster inversion when
+  timing leakage is acceptable.
 - The GLV path now recodes the two halves of the scalar decomposition as a single
   width-3 NAF over the Eisenstein integers instead of two independent width-4 wNAFs,
   cutting the shared-doubling ladder from ~51 to ~39 mixed additions. `glv::Table`
@@ -17,7 +19,7 @@ and this project adheres to Rust's notion of
 - Added `glv::Table::mul_decomposed_batch`, which multiplies many points by one
   scalar on affine accumulators, batching each ladder column's field inversions
   across the batch and fusing nonzero-digit columns as affine `2P+Q`. Batches under
-  512 live points, and the scalar-dependent exceptional schedules (checked exactly
+  128 live points, and the scalar-dependent exceptional schedules (checked exactly
   per call), fall back to the per-point ladder.
   `CurveExt::batch_mul_same_scalar_vartime` now routes through it.
 - Forked from upstream `pasta_curves` and renamed to `zakura-pasta-curves`; this changelog starts

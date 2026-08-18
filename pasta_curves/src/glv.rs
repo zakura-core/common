@@ -64,7 +64,7 @@
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use ff::{BatchInverter, Field, PrimeField, WithSmallOrderMulGroup};
+use ff::{Field, PrimeField, WithSmallOrderMulGroup};
 use group::prime::PrimeCurveAffine;
 
 use crate::arithmetic::{mac, sbb, CurveExt};
@@ -109,6 +109,10 @@ pub trait GlvParams: CurveExt + private::Sealed {
     /// The raw affine coordinates of `p` (`(0, 0)` for the identity).
     #[doc(hidden)]
     fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base);
+
+    /// Variable-time inversion in the curve's base field.
+    #[doc(hidden)]
+    fn base_invert_vartime(value: &Self::Base) -> Option<Self::Base>;
 
     /// One-shot `k * self` via the GLV split — variable-time in `k` (see the
     /// module docs), identical in value to `self * k` (including `self` =
@@ -162,6 +166,10 @@ impl GlvParams for pallas::Point {
     fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
         p.raw_xy()
     }
+
+    fn base_invert_vartime(value: &Self::Base) -> Option<Self::Base> {
+        value.invert_vartime()
+    }
 }
 
 /// As for Pallas, these constants are computed by `sage/glv_constants.sage`,
@@ -194,6 +202,10 @@ impl GlvParams for vesta::Point {
 
     fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
         p.raw_xy()
+    }
+
+    fn base_invert_vartime(value: &Self::Base) -> Option<Self::Base> {
+        value.invert_vartime()
     }
 }
 
@@ -419,17 +431,29 @@ fn joint_digits(mut a: i128, mut b: i128) -> ([u8; MAX_JOINT_DIGITS], usize) {
 /// `127·(2M + 5S) + H·(7M + 4S)` with `(5D + 4H)M + 2D·S` plus a
 /// `(D + H)/n` share of one field inversion per ladder column phase
 /// (`D ≈ 127` doublings, `H ≈ 39` active columns): it eliminates ~585
-/// squarings but adds ~264 multiplications and the shared inversions.
-/// With this crate's Fermat inversion (measured `I/M ≈ 440`, `S/M ≈ 0.86`
-/// on Apple aarch64 with the assembly backend) the operation-count model
-/// puts break-even against the Jacobian ladder at `n ≈ 365` — far above
-/// the `n ≈ 50` a textbook `I = 100M` would suggest — and the *measured*
-/// curve (same-scalar batch benches in `benches/glv.rs`, kernel forced on
-/// at every size) crosses at `n ≈ 512`: −0.8% there, −4% to −5% at
-/// 1024–4096, +7% at 256. The threshold sits on that measured break-even,
-/// so smaller batches keep the plain per-point ladders. A cheaper
-/// variable-time inversion would pull this down substantially.
-const BATCH_AFFINE_MIN_POINTS: usize = 512;
+/// squarings but adds ~264 multiplications and the shared inversions. The
+/// variable-time base-field inverter moves the measured break-even to around
+/// 128 points on Apple aarch64; smaller batches keep the per-point ladders.
+const BATCH_AFFINE_MIN_POINTS: usize = 128;
+
+/// Montgomery batch inversion for a nonempty slice of nonzero values, using
+/// the curve's explicit variable-time base-field inversion for the one
+/// accumulated product.
+fn batch_invert_nonzero_vartime<C: GlvParams>(elements: &mut [C::Base], scratch: &mut [C::Base]) {
+    assert_eq!(elements.len(), scratch.len());
+    let mut acc = C::Base::ONE;
+    for (element, scratch) in elements.iter().zip(scratch.iter_mut()) {
+        debug_assert!(!element.is_zero_vartime());
+        *scratch = acc;
+        acc *= element;
+    }
+    acc = C::base_invert_vartime(&acc).expect("product of nonzero field elements is nonzero");
+    for (element, scratch) in elements.iter_mut().zip(scratch.iter()).rev() {
+        let inverse = *scratch * acc;
+        acc *= *element;
+        *element = inverse;
+    }
+}
 
 /// The GLV digit window for one base point: the eight Eisenstein orbit
 /// representatives $[\Delta_i]P$ in affine coordinates, with each
@@ -659,7 +683,7 @@ impl<C: GlvParams> Table<C> {
                 for (den, y) in den.iter_mut().zip(&ys) {
                     *den = y.double();
                 }
-                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                batch_invert_nonzero_vartime::<C>(&mut den, &mut scratch);
                 for i in 0..n {
                     let xx = xs[i].square();
                     let m = (xx.double() + xx) * den[i];
@@ -678,7 +702,7 @@ impl<C: GlvParams> Table<C> {
                 for (den, (x, t)) in den.iter_mut().zip(xs.iter().zip(live)) {
                     *den = t.xs[e][orbit] - x;
                 }
-                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                batch_invert_nonzero_vartime::<C>(&mut den, &mut scratch);
                 for i in 0..n {
                     let u = live[i].xs[e][orbit];
                     let v = if negate {
@@ -695,7 +719,7 @@ impl<C: GlvParams> Table<C> {
                 for (den, (x, x1)) in den.iter_mut().zip(xs.iter().zip(&x1s)) {
                     *den = *x1 - x;
                 }
-                BatchInverter::invert_with_external_scratch(&mut den, &mut scratch);
+                batch_invert_nonzero_vartime::<C>(&mut den, &mut scratch);
                 for i in 0..n {
                     let t = -(slopes[i] + ys[i].double() * den[i]);
                     let x2 = t.square() - xs[i] - x1s[i];

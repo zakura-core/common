@@ -274,6 +274,17 @@ impl Fp {
         R
     }
 
+    /// Computes the multiplicative inverse of this element with a
+    /// variable-time extended-GCD algorithm.
+    ///
+    /// This method is variable time with respect to `self` and must only be
+    /// used when timing leakage is acceptable. Returns `None` if `self` is zero.
+    #[must_use]
+    pub fn invert_vartime(&self) -> Option<Self> {
+        super::invert::invert_montgomery_vartime(self.0, MODULUS.0, INV.wrapping_neg(), R2.0)
+            .map(Fp)
+    }
+
     /// Doubles this field element.
     #[inline]
     pub const fn double(&self) -> Fp {
@@ -986,6 +997,33 @@ fn test_inv() {
     inv = inv.wrapping_neg();
 
     assert_eq!(inv, INV);
+}
+
+#[test]
+fn test_invert_vartime() {
+    use rand::SeedableRng;
+
+    assert_eq!(Fp::zero().invert_vartime(), None);
+    for value in [
+        Fp::one(),
+        -Fp::one(),
+        Fp::from(2),
+        Fp::from(u64::MAX),
+        Fp([1, 0, 0, 0]),
+        Fp([MODULUS.0[0] - 1, MODULUS.0[1], MODULUS.0[2], MODULUS.0[3]]),
+    ] {
+        let inverse = value.invert_vartime().unwrap();
+        assert_eq!(inverse, value.invert().unwrap());
+        assert_eq!(value * inverse, Fp::one());
+    }
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x69; 16]);
+    for _ in 0..10_000 {
+        let value = Fp::random(&mut rng);
+        let inverse = value.invert_vartime().unwrap();
+        assert_eq!(inverse, value.invert().unwrap());
+        assert_eq!(value * inverse, Fp::one());
+    }
 }
 
 #[test]

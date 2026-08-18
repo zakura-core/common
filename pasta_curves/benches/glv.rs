@@ -9,8 +9,9 @@ use rand::SeedableRng;
 use rand_xorshift::XorShiftRng;
 
 // A k = 13 Halo generator collapse calls batches from 2^12 down to 2^0.
-const SAME_SCALAR_BATCH_SIZES: [usize; 13] =
-    [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+const SAME_SCALAR_BATCH_SIZES: [usize; 16] = [
+    1, 2, 4, 8, 16, 32, 50, 64, 100, 128, 200, 256, 512, 1024, 2048, 4096,
+];
 const SAME_SCALAR_CORPUS_SIZE: usize = 8;
 
 fn same_scalar_corpus<C: GlvParams>() -> Vec<C::ScalarExt> {
