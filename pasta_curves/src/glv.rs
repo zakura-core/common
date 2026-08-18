@@ -421,16 +421,17 @@ fn joint_digits(mut a: i128, mut b: i128) -> ([u8; MAX_JOINT_DIGITS], usize) {
 /// `(D + H)/n` share of one field inversion per ladder column phase
 /// (`D ≈ 127` doublings, `H ≈ 39` active columns): it eliminates ~585
 /// squarings but adds ~264 multiplications and the shared inversions.
-/// With this crate's Fermat inversion (measured `I/M ≈ 440`, `S/M ≈ 0.86`
+/// With this crate's divstep inversion (measured `I/M ≈ 77`, `S/M ≈ 0.86`
 /// on Apple aarch64 with the assembly backend) the operation-count model
-/// puts break-even against the Jacobian ladder at `n ≈ 365` — far above
-/// the `n ≈ 50` a textbook `I = 100M` would suggest — and the *measured*
+/// that put break-even at `n ≈ 365` under the old Fermat inversion
+/// (`I/M ≈ 440`) scales linearly in `I` to `n ≈ 64`, and the *measured*
 /// curve (same-scalar batch benches in `benches/glv.rs`, kernel forced on
-/// at every size) crosses at `n ≈ 512`: −0.8% there, −4% to −5% at
-/// 1024–4096, +7% at 256. The threshold sits on that measured break-even,
-/// so smaller batches keep the plain per-point ladders. A cheaper
-/// variable-time inversion would pull this down substantially.
-const BATCH_AFFINE_MIN_POINTS: usize = 512;
+/// at every size) agrees: a tie at 64 (−0.2%/−1.5% across the two curves,
+/// inside the ±1% run-to-run noise), −5% to −6% at 128, −7% to −8% at
+/// 256. The threshold sits on that measured break-even, so smaller
+/// batches keep the plain per-point ladders. (The Fermat-era gate was
+/// 512; the cheaper inversion pulled it down 8×.)
+const BATCH_AFFINE_MIN_POINTS: usize = 64;
 
 /// The GLV digit window for one base point: the eight Eisenstein orbit
 /// representatives $[\Delta_i]P$ in affine coordinates, with each
