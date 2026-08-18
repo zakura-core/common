@@ -501,8 +501,10 @@ pub fn create_proof<
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Commit to the vanishing argument's random polynomial for blinding h(x_3)
-    let vanishing = vanishing::Argument::commit(params, domain, &mut rng, transcript)?;
+    // Commit to the random polynomial that masks the folded quotient
+    // evaluation in the multiopening argument.
+    let vanishing =
+        vanishing::Argument::commit_random_polynomial(params, domain, &mut rng, transcript)?;
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
@@ -584,8 +586,8 @@ pub fn create_proof<
             },
         );
 
-    // Construct the vanishing argument's h(X) commitments
-    let vanishing = vanishing.construct(
+    // Construct and commit to the quotient polynomial h(X).
+    let vanishing = vanishing.construct_quotient(
         params,
         domain,
         coset_evaluator,

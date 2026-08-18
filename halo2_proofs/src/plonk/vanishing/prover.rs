@@ -17,30 +17,36 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
-pub(in crate::plonk) struct Committed<C: CurveAffine> {
-    random_poly: Polynomial<C::Scalar, Coeff>,
-    random_blind: Blind<C::Scalar>,
+pub(in crate::plonk) struct CommittedRandomPolynomial<C: CurveAffine> {
+    poly: Polynomial<C::Scalar, Coeff>,
+    blind: Blind<C::Scalar>,
 }
 
-pub(in crate::plonk) struct Constructed<C: CurveAffine> {
+pub(in crate::plonk) struct ConstructedQuotient<C: CurveAffine> {
     h_pieces: Vec<Polynomial<C::Scalar, Coeff>>,
     h_blinds: Vec<Blind<C::Scalar>>,
-    committed: Committed<C>,
+    random_poly: CommittedRandomPolynomial<C>,
 }
 
-pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
+pub(in crate::plonk) struct EvaluatedQuotient<C: CurveAffine> {
     h_poly: Polynomial<C::Scalar, Coeff>,
     h_blind: Blind<C::Scalar>,
-    committed: Committed<C>,
+    random_poly: CommittedRandomPolynomial<C>,
 }
 
 impl<C: CurveAffine> Argument<C> {
-    pub(in crate::plonk) fn commit<E: EncodedChallenge<C>, R: RngCore, T: TranscriptWrite<C, E>>(
+    /// Commits to the random polynomial that masks the folded quotient
+    /// evaluation in the multiopening argument.
+    pub(in crate::plonk) fn commit_random_polynomial<
+        E: EncodedChallenge<C>,
+        R: RngCore,
+        T: TranscriptWrite<C, E>,
+    >(
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
         mut rng: R,
         transcript: &mut T,
-    ) -> Result<Committed<C>, Error> {
+    ) -> Result<CommittedRandomPolynomial<C>, Error> {
         // Sample a random polynomial of degree n - 1
         let mut random_poly = domain.empty_coeff();
         for coeff in random_poly.iter_mut() {
@@ -50,19 +56,20 @@ impl<C: CurveAffine> Argument<C> {
         let random_blind = Blind(C::Scalar::random(rng));
 
         // Commit
-        let c = params.commit(&random_poly, random_blind).to_affine();
-        transcript.write_point(c)?;
+        let random_poly_commitment = params.commit(&random_poly, random_blind).to_affine();
+        transcript.write_point(random_poly_commitment)?;
 
-        Ok(Committed {
-            random_poly,
-            random_blind,
+        Ok(CommittedRandomPolynomial {
+            poly: random_poly,
+            blind: random_blind,
         })
     }
 }
 
-impl<C: CurveAffine> Committed<C> {
+impl<C: CurveAffine> CommittedRandomPolynomial<C> {
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::plonk) fn construct<
+    /// Constructs and commits to the quotient polynomial pieces.
+    pub(in crate::plonk) fn construct_quotient<
         E: EncodedChallenge<C>,
         Ev: Copy + Send + Sync,
         R: RngCore,
@@ -76,15 +83,16 @@ impl<C: CurveAffine> Committed<C> {
         y: ChallengeY<C>,
         mut rng: R,
         transcript: &mut T,
-    ) -> Result<Constructed<C>, Error> {
-        // Evaluate the h(X) polynomial's constraint system expressions for the constraints provided
-        let h_poly = poly::Ast::distribute_powers(expressions, *y); // Fold the gates together with the y challenge
-        let h_poly = evaluator.evaluate(&h_poly, domain); // Evaluate the h(X) polynomial
+    ) -> Result<ConstructedQuotient<C>, Error> {
+        // Fold the constraint expressions into the quotient numerator using
+        // the y challenge, then evaluate the numerator.
+        let quotient_numerator = poly::Ast::distribute_powers(expressions, *y);
+        let quotient_numerator = evaluator.evaluate(&quotient_numerator, domain);
 
         // Divide by t(X) = X^{params.n} - 1.
-        let h_poly = domain.divide_by_vanishing_poly(h_poly);
+        let h_poly = domain.divide_by_vanishing_poly(quotient_numerator);
 
-        // Obtain final h(X) polynomial
+        // Obtain the quotient polynomial h(X).
         let h_poly = domain.extended_to_coeff(h_poly);
 
         // Split h(X) up into pieces
@@ -113,22 +121,22 @@ impl<C: CurveAffine> Committed<C> {
             transcript.write_point(*c)?;
         }
 
-        Ok(Constructed {
+        Ok(ConstructedQuotient {
             h_pieces,
             h_blinds,
-            committed: self,
+            random_poly: self,
         })
     }
 }
 
-impl<C: CurveAffine> Constructed<C> {
+impl<C: CurveAffine> ConstructedQuotient<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
         x: ChallengeX<C>,
         xn: C::Scalar,
         domain: &EvaluationDomain<C::Scalar>,
         transcript: &mut T,
-    ) -> Result<Evaluated<C>, Error> {
+    ) -> Result<EvaluatedQuotient<C>, Error> {
         let h_poly = self
             .h_pieces
             .iter()
@@ -141,18 +149,18 @@ impl<C: CurveAffine> Constructed<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
-        let random_eval = eval_polynomial(&self.committed.random_poly, *x);
+        let random_eval = eval_polynomial(&self.random_poly.poly, *x);
         transcript.write_scalar(random_eval)?;
 
-        Ok(Evaluated {
+        Ok(EvaluatedQuotient {
             h_poly,
             h_blind,
-            committed: self.committed,
+            random_poly: self.random_poly,
         })
     }
 }
 
-impl<C: CurveAffine> Evaluated<C> {
+impl<C: CurveAffine> EvaluatedQuotient<C> {
     pub(in crate::plonk) fn open(
         &self,
         x: ChallengeX<C>,
@@ -165,8 +173,8 @@ impl<C: CurveAffine> Evaluated<C> {
             }))
             .chain(Some(ProverQuery {
                 point: *x,
-                poly: &self.committed.random_poly,
-                blind: self.committed.random_blind,
+                poly: &self.random_poly.poly,
+                blind: self.random_poly.blind,
             }))
     }
 }
