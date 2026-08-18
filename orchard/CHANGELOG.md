@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `ProvingKey::verifying_key` to reuse the verifying key generated as
+  part of proving-key construction.
 - Added reproducible one-Action prover and validated-corpus batch-verifier
   benchmark harnesses.
 - The Sinsemilla note-commitment domain is now initialized once and reused
