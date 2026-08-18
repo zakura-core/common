@@ -1053,6 +1053,11 @@ impl<F: Field> ConstraintSystem<F> {
     ///
     /// `table_map` returns a map between input expressions and the table columns
     /// they need to match.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `table_map` returns no input-table pairs, or if an input
+    /// expression contains a simple selector.
     pub fn lookup(
         &mut self,
         table_map: impl FnOnce(&mut VirtualCells<'_, F>) -> Vec<(Expression<F>, TableColumn)>,
