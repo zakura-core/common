@@ -1318,16 +1318,36 @@ mod tests {
         let d_eq_s = craft(&[1, 1]);
         // d == -s: 2P + (-P) — the intermediate P + D is the identity.
         let d_eq_neg_s = craft(&[2, 1]);
+
+        // d == -2s needs a mod-n lattice wraparound. Let L = v1 be the
+        // first GLV lattice vector and D its unique joint digit mod 8. Then
+        // S = (L - D)/2 is integral, and the schedule D || recode(S) reaches
+        // the final active column with 2s + d = L = 0 in the scalar field.
+        let lattice_a = i128::try_from(C::V1A).expect("v1.a fits i128");
+        let lattice_b = -i128::try_from(C::V1B_NEG).expect("v1.b fits i128");
+        let (da, db, code) = JOINT_DIGITS[(((lattice_a & 7) << 3) | (lattice_b & 7)) as usize];
+        assert_ne!(code, 0, "v1 must be odd");
+        let (prefix, prefix_len) = joint_digits(
+            (lattice_a - i128::from(da)) / 2,
+            (lattice_b - i128::from(db)) / 2,
+        );
+        assert!(prefix_len < MAX_JOINT_DIGITS);
+        let mut positions = [0u8; MAX_JOINT_DIGITS];
+        positions[0] = code;
+        positions[1..prefix_len + 1].copy_from_slice(&prefix[..prefix_len]);
+        let d_eq_neg_2s = craft(&positions[..prefix_len + 1]);
+        assert_eq!(
+            d_eq_neg_2s.1,
+            C::ScalarExt::ZERO,
+            "v1 schedule must fold to zero"
+        );
+
         // Same shape, but safe (s = 2, d = -1): the kernel must handle it.
-        // (The remaining exceptional case d = -2s is unreachable by short
-        // crafted schedules: componentwise it would need an even digit, and
-        // the digit set is odd by construction; it only occurs via mod-n
-        // wraparound at lattice-sized prefixes, which the check also
-        // covers.)
         let safe = craft(&[2, 0, 1]);
 
         assert!(!affine_ladder_safe::<C>(&d_eq_s.0));
         assert!(!affine_ladder_safe::<C>(&d_eq_neg_s.0));
+        assert!(!affine_ladder_safe::<C>(&d_eq_neg_2s.0));
         assert!(affine_ladder_safe::<C>(&safe.0));
 
         let g = C::generator();
@@ -1336,7 +1356,7 @@ mod tests {
             .collect();
         let tables = Table::batch(&points);
         let refs: Vec<&Table<C>> = tables.iter().collect();
-        for (d, value) in [d_eq_s, d_eq_neg_s, safe] {
+        for (d, value) in [d_eq_s, d_eq_neg_s, d_eq_neg_2s, safe] {
             let batched = Table::mul_decomposed_batch(&refs, &d);
             for (p, out) in points.iter().zip(&batched) {
                 assert_eq!(*out, *p * value, "crafted schedule must stay exact");
