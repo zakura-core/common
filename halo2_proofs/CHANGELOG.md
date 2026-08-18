@@ -24,6 +24,8 @@ and this project adheres to Rust's notion of
   decomposition with signed-Booth buckets.
 - Large multicore Pasta multiscalar multiplications now evaluate GLV
   signed-Booth windows in parallel when the backend cost model selects GLV.
+- Large single-worker Signed-Booth multiscalar multiplications use 10-bit
+  windows when the operation model favors them over 9-bit windows.
 - Batch verification now reuses per-parameter fixed-window tables when
   constructing instance commitments.
 - Batch verification now folds each proof's random batching scalar into its

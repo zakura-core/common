@@ -240,6 +240,41 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
     acc
 }
 
+fn estimated_serial_signed_booth_work(
+    num_terms: usize,
+    scalar_bits: usize,
+    window_bits: usize,
+) -> Option<usize> {
+    let windows = scalar_bits.checked_div(window_bits)?.checked_add(1)?;
+    let bucket_shift = u32::try_from(window_bits.checked_sub(1)?).ok()?;
+    let buckets = 1usize.checked_shl(bucket_shift)?;
+    num_terms
+        .checked_mul(windows)?
+        .checked_add(buckets.checked_mul(windows)?.checked_mul(2)?)?
+        .checked_add(window_bits.checked_mul(windows.checked_sub(1)?)?)
+}
+
+fn multiexp_window_bits(num_terms: usize, scalar_bits: usize, num_threads: usize) -> usize {
+    let window_bits = if num_terms < 4 {
+        1
+    } else if num_terms < 32 {
+        3
+    } else {
+        (f64::from(num_terms as u32)).ln().ceil() as usize
+    };
+
+    if num_threads == 1 && window_bits == 9 {
+        let next_window_bits = window_bits + 1;
+        let current = estimated_serial_signed_booth_work(num_terms, scalar_bits, window_bits);
+        let next = estimated_serial_signed_booth_work(num_terms, scalar_bits, next_window_bits);
+        if matches!((current, next), (Some(current), Some(next)) if next < current) {
+            return next_window_bits;
+        }
+    }
+
+    window_bits
+}
+
 /// Performs a multi-exponentiation operation.
 ///
 /// This function will panic if coeffs and bases have a different length.
@@ -248,15 +283,12 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     assert_eq!(coeffs.len(), bases.len());
 
-    let c = if bases.len() < 4 {
-        1
-    } else if bases.len() < 32 {
-        3
-    } else {
-        (f64::from(bases.len() as u32)).ln().ceil() as usize
-    };
-
     let num_threads = multicore::current_num_threads();
+    let scalar_bits = <C::Scalar as PrimeField>::Repr::default()
+        .as_ref()
+        .len()
+        .saturating_mul(u8::BITS as usize);
+    let c = multiexp_window_bits(bases.len(), scalar_bits, num_threads);
     if let Some(result) = C::Curve::try_glv_multiexp_vartime(coeffs, bases, c) {
         return result;
     }
@@ -757,7 +789,7 @@ fn test_booth_digit_wide_representation() {
     // Folding into `Fp` avoids a big-integer test dependency while exercising
     // the complete 320-bit recoding schedule.
     for bytes in [&bytes, &first_high_bit, &all_ones] {
-        for window_bits in [1, 3, 5, 8, 9] {
+        for window_bits in [1, 3, 5, 8, 9, 10] {
             assert_eq!(
                 evaluate_booth_digits(bytes, window_bits),
                 evaluate_le_bytes(bytes)
@@ -815,6 +847,21 @@ fn test_multiexp_algorithm_selection() {
     assert!(!should_parallelize_multiexp(usize::MAX, 1));
     assert!(!should_parallelize_multiexp(2, 2));
     assert!(should_parallelize_multiexp(3, 2));
+
+    assert_eq!(
+        estimated_serial_signed_booth_work(5_678, 256, 9),
+        Some(179_762)
+    );
+    assert_eq!(
+        estimated_serial_signed_booth_work(5_678, 256, 10),
+        Some(174_502)
+    );
+    assert_eq!(multiexp_window_bits(2_150, 256, 1), 8);
+    assert_eq!(multiexp_window_bits(2_990, 256, 1), 9);
+    assert_eq!(multiexp_window_bits(3_924, 256, 1), 9);
+    assert_eq!(multiexp_window_bits(3_925, 256, 1), 10);
+    assert_eq!(multiexp_window_bits(5_678, 256, 1), 10);
+    assert_eq!(multiexp_window_bits(5_678, 256, 8), 9);
 }
 
 #[test]
