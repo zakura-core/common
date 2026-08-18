@@ -148,7 +148,12 @@ pub(crate) fn windowed_pedersen_commit<I>(
 where
     I: IntoIterator<Item = bool>,
 {
-    pedersen_hash(personalization, s) + (NOTE_COMMITMENT_RANDOMNESS_GENERATOR * r)
+    let commitment = pedersen_hash(personalization, s) + (NOTE_COMMITMENT_RANDOMNESS_GENERATOR * r);
+    // `pedersen_hash` returns an `ExtendedPoint`; the commitment is in the prime-order subgroup,
+    // so re-wrap it as a `SubgroupPoint`. This is off the hot path (one note commitment per note),
+    // so the single inversion in the affine conversion is fine.
+    let affine = jubjub::AffinePoint::from(commitment);
+    jubjub::SubgroupPoint::from_raw_unchecked(affine.get_u(), affine.get_v())
 }
 
 /// Coordinate extractor for Jubjub.
