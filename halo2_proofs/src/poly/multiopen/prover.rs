@@ -17,7 +17,12 @@ use std::hash::Hash;
 use std::io;
 use std::marker::PhantomData;
 
-/// Create a multi-opening proof
+/// Create a multi-opening proof.
+///
+/// # Errors
+///
+/// Returns [`std::io::ErrorKind::InvalidInput`] if `queries` is empty or
+/// contains more than one query for the same commitment at the same point.
 pub fn create_proof<
     'a,
     I,
@@ -40,7 +45,7 @@ where
     let (poly_map, point_sets) = construct_intermediate_sets(queries).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "queries iterator contains mismatching evaluations",
+            "queries iterator is empty or contains duplicate queries",
         )
     })?;
 

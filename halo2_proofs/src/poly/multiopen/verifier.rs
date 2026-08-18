@@ -98,7 +98,8 @@ fn compute_msm_eval<F: Field>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::OpeningError`] if the query set is invalid or the verifier
+/// Returns [`Error::OpeningError`] if the query set is empty, contains more
+/// than one query for the same commitment at the same point, or the verifier
 /// challenge is one of the queried points.
 pub fn verify_proof<
     'r,

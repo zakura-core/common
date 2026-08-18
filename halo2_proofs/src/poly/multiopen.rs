@@ -147,8 +147,8 @@ type IntermediateSets<F, Q> = (
     Vec<Vec<F>>,
 );
 
-/// Returns `None` if `queries` contains the same point and commitment more than
-/// once.
+/// Returns `None` if `queries` is empty or contains the same point and
+/// commitment more than once.
 fn construct_intermediate_sets<F: Field + Ord, I, Q: Query<F>>(
     queries: I,
 ) -> Option<IntermediateSets<F, Q>>
@@ -184,6 +184,10 @@ where
         }
         commitment_data.point_indices.push(point_idx);
         commitment_data.evals.push(query.get_eval());
+    }
+
+    if commitment_map.is_empty() {
+        return None;
     }
 
     // Construct map of unique ordered point_idx_sets to their set_idx
@@ -226,6 +230,40 @@ where
     }
 
     Some((commitment_map, point_sets))
+}
+
+#[test]
+fn test_empty_queries() {
+    use assert_matches::assert_matches;
+    use rand::rng;
+
+    use super::commitment::Params;
+    use crate::pasta::EqAffine;
+    use crate::transcript::Challenge255;
+
+    let params = Params::<EqAffine>::new(1);
+    let mut transcript = crate::transcript::Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+
+    let error = create_proof(
+        &params,
+        rng(),
+        &mut transcript,
+        std::iter::empty::<ProverQuery<'_, EqAffine>>(),
+    )
+    .expect_err("empty query sets must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+    let mut proof = &[][..];
+    let mut transcript = crate::transcript::Blake2bRead::<_, _, Challenge255<_>>::init(&mut proof);
+    assert_matches!(
+        verify_proof(
+            &params,
+            &mut transcript,
+            std::iter::empty::<VerifierQuery<'_, '_, EqAffine>>(),
+            params.empty_msm(),
+        ),
+        Err(Error::OpeningError)
+    );
 }
 
 #[test]

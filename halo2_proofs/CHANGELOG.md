@@ -62,6 +62,8 @@ and this project adheres to Rust's notion of
 - Batch verification now reuses bounded per-parameter fixed-window tables when
   constructing instance commitments, with longer columns using the generic
   multiscalar multiplication path.
+- Multi-opening proof construction now returns an invalid-input error instead
+  of panicking when given no queries, and verification rejects empty query sets.
 - Polynomial evaluation now shares missing-root products across complete
   compressed-selector families.
 - Polynomial evaluation now combines compressed-selector contributions with a
