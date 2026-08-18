@@ -514,6 +514,9 @@ fn test_opening_proof() {
         let msm_challenges = guard.clone().use_challenges();
         assert!(msm_challenges.eval());
 
+        let msm_scaled = guard.clone().use_challenges_with_scale(Fq::from(7));
+        assert!(msm_scaled.eval());
+
         // Test use_g()
         let g = guard.compute_g();
         let (msm_g, _accumulator) = guard.clone().use_g(g);

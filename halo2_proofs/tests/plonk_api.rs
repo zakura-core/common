@@ -658,11 +658,25 @@ fn plonk_api() {
             // "Second" proof (just the first proof again).
             batch.add_proof(
                 vec![vec![pubinputs.clone()], vec![pubinputs.clone()]],
-                proof,
+                proof.clone(),
             );
 
             // Check the batch.
             assert!(batch.finalize(&params, pk.get_vk()));
+
+            // A random batching scalar must scale the complete verifier
+            // equation, rather than hiding an invalid proof.
+            let mut invalid_batch = BatchVerifier::new();
+            invalid_batch.add_proof(
+                vec![vec![pubinputs.clone()], vec![pubinputs.clone()]],
+                proof.clone(),
+            );
+            let wrong_pubinputs = vec![instance + Fp::ONE];
+            invalid_batch.add_proof(
+                vec![vec![wrong_pubinputs.clone()], vec![wrong_pubinputs]],
+                proof,
+            );
+            assert!(!invalid_batch.finalize(&params, pk.get_vk()));
         }
     }
 

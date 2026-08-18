@@ -22,6 +22,8 @@ and this project adheres to Rust's notion of
   denominators together.
 - Batch verification now reuses per-parameter fixed-window tables when
   constructing instance commitments.
+- Batch verification now folds each proof's random batching scalar into its
+  inner-product coefficient expansion.
 - Polynomial evaluation now shares missing-root products across complete
   compressed-selector families.
 - Polynomial evaluation now uses field squaring for structurally repeated

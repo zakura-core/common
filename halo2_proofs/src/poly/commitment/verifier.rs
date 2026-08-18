@@ -7,6 +7,8 @@ use super::super::Error;
 use super::{Params, MSM};
 use crate::transcript::{EncodedChallenge, TranscriptRead};
 
+#[cfg(any(test, feature = "batch"))]
+use crate::arithmetic::BatchInvertAndScale;
 use crate::arithmetic::{best_multiexp, CurveAffine};
 
 /// A guard returned by the verifier
@@ -14,6 +16,7 @@ use crate::arithmetic::{best_multiexp, CurveAffine};
 pub struct Guard<'a, C: CurveAffine, E: EncodedChallenge<C>> {
     msm: MSM<'a, C>,
     neg_c: C::Scalar,
+    rounds: Vec<(C, C)>,
     u: Vec<C::Scalar>,
     u_packed: Vec<E>,
 }
@@ -33,7 +36,30 @@ impl<'a, C: CurveAffine, E: EncodedChallenge<C>> Guard<'a, C, E> {
     /// Lets caller supply the challenges and obtain an MSM with updated
     /// scalars and points.
     pub fn use_challenges(mut self) -> MSM<'a, C> {
+        self.append_round_terms();
+
         let s = compute_s(&self.u, self.neg_c);
+        self.msm.add_to_g_scalars(&s);
+
+        self.msm
+    }
+
+    /// Applies `scale` to every term of this IPA verifier equation.
+    ///
+    /// The existing MSM terms, the deferred round terms, and the generator
+    /// coefficients must all receive the same scale exactly once.
+    #[cfg(any(test, feature = "batch"))]
+    pub(crate) fn use_challenges_with_scale(mut self, scale: C::Scalar) -> MSM<'a, C> {
+        // Scale P', U, W, and every commitment term assembled before the IPA
+        // round terms.
+        self.msm.scale(scale);
+
+        // Append [scale * u_j^-1] L_j and [scale * u_j] R_j.
+        self.append_round_terms_with_scale(scale);
+
+        // Seeding the expansion with -c * scale applies the common factor to
+        // all coefficients of G'_0 without a second pass over the vector.
+        let s = compute_s(&self.u, self.neg_c * scale);
         self.msm.add_to_g_scalars(&s);
 
         self.msm
@@ -42,6 +68,7 @@ impl<'a, C: CurveAffine, E: EncodedChallenge<C>> Guard<'a, C, E> {
     /// Lets caller supply the purported G point and simply appends
     /// [-c] G to return an updated MSM.
     pub fn use_g(mut self, g: C) -> (MSM<'a, C>, Accumulator<C, E>) {
+        self.append_round_terms();
         self.msm.append_term(self.neg_c, g);
 
         let accumulator = Accumulator {
@@ -57,6 +84,32 @@ impl<'a, C: CurveAffine, E: EncodedChallenge<C>> Guard<'a, C, E> {
         let s = compute_s(&self.u, C::Scalar::ONE);
 
         best_multiexp(&s, &self.msm.params.g).to_affine()
+    }
+
+    fn append_round_terms(&mut self) {
+        let mut u_inv = self.u.clone();
+        u_inv.iter_mut().batch_invert();
+
+        // This is the left-hand side of the verifier equation.
+        // P' + \sum([u_j^{-1}] L_j) + \sum([u_j] R_j)
+        for (((l, r), u_j), u_j_inv) in self.rounds.iter().zip(&self.u).zip(u_inv) {
+            self.msm.append_term(u_j_inv, *l);
+            self.msm.append_term(*u_j, *r);
+        }
+    }
+
+    #[cfg(any(test, feature = "batch"))]
+    fn append_round_terms_with_scale(&mut self, scale: C::Scalar) {
+        let mut u_inv = self.u.clone();
+        u_inv.iter_mut().batch_inverse_and_scale(scale);
+
+        // This is the scaled left-hand side of the verifier equation.
+        // [scale] P' + \sum([scale u_j^{-1}] L_j)
+        // + \sum([scale u_j] R_j)
+        for (((l, r), u_j), u_j_inv) in self.rounds.iter().zip(&self.u).zip(u_inv) {
+            self.msm.append_term(u_j_inv, *l);
+            self.msm.append_term(*u_j * scale, *r);
+        }
     }
 }
 
@@ -89,22 +142,14 @@ pub fn verify_proof<'a, C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptRea
         let u_j_packed = transcript.squeeze_challenge();
         let u_j = *u_j_packed.as_challenge_scalar::<()>();
 
-        rounds.push((l, r, u_j, /* to be inverted */ u_j, u_j_packed));
+        rounds.push((l, r, /* to be inverted */ u_j, u_j_packed));
     }
 
-    rounds
-        .iter_mut()
-        .map(|&mut (_, _, _, ref mut u_j, _)| u_j)
-        .batch_invert();
-
-    // This is the left-hand side of the verifier equation.
-    // P' + \sum([u_j^{-1}] L_j) + \sum([u_j] R_j)
     let mut u = Vec::with_capacity(k);
-    let mut u_packed: Vec<E> = Vec::with_capacity(k);
-    for (l, r, u_j, u_j_inv, u_j_packed) in rounds {
-        msm.append_term(u_j_inv, l);
-        msm.append_term(u_j, r);
-
+    let mut u_packed = Vec::with_capacity(k);
+    let mut round_points = Vec::with_capacity(k);
+    for (l, r, u_j, u_j_packed) in rounds {
+        round_points.push((l, r));
         u.push(u_j);
         u_packed.push(u_j_packed);
     }
@@ -134,6 +179,7 @@ pub fn verify_proof<'a, C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptRea
     let guard = Guard {
         msm,
         neg_c,
+        rounds: round_points,
         u,
         u_packed,
     };
