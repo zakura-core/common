@@ -2,6 +2,7 @@
 
 use std::{env, fs, path::Path};
 
+use group::ff::PrimeField;
 use rand::rngs::OsRng;
 
 use pasta_curves::{pallas, vesta};
@@ -13,6 +14,8 @@ use halo2_proofs::{
     poly::commitment::Params,
     transcript::{Blake2bRead, Blake2bWrite},
 };
+
+use crate::ecc::chip::{find_zs_and_us, H};
 
 const TEST_DATA_DIR: &str = "src/test_circuits/circuit_data";
 const GEN_ENV_VAR: &str = "CIRCUIT_TEST_GENERATE_NEW_DATA";
@@ -108,4 +111,55 @@ pub(crate) fn test_against_stored_circuit<C: Circuit<pallas::Base>>(
     // Verify the stored proof with the generated or stored vk.
     assert!(proof.verify(&vk, &params).is_ok());
     assert_eq!(proof.0.len(), expected_proof_size);
+}
+
+/// Loads the `(z, u)` window constants for `base` from a stored fixture, or
+/// regenerates the fixture when the env variable GEN_ENV_VAR is set.
+///
+/// `find_zs_and_us` performs a square-root search per window, which is
+/// expensive enough on targets with slow field arithmetic (notably the
+/// 32-bit CI targets) to dominate the runtime of every test whose circuit
+/// uses these constants. The fixtures let those tests load the constants
+/// instead. `ecc::chip::constants::tests::zs_and_us_fixtures_match_search`
+/// checks every stored fixture against a fresh search.
+pub(crate) fn test_zs_and_us(
+    base: pallas::Affine,
+    num_windows: usize,
+    fixture_name: &str,
+) -> Vec<(u64, [pallas::Base; H])> {
+    let file_path = Path::new(TEST_DATA_DIR)
+        .join(format!("zs_and_us_{fixture_name}"))
+        .with_extension("bin");
+
+    if env::var_os(GEN_ENV_VAR).is_some() {
+        let zs_and_us = find_zs_and_us(base, num_windows).unwrap();
+        let mut bytes = Vec::with_capacity(zs_and_us.len() * (8 + H * 32));
+        for (z, us) in &zs_and_us {
+            bytes.extend_from_slice(&z.to_le_bytes());
+            for u in us {
+                bytes.extend_from_slice(&u.to_repr());
+            }
+        }
+        fs::write(&file_path, &bytes).expect("Unable to write zs-and-us fixture");
+        zs_and_us
+    } else {
+        let bytes = fs::read(&file_path).expect("Unable to read zs-and-us fixture");
+        assert_eq!(bytes.len(), num_windows * (8 + H * 32));
+        bytes
+            .chunks_exact(8 + H * 32)
+            .map(|window| {
+                let z = u64::from_le_bytes(window[0..8].try_into().unwrap());
+                let us: [pallas::Base; H] = window[8..]
+                    .chunks_exact(32)
+                    .map(|repr| {
+                        pallas::Base::from_repr(repr.try_into().unwrap())
+                            .expect("fixture contains valid field elements")
+                    })
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
+                (z, us)
+            })
+            .collect()
+    }
 }

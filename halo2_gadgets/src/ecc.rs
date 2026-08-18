@@ -638,13 +638,13 @@ pub(crate) mod tests {
 
     use super::{
         chip::{
-            find_zs_and_us, BaseFieldElem, EccChip, EccConfig, FixedPoint, FullScalar, ShortScalar,
-            H, NUM_WINDOWS, NUM_WINDOWS_SHORT,
+            BaseFieldElem, EccChip, EccConfig, FixedPoint, FullScalar, ShortScalar, H, NUM_WINDOWS,
+            NUM_WINDOWS_SHORT,
         },
         CircuitVersion, FixedPoints,
     };
     use crate::{
-        test_circuits::test_utils::test_against_stored_circuit,
+        test_circuits::test_utils::{test_against_stored_circuit, test_zs_and_us},
         utilities::lookup_range_check::{
             PallasLookupRangeCheck, PallasLookupRangeCheck4_5BConfig, PallasLookupRangeCheckConfig,
         },
@@ -662,9 +662,9 @@ pub(crate) mod tests {
     lazy_static! {
         static ref BASE: pallas::Affine = pallas::Point::generator().to_affine();
         static ref ZS_AND_US: Vec<(u64, [pallas::Base; H])> =
-            find_zs_and_us(*BASE, NUM_WINDOWS).unwrap();
+            test_zs_and_us(*BASE, NUM_WINDOWS, "test_base_full_width");
         static ref ZS_AND_US_SHORT: Vec<(u64, [pallas::Base; H])> =
-            find_zs_and_us(*BASE, NUM_WINDOWS_SHORT).unwrap();
+            test_zs_and_us(*BASE, NUM_WINDOWS_SHORT, "test_base_short");
     }
 
     impl FullWidth {
