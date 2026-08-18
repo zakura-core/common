@@ -10,9 +10,8 @@ use group::ff::{Field, FromUniformBytes, PrimeField};
 
 use crate::arithmetic::{best_multiexp, CurveAffine};
 use crate::poly::{
-    commitment::{Blind, Params},
-    Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, PinnedEvaluationDomain,
-    Polynomial,
+    commitment::Params, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff,
+    PinnedEvaluationDomain, Polynomial,
 };
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript};
 
@@ -41,15 +40,9 @@ pub use verifier::*;
 use std::io;
 
 fn commit_instance<C: CurveAffine>(params: &Params<C>, instance: &[C::Scalar]) -> C::Curve {
-    let mut scalars = Vec::with_capacity(instance.len() + 1);
-    scalars.extend(instance);
-    scalars.push(Blind::default().0);
-
-    let mut bases = Vec::with_capacity(instance.len() + 1);
-    bases.extend(&params.g_lagrange[..instance.len()]);
-    bases.push(params.w);
-
-    best_multiexp::<C>(&scalars, &bases)
+    let mut commitment = C::Curve::from(params.w);
+    commitment += best_multiexp::<C>(instance, &params.g_lagrange[..instance.len()]);
+    commitment
 }
 
 /// This is a verifying key which allows for the verification of proofs for a

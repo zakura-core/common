@@ -20,6 +20,8 @@ and this project adheres to Rust's notion of
   in one pass.
 - The multi-opening verifier now batch-inverts its Lagrange and vanishing
   denominators together.
+- Batch verification now reuses per-parameter fixed-window tables when
+  constructing instance commitments.
 - Polynomial evaluation now shares missing-root products across complete
   compressed-selector families.
 - Polynomial evaluation now uses field squaring for structurally repeated
