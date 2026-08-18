@@ -19,45 +19,69 @@ use super::{lebs2ip_k, HashDomain, Pad, C, K, SINSEMILLA_S_AFFINE};
 
 const GENERATOR_COUNT: usize = 1 << K;
 
+/// One weighted generator `W[e][j]` paired with the affine x-coordinate of
+/// its double `W[e+1][j]`, so each step reads one contiguous table entry.
+#[derive(Clone, Copy)]
+struct WeightedGenerator {
+    point: pallas::Affine,
+    doubled_x: pallas::Base,
+}
+
 /// A fixed-word-count Sinsemilla domain with position-weighted generators.
+///
+/// Each instance is bound to the [`HashDomain`] it was constructed from;
+/// instances built for different domains are interchangeable at the type
+/// level, so callers must pair each table with messages for its own domain.
 ///
 /// Construction is intentionally explicit and potentially expensive. Callers
 /// should build this once and keep it outside timed or repeated hash paths.
 pub struct FixedLengthHashDomain<const N: usize> {
     initial: pallas::Point,
-    /// Affine rows `W[e][j] = [2^e] S[j]`, flattened row-major for
-    /// `0 <= e <= N` and `0 <= j < 2^K`.
-    weighted_generators: Box<[pallas::Affine]>,
+    /// Interleaved entries `(W[e][j], x(W[e+1][j]))` with `W[e][j] = [2^e]
+    /// S[j]`, flattened row-major for `0 <= e < N` and `0 <= j < 2^K`.
+    weighted_generators: Box<[WeightedGenerator]>,
 }
 
 impl<const N: usize> FixedLengthHashDomain<N> {
     /// Precomputes the position-weighted table for `domain`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N` is zero or exceeds the protocol's maximum Sinsemilla
+    /// word count.
     pub fn new(domain: &HashDomain) -> Self {
         assert!(N > 0, "the weighted evaluator requires at least one word");
         assert!(N <= C, "Sinsemilla word count exceeds the protocol limit");
 
-        let mut weighted_generators = Vec::with_capacity((N + 1) * GENERATOR_COUNT);
-        weighted_generators.extend(SINSEMILLA_S_AFFINE.iter().copied());
+        let mut weighted_generators = Vec::with_capacity(N * GENERATOR_COUNT);
 
         let mut projective_row: Vec<_> = SINSEMILLA_S_AFFINE
             .iter()
             .copied()
             .map(pallas::Point::from)
             .collect();
-        let mut affine_row = vec![pallas::Affine::identity(); GENERATOR_COUNT];
+        let mut current_row: Vec<_> = SINSEMILLA_S_AFFINE.iter().copied().collect();
+        let mut doubled_row = vec![pallas::Affine::identity(); GENERATOR_COUNT];
 
-        for _ in 1..=N {
+        for _ in 0..N {
             projective_row
                 .iter_mut()
                 .for_each(|point| *point = point.double());
-            pallas::Point::batch_normalize(&projective_row, &mut affine_row);
-            assert!(affine_row
+            pallas::Point::batch_normalize(&projective_row, &mut doubled_row);
+            assert!(doubled_row
                 .iter()
                 .all(|point| !bool::from(point.is_identity())));
-            weighted_generators.extend(affine_row.iter().copied());
+            weighted_generators.extend(current_row.iter().zip(&doubled_row).map(
+                |(generator, doubled)| WeightedGenerator {
+                    point: *generator,
+                    // The assertion above guarantees affine coordinates exist.
+                    doubled_x: *doubled.coordinates().unwrap().x(),
+                },
+            ));
+            mem::swap(&mut current_row, &mut doubled_row);
         }
 
-        assert_eq!(weighted_generators.len(), (N + 1) * GENERATOR_COUNT);
+        assert_eq!(weighted_generators.len(), N * GENERATOR_COUNT);
 
         let initial = (0..N).fold(domain.Q, |point, _| point.double());
 
@@ -68,12 +92,20 @@ impl<const N: usize> FixedLengthHashDomain<N> {
     }
 
     /// Evaluates exactly `N` pre-decoded Sinsemilla words.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any word is not a valid `K`-bit Sinsemilla word.
     pub fn hash_words(&self, words: &[u16; N]) -> CtOption<pallas::Point> {
         self.evaluate(words.iter().copied())
     }
 
     /// Evaluates a bit iterator whose padded representation is exactly `N`
     /// Sinsemilla words.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the zero-padded message is not exactly `N` words long.
     pub fn hash_to_point(&self, msg: impl Iterator<Item = bool>) -> CtOption<pallas::Point> {
         let padded: Vec<_> = Pad::new(msg).collect();
         assert_eq!(padded.len(), N * K, "unexpected padded message length");
@@ -86,13 +118,17 @@ impl<const N: usize> FixedLengthHashDomain<N> {
 
     /// Evaluates the Sinsemilla hash of a bit iterator whose padded
     /// representation is exactly `N` words.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::hash_to_point`] does.
     pub fn hash(&self, msg: impl Iterator<Item = bool>) -> CtOption<pallas::Base> {
         super::extract_p_bottom(self.hash_to_point(msg))
     }
 
-    /// Returns the heap size occupied by the weighted affine table.
+    /// Returns the heap size occupied by the weighted generator table.
     pub fn table_bytes(&self) -> usize {
-        self.weighted_generators.len() * mem::size_of::<pallas::Affine>()
+        self.weighted_generators.len() * mem::size_of::<WeightedGenerator>()
     }
 
     fn evaluate(&self, words: impl ExactSizeIterator<Item = u16>) -> CtOption<pallas::Point> {
@@ -105,14 +141,13 @@ impl<const N: usize> FixedLengthHashDomain<N> {
                 assert!(generator_index < GENERATOR_COUNT, "invalid Sinsemilla word");
 
                 let exponent = N - i - 1;
-                let generator = self.weighted_generator(exponent, generator_index);
-                let doubled_generator = self.weighted_generator(exponent + 1, generator_index);
+                let entry = self.weighted_generator(exponent, generator_index);
 
-                weighted_step(acc, generator, doubled_generator)
+                weighted_step(acc, entry.point, entry.doubled_x)
             })
     }
 
-    fn weighted_generator(&self, exponent: usize, generator: usize) -> pallas::Affine {
+    fn weighted_generator(&self, exponent: usize, generator: usize) -> WeightedGenerator {
         self.weighted_generators[exponent * GENERATOR_COUNT + generator]
     }
 }
@@ -122,14 +157,10 @@ impl<const N: usize> FixedLengthHashDomain<N> {
 fn weighted_step(
     acc: CtOption<pallas::Point>,
     generator: pallas::Affine,
-    doubled_generator: pallas::Affine,
+    doubled_generator_x: pallas::Base,
 ) -> CtOption<pallas::Point> {
     acc.and_then(|point| {
         let (point_x, _, point_z) = point.jacobian_coordinates();
-        let doubled_generator_x = doubled_generator
-            .coordinates()
-            .map(|coordinates| *coordinates.x())
-            .unwrap_or(pallas::Base::zero());
 
         // In scaled coordinates, A = +/-S iff B = +/-[2]G. The two signs
         // have the same affine x-coordinate.
@@ -145,10 +176,10 @@ mod tests {
     use alloc::vec::Vec;
 
     use group::{ff::PrimeField, prime::PrimeCurveAffine, Curve, Group};
-    use pasta_curves::pallas;
+    use pasta_curves::{arithmetic::CurveAffine, pallas};
     use subtle::CtOption;
 
-    use super::{weighted_step, FixedLengthHashDomain, GENERATOR_COUNT};
+    use super::{weighted_step, FixedLengthHashDomain, WeightedGenerator, GENERATOR_COUNT};
     use crate::{HashDomain, IncompletePoint, K, SINSEMILLA_S_AFFINE};
 
     const MERKLE_WORDS: usize = 52;
@@ -167,12 +198,16 @@ mod tests {
         ((point + generator) + point).into()
     }
 
+    fn affine_x(point: pallas::Affine) -> pallas::Base {
+        *point.coordinates().unwrap().x()
+    }
+
     fn scaled_step(point: pallas::Point, generator: pallas::Affine) -> CtOption<pallas::Point> {
-        let doubled_generator = pallas::Point::from(generator).double().to_affine();
+        let doubled_x = affine_x(pallas::Point::from(generator).double().to_affine());
         weighted_step(
             CtOption::new(point.double(), 1.into()),
             generator,
-            doubled_generator,
+            doubled_x,
         )
     }
 
@@ -244,21 +279,28 @@ mod tests {
 
         assert_eq!(
             weighted.table_bytes(),
-            (MERKLE_WORDS + 1) * GENERATOR_COUNT * core::mem::size_of::<pallas::Affine>()
+            MERKLE_WORDS * GENERATOR_COUNT * core::mem::size_of::<WeightedGenerator>()
         );
 
         for generator in 0..GENERATOR_COUNT {
             assert_eq!(
-                weighted.weighted_generator(0, generator),
+                weighted.weighted_generator(0, generator).point,
                 SINSEMILLA_S_AFFINE[generator]
             );
             for exponent in 0..MERKLE_WORDS {
-                assert_eq!(
-                    pallas::Point::from(weighted.weighted_generator(exponent, generator))
-                        .double()
-                        .to_affine(),
-                    weighted.weighted_generator(exponent + 1, generator)
-                );
+                let entry = weighted.weighted_generator(exponent, generator);
+                let doubled = pallas::Point::from(entry.point).double().to_affine();
+
+                // Each entry pairs a generator with its double's x-coordinate.
+                assert_eq!(entry.doubled_x, affine_x(doubled));
+
+                // Adjacent rows chain by doubling.
+                if exponent + 1 < MERKLE_WORDS {
+                    assert_eq!(
+                        weighted.weighted_generator(exponent + 1, generator).point,
+                        doubled
+                    );
+                }
             }
         }
     }
