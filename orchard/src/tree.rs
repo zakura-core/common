@@ -3,9 +3,11 @@
 use alloc::vec::Vec;
 use core::iter;
 
+#[cfg(feature = "weighted-merkle")]
+use crate::constants::sinsemilla::K;
 use crate::{
     constants::{
-        sinsemilla::{i2lebsp_k, K, L_ORCHARD_MERKLE, MERKLE_CRH_PERSONALIZATION},
+        sinsemilla::{i2lebsp_k, L_ORCHARD_MERKLE, MERKLE_CRH_PERSONALIZATION},
         MERKLE_DEPTH_ORCHARD,
     },
     note::commitment::ExtractedNoteCommitment,
@@ -14,7 +16,9 @@ use crate::{
 
 use incrementalmerkletree::{Hashable, Level};
 use pasta_curves::pallas;
-use sinsemilla::{weighted::FixedLengthHashDomain, HashDomain};
+#[cfg(feature = "weighted-merkle")]
+use sinsemilla::weighted::FixedLengthHashDomain;
+use sinsemilla::HashDomain;
 
 use ff::{Field, PrimeField, PrimeFieldBits};
 use lazy_static::lazy_static;
@@ -27,17 +31,30 @@ use subtle::{Choice, ConditionallySelectable, CtOption};
 // The uncommitted leaf is defined as pallas::Base(2).
 // <https://zips.z.cash/protocol/protocol.pdf#thmuncommittedorchard>
 /// A Merkle parent hash consumes a left and a right child.
+#[cfg(feature = "weighted-merkle")]
 const MERKLE_CRH_CHILDREN: usize = 2;
 /// The level word is followed by one field encoding for each child.
+#[cfg(feature = "weighted-merkle")]
 const MERKLE_CRH_BITS: usize = K + MERKLE_CRH_CHILDREN * L_ORCHARD_MERKLE;
 /// Orchard Merkle CRH inputs always pad to this many Sinsemilla words.
+#[cfg(feature = "weighted-merkle")]
 const MERKLE_CRH_WORDS: usize = MERKLE_CRH_BITS / K;
+#[cfg(feature = "weighted-merkle")]
 const _: () = assert!(MERKLE_CRH_BITS.is_multiple_of(K));
+
+#[cfg(feature = "weighted-merkle")]
+lazy_static! {
+    static ref MERKLE_CRH_DOMAIN: FixedLengthHashDomain<MERKLE_CRH_WORDS> =
+        FixedLengthHashDomain::new(&HashDomain::new(MERKLE_CRH_PERSONALIZATION));
+}
+
+#[cfg(not(feature = "weighted-merkle"))]
+lazy_static! {
+    static ref MERKLE_CRH_DOMAIN: HashDomain = HashDomain::new(MERKLE_CRH_PERSONALIZATION);
+}
 
 lazy_static! {
     static ref UNCOMMITTED_ORCHARD: pallas::Base = pallas::Base::from(2);
-    static ref MERKLE_CRH_DOMAIN: FixedLengthHashDomain<MERKLE_CRH_WORDS> =
-        FixedLengthHashDomain::new(&HashDomain::new(MERKLE_CRH_PERSONALIZATION));
     pub(crate) static ref EMPTY_ROOTS: Vec<MerkleHashOrchard> = {
         iter::empty()
             .chain(Some(MerkleHashOrchard::empty_leaf()))
@@ -442,7 +459,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn weighted_merkle_combine_matches_generic(
+        fn production_merkle_combine_matches_generic(
             level in 0_u8..u8::try_from(MERKLE_DEPTH_ORCHARD).unwrap(),
             left in arb_merkle_hash(),
             right in arb_merkle_hash(),

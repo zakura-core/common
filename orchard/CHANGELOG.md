@@ -16,7 +16,9 @@ and this project adheres to Rust's notion of
 - Added `ProvingKey::verifying_key` to reuse the verifying key generated as
   part of proving-key construction.
 - Orchard Merkle hashing now reuses a cached 52-word position-weighted
-  Sinsemilla domain, with parent-hash and whole-tree benchmarks.
+  Sinsemilla domain by default, with parent-hash and whole-tree benchmarks.
+  Lower-memory builds can omit the `weighted-merkle` feature to retain the
+  generic fused Sinsemilla evaluator.
 - Added reproducible one-Action prover and validated-corpus batch-verifier
   benchmark harnesses.
 - The Sinsemilla note-commitment domain is now initialized once and reused

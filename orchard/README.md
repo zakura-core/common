@@ -26,6 +26,12 @@ must enable the `spin_no_std` feature of the `lazy_static` crate. This is
 needed because the `--no-default-features` build of `lazy_static` still relies
 on `std`.
 
+The default `weighted-merkle` feature caches a roughly 4.88 MiB table to speed
+up Orchard Merkle hashing. Lower-memory builds can omit this feature; they use
+the generic fused Sinsemilla evaluator instead. In particular,
+`--no-default-features` selects the low-memory evaluator unless
+`weighted-merkle` is explicitly enabled.
+
 ## License
 
 Copyright 2020-2023 The Electric Coin Company.

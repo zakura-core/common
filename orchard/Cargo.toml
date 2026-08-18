@@ -56,6 +56,7 @@ default = [
     "circuit",
     "multicore",
     "std",
+    "weighted-merkle",
 ]
 dev-graph = [
     "halo2_proofs?/dev-graph",
@@ -78,6 +79,7 @@ verifier-fingerprint = [
     "circuit",
     "halo2_proofs/unstable-verifier-fingerprint",
 ]
+weighted-merkle = []
 
 [lib]
 name = "orchard"
