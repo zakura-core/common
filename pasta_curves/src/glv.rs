@@ -39,6 +39,8 @@ use alloc::vec::Vec;
 use ff::WithSmallOrderMulGroup;
 use ff::{Field, PrimeField};
 use group::prime::PrimeCurveAffine;
+#[cfg(feature = "multicore")]
+use maybe_rayon::prelude::*;
 
 use crate::arithmetic::{mac, sbb, CurveExt};
 use crate::{pallas, vesta};
@@ -252,29 +254,53 @@ const GLV_COMPONENT_BITS: usize = 127;
 
 /// Estimates the dominant group work in a Signed-Booth MSM.
 ///
-/// The model counts one unit for each point/window visit, two bucket additions
-/// per bucket/window for summation by parts, and each accumulator doubling.
-/// It deliberately omits GLV setup costs; [`MIN_GLV_MULTIEXP_TERMS`] handles
-/// their small-MSM amortization separately.
+/// The serial model counts total point/window visits, bucket additions, and
+/// accumulator doublings. The parallel model estimates the corresponding
+/// critical-worker cost when windows have independent accumulators. Both omit
+/// GLV setup costs; [`MIN_GLV_MULTIEXP_TERMS`] handles their small-MSM
+/// amortization separately.
 fn estimated_signed_booth_work(
     terms: usize,
     scalar_bits: usize,
     window_bits: usize,
+    num_threads: usize,
 ) -> Option<usize> {
     let windows = scalar_bits.checked_div(window_bits)?.checked_add(1)?;
     let bucket_shift = u32::try_from(window_bits.checked_sub(1)?).ok()?;
     let buckets = 1usize.checked_shl(bucket_shift)?;
 
-    let point_visits = terms.checked_mul(windows)?;
-    let bucket_additions = buckets.checked_mul(windows)?.checked_mul(2)?;
-    let doublings = window_bits.checked_mul(windows.checked_sub(1)?)?;
-    point_visits
-        .checked_add(bucket_additions)?
-        .checked_add(doublings)
+    if num_threads <= 1 {
+        let point_visits = terms.checked_mul(windows)?;
+        let bucket_additions = buckets.checked_mul(windows)?.checked_mul(2)?;
+        let doublings = window_bits.checked_mul(windows.checked_sub(1)?)?;
+        return point_visits
+            .checked_add(bucket_additions)?
+            .checked_add(doublings);
+    }
+
+    // Parallel windows have independent accumulators. Estimate the critical
+    // worker's full-window work and the shifts of its highest-cost windows.
+    let workers = num_threads.min(windows);
+    let waves = windows.div_ceil(workers);
+    let per_window = terms.checked_add(buckets.checked_mul(2)?)?;
+    let mut shift_doublings = 0usize;
+    let mut window = windows.checked_sub(1)?;
+    for _ in 0..waves {
+        shift_doublings = shift_doublings.checked_add(window_bits.checked_mul(window)?)?;
+        match window.checked_sub(workers) {
+            Some(next) => window = next,
+            None => break,
+        }
+    }
+    per_window.checked_mul(waves)?.checked_add(shift_doublings)
 }
 
 /// Chooses GLV only when its estimated Signed-Booth work is lower.
-fn should_use_glv_multiexp<C: GlvParams>(terms: usize, window_bits: usize) -> bool {
+fn should_use_glv_multiexp<C: GlvParams>(
+    terms: usize,
+    window_bits: usize,
+    num_threads: usize,
+) -> bool {
     if terms < MIN_GLV_MULTIEXP_TERMS {
         return false;
     }
@@ -288,14 +314,30 @@ fn should_use_glv_multiexp<C: GlvParams>(terms: usize, window_bits: usize) -> bo
     match (scalar_bits, glv_terms) {
         (Some(scalar_bits), Some(glv_terms)) => {
             match (
-                estimated_signed_booth_work(terms, scalar_bits, window_bits),
-                estimated_signed_booth_work(glv_terms, GLV_COMPONENT_BITS, window_bits),
+                estimated_signed_booth_work(terms, scalar_bits, window_bits, num_threads),
+                estimated_signed_booth_work(
+                    glv_terms,
+                    GLV_COMPONENT_BITS,
+                    window_bits,
+                    num_threads,
+                ),
             ) {
                 (Some(generic), Some(glv)) => glv < generic,
                 _ => false,
             }
         }
         _ => false,
+    }
+}
+
+fn current_num_threads() -> usize {
+    #[cfg(feature = "multicore")]
+    {
+        maybe_rayon::current_num_threads()
+    }
+    #[cfg(not(feature = "multicore"))]
+    {
+        1
     }
 }
 
@@ -494,22 +536,51 @@ fn sum_buckets<F: Field>(buckets: &[Xyzz<F>]) -> Xyzz<F> {
     sum
 }
 
-fn multiexp<C, Coordinates, ToCurve>(
+fn fill_window<C, Coordinates>(
+    buckets: &mut [Xyzz<C::Base>],
+    components: &[(SignedMagnitude, SignedMagnitude)],
+    bases: &[C::AffineExt],
+    endo_bases: &[C::AffineExt],
+    window_bits: usize,
+    window: usize,
+    affine_coordinates: &Coordinates,
+) where
+    C: GlvParams,
+    Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
+{
+    buckets.fill(Xyzz::identity());
+    for ((first, second), base, endo_base) in components
+        .iter()
+        .zip(bases)
+        .zip(endo_bases)
+        .map(|(((first, second), base), endo_base)| ((first, second), base, endo_base))
+    {
+        add_digit::<C, Coordinates>(
+            buckets,
+            booth_digit(*first, window_bits, window),
+            *base,
+            affine_coordinates,
+        );
+        add_digit::<C, Coordinates>(
+            buckets,
+            booth_digit(*second, window_bits, window),
+            *endo_base,
+            affine_coordinates,
+        );
+    }
+}
+
+fn multiexp_serial<C, Coordinates>(
     components: &[(SignedMagnitude, SignedMagnitude)],
     bases: &[C::AffineExt],
     endo_bases: &[C::AffineExt],
     window_bits: usize,
     affine_coordinates: &Coordinates,
-    xyzz_to_curve: ToCurve,
-) -> C
+) -> Xyzz<C::Base>
 where
     C: GlvParams,
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
-    ToCurve: FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
 {
-    debug_assert_eq!(components.len(), bases.len());
-    debug_assert_eq!(components.len(), endo_bases.len());
-
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
     let mut buckets = alloc::vec![Xyzz::identity(); 1 << (window_bits - 1)];
     let mut acc = Xyzz::identity();
@@ -521,28 +592,103 @@ where
             }
         }
 
-        buckets.fill(Xyzz::identity());
-        for ((first, second), base, endo_base) in components
-            .iter()
-            .zip(bases)
-            .zip(endo_bases)
-            .map(|(((first, second), base), endo_base)| ((first, second), base, endo_base))
-        {
-            add_digit::<C, Coordinates>(
-                &mut buckets,
-                booth_digit(*first, window_bits, window),
-                *base,
-                affine_coordinates,
-            );
-            add_digit::<C, Coordinates>(
-                &mut buckets,
-                booth_digit(*second, window_bits, window),
-                *endo_base,
-                affine_coordinates,
-            );
-        }
+        fill_window::<C, Coordinates>(
+            &mut buckets,
+            components,
+            bases,
+            endo_bases,
+            window_bits,
+            window,
+            affine_coordinates,
+        );
         acc.add(&sum_buckets(&buckets));
     }
+    acc
+}
+
+#[cfg(feature = "multicore")]
+fn multiexp_parallel<C, Coordinates>(
+    components: &[(SignedMagnitude, SignedMagnitude)],
+    bases: &[C::AffineExt],
+    endo_bases: &[C::AffineExt],
+    window_bits: usize,
+    affine_coordinates: &Coordinates,
+) -> Xyzz<C::Base>
+where
+    C: GlvParams,
+    Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
+{
+    let window_count = GLV_COMPONENT_BITS / window_bits + 1;
+    (0..window_count)
+        .into_par_iter()
+        .map(|window| {
+            let mut buckets = alloc::vec![Xyzz::identity(); 1 << (window_bits - 1)];
+            fill_window::<C, Coordinates>(
+                &mut buckets,
+                components,
+                bases,
+                endo_bases,
+                window_bits,
+                window,
+                affine_coordinates,
+            );
+            let mut sum = sum_buckets(&buckets);
+            for _ in 0..window_bits * window {
+                sum.double();
+            }
+            sum
+        })
+        .reduce(Xyzz::identity, |mut left, right| {
+            left.add(&right);
+            left
+        })
+}
+
+fn multiexp<C, Coordinates, ToCurve>(
+    components: &[(SignedMagnitude, SignedMagnitude)],
+    bases: &[C::AffineExt],
+    endo_bases: &[C::AffineExt],
+    window_bits: usize,
+    num_threads: usize,
+    affine_coordinates: &Coordinates,
+    xyzz_to_curve: ToCurve,
+) -> C
+where
+    C: GlvParams,
+    Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
+    ToCurve: FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
+{
+    debug_assert_eq!(components.len(), bases.len());
+    debug_assert_eq!(components.len(), endo_bases.len());
+
+    #[cfg(not(feature = "multicore"))]
+    let _ = num_threads;
+    #[cfg(feature = "multicore")]
+    let acc = if num_threads > 1 {
+        multiexp_parallel::<C, Coordinates>(
+            components,
+            bases,
+            endo_bases,
+            window_bits,
+            affine_coordinates,
+        )
+    } else {
+        multiexp_serial::<C, Coordinates>(
+            components,
+            bases,
+            endo_bases,
+            window_bits,
+            affine_coordinates,
+        )
+    };
+    #[cfg(not(feature = "multicore"))]
+    let acc = multiexp_serial::<C, Coordinates>(
+        components,
+        bases,
+        endo_bases,
+        window_bits,
+        affine_coordinates,
+    );
     xyzz_to_curve(acc.x, acc.y, acc.zz, acc.zzz)
 }
 
@@ -554,12 +700,13 @@ pub(crate) fn try_multiexp<C: GlvParams>(
     bases: &[C::AffineExt],
     window_bits: usize,
     mut affine_endo: impl FnMut(C::AffineExt) -> C::AffineExt,
-    affine_coordinates: impl Fn(C::AffineExt) -> (C::Base, C::Base),
+    affine_coordinates: impl Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
     xyzz_to_curve: impl FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
 ) -> Option<C> {
     assert_eq!(scalars.len(), bases.len());
     assert!(window_bits > 0 && window_bits < usize::BITS as usize);
-    if !should_use_glv_multiexp::<C>(scalars.len(), window_bits) {
+    let num_threads = current_num_threads();
+    if !should_use_glv_multiexp::<C>(scalars.len(), window_bits, num_threads) {
         return None;
     }
 
@@ -578,6 +725,7 @@ pub(crate) fn try_multiexp<C: GlvParams>(
         bases,
         &endo_bases,
         window_bits,
+        num_threads,
         &affine_coordinates,
         xyzz_to_curve,
     ))
@@ -766,25 +914,39 @@ mod tests {
 
     #[test]
     fn multiexp_backend_selection() {
-        assert_eq!(estimated_signed_booth_work(2_150, 256, 8), Some(79_654));
+        assert_eq!(estimated_signed_booth_work(2_150, 256, 8, 1), Some(79_654));
         assert_eq!(
-            estimated_signed_booth_work(4_300, GLV_COMPONENT_BITS, 8),
+            estimated_signed_booth_work(4_300, GLV_COMPONENT_BITS, 8, 1),
             Some(73_016)
         );
-        assert_eq!(estimated_signed_booth_work(5_678, 256, 9), Some(179_762));
+        assert_eq!(estimated_signed_booth_work(5_678, 256, 9, 1), Some(179_762));
         assert_eq!(
-            estimated_signed_booth_work(11_356, GLV_COMPONENT_BITS, 9),
+            estimated_signed_booth_work(11_356, GLV_COMPONENT_BITS, 9, 1),
             Some(178_146)
         );
 
-        assert!(!should_use_glv_multiexp::<pallas::Point>(255, 8));
-        assert!(should_use_glv_multiexp::<pallas::Point>(2_150, 8));
-        assert!(should_use_glv_multiexp::<vesta::Point>(5_678, 9));
+        assert!(!should_use_glv_multiexp::<pallas::Point>(255, 8, 1));
+        assert!(should_use_glv_multiexp::<pallas::Point>(2_150, 8, 1));
+        assert!(should_use_glv_multiexp::<vesta::Point>(5_678, 9, 1));
+
+        assert_eq!(estimated_signed_booth_work(2_150, 256, 8, 8), Some(12_670));
+        assert_eq!(
+            estimated_signed_booth_work(4_300, GLV_COMPONENT_BITS, 8, 8),
+            Some(9_288)
+        );
+        assert_eq!(estimated_signed_booth_work(5_678, 256, 9, 8), Some(25_336));
+        assert_eq!(
+            estimated_signed_booth_work(11_356, GLV_COMPONENT_BITS, 9, 8),
+            Some(23_916)
+        );
+        assert!(should_use_glv_multiexp::<pallas::Point>(2_150, 8, 8));
+        assert!(should_use_glv_multiexp::<vesta::Point>(5_678, 9, 8));
 
         // At sufficiently large sizes, doubling the term count outweighs the
         // shorter components for this unchanged window width.
-        assert!(!should_use_glv_multiexp::<pallas::Point>(1_000_000, 14));
-        assert!(!should_use_glv_multiexp::<pallas::Point>(usize::MAX, 14));
+        assert!(!should_use_glv_multiexp::<pallas::Point>(1_000_000, 14, 1));
+        assert!(!should_use_glv_multiexp::<pallas::Point>(1_000_000, 14, 8));
+        assert!(!should_use_glv_multiexp::<pallas::Point>(usize::MAX, 14, 8));
     }
 
     #[test]

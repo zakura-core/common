@@ -22,6 +22,8 @@ and this project adheres to Rust's notion of
   denominators together.
 - Large single-worker Pasta multiscalar multiplications now use GLV scalar
   decomposition with signed-Booth buckets.
+- Large multicore Pasta multiscalar multiplications now evaluate GLV
+  signed-Booth windows in parallel when the backend cost model selects GLV.
 - Batch verification now reuses per-parameter fixed-window tables when
   constructing instance commitments.
 - Batch verification now folds each proof's random batching scalar into its

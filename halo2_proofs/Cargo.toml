@@ -62,7 +62,10 @@ dev-graph = [
 ]
 floor-planner-v1-legacy-pdqsort = ["halo2_legacy_pdqsort"]
 gadget-traces = ["backtrace"]
-multicore = ["maybe-rayon/threads"]
+multicore = [
+    "maybe-rayon/threads",
+    "pasta_curves/multicore",
+]
 nightly = [
     "beta",
     "unstable-verifier-fingerprint",

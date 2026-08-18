@@ -3818,6 +3818,7 @@ dependencies = [
  "group",
  "hex",
  "lazy_static",
+ "maybe-rayon",
  "proptest",
  "rand",
  "rand_xorshift",

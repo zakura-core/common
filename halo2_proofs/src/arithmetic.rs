@@ -257,10 +257,8 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
     };
 
     let num_threads = multicore::current_num_threads();
-    if num_threads == 1 {
-        if let Some(result) = C::Curve::try_glv_multiexp_vartime(coeffs, bases, c) {
-            return result;
-        }
+    if let Some(result) = C::Curve::try_glv_multiexp_vartime(coeffs, bases, c) {
+        return result;
     }
 
     // Convert to canonical representations once instead of once per window.
