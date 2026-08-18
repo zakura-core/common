@@ -399,6 +399,13 @@ enum EvaluationPlan<E, F: Field, B: Basis> {
         work: Vec<DistributionWork<E, F, B>>,
         base: F,
     },
+    CacheStore {
+        slot: usize,
+        inner: Box<Self>,
+    },
+    CacheLoad {
+        slot: usize,
+    },
     LinearTerm(F),
     ConstantTerm(F),
 }
@@ -849,6 +856,354 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
                 .map(DistributionWork::required_scratch_slots)
                 .max()
                 .unwrap_or(0),
+            Self::CacheStore { inner, .. } => inner.required_scratch_slots(),
+            Self::CacheLoad { .. } => 0,
+        }
+    }
+}
+
+fn same_plan<E, F: Field, B: Basis>(
+    lhs: &EvaluationPlan<E, F, B>,
+    rhs: &EvaluationPlan<E, F, B>,
+) -> bool {
+    match (lhs, rhs) {
+        (EvaluationPlan::Poly(lhs), EvaluationPlan::Poly(rhs)) => lhs == rhs,
+        (EvaluationPlan::Add(lhs_a, lhs_b), EvaluationPlan::Add(rhs_a, rhs_b))
+        | (EvaluationPlan::Mul(lhs_a, lhs_b), EvaluationPlan::Mul(rhs_a, rhs_b)) => {
+            same_plan(lhs_a, rhs_a) && same_plan(lhs_b, rhs_b)
+        }
+        (EvaluationPlan::Square(lhs), EvaluationPlan::Square(rhs)) => same_plan(lhs, rhs),
+        (EvaluationPlan::Scale(lhs, lhs_scalar), EvaluationPlan::Scale(rhs, rhs_scalar)) => {
+            lhs_scalar == rhs_scalar && same_plan(lhs, rhs)
+        }
+        (
+            EvaluationPlan::Horner {
+                base: lhs_base,
+                coefficients: lhs_coefficients,
+            },
+            EvaluationPlan::Horner {
+                base: rhs_base,
+                coefficients: rhs_coefficients,
+            },
+        ) => {
+            same_plan(lhs_base, rhs_base)
+                && lhs_coefficients.len() == rhs_coefficients.len()
+                && lhs_coefficients
+                    .iter()
+                    .zip(rhs_coefficients.iter())
+                    .all(|(lhs, rhs)| lhs == rhs)
+        }
+        (EvaluationPlan::LinearTerm(lhs), EvaluationPlan::LinearTerm(rhs))
+        | (EvaluationPlan::ConstantTerm(lhs), EvaluationPlan::ConstantTerm(rhs)) => lhs == rhs,
+        (EvaluationPlan::CacheStore { .. }, _)
+        | (EvaluationPlan::CacheLoad { .. }, _)
+        | (_, EvaluationPlan::CacheStore { .. })
+        | (_, EvaluationPlan::CacheLoad { .. }) => {
+            unreachable!("common-subexpression planning runs once")
+        }
+        _ => false,
+    }
+}
+
+struct PlanOccurrence<'a, E, F: Field, B: Basis> {
+    plan: &'a EvaluationPlan<E, F, B>,
+    end: usize,
+}
+
+fn collect_plan_occurrences<'a, E, F: Field, B: Basis>(
+    plan: &'a EvaluationPlan<E, F, B>,
+    nodes: &mut Vec<PlanOccurrence<'a, E, F, B>>,
+) {
+    let index = nodes.len();
+    nodes.push(PlanOccurrence {
+        plan,
+        end: usize::MAX,
+    });
+    match plan {
+        EvaluationPlan::Add(lhs, rhs) | EvaluationPlan::Mul(lhs, rhs) => {
+            collect_plan_occurrences(lhs, nodes);
+            collect_plan_occurrences(rhs, nodes);
+        }
+        EvaluationPlan::Square(inner) | EvaluationPlan::Scale(inner, _) => {
+            collect_plan_occurrences(inner, nodes)
+        }
+        EvaluationPlan::Horner { base, .. } => collect_plan_occurrences(base, nodes),
+        EvaluationPlan::DistributePowers { work, .. } => {
+            for work in work {
+                match work {
+                    DistributionWork::Term { term, .. } => collect_plan_occurrences(term, nodes),
+                    DistributionWork::SharedFactor { factor, bodies, .. } => {
+                        collect_plan_occurrences(factor, nodes);
+                        collect_factor_body_occurrences(bodies, nodes);
+                    }
+                    DistributionWork::SelectorFamily { runs, .. } => {
+                        for run in runs.iter().rev() {
+                            collect_factor_body_occurrences(&run.bodies, nodes);
+                        }
+                    }
+                }
+            }
+        }
+        EvaluationPlan::Poly(_)
+        | EvaluationPlan::LinearTerm(_)
+        | EvaluationPlan::ConstantTerm(_) => {}
+        EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
+            unreachable!("common-subexpression planning runs once")
+        }
+    }
+    nodes[index].end = nodes.len();
+}
+
+fn collect_factor_body_occurrences<'a, E, F: Field, B: Basis>(
+    plan: &'a FactorBodyPlan<E, F, B>,
+    nodes: &mut Vec<PlanOccurrence<'a, E, F, B>>,
+) {
+    match plan {
+        FactorBodyPlan::Sequential(bodies) => {
+            for body in bodies {
+                collect_plan_occurrences(body, nodes);
+            }
+        }
+        FactorBodyPlan::Factored(work) => {
+            for work in work {
+                match work {
+                    FactorBodyWork::Term(term) => collect_plan_occurrences(&term.term, nodes),
+                    FactorBodyWork::SharedFactor { factor, terms } => {
+                        collect_plan_occurrences(factor, nodes);
+                        for term in terms {
+                            collect_plan_occurrences(&term.term, nodes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn plan_cost<E, F: Field, B: Basis>(plan: &EvaluationPlan<E, F, B>, two: F) -> (usize, usize) {
+    match plan {
+        EvaluationPlan::Poly(_)
+        | EvaluationPlan::LinearTerm(_)
+        | EvaluationPlan::ConstantTerm(_) => (0, 1),
+        EvaluationPlan::Add(lhs, rhs) => {
+            let lhs = plan_cost(lhs, two);
+            let rhs = plan_cost(rhs, two);
+            (lhs.0 + rhs.0, 1 + lhs.1 + rhs.1)
+        }
+        EvaluationPlan::Mul(lhs, rhs) => {
+            let lhs = plan_cost(lhs, two);
+            let rhs = plan_cost(rhs, two);
+            (1 + lhs.0 + rhs.0, 1 + lhs.1 + rhs.1)
+        }
+        EvaluationPlan::Square(inner) => {
+            let inner = plan_cost(inner, two);
+            (inner.0, 1 + inner.1)
+        }
+        EvaluationPlan::Scale(inner, scalar) => {
+            let inner = plan_cost(inner, two);
+            let multiplication =
+                usize::from(*scalar != -F::ONE && *scalar != F::ONE && *scalar != two);
+            (multiplication + inner.0, 1 + inner.1)
+        }
+        EvaluationPlan::Horner { base, coefficients } => {
+            let base = plan_cost(base, two);
+            (
+                base.0 + coefficients.len() - 1,
+                1 + base.1 + coefficients.len(),
+            )
+        }
+        EvaluationPlan::DistributePowers { .. } => (0, 1),
+        EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
+            unreachable!("common-subexpression planning runs once")
+        }
+    }
+}
+
+// Each cached polynomial occupies one chunk-sized buffer. Require enough
+// avoided multiplications to amortize storing and loading that buffer.
+const MIN_CSE_SAVED_MULTIPLICATIONS: usize = 3;
+
+#[derive(Clone, Copy)]
+struct CacheAction {
+    slot: usize,
+    store: bool,
+    end: usize,
+}
+
+struct RepeatShape {
+    saved_multiplications: usize,
+    saved_visits: usize,
+    first_occurrence: usize,
+    occurrences: Vec<usize>,
+}
+
+impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
+    fn cache_common_subexpressions(&mut self) -> usize {
+        let (actions, cache_slots) = {
+            let mut occurrences = vec![];
+            collect_plan_occurrences(self, &mut occurrences);
+            let mut grouped = vec![false; occurrences.len()];
+            let mut shapes = vec![];
+            let two = F::ONE.double();
+
+            for index in 0..occurrences.len() {
+                if grouped[index] {
+                    continue;
+                }
+                let matching = (index..occurrences.len())
+                    .filter(|candidate| {
+                        !grouped[*candidate]
+                            && same_plan(occurrences[index].plan, occurrences[*candidate].plan)
+                    })
+                    .collect::<Vec<_>>();
+                if matching.len() > 1 {
+                    for candidate in &matching {
+                        grouped[*candidate] = true;
+                    }
+                    let cost = plan_cost(occurrences[index].plan, two);
+                    shapes.push(RepeatShape {
+                        saved_multiplications: (matching.len() - 1) * cost.0,
+                        saved_visits: (matching.len() - 1) * cost.1,
+                        first_occurrence: index,
+                        occurrences: matching,
+                    });
+                }
+            }
+
+            shapes.sort_unstable_by(|lhs, rhs| {
+                rhs.saved_multiplications
+                    .cmp(&lhs.saved_multiplications)
+                    .then_with(|| rhs.saved_visits.cmp(&lhs.saved_visits))
+                    .then_with(|| lhs.first_occurrence.cmp(&rhs.first_occurrence))
+            });
+
+            let mut actions = vec![None; occurrences.len()];
+            let mut covered = vec![false; occurrences.len()];
+            let mut cache_slots = 0;
+            for shape in shapes {
+                let matching = shape
+                    .occurrences
+                    .into_iter()
+                    .filter(|candidate| {
+                        !covered[*candidate..occurrences[*candidate].end]
+                            .iter()
+                            .any(|value| *value)
+                    })
+                    .collect::<Vec<_>>();
+                if matching.len() < 2 {
+                    continue;
+                }
+
+                let cost = plan_cost(occurrences[matching[0]].plan, two);
+                if (matching.len() - 1) * cost.0 < MIN_CSE_SAVED_MULTIPLICATIONS {
+                    continue;
+                }
+
+                let slot = cache_slots;
+                cache_slots += 1;
+                for (index, occurrence) in matching.into_iter().enumerate() {
+                    actions[occurrence] = Some(CacheAction {
+                        slot,
+                        store: index == 0,
+                        end: occurrences[occurrence].end,
+                    });
+                    covered[occurrence..occurrences[occurrence].end].fill(true);
+                }
+            }
+            (actions, cache_slots)
+        };
+
+        let mut occurrence = 0;
+        apply_cache_actions(self, &actions, &mut occurrence);
+        debug_assert_eq!(occurrence, actions.len());
+        cache_slots
+    }
+}
+
+fn apply_cache_actions<E, F: Field, B: Basis>(
+    plan: &mut EvaluationPlan<E, F, B>,
+    actions: &[Option<CacheAction>],
+    occurrence: &mut usize,
+) {
+    let action = actions[*occurrence];
+    *occurrence += 1;
+    if let Some(action) = action {
+        if !action.store {
+            *plan = EvaluationPlan::CacheLoad { slot: action.slot };
+            *occurrence = action.end;
+            return;
+        }
+    }
+
+    match plan {
+        EvaluationPlan::Add(lhs, rhs) | EvaluationPlan::Mul(lhs, rhs) => {
+            apply_cache_actions(lhs, actions, occurrence);
+            apply_cache_actions(rhs, actions, occurrence);
+        }
+        EvaluationPlan::Square(inner) | EvaluationPlan::Scale(inner, _) => {
+            apply_cache_actions(inner, actions, occurrence)
+        }
+        EvaluationPlan::Horner { base, .. } => apply_cache_actions(base, actions, occurrence),
+        EvaluationPlan::DistributePowers { work, .. } => {
+            for work in work {
+                match work {
+                    DistributionWork::Term { term, .. } => {
+                        apply_cache_actions(term, actions, occurrence)
+                    }
+                    DistributionWork::SharedFactor { factor, bodies, .. } => {
+                        apply_cache_actions(factor, actions, occurrence);
+                        apply_factor_body_cache_actions(bodies, actions, occurrence);
+                    }
+                    DistributionWork::SelectorFamily { runs, .. } => {
+                        for run in runs.iter_mut().rev() {
+                            apply_factor_body_cache_actions(&mut run.bodies, actions, occurrence);
+                        }
+                    }
+                }
+            }
+        }
+        EvaluationPlan::Poly(_)
+        | EvaluationPlan::LinearTerm(_)
+        | EvaluationPlan::ConstantTerm(_) => {}
+        EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
+            unreachable!("common-subexpression planning runs once")
+        }
+    }
+
+    if let Some(action) = action {
+        let inner = std::mem::replace(plan, EvaluationPlan::CacheLoad { slot: action.slot });
+        *plan = EvaluationPlan::CacheStore {
+            slot: action.slot,
+            inner: Box::new(inner),
+        };
+    }
+}
+
+fn apply_factor_body_cache_actions<E, F: Field, B: Basis>(
+    plan: &mut FactorBodyPlan<E, F, B>,
+    actions: &[Option<CacheAction>],
+    occurrence: &mut usize,
+) {
+    match plan {
+        FactorBodyPlan::Sequential(bodies) => {
+            for body in bodies {
+                apply_cache_actions(body, actions, occurrence);
+            }
+        }
+        FactorBodyPlan::Factored(work) => {
+            for work in work {
+                match work {
+                    FactorBodyWork::Term(term) => {
+                        apply_cache_actions(&mut term.term, actions, occurrence)
+                    }
+                    FactorBodyWork::SharedFactor { factor, terms } => {
+                        apply_cache_actions(factor, actions, occurrence);
+                        for term in terms {
+                            apply_cache_actions(&mut term.term, actions, occurrence);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1007,11 +1362,12 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             terms: &[WeightedTerm<E, F, B>],
             ctx: &AstContext<'_, F, B>,
             output: &mut [F],
+            cache: &mut [F],
             scratch: &mut [F],
         ) {
             let mut fold = PowerFold::new(output);
             for term in terms {
-                recurse_into(&term.term, ctx, fold.terms(), scratch);
+                recurse_into(&term.term, ctx, fold.terms(), cache, scratch);
                 fold.accumulate(term.power);
             }
             fold.finish();
@@ -1024,6 +1380,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             base: F,
             ctx: &AstContext<'_, F, B>,
             output: &mut [F],
+            cache: &mut [F],
             scratch: &mut [F],
         ) {
             match plan {
@@ -1031,12 +1388,12 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     let (first, remaining) = bodies
                         .split_first()
                         .expect("a compiled factor body has at least one term");
-                    recurse_into(first, ctx, output, scratch);
+                    recurse_into(first, ctx, output, cache, scratch);
 
                     if !remaining.is_empty() {
                         let (term_values, recurse_scratch) = scratch.split_at_mut(output.len());
                         for body in remaining {
-                            recurse_into(body, ctx, term_values, recurse_scratch);
+                            recurse_into(body, ctx, term_values, cache, recurse_scratch);
                             for (group, term) in output.iter_mut().zip(term_values.iter()) {
                                 *group *= base;
                                 *group += term;
@@ -1049,14 +1406,14 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     for work in work {
                         match work {
                             FactorBodyWork::Term(term) => {
-                                recurse_into(&term.term, ctx, fold.terms(), scratch);
+                                recurse_into(&term.term, ctx, fold.terms(), cache, scratch);
                                 fold.accumulate(term.power);
                             }
                             FactorBodyWork::SharedFactor { factor, terms } => {
-                                recurse_into(factor, ctx, fold.factors(), scratch);
+                                recurse_into(factor, ctx, fold.factors(), cache, scratch);
                                 {
                                     let body_values = fold.terms();
-                                    recurse_weighted_terms(terms, ctx, body_values, scratch);
+                                    recurse_weighted_terms(terms, ctx, body_values, cache, scratch);
                                 }
                                 fold.accumulate_products();
                             }
@@ -1073,6 +1430,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             base: F,
             ctx: &AstContext<'_, F, B>,
             scratch: &mut [F],
+            cache: &mut [F],
             fold: &mut PowerFold<'_, F>,
         ) {
             let chunk_len = fold.terms().len();
@@ -1115,7 +1473,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
 
                     {
                         let terms = fold.terms();
-                        recurse_factor_body(&run.bodies, base, ctx, terms, body_scratch);
+                        recurse_factor_body(&run.bodies, base, ctx, terms, cache, body_scratch);
                         for (term, selector) in terms.iter_mut().zip(selector.iter()) {
                             *term *= selector;
                         }
@@ -1144,6 +1502,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             plan: &EvaluationPlan<E, F, B>,
             ctx: &AstContext<'_, F, B>,
             output: &mut [F],
+            cache: &mut [F],
             scratch: &mut [F],
         ) {
             match plan {
@@ -1156,11 +1515,11 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     output,
                 ),
                 EvaluationPlan::Add(a, b) => {
-                    recurse_into(a, ctx, output, scratch);
+                    recurse_into(a, ctx, output, cache, scratch);
                     let (rhs_values, rhs_scratch) = scratch.split_at_mut(output.len());
                     if let EvaluationPlan::Scale(negated_rhs, scalar) = b.as_ref() {
                         if *scalar == ctx.minus_one {
-                            recurse_into(negated_rhs, ctx, rhs_values, rhs_scratch);
+                            recurse_into(negated_rhs, ctx, rhs_values, cache, rhs_scratch);
                             for (lhs, rhs) in output.iter_mut().zip(rhs_values.iter()) {
                                 *lhs -= *rhs;
                             }
@@ -1168,7 +1527,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                         }
                     }
 
-                    recurse_into(b, ctx, rhs_values, rhs_scratch);
+                    recurse_into(b, ctx, rhs_values, cache, rhs_scratch);
                     for (lhs, rhs) in output.iter_mut().zip(rhs_values.iter()) {
                         *lhs += *rhs;
                     }
@@ -1177,32 +1536,32 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     // Preserve the multiplication shape while avoiding a
                     // constant vector for scalars with cheap field operations.
                     if let EvaluationPlan::ConstantTerm(scalar) = a.as_ref() {
-                        if recurse_small_scale_into(b, *scalar, ctx, output, scratch) {
+                        if recurse_small_scale_into(b, *scalar, ctx, output, cache, scratch) {
                             return;
                         }
                     }
                     if let EvaluationPlan::ConstantTerm(scalar) = b.as_ref() {
-                        if recurse_small_scale_into(a, *scalar, ctx, output, scratch) {
+                        if recurse_small_scale_into(a, *scalar, ctx, output, cache, scratch) {
                             return;
                         }
                     }
 
-                    recurse_into(a, ctx, output, scratch);
+                    recurse_into(a, ctx, output, cache, scratch);
                     let (rhs, rhs_scratch) = scratch.split_at_mut(output.len());
-                    recurse_into(b, ctx, rhs, rhs_scratch);
+                    recurse_into(b, ctx, rhs, cache, rhs_scratch);
                     for (lhs, rhs) in output.iter_mut().zip(rhs.iter()) {
                         *lhs *= *rhs;
                     }
                 }
                 EvaluationPlan::Square(inner) => {
-                    recurse_into(inner, ctx, output, scratch);
+                    recurse_into(inner, ctx, output, cache, scratch);
                     for value in output.iter_mut() {
                         *value = value.square();
                     }
                 }
                 EvaluationPlan::Scale(a, scalar) => {
-                    if !recurse_small_scale_into(a, *scalar, ctx, output, scratch) {
-                        recurse_into(a, ctx, output, scratch);
+                    if !recurse_small_scale_into(a, *scalar, ctx, output, cache, scratch) {
+                        recurse_into(a, ctx, output, cache, scratch);
                         for lhs in output.iter_mut() {
                             *lhs *= scalar;
                         }
@@ -1222,7 +1581,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     );
 
                     let (base_values, scratch) = scratch.split_at_mut(output.len());
-                    recurse_into(base, ctx, base_values, scratch);
+                    recurse_into(base, ctx, base_values, cache, scratch);
                     let (coefficient_values, _) = scratch.split_at_mut(output.len());
                     for coefficient in remaining.iter().rev() {
                         for (value, base) in output.iter_mut().zip(base_values.iter()) {
@@ -1248,7 +1607,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     for work in work {
                         match work {
                             DistributionWork::Term { term, power } => {
-                                recurse_into(term, ctx, fold.terms(), scratch);
+                                recurse_into(term, ctx, fold.terms(), cache, scratch);
                                 fold.accumulate(*power);
                             }
                             DistributionWork::SharedFactor {
@@ -1258,10 +1617,17 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                             } => {
                                 let (factor_values, body_scratch) =
                                     scratch.split_at_mut(output_len);
-                                recurse_into(factor, ctx, factor_values, body_scratch);
+                                recurse_into(factor, ctx, factor_values, cache, body_scratch);
                                 {
                                     let terms = fold.terms();
-                                    recurse_factor_body(bodies, *base, ctx, terms, body_scratch);
+                                    recurse_factor_body(
+                                        bodies,
+                                        *base,
+                                        ctx,
+                                        terms,
+                                        cache,
+                                        body_scratch,
+                                    );
                                     for (term, factor) in terms.iter_mut().zip(factor_values.iter())
                                     {
                                         *term *= factor;
@@ -1271,13 +1637,22 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                             }
                             DistributionWork::SelectorFamily { query, runs } => {
                                 accumulate_selector_family(
-                                    query, runs, *base, ctx, scratch, &mut fold,
+                                    query, runs, *base, ctx, scratch, cache, &mut fold,
                                 );
                             }
                         }
                     }
 
                     fold.finish();
+                }
+                EvaluationPlan::CacheStore { slot, inner } => {
+                    recurse_into(inner, ctx, output, cache, scratch);
+                    let start = slot * output.len();
+                    cache[start..start + output.len()].copy_from_slice(output);
+                }
+                EvaluationPlan::CacheLoad { slot } => {
+                    let start = slot * output.len();
+                    output.copy_from_slice(&cache[start..start + output.len()]);
                 }
                 EvaluationPlan::LinearTerm(scalar) => {
                     B::fill_linear(ctx.domain, ctx.chunk_size, ctx.chunk_index, *scalar, output)
@@ -1293,19 +1668,20 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             scalar: F,
             ctx: &AstContext<'_, F, B>,
             output: &mut [F],
+            cache: &mut [F],
             scratch: &mut [F],
         ) -> bool {
             if scalar == ctx.minus_one {
-                recurse_into(plan, ctx, output, scratch);
+                recurse_into(plan, ctx, output, cache, scratch);
                 for value in output.iter_mut() {
                     *value = -*value;
                 }
                 true
             } else if scalar == F::ONE {
-                recurse_into(plan, ctx, output, scratch);
+                recurse_into(plan, ctx, output, cache, scratch);
                 true
             } else if scalar == ctx.two {
-                recurse_into(plan, ctx, output, scratch);
+                recurse_into(plan, ctx, output, cache, scratch);
                 for value in output.iter_mut() {
                     *value = value.double();
                 }
@@ -1319,7 +1695,8 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
         // polynomial.
         let minus_one = -F::ONE;
         let two = F::ONE.double();
-        let plan = EvaluationPlan::compile(ast);
+        let mut plan = EvaluationPlan::compile(ast);
+        let cache_slots = plan.cache_common_subexpressions();
         let mut result = B::empty_poly(domain);
         let scratch_slots = plan.required_scratch_slots();
         multicore::scope(|scope| {
@@ -1334,8 +1711,9 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                         minus_one,
                         two,
                     };
-                    let mut scratch = vec![F::ZERO; scratch_slots * out.len()];
-                    recurse_into(plan, &ctx, out, &mut scratch);
+                    let mut storage = vec![F::ZERO; (cache_slots + scratch_slots) * out.len()];
+                    let (cache, scratch) = storage.split_at_mut(cache_slots * out.len());
+                    recurse_into(plan, &ctx, out, cache, scratch);
                 });
             }
         });
@@ -2300,6 +2678,55 @@ mod tests {
         check_repeated_subexpressions_use_squares::<pallas::Base, ExtendedLagrangeCoeff>();
         check_repeated_subexpressions_use_squares::<vesta::Base, LagrangeCoeff>();
         check_repeated_subexpressions_use_squares::<vesta::Base, ExtendedLagrangeCoeff>();
+    }
+
+    fn check_common_subexpressions_are_cached<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(3, 4);
+        let mut evaluator = new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {});
+        let mut values = vec![];
+        let leaves = (0..4)
+            .map(|poly_index| {
+                let mut poly = domain.empty_extended();
+                let poly_len = poly.len();
+                for (row, value) in poly.iter_mut().enumerate() {
+                    *value = F::from((poly_index * poly_len + row + 1) as u64);
+                }
+                values.push(poly.clone());
+                evaluator.register_poly(poly)
+            })
+            .collect::<Vec<_>>();
+
+        let repeated = (Ast::from(leaves[0]) + leaves[1]) * (Ast::from(leaves[2]) + leaves[3]);
+        let terms = (5..9)
+            .map(|constant| repeated.clone() + Ast::ConstantTerm(F::from(constant)))
+            .collect::<Vec<_>>();
+        let base = F::from(11);
+        let ast = Ast::distribute_powers(terms.clone(), base);
+
+        let mut plan = EvaluationPlan::compile(&ast);
+        assert_eq!(plan.cache_common_subexpressions(), 1);
+
+        let mut below_threshold =
+            EvaluationPlan::compile(&Ast::distribute_powers(terms.into_iter().take(3), base));
+        assert_eq!(below_threshold.cache_common_subexpressions(), 0);
+
+        let actual = evaluator.evaluate(&ast, &domain);
+        for row in 0..actual.len() {
+            let repeated = (values[0][row] + values[1][row]) * (values[2][row] + values[3][row]);
+            let expected = (5..9).fold(F::ZERO, |accumulator, constant| {
+                accumulator * base + repeated + F::from(constant)
+            });
+            assert_eq!(actual[row], expected);
+        }
+    }
+
+    #[test]
+    fn common_subexpressions_are_cached() {
+        check_common_subexpressions_are_cached::<pallas::Base>();
+        check_common_subexpressions_are_cached::<vesta::Base>();
     }
 
     #[test]
