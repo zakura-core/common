@@ -51,6 +51,10 @@ fn glv_bench<C: GlvParams>(c: &mut Criterion, name: &str) {
     group.bench_function("table mul (reused table + decomposed)", |b| {
         b.iter(|| table.mul_decomposed(&decomposed));
     });
+    // The per-scalar hoisted work on its own (GLV split + joint recoding).
+    group.bench_function("decompose + recode", |b| {
+        b.iter(|| Decomposed::<C>::new(&k))
+    });
 
     group.finish();
 
