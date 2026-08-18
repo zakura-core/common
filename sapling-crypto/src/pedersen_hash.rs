@@ -232,6 +232,19 @@ pub mod test {
 
     #[test]
     #[should_panic(expected = "we don't have enough Pedersen hash generators")]
+    fn rejects_one_bit_over_generator_capacity() {
+        let max_input_bits = crate::constants::PEDERSEN_HASH_GENERATORS.len()
+            * PEDERSEN_HASH_CHUNKS_PER_GENERATOR
+            * 3
+            - Personalization::NoteCommitment.get_bits().len();
+        pedersen_hash(
+            Personalization::NoteCommitment,
+            core::iter::repeat_n(true, max_input_bits + 1),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "we don't have enough Pedersen hash generators")]
     fn rejects_infinite_input_at_generator_capacity() {
         pedersen_hash(Personalization::NoteCommitment, core::iter::repeat(true));
     }

@@ -124,6 +124,8 @@ Guards:
   straightforward reference (accumulate-then-multiply) over many input lengths that straddle
   chunk, block, and generator boundaries (including the 6-bit personalization shift) up to the
   six-generator capacity.
+- Capacity tests verify that both a one-bit-oversized input and an infinite iterator are rejected
+  after bounded consumption.
 
 Besides the return type (see above), the now-unused exp-window constants
 (`PEDERSEN_HASH_EXP_TABLE`, `PEDERSEN_HASH_EXP_WINDOW_SIZE`, and their builder) were removed from
