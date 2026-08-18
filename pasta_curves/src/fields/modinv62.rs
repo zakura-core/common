@@ -1,6 +1,10 @@
 //! Variable-time modular inversion for the Pasta base fields, using 62-bit
 //! divsteps (safegcd).
 //!
+//! Portions adapted from libsecp256k1's `src/modinv64_impl.h`:
+//! Copyright (c) 2020 Peter Dettman. Distributed under the MIT software
+//! license; see the repository's `LICENSE-MIT` file.
+//!
 //! This is a near-verbatim port of libsecp256k1's signed-62 variable-time
 //! modular inversion, specialized to the Pasta base fields:
 //!
@@ -31,8 +35,9 @@
 //! This inversion is **variable-time in the value being inverted**: its
 //! trailing-zero counts, divstep branches, batch count, and active limb length
 //! all depend on the input. It must only reach values whose timing is
-//! acceptable to leak. See the crate changelog entry for the posture of this
-//! fork's inversion call sites.
+//! acceptable to leak. Callers opt into this implementation explicitly through
+//! `Fp::invert_vartime` or `Fq::invert_vartime`; `Field::invert` retains the
+//! existing data-oblivious Fermat implementation.
 //!
 //! # References
 //!
@@ -1588,8 +1593,8 @@ mod tests {
 
                 #[test]
                 fn invert_fixed_edge_values() {
-                    // T13: field-value edges. `invert()` here is already the
-                    // divstep implementation under test.
+                    // T13: field-value edges through the public variable-time
+                    // API backed by the divstep implementation under test.
                     let r_val = <$F>::from_u128(1u128 << 64).square().square();
                     let mut edge = [
                         <$F>::ONE,
@@ -1607,7 +1612,7 @@ mod tests {
                         edge.push(<$F>::from(k));
                     }
                     for x in edge {
-                        let inv = x.invert().unwrap();
+                        let inv = x.invert_vartime().unwrap();
                         assert_eq!(x * inv, <$F>::ONE);
                         assert_eq!(inv, fermat_invert(&x));
                     }
@@ -1648,7 +1653,7 @@ mod tests {
                     }
                     for repr in reprs {
                         let x = $F(repr);
-                        let inv = x.invert().unwrap();
+                        let inv = x.invert_vartime().unwrap();
                         assert_eq!(x * inv, <$F>::ONE, "repr {:x?}", repr);
                         assert_eq!(inv, fermat_invert(&x), "repr {:x?}", repr);
                     }
@@ -1658,8 +1663,8 @@ mod tests {
                 fn invert_zero_is_none() {
                     // T15
                     assert!(invert::<$P>(&[0u64; 4]).is_none());
-                    assert!(bool::from(<$F>::ZERO.invert().is_none()));
-                    assert!(bool::from(<$F>::ONE.invert().is_some()));
+                    assert!(<$F>::ZERO.invert_vartime().is_none());
+                    assert!(<$F>::ONE.invert_vartime().is_some());
                 }
 
                 #[test]
@@ -1744,10 +1749,10 @@ mod tests {
                         // T25
                         let x = <$F>::from_raw(a);
                         if !bool::from(x.is_zero()) {
-                            let inv = x.invert().unwrap();
+                            let inv = x.invert_vartime().unwrap();
                             proptest::prop_assert_eq!(inv, fermat_invert(&x));
                             proptest::prop_assert_eq!(x * inv, <$F>::ONE);
-                            proptest::prop_assert_eq!(inv.invert().unwrap(), x);
+                            proptest::prop_assert_eq!(inv.invert_vartime().unwrap(), x);
                         }
                     }
                 }
