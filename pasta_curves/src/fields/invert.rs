@@ -80,8 +80,8 @@ pub(super) fn invert_montgomery_vartime(
     while steps > 0 && !g.is_zero() {
         let batch = steps.min(BATCH_SIZE);
         let (next_delta, matrix) = jump(f.lowest(), g.lowest(), delta, batch);
-        (f, g) = update_fg(f, g, matrix);
-        (d, e) = update_de(d, e, modulus, modulus_inverse, matrix);
+        (f, g) = update_fg(f, g, matrix, batch);
+        (d, e) = update_de(d, e, modulus, modulus_inverse, matrix, batch);
         delta = next_delta;
         steps -= batch;
     }
@@ -137,10 +137,10 @@ fn jump(mut f: i64, mut g: i64, mut delta: i64, mut batch: u32) -> (i64, Matrix)
 }
 
 #[inline]
-fn update_fg(a: Signed, b: Signed, matrix: Matrix) -> (Signed, Signed) {
+fn update_fg(a: Signed, b: Signed, matrix: Matrix, shift: u32) -> (Signed, Signed) {
     (
-        lincomb_reduce_shift(a, b, matrix[0][0], matrix[0][1]),
-        lincomb_reduce_shift(a, b, matrix[1][0], matrix[1][1]),
+        lincomb_reduce_shift(a, b, matrix[0][0], matrix[0][1], shift),
+        lincomb_reduce_shift(a, b, matrix[1][0], matrix[1][1], shift),
     )
 }
 
@@ -151,20 +151,38 @@ fn update_de(
     modulus: Uint,
     modulus_inverse: u64,
     matrix: Matrix,
+    shift: u32,
 ) -> (Signed, Signed) {
     (
-        lincomb_reduce_shift_mod(a, b, matrix[0][0], matrix[0][1], modulus, modulus_inverse),
-        lincomb_reduce_shift_mod(a, b, matrix[1][0], matrix[1][1], modulus, modulus_inverse),
+        lincomb_reduce_shift_mod(
+            a,
+            b,
+            matrix[0][0],
+            matrix[0][1],
+            modulus,
+            modulus_inverse,
+            shift,
+        ),
+        lincomb_reduce_shift_mod(
+            a,
+            b,
+            matrix[1][0],
+            matrix[1][1],
+            modulus,
+            modulus_inverse,
+            shift,
+        ),
     )
 }
 
 #[inline]
-fn lincomb_reduce_shift(a: Signed, b: Signed, c: i64, d: i64) -> Signed {
+fn lincomb_reduce_shift(a: Signed, b: Signed, c: i64, d: i64, shift: u32) -> Signed {
+    debug_assert!(shift > 0 && shift <= BATCH_SIZE);
     let (wide, negative) = lincomb(a, b, c, d);
-    debug_assert_eq!(wide[0] & ((1u64 << BATCH_SIZE) - 1), 0);
+    debug_assert_eq!(wide[0] & ((1u64 << shift) - 1), 0);
     Signed {
         negative,
-        magnitude: shr_62(wide),
+        magnitude: shr(wide, shift),
     }
 }
 
@@ -176,17 +194,19 @@ fn lincomb_reduce_shift_mod(
     d: i64,
     modulus: Uint,
     modulus_inverse: u64,
+    shift: u32,
 ) -> Signed {
+    debug_assert!(shift > 0 && shift <= BATCH_SIZE);
     let (wide, mut negative) = lincomb(a, b, c, d);
 
-    // Subtract a multiple of the modulus that clears the low 62 bits.
-    let factor = wide[0].wrapping_mul(modulus_inverse) & ((1u64 << BATCH_SIZE) - 1);
+    // Subtract a multiple of the modulus that clears the low `shift` bits.
+    let factor = wide[0].wrapping_mul(modulus_inverse) & ((1u64 << shift) - 1);
     let modulus_multiple = mul_word(modulus, factor);
     let (wide, reversed) = sub_wide_abs(wide, modulus_multiple);
     negative ^= reversed;
 
-    debug_assert_eq!(wide[0] & ((1u64 << BATCH_SIZE) - 1), 0);
-    let mut magnitude = shr_62(wide);
+    debug_assert_eq!(wide[0] & ((1u64 << shift) - 1), 0);
+    let mut magnitude = shr(wide, shift);
     if ge_uint(magnitude, modulus) {
         magnitude = sub_uint(magnitude, modulus);
     }
@@ -272,13 +292,15 @@ fn sub_wide(lhs: Wide, rhs: Wide) -> Wide {
 }
 
 #[inline]
-fn shr_62(value: Wide) -> Uint {
-    debug_assert_eq!(value[WIDE_LIMBS - 1] >> BATCH_SIZE, 0);
+fn shr(value: Wide, shift: u32) -> Uint {
+    debug_assert!(shift > 0 && shift < u64::BITS);
+    debug_assert_eq!(value[WIDE_LIMBS - 1] >> shift, 0);
+    let carry_shift = u64::BITS - shift;
     [
-        (value[0] >> BATCH_SIZE) | (value[1] << 2),
-        (value[1] >> BATCH_SIZE) | (value[2] << 2),
-        (value[2] >> BATCH_SIZE) | (value[3] << 2),
-        (value[3] >> BATCH_SIZE) | (value[4] << 2),
+        (value[0] >> shift) | (value[1] << carry_shift),
+        (value[1] >> shift) | (value[2] << carry_shift),
+        (value[2] >> shift) | (value[3] << carry_shift),
+        (value[3] >> shift) | (value[4] << carry_shift),
     ]
 }
 
@@ -319,4 +341,60 @@ fn sub_uint(lhs: Uint, rhs: Uint) -> Uint {
     }
     debug_assert_eq!(borrow, 0);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PARTIAL_BATCH: u32 = 33;
+    const TEST_MODULUS: u64 = 101;
+    const TEST_VALUE: u64 = 37;
+
+    #[test]
+    fn partial_batch_reductions_use_batch_width() {
+        let modulus = [TEST_MODULUS, 0, 0, 0];
+        let value = [TEST_VALUE, 0, 0, 0];
+        let initial_f = Signed::positive(modulus);
+        let initial_g = Signed::positive(value);
+        let (_, matrix) = jump(initial_f.lowest(), initial_g.lowest(), 1, PARTIAL_BATCH);
+
+        let (f, g) = update_fg(initial_f, initial_g, matrix, PARTIAL_BATCH);
+        assert_eq!(signed_small(f), -1);
+        assert_eq!(signed_small(g), 0);
+
+        let (d, e) = update_de(
+            Signed::ZERO,
+            Signed::positive([1, 0, 0, 0]),
+            modulus,
+            invert_odd_word(TEST_MODULUS),
+            matrix,
+            PARTIAL_BATCH,
+        );
+        assert_eq!(modulo(signed_small(d) * i128::from(TEST_VALUE)), modulo(-1));
+        assert_eq!(modulo(signed_small(e) * i128::from(TEST_VALUE)), 0);
+    }
+
+    fn invert_odd_word(value: u64) -> u64 {
+        let mut inverse = 1u64;
+        for _ in 0..6 {
+            inverse = inverse.wrapping_mul(2u64.wrapping_sub(value.wrapping_mul(inverse)));
+        }
+        assert_eq!(value.wrapping_mul(inverse), 1);
+        inverse
+    }
+
+    fn signed_small(value: Signed) -> i128 {
+        assert_eq!(value.magnitude[1..], [0; LIMBS - 1]);
+        let magnitude = i128::from(value.magnitude[0]);
+        if value.negative {
+            -magnitude
+        } else {
+            magnitude
+        }
+    }
+
+    fn modulo(value: i128) -> i128 {
+        value.rem_euclid(i128::from(TEST_MODULUS))
+    }
 }

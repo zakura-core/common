@@ -373,9 +373,11 @@ impl<P: DomainPolicy> BatchDomain for NoteEncryptionDomain<P> {
     where
         Self::PreparedEphemeralPublicKey: 'a,
     {
-        // One GLV decomposition and digit recoding of the viewing key for
-        // the whole batch, then one synchronized ladder over every prepared
-        // ephemeral key (see `PreparedEphemeralPublicKey::batch_agree`).
+        // This path is variable-time in the viewing key and is only suitable
+        // where timing leakage is acceptable. It performs one GLV decomposition
+        // and digit recoding of the viewing key for the whole batch, then one
+        // synchronized ladder over every prepared ephemeral key (see
+        // `PreparedEphemeralPublicKey::batch_agree`).
         let decomposed =
             pasta_curves::glv::Decomposed::<pasta_curves::pallas::Point>::new(&ivk.raw_scalar());
         let epks: Vec<_> = epks.collect();
