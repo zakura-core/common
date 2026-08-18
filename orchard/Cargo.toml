@@ -56,7 +56,6 @@ default = [
     "circuit",
     "multicore",
     "std",
-    "weighted-merkle",
 ]
 dev-graph = [
     "halo2_proofs?/dev-graph",
