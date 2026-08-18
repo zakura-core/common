@@ -52,6 +52,24 @@ macro_rules! impl_batch_mul_same_scalar_vartime {
     (native, $name:ident) => {};
 }
 
+#[cfg(feature = "alloc")]
+macro_rules! impl_glv_multiexp_vartime {
+    (glv, $name:ident, $name_affine:ident, $base:ident) => {
+        #[cfg(feature = "glv")]
+        fn try_glv_multiexp_vartime(
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+            window_bits: usize,
+        ) -> Option<Self> {
+            crate::glv::try_multiexp::<$name>(scalars, bases, window_bits, |point| $name_affine {
+                x: point.x * $base::ZETA,
+                y: point.y,
+            })
+        }
+    };
+    (native, $name:ident, $name_affine:ident, $base:ident) => {};
+}
+
 macro_rules! new_curve_impl {
     (($($privacy:tt)*), $name:ident, $name_affine:ident, $iso:ident, $base:ident, $scalar:ident,
      $curve_id:literal, $a_raw:expr, $b_raw:expr, $curve_type:ident, $same_scalar_mul:ident) => {
@@ -193,6 +211,12 @@ macro_rules! new_curve_impl {
             }
 
             impl_batch_mul_same_scalar_vartime!($same_scalar_mul, $name);
+            impl_glv_multiexp_vartime!(
+                $same_scalar_mul,
+                $name,
+                $name_affine,
+                $base
+            );
         }
 
         impl group::Curve for $name {

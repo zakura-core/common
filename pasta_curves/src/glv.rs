@@ -243,6 +243,233 @@ fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
     (signed_halves(k1), signed_halves(k2))
 }
 
+/// Small MSMs do not amortize GLV decomposition, affine endomorphism mapping,
+/// and the two temporary vectors.
+const MIN_GLV_MULTIEXP_TERMS: usize = 256;
+
+/// Each GLV decomposition component has magnitude strictly below `2^127`.
+const GLV_COMPONENT_BITS: usize = 127;
+
+/// Estimates the dominant group work in a Signed-Booth MSM.
+///
+/// The model counts one unit for each point/window visit, two bucket additions
+/// per bucket/window for summation by parts, and each accumulator doubling.
+/// It deliberately omits GLV setup costs; [`MIN_GLV_MULTIEXP_TERMS`] handles
+/// their small-MSM amortization separately.
+fn estimated_signed_booth_work(
+    terms: usize,
+    scalar_bits: usize,
+    window_bits: usize,
+) -> Option<usize> {
+    let windows = scalar_bits.checked_div(window_bits)?.checked_add(1)?;
+    let bucket_shift = u32::try_from(window_bits.checked_sub(1)?).ok()?;
+    let buckets = 1usize.checked_shl(bucket_shift)?;
+
+    let point_visits = terms.checked_mul(windows)?;
+    let bucket_additions = buckets.checked_mul(windows)?.checked_mul(2)?;
+    let doublings = window_bits.checked_mul(windows.checked_sub(1)?)?;
+    point_visits
+        .checked_add(bucket_additions)?
+        .checked_add(doublings)
+}
+
+/// Chooses GLV only when its estimated Signed-Booth work is lower.
+fn should_use_glv_multiexp<C: GlvParams>(terms: usize, window_bits: usize) -> bool {
+    if terms < MIN_GLV_MULTIEXP_TERMS {
+        return false;
+    }
+
+    let scalar_bits = <C::ScalarExt as PrimeField>::Repr::default()
+        .as_ref()
+        .len()
+        .checked_mul(u8::BITS as usize);
+    let glv_terms = terms.checked_mul(2);
+
+    match (scalar_bits, glv_terms) {
+        (Some(scalar_bits), Some(glv_terms)) => {
+            match (
+                estimated_signed_booth_work(terms, scalar_bits, window_bits),
+                estimated_signed_booth_work(glv_terms, GLV_COMPONENT_BITS, window_bits),
+            ) {
+                (Some(generic), Some(glv)) => glv < generic,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SignedMagnitude {
+    negative: bool,
+    magnitude: u128,
+}
+
+impl From<(bool, u128)> for SignedMagnitude {
+    fn from((negative, magnitude): (bool, u128)) -> Self {
+        Self {
+            negative,
+            magnitude,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BoothDigit {
+    magnitude: usize,
+    negative: bool,
+}
+
+/// Extracts one signed-Booth digit and folds in the component's overall sign.
+fn booth_digit(component: SignedMagnitude, window_bits: usize, window: usize) -> BoothDigit {
+    let window_start = window * window_bits;
+    let radix = 1usize << window_bits;
+    let value = if window_start < u128::BITS as usize {
+        ((component.magnitude >> window_start) as usize) & (radix - 1)
+    } else {
+        0
+    };
+    let overlap = if window_start == 0 {
+        0
+    } else {
+        ((component.magnitude >> (window_start - 1)) & 1) as usize
+    };
+
+    let (magnitude, digit_negative) = if value < radix / 2 {
+        (value + overlap, false)
+    } else {
+        let magnitude = radix - value - overlap;
+        (magnitude, magnitude != 0)
+    };
+    BoothDigit {
+        magnitude,
+        negative: magnitude != 0 && (digit_negative ^ component.negative),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MultiexpBucket<C: GlvParams> {
+    None,
+    Affine(C::AffineExt),
+    Projective(C),
+}
+
+impl<C: GlvParams> MultiexpBucket<C> {
+    fn add_assign(&mut self, point: C::AffineExt) {
+        *self = match *self {
+            Self::None => Self::Affine(point),
+            Self::Affine(current) => Self::Projective(current + point),
+            Self::Projective(mut current) => {
+                current += point;
+                Self::Projective(current)
+            }
+        };
+    }
+
+    fn add(self, mut other: C) -> C {
+        match self {
+            Self::None => other,
+            Self::Affine(point) => {
+                other += point;
+                other
+            }
+            Self::Projective(point) => other + point,
+        }
+    }
+}
+
+fn add_digit<C: GlvParams>(
+    buckets: &mut [MultiexpBucket<C>],
+    digit: BoothDigit,
+    base: C::AffineExt,
+) {
+    if digit.magnitude != 0 {
+        let base = if digit.negative { -base } else { base };
+        buckets[digit.magnitude - 1].add_assign(base);
+    }
+}
+
+fn sum_buckets<C: GlvParams>(buckets: &[MultiexpBucket<C>]) -> C {
+    let mut running = C::identity();
+    let mut sum = C::identity();
+    for bucket in buckets.iter().rev() {
+        running = bucket.add(running);
+        sum += running;
+    }
+    sum
+}
+
+fn multiexp<C: GlvParams>(
+    components: &[(SignedMagnitude, SignedMagnitude)],
+    bases: &[C::AffineExt],
+    endo_bases: &[C::AffineExt],
+    window_bits: usize,
+) -> C {
+    debug_assert_eq!(components.len(), bases.len());
+    debug_assert_eq!(components.len(), endo_bases.len());
+
+    let window_count = GLV_COMPONENT_BITS / window_bits + 1;
+    let mut buckets = alloc::vec![MultiexpBucket::<C>::None; 1 << (window_bits - 1)];
+    let mut acc = C::identity();
+
+    for window in (0..window_count).rev() {
+        if window + 1 != window_count {
+            for _ in 0..window_bits {
+                acc = acc.double();
+            }
+        }
+
+        buckets.fill(MultiexpBucket::None);
+        for ((first, second), base, endo_base) in components
+            .iter()
+            .zip(bases)
+            .zip(endo_bases)
+            .map(|(((first, second), base), endo_base)| ((first, second), base, endo_base))
+        {
+            add_digit(
+                &mut buckets,
+                booth_digit(*first, window_bits, window),
+                *base,
+            );
+            add_digit(
+                &mut buckets,
+                booth_digit(*second, window_bits, window),
+                *endo_base,
+            );
+        }
+        acc += sum_buckets(&buckets);
+    }
+    acc
+}
+
+/// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
+/// MSM. The caller supplies the affine endomorphism because the concrete
+/// affine coordinates remain private to `curves`.
+pub(crate) fn try_multiexp<C: GlvParams>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+    window_bits: usize,
+    mut affine_endo: impl FnMut(C::AffineExt) -> C::AffineExt,
+) -> Option<C> {
+    assert_eq!(scalars.len(), bases.len());
+    assert!(window_bits > 0 && window_bits < usize::BITS as usize);
+    if !should_use_glv_multiexp::<C>(scalars.len(), window_bits) {
+        return None;
+    }
+
+    let components = scalars
+        .iter()
+        .map(decompose::<C>)
+        .map(|(first, second)| (first.into(), second.into()))
+        .collect::<Vec<_>>();
+    let endo_bases = bases
+        .iter()
+        .copied()
+        .map(&mut affine_endo)
+        .collect::<Vec<_>>();
+    Some(multiexp(&components, bases, &endo_bases, window_bits))
+}
+
 /// The GLV window for one base point: the odd multiples `{1, 3, 5, 7} * P` and
 /// `{1, 3, 5, 7} * phi(P)` in affine coordinates. 512 bytes per table.
 ///
@@ -423,6 +650,29 @@ mod tests {
     use super::*;
     use crate::arithmetic::adc;
     use ff::Field;
+
+    #[test]
+    fn multiexp_backend_selection() {
+        assert_eq!(estimated_signed_booth_work(2_150, 256, 8), Some(79_654));
+        assert_eq!(
+            estimated_signed_booth_work(4_300, GLV_COMPONENT_BITS, 8),
+            Some(73_016)
+        );
+        assert_eq!(estimated_signed_booth_work(5_678, 256, 9), Some(179_762));
+        assert_eq!(
+            estimated_signed_booth_work(11_356, GLV_COMPONENT_BITS, 9),
+            Some(178_146)
+        );
+
+        assert!(!should_use_glv_multiexp::<pallas::Point>(255, 8));
+        assert!(should_use_glv_multiexp::<pallas::Point>(2_150, 8));
+        assert!(should_use_glv_multiexp::<vesta::Point>(5_678, 9));
+
+        // At sufficiently large sizes, doubling the term count outweighs the
+        // shorter components for this unchanged window width.
+        assert!(!should_use_glv_multiexp::<pallas::Point>(1_000_000, 14));
+        assert!(!should_use_glv_multiexp::<pallas::Point>(usize::MAX, 14));
+    }
 
     #[test]
     fn integer_multiplication_carry_boundaries() {

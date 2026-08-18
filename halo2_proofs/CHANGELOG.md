@@ -20,6 +20,8 @@ and this project adheres to Rust's notion of
   in one pass.
 - The multi-opening verifier now batch-inverts its Lagrange and vanishing
   denominators together.
+- Large single-worker Pasta multiscalar multiplications now use GLV scalar
+  decomposition with signed-Booth buckets.
 - Batch verification now reuses per-parameter fixed-window tables when
   constructing instance commitments.
 - Batch verification now folds each proof's random batching scalar into its
