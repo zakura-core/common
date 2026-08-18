@@ -3,6 +3,7 @@
 
 mod fp;
 mod fq;
+mod modinv62;
 
 // Keep the assembly FFI exception contained within a private module whose
 // public interface consists only of safe wrappers.
