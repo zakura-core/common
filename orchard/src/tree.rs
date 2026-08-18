@@ -17,7 +17,7 @@ use crate::{
 use incrementalmerkletree::{Hashable, Level};
 use pasta_curves::pallas;
 #[cfg(feature = "weighted-merkle")]
-use sinsemilla::weighted::FixedLengthHashDomain;
+use sinsemilla::weighted::UncheckedFixedLengthHashDomain;
 use sinsemilla::HashDomain;
 
 use ff::{Field, PrimeField, PrimeFieldBits};
@@ -44,13 +44,35 @@ const _: () = assert!(MERKLE_CRH_BITS.is_multiple_of(K));
 
 #[cfg(feature = "weighted-merkle")]
 lazy_static! {
-    static ref MERKLE_CRH_DOMAIN: FixedLengthHashDomain<MERKLE_CRH_WORDS> =
-        FixedLengthHashDomain::new(&HashDomain::new(MERKLE_CRH_PERSONALIZATION));
+    static ref MERKLE_CRH_DOMAIN: UncheckedFixedLengthHashDomain<MERKLE_CRH_WORDS> =
+        UncheckedFixedLengthHashDomain::new(&HashDomain::new(MERKLE_CRH_PERSONALIZATION));
 }
 
 #[cfg(not(feature = "weighted-merkle"))]
 lazy_static! {
     static ref MERKLE_CRH_DOMAIN: HashDomain = HashDomain::new(MERKLE_CRH_PERSONALIZATION);
+}
+
+#[cfg(feature = "weighted-merkle")]
+fn merkle_crh(message: impl Iterator<Item = bool>) -> pallas::Base {
+    MERKLE_CRH_DOMAIN.hash(message)
+}
+
+#[cfg(not(feature = "weighted-merkle"))]
+fn merkle_crh(message: impl Iterator<Item = bool>) -> pallas::Base {
+    MERKLE_CRH_DOMAIN
+        .hash(message)
+        .unwrap_or(pallas::Base::zero())
+}
+
+#[cfg(feature = "weighted-merkle")]
+fn merkle_crh_to_point(message: impl Iterator<Item = bool>) -> CtOption<pallas::Point> {
+    CtOption::new(MERKLE_CRH_DOMAIN.hash_to_point(message), 1.into())
+}
+
+#[cfg(not(feature = "weighted-merkle"))]
+fn merkle_crh_to_point(message: impl Iterator<Item = bool>) -> CtOption<pallas::Point> {
+    MERKLE_CRH_DOMAIN.hash_to_point(message)
 }
 
 lazy_static! {
@@ -248,9 +270,11 @@ impl MerkleHashOrchard {
         level: Level,
         pairs: impl IntoIterator<Item = (&'a Self, &'a Self)>,
     ) -> Vec<Self> {
-        extract_p_bottom_batch(pairs.into_iter().map(|(left, right)| {
-            MERKLE_CRH_DOMAIN.hash_to_point(merkle_crh_message(level, left, right))
-        }))
+        extract_p_bottom_batch(
+            pairs
+                .into_iter()
+                .map(|(left, right)| merkle_crh_to_point(merkle_crh_message(level, left, right))),
+        )
         .map(|hash| MerkleHashOrchard(hash.unwrap_or(pallas::Base::zero())))
         .collect()
     }
@@ -289,11 +313,7 @@ impl Hashable for MerkleHashOrchard {
     ///        layer = 31, l = 0
     ///      - when hashing to the final root, we produce the anchor with layer = 0, l = 31.
     fn combine(level: Level, left: &Self, right: &Self) -> Self {
-        MerkleHashOrchard(
-            MERKLE_CRH_DOMAIN
-                .hash(merkle_crh_message(level, left, right))
-                .unwrap_or(pallas::Base::zero()),
-        )
+        MerkleHashOrchard(merkle_crh(merkle_crh_message(level, left, right)))
     }
 
     fn empty_root(level: Level) -> Self {
@@ -358,13 +378,8 @@ pub mod testing {
 mod tests {
     use {
         crate::{
-            constants::{
-                sinsemilla::MERKLE_CRH_PERSONALIZATION, MERKLE_DEPTH_ORCHARD,
-            },
-            tree::{
-                merkle_crh_message, testing::arb_merkle_hash, MerkleHashOrchard,
-                EMPTY_ROOTS,
-            },
+            constants::{sinsemilla::MERKLE_CRH_PERSONALIZATION, MERKLE_DEPTH_ORCHARD},
+            tree::{merkle_crh_message, testing::arb_merkle_hash, MerkleHashOrchard, EMPTY_ROOTS},
         },
         alloc::vec::Vec,
         group::ff::{Field, PrimeField},
@@ -372,9 +387,9 @@ mod tests {
             frontier::Frontier, Hashable, Level, Marking, MerklePath, Retention,
         },
         pasta_curves::pallas,
+        proptest::prelude::*,
         rand::SeedableRng,
         rand_chacha::ChaCha20Rng,
-        proptest::prelude::*,
         shardtree::{store::memory::MemoryShardStore, ShardTree},
         sinsemilla::HashDomain,
     };

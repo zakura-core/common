@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::mem;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
-use sinsemilla::{weighted::FixedLengthHashDomain, HashDomain, K};
+use sinsemilla::{weighted::UncheckedFixedLengthHashDomain, HashDomain, K};
 
 const MERKLE_WORDS: usize = 52;
 const MERKLE_BITS: usize = MERKLE_WORDS * K;
@@ -48,17 +48,17 @@ fn benchmark_weighted(c: &mut Criterion) {
         .map(|_| words_to_bits(&message_words(&mut state)))
         .collect();
     let domain = HashDomain::new(MERKLE_DOMAIN);
-    let weighted = FixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
+    let weighted = UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
 
     let expected = domain.hash_to_point(bits.iter().copied());
     let actual = weighted.hash_to_point(bits.iter().copied());
-    assert_eq!(bool::from(expected.is_some()), bool::from(actual.is_some()));
-    assert_eq!(expected.unwrap(), actual.unwrap());
+    assert!(bool::from(expected.is_some()));
+    assert_eq!(expected.unwrap(), actual);
     for bits in &varied_bits {
         let expected = domain.hash_to_point(bits.iter().copied());
         let actual = weighted.hash_to_point(bits.iter().copied());
-        assert_eq!(bool::from(expected.is_some()), bool::from(actual.is_some()));
-        assert_eq!(expected.unwrap(), actual.unwrap());
+        assert!(bool::from(expected.is_some()));
+        assert_eq!(expected.unwrap(), actual);
     }
 
     let mut group = c.benchmark_group("sinsemilla-merkle-52-words-single");
@@ -72,7 +72,7 @@ fn benchmark_weighted(c: &mut Criterion) {
         },
     );
     group.bench_with_input(
-        BenchmarkId::new("position-weighted", MERKLE_BITS),
+        BenchmarkId::new("position-weighted-unchecked", MERKLE_BITS),
         &bits,
         |bencher, bits| {
             bencher.iter(|| black_box(weighted.hash_to_point(bits.iter().copied())));
@@ -90,7 +90,7 @@ fn benchmark_weighted(c: &mut Criterion) {
             }
         });
     });
-    group.bench_function("position-weighted", |bencher| {
+    group.bench_function("position-weighted-unchecked", |bencher| {
         bencher.iter(|| {
             for bits in &varied_bits {
                 black_box(weighted.hash_to_point(bits.iter().copied()));
@@ -118,7 +118,7 @@ fn benchmark_weighted(c: &mut Criterion) {
         },
     );
     group.bench_with_input(
-        BenchmarkId::new("position-weighted", MERKLE_BITS),
+        BenchmarkId::new("position-weighted-unchecked", MERKLE_BITS),
         &bits,
         |bencher, bits| {
             bencher.iter_batched(
@@ -130,9 +130,13 @@ fn benchmark_weighted(c: &mut Criterion) {
     );
     group.finish();
 
-    c.bench_function("sinsemilla-merkle-weighted-table-construction", |bencher| {
-        bencher.iter(|| black_box(FixedLengthHashDomain::<MERKLE_WORDS>::new(&domain)));
-    });
+    c.bench_function(
+        "sinsemilla-merkle-unchecked-weighted-table-construction",
+        |bencher| {
+            bencher
+                .iter(|| black_box(UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain)));
+        },
+    );
 }
 
 criterion_group!(benches, benchmark_weighted);

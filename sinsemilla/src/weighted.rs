@@ -5,44 +5,40 @@
 //!
 //! `B_i = [2^(N-i)] A_i`, so `B_(i+1) = B_i + [2^(N-i-1)] S[m_i]`.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::mem;
 
 use group::{prime::PrimeCurveAffine, Curve, Group};
-use pasta_curves::{
-    arithmetic::{CurveAffine, CurveExt},
-    pallas,
-};
-use subtle::{ConstantTimeEq, CtOption};
+use pasta_curves::{arithmetic::CurveAffine, pallas};
 
 use super::{lebs2ip_k, HashDomain, Pad, C, K, SINSEMILLA_S_AFFINE};
 
 const GENERATOR_COUNT: usize = 1 << K;
 
-/// One weighted generator `W[e][j]` paired with the affine x-coordinate of
-/// its double `W[e+1][j]`, so each step reads one contiguous table entry.
-#[derive(Clone, Copy)]
-struct WeightedGenerator {
-    point: pallas::Affine,
-    doubled_x: pallas::Base,
-}
-
-/// A fixed-word-count Sinsemilla domain with position-weighted generators.
+/// An unchecked fixed-word-count Sinsemilla domain with position-weighted
+/// generators.
 ///
 /// Each instance is bound to the [`HashDomain`] it was constructed from;
 /// instances built for different domains are interchangeable at the type
 /// level, so callers must pair each table with messages for its own domain.
 ///
+/// This evaluator deliberately omits Sinsemilla's incomplete-addition checks.
+/// Finding an input that triggers one of those exceptional cases for the
+/// protocol's independently generated `Q` and `S` points would exhibit a
+/// nontrivial multi-base discrete-log relation between those points. Callers
+/// that require exact partial-function semantics must use [`HashDomain`]
+/// instead.
+///
 /// Construction is intentionally explicit and potentially expensive. Callers
 /// should build this once and keep it outside timed or repeated hash paths.
-pub struct FixedLengthHashDomain<const N: usize> {
+pub struct UncheckedFixedLengthHashDomain<const N: usize> {
     initial: pallas::Point,
-    /// Interleaved entries `(W[e][j], x(W[e+1][j]))` with `W[e][j] = [2^e]
-    /// S[j]`, flattened row-major for `0 <= e < N` and `0 <= j < 2^K`.
-    weighted_generators: Box<[WeightedGenerator]>,
+    /// Affine entries `W[e][j] = [2^e] S[j]`, flattened row-major for
+    /// `0 <= e < N` and `0 <= j < 2^K`.
+    weighted_generators: Box<[pallas::Affine]>,
 }
 
-impl<const N: usize> FixedLengthHashDomain<N> {
+impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     /// Precomputes the position-weighted table for `domain`.
     ///
     /// # Panics
@@ -60,25 +56,20 @@ impl<const N: usize> FixedLengthHashDomain<N> {
             .copied()
             .map(pallas::Point::from)
             .collect();
-        let mut current_row: Vec<_> = SINSEMILLA_S_AFFINE.iter().copied().collect();
-        let mut doubled_row = vec![pallas::Affine::identity(); GENERATOR_COUNT];
+        let mut affine_row: Vec<_> = SINSEMILLA_S_AFFINE.iter().copied().collect();
 
-        for _ in 0..N {
-            projective_row
-                .iter_mut()
-                .for_each(|point| *point = point.double());
-            pallas::Point::batch_normalize(&projective_row, &mut doubled_row);
-            assert!(doubled_row
+        for exponent in 0..N {
+            assert!(affine_row
                 .iter()
                 .all(|point| !bool::from(point.is_identity())));
-            weighted_generators.extend(current_row.iter().zip(&doubled_row).map(
-                |(generator, doubled)| WeightedGenerator {
-                    point: *generator,
-                    // The assertion above guarantees affine coordinates exist.
-                    doubled_x: *doubled.coordinates().unwrap().x(),
-                },
-            ));
-            mem::swap(&mut current_row, &mut doubled_row);
+            weighted_generators.extend(affine_row.iter().copied());
+
+            if exponent + 1 < N {
+                projective_row
+                    .iter_mut()
+                    .for_each(|point| *point = point.double());
+                pallas::Point::batch_normalize(&projective_row, &mut affine_row);
+            }
         }
 
         assert_eq!(weighted_generators.len(), N * GENERATOR_COUNT);
@@ -96,7 +87,7 @@ impl<const N: usize> FixedLengthHashDomain<N> {
     /// # Panics
     ///
     /// Panics if any word is not a valid `K`-bit Sinsemilla word.
-    pub fn hash_words(&self, words: &[u16; N]) -> CtOption<pallas::Point> {
+    pub fn hash_words(&self, words: &[u16; N]) -> pallas::Point {
         self.evaluate(words.iter().copied())
     }
 
@@ -106,7 +97,7 @@ impl<const N: usize> FixedLengthHashDomain<N> {
     /// # Panics
     ///
     /// Panics if the zero-padded message is not exactly `N` words long.
-    pub fn hash_to_point(&self, msg: impl Iterator<Item = bool>) -> CtOption<pallas::Point> {
+    pub fn hash_to_point(&self, msg: impl Iterator<Item = bool>) -> pallas::Point {
         let padded: Vec<_> = Pad::new(msg).collect();
         assert_eq!(padded.len(), N * K, "unexpected padded message length");
 
@@ -122,93 +113,53 @@ impl<const N: usize> FixedLengthHashDomain<N> {
     /// # Panics
     ///
     /// Panics as [`Self::hash_to_point`] does.
-    pub fn hash(&self, msg: impl Iterator<Item = bool>) -> CtOption<pallas::Base> {
-        super::extract_p_bottom(self.hash_to_point(msg))
+    pub fn hash(&self, msg: impl Iterator<Item = bool>) -> pallas::Base {
+        self.hash_to_point(msg)
+            .to_affine()
+            .coordinates()
+            .map(|coordinates| *coordinates.x())
+            .unwrap_or_else(pallas::Base::zero)
     }
 
     /// Returns the heap size occupied by the weighted generator table.
     pub fn table_bytes(&self) -> usize {
-        self.weighted_generators.len() * mem::size_of::<WeightedGenerator>()
+        self.weighted_generators.len() * mem::size_of::<pallas::Affine>()
     }
 
-    fn evaluate(&self, words: impl ExactSizeIterator<Item = u16>) -> CtOption<pallas::Point> {
+    fn evaluate(&self, words: impl ExactSizeIterator<Item = u16>) -> pallas::Point {
         assert_eq!(words.len(), N, "unexpected Sinsemilla word count");
 
-        words
-            .enumerate()
-            .fold(CtOption::new(self.initial, 1.into()), |acc, (i, word)| {
-                let generator_index = usize::from(word);
-                assert!(generator_index < GENERATOR_COUNT, "invalid Sinsemilla word");
+        words.enumerate().fold(self.initial, |point, (i, word)| {
+            let generator_index = usize::from(word);
+            assert!(generator_index < GENERATOR_COUNT, "invalid Sinsemilla word");
 
-                let exponent = N - i - 1;
-                let entry = self.weighted_generator(exponent, generator_index);
-
-                weighted_step(acc, entry.point, entry.doubled_x)
-            })
+            let exponent = N - i - 1;
+            point + self.weighted_generator(exponent, generator_index)
+        })
     }
 
-    fn weighted_generator(&self, exponent: usize, generator: usize) -> WeightedGenerator {
+    fn weighted_generator(&self, exponent: usize, generator: usize) -> pallas::Affine {
         self.weighted_generators[exponent * GENERATOR_COUNT + generator]
     }
-}
-
-/// Applies one scaled transition while preserving the canonical incomplete-
-/// addition failure conditions.
-fn weighted_step(
-    acc: CtOption<pallas::Point>,
-    generator: pallas::Affine,
-    doubled_generator_x: pallas::Base,
-) -> CtOption<pallas::Point> {
-    acc.and_then(|point| {
-        let (point_x, _, point_z) = point.jacobian_coordinates();
-
-        // In scaled coordinates, A = +/-S iff B = +/-[2]G. The two signs
-        // have the same affine x-coordinate.
-        let same_x = point_x.ct_eq(&(doubled_generator_x * point_z.square()));
-        let next = point + generator;
-
-        CtOption::new(next, !(point.is_identity() | same_x | next.is_identity()))
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
 
-    use group::{ff::PrimeField, prime::PrimeCurveAffine, Curve, Group};
-    use pasta_curves::{arithmetic::CurveAffine, pallas};
+    use group::{prime::PrimeCurveAffine, Curve, Group};
+    use pasta_curves::pallas;
     use subtle::CtOption;
 
-    use super::{weighted_step, FixedLengthHashDomain, WeightedGenerator, GENERATOR_COUNT};
-    use crate::{HashDomain, IncompletePoint, K, SINSEMILLA_S_AFFINE};
+    use super::{UncheckedFixedLengthHashDomain, GENERATOR_COUNT};
+    use crate::{HashDomain, K, SINSEMILLA_S_AFFINE};
 
     const MERKLE_WORDS: usize = 52;
     const MERKLE_DOMAIN: &str = "z.cash:Orchard-MerkleCRH";
 
-    fn assert_same(expected: CtOption<pallas::Point>, actual: CtOption<pallas::Point>) {
-        let expected_is_some = bool::from(expected.is_some());
-        assert_eq!(bool::from(actual.is_some()), expected_is_some);
-        if expected_is_some {
-            assert_eq!(actual.unwrap(), expected.unwrap());
-        }
-    }
-
-    fn canonical_step(point: pallas::Point, generator: pallas::Affine) -> CtOption<pallas::Point> {
-        let point = IncompletePoint::from(point);
-        ((point + generator) + point).into()
-    }
-
-    fn affine_x(point: pallas::Affine) -> pallas::Base {
-        *point.coordinates().unwrap().x()
-    }
-
-    fn scaled_step(point: pallas::Point, generator: pallas::Affine) -> CtOption<pallas::Point> {
-        let doubled_x = affine_x(pallas::Point::from(generator).double().to_affine());
-        weighted_step(
-            CtOption::new(point.double(), 1.into()),
-            generator,
-            doubled_x,
-        )
+    fn assert_matches(expected: CtOption<pallas::Point>, actual: pallas::Point) {
+        assert!(bool::from(expected.is_some()));
+        assert_eq!(actual, expected.unwrap());
     }
 
     fn words_to_bits(words: &[u16]) -> Vec<bool> {
@@ -227,30 +178,31 @@ mod tests {
     }
 
     #[test]
-    fn weighted_step_preserves_every_generator_exception() {
-        let generator = pallas::Point::generator();
+    fn unchecked_evaluator_deliberately_skips_incomplete_addition_failure() {
+        let generator_index = 0;
+        let generator = SINSEMILLA_S_AFFINE[generator_index];
+        let generator_point = pallas::Point::from(generator);
+        let domain = HashDomain::from_Q(generator_point);
+        let unchecked = UncheckedFixedLengthHashDomain::<1>::new(&domain);
+        let words = [generator_index as u16];
+        let bits = words_to_bits(&words);
 
-        for (index, s) in SINSEMILLA_S_AFFINE.iter().copied().enumerate() {
-            assert!(!bool::from(s.is_identity()), "identity generator {index}");
-            let s_point = pallas::Point::from(s);
-
-            for point in [
-                pallas::Point::identity(),
-                s_point,
-                -s_point,
-                -(s_point * pallas::Scalar::TWO_INV),
-                s_point * pallas::Scalar::TWO_INV,
-                generator * pallas::Scalar::from(index as u64 + 1),
-            ] {
-                assert_same(canonical_step(point, s), scaled_step(point, s));
-            }
-        }
+        // The first incomplete addition attempts S + S, so the specified
+        // partial function returns bottom. The unchecked evaluator computes
+        // the corresponding complete group expression instead.
+        assert!(!bool::from(
+            domain.hash_to_point(bits.iter().copied()).is_some()
+        ));
+        assert_eq!(
+            unchecked.hash_words(&words),
+            generator_point.double() + generator
+        );
     }
 
     #[test]
     fn fixed_merkle_length_matches_generic_evaluation() {
         let domain = HashDomain::new(MERKLE_DOMAIN);
-        let weighted = FixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
+        let weighted = UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
 
         let mut fixtures = vec![
             [0; MERKLE_WORDS],
@@ -267,37 +219,39 @@ mod tests {
         for words in fixtures {
             let bits = words_to_bits(&words);
             let expected = domain.hash_to_point(bits.iter().copied());
-            assert_same(expected, weighted.hash_words(&words));
-            assert_same(expected, weighted.hash_to_point(bits.iter().copied()));
+            assert_matches(expected, weighted.hash_words(&words));
+            assert_matches(expected, weighted.hash_to_point(bits.iter().copied()));
+
+            let expected = domain.hash(bits.iter().copied());
+            assert!(bool::from(expected.is_some()));
+            assert_eq!(expected.unwrap(), weighted.hash(bits.iter().copied()));
         }
     }
 
     #[test]
     fn weighted_table_is_a_doubling_chain() {
         let domain = HashDomain::new(MERKLE_DOMAIN);
-        let weighted = FixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
+        let weighted = UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
 
         assert_eq!(
             weighted.table_bytes(),
-            MERKLE_WORDS * GENERATOR_COUNT * core::mem::size_of::<WeightedGenerator>()
+            MERKLE_WORDS * GENERATOR_COUNT * core::mem::size_of::<pallas::Affine>()
         );
 
         for generator in 0..GENERATOR_COUNT {
             assert_eq!(
-                weighted.weighted_generator(0, generator).point,
+                weighted.weighted_generator(0, generator),
                 SINSEMILLA_S_AFFINE[generator]
             );
             for exponent in 0..MERKLE_WORDS {
                 let entry = weighted.weighted_generator(exponent, generator);
-                let doubled = pallas::Point::from(entry.point).double().to_affine();
-
-                // Each entry pairs a generator with its double's x-coordinate.
-                assert_eq!(entry.doubled_x, affine_x(doubled));
+                assert!(!bool::from(entry.is_identity()));
+                let doubled = pallas::Point::from(entry).double().to_affine();
 
                 // Adjacent rows chain by doubling.
                 if exponent + 1 < MERKLE_WORDS {
                     assert_eq!(
-                        weighted.weighted_generator(exponent + 1, generator).point,
+                        weighted.weighted_generator(exponent + 1, generator),
                         doubled
                     );
                 }
