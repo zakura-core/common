@@ -35,9 +35,9 @@
 
 use alloc::vec::Vec;
 
-use ff::PrimeField;
 #[cfg(test)]
 use ff::WithSmallOrderMulGroup;
+use ff::{Field, PrimeField};
 use group::prime::PrimeCurveAffine;
 
 use crate::arithmetic::{mac, sbb, CurveExt};
@@ -347,99 +347,203 @@ fn booth_digit(component: SignedMagnitude, window_bits: usize, window: usize) ->
     }
 }
 
+// XYZZ stores `(X, Y, Z^2, Z^3)`, avoiding field inversions while MSM buckets
+// are accumulated. The formulas are adapted from Supranational's Apache-2.0
+// licensed `sppark` implementation: https://github.com/supranational/sppark.
 #[derive(Clone, Copy)]
-enum MultiexpBucket<C: GlvParams> {
-    None,
-    Affine(C::AffineExt),
-    Projective(C),
+struct Xyzz<F: Field> {
+    x: F,
+    y: F,
+    zz: F,
+    zzz: F,
 }
 
-impl<C: GlvParams> MultiexpBucket<C> {
-    fn add_assign(&mut self, point: C::AffineExt) {
-        *self = match *self {
-            Self::None => Self::Affine(point),
-            Self::Affine(current) => Self::Projective(current + point),
-            Self::Projective(mut current) => {
-                current += point;
-                Self::Projective(current)
-            }
-        };
+impl<F: Field> Xyzz<F> {
+    fn identity() -> Self {
+        Self {
+            x: F::ZERO,
+            y: F::ZERO,
+            zz: F::ZERO,
+            zzz: F::ZERO,
+        }
     }
 
-    fn add(self, mut other: C) -> C {
-        match self {
-            Self::None => other,
-            Self::Affine(point) => {
-                other += point;
-                other
+    fn is_identity(&self) -> bool {
+        bool::from(self.zz.is_zero() & self.zzz.is_zero())
+    }
+
+    fn add_affine(&mut self, point_x: F, point_y: F, subtract: bool) {
+        if self.is_identity() {
+            self.x = point_x;
+            self.y = if subtract { -point_y } else { point_y };
+            self.zz = F::ONE;
+            self.zzz = F::ONE;
+            return;
+        }
+
+        let mut r = point_y * self.zzz;
+        if subtract {
+            r = -r;
+        }
+        r -= self.y;
+        let mut p = point_x * self.zz - self.x;
+
+        if !bool::from(p.is_zero()) {
+            let mut pp = p.square();
+            p *= pp;
+            self.zz *= pp;
+            self.zzz *= p;
+            pp *= self.x;
+            self.x = r.square() - p - pp - pp;
+            pp = (pp - self.x) * r;
+            self.y *= p;
+            self.y = pp - self.y;
+        } else if bool::from(r.is_zero()) {
+            p = point_y.double();
+            self.zz = p.square();
+            self.zzz = self.zz * p;
+            r = point_x * self.zz;
+            let x_squared = point_x.square();
+            let m = x_squared.double() + x_squared;
+            self.x = m.square() - r - r;
+            self.y = self.zzz * point_y;
+            r = (r - self.x) * m;
+            self.y = r - self.y;
+            if subtract {
+                self.zzz = -self.zzz;
             }
-            Self::Projective(point) => other + point,
+        } else {
+            *self = Self::identity();
+        }
+    }
+
+    fn double(&mut self) {
+        if self.is_identity() {
+            return;
+        }
+
+        let u = self.y.double();
+        let p = u.square();
+        let r = u * p;
+        let mut s = self.x * p;
+        let x_squared = self.x.square();
+        let m = x_squared.double() + x_squared;
+        self.x = m.square() - s - s;
+        self.y *= r;
+        s = (s - self.x) * m;
+        self.y = s - self.y;
+        self.zz *= p;
+        self.zzz *= r;
+    }
+
+    fn add(&mut self, other: &Self) {
+        if other.is_identity() {
+            return;
+        }
+        if self.is_identity() {
+            *self = *other;
+            return;
+        }
+
+        let u = self.x * other.zz;
+        let s = self.y * other.zzz;
+        let mut p = other.x * self.zz - u;
+        let r = other.y * self.zzz - s;
+
+        if !bool::from(p.is_zero()) {
+            let mut pp = p.square();
+            p *= pp;
+            self.zz *= pp;
+            self.zzz *= p;
+            pp *= u;
+            self.x = r.square() - p - pp - pp;
+            pp = (pp - self.x) * r;
+            self.y = pp - s * p;
+            self.zz *= other.zz;
+            self.zzz *= other.zzz;
+        } else if bool::from(r.is_zero()) {
+            self.double();
+        } else {
+            *self = Self::identity();
         }
     }
 }
 
-fn add_digit<C: GlvParams>(
-    buckets: &mut [MultiexpBucket<C>],
+fn add_digit<C, Coordinates>(
+    buckets: &mut [Xyzz<C::Base>],
     digit: BoothDigit,
     base: C::AffineExt,
-) {
-    if digit.magnitude != 0 {
-        let base = if digit.negative { -base } else { base };
-        buckets[digit.magnitude - 1].add_assign(base);
+    affine_coordinates: &Coordinates,
+) where
+    C: GlvParams,
+    Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
+{
+    if digit.magnitude != 0 && !bool::from(base.is_identity()) {
+        let (x, y) = affine_coordinates(base);
+        buckets[digit.magnitude - 1].add_affine(x, y, digit.negative);
     }
 }
 
-fn sum_buckets<C: GlvParams>(buckets: &[MultiexpBucket<C>]) -> C {
-    let mut running = C::identity();
-    let mut sum = C::identity();
+fn sum_buckets<F: Field>(buckets: &[Xyzz<F>]) -> Xyzz<F> {
+    let mut running = Xyzz::identity();
+    let mut sum = Xyzz::identity();
     for bucket in buckets.iter().rev() {
-        running = bucket.add(running);
-        sum += running;
+        running.add(bucket);
+        sum.add(&running);
     }
     sum
 }
 
-fn multiexp<C: GlvParams>(
+fn multiexp<C, Coordinates, ToCurve>(
     components: &[(SignedMagnitude, SignedMagnitude)],
     bases: &[C::AffineExt],
     endo_bases: &[C::AffineExt],
     window_bits: usize,
-) -> C {
+    affine_coordinates: &Coordinates,
+    xyzz_to_curve: ToCurve,
+) -> C
+where
+    C: GlvParams,
+    Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
+    ToCurve: FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
+{
     debug_assert_eq!(components.len(), bases.len());
     debug_assert_eq!(components.len(), endo_bases.len());
 
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
-    let mut buckets = alloc::vec![MultiexpBucket::<C>::None; 1 << (window_bits - 1)];
-    let mut acc = C::identity();
+    let mut buckets = alloc::vec![Xyzz::identity(); 1 << (window_bits - 1)];
+    let mut acc = Xyzz::identity();
 
     for window in (0..window_count).rev() {
         if window + 1 != window_count {
             for _ in 0..window_bits {
-                acc = acc.double();
+                acc.double();
             }
         }
 
-        buckets.fill(MultiexpBucket::None);
+        buckets.fill(Xyzz::identity());
         for ((first, second), base, endo_base) in components
             .iter()
             .zip(bases)
             .zip(endo_bases)
             .map(|(((first, second), base), endo_base)| ((first, second), base, endo_base))
         {
-            add_digit(
+            add_digit::<C, Coordinates>(
                 &mut buckets,
                 booth_digit(*first, window_bits, window),
                 *base,
+                affine_coordinates,
             );
-            add_digit(
+            add_digit::<C, Coordinates>(
                 &mut buckets,
                 booth_digit(*second, window_bits, window),
                 *endo_base,
+                affine_coordinates,
             );
         }
-        acc += sum_buckets(&buckets);
+        acc.add(&sum_buckets(&buckets));
     }
-    acc
+    xyzz_to_curve(acc.x, acc.y, acc.zz, acc.zzz)
 }
 
 /// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
@@ -450,6 +554,8 @@ pub(crate) fn try_multiexp<C: GlvParams>(
     bases: &[C::AffineExt],
     window_bits: usize,
     mut affine_endo: impl FnMut(C::AffineExt) -> C::AffineExt,
+    affine_coordinates: impl Fn(C::AffineExt) -> (C::Base, C::Base),
+    xyzz_to_curve: impl FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
 ) -> Option<C> {
     assert_eq!(scalars.len(), bases.len());
     assert!(window_bits > 0 && window_bits < usize::BITS as usize);
@@ -467,7 +573,14 @@ pub(crate) fn try_multiexp<C: GlvParams>(
         .copied()
         .map(&mut affine_endo)
         .collect::<Vec<_>>();
-    Some(multiexp(&components, bases, &endo_bases, window_bits))
+    Some(multiexp(
+        &components,
+        bases,
+        &endo_bases,
+        window_bits,
+        &affine_coordinates,
+        xyzz_to_curve,
+    ))
 }
 
 /// The GLV window for one base point: the odd multiples `{1, 3, 5, 7} * P` and
@@ -648,7 +761,7 @@ fn wnaf_digits(a: u128, negate: bool) -> ([i8; MAX_WNAF_DIGITS], usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arithmetic::adc;
+    use crate::arithmetic::{adc, CurveAffine};
     use ff::Field;
 
     #[test]
@@ -907,6 +1020,52 @@ mod tests {
         }
     }
 
+    fn xyzz_matches_native<C>()
+    where
+        C: GlvParams,
+        C::AffineExt: CurveAffine<Base = C::Base>,
+    {
+        let generator = C::generator();
+        let affine = C::AffineExt::from(generator);
+        let coordinates = affine.coordinates().unwrap();
+        let (x, y) = (*coordinates.x(), *coordinates.y());
+        let to_curve = |point: Xyzz<C::Base>| {
+            if point.is_identity() {
+                C::identity()
+            } else {
+                C::new_jacobian(
+                    point.x * point.zz.square(),
+                    point.y * point.zzz.square(),
+                    point.zzz,
+                )
+                .unwrap()
+            }
+        };
+
+        let mut positive = Xyzz::identity();
+        assert_eq!(to_curve(positive), C::identity());
+        positive.add_affine(x, y, false);
+        assert_eq!(to_curve(positive), generator);
+        positive.add_affine(x, y, false);
+        assert_eq!(to_curve(positive), generator.double());
+
+        let mut negative = Xyzz::identity();
+        negative.add_affine(x, y, true);
+        negative.add_affine(x, y, true);
+        assert_eq!(to_curve(negative), -generator.double());
+
+        positive.add(&negative);
+        assert_eq!(to_curve(positive), C::identity());
+
+        let mut two = Xyzz::identity();
+        two.add_affine(x, y, false);
+        two.double();
+        let mut three = two;
+        three.add_affine(x, y, false);
+        two.add(&three);
+        assert_eq!(to_curve(two), generator * C::ScalarExt::from(5));
+    }
+
     macro_rules! glv_tests {
         ($mod_name:ident, $curve:ty) => {
             mod $mod_name {
@@ -943,6 +1102,10 @@ mod tests {
                 #[test]
                 fn decomposed_reuse() {
                     decomposed_reuse_matches_fresh::<$curve>();
+                }
+                #[test]
+                fn xyzz() {
+                    xyzz_matches_native::<$curve>();
                 }
             }
         };

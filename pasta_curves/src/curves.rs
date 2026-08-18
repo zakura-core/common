@@ -61,10 +61,28 @@ macro_rules! impl_glv_multiexp_vartime {
             bases: &[Self::AffineExt],
             window_bits: usize,
         ) -> Option<Self> {
-            crate::glv::try_multiexp::<$name>(scalars, bases, window_bits, |point| $name_affine {
-                x: point.x * $base::ZETA,
-                y: point.y,
-            })
+            crate::glv::try_multiexp::<$name>(
+                scalars,
+                bases,
+                window_bits,
+                |point| $name_affine {
+                    x: point.x * $base::ZETA,
+                    y: point.y,
+                },
+                |point| (point.x, point.y),
+                |x, y, zz, zzz| {
+                    if bool::from(zzz.is_zero()) {
+                        debug_assert!(bool::from(zz.is_zero()));
+                        $name::identity()
+                    } else {
+                        $name {
+                            x: x * zz.square(),
+                            y: y * zzz.square(),
+                            z: zzz,
+                        }
+                    }
+                },
+            )
         }
     };
     (native, $name:ident, $name_affine:ident, $base:ident) => {};
