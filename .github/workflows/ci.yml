@@ -6,9 +6,11 @@ name: CI
 # the same policy as zakura-core/zakura.
 
 on:
+  # Allow maintainers to toggle the ci-backfill label when an unchanged PR
+  # needs a fresh required test success check.
   pull_request:
-    branches:
-      - main
+    branches: [main, "feat/**", "release/**", "agent/**"]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
       - main
@@ -412,13 +414,33 @@ jobs:
           if [[ "$STAGE" != stable ]]; then
             features="$features,$STAGE"
           fi
+          # This job is a 32-bit portability gate, not a full regression
+          # suite: it exists to exercise pointer-width-dependent code
+          # (PrimeFieldBits' u32 limbs, usize assumptions, u128 lowering)
+          # and proof (de)serialization on a 32-bit target. The skipped
+          # tests below are the handful of multi-minute MockProver /
+          # constant-generation tests; they re-run arithmetic that the
+          # remaining tests already cover and account for ~90% of this
+          # job's runtime (the full suite runs on x86_64 above). All
+          # stored-proof verifier tests, the real prove-and-verify path
+          # (halo2_proofs plonk tests), and one MockProver satisfaction
+          # test per chip still run here. Note --skip matches substrings,
+          # so ecc_chip and invalid_magnitude_sign also cover their
+          # _4_5b variants.
           cargo +1.88.0 test --verbose --release \
             -p zakura-halo2-gadgets \
             -p zakura-halo2-poseidon \
             -p zakura-halo2-proofs \
             --target i686-unknown-linux-gnu \
             --no-default-features \
-            --features "$features"
+            --features "$features" \
+            -- \
+            --skip ecc::chip::constants::tests::lagrange_coeffs \
+            --skip ecc::chip::constants::tests::zs_and_us \
+            --skip ecc::chip::mul_fixed::short::tests::invalid_magnitude_sign \
+            --skip ecc::tests::ecc_chip \
+            --skip sinsemilla::tests::sinsemilla_chip \
+            --skip utilities::lookup_range_check::tests::short_range_check
 
   halo2-build:
     name: halo2 / Build ${{ matrix.target }}

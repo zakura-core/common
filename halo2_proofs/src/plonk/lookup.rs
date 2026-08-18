@@ -14,7 +14,15 @@ impl<F: Field> Argument<F> {
     /// Constructs a new lookup argument.
     ///
     /// `table_map` is a sequence of `(input, table)` tuples.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `table_map` is empty.
     pub fn new(table_map: Vec<(Expression<F>, Expression<F>)>) -> Self {
+        assert!(
+            !table_map.is_empty(),
+            "lookup argument requires at least one input-table pair"
+        );
         let (input_expressions, table_expressions) = table_map.into_iter().unzip();
         Argument {
             input_expressions,
@@ -68,5 +76,19 @@ impl<F: Field> Argument<F> {
             // (1 - (l_last + l_blind)) z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
             2 + input_degree + table_degree,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pasta_curves::Fp;
+
+    use crate::plonk::ConstraintSystem;
+
+    #[test]
+    #[should_panic(expected = "lookup argument requires at least one input-table pair")]
+    fn empty_lookup_panics() {
+        let mut meta = ConstraintSystem::<Fp>::default();
+        meta.lookup(|_| vec![]);
     }
 }
