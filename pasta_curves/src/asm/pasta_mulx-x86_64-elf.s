@@ -298,6 +298,251 @@ pasta_curves_sqrx_mont:
 	.byte	0xf3,0xc3
 .cfi_endproc
 .size	pasta_curves_sqrx_mont,.-pasta_curves_sqrx_mont
+
+# Squares `value` `count` times, then multiplies by `rhs`. `count` must be at
+# least one. The square accumulator remains inside one native frame, avoiding
+# a Rust/native round trip for every step in exponentiation addition chains.
+.globl	pasta_curves_sqr_n_mulx_mont
+.hidden	pasta_curves_sqr_n_mulx_mont
+.type	pasta_curves_sqr_n_mulx_mont,@function
+.align	32
+pasta_curves_sqr_n_mulx_mont:
+.cfi_startproc
+	.byte	0xf3,0x0f,0x1e,0xfa
+
+	pushq	%rbp
+.cfi_adjust_cfa_offset	8
+.cfi_offset	%rbp,-16
+	pushq	%rbx
+.cfi_adjust_cfa_offset	8
+.cfi_offset	%rbx,-24
+	pushq	%r12
+.cfi_adjust_cfa_offset	8
+.cfi_offset	%r12,-32
+	pushq	%r13
+.cfi_adjust_cfa_offset	8
+.cfi_offset	%r13,-40
+	pushq	%r14
+.cfi_adjust_cfa_offset	8
+.cfi_offset	%r14,-48
+	pushq	%r15
+.cfi_adjust_cfa_offset	8
+.cfi_offset	%r15,-56
+	subq	$88,%rsp
+.cfi_adjust_cfa_offset	88
+
+	movq	%rdi,32(%rsp)
+	movq	%rcx,40(%rsp)
+	movq	%rdx,48(%rsp)
+	movq	%r8,%rbp
+	movq	%r9,%rcx
+
+.L_pasta_curves_sqr_n_mulx_loop:
+	# Form the six off-diagonal products once.
+	movq	0(%rsi),%rdx
+	mulxq	8(%rsi),%r9,%rax
+	mulxq	16(%rsi),%r10,%rdi
+	addq	%rax,%r10
+	adcq	$0,%rdi
+	mulxq	24(%rsi),%r11,%r12
+	addq	%rdi,%r11
+	adcq	$0,%r12
+
+	movq	8(%rsi),%rdx
+	mulxq	16(%rsi),%rax,%rdi
+	addq	%rax,%r11
+	adcq	$0,%rdi
+	mulxq	24(%rsi),%rax,%r13
+	addq	%r12,%rax
+	adcq	$0,%r13
+	addq	%rdi,%rax
+	adcq	$0,%r13
+	movq	%rax,%r12
+
+	movq	16(%rsi),%rdx
+	mulxq	24(%rsi),%rax,%r14
+	addq	%r13,%rax
+	adcq	$0,%r14
+	movq	%rax,%r13
+
+	# Double the off-diagonal half of the square.
+	xorq	%r15,%r15
+	addq	%r9,%r9
+	adcq	%r10,%r10
+	adcq	%r11,%r11
+	adcq	%r12,%r12
+	adcq	%r13,%r13
+	adcq	%r14,%r14
+	adcq	%r15,%r15
+
+	# Add the four diagonal products.
+	movq	0(%rsi),%rdx
+	mulxq	%rdx,%r8,%rax
+	addq	%rax,%r9
+	movq	8(%rsi),%rdx
+	mulxq	%rdx,%rax,%rdi
+	adcq	%r10,%rax
+	adcq	$0,%rdi
+	movq	%rax,%r10
+	addq	%rdi,%r11
+	movq	16(%rsi),%rdx
+	mulxq	%rdx,%rax,%rdi
+	adcq	%r12,%rax
+	adcq	$0,%rdi
+	movq	%rax,%r12
+	addq	%rdi,%r13
+	movq	24(%rsi),%rdx
+	mulxq	%rdx,%rax,%rdi
+	adcq	%r14,%rax
+	adcq	$0,%rdi
+	movq	%rax,%r14
+	addq	%rdi,%r15
+
+	# Preserve the upper half while reducing the lower half by R.
+	movq	%r12,0(%rsp)
+	movq	%r13,8(%rsp)
+	movq	%r14,16(%rsp)
+	movq	%r15,24(%rsp)
+	movq	0(%rbp),%r12
+	movq	8(%rbp),%r13
+
+	# Montgomery cancellation 0.
+	movq	%r8,%rdx
+	imulq	%rcx,%rdx
+	mulxq	%r13,%r15,%rdi
+	mulxq	%r12,%rax,%r14
+	movq	%rdx,%rax
+	shlq	$62,%rax
+	shrq	$2,%rdx
+	negq	%r8
+	adcq	%r15,%r9
+	adcq	$0,%r10
+	adcq	%rax,%r11
+	movq	$0,%r8
+	adcq	$0,%r8
+	addq	%r14,%r9
+	adcq	%rdi,%r10
+	adcq	$0,%r11
+	adcq	%rdx,%r8
+
+	# Montgomery cancellation 1.
+	movq	%r9,%rdx
+	imulq	%rcx,%rdx
+	mulxq	%r13,%r15,%rdi
+	mulxq	%r12,%rax,%r14
+	movq	%rdx,%rax
+	shlq	$62,%rax
+	shrq	$2,%rdx
+	negq	%r9
+	adcq	%r15,%r10
+	adcq	$0,%r11
+	adcq	%rax,%r8
+	movq	$0,%r9
+	adcq	$0,%r9
+	addq	%r14,%r10
+	adcq	%rdi,%r11
+	adcq	$0,%r8
+	adcq	%rdx,%r9
+
+	# Montgomery cancellation 2.
+	movq	%r10,%rdx
+	imulq	%rcx,%rdx
+	mulxq	%r13,%r15,%rdi
+	mulxq	%r12,%rax,%r14
+	movq	%rdx,%rax
+	shlq	$62,%rax
+	shrq	$2,%rdx
+	negq	%r10
+	adcq	%r15,%r11
+	adcq	$0,%r8
+	adcq	%rax,%r9
+	movq	$0,%r10
+	adcq	$0,%r10
+	addq	%r14,%r11
+	adcq	%rdi,%r8
+	adcq	$0,%r9
+	adcq	%rdx,%r10
+
+	# Montgomery cancellation 3.
+	movq	%r11,%rdx
+	imulq	%rcx,%rdx
+	mulxq	%r13,%r15,%rdi
+	mulxq	%r12,%rax,%r14
+	movq	%rdx,%rax
+	shlq	$62,%rax
+	shrq	$2,%rdx
+	negq	%r11
+	adcq	%r15,%r8
+	adcq	$0,%r9
+	adcq	%rax,%r10
+	movq	$0,%r11
+	adcq	$0,%r11
+	addq	%r14,%r8
+	adcq	%rdi,%r9
+	adcq	$0,%r10
+	adcq	%rdx,%r11
+
+	# Add the upper half and canonicalize.
+	addq	0(%rsp),%r8
+	adcq	8(%rsp),%r9
+	adcq	16(%rsp),%r10
+	adcq	24(%rsp),%r11
+	movq	$0,%rsi
+	adcq	$0,%rsi
+	movq	%r8,%r14
+	movq	%r9,%r15
+	movq	%r10,%rax
+	movq	%r11,%rdi
+	subq	%r12,%r8
+	sbbq	%r13,%r9
+	sbbq	$0,%r10
+	sbbq	24(%rbp),%r11
+	sbbq	$0,%rsi
+	cmovcq	%r14,%r8
+	cmovcq	%r15,%r9
+	cmovcq	%rax,%r10
+	cmovcq	%rdi,%r11
+
+	subq	$1,48(%rsp)
+	jz	.L_pasta_curves_sqr_n_mulx_finish
+	movq	%r8,56(%rsp)
+	movq	%r9,64(%rsp)
+	movq	%r10,72(%rsp)
+	movq	%r11,80(%rsp)
+	leaq	56(%rsp),%rsi
+	jmp	.L_pasta_curves_sqr_n_mulx_loop
+
+.L_pasta_curves_sqr_n_mulx_finish:
+	movq	%r8,56(%rsp)
+	movq	%r9,64(%rsp)
+	movq	%r10,72(%rsp)
+	movq	%r11,80(%rsp)
+	movq	%rcx,%r8
+	movq	32(%rsp),%rdi
+	leaq	56(%rsp),%rsi
+	movq	40(%rsp),%rdx
+	movq	%rbp,%rcx
+	call	pasta_curves_mulx_mont
+
+	movq	88(%rsp),%r15
+.cfi_restore	%r15
+	movq	96(%rsp),%r14
+.cfi_restore	%r14
+	movq	104(%rsp),%r13
+.cfi_restore	%r13
+	movq	112(%rsp),%r12
+.cfi_restore	%r12
+	movq	120(%rsp),%rbx
+.cfi_restore	%rbx
+	movq	128(%rsp),%rbp
+.cfi_restore	%rbp
+	leaq	136(%rsp),%rsp
+.cfi_adjust_cfa_offset	-136
+
+	.byte	0xf3,0xc3
+.cfi_endproc
+.size	pasta_curves_sqr_n_mulx_mont,.-pasta_curves_sqr_n_mulx_mont
+
 .type	__pasta_curves_mulx_mont,@function
 .align	32
 __pasta_curves_mulx_mont:

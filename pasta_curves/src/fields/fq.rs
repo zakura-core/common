@@ -432,8 +432,8 @@ impl Fq {
     }
 
     /// Squares `self` `n` times (`n` must be at least 1), then multiplies the
-    /// result by `by`. The assembly backend keeps the accumulator in
-    /// registers for the whole chain.
+    /// result by `by`. The runtime backend is selected once for the entire
+    /// chain, and fused backends may keep the accumulator in registers.
     #[inline]
     fn sqr_n_mul_runtime(&self, n: u32, by: &Self) -> Self {
         assert!(n >= 1);
@@ -449,10 +449,20 @@ impl Fq {
             ))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple"
+        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64", any(unix, windows)))]
+        {
+            super::x86_64_asm::sqr_n_mul(&self.0, n as usize, &by.0, &MODULUS.0, INV)
+                .map(Fq)
+                .unwrap_or_else(|| (0..n).fold(*self, |acc, _| acc.square()).mul(by))
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ),
+            all(feature = "x86_64-asm", target_arch = "x86_64", any(unix, windows))
         )))]
         {
             (0..n).fold(*self, |acc, _| acc.square()).mul(by)
@@ -1075,6 +1085,14 @@ fn x86_64_asm_check(lhs: Fq, rhs: Fq) {
         super::x86_64_asm::square(&lhs.0, &MODULUS.0, INV).map(Fq),
         available.then_some(portable_square),
     );
+    for n in [1, 2, 7, 129] {
+        let portable = (0..n).fold(lhs, |acc, _| Fq::square(&acc)).mul(&rhs);
+        assert_eq!(lhs.sqr_n_mul_runtime(n, &rhs), portable);
+        assert_eq!(
+            super::x86_64_asm::sqr_n_mul(&lhs.0, n as usize, &rhs.0, &MODULUS.0, INV,).map(Fq),
+            (available && cfg!(target_os = "linux")).then_some(portable),
+        );
+    }
 }
 
 #[cfg(all(

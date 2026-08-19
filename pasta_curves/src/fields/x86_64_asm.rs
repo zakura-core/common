@@ -36,6 +36,15 @@ extern "C" {
         modulus: *const Limbs,
         inv: u64,
     );
+    #[cfg(target_os = "linux")]
+    fn pasta_curves_sqr_n_mulx_mont(
+        out: *mut Limbs,
+        value: *const Limbs,
+        n: usize,
+        rhs: *const Limbs,
+        modulus: *const Limbs,
+        inv: u64,
+    );
 }
 
 #[cfg(all(target_feature = "adx", target_feature = "bmi2"))]
@@ -112,6 +121,43 @@ pub(super) fn square(value: &Limbs, modulus: &Limbs, inv: u64) -> Option<Limbs> 
         pasta_curves_sqrx_mont(&mut out, value, modulus, inv);
     }
     Some(out)
+}
+
+/// Squares a canonical Montgomery residue `n` times, then multiplies by
+/// `rhs`, when the fused BMI2/ADX backend is available.
+///
+/// Both moduli must have limb 2 equal to zero and limb 3 equal to $2^{62}$,
+/// and `inv` must equal the modulus's Montgomery inverse.
+pub(super) fn sqr_n_mul(
+    value: &Limbs,
+    n: usize,
+    rhs: &Limbs,
+    modulus: &Limbs,
+    inv: u64,
+) -> Option<Limbs> {
+    debug_assert!(n >= 1);
+
+    #[cfg(target_os = "linux")]
+    {
+        if !adx_available() {
+            return None;
+        }
+
+        let mut out = Limbs::default();
+        // SAFETY: Feature detection above establishes the BMI2 and ADX
+        // preconditions. All pointers refer to four initialized `u64` limbs
+        // for the duration of the call, and the backend writes four limbs.
+        unsafe {
+            pasta_curves_sqr_n_mulx_mont(&mut out, value, n, rhs, modulus, inv);
+        }
+        Some(out)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (value, n, rhs, modulus, inv);
+        None
+    }
 }
 
 #[cfg(test)]

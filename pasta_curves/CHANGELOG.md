@@ -35,3 +35,5 @@ and this project adheres to Rust's notion of
 - The `x86_64-asm` backend now uses a dedicated squaring schedule for `Fp` and
   `Fq`, instead of passing identical operands to the general multiplication
   routine.
+- On Linux, the `x86_64-asm` backend now fuses repeated squarings and the
+  following multiplication in exponentiation chains into one native call.
