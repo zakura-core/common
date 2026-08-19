@@ -959,7 +959,7 @@ jobs:
         include:
           - target: wasm32-wasip1
             packages: -p zakura-proofs
-            build-deps: gcc-multilib
+            build-deps: ""
           - target: thumbv7em-none-eabihf
             packages: -p zakura-keys -p zakura-primitives
             build-deps: gcc-arm-none-eabi
@@ -971,6 +971,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Install cross-platform support dependencies
+        if: matrix.build-deps != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.build-deps }}
       - name: Build target
         shell: bash
