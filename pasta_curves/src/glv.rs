@@ -43,6 +43,8 @@ use group::prime::PrimeCurveAffine;
 use maybe_rayon::prelude::*;
 
 use crate::arithmetic::{adc, mac, sbb, CurveExt};
+#[cfg(feature = "deferred")]
+use crate::deferred::DeferredField;
 use crate::{pallas, vesta};
 
 mod private {
@@ -400,6 +402,46 @@ struct Xyzz<F: Field> {
     zzz: F,
 }
 
+/// Field operations required by the XYZZ formulas.
+///
+/// With deferred arithmetic, a difference of two terminal products shares a
+/// single reduction. The eager fallback preserves `glv` without `deferred`.
+trait XyzzField: Field {
+    fn difference_of_products(
+        positive_left: Self,
+        positive_right: Self,
+        negative_left: Self,
+        negative_right: Self,
+    ) -> Self;
+}
+
+#[cfg(feature = "deferred")]
+impl<F: DeferredField> XyzzField for F {
+    fn difference_of_products(
+        positive_left: Self,
+        positive_right: Self,
+        negative_left: Self,
+        negative_right: Self,
+    ) -> Self {
+        let mut accumulator = <Self as DeferredField>::Accumulator::default();
+        Self::mul_accumulate(&mut accumulator, &positive_left, &positive_right);
+        Self::mul_accumulate(&mut accumulator, &-negative_left, &negative_right);
+        Self::reduce(accumulator)
+    }
+}
+
+#[cfg(not(feature = "deferred"))]
+impl<F: Field> XyzzField for F {
+    fn difference_of_products(
+        positive_left: Self,
+        positive_right: Self,
+        negative_left: Self,
+        negative_right: Self,
+    ) -> Self {
+        positive_left * positive_right - negative_left * negative_right
+    }
+}
+
 impl<F: Field> Xyzz<F> {
     fn identity() -> Self {
         Self {
@@ -422,7 +464,9 @@ impl<F: Field> Xyzz<F> {
     fn is_identity(&self) -> bool {
         bool::from(self.zz.is_zero() & self.zzz.is_zero())
     }
+}
 
+impl<F: XyzzField> Xyzz<F> {
     fn double(&mut self) {
         if self.is_identity() {
             return;
@@ -431,13 +475,11 @@ impl<F: Field> Xyzz<F> {
         let u = self.y.double();
         let p = u.square();
         let r = u * p;
-        let mut s = self.x * p;
+        let s = self.x * p;
         let x_squared = self.x.square();
         let m = x_squared.double() + x_squared;
         self.x = m.square() - s - s;
-        self.y *= r;
-        s = (s - self.x) * m;
-        self.y = s - self.y;
+        self.y = F::difference_of_products(s - self.x, m, self.y, r);
         self.zz *= p;
         self.zzz *= r;
     }
@@ -463,8 +505,7 @@ impl<F: Field> Xyzz<F> {
             self.zzz *= p;
             pp *= u;
             self.x = r.square() - p - pp - pp;
-            pp = (pp - self.x) * r;
-            self.y = pp - s * p;
+            self.y = F::difference_of_products(pp - self.x, r, s, p);
             self.zz *= other.zz;
             self.zzz *= other.zzz;
         } else if bool::from(r.is_zero()) {
@@ -749,7 +790,7 @@ fn reduce_affine_buckets<F: PrimeField>(
     buckets
 }
 
-fn sum_buckets<F: Field>(buckets: &[Xyzz<F>]) -> Xyzz<F> {
+fn sum_buckets<F: XyzzField>(buckets: &[Xyzz<F>]) -> Xyzz<F> {
     let mut running = Xyzz::identity();
     let mut sum = Xyzz::identity();
     for bucket in buckets.iter().rev() {
@@ -825,6 +866,7 @@ fn multiexp_serial<C, Coordinates>(
 ) -> Xyzz<C::Base>
 where
     C: GlvParams,
+    C::Base: XyzzField,
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
 {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
@@ -860,6 +902,7 @@ fn multiexp_parallel<C, Coordinates>(
 ) -> Xyzz<C::Base>
 where
     C: GlvParams,
+    C::Base: XyzzField,
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
 {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
@@ -897,6 +940,7 @@ fn multiexp<C, Coordinates, ToCurve>(
 ) -> C
 where
     C: GlvParams,
+    C::Base: XyzzField,
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
     ToCurve: FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
 {
@@ -934,17 +978,18 @@ where
     xyzz_to_curve(acc.x, acc.y, acc.zz, acc.zzz)
 }
 
-/// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
-/// MSM. The caller supplies the affine endomorphism because the concrete
-/// affine coordinates remain private to `curves`.
-pub(crate) fn try_multiexp<C: GlvParams>(
+fn try_multiexp_inner<C>(
     scalars: &[C::ScalarExt],
     bases: &[C::AffineExt],
     window_bits: usize,
     mut affine_endo: impl FnMut(C::AffineExt) -> C::AffineExt,
     affine_coordinates: impl Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
     xyzz_to_curve: impl FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
-) -> Option<C> {
+) -> Option<C>
+where
+    C: GlvParams,
+    C::Base: XyzzField,
+{
     assert_eq!(scalars.len(), bases.len());
     assert!(window_bits > 0 && window_bits < usize::BITS as usize);
     let num_threads = current_num_threads();
@@ -971,6 +1016,54 @@ pub(crate) fn try_multiexp<C: GlvParams>(
         &affine_coordinates,
         xyzz_to_curve,
     ))
+}
+
+/// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
+/// MSM. The caller supplies the affine endomorphism because the concrete
+/// affine coordinates remain private to `curves`.
+#[cfg(feature = "deferred")]
+pub(crate) fn try_multiexp<C>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+    window_bits: usize,
+    affine_endo: impl FnMut(C::AffineExt) -> C::AffineExt,
+    affine_coordinates: impl Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
+    xyzz_to_curve: impl FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
+) -> Option<C>
+where
+    C: GlvParams,
+    C::Base: DeferredField,
+{
+    try_multiexp_inner(
+        scalars,
+        bases,
+        window_bits,
+        affine_endo,
+        affine_coordinates,
+        xyzz_to_curve,
+    )
+}
+
+/// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
+/// MSM. The caller supplies the affine endomorphism because the concrete
+/// affine coordinates remain private to `curves`.
+#[cfg(not(feature = "deferred"))]
+pub(crate) fn try_multiexp<C: GlvParams>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+    window_bits: usize,
+    affine_endo: impl FnMut(C::AffineExt) -> C::AffineExt,
+    affine_coordinates: impl Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
+    xyzz_to_curve: impl FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
+) -> Option<C> {
+    try_multiexp_inner(
+        scalars,
+        bases,
+        window_bits,
+        affine_endo,
+        affine_coordinates,
+        xyzz_to_curve,
+    )
 }
 
 /// The GLV window for one base point: the odd multiples `{1, 3, 5, 7} * P` and
@@ -1427,6 +1520,7 @@ mod tests {
     fn xyzz_matches_native<C>()
     where
         C: GlvParams,
+        C::Base: XyzzField,
         C::AffineExt: CurveAffine<Base = C::Base>,
     {
         let generator = C::generator();
