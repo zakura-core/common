@@ -4,6 +4,60 @@
 //! precomputed table:
 //!
 //! `B_i = [2^(N-i)] A_i`, so `B_(i+1) = B_i + [2^(N-i-1)] S[m_i]`.
+//!
+//! ## Exceptional-case reduction
+//!
+//! Let `A_0 = Q` and `A_(i+1) = [2] A_i + S[m_i]`. Before the first
+//! exceptional incomplete addition, induction gives
+//!
+//! `A_i = [2^i] Q + sum_j [X_(i,j)] S[j]`,
+//!
+//! where `X_(i,j)` is the sum of `2^(i-1-t)` over the positions `t < i`
+//! for which `m_t = j`.
+//!
+//! The first incomplete addition in a step can fail only when
+//! `A_i = +/-S[m_i]`. If it succeeds, the second can fail only when
+//! `A_i + S[m_i] = -A_i`; equality with `A_i` would imply
+//! `S[m_i] = O`. Thus every exceptional step gives
+//!
+//! `[alpha] A_i + S[m_i] = O`
+//!
+//! for some `alpha` in `{-1, 1, 2}`. Substitution gives the efficiently
+//! computable discrete-logarithm relation
+//!
+//! `[alpha * 2^i] Q
+//!     + sum_j [alpha * X_(i,j) + delta_(j,m_i)] S[j] = O`.
+//!
+//! This relation is nontrivial because its coefficient of `Q` is nonzero.
+//! In particular, `i < N` and `N <= C` (enforced using [`C`]) ensure that
+//! its magnitude is at most `2^N <= 2^C <= (r_P - 1) / 2`, where `r_P` is
+//! the Pallas group order.
+//! Therefore an input on which this evaluator differs from [`HashDomain`]
+//! yields a nontrivial discrete-logarithm relation among the independently
+//! generated Sinsemilla bases. This is the reduction in the
+//! [Sinsemilla exceptional-case theorem].
+//!
+//! Finding such a relation tightly reduces to the discrete logarithm
+//! problem [by Jaeger and Tessaro]. The [Pasta curve parameters] give Pallas
+//! a group order greater than `2^254`. Accounting conservatively for its
+//! efficient order-3 endomorphism, the [Pollard-rho work estimate] is
+//! `sqrt(pi * r_P / 12)`, which is greater than `2^126` classical group
+//! operations. Triggering an omitted check is therefore considered infeasible
+//! under the standard discrete-logarithm relation assumption.
+//!
+//! ## Required checks and invariants
+//!
+//! The reduction requires `Q` and every `S[j]` to be nonidentity, and it
+//! requires `N <= C`. Construction checks these conditions. Evaluation also
+//! checks the exact word count and that every word indexes the Sinsemilla
+//! generator table. Callers must additionally use the table with the
+//! [`HashDomain`] from which it was constructed; production domains must use
+//! the protocol's independently personalized hash-to-curve generators.
+//!
+//! [Sinsemilla exceptional-case theorem]: https://zips.z.cash/protocol/protocol.pdf#thmsinsemillaex
+//! [by Jaeger and Tessaro]: https://eprint.iacr.org/2020/1213.pdf#page=6
+//! [Pasta curve parameters]: https://electriccoin.co/blog/the-pasta-curves-for-halo-2-and-beyond/
+//! [Pollard-rho work estimate]: https://eprint.iacr.org/2019/1021.pdf#page=13
 
 use alloc::{boxed::Box, vec::Vec};
 use core::mem;
@@ -25,9 +79,9 @@ const GENERATOR_COUNT: usize = 1 << K;
 /// This evaluator deliberately omits Sinsemilla's incomplete-addition checks.
 /// Finding an input that triggers one of those exceptional cases for the
 /// protocol's independently generated `Q` and `S` points would exhibit a
-/// nontrivial multi-base discrete-log relation between those points. Callers
-/// that require exact partial-function semantics must use [`HashDomain`]
-/// instead.
+/// nontrivial discrete-logarithm relation between those points, as shown in
+/// the [module-level security argument](self). Callers that require exact
+/// partial-function semantics must use [`HashDomain`] instead.
 ///
 /// Construction is intentionally explicit and potentially expensive. Callers
 /// should build this once and keep it outside timed or repeated hash paths.
@@ -43,11 +97,15 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     ///
     /// # Panics
     ///
-    /// Panics if `N` is zero or exceeds the protocol's maximum Sinsemilla
-    /// word count.
+    /// Panics if `N` is zero, exceeds the protocol's maximum Sinsemilla word
+    /// count, or the domain's `Q` is the identity.
     pub fn new(domain: &HashDomain) -> Self {
         assert!(N > 0, "the weighted evaluator requires at least one word");
         assert!(N <= C, "Sinsemilla word count exceeds the protocol limit");
+        assert!(
+            !bool::from(domain.Q.is_identity()),
+            "the weighted evaluator requires a nonidentity Q"
+        );
 
         let mut weighted_generators = Vec::with_capacity(N * GENERATOR_COUNT);
 
@@ -197,6 +255,13 @@ mod tests {
             unchecked.hash_words(&words),
             generator_point.double() + generator
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "the weighted evaluator requires a nonidentity Q")]
+    fn rejects_identity_q() {
+        let domain = HashDomain::from_Q(pallas::Point::identity());
+        let _ = UncheckedFixedLengthHashDomain::<1>::new(&domain);
     }
 
     #[test]

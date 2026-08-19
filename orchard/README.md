@@ -36,7 +36,7 @@ on the dependency with `features = ["weighted-merkle"]`.
 
 The fixed-length evaluator omits Sinsemilla's incomplete-addition checks. An
 input that triggers one of these exceptional cases would exhibit a nontrivial
-multi-base discrete-log relation between independently generated Sinsemilla
+discrete-logarithm relation between independently generated Sinsemilla
 points. The generic evaluator retains the exact partial-function checks.
 
 ## License
