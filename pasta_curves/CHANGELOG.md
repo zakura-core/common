@@ -24,6 +24,8 @@ and this project adheres to Rust's notion of
   assembly routine that keeps the accumulator in registers for the whole run.
 
 ### Changed
+- The GLV Signed-Booth multiscalar backend reduces bucket trees with batched
+  affine additions and variable-time inversion of public denominators.
 - The GLV Signed-Booth multiscalar backend accumulates buckets in XYZZ
   coordinates to reduce field operations during mixed and projective adds.
 - The `aarch64-asm` backend now implements runtime multiplication and

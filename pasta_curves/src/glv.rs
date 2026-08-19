@@ -42,7 +42,7 @@ use group::prime::PrimeCurveAffine;
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
 
-use crate::arithmetic::{mac, sbb, CurveExt};
+use crate::arithmetic::{adc, mac, sbb, CurveExt};
 use crate::{pallas, vesta};
 
 mod private {
@@ -410,53 +410,17 @@ impl<F: Field> Xyzz<F> {
         }
     }
 
-    fn is_identity(&self) -> bool {
-        bool::from(self.zz.is_zero() & self.zzz.is_zero())
+    fn from_affine(point: AffinePoint<F>) -> Self {
+        Self {
+            x: point.x,
+            y: point.y,
+            zz: F::ONE,
+            zzz: F::ONE,
+        }
     }
 
-    fn add_affine(&mut self, point_x: F, point_y: F, subtract: bool) {
-        if self.is_identity() {
-            self.x = point_x;
-            self.y = if subtract { -point_y } else { point_y };
-            self.zz = F::ONE;
-            self.zzz = F::ONE;
-            return;
-        }
-
-        let mut r = point_y * self.zzz;
-        if subtract {
-            r = -r;
-        }
-        r -= self.y;
-        let mut p = point_x * self.zz - self.x;
-
-        if !bool::from(p.is_zero()) {
-            let mut pp = p.square();
-            p *= pp;
-            self.zz *= pp;
-            self.zzz *= p;
-            pp *= self.x;
-            self.x = r.square() - p - pp - pp;
-            pp = (pp - self.x) * r;
-            self.y *= p;
-            self.y = pp - self.y;
-        } else if bool::from(r.is_zero()) {
-            p = point_y.double();
-            self.zz = p.square();
-            self.zzz = self.zz * p;
-            r = point_x * self.zz;
-            let x_squared = point_x.square();
-            let m = x_squared.double() + x_squared;
-            self.x = m.square() - r - r;
-            self.y = self.zzz * point_y;
-            r = (r - self.x) * m;
-            self.y = r - self.y;
-            if subtract {
-                self.zzz = -self.zzz;
-            }
-        } else {
-            *self = Self::identity();
-        }
+    fn is_identity(&self) -> bool {
+        bool::from(self.zz.is_zero() & self.zzz.is_zero())
     }
 
     fn double(&mut self) {
@@ -511,19 +475,278 @@ impl<F: Field> Xyzz<F> {
     }
 }
 
-fn add_digit<C, Coordinates>(
-    buckets: &mut [Xyzz<C::Base>],
-    digit: BoothDigit,
-    base: C::AffineExt,
-    affine_coordinates: &Coordinates,
+#[derive(Clone, Copy)]
+struct AffinePoint<F> {
+    x: F,
+    y: F,
+}
+
+struct PendingAffineAddition<F> {
+    output: usize,
+    left_x: F,
+    left_y: F,
+    x_sum: F,
+    numerator: F,
+    denominator: F,
+    inversion_scratch: F,
+}
+
+const PASTA_FIELD_LIMBS: usize = 4;
+const PASTA_REPR_BYTES: usize = PASTA_FIELD_LIMBS * core::mem::size_of::<u64>();
+type PastaLimbs = [u64; PASTA_FIELD_LIMBS];
+
+fn repr_limbs<F: PrimeField>(value: &F) -> PastaLimbs {
+    let repr = value.to_repr();
+    let bytes = repr.as_ref();
+    assert_eq!(
+        bytes.len(),
+        PASTA_REPR_BYTES,
+        "Pasta field representations are 256 bits"
+    );
+    let mut limbs = [0; PASTA_FIELD_LIMBS];
+    for (limb, bytes) in limbs
+        .iter_mut()
+        .zip(bytes.chunks_exact(core::mem::size_of::<u64>()))
+    {
+        *limb = u64::from_le_bytes(bytes.try_into().unwrap());
+    }
+    limbs
+}
+
+fn field_from_limbs<F: PrimeField>(limbs: PastaLimbs) -> F {
+    let mut repr = F::Repr::default();
+    let bytes = repr.as_mut();
+    assert_eq!(
+        bytes.len(),
+        PASTA_REPR_BYTES,
+        "Pasta field representations are 256 bits"
+    );
+    for (bytes, limb) in bytes
+        .chunks_exact_mut(core::mem::size_of::<u64>())
+        .zip(limbs)
+    {
+        bytes.copy_from_slice(&limb.to_le_bytes());
+    }
+    Option::<F>::from(F::from_repr(repr)).expect("inverse must be canonical")
+}
+
+fn limbs_cmp(left: &PastaLimbs, right: &PastaLimbs) -> core::cmp::Ordering {
+    left.iter()
+        .zip(right)
+        .rev()
+        .find_map(|(left, right)| match left.cmp(right) {
+            core::cmp::Ordering::Equal => None,
+            ordering => Some(ordering),
+        })
+        .unwrap_or(core::cmp::Ordering::Equal)
+}
+
+fn limbs_add_assign(left: &mut PastaLimbs, right: &PastaLimbs) -> u64 {
+    let mut carry = 0;
+    for (left, right) in left.iter_mut().zip(right) {
+        (*left, carry) = adc(*left, *right, carry);
+    }
+    carry
+}
+
+fn limbs_sub_assign(left: &mut PastaLimbs, right: &PastaLimbs) -> bool {
+    let mut borrow = 0;
+    for (left, right) in left.iter_mut().zip(right) {
+        (*left, borrow) = sbb(*left, *right, borrow);
+    }
+    borrow != 0
+}
+
+fn limbs_shr_one(value: &mut PastaLimbs) {
+    let mut high_bit = 0;
+    for limb in value.iter_mut().rev() {
+        let next_high_bit = *limb << 63;
+        *limb = (*limb >> 1) | high_bit;
+        high_bit = next_high_bit;
+    }
+}
+
+fn halve_mod(value: &mut PastaLimbs, modulus: &PastaLimbs) {
+    if value[0] & 1 == 1 {
+        // Both Pasta moduli have a spare high bit, so this cannot overflow.
+        let carry = limbs_add_assign(value, modulus);
+        debug_assert_eq!(carry, 0);
+    }
+    limbs_shr_one(value);
+}
+
+fn sub_mod(left: &mut PastaLimbs, right: &PastaLimbs, modulus: &PastaLimbs) {
+    if limbs_sub_assign(left, right) {
+        // The carry cancels the borrow from the subtraction.
+        let _ = limbs_add_assign(left, modulus);
+    }
+}
+
+/// Inverts a public Pasta field element with the binary extended algorithm.
+///
+/// This is variable-time in `value`, which is appropriate for the public
+/// affine denominators produced by verifier/prover MSMs. It must not be
+/// exposed as a general replacement for [`Field::invert`].
+fn invert_vartime<F: PrimeField>(value: &F) -> Option<F> {
+    if bool::from(value.is_zero()) {
+        return None;
+    }
+
+    let mut one = [0; PASTA_FIELD_LIMBS];
+    one[0] = 1;
+    let mut modulus = repr_limbs(&-F::ONE);
+    let carry = limbs_add_assign(&mut modulus, &one);
+    debug_assert_eq!(carry, 0);
+
+    let mut u = repr_limbs(value);
+    let mut v = modulus;
+    let mut b = one;
+    let mut c = [0; PASTA_FIELD_LIMBS];
+
+    while u != one && v != one {
+        while u[0] & 1 == 0 {
+            limbs_shr_one(&mut u);
+            halve_mod(&mut b, &modulus);
+        }
+        while v[0] & 1 == 0 {
+            limbs_shr_one(&mut v);
+            halve_mod(&mut c, &modulus);
+        }
+
+        if limbs_cmp(&v, &u).is_lt() {
+            let borrow = limbs_sub_assign(&mut u, &v);
+            debug_assert!(!borrow);
+            sub_mod(&mut b, &c, &modulus);
+        } else {
+            let borrow = limbs_sub_assign(&mut v, &u);
+            debug_assert!(!borrow);
+            sub_mod(&mut c, &b, &modulus);
+        }
+    }
+
+    Some(field_from_limbs(if u == one { b } else { c }))
+}
+
+fn batch_invert_denominators_vartime<F: PrimeField>(additions: &mut [PendingAffineAddition<F>]) {
+    if additions.is_empty() {
+        return;
+    }
+
+    let mut product = F::ONE;
+    for addition in additions.iter_mut() {
+        debug_assert!(!bool::from(addition.denominator.is_zero()));
+        addition.inversion_scratch = product;
+        product *= addition.denominator;
+    }
+
+    let mut product_inverse = invert_vartime(&product).expect("nonzero product");
+    for addition in additions.iter_mut().rev() {
+        let denominator = addition.denominator;
+        addition.denominator = addition.inversion_scratch * product_inverse;
+        product_inverse *= denominator;
+    }
+}
+
+/// Visits the nonzero signed points assigned to one Booth window.
+fn for_each_window_point<C, Visit>(
+    components: &[(SignedMagnitude, SignedMagnitude)],
+    bases: &[C::AffineExt],
+    endo_bases: &[C::AffineExt],
+    window_bits: usize,
+    window: usize,
+    mut visit: Visit,
 ) where
     C: GlvParams,
-    Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
+    Visit: FnMut(usize, C::AffineExt, bool),
 {
-    if digit.magnitude != 0 && !bool::from(base.is_identity()) {
-        let (x, y) = affine_coordinates(base);
-        buckets[digit.magnitude - 1].add_affine(x, y, digit.negative);
+    for (((first, second), base), endo_base) in components.iter().zip(bases).zip(endo_bases) {
+        for (component, base) in [(*first, *base), (*second, *endo_base)] {
+            let digit = booth_digit(component, window_bits, window);
+            if digit.magnitude != 0 && !bool::from(base.is_identity()) {
+                visit(digit.magnitude - 1, base, digit.negative);
+            }
+        }
     }
+}
+
+/// Reduces every affine bucket through shared Montgomery batch inversions.
+///
+/// `offsets` partitions `points` into one contiguous range per bucket. At
+/// each tree level, all independent additions share one inversion. Identity,
+/// doubling, and inverse pairs are handled explicitly because verifier MSM
+/// inputs are public but not trusted.
+fn reduce_affine_buckets<F: PrimeField>(
+    mut points: Vec<AffinePoint<F>>,
+    mut offsets: Vec<usize>,
+) -> Vec<Xyzz<F>> {
+    debug_assert!(!offsets.is_empty());
+    let bucket_count = offsets.len() - 1;
+
+    while offsets.windows(2).any(|range| range[1] - range[0] > 1) {
+        let mut next_points = Vec::with_capacity((points.len() + bucket_count) / 2);
+        let mut next_offsets = Vec::with_capacity(offsets.len());
+        let mut pending = Vec::with_capacity(points.len() / 2);
+        next_offsets.push(0);
+
+        for range in offsets.windows(2) {
+            let bucket = &points[range[0]..range[1]];
+            for pair in bucket.chunks_exact(2) {
+                let left = pair[0];
+                let right = pair[1];
+
+                let (numerator, denominator) = if left.x == right.x {
+                    if left.y != right.y || bool::from(left.y.is_zero()) {
+                        // The points are inverses, or this is a point of order
+                        // two. Their sum is the identity, which is omitted.
+                        continue;
+                    }
+                    let x_squared = left.x.square();
+                    (x_squared.double() + x_squared, left.y.double())
+                } else {
+                    (right.y - left.y, right.x - left.x)
+                };
+
+                let output = next_points.len();
+                next_points.push(AffinePoint {
+                    x: F::ZERO,
+                    y: F::ZERO,
+                });
+                pending.push(PendingAffineAddition {
+                    output,
+                    left_x: left.x,
+                    left_y: left.y,
+                    x_sum: left.x + right.x,
+                    numerator,
+                    denominator,
+                    inversion_scratch: F::ZERO,
+                });
+            }
+            if bucket.len() % 2 == 1 {
+                next_points.push(bucket[bucket.len() - 1]);
+            }
+            next_offsets.push(next_points.len());
+        }
+
+        batch_invert_denominators_vartime(&mut pending);
+        for addition in pending {
+            let slope = addition.numerator * addition.denominator;
+            let x = slope.square() - addition.x_sum;
+            let y = slope * (addition.left_x - x) - addition.left_y;
+            next_points[addition.output] = AffinePoint { x, y };
+        }
+
+        points = next_points;
+        offsets = next_offsets;
+    }
+
+    let mut buckets = alloc::vec![Xyzz::identity(); bucket_count];
+    for (bucket, range) in buckets.iter_mut().zip(offsets.windows(2)) {
+        if range[0] != range[1] {
+            debug_assert_eq!(range[1] - range[0], 1);
+            *bucket = Xyzz::from_affine(points[range[0]]);
+        }
+    }
+    buckets
 }
 
 fn sum_buckets<F: Field>(buckets: &[Xyzz<F>]) -> Xyzz<F> {
@@ -537,37 +760,60 @@ fn sum_buckets<F: Field>(buckets: &[Xyzz<F>]) -> Xyzz<F> {
 }
 
 fn fill_window<C, Coordinates>(
-    buckets: &mut [Xyzz<C::Base>],
     components: &[(SignedMagnitude, SignedMagnitude)],
     bases: &[C::AffineExt],
     endo_bases: &[C::AffineExt],
     window_bits: usize,
     window: usize,
     affine_coordinates: &Coordinates,
-) where
+) -> Vec<Xyzz<C::Base>>
+where
     C: GlvParams,
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
 {
-    buckets.fill(Xyzz::identity());
-    for ((first, second), base, endo_base) in components
-        .iter()
-        .zip(bases)
-        .zip(endo_bases)
-        .map(|(((first, second), base), endo_base)| ((first, second), base, endo_base))
-    {
-        add_digit::<C, Coordinates>(
-            buckets,
-            booth_digit(*first, window_bits, window),
-            *base,
-            affine_coordinates,
-        );
-        add_digit::<C, Coordinates>(
-            buckets,
-            booth_digit(*second, window_bits, window),
-            *endo_base,
-            affine_coordinates,
-        );
+    let bucket_count = 1 << (window_bits - 1);
+    let mut counts = alloc::vec![0usize; bucket_count];
+    for_each_window_point::<C, _>(
+        components,
+        bases,
+        endo_bases,
+        window_bits,
+        window,
+        |bucket, _, _| counts[bucket] += 1,
+    );
+
+    let mut offsets = Vec::with_capacity(bucket_count + 1);
+    offsets.push(0);
+    for count in counts {
+        offsets.push(offsets.last().copied().unwrap() + count);
     }
+
+    let mut positions = offsets[..bucket_count].to_vec();
+    let mut points = alloc::vec![
+        AffinePoint {
+            x: C::Base::ZERO,
+            y: C::Base::ZERO,
+        };
+        *offsets.last().unwrap()
+    ];
+    for_each_window_point::<C, _>(
+        components,
+        bases,
+        endo_bases,
+        window_bits,
+        window,
+        |bucket, base, negative| {
+            let (x, y) = affine_coordinates(base);
+            let position = positions[bucket];
+            points[position] = AffinePoint {
+                x,
+                y: if negative { -y } else { y },
+            };
+            positions[bucket] += 1;
+        },
+    );
+
+    reduce_affine_buckets(points, offsets)
 }
 
 fn multiexp_serial<C, Coordinates>(
@@ -582,7 +828,6 @@ where
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
 {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
-    let mut buckets = alloc::vec![Xyzz::identity(); 1 << (window_bits - 1)];
     let mut acc = Xyzz::identity();
 
     for window in (0..window_count).rev() {
@@ -592,8 +837,7 @@ where
             }
         }
 
-        fill_window::<C, Coordinates>(
-            &mut buckets,
+        let buckets = fill_window::<C, Coordinates>(
             components,
             bases,
             endo_bases,
@@ -622,9 +866,7 @@ where
     (0..window_count)
         .into_par_iter()
         .map(|window| {
-            let mut buckets = alloc::vec![Xyzz::identity(); 1 << (window_bits - 1)];
-            fill_window::<C, Coordinates>(
-                &mut buckets,
+            let buckets = fill_window::<C, Coordinates>(
                 components,
                 bases,
                 endo_bases,
@@ -1204,28 +1446,87 @@ mod tests {
             }
         };
 
-        let mut positive = Xyzz::identity();
-        assert_eq!(to_curve(positive), C::identity());
-        positive.add_affine(x, y, false);
+        let affine = Xyzz::from_affine(AffinePoint { x, y });
+        let negative_affine = Xyzz::from_affine(AffinePoint { x, y: -y });
+
+        let mut positive = affine;
         assert_eq!(to_curve(positive), generator);
-        positive.add_affine(x, y, false);
+        positive.add(&affine);
         assert_eq!(to_curve(positive), generator.double());
 
-        let mut negative = Xyzz::identity();
-        negative.add_affine(x, y, true);
-        negative.add_affine(x, y, true);
+        let mut negative = negative_affine;
+        negative.add(&negative_affine);
         assert_eq!(to_curve(negative), -generator.double());
 
         positive.add(&negative);
         assert_eq!(to_curve(positive), C::identity());
 
-        let mut two = Xyzz::identity();
-        two.add_affine(x, y, false);
+        let mut two = affine;
         two.double();
         let mut three = two;
-        three.add_affine(x, y, false);
+        three.add(&affine);
         two.add(&three);
         assert_eq!(to_curve(two), generator * C::ScalarExt::from(5));
+    }
+
+    fn batch_affine_buckets_match_native<C>()
+    where
+        C: GlvParams,
+        C::AffineExt: CurveAffine<Base = C::Base>,
+    {
+        let generator = C::generator();
+        let two = generator.double();
+        let three = two + generator;
+        let four = three + generator;
+        let five = four + generator;
+        let source = [
+            Vec::new(),
+            alloc::vec![generator],
+            alloc::vec![generator, generator],
+            alloc::vec![generator, -generator],
+            alloc::vec![generator, two, three],
+            alloc::vec![generator, two, -three],
+            alloc::vec![generator, two, three, four, five],
+        ];
+
+        let mut points = Vec::new();
+        let mut offsets = Vec::with_capacity(source.len() + 1);
+        offsets.push(0);
+        for bucket in &source {
+            for point in bucket {
+                let affine = C::AffineExt::from(*point);
+                let coordinates = affine.coordinates().unwrap();
+                points.push(AffinePoint {
+                    x: *coordinates.x(),
+                    y: *coordinates.y(),
+                });
+            }
+            offsets.push(points.len());
+        }
+
+        let reduced = reduce_affine_buckets(points, offsets);
+        assert_eq!(reduced.len(), source.len());
+        for (actual, bucket) in reduced.into_iter().zip(source) {
+            let actual = if actual.is_identity() {
+                C::identity()
+            } else {
+                C::new_jacobian(
+                    actual.x * actual.zz.square(),
+                    actual.y * actual.zzz.square(),
+                    actual.zzz,
+                )
+                .unwrap()
+            };
+            let expected = bucket.into_iter().sum::<C>();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    fn vartime_inverse_matches_field<F: PrimeField>() {
+        assert_eq!(invert_vartime(&F::ZERO), None);
+        for value in [F::ONE, -F::ONE].into_iter().chain(scalars::<F>(1_000)) {
+            assert_eq!(invert_vartime(&value), Option::<F>::from(value.invert()));
+        }
     }
 
     macro_rules! glv_tests {
@@ -1268,6 +1569,14 @@ mod tests {
                 #[test]
                 fn xyzz() {
                     xyzz_matches_native::<$curve>();
+                }
+                #[test]
+                fn batch_affine_buckets() {
+                    batch_affine_buckets_match_native::<$curve>();
+                }
+                #[test]
+                fn vartime_inverse() {
+                    vartime_inverse_matches_field::<<$curve as CurveExt>::Base>();
                 }
             }
         };

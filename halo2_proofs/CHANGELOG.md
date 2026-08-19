@@ -26,6 +26,8 @@ and this project adheres to Rust's notion of
   signed-Booth windows in parallel when the backend cost model selects GLV.
 - Large single-worker Signed-Booth multiscalar multiplications use 10-bit
   windows when the operation model favors them over 9-bit windows.
+- Large Pasta multiscalar multiplications batch affine bucket additions and
+  invert their public denominators in variable time.
 - Batch verification now reuses per-parameter fixed-window tables when
   constructing instance commitments.
 - Batch verification now folds each proof's random batching scalar into its
