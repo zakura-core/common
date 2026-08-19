@@ -121,7 +121,11 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
     pub fn scale(&mut self, factor: C::Scalar) {
         if let Some(g_scalars) = &mut self.g_scalars {
             for g_scalar in g_scalars {
-                *g_scalar *= &factor;
+                // Verifier construction can leave this vector sparse until
+                // the IPA coefficient expansion is added.
+                if !bool::from(g_scalar.is_zero()) {
+                    *g_scalar *= &factor;
+                }
             }
         }
 

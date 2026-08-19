@@ -371,6 +371,37 @@ fn test_opening_proof() {
         let msm_challenges = guard.clone().use_challenges();
         assert!(msm_challenges.eval());
 
+        let msm_scaled = guard.clone().use_challenges_with_scale(Fq::from(7));
+        assert!(msm_scaled.eval());
+
+        // A valid opening evaluates to the identity with or without scaling,
+        // so use a bad opening to check that the scale is actually applied.
+        let mut bad_transcript =
+            Blake2bRead::<&[u8], EpAffine, Challenge255<EpAffine>>::init(&proof[..]);
+        let bad_p = bad_transcript.read_point().unwrap();
+        let bad_x = bad_transcript.squeeze_challenge_scalar::<()>();
+        let bad_v = bad_transcript.read_scalar().unwrap();
+        let mut bad_commitment_msm = params.empty_msm();
+        bad_commitment_msm.append_term(Field::ONE, bad_p);
+        let bad_guard = verify_proof(
+            &params,
+            bad_commitment_msm,
+            &mut bad_transcript,
+            *bad_x,
+            bad_v + Fq::ONE,
+        )
+        .unwrap();
+
+        let rho = Fq::from(7);
+        let unscaled = bad_guard.clone().use_challenges();
+        assert!(!unscaled.clone().eval());
+        let mut expected_scaled = unscaled;
+        expected_scaled.scale(rho);
+        let mut actual_scaled = bad_guard.use_challenges_with_scale(rho);
+        actual_scaled.scale(-Fq::ONE);
+        expected_scaled.add_msm(&actual_scaled);
+        assert!(expected_scaled.eval());
+
         // Test use_g()
         let g = guard.compute_g();
         let (msm_g, _accumulator) = guard.clone().use_g(g);
