@@ -502,9 +502,29 @@ macro_rules! new_curve_impl {
                         let r = r + r;
                         let v = self.x * i;
                         let x3 = Field::square(&r) - j - v - v;
-                        let j = self.y * j;
-                        let j = j + j;
-                        let y3 = r * (v - x3) - j;
+                        #[cfg(feature = "deferred")]
+                        let y3 = {
+                            // Both products are terminal, so they can share
+                            // one Montgomery reduction.
+                            let mut accumulator = <$base as crate::deferred::DeferredField>::Accumulator::default();
+                            <$base as crate::deferred::DeferredField>::mul_accumulate(
+                                &mut accumulator,
+                                &r,
+                                &(v - x3),
+                            );
+                            <$base as crate::deferred::DeferredField>::mul_accumulate(
+                                &mut accumulator,
+                                &-self.y.double(),
+                                &j,
+                            );
+                            <$base as crate::deferred::DeferredField>::reduce(accumulator)
+                        };
+                        #[cfg(not(feature = "deferred"))]
+                        let y3 = {
+                            let j = self.y * j;
+                            let j = j + j;
+                            r * (v - x3) - j
+                        };
                         let z3 = Field::square(&(self.z + h)) - z1z1 - hh;
 
                         $name {
