@@ -206,6 +206,59 @@ const R2: Fp = Fp([
     0x096d41af7b9cb714,
 ]);
 
+/// 2^448 mod p (little-endian limbs).
+#[cfg(any(
+    feature = "deferred",
+    all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    )
+))]
+const B448: [u64; 4] = [
+    0x9b9858f294cf91ba,
+    0x8635bd2c4252b065,
+    0x496d41af7b9cb714,
+    0x1b4b3c4bfffffffc,
+];
+
+impl super::DifferenceOfProducts for Fp {
+    #[inline]
+    fn difference_of_products(
+        positive_left: Self,
+        positive_right: Self,
+        negative_left: Self,
+        negative_right: Self,
+    ) -> Self {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            let negative_left = -negative_left;
+            Fp(super::aarch64_asm::mul_add(
+                &positive_left.0,
+                &positive_right.0,
+                &negative_left.0,
+                &negative_right.0,
+                &B448,
+                &MODULUS.0,
+                INV,
+            ))
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            positive_left * positive_right - negative_left * negative_right
+        }
+    }
+}
+
 /// R^3 = 2^768 mod p
 const R3: Fp = Fp([
     0xf185a5993a9e10f9,
@@ -565,13 +618,6 @@ impl DeferredField for Fp {
 
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     fn reduce(acc: Self::Accumulator) -> Fp {
-        /// 2^448 mod p (little-endian limbs).
-        const B448: [u64; 4] = [
-            0x9b9858f294cf91ba,
-            0x8635bd2c4252b065,
-            0x496d41af7b9cb714,
-            0x1b4b3c4bfffffffc,
-        ];
         let limbs = acc.partial_reduce(&B448, &R2.0);
         Fp::montgomery_reduce(
             limbs[0], limbs[1], limbs[2], limbs[3], limbs[4], limbs[5], limbs[6], limbs[7],
@@ -992,6 +1038,12 @@ fn aarch64_asm_matches_portable_arithmetic() {
         (0..n).fold(value, |acc, _| Fp::square(&acc)).mul(&by)
     }
 
+    fn check_difference_of_products(a: Fp, b: Fp, c: Fp, d: Fp) {
+        let expected = Fp::sub(&Fp::mul(&a, &b), &Fp::mul(&c, &d));
+        let actual = <Fp as super::DifferenceOfProducts>::difference_of_products(a, b, c, d);
+        assert_eq!(actual, expected);
+    }
+
     for lhs in boundaries {
         aarch64_asm_check_repr(lhs);
         assert_eq!(<Fp as Field>::square(&lhs), Fp::square(&lhs));
@@ -1003,6 +1055,15 @@ fn aarch64_asm_matches_portable_arithmetic() {
                     lhs.sqr_n_mul_runtime(n, &rhs),
                     portable_sqr_n_mul(lhs, n, rhs)
                 );
+            }
+        }
+    }
+    for a in boundaries {
+        for b in boundaries {
+            for c in boundaries {
+                for d in boundaries {
+                    check_difference_of_products(a, b, c, d);
+                }
             }
         }
     }
@@ -1021,11 +1082,24 @@ fn aarch64_asm_matches_portable_arithmetic() {
             rng.next_u64(),
             rng.next_u64(),
         ]);
+        let negative_left = Fp::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+        let negative_right = Fp::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
 
         aarch64_asm_check_repr(lhs);
         assert_eq!(lhs.cmp(&rhs), aarch64_asm_portable_cmp(lhs, rhs));
         assert_eq!(&lhs * &rhs, Fp::mul(&lhs, &rhs));
         assert_eq!(<Fp as Field>::square(&lhs), Fp::square(&lhs));
+        check_difference_of_products(lhs, rhs, negative_left, negative_right);
         for n in [1, 129] {
             assert_eq!(
                 lhs.sqr_n_mul_runtime(n, &rhs),

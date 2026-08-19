@@ -5,10 +5,11 @@
 // Adapted from the pre-generated Mach-O assembly in Semolina v0.1.4:
 // https://github.com/supranational/semolina/blob/v0.1.4/src/mach-o/pasta_mul-armv8.S
 //
-// Only Montgomery multiplication, squaring, fused repeated-squaring
-// multiplication, conversion, and their shared reduction helper are retained.
-// Symbols are renamed for this crate. The implementation relies on both Pasta
-// moduli having limb 2 equal to zero and limb 3 equal to 2^62.
+// Only Montgomery multiplication, squaring, two-product addition, fused
+// repeated-squaring multiplication, conversion, and their shared reduction
+// helper are retained. Symbols are renamed for this crate. The implementation
+// relies on both Pasta moduli having limb 2 equal to zero and limb 3 equal to
+// 2^62.
 
 // All field elements and moduli are four little-endian 64-bit limbs. `inv` is
 // -modulus[0]^-1 mod 2^64. The routines implement Montgomery reduction with
@@ -17,6 +18,8 @@
 //
 // Apple AArch64 argument registers:
 //
+// - mul_add:    x0 = out, x1 = left_a, x2 = right_a, x3 = left_b,
+//               x4 = right_b, x5 = B448, x6 = modulus, x7 = inv
 // - mul:        x0 = out, x1 = lhs, x2 = rhs, x3 = modulus, x4 = inv
 // - square:     x0 = out, x1 = value, x2 = modulus, x3 = inv
 // - sqr_n_mul:  x0 = out, x1 = value, x2 = count, x3 = rhs, x4 = modulus,
@@ -27,6 +30,277 @@
 // reductions use `csel` after a full-width subtraction.
 
 .text
+
+.globl _pasta_curves_mul_add_mont_pasta
+.private_extern _pasta_curves_mul_add_mont_pasta
+
+.align 5
+_pasta_curves_mul_add_mont_pasta:
+    .long 3573752639        // `paciasp`: sign LR with the entry SP.
+    stp x29,x30,[sp,#-96]!
+    stp x19,x20,[sp,#16]
+    stp x21,x22,[sp,#32]
+    stp x23,x24,[sp,#48]
+    stp x25,x26,[sp,#64]
+    stp x27,x28,[sp,#80]
+
+    mov x29,x0              // Preserve the output pointer.
+    mov x27,x5              // Preserve the B448 pointer.
+    mov x28,x6              // Preserve the modulus pointer.
+    mov x0,x7               // Preserve the Montgomery inverse.
+
+    // Compute left_a * right_a into x9..x16.
+    ldp x5,x6,[x1]
+    ldp x7,x8,[x1,#16]
+    ldr x17,[x2]
+
+    // First multiplication row.
+    mul x9,x5,x17
+    umulh x1,x5,x17
+    mul x10,x6,x17
+    adds x10,x10,x1
+    umulh x1,x6,x17
+    mul x11,x7,x17
+    adcs x11,x11,x1
+    umulh x1,x7,x17
+    mul x12,x8,x17
+    adcs x12,x12,x1
+    umulh x1,x8,x17
+    adc x13,x1,xzr
+
+    // Second multiplication row.
+    ldr x17,[x2,#8]
+    mul x1,x5,x17
+    adds x10,x10,x1
+    mul x1,x6,x17
+    adcs x11,x11,x1
+    mul x1,x7,x17
+    adcs x12,x12,x1
+    mul x1,x8,x17
+    adcs x13,x13,x1
+    adc x14,xzr,xzr
+
+    umulh x1,x5,x17
+    adds x11,x11,x1
+    umulh x1,x6,x17
+    adcs x12,x12,x1
+    umulh x1,x7,x17
+    adcs x13,x13,x1
+    umulh x1,x8,x17
+    adcs x14,x14,x1
+    adc x15,xzr,xzr
+
+    // Third multiplication row.
+    ldr x17,[x2,#16]
+    mul x1,x5,x17
+    adds x11,x11,x1
+    mul x1,x6,x17
+    adcs x12,x12,x1
+    mul x1,x7,x17
+    adcs x13,x13,x1
+    mul x1,x8,x17
+    adcs x14,x14,x1
+    adc x15,x15,xzr
+
+    umulh x1,x5,x17
+    adds x12,x12,x1
+    umulh x1,x6,x17
+    adcs x13,x13,x1
+    umulh x1,x7,x17
+    adcs x14,x14,x1
+    umulh x1,x8,x17
+    adcs x15,x15,x1
+    adc x16,xzr,xzr
+
+    // Fourth multiplication row.
+    ldr x17,[x2,#24]
+    mul x1,x5,x17
+    adds x12,x12,x1
+    mul x1,x6,x17
+    adcs x13,x13,x1
+    mul x1,x7,x17
+    adcs x14,x14,x1
+    mul x1,x8,x17
+    adcs x15,x15,x1
+    adc x16,x16,xzr
+
+    umulh x1,x5,x17
+    adds x13,x13,x1
+    umulh x1,x6,x17
+    adcs x14,x14,x1
+    umulh x1,x7,x17
+    adcs x15,x15,x1
+    umulh x1,x8,x17
+    adcs x16,x16,x1
+
+    mov x19,x9
+    mov x20,x10
+    mov x21,x11
+    mov x22,x12
+    mov x23,x13
+    mov x24,x14
+    mov x25,x15
+    mov x26,x16
+
+    // Compute left_b * right_b into x9..x16.
+    ldp x5,x6,[x3]
+    ldp x7,x8,[x3,#16]
+    ldr x17,[x4]
+
+    // First multiplication row.
+    mul x9,x5,x17
+    umulh x1,x5,x17
+    mul x10,x6,x17
+    adds x10,x10,x1
+    umulh x1,x6,x17
+    mul x11,x7,x17
+    adcs x11,x11,x1
+    umulh x1,x7,x17
+    mul x12,x8,x17
+    adcs x12,x12,x1
+    umulh x1,x8,x17
+    adc x13,x1,xzr
+
+    // Second multiplication row.
+    ldr x17,[x4,#8]
+    mul x1,x5,x17
+    adds x10,x10,x1
+    mul x1,x6,x17
+    adcs x11,x11,x1
+    mul x1,x7,x17
+    adcs x12,x12,x1
+    mul x1,x8,x17
+    adcs x13,x13,x1
+    adc x14,xzr,xzr
+
+    umulh x1,x5,x17
+    adds x11,x11,x1
+    umulh x1,x6,x17
+    adcs x12,x12,x1
+    umulh x1,x7,x17
+    adcs x13,x13,x1
+    umulh x1,x8,x17
+    adcs x14,x14,x1
+    adc x15,xzr,xzr
+
+    // Third multiplication row.
+    ldr x17,[x4,#16]
+    mul x1,x5,x17
+    adds x11,x11,x1
+    mul x1,x6,x17
+    adcs x12,x12,x1
+    mul x1,x7,x17
+    adcs x13,x13,x1
+    mul x1,x8,x17
+    adcs x14,x14,x1
+    adc x15,x15,xzr
+
+    umulh x1,x5,x17
+    adds x12,x12,x1
+    umulh x1,x6,x17
+    adcs x13,x13,x1
+    umulh x1,x7,x17
+    adcs x14,x14,x1
+    umulh x1,x8,x17
+    adcs x15,x15,x1
+    adc x16,xzr,xzr
+
+    // Fourth multiplication row.
+    ldr x17,[x4,#24]
+    mul x1,x5,x17
+    adds x12,x12,x1
+    mul x1,x6,x17
+    adcs x13,x13,x1
+    mul x1,x7,x17
+    adcs x14,x14,x1
+    mul x1,x8,x17
+    adcs x15,x15,x1
+    adc x16,x16,xzr
+
+    umulh x1,x5,x17
+    adds x13,x13,x1
+    umulh x1,x6,x17
+    adcs x14,x14,x1
+    umulh x1,x7,x17
+    adcs x15,x15,x1
+    umulh x1,x8,x17
+    adcs x16,x16,x1
+
+    // Both factors are below the 254-bit modulus, so the product sum is
+    // below 2^509 and the final 512-bit addition cannot overflow.
+    adds x19,x19,x9
+    adcs x20,x20,x10
+    adcs x21,x21,x11
+    adcs x22,x22,x12
+    adcs x23,x23,x13
+    adcs x24,x24,x14
+    adcs x25,x25,x15
+    adcs x26,x26,x16
+
+    // Fold the top limb with 2^448 mod p. The congruent result occupies at
+    // most seven limbs, which splits into a low half and a sub-modulus high
+    // half for one Montgomery reduction.
+    ldp x5,x6,[x27]
+    mul x10,x26,x5
+    umulh x11,x26,x5
+    mul x15,x26,x6
+    adds x11,x11,x15
+    umulh x12,x26,x6
+    adc x12,x12,xzr
+    ldp x5,x6,[x27,#16]
+    mul x15,x26,x5
+    adds x12,x12,x15
+    umulh x13,x26,x5
+    adc x13,x13,xzr
+    mul x15,x26,x6
+    adds x13,x13,x15
+    umulh x14,x26,x6
+    adc x14,x14,xzr
+
+    // Add the folding term to product limbs 0 through 6.
+    adds x10,x10,x19
+    adcs x11,x11,x20
+    adcs x12,x12,x21
+    adcs x13,x13,x22
+    adcs x19,x14,x23
+    adcs x20,x24,xzr
+    adcs x21,x25,xzr
+    adc x22,xzr,xzr
+
+    // Montgomery-reduce the low half, then add the high half.
+    mov x2,x28
+    mov x4,x0
+    bl L$pasta_curves_mul_by_1_mont_pasta
+
+    adds x10,x10,x19
+    adcs x11,x11,x20
+    adcs x12,x12,x21
+    adcs x13,x13,x22
+    adc x19,xzr,xzr
+
+    // Canonicalize the result, including any carry above limb 3.
+    subs x14,x10,x5
+    sbcs x15,x11,x6
+    sbcs x16,x12,x7
+    sbcs x17,x13,x8
+    sbcs xzr,x19,xzr
+
+    csel x10,x10,x14,lo
+    csel x11,x11,x15,lo
+    csel x12,x12,x16,lo
+    csel x13,x13,x17,lo
+
+    stp x10,x11,[x29]
+    stp x12,x13,[x29,#16]
+
+    ldp x19,x20,[sp,#16]
+    ldp x21,x22,[sp,#32]
+    ldp x23,x24,[sp,#48]
+    ldp x25,x26,[sp,#64]
+    ldp x27,x28,[sp,#80]
+    ldp x29,x30,[sp],#96
+    .long 3573752767        // `autiasp`: authenticate LR with entry SP.
+    ret
 
 .globl _pasta_curves_mul_mont_pasta
 .private_extern _pasta_curves_mul_mont_pasta

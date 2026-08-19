@@ -17,6 +17,18 @@ mod aarch64_asm;
 pub use fp::*;
 pub use fq::*;
 
+/// Computes a difference of two field products.
+///
+/// Field backends may fuse the two products into a single reduction.
+pub(crate) trait DifferenceOfProducts: ff::Field {
+    fn difference_of_products(
+        positive_left: Self,
+        positive_right: Self,
+        negative_left: Self,
+        negative_right: Self,
+    ) -> Self;
+}
+
 /// Converts 64-bit little-endian limbs to 32-bit little endian limbs.
 #[cfg(feature = "gpu")]
 fn u64_to_u32(limbs: &[u64]) -> alloc::vec::Vec<u32> {

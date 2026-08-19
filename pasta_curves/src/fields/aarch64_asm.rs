@@ -1,9 +1,9 @@
 //! Private Apple AArch64 backend for the Pasta fields.
 //!
 //! Montgomery multiplication and squaring are implemented as inline `asm!`
-//! blocks below; the fused repeated-squaring chain and the canonical-form
-//! conversion remain in `src/asm/pasta_mul-armv8.S` and are reached through
-//! `extern "C"`.
+//! blocks below. The two-product fused kernel, repeated-squaring chain, and
+//! canonical-form conversion remain in `src/asm/pasta_mul-armv8.S` and are
+//! reached through `extern "C"`.
 //!
 //! The inline blocks are register-renamed transcriptions of the vendored
 //! Semolina v0.1.4 routines (`mul_mont_pasta`, and the squaring loop body of
@@ -29,6 +29,16 @@ use core::arch::asm;
 type Limbs = [u64; 4];
 
 extern "C" {
+    fn pasta_curves_mul_add_mont_pasta(
+        out: *mut Limbs,
+        left_a: *const Limbs,
+        right_a: *const Limbs,
+        left_b: *const Limbs,
+        right_b: *const Limbs,
+        b448: *const Limbs,
+        modulus: *const Limbs,
+        inv: u64,
+    );
     fn pasta_curves_sqr_n_mul_mont_pasta(
         out: *mut Limbs,
         value: *const Limbs,
@@ -43,6 +53,28 @@ extern "C" {
         modulus: *const Limbs,
         inv: u64,
     );
+}
+
+/// Adds two products of canonical Montgomery residues with one reduction.
+#[inline]
+pub(super) fn mul_add(
+    left_a: &Limbs,
+    right_a: &Limbs,
+    left_b: &Limbs,
+    right_b: &Limbs,
+    b448: &Limbs,
+    modulus: &Limbs,
+    inv: u64,
+) -> Limbs {
+    let mut out = Limbs::default();
+    // SAFETY: All pointers refer to four initialized `u64` limbs for the
+    // duration of the call. The backend writes exactly four limbs to `out`.
+    unsafe {
+        pasta_curves_mul_add_mont_pasta(
+            &mut out, left_a, right_a, left_b, right_b, b448, modulus, inv,
+        );
+    }
+    out
 }
 
 /// Multiplies two Montgomery residues for a Pasta modulus. `rhs` must be

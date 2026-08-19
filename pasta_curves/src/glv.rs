@@ -43,8 +43,7 @@ use group::prime::PrimeCurveAffine;
 use maybe_rayon::prelude::*;
 
 use crate::arithmetic::{adc, mac, sbb, CurveExt};
-#[cfg(feature = "deferred")]
-use crate::deferred::DeferredField;
+use crate::fields::DifferenceOfProducts;
 use crate::{pallas, vesta};
 
 mod private {
@@ -402,46 +401,6 @@ struct Xyzz<F: Field> {
     zzz: F,
 }
 
-/// Field operations required by the XYZZ formulas.
-///
-/// With deferred arithmetic, a difference of two terminal products shares a
-/// single reduction. The eager fallback preserves `glv` without `deferred`.
-trait XyzzField: Field {
-    fn difference_of_products(
-        positive_left: Self,
-        positive_right: Self,
-        negative_left: Self,
-        negative_right: Self,
-    ) -> Self;
-}
-
-#[cfg(feature = "deferred")]
-impl<F: DeferredField> XyzzField for F {
-    fn difference_of_products(
-        positive_left: Self,
-        positive_right: Self,
-        negative_left: Self,
-        negative_right: Self,
-    ) -> Self {
-        let mut accumulator = <Self as DeferredField>::Accumulator::default();
-        Self::mul_accumulate(&mut accumulator, &positive_left, &positive_right);
-        Self::mul_accumulate(&mut accumulator, &-negative_left, &negative_right);
-        Self::reduce(accumulator)
-    }
-}
-
-#[cfg(not(feature = "deferred"))]
-impl<F: Field> XyzzField for F {
-    fn difference_of_products(
-        positive_left: Self,
-        positive_right: Self,
-        negative_left: Self,
-        negative_right: Self,
-    ) -> Self {
-        positive_left * positive_right - negative_left * negative_right
-    }
-}
-
 impl<F: Field> Xyzz<F> {
     fn identity() -> Self {
         Self {
@@ -466,7 +425,7 @@ impl<F: Field> Xyzz<F> {
     }
 }
 
-impl<F: XyzzField> Xyzz<F> {
+impl<F: DifferenceOfProducts> Xyzz<F> {
     fn double(&mut self) {
         if self.is_identity() {
             return;
@@ -790,7 +749,7 @@ fn reduce_affine_buckets<F: PrimeField>(
     buckets
 }
 
-fn sum_buckets<F: XyzzField>(buckets: &[Xyzz<F>]) -> Xyzz<F> {
+fn sum_buckets<F: DifferenceOfProducts>(buckets: &[Xyzz<F>]) -> Xyzz<F> {
     let mut running = Xyzz::identity();
     let mut sum = Xyzz::identity();
     for bucket in buckets.iter().rev() {
@@ -866,7 +825,7 @@ fn multiexp_serial<C, Coordinates>(
 ) -> Xyzz<C::Base>
 where
     C: GlvParams,
-    C::Base: XyzzField,
+    C::Base: DifferenceOfProducts,
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base),
 {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
@@ -902,7 +861,7 @@ fn multiexp_parallel<C, Coordinates>(
 ) -> Xyzz<C::Base>
 where
     C: GlvParams,
-    C::Base: XyzzField,
+    C::Base: DifferenceOfProducts,
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
 {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
@@ -940,7 +899,7 @@ fn multiexp<C, Coordinates, ToCurve>(
 ) -> C
 where
     C: GlvParams,
-    C::Base: XyzzField,
+    C::Base: DifferenceOfProducts,
     Coordinates: Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
     ToCurve: FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
 {
@@ -988,7 +947,7 @@ fn try_multiexp_inner<C>(
 ) -> Option<C>
 where
     C: GlvParams,
-    C::Base: XyzzField,
+    C::Base: DifferenceOfProducts,
 {
     assert_eq!(scalars.len(), bases.len());
     assert!(window_bits > 0 && window_bits < usize::BITS as usize);
@@ -1021,7 +980,6 @@ where
 /// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
 /// MSM. The caller supplies the affine endomorphism because the concrete
 /// affine coordinates remain private to `curves`.
-#[cfg(feature = "deferred")]
 pub(crate) fn try_multiexp<C>(
     scalars: &[C::ScalarExt],
     bases: &[C::AffineExt],
@@ -1032,30 +990,8 @@ pub(crate) fn try_multiexp<C>(
 ) -> Option<C>
 where
     C: GlvParams,
-    C::Base: DeferredField,
+    C::Base: DifferenceOfProducts,
 {
-    try_multiexp_inner(
-        scalars,
-        bases,
-        window_bits,
-        affine_endo,
-        affine_coordinates,
-        xyzz_to_curve,
-    )
-}
-
-/// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
-/// MSM. The caller supplies the affine endomorphism because the concrete
-/// affine coordinates remain private to `curves`.
-#[cfg(not(feature = "deferred"))]
-pub(crate) fn try_multiexp<C: GlvParams>(
-    scalars: &[C::ScalarExt],
-    bases: &[C::AffineExt],
-    window_bits: usize,
-    affine_endo: impl FnMut(C::AffineExt) -> C::AffineExt,
-    affine_coordinates: impl Fn(C::AffineExt) -> (C::Base, C::Base) + Sync,
-    xyzz_to_curve: impl FnOnce(C::Base, C::Base, C::Base, C::Base) -> C,
-) -> Option<C> {
     try_multiexp_inner(
         scalars,
         bases,
@@ -1520,7 +1456,7 @@ mod tests {
     fn xyzz_matches_native<C>()
     where
         C: GlvParams,
-        C::Base: XyzzField,
+        C::Base: DifferenceOfProducts,
         C::AffineExt: CurveAffine<Base = C::Base>,
     {
         let generator = C::generator();
