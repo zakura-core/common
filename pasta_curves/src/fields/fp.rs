@@ -207,14 +207,7 @@ const R2: Fp = Fp([
 ]);
 
 /// 2^448 mod p (little-endian limbs).
-#[cfg(any(
-    feature = "deferred",
-    all(
-        feature = "aarch64-asm",
-        target_arch = "aarch64",
-        target_vendor = "apple"
-    )
-))]
+#[cfg(feature = "deferred")]
 const B448: [u64; 4] = [
     0x9b9858f294cf91ba,
     0x8635bd2c4252b065,
@@ -242,7 +235,6 @@ impl super::DifferenceOfProducts for Fp {
                 &positive_right.0,
                 &negative_left.0,
                 &negative_right.0,
-                &B448,
                 &MODULUS.0,
                 INV,
             ))

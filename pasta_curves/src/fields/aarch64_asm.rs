@@ -35,7 +35,6 @@ extern "C" {
         right_a: *const Limbs,
         left_b: *const Limbs,
         right_b: *const Limbs,
-        b448: *const Limbs,
         modulus: *const Limbs,
         inv: u64,
     );
@@ -62,7 +61,6 @@ pub(super) fn mul_add(
     right_a: &Limbs,
     left_b: &Limbs,
     right_b: &Limbs,
-    b448: &Limbs,
     modulus: &Limbs,
     inv: u64,
 ) -> Limbs {
@@ -70,9 +68,7 @@ pub(super) fn mul_add(
     // SAFETY: All pointers refer to four initialized `u64` limbs for the
     // duration of the call. The backend writes exactly four limbs to `out`.
     unsafe {
-        pasta_curves_mul_add_mont_pasta(
-            &mut out, left_a, right_a, left_b, right_b, b448, modulus, inv,
-        );
+        pasta_curves_mul_add_mont_pasta(&mut out, left_a, right_a, left_b, right_b, modulus, inv);
     }
     out
 }

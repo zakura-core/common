@@ -207,14 +207,7 @@ const R2: Fq = Fq([
 ]);
 
 /// 2^448 mod q (little-endian limbs).
-#[cfg(any(
-    feature = "deferred",
-    all(
-        feature = "aarch64-asm",
-        target_arch = "aarch64",
-        target_vendor = "apple"
-    )
-))]
+#[cfg(feature = "deferred")]
 const B448: [u64; 4] = [
     0xcc920bb9994a8dd9,
     0x87a7dcbe1ff6e0d7,
@@ -242,7 +235,6 @@ impl super::DifferenceOfProducts for Fq {
                 &positive_right.0,
                 &negative_left.0,
                 &negative_right.0,
-                &B448,
                 &MODULUS.0,
                 INV,
             ))

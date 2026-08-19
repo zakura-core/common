@@ -19,7 +19,7 @@
 // Apple AArch64 argument registers:
 //
 // - mul_add:    x0 = out, x1 = left_a, x2 = right_a, x3 = left_b,
-//               x4 = right_b, x5 = B448, x6 = modulus, x7 = inv
+//               x4 = right_b, x5 = modulus, x6 = inv
 // - mul:        x0 = out, x1 = lhs, x2 = rhs, x3 = modulus, x4 = inv
 // - square:     x0 = out, x1 = value, x2 = modulus, x3 = inv
 // - sqr_n_mul:  x0 = out, x1 = value, x2 = count, x3 = rhs, x4 = modulus,
@@ -45,9 +45,8 @@ _pasta_curves_mul_add_mont_pasta:
     stp x27,x28,[sp,#80]
 
     mov x29,x0              // Preserve the output pointer.
-    mov x27,x5              // Preserve the B448 pointer.
-    mov x28,x6              // Preserve the modulus pointer.
-    mov x0,x7               // Preserve the Montgomery inverse.
+    mov x28,x5              // Preserve the modulus pointer.
+    mov x0,x6               // Preserve the Montgomery inverse.
 
     // Compute left_a * right_a into x9..x16.
     ldp x5,x6,[x1]
@@ -237,61 +236,130 @@ _pasta_curves_mul_add_mont_pasta:
     adcs x25,x25,x15
     adcs x26,x26,x16
 
-    // Fold the top limb with 2^448 mod p. The congruent result occupies at
-    // most seven limbs, which splits into a low half and a sub-modulus high
-    // half for one Montgomery reduction.
-    ldp x5,x6,[x27]
-    mul x10,x26,x5
-    umulh x11,x26,x5
-    mul x15,x26,x6
-    adds x11,x11,x15
-    umulh x12,x26,x6
-    adc x12,x12,xzr
-    ldp x5,x6,[x27,#16]
-    mul x15,x26,x5
-    adds x12,x12,x15
-    umulh x13,x26,x5
-    adc x13,x13,xzr
-    mul x15,x26,x6
-    adds x13,x13,x15
-    umulh x14,x26,x6
-    adc x14,x14,xzr
+    // Reduce the complete product sum directly. Each round cancels one low
+    // limb, adds the remaining low halves of q * p, and then folds in the
+    // high halves while shifting out the cancelled limb.
+    ldp x5,x6,[x28]
+    ldp x7,x8,[x28,#16]
 
-    // Add the folding term to product limbs 0 through 6.
-    adds x10,x10,x19
-    adcs x11,x11,x20
-    adcs x12,x12,x21
-    adcs x13,x13,x22
-    adcs x19,x14,x23
-    adcs x20,x24,xzr
-    adcs x21,x25,xzr
-    adc x22,xzr,xzr
+    // Montgomery cancellation 0.
+    mul x3,x0,x19
+    mul x15,x6,x3
+    lsl x17,x3,#62
+    subs xzr,x19,#1
+    adcs x20,x20,x15
+    adcs x21,x21,xzr
+    adcs x22,x22,x17
+    adcs x23,x23,xzr
+    adcs x24,x24,xzr
+    adcs x25,x25,xzr
+    adcs x26,x26,xzr
+    adc x9,xzr,xzr
+    umulh x14,x5,x3
+    umulh x16,x6,x3
+    lsr x1,x3,#2
+    adds x19,x20,x14
+    adcs x20,x21,x16
+    adcs x21,x22,xzr
+    adcs x22,x23,x1
+    adcs x23,x24,xzr
+    adcs x24,x25,xzr
+    adcs x25,x26,xzr
+    adc x26,x9,xzr
 
-    // Montgomery-reduce the low half, then add the high half.
-    mov x2,x28
-    mov x4,x0
-    bl L$pasta_curves_mul_by_1_mont_pasta
+    // Montgomery cancellation 1.
+    mul x3,x0,x19
+    mul x15,x6,x3
+    lsl x17,x3,#62
+    subs xzr,x19,#1
+    adcs x20,x20,x15
+    adcs x21,x21,xzr
+    adcs x22,x22,x17
+    adcs x23,x23,xzr
+    adcs x24,x24,xzr
+    adcs x25,x25,xzr
+    adcs x26,x26,xzr
+    adc x9,xzr,xzr
+    umulh x14,x5,x3
+    umulh x16,x6,x3
+    lsr x1,x3,#2
+    adds x19,x20,x14
+    adcs x20,x21,x16
+    adcs x21,x22,xzr
+    adcs x22,x23,x1
+    adcs x23,x24,xzr
+    adcs x24,x25,xzr
+    adcs x25,x26,xzr
+    adc x26,x9,xzr
 
-    adds x10,x10,x19
-    adcs x11,x11,x20
-    adcs x12,x12,x21
-    adcs x13,x13,x22
-    adc x19,xzr,xzr
+    // Montgomery cancellation 2.
+    mul x3,x0,x19
+    mul x15,x6,x3
+    lsl x17,x3,#62
+    subs xzr,x19,#1
+    adcs x20,x20,x15
+    adcs x21,x21,xzr
+    adcs x22,x22,x17
+    adcs x23,x23,xzr
+    adcs x24,x24,xzr
+    adcs x25,x25,xzr
+    adcs x26,x26,xzr
+    adc x9,xzr,xzr
+    umulh x14,x5,x3
+    umulh x16,x6,x3
+    lsr x1,x3,#2
+    adds x19,x20,x14
+    adcs x20,x21,x16
+    adcs x21,x22,xzr
+    adcs x22,x23,x1
+    adcs x23,x24,xzr
+    adcs x24,x25,xzr
+    adcs x25,x26,xzr
+    adc x26,x9,xzr
 
-    // Canonicalize the result, including any carry above limb 3.
-    subs x14,x10,x5
-    sbcs x15,x11,x6
-    sbcs x16,x12,x7
-    sbcs x17,x13,x8
-    sbcs xzr,x19,xzr
+    // Montgomery cancellation 3.
+    mul x3,x0,x19
+    mul x15,x6,x3
+    lsl x17,x3,#62
+    subs xzr,x19,#1
+    adcs x20,x20,x15
+    adcs x21,x21,xzr
+    adcs x22,x22,x17
+    adcs x23,x23,xzr
+    adcs x24,x24,xzr
+    adcs x25,x25,xzr
+    adcs x26,x26,xzr
+    adc x9,xzr,xzr
+    umulh x14,x5,x3
+    umulh x16,x6,x3
+    lsr x1,x3,#2
+    adds x19,x20,x14
+    adcs x20,x21,x16
+    adcs x21,x22,xzr
+    adcs x22,x23,x1
+    adcs x23,x24,xzr
+    adcs x24,x25,xzr
+    adcs x25,x26,xzr
+    adc x26,x9,xzr
 
-    csel x10,x10,x14,lo
-    csel x11,x11,x15,lo
-    csel x12,x12,x16,lo
-    csel x13,x13,x17,lo
+    // The two-product input bound makes the reduced value smaller than 2p.
+    // Subtract p once and include all upper limbs in the comparison.
+    subs x10,x19,x5
+    sbcs x11,x20,x6
+    sbcs x12,x21,x7
+    sbcs x13,x22,x8
+    sbcs xzr,x23,xzr
+    sbcs xzr,x24,xzr
+    sbcs xzr,x25,xzr
+    sbcs xzr,x26,xzr
 
-    stp x10,x11,[x29]
-    stp x12,x13,[x29,#16]
+    csel x19,x19,x10,lo
+    csel x20,x20,x11,lo
+    csel x21,x21,x12,lo
+    csel x22,x22,x13,lo
+
+    stp x19,x20,[x29]
+    stp x21,x22,[x29,#16]
 
     ldp x19,x20,[sp,#16]
     ldp x21,x22,[sp,#32]
