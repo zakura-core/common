@@ -1056,8 +1056,7 @@ impl<F: Field> ConstraintSystem<F> {
     ///
     /// # Panics
     ///
-    /// Panics if `table_map` returns no input-table pairs, or if an input
-    /// expression contains a simple selector.
+    /// Panics if an input expression contains a simple selector.
     pub fn lookup(
         &mut self,
         table_map: impl FnOnce(&mut VirtualCells<'_, F>) -> Vec<(Expression<F>, TableColumn)>,

@@ -14,15 +14,7 @@ impl<F: Field> Argument<F> {
     /// Constructs a new lookup argument.
     ///
     /// `table_map` is a sequence of `(input, table)` tuples.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `table_map` is empty.
     pub fn new(table_map: Vec<(Expression<F>, Expression<F>)>) -> Self {
-        assert!(
-            !table_map.is_empty(),
-            "lookup argument requires at least one input-table pair"
-        );
         let (input_expressions, table_expressions) = table_map.into_iter().unzip();
         Argument {
             input_expressions,
@@ -86,9 +78,11 @@ mod tests {
     use crate::plonk::ConstraintSystem;
 
     #[test]
-    #[should_panic(expected = "lookup argument requires at least one input-table pair")]
-    fn empty_lookup_panics() {
+    fn empty_lookup_is_vacuous() {
         let mut meta = ConstraintSystem::<Fp>::default();
-        meta.lookup(|_| vec![]);
+        let index = meta.lookup(|_| vec![]);
+        assert_eq!(index, 0);
+        assert!(meta.lookups[index].input_expressions.is_empty());
+        assert!(meta.lookups[index].table_expressions.is_empty());
     }
 }
