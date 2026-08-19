@@ -428,6 +428,19 @@ fn plonk_api() {
 
     // Initialize the proving key
     let vk = keygen_vk(&params, &empty_circuit).expect("keygen_vk should not fail");
+
+    // Check that we get an error if we try to verify with a parameter set whose
+    // domain is too small for the verifying key's blinding rows.
+    {
+        let tiny_params: Params<EqAffine> = Params::new(0);
+        let strategy = SingleVerifier::new(&tiny_params);
+        let mut transcript = Blake2bRead::<_, EqAffine, Challenge255<_>>::init(&[][..]);
+        assert_matches!(
+            verify_proof(&tiny_params, &vk, strategy, &[], &mut transcript),
+            Err(Error::NotEnoughRowsAvailable { current_k }) if current_k == 0
+        );
+    }
+
     let pk = keygen_pk(&params, vk, &empty_circuit).expect("keygen_pk should not fail");
 
     let pubinputs = vec![instance];

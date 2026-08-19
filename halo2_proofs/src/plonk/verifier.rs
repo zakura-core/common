@@ -87,7 +87,11 @@ pub fn verify_proof<
         }
     }
 
-    let max_instance_len = params.n as usize - (vk.cs.blinding_factors() + 1);
+    // The parameters may have been supplied independently of the verifying
+    // key, so the domain is not guaranteed to accommodate the blinding rows.
+    let max_instance_len = (params.n as usize)
+        .checked_sub(vk.cs.blinding_factors() + 1)
+        .ok_or_else(|| Error::not_enough_rows_available(params.k))?;
     if instances
         .iter()
         .flat_map(|instance| instance.iter())
