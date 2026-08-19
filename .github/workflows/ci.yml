@@ -959,7 +959,7 @@ jobs:
         include:
           - target: wasm32-wasip1
             packages: -p zakura-proofs
-            build-deps: ""
+            build-deps: gcc-multilib
           - target: thumbv7em-none-eabihf
             packages: -p zakura-keys -p zakura-primitives
             build-deps: gcc-arm-none-eabi
