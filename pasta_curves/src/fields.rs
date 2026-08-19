@@ -17,6 +17,14 @@ mod aarch64_asm;
 pub use fp::*;
 pub use fq::*;
 
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    target_vendor = "apple"
+))]
+mod benchmark;
+
 /// Computes a difference of two field products.
 ///
 /// Field backends may fuse the two products into a single reduction.
