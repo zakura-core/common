@@ -46,6 +46,13 @@ rustdoc-args = [
 
 [features]
 aarch64-asm = ["dep:cc"]
+# EXPERIMENTAL: store Fp/Fq as quadratic CM/AMNS coefficient pairs instead of
+# Montgomery residues (see CM-TECHNIQUE.md at the workspace root). Changes the
+# internal representation only: wire format, PrimeField semantics, and the
+# constant-time posture are unchanged. Takes precedence over `aarch64-asm`
+# (the Montgomery assembly backend is disabled) until a CM assembly backend
+# exists.
+cm-field = []
 alloc = [
     "group/alloc",
     "blake2b_simd",

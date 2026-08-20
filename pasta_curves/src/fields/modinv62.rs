@@ -1759,6 +1759,12 @@ mod tests {
         };
     }
 
+    // The generated suites construct field elements from raw Montgomery
+    // limbs and feed stored words directly into `invert`, so they are
+    // representation-coupled. Canonical-mode coverage that runs in both
+    // modes arrives with the canonical-seed parameterization (M4 of the
+    // CM experiment).
+    #[cfg(not(feature = "cm-field"))]
     modinv_field_tests!(
         crate::fields::Fp,
         fp,
@@ -1772,6 +1778,7 @@ mod tests {
         PALLAS_VECTORS
     );
 
+    #[cfg(not(feature = "cm-field"))]
     modinv_field_tests!(
         crate::fields::Fq,
         fq,

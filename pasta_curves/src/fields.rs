@@ -1,16 +1,22 @@
 //! This module contains implementations for the two finite fields of the Pallas
 //! and Vesta curves.
 
-mod cm;
+pub(crate) mod cm;
 mod fp;
 mod fq;
+// Unused under `cm-field` only until the canonical-mode inversion lands
+// (the CM `Field::invert` is temporarily a Fermat scaffold).
+#[cfg_attr(feature = "cm-field", allow(dead_code, unused_macros))]
 mod modinv62;
 
 // Keep the assembly FFI exception contained within a private module whose
-// public interface consists only of safe wrappers.
+// public interface consists only of safe wrappers. The backend implements
+// Montgomery arithmetic, so it is disabled under the experimental `cm-field`
+// representation until a CM backend exists.
 #[allow(unsafe_code)]
 #[cfg(all(
     feature = "aarch64-asm",
+    not(feature = "cm-field"),
     target_arch = "aarch64",
     target_vendor = "apple"
 ))]

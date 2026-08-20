@@ -11,9 +11,19 @@ use lazy_static::lazy_static;
 #[cfg(feature = "bits")]
 use ff::{FieldBits, PrimeFieldBits};
 
-use crate::arithmetic::{adc, mac, sbb, SqrtTableHelpers};
+use crate::arithmetic::{sbb, SqrtTableHelpers};
+#[cfg(not(feature = "cm-field"))]
+use crate::arithmetic::{adc, mac};
+#[cfg(feature = "cm-field")]
+use super::cm;
 #[cfg(feature = "deferred")]
-use crate::deferred::{DeferredField, Product};
+use crate::deferred::DeferredField;
+#[cfg(all(feature = "deferred", not(feature = "cm-field")))]
+use crate::deferred::Product;
+
+/// The per-field CM parameter set (see `fields/cm.rs`).
+#[cfg(feature = "cm-field")]
+type CmP = cm::FqParams;
 
 #[cfg(feature = "sqrt-table")]
 use crate::arithmetic::SqrtTables;
@@ -24,8 +34,11 @@ use crate::arithmetic::SqrtTables;
 ///
 /// is the base field of the Vesta curve.
 // The internal representation of this type is four 64-bit unsigned
-// integers in little-endian order. `Fq` values are always in
-// Montgomery form; i.e., Fq(a) = aR mod q, with R = 2^256.
+// integers in little-endian order. By default `Fq` values are in
+// Montgomery form; i.e., Fq(a) = aR mod q, with R = 2^256. Under the
+// experimental `cm-field` feature the same four words instead pack two
+// two's-complement `i128` coefficients (a, b) representing the element
+// (a + b*sigma)/2^131 modulo the CM generator (see `fields/cm.rs`).
 #[derive(Clone, Copy, Eq)]
 #[repr(transparent)]
 pub struct Fq(pub(crate) [u64; 4]);
@@ -57,18 +70,39 @@ impl From<bool> for Fq {
     }
 }
 
+#[cfg(not(feature = "cm-field"))]
 impl From<u64> for Fq {
     fn from(val: u64) -> Fq {
         Fq([val, 0, 0, 0]) * R2
     }
 }
 
+#[cfg(feature = "cm-field")]
+impl From<u64> for Fq {
+    fn from(val: u64) -> Fq {
+        Fq(cm::pack(cm::from_u64::<CmP>(val)))
+    }
+}
+
+// Montgomery residues are unique, so structural limb equality is field
+// equality.
+#[cfg(not(feature = "cm-field"))]
 impl ConstantTimeEq for Fq {
     fn ct_eq(&self, other: &Self) -> Choice {
         self.0[0].ct_eq(&other.0[0])
             & self.0[1].ct_eq(&other.0[1])
             & self.0[2].ct_eq(&other.0[2])
             & self.0[3].ct_eq(&other.0[3])
+    }
+}
+
+// The CM representation is redundant (representatives can differ by
+// small lattice vectors), so equality must NOT compare stored words:
+// normalize the difference and test the raw coefficients for zero.
+#[cfg(feature = "cm-field")]
+impl ConstantTimeEq for Fq {
+    fn ct_eq(&self, other: &Self) -> Choice {
+        cm::ct_eq::<CmP>(cm::unpack(&self.0), cm::unpack(&other.0))
     }
 }
 
@@ -194,9 +228,11 @@ impl<T: ::core::borrow::Borrow<Fq>> ::core::iter::Product<T> for Fq {
 }
 
 /// INV = -(q^{-1} mod 2^64) mod 2^64
+#[cfg(not(feature = "cm-field"))]
 const INV: u64 = 0x8c46eb20ffffffff;
 
 /// R = 2^256 mod q (limbs; published to GPU kernels verbatim).
+#[cfg_attr(feature = "cm-field", allow(dead_code))] // GPU-contract constant
 const MONT_R_LIMBS: [u64; 4] = [
     0x5b2b3e9cfffffffd,
     0x992c350be3420567,
@@ -205,9 +241,11 @@ const MONT_R_LIMBS: [u64; 4] = [
 ];
 
 /// R as a field element (Montgomery form of 1).
+#[cfg(not(feature = "cm-field"))]
 const R: Fq = Fq(MONT_R_LIMBS);
 
 /// R^2 = 2^512 mod q (limbs; published to GPU kernels verbatim).
+#[cfg_attr(feature = "cm-field", allow(dead_code))] // GPU-contract constant
 const MONT_R2_LIMBS: [u64; 4] = [
     0xfc9678ff0000000f,
     0x67bb433d891a16e3,
@@ -216,9 +254,11 @@ const MONT_R2_LIMBS: [u64; 4] = [
 ];
 
 /// R^2 as a field element (converts integers into Montgomery form).
+#[cfg(not(feature = "cm-field"))]
 const R2: Fq = Fq(MONT_R2_LIMBS);
 
 /// R^3 = 2^768 mod q
+#[cfg(not(feature = "cm-field"))]
 const R3: Fq = Fq([
     0x008b421c249dae4c,
     0xe13bda50dba41326,
@@ -282,8 +322,16 @@ impl Fq {
 
     /// Returns one, the multiplicative identity.
     #[inline]
+    #[cfg(not(feature = "cm-field"))]
     pub const fn one() -> Fq {
         R
+    }
+
+    /// Returns one, the multiplicative identity.
+    #[inline]
+    #[cfg(feature = "cm-field")]
+    pub const fn one() -> Fq {
+        Fq(cm::pack(<CmP as cm::CmParams>::ONE))
     }
 
     /// Doubles this field element.
@@ -293,6 +341,12 @@ impl Fq {
         self.add(self)
     }
 
+    #[cfg(feature = "cm-field")]
+    fn from_u512(limbs: [u64; 8]) -> Fq {
+        Fq(cm::pack(cm::from_u512::<CmP>(&limbs)))
+    }
+
+    #[cfg(not(feature = "cm-field"))]
     fn from_u512(limbs: [u64; 8]) -> Fq {
         // We reduce an arbitrary 512-bit number by decomposing it into two 256-bit digits
         // with the higher bits multiplied by 2^256. Thus, we perform two reductions
@@ -321,17 +375,34 @@ impl Fq {
 
     /// Converts from an integer represented in little endian
     /// into its (congruent) `Fq` representation.
+    #[cfg(not(feature = "cm-field"))]
     pub const fn from_raw(val: [u64; 4]) -> Self {
         (&Fq(val)).mul(&R2)
     }
 
+    /// Converts from an integer represented in little endian
+    /// into its (congruent) `Fq` representation.
+    #[cfg(feature = "cm-field")]
+    pub const fn from_raw(val: [u64; 4]) -> Self {
+        Fq(cm::pack(cm::from_raw::<CmP>(val)))
+    }
+
     /// Squares this element.
+    #[cfg(not(feature = "cm-field"))]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn square(&self) -> Fq {
         let u = self.square_unreduced();
         Fq::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
     }
 
+    /// Squares this element.
+    #[cfg(feature = "cm-field")]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn square(&self) -> Fq {
+        Fq(cm::pack(cm::square::<CmP>(cm::unpack(&self.0))))
+    }
+
+    #[cfg(not(feature = "cm-field"))]
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
     const fn montgomery_reduce(
@@ -381,16 +452,25 @@ impl Fq {
     }
 
     /// Multiplies `rhs` by `self`, returning the result.
+    #[cfg(not(feature = "cm-field"))]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn mul(&self, rhs: &Self) -> Self {
         let u = self.mul_unreduced(rhs);
         Fq::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
     }
 
+    /// Multiplies `rhs` by `self`, returning the result.
+    #[cfg(feature = "cm-field")]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn mul(&self, rhs: &Self) -> Self {
+        Fq(cm::pack(cm::mul::<CmP>(cm::unpack(&self.0), cm::unpack(&rhs.0))))
+    }
+
     #[inline]
     fn mul_runtime(&self, rhs: &Self) -> Self {
         #[cfg(all(
             feature = "aarch64-asm",
+            not(feature = "cm-field"),
             target_arch = "aarch64",
             target_vendor = "apple"
         ))]
@@ -400,6 +480,7 @@ impl Fq {
 
         #[cfg(not(all(
             feature = "aarch64-asm",
+            not(feature = "cm-field"),
             target_arch = "aarch64",
             target_vendor = "apple"
         )))]
@@ -412,6 +493,7 @@ impl Fq {
     fn square_runtime(&self) -> Self {
         #[cfg(all(
             feature = "aarch64-asm",
+            not(feature = "cm-field"),
             target_arch = "aarch64",
             target_vendor = "apple"
         ))]
@@ -421,6 +503,7 @@ impl Fq {
 
         #[cfg(not(all(
             feature = "aarch64-asm",
+            not(feature = "cm-field"),
             target_arch = "aarch64",
             target_vendor = "apple"
         )))]
@@ -438,6 +521,7 @@ impl Fq {
 
         #[cfg(all(
             feature = "aarch64-asm",
+            not(feature = "cm-field"),
             target_arch = "aarch64",
             target_vendor = "apple"
         ))]
@@ -449,6 +533,7 @@ impl Fq {
 
         #[cfg(not(all(
             feature = "aarch64-asm",
+            not(feature = "cm-field"),
             target_arch = "aarch64",
             target_vendor = "apple"
         )))]
@@ -458,6 +543,7 @@ impl Fq {
     }
 
     /// Subtracts `rhs` from `self`, returning the result.
+    #[cfg(not(feature = "cm-field"))]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn sub(&self, rhs: &Self) -> Self {
         let (d0, borrow) = sbb(self.0[0], rhs.0[0], 0);
@@ -475,7 +561,15 @@ impl Fq {
         Fq([d0, d1, d2, d3])
     }
 
+    /// Subtracts `rhs` from `self`, returning the result.
+    #[cfg(feature = "cm-field")]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn sub(&self, rhs: &Self) -> Self {
+        Fq(cm::pack(cm::sub::<CmP>(cm::unpack(&self.0), cm::unpack(&rhs.0))))
+    }
+
     /// Adds `rhs` to `self`, returning the result.
+    #[cfg(not(feature = "cm-field"))]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn add(&self, rhs: &Self) -> Self {
         let (d0, carry) = adc(self.0[0], rhs.0[0], 0);
@@ -488,7 +582,15 @@ impl Fq {
         (&Fq([d0, d1, d2, d3])).sub(&Fq(MODULUS_LIMBS))
     }
 
+    /// Adds `rhs` to `self`, returning the result.
+    #[cfg(feature = "cm-field")]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn add(&self, rhs: &Self) -> Self {
+        Fq(cm::pack(cm::add::<CmP>(cm::unpack(&self.0), cm::unpack(&rhs.0))))
+    }
+
     /// Negates `self`.
+    #[cfg(not(feature = "cm-field"))]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn neg(&self) -> Self {
         // Subtract `self` from `MODULUS` to negate. Ignore the final
@@ -506,7 +608,15 @@ impl Fq {
         Fq([d0 & mask, d1 & mask, d2 & mask, d3 & mask])
     }
 
+    /// Negates `self`.
+    #[cfg(feature = "cm-field")]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn neg(&self) -> Self {
+        Fq(cm::pack(cm::neg(cm::unpack(&self.0))))
+    }
+
     /// Multiplies `rhs` by `self`, returning the unreduced 512-bit product.
+    #[cfg(not(feature = "cm-field"))]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) const fn mul_unreduced(&self, rhs: &Self) -> [u64; 8] {
         // Schoolbook multiplication
@@ -535,6 +645,7 @@ impl Fq {
     }
 
     /// Squares this element, returning the unreduced 512-bit product.
+    #[cfg(not(feature = "cm-field"))]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) const fn square_unreduced(&self) -> [u64; 8] {
         let (r1, carry) = mac(0, self.0[0], self.0[1], 0);
@@ -567,7 +678,7 @@ impl Fq {
     }
 }
 
-#[cfg(feature = "deferred")]
+#[cfg(all(feature = "deferred", not(feature = "cm-field")))]
 impl DeferredField for Fq {
     type Accumulator = Product<Fq>;
 
@@ -594,6 +705,29 @@ impl DeferredField for Fq {
         Fq::montgomery_reduce(
             limbs[0], limbs[1], limbs[2], limbs[3], limbs[4], limbs[5], limbs[6], limbs[7],
         )
+    }
+}
+
+// Phase A under the CM representation: eager per-product reduction. This
+// keeps every DeferredField consumer compiling and correct; the wide CM
+// accumulator (deferred Phase B) replaces it in a follow-up.
+#[cfg(all(feature = "deferred", feature = "cm-field"))]
+impl DeferredField for Fq {
+    type Accumulator = Fq;
+
+    #[inline]
+    fn mul_accumulate(acc: &mut Self::Accumulator, a: &Fq, b: &Fq) {
+        *acc += *a * *b;
+    }
+
+    #[inline]
+    fn square_accumulate(acc: &mut Self::Accumulator, a: &Fq) {
+        *acc += a.square_runtime();
+    }
+
+    #[inline]
+    fn reduce(acc: Self::Accumulator) -> Fq {
+        acc
     }
 }
 
@@ -672,9 +806,28 @@ impl ff::Field for Fq {
     /// previous (data-oblivious) Fermat implementation, which remains
     /// expressible as `self.pow_vartime(&[q - 2])`.
     fn invert(&self) -> CtOption<Self> {
-        match super::modinv62::invert::<super::modinv62::FqParams>(&self.0) {
-            Some(limbs) => CtOption::new(Fq(limbs), Choice::from(1)),
-            None => CtOption::new(Self::zero(), Choice::from(0)),
+        #[cfg(not(feature = "cm-field"))]
+        {
+            match super::modinv62::invert::<super::modinv62::FqParams>(&self.0) {
+                Some(limbs) => CtOption::new(Fq(limbs), Choice::from(1)),
+                None => CtOption::new(Self::zero(), Choice::from(0)),
+            }
+        }
+
+        // TODO(M4): route through `modinv62` in canonical mode (seed 1).
+        // Fermat scaffold so the representation swap is testable
+        // end-to-end; correct but several times slower than divstep.
+        #[cfg(feature = "cm-field")]
+        {
+            /// The Fermat exponent q - 2, little-endian limbs.
+            const EXP: [u64; 4] = [
+                0x8c46eb20ffffffff,
+                0x224698fc0994a8dd,
+                0x0000000000000000,
+                0x4000000000000000,
+            ];
+            let inv = self.pow_vartime(EXP);
+            CtOption::new(inv, !self.ct_eq(&Self::zero()))
         }
     }
 
@@ -742,7 +895,15 @@ impl ff::PrimeField for Fq {
     const DELTA: Self = DELTA;
 
     fn from_u128(v: u128) -> Self {
-        Fq::from_raw([v as u64, (v >> 64) as u64, 0, 0])
+        #[cfg(not(feature = "cm-field"))]
+        {
+            Fq::from_raw([v as u64, (v >> 64) as u64, 0, 0])
+        }
+
+        #[cfg(feature = "cm-field")]
+        {
+            Fq(cm::pack(cm::from_u128::<CmP>(v)))
+        }
     }
 
     fn from_repr(repr: Self::Repr) -> CtOption<Self> {
@@ -764,29 +925,51 @@ impl ff::PrimeField for Fq {
         // of 0xffff...ffff. Otherwise, it'll be zero.
         let is_some = (borrow as u8) & 1;
 
-        // Convert to Montgomery form by computing
-        // (a.R^0 * R^2) / R = a.R
-        tmp *= &R2;
+        // Convert into the internal representation.
+        #[cfg(not(feature = "cm-field"))]
+        {
+            // Montgomery form: (a.R^0 * R^2) / R = a.R.
+            tmp *= &R2;
+            CtOption::new(tmp, Choice::from(is_some))
+        }
 
-        CtOption::new(tmp, Choice::from(is_some))
+        #[cfg(feature = "cm-field")]
+        {
+            // The value is only meaningful when `is_some` is set; clear
+            // the top bit so even a non-canonical repr stays inside
+            // `encode`'s x < 2^255 domain (canonical values never have
+            // it set).
+            let mut limbs = tmp.0;
+            limbs[3] &= (1 << 63) - 1;
+            CtOption::new(
+                Fq(cm::pack(cm::encode::<CmP>(limbs))),
+                Choice::from(is_some),
+            )
+        }
     }
 
     fn to_repr(&self) -> Self::Repr {
-        // Turn into canonical form by computing
-        // (a.R) / R = a
+        // Turn the internal representation into canonical form.
         #[cfg(all(
             feature = "aarch64-asm",
+            not(feature = "cm-field"),
             target_arch = "aarch64",
             target_vendor = "apple"
         ))]
         let tmp = Fq(super::aarch64_asm::from_mont(&self.0, &MODULUS_LIMBS, INV));
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple"
-        )))]
+        #[cfg(all(
+            not(feature = "cm-field"),
+            not(all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ))
+        ))]
         let tmp = Fq::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
+
+        #[cfg(feature = "cm-field")]
+        let tmp = Fq(cm::decode::<CmP>(cm::unpack(&self.0)));
 
         let mut res = [0; 32];
         res[0..8].copy_from_slice(&tmp.0[0].to_le_bytes());
@@ -887,10 +1070,16 @@ impl SqrtTableHelpers for Fq {
     }
 
     fn get_lower_32(&self) -> u32 {
-        // TODO: don't reduce, just hash the Montgomery form. (Requires rebuilding perfect hash table.)
-        let tmp = Fq::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
+        // TODO: don't convert to canonical form, hash the internal
+        // representation. (Requires rebuilding the perfect hash table —
+        // and, under cm-field, a canonical representative first.)
+        #[cfg(not(feature = "cm-field"))]
+        let low = Fq::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0).0[0];
 
-        tmp.0[0] as u32
+        #[cfg(feature = "cm-field")]
+        let low = cm::decode::<CmP>(cm::unpack(&self.0))[0];
+
+        low as u32
     }
 }
 
@@ -980,6 +1169,7 @@ fn gpu_constants_are_montgomery() {
 #[cfg(all(
     test,
     feature = "aarch64-asm",
+    not(feature = "cm-field"),
     target_arch = "aarch64",
     target_vendor = "apple"
 ))]
@@ -995,6 +1185,7 @@ fn aarch64_asm_portable_repr(value: Fq) -> [u8; 32] {
 #[cfg(all(
     test,
     feature = "aarch64-asm",
+    not(feature = "cm-field"),
     target_arch = "aarch64",
     target_vendor = "apple"
 ))]
@@ -1008,6 +1199,7 @@ fn aarch64_asm_check_repr(value: Fq) {
 #[cfg(all(
     test,
     feature = "aarch64-asm",
+    not(feature = "cm-field"),
     target_arch = "aarch64",
     target_vendor = "apple"
 ))]
@@ -1026,6 +1218,7 @@ fn aarch64_asm_portable_cmp(lhs: Fq, rhs: Fq) -> core::cmp::Ordering {
 #[cfg(all(
     test,
     feature = "aarch64-asm",
+    not(feature = "cm-field"),
     target_arch = "aarch64",
     target_vendor = "apple"
 ))]
@@ -1090,6 +1283,7 @@ fn aarch64_asm_matches_portable_arithmetic() {
     }
 }
 
+#[cfg(not(feature = "cm-field"))]
 #[test]
 fn test_inv() {
     // Compute -(r^{-1} mod 2^64) mod 2^64 by exponentiating
@@ -1298,6 +1492,9 @@ fn consistent_modulus_limbs() {
     }
 }
 
+// Montgomery-coupled (constructs raw residues and uses R2/R3); the CM
+// path is covered by the kernel's from_u512 tests and repr_roundtrip.
+#[cfg(not(feature = "cm-field"))]
 #[test]
 fn test_from_u512() {
     assert_eq!(
@@ -1323,6 +1520,7 @@ fn test_from_u512() {
 #[cfg(all(
     test,
     feature = "aarch64-asm",
+    not(feature = "cm-field"),
     target_arch = "aarch64",
     target_vendor = "apple"
 ))]
@@ -1394,4 +1592,113 @@ fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
         l[7] |= 0xc000000000000000;
         assert_eq!(Fq::from_u512(l), portable_from_u512(l), "limbs {:x?}", l);
     }
+}
+
+/// Byte-identity tripwire across internal representations: fixed raw inputs
+/// must serialize to exactly the same canonical bytes in every mode.
+#[test]
+fn repr_pinned_vectors() {
+    let cases: [([u64; 4], [u8; 32]); 8] = [
+        (
+            [0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
+            [
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+        ),
+        (
+            [0x0000000000000001, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
+            [
+                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+        ),
+        (
+            [0x0000000000000005, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
+            [
+                0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+        ),
+        (
+            [0x8c46eb2100000000, 0x224698fc0994a8dd, 0x0000000000000000, 0x4000000000000000],
+            [
+                0x00, 0x00, 0x00, 0x00, 0x21, 0xeb, 0x46, 0x8c,
+                0xdd, 0xa8, 0x94, 0x09, 0xfc, 0x98, 0x46, 0x22,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+            ],
+        ),
+        (
+            [0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff],
+            [
+                0xfc, 0xff, 0xff, 0xff, 0x9c, 0x3e, 0x2b, 0x5b,
+                0x67, 0x05, 0x42, 0xe3, 0x0b, 0x35, 0x2c, 0x99,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f,
+            ],
+        ),
+        (
+            [0x123456789abcdef0, 0xfedcba9876543210, 0x0f1e2d3c4b5a6978, 0x0123456789abcdef],
+            [
+                0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
+                0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+                0x78, 0x69, 0x5a, 0x4b, 0x3c, 0x2d, 0x1e, 0x0f,
+                0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+            ],
+        ),
+        (
+            [0x5b2b3e9cfffffffd, 0x992c350be3420567, 0xffffffffffffffff, 0x3fffffffffffffff],
+            [
+                0xfd, 0xff, 0xff, 0xff, 0x9c, 0x3e, 0x2b, 0x5b,
+                0x67, 0x05, 0x42, 0xe3, 0x0b, 0x35, 0x2c, 0x99,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f,
+            ],
+        ),
+        (
+            [0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x4000000000000000],
+            [
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+            ],
+        ),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(Fq::from_raw(raw).to_repr(), expected);
+    }
+}
+
+/// `from_repr` inverts `to_repr` on canonical values, `is_odd` matches the
+/// canonical low bit, and non-canonical reprs are rejected — in every mode.
+#[test]
+fn repr_roundtrip() {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x21; 16]);
+    for x in [Fq::zero(), Fq::one(), -Fq::one()] {
+        assert_eq!(Fq::from_repr(x.to_repr()).unwrap(), x);
+    }
+    for _ in 0..1000 {
+        let x = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+        assert_eq!(Fq::from_repr(x.to_repr()).unwrap(), x);
+        assert_eq!(x.is_odd().unwrap_u8(), x.to_repr()[0] & 1);
+    }
+    // Non-canonical reprs are rejected.
+    let mut bytes = (-Fq::one()).to_repr();
+    bytes[0] = bytes[0].wrapping_add(1); // = the modulus itself
+    assert!(bool::from(Fq::from_repr(bytes).is_none()));
+    assert!(bool::from(Fq::from_repr([0xff; 32]).is_none()));
 }

@@ -1131,9 +1131,11 @@ fn babai<P: CmParams>(k: [u64; 4]) -> (i128, i128) {
     out
 }
 
-/// Canonical → CM: encodes a canonical little-endian value `x < r`.
+/// Canonical → CM: encodes a little-endian value `x < 2^255` (reduced
+/// modulo `r`, so any canonical value and, e.g., `from_repr`'s masked
+/// candidate bytes are in domain).
 pub(crate) fn encode<P: CmParams>(x: [u64; 4]) -> (i128, i128) {
-    verify!(x[3] <= (1 << 62), "encode input must be canonical");
+    verify!(x[3] >> 63 == 0, "encode input must be below 2^255");
     // k = x·2^131, a pure limb shift; < r·2^131 < 2^386.
     let k512 = [
         0,

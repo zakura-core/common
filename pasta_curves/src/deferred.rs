@@ -40,6 +40,7 @@ pub trait DeferredField: ff::Field {
 /// Call [`DeferredField::reduce`] to fold the carry back into range and
 /// perform Montgomery reduction.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "cm-field", allow(dead_code))] // Montgomery-mode accumulator
 pub struct Product<F> {
     limbs: [u64; 8],
     carry: u64,
@@ -52,6 +53,7 @@ impl<F> Default for Product<F> {
     }
 }
 
+#[cfg_attr(feature = "cm-field", allow(dead_code))] // Montgomery-mode accumulator
 impl<F> Product<F> {
     /// The zero (additive identity) accumulator.
     pub const ZERO: Self = Product {
@@ -249,6 +251,11 @@ mod tests {
         };
     }
 
+    // The adversarial elements are representation-specific: raw Montgomery
+    // residues with extreme top limbs for the lazy Product accumulator, and
+    // maximal-coefficient CM pairs (built via the kernel's `pack`) under
+    // `cm-field`.
+    #[cfg(not(feature = "cm-field"))]
     deferred_field_tests!(
         crate::Fp,
         fp,
@@ -265,6 +272,7 @@ mod tests {
             0x3d8a19f5e6c7b042,
         ])
     );
+    #[cfg(not(feature = "cm-field"))]
     deferred_field_tests!(
         crate::Fq,
         fq,
@@ -280,5 +288,31 @@ mod tests {
             0xcb45a8d2e1f36790,
             0x3c47d2a8b10e5f93,
         ])
+    );
+    #[cfg(feature = "cm-field")]
+    deferred_field_tests!(
+        crate::Fp,
+        fp,
+        crate::Fp(crate::fields::cm::pack((
+            ((31u128 << 122) - 1) as i128,
+            -(((3u128 << 124) - 1) as i128),
+        ))),
+        crate::Fp(crate::fields::cm::pack((
+            -(((31u128 << 122) - 1) as i128),
+            ((3u128 << 124) - 1) as i128,
+        )))
+    );
+    #[cfg(feature = "cm-field")]
+    deferred_field_tests!(
+        crate::Fq,
+        fq,
+        crate::Fq(crate::fields::cm::pack((
+            ((31u128 << 122) - 1) as i128,
+            ((3u128 << 124) - 1) as i128,
+        ))),
+        crate::Fq(crate::fields::cm::pack((
+            -(((31u128 << 122) - 1) as i128),
+            -(((3u128 << 124) - 1) as i128),
+        )))
     );
 }
