@@ -862,7 +862,7 @@ mod tests {
     use super::*;
     use core::cmp::Ordering;
     use ff::{Field, PrimeField, WithSmallOrderMulGroup};
-    use rand::{RngCore, SeedableRng};
+    use rand::{Rng, SeedableRng};
     use rand_xorshift::XorShiftRng;
 
     const SEED: [u8; 16] = [
