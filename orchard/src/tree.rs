@@ -13,8 +13,6 @@ use crate::{
     note::commitment::ExtractedNoteCommitment,
 };
 
-#[cfg(feature = "weighted-merkle")]
-use crate::spec::extract_p;
 #[cfg(not(feature = "weighted-merkle"))]
 use crate::spec::extract_p_bottom_batch;
 
@@ -74,7 +72,7 @@ lazy_static! {
 
 #[cfg(feature = "weighted-merkle")]
 fn merkle_crh(level: Level, left: &MerkleHashOrchard, right: &MerkleHashOrchard) -> pallas::Base {
-    extract_p(&MERKLE_CRH_DOMAIN.hash_words(&merkle_crh_words(level, left, right)))
+    MERKLE_CRH_DOMAIN.hash_words(&merkle_crh_words(level, left, right))
 }
 
 #[cfg(not(feature = "weighted-merkle"))]
@@ -82,18 +80,6 @@ fn merkle_crh(level: Level, left: &MerkleHashOrchard, right: &MerkleHashOrchard)
     MERKLE_CRH_DOMAIN
         .hash(merkle_crh_message(level, left, right))
         .unwrap_or(pallas::Base::zero())
-}
-
-#[cfg(feature = "weighted-merkle")]
-fn merkle_crh_to_point(
-    level: Level,
-    left: &MerkleHashOrchard,
-    right: &MerkleHashOrchard,
-) -> CtOption<pallas::Point> {
-    CtOption::new(
-        MERKLE_CRH_DOMAIN.hash_words(&merkle_crh_words(level, left, right)),
-        1.into(),
-    )
 }
 
 #[cfg(not(feature = "weighted-merkle"))]

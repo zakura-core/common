@@ -69,6 +69,14 @@ use super::{HashDomain, MessageWords, C, K, SINSEMILLA_S_AFFINE};
 
 const GENERATOR_COUNT: usize = 1 << K;
 
+fn extract(point: pallas::Point) -> pallas::Base {
+    point
+        .to_affine()
+        .coordinates()
+        .map(|coordinates| *coordinates.x())
+        .unwrap_or_else(pallas::Base::zero)
+}
+
 /// An unchecked fixed-word-count Sinsemilla domain with position-weighted
 /// generators.
 ///
@@ -140,13 +148,22 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         }
     }
 
-    /// Evaluates exactly `N` pre-decoded Sinsemilla words.
+    /// Evaluates exactly `N` pre-decoded Sinsemilla words to a point.
     ///
     /// # Panics
     ///
-    /// Panics if any word is not a valid `K`-bit Sinsemilla word.
-    pub fn hash_words(&self, words: &[u16; N]) -> pallas::Point {
+    /// Panics if any word is not a valid [`K`]-bit Sinsemilla word.
+    pub fn hash_words_to_point(&self, words: &[u16; N]) -> pallas::Point {
         self.evaluate(words.iter().copied())
+    }
+
+    /// Evaluates the Sinsemilla hash of exactly `N` pre-decoded words.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any word is not a valid [`K`]-bit Sinsemilla word.
+    pub fn hash_words(&self, words: &[u16; N]) -> pallas::Base {
+        extract(self.hash_words_to_point(words))
     }
 
     /// Evaluates a batch of `N`-word messages position-first and returns their
@@ -157,7 +174,7 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     ///
     /// # Panics
     ///
-    /// Panics if any word is not a valid `K`-bit Sinsemilla word.
+    /// Panics if any word is not a valid [`K`]-bit Sinsemilla word.
     pub fn hash_words_batch(&self, messages: &[[u16; N]]) -> Vec<pallas::Base> {
         let points = self.evaluate_batch(messages);
         let mut affine = vec![pallas::Affine::identity(); points.len()];
@@ -211,11 +228,7 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     ///
     /// Panics as [`Self::hash_to_point`] does.
     pub fn hash(&self, msg: impl Iterator<Item = bool>) -> pallas::Base {
-        self.hash_to_point(msg)
-            .to_affine()
-            .coordinates()
-            .map(|coordinates| *coordinates.x())
-            .unwrap_or_else(pallas::Base::zero)
+        extract(self.hash_to_point(msg))
     }
 
     /// Returns the heap size occupied by the weighted generator table.
@@ -247,7 +260,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use group::{Curve, CurveAffine as _, Group};
-    use pasta_curves::{arithmetic::CurveAffine as _, pallas};
+    use pasta_curves::pallas;
     use subtle::CtOption;
 
     use super::{UncheckedFixedLengthHashDomain, GENERATOR_COUNT};
@@ -259,14 +272,6 @@ mod tests {
     fn assert_matches(expected: CtOption<pallas::Point>, actual: pallas::Point) {
         assert!(bool::from(expected.is_some()));
         assert_eq!(actual, expected.unwrap());
-    }
-
-    fn extract(point: pallas::Point) -> pallas::Base {
-        point
-            .to_affine()
-            .coordinates()
-            .map(|coordinates| *coordinates.x())
-            .unwrap_or_else(pallas::Base::zero)
     }
 
     fn words_to_bits(words: &[u16]) -> Vec<bool> {
@@ -301,7 +306,7 @@ mod tests {
             domain.hash_to_point(bits.iter().copied()).is_some()
         ));
         assert_eq!(
-            unchecked.hash_words(&words),
+            unchecked.hash_words_to_point(&words),
             generator_point.double() + generator
         );
     }
@@ -333,12 +338,14 @@ mod tests {
         for words in fixtures {
             let bits = words_to_bits(&words);
             let expected = domain.hash_to_point(bits.iter().copied());
-            assert_matches(expected, weighted.hash_words(&words));
+            assert_matches(expected, weighted.hash_words_to_point(&words));
             assert_matches(expected, weighted.hash_to_point(bits.iter().copied()));
 
             let expected = domain.hash(bits.iter().copied());
             assert!(bool::from(expected.is_some()));
-            assert_eq!(expected.unwrap(), weighted.hash(bits.iter().copied()));
+            let expected = expected.unwrap();
+            assert_eq!(expected, weighted.hash_words(&words));
+            assert_eq!(expected, weighted.hash(bits.iter().copied()));
         }
     }
 
@@ -354,7 +361,7 @@ mod tests {
             .collect();
         let expected: Vec<_> = messages
             .iter()
-            .map(|words| extract(weighted.hash_words(words)))
+            .map(|words| weighted.hash_words(words))
             .collect();
 
         assert_eq!(weighted.hash_words_batch(&messages), expected);

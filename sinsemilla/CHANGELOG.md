@@ -9,8 +9,11 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 - Prepared the `1.0.0-rc.2` release.
-- Added batched fixed-length weighted evaluation that processes messages
-  position-first and shares projective normalization across the batch.
+- Added `UncheckedFixedLengthHashDomain::hash_words` and
+  `UncheckedFixedLengthHashDomain::hash_words_batch` for extracted hashes of
+  pre-decoded words. The batch method processes messages position-first and
+  shares projective normalization across the batch. The point-valued method is
+  exposed as `UncheckedFixedLengthHashDomain::hash_words_to_point`.
 - The fixed-length weighted evaluator now reuses the streaming message-word
   conversion, removing its padded message allocation.
 - Added an unchecked fixed-length, position-weighted hash evaluator that moves
