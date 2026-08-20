@@ -455,70 +455,106 @@ where
     q
 }
 
-/// Number of independent accumulator lanes used by [`batch_invert_lanes`].
-///
-/// The classic Montgomery batch-inversion walks one serial multiplication
-/// chain forward and one backward, so it runs at the field multiplication's
-/// dependency latency. Splitting the elements into `LANES` interleaved
-/// groups runs that many independent chains (throughput-bound) for a fixed
-/// overhead of `3 * (LANES - 1)` extra multiplications per batch.
-pub(crate) const BATCH_INVERT_LANES: usize = 2;
-
 /// Batches below this length use the single-chain algorithm: measured on
-/// x86-64 (EPYC Zen 4, portable arithmetic), the fixed `3 * (LANES - 1)`
-/// multiplication overhead and lane bookkeeping only pay for themselves from
-/// ~32 elements; on Apple aarch64 with the assembly backend two lanes win at
-/// every measured size, but by under 2% below 32 elements, so one shared
-/// threshold serves both.
-pub(crate) const BATCH_INVERT_LANES_MIN: usize = 32;
+/// x86-64 (EPYC Zen 4, portable arithmetic), the two-lane variant's fixed
+/// overhead (three extra multiplications) and lane bookkeeping only pay for
+/// themselves from ~32 elements; on Apple aarch64 with the assembly backend
+/// two lanes win at every measured size, but by under 2% below 32 elements,
+/// so one shared threshold serves both.
+pub(crate) const BATCH_INVERT_TWO_LANE_MIN: usize = 32;
 
-/// Batch inversion with `ff::BatchInverter`-compatible zero handling,
-/// dispatching between the single-chain and two-lane algorithms by length
-/// (see [`BATCH_INVERT_LANES_MIN`]).
+/// In-place batch inversion with `ff::BatchInverter`-compatible zero
+/// handling: zero elements are skipped (left as zero) in constant time.
+///
+/// The classic Montgomery walk runs one serial multiplication chain forward
+/// (prefix products) and one backward (substitution), so both passes run at
+/// the field multiplication's dependency latency. From
+/// [`BATCH_INVERT_TWO_LANE_MIN`] elements, even- and odd-indexed elements
+/// instead run two independent chains (throughput-bound), joined around a
+/// single shared inversion, for a fixed overhead of three multiplications
+/// per call.
 pub(crate) fn batch_invert_multi<F: Field>(values: &mut [F]) {
-    if values.len() < BATCH_INVERT_LANES_MIN {
-        batch_invert_lanes::<F, 1>(values);
-    } else {
-        batch_invert_lanes::<F, BATCH_INVERT_LANES>(values);
-    }
-}
-
-/// Multi-lane Montgomery batch inversion with `ff::BatchInverter`-compatible
-/// zero handling: zero elements are skipped (left as zero) in constant time.
-pub(crate) fn batch_invert_lanes<F: Field, const K: usize>(values: &mut [F]) {
+    // At the backward step for element `i`, both the original value (to
+    // extend the running inverse) and the prefix product before it (to form
+    // the answer) are needed, so an in-place walk requires one auxiliary
+    // slot per element.
     let mut scratch = vec![F::ZERO; values.len()];
-    let mut acc = [F::ONE; K];
-    for (i, (value, slot)) in values.iter().zip(scratch.iter_mut()).enumerate() {
-        let term = F::conditional_select(value, &F::ONE, value.is_zero());
-        *slot = acc[i % K];
-        acc[i % K] *= term;
-    }
-    let mut product = acc[0];
-    for lane in &acc[1..] {
-        product *= *lane;
-    }
-    // The product of the nonzero terms; it can only fail to invert if the
-    // slice is entirely zero (product = ONE inverts fine) — never, since
-    // skipped elements contribute ONE.
-    let inverse = product.invert().unwrap();
-    let mut seeds = [inverse; K];
-    if K > 1 {
-        for (j, seed) in seeds.iter_mut().enumerate() {
-            for (l, lane) in acc.iter().enumerate() {
-                if l != j {
-                    *seed *= *lane;
-                }
-            }
+
+    let nonzero = |value: &F| F::conditional_select(value, &F::ONE, value.is_zero());
+
+    if values.len() < BATCH_INVERT_TWO_LANE_MIN {
+        let mut acc = F::ONE;
+        for (value, slot) in values.iter().zip(scratch.iter_mut()) {
+            *slot = acc;
+            acc *= nonzero(value);
         }
+        // Skipped elements contribute ONE, so this cannot fail.
+        let mut acc = acc.invert().unwrap();
+        for (value, slot) in values.iter_mut().zip(scratch.iter()).rev() {
+            let is_zero = value.is_zero();
+            let term = nonzero(value);
+            let inverted = acc * slot;
+            acc *= term;
+            *value = F::conditional_select(&inverted, &F::ZERO, is_zero);
+        }
+        return;
     }
-    for i in (0..values.len()).rev() {
-        let lane = i % K;
-        let value = values[i];
+
+    // Two-lane walk, stepped in (even, odd) pairs so the independent chains
+    // are explicit. A trailing element (odd length) has an even index and
+    // belongs to the first lane.
+    let mut acc0 = F::ONE;
+    let mut acc1 = F::ONE;
+    for (pair, slots) in values.chunks_exact(2).zip(scratch.chunks_exact_mut(2)) {
+        slots[0] = acc0;
+        acc0 *= nonzero(&pair[0]);
+        slots[1] = acc1;
+        acc1 *= nonzero(&pair[1]);
+    }
+    if let (Some(value), Some(slot)) = (
+        values.chunks_exact(2).remainder().first(),
+        scratch.chunks_exact_mut(2).into_remainder().first_mut(),
+    ) {
+        *slot = acc0;
+        acc0 *= nonzero(value);
+    }
+
+    // Join the lane products around one shared inversion, then recover each
+    // lane's inverse seed.
+    let inverse = (acc0 * acc1).invert().unwrap();
+    let seed0 = inverse * acc1;
+    let seed1 = inverse * acc0;
+    let mut acc0 = seed0;
+    let mut acc1 = seed1;
+
+    // The odd tail is the highest index, so the backward walk visits it
+    // before the pairs.
+    if let (Some(value), Some(slot)) = (
+        values.chunks_exact_mut(2).into_remainder().first_mut(),
+        scratch.chunks_exact(2).remainder().first(),
+    ) {
         let is_zero = value.is_zero();
-        let term = F::conditional_select(&value, &F::ONE, is_zero);
-        let inverted = seeds[lane] * scratch[i];
-        seeds[lane] *= term;
-        values[i] = F::conditional_select(&inverted, &F::ZERO, is_zero);
+        let term = nonzero(value);
+        let inverted = acc0 * slot;
+        acc0 *= term;
+        *value = F::conditional_select(&inverted, &F::ZERO, is_zero);
+    }
+
+    for (pair, slots) in values
+        .chunks_exact_mut(2)
+        .zip(scratch.chunks_exact(2))
+        .rev()
+    {
+        let is_zero0 = pair[0].is_zero();
+        let is_zero1 = pair[1].is_zero();
+        let term0 = nonzero(&pair[0]);
+        let term1 = nonzero(&pair[1]);
+        let inverted0 = acc0 * slots[0];
+        let inverted1 = acc1 * slots[1];
+        acc0 *= term0;
+        acc1 *= term1;
+        pair[0] = F::conditional_select(&inverted0, &F::ZERO, is_zero0);
+        pair[1] = F::conditional_select(&inverted1, &F::ZERO, is_zero1);
     }
 }
 
@@ -895,13 +931,16 @@ fn test_lagrange_interpolate() {
 }
 
 #[cfg(test)]
-mod batch_invert_lanes_tests {
+mod batch_invert_multi_tests {
     use super::*;
     use crate::pasta::Fp;
     use group::ff::BatchInvert;
 
     #[test]
     fn matches_ff_batch_invert_with_zeros() {
+        // Lengths cover the empty slice, the single-chain branch, the
+        // threshold crossing, odd and even two-lane lengths, and a large
+        // batch; zeros are planted at both even and odd indices.
         let mut state = 0x4c4c_4c4c_u64;
         let mut next = move || {
             state = state
@@ -909,8 +948,8 @@ mod batch_invert_lanes_tests {
                 .wrapping_add(1442695040888963407);
             state
         };
-        for n in [0usize, 1, 2, 3, 7, 64, 257, 1000] {
-            let mut values: Vec<Fp> = (0..n)
+        for n in [0usize, 1, 2, 3, 7, 31, 32, 33, 64, 257, 1000] {
+            let values: Vec<Fp> = (0..n)
                 .map(|i| {
                     if i % 5 == 3 {
                         Fp::zero()
@@ -922,12 +961,8 @@ mod batch_invert_lanes_tests {
             let mut expected = values.clone();
             expected.iter_mut().batch_invert();
             let mut ours = values.clone();
-            batch_invert_lanes::<_, BATCH_INVERT_LANES>(&mut ours);
+            batch_invert_multi(&mut ours);
             assert_eq!(ours, expected, "n = {}", n);
-            let mut three = values.clone();
-            batch_invert_lanes::<_, 3>(&mut three);
-            assert_eq!(three, expected, "n = {} (3 lanes)", n);
-            values.clear();
         }
     }
 }
