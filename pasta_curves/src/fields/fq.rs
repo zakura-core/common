@@ -1063,7 +1063,7 @@ fn test_sqrt_32bit_overflow() {
 
 #[test]
 fn test_pow_vartime() {
-    use rand::SeedableRng;
+    use rand::{Rng, SeedableRng};
 
     // The classic square-and-multiply loop, as a reference for the fused
     // implementation.
