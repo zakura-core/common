@@ -1012,6 +1012,63 @@ new_curve_impl!(
 );
 
 impl Ep {
+    #[inline(never)]
+    pub(crate) fn add_mixed_pair(
+        lhs_0: &Self,
+        rhs_0: &EpAffine,
+        lhs_1: &Self,
+        rhs_1: &EpAffine,
+    ) -> [Self; 2] {
+        if bool::from(
+            lhs_0.is_identity() | rhs_0.is_identity() | lhs_1.is_identity() | rhs_1.is_identity(),
+        ) {
+            return [lhs_0 + rhs_0, lhs_1 + rhs_1];
+        }
+
+        let z1z1_0 = Field::square(&lhs_0.z);
+        let z1z1_1 = Field::square(&lhs_1.z);
+        let u2_0 = rhs_0.x * z1z1_0;
+        let u2_1 = rhs_1.x * z1z1_1;
+        let s2_0 = rhs_0.y * z1z1_0 * lhs_0.z;
+        let s2_1 = rhs_1.y * z1z1_1 * lhs_1.z;
+
+        if lhs_0.x == u2_0 || lhs_1.x == u2_1 {
+            return [lhs_0 + rhs_0, lhs_1 + rhs_1];
+        }
+
+        let h_0 = u2_0 - lhs_0.x;
+        let h_1 = u2_1 - lhs_1.x;
+        let hh_0 = Field::square(&h_0);
+        let hh_1 = Field::square(&h_1);
+        let i_0 = hh_0.double().double();
+        let i_1 = hh_1.double().double();
+        let j_0 = h_0 * i_0;
+        let j_1 = h_1 * i_1;
+        let r_0 = (s2_0 - lhs_0.y).double();
+        let r_1 = (s2_1 - lhs_1.y).double();
+        let v_0 = lhs_0.x * i_0;
+        let v_1 = lhs_1.x * i_1;
+        let x3_0 = Field::square(&r_0) - j_0 - v_0.double();
+        let x3_1 = Field::square(&r_1) - j_1 - v_1.double();
+        let y3_0 = r_0 * (v_0 - x3_0) - (lhs_0.y * j_0).double();
+        let y3_1 = r_1 * (v_1 - x3_1) - (lhs_1.y * j_1).double();
+        let z3_0 = Field::square(&(lhs_0.z + h_0)) - z1z1_0 - hh_0;
+        let z3_1 = Field::square(&(lhs_1.z + h_1)) - z1z1_1 - hh_1;
+
+        [
+            Self {
+                x: x3_0,
+                y: y3_0,
+                z: z3_0,
+            },
+            Self {
+                x: x3_1,
+                y: y3_1,
+                z: z3_1,
+            },
+        ]
+    }
+
     /// Constants used for computing the isogeny from IsoEp to Ep.
     pub const ISOGENY_CONSTANTS: [Fp; 13] = [
         Fp::from_raw([
