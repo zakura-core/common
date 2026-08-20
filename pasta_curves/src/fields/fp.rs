@@ -30,6 +30,12 @@ use crate::arithmetic::SqrtTables;
 #[repr(transparent)]
 pub struct Fp(pub(crate) [u64; 4]);
 
+// The 32-byte, u64-aligned storage shape is a crate-level contract
+// (serialization, GPU code generation, and point layouts build on it);
+// pin it independently of the internal representation.
+static_assertions::assert_eq_size!(Fp, [u64; 4]);
+static_assertions::assert_eq_align!(Fp, u64);
+
 impl fmt::Debug for Fp {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let tmp = self.to_repr();
@@ -107,12 +113,12 @@ impl ConditionallySelectable for Fp {
 
 /// Constant representing the modulus
 /// p = 0x40000000000000000000000000000000224698fc094cf91b992d30ed00000001
-const MODULUS: Fp = Fp([
+const MODULUS_LIMBS: [u64; 4] = [
     0x992d30ed00000001,
     0x224698fc094cf91b,
     0x0000000000000000,
     0x4000000000000000,
-]);
+];
 
 /// The modulus as u32 limbs.
 #[cfg(not(target_pointer_width = "64"))]
@@ -190,21 +196,27 @@ impl<T: ::core::borrow::Borrow<Fp>> ::core::iter::Product<T> for Fp {
 /// INV = -(p^{-1} mod 2^64) mod 2^64
 const INV: u64 = 0x992d30ecffffffff;
 
-/// R = 2^256 mod p
-const R: Fp = Fp([
+/// R = 2^256 mod p (limbs; published to GPU kernels verbatim).
+const MONT_R_LIMBS: [u64; 4] = [
     0x34786d38fffffffd,
     0x992c350be41914ad,
     0xffffffffffffffff,
     0x3fffffffffffffff,
-]);
+];
 
-/// R^2 = 2^512 mod p
-const R2: Fp = Fp([
+/// R as a field element (Montgomery form of 1).
+const R: Fp = Fp(MONT_R_LIMBS);
+
+/// R^2 = 2^512 mod p (limbs; published to GPU kernels verbatim).
+const MONT_R2_LIMBS: [u64; 4] = [
     0x8c78ecb30000000f,
     0xd7d30dbd8b0de0e7,
     0x7797a99bc3c95d18,
     0x096d41af7b9cb714,
-]);
+];
+
+/// R^2 as a field element (converts integers into Montgomery form).
+const R2: Fp = Fp(MONT_R2_LIMBS);
 
 /// R^3 = 2^768 mod p
 const R3: Fp = Fp([
@@ -337,35 +349,35 @@ impl Fp {
         // <http://cacr.uwaterloo.ca/hac/about/chap14.pdf>.
 
         let k = r0.wrapping_mul(INV);
-        let (_, carry) = mac(r0, k, MODULUS.0[0], 0);
-        let (r1, carry) = mac(r1, k, MODULUS.0[1], carry);
-        let (r2, carry) = mac(r2, k, MODULUS.0[2], carry);
-        let (r3, carry) = mac(r3, k, MODULUS.0[3], carry);
+        let (_, carry) = mac(r0, k, MODULUS_LIMBS[0], 0);
+        let (r1, carry) = mac(r1, k, MODULUS_LIMBS[1], carry);
+        let (r2, carry) = mac(r2, k, MODULUS_LIMBS[2], carry);
+        let (r3, carry) = mac(r3, k, MODULUS_LIMBS[3], carry);
         let (r4, carry2) = adc(r4, 0, carry);
 
         let k = r1.wrapping_mul(INV);
-        let (_, carry) = mac(r1, k, MODULUS.0[0], 0);
-        let (r2, carry) = mac(r2, k, MODULUS.0[1], carry);
-        let (r3, carry) = mac(r3, k, MODULUS.0[2], carry);
-        let (r4, carry) = mac(r4, k, MODULUS.0[3], carry);
+        let (_, carry) = mac(r1, k, MODULUS_LIMBS[0], 0);
+        let (r2, carry) = mac(r2, k, MODULUS_LIMBS[1], carry);
+        let (r3, carry) = mac(r3, k, MODULUS_LIMBS[2], carry);
+        let (r4, carry) = mac(r4, k, MODULUS_LIMBS[3], carry);
         let (r5, carry2) = adc(r5, carry2, carry);
 
         let k = r2.wrapping_mul(INV);
-        let (_, carry) = mac(r2, k, MODULUS.0[0], 0);
-        let (r3, carry) = mac(r3, k, MODULUS.0[1], carry);
-        let (r4, carry) = mac(r4, k, MODULUS.0[2], carry);
-        let (r5, carry) = mac(r5, k, MODULUS.0[3], carry);
+        let (_, carry) = mac(r2, k, MODULUS_LIMBS[0], 0);
+        let (r3, carry) = mac(r3, k, MODULUS_LIMBS[1], carry);
+        let (r4, carry) = mac(r4, k, MODULUS_LIMBS[2], carry);
+        let (r5, carry) = mac(r5, k, MODULUS_LIMBS[3], carry);
         let (r6, carry2) = adc(r6, carry2, carry);
 
         let k = r3.wrapping_mul(INV);
-        let (_, carry) = mac(r3, k, MODULUS.0[0], 0);
-        let (r4, carry) = mac(r4, k, MODULUS.0[1], carry);
-        let (r5, carry) = mac(r5, k, MODULUS.0[2], carry);
-        let (r6, carry) = mac(r6, k, MODULUS.0[3], carry);
+        let (_, carry) = mac(r3, k, MODULUS_LIMBS[0], 0);
+        let (r4, carry) = mac(r4, k, MODULUS_LIMBS[1], carry);
+        let (r5, carry) = mac(r5, k, MODULUS_LIMBS[2], carry);
+        let (r6, carry) = mac(r6, k, MODULUS_LIMBS[3], carry);
         let (r7, _) = adc(r7, carry2, carry);
 
         // Result may be within MODULUS of the correct value
-        (&Fp([r4, r5, r6, r7])).sub(&MODULUS)
+        (&Fp([r4, r5, r6, r7])).sub(&Fp(MODULUS_LIMBS))
     }
 
     /// Multiplies `rhs` by `self`, returning the result.
@@ -383,7 +395,7 @@ impl Fp {
             target_vendor = "apple"
         ))]
         {
-            Fp(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
+            Fp(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS_LIMBS, INV))
         }
 
         #[cfg(not(all(
@@ -404,7 +416,7 @@ impl Fp {
             target_vendor = "apple"
         ))]
         {
-            Fp(super::aarch64_asm::square(&self.0, &MODULUS.0, INV))
+            Fp(super::aarch64_asm::square(&self.0, &MODULUS_LIMBS, INV))
         }
 
         #[cfg(not(all(
@@ -431,7 +443,7 @@ impl Fp {
         ))]
         {
             Fp(super::aarch64_asm::sqr_n_mul(
-                &self.0, n as usize, &by.0, &MODULUS.0, INV,
+                &self.0, n as usize, &by.0, &MODULUS_LIMBS, INV,
             ))
         }
 
@@ -455,10 +467,10 @@ impl Fp {
 
         // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
         // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the modulus.
-        let (d0, carry) = adc(d0, MODULUS.0[0] & borrow, 0);
-        let (d1, carry) = adc(d1, MODULUS.0[1] & borrow, carry);
-        let (d2, carry) = adc(d2, MODULUS.0[2] & borrow, carry);
-        let (d3, _) = adc(d3, MODULUS.0[3] & borrow, carry);
+        let (d0, carry) = adc(d0, MODULUS_LIMBS[0] & borrow, 0);
+        let (d1, carry) = adc(d1, MODULUS_LIMBS[1] & borrow, carry);
+        let (d2, carry) = adc(d2, MODULUS_LIMBS[2] & borrow, carry);
+        let (d3, _) = adc(d3, MODULUS_LIMBS[3] & borrow, carry);
 
         Fp([d0, d1, d2, d3])
     }
@@ -473,7 +485,7 @@ impl Fp {
 
         // Attempt to subtract the modulus, to ensure the value
         // is smaller than the modulus.
-        (&Fp([d0, d1, d2, d3])).sub(&MODULUS)
+        (&Fp([d0, d1, d2, d3])).sub(&Fp(MODULUS_LIMBS))
     }
 
     /// Negates `self`.
@@ -482,10 +494,10 @@ impl Fp {
         // Subtract `self` from `MODULUS` to negate. Ignore the final
         // borrow because it cannot underflow; self is guaranteed to
         // be in the field.
-        let (d0, borrow) = sbb(MODULUS.0[0], self.0[0], 0);
-        let (d1, borrow) = sbb(MODULUS.0[1], self.0[1], borrow);
-        let (d2, borrow) = sbb(MODULUS.0[2], self.0[2], borrow);
-        let (d3, _) = sbb(MODULUS.0[3], self.0[3], borrow);
+        let (d0, borrow) = sbb(MODULUS_LIMBS[0], self.0[0], 0);
+        let (d1, borrow) = sbb(MODULUS_LIMBS[1], self.0[1], borrow);
+        let (d2, borrow) = sbb(MODULUS_LIMBS[2], self.0[2], borrow);
+        let (d3, _) = sbb(MODULUS_LIMBS[3], self.0[3], borrow);
 
         // `tmp` could be `MODULUS` if `self` was zero. Create a mask that is
         // zero if `self` was zero, and `u64::max_value()` if self was nonzero.
@@ -578,7 +590,7 @@ impl DeferredField for Fp {
             0x496d41af7b9cb714,
             0x1b4b3c4bfffffffc,
         ];
-        let limbs = acc.partial_reduce(&B448, &R2.0);
+        let limbs = acc.partial_reduce(&B448, &MONT_R2_LIMBS);
         Fp::montgomery_reduce(
             limbs[0], limbs[1], limbs[2], limbs[3], limbs[4], limbs[5], limbs[6], limbs[7],
         )
@@ -742,10 +754,10 @@ impl ff::PrimeField for Fp {
         tmp.0[3] = u64::from_le_bytes(repr[24..32].try_into().unwrap());
 
         // Try to subtract the modulus
-        let (_, borrow) = sbb(tmp.0[0], MODULUS.0[0], 0);
-        let (_, borrow) = sbb(tmp.0[1], MODULUS.0[1], borrow);
-        let (_, borrow) = sbb(tmp.0[2], MODULUS.0[2], borrow);
-        let (_, borrow) = sbb(tmp.0[3], MODULUS.0[3], borrow);
+        let (_, borrow) = sbb(tmp.0[0], MODULUS_LIMBS[0], 0);
+        let (_, borrow) = sbb(tmp.0[1], MODULUS_LIMBS[1], borrow);
+        let (_, borrow) = sbb(tmp.0[2], MODULUS_LIMBS[2], borrow);
+        let (_, borrow) = sbb(tmp.0[3], MODULUS_LIMBS[3], borrow);
 
         // If the element is smaller than MODULUS then the
         // subtraction will underflow, producing a borrow value
@@ -767,7 +779,7 @@ impl ff::PrimeField for Fp {
             target_arch = "aarch64",
             target_vendor = "apple"
         ))]
-        let tmp = Fp(super::aarch64_asm::from_mont(&self.0, &MODULUS.0, INV));
+        let tmp = Fp(super::aarch64_asm::from_mont(&self.0, &MODULUS_LIMBS, INV));
 
         #[cfg(not(all(
             feature = "aarch64-asm",
@@ -834,7 +846,7 @@ impl PrimeFieldBits for Fp {
         }
 
         #[cfg(target_pointer_width = "64")]
-        FieldBits::new(MODULUS.0)
+        FieldBits::new(MODULUS_LIMBS)
     }
 }
 
@@ -919,16 +931,51 @@ impl ec_gpu::GpuName for Fp {
 #[cfg(feature = "gpu")]
 impl ec_gpu::GpuField for Fp {
     fn one() -> alloc::vec::Vec<u32> {
-        crate::fields::u64_to_u32(&R.0[..])
+        crate::fields::u64_to_u32(&MONT_R_LIMBS[..])
     }
 
     fn r2() -> alloc::vec::Vec<u32> {
-        crate::fields::u64_to_u32(&R2.0[..])
+        crate::fields::u64_to_u32(&MONT_R2_LIMBS[..])
     }
 
     fn modulus() -> alloc::vec::Vec<u32> {
-        crate::fields::u64_to_u32(&MODULUS.0[..])
+        crate::fields::u64_to_u32(&MODULUS_LIMBS[..])
     }
+}
+
+/// The GPU contract publishes the MONTGOMERY constants (R, R^2, and the
+/// modulus) regardless of the CPU-side representation; pin the exact words
+/// so a representation change can never silently leak into GPU kernels.
+#[cfg(all(test, feature = "gpu"))]
+#[test]
+fn gpu_constants_are_montgomery() {
+    assert_eq!(
+        <Fp as ec_gpu::GpuField>::one(),
+        crate::fields::u64_to_u32(&[
+            0x34786d38fffffffd,
+            0x992c350be41914ad,
+            0xffffffffffffffff,
+            0x3fffffffffffffff,
+        ])
+    );
+    assert_eq!(
+        <Fp as ec_gpu::GpuField>::r2(),
+        crate::fields::u64_to_u32(&[
+            0x8c78ecb30000000f,
+            0xd7d30dbd8b0de0e7,
+            0x7797a99bc3c95d18,
+            0x096d41af7b9cb714,
+        ])
+    );
+    assert_eq!(
+        <Fp as ec_gpu::GpuField>::modulus(),
+        crate::fields::u64_to_u32(&[
+            0x992d30ed00000001,
+            0x224698fc094cf91b,
+            0x0000000000000000,
+            0x4000000000000000,
+        ])
+    );
 }
 
 #[cfg(all(
@@ -987,7 +1034,7 @@ fn aarch64_asm_portable_cmp(lhs: Fp, rhs: Fp) -> core::cmp::Ordering {
 fn aarch64_asm_matches_portable_arithmetic() {
     use rand::{Rng, SeedableRng};
 
-    let max_montgomery_residue = Fp([MODULUS.0[0] - 1, MODULUS.0[1], MODULUS.0[2], MODULUS.0[3]]);
+    let max_montgomery_residue = Fp([MODULUS_LIMBS[0] - 1, MODULUS_LIMBS[1], MODULUS_LIMBS[2], MODULUS_LIMBS[3]]);
     let boundaries = [
         Fp::zero(),
         Fp::one(),
@@ -1052,7 +1099,7 @@ fn test_inv() {
     let mut inv = 1u64;
     for _ in 0..63 {
         inv = inv.wrapping_mul(inv);
-        inv = inv.wrapping_mul(MODULUS.0[0]);
+        inv = inv.wrapping_mul(MODULUS_LIMBS[0]);
     }
     inv = inv.wrapping_neg();
 
