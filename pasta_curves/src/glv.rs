@@ -762,79 +762,212 @@ fn booth_digit(component: SignedMagnitude, window_bits: usize, window: usize) ->
 }
 
 #[derive(Clone, Copy)]
-enum MultiexpBucket<C: GlvParams> {
-    None,
-    Affine(C::AffineExt),
-    Projective(C),
+struct AffinePoint<F> {
+    x: F,
+    y: F,
 }
 
-impl<C: GlvParams> MultiexpBucket<C> {
-    fn add_assign(&mut self, point: C::AffineExt) {
-        *self = match *self {
-            Self::None => Self::Affine(point),
-            Self::Affine(current) => Self::Projective(current + point),
-            Self::Projective(mut current) => {
-                current += point;
-                Self::Projective(current)
-            }
-        };
+struct PendingAffineAddition<F> {
+    output: usize,
+    left_x: F,
+    left_y: F,
+    x_sum: F,
+    numerator: F,
+    denominator: F,
+    inversion_scratch: F,
+}
+
+/// Inverts every denominator, returning `None` if their product is zero.
+///
+/// The failure must propagate through [`try_multiexp`] so verifier callers can
+/// fall back to the generic MSM instead of panicking. The
+/// `batch_inversion_zero_denominator_returns_none` test covers this guard.
+fn batch_invert_denominators<F: Field>(additions: &mut [PendingAffineAddition<F>]) -> Option<()> {
+    if additions.is_empty() {
+        return Some(());
     }
 
-    fn add(self, mut other: C) -> C {
-        match self {
-            Self::None => other,
-            Self::Affine(point) => {
-                other += point;
-                other
+    let mut product = F::ONE;
+    for addition in additions.iter_mut() {
+        addition.inversion_scratch = product;
+        product *= addition.denominator;
+    }
+
+    // Pasta base-field inversion is variable-time, which is appropriate
+    // because MSM scalars and points are public.
+    let mut product_inverse = Option::<F>::from(product.invert())?;
+    for addition in additions.iter_mut().rev() {
+        let denominator = addition.denominator;
+        addition.denominator = addition.inversion_scratch * product_inverse;
+        product_inverse *= denominator;
+    }
+    Some(())
+}
+
+/// Visits the nonzero signed points assigned to one Booth window.
+fn for_each_window_point<C, Visit>(
+    components: &[(SignedMagnitude, SignedMagnitude)],
+    bases: &[C::AffineExt],
+    endo_bases: &[C::AffineExt],
+    window_bits: usize,
+    window: usize,
+    mut visit: Visit,
+) where
+    C: GlvParams,
+    Visit: FnMut(usize, C::AffineExt, bool),
+{
+    for (((first, second), base), endo_base) in components.iter().zip(bases).zip(endo_bases) {
+        for (component, base) in [(*first, *base), (*second, *endo_base)] {
+            let digit = booth_digit(component, window_bits, window);
+            if digit.magnitude != 0 && !bool::from(base.is_identity()) {
+                visit(digit.magnitude - 1, base, digit.negative);
             }
-            Self::Projective(point) => other + point,
         }
     }
 }
 
-fn add_digit<C: GlvParams>(
-    buckets: &mut [MultiexpBucket<C>],
-    digit: BoothDigit,
-    base: C::AffineExt,
-) {
-    if digit.magnitude != 0 {
-        let base = if digit.negative { -base } else { base };
-        buckets[digit.magnitude - 1].add_assign(base);
+/// Reduces every affine bucket through shared Montgomery batch inversions.
+///
+/// `offsets` partitions `points` into one contiguous range per bucket. At
+/// each tree level, all independent additions share one inversion. Identity,
+/// doubling, and inverse pairs are handled explicitly because verifier MSM
+/// inputs are public but not trusted.
+fn reduce_affine_buckets<F: Field>(
+    mut points: Vec<AffinePoint<F>>,
+    mut offsets: Vec<usize>,
+) -> Option<Vec<Option<AffinePoint<F>>>> {
+    debug_assert!(!offsets.is_empty());
+    let bucket_count = offsets.len() - 1;
+
+    while offsets.windows(2).any(|range| range[1] - range[0] > 1) {
+        let mut next_points = Vec::with_capacity((points.len() + bucket_count) / 2);
+        let mut next_offsets = Vec::with_capacity(offsets.len());
+        let mut pending = Vec::with_capacity(points.len() / 2);
+        next_offsets.push(0);
+
+        for range in offsets.windows(2) {
+            let bucket = &points[range[0]..range[1]];
+            for pair in bucket.chunks_exact(2) {
+                let left = pair[0];
+                let right = pair[1];
+
+                let (numerator, denominator) = if left.x == right.x {
+                    if left.y != right.y || bool::from(left.y.is_zero()) {
+                        // The points are inverses, or this is a point of order
+                        // two. Their sum is the identity, which is omitted.
+                        continue;
+                    }
+                    let x_squared = left.x.square();
+                    (x_squared.double() + x_squared, left.y.double())
+                } else {
+                    (right.y - left.y, right.x - left.x)
+                };
+
+                let output = next_points.len();
+                next_points.push(AffinePoint {
+                    x: F::ZERO,
+                    y: F::ZERO,
+                });
+                pending.push(PendingAffineAddition {
+                    output,
+                    left_x: left.x,
+                    left_y: left.y,
+                    x_sum: left.x + right.x,
+                    numerator,
+                    denominator,
+                    inversion_scratch: F::ZERO,
+                });
+            }
+            if bucket.len() % 2 == 1 {
+                next_points.push(bucket[bucket.len() - 1]);
+            }
+            next_offsets.push(next_points.len());
+        }
+
+        batch_invert_denominators(&mut pending)?;
+        for addition in pending {
+            let slope = addition.numerator * addition.denominator;
+            let x = slope.square() - addition.x_sum;
+            let y = slope * (addition.left_x - x) - addition.left_y;
+            next_points[addition.output] = AffinePoint { x, y };
+        }
+
+        points = next_points;
+        offsets = next_offsets;
     }
+
+    let mut buckets = alloc::vec![None; bucket_count];
+    for (bucket, range) in buckets.iter_mut().zip(offsets.windows(2)) {
+        if range[0] != range[1] {
+            debug_assert_eq!(range[1] - range[0], 1);
+            *bucket = Some(points[range[0]]);
+        }
+    }
+    Some(buckets)
 }
 
-fn sum_buckets<C: GlvParams>(buckets: &[MultiexpBucket<C>]) -> C {
+fn sum_buckets<C: GlvParams>(buckets: &[Option<AffinePoint<C::Base>>]) -> C {
     let mut running = C::identity();
     let mut sum = C::identity();
     for bucket in buckets.iter().rev() {
-        running = bucket.add(running);
+        if let Some(point) = bucket {
+            running += C::affine_unchecked(point.x, point.y, private::CrateToken(()));
+        }
         sum += running;
     }
     sum
 }
 
 fn fill_window<C: GlvParams>(
-    buckets: &mut [MultiexpBucket<C>],
     components: &[(SignedMagnitude, SignedMagnitude)],
     bases: &[C::AffineExt],
     endo_bases: &[C::AffineExt],
     window_bits: usize,
     window: usize,
-) {
-    buckets.fill(MultiexpBucket::None);
-    for ((first, second), base, endo_base) in components
-        .iter()
-        .zip(bases)
-        .zip(endo_bases)
-        .map(|(((first, second), base), endo_base)| ((first, second), base, endo_base))
-    {
-        add_digit(buckets, booth_digit(*first, window_bits, window), *base);
-        add_digit(
-            buckets,
-            booth_digit(*second, window_bits, window),
-            *endo_base,
-        );
+) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
+    let bucket_count = 1 << (window_bits - 1);
+    let mut counts = alloc::vec![0usize; bucket_count];
+    for_each_window_point::<C, _>(
+        components,
+        bases,
+        endo_bases,
+        window_bits,
+        window,
+        |bucket, _, _| counts[bucket] += 1,
+    );
+
+    let mut offsets = Vec::with_capacity(bucket_count + 1);
+    offsets.push(0);
+    for count in counts {
+        offsets.push(offsets.last().copied().unwrap() + count);
     }
+
+    let mut positions = offsets[..bucket_count].to_vec();
+    let mut points = alloc::vec![
+        AffinePoint {
+            x: C::Base::ZERO,
+            y: C::Base::ZERO,
+        };
+        *offsets.last().unwrap()
+    ];
+    for_each_window_point::<C, _>(
+        components,
+        bases,
+        endo_bases,
+        window_bits,
+        window,
+        |bucket, base, negative| {
+            let (x, y) = C::affine_xy(&base);
+            let position = positions[bucket];
+            points[position] = AffinePoint {
+                x,
+                y: if negative { -y } else { y },
+            };
+            positions[bucket] += 1;
+        },
+    );
+
+    reduce_affine_buckets(points, offsets)
 }
 
 fn multiexp_serial<C: GlvParams>(
@@ -842,9 +975,8 @@ fn multiexp_serial<C: GlvParams>(
     bases: &[C::AffineExt],
     endo_bases: &[C::AffineExt],
     window_bits: usize,
-) -> C {
+) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
-    let mut buckets = alloc::vec![MultiexpBucket::<C>::None; 1 << (window_bits - 1)];
     let mut acc = C::identity();
 
     for window in (0..window_count).rev() {
@@ -854,17 +986,10 @@ fn multiexp_serial<C: GlvParams>(
             }
         }
 
-        fill_window::<C>(
-            &mut buckets,
-            components,
-            bases,
-            endo_bases,
-            window_bits,
-            window,
-        );
-        acc += sum_buckets(&buckets);
+        let buckets = fill_window::<C>(components, bases, endo_bases, window_bits, window)?;
+        acc += sum_buckets::<C>(&buckets);
     }
-    acc
+    Some(acc)
 }
 
 #[cfg(feature = "multicore")]
@@ -873,29 +998,21 @@ fn multiexp_parallel<C: GlvParams>(
     bases: &[C::AffineExt],
     endo_bases: &[C::AffineExt],
     window_bits: usize,
-) -> C {
+) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
     (0..window_count)
         .into_par_iter()
         .map(|window| {
-            let mut buckets = alloc::vec![MultiexpBucket::<C>::None; 1 << (window_bits - 1)];
-            fill_window::<C>(
-                &mut buckets,
-                components,
-                bases,
-                endo_bases,
-                window_bits,
-                window,
-            );
-            let mut sum = sum_buckets(&buckets);
+            let buckets = fill_window::<C>(components, bases, endo_bases, window_bits, window)?;
+            let mut sum = sum_buckets::<C>(&buckets);
             for _ in 0..window_bits * window {
                 sum = sum.double();
             }
-            sum
+            Some(sum)
         })
-        .reduce(C::identity, |mut left, right| {
+        .try_reduce(C::identity, |mut left, right| {
             left += right;
-            left
+            Some(left)
         })
 }
 
@@ -905,7 +1022,7 @@ fn multiexp<C: GlvParams>(
     endo_bases: &[C::AffineExt],
     window_bits: usize,
     num_threads: usize,
-) -> C {
+) -> Option<C> {
     debug_assert_eq!(components.len(), bases.len());
     debug_assert_eq!(components.len(), endo_bases.len());
 
@@ -924,6 +1041,10 @@ fn multiexp<C: GlvParams>(
 
 /// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
 /// MSM.
+///
+/// Returns `None` when the cost model selects the generic MSM or when an
+/// internal arithmetic guard fails, allowing verifier callers to use the
+/// generic implementation instead of panicking.
 pub(crate) fn try_multiexp<C: GlvParams>(
     scalars: &[C::ScalarExt],
     bases: &[C::AffineExt],
@@ -947,13 +1068,7 @@ pub(crate) fn try_multiexp<C: GlvParams>(
             C::affine_unchecked(x * C::Base::ZETA, y, private::CrateToken(()))
         })
         .collect::<Vec<_>>();
-    Some(multiexp(
-        &components,
-        bases,
-        &endo_bases,
-        window_bits,
-        num_threads,
-    ))
+    multiexp(&components, bases, &endo_bases, window_bits, num_threads)
 }
 
 /// The GLV digit window for one base point: the eight Eisenstein orbit
@@ -3114,6 +3229,75 @@ mod tests {
         }
     }
 
+    fn batch_affine_buckets_match_native<C: GlvParams>() {
+        let generator = C::generator();
+        let two = generator.double();
+        let three = two + generator;
+        let four = three + generator;
+        let five = four + generator;
+        let source = [
+            Vec::new(),
+            alloc::vec![generator],
+            alloc::vec![generator, generator],
+            alloc::vec![generator, -generator],
+            alloc::vec![generator, two, three],
+            alloc::vec![generator, two, -three],
+            alloc::vec![generator, two, three, four, five],
+        ];
+
+        let mut points = Vec::new();
+        let mut offsets = Vec::with_capacity(source.len() + 1);
+        offsets.push(0);
+        for bucket in &source {
+            for point in bucket {
+                let affine = C::AffineExt::from(*point);
+                let (x, y) = C::affine_xy(&affine);
+                points.push(AffinePoint { x, y });
+            }
+            offsets.push(points.len());
+        }
+
+        let reduced = reduce_affine_buckets(points, offsets)
+            .expect("valid curve points have invertible affine denominators");
+        assert_eq!(reduced.len(), source.len());
+        for (actual, bucket) in reduced.into_iter().zip(source) {
+            let actual = match actual {
+                Some(point) => C::from(C::affine_unchecked(
+                    point.x,
+                    point.y,
+                    private::CrateToken(()),
+                )),
+                None => C::identity(),
+            };
+            let expected = bucket.into_iter().sum::<C>();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    fn batch_inversion_rejects_zero_denominator<F: Field>() {
+        let mut additions = [F::ONE, F::ZERO, F::ONE.double()]
+            .into_iter()
+            .enumerate()
+            .map(|(output, denominator)| PendingAffineAddition {
+                output,
+                left_x: F::ZERO,
+                left_y: F::ZERO,
+                x_sum: F::ZERO,
+                numerator: F::ZERO,
+                denominator,
+                inversion_scratch: F::ZERO,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(batch_invert_denominators(&mut additions).is_none());
+    }
+
+    #[test]
+    fn batch_inversion_zero_denominator_returns_none() {
+        batch_inversion_rejects_zero_denominator::<crate::Fp>();
+        batch_inversion_rejects_zero_denominator::<crate::Fq>();
+    }
+
     macro_rules! glv_tests {
         ($mod_name:ident, $curve:ty) => {
             mod $mod_name {
@@ -3170,6 +3354,10 @@ mod tests {
                 #[test]
                 fn affine_fft() {
                     affine_fft_matches_projective::<$curve>();
+                }
+                #[test]
+                fn batch_affine_buckets() {
+                    batch_affine_buckets_match_native::<$curve>();
                 }
             }
         };
