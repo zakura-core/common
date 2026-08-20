@@ -457,20 +457,69 @@ const BATCH_AFFINE_MIN_POINTS: usize = 32;
 /// [`affine_ladder_safe`], so unlike `ff::BatchInverter` this skips the
 /// per-element zero handling (one extra multiplication and two conditional
 /// selects per element), which is a measurable share of each ladder column.
+/// Twin implementation: `batch_invert_multi` in
+/// `halo2_proofs/src/arithmetic.rs` is the same even/odd two-lane walk with
+/// `ff`-style (variable-time) zero skipping and internally allocated
+/// scratch; `Curve::batch_normalize` in `src/curves.rs` fuses the walk with
+/// the Jacobian-to-affine conversion. Keep the three in step when changing
+/// any of them.
 fn batch_invert_nonzero<F: Field>(values: &mut [F], scratch: &mut [F]) {
     assert_eq!(values.len(), scratch.len());
-    let mut acc = F::ONE;
-    for (value, scratch) in values.iter().zip(scratch.iter_mut()) {
-        debug_assert!(!value.is_zero_vartime());
-        *scratch = acc;
-        acc *= value;
+    // Two accumulator chains, stepped in (even, odd) pairs: the classic
+    // single-chain walk runs both passes at the field multiplication's
+    // dependency latency, while independent even/odd chains run at its
+    // throughput, for a fixed overhead of three extra multiplications per
+    // call (one join before the shared inversion, two lane-seed recoveries
+    // after). The ladder only calls this with `BATCH_AFFINE_MIN_POINTS` or
+    // more live lanes — at the measured two-lane crossover on both x86-64
+    // (portable) and Apple aarch64 (assembly backend) — so no small-batch
+    // fallback is needed. A trailing element (odd length) has an even index
+    // and belongs to the first chain.
+    let mut acc0 = F::ONE;
+    let mut acc1 = F::ONE;
+    for (pair, slots) in values.chunks_exact(2).zip(scratch.chunks_exact_mut(2)) {
+        debug_assert!(!pair[0].is_zero_vartime());
+        debug_assert!(!pair[1].is_zero_vartime());
+        slots[0] = acc0;
+        acc0 *= pair[0];
+        slots[1] = acc1;
+        acc1 *= pair[1];
     }
+    if let (Some(value), Some(slot)) = (
+        values.chunks_exact(2).remainder().first(),
+        scratch.chunks_exact_mut(2).into_remainder().first_mut(),
+    ) {
+        debug_assert!(!value.is_zero_vartime());
+        *slot = acc0;
+        acc0 *= value;
+    }
+
     // A product of nonzero field elements is nonzero, so this cannot fail.
-    acc = acc.invert().unwrap();
-    for (value, scratch) in values.iter_mut().zip(scratch.iter()).rev() {
-        let inverse = acc * scratch;
-        acc *= *value;
-        *value = inverse;
+    let inverse = (acc0 * acc1).invert().unwrap();
+    let seed0 = inverse * acc1;
+    let seed1 = inverse * acc0;
+    let mut acc0 = seed0;
+    let mut acc1 = seed1;
+
+    if let (Some(value), Some(slot)) = (
+        values.chunks_exact_mut(2).into_remainder().first_mut(),
+        scratch.chunks_exact(2).remainder().first(),
+    ) {
+        let inverted = acc0 * slot;
+        acc0 *= *value;
+        *value = inverted;
+    }
+    for (pair, slots) in values
+        .chunks_exact_mut(2)
+        .zip(scratch.chunks_exact(2))
+        .rev()
+    {
+        let inverted0 = acc0 * slots[0];
+        let inverted1 = acc1 * slots[1];
+        acc0 *= pair[0];
+        acc1 *= pair[1];
+        pair[0] = inverted0;
+        pair[1] = inverted1;
     }
 }
 
