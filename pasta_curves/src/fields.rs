@@ -1,6 +1,7 @@
 //! This module contains implementations for the two finite fields of the Pallas
 //! and Vesta curves.
 
+mod cm;
 mod fp;
 mod fq;
 mod modinv62;

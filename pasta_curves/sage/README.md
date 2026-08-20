@@ -10,6 +10,13 @@ them in the exact shape of the Rust code so the two can be diffed:
 - `glv_boundary_scalars.sage` — the `*_BOUNDARY_SCALAR` witnesses used
   by the `babai_boundary_*` and `native_vs_glv_boundary_*` regression
   tests in `src/glv.rs`.
+- `cm_constants.sage` — the quadratic CM/AMNS representation constants
+  in the `CmParams` implementations in `src/fields/cm.rs` (the reduced
+  generator `T`/`M`/`M0`, `I0`/`I1`, `ONE`, `SIGMA`, `BETA_INV`,
+  `SIGMA_BETA_INV`, `SOLINAS_C`, and the 512-fractional-bit Babai
+  constants `G_T`/`G_M`), plus the rounding-tie scalar test vectors.
+  The same values are re-verified in-crate by compile-time assertions
+  and the `cm_field_tests!` suites.
 
 The scripts use exact integer/rational arithmetic and hand-rolled
 lattice reduction only, so their output is deterministic and does not
