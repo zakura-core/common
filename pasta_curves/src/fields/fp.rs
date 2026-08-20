@@ -11,6 +11,9 @@ use lazy_static::lazy_static;
 #[cfg(feature = "bits")]
 use ff::{FieldBits, PrimeFieldBits};
 
+use static_assertions::const_assert_eq;
+
+use super::portable;
 use crate::arithmetic::{adc, mac, sbb, SqrtTableHelpers};
 #[cfg(feature = "deferred")]
 use crate::deferred::{DeferredField, Product};
@@ -113,6 +116,11 @@ const MODULUS: Fp = Fp([
     0x0000000000000000,
     0x4000000000000000,
 ]);
+
+// The portable additive backend and the Apple AArch64 assembly both rely on
+// this shape: limb 2 of the modulus is zero and limb 3 is exactly 2^62.
+const_assert_eq!(MODULUS.0[2], 0);
+const_assert_eq!(MODULUS.0[3], 1 << 62);
 
 /// The modulus as u32 limbs.
 #[cfg(not(target_pointer_width = "64"))]
@@ -277,8 +285,7 @@ impl Fp {
     /// Doubles this field element.
     #[inline]
     pub const fn double(&self) -> Fp {
-        // TODO: This can be achieved more efficiently with a bitshift.
-        self.add(self)
+        Fp(portable::double(&self.0, MODULUS.0[0], MODULUS.0[1]))
     }
 
     fn from_u512(limbs: [u64; 8]) -> Fp {
@@ -316,8 +323,16 @@ impl Fp {
     /// Squares this element.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn square(&self) -> Fp {
-        let u = self.square_unreduced();
-        Fp::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
+        // The square is below `p^2 < R * p`, so the cheaper low-half
+        // reduction applies. `mul` keeps the classical reduction: the same
+        // substitution measured slower there, where the wider dependency
+        // graph of the 4x4 product already hides the reduction's latency.
+        Fp(portable::montgomery_reduce_low(
+            &self.square_unreduced(),
+            MODULUS.0[0],
+            MODULUS.0[1],
+            INV,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -448,50 +463,19 @@ impl Fp {
     /// Subtracts `rhs` from `self`, returning the result.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn sub(&self, rhs: &Self) -> Self {
-        let (d0, borrow) = sbb(self.0[0], rhs.0[0], 0);
-        let (d1, borrow) = sbb(self.0[1], rhs.0[1], borrow);
-        let (d2, borrow) = sbb(self.0[2], rhs.0[2], borrow);
-        let (d3, borrow) = sbb(self.0[3], rhs.0[3], borrow);
-
-        // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
-        // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the modulus.
-        let (d0, carry) = adc(d0, MODULUS.0[0] & borrow, 0);
-        let (d1, carry) = adc(d1, MODULUS.0[1] & borrow, carry);
-        let (d2, carry) = adc(d2, MODULUS.0[2] & borrow, carry);
-        let (d3, _) = adc(d3, MODULUS.0[3] & borrow, carry);
-
-        Fp([d0, d1, d2, d3])
+        Fp(portable::sub(&self.0, &rhs.0, MODULUS.0[0], MODULUS.0[1]))
     }
 
     /// Adds `rhs` to `self`, returning the result.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn add(&self, rhs: &Self) -> Self {
-        let (d0, carry) = adc(self.0[0], rhs.0[0], 0);
-        let (d1, carry) = adc(self.0[1], rhs.0[1], carry);
-        let (d2, carry) = adc(self.0[2], rhs.0[2], carry);
-        let (d3, _) = adc(self.0[3], rhs.0[3], carry);
-
-        // Attempt to subtract the modulus, to ensure the value
-        // is smaller than the modulus.
-        (&Fp([d0, d1, d2, d3])).sub(&MODULUS)
+        Fp(portable::add(&self.0, &rhs.0, MODULUS.0[0], MODULUS.0[1]))
     }
 
     /// Negates `self`.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn neg(&self) -> Self {
-        // Subtract `self` from `MODULUS` to negate. Ignore the final
-        // borrow because it cannot underflow; self is guaranteed to
-        // be in the field.
-        let (d0, borrow) = sbb(MODULUS.0[0], self.0[0], 0);
-        let (d1, borrow) = sbb(MODULUS.0[1], self.0[1], borrow);
-        let (d2, borrow) = sbb(MODULUS.0[2], self.0[2], borrow);
-        let (d3, _) = sbb(MODULUS.0[3], self.0[3], borrow);
-
-        // `tmp` could be `MODULUS` if `self` was zero. Create a mask that is
-        // zero if `self` was zero, and `u64::max_value()` if self was nonzero.
-        let mask = (((self.0[0] | self.0[1] | self.0[2] | self.0[3]) == 0) as u64).wrapping_sub(1);
-
-        Fp([d0 & mask, d1 & mask, d2 & mask, d3 & mask])
+        Fp(portable::neg(&self.0, MODULUS.0[0], MODULUS.0[1]))
     }
 
     /// Multiplies `rhs` by `self`, returning the unreduced 512-bit product.
@@ -1076,6 +1060,76 @@ fn test_pow_by_t_minus1_over2() {
     // NB: TWO_INV is standing in as a "random" field element
     let v = (Fp::TWO_INV).pow_by_t_minus1_over2();
     assert!(v == ff::Field::pow_vartime(&Fp::TWO_INV, &T_MINUS1_OVER2));
+}
+
+#[test]
+fn montgomery_reduce_low_matches_classical() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x3c; 16]);
+
+    // Any value of the form `t_lo + R * t_hi` with `t_hi` canonical is below
+    // `R * p`, which is the whole domain both reductions accept.
+    for _ in 0..20_000 {
+        let hi = <Fp as ff::Field>::random(&mut rng);
+        let lo = <Fp as ff::Field>::random(&mut rng);
+        let t = [
+            lo.0[0], lo.0[1], lo.0[2], lo.0[3], hi.0[0], hi.0[1], hi.0[2], hi.0[3],
+        ];
+
+        let classical = Fp::montgomery_reduce(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
+        let low_half = Fp(super::portable::montgomery_reduce_low(
+            &t,
+            MODULUS.0[0],
+            MODULUS.0[1],
+            INV,
+        ));
+        assert_eq!(classical, low_half);
+    }
+
+    // Boundary values: zero, `R * (p - 1)`, and an all-ones low half.
+    let max = -Fp::one();
+    for t in [
+        [0u64; 8],
+        [0, 0, 0, 0, max.0[0], max.0[1], max.0[2], max.0[3]],
+        [
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            max.0[0],
+            max.0[1],
+            max.0[2],
+            max.0[3],
+        ],
+        [u64::MAX, u64::MAX, u64::MAX, u64::MAX, 0, 0, 0, 0],
+    ] {
+        assert_eq!(
+            Fp::montgomery_reduce(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]),
+            Fp(super::portable::montgomery_reduce_low(
+                &t,
+                MODULUS.0[0],
+                MODULUS.0[1],
+                INV
+            )),
+        );
+    }
+}
+
+#[test]
+fn square_matches_classical_reduction() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x5e; 16]);
+
+    for _ in 0..20_000 {
+        let a = <Fp as ff::Field>::random(&mut rng);
+        let u = a.square_unreduced();
+        assert_eq!(
+            a.square(),
+            Fp::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]),
+        );
+    }
 }
 
 #[test]
