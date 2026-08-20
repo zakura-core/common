@@ -231,7 +231,10 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
                 assert!(generator_0 < GENERATOR_COUNT, "invalid Sinsemilla word");
                 assert!(generator_1 < GENERATOR_COUNT, "invalid Sinsemilla word");
 
-                let sum = pallas::add_mixed_pair(
+                // The module-level discrete-logarithm reduction establishes
+                // that these weighted additions cannot feasibly encounter an
+                // exceptional input.
+                let sum = pallas::add_mixed_pair_unchecked(
                     &point_pair[0],
                     &self.weighted_generator(exponent, generator_0),
                     &point_pair[1],
