@@ -69,6 +69,81 @@ use super::{HashDomain, MessageWords, C, K, SINSEMILLA_S_AFFINE};
 
 const GENERATOR_COUNT: usize = 1 << K;
 
+/// Batches at least this large take the batch-affine evaluator in
+/// [`UncheckedFixedLengthHashDomain::hash_words_batch`]; smaller ones keep
+/// the projective paired evaluation, whose per-lane cost does not carry the
+/// per-column shared-inversion overhead. Initial placement near the
+/// measured GLV batch-affine crossover; tuned by the width-sweep bench.
+const BATCH_AFFINE_MIN_MESSAGES: usize = 16;
+
+/// Two-lane Montgomery batch inversion for provably nonzero values (the
+/// chord denominators of [`UncheckedFixedLengthHashDomain::evaluate_batch_affine`]).
+///
+/// Twin implementations — keep them in step when changing any:
+/// `batch_invert_nonzero` in `pasta_curves/src/glv.rs` (the GLV ladder's
+/// columns, same nonzero-only contract), `batch_invert_multi` in
+/// `halo2_proofs/src/arithmetic.rs` (ff-style zero skipping), and
+/// `Curve::batch_normalize` in `pasta_curves/src/curves.rs` (fused with the
+/// Jacobian-to-affine conversion).
+fn batch_invert_nonzero(values: &mut [pallas::Base], scratch: &mut [pallas::Base]) {
+    use group::ff::Field;
+
+    assert_eq!(values.len(), scratch.len());
+    let mut acc0 = pallas::Base::one();
+    let mut acc1 = pallas::Base::one();
+    for (pair, slots) in values
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(scratch.as_chunks_mut::<2>().0)
+    {
+        debug_assert!(!pair[0].is_zero_vartime());
+        debug_assert!(!pair[1].is_zero_vartime());
+        slots[0] = acc0;
+        acc0 *= pair[0];
+        slots[1] = acc1;
+        acc1 *= pair[1];
+    }
+    if let (Some(value), Some(slot)) = (
+        values.as_chunks::<2>().1.first(),
+        scratch.as_chunks_mut::<2>().1.first_mut(),
+    ) {
+        debug_assert!(!value.is_zero_vartime());
+        *slot = acc0;
+        acc0 *= value;
+    }
+
+    // A product of nonzero field elements is nonzero, so this cannot fail.
+    let inverse = (acc0 * acc1).invert().unwrap();
+    let seed0 = inverse * acc1;
+    let seed1 = inverse * acc0;
+    let mut acc0 = seed0;
+    let mut acc1 = seed1;
+
+    if let (Some(value), Some(slot)) = (
+        values.as_chunks_mut::<2>().1.first_mut(),
+        scratch.as_chunks::<2>().1.first(),
+    ) {
+        let inverted = acc0 * *slot;
+        acc0 *= *value;
+        *value = inverted;
+    }
+    for (pair, slots) in values
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(scratch.as_chunks::<2>().0)
+        .rev()
+    {
+        let inverted0 = acc0 * slots[0];
+        let inverted1 = acc1 * slots[1];
+        acc0 *= pair[0];
+        acc1 *= pair[1];
+        pair[0] = inverted0;
+        pair[1] = inverted1;
+    }
+}
+
 fn extract(point: pallas::Point) -> pallas::Base {
     point
         .to_affine()
@@ -179,6 +254,10 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         use group::ff::Field;
         use pasta_curves::arithmetic::CurveExt;
 
+        if messages.len() >= BATCH_AFFINE_MIN_MESSAGES {
+            return self.evaluate_batch_affine(messages);
+        }
+
         let points = self.evaluate_batch(messages);
 
         // Fused batch x-extraction, sharing one field inversion across the
@@ -215,6 +294,84 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
             }
         }
         hashes
+    }
+
+    /// Evaluates a batch on **affine** accumulators: every lane performs its
+    /// position-`i` addition in lockstep (the schedule is fixed by `N`, not
+    /// by the messages), so each column batch-inverts its chord denominators
+    /// across the batch with one shared field inversion, and each addition
+    /// is the plain affine chord formula (2M + 1S after the inversion) in
+    /// place of a projective mixed addition. The accumulators finish in
+    /// affine form, so the returned hashes are simply their x-coordinates —
+    /// no normalization pass at all.
+    ///
+    /// The chord formula is undefined when a lane's accumulator collides
+    /// with its table point (`x` equal: the lane is adding `±P` to `P`) or
+    /// is the identity; both are exactly the exceptional cases of the
+    /// module-level discrete-logarithm reduction, so — as with the omitted
+    /// mixed-addition checks — they are infeasible to reach and are not
+    /// checked. The denominators are therefore provably nonzero, which the
+    /// lean batched inversion below relies on.
+    ///
+    /// Both the inversion and the field arithmetic run two interleaved
+    /// even/odd lanes so the dependency chains overlap (the same
+    /// construction as the two-lane batched inversions elsewhere in the
+    /// workspace).
+    fn evaluate_batch_affine(&self, messages: &[[u16; N]]) -> Vec<pallas::Base> {
+        use group::ff::Field;
+        use group::Curve as _;
+
+        let n = messages.len();
+        let initial = self.initial.to_affine();
+        let initial = initial
+            .coordinates()
+            .expect("the initial accumulator [2^N]Q is not the identity");
+        let mut xs = vec![*initial.x(); n];
+        let mut ys = vec![*initial.y(); n];
+        let mut table_xs = vec![pallas::Base::zero(); n];
+        let mut table_ys = vec![pallas::Base::zero(); n];
+        let mut dens = vec![pallas::Base::zero(); n];
+        let mut scratch = vec![pallas::Base::zero(); n];
+
+        for i in 0..N {
+            let exponent = N - i - 1;
+            for (lane, message) in messages.iter().enumerate() {
+                let generator = usize::from(message[i]);
+                assert!(generator < GENERATOR_COUNT, "invalid Sinsemilla word");
+                let point = self.weighted_generator(exponent, generator);
+                let point = point
+                    .coordinates()
+                    .expect("weighted table entries are not the identity");
+                table_xs[lane] = *point.x();
+                table_ys[lane] = *point.y();
+                dens[lane] = table_xs[lane] - xs[lane];
+            }
+
+            batch_invert_nonzero(&mut dens, &mut scratch);
+
+            // Affine chord additions, two lanes interleaved.
+            let pairs = n / 2;
+            for pair in 0..pairs {
+                let (a, b) = (2 * pair, 2 * pair + 1);
+                let lambda_a = (table_ys[a] - ys[a]) * dens[a];
+                let lambda_b = (table_ys[b] - ys[b]) * dens[b];
+                let x3_a = lambda_a.square() - xs[a] - table_xs[a];
+                let x3_b = lambda_b.square() - xs[b] - table_xs[b];
+                ys[a] = lambda_a * (xs[a] - x3_a) - ys[a];
+                ys[b] = lambda_b * (xs[b] - x3_b) - ys[b];
+                xs[a] = x3_a;
+                xs[b] = x3_b;
+            }
+            if n % 2 == 1 {
+                let a = n - 1;
+                let lambda = (table_ys[a] - ys[a]) * dens[a];
+                let x3 = lambda.square() - xs[a] - table_xs[a];
+                ys[a] = lambda * (xs[a] - x3) - ys[a];
+                xs[a] = x3;
+            }
+        }
+
+        xs
     }
 
     fn evaluate_batch(&self, messages: &[[u16; N]]) -> Vec<pallas::Point> {
@@ -402,7 +559,7 @@ mod tests {
         let domain = HashDomain::new(MERKLE_DOMAIN);
         let weighted = UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
         let mut state = 0x5369_6e73_656d_696c;
-        let messages: Vec<_> = (0..32)
+        let messages: Vec<_> = (0..64)
             .map(|_| {
                 core::array::from_fn(|_| (splitmix64(&mut state) as usize % GENERATOR_COUNT) as u16)
             })
@@ -412,7 +569,25 @@ mod tests {
             .map(|words| weighted.hash_words(words))
             .collect();
 
-        assert_eq!(weighted.hash_words_batch(&messages), expected);
+        // Cover the projective fallback, both sides of the batch-affine
+        // threshold, and odd batch widths on both paths.
+        for width in [
+            1,
+            2,
+            3,
+            super::BATCH_AFFINE_MIN_MESSAGES - 1,
+            super::BATCH_AFFINE_MIN_MESSAGES,
+            17,
+            33,
+            64,
+        ] {
+            assert_eq!(
+                weighted.hash_words_batch(&messages[..width]),
+                expected[..width],
+                "width {}",
+                width
+            );
+        }
         assert!(weighted.hash_words_batch(&[]).is_empty());
     }
 
