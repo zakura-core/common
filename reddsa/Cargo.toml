@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.88"
 name = "zakura-reddsa"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 authors = [
     "Dev Ojha <ValarDragon@users.noreply.github.com>",
     "Sean Bowe <ewillbefull@gmail.com>",
@@ -138,13 +138,13 @@ default-features = false
 
 [dependencies.jubjub]
 path = "../jubjub"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 default-features = false
 package = "zakura-jubjub"
 
 [dependencies.pasta_curves]
 path = "../pasta_curves"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 default-features = false
 package = "zakura-pasta-curves"
 
@@ -197,7 +197,7 @@ version = "0.2.19"
 
 [dev-dependencies.pasta_curves]
 path = "../pasta_curves"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 features = ["alloc"]
 default-features = false
 package = "zakura-pasta-curves"

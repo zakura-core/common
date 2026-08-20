@@ -6,7 +6,7 @@ replacement by renaming the dependency:
 
 ```toml
 [dependencies]
-bls12_381 = { package = "zakura-bls12-381", version = "1.0.0-rc.1" }
+bls12_381 = { package = "zakura-bls12-381", version = "1.0.0-rc.2" }
 ```
 
 # bls12_381

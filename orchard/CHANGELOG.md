@@ -8,6 +8,7 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Prepared the `1.0.0-rc.2` release.
 - Updated the curve stack to `ff 0.14`, `group 0.14`, and `rand 0.10`.
 - Added `MerkleHashOrchard::combine_batch` for same-level Merkle node pairs,
   sharing projective-to-affine normalization across each batch.
