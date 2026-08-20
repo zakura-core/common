@@ -35,10 +35,12 @@
 //! `lhs[3]` and some `rhs` limb are both within 3 of `2^64`. A canonical
 //! `lhs` has `lhs[3] <= 2^62`, and any `rhs` limb `<= 2^64 - 4` caps the
 //! high product at `2^64 - 5`, so either condition alone rules the wrap out.
-//! The one unreduced-`lhs` caller is `from_u512`, whose `rhs` operands are
-//! the `R2`/`R3` constants; their limbs sit far below the bound (see the
+//! No current caller passes an unreduced `lhs`: `from_u512`, the one place
+//! that produces unreduced values, deliberately uses the portable
+//! multiplication instead. The
 //! `aarch64_asm_mul_unreduced_lhs_matches_portable` tests in `fp.rs` and
-//! `fq.rs`, which pin this case against the portable implementation).
+//! `fq.rs` still pin the unreduced-`lhs` behaviour against the `R2`/`R3`
+//! constants in case a future caller relies on it.
 //!
 //! There are no branches and no memory accesses inside the blocks, so the
 //! code is constant-time.

@@ -297,8 +297,14 @@ impl Fq {
         // constant `R2` or `R3`.
         let d0 = Fq([limbs[0], limbs[1], limbs[2], limbs[3]]);
         let d1 = Fq([limbs[4], limbs[5], limbs[6], limbs[7]]);
-        // Convert to Montgomery form
-        d0 * R2 + d1 * R3
+        // Convert to Montgomery form. `d0` and `d1` are unreduced, so use the
+        // portable multiplication: its classical 8-limb reduction is valid for
+        // any 256-bit value times a canonical constant, with no precondition
+        // on the constant's limbs. The inline-assembly `mul` tolerates an
+        // unreduced lhs only while every rhs limb stays at most `2^64 - 4`
+        // (see `aarch64_asm.rs`); this cold path is not worth carrying that
+        // coupling, and hashing dominates its callers anyway.
+        Fq::mul(&d0, &R2).add(&Fq::mul(&d1, &R3))
     }
 
     /// Converts from an integer represented in little endian
