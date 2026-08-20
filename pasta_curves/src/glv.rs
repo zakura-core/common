@@ -65,7 +65,6 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use ff::{Field, PrimeField, WithSmallOrderMulGroup};
-use group::prime::PrimeCurveAffine;
 use group::CurveAffine as _;
 
 use crate::arithmetic::{mac, sbb, CurveExt};
