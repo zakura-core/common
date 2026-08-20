@@ -77,6 +77,11 @@ name = "pasta_curves"
 path = "src/lib.rs"
 
 [[bench]]
+name = "batch_invert"
+path = "benches/batch_invert.rs"
+harness = false
+
+[[bench]]
 name = "fp"
 path = "benches/fp.rs"
 harness = false
