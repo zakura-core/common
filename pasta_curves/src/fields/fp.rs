@@ -1332,7 +1332,10 @@ fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
         let d1 = Fp([l[4], l[5], l[6], l[7]]);
         Fp::mul(&d0, &R2).add(&Fp::mul(&d1, &R3))
     };
-    assert_eq!(Fp::from_u512([u64::MAX; 8]), portable_from_u512([u64::MAX; 8]));
+    assert_eq!(
+        Fp::from_u512([u64::MAX; 8]),
+        portable_from_u512([u64::MAX; 8])
+    );
     for _ in 0..10_000u32 {
         let mut l = [0u64; 8];
         for w in l.iter_mut() {
