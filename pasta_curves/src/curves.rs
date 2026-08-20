@@ -1087,29 +1087,24 @@ new_curve_impl!(
 );
 
 impl Ep {
+    /// Evaluates two incomplete mixed additions in parallel.
+    ///
+    /// Each projective and affine input must be nonidentity, and neither
+    /// projective point may equal or negate its corresponding affine point.
+    /// Violating these requirements returns an incorrect group result.
     #[inline(never)]
-    pub(crate) fn add_mixed_pair(
+    pub(crate) fn add_mixed_pair_unchecked(
         lhs_0: &Self,
         rhs_0: &EpAffine,
         lhs_1: &Self,
         rhs_1: &EpAffine,
     ) -> [Self; 2] {
-        if bool::from(
-            lhs_0.is_identity() | rhs_0.is_identity() | lhs_1.is_identity() | rhs_1.is_identity(),
-        ) {
-            return [lhs_0 + rhs_0, lhs_1 + rhs_1];
-        }
-
         let z1z1_0 = Field::square(&lhs_0.z);
         let z1z1_1 = Field::square(&lhs_1.z);
         let u2_0 = rhs_0.x * z1z1_0;
         let u2_1 = rhs_1.x * z1z1_1;
         let s2_0 = rhs_0.y * z1z1_0 * lhs_0.z;
         let s2_1 = rhs_1.y * z1z1_1 * lhs_1.z;
-
-        if lhs_0.x == u2_0 || lhs_1.x == u2_1 {
-            return [lhs_0 + rhs_0, lhs_1 + rhs_1];
-        }
 
         let h_0 = u2_0 - lhs_0.x;
         let h_1 = u2_1 - lhs_1.x;

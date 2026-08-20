@@ -14,19 +14,27 @@ pub type Point = Ep;
 /// A Pallas point in the affine coordinate space (or the point at infinity).
 pub type Affine = EpAffine;
 
-/// Adds two independent projective-affine pairs in parallel.
+/// Performs two independent incomplete projective-affine additions in
+/// parallel.
 ///
-/// This helper evaluates the complete mixed-addition formula in two lanes,
-/// exposing instruction-level parallelism between the independent additions.
+/// This helper exposes instruction-level parallelism across the two mixed
+/// additions. Each input must be nonidentity, and each projective point must
+/// differ from both signs of its affine addend. If these requirements are
+/// violated, the returned group result is incorrect.
 #[doc(hidden)]
 #[inline(always)]
-pub fn add_mixed_pair(lhs_0: &Point, rhs_0: &Affine, lhs_1: &Point, rhs_1: &Affine) -> [Point; 2] {
-    Point::add_mixed_pair(lhs_0, rhs_0, lhs_1, rhs_1)
+pub fn add_mixed_pair_unchecked(
+    lhs_0: &Point,
+    rhs_0: &Affine,
+    lhs_1: &Point,
+    rhs_1: &Affine,
+) -> [Point; 2] {
+    Point::add_mixed_pair_unchecked(lhs_0, rhs_0, lhs_1, rhs_1)
 }
 
 #[test]
-fn add_mixed_pair_matches_complete_addition() {
-    use group::{Curve, CurveAffine, Group};
+fn add_mixed_pair_unchecked_matches_complete_addition() {
+    use group::{Curve, Group};
 
     let point = Point::generator() * Scalar::from(7);
     let other = Point::generator() * Scalar::from(11);
@@ -34,20 +42,10 @@ fn add_mixed_pair_matches_complete_addition() {
         Point::generator() * Scalar::from(13),
         (Point::generator() * Scalar::from(17)).to_affine(),
     );
-    let cases = [
-        (point, other.to_affine()),
-        (Point::identity(), other.to_affine()),
-        (point, Affine::identity()),
-        (point, point.to_affine()),
-        (point, (-point).to_affine()),
-    ];
-
-    for exceptional in cases {
-        assert_eq!(
-            add_mixed_pair(&exceptional.0, &exceptional.1, &ordinary.0, &ordinary.1,),
-            [exceptional.0 + exceptional.1, ordinary.0 + ordinary.1,],
-        );
-    }
+    assert_eq!(
+        add_mixed_pair_unchecked(&point, &other.to_affine(), &ordinary.0, &ordinary.1),
+        [point + other, ordinary.0 + ordinary.1],
+    );
 }
 
 #[cfg(feature = "alloc")]

@@ -10,7 +10,8 @@ and this project adheres to Rust's notion of
 
 - Prepared the `1.0.0-rc.2` release.
 - The batched fixed-length weighted evaluator now processes two independent
-  mixed additions in parallel.
+  incomplete mixed additions in parallel and omits exceptional-case checks
+  under its existing discrete-logarithm relation assumption.
 - Added `UncheckedFixedLengthHashDomain::hash_words` and
   `UncheckedFixedLengthHashDomain::hash_words_batch` for extracted hashes of
   pre-decoded words. The batch method processes messages position-first and
