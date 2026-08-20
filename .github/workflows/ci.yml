@@ -609,7 +609,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [--all-features, --no-default-features]
+        # --all-features includes the experimental cm-field representation;
+        # the empty entry keeps the default (Montgomery + bits + sqrt-table)
+        # posture covered.
+        features: [--all-features, --no-default-features, ""]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -647,19 +650,24 @@ jobs:
           --all-features
           --no-run
       - name: Test field arithmetic
+        # repr_ tests exist in both representations (test_inv is
+        # Montgomery-only and --all-features now selects cm-field).
         run: >-
           cargo +stable test -p zakura-pasta-curves
           --verbose
           --release
           --all-features
-          test_inv
+          repr_
       - name: Test Apple AArch64 assembly
+        # Pinned to explicit Montgomery features: under --all-features the
+        # cm-field representation disables the assembly backend and the
+        # filter would match zero tests (a vacuous pass).
         if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: >-
           cargo +stable test -p zakura-pasta-curves
           --verbose
           --release
-          --all-features
+          --features aarch64-asm,bits,sqrt-table
           aarch64_asm_matches_portable_arithmetic
       - name: Verify working directory is clean
         run: git diff --exit-code
@@ -673,7 +681,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [--all-features, --no-default-features]
+        # Same coverage note as pasta-test; --release keeps the (compiler-
+        # lowered) u128 arithmetic of the cm-field representation inside the
+        # job's time budget.
+        features: [--all-features, --no-default-features, ""]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -687,6 +698,7 @@ jobs:
         run: >-
           cargo +1.88.0 test -p zakura-pasta-curves
           --verbose
+          --release
           --target i686-unknown-linux-gnu
           ${{ matrix.features }}
       - name: Verify working directory is clean
@@ -718,6 +730,13 @@ jobs:
           --verbose
           --target ${{ matrix.target }}
           --no-default-features
+      - name: Build target (cm-field)
+        run: >-
+          cargo +1.88.0 build -p zakura-pasta-curves
+          --verbose
+          --target ${{ matrix.target }}
+          --no-default-features
+          --features cm-field
 
   # ZcashFoundation/reddsa .github/workflows/main.yml @
   # ad34fbe2eb3c3471f43823407b89f313745d51da
