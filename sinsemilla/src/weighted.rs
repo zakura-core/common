@@ -72,9 +72,17 @@ const GENERATOR_COUNT: usize = 1 << K;
 /// Batches at least this large take the batch-affine evaluator in
 /// [`UncheckedFixedLengthHashDomain::hash_words_batch`]; smaller ones keep
 /// the projective paired evaluation, whose per-lane cost does not carry the
-/// per-column shared-inversion overhead. Initial placement near the
-/// measured GLV batch-affine crossover; tuned by the width-sweep bench.
-const BATCH_AFFINE_MIN_MESSAGES: usize = 16;
+/// per-column shared field inversion.
+///
+/// Measured on the width-sweep bench: with portable field arithmetic the
+/// affine path already wins at 16 lanes (−20% per hash on both Apple
+/// aarch64 and x86-64), but with the `aarch64-asm` pasta backend the
+/// multiplications it saves get cheaper while the per-column inversion does
+/// not, and 16 lanes is a 9% *loss*; the crossover sits between 16 and 32,
+/// and 32 wins on every configuration (−12% asm, −33% portable). The
+/// threshold therefore sits at 32 so no build regresses; in a Merkle
+/// rebuild the 16-lane level holds 16 of 1023 combines.
+const BATCH_AFFINE_MIN_MESSAGES: usize = 32;
 
 /// Two-lane Montgomery batch inversion for provably nonzero values (the
 /// chord denominators of [`UncheckedFixedLengthHashDomain::evaluate_batch_affine`]).
