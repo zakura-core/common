@@ -39,14 +39,63 @@ Companion docs: `TECHNIQUE.md` (the variable-time 62-divstep inversion this crat
 
 ## Benchmark record
 
-Machine: (filled at capture) · Toolchain: (filled at capture) · Criterion 0.4, default sampling.
-Baselines: `mont-portable` (default features per bench target), `mont-asm` (`+aarch64-asm`).
+Machine: **Apple M4 Max** (12P+4E, macOS 26.5.2, arm64) · rustc 1.96.0 · Criterion 0.4, default
+sampling · captured at `a76eb1a` (bench-extension commit, Montgomery arithmetic unchanged).
+Baselines: `mont-portable` (default features per bench target), `mont-asm` (`+aarch64-asm`);
+saved as Criterion baselines of those names, and pinned here because `target/criterion` is
+ephemeral. Chain benches report the whole 64-op chain; per-op = value/64.
 
-### Apple M-series (primary)
+### Field operations (Fp / Fq medians)
 
-_To be filled by the baseline capture (PR-1) and per-milestone measurement runs._
+| benchmark | Fp mont-portable | Fp mont-asm | Fq mont-portable | Fq mont-asm |
+|---|---|---|---|---|
+| mul_assign | 11.11 ns | 8.64 ns | 11.12 ns | 8.75 ns |
+| square | 9.62 ns | 9.62 ns | 9.61 ns | 9.57 ns |
+| mul_chain/64 (latency) | 1.001 µs (15.6/op) | 742.5 ns (11.6/op) | 992.9 ns | 739.8 ns |
+| square_chain/64 | 935.0 ns (14.6/op) | 930.7 ns | 927.8 ns | 932.6 ns |
+| mul_indep/4 (ILP) | 36.50 ns (9.1/op) | 30.84 ns (7.7/op) | 36.50 ns | 30.53 ns |
+| mul_indep/8 | 72.38 ns (9.0/op) | 61.22 ns (7.7/op) | 72.23 ns | 61.05 ns |
+| add_assign / sub_assign / neg / double | 2.65–2.76 ns | 2.64–2.76 ns | ~same | ~same |
+| add_chain/64 | 256.3 ns (4.0/op) | 256.9 ns | 256.2 ns | 255.8 ns |
+| invert (divstep) | 759.4 ns | 754.4 ns | 756.1 ns | 759.6 ns |
+| sqrt | 4.358 µs | 3.013 µs | 4.377 µs | 3.003 µs |
+| pow_vartime_(p\|q)−2 | 4.882 µs | 3.895 µs | 4.832 µs | 3.826 µs |
+| to_repr | 10.30 ns | 10.12 ns | 10.30 ns | 10.08 ns |
+| from_repr | 12.23 ns | 9.83 ns | 12.19 ns | 9.81 ns |
 
-| benchmark | mont-portable | mont-asm | cm-portable | predicted (cm vs mont-portable) | measured Δ | explanation |
+Deferred inner products (Fp; Fq within noise of the same values):
+
+| length | lazy portable | lazy asm | eager portable | eager asm |
+|---|---|---|---|---|
+| 100 | 546.9 ns | 550.1 ns | 1.295 µs | 954.3 ns |
+| 1024 | 5.560 µs | 5.563 µs | 13.271 µs | 9.750 µs |
+| 10000 | 54.17 µs (5.4 ns/term) | 54.30 µs | 129.8 µs | 95.2 µs |
+
+### Curve-level (Pallas; Vesta within noise)
+
+| benchmark | mont-portable | mont-asm |
+|---|---|---|
+| point doubling | 114.9 ns | 84.4 ns |
+| point addition | 228.6 ns | 173.0 ns |
+| point to_affine | 239.7 ns | 228.7 ns |
+| batch_normalize/1000 | 92.7 µs | 70.0 µs |
+| native scalar mul | 89.1 µs | 67.7 µs |
+| mul_glv one-shot | 27.5 µs | 21.1 µs |
+| GLV table mul (reused) | 25.0 µs | 18.9 µs |
+| same-scalar batch hook /128 | 27.3 ms | 20.5 ms |
+| hash-to-curve | 12.80 µs | 9.05 µs |
+
+Early observations against the predictions:
+- The asm **square is no faster than portable square** (9.6 ns both) while asm mul is (8.6 vs
+  11.1 ns) — squaring is already reduction-dominated, consistent with the spec's warning that
+  square chains are the CM risk case.
+- Dependent-mul latency (15.6 ns/op portable) far exceeds throughput (9.0 ns/op with 8-way ILP):
+  there is real serial-dependency headroom for CM's independent product chains to attack.
+- add/sub at 2.7 ns are already cheap; the CM lattice normalizer has to stay within ~a ns of this.
+
+### CM measurement columns (filled at M5)
+
+| benchmark | mont-portable | mont-asm | cm-portable | predicted | measured Δ | explanation |
 |---|---|---|---|---|---|---|
 
 ## Predictions to test (from the operation-count analysis)
