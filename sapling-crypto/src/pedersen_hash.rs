@@ -89,8 +89,13 @@ where
         let acc = acc.to_repr();
         let num_limbs: usize = acc.as_ref().len() / 8;
         let mut limbs = vec![0u64; num_limbs + 1];
-        for (src, dst) in acc.chunks_exact(8).zip(limbs[..num_limbs].iter_mut()) {
-            *dst = u64::from_le_bytes(src.try_into().expect("correct length"));
+        for (src, dst) in acc
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(limbs[..num_limbs].iter_mut())
+        {
+            *dst = u64::from_le_bytes(*src);
         }
 
         let mut tmp = jubjub::SubgroupPoint::identity();

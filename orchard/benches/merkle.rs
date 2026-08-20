@@ -48,7 +48,9 @@ fn merkle_root(mut nodes: Vec<MerkleHashOrchard>) -> MerkleHashOrchard {
         let merkle_level =
             Level::from(u8::try_from(level).expect("benchmark tree height fits in u8"));
         nodes = nodes
-            .chunks_exact(CHILDREN_PER_PARENT)
+            .as_chunks::<CHILDREN_PER_PARENT>()
+            .0
+            .iter()
             .map(|children| {
                 MerkleHashOrchard::combine(
                     merkle_level,
@@ -72,7 +74,9 @@ fn merkle_root_batch(mut nodes: Vec<MerkleHashOrchard>) -> MerkleHashOrchard {
         nodes = MerkleHashOrchard::combine_batch(
             merkle_level,
             nodes
-                .chunks_exact(CHILDREN_PER_PARENT)
+                .as_chunks::<CHILDREN_PER_PARENT>()
+                .0
+                .iter()
                 .map(|children| (&children[LEFT_CHILD], &children[RIGHT_CHILD])),
         );
         level += 1;

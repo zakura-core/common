@@ -72,7 +72,9 @@ fn merkle_crh_batch(c: &mut Criterion) {
 
     for width in BATCH_WIDTHS {
         let pairs: Vec<_> = nodes[..width * 2]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0], pair[1]))
             .collect();
         let expected = combine_scalar(level, &pairs);
