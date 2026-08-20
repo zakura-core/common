@@ -52,6 +52,7 @@
 //! and re-verified by the compile-time assertions and unit tests below.
 #![allow(dead_code)] // TODO(M3): remove when Fp/Fq route through this kernel.
 
+use crate::arithmetic::{adc, mac, sbb};
 use subtle::{Choice, ConstantTimeEq};
 
 /// An upstream-style verification check: live in unit tests (including
@@ -383,6 +384,7 @@ const fn w256_asr128_exact(a: W256) -> W256 {
 #[inline(always)]
 const fn w256_add_asr128_exact(a: W256, b: W256) -> W256 {
     let (lo, carry) = a.lo.overflowing_add(b.lo);
+    let _ = lo;
     verify!(lo == 0, "division by 2^128 must be exact");
     let (wlo, c1) = a.hi.overflowing_add(b.hi);
     let (wlo, c2) = wlo.overflowing_add(carry as u128);
@@ -977,6 +979,347 @@ pub(crate) const fn unpack(w: &[u64; 4]) -> (i128, i128) {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical conversions.
+//
+// CM → canonical: x = a·β⁻¹ + b·σβ⁻¹ (mod r), two 128×256 products with a
+// Solinas reduction over r = 2^254 + c.
+//
+// Canonical → CM: k = x·β (a pure limb shift by 131), canonicalized below r,
+// then Babai-rounded against the lattice basis w1 = (t, m), w2 = (−3m0, t)
+// with 512-fractional-bit fixed-point coefficients (G_T, G_M). At this
+// precision the fixed-point rounding equals exact rounding for every
+// canonical k (the perturbation is below 1/(2r) and r is odd, so there are
+// no ties), which the storage-bound margins require: a ±1 slip in c2 would
+// add 3m0 ≈ 1.73·2^127 to `a`.
+//
+// All conversion paths are constant-time: fixed loop shapes, borrow-masked
+// conditional subtractions, and compile-time-constant sign branches only.
+// ---------------------------------------------------------------------------
+
+/// Fixed-shape schoolbook product; `prod` must be zeroed with length
+/// `a.len() + b.len()`. (A local clone of the `glv.rs` helper — that module
+/// is feature-gated and cannot be imported here.)
+fn schoolbook_mul(a: &[u64], b: &[u64], prod: &mut [u64]) {
+    debug_assert_eq!(prod.len(), a.len() + b.len());
+    for (i, &ai) in a.iter().enumerate() {
+        let mut carry = 0u64;
+        for (j, &bj) in b.iter().enumerate() {
+            let (limb, c) = mac(prod[i + j], ai, bj, carry);
+            prod[i + j] = limb;
+            carry = c;
+        }
+        prod[i + b.len()] = carry;
+    }
+}
+
+/// `round((g · k) / 2^512)` for the 7-limb Babai constants: the fixed-point
+/// nearest-integer coefficient. Fits `u128` (below `max(|t|, m) < 2^127`
+/// for canonical `k`).
+fn round_mul_shift_512(g: &[u64; 7], k: &[u64; 4]) -> u128 {
+    let mut prod = [0u64; 11];
+    schoolbook_mul(g, k, &mut prod);
+    let round = prod[7] >> 63;
+    verify!(prod[10] == 0, "Babai coefficient must fit 128 bits");
+    ((prod[8] as u128) | ((prod[9] as u128) << 64)).wrapping_add(round as u128)
+}
+
+/// One borrow-masked conditional subtraction of `r`: maps `[0, 2r)` to
+/// `[0, r)`.
+fn cond_sub_r<P: CmParams>(x: [u64; 4]) -> [u64; 4] {
+    let r = P::MODULUS_LIMBS;
+    let (d0, b) = sbb(x[0], r[0], 0);
+    let (d1, b) = sbb(x[1], r[1], b);
+    let (d2, b) = sbb(x[2], r[2], b);
+    let (d3, b) = sbb(x[3], r[3], b);
+    // `b` is all-ones iff x < r (underflow): keep x, else the difference.
+    [
+        (x[0] & b) | (d0 & !b),
+        (x[1] & b) | (d1 & !b),
+        (x[2] & b) | (d2 & !b),
+        (x[3] & b) | (d3 & !b),
+    ]
+}
+
+/// Reduces a value below `2^386` (seven limbs) to its canonical residue in
+/// `[0, r)`: two positive Solinas folds over `r = 2^254 + c`, then one
+/// conditional subtraction.
+fn canonicalize7<P: CmParams>(x: [u64; 7]) -> [u64; 4] {
+    let c = [P::SOLINAS_C as u64, (P::SOLINAS_C >> 64) as u64];
+    let r = P::MODULUS_LIMBS;
+
+    // Split at 2^254: H < 2^132, L < 2^254.
+    let h = [
+        (x[3] >> 62) | (x[4] << 2),
+        (x[4] >> 62) | (x[5] << 2),
+        (x[5] >> 62) | (x[6] << 2),
+    ];
+    let l = [x[0], x[1], x[2], x[3] & ((1 << 62) - 1)];
+
+    // X1 = L + 16r − H·c: positive (16r = 2^258 + 16c > H·c) and < 2^259.
+    let mut hc = [0u64; 5];
+    schoolbook_mul(&h, &c, &mut hc);
+    let r16 = [
+        r[0] << 4,
+        (r[1] << 4) | (r[0] >> 60),
+        (r[2] << 4) | (r[1] >> 60),
+        (r[3] << 4) | (r[2] >> 60),
+        r[3] >> 60,
+    ];
+    let mut x1 = [0u64; 5];
+    let mut carry = 0;
+    for i in 0..5 {
+        let li = if i < 4 { l[i] } else { 0 };
+        let (v, cc) = adc(li, r16[i], carry);
+        x1[i] = v;
+        carry = cc;
+    }
+    verify!(carry == 0, "fold 1 sum must fit 320 bits");
+    let mut borrow = 0;
+    for i in 0..5 {
+        let (v, bb) = sbb(x1[i], hc[i], borrow);
+        x1[i] = v;
+        borrow = bb;
+    }
+    verify!(borrow == 0, "fold 1 must not underflow");
+    verify!(x1[4] < (1 << 3), "fold 1 result must be below 2^259");
+
+    // X2 = L2 + r − H2·c with H2 = X1 >> 254 < 2^5: lands in [0, 2r).
+    let h2 = (x1[3] >> 62) | (x1[4] << 2);
+    let l2 = [x1[0], x1[1], x1[2], x1[3] & ((1 << 62) - 1)];
+    let (p0, cc) = mac(0, h2, c[0], 0);
+    let (p1, p2) = mac(0, h2, c[1], cc);
+    let h2c = [p0, p1, p2, 0];
+
+    let (s0, cy) = adc(l2[0], r[0], 0);
+    let (s1, cy) = adc(l2[1], r[1], cy);
+    let (s2, cy) = adc(l2[2], r[2], cy);
+    let (s3, cy) = adc(l2[3], r[3], cy);
+    let _ = cy;
+    verify!(cy == 0, "fold 2 sum must fit 256 bits");
+    let (s0, bb) = sbb(s0, h2c[0], 0);
+    let (s1, bb) = sbb(s1, h2c[1], bb);
+    let (s2, bb) = sbb(s2, h2c[2], bb);
+    let (s3, bb) = sbb(s3, h2c[3], bb);
+    let _ = bb;
+    verify!(bb == 0, "fold 2 must not underflow");
+
+    cond_sub_r::<P>([s0, s1, s2, s3])
+}
+
+/// Babai rounding of a canonical `k` (representing `k = x·β mod r`) into a
+/// CM coefficient pair. The exact residual satisfies `|a| ≤ (|t| + 3m0)/2`
+/// and `|b| ≤ (m + |t|)/2`, inside the storage box.
+fn babai<P: CmParams>(k: [u64; 4]) -> (i128, i128) {
+    let c1 = round_mul_shift_512(&P::G_T, &k); // round(k·|t|/r) < 2^87
+    let c2 = round_mul_shift_512(&P::G_M, &k); // round(k·m/r)   < 2^127
+    let t_abs = abs_i128(P::T);
+    let kw = W256 {
+        lo: (k[0] as u128) | ((k[1] as u128) << 64),
+        hi: (k[2] as u128) | ((k[3] as u128) << 64),
+    };
+    // a = k − c1·|t| − 3·c2·m0 (sign-uniform in t: the signed coefficient
+    // times the signed t is always +c1·|t|).
+    let a = w256_sub(
+        w256_sub(kw, mul_u128_wide(c1, t_abs)),
+        w256_mul3(mul_u128_wide(c2, P::M0 as u128)),
+    );
+    // b = sign(t)·(c2·|t| − c1·m): one compile-time sign flip.
+    let b = w256_sub(mul_u128_wide(c2, t_abs), mul_u128_wide(c1, P::M as u128));
+    let b = if P::T < 0 { w256_sub(W256_ZERO, b) } else { b };
+    let out = (w256_low_i128(a), w256_low_i128(b));
+    verify!(in_bounds(out), "Babai output must satisfy the invariant");
+    out
+}
+
+/// Canonical → CM: encodes a canonical little-endian value `x < r`.
+pub(crate) fn encode<P: CmParams>(x: [u64; 4]) -> (i128, i128) {
+    verify!(x[3] <= (1 << 62), "encode input must be canonical");
+    // k = x·2^131, a pure limb shift; < r·2^131 < 2^386.
+    let k512 = [
+        0,
+        0,
+        x[0] << 3,
+        (x[1] << 3) | (x[0] >> 61),
+        (x[2] << 3) | (x[1] >> 61),
+        (x[3] << 3) | (x[2] >> 61),
+        x[3] >> 61,
+    ];
+    babai::<P>(canonicalize7::<P>(k512))
+}
+
+/// `v·konst mod r` for a signed coefficient `v` (`|v| < 2^127`) and a
+/// canonical constant: the building block of `decode`.
+fn conversion_term<P: CmParams>(v: i128, konst: &[u64; 4]) -> [u64; 4] {
+    let sv = (v >> 127) as u128; // all-ones iff v < 0
+    let mag = ((v as u128) ^ sv).wrapping_add(sv & 1);
+    let mlimbs = [mag as u64, (mag >> 64) as u64];
+    let mut prod = [0u64; 6];
+    schoolbook_mul(&mlimbs, konst, &mut prod);
+
+    // Reduce the 381-bit product: H < 2^127, X1 = L + 2r − H·c < 2^256,
+    // then the small second fold and a conditional subtraction.
+    let c = [P::SOLINAS_C as u64, (P::SOLINAS_C >> 64) as u64];
+    let r = P::MODULUS_LIMBS;
+    let h = [
+        (prod[3] >> 62) | (prod[4] << 2),
+        (prod[4] >> 62) | (prod[5] << 2),
+    ];
+    let l = [prod[0], prod[1], prod[2], prod[3] & ((1 << 62) - 1)];
+    let mut hc = [0u64; 4];
+    schoolbook_mul(&h, &c, &mut hc);
+    let r2 = [
+        r[0] << 1,
+        (r[1] << 1) | (r[0] >> 63),
+        (r[2] << 1) | (r[1] >> 63),
+        (r[3] << 1) | (r[2] >> 63),
+    ];
+    let (s0, cy) = adc(l[0], r2[0], 0);
+    let (s1, cy) = adc(l[1], r2[1], cy);
+    let (s2, cy) = adc(l[2], r2[2], cy);
+    let (s3, cy) = adc(l[3], r2[3], cy);
+    let _ = cy;
+    verify!(cy == 0, "term fold 1 must fit 256 bits");
+    let (s0, bb) = sbb(s0, hc[0], 0);
+    let (s1, bb) = sbb(s1, hc[1], bb);
+    let (s2, bb) = sbb(s2, hc[2], bb);
+    let (s3, bb) = sbb(s3, hc[3], bb);
+    let _ = bb;
+    verify!(bb == 0, "term fold 1 must not underflow");
+
+    let h2 = s3 >> 62;
+    let l2 = [s0, s1, s2, s3 & ((1 << 62) - 1)];
+    let (p0, cc) = mac(0, h2, c[0], 0);
+    let (p1, p2) = mac(0, h2, c[1], cc);
+    let (s0, cy) = adc(l2[0], r[0], 0);
+    let (s1, cy) = adc(l2[1], r[1], cy);
+    let (s2, cy) = adc(l2[2], r[2], cy);
+    let (s3, cy) = adc(l2[3], r[3], cy);
+    let _ = cy;
+    verify!(cy == 0, "term fold 2 must fit 256 bits");
+    let (s0, bb) = sbb(s0, p0, 0);
+    let (s1, bb) = sbb(s1, p1, bb);
+    let (s2, bb) = sbb(s2, p2, bb);
+    let (s3, bb) = sbb(s3, 0, bb);
+    let _ = bb;
+    verify!(bb == 0, "term fold 2 must not underflow");
+    let red = cond_sub_r::<P>([s0, s1, s2, s3]);
+
+    // Modular negation when v < 0 (with the zero guard), mask-selected:
+    // red < r, so r − red never underflows.
+    let (d0, bb) = sbb(r[0], red[0], 0);
+    let (d1, bb) = sbb(r[1], red[1], bb);
+    let (d2, bb) = sbb(r[2], red[2], bb);
+    let (d3, _) = sbb(r[3], red[3], bb);
+    let z = red[0] | red[1] | red[2] | red[3];
+    let nonzero = ((z | z.wrapping_neg()) >> 63).wrapping_neg(); // all-ones iff z != 0
+    let neg_mask = (sv as u64) & nonzero; // sv is an all-ones/all-zeros mask
+    [
+        (d0 & neg_mask) | (red[0] & !neg_mask),
+        (d1 & neg_mask) | (red[1] & !neg_mask),
+        (d2 & neg_mask) | (red[2] & !neg_mask),
+        (d3 & neg_mask) | (red[3] & !neg_mask),
+    ]
+}
+
+/// Modular addition of two canonical values.
+fn add_mod_r<P: CmParams>(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+    let (s0, cy) = adc(a[0], b[0], 0);
+    let (s1, cy) = adc(a[1], b[1], cy);
+    let (s2, cy) = adc(a[2], b[2], cy);
+    let (s3, cy) = adc(a[3], b[3], cy);
+    let _ = cy;
+    verify!(cy == 0, "canonical sum must fit 256 bits");
+    cond_sub_r::<P>([s0, s1, s2, s3])
+}
+
+/// CM → canonical: `x = a·β⁻¹ + b·σβ⁻¹ (mod r)`, little-endian limbs.
+pub(crate) fn decode<P: CmParams>(x: (i128, i128)) -> [u64; 4] {
+    verify!(in_bounds(x), "decode operand out of bounds");
+    add_mod_r::<P>(
+        conversion_term::<P>(x.0, &P::BETA_INV),
+        conversion_term::<P>(x.1, &P::SIGMA_BETA_INV),
+    )
+}
+
+/// Canonical residue of a 512-bit little-endian value: one positive
+/// pre-fold (`Lo + 2^131·r − 4c·Hi`, using `2^256 ≡ −4c (mod r)`), then the
+/// shared seven-limb canonicalizer.
+pub(crate) fn solinas_from_wide<P: CmParams>(x: &[u64; 8]) -> [u64; 4] {
+    let c4 = P::SOLINAS_C << 2; // 4c < 2^128
+    let c4 = [c4 as u64, (c4 >> 64) as u64];
+    let r = P::MODULUS_LIMBS;
+
+    let mut hc = [0u64; 6];
+    schoolbook_mul(&x[4..8], &c4, &mut hc);
+    // r·2^131 as seven limbs.
+    let r131 = [
+        0,
+        0,
+        r[0] << 3,
+        (r[1] << 3) | (r[0] >> 61),
+        (r[2] << 3) | (r[1] >> 61),
+        (r[3] << 3) | (r[2] >> 61),
+        r[3] >> 61,
+    ];
+    let mut s = [0u64; 7];
+    let mut carry = 0;
+    for i in 0..7 {
+        let lo = if i < 4 { x[i] } else { 0 };
+        let (v, cc) = adc(lo, r131[i], carry);
+        s[i] = v;
+        carry = cc;
+    }
+    verify!(carry == 0, "wide pre-fold must fit 448 bits");
+    let mut borrow = 0;
+    for i in 0..7 {
+        let hi = if i < 6 { hc[i] } else { 0 };
+        let (v, bb) = sbb(s[i], hi, borrow);
+        s[i] = v;
+        borrow = bb;
+    }
+    verify!(borrow == 0, "wide pre-fold must not underflow");
+    canonicalize7::<P>(s)
+}
+
+/// Converts a little-endian 256-bit integer (any value; reduced modulo `r`)
+/// into its CM representation. `const`, so the crate's `from_raw` constant
+/// sites keep compiling unchanged: a 256-step double-and-add ladder over
+/// `ONE`, mask-selected — both const-compatible and constant-time. Runtime
+/// conversions should prefer [`encode`]/[`from_u64`] (the Babai path); this
+/// ladder is the const-context fallback.
+pub(crate) const fn from_raw<P: CmParams>(val: [u64; 4]) -> (i128, i128) {
+    let mut acc = (0i128, 0i128);
+    let mut i = 256usize;
+    while i > 0 {
+        i -= 1;
+        acc = add::<P>(acc, acc);
+        let bit = (val[i >> 6] >> (i & 63)) & 1;
+        let mask = (bit as u128).wrapping_neg();
+        let addend = (
+            ((P::ONE.0 as u128) & mask) as i128,
+            ((P::ONE.1 as u128) & mask) as i128,
+        );
+        acc = add::<P>(acc, addend);
+    }
+    acc
+}
+
+/// Runtime conversion of a `u64` (Babai path, not the ladder).
+pub(crate) fn from_u64<P: CmParams>(v: u64) -> (i128, i128) {
+    encode::<P>([v, 0, 0, 0])
+}
+
+/// Runtime conversion of a `u128` (Babai path, not the ladder).
+pub(crate) fn from_u128<P: CmParams>(v: u128) -> (i128, i128) {
+    encode::<P>([v as u64, (v >> 64) as u64, 0, 0])
+}
+
+/// Runtime conversion of a 512-bit little-endian integer.
+pub(crate) fn from_u512<P: CmParams>(limbs: &[u64; 8]) -> (i128, i128) {
+    encode::<P>(solinas_from_wide::<P>(limbs))
+}
+
+// ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
 
@@ -1549,6 +1892,313 @@ mod tests {
                     let one = <P as CmParams>::ONE;
                     assert_eq!(unpack(&pack(one)), one);
                 }
+
+                // ----- M2: canonical conversions -----
+
+                /// Canonical limbs of a field element (via the oracle).
+                fn limbs_of(x: F) -> [u64; 4] {
+                    let bytes: [u8; 32] = x.to_repr();
+                    let mut l = [0u64; 4];
+                    for (i, limb) in l.iter_mut().enumerate() {
+                        *limb = u64::from_le_bytes(
+                            bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+                        );
+                    }
+                    l
+                }
+
+                // T15/T17: encode/decode round-trips over boundary vectors
+                // and the Babai rounding-tie scalars.
+                #[test]
+                fn encode_decode_roundtrip_vectors() {
+                    let check = |v: [u64; 4]| {
+                        let enc = encode::<P>(v);
+                        assert!(in_bounds(enc));
+                        assert_eq!(decode::<P>(enc), v, "round-trip");
+                        assert_eq!(oracle_val(enc), F::from_raw(v));
+                    };
+                    check([0, 0, 0, 0]);
+                    check([1, 0, 0, 0]);
+                    check([2, 0, 0, 0]);
+                    check(limbs_of(-F::ONE)); // r − 1
+                    check(limbs_of(-F::ONE - F::ONE)); // r − 2
+                    check([u64::MAX, (1 << 63) - 1, 0, 0]); // 2^127 − 1
+                    check([0, 1 << 63, 0, 0]); // 2^127
+                    check([u64::MAX, u64::MAX, 0, 0]); // 2^128 − 1
+                    check([u64::MAX, u64::MAX, u64::MAX, (1 << 62) - 1]); // 2^254 − 1
+
+                    // Rounding-tie scalars: k with k·|t| or k·m as close as
+                    // possible to a half-integer multiple of r, and their
+                    // ±1 neighbors — the fixed-point Babai worst cases.
+                    let t_abs = abs_i128(<P as CmParams>::T);
+                    let m_abs = <P as CmParams>::M as u128;
+                    let two_inv = F::from(2u64).invert().unwrap();
+                    for coeff in [F::from_u128(t_abs), F::from_u128(m_abs)] {
+                        let cinv = coeff.invert().unwrap();
+                        for target in [-two_inv, two_inv] {
+                            let k = target * cinv;
+                            for dk in [-F::ONE, F::ZERO, F::ONE] {
+                                check(limbs_of(k + dk));
+                            }
+                        }
+                    }
+                }
+
+                // T16: conversions against the Montgomery oracle end-to-end.
+                #[test]
+                fn conversions_match_montgomery() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    for _ in 0..10_000 {
+                        let x = F::random(&mut rng);
+                        let y = F::random(&mut rng);
+                        let ex = encode::<P>(limbs_of(x));
+                        let ey = encode::<P>(limbs_of(y));
+                        assert!(in_bounds(ex) && in_bounds(ey));
+                        assert_eq!(oracle_val(ex), x);
+                        assert_eq!(decode::<P>(ex), limbs_of(x));
+                        assert_eq!(decode::<P>(mul::<P>(ex, ey)), limbs_of(x * y));
+                        assert_eq!(decode::<P>(add::<P>(ex, ey)), limbs_of(x + y));
+                    }
+                }
+
+                // T18: the const ladder agrees with encode and the oracle,
+                // including inputs at and above r (congruent reduction).
+                #[test]
+                fn from_raw_matches_encode_and_oracle() {
+                    use rand::Rng;
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    let r = <P as CmParams>::MODULUS_LIMBS;
+                    let (r0, c) = adc(r[0], 1, 0);
+                    let (r1, c) = adc(r[1], 0, c);
+                    let (r2, c) = adc(r[2], 0, c);
+                    let (r3, _) = adc(r[3], 0, c);
+                    let mut vectors = [
+                        [0, 0, 0, 0],
+                        [1, 0, 0, 0],
+                        [5, 0, 0, 0],
+                        r,
+                        [r0, r1, r2, r3], // r + 1
+                        [u64::MAX; 4],
+                    ]
+                    .to_vec();
+                    for _ in 0..100 {
+                        vectors.push([
+                            rng.next_u64(),
+                            rng.next_u64(),
+                            rng.next_u64(),
+                            rng.next_u64(),
+                        ]);
+                    }
+                    for v in vectors {
+                        let ladder = from_raw::<P>(v);
+                        assert!(in_bounds(ladder));
+                        assert_eq!(oracle_val(ladder), F::from_raw(v));
+                        let canon = limbs_of(F::from_raw(v));
+                        assert!(bool::from(ct_eq::<P>(ladder, encode::<P>(canon))));
+                    }
+                }
+
+                // T19: the ladder must stay const-evaluable (compile guard
+                // for the crate's `from_raw` constant sites).
+                const LADDER_FIVE: (i128, i128) = from_raw::<P>([5, 0, 0, 0]);
+
+                #[test]
+                fn from_raw_is_const() {
+                    assert_eq!(oracle_val(LADDER_FIVE), F::from(5u64));
+                }
+
+                // T20: runtime fast paths (Babai, not the ladder).
+                #[test]
+                fn fast_paths_match_from_raw() {
+                    for v in [0u64, 1, 2, 5, u64::MAX] {
+                        let fast = from_u64::<P>(v);
+                        assert!(bool::from(ct_eq::<P>(fast, from_raw::<P>([v, 0, 0, 0]))));
+                        assert_eq!(oracle_val(fast), F::from(v));
+                    }
+                    for v in [0u128, 1, (u64::MAX as u128) + 1, 1 << 127, u128::MAX] {
+                        let fast = from_u128::<P>(v);
+                        let raw = from_raw::<P>([v as u64, (v >> 64) as u64, 0, 0]);
+                        assert!(bool::from(ct_eq::<P>(fast, raw)));
+                        assert_eq!(oracle_val(fast), F::from_u128(v));
+                    }
+                }
+
+                // T21: 512-bit reduction against FromUniformBytes.
+                #[test]
+                fn from_u512_matches_uniform_bytes() {
+                    use rand::Rng;
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    let check = |limbs: [u64; 8]| {
+                        let mut bytes = [0u8; 64];
+                        for (i, l) in limbs.iter().enumerate() {
+                            bytes[i * 8..(i + 1) * 8].copy_from_slice(&l.to_le_bytes());
+                        }
+                        let got = from_u512::<P>(&limbs);
+                        assert!(in_bounds(got));
+                        assert_eq!(oracle_val(got), F::from_uniform_bytes(&bytes));
+                    };
+                    check([0; 8]);
+                    check([u64::MAX; 8]);
+                    let r = <P as CmParams>::MODULUS_LIMBS;
+                    check([r[0], r[1], r[2], r[3], 0, 0, 0, 0]);
+                    for _ in 0..1000 {
+                        let mut limbs = [0u64; 8];
+                        for l in limbs.iter_mut() {
+                            *l = rng.next_u64();
+                        }
+                        check(limbs);
+                    }
+                }
+
+                // T22: decode across all coefficient sign patterns.
+                #[test]
+                fn decode_sign_corners() {
+                    let one = <P as CmParams>::ONE;
+                    let vals = [
+                        (0i128, 0i128),
+                        (1, 0),
+                        (-1, 0),
+                        (0, 1),
+                        (0, -1),
+                        (3, 5),
+                        (3, -5),
+                        (-3, 5),
+                        (-3, -5),
+                        one,
+                        neg(one),
+                    ];
+                    for x in vals {
+                        assert_eq!(decode::<P>(x), limbs_of(oracle_val(x)));
+                    }
+                }
+
+                // T23: deterministic redundant representatives in the shift
+                // windows, checked through decode as well as ct_eq. (Both
+                // sides written in closed form: the w2 delta 3m0 exceeds
+                // i128.)
+                #[test]
+                fn redundant_representations_in_window() {
+                    let t = <P as CmParams>::T;
+                    let m = <P as CmParams>::M;
+                    let a_max = (A_BOUND - 1) as i128;
+                    let b_max = (B_BOUND - 1) as i128;
+                    let three_m0 = 3 * (<P as CmParams>::M0 as u128);
+                    let w2_lo = (three_m0 - (A_BOUND - 1)) as i128;
+                    for j in 0..4i128 {
+                        // x and y = x + w2 = (x.0 − 3m0, x.1 + t).
+                        let x = (w2_lo + j, j);
+                        let y = (j - a_max, j + t);
+                        assert!(in_bounds(x) && in_bounds(y));
+                        assert!(bool::from(ct_eq::<P>(x, y)));
+                        assert_eq!(decode::<P>(x), decode::<P>(y));
+                        // x1 and y1 = x1 + w1 = (x1.0 + t, x1.1 + m).
+                        let x1 = (j, b_max - m - j);
+                        let y1 = (x1.0 + t, x1.1 + m);
+                        assert!(in_bounds(x1) && in_bounds(y1));
+                        assert!(bool::from(ct_eq::<P>(x1, y1)));
+                        assert_eq!(decode::<P>(x1), decode::<P>(y1));
+                    }
+                }
+
+                // T24: zero semantics across representations.
+                #[test]
+                fn zero_semantics() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    assert_eq!(encode::<P>([0; 4]), (0, 0));
+                    assert_eq!(decode::<P>((0, 0)), [0u64; 4]);
+                    for _ in 0..100 {
+                        let x = random_pair(&mut rng);
+                        assert!(bool::from(ct_eq::<P>(sub::<P>(x, x), (0, 0))));
+                        let is_zero = bool::from(ct_eq::<P>(x, (0, 0)));
+                        assert_eq!(is_zero, decode::<P>(x) == [0u64; 4]);
+                    }
+                }
+
+                // T25: the wide Solinas reduction on fixed and random
+                // vectors.
+                #[test]
+                fn solinas_wide_reduction_vectors() {
+                    use rand::Rng;
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    let check = |limbs: [u64; 8]| {
+                        let mut bytes = [0u8; 64];
+                        for (i, l) in limbs.iter().enumerate() {
+                            bytes[i * 8..(i + 1) * 8].copy_from_slice(&l.to_le_bytes());
+                        }
+                        assert_eq!(
+                            solinas_from_wide::<P>(&limbs),
+                            limbs_of(F::from_uniform_bytes(&bytes))
+                        );
+                    };
+                    let r = <P as CmParams>::MODULUS_LIMBS;
+                    check([0; 8]);
+                    check([r[0], r[1], r[2], r[3], 0, 0, 0, 0]);
+                    let (d0, c) = adc(r[0], r[0], 0);
+                    let (d1, c) = adc(r[1], r[1], c);
+                    let (d2, c) = adc(r[2], r[2], c);
+                    let (d3, c) = adc(r[3], r[3], c);
+                    check([d0, d1, d2, d3, c, 0, 0, 0]); // 2r
+                    check([u64::MAX; 8]);
+                    for _ in 0..1000 {
+                        let mut limbs = [0u64; 8];
+                        for l in limbs.iter_mut() {
+                            *l = rng.next_u64();
+                        }
+                        check(limbs);
+                    }
+                }
+
+                // T26: the Babai constants satisfy their defining rounding
+                // inequality |2^512·coeff − G·r| ≤ (r−1)/2.
+                #[test]
+                fn babai_constants_definition() {
+                    let r = <P as CmParams>::MODULUS_LIMBS;
+                    let cases = [
+                        (abs_i128(<P as CmParams>::T), <P as CmParams>::G_T),
+                        (<P as CmParams>::M as u128, <P as CmParams>::G_M),
+                    ];
+                    // (r − 1)/2, little-endian limbs.
+                    let (h0, b) = sbb(r[0], 1, 0);
+                    let (h1, b) = sbb(r[1], 0, b);
+                    let (h2, b) = sbb(r[2], 0, b);
+                    let (h3, _) = sbb(r[3], 0, b);
+                    let half = [
+                        (h0 >> 1) | (h1 << 63),
+                        (h1 >> 1) | (h2 << 63),
+                        (h2 >> 1) | (h3 << 63),
+                        h3 >> 1,
+                    ];
+                    for (coeff, g) in cases {
+                        let mut gr = [0u64; 11];
+                        limb::schoolbook_mul(&g, &r, &mut gr);
+                        let mut lhs = [0u64; 11];
+                        lhs[8] = coeff as u64;
+                        lhs[9] = (coeff >> 64) as u64;
+                        // diff = |lhs − gr| over 11 limbs.
+                        let ge = (0..11)
+                            .rev()
+                            .find_map(|i| (lhs[i] != gr[i]).then(|| lhs[i] > gr[i]));
+                        let (big, small) = if ge.unwrap_or(true) {
+                            (lhs, gr)
+                        } else {
+                            (gr, lhs)
+                        };
+                        let mut diff = [0u64; 11];
+                        let mut borrow = 0;
+                        for i in 0..11 {
+                            let (d, bb) = sbb(big[i], small[i], borrow);
+                            diff[i] = d;
+                            borrow = bb;
+                        }
+                        assert_eq!(borrow, 0);
+                        assert!(diff[4..].iter().all(|&l| l == 0));
+                        // diff[0..4] ≤ (r−1)/2, most-significant first.
+                        let le = (0..4)
+                            .rev()
+                            .find_map(|i| (diff[i] != half[i]).then(|| diff[i] < half[i]));
+                        assert!(le.unwrap_or(true), "rounding residue too large");
+                    }
+                }
             }
         };
     }
@@ -1561,7 +2211,7 @@ mod tests {
     #[test]
     fn reduce_intermediates_match_oracle() {
         use crate::fields::Fp;
-        use ff::{Field, FromUniformBytes, PrimeField};
+        use ff::{FromUniformBytes, PrimeField};
         type P = FpParams;
 
         fn f_of_i128(v: i128) -> Fp {
