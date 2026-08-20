@@ -10,13 +10,15 @@ and this project adheres to Rust's notion of
 
 - Prepared the `1.0.0-rc.2` release.
 - Updated the curve traits to `ff 0.14`, `group 0.14`, and `rand_core 0.10`.
-- Added explicit `Fp::invert_vartime` and `Fq::invert_vartime` APIs backed by a
-  Montgomery-native 62-divstep safegcd port of libsecp256k1's `modinv64`, exploiting
-  both Pasta moduli's sparse `[m0, m1, 2, 0, 64]` radix-2^62 shape. The existing
-  data-oblivious `Field::invert` implementation remains unchanged; callers must opt
-  into the variable-time API where timing leakage is acceptable. The new kernel was
+- `Fp`/`Fq` field inversion is now a variable-time 62-divstep safegcd (a
+  Montgomery-native port of libsecp256k1's `modinv64`, exploiting both Pasta moduli's
+  sparse `[m0, m1, 2, 0, 64]` radix-2^62 shape), replacing the Fermat exponentiation:
   measured 7.2x faster (4.83 µs → 0.67 µs, I/M ≈ 572 → ≈ 77 on Apple aarch64 with the
-  assembly backend).
+  assembly backend). **`Field::invert` is no longer constant-time in its input**: every
+  inversion-bearing path (`to_affine`, `batch_normalize`, `ff` batch inversions, the
+  GLV ladder, downstream Orchard/halo2 users) inherits variable-time inversion. This
+  fork's inversion call sites operate on values whose timing is acceptable to leak;
+  the previous data-oblivious behavior remains expressible via `pow_vartime(m - 2)`.
 - Forked from upstream `pasta_curves` and renamed to `zakura-pasta-curves`; this changelog starts
   fresh for the Zakura fork's initial release.
 - Restarted the version lineage at 1.0.0, leaving behind the inherited upstream

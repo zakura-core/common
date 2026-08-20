@@ -16,7 +16,6 @@ fn criterion_benchmark(c: &mut Criterion) {
     group.bench_function("mul_assign", bench_fp_mul_assign);
     group.bench_function("square", bench_fp_square);
     group.bench_function("invert", bench_fp_invert);
-    group.bench_function("invert_vartime", bench_fp_invert_vartime);
     group.bench_function("neg", bench_fp_neg);
     group.bench_function("sqrt", bench_fp_sqrt);
     group.bench_function("to_repr", bench_fp_to_repr);
@@ -134,31 +133,14 @@ fn bench_fp_invert(b: &mut Bencher) {
 
     let v: Vec<Fp> = (0..SAMPLES).map(|_| Fp::random(&mut rng)).collect();
 
+    // The unit-test instrumentation is compiled out of bench builds; sanity-
+    // check the production codegen of the divstep inversion once per run.
+    assert_eq!(v[0] * v[0].invert().unwrap(), Fp::ONE);
+
     let mut count = 0;
     b.iter(|| {
         count = (count + 1) % SAMPLES;
         v[count].invert()
-    });
-}
-
-fn bench_fp_invert_vartime(b: &mut Bencher) {
-    const SAMPLES: usize = 1000;
-
-    let mut rng = XorShiftRng::from_seed([
-        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
-        0xe5,
-    ]);
-
-    let v: Vec<Fp> = (0..SAMPLES).map(|_| Fp::random(&mut rng)).collect();
-
-    // The unit-test instrumentation is compiled out of bench builds; sanity-
-    // check the production codegen of the divstep inversion once per run.
-    assert_eq!(v[0] * v[0].invert_vartime().unwrap(), Fp::ONE);
-
-    let mut count = 0;
-    b.iter(|| {
-        count = (count + 1) % SAMPLES;
-        v[count].invert_vartime()
     });
 }
 

@@ -274,16 +274,6 @@ impl Fp {
         R
     }
 
-    /// Computes the multiplicative inverse of this element using the
-    /// variable-time 62-divstep safegcd implementation.
-    ///
-    /// This method is variable time with respect to `self` and must only be
-    /// used when timing leakage is acceptable. Returns `None` if `self` is zero.
-    #[must_use]
-    pub fn invert_vartime(&self) -> Option<Self> {
-        super::modinv62::invert::<super::modinv62::FpParams>(&self.0).map(Fp)
-    }
-
     /// Doubles this field element.
     #[inline]
     pub const fn double(&self) -> Fp {
@@ -662,15 +652,18 @@ impl ff::Field for Fp {
 
     /// Computes the multiplicative inverse of this element,
     /// failing if the element is zero.
+    ///
+    /// This runs a **variable-time** 62-divstep safegcd inversion (the
+    /// crate-internal `modinv62` module): its timing depends on the value
+    /// being inverted, which every inversion call site in this fork
+    /// tolerates. The result and the `is_some` flag are identical to the
+    /// previous (data-oblivious) Fermat implementation, which remains
+    /// expressible as `self.pow_vartime(&[p - 2])`.
     fn invert(&self) -> CtOption<Self> {
-        let tmp = self.pow_vartime([
-            0x992d30ecffffffff,
-            0x224698fc094cf91b,
-            0x0,
-            0x4000000000000000,
-        ]);
-
-        CtOption::new(tmp, !self.ct_eq(&Self::zero()))
+        match super::modinv62::invert::<super::modinv62::FpParams>(&self.0) {
+            Some(limbs) => CtOption::new(Fp(limbs), Choice::from(1)),
+            None => CtOption::new(Self::zero(), Choice::from(0)),
+        }
     }
 
     fn pow_vartime<S: AsRef<[u64]>>(&self, exp: S) -> Self {
