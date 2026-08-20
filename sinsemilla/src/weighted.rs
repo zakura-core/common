@@ -326,7 +326,6 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     /// construction as the two-lane batched inversions elsewhere in the
     /// workspace).
     fn evaluate_batch_affine(&self, messages: &[[u16; N]]) -> Vec<pallas::Base> {
-        use group::ff::Field;
         use group::Curve as _;
 
         let n = messages.len();
