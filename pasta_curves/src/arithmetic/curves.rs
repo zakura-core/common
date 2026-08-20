@@ -108,6 +108,28 @@ pub trait CurveExt:
             *output = *point * scalar;
         }
     }
+
+    /// Attempts an optimized variable-time multiscalar multiplication.
+    ///
+    /// Implementations own the backend and tuning decisions. Implementations
+    /// without a specialized backend return `None`.
+    ///
+    /// # Security
+    ///
+    /// This method may run in variable time with respect to `scalars`. **Every
+    /// scalar must be public.** Do not use this method with secret scalar
+    /// material.
+    ///
+    /// # Panics
+    ///
+    /// Implementations may panic if `scalars` and `bases` have different
+    /// lengths.
+    fn try_multiexp_vartime(
+        _scalars: &[Self::ScalarExt],
+        _bases: &[Self::AffineExt],
+    ) -> Option<Self> {
+        None
+    }
 }
 
 /// This trait is the affine counterpart to `Curve` and is used for

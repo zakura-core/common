@@ -28,6 +28,11 @@ and this project adheres to Rust's notion of
   in one pass.
 - The multi-opening verifier now batch-inverts its Lagrange and vanishing
   denominators together, and rejects challenge collisions without panicking.
+- Large single-worker Pasta multiscalar multiplications now use GLV scalar
+  decomposition with signed-Booth buckets.
+- The Pasta GLV Signed-Booth backend uses 10-bit windows for large
+  single-worker multiscalar multiplications when its operation model favors
+  them over 9-bit windows.
 - Batch verification now folds each proof's random batching scalar into its
   inner-product coefficient expansion.
 - Common evaluation-domain rotations now bypass general exponentiation.

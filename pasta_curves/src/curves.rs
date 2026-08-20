@@ -73,9 +73,23 @@ macro_rules! impl_batch_mul_same_scalar_vartime {
     (native, $name:ident) => {};
 }
 
+#[cfg(feature = "alloc")]
+macro_rules! impl_multiexp_vartime {
+    (glv, $name:ident) => {
+        #[cfg(feature = "glv")]
+        fn try_multiexp_vartime(
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+        ) -> Option<Self> {
+            crate::glv::try_multiexp::<$name>(scalars, bases)
+        }
+    };
+    (native, $name:ident) => {};
+}
+
 macro_rules! new_curve_impl {
     (($($privacy:tt)*), $name:ident, $name_affine:ident, $iso:ident, $base:ident, $scalar:ident,
-     $curve_id:literal, $a_raw:expr, $b_raw:expr, $curve_type:ident, $same_scalar_mul:ident) => {
+     $curve_id:literal, $a_raw:expr, $b_raw:expr, $curve_type:ident, $glv_backend:ident) => {
         /// Represents a point in the projective coordinate space.
         #[derive(Copy, Clone, Debug)]
         #[cfg_attr(feature = "repr-c", repr(C))]
@@ -104,7 +118,7 @@ macro_rules! new_curve_impl {
             y: $base,
         }
 
-        impl_raw_coordinates!($same_scalar_mul, $name_affine, $base);
+        impl_raw_coordinates!($glv_backend, $name_affine, $base);
 
         impl fmt::Debug for $name_affine {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -236,7 +250,8 @@ macro_rules! new_curve_impl {
                     | self.z.is_zero()
             }
 
-            impl_batch_mul_same_scalar_vartime!($same_scalar_mul, $name);
+            impl_batch_mul_same_scalar_vartime!($glv_backend, $name);
+            impl_multiexp_vartime!($glv_backend, $name);
         }
 
         impl group::Curve for $name {

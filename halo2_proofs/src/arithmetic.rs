@@ -248,8 +248,12 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     assert_eq!(coeffs.len(), bases.len());
 
-    // Convert to canonical representations once instead of once per window.
-    let coeffs = coeffs.iter().map(PrimeField::to_repr).collect::<Vec<_>>();
+    let num_threads = multicore::current_num_threads();
+    if num_threads == 1 {
+        if let Some(result) = C::Curve::try_multiexp_vartime(coeffs, bases) {
+            return result;
+        }
+    }
 
     let c = if bases.len() < 4 {
         1
@@ -259,9 +263,11 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
         (f64::from(bases.len() as u32)).ln().ceil() as usize
     };
 
+    // Convert to canonical representations once instead of once per window.
+    let coeffs = coeffs.iter().map(PrimeField::to_repr).collect::<Vec<_>>();
+
     let mut multi_buckets: Vec<BoothBuckets<C>> =
         vec![BoothBuckets::new(c); booth_window_count(&coeffs, c)];
-    let num_threads = multicore::current_num_threads();
     if should_parallelize_multiexp(coeffs.len(), num_threads) {
         multi_buckets
             .par_iter_mut()
@@ -774,6 +780,13 @@ fn test_multiexp() {
         let coeffs = (0..len).map(|_| Fp::random(&mut rng)).collect::<Vec<_>>();
         let bases = (0..len)
             .map(|_| EqAffine::from(Eq::random(&mut rng)))
+            .collect::<Vec<_>>();
+
+        assert_multiexp_matches_naive(&coeffs, &bases);
+
+        let coeffs = (0..len).map(|_| Fq::random(&mut rng)).collect::<Vec<_>>();
+        let bases = (0..len)
+            .map(|_| EpAffine::from(Ep::random(&mut rng)))
             .collect::<Vec<_>>();
 
         assert_multiexp_matches_naive(&coeffs, &bases);
