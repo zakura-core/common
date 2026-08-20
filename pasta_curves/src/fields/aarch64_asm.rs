@@ -20,9 +20,26 @@
 //! and Fq, so a single implementation serves both fields.
 //!
 //! Canonicity contract (same as the assembly): `rhs` in `mul` and the input
-//! of `square` must be canonical (below the modulus); `lhs` in `mul` may be
-//! any 256-bit value. Outputs are canonical. There are no branches and no
-//! memory accesses inside the blocks, so the code is constant-time.
+//! of `square` must be canonical (below the modulus). `lhs` in `mul` may be
+//! an unreduced 256-bit value **only if every `rhs` limb is at most
+//! `2^64 - 4`**; with both operands canonical the routines are always safe.
+//! Outputs are canonical.
+//!
+//! The `lhs` caveat exists because `mul` keeps a five-limb accumulator (one
+//! word fewer than textbook CIOS). The only carry chain that can wrap is the
+//! one folding in the high cross-products: its tail computes
+//! `acc4 + high(lhs[3] * rhs_limb) + carry` with `acc4 <= 2`, which reaches
+//! `2^64` only when `high(lhs[3] * rhs_limb) >= 2^64 - 3`, i.e. when
+//! `lhs[3]` and some `rhs` limb are both within 3 of `2^64`. A canonical
+//! `lhs` has `lhs[3] <= 2^62`, and any `rhs` limb `<= 2^64 - 4` caps the
+//! high product at `2^64 - 5`, so either condition alone rules the wrap out.
+//! The one unreduced-`lhs` caller is `from_u512`, whose `rhs` operands are
+//! the `R2`/`R3` constants; their limbs sit far below the bound (see the
+//! `aarch64_asm_mul_unreduced_lhs_matches_portable` tests in `fp.rs` and
+//! `fq.rs`, which pin this case against the portable implementation).
+//!
+//! There are no branches and no memory accesses inside the blocks, so the
+//! code is constant-time.
 
 use core::arch::asm;
 
@@ -46,7 +63,8 @@ extern "C" {
 }
 
 /// Multiplies two Montgomery residues for a Pasta modulus. `rhs` must be
-/// canonical; `lhs` may be any 256-bit value (see the module docs).
+/// canonical. `lhs` may be unreduced only if every `rhs` limb is at most
+/// `2^64 - 4`; see the module docs for the carry-chain bound behind this.
 #[inline(always)]
 pub(super) fn mul(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
     let (o0, o1, o2, o3): (u64, u64, u64, u64);
