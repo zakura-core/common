@@ -222,10 +222,31 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
 
         for i in 0..N {
             let exponent = N - i - 1;
-            for (point, words) in points.iter_mut().zip(messages) {
-                let generator_index = usize::from(words[i]);
-                assert!(generator_index < GENERATOR_COUNT, "invalid Sinsemilla word");
-                *point += self.weighted_generator(exponent, generator_index);
+            let mut point_pairs = points.chunks_exact_mut(2);
+            let mut message_pairs = messages.chunks_exact(2);
+
+            for (point_pair, message_pair) in point_pairs.by_ref().zip(&mut message_pairs) {
+                let generator_0 = usize::from(message_pair[0][i]);
+                let generator_1 = usize::from(message_pair[1][i]);
+                assert!(generator_0 < GENERATOR_COUNT, "invalid Sinsemilla word");
+                assert!(generator_1 < GENERATOR_COUNT, "invalid Sinsemilla word");
+
+                let sum = pallas::add_mixed_pair(
+                    &point_pair[0],
+                    &self.weighted_generator(exponent, generator_0),
+                    &point_pair[1],
+                    &self.weighted_generator(exponent, generator_1),
+                );
+                point_pair.copy_from_slice(&sum);
+            }
+
+            if let (Some(point), Some(words)) = (
+                point_pairs.into_remainder().first_mut(),
+                message_pairs.remainder().first(),
+            ) {
+                let generator = usize::from(words[i]);
+                assert!(generator < GENERATOR_COUNT, "invalid Sinsemilla word");
+                *point += self.weighted_generator(exponent, generator);
             }
         }
 
