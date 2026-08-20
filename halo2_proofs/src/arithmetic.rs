@@ -463,8 +463,14 @@ where
 /// so one shared threshold serves both.
 pub(crate) const BATCH_INVERT_TWO_LANE_MIN: usize = 32;
 
-/// In-place batch inversion with `ff::BatchInverter`-compatible zero
-/// handling: zero elements are skipped (left as zero) in constant time.
+/// In-place batch inversion. Zero elements are skipped (left as zero), with
+/// the same outputs as `ff::BatchInverter` but **variable-time** zero
+/// detection: zeros at these call sites are cosmically improbable
+/// (challenge-blinded denominators), the skip branch is never taken in
+/// practice and predicted perfectly, and this fork's `Field::invert` is
+/// already variable-time in its input (see the pasta_curves changelog), so
+/// constant-time skipping would spend selects protecting a channel the
+/// shared inversion already leaks.
 ///
 /// The classic Montgomery walk runs one serial multiplication chain forward
 /// (prefix products) and one backward (substitution), so both passes run at
@@ -480,22 +486,22 @@ pub(crate) fn batch_invert_multi<F: Field>(values: &mut [F]) {
     // slot per element.
     let mut scratch = vec![F::ZERO; values.len()];
 
-    let nonzero = |value: &F| F::conditional_select(value, &F::ONE, value.is_zero());
-
     if values.len() < BATCH_INVERT_TWO_LANE_MIN {
         let mut acc = F::ONE;
         for (value, slot) in values.iter().zip(scratch.iter_mut()) {
             *slot = acc;
-            acc *= nonzero(value);
+            if !value.is_zero_vartime() {
+                acc *= value;
+            }
         }
-        // Skipped elements contribute ONE, so this cannot fail.
+        // Skipped elements never enter the product, so this cannot fail.
         let mut acc = acc.invert().unwrap();
         for (value, slot) in values.iter_mut().zip(scratch.iter()).rev() {
-            let is_zero = value.is_zero();
-            let term = nonzero(value);
-            let inverted = acc * slot;
-            acc *= term;
-            *value = F::conditional_select(&inverted, &F::ZERO, is_zero);
+            if !value.is_zero_vartime() {
+                let inverted = acc * slot;
+                acc *= *value;
+                *value = inverted;
+            }
         }
         return;
     }
@@ -507,16 +513,22 @@ pub(crate) fn batch_invert_multi<F: Field>(values: &mut [F]) {
     let mut acc1 = F::ONE;
     for (pair, slots) in values.chunks_exact(2).zip(scratch.chunks_exact_mut(2)) {
         slots[0] = acc0;
-        acc0 *= nonzero(&pair[0]);
+        if !pair[0].is_zero_vartime() {
+            acc0 *= pair[0];
+        }
         slots[1] = acc1;
-        acc1 *= nonzero(&pair[1]);
+        if !pair[1].is_zero_vartime() {
+            acc1 *= pair[1];
+        }
     }
     if let (Some(value), Some(slot)) = (
         values.chunks_exact(2).remainder().first(),
         scratch.chunks_exact_mut(2).into_remainder().first_mut(),
     ) {
         *slot = acc0;
-        acc0 *= nonzero(value);
+        if !value.is_zero_vartime() {
+            acc0 *= value;
+        }
     }
 
     // Join the lane products around one shared inversion, then recover each
@@ -533,28 +545,27 @@ pub(crate) fn batch_invert_multi<F: Field>(values: &mut [F]) {
         values.chunks_exact_mut(2).into_remainder().first_mut(),
         scratch.chunks_exact(2).remainder().first(),
     ) {
-        let is_zero = value.is_zero();
-        let term = nonzero(value);
-        let inverted = acc0 * slot;
-        acc0 *= term;
-        *value = F::conditional_select(&inverted, &F::ZERO, is_zero);
+        if !value.is_zero_vartime() {
+            let inverted = acc0 * slot;
+            acc0 *= *value;
+            *value = inverted;
+        }
     }
-
     for (pair, slots) in values
         .chunks_exact_mut(2)
         .zip(scratch.chunks_exact(2))
         .rev()
     {
-        let is_zero0 = pair[0].is_zero();
-        let is_zero1 = pair[1].is_zero();
-        let term0 = nonzero(&pair[0]);
-        let term1 = nonzero(&pair[1]);
-        let inverted0 = acc0 * slots[0];
-        let inverted1 = acc1 * slots[1];
-        acc0 *= term0;
-        acc1 *= term1;
-        pair[0] = F::conditional_select(&inverted0, &F::ZERO, is_zero0);
-        pair[1] = F::conditional_select(&inverted1, &F::ZERO, is_zero1);
+        if !pair[0].is_zero_vartime() {
+            let inverted = acc0 * slots[0];
+            acc0 *= pair[0];
+            pair[0] = inverted;
+        }
+        if !pair[1].is_zero_vartime() {
+            let inverted = acc1 * slots[1];
+            acc1 *= pair[1];
+            pair[1] = inverted;
+        }
     }
 }
 
@@ -665,7 +676,7 @@ fn test_batch_inverse_and_scale() {
     let product_inverse = values.iter_mut().batch_inverse_and_scale(scale);
     let expected_product = original
         .iter()
-        .filter(|value| !bool::from(value.is_zero()))
+        .filter(|value| !value.is_zero_vartime())
         .product::<Fp>()
         .invert()
         .unwrap();
