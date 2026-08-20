@@ -1265,3 +1265,75 @@ fn test_from_u512() {
         ])
     );
 }
+
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    target_vendor = "apple"
+))]
+#[test]
+fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
+    use rand::{Rng, SeedableRng};
+
+    // `from_u512` feeds raw (unreduced) 256-bit digits as the lhs of the
+    // inline `mul`, with `R2`/`R3` as the rhs. The five-limb accumulator
+    // tolerates an unreduced lhs only while every rhs limb is at most
+    // `2^64 - 4` (see the contract in `aarch64_asm.rs`); assert the
+    // constants keep that invariant, then pin the behaviour against the
+    // portable implementation on the most adversarial inputs known.
+    for by in [R2, R3] {
+        for limb in by.0 {
+            assert!(limb <= u64::MAX - 3);
+        }
+    }
+
+    // lhs values with the low limbs solved so the first two Montgomery
+    // quotients hit (or approach) their maximum `2^64 - 1` while the top
+    // limbs are all-ones: jointly the nearest known approach to the
+    // carry-chain wrap described in `aarch64_asm.rs`.
+    let forced_q_r2 = Fp([0x3cc9961eeeeeeeef, 0x907f42c685cc8a31, u64::MAX, u64::MAX]);
+    let forced_q_r3 = Fp([0x032c286da5f9b149, 0x3f747fab2d936552, u64::MAX, u64::MAX]);
+
+    let check = |lhs: Fp, by: Fp| {
+        // Inherent `Fp::mul` is the portable implementation; its classical
+        // 8-limb reduction is valid for any lhs when `by` is canonical.
+        assert_eq!(lhs.mul_runtime(&by), Fp::mul(&lhs, &by), "lhs {:x?}", lhs.0);
+    };
+
+    check(Fp([u64::MAX; 4]), R2);
+    check(Fp([u64::MAX; 4]), R3);
+    check(forced_q_r2, R2);
+    check(forced_q_r3, R3);
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x9d; 16]);
+    for i in 0..20_000u32 {
+        let mut l = [0u64; 4];
+        for w in l.iter_mut() {
+            *w = rng.next_u64();
+        }
+        if i % 2 == 0 {
+            l[3] = u64::MAX;
+            l[2] = u64::MAX;
+        }
+        check(Fp(l), R2);
+        check(Fp(l), R3);
+    }
+
+    // End-to-end `from_u512` against a portable recomposition.
+    let portable_from_u512 = |l: [u64; 8]| {
+        let d0 = Fp([l[0], l[1], l[2], l[3]]);
+        let d1 = Fp([l[4], l[5], l[6], l[7]]);
+        Fp::mul(&d0, &R2).add(&Fp::mul(&d1, &R3))
+    };
+    assert_eq!(Fp::from_u512([u64::MAX; 8]), portable_from_u512([u64::MAX; 8]));
+    for _ in 0..10_000u32 {
+        let mut l = [0u64; 8];
+        for w in l.iter_mut() {
+            *w = rng.next_u64();
+        }
+        l[3] |= 0xc000000000000000;
+        l[7] |= 0xc000000000000000;
+        assert_eq!(Fp::from_u512(l), portable_from_u512(l), "limbs {:x?}", l);
+    }
+}
