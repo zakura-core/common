@@ -226,28 +226,78 @@ macro_rules! new_curve_impl {
             fn batch_normalize(p: &[Self], q: &mut [Self::Affine]) {
                 assert_eq!(p.len(), q.len());
 
-                let mut acc = $base::one();
-                for (p, q) in p.iter().zip(q.iter_mut()) {
-                    // We use the `x` field of $name_affine to store the product
-                    // of previous z-coordinates seen.
-                    q.x = acc;
+                // Below this length, the two-lane variant's fixed overhead
+                // (three extra multiplications) and lane bookkeeping outweigh
+                // the dependency-chain split; measured crossover on both
+                // x86-64 (Zen 4, portable) and Apple aarch64 (assembly
+                // backend) is ~32 elements.
+                const TWO_LANE_MIN: usize = 32;
 
-                    // We will end up skipping all identities in p
-                    acc = $base::conditional_select(&(acc * p.z), &acc, p.is_identity());
+                if p.len() < TWO_LANE_MIN {
+                    let mut acc = $base::one();
+                    for (p, q) in p.iter().zip(q.iter_mut()) {
+                        // We use the `x` field of $name_affine to store the
+                        // product of previous z-coordinates seen.
+                        q.x = acc;
+
+                        // We will end up skipping all identities in p
+                        acc = $base::conditional_select(&(acc * p.z), &acc, p.is_identity());
+                    }
+
+                    // This is the inverse, as all z-coordinates are nonzero and
+                    // the ones that are not are skipped.
+                    acc = acc.invert().unwrap();
+
+                    for (p, q) in p.iter().rev().zip(q.iter_mut().rev()) {
+                        let skip = p.is_identity();
+
+                        // Compute tmp = 1/z
+                        let tmp = q.x * acc;
+
+                        // Cancel out z-coordinate in denominator of `acc`
+                        acc = $base::conditional_select(&(acc * p.z), &acc, skip);
+
+                        // Set the coordinates to the correct value
+                        let tmp2 = Field::square(&tmp);
+                        let tmp3 = tmp2 * tmp;
+
+                        q.x = p.x * tmp2;
+                        q.y = p.y * tmp3;
+
+                        *q = $name_affine::conditional_select(&q, &$name_affine::identity(), skip);
+                    }
+                    return;
                 }
 
-                // This is the inverse, as all z-coordinates are nonzero and the ones
-                // that are not are skipped.
-                acc = acc.invert().unwrap();
+                // Two-lane Montgomery batch inversion: even- and odd-indexed
+                // elements run independent prefix-product and back-substitution
+                // chains (throughput-bound instead of latency-bound), joined
+                // around a single shared field inversion. Identity handling is
+                // unchanged from the single-chain path above.
+                let mut acc = [$base::one(); 2];
+                for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate() {
+                    q.x = acc[i & 1];
+                    acc[i & 1] = $base::conditional_select(
+                        &(acc[i & 1] * p.z),
+                        &acc[i & 1],
+                        p.is_identity(),
+                    );
+                }
 
-                for (p, q) in p.iter().rev().zip(q.iter_mut().rev()) {
+                // Join the lane products, invert once, and recover each
+                // lane's inverse seed.
+                let inverse = (acc[0] * acc[1]).invert().unwrap();
+                let mut acc = [inverse * acc[1], inverse * acc[0]];
+
+                for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate().rev() {
+                    let lane = i & 1;
                     let skip = p.is_identity();
 
                     // Compute tmp = 1/z
-                    let tmp = q.x * acc;
+                    let tmp = q.x * acc[lane];
 
-                    // Cancel out z-coordinate in denominator of `acc`
-                    acc = $base::conditional_select(&(acc * p.z), &acc, skip);
+                    // Cancel out z-coordinate in denominator of the lane seed
+                    acc[lane] = $base::conditional_select(&(acc[lane] * p.z), &acc[lane], skip);
 
                     // Set the coordinates to the correct value
                     let tmp2 = Field::square(&tmp);
@@ -1234,4 +1284,43 @@ impl Eq {
         0x53c3808d9e2f2357,
         0x2b3483a1ee9a382f,
     ]);
+}
+
+#[cfg(test)]
+mod batch_normalize_two_lane_tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use group::{Curve, Group};
+
+    use super::*;
+
+    #[test]
+    fn matches_to_affine_with_identities() {
+        // Cover the single-chain path (< 32), the crossover, and the
+        // two-lane path, with identities sprinkled at even and odd indices.
+        let mut rng_state = 0x9e3779b97f4a7c15u64;
+        let mut next = move || {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            rng_state
+        };
+        for n in [0usize, 1, 2, 31, 32, 33, 64, 257, 512] {
+            let points: Vec<Ep> = (0..n)
+                .map(|i| {
+                    if i % 7 == 3 || i % 7 == 4 {
+                        Ep::identity()
+                    } else {
+                        Ep::generator() * Fq::from(next() | 1)
+                    }
+                })
+                .collect();
+            let mut affine = vec![EpAffine::identity(); n];
+            Ep::batch_normalize(&points, &mut affine);
+            for (i, (p, a)) in points.iter().zip(&affine).enumerate() {
+                assert_eq!(p.to_affine(), *a, "n = {}, index {}", n, i);
+            }
+        }
+    }
 }

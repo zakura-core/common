@@ -116,9 +116,7 @@ impl Argument {
             }
 
             // Invert to obtain the denominator for the permutation product polynomial
-            crate::arithmetic::batch_invert_multi(
-                &mut modified_values,
-            );
+            crate::arithmetic::batch_invert_multi(&mut modified_values);
 
             // Iterate over each column again, this time finishing the computation
             // of the entire fraction by computing the numerators

@@ -904,7 +904,9 @@ mod batch_invert_lanes_tests {
     fn matches_ff_batch_invert_with_zeros() {
         let mut state = 0x4c4c_4c4c_u64;
         let mut next = move || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             state
         };
         for n in [0usize, 1, 2, 3, 7, 64, 257, 1000] {
