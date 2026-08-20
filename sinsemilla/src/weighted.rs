@@ -65,7 +65,7 @@ use core::mem;
 use group::{Curve, CurveAffine as _, Group};
 use pasta_curves::{arithmetic::CurveAffine as _, pallas};
 
-use super::{lebs2ip_k, HashDomain, Pad, C, K, SINSEMILLA_S_AFFINE};
+use super::{HashDomain, MessageWords, C, K, SINSEMILLA_S_AFFINE};
 
 const GENERATOR_COUNT: usize = 1 << K;
 
@@ -156,13 +156,10 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     ///
     /// Panics if the zero-padded message is not exactly `N` words long.
     pub fn hash_to_point(&self, msg: impl Iterator<Item = bool>) -> pallas::Point {
-        let padded: Vec<_> = Pad::new(msg).collect();
-        assert_eq!(padded.len(), N * K, "unexpected padded message length");
-
-        self.evaluate(padded.chunks_exact(K).map(|chunk| {
-            u16::try_from(lebs2ip_k(chunk.try_into().expect("correct length")))
-                .expect("a Sinsemilla word fits into u16")
-        }))
+        self.evaluate(
+            MessageWords::new(msg)
+                .map(|word| u16::try_from(word).expect("a Sinsemilla word fits into u16")),
+        )
     }
 
     /// Evaluates the Sinsemilla hash of a bit iterator whose padded
@@ -184,16 +181,18 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         self.weighted_generators.len() * mem::size_of::<pallas::Affine>()
     }
 
-    fn evaluate(&self, words: impl ExactSizeIterator<Item = u16>) -> pallas::Point {
-        assert_eq!(words.len(), N, "unexpected Sinsemilla word count");
-
-        words.enumerate().fold(self.initial, |point, (i, word)| {
+    fn evaluate(&self, words: impl Iterator<Item = u16>) -> pallas::Point {
+        let mut words = words;
+        let point = (0..N).fold(self.initial, |point, i| {
+            let word = words.next().expect("unexpected Sinsemilla word count");
             let generator_index = usize::from(word);
             assert!(generator_index < GENERATOR_COUNT, "invalid Sinsemilla word");
 
             let exponent = N - i - 1;
             point + self.weighted_generator(exponent, generator_index)
-        })
+        });
+        assert!(words.next().is_none(), "unexpected Sinsemilla word count");
+        point
     }
 
     fn weighted_generator(&self, exponent: usize, generator: usize) -> pallas::Affine {
@@ -291,6 +290,22 @@ mod tests {
             assert!(bool::from(expected.is_some()));
             assert_eq!(expected.unwrap(), weighted.hash(bits.iter().copied()));
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected Sinsemilla word count")]
+    fn rejects_too_few_message_words() {
+        let domain = HashDomain::new(MERKLE_DOMAIN);
+        let weighted = UncheckedFixedLengthHashDomain::<2>::new(&domain);
+        weighted.hash_to_point(core::iter::repeat_n(false, K));
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected Sinsemilla word count")]
+    fn rejects_too_many_message_words() {
+        let domain = HashDomain::new(MERKLE_DOMAIN);
+        let weighted = UncheckedFixedLengthHashDomain::<2>::new(&domain);
+        weighted.hash_to_point(core::iter::repeat_n(false, 3 * K));
     }
 
     #[test]
