@@ -249,10 +249,8 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
     assert_eq!(coeffs.len(), bases.len());
 
     let num_threads = multicore::current_num_threads();
-    if num_threads == 1 {
-        if let Some(result) = C::Curve::try_multiexp_vartime(coeffs, bases) {
-            return result;
-        }
+    if let Some(result) = C::Curve::try_multiexp_vartime(coeffs, bases) {
+        return result;
     }
 
     let c = if bases.len() < 4 {

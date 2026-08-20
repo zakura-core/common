@@ -37,6 +37,8 @@ and this project adheres to Rust's notion of
 - The Pasta GLV Signed-Booth backend uses 10-bit windows for large
   single-worker multiscalar multiplications when its operation model favors
   them over 9-bit windows.
+- Large multicore Pasta multiscalar multiplications now evaluate GLV
+  signed-Booth windows in parallel when the backend cost model selects GLV.
 - Batch verification now folds each proof's random batching scalar into its
   inner-product coefficient expansion.
 - Common evaluation-domain rotations now bypass general exponentiation.

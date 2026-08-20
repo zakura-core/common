@@ -61,6 +61,11 @@ gpu = [
     "alloc",
     "ec-gpu",
 ]
+multicore = [
+    "glv",
+    "dep:maybe-rayon",
+    "maybe-rayon/threads",
+]
 repr-c = []
 serde = [
     "hex",
@@ -134,6 +139,11 @@ default-features = false
 version = "1.4.0"
 features = ["spin_no_std"]
 optional = true
+
+[dependencies.maybe-rayon]
+version = "0.1.0"
+optional = true
+default-features = false
 
 [dependencies.rand]
 version = "0.10"
