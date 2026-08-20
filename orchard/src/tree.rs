@@ -14,6 +14,9 @@ use crate::{
     spec::extract_p_bottom_batch,
 };
 
+#[cfg(feature = "weighted-merkle")]
+use crate::spec::extract_p;
+
 use incrementalmerkletree::{Hashable, Level};
 use pasta_curves::pallas;
 #[cfg(feature = "weighted-merkle")]
@@ -41,6 +44,21 @@ const MERKLE_CRH_BITS: usize = K + MERKLE_CRH_CHILDREN * L_ORCHARD_MERKLE;
 const MERKLE_CRH_WORDS: usize = MERKLE_CRH_BITS / K;
 #[cfg(feature = "weighted-merkle")]
 const _: () = assert!(MERKLE_CRH_BITS.is_multiple_of(K));
+/// Complete Sinsemilla words in one 255-bit child encoding.
+#[cfg(feature = "weighted-merkle")]
+const MERKLE_CRH_FULL_CHILD_WORDS: usize = L_ORCHARD_MERKLE / K;
+/// Bits left after decoding a child's complete Sinsemilla words.
+#[cfg(feature = "weighted-merkle")]
+const MERKLE_CRH_CHILD_REMAINDER_BITS: usize = L_ORCHARD_MERKLE % K;
+/// Index of the word spanning the left and right child encodings.
+#[cfg(feature = "weighted-merkle")]
+const MERKLE_CRH_CROSS_CHILD_WORD: usize = 1 + MERKLE_CRH_FULL_CHILD_WORDS;
+#[cfg(feature = "weighted-merkle")]
+const SINSEMILLA_WORD_MASK: u16 = (1 << K) - 1;
+#[cfg(feature = "weighted-merkle")]
+const CHILD_REMAINDER_MASK: u8 = (1 << MERKLE_CRH_CHILD_REMAINDER_BITS) - 1;
+#[cfg(feature = "weighted-merkle")]
+const BYTE_BITS: usize = u8::BITS as usize;
 
 #[cfg(feature = "weighted-merkle")]
 lazy_static! {
@@ -54,25 +72,36 @@ lazy_static! {
 }
 
 #[cfg(feature = "weighted-merkle")]
-fn merkle_crh(message: impl Iterator<Item = bool>) -> pallas::Base {
-    MERKLE_CRH_DOMAIN.hash(message)
+fn merkle_crh(level: Level, left: &MerkleHashOrchard, right: &MerkleHashOrchard) -> pallas::Base {
+    extract_p(&MERKLE_CRH_DOMAIN.hash_words(&merkle_crh_words(level, left, right)))
 }
 
 #[cfg(not(feature = "weighted-merkle"))]
-fn merkle_crh(message: impl Iterator<Item = bool>) -> pallas::Base {
+fn merkle_crh(level: Level, left: &MerkleHashOrchard, right: &MerkleHashOrchard) -> pallas::Base {
     MERKLE_CRH_DOMAIN
-        .hash(message)
+        .hash(merkle_crh_message(level, left, right))
         .unwrap_or(pallas::Base::zero())
 }
 
 #[cfg(feature = "weighted-merkle")]
-fn merkle_crh_to_point(message: impl Iterator<Item = bool>) -> CtOption<pallas::Point> {
-    CtOption::new(MERKLE_CRH_DOMAIN.hash_to_point(message), 1.into())
+fn merkle_crh_to_point(
+    level: Level,
+    left: &MerkleHashOrchard,
+    right: &MerkleHashOrchard,
+) -> CtOption<pallas::Point> {
+    CtOption::new(
+        MERKLE_CRH_DOMAIN.hash_words(&merkle_crh_words(level, left, right)),
+        1.into(),
+    )
 }
 
 #[cfg(not(feature = "weighted-merkle"))]
-fn merkle_crh_to_point(message: impl Iterator<Item = bool>) -> CtOption<pallas::Point> {
-    MERKLE_CRH_DOMAIN.hash_to_point(message)
+fn merkle_crh_to_point(
+    level: Level,
+    left: &MerkleHashOrchard,
+    right: &MerkleHashOrchard,
+) -> CtOption<pallas::Point> {
+    MERKLE_CRH_DOMAIN.hash_to_point(merkle_crh_message(level, left, right))
 }
 
 lazy_static! {
@@ -273,11 +302,56 @@ impl MerkleHashOrchard {
         extract_p_bottom_batch(
             pairs
                 .into_iter()
-                .map(|(left, right)| merkle_crh_to_point(merkle_crh_message(level, left, right))),
+                .map(|(left, right)| merkle_crh_to_point(level, left, right)),
         )
         .map(|hash| MerkleHashOrchard(hash.unwrap_or(pallas::Base::zero())))
         .collect()
     }
+}
+
+#[cfg(feature = "weighted-merkle")]
+fn merkle_crh_words(
+    level: Level,
+    left: &MerkleHashOrchard,
+    right: &MerkleHashOrchard,
+) -> [u16; MERKLE_CRH_WORDS] {
+    fn word_at(bytes: &[u8; 32], bit_offset: usize) -> u16 {
+        let byte_offset = bit_offset / BYTE_BITS;
+        let shift = bit_offset % BYTE_BITS;
+        let window =
+            u16::from(bytes[byte_offset]) | (u16::from(bytes[byte_offset + 1]) << BYTE_BITS);
+        let word = window >> shift;
+
+        if shift + K > u16::BITS as usize {
+            (word | (u16::from(bytes[byte_offset + 2]) << (u16::BITS as usize - shift)))
+                & SINSEMILLA_WORD_MASK
+        } else {
+            word & SINSEMILLA_WORD_MASK
+        }
+    }
+
+    let left = left.0.to_repr();
+    let right = right.0.to_repr();
+    let mut words = [0; MERKLE_CRH_WORDS];
+
+    words[0] = u16::try_from(usize::from(level)).expect("an Orchard tree level fits into u16");
+    for (index, word) in words[1..MERKLE_CRH_CROSS_CHILD_WORD].iter_mut().enumerate() {
+        *word = word_at(&left, index * K);
+    }
+    let left_tail_offset = MERKLE_CRH_FULL_CHILD_WORDS * K;
+    words[MERKLE_CRH_CROSS_CHILD_WORD] = u16::from(
+        (left[left_tail_offset / BYTE_BITS] >> (left_tail_offset % BYTE_BITS))
+            & CHILD_REMAINDER_MASK,
+    ) | (u16::from(right[0] & CHILD_REMAINDER_MASK)
+        << MERKLE_CRH_CHILD_REMAINDER_BITS);
+    for (index, word) in words[MERKLE_CRH_CROSS_CHILD_WORD + 1..]
+        .iter_mut()
+        .enumerate()
+    {
+        *word = word_at(&right, MERKLE_CRH_CHILD_REMAINDER_BITS + index * K);
+    }
+
+    words
 }
 
 fn merkle_crh_message(
@@ -313,7 +387,7 @@ impl Hashable for MerkleHashOrchard {
     ///        layer = 31, l = 0
     ///      - when hashing to the final root, we produce the anchor with layer = 0, l = 31.
     fn combine(level: Level, left: &Self, right: &Self) -> Self {
-        MerkleHashOrchard(merkle_crh(merkle_crh_message(level, left, right)))
+        MerkleHashOrchard(merkle_crh(level, left, right))
     }
 
     fn empty_root(level: Level) -> Self {
@@ -376,6 +450,9 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "weighted-merkle")]
+    use crate::{constants::sinsemilla::K, tree::merkle_crh_words};
+
     use {
         crate::{
             constants::{sinsemilla::MERKLE_CRH_PERSONALIZATION, MERKLE_DEPTH_ORCHARD},
@@ -473,6 +550,23 @@ mod tests {
     }
 
     proptest! {
+        #[cfg(feature = "weighted-merkle")]
+        #[test]
+        fn weighted_words_match_merkle_message(
+            level in 0_u8..u8::try_from(MERKLE_DEPTH_ORCHARD).unwrap(),
+            left in arb_merkle_hash(),
+            right in arb_merkle_hash(),
+        ) {
+            let level = Level::from(level);
+            let expected: Vec<_> = merkle_crh_message(level, &left, &right).collect();
+            let actual: Vec<_> = merkle_crh_words(level, &left, &right)
+                .into_iter()
+                .flat_map(|word| (0..K).map(move |bit| ((word >> bit) & 1) == 1))
+                .collect();
+
+            prop_assert_eq!(actual, expected);
+        }
+
         #[test]
         fn production_merkle_combine_matches_generic(
             level in 0_u8..u8::try_from(MERKLE_DEPTH_ORCHARD).unwrap(),
