@@ -139,5 +139,26 @@ fn benchmark_weighted(c: &mut Criterion) {
     );
 }
 
-criterion_group!(benches, benchmark_weighted);
+fn benchmark_batch_widths(c: &mut Criterion) {
+    let mut state = FIXTURE_SEED ^ 0xba7c_4a11;
+    let domain = HashDomain::new(MERKLE_DOMAIN);
+    let weighted = UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
+
+    let mut group = c.benchmark_group("sinsemilla-batch-width");
+    for width in [4usize, 8, 16, 32, 64, 128, 256, 512] {
+        let messages: Vec<[u16; MERKLE_WORDS]> =
+            (0..width).map(|_| message_words(&mut state)).collect();
+        group.throughput(Throughput::Elements(width as u64));
+        group.bench_with_input(
+            BenchmarkId::new("hash_words_batch", width),
+            &width,
+            |b, _| {
+                b.iter(|| black_box(weighted.hash_words_batch(black_box(&messages))));
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, benchmark_weighted, benchmark_batch_widths);
 criterion_main!(benches);
