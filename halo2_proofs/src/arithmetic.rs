@@ -463,14 +463,24 @@ where
 /// so one shared threshold serves both.
 pub(crate) const BATCH_INVERT_TWO_LANE_MIN: usize = 32;
 
-/// In-place batch inversion. Zero elements are skipped (left as zero), with
-/// the same outputs as `ff::BatchInverter` but **variable-time** zero
-/// detection: zeros at these call sites are cosmically improbable
-/// (challenge-blinded denominators), the skip branch is never taken in
-/// practice and predicted perfectly, and this fork's `Field::invert` is
+/// In-place batch inversion. Zero elements are skipped (left as zero) —
+/// the same outputs as `ff::BatchInverter` — with **variable-time** zero
+/// detection. Correctness never assumes zeros are absent: a zero element
+/// stays zero and never enters the shared product. The vartime posture is
+/// justified because both call sites invert challenge-blinded products
+/// (zeros are negligibly likely, so the skip branch is never taken in
+/// practice and predicts perfectly), and this fork's `Field::invert` is
 /// already variable-time in its input (see the pasta_curves changelog), so
 /// constant-time skipping would spend selects protecting a channel the
 /// shared inversion already leaks.
+///
+/// Twin implementations — keep them in step when changing any:
+/// `batch_invert_nonzero` in `pasta_curves/src/glv.rs` is the same
+/// even/odd two-lane walk without zero handling (the GLV ladder proves its
+/// denominators nonzero) and with caller-owned scratch reused across
+/// calls; `Curve::batch_normalize` in `pasta_curves/src/curves.rs` fuses
+/// the same walk with the Jacobian-to-affine conversion (its output array
+/// doubles as the prefix store, so it needs no scratch).
 ///
 /// The classic Montgomery walk runs one serial multiplication chain forward
 /// (prefix products) and one backward (substitution), so both passes run at
