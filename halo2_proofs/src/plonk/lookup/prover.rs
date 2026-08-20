@@ -15,7 +15,7 @@ use crate::{
 };
 use ff::WithSmallOrderMulGroup;
 use group::{
-    ff::{BatchInvert, Field},
+    ff::Field,
     Curve,
 };
 use rand_core::Rng;
@@ -291,7 +291,9 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
 
         // Batch invert to obtain the denominators for the lookup product
         // polynomials
-        lookup_product.iter_mut().batch_invert();
+        crate::arithmetic::batch_invert_multi(
+            &mut lookup_product,
+        );
 
         // Finish the computation of the entire fraction by computing the numerators
         // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)

@@ -1,5 +1,5 @@
 use group::{
-    ff::{BatchInvert, Field, PrimeField},
+    ff::{Field, PrimeField},
     Curve,
 };
 use rand_core::Rng;
@@ -116,7 +116,9 @@ impl Argument {
             }
 
             // Invert to obtain the denominator for the permutation product polynomial
-            modified_values.batch_invert();
+            crate::arithmetic::batch_invert_multi(
+                &mut modified_values,
+            );
 
             // Iterate over each column again, this time finishing the computation
             // of the entire fraction by computing the numerators
