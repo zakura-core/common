@@ -130,6 +130,37 @@ impl<F> Product<F> {
     }
 }
 
+/// A wide accumulator for unreduced CM ring products over field `F`: a pair
+/// of 320-bit two's-complement sums of the raw (V0, V1) product
+/// coefficients. Each product contributes below 1.37·2^254 per coefficient,
+/// so up to 2^63 accumulated products stay a factor ~2.9 below the i320
+/// limit (the analogue of `Product`'s 2^64-products carry argument). One
+/// generalized reduction at [`DeferredField::reduce`] finalizes the sum.
+#[cfg(feature = "cm-field")]
+#[derive(Clone, Copy, Debug)]
+pub struct CmProduct<F> {
+    pub(crate) v0: [u64; 5],
+    pub(crate) v1: [u64; 5],
+    _marker: core::marker::PhantomData<F>,
+}
+
+#[cfg(feature = "cm-field")]
+impl<F> Default for CmProduct<F> {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+#[cfg(feature = "cm-field")]
+impl<F> CmProduct<F> {
+    /// The zero (additive identity) accumulator.
+    pub const ZERO: Self = CmProduct {
+        v0: [0; 5],
+        v1: [0; 5],
+        _marker: core::marker::PhantomData,
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::DeferredField;

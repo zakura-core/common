@@ -4,8 +4,9 @@
 pub(crate) mod cm;
 mod fp;
 mod fq;
-// Unused under `cm-field` only until the canonical-mode inversion lands
-// (the CM `Field::invert` is temporarily a Fermat scaffold).
+// Under `cm-field` the Montgomery parameter sets (and the Montgomery-coupled
+// test macro) are compiled but unused outside tests; inversion itself runs
+// through the canonical parameter sets in both representations.
 #[cfg_attr(feature = "cm-field", allow(dead_code, unused_macros))]
 mod modinv62;
 

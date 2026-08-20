@@ -87,6 +87,9 @@ pub(crate) trait CmParams {
     /// The CM encoding of the field element 1, i.e. a reduced representative
     /// of $\beta = 2^{131}$.
     const ONE: (i128, i128);
+    /// A reduced ring representative of $2^{259} = 2^{128}\beta \pmod g$:
+    /// the deferred finalize's scale correction (see [`reduce_wide`]).
+    const TWO_POW_259: (i128, i128);
     /// The canonical modulus $r$, four little-endian `u64` limbs.
     const MODULUS_LIMBS: [u64; 4];
     /// $c = r - 2^{254}$ (126 bits), for the Solinas folds in conversion.
@@ -121,6 +124,10 @@ impl CmParams for FpParams {
     const ONE: (i128, i128) = (
         0x34ad6ea72e37d4302950d37effffffe5,
         -0x02852dd18be78bd3fffffff7,
+    );
+    const TWO_POW_259: (i128, i128) = (
+        0x0bb014cca041d87218bb33fcffffffef,
+        0x01666ec9bf80a303fffffffb,
     );
     const MODULUS_LIMBS: [u64; 4] = [
         0x992d30ed00000001,
@@ -181,6 +188,10 @@ impl CmParams for FqParams {
     const ONE: (i128, i128) = (
         0x34ad6ea726a84abb859a3002ffffffe5,
         0x02852dd18be78bd400000009,
+    );
+    const TWO_POW_259: (i128, i128) = (
+        0x0bb014cc9b7f2c90f405d688ffffffef,
+        -0x01666ec9bf80a30400000005,
     );
     const MODULUS_LIMBS: [u64; 4] = [
         0x8c46eb2100000001,
@@ -282,6 +293,10 @@ const fn check_params<P: CmParams>() {
 
     // ONE must satisfy the storage invariant.
     assert!(in_bounds(P::ONE), "ONE must satisfy the storage invariant");
+    assert!(
+        in_bounds(P::TWO_POW_259),
+        "TWO_POW_259 must satisfy the storage invariant"
+    );
 }
 
 const _: () = {
@@ -658,7 +673,7 @@ const fn karatsuba_combine(u: W256, v: W256, w: W256) -> (W256, W256) {
 /// `w = (a+b)(c+d)` (the sums via [`Sm129`]: they can exceed `i128`);
 /// `V0 = u − 3v`, `V1 = w − u + 2v`. Nine full 64×64 word products.
 #[inline(always)]
-const fn ring_mul_wide(a: i128, b: i128, c: i128, d: i128) -> (W256, W256) {
+pub(crate) const fn ring_mul_wide(a: i128, b: i128, c: i128, d: i128) -> (W256, W256) {
     let u = smul_i128(a, c);
     let v = smul_i128(b, d);
     let w = smul_sm_pair(sm129_from_sum(a, b), sm129_from_sum(c, d));
@@ -668,7 +683,7 @@ const fn ring_mul_wide(a: i128, b: i128, c: i128, d: i128) -> (W256, W256) {
 /// Raw ring square: `V0 = a² − 3b²`, `V1 = 2ab + 3b²` (two squares and one
 /// signed product).
 #[inline(always)]
-const fn ring_square_wide(a: i128, b: i128) -> (W256, W256) {
+pub(crate) const fn ring_square_wide(a: i128, b: i128) -> (W256, W256) {
     let sa = (a >> 127) as u128;
     let sb = (b >> 127) as u128;
     let za = square_u128_wide(((a as u128) ^ sa).wrapping_add(sa & 1));
@@ -976,6 +991,112 @@ pub(crate) const fn unpack(w: &[u64; 4]) -> (i128, i128) {
         ((w[0] as u128) | ((w[1] as u128) << 64)) as i128,
         ((w[2] as u128) | ((w[3] as u128) << 64)) as i128,
     )
+}
+
+
+// ---------------------------------------------------------------------------
+// Deferred accumulation (the wide inner-product accumulator).
+//
+// Raw ring products carry scale β² (each operand carries β). The 320-bit
+// two's-complement sums below hold ΣV with |V0| < 1.37·2^254 per product, so
+// the documented maximum of 2^63 accumulated products stays a factor ~2.9
+// below the i320 limit. The finalize divides by 2^128 (one extra pass-1
+// fold), by β (the standard reduction), and multiplies by
+// 2^259 = 2^128·β (mod g) via the ordinary product (itself a ÷β) — a net
+// division by exactly β, yielding the stored pair of Σxᵢyᵢ.
+// ---------------------------------------------------------------------------
+
+/// Adds a signed 256-bit value into a 320-bit two's-complement sum.
+#[inline(always)]
+fn add_i320(acc: &mut [u64; 5], p: W256) {
+    let limbs = [
+        p.lo as u64,
+        (p.lo >> 64) as u64,
+        p.hi as u64,
+        (p.hi >> 64) as u64,
+        (((p.hi as i128) >> 127) as u128) as u64,
+    ];
+    let mut carry = 0;
+    let mut i = 0;
+    while i < 5 {
+        let (v, c) = adc(acc[i], limbs[i], carry);
+        acc[i] = v;
+        carry = c;
+        i += 1;
+    }
+}
+
+/// Accumulates the raw ring product `x·y` into the 320-bit sums.
+#[cfg_attr(not(feature = "uninline-portable"), inline)]
+pub(crate) fn mul_accumulate(
+    v0: &mut [u64; 5],
+    v1: &mut [u64; 5],
+    x: (i128, i128),
+    y: (i128, i128),
+) {
+    verify!(in_bounds(x) && in_bounds(y), "accumulate operand out of bounds");
+    let (p0, p1) = ring_mul_wide(x.0, x.1, y.0, y.1);
+    add_i320(v0, p0);
+    add_i320(v1, p1);
+}
+
+/// Accumulates the raw ring square `x²` into the 320-bit sums.
+#[cfg_attr(not(feature = "uninline-portable"), inline)]
+pub(crate) fn square_accumulate(v0: &mut [u64; 5], v1: &mut [u64; 5], x: (i128, i128)) {
+    verify!(in_bounds(x), "accumulate operand out of bounds");
+    let (p0, p1) = ring_square_wide(x.0, x.1);
+    add_i320(v0, p0);
+    add_i320(v1, p1);
+}
+
+/// `(acc + q)/2^128` for a 320-bit sum and the (extended) `q·g` term; the
+/// low 128 bits must cancel exactly. The quotient (< ~2^191) is returned as
+/// a signed 256-bit value.
+#[inline(always)]
+fn i320_add_shift(acc: [u64; 5], q: W320) -> W256 {
+    let q_limbs = [
+        q.lo as u64,
+        (q.lo >> 64) as u64,
+        q.hi as u64,
+        (q.hi >> 64) as u64,
+        q.ext as u64,
+    ];
+    let mut sum = [0u64; 5];
+    let mut carry = 0;
+    let mut i = 0;
+    while i < 5 {
+        let (v, c) = adc(acc[i], q_limbs[i], carry);
+        sum[i] = v;
+        carry = c;
+        i += 1;
+    }
+    verify!(sum[0] == 0 && sum[1] == 0, "deferred fold must be exact");
+    W256 {
+        lo: (sum[2] as u128) | ((sum[3] as u128) << 64),
+        hi: ((sum[4] as i64) as i128) as u128,
+    }
+}
+
+/// Reduces a pair of 320-bit deferred sums to the stored pair representing
+/// the accumulated inner product: one extra pass-1 fold (÷2^128, bringing
+/// |W| below ~2^191, far inside the standard reducer's caps), the standard
+/// reduction (÷β), then ×TWO_POW_259 (≡ 2^259 mod g; the multiplication
+/// divides by β again) for a net ÷β.
+pub(crate) fn reduce_wide<P: CmParams>(v0: [u64; 5], v1: [u64; 5]) -> (i128, i128) {
+    let lo0 = (v0[0] as u128) | ((v0[1] as u128) << 64);
+    let lo1 = (v1[0] as u128) | ((v1[1] as u128) << 64);
+    let (n0, n1) = ring_mul_low(lo0, lo1, P::I0, P::I1);
+    let q0 = n0.wrapping_neg() as i128;
+    let q1 = n1.wrapping_neg() as i128;
+    let u = smul_i128(q0, P::T);
+    let v = smul_i128(q1, P::M);
+    let w = smul_sm_m0::<P>(sm129_from_sum(q0, q1));
+    let qg0 = w256_sub(u, w256_mul3(v));
+    let qg1 = w320_add(w320_sub(w320_from(w), w320_from(u)), w320_shl1(w320_from(v)));
+    let w0 = i320_add_shift(v0, w320_from(qg0));
+    let w1 = i320_add_shift(v1, qg1);
+    let z = reduce::<P>(w0, w1);
+    mul::<P>(z, P::TWO_POW_259)
 }
 
 // ---------------------------------------------------------------------------
@@ -2200,6 +2321,56 @@ mod tests {
                             .find_map(|i| (diff[i] != half[i]).then(|| diff[i] < half[i]));
                         assert!(le.unwrap_or(true), "rounding residue too large");
                     }
+                }
+
+                // Deferred accumulation: mixed random inner products and
+                // 100 maximal-magnitude products against the oracle.
+                #[test]
+                fn deferred_accumulate_matches_oracle() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    for len in [0usize, 1, 2, 3, 100] {
+                        let mut v0 = [0u64; 5];
+                        let mut v1 = [0u64; 5];
+                        let mut expect = F::ZERO;
+                        for i in 0..len {
+                            let x = random_pair(&mut rng);
+                            let y = random_pair(&mut rng);
+                            if i % 3 == 0 {
+                                square_accumulate(&mut v0, &mut v1, x);
+                                expect += oracle_val(x).square();
+                            } else {
+                                mul_accumulate(&mut v0, &mut v1, x, y);
+                                expect += oracle_val(x) * oracle_val(y);
+                            }
+                        }
+                        let z = reduce_wide::<P>(v0, v1);
+                        assert!(in_bounds(z));
+                        assert_eq!(oracle_val(z), expect, "len={len}");
+                    }
+
+                    let a_max = (A_BOUND - 1) as i128;
+                    let b_max = (B_BOUND - 1) as i128;
+                    let x = (a_max, -b_max);
+                    let y = (-a_max, b_max);
+                    let mut v0 = [0u64; 5];
+                    let mut v1 = [0u64; 5];
+                    let mut expect = F::ZERO;
+                    for _ in 0..100 {
+                        mul_accumulate(&mut v0, &mut v1, x, y);
+                        expect += oracle_val(x) * oracle_val(y);
+                    }
+                    let z = reduce_wide::<P>(v0, v1);
+                    assert_eq!(oracle_val(z), expect);
+                }
+
+                // The finalize scale constant represents exactly 2^259.
+                #[test]
+                fn two_pow_259_constant() {
+                    let two_128 = F::from_u128(1u128 << 127) * F::from(2u64);
+                    let expected = two_128 * two_128 * F::from(8u64);
+                    let c = <P as CmParams>::TWO_POW_259;
+                    assert!(in_bounds(c));
+                    assert_eq!(f_of_i128(c.0) + f_of_i128(c.1) * sigma_f(), expected);
                 }
             }
         };

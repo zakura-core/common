@@ -140,6 +140,12 @@ def derive(field_name, r, Fr, zeta):
     assert Fr(one_a) + Fr(one_b) * Fr(sigma) == Fr(BETA)
     assert abs(one_a) < A_BOUND and abs(one_b) < B_BOUND
 
+    # The deferred-finalize scale correction: a reduced representative of
+    # 2^259 = 2^128 * beta (mod g).
+    tp259_a, tp259_b = babai(2 ^ 259 % r)
+    assert Fr(tp259_a) + Fr(tp259_b) * Fr(sigma) == Fr(2 ^ 259)
+    assert abs(tp259_a) < A_BOUND and abs(tp259_b) < B_BOUND
+
     # Conversion constants.
     beta_inv = int(Fr(BETA) ^ -1)
     sigma_beta_inv = int(Fr(sigma) * Fr(BETA) ^ -1)
@@ -168,6 +174,7 @@ def derive(field_name, r, Fr, zeta):
         "i0": i0,
         "i1": i1,
         "one": (one_a, one_b),
+        "two_pow_259": (tp259_a, tp259_b),
         "modulus": r,
         "solinas_c": solinas_c,
         "beta_inv": beta_inv,
@@ -197,6 +204,10 @@ def print_impl(struct, d):
     print("    const ONE: (i128, i128) = (")
     print("        %s," % rust_i128(d["one"][0]))
     print("        %s," % rust_i128(d["one"][1]))
+    print("    );")
+    print("    const TWO_POW_259: (i128, i128) = (")
+    print("        %s," % rust_i128(d["two_pow_259"][0]))
+    print("        %s," % rust_i128(d["two_pow_259"][1]))
     print("    );")
     for name, value, count in [
         ("MODULUS_LIMBS", d["modulus"], 4),

@@ -20,6 +20,8 @@ use super::cm;
 use crate::deferred::DeferredField;
 #[cfg(all(feature = "deferred", not(feature = "cm-field")))]
 use crate::deferred::Product;
+#[cfg(all(feature = "deferred", feature = "cm-field"))]
+use crate::deferred::CmProduct;
 
 /// The per-field CM parameter set (see `fields/cm.rs`).
 #[cfg(feature = "cm-field")]
@@ -708,26 +710,31 @@ impl DeferredField for Fq {
     }
 }
 
-// Phase A under the CM representation: eager per-product reduction. This
-// keeps every DeferredField consumer compiling and correct; the wide CM
-// accumulator (deferred Phase B) replaces it in a follow-up.
+// Under the CM representation the accumulator holds 320-bit sums of the
+// raw ring products; one generalized reduction finalizes the whole inner
+// product (see `cm::reduce_wide`).
 #[cfg(all(feature = "deferred", feature = "cm-field"))]
 impl DeferredField for Fq {
-    type Accumulator = Fq;
+    type Accumulator = CmProduct<Fq>;
 
-    #[inline]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
     fn mul_accumulate(acc: &mut Self::Accumulator, a: &Fq, b: &Fq) {
-        *acc += *a * *b;
+        cm::mul_accumulate(
+            &mut acc.v0,
+            &mut acc.v1,
+            cm::unpack(&a.0),
+            cm::unpack(&b.0),
+        );
     }
 
-    #[inline]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
     fn square_accumulate(acc: &mut Self::Accumulator, a: &Fq) {
-        *acc += a.square_runtime();
+        cm::square_accumulate(&mut acc.v0, &mut acc.v1, cm::unpack(&a.0));
     }
 
-    #[inline]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
     fn reduce(acc: Self::Accumulator) -> Fq {
-        acc
+        Fq(cm::pack(cm::reduce_wide::<CmP>(acc.v0, acc.v1)))
     }
 }
 
@@ -814,20 +821,18 @@ impl ff::Field for Fq {
             }
         }
 
-        // TODO(M4): route through `modinv62` in canonical mode (seed 1).
-        // Fermat scaffold so the representation swap is testable
-        // end-to-end; correct but several times slower than divstep.
+        // CM pairs decode to canonical limbs, invert through the same
+        // variable-time divstep kernel in canonical mode (seed 1), and
+        // re-encode.
         #[cfg(feature = "cm-field")]
         {
-            /// The Fermat exponent q - 2, little-endian limbs.
-            const EXP: [u64; 4] = [
-                0x8c46eb20ffffffff,
-                0x224698fc0994a8dd,
-                0x0000000000000000,
-                0x4000000000000000,
-            ];
-            let inv = self.pow_vartime(EXP);
-            CtOption::new(inv, !self.ct_eq(&Self::zero()))
+            let canonical = cm::decode::<CmP>(cm::unpack(&self.0));
+            match super::modinv62::invert::<super::modinv62::FqCanonicalParams>(&canonical) {
+                Some(limbs) => {
+                    CtOption::new(Fq(cm::pack(cm::encode::<CmP>(limbs))), Choice::from(1))
+                }
+                None => CtOption::new(Self::zero(), Choice::from(0)),
+            }
         }
     }
 

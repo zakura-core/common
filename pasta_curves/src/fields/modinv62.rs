@@ -8,10 +8,13 @@
 //! This is a near-verbatim port of libsecp256k1's signed-62 variable-time
 //! modular inversion, specialized to the Pasta base fields:
 //!
-//! - The coefficient `e` is seeded with $R^2 \bmod m$ (rather than $1$), so a
-//!   Montgomery-form input $X = aR$ yields the Montgomery-form inverse
-//!   $a^{-1}R$ directly: no conversion into or out of Montgomery form, and no
-//!   Montgomery reduction anywhere.
+//! - The coefficient `e` is seeded per parameter set (`InvParams::SEED`).
+//!   The Montgomery sets seed $R^2 \bmod m$, so a Montgomery-form input
+//!   $X = aR$ yields the Montgomery-form inverse $a^{-1}R$ directly: no
+//!   conversion into or out of Montgomery form, and no Montgomery
+//!   reduction anywhere. The canonical sets seed $1$, mapping canonical
+//!   limbs to the canonical inverse (used by the `cm-field`
+//!   representation, which converts through canonical form).
 //! - Both moduli are $[m_0, m_1, 2, 0, 64]$ in signed radix $2^{62}$, so the
 //!   `k*m` corrections in the coefficient updates need only two general
 //!   multiplications (limbs 0 and 1); limb 2 is `k << 1`, limb 3 vanishes,
@@ -22,9 +25,12 @@
 //!   batch (where `d = 0`) skips every product against `d`.
 //!
 //! The scaled invariants maintained across batches are
-//! $X d \equiv R^2 f \pmod m$ and $X e \equiv R^2 g \pmod m$; at termination
-//! $g = 0$ and $f = \sigma \in \{-1, 1\}$, so $\sigma d \equiv R^2 X^{-1}
-//! \equiv a^{-1} R \pmod m$.
+//! $X d \equiv S f \pmod m$ and $X e \equiv S g \pmod m$ for the seed $S$;
+//! at termination $g = 0$ and $f = \sigma \in \{-1, 1\}$, so $\sigma d
+//! \equiv S X^{-1} \pmod m$ (with $S = R^2$ this is the Montgomery-form
+//! inverse $a^{-1} R$ of $X = aR$; with $S = 1$, the canonical inverse).
+//! The divstep trajectory itself (and hence every batch count) depends
+//! only on `f, g`, never on the seed.
 //!
 //! Every inner-loop invariant inherited from upstream (`VERIFY_CHECK`) is kept
 //! live in unit tests — including `--release` test runs — via the `verify!`
@@ -62,8 +68,11 @@ pub(crate) trait InvParams {
     /// $m^{-1} \bmod 2^{62}$ (note: *not* the Montgomery `INV`, which is
     /// $-m^{-1} \bmod 2^{64}$).
     const MU: u64;
-    /// $R^2 = 2^{512} \bmod m$, radix $2^{62}$: the initial value of `e`.
-    const R2: [i64; 5];
+    /// The initial value of the coefficient `e`, radix $2^{62}$; the
+    /// algorithm returns `SEED * X^{-1} mod m`. Must satisfy
+    /// `0 <= SEED < m`. Montgomery sets use $R^2 = 2^{512} \bmod m$;
+    /// canonical sets use $1$.
+    const SEED: [i64; 5];
 }
 
 /// [`InvParams`] for the Pallas base field (`Fp`).
@@ -72,7 +81,7 @@ pub(crate) struct FpParams;
 impl InvParams for FpParams {
     const MODULUS: [i64; 5] = [0x192d_30ed_0000_0001, 0x091a_63f0_2533_e46e, 2, 0, 0x40];
     const MU: u64 = 0x26d2_cf13_0000_0001;
-    const R2: [i64; 5] = [
+    const SEED: [i64; 5] = [
         0x0c78_ecb3_0000_000f,
         0x1f4c_36f6_2c37_839e,
         0x397a_99bc_3c95_d18d,
@@ -87,7 +96,7 @@ pub(crate) struct FqParams;
 impl InvParams for FqParams {
     const MODULUS: [i64; 5] = [0x0c46_eb21_0000_0001, 0x091a_63f0_2652_a376, 2, 0, 0x40];
     const MU: u64 = 0x33b9_14df_0000_0001;
-    const R2: [i64; 5] = [
+    const SEED: [i64; 5] = [
         0x3c96_78ff_0000_000f,
         0x1eed_0cf6_2468_5b8f,
         0x3ae2_3100_4ccf_5906,
@@ -96,13 +105,41 @@ impl InvParams for FqParams {
     ];
 }
 
+/// Canonical-mode [`InvParams`] for the Pallas base field: same modulus
+/// and kernels, seed 1, so canonical limbs map to the canonical inverse.
+pub(crate) struct FpCanonicalParams;
+
+impl InvParams for FpCanonicalParams {
+    const MODULUS: [i64; 5] = FpParams::MODULUS;
+    const MU: u64 = FpParams::MU;
+    const SEED: [i64; 5] = [1, 0, 0, 0, 0];
+}
+
+/// Canonical-mode [`InvParams`] for the Vesta base field.
+pub(crate) struct FqCanonicalParams;
+
+impl InvParams for FqCanonicalParams {
+    const MODULUS: [i64; 5] = FqParams::MODULUS;
+    const MU: u64 = FqParams::MU;
+    const SEED: [i64; 5] = [1, 0, 0, 0, 0];
+}
+
 /// The kernels bake in the sparse modulus shape; pin it (and the low-limb
-/// inverse relation) at compile time for both parameter sets.
+/// inverse relation) at compile time for every parameter set.
 const _: () = {
     assert!(FpParams::MODULUS[2] == 2 && FpParams::MODULUS[3] == 0 && FpParams::MODULUS[4] == 64);
     assert!(FqParams::MODULUS[2] == 2 && FqParams::MODULUS[3] == 0 && FqParams::MODULUS[4] == 64);
     assert!(FpParams::MU.wrapping_mul(FpParams::MODULUS[0] as u64) & MASK62 == 1);
     assert!(FqParams::MU.wrapping_mul(FqParams::MODULUS[0] as u64) & MASK62 == 1);
+    // The canonical sets share modulus and MU with the Montgomery sets and
+    // seed with exactly 1.
+    assert!(FpCanonicalParams::SEED[0] == 1);
+    assert!(FqCanonicalParams::SEED[0] == 1);
+    let mut i = 1;
+    while i < 5 {
+        assert!(FpCanonicalParams::SEED[i] == 0 && FqCanonicalParams::SEED[i] == 0);
+        i += 1;
+    }
 };
 
 /// A signed multi-word integer in radix $2^{62}$, least-significant limb
@@ -796,7 +833,7 @@ pub(crate) fn invert_counted<P: InvParams>(x: &[u64; 4]) -> Option<([u64; 4], u3
     let mut f = Signed62(P::MODULUS);
     let mut g = pack62(x);
     let mut d;
-    let mut e = Signed62(P::R2);
+    let mut e = Signed62(P::SEED);
     let mut eta: i64 = -1;
     let mut len: usize = 5;
 
@@ -1217,7 +1254,7 @@ mod tests {
                 /// R, so representation-level products compare exactly.
                 fn assert_trace_congruences(x_repr: &[u64; 4], run: &RefRun) {
                     let xf = $F(*x_repr);
-                    let r2f = $F(unpack62(&Signed62(<$P as InvParams>::R2)));
+                    let r2f = $F(unpack62(&Signed62(<$P as InvParams>::SEED)));
                     for rec in run.trace[..run.batches as usize].iter() {
                         assert_eq!(
                             xf * lift(&rec.d_in),
@@ -1237,7 +1274,7 @@ mod tests {
                         x,
                         &modulus62(),
                         <$P as InvParams>::MU,
-                        &<$P as InvParams>::R2,
+                        &<$P as InvParams>::SEED,
                     )
                     .expect("nonzero input")
                 }
@@ -1263,7 +1300,7 @@ mod tests {
                     // 2^256 * R = R^2 (mod m): exactly the R2 constant.
                     let r_val = <$F>::from_u128(1u128 << 64).square().square();
                     assert_eq!(
-                        unpack62(&Signed62(<$P as InvParams>::R2)),
+                        unpack62(&Signed62(<$P as InvParams>::SEED)),
                         r_val.0,
                         "R2 mismatch vs field constants"
                     );
@@ -1277,7 +1314,7 @@ mod tests {
                     );
                     assert_eq!(&m62[2..], &[2, 0, 64]);
                     // R2 is canonical and reduced.
-                    let r2 = Signed62(<$P as InvParams>::R2);
+                    let r2 = Signed62(<$P as InvParams>::SEED);
                     for l in r2.0 {
                         assert!(l >= 0 && (l as u64) <= MASK62);
                     }
@@ -1470,7 +1507,7 @@ mod tests {
                         // The real first-batch e is R2; also cover random
                         // e in [0, m).
                         let e = if i == 0 {
-                            Signed62(<$P as InvParams>::R2)
+                            Signed62(<$P as InvParams>::SEED)
                         } else {
                             pack62(&rnd_elt(&mut rng).0)
                         };
@@ -1727,7 +1764,7 @@ mod tests {
                     // inversion followed by two R2 Montgomery multiplications.
                     let m = modulus62();
                     let one_seed = [1i64, 0, 0, 0, 0];
-                    let r2f = $F(unpack62(&Signed62(<$P as InvParams>::R2)));
+                    let r2f = $F(unpack62(&Signed62(<$P as InvParams>::SEED)));
                     let mut rng = XorShiftRng::from_seed(SEED);
                     for _ in 0..1000 {
                         let x = rnd_elt(&mut rng);
@@ -1789,6 +1826,121 @@ mod tests {
             0x0000_0000_0000_0000,
             0x4000_0000_0000_0000,
         ],
+        VESTA_VECTORS
+    );
+
+    /// Canonical-mode coverage that is representation-agnostic (inputs are
+    /// canonical limbs obtained through `to_repr`, outputs checked through
+    /// `from_repr`), so it runs under both the Montgomery and `cm-field`
+    /// representations.
+    macro_rules! modinv_canonical_tests {
+        ($F:path, $mod:ident, $MontP:ty, $CanonP:ty, $vectors:expr) => {
+            mod $mod {
+                use super::*;
+                use ff::{Field, PrimeField};
+
+                fn limbs_of(x: $F) -> [u64; 4] {
+                    let bytes = <$F as PrimeField>::to_repr(&x);
+                    let mut l = [0u64; 4];
+                    for (i, limb) in l.iter_mut().enumerate() {
+                        *limb = u64::from_le_bytes(
+                            bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+                        );
+                    }
+                    l
+                }
+
+                fn field_of(l: [u64; 4]) -> $F {
+                    let mut bytes = [0u8; 32];
+                    for (i, limb) in l.iter().enumerate() {
+                        bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+                    }
+                    <$F as PrimeField>::from_repr(bytes).unwrap()
+                }
+
+                /// Canonical-mode outputs match the seed-parameterized
+                /// reference driver limb-exactly, and the batch counts equal
+                /// the Montgomery-mode run on the same limbs: the divstep
+                /// trajectory is seed-independent.
+                #[test]
+                fn canonical_matches_reference_and_counts() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    for _ in 0..2000 {
+                        let x = limbs_of(<$F as Field>::random(&mut rng));
+                        if x == [0u64; 4] {
+                            continue;
+                        }
+                        let (out, batches) = invert_counted::<$CanonP>(&x).unwrap();
+                        let reference = ref_invert(
+                            &x,
+                            &<$CanonP as InvParams>::MODULUS,
+                            <$CanonP as InvParams>::MU,
+                            &[1, 0, 0, 0, 0],
+                        )
+                        .unwrap();
+                        assert_eq!(out, reference.out);
+                        assert_eq!(batches, reference.batches);
+                        let (_, mont_batches) = invert_counted::<$MontP>(&x).unwrap();
+                        assert_eq!(batches, mont_batches, "seed changed the trajectory");
+                    }
+                }
+
+                /// Field-level round-trip through canonical limbs:
+                /// x * invert_canonical(x) == 1.
+                #[test]
+                fn canonical_field_roundtrip() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    let one = <$F as Field>::ONE;
+                    let mut check = |xf: $F| {
+                        let x = limbs_of(xf);
+                        let inv = invert::<$CanonP>(&x).unwrap();
+                        assert_eq!(field_of(inv) * xf, one);
+                    };
+                    check(one);
+                    check(-one);
+                    check(one + one);
+                    check((one + one).invert().unwrap());
+                    for _ in 0..10_000 {
+                        let xf = <$F as Field>::random(&mut rng);
+                        if bool::from(xf.is_zero()) {
+                            continue;
+                        }
+                        check(xf);
+                    }
+                }
+
+                /// The pinned adversarial vectors keep their batch counts in
+                /// canonical mode (seed-independence, pinned).
+                #[test]
+                fn canonical_vectors_batch_counts() {
+                    for &(input, batches) in $vectors {
+                        let (_, got) = invert_counted::<$CanonP>(&input).unwrap();
+                        assert_eq!(got, batches);
+                    }
+                }
+
+                #[test]
+                fn canonical_zero_is_none() {
+                    assert!(invert::<$CanonP>(&[0u64; 4]).is_none());
+                    assert!(invert_counted::<$CanonP>(&[0u64; 4]).is_none());
+                }
+            }
+        };
+    }
+
+    modinv_canonical_tests!(
+        crate::fields::Fp,
+        fp_canonical,
+        FpParams,
+        FpCanonicalParams,
+        PALLAS_VECTORS
+    );
+
+    modinv_canonical_tests!(
+        crate::fields::Fq,
+        fq_canonical,
+        FqParams,
+        FqCanonicalParams,
         VESTA_VECTORS
     );
 }
