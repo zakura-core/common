@@ -620,6 +620,30 @@ mod tests {
         }
     }
 
+    /// Pins the batched combine directly to the protocol's fixed empty-root
+    /// vectors, rather than only checking it against the scalar implementation.
+    /// The largest configured batch width also exercises the large-batch
+    /// implementation used by tree construction when the `weighted-merkle`
+    /// feature is enabled.
+    #[test]
+    fn combine_batch_matches_empty_root_vectors() {
+        let empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
+        let width = *BATCH_WIDTHS.last().expect("batch widths are nonempty");
+        for level in 0..MERKLE_DEPTH_ORCHARD {
+            let child = MerkleHashOrchard::from_bytes(&empty_roots[level]).unwrap();
+            let pairs = vec![(&child, &child); width];
+            let parents = MerkleHashOrchard::combine_batch(
+                Level::from(u8::try_from(level).unwrap()),
+                pairs.into_iter(),
+            );
+
+            assert_eq!(parents.len(), width);
+            for parent in parents {
+                assert_eq!(parent.to_bytes(), empty_roots[level + 1], "level {level}");
+            }
+        }
+    }
+
     #[test]
     fn test_vectors() {
         let tv_empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
