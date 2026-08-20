@@ -9,6 +9,8 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 - Prepared the `1.0.0-rc.2` release.
+- Added batched fixed-length weighted evaluation that processes messages
+  position-first and shares projective normalization across the batch.
 - The fixed-length weighted evaluator now reuses the streaming message-word
   conversion, removing its padded message allocation.
 - Added an unchecked fixed-length, position-weighted hash evaluator that moves

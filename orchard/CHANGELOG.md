@@ -16,6 +16,8 @@ and this project adheres to Rust's notion of
 - Updated the curve stack to `ff 0.14`, `group 0.14`, and `rand 0.10`.
 - Added `MerkleHashOrchard::combine_batch` for same-level Merkle node pairs,
   sharing projective-to-affine normalization across each batch.
+- Weighted `MerkleHashOrchard::combine_batch` now delegates complete batch
+  evaluation to `zakura-sinsemilla`, improving generator-table locality.
 - Weighted Merkle hashing now decodes its fixed 52-word input directly from
   child field encodings instead of iterating through individual bits.
 - The Sinsemilla Merkle CRH domain is now initialized once and reused for

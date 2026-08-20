@@ -11,11 +11,12 @@ use crate::{
         MERKLE_DEPTH_ORCHARD,
     },
     note::commitment::ExtractedNoteCommitment,
-    spec::extract_p_bottom_batch,
 };
 
 #[cfg(feature = "weighted-merkle")]
 use crate::spec::extract_p;
+#[cfg(not(feature = "weighted-merkle"))]
+use crate::spec::extract_p_bottom_batch;
 
 use incrementalmerkletree::{Hashable, Level};
 use pasta_curves::pallas;
@@ -299,13 +300,29 @@ impl MerkleHashOrchard {
         level: Level,
         pairs: impl IntoIterator<Item = (&'a Self, &'a Self)>,
     ) -> Vec<Self> {
-        extract_p_bottom_batch(
-            pairs
+        #[cfg(feature = "weighted-merkle")]
+        {
+            let messages: Vec<_> = pairs
                 .into_iter()
-                .map(|(left, right)| merkle_crh_to_point(level, left, right)),
-        )
-        .map(|hash| MerkleHashOrchard(hash.unwrap_or(pallas::Base::zero())))
-        .collect()
+                .map(|(left, right)| merkle_crh_words(level, left, right))
+                .collect();
+            MERKLE_CRH_DOMAIN
+                .hash_words_batch(&messages)
+                .into_iter()
+                .map(MerkleHashOrchard)
+                .collect()
+        }
+
+        #[cfg(not(feature = "weighted-merkle"))]
+        {
+            extract_p_bottom_batch(
+                pairs
+                    .into_iter()
+                    .map(|(left, right)| merkle_crh_to_point(level, left, right)),
+            )
+            .map(|hash| MerkleHashOrchard(hash.unwrap_or(pallas::Base::zero())))
+            .collect()
+        }
     }
 }
 
