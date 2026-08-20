@@ -744,6 +744,22 @@ struct BoothDigit {
     negative: bool,
 }
 
+#[derive(Clone, Copy)]
+struct WindowAssignment {
+    component: usize,
+    signed_bucket: isize,
+}
+
+impl WindowAssignment {
+    fn bucket(self) -> usize {
+        self.signed_bucket.unsigned_abs() - 1
+    }
+
+    fn negative(self) -> bool {
+        self.signed_bucket < 0
+    }
+}
+
 /// Extracts one signed-Booth digit and folds in the component's overall sign.
 fn booth_digit(component: SignedMagnitude, window_bits: usize, window: usize) -> BoothDigit {
     let window_start = window * window_bits;
@@ -820,26 +836,44 @@ fn batch_invert_denominators<F: Field>(additions: &mut [PendingAffineAddition<F>
     Some(())
 }
 
-/// Visits the nonzero signed points assigned to one Booth window.
-fn for_each_window_point<C, Visit>(
+/// Collects the nonzero signed points assigned to one Booth window.
+fn window_assignments<C>(
     components: &[(SignedMagnitude, SignedMagnitude)],
     bases: &[C::AffineExt],
-    endo_bases: &[C::AffineExt],
     window_bits: usize,
     window: usize,
-    mut visit: Visit,
-) where
+) -> (Vec<WindowAssignment>, Vec<usize>)
+where
     C: GlvParams,
-    Visit: FnMut(usize, C::AffineExt, bool),
 {
-    for (((first, second), base), endo_base) in components.iter().zip(bases).zip(endo_bases) {
-        for (component, base) in [(*first, *base), (*second, *endo_base)] {
+    let bucket_count = 1 << (window_bits - 1);
+    let mut assignments = Vec::with_capacity(bases.len().saturating_mul(2));
+    let mut counts = alloc::vec![0usize; bucket_count];
+
+    for (base_index, ((first, second), base)) in components.iter().zip(bases).enumerate() {
+        if bool::from(base.is_identity()) {
+            continue;
+        }
+        for (component_offset, component) in [*first, *second].into_iter().enumerate() {
             let digit = booth_digit(component, window_bits, window);
-            if digit.magnitude != 0 && !bool::from(base.is_identity()) {
-                visit(digit.magnitude - 1, base, digit.negative);
+            if digit.magnitude != 0 {
+                let bucket = digit.magnitude - 1;
+                let magnitude =
+                    isize::try_from(digit.magnitude).expect("Booth digit magnitude fits in isize");
+                assignments.push(WindowAssignment {
+                    component: base_index * 2 + component_offset,
+                    signed_bucket: if digit.negative {
+                        -magnitude
+                    } else {
+                        magnitude
+                    },
+                });
+                counts[bucket] += 1;
             }
         }
     }
+
+    (assignments, counts)
 }
 
 /// Reduces every affine bucket through shared Montgomery batch inversions.
@@ -955,15 +989,7 @@ fn fill_window<C: GlvParams>(
     window: usize,
 ) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
     let bucket_count = 1 << (window_bits - 1);
-    let mut counts = alloc::vec![0usize; bucket_count];
-    for_each_window_point::<C, _>(
-        components,
-        bases,
-        endo_bases,
-        window_bits,
-        window,
-        |bucket, _, _| counts[bucket] += 1,
-    );
+    let (assignments, counts) = window_assignments::<C>(components, bases, window_bits, window);
 
     let mut offsets = Vec::with_capacity(bucket_count + 1);
     offsets.push(0);
@@ -979,22 +1005,22 @@ fn fill_window<C: GlvParams>(
         };
         *offsets.last().unwrap()
     ];
-    for_each_window_point::<C, _>(
-        components,
-        bases,
-        endo_bases,
-        window_bits,
-        window,
-        |bucket, base, negative| {
-            let (x, y) = C::affine_xy(&base);
-            let position = positions[bucket];
-            points[position] = AffinePoint {
-                x,
-                y: if negative { -y } else { y },
-            };
-            positions[bucket] += 1;
-        },
-    );
+    for assignment in assignments {
+        let base_index = assignment.component / 2;
+        let base = if assignment.component & 1 == 0 {
+            bases[base_index]
+        } else {
+            endo_bases[base_index]
+        };
+        let bucket = assignment.bucket();
+        let (x, y) = C::affine_xy(&base);
+        let position = positions[bucket];
+        points[position] = AffinePoint {
+            x,
+            y: if assignment.negative() { -y } else { y },
+        };
+        positions[bucket] += 1;
+    }
 
     reduce_affine_buckets(points, offsets)
 }
