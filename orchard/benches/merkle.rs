@@ -63,6 +63,24 @@ fn merkle_root(mut nodes: Vec<MerkleHashOrchard>) -> MerkleHashOrchard {
     nodes.pop().expect("benchmark tree is non-empty")
 }
 
+fn merkle_root_batch(mut nodes: Vec<MerkleHashOrchard>) -> MerkleHashOrchard {
+    let mut level = 0;
+
+    while nodes.len() > 1 {
+        let merkle_level =
+            Level::from(u8::try_from(level).expect("benchmark tree height fits in u8"));
+        nodes = MerkleHashOrchard::combine_batch(
+            merkle_level,
+            nodes
+                .chunks_exact(CHILDREN_PER_PARENT)
+                .map(|children| (&children[LEFT_CHILD], &children[RIGHT_CHILD])),
+        );
+        level += 1;
+    }
+
+    nodes.pop().expect("benchmark tree is non-empty")
+}
+
 fn benchmark_merkle(c: &mut Criterion) {
     let leaves = fixture_leaves();
     let level = Level::from(LEAF_PARENT_LEVEL);
@@ -83,6 +101,13 @@ fn benchmark_merkle(c: &mut Criterion) {
         bencher.iter_batched(
             || leaves.clone(),
             |leaves| black_box(merkle_root(leaves)),
+            BatchSize::LargeInput,
+        );
+    });
+    group.bench_function(format!("{TREE_LEAVES}-leaves-batch"), |bencher| {
+        bencher.iter_batched(
+            || leaves.clone(),
+            |leaves| black_box(merkle_root_batch(leaves)),
             BatchSize::LargeInput,
         );
     });
