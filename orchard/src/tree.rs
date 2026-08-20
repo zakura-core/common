@@ -549,6 +549,41 @@ mod tests {
         )
     }
 
+    /// Deterministic edge vectors for the direct word decoder, pinning the
+    /// mask and shift boundaries independently of proptest's sampling: the
+    /// all-zero and all-one bit patterns, both ends of the canonical range,
+    /// dense low limbs, and alternating bits (reduced from an over-wide raw
+    /// encoding), at the bottom and top tree levels.
+    #[cfg(feature = "weighted-merkle")]
+    #[test]
+    fn weighted_words_edge_vectors() {
+        use crate::tree::{merkle_crh_message, merkle_crh_words};
+
+        let edges = [
+            pallas::Base::zero(),
+            pallas::Base::one(),
+            -pallas::Base::one(),
+            pallas::Base::from(u64::MAX),
+            pallas::Base::from_raw([u64::MAX; 4]),
+            pallas::Base::from_raw([0x5555_5555_5555_5555; 4]),
+            pallas::Base::from_raw([0xAAAA_AAAA_AAAA_AAAA; 4]),
+        ];
+
+        for level in [0, u8::try_from(MERKLE_DEPTH_ORCHARD - 1).unwrap()] {
+            let level = Level::from(level);
+            for left in edges.map(MerkleHashOrchard) {
+                for right in edges.map(MerkleHashOrchard) {
+                    let expected: Vec<_> = merkle_crh_message(level, &left, &right).collect();
+                    let actual: Vec<_> = merkle_crh_words(level, &left, &right)
+                        .into_iter()
+                        .flat_map(|word| (0..K).map(move |bit| ((word >> bit) & 1) == 1))
+                        .collect();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
     proptest! {
         #[cfg(feature = "weighted-merkle")]
         #[test]

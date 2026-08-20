@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The weighted Merkle word decoder's equivalence tests now include
+  deterministic edge vectors (all-zero and all-one bit patterns, both ends of
+  the canonical range, dense and alternating limbs) alongside the random
+  property test, pinning the decoder's mask and shift boundaries.
 - Prepared the `1.0.0-rc.2` release.
 - Updated the curve stack to `ff 0.14`, `group 0.14`, and `rand 0.10`.
 - Added `MerkleHashOrchard::combine_batch` for same-level Merkle node pairs,
