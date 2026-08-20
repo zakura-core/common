@@ -15,6 +15,7 @@ and this project adheres to Rust's notion of
   candidates.
 
 ### Added
+
 - `CurveExt::try_glv_multiexp_vartime`, with a GLV Signed-Booth backend for
   large Pallas and Vesta multiscalar multiplications.
 - A non-default `multicore` feature parallelizes independent GLV multiscalar
@@ -24,6 +25,9 @@ and this project adheres to Rust's notion of
   assembly routine that keeps the accumulator in registers for the whole run.
 
 ### Changed
+
+- The GLV Signed-Booth multiscalar backend caches each current window's
+  nonzero assignments so it does not recode the same components twice.
 - The GLV Signed-Booth multiscalar backend reduces bucket trees with batched
   affine additions and variable-time inversion of public denominators.
 - The GLV Signed-Booth multiscalar backend accumulates buckets in XYZZ
