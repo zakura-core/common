@@ -620,6 +620,35 @@ mod tests {
         }
     }
 
+    /// Pins the batched combine directly to the protocol's fixed empty-root
+    /// vectors (not only to the scalar combine by equivalence): at every
+    /// level, a batch of 64 identical `(empty[h], empty[h])` pairs must
+    /// reproduce the fixed `empty[h + 1]` in every lane. Under the
+    /// `weighted-merkle` feature this width runs the batch-affine evaluator.
+    #[test]
+    fn batched_combine_reproduces_empty_root_vectors() {
+        let tv_empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
+        const WIDTH: usize = 64;
+
+        for level in 0..MERKLE_DEPTH_ORCHARD {
+            let node = EMPTY_ROOTS[level];
+            let pairs = vec![(&node, &node); WIDTH];
+            let parents = MerkleHashOrchard::combine_batch(
+                Level::from(u8::try_from(level).unwrap()),
+                pairs.into_iter(),
+            );
+            assert_eq!(parents.len(), WIDTH);
+            for parent in parents {
+                assert_eq!(
+                    parent.to_bytes(),
+                    tv_empty_roots[level + 1],
+                    "level {}",
+                    level
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_vectors() {
         let tv_empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
