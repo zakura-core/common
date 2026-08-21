@@ -170,6 +170,21 @@ pub fn map_to_curve_simple_swu<
     //
     // When gx1 is not square, y1 is a square root of h * gx1, and so Z * theta * u^3 * y1
     // is a square root of gx2. Note that we don't actually need to compute gx2.
+    //
+    // The identity gx2 = Z^3 * u^6 * gx1 relies on x1 having its generic form
+    // (step 2). It does *not* hold in the exceptional case of step 3, where
+    // Z^2 * u^4 + Z * u^2 = 0 and x1 = B / (Z * A): for u = 0 it would give
+    // gx2 = 0 although g(x2) = g(0) = B, and for Z * u^2 = -1 it flips the
+    // sign of B. In those cases the nonsquare branch would therefore produce
+    // a point that is not on the curve — which is why this function no longer
+    // re-checking the curve equation (see `new_jacobian_unchecked`) needs the
+    // exceptional inputs to be harmless. They are, for both Pasta curves:
+    //
+    // - g(B / (Z * A)) is a square in the base field, so u = 0 always takes
+    //   the gx1 branch (where no identity is involved); and
+    // - -1 / Z is not a square, so no u with Z * u^2 = -1 exists at all.
+    //
+    // `tests::exceptional_swu_inputs` pins both facts for Pallas and Vesta.
 
     let y2 = theta * z_u2 * u * y1;
     let num_x = F::conditional_select(&num_x2, &num_x1, gx1_square);
@@ -189,6 +204,54 @@ mod tests {
         curves::{IsoEp, IsoEq},
         Ep, Eq, Fp, Fq,
     };
+    use ff::Field;
+    use group::Group;
+
+    /// The simplified SWU map's `gx2 = Z^3 u^6 gx1` shortcut is invalid on
+    /// the exceptional inputs `Z^2 u^4 + Z u^2 = 0` (see the comment in
+    /// `map_to_curve_simple_swu`), so with the curve-equation check gone
+    /// from release builds the map must never take the nonsquare branch
+    /// there. Pin the two facts that guarantee it for each Pasta curve:
+    /// `g(B / (Z A))` is a square (so `u = 0` takes the square branch), and
+    /// `-1 / Z` is not a square (so no other exceptional input exists);
+    /// then check `u = 0` itself lands on `x = B / (Z A)`, on the curve.
+    macro_rules! exceptional_swu_inputs_are_harmless {
+        ($F:ty, $C:ty, $I:ty) => {{
+            let a = <$I as CurveExt>::a();
+            let b = <$I as CurveExt>::b();
+            let z = <$C>::Z;
+
+            let x1 = b * (z * a).invert().unwrap();
+            let gx1 = (x1.square() + a) * x1 + b;
+            assert!(
+                bool::from(gx1.sqrt().is_some()),
+                "g(B / (Z A)) must be a square so that u = 0 takes the square branch"
+            );
+            assert!(
+                bool::from((-z.invert().unwrap()).sqrt().is_none()),
+                "-1 / Z must be a nonsquare so that no u with Z u^2 = -1 exists"
+            );
+
+            let q = map_to_curve_simple_swu::<$F, $C, $I>(&<$F>::ZERO, <$C>::THETA, z);
+            assert!(bool::from(q.is_on_curve()));
+            assert!(!bool::from(q.is_identity()));
+            let (x, _, zz) = q.jacobian_coordinates();
+            assert_eq!(
+                x * zz.square().invert().unwrap(),
+                x1,
+                "u = 0 must map to x = B / (Z A)"
+            );
+            assert!(bool::from(
+                iso_map::<_, $C, _>(&q, &<$C>::ISOGENY_CONSTANTS).is_on_curve()
+            ));
+        }};
+    }
+
+    #[test]
+    fn exceptional_swu_inputs() {
+        exceptional_swu_inputs_are_harmless!(Fp, Ep, IsoEp);
+        exceptional_swu_inputs_are_harmless!(Fq, Eq, IsoEq);
+    }
 
     #[test]
     fn unchecked_map_outputs_are_on_curve() {
