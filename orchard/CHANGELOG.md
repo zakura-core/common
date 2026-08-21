@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Orchard proving-key generation now uses precomputed fixed-base Lagrange
+  coefficients instead of recomputing them during every circuit synthesis.
 - The `merkle` benchmark gained `4096-leaves-distinct` and
   `4096-leaves-distinct-batch`: a 2^12-leaf tree of seeded pseudorandom leaves
   drawn with repeats rejected, so every leaf is distinct by construction,

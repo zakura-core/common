@@ -46,6 +46,11 @@ rustdoc-args = [
     "katex-header.html",
 ]
 
+[[example]]
+name = "generate_lagrange_coeffs"
+path = "examples/generate_lagrange_coeffs.rs"
+required-features = ["circuit", "unstable-voting-circuits"]
+
 [features]
 circuit = [
     "dep:halo2_gadgets",

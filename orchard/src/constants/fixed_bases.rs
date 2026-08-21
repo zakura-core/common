@@ -16,6 +16,8 @@ use pasta_curves::pallas;
 
 /// Precomputed table for the `CommitIvk` commitment randomness base.
 pub mod commit_ivk_r;
+#[cfg(feature = "circuit")]
+mod lagrange_coeffs;
 /// Precomputed table for the `NoteCommit` commitment randomness base.
 pub mod note_commit_r;
 /// Precomputed table for the nullifier base `K^Orchard`.
@@ -174,6 +176,15 @@ impl FixedPoint<pallas::Affine> for OrchardFixedBasesFull {
             Self::SpendAuthG => spend_auth_g::Z.to_vec(),
         }
     }
+
+    fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+        match self {
+            Self::CommitIvkR => lagrange_coeffs::COMMIT_IVK_R.to_vec(),
+            Self::NoteCommitR => lagrange_coeffs::NOTE_COMMIT_R.to_vec(),
+            Self::ValueCommitR => lagrange_coeffs::VALUE_COMMIT_R.to_vec(),
+            Self::SpendAuthG => lagrange_coeffs::SPEND_AUTH_G.to_vec(),
+        }
+    }
 }
 
 #[cfg(feature = "circuit")]
@@ -204,6 +215,13 @@ impl FixedPoint<pallas::Affine> for OrchardBaseFieldBases {
             Self::SpendAuthGBase => spend_auth_g::Z.to_vec(),
         }
     }
+
+    fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+        match self {
+            Self::NullifierK => lagrange_coeffs::NULLIFIER_K.to_vec(),
+            Self::SpendAuthGBase => lagrange_coeffs::SPEND_AUTH_G.to_vec(),
+        }
+    }
 }
 
 #[cfg(feature = "circuit")]
@@ -230,11 +248,53 @@ impl FixedPoint<pallas::Affine> for OrchardShortScalarBases {
             Self::SpendAuthGShort => spend_auth_g::Z_SHORT.to_vec(),
         }
     }
+
+    fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+        match self {
+            Self::ValueCommitV => lagrange_coeffs::VALUE_COMMIT_V.to_vec(),
+            Self::SpendAuthGShort => lagrange_coeffs::SPEND_AUTH_G_SHORT.to_vec(),
+        }
+    }
 }
 
 #[cfg(all(test, feature = "circuit"))]
 mod tests {
     use super::*;
+    use halo2_gadgets::ecc::chip::constants::compute_lagrange_coeffs;
+
+    fn assert_precomputed_lagrange_coeffs<F>(base: F, num_windows: usize)
+    where
+        F: FixedPoint<pallas::Affine>,
+    {
+        assert_eq!(
+            base.lagrange_coeffs(),
+            compute_lagrange_coeffs(base.generator(), num_windows),
+        );
+    }
+
+    #[test]
+    fn precomputed_lagrange_coeffs_match_generators() {
+        for base in [
+            OrchardFixedBasesFull::CommitIvkR,
+            OrchardFixedBasesFull::NoteCommitR,
+            OrchardFixedBasesFull::ValueCommitR,
+            OrchardFixedBasesFull::SpendAuthG,
+        ] {
+            assert_precomputed_lagrange_coeffs(base, NUM_WINDOWS);
+        }
+        for base in [
+            OrchardBaseFieldBases::NullifierK,
+            OrchardBaseFieldBases::SpendAuthGBase,
+        ] {
+            assert_precomputed_lagrange_coeffs(base, NUM_WINDOWS);
+        }
+        for base in [
+            OrchardShortScalarBases::ValueCommitV,
+            OrchardShortScalarBases::SpendAuthGShort,
+        ] {
+            assert_precomputed_lagrange_coeffs(base, NUM_WINDOWS_SHORT);
+        }
+    }
 
     /// Ensures that `OrchardBaseFieldBases::SpendAuthGBase` routes to the
     /// correct generator and tables via the `FixedPoint` trait. The U/Z data
