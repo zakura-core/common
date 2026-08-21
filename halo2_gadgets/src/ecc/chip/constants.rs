@@ -3,7 +3,7 @@
 use arrayvec::ArrayVec;
 use group::{
     ff::{Field, PrimeField},
-    Curve,
+    Curve, CurveAffine as _,
 };
 use halo2_proofs::arithmetic::lagrange_interpolate;
 use pasta_curves::{arithmetic::CurveAffine, pallas};
@@ -81,9 +81,11 @@ fn compute_window_table<C: CurveAffine>(base: C, num_windows: usize) -> Vec<[C; 
     window_table
 }
 
-/// For each window, we interpolate the $x$-coordinate.
-/// Here, we pre-compute and store the coefficients of the interpolation polynomial.
-pub fn compute_lagrange_coeffs<C: CurveAffine>(base: C, num_windows: usize) -> Vec<[C::Base; H]> {
+fn compute_lagrange_coeffs_with_x<C: CurveAffine>(
+    base: C,
+    num_windows: usize,
+    x_coordinate: impl Fn(&C) -> C::Base,
+) -> Vec<[C::Base; H]> {
     // We are interpolating over the 3-bit window, k \in [0..8)
     let points: Vec<_> = (0..H).map(|i| C::Base::from(i as u64)).collect();
 
@@ -92,10 +94,7 @@ pub fn compute_lagrange_coeffs<C: CurveAffine>(base: C, num_windows: usize) -> V
     window_table
         .iter()
         .map(|window_points| {
-            let x_window_points: Vec<_> = window_points
-                .iter()
-                .map(|point| *point.coordinates().unwrap().x())
-                .collect();
+            let x_window_points: Vec<_> = window_points.iter().map(&x_coordinate).collect();
             lagrange_interpolate(&points, &x_window_points)
                 .into_iter()
                 .collect::<ArrayVec<C::Base, H>>()
@@ -103,6 +102,38 @@ pub fn compute_lagrange_coeffs<C: CurveAffine>(base: C, num_windows: usize) -> V
                 .unwrap()
         })
         .collect()
+}
+
+/// For each window, interpolates the x-coordinate and returns the
+/// coefficients of the interpolation polynomial.
+pub fn compute_lagrange_coeffs<C: CurveAffine>(base: C, num_windows: usize) -> Vec<[C::Base; H]> {
+    compute_lagrange_coeffs_with_x(base, num_windows, |point| *point.coordinates().unwrap().x())
+}
+
+/// Computes Pallas fixed-base interpolation coefficients without repeatedly
+/// checking the construction-time-guaranteed nonidentity table entries.
+///
+/// This is equivalent to [`compute_lagrange_coeffs`] for the supported ECC
+/// chip window counts.
+///
+/// # Panics
+///
+/// Panics if `base` is the identity or `num_windows` is not one of
+/// [`NUM_WINDOWS_SHORT`] and [`NUM_WINDOWS`].
+pub fn compute_pallas_lagrange_coeffs(
+    base: pallas::Affine,
+    num_windows: usize,
+) -> Vec<[pallas::Base; H]> {
+    assert!(
+        !bool::from(base.is_identity()),
+        "fixed base is the identity"
+    );
+    assert!(
+        [NUM_WINDOWS_SHORT, NUM_WINDOWS].contains(&num_windows),
+        "invalid fixed-base window count"
+    );
+
+    compute_lagrange_coeffs_with_x(base, num_windows, |point| point.raw_coordinates().0)
 }
 
 /// For each window, $z$ is a field element such that for each point $(x, y)$ in the window:
@@ -235,7 +266,10 @@ mod tests {
     use pasta_curves::{arithmetic::CurveAffine, pallas};
     use proptest::prelude::*;
 
-    use super::{compute_window_table, find_zs_and_us, test_lagrange_coeffs, H, NUM_WINDOWS};
+    use super::{
+        compute_lagrange_coeffs, compute_pallas_lagrange_coeffs, compute_window_table,
+        find_zs_and_us, test_lagrange_coeffs, H, NUM_WINDOWS, NUM_WINDOWS_SHORT,
+    };
 
     prop_compose! {
         /// Generate an arbitrary Pallas point.
@@ -255,6 +289,24 @@ mod tests {
         ) {
             test_lagrange_coeffs(base.to_affine(), NUM_WINDOWS);
         }
+    }
+
+    #[test]
+    fn pallas_lagrange_coeffs_match_generic_path() {
+        let base = pallas::Point::generator().to_affine();
+
+        for num_windows in [NUM_WINDOWS_SHORT, NUM_WINDOWS] {
+            assert_eq!(
+                compute_pallas_lagrange_coeffs(base, num_windows),
+                compute_lagrange_coeffs(base, num_windows),
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid fixed-base window count")]
+    fn pallas_lagrange_coeffs_reject_unsupported_window_count() {
+        compute_pallas_lagrange_coeffs(pallas::Point::generator().to_affine(), 1);
     }
 
     #[test]

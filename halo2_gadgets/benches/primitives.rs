@@ -1,6 +1,10 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use ff::Field;
+use group::{Curve, Group};
 use halo2_gadgets::{
+    ecc::chip::constants::{
+        compute_lagrange_coeffs, compute_pallas_lagrange_coeffs, NUM_WINDOWS, NUM_WINDOWS_SHORT,
+    },
     poseidon::primitives::{self as poseidon, ConstantLength, P128Pow5T3},
     sinsemilla::primitives as sinsemilla,
 };
@@ -12,6 +16,20 @@ use rand::{rng, RngExt};
 
 fn bench_primitives(c: &mut Criterion) {
     let mut rng = rng();
+
+    {
+        let mut group = c.benchmark_group("Fixed-base table construction");
+        let base = pallas::Point::generator().to_affine();
+
+        for num_windows in [NUM_WINDOWS_SHORT, NUM_WINDOWS] {
+            group.bench_function(BenchmarkId::new("generic", num_windows), |b| {
+                b.iter(|| compute_lagrange_coeffs(black_box(base), num_windows))
+            });
+            group.bench_function(BenchmarkId::new("pallas", num_windows), |b| {
+                b.iter(|| compute_pallas_lagrange_coeffs(black_box(base), num_windows))
+            });
+        }
+    }
 
     {
         let mut group = c.benchmark_group("Poseidon");

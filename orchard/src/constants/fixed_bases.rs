@@ -7,7 +7,10 @@ use super::{L_ORCHARD_SCALAR, L_VALUE};
 
 #[cfg(feature = "circuit")]
 use halo2_gadgets::ecc::{
-    chip::{BaseFieldElem, FixedPoint, FullScalar, ShortScalar},
+    chip::{
+        constants::compute_pallas_lagrange_coeffs, BaseFieldElem, FixedPoint, FullScalar,
+        ShortScalar,
+    },
     FixedPoints,
 };
 
@@ -157,6 +160,10 @@ impl FixedPoint<pallas::Affine> for OrchardFixedBasesFull {
         }
     }
 
+    fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+        compute_pallas_lagrange_coeffs(self.generator(), NUM_WINDOWS)
+    }
+
     fn u(&self) -> Vec<[[u8; 32]; H]> {
         match self {
             Self::CommitIvkR => commit_ivk_r::U.to_vec(),
@@ -187,6 +194,10 @@ impl FixedPoint<pallas::Affine> for OrchardBaseFieldBases {
         }
     }
 
+    fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+        compute_pallas_lagrange_coeffs(self.generator(), NUM_WINDOWS)
+    }
+
     fn u(&self) -> Vec<[[u8; 32]; H]> {
         match self {
             Self::NullifierK => nullifier_k::U.to_vec(),
@@ -215,6 +226,10 @@ impl FixedPoint<pallas::Affine> for OrchardShortScalarBases {
             Self::ValueCommitV => value_commit_v::generator(),
             Self::SpendAuthGShort => spend_auth_g::generator(),
         }
+    }
+
+    fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+        compute_pallas_lagrange_coeffs(self.generator(), NUM_WINDOWS_SHORT)
     }
 
     fn u(&self) -> Vec<[[u8; 32]; H]> {

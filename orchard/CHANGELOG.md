@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Orchard fixed-base circuit tables now use unchecked coordinate extraction
+  after validating their Pallas generator.
 - The `merkle` benchmark gained `4096-leaves-distinct` and
   `4096-leaves-distinct-batch`: a 2^12-leaf tree of seeded pseudorandom leaves
   drawn with repeats rejected, so every leaf is distinct by construction,
