@@ -521,9 +521,12 @@ mod tests {
     /// Width required by the field's uniform-byte reduction.
     const UNIFORM_BYTES: usize = 64;
 
-    /// Height of the deterministic fixture tree built from [`fixture_leaves`].
+    /// Height of the deterministic fixture tree built from [`fixture_leaves`]:
+    /// 2^11 leaves fold through levels of 1024, 512, ..., 2, 1 parents, so one
+    /// tree exercises `combine_batch` at every power-of-two width from 1024
+    /// down to 1 (and, at level 1, the 1024-leaf-tree first level).
     const FIXTURE_TREE_HEIGHT: usize = 11;
-    /// Number of leaves in the fixture tree (2^11).
+    /// Number of leaves in the fixture tree (2^11 = 2048).
     const FIXTURE_LEAVES: usize = 1 << FIXTURE_TREE_HEIGHT;
     /// The leading run of edge-case leaves placed contiguously, so that
     /// edge cases are paired with each other (and their parents with each
@@ -655,8 +658,9 @@ mod tests {
     /// Deterministic fixture of [`FIXTURE_LEAVES`] distinct leaves: the
     /// [`edge_case_leaves`] (the first [`FIXTURE_CONTIGUOUS_EDGES`] of them
     /// contiguous, the rest spread at a fixed stride) interleaved with
-    /// BLAKE2b-derived fill values. Shared by the fixed-vector test and the
-    /// `merkle` benchmark, so both exercise the same tree.
+    /// BLAKE2b-derived fill values. RNG-free and fully determined by this
+    /// function, so the vectors pinned in `test_vectors/merkle_fixture.rs`
+    /// are reproducible; [`print_merkle_fixture_vectors`] regenerates them.
     fn fixture_leaves() -> alloc::vec::Vec<MerkleHashOrchard> {
         use alloc::collections::BTreeSet;
         use ff::{FromUniformBytes, PrimeField};
@@ -847,11 +851,44 @@ mod tests {
         }
     }
 
+    // ----------------------------------------------------------------------
+    // Fixed-vector tests for `MerkleHashOrchard::combine_batch`.
+    //
+    // `combine_batch_matches_scalar_at_every_level_and_width` above checks the
+    // batched combine against the scalar one on random nodes. The four tests
+    // below instead pin it to fixed bytes, so a regression shared by both
+    // implementations (or in the Sinsemilla evaluator underneath) is caught
+    // too. They differ in where the bytes come from and in what shape of
+    // input the batch sees:
+    //
+    // | test                                      | vectors from              | children            | batch widths        |
+    // |-------------------------------------------|---------------------------|---------------------|---------------------|
+    // | `combine_batch_matches_empty_root_vectors`| zcash-test-vectors        | identical (empty    | 512 (= the first    |
+    // |                                           | `orchard_empty_roots.py`  | root, every level)  | level of a 1024-    |
+    // |                                           |                           |                     | leaf tree)          |
+    // | `combine_batch_matches_merkle_path_vectors`| zcash-test-vectors       | distinct, external  | 8/4/2/1 per tree;   |
+    // |                                           | `orchard_merkle_tree.py`  | (16 snapshots of a  | 128/64/32/16 with   |
+    // |                                           |                           | 16-leaf tree)       | all trees batched   |
+    // | `combine_batch_matches_zcashd_anchor_vector`| zcashd                  | live node left,     | 1..3, all 32 levels |
+    // |                                           | `merkle_roots_orchard.h`  | empty root right    |                     |
+    // | `fixture_tree_matches_vectors`            | this crate's scalar path, | 2048 distinct, 586  | 1024/512/.../1      |
+    // |                                           | recorded in               | edge cases          |                     |
+    // |                                           | `merkle_fixture.rs`       |                     |                     |
+    //
+    // The first three use vectors produced outside this crate; only the last
+    // is self-generated, which is why it additionally checks every node
+    // against the scalar `combine` and a fresh generic Sinsemilla domain.
+    // Widths of 32 and above reach the batch-affine evaluator under
+    // `weighted-merkle`.
+    // ----------------------------------------------------------------------
+
     /// Pins the batched combine directly to the protocol's fixed empty-root
-    /// vectors, rather than only checking it against the scalar implementation.
-    /// The largest configured batch width also exercises the large-batch
-    /// implementation used by tree construction when the `weighted-merkle`
-    /// feature is enabled.
+    /// vectors (`orchard_empty_roots.py`): at each of the 32 levels, 512
+    /// copies of the pair (empty root, empty root) must all hash to the
+    /// next level's empty root. The width is the first level of a
+    /// 1024-leaf tree; the children are identical, so this pins the
+    /// per-level domain separation but not left/right asymmetry (see the
+    /// tests that follow for that).
     #[test]
     fn combine_batch_matches_empty_root_vectors() {
         let empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
@@ -870,11 +907,13 @@ mod tests {
     }
 
     /// Folds `leaves` up to a single depth-`DEPTH` root using one
-    /// [`MerkleHashOrchard::combine_batch`] call per level. Levels with an odd
-    /// number of nodes are right-padded with the protocol's fixed empty-root
-    /// vector for that level (not the crate's own `empty_root`), so every
-    /// input the batch sees is pinned to external bytes. Returns the nodes of
-    /// every level from the leaves (index 0) to the root (index `DEPTH`).
+    /// [`MerkleHashOrchard::combine_batch`] call per level, i.e. the way a
+    /// tree builder would use the batch API. Levels with an odd number of
+    /// nodes are right-padded with the protocol's fixed empty-root vector
+    /// for that level (taken from the test vectors, not from the crate's own
+    /// `empty_root`), so every input the batch sees is pinned to external
+    /// bytes. Returns the nodes of every level, from the leaves (index 0) to
+    /// the root (index `DEPTH`), so callers can check internal nodes too.
     fn batched_levels<const DEPTH: usize>(
         leaves: &[MerkleHashOrchard],
     ) -> Vec<Vec<MerkleHashOrchard>> {
@@ -899,14 +938,22 @@ mod tests {
         levels
     }
 
-    /// Pins the batched combine to the zcash-test-vectors Merkle path set:
-    /// sixteen depth-4 trees whose leaves, authentication paths, and roots
-    /// are all fixed bytes. Unlike the empty-root vectors, these pairs have
-    /// distinct (and, for partially filled trees, asymmetric) children. Every
-    /// internal node is the path sibling of some leaf, so every output of
-    /// every batch is checked against external bytes; all sixteen trees'
-    /// pairs at a level go through one call (widths 128, 64, 32, 16), which
-    /// also covers the large-batch evaluator under `weighted-merkle`.
+    /// Pins the batched combine to the zcash-test-vectors Merkle path set
+    /// (`orchard_merkle_tree.py`, vendored in `test_vectors/merkle_path.rs`).
+    ///
+    /// That set is one 16-leaf (depth-4) tree, snapshotted after each of its
+    /// 16 appends: each snapshot records all 16 leaf slots (appended leaves,
+    /// then the uncommitted value `2` for the rest), the authentication path
+    /// of every leaf, and the root. These are the only externally produced
+    /// Orchard Merkle vectors with *distinct* left and right children, and
+    /// because every internal node is the path sibling of some leaf, every
+    /// node of every snapshot has recorded bytes — so every output of every
+    /// batch below is checked, not just the root.
+    ///
+    /// Two passes: each snapshot folded on its own (widths 8, 4, 2, 1), then
+    /// all 16 snapshots' pairs at a level in one call (widths 128, 64, 32,
+    /// 16), which is how a few small external vectors still reach the
+    /// large-batch evaluator.
     #[test]
     fn combine_batch_matches_merkle_path_vectors() {
         const DEPTH: usize = 4;
@@ -978,11 +1025,14 @@ mod tests {
         }
     }
 
-    /// Pins the batched combine, level by level across the full 32-level
-    /// tree, to the zcashd-derived anchor: the live frontier node sits on
-    /// the left with the fixed empty-root vector on the right at every level
-    /// where the node count is odd, so the batch sees asymmetric pairs at
-    /// most levels and must reproduce the anchor exactly.
+    /// Pins the batched combine, level by level through the full 32-level
+    /// tree, to the anchor zcashd derived for five commitments
+    /// (`merkle_roots_orchard.h`; see [`ZCASHD_COMMITMENTS`]). With five
+    /// leaves, most levels hold a single live node that is paired with the
+    /// fixed empty root on its right, so this is the asymmetric (live,
+    /// empty) shape that the empty-root test cannot see, at every level up
+    /// to the top. Every prefix of the commitments is also folded and
+    /// compared with the incremental frontier.
     #[test]
     fn combine_batch_matches_zcashd_anchor_vector() {
         let leaves: Vec<_> = ZCASHD_COMMITMENTS
@@ -1008,13 +1058,23 @@ mod tests {
         }
     }
 
-    /// The 2048-leaf fixture tree (see [`fixture_leaves`]): every
-    /// batched parent at every level (widths 1024 down to 1) must equal the
-    /// scalar `combine` and a fresh generic Sinsemilla domain, and the tree
-    /// must reproduce the pinned fixed vectors — the root, the first and
-    /// last node of every level, and every node of the top three levels.
-    /// Regenerate the vectors with `print_merkle_fixture_vectors` if the
-    /// leaf set is deliberately changed.
+    /// The 2^11-leaf fixture tree (see [`fixture_leaves`]): 2048 distinct
+    /// leaves, 586 of them edge cases, folded with one `combine_batch` call
+    /// per level at widths 1024, 512, ..., 1. Two kinds of check:
+    ///
+    /// - every batched parent at every level must equal the scalar
+    ///   `combine` and a fresh generic Sinsemilla domain (the full tree,
+    ///   node by node);
+    /// - the root, the first and last node of every level, and every node
+    ///   of the top three levels must equal the bytes recorded in
+    ///   `test_vectors/merkle_fixture.rs`, which were generated by the
+    ///   scalar path and are what makes this a regression vector rather
+    ///   than only an equivalence test.
+    ///
+    /// The vectors are self-generated (no external implementation has hashed
+    /// this tree), which is why the first check exists. Regenerate them with
+    /// [`print_merkle_fixture_vectors`] if the leaf set is deliberately
+    /// changed; any other change to these bytes is a bug.
     #[test]
     fn fixture_tree_matches_vectors() {
         let leaves = fixture_leaves();
@@ -1070,10 +1130,17 @@ mod tests {
         assert_eq!(top, tv.top_levels);
     }
 
-    /// Prints the `merkle_fixture` vector module for the current fixture
-    /// leaves. Run with `--ignored --nocapture` (without `weighted-merkle`,
-    /// so the upstream scalar path produces the bytes) after changing
-    /// [`edge_case_leaves`] or [`fixture_leaves`].
+    /// Prints the `test_vectors/merkle_fixture.rs` module for the current
+    /// fixture leaves, using the scalar `combine` (not the batch). Run with
+    ///
+    /// ```text
+    /// cargo test -p zakura-orchard --lib \
+    ///     tree::tests::print_merkle_fixture_vectors -- --ignored --nocapture
+    /// ```
+    ///
+    /// without `weighted-merkle`, so the upstream scalar path produces the
+    /// bytes, then paste the output over the module. Only needed after a
+    /// deliberate change to [`edge_case_leaves`] or [`fixture_leaves`].
     #[test]
     #[ignore]
     fn print_merkle_fixture_vectors() {
@@ -1114,20 +1181,56 @@ mod tests {
             }
         }
         let mut out = String::new();
-        out.push_str("// Generated by `tree::tests::print_merkle_fixture_vectors` from\n");
-        out.push_str("// `tree::tests::fixture_leaves`; do not edit by hand.\n");
+        let edges = edge_case_leaves().len();
         out.push_str(&format!(
-            "// {} leaves, of which {} are edge cases (`tree::tests::edge_case_leaves`).\n\n",
-            leaves.len(),
-            edge_case_leaves().len()
+            "\
+// Fixed vectors for the Orchard Merkle fixture tree.
+//
+// GENERATED by `tree::tests::print_merkle_fixture_vectors`; do not edit by
+// hand. Regenerate (without `weighted-merkle`) only after a deliberate
+// change to `tree::tests::edge_case_leaves` or `tree::tests::fixture_leaves`:
+//
+//     cargo test -p zakura-orchard --lib \\
+//         tree::tests::print_merkle_fixture_vectors -- --ignored --nocapture
+//
+// The tree: {leaves} leaves (2^{height}), of which {edges} are edge cases
+// (the protocol's special values, a single set or clear bit at every
+// position, a single all-ones Sinsemilla word at every word offset,
+// alternating patterns, the largest canonical values, and every empty
+// root) and the rest BLAKE2b-derived fill; all leaves are distinct. The
+// first 256 edge cases are contiguous so they pair with each other, the
+// remainder are spread so they pair with fill values. Folding it yields
+// levels of 1024, 512, ..., 2, 1 parents, so `combine_batch` is
+// exercised at every power-of-two width from 1024 down to 1.
+//
+// What is recorded (the full tree would be 4095 nodes; the test checks
+// all of them against the scalar implementation, and these bytes pin a
+// representative subset as a regression vector):
+// - `root`: the level-{height} root;
+// - `level_bounds[l]`: the first and last parent of level `l + 1`, for
+//   `l` in `0..{height}` (level 1 holds 1024 parents, level {height} holds 1);
+// - `top_levels`: every node of levels {h2}, {h1}, and {height} (4 + 2 + 1, root last).
+//
+// Produced by the scalar `MerkleHashOrchard::combine` on this crate's
+// default (non-weighted) Sinsemilla path; `tree::tests::fixture_tree_matches_vectors`
+// checks the batched combine, on both paths, against them.
+
+",
+            leaves = leaves.len(),
+            height = FIXTURE_TREE_HEIGHT,
+            edges = edges,
+            h2 = FIXTURE_TREE_HEIGHT - 2,
+            h1 = FIXTURE_TREE_HEIGHT - 1,
         ));
         out.push_str("pub(crate) struct TestVector {\n");
-        out.push_str("    /// Root of the fixture tree.\n    pub(crate) root: [u8; 32],\n");
-        out.push_str("    /// First and last node of each level above the leaves.\n");
+        out.push_str(
+            "    /// Root of the fixture tree (level 11).\n    pub(crate) root: [u8; 32],\n",
+        );
+        out.push_str("    /// `[first, last]` parent of level `l + 1`, for `l` in `0..11`.\n");
         out.push_str(&format!(
             "    pub(crate) level_bounds: [[[u8; 32]; 2]; {FIXTURE_TREE_HEIGHT}],\n"
         ));
-        out.push_str("    /// Every node of the top three levels (4 + 2 + 1, root last).\n");
+        out.push_str("    /// Every node of levels 9, 10, and 11 (4 + 2 + 1, root last).\n");
         out.push_str("    pub(crate) top_levels: [[u8; 32]; 7],\n}\n\n");
         out.push_str("pub(crate) fn test_vectors() -> TestVector {\n    TestVector {\n");
         out.push_str("        root: ");

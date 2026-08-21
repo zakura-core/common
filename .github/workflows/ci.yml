@@ -569,6 +569,20 @@ jobs:
         run: cargo +stable test -p zakura-orchard --verbose --no-run
       - name: Create and verify a proof individually and in a batch
         run: cargo +stable test -p zakura-orchard --verbose --test platform_smoke
+      - name: Run weighted Merkle vector tests on the Apple AArch64 assembly backend
+        # The macOS runner is Apple silicon, the only place the
+        # `pasta_curves/aarch64-asm` field backend is live. Linux already runs
+        # the weighted-merkle lib tests on the portable backend; this re-runs
+        # the Merkle fixed-vector tests (tree::tests) with the weighted
+        # evaluator on top of the assembly field arithmetic, so both are
+        # pinned to the same external bytes on real hardware.
+        if: matrix.os == 'macOS-latest'
+        run: >-
+          cargo +stable test -p zakura-orchard
+          --features weighted-merkle,pasta_curves/aarch64-asm
+          --lib
+          --verbose
+          -- tree::tests
       - name: Verify working directory is clean
         run: git diff --exit-code
 
