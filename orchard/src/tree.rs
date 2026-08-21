@@ -562,8 +562,8 @@ mod tests {
         /// `value` if its 255-bit raw encoding is a canonical field element.
         fn canonical(limbs: [u64; 4]) -> Option<pallas::Base> {
             let mut bytes = [0u8; 32];
-            for (chunk, limb) in bytes.chunks_exact_mut(8).zip(limbs) {
-                chunk.copy_from_slice(&limb.to_le_bytes());
+            for (chunk, limb) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(limbs) {
+                *chunk = limb.to_le_bytes();
             }
             pallas::Base::from_repr(bytes).into()
         }
@@ -859,10 +859,8 @@ mod tests {
         for level in 0..MERKLE_DEPTH_ORCHARD {
             let child = MerkleHashOrchard::from_bytes(&empty_roots[level]).unwrap();
             let pairs = vec![(&child, &child); width];
-            let parents = MerkleHashOrchard::combine_batch(
-                Level::from(u8::try_from(level).unwrap()),
-                pairs.into_iter(),
-            );
+            let parents =
+                MerkleHashOrchard::combine_batch(Level::from(u8::try_from(level).unwrap()), pairs);
 
             assert_eq!(parents.len(), width);
             for parent in parents {
@@ -887,7 +885,11 @@ mod tests {
             if nodes.len() % 2 == 1 {
                 nodes.push(MerkleHashOrchard::from_bytes(&empty_roots[level]).unwrap());
             }
-            let pairs = nodes.chunks_exact(2).map(|pair| (&pair[0], &pair[1]));
+            let pairs = nodes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| (&pair[0], &pair[1]));
             let parents =
                 MerkleHashOrchard::combine_batch(Level::from(u8::try_from(level).unwrap()), pairs);
             assert_eq!(parents.len(), nodes.len() / 2);
@@ -955,15 +957,15 @@ mod tests {
                 .iter()
                 .flat_map(|levels| {
                     levels[level]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|pair| (&pair[0], &pair[1]))
                 })
                 .collect();
             assert_eq!(pairs.len(), LEAVES * (LEAVES >> (level + 1)));
-            let parents = MerkleHashOrchard::combine_batch(
-                Level::from(u8::try_from(level).unwrap()),
-                pairs.into_iter(),
-            );
+            let parents =
+                MerkleHashOrchard::combine_batch(Level::from(u8::try_from(level).unwrap()), pairs);
             let per_tree = LEAVES >> (level + 1);
             for (position, parent) in parents.iter().enumerate() {
                 let (tree, index) = (position / per_tree, position % per_tree);
@@ -1029,7 +1031,7 @@ mod tests {
         let domain = HashDomain::new(MERKLE_CRH_PERSONALIZATION);
         for level in 0..FIXTURE_TREE_HEIGHT {
             let merkle_level = Level::from(u8::try_from(level).unwrap());
-            for (index, pair) in levels[level].chunks_exact(2).enumerate() {
+            for (index, pair) in levels[level].as_chunks::<2>().0.iter().enumerate() {
                 let batched = levels[level + 1][index];
                 assert_eq!(
                     batched,
@@ -1101,7 +1103,9 @@ mod tests {
         for level in 0..FIXTURE_TREE_HEIGHT {
             let merkle_level = Level::from(u8::try_from(level).unwrap());
             nodes = nodes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| MerkleHashOrchard::combine(merkle_level, &pair[0], &pair[1]))
                 .collect();
             level_bounds.push([nodes[0].to_bytes(), nodes[nodes.len() - 1].to_bytes()]);
