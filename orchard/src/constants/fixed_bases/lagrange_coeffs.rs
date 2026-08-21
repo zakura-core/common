@@ -6,7 +6,7 @@ use pasta_curves::pallas;
 use super::{H, NUM_WINDOWS, NUM_WINDOWS_SHORT};
 
 #[rustfmt::skip]
-pub(super) const COMMIT_IVK_R: [[pallas::Base; H]; NUM_WINDOWS] = [
+pub(super) static COMMIT_IVK_R: [[pallas::Base; H]; NUM_WINDOWS] = [
     [
         pallas::Base::from_raw([0x2174536c2ff5447b, 0x7e3632e0d23bb6ab, 0x76ae394d27015677, 0x224634b22b313c08]),
         pallas::Base::from_raw([0xfd5886cfe8eee321, 0x60230a3b1a8ecf2f, 0xaa4193411c0c7ffa, 0x345d470930bb8e5a]),
@@ -860,7 +860,7 @@ pub(super) const COMMIT_IVK_R: [[pallas::Base; H]; NUM_WINDOWS] = [
 ];
 
 #[rustfmt::skip]
-pub(super) const NOTE_COMMIT_R: [[pallas::Base; H]; NUM_WINDOWS] = [
+pub(super) static NOTE_COMMIT_R: [[pallas::Base; H]; NUM_WINDOWS] = [
     [
         pallas::Base::from_raw([0xc4ee78b2e913f61b, 0xea327a6fb49053ca, 0xacf3ce7ada6cf476, 0x24f68bf240c06cfd]),
         pallas::Base::from_raw([0x4ec81a45458fd166, 0x18f474e9562426f3, 0x7d0cdda5115875eb, 0x3e58e55a810f6b9b]),
@@ -1714,7 +1714,7 @@ pub(super) const NOTE_COMMIT_R: [[pallas::Base; H]; NUM_WINDOWS] = [
 ];
 
 #[rustfmt::skip]
-pub(super) const VALUE_COMMIT_R: [[pallas::Base; H]; NUM_WINDOWS] = [
+pub(super) static VALUE_COMMIT_R: [[pallas::Base; H]; NUM_WINDOWS] = [
     [
         pallas::Base::from_raw([0xef278afa1cbf7503, 0x25435914e1977f64, 0xa5a0b15c3b97f6f5, 0x06110db5b0007326]),
         pallas::Base::from_raw([0x941cf9b7f82f5fd3, 0xba0132cff00ce8bc, 0x1196dce7560144ed, 0x3796c3790d6ba3b6]),
@@ -2568,7 +2568,7 @@ pub(super) const VALUE_COMMIT_R: [[pallas::Base; H]; NUM_WINDOWS] = [
 ];
 
 #[rustfmt::skip]
-pub(super) const SPEND_AUTH_G: [[pallas::Base; H]; NUM_WINDOWS] = [
+pub(super) static SPEND_AUTH_G: [[pallas::Base; H]; NUM_WINDOWS] = [
     [
         pallas::Base::from_raw([0x7d61b57fe449ab05, 0x419c3bd75edd966d, 0x7ff747ca15c86a57, 0x08ea0058bac9576a]),
         pallas::Base::from_raw([0x40fbbc14b5e11259, 0xe79cf5ff44425878, 0x19890a99a018041e, 0x27b0d066c11e3207]),
@@ -3422,7 +3422,7 @@ pub(super) const SPEND_AUTH_G: [[pallas::Base; H]; NUM_WINDOWS] = [
 ];
 
 #[rustfmt::skip]
-pub(super) const NULLIFIER_K: [[pallas::Base; H]; NUM_WINDOWS] = [
+pub(super) static NULLIFIER_K: [[pallas::Base; H]; NUM_WINDOWS] = [
     [
         pallas::Base::from_raw([0x0e1d90dadcf9d486, 0xd5b05a5747d93ae9, 0x091acbde54d590c0, 0x1ce89afd537844bc]),
         pallas::Base::from_raw([0x0d7b7cd568ae3bc8, 0x8dea4ad819cdad2a, 0x5aa52aaed8328e04, 0x2bd393b9f9872b7a]),
@@ -4276,7 +4276,7 @@ pub(super) const NULLIFIER_K: [[pallas::Base; H]; NUM_WINDOWS] = [
 ];
 
 #[rustfmt::skip]
-pub(super) const VALUE_COMMIT_V: [[pallas::Base; H]; NUM_WINDOWS_SHORT] = [
+pub(super) static VALUE_COMMIT_V: [[pallas::Base; H]; NUM_WINDOWS_SHORT] = [
     [
         pallas::Base::from_raw([0xa921c6541c1e532e, 0x62ce6cf1cdea899f, 0x926f079eb4d46954, 0x255b310138c382ab]),
         pallas::Base::from_raw([0x6c5b78932abd7ea3, 0xe174ab5f5a6f3cbd, 0x92670b8b31a09ada, 0x00f04a0a2271edb2]),
@@ -4500,7 +4500,7 @@ pub(super) const VALUE_COMMIT_V: [[pallas::Base; H]; NUM_WINDOWS_SHORT] = [
 ];
 
 #[rustfmt::skip]
-pub(super) const SPEND_AUTH_G_SHORT: [[pallas::Base; H]; NUM_WINDOWS_SHORT] = [
+pub(super) static SPEND_AUTH_G_SHORT: [[pallas::Base; H]; NUM_WINDOWS_SHORT] = [
     [
         pallas::Base::from_raw([0x7d61b57fe449ab05, 0x419c3bd75edd966d, 0x7ff747ca15c86a57, 0x08ea0058bac9576a]),
         pallas::Base::from_raw([0x40fbbc14b5e11259, 0xe79cf5ff44425878, 0x19890a99a018041e, 0x27b0d066c11e3207]),

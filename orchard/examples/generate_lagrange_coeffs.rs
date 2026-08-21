@@ -17,17 +17,19 @@ fn emit<B: FixedPoint<pallas::Affine>>(
 ) {
     writeln!(
         output,
-        "#[rustfmt::skip]\npub(super) const {name}: [[pallas::Base; H]; {length}] = ["
+        "#[rustfmt::skip]\npub(super) static {name}: [[pallas::Base; H]; {length}] = ["
     )
     .unwrap();
     for window in compute_lagrange_coeffs(base.generator(), windows) {
         writeln!(output, "    [").unwrap();
         for coefficient in window {
             let repr = coefficient.to_repr();
-            let limbs: Vec<_> = repr
+            let limbs: Vec<u64> = repr
                 .as_ref()
-                .chunks_exact(8)
-                .map(|limb| u64::from_le_bytes(limb.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|limb| u64::from_le_bytes(*limb))
                 .collect();
             writeln!(
                 output,
