@@ -444,6 +444,191 @@ pub mod testing {
         })
     }
 
+    /// Height of the deterministic fixture tree built from [`fixture_leaves`].
+    pub const FIXTURE_TREE_HEIGHT: usize = 11;
+    /// Number of leaves in the fixture tree (2^11).
+    pub const FIXTURE_LEAVES: usize = 1 << FIXTURE_TREE_HEIGHT;
+    /// The leading run of edge-case leaves placed contiguously, so that
+    /// edge cases are paired with each other (and their parents with each
+    /// other, up the tree); the remaining edge cases are spread through the
+    /// BLAKE2b fill so they are paired with ordinary values.
+    const FIXTURE_CONTIGUOUS_EDGES: usize = 256;
+    /// BLAKE2b personalization for the fill values (exactly 16 bytes).
+    const FIXTURE_FILL_PERSONALIZATION: &[u8; 16] = b"ZakuraMerkleFx01";
+
+    /// Edge-case tree nodes, in a fixed order, with duplicates removed.
+    ///
+    /// Intended to stress the Merkle CRH and its batched evaluation on
+    /// inputs that random sampling never produces: the protocol's special
+    /// values (zero, one, the uncommitted leaf `2`, `p - 1`, `p - 2`,
+    /// `(p - 1) / 2`), every canonical power of two and its negation
+    /// (single set bit and single clear bit at every position), a single
+    /// all-ones Sinsemilla word at each of the 26 word offsets (including
+    /// the word straddling the child boundary), alternating word and bit
+    /// patterns, the largest canonical values above `2^254`, and the empty
+    /// root of every tree level.
+    pub fn edge_case_leaves() -> alloc::vec::Vec<MerkleHashOrchard> {
+        use alloc::collections::BTreeSet;
+        use alloc::vec::Vec;
+        use ff::PrimeField;
+        use incrementalmerkletree::{Hashable, Level};
+        use pasta_curves::pallas;
+
+        use crate::constants::{sinsemilla::K, MERKLE_DEPTH_ORCHARD};
+
+        /// `2^bit` as raw limbs (for `bit < 256`).
+        fn bit_limbs(bit: usize) -> [u64; 4] {
+            let mut limbs = [0u64; 4];
+            limbs[bit / 64] = 1u64 << (bit % 64);
+            limbs
+        }
+        /// `value` if its 255-bit raw encoding is a canonical field element.
+        fn canonical(limbs: [u64; 4]) -> Option<pallas::Base> {
+            let mut bytes = [0u8; 32];
+            for (chunk, limb) in bytes.chunks_exact_mut(8).zip(limbs) {
+                chunk.copy_from_slice(&limb.to_le_bytes());
+            }
+            pallas::Base::from_repr(bytes).into()
+        }
+        /// Raw limbs with bits `[lo, lo + width)` set (clipped to 256 bits).
+        fn bit_run(lo: usize, width: usize) -> [u64; 4] {
+            let mut limbs = [0u64; 4];
+            for bit in lo..(lo + width).min(256) {
+                limbs[bit / 64] |= 1u64 << (bit % 64);
+            }
+            limbs
+        }
+
+        let one = pallas::Base::ONE;
+        let mut candidates: Vec<pallas::Base> = alloc::vec![
+            pallas::Base::ZERO,
+            one,
+            one + one, // the uncommitted leaf
+            -one,
+            -(one + one),
+            pallas::Base::TWO_INV - one, // (p - 1) / 2
+        ];
+        // Single set bit, and single clear bit (`p - 2^i`), at every position.
+        for bit in 0..256 {
+            if let Some(v) = canonical(bit_limbs(bit)) {
+                candidates.push(v);
+                candidates.push(-v);
+            }
+        }
+        // One all-ones Sinsemilla word at each word offset of the 255-bit
+        // child encoding; the top word is clipped to the canonical range.
+        let words = crate::constants::sinsemilla::L_ORCHARD_MERKLE.div_ceil(K);
+        for word in 0..words {
+            let lo = word * K;
+            let mut width = K;
+            while width > 0 {
+                if let Some(v) = canonical(bit_run(lo, width)) {
+                    candidates.push(v);
+                    break;
+                }
+                width -= 1;
+            }
+        }
+        // Alternating words (every other 10-bit word all ones) and bits.
+        for phase in 0..2 {
+            let mut limbs = [0u64; 4];
+            for word in (phase..words).step_by(2) {
+                for (i, l) in bit_run(word * K, K).iter().enumerate() {
+                    limbs[i] |= l;
+                }
+            }
+            // Clear the top bits until canonical.
+            for bit in (0..256).rev() {
+                if let Some(v) = canonical(limbs) {
+                    candidates.push(v);
+                    break;
+                }
+                limbs[bit / 64] &= !(1u64 << (bit % 64));
+            }
+        }
+        for pattern in [
+            0x5555_5555_5555_5555u64,
+            0xAAAA_AAAA_AAAA_AAAA,
+            0x0F0F_0F0F_0F0F_0F0F,
+            0xF0F0_F0F0_F0F0_F0F0,
+        ] {
+            candidates.push(pallas::Base::from_raw([pattern; 4]));
+        }
+        // Largest canonical values: p - 1 - 2^i just below the modulus, and
+        // 2^254 + (2^i - 1) just above the top power of two.
+        for bit in [1usize, 8, 64, 120, 124] {
+            candidates.push(-one - pallas::Base::from_raw(bit_limbs(bit)));
+            candidates.push(
+                pallas::Base::from_raw(bit_limbs(254)) + pallas::Base::from_raw(bit_run(0, bit)),
+            );
+        }
+        // The empty root at every level (and the leaf level).
+        for level in 0..=MERKLE_DEPTH_ORCHARD {
+            candidates.push(MerkleHashOrchard::empty_root(Level::from(level as u8)).0);
+        }
+
+        let mut seen = BTreeSet::new();
+        candidates
+            .into_iter()
+            .filter(|v| seen.insert(v.to_repr()))
+            .map(MerkleHashOrchard)
+            .collect()
+    }
+
+    /// Deterministic fixture of [`FIXTURE_LEAVES`] distinct leaves: the
+    /// [`edge_case_leaves`] (the first [`FIXTURE_CONTIGUOUS_EDGES`] of them
+    /// contiguous, the rest spread at a fixed stride) interleaved with
+    /// BLAKE2b-derived fill values. Shared by the fixed-vector test and the
+    /// `merkle` benchmark, so both exercise the same tree.
+    pub fn fixture_leaves() -> alloc::vec::Vec<MerkleHashOrchard> {
+        use alloc::collections::BTreeSet;
+        use ff::PrimeField;
+
+        let edges = edge_case_leaves();
+        assert!(edges.len() > FIXTURE_CONTIGUOUS_EDGES);
+        assert!(edges.len() < FIXTURE_LEAVES / 2);
+        let spread = edges.len() - FIXTURE_CONTIGUOUS_EDGES;
+        let stride = (FIXTURE_LEAVES - FIXTURE_CONTIGUOUS_EDGES) / spread;
+
+        let mut leaves: alloc::vec::Vec<Option<MerkleHashOrchard>> =
+            alloc::vec![None; FIXTURE_LEAVES];
+        let mut seen = BTreeSet::new();
+        for (i, edge) in edges.iter().enumerate() {
+            let position = if i < FIXTURE_CONTIGUOUS_EDGES {
+                i
+            } else {
+                FIXTURE_CONTIGUOUS_EDGES + (i - FIXTURE_CONTIGUOUS_EDGES) * stride
+            };
+            leaves[position] = Some(*edge);
+            seen.insert(edge.to_bytes());
+        }
+
+        let mut counter = 0u64;
+        for slot in leaves.iter_mut() {
+            if slot.is_some() {
+                continue;
+            }
+            loop {
+                let hash = blake2b_simd::Params::new()
+                    .hash_length(UNIFORM_BYTES)
+                    .personal(FIXTURE_FILL_PERSONALIZATION)
+                    .hash(&counter.to_le_bytes());
+                counter += 1;
+                let mut uniform = [0u8; UNIFORM_BYTES];
+                uniform.copy_from_slice(hash.as_bytes());
+                let value = pasta_curves::pallas::Base::from_uniform_bytes(&uniform);
+                if seen.insert(value.to_repr()) {
+                    *slot = Some(MerkleHashOrchard(value));
+                    break;
+                }
+            }
+        }
+        leaves
+            .into_iter()
+            .map(|leaf| leaf.expect("every slot filled"))
+            .collect()
+    }
+
     impl Distribution<MerkleHashOrchard> for StandardUniform {
         fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> MerkleHashOrchard {
             MerkleHashOrchard(pasta_curves::Fp::random(rng))
@@ -816,6 +1001,146 @@ mod tests {
                 "prefix {prefix}"
             );
         }
+    }
+
+    /// The 2048-leaf fixture tree (see [`testing::fixture_leaves`]): every
+    /// batched parent at every level (widths 1024 down to 1) must equal the
+    /// scalar `combine` and a fresh generic Sinsemilla domain, and the tree
+    /// must reproduce the pinned fixed vectors — the root, the first and
+    /// last node of every level, and every node of the top three levels.
+    /// Regenerate the vectors with `print_merkle_fixture_vectors` if the
+    /// leaf set is deliberately changed.
+    #[test]
+    fn fixture_tree_matches_vectors() {
+        use crate::tree::testing::{fixture_leaves, FIXTURE_LEAVES, FIXTURE_TREE_HEIGHT};
+
+        let leaves = fixture_leaves();
+        assert_eq!(leaves.len(), FIXTURE_LEAVES);
+        let distinct: alloc::collections::BTreeSet<_> =
+            leaves.iter().map(MerkleHashOrchard::to_bytes).collect();
+        assert_eq!(
+            distinct.len(),
+            FIXTURE_LEAVES,
+            "fixture leaves must be distinct"
+        );
+
+        let levels = batched_levels::<FIXTURE_TREE_HEIGHT>(&leaves);
+        let domain = HashDomain::new(MERKLE_CRH_PERSONALIZATION);
+        for level in 0..FIXTURE_TREE_HEIGHT {
+            let merkle_level = Level::from(u8::try_from(level).unwrap());
+            for (index, pair) in levels[level].chunks_exact(2).enumerate() {
+                let batched = levels[level + 1][index];
+                assert_eq!(
+                    batched,
+                    MerkleHashOrchard::combine(merkle_level, &pair[0], &pair[1]),
+                    "scalar mismatch at level {level}, index {index}"
+                );
+                assert_eq!(
+                    batched,
+                    generic_combine(&domain, merkle_level, &pair[0], &pair[1]),
+                    "generic mismatch at level {level}, index {index}"
+                );
+            }
+        }
+
+        let tv = crate::test_vectors::merkle_fixture::test_vectors();
+        assert_eq!(levels[FIXTURE_TREE_HEIGHT][0].to_bytes(), tv.root);
+        for (level, [first, last]) in tv.level_bounds.iter().enumerate() {
+            let nodes = &levels[level + 1];
+            assert_eq!(
+                nodes[0].to_bytes(),
+                *first,
+                "first node of level {}",
+                level + 1
+            );
+            assert_eq!(
+                nodes[nodes.len() - 1].to_bytes(),
+                *last,
+                "last node of level {}",
+                level + 1
+            );
+        }
+        let top: Vec<[u8; 32]> = levels[FIXTURE_TREE_HEIGHT - 2..]
+            .iter()
+            .flat_map(|nodes| nodes.iter().map(MerkleHashOrchard::to_bytes))
+            .collect();
+        assert_eq!(top, tv.top_levels);
+    }
+
+    /// Prints the `merkle_fixture` vector module for the current fixture
+    /// leaves. Run with `--ignored --nocapture` (without `weighted-merkle`,
+    /// so the upstream scalar path produces the bytes) after changing
+    /// [`testing::edge_case_leaves`] or [`testing::fixture_leaves`].
+    #[test]
+    #[ignore]
+    fn print_merkle_fixture_vectors() {
+        use crate::tree::testing::{fixture_leaves, FIXTURE_TREE_HEIGHT};
+        use alloc::{format, string::String};
+
+        fn fmt(bytes: [u8; 32], indent: &str) -> String {
+            let mut out = format!("{indent}[\n");
+            for row in bytes.chunks(14) {
+                out.push_str(indent);
+                out.push_str("    ");
+                out.push_str(
+                    &row.iter()
+                        .map(|b| format!("0x{b:02x},"))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                out.push('\n');
+            }
+            out.push_str(&format!("{indent}],\n"));
+            out
+        }
+
+        let leaves = fixture_leaves();
+        let mut nodes = leaves.clone();
+        let mut level_bounds = Vec::new();
+        let mut top_levels = Vec::new();
+        for level in 0..FIXTURE_TREE_HEIGHT {
+            let merkle_level = Level::from(u8::try_from(level).unwrap());
+            nodes = nodes
+                .chunks_exact(2)
+                .map(|pair| MerkleHashOrchard::combine(merkle_level, &pair[0], &pair[1]))
+                .collect();
+            level_bounds.push([nodes[0].to_bytes(), nodes[nodes.len() - 1].to_bytes()]);
+            if level + 1 >= FIXTURE_TREE_HEIGHT - 2 {
+                top_levels.extend(nodes.iter().map(MerkleHashOrchard::to_bytes));
+            }
+        }
+        let mut out = String::new();
+        out.push_str("// Generated by `tree::tests::print_merkle_fixture_vectors` from\n");
+        out.push_str("// `tree::testing::fixture_leaves`; do not edit by hand.\n");
+        out.push_str(&format!(
+            "// {} leaves, of which {} are edge cases (`tree::testing::edge_case_leaves`).\n\n",
+            leaves.len(),
+            crate::tree::testing::edge_case_leaves().len()
+        ));
+        out.push_str("pub(crate) struct TestVector {\n");
+        out.push_str("    /// Root of the fixture tree.\n    pub(crate) root: [u8; 32],\n");
+        out.push_str("    /// First and last node of each level above the leaves.\n");
+        out.push_str(&format!(
+            "    pub(crate) level_bounds: [[[u8; 32]; 2]; {FIXTURE_TREE_HEIGHT}],\n"
+        ));
+        out.push_str("    /// Every node of the top three levels (4 + 2 + 1, root last).\n");
+        out.push_str("    pub(crate) top_levels: [[u8; 32]; 7],\n}\n\n");
+        out.push_str("pub(crate) fn test_vectors() -> TestVector {\n    TestVector {\n");
+        out.push_str("        root: ");
+        out.push_str(fmt(nodes[0].to_bytes(), "        ").trim_start());
+        out.push_str("        level_bounds: [\n");
+        for [first, last] in level_bounds {
+            out.push_str("            [\n");
+            out.push_str(&fmt(first, "                "));
+            out.push_str(&fmt(last, "                "));
+            out.push_str("            ],\n");
+        }
+        out.push_str("        ],\n        top_levels: [\n");
+        for node in top_levels {
+            out.push_str(&fmt(node, "            "));
+        }
+        out.push_str("        ],\n    }\n}\n");
+        std::println!("{out}");
     }
 
     #[test]

@@ -6,16 +6,23 @@ already-built revisions, not for microbenchmarking isolated arithmetic.
 
 ## Merkle hashing
 
-The Merkle harness measures one parent hash and construction of a complete
-1,024-leaf subtree:
+The Merkle harness measures one parent hash and construction of complete
+subtrees, scalar and batched: a 1,024-leaf tree of seeded random leaves, and
+the 2,048-leaf edge-case fixture shared with the library's fixed-vector test
+(`orchard::tree::testing::fixture_leaves`, which is why the bench needs the
+`test-dependencies` feature; add `weighted-merkle` to time that evaluator):
 
 ```console
-cargo +1.88 bench --locked -p zakura-orchard --bench merkle
+cargo +1.88 bench --locked -p zakura-orchard --features test-dependencies --bench merkle
 ```
 
-The deterministic leaves are generated outside the timed routines. Criterion
-also excludes the per-sample clone of the leaf vector from the whole-tree
-measurement.
+The fixture's distinct leaves mix the protocol's special values, single-bit
+and single-Sinsemilla-word patterns, and the empty roots into a BLAKE2b fill,
+so the timed tree contains inputs that random sampling never produces, and
+`tree::tests::fixture_tree_matches_vectors` pins the same tree's nodes to
+fixed vectors. The deterministic leaves are generated outside the timed
+routines. Criterion also excludes the per-sample clone of the leaf vector from
+the whole-tree measurement.
 
 ## One-Action prover
 

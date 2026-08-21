@@ -115,6 +115,7 @@ harness = false
 name = "merkle"
 path = "benches/merkle.rs"
 harness = false
+required-features = ["test-dependencies"]
 
 [[bench]]
 name = "orchard_k11_prover"
