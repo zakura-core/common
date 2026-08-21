@@ -184,9 +184,9 @@ fn extract(point: pallas::Point) -> pallas::Base {
 /// Construction is intentionally explicit and potentially expensive. Callers
 /// should build this once and keep it outside timed or repeated hash paths.
 pub struct UncheckedFixedLengthHashDomain<const N: usize> {
-    initial: pallas::Point,
-    /// Affine entries `W[e][j] = [2^e] S[j]`, flattened row-major for
-    /// `0 <= e < N` and `0 <= j < 2^K`.
+    /// Affine entries `W[e][j] = [2^e] S[j]` for `0 <= e < N - 1`,
+    /// followed by the first-step accumulators
+    /// `[2^N] Q + [2^(N-1)] S[j]`. Rows are flattened row-major.
     weighted_generators: Box<[pallas::Affine]>,
 }
 
@@ -231,9 +231,20 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         assert_eq!(weighted_generators.len(), N * GENERATOR_COUNT);
 
         let initial = (0..N).fold(domain.Q, |point, _| point.double());
+        let first_row_start = (N - 1) * GENERATOR_COUNT;
+        let first_accumulator_points: Vec<_> = weighted_generators[first_row_start..]
+            .iter()
+            .map(|generator| initial + generator)
+            .collect();
+        pallas::Point::batch_normalize(
+            &first_accumulator_points,
+            &mut weighted_generators[first_row_start..],
+        );
+        assert!(weighted_generators[first_row_start..]
+            .iter()
+            .all(|point| !bool::from(point.is_identity())));
 
         Self {
-            initial,
             weighted_generators: weighted_generators.into_boxed_slice(),
         }
     }
@@ -333,21 +344,33 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     /// construction as the two-lane batched inversions elsewhere in the
     /// workspace).
     fn evaluate_batch_affine(&self, messages: &[[u16; N]]) -> Vec<pallas::Base> {
-        use group::Curve as _;
-
         let n = messages.len();
-        let initial = self.initial.to_affine();
-        let initial = initial
-            .coordinates()
-            .expect("the initial accumulator [2^N]Q is not the identity");
-        let mut xs = vec![*initial.x(); n];
-        let mut ys = vec![*initial.y(); n];
+        let mut xs = Vec::with_capacity(n);
+        let mut ys = Vec::with_capacity(n);
+        let first_word = messages[0][0];
+        let first_generator = usize::from(first_word);
+        assert!(first_generator < GENERATOR_COUNT, "invalid Sinsemilla word");
+        if messages[1..].iter().all(|message| message[0] == first_word) {
+            let (x, y) = self.first_accumulator(first_generator).raw_coordinates();
+            xs.resize(n, x);
+            ys.resize(n, y);
+        } else {
+            for message in messages {
+                let generator = usize::from(message[0]);
+                assert!(generator < GENERATOR_COUNT, "invalid Sinsemilla word");
+                let (x, y) = self.first_accumulator(generator).raw_coordinates();
+                xs.push(x);
+                ys.push(y);
+            }
+        }
         let mut table_xs = vec![pallas::Base::zero(); n];
         let mut table_ys = vec![pallas::Base::zero(); n];
         let mut dens = vec![pallas::Base::zero(); n];
         let mut scratch = vec![pallas::Base::zero(); n];
 
-        for i in 0..N {
+        // The precomputed first accumulators above replace the `i = 0`
+        // column, including its shared inversion and per-lane chord work.
+        for i in 1..N {
             let exponent = N - i - 1;
             for (lane, message) in messages.iter().enumerate() {
                 let generator = usize::from(message[i]);
@@ -390,9 +413,28 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     }
 
     fn evaluate_batch(&self, messages: &[[u16; N]]) -> Vec<pallas::Point> {
-        let mut points = vec![self.initial; messages.len()];
+        let mut points = Vec::with_capacity(messages.len());
+        if let Some(first_message) = messages.first() {
+            let first_word = first_message[0];
+            let first_generator = usize::from(first_word);
+            assert!(first_generator < GENERATOR_COUNT, "invalid Sinsemilla word");
+            if messages[1..].iter().all(|message| message[0] == first_word) {
+                points.resize(
+                    messages.len(),
+                    self.first_accumulator(first_generator).into(),
+                );
+            } else {
+                for message in messages {
+                    let generator = usize::from(message[0]);
+                    assert!(generator < GENERATOR_COUNT, "invalid Sinsemilla word");
+                    points.push(self.first_accumulator(generator).into());
+                }
+            }
+        }
 
-        for i in 0..N {
+        // The precomputed first accumulators above replace the `i = 0`
+        // column and its mixed addition.
+        for i in 1..N {
             let exponent = N - i - 1;
             let mut point_pairs = points.chunks_exact_mut(2);
             let mut message_pairs = messages.chunks_exact(2);
@@ -458,20 +500,30 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
 
     fn evaluate(&self, words: impl Iterator<Item = u16>) -> pallas::Point {
         let mut words = words;
-        let point = (0..N).fold(self.initial, |point, i| {
+        let first_word = words.next().expect("unexpected Sinsemilla word count");
+        let first_generator = usize::from(first_word);
+        assert!(first_generator < GENERATOR_COUNT, "invalid Sinsemilla word");
+        let mut point = self.first_accumulator(first_generator).into();
+
+        for i in 1..N {
             let word = words.next().expect("unexpected Sinsemilla word count");
             let generator_index = usize::from(word);
             assert!(generator_index < GENERATOR_COUNT, "invalid Sinsemilla word");
 
             let exponent = N - i - 1;
-            point + self.weighted_generator(exponent, generator_index)
-        });
+            point += self.weighted_generator(exponent, generator_index);
+        }
         assert!(words.next().is_none(), "unexpected Sinsemilla word count");
         point
     }
 
     fn weighted_generator(&self, exponent: usize, generator: usize) -> pallas::Affine {
+        debug_assert!(exponent + 1 < N);
         self.weighted_generators[exponent * GENERATOR_COUNT + generator]
+    }
+
+    fn first_accumulator(&self, generator: usize) -> pallas::Affine {
+        self.weighted_generators[(N - 1) * GENERATOR_COUNT + generator]
     }
 }
 
@@ -634,6 +686,7 @@ mod tests {
     fn weighted_table_is_a_doubling_chain() {
         let domain = HashDomain::new(MERKLE_DOMAIN);
         let weighted = UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
+        let initial = (0..MERKLE_WORDS).fold(domain.Q, |point, _| point.double());
 
         assert_eq!(
             weighted.table_bytes(),
@@ -645,19 +698,27 @@ mod tests {
                 weighted.weighted_generator(0, generator),
                 SINSEMILLA_S_AFFINE[generator]
             );
-            for exponent in 0..MERKLE_WORDS {
+            for exponent in 0..MERKLE_WORDS - 1 {
                 let entry = weighted.weighted_generator(exponent, generator);
                 assert!(!bool::from(entry.is_identity()));
                 let doubled = pallas::Point::from(entry).double().to_affine();
 
                 // Adjacent rows chain by doubling.
-                if exponent + 1 < MERKLE_WORDS {
+                if exponent + 1 < MERKLE_WORDS - 1 {
                     assert_eq!(
                         weighted.weighted_generator(exponent + 1, generator),
                         doubled
                     );
                 }
             }
+
+            let first_generator =
+                pallas::Point::from(weighted.weighted_generator(MERKLE_WORDS - 2, generator))
+                    .double();
+            assert_eq!(
+                weighted.first_accumulator(generator),
+                (initial + first_generator).to_affine()
+            );
         }
     }
 }
