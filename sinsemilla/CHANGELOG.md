@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The fixed-length weighted evaluator precomputes its first addition and, for
+  the first eight possible leading words, its second addition. This removes
+  runtime batch-affine columns from the widest Orchard Merkle tree levels at
+  the cost of a 512 KiB larger weighted table.
 - Prepared the `1.0.0-rc.2` release.
 - The batched fixed-length weighted evaluator now processes two independent
   incomplete mixed additions in parallel and omits exceptional-case checks
