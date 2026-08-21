@@ -8,6 +8,11 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The `merkle` benchmark gained `4096-leaves-distinct` and
+  `4096-leaves-distinct-batch`: a 2^12-leaf tree whose leaves are regenerated
+  in the untimed setup for every sample, from a fixed-seed stream with repeats
+  rejected, so every leaf is distinct and no sample reuses an input. The
+  fixed-vector `1024-leaves` cases are unchanged.
 - The weighted Merkle word decoder's equivalence tests now include
   deterministic edge vectors (all-zero and all-one bit patterns, both ends of
   the canonical range, dense and alternating limbs) alongside the random
