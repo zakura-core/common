@@ -19,7 +19,7 @@ use crate::spec::extract_p_bottom_batch;
 use incrementalmerkletree::{Hashable, Level};
 use pasta_curves::pallas;
 #[cfg(feature = "weighted-merkle")]
-use sinsemilla::weighted::UncheckedFixedLengthHashDomain;
+use sinsemilla::weighted::{BatchHashWorkspace, UncheckedFixedLengthHashDomain};
 use sinsemilla::HashDomain;
 
 use ff::{Field, PrimeField, PrimeFieldBits};
@@ -243,6 +243,14 @@ impl MerklePath {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MerkleHashOrchard(pallas::Base);
 
+/// Reusable allocation storage for weighted batched Merkle hashing.
+#[cfg(feature = "weighted-merkle")]
+#[derive(Debug, Default)]
+pub struct MerkleHashBatchWorkspace {
+    messages: Vec<[u16; MERKLE_CRH_WORDS]>,
+    hash: BatchHashWorkspace,
+}
+
 impl MerkleHashOrchard {
     /// Creates an incremental tree leaf digest from the specified
     /// Orchard extracted note commitment.
@@ -288,15 +296,10 @@ impl MerkleHashOrchard {
     ) -> Vec<Self> {
         #[cfg(feature = "weighted-merkle")]
         {
-            let messages: Vec<_> = pairs
-                .into_iter()
-                .map(|(left, right)| merkle_crh_words(level, left, right))
-                .collect();
-            MERKLE_CRH_DOMAIN
-                .hash_words_batch(&messages)
-                .into_iter()
-                .map(MerkleHashOrchard)
-                .collect()
+            let mut workspace = MerkleHashBatchWorkspace::default();
+            let mut output = Vec::new();
+            Self::combine_batch_with_workspace(level, pairs, &mut workspace, &mut output);
+            output
         }
 
         #[cfg(not(feature = "weighted-merkle"))]
@@ -309,6 +312,28 @@ impl MerkleHashOrchard {
             .map(|hash| MerkleHashOrchard(hash.unwrap_or(pallas::Base::zero())))
             .collect()
         }
+    }
+
+    /// Combines same-level node pairs while retaining temporary allocations
+    /// in `workspace` and reusing the capacity of `output`.
+    #[cfg(feature = "weighted-merkle")]
+    pub fn combine_batch_with_workspace<'a>(
+        level: Level,
+        pairs: impl IntoIterator<Item = (&'a Self, &'a Self)>,
+        workspace: &mut MerkleHashBatchWorkspace,
+        output: &mut Vec<Self>,
+    ) {
+        workspace.messages.clear();
+        workspace.messages.extend(
+            pairs
+                .into_iter()
+                .map(|(left, right)| merkle_crh_words(level, left, right)),
+        );
+        let hashes = MERKLE_CRH_DOMAIN
+            .hash_words_batch_with_workspace(&workspace.messages, &mut workspace.hash);
+        output.clear();
+        output.reserve(hashes.len());
+        output.extend(hashes.iter().copied().map(MerkleHashOrchard));
     }
 }
 
@@ -454,6 +479,8 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "weighted-merkle")]
+    use crate::tree::MerkleHashBatchWorkspace;
+    #[cfg(feature = "weighted-merkle")]
     use crate::{constants::sinsemilla::K, tree::merkle_crh_words};
 
     use {
@@ -495,6 +522,10 @@ mod tests {
     #[test]
     fn combine_batch_matches_scalar_at_every_level_and_width() {
         let mut rng = ChaCha20Rng::from_seed(BATCH_TEST_SEED);
+        #[cfg(feature = "weighted-merkle")]
+        let mut workspace = MerkleHashBatchWorkspace::default();
+        #[cfg(feature = "weighted-merkle")]
+        let mut workspace_output = Vec::new();
         let pairs: Vec<_> = (0..*BATCH_WIDTHS.last().expect("batch widths are nonempty"))
             .map(|_| {
                 (
@@ -518,6 +549,20 @@ mod tests {
                 );
 
                 assert_eq!(actual, expected, "level {level:?}, width {width}");
+
+                #[cfg(feature = "weighted-merkle")]
+                {
+                    MerkleHashOrchard::combine_batch_with_workspace(
+                        level,
+                        pairs[..width].iter().map(|(left, right)| (left, right)),
+                        &mut workspace,
+                        &mut workspace_output,
+                    );
+                    assert_eq!(
+                        workspace_output, expected,
+                        "workspace level {level:?}, width {width}"
+                    );
+                }
             }
         }
     }

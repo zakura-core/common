@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `MerkleHashBatchWorkspace` and
+  `MerkleHashOrchard::combine_batch_with_workspace` under the
+  `weighted-merkle` feature so repeated batched tree hashing can retain its
+  temporary allocations.
 - The weighted Merkle word decoder's equivalence tests now include
   deterministic edge vectors (all-zero and all-one bit patterns, both ends of
   the canonical range, dense and alternating limbs) alongside the random

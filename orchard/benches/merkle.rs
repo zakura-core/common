@@ -3,6 +3,8 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use group::ff::{FromUniformBytes, PrimeField};
 use incrementalmerkletree::{Hashable, Level};
+#[cfg(feature = "weighted-merkle")]
+use orchard::tree::MerkleHashBatchWorkspace;
 use orchard::tree::MerkleHashOrchard;
 use pasta_curves::pallas;
 use rand::{Rng, SeedableRng};
@@ -65,6 +67,35 @@ fn merkle_root(mut nodes: Vec<MerkleHashOrchard>) -> MerkleHashOrchard {
     nodes.pop().expect("benchmark tree is non-empty")
 }
 
+#[cfg(feature = "weighted-merkle")]
+fn merkle_root_batch(
+    mut nodes: Vec<MerkleHashOrchard>,
+    workspace: &mut MerkleHashBatchWorkspace,
+    parents: &mut Vec<MerkleHashOrchard>,
+) -> MerkleHashOrchard {
+    let mut level = 0;
+
+    while nodes.len() > 1 {
+        let merkle_level =
+            Level::from(u8::try_from(level).expect("benchmark tree height fits in u8"));
+        MerkleHashOrchard::combine_batch_with_workspace(
+            merkle_level,
+            nodes
+                .as_chunks::<CHILDREN_PER_PARENT>()
+                .0
+                .iter()
+                .map(|children| (&children[LEFT_CHILD], &children[RIGHT_CHILD])),
+            workspace,
+            parents,
+        );
+        core::mem::swap(&mut nodes, parents);
+        level += 1;
+    }
+
+    nodes.pop().expect("benchmark tree is non-empty")
+}
+
+#[cfg(not(feature = "weighted-merkle"))]
 fn merkle_root_batch(mut nodes: Vec<MerkleHashOrchard>) -> MerkleHashOrchard {
     let mut level = 0;
 
@@ -109,9 +140,19 @@ fn benchmark_merkle(c: &mut Criterion) {
         );
     });
     group.bench_function(format!("{TREE_LEAVES}-leaves-batch"), |bencher| {
+        #[cfg(feature = "weighted-merkle")]
+        let mut workspace = MerkleHashBatchWorkspace::default();
+        #[cfg(feature = "weighted-merkle")]
+        let mut parents = Vec::with_capacity(leaves.len() / CHILDREN_PER_PARENT);
         bencher.iter_batched(
             || leaves.clone(),
-            |leaves| black_box(merkle_root_batch(leaves)),
+            |leaves| {
+                #[cfg(feature = "weighted-merkle")]
+                return black_box(merkle_root_batch(leaves, &mut workspace, &mut parents));
+
+                #[cfg(not(feature = "weighted-merkle"))]
+                black_box(merkle_root_batch(leaves))
+            },
             BatchSize::LargeInput,
         );
     });
