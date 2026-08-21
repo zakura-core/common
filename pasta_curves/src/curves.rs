@@ -24,7 +24,7 @@ use ff::WithSmallOrderMulGroup;
 use super::{Fp, Fq};
 
 #[cfg(feature = "alloc")]
-use crate::arithmetic::{Coordinates, CurveAffine, CurveExt};
+use crate::arithmetic::{Coordinates, CurveAffine, CurveExt, CurveExtUnchecked};
 
 macro_rules! impl_raw_coordinates {
     (glv, $name_affine:ident, $base:ident) => {
@@ -342,6 +342,15 @@ macro_rules! new_curve_impl {
                 };
 
                 $name_affine::conditional_select(&tmp, &$name_affine::identity(), zinv.is_zero())
+            }
+        }
+
+        #[cfg(feature = "alloc")]
+        impl CurveExtUnchecked for $name {
+            fn new_jacobian_unchecked(x: Self::Base, y: Self::Base, z: Self::Base) -> Self {
+                let point = $name { x, y, z };
+                debug_assert!(bool::from(point.is_on_curve()));
+                point
             }
         }
 

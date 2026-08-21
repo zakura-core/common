@@ -62,6 +62,9 @@ and this project adheres to Rust's notion of
 
 ### Changed
 
+- Hash-to-curve now avoids redundant release-mode curve-equation checks after
+  the simplified SWU and isogeny formulas, while retaining debug assertions.
+  Vesta hash-to-curve is about 5% faster on Apple aarch64.
 - The `aarch64-asm` backend now implements runtime multiplication and
   squaring as inline assembly with register operands instead of calls into
   the assembly file. This removes the per-operation call and memory

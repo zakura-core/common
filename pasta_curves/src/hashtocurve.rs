@@ -5,7 +5,7 @@ use ff::{Field, FromUniformBytes, PrimeField};
 use static_assertions::const_assert;
 use subtle::ConstantTimeEq;
 
-use crate::arithmetic::CurveExt;
+use crate::arithmetic::{CurveExt, CurveExtUnchecked};
 
 /// Hashes over a message and writes the output to all of `buf`.
 pub fn hash_to_field<F: FromUniformBytes<64>>(
@@ -78,7 +78,7 @@ pub fn hash_to_field<F: FromUniformBytes<64>>(
 }
 
 /// Implements a degree 3 isogeny map.
-pub fn iso_map<F: Field, C: CurveExt<Base = F>, I: CurveExt<Base = F>>(
+pub fn iso_map<F: Field, C: CurveExtUnchecked<Base = F>, I: CurveExt<Base = F>>(
     p: &I,
     iso: &[C::Base; 13],
 ) -> C {
@@ -102,11 +102,15 @@ pub fn iso_map<F: Field, C: CurveExt<Base = F>, I: CurveExt<Base = F>>(
     let xo = num_x * div_y * zo;
     let yo = num_y * div_x * zo.square();
 
-    C::new_jacobian(xo, yo, zo).unwrap()
+    C::new_jacobian_unchecked(xo, yo, zo)
 }
 
 #[allow(clippy::many_single_char_names)]
-pub fn map_to_curve_simple_swu<F: PrimeField, C: CurveExt<Base = F>, I: CurveExt<Base = F>>(
+pub fn map_to_curve_simple_swu<
+    F: PrimeField,
+    C: CurveExt<Base = F>,
+    I: CurveExtUnchecked<Base = F>,
+>(
     u: &F,
     theta: F,
     z: F,
@@ -174,5 +178,36 @@ pub fn map_to_curve_simple_swu<F: PrimeField, C: CurveExt<Base = F>, I: CurveExt
     // 9. If sgn0(u) != sgn0(y), set y = -y
     let y = F::conditional_select(&(-y), &y, u.is_odd().ct_eq(&y.is_odd()));
 
-    I::new_jacobian(num_x * div, y * div3, div).unwrap()
+    I::new_jacobian_unchecked(num_x * div, y * div3, div)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{iso_map, map_to_curve_simple_swu};
+    use crate::{
+        arithmetic::CurveExt,
+        curves::{IsoEp, IsoEq},
+        Ep, Eq, Fp, Fq,
+    };
+
+    #[test]
+    fn unchecked_map_outputs_are_on_curve() {
+        for i in 0..256 {
+            let q0 = map_to_curve_simple_swu::<Fp, Ep, IsoEp>(&Fp::from(i), Ep::THETA, Ep::Z);
+            let q1 = map_to_curve_simple_swu::<Fp, Ep, IsoEp>(&Fp::from(i + 256), Ep::THETA, Ep::Z);
+            assert!(bool::from(q0.is_on_curve()));
+            assert!(bool::from(q1.is_on_curve()));
+            assert!(bool::from(
+                iso_map::<_, Ep, _>(&(q0 + q1), &Ep::ISOGENY_CONSTANTS).is_on_curve()
+            ));
+
+            let q0 = map_to_curve_simple_swu::<Fq, Eq, IsoEq>(&Fq::from(i), Eq::THETA, Eq::Z);
+            let q1 = map_to_curve_simple_swu::<Fq, Eq, IsoEq>(&Fq::from(i + 256), Eq::THETA, Eq::Z);
+            assert!(bool::from(q0.is_on_curve()));
+            assert!(bool::from(q1.is_on_curve()));
+            assert!(bool::from(
+                iso_map::<_, Eq, _>(&(q0 + q1), &Eq::ISOGENY_CONSTANTS).is_on_curve()
+            ));
+        }
+    }
 }
