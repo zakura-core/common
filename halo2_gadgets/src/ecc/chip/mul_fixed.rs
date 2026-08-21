@@ -6,10 +6,9 @@ use crate::utilities::decompose_running_sum::RunningSumConfig;
 
 use std::marker::PhantomData;
 
-use group::{
-    ff::{PrimeField, PrimeFieldBits},
-    Curve, CurveAffine as _, Group,
-};
+use group::ff::{PrimeField, PrimeFieldBits};
+#[cfg(test)]
+use group::{Curve, CurveAffine as _, Group};
 use halo2_proofs::{
     circuit::{AssignedCell, Region, Value},
     plonk::{
@@ -20,6 +19,7 @@ use halo2_proofs::{
 };
 use lazy_static::lazy_static;
 use pasta_curves::{arithmetic::CurveAffine, pallas};
+#[cfg(test)]
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 pub mod base_field_elem;
@@ -31,6 +31,7 @@ lazy_static! {
 }
 
 /// Computes the points selected by a fixed-base scalar's windows.
+#[cfg(test)]
 fn compute_window_points(base: pallas::Affine, windows: &[usize]) -> Vec<pallas::Affine> {
     assert!(!windows.is_empty());
     assert!(windows.iter().all(|window| *window < H));
@@ -71,6 +72,7 @@ fn compute_window_points(base: pallas::Affine, windows: &[usize]) -> Vec<pallas:
 /// Selects the `window`th point of the length-`H` sequence by visiting and
 /// conditionally selecting from every candidate, starting at `start` and
 /// advancing by `step`.
+#[cfg(test)]
 fn select_window_point(start: pallas::Point, step: pallas::Point, window: usize) -> pallas::Point {
     let mut candidate = start;
     let mut selected = start;
@@ -80,6 +82,47 @@ fn select_window_point(start: pallas::Point, step: pallas::Point, window: usize)
         selected = pallas::Point::conditional_select(&selected, &candidate, choice);
     }
     selected
+}
+
+#[derive(Clone, Copy)]
+struct WindowWitness {
+    x: pallas::Base,
+    y: pallas::Base,
+    u: pallas::Base,
+}
+
+fn evaluate_lagrange_polynomial(coefficients: &[pallas::Base; H], window: usize) -> pallas::Base {
+    let window = pallas::Base::from(window as u64);
+    coefficients
+        .iter()
+        .rev()
+        .copied()
+        .reduce(|accumulator, coefficient| accumulator * window + coefficient)
+        .expect("a fixed-base interpolation polynomial is non-empty")
+}
+
+fn reconstruct_window_witnesses(
+    lagrange_coeffs: &[[pallas::Base; H]],
+    us: &[[<pallas::Base as PrimeField>::Repr; H]],
+    zs: &[u64],
+    windows: &[usize],
+) -> Vec<WindowWitness> {
+    assert_eq!(lagrange_coeffs.len(), windows.len());
+    assert_eq!(us.len(), windows.len());
+    assert_eq!(zs.len(), windows.len());
+    assert!(windows.iter().all(|window| *window < H));
+
+    windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let x = evaluate_lagrange_polynomial(&lagrange_coeffs[index], *window);
+            let u = pallas::Base::from_repr(us[index][*window])
+                .expect("stored fixed-base u-coordinate is canonical");
+            let y = u.square() - pallas::Base::from(zs[index]);
+            WindowWitness { x, y, u }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,67 +270,57 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
         base: &F,
         coords_check_toggle: Selector,
     ) -> Result<(NonIdentityEccPoint, NonIdentityEccPoint), Error> {
+        let lagrange_coeffs = base.lagrange_coeffs();
+        let us = base.u();
+        let zs = base.z();
+        assert_eq!(lagrange_coeffs.len(), NUM_WINDOWS);
+        assert_eq!(us.len(), NUM_WINDOWS);
+        assert_eq!(zs.len(), NUM_WINDOWS);
+
         // Assign fixed columns for given fixed base
-        self.assign_fixed_constants::<F, NUM_WINDOWS>(region, offset, base, coords_check_toggle)?;
+        self.assign_fixed_constants::<NUM_WINDOWS>(
+            region,
+            offset,
+            &lagrange_coeffs,
+            &zs,
+            coords_check_toggle,
+        )?;
 
         let scalar_windows_usize = scalar.windows_usize();
         assert_eq!(scalar_windows_usize.len(), NUM_WINDOWS);
-        let window_points: Value<Vec<_>> = scalar_windows_usize.iter().copied().collect();
-        let window_points = window_points
-            .map(|windows| compute_window_points(base.generator(), &windows))
+        let window_witnesses: Value<Vec<_>> = scalar_windows_usize.iter().copied().collect();
+        let window_witnesses = window_witnesses
+            .map(|windows| reconstruct_window_witnesses(&lagrange_coeffs, &us, &zs, &windows))
             .transpose_vec(NUM_WINDOWS);
 
         // Initialize accumulator
-        let acc = self.process_window::<_, NUM_WINDOWS>(
-            region,
-            offset,
-            0,
-            scalar_windows_usize[0],
-            window_points[0],
-            base,
-        )?;
+        let acc = self.process_window(region, offset, 0, window_witnesses[0])?;
 
         // Process all windows excluding least and most significant windows
-        let acc = self.add_incomplete::<F, NUM_WINDOWS>(
-            region,
-            offset,
-            acc,
-            base,
-            &scalar_windows_usize,
-            &window_points,
-        )?;
+        let acc = self.add_incomplete::<NUM_WINDOWS>(region, offset, acc, &window_witnesses)?;
 
         // Process most significant window
-        let mul_b = self.process_window::<_, NUM_WINDOWS>(
+        let mul_b = self.process_window(
             region,
             offset,
             NUM_WINDOWS - 1,
-            scalar_windows_usize[NUM_WINDOWS - 1],
-            window_points[NUM_WINDOWS - 1],
-            base,
+            window_witnesses[NUM_WINDOWS - 1],
         )?;
 
         Ok((acc, mul_b))
     }
 
     /// [Specification](https://p.z.cash/halo2-0.1:ecc-fixed-mul-load-base).
-    fn assign_fixed_constants<F: FixedPoint<pallas::Affine>, const NUM_WINDOWS: usize>(
+    fn assign_fixed_constants<const NUM_WINDOWS: usize>(
         &self,
         region: &mut Region<'_, pallas::Base>,
         offset: usize,
-        base: &F,
+        lagrange_coeffs: &[[pallas::Base; H]],
+        zs: &[u64],
         coords_check_toggle: Selector,
     ) -> Result<(), Error> {
-        let mut constants = None;
-        let build_constants = || {
-            let lagrange_coeffs = base.lagrange_coeffs();
-            assert_eq!(lagrange_coeffs.len(), NUM_WINDOWS);
-
-            let z = base.z();
-            assert_eq!(z.len(), NUM_WINDOWS);
-
-            (lagrange_coeffs, z)
-        };
+        assert_eq!(lagrange_coeffs.len(), NUM_WINDOWS);
+        assert_eq!(zs.len(), NUM_WINDOWS);
 
         // Assign fixed columns for given fixed base
         for window in 0..NUM_WINDOWS {
@@ -304,13 +337,7 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
                     },
                     self.lagrange_coeffs[k],
                     window + offset,
-                    || {
-                        if constants.as_ref().is_none() {
-                            constants = Some(build_constants());
-                        }
-                        let lagrange_coeffs = &constants.as_ref().unwrap().0;
-                        Value::known(lagrange_coeffs[window][k])
-                    },
+                    || Value::known(lagrange_coeffs[window][k]),
                 )?;
             }
 
@@ -319,10 +346,7 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
                 || format!("z-value for window: {:?}", window),
                 self.fixed_z,
                 window + offset,
-                || {
-                    let z = &constants.as_ref().unwrap().1;
-                    Value::known(pallas::Base::from(z[window]))
-                },
+                || Value::known(pallas::Base::from(zs[window])),
             )?;
         }
 
@@ -330,24 +354,17 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
     }
 
     /// Assigns the values used to process a window.
-    fn process_window<F: FixedPoint<pallas::Affine>, const NUM_WINDOWS: usize>(
+    fn process_window(
         &self,
         region: &mut Region<'_, pallas::Base>,
         offset: usize,
         w: usize,
-        k_usize: Value<usize>,
-        mul_b: Value<pallas::Affine>,
-        base: &F,
+        witness: Value<WindowWitness>,
     ) -> Result<NonIdentityEccPoint, Error> {
-        let base_u = base.u();
-        assert_eq!(base_u.len(), NUM_WINDOWS);
-
         // Assign the fixed-window multiple.
         let mul_b = {
-            let mul_b = mul_b.map(|mul_b| mul_b.coordinates().unwrap());
-
-            let x = mul_b.map(|mul_b| {
-                let x = *mul_b.x();
+            let x = witness.map(|witness| {
+                let x = witness.x;
                 assert!(x != pallas::Base::zero());
                 x.into()
             });
@@ -358,8 +375,8 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
                 || x,
             )?;
 
-            let y = mul_b.map(|mul_b| {
-                let y = *mul_b.y();
+            let y = witness.map(|witness| {
+                let y = witness.y;
                 assert!(y != pallas::Base::zero());
                 y.into()
             });
@@ -374,20 +391,18 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
         };
 
         // Assign u = (y_p + z_w).sqrt()
-        let u_val = k_usize.map(|k| pallas::Base::from_repr(base_u[w][k]).unwrap());
+        let u_val = witness.map(|witness| witness.u);
         region.assign_advice(|| "u", self.u, offset + w, || u_val)?;
 
         Ok(mul_b)
     }
 
-    fn add_incomplete<F: FixedPoint<pallas::Affine>, const NUM_WINDOWS: usize>(
+    fn add_incomplete<const NUM_WINDOWS: usize>(
         &self,
         region: &mut Region<'_, pallas::Base>,
         offset: usize,
         mut acc: NonIdentityEccPoint,
-        base: &F,
-        scalar_windows_usize: &[Value<usize>],
-        window_points: &[Value<pallas::Affine>],
+        window_witnesses: &[Value<WindowWitness>],
     ) -> Result<NonIdentityEccPoint, Error> {
         for w in (0..NUM_WINDOWS)
             // The MSB is processed separately.
@@ -399,14 +414,7 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
             //
             // This assigns the coordinates of the returned point into the input cells for
             // the incomplete addition gate, which will then copy them into themselves.
-            let mul_b = self.process_window::<_, NUM_WINDOWS>(
-                region,
-                offset,
-                w,
-                scalar_windows_usize[w],
-                window_points[w],
-                base,
-            )?;
+            let mul_b = self.process_window(region, offset, w, window_witnesses[w])?;
 
             // Add to the accumulator.
             //
@@ -514,6 +522,7 @@ impl ScalarFixed {
 mod tests {
     use super::*;
     use crate::ecc::chip::{NUM_WINDOWS, NUM_WINDOWS_SHORT};
+    use crate::ecc::tests::{FullWidth, Short};
     use group::ff::Field;
 
     /// Offset applied to non-MSB windows to avoid identity points.
@@ -563,5 +572,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn assert_reconstructed_window_witnesses<F>(base: F, num_windows: usize)
+    where
+        F: FixedPoint<pallas::Affine>,
+    {
+        let lagrange_coeffs = base.lagrange_coeffs();
+        let us = base.u();
+        let zs = base.z();
+        assert_eq!(lagrange_coeffs.len(), num_windows);
+        assert_eq!(us.len(), num_windows);
+        assert_eq!(zs.len(), num_windows);
+
+        let mut cases = (0..H)
+            .map(|digit| vec![digit; num_windows])
+            .collect::<Vec<_>>();
+        cases.push((0..num_windows).map(|window| window % H).collect());
+
+        for windows in cases {
+            let expected = compute_window_points(base.generator(), &windows);
+            let reconstructed = reconstruct_window_witnesses(&lagrange_coeffs, &us, &zs, &windows);
+            for (expected, reconstructed) in expected.iter().zip(reconstructed) {
+                let expected = expected.coordinates().unwrap();
+                assert_eq!(*expected.x(), reconstructed.x);
+                assert_eq!(*expected.y(), reconstructed.y);
+            }
+        }
+    }
+
+    #[test]
+    fn reconstructed_window_witnesses_match_curve_points() {
+        assert_reconstructed_window_witnesses(FullWidth::from_pallas_generator(), NUM_WINDOWS);
+        assert_reconstructed_window_witnesses(Short, NUM_WINDOWS_SHORT);
     }
 }
