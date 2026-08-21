@@ -99,6 +99,11 @@ harness = false
 required-features = ["alloc"]
 
 [[bench]]
+name = "mul_dependency"
+path = "benches/mul_dependency.rs"
+harness = false
+
+[[bench]]
 name = "point"
 path = "benches/point.rs"
 harness = false
