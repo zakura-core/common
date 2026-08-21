@@ -59,7 +59,7 @@
 //! [Pasta curve parameters]: https://electriccoin.co/blog/the-pasta-curves-for-halo-2-and-beyond/
 //! [Pollard-rho work estimate]: https://eprint.iacr.org/2019/1021.pdf#page=13
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::mem;
 
 use group::{Curve, CurveAffine as _, Group};
@@ -199,6 +199,22 @@ pub struct UncheckedFixedLengthHashDomain<const N: usize> {
     fused_first_two: Box<[pallas::Affine]>,
 }
 
+/// Reusable allocation storage for batched weighted hash evaluation.
+///
+/// The buffers remain separate allocations so the evaluator retains the
+/// aliasing properties of its one-shot path. Retaining this value across
+/// calls reuses their capacities.
+#[derive(Debug, Default)]
+pub struct BatchHashWorkspace {
+    points: Vec<pallas::Point>,
+    xs: Vec<pallas::Base>,
+    ys: Vec<pallas::Base>,
+    table_xs: Vec<pallas::Base>,
+    table_ys: Vec<pallas::Base>,
+    denominators: Vec<pallas::Base>,
+    inversion_scratch: Vec<pallas::Base>,
+}
+
 impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     /// Precomputes the position-weighted table for `domain`.
     ///
@@ -307,14 +323,34 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     ///
     /// Panics if any word is not a valid [`K`]-bit Sinsemilla word.
     pub fn hash_words_batch(&self, messages: &[[u16; N]]) -> Vec<pallas::Base> {
+        let mut workspace = BatchHashWorkspace::default();
+        self.hash_words_batch_with_workspace(messages, &mut workspace);
+        workspace.xs
+    }
+
+    /// Evaluates a batch while retaining temporary allocations in
+    /// `workspace`, and returns the extracted hashes stored there.
+    ///
+    /// The returned slice remains valid until `workspace` is mutably borrowed
+    /// again. An empty batch returns an empty slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any word is not a valid [`K`]-bit Sinsemilla word.
+    pub fn hash_words_batch_with_workspace<'a>(
+        &self,
+        messages: &[[u16; N]],
+        workspace: &'a mut BatchHashWorkspace,
+    ) -> &'a [pallas::Base] {
         use group::ff::Field;
         use pasta_curves::arithmetic::CurveExt;
 
         if messages.len() >= BATCH_AFFINE_MIN_MESSAGES {
-            return self.evaluate_batch_affine(messages);
+            self.evaluate_batch_affine(messages, workspace);
+            return &workspace.xs;
         }
 
-        let points = self.evaluate_batch(messages);
+        self.evaluate_batch(messages, &mut workspace.points);
 
         // Fused batch x-extraction, sharing one field inversion across the
         // batch. A full `batch_normalize` would also compute every
@@ -328,9 +364,11 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         // reachable through the infeasible exceptional cases (see the
         // module docs) — extracts to zero, matching [`extract`], and an
         // empty batch runs zero iterations around an inversion of one.
-        let mut hashes = vec![pallas::Base::zero(); points.len()];
+        workspace
+            .xs
+            .resize(workspace.points.len(), pallas::Base::zero());
         let mut acc = pallas::Base::one();
-        for (point, slot) in points.iter().zip(hashes.iter_mut()) {
+        for (point, slot) in workspace.points.iter().zip(workspace.xs.iter_mut()) {
             let (_, _, z) = point.jacobian_coordinates();
             *slot = acc;
             if !z.is_zero_vartime() {
@@ -339,7 +377,7 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         }
         // Skipped (identity) points never enter the product.
         let mut acc = acc.invert().unwrap();
-        for (point, slot) in points.iter().zip(hashes.iter_mut()).rev() {
+        for (point, slot) in workspace.points.iter().zip(workspace.xs.iter_mut()).rev() {
             let (x, _, z) = point.jacobian_coordinates();
             if z.is_zero_vartime() {
                 *slot = pallas::Base::zero();
@@ -349,7 +387,7 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
                 *slot = x * square_with_runtime_backend(&z_inv);
             }
         }
-        hashes
+        &workspace.xs
     }
 
     /// Evaluates a batch on **affine** accumulators: every lane performs its
@@ -373,10 +411,21 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     /// even/odd lanes so the dependency chains overlap (the same
     /// construction as the two-lane batched inversions elsewhere in the
     /// workspace).
-    fn evaluate_batch_affine(&self, messages: &[[u16; N]]) -> Vec<pallas::Base> {
+    fn evaluate_batch_affine(&self, messages: &[[u16; N]], workspace: &mut BatchHashWorkspace) {
         let n = messages.len();
-        let mut xs = Vec::with_capacity(n);
-        let mut ys = Vec::with_capacity(n);
+        let BatchHashWorkspace {
+            xs,
+            ys,
+            table_xs,
+            table_ys,
+            denominators,
+            inversion_scratch,
+            ..
+        } = workspace;
+        xs.clear();
+        ys.clear();
+        xs.reserve(n);
+        ys.reserve(n);
         let first_word = messages[0][0];
         let first_generator = usize::from(first_word);
         assert!(first_generator < GENERATOR_COUNT, "invalid Sinsemilla word");
@@ -410,10 +459,10 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
             }
             1
         };
-        let mut table_xs = vec![pallas::Base::zero(); n];
-        let mut table_ys = vec![pallas::Base::zero(); n];
-        let mut dens = vec![pallas::Base::zero(); n];
-        let mut scratch = vec![pallas::Base::zero(); n];
+        table_xs.resize(n, pallas::Base::zero());
+        table_ys.resize(n, pallas::Base::zero());
+        denominators.resize(n, pallas::Base::zero());
+        inversion_scratch.resize(n, pallas::Base::zero());
 
         // The precomputed first accumulators above replace the `i = 0`
         // column, including its shared inversion and per-lane chord work.
@@ -429,17 +478,17 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
                     .raw_coordinates();
                 table_xs[lane] = table_x;
                 table_ys[lane] = table_y;
-                dens[lane] = table_xs[lane] - xs[lane];
+                denominators[lane] = table_xs[lane] - xs[lane];
             }
 
-            batch_invert_nonzero(&mut dens, &mut scratch);
+            batch_invert_nonzero(denominators, inversion_scratch);
 
             // Affine chord additions, two lanes interleaved.
             let pairs = n / 2;
             for pair in 0..pairs {
                 let (a, b) = (2 * pair, 2 * pair + 1);
-                let lambda_a = (table_ys[a] - ys[a]) * dens[a];
-                let lambda_b = (table_ys[b] - ys[b]) * dens[b];
+                let lambda_a = (table_ys[a] - ys[a]) * denominators[a];
+                let lambda_b = (table_ys[b] - ys[b]) * denominators[b];
                 let x3_a = square_with_runtime_backend(&lambda_a) - xs[a] - table_xs[a];
                 let x3_b = square_with_runtime_backend(&lambda_b) - xs[b] - table_xs[b];
                 ys[a] = lambda_a * (xs[a] - x3_a) - ys[a];
@@ -449,18 +498,17 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
             }
             if n % 2 == 1 {
                 let a = n - 1;
-                let lambda = (table_ys[a] - ys[a]) * dens[a];
+                let lambda = (table_ys[a] - ys[a]) * denominators[a];
                 let x3 = square_with_runtime_backend(&lambda) - xs[a] - table_xs[a];
                 ys[a] = lambda * (xs[a] - x3) - ys[a];
                 xs[a] = x3;
             }
         }
-
-        xs
     }
 
-    fn evaluate_batch(&self, messages: &[[u16; N]]) -> Vec<pallas::Point> {
-        let mut points = Vec::with_capacity(messages.len());
+    fn evaluate_batch(&self, messages: &[[u16; N]], points: &mut Vec<pallas::Point>) {
+        points.clear();
+        points.reserve(messages.len());
         let mut start = 1;
         if let Some(first_message) = messages.first() {
             let first_word = first_message[0];
@@ -528,8 +576,6 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
                 *point += self.weighted_generator(exponent, generator);
             }
         }
-
-        points
     }
 
     /// Evaluates a bit iterator whose padded representation is exactly `N`
@@ -707,6 +753,7 @@ mod tests {
     fn batch_matches_individual_word_evaluation() {
         let domain = HashDomain::new(MERKLE_DOMAIN);
         let weighted = UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
+        let mut workspace = super::BatchHashWorkspace::default();
         let mut state = 0x5369_6e73_656d_696c;
         let messages: Vec<_> = (0..64)
             .map(|_| {
@@ -736,8 +783,17 @@ mod tests {
                 "width {}",
                 width
             );
+            assert_eq!(
+                weighted.hash_words_batch_with_workspace(&messages[..width], &mut workspace,),
+                &expected[..width],
+                "workspace width {}",
+                width
+            );
         }
         assert!(weighted.hash_words_batch(&[]).is_empty());
+        assert!(weighted
+            .hash_words_batch_with_workspace(&[], &mut workspace)
+            .is_empty());
     }
 
     #[test]

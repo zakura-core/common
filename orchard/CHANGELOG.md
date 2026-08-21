@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `MerkleHashBatchWorkspace` and
+  `MerkleHashOrchard::combine_batch_with_workspace` under the
+  `weighted-merkle` feature so repeated batched tree hashing can retain its
+  temporary allocations.
 - Prepared the `1.0.0-rc.3` release.
 - Orchard proving-key generation now uses precomputed fixed-base Lagrange
   coefficients instead of recomputing them during every circuit synthesis.
