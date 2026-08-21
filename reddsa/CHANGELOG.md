@@ -13,10 +13,12 @@ and this project adheres to Rust's notion of
   multiplications (all inputs are public). With the `alloc` feature this uses
   the GLV endomorphism on Pallas (RedPallas) and the existing wNAF Straus
   ladder on Jubjub (RedJubjub); without `alloc` the previous code is kept.
-- RedPallas batch verification now uses GLV-split scalars on one shared
-  doubling ladder (`pasta_curves::glv::sum_of_products_vartime`), halving the
-  ladder's doublings relative to the width-5 wNAF Straus multiscalar
-  multiplication it replaces. The `alloc` feature now enables
+- RedPallas multiscalar multiplication (used by batch verification) now uses
+  GLV-split scalars on one shared doubling ladder
+  (`pasta_curves::glv::sum_of_products_vartime`) for sums of up to 32 terms,
+  where halving the doublings wins; larger sums keep the width-5 wNAF Straus
+  ladder, whose sparser digits win once additions dominate (measured crossover
+  on both benchmark architectures). The `alloc` feature now enables
   `pasta_curves/glv`.
 - Prepared the `1.0.0-rc.2` release.
 - Updated to `group 0.14` and the Zakura Pasta and Jubjub forks, while retaining
