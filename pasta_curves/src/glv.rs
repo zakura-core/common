@@ -793,6 +793,9 @@ struct PendingAffineAddition<F> {
     inversion_scratch: F,
 }
 
+/// Independent multiplication lanes used by batch inversion.
+const BATCH_INVERSION_LANES: usize = 2;
+
 /// Inverts every denominator, returning `None` if their product is zero.
 ///
 /// The failure must propagate through [`try_multiexp`] so verifier callers can
@@ -803,19 +806,44 @@ fn batch_invert_denominators<F: Field>(additions: &mut [PendingAffineAddition<F>
         return Some(());
     }
 
-    let mut product = F::ONE;
-    for addition in additions.iter_mut() {
-        addition.inversion_scratch = product;
-        product *= addition.denominator;
+    // Compute two prefix lanes in lockstep. This retains one field inversion
+    // for the entire batch while exposing independent multiplication chains.
+    let mut lane_products = [F::ONE; BATCH_INVERSION_LANES];
+    for pair in additions.chunks_mut(BATCH_INVERSION_LANES) {
+        for (addition, product) in pair.iter_mut().zip(&mut lane_products) {
+            addition.inversion_scratch = *product;
+            *product *= addition.denominator;
+        }
     }
 
+    // Invert both lane products with one inversion.
+    let product = lane_products[0] * lane_products[1];
     // Pasta base-field inversion is variable-time, which is appropriate
     // because MSM scalars and points are public.
-    let mut product_inverse = Option::<F>::from(product.invert())?;
-    for addition in additions.iter_mut().rev() {
+    let product_inverse = Option::<F>::from(product.invert())?;
+    let mut lane_inverses = [
+        lane_products[1] * product_inverse,
+        lane_products[0] * product_inverse,
+    ];
+
+    // If the last pair is incomplete, consume its first lane before walking
+    // the complete pairs backward.
+    let complete_pairs = additions.len() / BATCH_INVERSION_LANES;
+    if additions.len() % BATCH_INVERSION_LANES != 0 {
+        let addition = &mut additions[additions.len() - 1];
         let denominator = addition.denominator;
-        addition.denominator = addition.inversion_scratch * product_inverse;
-        product_inverse *= denominator;
+        addition.denominator = addition.inversion_scratch * lane_inverses[0];
+        lane_inverses[0] *= denominator;
+    }
+    for pair in additions[..complete_pairs * BATCH_INVERSION_LANES]
+        .chunks_mut(BATCH_INVERSION_LANES)
+        .rev()
+    {
+        for (addition, lane_inverse) in pair.iter_mut().zip(&mut lane_inverses) {
+            let denominator = addition.denominator;
+            addition.denominator = addition.inversion_scratch * *lane_inverse;
+            *lane_inverse *= denominator;
+        }
     }
     Some(())
 }
@@ -919,7 +947,28 @@ fn reduce_affine_buckets<F: Field>(
         }
 
         batch_invert_denominators(&mut pending)?;
-        for addition in pending {
+        // Affine chord additions, two lanes interleaved.
+        let pairs = pending.len() / BATCH_INVERSION_LANES;
+        for pair in 0..pairs {
+            let first = &pending[BATCH_INVERSION_LANES * pair];
+            let second = &pending[BATCH_INVERSION_LANES * pair + 1];
+            let first_slope = first.numerator * first.denominator;
+            let second_slope = second.numerator * second.denominator;
+            let first_x = first_slope.square() - first.x_sum;
+            let second_x = second_slope.square() - second.x_sum;
+            let first_y = first_slope * (first.left_x - first_x) - first.left_y;
+            let second_y = second_slope * (second.left_x - second_x) - second.left_y;
+            next_points[first.output] = AffinePoint {
+                x: first_x,
+                y: first_y,
+            };
+            next_points[second.output] = AffinePoint {
+                x: second_x,
+                y: second_y,
+            };
+        }
+        if pending.len() % BATCH_INVERSION_LANES != 0 {
+            let addition = &pending[pending.len() - 1];
             let slope = addition.numerator * addition.denominator;
             let x = slope.square() - addition.x_sum;
             let y = slope * (addition.left_x - x) - addition.left_y;
@@ -2513,6 +2562,44 @@ mod tests {
         }
 
         (scalars, bases, generator * expected_scalar)
+    }
+
+    fn batch_inversion_two_lanes_matches_individual<F>()
+    where
+        F: Field + From<u64>,
+    {
+        const LENGTHS: [usize; 13] = [0, 1, 2, 3, 31, 32, 33, 63, 64, 65, 255, 256, 257];
+
+        for length in LENGTHS {
+            let mut additions = (0..length)
+                .map(|index| PendingAffineAddition {
+                    output: index,
+                    left_x: F::ZERO,
+                    left_y: F::ZERO,
+                    x_sum: F::ZERO,
+                    numerator: F::ZERO,
+                    denominator: F::from(u64::try_from(index + 1).unwrap()),
+                    inversion_scratch: F::ZERO,
+                })
+                .collect::<Vec<_>>();
+
+            batch_invert_denominators(&mut additions)
+                .expect("nonzero denominators must be invertible");
+            for (index, addition) in additions.iter().enumerate() {
+                let original = F::from(u64::try_from(index + 1).unwrap());
+                assert_eq!(
+                    addition.denominator * original,
+                    F::ONE,
+                    "two-lane inversion mismatch at length {length}, index {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batch_inversion_two_lanes() {
+        batch_inversion_two_lanes_matches_individual::<crate::Fp>();
+        batch_inversion_two_lanes_matches_individual::<crate::Fq>();
     }
 
     fn optimized_multiexp_matches_expected<C: GlvParams>() {
