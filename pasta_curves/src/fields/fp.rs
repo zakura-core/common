@@ -1289,9 +1289,15 @@ fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
     // inline `mul`, with `R2`/`R3` as the rhs. The five-limb accumulator
     // tolerates an unreduced lhs only while every rhs limb is at most
     // `2^64 - 4` (see the contract in `aarch64_asm.rs`); assert the
-    // constants keep that invariant, then pin the behaviour against the
-    // portable implementation on the most adversarial inputs known.
-    for by in [R2, R3] {
+    // selected rhs values keep that invariant, then pin the behaviour against
+    // the portable implementation on the most adversarial inputs known.
+    let mut max_canonical = MODULUS;
+    max_canonical.0[0] -= 1;
+    let dense_limb = u64::MAX - 3;
+    let mut dense_canonical = Fp([dense_limb; 4]);
+    dense_canonical.0[3] = MODULUS.0[3] - 1;
+    let canonical_rhs = [R2, R3, max_canonical, dense_canonical];
+    for by in canonical_rhs {
         for limb in by.0 {
             assert!(limb <= u64::MAX - 3);
         }
@@ -1314,6 +1320,10 @@ fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
     check(Fp([u64::MAX; 4]), R3);
     check(forced_q_r2, R2);
     check(forced_q_r3, R3);
+    // These maximize the full 256-bit lhs while taking the canonical rhs
+    // close to p. They exercise the final candidate's `T < 2p < R` bound.
+    check(Fp([u64::MAX; 4]), max_canonical);
+    check(Fp([u64::MAX; 4]), dense_canonical);
 
     let mut rng = rand_xorshift::XorShiftRng::from_seed([0x9d; 16]);
     for i in 0..20_000u32 {

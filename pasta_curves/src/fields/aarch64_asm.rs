@@ -42,6 +42,14 @@
 //! `fq.rs` still pin the unreduced-`lhs` behaviour against the `R2`/`R3`
 //! constants in case a future caller relies on it.
 //!
+//! The canonical-`rhs` requirement and the accumulator no-wrap requirement
+//! are separate. Canonical `rhs` gives `rhs < p`; the per-limb bound above
+//! does not imply this. If `m < R` is the Montgomery cancellation factor and
+//! `lhs < R` is any four-limb value, the final candidate satisfies
+//! `(lhs * rhs + m * p) / R < 2p < R`. The separate per-limb condition only
+//! ensures that the implementation computes this candidate without an
+//! intermediate five-limb addition wrapping.
+//!
 //! There are no branches and no memory accesses inside the blocks, so the
 //! code is constant-time.
 
@@ -230,20 +238,20 @@ pub(super) fn mul(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, inv: u64) -> Limbs 
             "lsr {t3}, {q}, #2",                // t3 = high(q * p[3]).
             "adc {r4}, {r4}, xzr",              // Propagate carry to limb 4.
 
-            // Shift out the fourth cancelled limb. r4 records any 257th bit.
+            // Shift out the fourth cancelled limb. Canonical rhs gives
+            // lhs*rhs < R*p, and m < R gives m*p < R*p. Thus the candidate
+            // (lhs*rhs + m*p)/R is below 2p < R, so no fifth limb exists.
             "adds {r0}, {r1}, {t0}",            // Final candidate limb 0.
             "adcs {r1}, {r2}, {t1}",            // Final candidate limb 1.
             "adcs {r2}, {r3}, xzr",             // Final candidate limb 2.
             "adcs {r3}, {r4}, {t3}",            // Final candidate limb 3.
-            "adc {r4}, xzr, xzr",               // Final candidate carry limb.
 
-            // Subtract the five-limb value p = [p0,p1,0,p3,0].
+            // Subtract p = [p0,p1,0,p3].
             "mov {q}, #0x4000000000000000",     // Materialize p3 = 2^62.
             "subs {t0}, {r0}, {p0}",            // Tentative result limb 0 = candidate - p[0].
             "sbcs {t1}, {r1}, {p1}",            // Tentative result limb 1 minus p[1].
             "sbcs {t2}, {r2}, xzr",             // Tentative result limb 2; p[2] is zero.
             "sbcs {t3}, {r3}, {q}",             // Tentative result limb 3 minus p[3].
-            "sbcs xzr, {r4}, xzr",              // Include the carry limb in the comparison.
 
             // `lo` means subtraction borrowed, so retain the original candidate.
             "csel {r0}, {r0}, {t0}, lo",        // Select canonical output limb 0.
