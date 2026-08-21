@@ -693,11 +693,12 @@ fn normalize_62<P: InvParams>(r: &mut Signed62, sign: i64) {
 
     // Add the modulus if the input is negative, bringing r to (-m, m); then
     // negate if requested (still (-m, m)). All limbs remain within i64.
+    // Limb 3 of both Pasta moduli is zero (pinned by the const assertions
+    // above), so the conditional add skips it, as the coefficient updates do.
     let mut cond_add = r4 >> 63;
     r0 += P::MODULUS[0] & cond_add;
     r1 += P::MODULUS[1] & cond_add;
     r2 += P::MODULUS[2] & cond_add;
-    r3 += P::MODULUS[3] & cond_add;
     r4 += P::MODULUS[4] & cond_add;
     let cond_negate = sign >> 63;
     r0 = (r0 ^ cond_negate) - cond_negate;
@@ -720,7 +721,6 @@ fn normalize_62<P: InvParams>(r: &mut Signed62, sign: i64) {
     r0 += P::MODULUS[0] & cond_add;
     r1 += P::MODULUS[1] & cond_add;
     r2 += P::MODULUS[2] & cond_add;
-    r3 += P::MODULUS[3] & cond_add;
     r4 += P::MODULUS[4] & cond_add;
     r1 += r0 >> 62;
     r0 &= MASK62 as i64;

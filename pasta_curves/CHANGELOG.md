@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The divstep inversion's final normalization no longer performs the
+  conditional add for limb 3 of the modulus, which is zero for both Pasta
+  moduli in the signed radix-$2^{62}$ representation (the coefficient updates
+  already skipped it). Source-level cleanup; the generated code is unchanged.
 - `Curve::batch_normalize` now runs its Montgomery batch inversion as two
   interleaved even/odd accumulator lanes for batches of 32 or more points
   (three extra multiplications per batch, one shared inversion), preserving the
