@@ -3,10 +3,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use group::ff::{FromUniformBytes, PrimeField};
 use incrementalmerkletree::{Hashable, Level};
-use orchard::tree::{
-    testing::{fixture_leaves as edge_fixture_leaves, FIXTURE_LEAVES},
-    MerkleHashOrchard,
-};
+use orchard::tree::MerkleHashOrchard;
 use pasta_curves::pallas;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -118,31 +115,6 @@ fn benchmark_merkle(c: &mut Criterion) {
             BatchSize::LargeInput,
         );
     });
-
-    // The 2,048-leaf edge-case fixture shared with the library's fixed-vector
-    // test (`tree::tests::fixture_tree_matches_vectors`): distinct leaves
-    // mixing protocol special values, single-bit and single-word patterns,
-    // and empty roots into a BLAKE2b fill, so the timed tree contains the
-    // inputs that random sampling never produces.
-    let fixture = edge_fixture_leaves();
-    group.throughput(Throughput::Elements((FIXTURE_LEAVES - 1) as u64));
-    group.bench_function(format!("{FIXTURE_LEAVES}-leaves-fixture"), |bencher| {
-        bencher.iter_batched(
-            || fixture.clone(),
-            |leaves| black_box(merkle_root(leaves)),
-            BatchSize::LargeInput,
-        );
-    });
-    group.bench_function(
-        format!("{FIXTURE_LEAVES}-leaves-fixture-batch"),
-        |bencher| {
-            bencher.iter_batched(
-                || fixture.clone(),
-                |leaves| black_box(merkle_root_batch(leaves)),
-                BatchSize::LargeInput,
-            );
-        },
-    );
     group.finish();
 }
 
