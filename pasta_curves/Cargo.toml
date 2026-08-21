@@ -87,6 +87,11 @@ path = "benches/fq.rs"
 harness = false
 
 [[bench]]
+name = "mont_simd"
+path = "benches/mont_simd.rs"
+harness = false
+
+[[bench]]
 name = "glv"
 path = "benches/glv.rs"
 harness = false
