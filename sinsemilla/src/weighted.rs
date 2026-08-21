@@ -84,6 +84,13 @@ const GENERATOR_COUNT: usize = 1 << K;
 /// rebuild the 16-lane level holds 16 of 1023 combines.
 const BATCH_AFFINE_MIN_MESSAGES: usize = 32;
 
+#[inline(always)]
+fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
+    // Method syntax selects `pallas::Base`'s portable inherent `const fn`.
+    // Trait dispatch selects the configured runtime backend instead.
+    group::ff::Field::square(value)
+}
+
 /// Two-lane Montgomery batch inversion for provably nonzero values (the
 /// chord denominators of [`UncheckedFixedLengthHashDomain::evaluate_batch_affine`]).
 ///
@@ -298,7 +305,7 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
             } else {
                 let z_inv = acc * *slot;
                 acc *= z;
-                *slot = x * z_inv.square();
+                *slot = x * square_with_runtime_backend(&z_inv);
             }
         }
         hashes
@@ -362,8 +369,8 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
                 let (a, b) = (2 * pair, 2 * pair + 1);
                 let lambda_a = (table_ys[a] - ys[a]) * dens[a];
                 let lambda_b = (table_ys[b] - ys[b]) * dens[b];
-                let x3_a = lambda_a.square() - xs[a] - table_xs[a];
-                let x3_b = lambda_b.square() - xs[b] - table_xs[b];
+                let x3_a = square_with_runtime_backend(&lambda_a) - xs[a] - table_xs[a];
+                let x3_b = square_with_runtime_backend(&lambda_b) - xs[b] - table_xs[b];
                 ys[a] = lambda_a * (xs[a] - x3_a) - ys[a];
                 ys[b] = lambda_b * (xs[b] - x3_b) - ys[b];
                 xs[a] = x3_a;
@@ -372,7 +379,7 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
             if n % 2 == 1 {
                 let a = n - 1;
                 let lambda = (table_ys[a] - ys[a]) * dens[a];
-                let x3 = lambda.square() - xs[a] - table_xs[a];
+                let x3 = square_with_runtime_backend(&lambda) - xs[a] - table_xs[a];
                 ys[a] = lambda * (xs[a] - x3) - ys[a];
                 xs[a] = x3;
             }

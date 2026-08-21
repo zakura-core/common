@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Weighted batch evaluation now uses the configured runtime field backend for
+  squaring.
 - Prepared the `1.0.0-rc.2` release.
 - The batched fixed-length weighted evaluator now processes two independent
   incomplete mixed additions in parallel and omits exceptional-case checks
