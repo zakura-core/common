@@ -479,6 +479,45 @@ mod tests {
     /// Fixed seed makes the scalar-equivalence test deterministic.
     const BATCH_TEST_SEED: [u8; 32] = [0x42; 32];
 
+    /// These commitment values are derived from the bundle data that was generated for
+    /// testing commitment tree construction inside of zcashd here.
+    /// <https://github.com/zcash/zcash/blob/ecec1f9769a5e37eb3f7fd89a4fcfb35bc28eed7/src/test/data/merkle_roots_orchard.h>
+    const ZCASHD_COMMITMENTS: [[u8; 32]; 5] = [
+        [
+            0x68, 0x13, 0x5c, 0xf4, 0x99, 0x33, 0x22, 0x90, 0x99, 0xa4, 0x4e, 0xc9, 0x9a, 0x75,
+            0xe1, 0xe1, 0xcb, 0x46, 0x40, 0xf9, 0xb5, 0xbd, 0xec, 0x6b, 0x32, 0x23, 0x85, 0x6f,
+            0xea, 0x16, 0x39, 0x0a,
+        ],
+        [
+            0x78, 0x31, 0x50, 0x08, 0xfb, 0x29, 0x98, 0xb4, 0x30, 0xa5, 0x73, 0x1d, 0x67, 0x26,
+            0x20, 0x7d, 0xc0, 0xf0, 0xec, 0x81, 0xea, 0x64, 0xaf, 0x5c, 0xf6, 0x12, 0x95, 0x69,
+            0x01, 0xe7, 0x2f, 0x0e,
+        ],
+        [
+            0xee, 0x94, 0x88, 0x05, 0x3a, 0x30, 0xc5, 0x96, 0xb4, 0x30, 0x14, 0x10, 0x5d, 0x34,
+            0x77, 0xe6, 0xf5, 0x78, 0xc8, 0x92, 0x40, 0xd1, 0xd1, 0xee, 0x17, 0x43, 0xb7, 0x7b,
+            0xb6, 0xad, 0xc4, 0x0a,
+        ],
+        [
+            0x9d, 0xdc, 0xe7, 0xf0, 0x65, 0x01, 0xf3, 0x63, 0x76, 0x8c, 0x5b, 0xca, 0x3f, 0x26,
+            0x46, 0x60, 0x83, 0x4d, 0x4d, 0xf4, 0x46, 0xd1, 0x3e, 0xfc, 0xd7, 0xc6, 0xf1, 0x7b,
+            0x16, 0x7a, 0xac, 0x1a,
+        ],
+        [
+            0xbd, 0x86, 0x16, 0x81, 0x1c, 0x6f, 0x5f, 0x76, 0x9e, 0xa4, 0x53, 0x9b, 0xba, 0xff,
+            0x0f, 0x19, 0x8a, 0x6c, 0xdf, 0x3b, 0x28, 0x0d, 0xd4, 0x99, 0x26, 0x16, 0x3b, 0xd5,
+            0x3f, 0x53, 0xa1, 0x21,
+        ],
+    ];
+
+    /// This value was produced by the Python test vector generation code implemented here:
+    /// <https://github.com/zcash-hackworks/zcash-test-vectors/blob/f4d756410c8f2456f5d84cedf6dac6eb8c068eed/orchard_merkle_tree.py>
+    const ZCASHD_ANCHOR: [u8; 32] = [
+        0xc8, 0x75, 0xbe, 0x2d, 0x60, 0x87, 0x3f, 0x8b, 0xcd, 0xeb, 0x91, 0x28, 0x2e, 0x64, 0x2e,
+        0x0c, 0xc6, 0x5f, 0xf7, 0xd0, 0x64, 0x2d, 0x13, 0x7b, 0x28, 0xcf, 0x28, 0xcc, 0x9c, 0x52,
+        0x7f, 0x0e,
+    ];
+
     fn combine_with_fresh_domain(
         level: Level,
         left: &MerkleHashOrchard,
@@ -644,6 +683,141 @@ mod tests {
         }
     }
 
+    /// Folds `leaves` up to a single depth-`DEPTH` root using one
+    /// [`MerkleHashOrchard::combine_batch`] call per level. Levels with an odd
+    /// number of nodes are right-padded with the protocol's fixed empty-root
+    /// vector for that level (not the crate's own `empty_root`), so every
+    /// input the batch sees is pinned to external bytes. Returns the nodes of
+    /// every level from the leaves (index 0) to the root (index `DEPTH`).
+    fn batched_levels<const DEPTH: usize>(
+        leaves: &[MerkleHashOrchard],
+    ) -> Vec<Vec<MerkleHashOrchard>> {
+        let empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
+        let mut levels = vec![leaves.to_vec()];
+        for level in 0..DEPTH {
+            let mut nodes = levels[level].clone();
+            if nodes.len() % 2 == 1 {
+                nodes.push(MerkleHashOrchard::from_bytes(&empty_roots[level]).unwrap());
+            }
+            let pairs = nodes.chunks_exact(2).map(|pair| (&pair[0], &pair[1]));
+            let parents =
+                MerkleHashOrchard::combine_batch(Level::from(u8::try_from(level).unwrap()), pairs);
+            assert_eq!(parents.len(), nodes.len() / 2);
+            levels.push(parents);
+        }
+        assert_eq!(levels[DEPTH].len(), 1);
+        levels
+    }
+
+    /// Pins the batched combine to the zcash-test-vectors Merkle path set:
+    /// sixteen depth-4 trees whose leaves, authentication paths, and roots
+    /// are all fixed bytes. Unlike the empty-root vectors, these pairs have
+    /// distinct (and, for partially filled trees, asymmetric) children. Every
+    /// internal node is the path sibling of some leaf, so every output of
+    /// every batch is checked against external bytes; all sixteen trees'
+    /// pairs at a level go through one call (widths 128, 64, 32, 16), which
+    /// also covers the large-batch evaluator under `weighted-merkle`.
+    #[test]
+    fn combine_batch_matches_merkle_path_vectors() {
+        const DEPTH: usize = 4;
+        const LEAVES: usize = 1 << DEPTH;
+        let vectors = crate::test_vectors::merkle_path::test_vectors();
+        assert_eq!(vectors.len(), LEAVES);
+
+        // Expected node at (level, index), from the authentication paths: the
+        // sibling of leaf `j` at level `l` is the node at index `(j >> l) ^ 1`,
+        // so index `k` is the level-`l` path entry of leaf `(k ^ 1) << l`.
+        let expected = |tv: &crate::test_vectors::merkle_path::TestVector,
+                        level: usize,
+                        index: usize|
+         -> [u8; 32] {
+            if level == DEPTH {
+                tv.root
+            } else {
+                tv.paths[(index ^ 1) << level][level]
+            }
+        };
+
+        // Per-tree folds: each tree's pairs batched on their own (widths 8,
+        // 4, 2, 1), with every node and the root checked.
+        let mut per_level_nodes: Vec<Vec<Vec<MerkleHashOrchard>>> = Vec::new();
+        for tv in &vectors {
+            let leaves: Vec<_> = tv
+                .leaves
+                .iter()
+                .map(|leaf| MerkleHashOrchard::from_bytes(leaf).unwrap())
+                .collect();
+            let levels = batched_levels::<DEPTH>(&leaves);
+            for (level, nodes) in levels.iter().enumerate() {
+                for (index, node) in nodes.iter().enumerate() {
+                    assert_eq!(
+                        node.to_bytes(),
+                        expected(tv, level, index),
+                        "level {level}, index {index}"
+                    );
+                }
+            }
+            per_level_nodes.push(levels);
+        }
+
+        // Cross-tree batches: all sixteen trees' pairs at one level in a
+        // single call, checked pair by pair against the same fixed bytes.
+        for level in 0..DEPTH {
+            let pairs: Vec<(&MerkleHashOrchard, &MerkleHashOrchard)> = per_level_nodes
+                .iter()
+                .flat_map(|levels| {
+                    levels[level]
+                        .chunks_exact(2)
+                        .map(|pair| (&pair[0], &pair[1]))
+                })
+                .collect();
+            assert_eq!(pairs.len(), LEAVES * (LEAVES >> (level + 1)));
+            let parents = MerkleHashOrchard::combine_batch(
+                Level::from(u8::try_from(level).unwrap()),
+                pairs.into_iter(),
+            );
+            let per_tree = LEAVES >> (level + 1);
+            for (position, parent) in parents.iter().enumerate() {
+                let (tree, index) = (position / per_tree, position % per_tree);
+                assert_eq!(
+                    parent.to_bytes(),
+                    expected(&vectors[tree], level + 1, index),
+                    "level {level}, tree {tree}, index {index}"
+                );
+            }
+        }
+    }
+
+    /// Pins the batched combine, level by level across the full 32-level
+    /// tree, to the zcashd-derived anchor: the live frontier node sits on
+    /// the left with the fixed empty-root vector on the right at every level
+    /// where the node count is odd, so the batch sees asymmetric pairs at
+    /// most levels and must reproduce the anchor exactly.
+    #[test]
+    fn combine_batch_matches_zcashd_anchor_vector() {
+        let leaves: Vec<_> = ZCASHD_COMMITMENTS
+            .iter()
+            .map(|cmx| MerkleHashOrchard::from_bytes(cmx).unwrap())
+            .collect();
+        let levels = batched_levels::<MERKLE_DEPTH_ORCHARD>(&leaves);
+        assert_eq!(levels[MERKLE_DEPTH_ORCHARD][0].to_bytes(), ZCASHD_ANCHOR);
+
+        // Every prefix of the commitments must also match the incremental
+        // frontier, which the fixed anchor pins at the full length.
+        for prefix in 1..=leaves.len() {
+            let mut frontier: Frontier<MerkleHashOrchard, 32> = Frontier::empty();
+            for leaf in &leaves[..prefix] {
+                frontier.append(*leaf);
+            }
+            let levels = batched_levels::<MERKLE_DEPTH_ORCHARD>(&leaves[..prefix]);
+            assert_eq!(
+                levels[MERKLE_DEPTH_ORCHARD][0],
+                frontier.root(),
+                "prefix {prefix}"
+            );
+        }
+    }
+
     #[test]
     fn test_vectors() {
         let tv_empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
@@ -713,50 +887,14 @@ mod tests {
 
     #[test]
     fn anchor_incremental() {
-        // These commitment values are derived from the bundle data that was generated for
-        // testing commitment tree construction inside of zcashd here.
-        // https://github.com/zcash/zcash/blob/ecec1f9769a5e37eb3f7fd89a4fcfb35bc28eed7/src/test/data/merkle_roots_orchard.h
-        let commitments = [
-            [
-                0x68, 0x13, 0x5c, 0xf4, 0x99, 0x33, 0x22, 0x90, 0x99, 0xa4, 0x4e, 0xc9, 0x9a, 0x75,
-                0xe1, 0xe1, 0xcb, 0x46, 0x40, 0xf9, 0xb5, 0xbd, 0xec, 0x6b, 0x32, 0x23, 0x85, 0x6f,
-                0xea, 0x16, 0x39, 0x0a,
-            ],
-            [
-                0x78, 0x31, 0x50, 0x08, 0xfb, 0x29, 0x98, 0xb4, 0x30, 0xa5, 0x73, 0x1d, 0x67, 0x26,
-                0x20, 0x7d, 0xc0, 0xf0, 0xec, 0x81, 0xea, 0x64, 0xaf, 0x5c, 0xf6, 0x12, 0x95, 0x69,
-                0x01, 0xe7, 0x2f, 0x0e,
-            ],
-            [
-                0xee, 0x94, 0x88, 0x05, 0x3a, 0x30, 0xc5, 0x96, 0xb4, 0x30, 0x14, 0x10, 0x5d, 0x34,
-                0x77, 0xe6, 0xf5, 0x78, 0xc8, 0x92, 0x40, 0xd1, 0xd1, 0xee, 0x17, 0x43, 0xb7, 0x7b,
-                0xb6, 0xad, 0xc4, 0x0a,
-            ],
-            [
-                0x9d, 0xdc, 0xe7, 0xf0, 0x65, 0x01, 0xf3, 0x63, 0x76, 0x8c, 0x5b, 0xca, 0x3f, 0x26,
-                0x46, 0x60, 0x83, 0x4d, 0x4d, 0xf4, 0x46, 0xd1, 0x3e, 0xfc, 0xd7, 0xc6, 0xf1, 0x7b,
-                0x16, 0x7a, 0xac, 0x1a,
-            ],
-            [
-                0xbd, 0x86, 0x16, 0x81, 0x1c, 0x6f, 0x5f, 0x76, 0x9e, 0xa4, 0x53, 0x9b, 0xba, 0xff,
-                0x0f, 0x19, 0x8a, 0x6c, 0xdf, 0x3b, 0x28, 0x0d, 0xd4, 0x99, 0x26, 0x16, 0x3b, 0xd5,
-                0x3f, 0x53, 0xa1, 0x21,
-            ],
-        ];
-
-        // This value was produced by the Python test vector generation code implemented here:
-        // https://github.com/zcash-hackworks/zcash-test-vectors/blob/f4d756410c8f2456f5d84cedf6dac6eb8c068eed/orchard_merkle_tree.py
-        let anchor = [
-            0xc8, 0x75, 0xbe, 0x2d, 0x60, 0x87, 0x3f, 0x8b, 0xcd, 0xeb, 0x91, 0x28, 0x2e, 0x64,
-            0x2e, 0x0c, 0xc6, 0x5f, 0xf7, 0xd0, 0x64, 0x2d, 0x13, 0x7b, 0x28, 0xcf, 0x28, 0xcc,
-            0x9c, 0x52, 0x7f, 0x0e,
-        ];
-
         let mut frontier: Frontier<MerkleHashOrchard, 32> = Frontier::empty();
-        for commitment in commitments.iter() {
+        for commitment in ZCASHD_COMMITMENTS.iter() {
             let cmx = MerkleHashOrchard(pallas::Base::from_repr(*commitment).unwrap());
             frontier.append(cmx);
         }
-        assert_eq!(frontier.root().0, pallas::Base::from_repr(anchor).unwrap());
+        assert_eq!(
+            frontier.root().0,
+            pallas::Base::from_repr(ZCASHD_ANCHOR).unwrap()
+        );
     }
 }
