@@ -1286,7 +1286,7 @@ impl Eq {
     ]);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod batch_normalize_two_lane_tests {
     use alloc::vec;
     use alloc::vec::Vec;

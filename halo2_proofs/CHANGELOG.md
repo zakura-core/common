@@ -8,6 +8,12 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The permutation- and lookup-argument provers' full-column batch inversions now
+  go through a shared `batch_invert_multi` helper that splits the Montgomery
+  prefix-product and back-substitution chains into interleaved lanes, with
+  `ff::BatchInverter`-compatible constant-time zero handling. Batches under 32
+  elements keep the single chain. Proof and verification timings are unchanged
+  within noise; these inversions are a negligible share of a proof.
 - Prepared the `1.0.0-rc.2` release.
 - Updated the proving stack to `ff 0.14`, `group 0.14`, and `rand 0.10`.
 - Forked from upstream `halo2_proofs` and renamed to `zakura-halo2-proofs`; this changelog starts

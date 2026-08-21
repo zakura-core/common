@@ -8,6 +8,13 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- `Curve::batch_normalize` now runs its Montgomery batch inversion as two
+  interleaved even/odd accumulator lanes for batches of 32 or more points
+  (three extra multiplications per batch, one shared inversion), preserving the
+  identity-skipping semantics; smaller batches keep the single chain. Measured
+  about 21% less per element on Apple aarch64 with the assembly backend and 6%
+  on x86-64 portable at large sizes; neutral on the Orchard Merkle workloads,
+  where normalization is a small share of each combine.
 - Prepared the `1.0.0-rc.2` release.
 - Updated the curve traits to `ff 0.14`, `group 0.14`, and `rand_core 0.10`.
 - `Fp`/`Fq` field inversion is now a variable-time 62-divstep safegcd (a
