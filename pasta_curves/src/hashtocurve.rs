@@ -176,9 +176,9 @@ pub fn map_to_curve_simple_swu<
     // Z^2 * u^4 + Z * u^2 = 0 and x1 = B / (Z * A): for u = 0 it would give
     // gx2 = 0 although g(x2) = g(0) = B, and for Z * u^2 = -1 it flips the
     // sign of B. In those cases the nonsquare branch would therefore produce
-    // a point that is not on the curve — which is why this function no longer
-    // re-checking the curve equation (see `new_jacobian_unchecked`) needs the
-    // exceptional inputs to be harmless. They are, for both Pasta curves:
+    // a point that is not on the curve. Since this function no longer
+    // re-checks the curve equation (see `new_jacobian_unchecked`), the
+    // exceptional inputs must be harmless. They are, for both Pasta curves:
     //
     // - g(B / (Z * A)) is a square in the base field, so u = 0 always takes
     //   the gx1 branch (where no identity is involved); and
