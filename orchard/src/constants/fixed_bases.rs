@@ -260,15 +260,21 @@ impl FixedPoint<pallas::Affine> for OrchardShortScalarBases {
 #[cfg(all(test, feature = "circuit"))]
 mod tests {
     use super::*;
-    use halo2_gadgets::ecc::chip::constants::compute_lagrange_coeffs;
+    use halo2_gadgets::ecc::chip::{constants::compute_lagrange_coeffs, FixedScalarKind};
 
-    fn assert_precomputed_lagrange_coeffs<F>(base: F, num_windows: usize)
+    /// The precomputed table must equal what the `FixedPoint::lagrange_coeffs`
+    /// default would compute, with the window count taken from the base's
+    /// `FixedScalarKind` exactly as the default does, so the test and the
+    /// trait cannot disagree about it.
+    fn assert_precomputed_lagrange_coeffs<F>(base: F)
     where
         F: FixedPoint<pallas::Affine>,
     {
+        let num_windows = <F::FixedScalarKind as FixedScalarKind>::NUM_WINDOWS;
         assert_eq!(
             base.lagrange_coeffs(),
             compute_lagrange_coeffs(base.generator(), num_windows),
+            "{base:?}"
         );
     }
 
@@ -280,19 +286,19 @@ mod tests {
             OrchardFixedBasesFull::ValueCommitR,
             OrchardFixedBasesFull::SpendAuthG,
         ] {
-            assert_precomputed_lagrange_coeffs(base, NUM_WINDOWS);
+            assert_precomputed_lagrange_coeffs(base);
         }
         for base in [
             OrchardBaseFieldBases::NullifierK,
             OrchardBaseFieldBases::SpendAuthGBase,
         ] {
-            assert_precomputed_lagrange_coeffs(base, NUM_WINDOWS);
+            assert_precomputed_lagrange_coeffs(base);
         }
         for base in [
             OrchardShortScalarBases::ValueCommitV,
             OrchardShortScalarBases::SpendAuthGShort,
         ] {
-            assert_precomputed_lagrange_coeffs(base, NUM_WINDOWS_SHORT);
+            assert_precomputed_lagrange_coeffs(base);
         }
     }
 
