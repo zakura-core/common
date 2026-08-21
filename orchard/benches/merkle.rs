@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
@@ -27,6 +28,13 @@ const RNG_SEED_BYTES: usize = 32;
 const FIXTURE_SEED: [u8; RNG_SEED_BYTES] = [0x53; RNG_SEED_BYTES];
 /// Level used when hashing pairs of leaves.
 const LEAF_PARENT_LEVEL: u8 = 0;
+/// A 4,096-leaf subtree whose leaves are regenerated for every sample.
+const DISTINCT_TREE_HEIGHT: usize = 12;
+const DISTINCT_TREE_LEAVES: usize = 1 << DISTINCT_TREE_HEIGHT;
+const DISTINCT_TREE_INTERNAL_NODES: usize = DISTINCT_TREE_LEAVES - 1;
+/// Seed of the stream that the per-sample distinct leaves are drawn from.
+/// Differs from `FIXTURE_SEED` so the two trees never share a leaf.
+const DISTINCT_SEED: [u8; RNG_SEED_BYTES] = [0xd1; RNG_SEED_BYTES];
 
 fn fixture_leaves() -> Vec<MerkleHashOrchard> {
     let mut rng = ChaCha20Rng::from_seed(FIXTURE_SEED);
@@ -39,6 +47,26 @@ fn fixture_leaves() -> Vec<MerkleHashOrchard> {
             MerkleHashOrchard::from_bytes(&value.to_repr()).unwrap()
         })
         .collect()
+}
+
+/// Draws `count` leaves from `rng`, rejecting any repeat, so every leaf in
+/// the returned tree is a distinct field element by construction rather than
+/// by probability. Called from Criterion's untimed setup, so each sample
+/// hashes a tree it has never seen: no input-specific cache or predictor
+/// warmth can carry over between samples, which a fixed leaf vector would
+/// permit in principle.
+fn distinct_leaves(rng: &mut ChaCha20Rng, count: usize) -> Vec<MerkleHashOrchard> {
+    let mut seen = HashSet::with_capacity(count);
+    let mut leaves = Vec::with_capacity(count);
+    while leaves.len() < count {
+        let mut uniform = [0; UNIFORM_BYTES];
+        rng.fill_bytes(&mut uniform);
+        let value = pallas::Base::from_uniform_bytes(&uniform);
+        if seen.insert(value.to_repr()) {
+            leaves.push(MerkleHashOrchard::from_bytes(&value.to_repr()).unwrap());
+        }
+    }
+    leaves
 }
 
 fn merkle_root(mut nodes: Vec<MerkleHashOrchard>) -> MerkleHashOrchard {
@@ -115,6 +143,32 @@ fn benchmark_merkle(c: &mut Criterion) {
             BatchSize::LargeInput,
         );
     });
+
+    // Fresh distinct leaves for every sample (generated in the untimed
+    // setup), from a fixed-seed stream so runs remain comparable.
+    group.throughput(Throughput::Elements(DISTINCT_TREE_INTERNAL_NODES as u64));
+    group.bench_function(
+        format!("{DISTINCT_TREE_LEAVES}-leaves-distinct"),
+        |bencher| {
+            let mut rng = ChaCha20Rng::from_seed(DISTINCT_SEED);
+            bencher.iter_batched(
+                || distinct_leaves(&mut rng, DISTINCT_TREE_LEAVES),
+                |leaves| black_box(merkle_root(leaves)),
+                BatchSize::LargeInput,
+            );
+        },
+    );
+    group.bench_function(
+        format!("{DISTINCT_TREE_LEAVES}-leaves-distinct-batch"),
+        |bencher| {
+            let mut rng = ChaCha20Rng::from_seed(DISTINCT_SEED);
+            bencher.iter_batched(
+                || distinct_leaves(&mut rng, DISTINCT_TREE_LEAVES),
+                |leaves| black_box(merkle_root_batch(leaves)),
+                BatchSize::LargeInput,
+            );
+        },
+    );
     group.finish();
 }
 

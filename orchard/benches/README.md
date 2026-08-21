@@ -6,16 +6,23 @@ already-built revisions, not for microbenchmarking isolated arithmetic.
 
 ## Merkle hashing
 
-The Merkle harness measures one parent hash and construction of a complete
-1,024-leaf subtree:
+The Merkle harness measures one parent hash and construction of complete
+subtrees, scalar and batched:
 
 ```console
 cargo +1.88 bench --locked -p zakura-orchard --bench merkle
 ```
 
-The deterministic leaves are generated outside the timed routines. Criterion
-also excludes the per-sample clone of the leaf vector from the whole-tree
-measurement.
+- `1024-leaves[-batch]`: one fixed vector of seeded pseudorandom leaves,
+  reused for every sample (the per-sample clone is excluded from the
+  measurement). This is the historical baseline.
+- `4096-leaves-distinct[-batch]`: a 2^12-leaf tree whose leaves are
+  regenerated in Criterion's untimed setup for every sample, from a
+  fixed-seed stream with repeats rejected, so every leaf is distinct and no
+  sample hashes a tree seen before. Use this when the question is whether a
+  result depends on input-specific cache or branch-predictor warmth.
+
+In both cases leaf generation happens outside the timed routines.
 
 ## One-Action prover
 
