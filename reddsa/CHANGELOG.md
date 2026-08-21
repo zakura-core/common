@@ -8,6 +8,16 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Single-signature verification now computes `s·B − c·A` as one variable-time
+  double-scalar multiplication instead of two constant-time full-width
+  multiplications (all inputs are public). With the `alloc` feature this uses
+  the GLV endomorphism on Pallas (RedPallas) and the existing wNAF Straus
+  ladder on Jubjub (RedJubjub); without `alloc` the previous code is kept.
+- RedPallas batch verification now uses GLV-split scalars on one shared
+  doubling ladder (`pasta_curves::glv::sum_of_products_vartime`), halving the
+  ladder's doublings relative to the width-5 wNAF Straus multiscalar
+  multiplication it replaces. The `alloc` feature now enables
+  `pasta_curves/glv`.
 - Prepared the `1.0.0-rc.2` release.
 - Updated to `group 0.14` and the Zakura Pasta and Jubjub forks, while retaining
   the `rand_core 0.6` boundary required by FROST.

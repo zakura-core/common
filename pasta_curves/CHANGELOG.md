@@ -8,6 +8,11 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `glv::Table::multi_mul_decomposed` and `glv::sum_of_products_vartime`:
+  a variable-time sum of several scalar multiples sharing one GLV doubling
+  ladder (~127 doublings for the whole sum plus ~39 mixed additions per term),
+  with the tables built under one batch normalization. This is the
+  small-multiexp shape of signature verification.
 - `Curve::batch_normalize` now runs its Montgomery batch inversion as two
   interleaved even/odd accumulator lanes for batches of 32 or more points
   (three extra multiplications per batch, one shared inversion), preserving the

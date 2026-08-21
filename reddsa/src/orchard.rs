@@ -112,46 +112,32 @@ impl<'a> From<&'a pallas::Point> for LookupTable5<pallas::Point> {
     }
 }
 
+/// Variable-time multiscalar multiplication on Pallas via the curve's GLV
+/// endomorphism: every scalar is split into two ~128-bit halves and recoded
+/// jointly, and all terms share one ~127-column doubling ladder
+/// (`pasta_curves::glv::sum_of_products_vartime`). Compared with the
+/// width-5 wNAF Straus ladder this replaces, it halves the doublings and
+/// needs no per-point odd-multiple tables beyond the GLV windows, which are
+/// built with one shared batch normalization.
 #[cfg(feature = "alloc")]
 impl VartimeMultiscalarMul for pallas::Point {
     type Scalar = pallas::Scalar;
     type Point = pallas::Point;
 
-    #[allow(non_snake_case)]
     fn optional_multiscalar_mul<I, J>(scalars: I, points: J) -> Option<pallas::Point>
     where
         I: IntoIterator,
         I::Item: Borrow<Self::Scalar>,
         J: IntoIterator<Item = Option<pallas::Point>>,
     {
-        let nafs: Vec<_> = scalars
-            .into_iter()
-            .map(|c| c.borrow().non_adjacent_form(5))
-            .collect();
-
-        let lookup_tables = points
-            .into_iter()
-            .map(|P_opt| P_opt.map(|P| LookupTable5::<pallas::Point>::from(&P)))
-            .collect::<Option<Vec<_>>>()?;
-
-        let mut r = pallas::Point::identity();
-        let naf_size = Self::Scalar::naf_length();
-
-        for i in (0..naf_size).rev() {
-            let mut t = r.double();
-
-            for (naf, lookup_table) in nafs.iter().zip(lookup_tables.iter()) {
-                #[allow(clippy::comparison_chain)]
-                if naf[i] > 0 {
-                    t += lookup_table.select(naf[i] as usize);
-                } else if naf[i] < 0 {
-                    t -= lookup_table.select(-naf[i] as usize);
-                }
-            }
-
-            r = t;
-        }
-
-        Some(r)
+        let scalars: Vec<pallas::Scalar> = scalars.into_iter().map(|c| *c.borrow()).collect();
+        let points = points.into_iter().collect::<Option<Vec<pallas::Point>>>()?;
+        // As with the previous ladder, extra scalars or points beyond the
+        // shorter of the two sequences are ignored.
+        let n = scalars.len().min(points.len());
+        Some(pasta_curves::glv::sum_of_products_vartime(
+            &points[..n],
+            &scalars[..n],
+        ))
     }
 }

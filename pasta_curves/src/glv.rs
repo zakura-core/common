@@ -639,6 +639,39 @@ impl<C: GlvParams> Table<C> {
         acc
     }
 
+    /// $\sum_i k_i P_i$ over `pairs` of (table, decomposed scalar), via one
+    /// shared-doubling ladder: each column doubles the accumulator once and
+    /// then adds every pair's digit point, so the doublings are paid once
+    /// for the whole sum instead of once per pair. Variable-time in the
+    /// scalars. Identity tables contribute nothing, and an empty slice
+    /// yields the identity. Identical in value to the sum of the per-pair
+    /// [`Table::mul_decomposed`] results (tested).
+    pub fn multi_mul_decomposed(pairs: &[(&Self, &Decomposed<C>)]) -> C {
+        let len = pairs
+            .iter()
+            .filter(|(table, _)| !table.is_identity())
+            .map(|(_, k)| k.len)
+            .max()
+            .unwrap_or(0);
+        let mut acc = C::identity();
+        for i in (0..len).rev() {
+            // `acc` is still the identity on the first column; skip the
+            // wasted doubling.
+            if i + 1 < len {
+                acc = acc.double();
+            }
+            for (table, k) in pairs {
+                if i < k.len && !table.is_identity() {
+                    let code = k.digits[i];
+                    if code != 0 {
+                        acc += table.digit_point(code);
+                    }
+                }
+            }
+        }
+        acc
+    }
+
     /// One `k * P` per table, sharing the whole column schedule across the
     /// batch. Identical, table by table, to [`Table::mul_decomposed`]
     /// (tested).
@@ -798,6 +831,28 @@ fn affine_ladder_safe<C: GlvParams>(k: &Decomposed<C>) -> bool {
         }
     }
     true
+}
+
+/// Variable-time $\sum_i \mathtt{scalars}[i] \cdot \mathtt{points}[i]$: builds
+/// all GLV tables with one shared batch normalization, decomposes every
+/// scalar, and runs one shared-doubling ladder
+/// ([`Table::multi_mul_decomposed`]). This is the small-multiexp shape of
+/// signature verification (two to a few dozen terms), where it replaces
+/// `n` full-width ladders — or a width-`w` wNAF Straus ladder over 255
+/// columns — with ~127 doublings plus ~39 mixed additions per term.
+///
+/// Identity points contribute nothing. Panics if the slices differ in
+/// length.
+pub fn sum_of_products_vartime<C: GlvParams>(points: &[C], scalars: &[C::ScalarExt]) -> C {
+    assert_eq!(
+        points.len(),
+        scalars.len(),
+        "sum_of_products_vartime needs one scalar per point"
+    );
+    let tables = Table::batch(points);
+    let decomposed: Vec<Decomposed<C>> = scalars.iter().map(Decomposed::new).collect();
+    let pairs: Vec<(&Table<C>, &Decomposed<C>)> = tables.iter().zip(&decomposed).collect();
+    Table::multi_mul_decomposed(&pairs)
 }
 
 /// A scalar in GLV-decomposed, jointly recoded form, ready for
@@ -1207,6 +1262,62 @@ mod tests {
         }
     }
 
+    /// The shared-doubling sum of products equals the native sum, across
+    /// term counts from zero to a dozen, with identity points, zero and
+    /// unit scalars, short scalars (whose digit strings are much shorter
+    /// than their neighbours') and full-width ones mixed together.
+    fn sum_of_products_matches_native<C: GlvParams>() {
+        let g = C::generator();
+        let lambda = C::ScalarExt::ZETA;
+        let specials = [
+            C::ScalarExt::ZERO,
+            C::ScalarExt::ONE,
+            -C::ScalarExt::ONE,
+            C::ScalarExt::from(2),
+            lambda,
+            -lambda,
+            C::ScalarExt::from_u128((1u128 << 127) - 1),
+        ];
+        let randoms: Vec<C::ScalarExt> = scalars::<C::ScalarExt>(16).collect();
+        for n in [0usize, 1, 2, 3, 4, 7, 12] {
+            let points: Vec<C> = (0..n)
+                .map(|i| {
+                    if n > 2 && i == n / 2 {
+                        C::identity()
+                    } else {
+                        g * (randoms[i] + C::ScalarExt::from(i as u64 + 1))
+                    }
+                })
+                .collect();
+            let scalars: Vec<C::ScalarExt> = (0..n)
+                .map(|i| {
+                    if i % 3 == 1 {
+                        specials[i % specials.len()]
+                    } else {
+                        randoms[(i + 5) % randoms.len()]
+                    }
+                })
+                .collect();
+            let expected = points
+                .iter()
+                .zip(&scalars)
+                .fold(C::identity(), |acc, (p, k)| acc + *p * *k);
+            assert_eq!(
+                sum_of_products_vartime(&points, &scalars),
+                expected,
+                "n = {n}"
+            );
+            // Per-pair ladders and the joint ladder agree exactly.
+            let tables = Table::batch(&points);
+            let decomposed: Vec<_> = scalars.iter().map(Decomposed::<C>::new).collect();
+            let pairs: Vec<_> = tables.iter().zip(&decomposed).collect();
+            let per_pair = pairs
+                .iter()
+                .fold(C::identity(), |acc, (t, k)| acc + t.mul_decomposed(k));
+            assert_eq!(Table::multi_mul_decomposed(&pairs), per_pair, "n = {n}");
+        }
+    }
+
     /// Table-based multiplication matches the group's native `Mul`.
     fn table_mul_matches_group_mul<C: GlvParams>() {
         let g = C::generator();
@@ -1438,6 +1549,10 @@ mod tests {
                 #[test]
                 fn table_mul() {
                     table_mul_matches_group_mul::<$curve>();
+                }
+                #[test]
+                fn sum_of_products() {
+                    sum_of_products_matches_native::<$curve>();
                 }
                 #[test]
                 fn one_shot() {
