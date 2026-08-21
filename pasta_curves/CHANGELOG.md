@@ -32,6 +32,11 @@ and this project adheres to Rust's notion of
 
 ### Changed
 
+- `Fp` and `Fq` square-root table lookups now hash their normalized
+  Montgomery representations directly with generated multiply-and-shift
+  perfect hashes. This removes four Montgomery reductions and four integer
+  remainders per square root, improving `Fp::sqrt` by 2.3% and `Fq::sqrt` by
+  1.8% on Apple AArch64 with the assembly backend.
 - The `aarch64-asm` backend now implements runtime multiplication and
   squaring as inline assembly with register operands instead of calls into
   the assembly file. This removes the per-operation call and memory
