@@ -1294,7 +1294,10 @@ impl<F: Field> ConstraintSystem<F> {
     /// find which fixed column corresponds with a given `Selector`.
     ///
     /// Do not call this twice. Yes, this should be a builder pattern instead.
-    pub(crate) fn compress_selectors(mut self, selectors: Vec<Vec<bool>>) -> (Self, Vec<Vec<F>>) {
+    pub(crate) fn compress_selectors(
+        mut self,
+        selectors: Vec<Vec<bool>>,
+    ) -> (Self, Vec<Vec<F>>, Vec<(usize, usize, usize)>) {
         // The number of provided selector assignments must be the number we
         // counted for this constraint system.
         assert_eq!(selectors.len(), self.num_selectors);
@@ -1342,9 +1345,16 @@ impl<F: Field> ConstraintSystem<F> {
 
         let mut selector_map = vec![None; selector_assignment.len()];
         let mut selector_replacements = vec![None; selector_assignment.len()];
+        let mut compressed_selectors = vec![];
         for assignment in selector_assignment {
+            let column = new_columns[assignment.combination_index];
             selector_replacements[assignment.selector] = Some(assignment.expression);
-            selector_map[assignment.selector] = Some(new_columns[assignment.combination_index]);
+            selector_map[assignment.selector] = Some(column);
+            compressed_selectors.push((
+                column.index,
+                assignment.combination_len,
+                assignment.assigned_root,
+            ));
         }
 
         self.selector_map = selector_map
@@ -1399,7 +1409,7 @@ impl<F: Field> ConstraintSystem<F> {
             replace_selectors(expr, &selector_replacements, true);
         }
 
-        (self, polys)
+        (self, polys, compressed_selectors)
     }
 
     /// Allocate a new (simple) selector. Simple selectors cannot be added to
