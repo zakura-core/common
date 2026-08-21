@@ -1019,9 +1019,10 @@ fn plan_cost<E, F: Field, B: Basis>(plan: &EvaluationPlan<E, F, B>, two: F) -> (
     }
 }
 
-// Each cached polynomial occupies one chunk-sized buffer. Require enough
-// avoided multiplications to amortize storing and loading that buffer.
-const MIN_CSE_SAVED_MULTIPLICATIONS: usize = 3;
+// Each cached polynomial occupies one chunk-sized buffer. One avoided field
+// multiplication amortizes storing and loading that buffer; copy-only shapes
+// remain uncached.
+const MIN_CSE_SAVED_MULTIPLICATIONS: usize = 1;
 
 #[derive(Clone, Copy)]
 struct CacheAction {
@@ -2709,9 +2710,16 @@ mod tests {
         let mut plan = EvaluationPlan::compile(&ast);
         assert_eq!(plan.cache_common_subexpressions(), 1);
 
-        let mut below_threshold =
-            EvaluationPlan::compile(&Ast::distribute_powers(terms.into_iter().take(3), base));
-        assert_eq!(below_threshold.cache_common_subexpressions(), 0);
+        let mut single_saved_multiplication =
+            EvaluationPlan::compile(&Ast::distribute_powers(terms.into_iter().take(2), base));
+        assert_eq!(single_saved_multiplication.cache_common_subexpressions(), 1);
+
+        let repeated_copy = Ast::from(leaves[0]);
+        let mut copy_only = EvaluationPlan::compile(&Ast::distribute_powers(
+            [repeated_copy.clone(), repeated_copy],
+            base,
+        ));
+        assert_eq!(copy_only.cache_common_subexpressions(), 0);
 
         let actual = evaluator.evaluate(&ast, &domain);
         for row in 0..actual.len() {

@@ -30,6 +30,8 @@ and this project adheres to Rust's notion of
   multiscalar multiplication path.
 - Polynomial evaluation now shares missing-root products across complete
   compressed-selector families.
+- Polynomial evaluation now caches repeated expressions whenever doing so
+  avoids at least one field multiplication.
 - Polynomial evaluation now uses field squaring for structurally repeated
   multiplication operands.
 - Polynomial evaluation now uses Horner's method for expanded fixed-base
