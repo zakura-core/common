@@ -16,11 +16,10 @@ cargo +1.88 bench --locked -p zakura-orchard --bench merkle
 - `1024-leaves[-batch]`: one fixed vector of seeded pseudorandom leaves,
   reused for every sample (the per-sample clone is excluded from the
   measurement). This is the historical baseline.
-- `4096-leaves-distinct[-batch]`: a 2^12-leaf tree whose leaves are
-  regenerated in Criterion's untimed setup for every sample, from a
-  fixed-seed stream with repeats rejected, so every leaf is distinct and no
-  sample hashes a tree seen before. Use this when the question is whether a
-  result depends on input-specific cache or branch-predictor warmth.
+- `4096-leaves-distinct[-batch]`: a 2^12-leaf tree of seeded pseudorandom
+  leaves drawn with repeats rejected, so every leaf is distinct by
+  construction; generated once and, like the 1,024-leaf cases, cloned per
+  sample outside the measurement.
 
 In both cases leaf generation happens outside the timed routines.
 

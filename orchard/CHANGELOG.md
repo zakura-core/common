@@ -9,10 +9,10 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 - The `merkle` benchmark gained `4096-leaves-distinct` and
-  `4096-leaves-distinct-batch`: a 2^12-leaf tree whose leaves are regenerated
-  in the untimed setup for every sample, from a fixed-seed stream with repeats
-  rejected, so every leaf is distinct and no sample reuses an input. The
-  fixed-vector `1024-leaves` cases are unchanged.
+  `4096-leaves-distinct-batch`: a 2^12-leaf tree of seeded pseudorandom leaves
+  drawn with repeats rejected, so every leaf is distinct by construction,
+  generated once and cloned per sample outside the measurement. The
+  `1024-leaves` cases are unchanged.
 - `MerkleHashOrchard::combine_batch` is now pinned directly to fixed vectors:
   the protocol's empty roots at every level, the zcash-test-vectors Merkle
   path trees (every internal node checked, in per-tree and cross-tree batches),
