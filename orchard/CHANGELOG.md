@@ -13,6 +13,13 @@ and this project adheres to Rust's notion of
   in the untimed setup for every sample, from a fixed-seed stream with repeats
   rejected, so every leaf is distinct and no sample reuses an input. The
   fixed-vector `1024-leaves` cases are unchanged.
+- `MerkleHashOrchard::combine_batch` is now pinned directly to fixed vectors:
+  the protocol's empty roots at every level, the zcash-test-vectors Merkle
+  path trees (every internal node checked, in per-tree and cross-tree batches),
+  the zcashd-derived anchor through all 32 levels, and a deterministic
+  2,048-leaf edge-case tree (special field values, single-bit and
+  single-Sinsemilla-word patterns, empty roots) whose nodes are recorded in
+  `test_vectors/merkle_fixture.rs`.
 - The weighted Merkle word decoder's equivalence tests now include
   deterministic edge vectors (all-zero and all-one bit patterns, both ends of
   the canonical range, dense and alternating limbs) alongside the random
