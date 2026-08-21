@@ -1133,12 +1133,50 @@ fn schoolbook_mul(a: &[u64], b: &[u64], prod: &mut [u64]) {
     }
 }
 
+/// Fixed-shape 7×4 schoolbook product (const-evaluable, unlike the
+/// slice-generic [`schoolbook_mul`]).
+const fn mul_7x4(g: &[u64; 7], k: &[u64; 4]) -> [u64; 11] {
+    let mut prod = [0u64; 11];
+    let mut i = 0;
+    while i < 7 {
+        let mut carry = 0u64;
+        let mut j = 0;
+        while j < 4 {
+            let (limb, c) = mac(prod[i + j], g[i], k[j], carry);
+            prod[i + j] = limb;
+            carry = c;
+            j += 1;
+        }
+        prod[i + 4] = carry;
+        i += 1;
+    }
+    prod
+}
+
+/// Fixed-shape 3×2 schoolbook product (const-evaluable).
+const fn mul_3x2(a: &[u64; 3], b: &[u64; 2]) -> [u64; 5] {
+    let mut prod = [0u64; 5];
+    let mut i = 0;
+    while i < 3 {
+        let mut carry = 0u64;
+        let mut j = 0;
+        while j < 2 {
+            let (limb, c) = mac(prod[i + j], a[i], b[j], carry);
+            prod[i + j] = limb;
+            carry = c;
+            j += 1;
+        }
+        prod[i + 2] = carry;
+        i += 1;
+    }
+    prod
+}
+
 /// `round((g · k) / 2^512)` for the 7-limb Babai constants: the fixed-point
 /// nearest-integer coefficient. Fits `u128` (below `max(|t|, m) < 2^127`
 /// for canonical `k`).
-fn round_mul_shift_512(g: &[u64; 7], k: &[u64; 4]) -> u128 {
-    let mut prod = [0u64; 11];
-    schoolbook_mul(g, k, &mut prod);
+const fn round_mul_shift_512(g: &[u64; 7], k: &[u64; 4]) -> u128 {
+    let prod = mul_7x4(g, k);
     let round = prod[7] >> 63;
     verify!(prod[10] == 0, "Babai coefficient must fit 128 bits");
     ((prod[8] as u128) | ((prod[9] as u128) << 64)).wrapping_add(round as u128)
@@ -1146,7 +1184,7 @@ fn round_mul_shift_512(g: &[u64; 7], k: &[u64; 4]) -> u128 {
 
 /// One borrow-masked conditional subtraction of `r`: maps `[0, 2r)` to
 /// `[0, r)`.
-fn cond_sub_r<P: CmParams>(x: [u64; 4]) -> [u64; 4] {
+const fn cond_sub_r<P: CmParams>(x: [u64; 4]) -> [u64; 4] {
     let r = P::MODULUS_LIMBS;
     let (d0, b) = sbb(x[0], r[0], 0);
     let (d1, b) = sbb(x[1], r[1], b);
@@ -1164,7 +1202,7 @@ fn cond_sub_r<P: CmParams>(x: [u64; 4]) -> [u64; 4] {
 /// Reduces a value below `2^386` (seven limbs) to its canonical residue in
 /// `[0, r)`: two positive Solinas folds over `r = 2^254 + c`, then one
 /// conditional subtraction.
-fn canonicalize7<P: CmParams>(x: [u64; 7]) -> [u64; 4] {
+const fn canonicalize7<P: CmParams>(x: [u64; 7]) -> [u64; 4] {
     let c = [P::SOLINAS_C as u64, (P::SOLINAS_C >> 64) as u64];
     let r = P::MODULUS_LIMBS;
 
@@ -1177,8 +1215,7 @@ fn canonicalize7<P: CmParams>(x: [u64; 7]) -> [u64; 4] {
     let l = [x[0], x[1], x[2], x[3] & ((1 << 62) - 1)];
 
     // X1 = L + 16r − H·c: positive (16r = 2^258 + 16c > H·c) and < 2^259.
-    let mut hc = [0u64; 5];
-    schoolbook_mul(&h, &c, &mut hc);
+    let hc = mul_3x2(&h, &c);
     let r16 = [
         r[0] << 4,
         (r[1] << 4) | (r[0] >> 60),
@@ -1188,18 +1225,22 @@ fn canonicalize7<P: CmParams>(x: [u64; 7]) -> [u64; 4] {
     ];
     let mut x1 = [0u64; 5];
     let mut carry = 0;
-    for i in 0..5 {
+    let mut i = 0;
+    while i < 5 {
         let li = if i < 4 { l[i] } else { 0 };
         let (v, cc) = adc(li, r16[i], carry);
         x1[i] = v;
         carry = cc;
+        i += 1;
     }
     verify!(carry == 0, "fold 1 sum must fit 320 bits");
     let mut borrow = 0;
-    for i in 0..5 {
+    let mut i = 0;
+    while i < 5 {
         let (v, bb) = sbb(x1[i], hc[i], borrow);
         x1[i] = v;
         borrow = bb;
+        i += 1;
     }
     verify!(borrow == 0, "fold 1 must not underflow");
     verify!(x1[4] < (1 << 3), "fold 1 result must be below 2^259");
@@ -1230,7 +1271,7 @@ fn canonicalize7<P: CmParams>(x: [u64; 7]) -> [u64; 4] {
 /// Babai rounding of a canonical `k` (representing `k = x·β mod r`) into a
 /// CM coefficient pair. The exact residual satisfies `|a| ≤ (|t| + 3m0)/2`
 /// and `|b| ≤ (m + |t|)/2`, inside the storage box.
-fn babai<P: CmParams>(k: [u64; 4]) -> (i128, i128) {
+const fn babai<P: CmParams>(k: [u64; 4]) -> (i128, i128) {
     let c1 = round_mul_shift_512(&P::G_T, &k); // round(k·|t|/r) < 2^87
     let c2 = round_mul_shift_512(&P::G_M, &k); // round(k·m/r)   < 2^127
     let t_abs = abs_i128(P::T);
@@ -1255,7 +1296,7 @@ fn babai<P: CmParams>(k: [u64; 4]) -> (i128, i128) {
 /// Canonical → CM: encodes a little-endian value `x < 2^255` (reduced
 /// modulo `r`, so any canonical value and, e.g., `from_repr`'s masked
 /// candidate bytes are in domain).
-pub(crate) fn encode<P: CmParams>(x: [u64; 4]) -> (i128, i128) {
+pub(crate) const fn encode<P: CmParams>(x: [u64; 4]) -> (i128, i128) {
     verify!(x[3] >> 63 == 0, "encode input must be below 2^255");
     // k = x·2^131, a pure limb shift; < r·2^131 < 2^386.
     let k512 = [
@@ -1405,12 +1446,39 @@ pub(crate) fn solinas_from_wide<P: CmParams>(x: &[u64; 8]) -> [u64; 4] {
 }
 
 /// Converts a little-endian 256-bit integer (any value; reduced modulo `r`)
-/// into its CM representation. `const`, so the crate's `from_raw` constant
-/// sites keep compiling unchanged: a 256-step double-and-add ladder over
-/// `ONE`, mask-selected — both const-compatible and constant-time. Runtime
-/// conversions should prefer [`encode`]/[`from_u64`] (the Babai path); this
-/// ladder is the const-context fallback.
+/// into its CM representation, `const` and constant-time: one tiny Solinas
+/// pre-fold (H = val >> 254 ∈ {0..3}) brings the value below `r`, then the
+/// Babai `encode` path runs. Cheap enough for const evaluation of large
+/// downstream constant tables (a 256-step ladder here tripped rustc's
+/// `long_running_const_eval` on halo2_poseidon's 192-element round-constant
+/// arrays) and for runtime use.
 pub(crate) const fn from_raw<P: CmParams>(val: [u64; 4]) -> (i128, i128) {
+    let r = P::MODULUS_LIMBS;
+    let c = [P::SOLINAS_C as u64, (P::SOLINAS_C >> 64) as u64];
+    let h = val[3] >> 62;
+    let l = [val[0], val[1], val[2], val[3] & ((1 << 62) - 1)];
+    // X = L + (r − H·c) ≡ val (mod r), in [0, 2r): H·c < 4·2^126 < r.
+    let (p0, cc) = mac(0, h, c[0], 0);
+    let (p1, p2) = mac(0, h, c[1], cc);
+    let (d0, bb) = sbb(r[0], p0, 0);
+    let (d1, bb) = sbb(r[1], p1, bb);
+    let (d2, bb) = sbb(r[2], p2, bb);
+    let (d3, bb) = sbb(r[3], 0, bb);
+    verify!(bb == 0, "r - H*c must not underflow");
+    let _ = bb;
+    let (s0, cy) = adc(l[0], d0, 0);
+    let (s1, cy) = adc(l[1], d1, cy);
+    let (s2, cy) = adc(l[2], d2, cy);
+    let (s3, cy) = adc(l[3], d3, cy);
+    verify!(cy == 0, "from_raw fold must fit 256 bits");
+    let _ = cy;
+    encode::<P>(cond_sub_r::<P>([s0, s1, s2, s3]))
+}
+
+/// An independent reference implementation of [`from_raw`]: a mask-selected
+/// 256-step double-and-add ladder over `ONE`. Exercised by tests only (it
+/// shares no code with the Babai conversion path beyond `add`).
+const fn from_raw_ladder<P: CmParams>(val: [u64; 4]) -> (i128, i128) {
     let mut acc = (0i128, 0i128);
     let mut i = 256usize;
     while i > 0 {
@@ -2113,11 +2181,15 @@ mod tests {
                         ]);
                     }
                     for v in vectors {
-                        let ladder = from_raw::<P>(v);
-                        assert!(in_bounds(ladder));
-                        assert_eq!(oracle_val(ladder), F::from_raw(v));
+                        let got = from_raw::<P>(v);
+                        assert!(in_bounds(got));
+                        assert_eq!(oracle_val(got), F::from_raw(v));
                         let canon = limbs_of(F::from_raw(v));
-                        assert!(bool::from(ct_eq::<P>(ladder, encode::<P>(canon))));
+                        assert!(bool::from(ct_eq::<P>(got, encode::<P>(canon))));
+                        // Independent 256-step ladder reference.
+                        let ladder = from_raw_ladder::<P>(v);
+                        assert!(in_bounds(ladder));
+                        assert!(bool::from(ct_eq::<P>(got, ladder)));
                     }
                 }
 
