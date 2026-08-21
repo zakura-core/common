@@ -257,7 +257,7 @@ where
     )?;
 
     let mut fixed = batch_invert_assigned(assembly.fixed);
-    let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
+    let (cs, selector_polys, _) = cs.compress_selectors(assembly.selectors);
     fixed.extend(
         selector_polys
             .into_iter()
@@ -322,7 +322,7 @@ where
     )?;
 
     let mut fixed = batch_invert_assigned(assembly.fixed);
-    let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
+    let (cs, selector_polys, compressed_selectors) = cs.compress_selectors(assembly.selectors);
     fixed.extend(
         selector_polys
             .into_iter()
@@ -333,6 +333,30 @@ where
     let (fixed_polys, fixed_cosets) = vk
         .domain
         .batch_lagrange_to_coeff_and_extended(&fixed, &fft_twiddles);
+
+    let mut compressed_selector_cosets = vec![];
+    for (column_index, combination_len, assigned_root) in compressed_selectors
+        .into_iter()
+        .filter(|(_, combination_len, _)| *combination_len >= crate::MIN_SELECTOR_FAMILY_LEN)
+    {
+        let mut selector = fixed_cosets[column_index].clone();
+        for value in selector.iter_mut() {
+            let query = *value;
+            let mut result = query;
+            for root in 1..=combination_len {
+                if root != assigned_root {
+                    result *= C::Scalar::from(root as u64) - query;
+                }
+            }
+            *value = result;
+        }
+        compressed_selector_cosets.push(super::CompressedSelectorCoset {
+            column_index,
+            combination_len,
+            assigned_root,
+            selector,
+        });
+    }
 
     let permutation_pk =
         assembly
@@ -378,6 +402,7 @@ where
         fixed_values: fixed,
         fixed_polys,
         fixed_cosets,
+        compressed_selector_cosets: compressed_selector_cosets.into(),
         permutation: permutation_pk,
         fft_twiddles,
         floor_plan,
