@@ -94,6 +94,11 @@ path = "benches/fq.rs"
 harness = false
 
 [[bench]]
+name = "fma51"
+path = "benches/fma51.rs"
+harness = false
+
+[[bench]]
 name = "deferred"
 path = "benches/deferred.rs"
 harness = false
