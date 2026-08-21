@@ -14,6 +14,25 @@ pub type Point = Ep;
 /// A Pallas point in the affine coordinate space (or the point at infinity).
 pub type Affine = EpAffine;
 
+#[cfg(feature = "alloc")]
+#[test]
+fn raw_coordinates_match_optional_coordinates() {
+    use crate::arithmetic::CurveAffine as _;
+    use group::{Curve, Group};
+
+    assert_eq!(
+        Point::identity().to_affine().raw_coordinates(),
+        (Base::zero(), Base::zero())
+    );
+
+    let affine = Point::generator().to_affine();
+    let coordinates = affine.coordinates().unwrap();
+    assert_eq!(
+        affine.raw_coordinates(),
+        (*coordinates.x(), *coordinates.y())
+    );
+}
+
 /// Performs two independent incomplete projective-affine additions in
 /// parallel.
 ///

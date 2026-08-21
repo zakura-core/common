@@ -14,6 +14,8 @@ and this project adheres to Rust's notion of
 - The batched fixed-length weighted evaluator now processes two independent
   incomplete mixed additions in parallel and omits exceptional-case checks
   under its existing discrete-logarithm relation assumption.
+- The batched fixed-length weighted evaluator avoids repeating affine identity
+  checks when reading its construction-time-validated generator table.
 - Added `UncheckedFixedLengthHashDomain::hash_words` and
   `UncheckedFixedLengthHashDomain::hash_words_batch` for extracted hashes of
   pre-decoded words. The batch method processes messages position-first and

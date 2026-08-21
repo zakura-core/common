@@ -51,6 +51,8 @@ and this project adheres to Rust's notion of
 
 ### Added
 
+- Added `raw_coordinates` to the Pasta affine point types for callers that
+  deliberately need the stored `(0, 0)` representation of the identity.
 - Added the hidden `pallas::add_mixed_pair_unchecked` helper for downstream
   batched arithmetic that can expose instruction-level parallelism across
   two incomplete mixed additions.

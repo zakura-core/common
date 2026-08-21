@@ -16,6 +16,25 @@ pub type Affine = EqAffine;
 
 #[cfg(feature = "alloc")]
 #[test]
+fn raw_coordinates_match_optional_coordinates() {
+    use crate::arithmetic::CurveAffine as _;
+    use group::{Curve, Group};
+
+    assert_eq!(
+        Point::identity().to_affine().raw_coordinates(),
+        (Base::zero(), Base::zero())
+    );
+
+    let affine = Point::generator().to_affine();
+    let coordinates = affine.coordinates().unwrap();
+    assert_eq!(
+        affine.raw_coordinates(),
+        (*coordinates.x(), *coordinates.y())
+    );
+}
+
+#[cfg(feature = "alloc")]
+#[test]
 fn test_map_to_curve_simple_swu() {
     use crate::arithmetic::CurveExt;
     use crate::curves::IsoEq;
