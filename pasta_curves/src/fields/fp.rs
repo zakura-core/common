@@ -11,6 +11,9 @@ use lazy_static::lazy_static;
 #[cfg(feature = "bits")]
 use ff::{FieldBits, PrimeFieldBits};
 
+use static_assertions::const_assert_eq;
+
+use super::portable;
 use crate::arithmetic::{adc, mac, sbb, SqrtTableHelpers};
 #[cfg(feature = "deferred")]
 use crate::deferred::{DeferredField, Product};
@@ -113,6 +116,11 @@ const MODULUS: Fp = Fp([
     0x0000000000000000,
     0x4000000000000000,
 ]);
+
+// The portable additive backend and the Apple AArch64 assembly both rely on
+// this shape: limb 2 of the modulus is zero and limb 3 is exactly 2^62.
+const_assert_eq!(MODULUS.0[2], 0);
+const_assert_eq!(MODULUS.0[3], 1 << 62);
 
 /// The modulus as u32 limbs.
 #[cfg(not(target_pointer_width = "64"))]
@@ -277,8 +285,7 @@ impl Fp {
     /// Doubles this field element.
     #[inline]
     pub const fn double(&self) -> Fp {
-        // TODO: This can be achieved more efficiently with a bitshift.
-        self.add(self)
+        Fp(portable::double(&self.0, MODULUS.0[0], MODULUS.0[1]))
     }
 
     fn from_u512(limbs: [u64; 8]) -> Fp {
@@ -316,8 +323,16 @@ impl Fp {
     /// Squares this element.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn square(&self) -> Fp {
-        let u = self.square_unreduced();
-        Fp::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
+        // The square is below `p^2 < R * p`, so the cheaper low-half
+        // reduction applies. `mul` keeps the classical reduction: the same
+        // substitution measured slower there, where the wider dependency
+        // graph of the 4x4 product already hides the reduction's latency.
+        Fp(portable::montgomery_reduce_low(
+            &self.square_unreduced(),
+            MODULUS.0[0],
+            MODULUS.0[1],
+            INV,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -441,57 +456,67 @@ impl Fp {
             target_vendor = "apple"
         )))]
         {
-            (0..n).fold(*self, |acc, _| acc.square()).mul(by)
+            // Leave the accumulator unreduced between squarings, as the
+            // assembly's `sqr_n_mul` loop does. The closing multiplication
+            // canonicalizes: its product is below `2p * p < R * p`, which is
+            // the whole domain the classical reduction accepts.
+            Fp(portable::sqr_n_lazy(
+                &self.0,
+                n,
+                MODULUS.0[0],
+                MODULUS.0[1],
+                INV,
+            ))
+            .mul(by)
+        }
+    }
+
+    /// Squares `self` `n` times (`n` must be at least 1).
+    #[inline]
+    fn sqr_n_runtime(&self, n: u32) -> Self {
+        assert!(n >= 1);
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            (0..n).fold(*self, |acc, _| acc.square_runtime())
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            // As in `sqr_n_mul_runtime`, but with nothing to fold the
+            // correction into, so canonicalize once at the end.
+            Fp(portable::conditional_subtract_p(
+                portable::sqr_n_lazy(&self.0, n, MODULUS.0[0], MODULUS.0[1], INV),
+                MODULUS.0[0],
+                MODULUS.0[1],
+            ))
         }
     }
 
     /// Subtracts `rhs` from `self`, returning the result.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn sub(&self, rhs: &Self) -> Self {
-        let (d0, borrow) = sbb(self.0[0], rhs.0[0], 0);
-        let (d1, borrow) = sbb(self.0[1], rhs.0[1], borrow);
-        let (d2, borrow) = sbb(self.0[2], rhs.0[2], borrow);
-        let (d3, borrow) = sbb(self.0[3], rhs.0[3], borrow);
-
-        // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
-        // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the modulus.
-        let (d0, carry) = adc(d0, MODULUS.0[0] & borrow, 0);
-        let (d1, carry) = adc(d1, MODULUS.0[1] & borrow, carry);
-        let (d2, carry) = adc(d2, MODULUS.0[2] & borrow, carry);
-        let (d3, _) = adc(d3, MODULUS.0[3] & borrow, carry);
-
-        Fp([d0, d1, d2, d3])
+        Fp(portable::sub(&self.0, &rhs.0, MODULUS.0[0], MODULUS.0[1]))
     }
 
     /// Adds `rhs` to `self`, returning the result.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn add(&self, rhs: &Self) -> Self {
-        let (d0, carry) = adc(self.0[0], rhs.0[0], 0);
-        let (d1, carry) = adc(self.0[1], rhs.0[1], carry);
-        let (d2, carry) = adc(self.0[2], rhs.0[2], carry);
-        let (d3, _) = adc(self.0[3], rhs.0[3], carry);
-
-        // Attempt to subtract the modulus, to ensure the value
-        // is smaller than the modulus.
-        (&Fp([d0, d1, d2, d3])).sub(&MODULUS)
+        Fp(portable::add(&self.0, &rhs.0, MODULUS.0[0], MODULUS.0[1]))
     }
 
     /// Negates `self`.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn neg(&self) -> Self {
-        // Subtract `self` from `MODULUS` to negate. Ignore the final
-        // borrow because it cannot underflow; self is guaranteed to
-        // be in the field.
-        let (d0, borrow) = sbb(MODULUS.0[0], self.0[0], 0);
-        let (d1, borrow) = sbb(MODULUS.0[1], self.0[1], borrow);
-        let (d2, borrow) = sbb(MODULUS.0[2], self.0[2], borrow);
-        let (d3, _) = sbb(MODULUS.0[3], self.0[3], borrow);
-
-        // `tmp` could be `MODULUS` if `self` was zero. Create a mask that is
-        // zero if `self` was zero, and `u64::max_value()` if self was nonzero.
-        let mask = (((self.0[0] | self.0[1] | self.0[2] | self.0[3]) == 0) as u64).wrapping_sub(1);
-
-        Fp([d0 & mask, d1 & mask, d2 & mask, d3 & mask])
+        Fp(portable::neg(&self.0, MODULUS.0[0], MODULUS.0[1]))
     }
 
     /// Multiplies `rhs` by `self`, returning the unreduced 512-bit product.
@@ -525,33 +550,7 @@ impl Fp {
     /// Squares this element, returning the unreduced 512-bit product.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) const fn square_unreduced(&self) -> [u64; 8] {
-        let (r1, carry) = mac(0, self.0[0], self.0[1], 0);
-        let (r2, carry) = mac(0, self.0[0], self.0[2], carry);
-        let (r3, r4) = mac(0, self.0[0], self.0[3], carry);
-
-        let (r3, carry) = mac(r3, self.0[1], self.0[2], 0);
-        let (r4, r5) = mac(r4, self.0[1], self.0[3], carry);
-
-        let (r5, r6) = mac(r5, self.0[2], self.0[3], 0);
-
-        let r7 = r6 >> 63;
-        let r6 = (r6 << 1) | (r5 >> 63);
-        let r5 = (r5 << 1) | (r4 >> 63);
-        let r4 = (r4 << 1) | (r3 >> 63);
-        let r3 = (r3 << 1) | (r2 >> 63);
-        let r2 = (r2 << 1) | (r1 >> 63);
-        let r1 = r1 << 1;
-
-        let (r0, carry) = mac(0, self.0[0], self.0[0], 0);
-        let (r1, carry) = adc(0, r1, carry);
-        let (r2, carry) = mac(r2, self.0[1], self.0[1], carry);
-        let (r3, carry) = adc(0, r3, carry);
-        let (r4, carry) = mac(r4, self.0[2], self.0[2], carry);
-        let (r5, carry) = adc(0, r5, carry);
-        let (r6, carry) = mac(r6, self.0[3], self.0[3], carry);
-        let (r7, _) = adc(0, r7, carry);
-
-        [r0, r1, r2, r3, r4, r5, r6, r7]
+        portable::square_wide(&self.0)
     }
 }
 
@@ -875,6 +874,14 @@ impl SqrtTableHelpers for Fp {
         rs.square_runtime() // rt
     }
 
+    fn sqr_n(&self, n: u32) -> Self {
+        self.sqr_n_runtime(n)
+    }
+
+    fn sqr_n_mul(&self, n: u32, by: &Self) -> Self {
+        self.sqr_n_mul_runtime(n, by)
+    }
+
     fn get_lower_32(&self) -> u32 {
         // TODO: don't reduce, just hash the Montgomery form. (Requires rebuilding perfect hash table.)
         let tmp = Fp::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
@@ -1076,6 +1083,138 @@ fn test_pow_by_t_minus1_over2() {
     // NB: TWO_INV is standing in as a "random" field element
     let v = (Fp::TWO_INV).pow_by_t_minus1_over2();
     assert!(v == ff::Field::pow_vartime(&Fp::TWO_INV, &T_MINUS1_OVER2));
+}
+
+#[test]
+fn sqr_n_mul_matches_eager_chain() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x71; 16]);
+
+    // The lazy chain must agree with squaring-and-canonicalizing at every
+    // step, including chains far longer than any caller uses.
+    for _ in 0..200 {
+        let a = <Fp as ff::Field>::random(&mut rng);
+        let by = <Fp as ff::Field>::random(&mut rng);
+
+        let mut eager = a;
+        for n in 1..=512u32 {
+            eager = eager.square();
+            assert_eq!(a.sqr_n_mul_runtime(n, &by), eager * by, "n = {}", n);
+        }
+    }
+}
+
+#[test]
+fn sqr_n_lazy_accumulator_stays_below_two_p() {
+    use rand::SeedableRng;
+
+    // `sqr_n_lazy` is only sound while the accumulator stays under
+    // `isqrt(R * p)`, which is `2p` minus the modulus' low half. Squaring
+    // pushes the bound towards `2p` as roughly `2 - 4/n`, so walk a long
+    // chain and check every step.
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x9d; 16]);
+
+    let two_p = {
+        let (d0, c) = (MODULUS.0[0]).overflowing_add(MODULUS.0[0]);
+        let (d1, c1) = (MODULUS.0[1]).overflowing_add(MODULUS.0[1]);
+        let (d1, c2) = d1.overflowing_add(c as u64);
+        let (d2, c3) = (MODULUS.0[2]).overflowing_add(MODULUS.0[2]);
+        let (d2, c4) = d2.overflowing_add((c1 | c2) as u64);
+        let (d3, _) = (MODULUS.0[3])
+            .overflowing_add(MODULUS.0[3])
+            .0
+            .overflowing_add((c3 | c4) as u64);
+        [d0, d1, d2, d3]
+    };
+    let below = |x: &[u64; 4]| {
+        let mut i = 4;
+        while i > 0 {
+            i -= 1;
+            if x[i] != two_p[i] {
+                return x[i] < two_p[i];
+            }
+        }
+        false
+    };
+
+    for _ in 0..100 {
+        let mut acc = <Fp as ff::Field>::random(&mut rng).0;
+        for n in 1..=2048u32 {
+            acc = super::portable::sqr_n_lazy(&acc, 1, MODULUS.0[0], MODULUS.0[1], INV);
+            assert!(below(&acc), "accumulator reached 2p after {} squarings", n);
+        }
+    }
+}
+
+#[test]
+fn montgomery_reduce_low_matches_classical() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x3c; 16]);
+
+    // Any value of the form `t_lo + R * t_hi` with `t_hi` canonical is below
+    // `R * p`, which is the whole domain both reductions accept.
+    for _ in 0..20_000 {
+        let hi = <Fp as ff::Field>::random(&mut rng);
+        let lo = <Fp as ff::Field>::random(&mut rng);
+        let t = [
+            lo.0[0], lo.0[1], lo.0[2], lo.0[3], hi.0[0], hi.0[1], hi.0[2], hi.0[3],
+        ];
+
+        let classical = Fp::montgomery_reduce(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
+        let low_half = Fp(super::portable::montgomery_reduce_low(
+            &t,
+            MODULUS.0[0],
+            MODULUS.0[1],
+            INV,
+        ));
+        assert_eq!(classical, low_half);
+    }
+
+    // Boundary values: zero, `R * (p - 1)`, and an all-ones low half.
+    let max = -Fp::one();
+    for t in [
+        [0u64; 8],
+        [0, 0, 0, 0, max.0[0], max.0[1], max.0[2], max.0[3]],
+        [
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            max.0[0],
+            max.0[1],
+            max.0[2],
+            max.0[3],
+        ],
+        [u64::MAX, u64::MAX, u64::MAX, u64::MAX, 0, 0, 0, 0],
+    ] {
+        assert_eq!(
+            Fp::montgomery_reduce(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]),
+            Fp(super::portable::montgomery_reduce_low(
+                &t,
+                MODULUS.0[0],
+                MODULUS.0[1],
+                INV
+            )),
+        );
+    }
+}
+
+#[test]
+fn square_matches_classical_reduction() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x5e; 16]);
+
+    for _ in 0..20_000 {
+        let a = <Fp as ff::Field>::random(&mut rng);
+        let u = a.square_unreduced();
+        assert_eq!(
+            a.square(),
+            Fp::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]),
+        );
+    }
 }
 
 #[test]
