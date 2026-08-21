@@ -29,6 +29,12 @@ pub struct SelectorAssignment<F> {
 
     /// The expression we wish to substitute with
     pub expression: Expression<F>,
+
+    /// The number of selectors represented by the combination column.
+    pub(super) combination_len: usize,
+
+    /// The root assigned to this selector within its combination.
+    pub(super) assigned_root: usize,
 }
 
 /// This function takes a vector that defines each selector as well as a closure
@@ -87,6 +93,8 @@ where
                 selector: selector.selector,
                 combination_index,
                 expression,
+                combination_len: 1,
+                assigned_root: 1,
             });
 
             false
@@ -183,6 +191,7 @@ where
         let query = allocate_fixed_column();
 
         let mut assigned_root = F::ONE;
+        let mut assigned_root_index = 1;
         selector_assignments.extend(combination.into_iter().map(|selector| {
             // Compute the expression for substitution. This produces an expression of the
             // form
@@ -214,11 +223,15 @@ where
 
             assigned_root += F::ONE;
 
-            SelectorAssignment {
+            let assignment = SelectorAssignment {
                 selector: selector.selector,
                 combination_index,
                 expression,
-            }
+                combination_len,
+                assigned_root: assigned_root_index,
+            };
+            assigned_root_index += 1;
+            assignment
         }));
         combination_assignments.push(combination_assignment);
     }

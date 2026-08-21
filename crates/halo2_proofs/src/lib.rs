@@ -19,6 +19,9 @@ pub mod transcript;
 pub mod dev;
 mod helpers;
 
+// Selector families smaller than this are cheaper to evaluate directly.
+const MIN_SELECTOR_FAMILY_LEN: usize = 4;
+
 #[cfg(feature = "batch")]
 const INSTANCE_WINDOW_BITS: usize = 8;
 #[cfg(feature = "batch")]
