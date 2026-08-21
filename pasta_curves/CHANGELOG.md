@@ -94,6 +94,8 @@ and this project adheres to Rust's notion of
   perfect hashes. This removes four Montgomery reductions and four integer
   remainders per square root, improving `Fp::sqrt` by 2.3% and `Fq::sqrt` by
   1.8% on Apple AArch64 with the assembly backend.
+- GLV affine bucket reductions interleave two independent multiplication
+  lanes through their shared inversion and post-inversion chord arithmetic.
 - The GLV Signed-Booth multiscalar backend caches each current window's
   nonzero assignments so it does not recode the same components twice.
 - The GLV Signed-Booth multiscalar backend reduces bucket trees with batched
