@@ -50,7 +50,10 @@ repository = "https://github.com/zakura-core/libraries"
 features = ["nightly"]
 
 [features]
-alloc = ["hex"]
+alloc = [
+    "hex",
+    "pasta_curves/glv",
+]
 default = ["std"]
 frost = [
     "frost-rerandomized",

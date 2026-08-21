@@ -191,12 +191,31 @@ impl<T: SigType> VerificationKey<T> {
             }
         };
 
-        // XXX rewrite as normal double scalar mul
         // Verify check is h * ( - s * B + R  + c * A) == 0
         //                 h * ( s * B - c * A - R) == 0
-        let sB = T::basepoint() * s;
-        let cA = self.point * c;
-        let check = sB - cA - r;
+        //
+        // Every input here is public (the verification key, the signature
+        // and the challenge), so `s * B - c * A` is computed as a single
+        // variable-time double-scalar multiplication: GLV tables and one
+        // shared-doubling ladder on Pallas, a wNAF Straus ladder on
+        // Jubjub. Without `alloc` it falls back to two constant-time
+        // multiplications.
+        #[cfg(feature = "alloc")]
+        let check = {
+            use crate::scalar_mul::VartimeMultiscalarMul;
+            let sb_minus_ca = <T::Point as VartimeMultiscalarMul>::optional_multiscalar_mul(
+                [s, -c],
+                [Some(T::basepoint()), Some(self.point)],
+            )
+            .expect("both points are present");
+            sb_minus_ca - r
+        };
+        #[cfg(not(feature = "alloc"))]
+        let check = {
+            let sB = T::basepoint() * s;
+            let cA = self.point * c;
+            sB - cA - r
+        };
 
         if check.is_small_order().into() {
             Ok(())

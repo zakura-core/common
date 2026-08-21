@@ -112,6 +112,29 @@ impl<'a> From<&'a pallas::Point> for LookupTable5<pallas::Point> {
     }
 }
 
+/// Sums of at most this many terms use the GLV ladder; larger sums keep
+/// the width-5 wNAF Straus ladder.
+///
+/// GLV halves the ladder's doublings (~127 instead of 255), which dominates
+/// small sums such as a single signature's `s·B − c·A`. Per term, however,
+/// its width-3 Eisenstein digit set costs ~39 additions for a full-width
+/// scalar and ~32 for a 128-bit one, against ~42 and ~21 for width-5 wNAF
+/// — and half of a verification batch's terms are the random 128-bit
+/// `z_i`. Measured on the batch verifier (Apple M4 asm backend and EPYC
+/// portable backend alike): 17 terms −1.3…−1.9%, 129 terms +1.2…+2.8%, so
+/// the crossover sits between, and 32 keeps every measured point on the
+/// winning side.
+#[cfg(feature = "alloc")]
+const GLV_MAX_TERMS: usize = 32;
+
+/// Variable-time multiscalar multiplication on Pallas.
+///
+/// Small sums (see [`GLV_MAX_TERMS`]) use the curve's GLV endomorphism:
+/// every scalar is split into two ~128-bit halves and recoded jointly, and
+/// all terms share one ~127-column doubling ladder
+/// (`pasta_curves::glv::sum_of_products_vartime`), with the GLV windows
+/// built under one shared batch normalization. Larger sums use the width-5
+/// wNAF Straus ladder, whose sparser digits win once additions dominate.
 #[cfg(feature = "alloc")]
 impl VartimeMultiscalarMul for pallas::Point {
     type Scalar = pallas::Scalar;
@@ -124,15 +147,27 @@ impl VartimeMultiscalarMul for pallas::Point {
         I::Item: Borrow<Self::Scalar>,
         J: IntoIterator<Item = Option<pallas::Point>>,
     {
-        let nafs: Vec<_> = scalars
-            .into_iter()
-            .map(|c| c.borrow().non_adjacent_form(5))
-            .collect();
+        let scalars: Vec<pallas::Scalar> = scalars.into_iter().map(|c| *c.borrow()).collect();
+        let points = points.into_iter().collect::<Option<Vec<pallas::Point>>>()?;
+        // As with the original ladder, extra scalars or points beyond the
+        // shorter of the two sequences are ignored.
+        let n = scalars.len().min(points.len());
 
-        let lookup_tables = points
-            .into_iter()
-            .map(|P_opt| P_opt.map(|P| LookupTable5::<pallas::Point>::from(&P)))
-            .collect::<Option<Vec<_>>>()?;
+        if n <= GLV_MAX_TERMS {
+            return Some(pasta_curves::glv::sum_of_products_vartime(
+                &points[..n],
+                &scalars[..n],
+            ));
+        }
+
+        let nafs: Vec<_> = scalars[..n]
+            .iter()
+            .map(|c| c.non_adjacent_form(5))
+            .collect();
+        let lookup_tables: Vec<_> = points[..n]
+            .iter()
+            .map(LookupTable5::<pallas::Point>::from)
+            .collect();
 
         let mut r = pallas::Point::identity();
         let naf_size = Self::Scalar::naf_length();
