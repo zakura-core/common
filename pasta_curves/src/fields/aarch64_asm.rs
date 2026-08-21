@@ -50,6 +50,14 @@
 //! ensures that the implementation computes this candidate without an
 //! intermediate five-limb addition wrapping.
 //!
+//! Because `mul` relies on that bound to omit a fifth candidate limb, a
+//! non-canonical `rhs` is no longer merely tolerated with a non-canonical
+//! (but congruent) output: for `rhs >= R - p` the candidate can reach `R`,
+//! and the dropped limb makes the result an **incorrect residue** that still
+//! looks canonical. Every in-crate caller supplies a canonical `rhs` by
+//! construction; `mul` and `square` debug-assert the precondition so a future
+//! caller that breaks it fails loudly under test instead of silently.
+//!
 //! There are no branches and no memory accesses inside the blocks, so the
 //! code is constant-time.
 
@@ -74,11 +82,28 @@ extern "C" {
     );
 }
 
+/// Whether `value < modulus` as little-endian 256-bit integers.
+#[inline(always)]
+fn is_canonical(value: &Limbs, modulus: &Limbs) -> bool {
+    for i in (0..4).rev() {
+        if value[i] != modulus[i] {
+            return value[i] < modulus[i];
+        }
+    }
+    false
+}
+
 /// Multiplies two Montgomery residues for a Pasta modulus. `rhs` must be
-/// canonical. `lhs` may be unreduced only if every `rhs` limb is at most
-/// `2^64 - 4`; see the module docs for the carry-chain bound behind this.
+/// canonical (debug-asserted; a violation yields an incorrect residue, see
+/// the module docs). `lhs` may be unreduced only if every `rhs` limb is at
+/// most `2^64 - 4`; see the module docs for the carry-chain bound behind
+/// this.
 #[inline(always)]
 pub(super) fn mul(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
+    debug_assert!(
+        is_canonical(rhs, modulus),
+        "aarch64_asm::mul requires a canonical rhs"
+    );
     let (o0, o1, o2, o3): (u64, u64, u64, u64);
     // SAFETY: straight-line register-only arithmetic; no memory access, no
     // stack use, and outputs depend only on the declared inputs.
@@ -285,9 +310,14 @@ pub(super) fn mul(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, inv: u64) -> Limbs 
     [o0, o1, o2, o3]
 }
 
-/// Squares a canonical Montgomery residue for a Pasta modulus.
+/// Squares a canonical Montgomery residue for a Pasta modulus (the input's
+/// canonicity is debug-asserted).
 #[inline(always)]
 pub(super) fn square(value: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
+    debug_assert!(
+        is_canonical(value, modulus),
+        "aarch64_asm::square requires a canonical input"
+    );
     let mut a0 = value[0];
     let mut a1 = value[1];
     let mut a2 = value[2];

@@ -56,7 +56,10 @@ and this project adheres to Rust's notion of
   operations (`double`, mixed addition) and everything built on them.
 - The `aarch64-asm` Montgomery multiplication no longer captures and compares
   a provably-zero fifth output limb. Direct `Fp` and `Fq` multiplication
-  benchmarks are approximately 1.7% faster on Apple M4.
+  benchmarks are approximately 1.7% faster on Apple M4. The bound that makes
+  the limb provably zero needs a canonical `rhs` (which every caller already
+  supplies); the assembly wrappers now debug-assert it, since a violation
+  would yield an incorrect residue rather than a merely non-canonical one.
 - `Fp::pow_vartime` and `Fq::pow_vartime` now fuse each run of squarings with
   the following multiplication. The sequence of field operations (and thus
   the variable-time profile, which depends only on the exponent) is
