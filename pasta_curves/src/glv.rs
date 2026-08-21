@@ -1599,7 +1599,7 @@ impl<C: GlvParams> Decomposed<C> {
         // the half-width guarantee; enforce it in every build profile.
         assert!(
             a1 >> GLV_COMPONENT_BITS == 0 && a2 >> GLV_COMPONENT_BITS == 0,
-            "GLV half exceeds 127 bits"
+            "GLV half exceeds {GLV_COMPONENT_BITS} bits"
         );
         let a = if neg1 { -(a1 as i128) } else { a1 as i128 };
         let b = if neg2 { -(a2 as i128) } else { a2 as i128 };
@@ -2462,6 +2462,123 @@ mod tests {
     use crate::arithmetic::adc;
     use ff::Field;
 
+    const VERIFIER_MULTIEXP_SIZES: [usize; 3] = [2_150, 2_990, 5_678];
+
+    /// Builds deterministic MSM inputs with known discrete logarithms.
+    ///
+    /// Each input includes identity, duplicate, and inverse bases, along with
+    /// zero, unit, endomorphism, and dense scalars. This exercises the complete
+    /// optimized MSM without computing the reference result through a second
+    /// multiscalar-multiplication implementation.
+    fn verifier_multiexp_inputs<C: GlvParams>(
+        terms: usize,
+    ) -> (Vec<C::ScalarExt>, Vec<C::AffineExt>, C) {
+        let generator = C::generator();
+        let identity = C::identity().to_affine();
+        let positive = generator.to_affine();
+        let negative = (-generator).to_affine();
+        let mut next_point = generator;
+        let mut next_weight = C::ScalarExt::ONE;
+        let mut scalar_state = C::ScalarExt::from(0x6a09_e667_f3bc_c909);
+        let mut expected_scalar = C::ScalarExt::ZERO;
+        let mut scalars = Vec::with_capacity(terms);
+        let mut bases = Vec::with_capacity(terms);
+
+        for index in 0..terms {
+            scalar_state =
+                scalar_state.square() + C::ScalarExt::from(u64::try_from(index + 1).unwrap());
+            let scalar = match index % 16 {
+                0 => C::ScalarExt::ZERO,
+                1 => C::ScalarExt::ONE,
+                2 => -C::ScalarExt::ONE,
+                3 => C::ScalarExt::ZETA,
+                4 => -C::ScalarExt::ZETA,
+                5 => -scalar_state,
+                _ => scalar_state,
+            };
+            let (base, weight) = match index % 64 {
+                0 => (identity, C::ScalarExt::ZERO),
+                1 | 2 => (positive, C::ScalarExt::ONE),
+                3 => (negative, -C::ScalarExt::ONE),
+                _ => {
+                    next_point += generator;
+                    next_weight += C::ScalarExt::ONE;
+                    (next_point.to_affine(), next_weight)
+                }
+            };
+
+            expected_scalar += weight * scalar;
+            scalars.push(scalar);
+            bases.push(base);
+        }
+
+        (scalars, bases, generator * expected_scalar)
+    }
+
+    fn optimized_multiexp_matches_expected<C: GlvParams>() {
+        let num_threads = current_num_threads();
+        let mut selected = 0;
+        for terms in VERIFIER_MULTIEXP_SIZES {
+            let (scalars, bases, expected) = verifier_multiexp_inputs::<C>(terms);
+            if let Some(actual) = try_multiexp::<C>(&scalars, &bases) {
+                assert_eq!(
+                    actual, expected,
+                    "GLV MSM mismatch at {terms} terms with {num_threads} threads"
+                );
+                selected += 1;
+            }
+        }
+        assert!(
+            selected > 0,
+            "GLV must be selected for at least one verifier-sized MSM with \
+             {num_threads} threads"
+        );
+    }
+
+    #[cfg(feature = "multicore")]
+    fn optimized_multiexp_matches_expected_at_thread_counts<C: GlvParams>() {
+        const THREAD_COUNTS: [usize; 5] = [1, 2, 3, 8, 32];
+
+        for num_threads in THREAD_COUNTS {
+            maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .expect("test thread pool must build")
+                .install(|| {
+                    assert_eq!(current_num_threads(), num_threads);
+                    optimized_multiexp_matches_expected::<C>();
+                });
+        }
+    }
+
+    fn serial_c10_multiexp_matches_expected<C: GlvParams>() {
+        const TERMS: usize = 5_678;
+        const WINDOW_BITS: usize = 10;
+
+        assert_eq!(
+            multiexp_window_bits::<C>(TERMS, 1),
+            Some(WINDOW_BITS),
+            "verifier batch-64 must select the serial c=10 schedule"
+        );
+        let (scalars, bases, expected) = verifier_multiexp_inputs::<C>(TERMS);
+        let components = scalars
+            .iter()
+            .map(decompose::<C>)
+            .map(|(first, second)| (first.into(), second.into()))
+            .collect::<Vec<_>>();
+        let endo_bases = bases
+            .iter()
+            .map(|base| {
+                let (x, y) = C::affine_xy(base);
+                C::affine_unchecked(x * C::Base::ZETA, y, private::CrateToken(()))
+            })
+            .collect::<Vec<_>>();
+        let actual = multiexp_serial::<C>(&components, &bases, &endo_bases, WINDOW_BITS)
+            .expect("valid curve points have invertible affine denominators");
+
+        assert_eq!(actual, expected, "serial c=10 GLV MSM mismatch");
+    }
+
     #[test]
     fn multiexp_backend_selection() {
         assert_eq!(default_multiexp_window_bits(31), Some(3));
@@ -2870,8 +2987,14 @@ mod tests {
         let lambda = C::ScalarExt::ZETA;
         let check = |k: C::ScalarExt| {
             let ((neg1, a1), (neg2, a2)) = decompose::<C>(&k);
-            assert!(a1 >> GLV_COMPONENT_BITS == 0, "k1 exceeds 127 bits");
-            assert!(a2 >> GLV_COMPONENT_BITS == 0, "k2 exceeds 127 bits");
+            assert!(
+                a1 >> GLV_COMPONENT_BITS == 0,
+                "k1 exceeds {GLV_COMPONENT_BITS} bits"
+            );
+            assert!(
+                a2 >> GLV_COMPONENT_BITS == 0,
+                "k2 exceeds {GLV_COMPONENT_BITS} bits"
+            );
             let s1 = C::ScalarExt::from_u128(a1);
             let s1 = if neg1 { -s1 } else { s1 };
             let s2 = C::ScalarExt::from_u128(a2);
@@ -3384,6 +3507,17 @@ mod tests {
                 #[test]
                 fn batch_affine_buckets() {
                     batch_affine_buckets_match_native::<$curve>();
+                }
+                #[test]
+                fn optimized_multiexp() {
+                    #[cfg(not(feature = "multicore"))]
+                    optimized_multiexp_matches_expected::<$curve>();
+                    #[cfg(feature = "multicore")]
+                    optimized_multiexp_matches_expected_at_thread_counts::<$curve>();
+                }
+                #[test]
+                fn serial_c10_multiexp() {
+                    serial_c10_multiexp_matches_expected::<$curve>();
                 }
             }
         };
