@@ -89,6 +89,8 @@ const FUSED_FIRST_WORDS: usize = 8;
 /// rebuild the 16-lane level holds 16 of 1023 combines.
 const BATCH_AFFINE_MIN_MESSAGES: usize = 32;
 
+const AFFINE_BATCH_LANES: usize = 3;
+
 #[inline(always)]
 fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
     // Method syntax selects `pallas::Base`'s portable inherent `const fn`.
@@ -96,10 +98,11 @@ fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
     group::ff::Field::square(value)
 }
 
-/// Two-lane Montgomery batch inversion for provably nonzero values (the
+/// Three-lane Montgomery batch inversion for provably nonzero values (the
 /// chord denominators of [`UncheckedFixedLengthHashDomain::evaluate_batch_affine`]).
 ///
-/// Twin implementations — keep them in step when changing any:
+/// Related two-lane implementations — keep the shared arithmetic contract
+/// in step when changing any:
 /// `batch_invert_nonzero` in `pasta_curves/src/glv.rs` (the GLV ladder's
 /// columns, same nonzero-only contract), `batch_invert_multi` in
 /// `halo2_proofs/src/arithmetic.rs` (ff-style zero skipping), and
@@ -111,56 +114,75 @@ fn batch_invert_nonzero(values: &mut [pallas::Base], scratch: &mut [pallas::Base
     assert_eq!(values.len(), scratch.len());
     let mut acc0 = pallas::Base::one();
     let mut acc1 = pallas::Base::one();
-    for (pair, slots) in values
-        .as_chunks::<2>()
+    let mut acc2 = pallas::Base::one();
+    for (triple, slots) in values
+        .as_chunks::<AFFINE_BATCH_LANES>()
         .0
         .iter()
-        .zip(scratch.as_chunks_mut::<2>().0)
+        .zip(scratch.as_chunks_mut::<AFFINE_BATCH_LANES>().0)
     {
-        debug_assert!(!pair[0].is_zero_vartime());
-        debug_assert!(!pair[1].is_zero_vartime());
+        debug_assert!(!triple[0].is_zero_vartime());
+        debug_assert!(!triple[1].is_zero_vartime());
+        debug_assert!(!triple[2].is_zero_vartime());
         slots[0] = acc0;
-        acc0 *= pair[0];
+        acc0 *= triple[0];
         slots[1] = acc1;
-        acc1 *= pair[1];
+        acc1 *= triple[1];
+        slots[2] = acc2;
+        acc2 *= triple[2];
     }
-    if let (Some(value), Some(slot)) = (
-        values.as_chunks::<2>().1.first(),
-        scratch.as_chunks_mut::<2>().1.first_mut(),
-    ) {
+    let values_remainder = values.as_chunks::<AFFINE_BATCH_LANES>().1;
+    let scratch_remainder = scratch.as_chunks_mut::<AFFINE_BATCH_LANES>().1;
+    if let (Some(value), Some(slot)) = (values_remainder.first(), scratch_remainder.first_mut()) {
         debug_assert!(!value.is_zero_vartime());
         *slot = acc0;
         acc0 *= value;
     }
+    if let (Some(value), Some(slot)) = (values_remainder.get(1), scratch_remainder.get_mut(1)) {
+        debug_assert!(!value.is_zero_vartime());
+        *slot = acc1;
+        acc1 *= value;
+    }
 
     // A product of nonzero field elements is nonzero, so this cannot fail.
-    let inverse = (acc0 * acc1).invert().unwrap();
-    let seed0 = inverse * acc1;
-    let seed1 = inverse * acc0;
+    let acc01 = acc0 * acc1;
+    let inverse = (acc01 * acc2).invert().unwrap();
+    let inverse01 = inverse * acc2;
+    let seed0 = inverse01 * acc1;
+    let seed1 = inverse01 * acc0;
+    let seed2 = inverse * acc01;
     let mut acc0 = seed0;
     let mut acc1 = seed1;
+    let mut acc2 = seed2;
 
-    if let (Some(value), Some(slot)) = (
-        values.as_chunks_mut::<2>().1.first_mut(),
-        scratch.as_chunks::<2>().1.first(),
-    ) {
+    let values_remainder = values.as_chunks_mut::<AFFINE_BATCH_LANES>().1;
+    let scratch_remainder = scratch.as_chunks::<AFFINE_BATCH_LANES>().1;
+    if let (Some(value), Some(slot)) = (values_remainder.get_mut(1), scratch_remainder.get(1)) {
+        let inverted = acc1 * *slot;
+        acc1 *= *value;
+        *value = inverted;
+    }
+    if let (Some(value), Some(slot)) = (values_remainder.first_mut(), scratch_remainder.first()) {
         let inverted = acc0 * *slot;
         acc0 *= *value;
         *value = inverted;
     }
-    for (pair, slots) in values
-        .as_chunks_mut::<2>()
+    for (triple, slots) in values
+        .as_chunks_mut::<AFFINE_BATCH_LANES>()
         .0
         .iter_mut()
-        .zip(scratch.as_chunks::<2>().0)
+        .zip(scratch.as_chunks::<AFFINE_BATCH_LANES>().0)
         .rev()
     {
         let inverted0 = acc0 * slots[0];
         let inverted1 = acc1 * slots[1];
-        acc0 *= pair[0];
-        acc1 *= pair[1];
-        pair[0] = inverted0;
-        pair[1] = inverted1;
+        let inverted2 = acc2 * slots[2];
+        acc0 *= triple[0];
+        acc1 *= triple[1];
+        acc2 *= triple[2];
+        triple[0] = inverted0;
+        triple[1] = inverted1;
+        triple[2] = inverted2;
     }
 }
 
@@ -407,10 +429,8 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     /// checked. The denominators are therefore provably nonzero, which the
     /// lean batched inversion below relies on.
     ///
-    /// Both the inversion and the field arithmetic run two interleaved
-    /// even/odd lanes so the dependency chains overlap (the same
-    /// construction as the two-lane batched inversions elsewhere in the
-    /// workspace).
+    /// Both the inversion and the field arithmetic run three interleaved
+    /// lanes so their dependency chains overlap.
     fn evaluate_batch_affine(&self, messages: &[[u16; N]], workspace: &mut BatchHashWorkspace) {
         let n = messages.len();
         let BatchHashWorkspace {
@@ -483,10 +503,27 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
 
             batch_invert_nonzero(denominators, inversion_scratch);
 
-            // Affine chord additions, two lanes interleaved.
-            let pairs = n / 2;
-            for pair in 0..pairs {
-                let (a, b) = (2 * pair, 2 * pair + 1);
+            // Affine chord additions, three lanes interleaved.
+            let triples = n / AFFINE_BATCH_LANES;
+            for triple in 0..triples {
+                let a = AFFINE_BATCH_LANES * triple;
+                let (b, c) = (a + 1, a + 2);
+                let lambda_a = (table_ys[a] - ys[a]) * denominators[a];
+                let lambda_b = (table_ys[b] - ys[b]) * denominators[b];
+                let lambda_c = (table_ys[c] - ys[c]) * denominators[c];
+                let x3_a = square_with_runtime_backend(&lambda_a) - xs[a] - table_xs[a];
+                let x3_b = square_with_runtime_backend(&lambda_b) - xs[b] - table_xs[b];
+                let x3_c = square_with_runtime_backend(&lambda_c) - xs[c] - table_xs[c];
+                ys[a] = lambda_a * (xs[a] - x3_a) - ys[a];
+                ys[b] = lambda_b * (xs[b] - x3_b) - ys[b];
+                ys[c] = lambda_c * (xs[c] - x3_c) - ys[c];
+                xs[a] = x3_a;
+                xs[b] = x3_b;
+                xs[c] = x3_c;
+            }
+            let remainder = AFFINE_BATCH_LANES * triples;
+            if n - remainder == 2 {
+                let (a, b) = (remainder, remainder + 1);
                 let lambda_a = (table_ys[a] - ys[a]) * denominators[a];
                 let lambda_b = (table_ys[b] - ys[b]) * denominators[b];
                 let x3_a = square_with_runtime_backend(&lambda_a) - xs[a] - table_xs[a];
@@ -495,9 +532,8 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
                 ys[b] = lambda_b * (xs[b] - x3_b) - ys[b];
                 xs[a] = x3_a;
                 xs[b] = x3_b;
-            }
-            if n % 2 == 1 {
-                let a = n - 1;
+            } else if n - remainder == 1 {
+                let a = remainder;
                 let lambda = (table_ys[a] - ys[a]) * denominators[a];
                 let x3 = square_with_runtime_backend(&lambda) - xs[a] - table_xs[a];
                 ys[a] = lambda * (xs[a] - x3) - ys[a];
@@ -766,7 +802,7 @@ mod tests {
             .collect();
 
         // Cover the projective fallback, both sides of the batch-affine
-        // threshold, and odd batch widths on both paths.
+        // threshold, and all three affine remainders.
         for width in [
             1,
             2,
