@@ -56,7 +56,7 @@ const fn mac(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
 
 /// Conditionally subtract `p` from a value already known to be less than `2p`.
 #[inline(always)]
-const fn conditional_subtract_p(r: [u64; 4], p0: u64, p1: u64) -> [u64; 4] {
+pub(super) const fn conditional_subtract_p(r: [u64; 4], p0: u64, p1: u64) -> [u64; 4] {
     let (s0, borrow) = sbb(r[0], p0, false);
     let (s1, borrow) = sbb(r[1], p1, borrow);
     let (s2, borrow) = sbb(r[2], 0, borrow);
@@ -143,6 +143,23 @@ pub(super) const fn neg(value: &[u64; 4], p0: u64, p1: u64) -> [u64; 4] {
 /// x86-64.
 #[inline(always)]
 pub(super) const fn montgomery_reduce_low(t: &[u64; 8], p0: u64, p1: u64, inv: u64) -> [u64; 4] {
+    conditional_subtract_p(montgomery_reduce_low_lazy(t, p0, p1, inv), p0, p1)
+}
+
+/// Montgomery-reduces a 512-bit value `t < R * p`, leaving the result in
+/// `[0, 2p)` rather than canonicalizing it.
+///
+/// Squaring chains use this: a Montgomery multiplication accepts any product
+/// below `R * p`, so the correction can be deferred to the end of the chain
+/// instead of paid on every step. See [`sqr_n_lazy`] for the bound that makes
+/// the chain safe.
+#[inline(always)]
+pub(super) const fn montgomery_reduce_low_lazy(
+    t: &[u64; 8],
+    p0: u64,
+    p1: u64,
+    inv: u64,
+) -> [u64; 4] {
     let (mut r0, mut r1, mut r2, mut r3) = (t[0], t[1], t[2], t[3]);
 
     let mut i = 0;
@@ -167,5 +184,77 @@ pub(super) const fn montgomery_reduce_low(t: &[u64; 8], p0: u64, p1: u64, inv: u
     let (r2, c) = adc(r2, t[6], c);
     let (r3, _) = adc(r3, t[7], c);
 
-    conditional_subtract_p([r0, r1, r2, r3], p0, p1)
+    [r0, r1, r2, r3]
+}
+
+/// Squares `value`, returning the unreduced 512-bit product.
+#[inline(always)]
+pub(super) const fn square_wide(value: &[u64; 4]) -> [u64; 8] {
+    let (r1, carry) = mac(0, value[0], value[1], 0);
+    let (r2, carry) = mac(0, value[0], value[2], carry);
+    let (r3, r4) = mac(0, value[0], value[3], carry);
+
+    let (r3, carry) = mac(r3, value[1], value[2], 0);
+    let (r4, r5) = mac(r4, value[1], value[3], carry);
+
+    let (r5, r6) = mac(r5, value[2], value[3], 0);
+
+    let r7 = r6 >> 63;
+    let r6 = (r6 << 1) | (r5 >> 63);
+    let r5 = (r5 << 1) | (r4 >> 63);
+    let r4 = (r4 << 1) | (r3 >> 63);
+    let r3 = (r3 << 1) | (r2 >> 63);
+    let r2 = (r2 << 1) | (r1 >> 63);
+    let r1 = r1 << 1;
+
+    let (r0, carry) = mac(0, value[0], value[0], 0);
+    let (r1, carry) = adc_wide(0, r1, carry);
+    let (r2, carry) = mac(r2, value[1], value[1], carry);
+    let (r3, carry) = adc_wide(0, r3, carry);
+    let (r4, carry) = mac(r4, value[2], value[2], carry);
+    let (r5, carry) = adc_wide(0, r5, carry);
+    let (r6, carry) = mac(r6, value[3], value[3], carry);
+    let (r7, _) = adc_wide(0, r7, carry);
+
+    [r0, r1, r2, r3, r4, r5, r6, r7]
+}
+
+/// Squares `value` `n` times, leaving the accumulator unreduced in `[0, 2p)`
+/// throughout. This is the loop body of the assembly's `sqr_n_mul`.
+///
+/// # Why the chain stays in range
+///
+/// A Montgomery reduction accepts any input below `R * p` and returns
+/// `(t_lo + Q*p) / R + t_hi <= p + t_hi`. So if the accumulator is below
+/// `c * p`, the square is below `c^2 * p^2` and the next accumulator is below
+/// `(1 + c^2 * p/R) * p`. Starting from a canonical value, the multipliers are
+///
+/// ```text
+/// 1, 1.25, 1.390625, 1.483…, … -> 2   (approaching 2 from below as ~2 - 4/n)
+/// ```
+///
+/// and each step is legal as long as `(c * p)^2 < R * p`. For both Pasta
+/// moduli `isqrt(R * p)` is exactly `2p - (p mod 2^128) - 1`, so the unsafe
+/// point sits about `2^125` below `2p` while the bound only closes on `2p` as
+/// `4p/n`. That needs `n > 4p / (p mod 2^128)`, about `2^131` squarings; `n`
+/// here is a `u32`, leaving roughly `2^99` of margin. Iterating the exact
+/// integer bound `B <- p + floor(B^2 / R)` for 40 million steps still gives
+/// `1.9999999 * p`.
+///
+/// The caller must canonicalize the result. Multiplying by a canonical value
+/// does that on its own: the product is below `2p * p < R * p`.
+#[inline(always)]
+pub(super) fn sqr_n_lazy(value: &[u64; 4], n: u32, p0: u64, p1: u64, inv: u64) -> [u64; 4] {
+    let mut acc = *value;
+    for _ in 0..n {
+        acc = montgomery_reduce_low_lazy(&square_wide(&acc), p0, p1, inv);
+    }
+    acc
+}
+
+/// Compute `a + b + carry` where the carry is a full 64-bit word.
+#[inline(always)]
+const fn adc_wide(a: u64, b: u64, carry: u64) -> (u64, u64) {
+    let ret = (a as u128) + (b as u128) + (carry as u128);
+    (ret as u64, (ret >> 64) as u64)
 }

@@ -456,7 +456,48 @@ impl Fq {
             target_vendor = "apple"
         )))]
         {
-            (0..n).fold(*self, |acc, _| acc.square()).mul(by)
+            // Leave the accumulator unreduced between squarings, as the
+            // assembly's `sqr_n_mul` loop does. The closing multiplication
+            // canonicalizes: its product is below `2p * p < R * p`, which is
+            // the whole domain the classical reduction accepts.
+            Fq(portable::sqr_n_lazy(
+                &self.0,
+                n,
+                MODULUS.0[0],
+                MODULUS.0[1],
+                INV,
+            ))
+            .mul(by)
+        }
+    }
+
+    /// Squares `self` `n` times (`n` must be at least 1).
+    #[inline]
+    fn sqr_n_runtime(&self, n: u32) -> Self {
+        assert!(n >= 1);
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            (0..n).fold(*self, |acc, _| acc.square_runtime())
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            // As in `sqr_n_mul_runtime`, but with nothing to fold the
+            // correction into, so canonicalize once at the end.
+            Fq(portable::conditional_subtract_p(
+                portable::sqr_n_lazy(&self.0, n, MODULUS.0[0], MODULUS.0[1], INV),
+                MODULUS.0[0],
+                MODULUS.0[1],
+            ))
         }
     }
 
@@ -509,33 +550,7 @@ impl Fq {
     /// Squares this element, returning the unreduced 512-bit product.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) const fn square_unreduced(&self) -> [u64; 8] {
-        let (r1, carry) = mac(0, self.0[0], self.0[1], 0);
-        let (r2, carry) = mac(0, self.0[0], self.0[2], carry);
-        let (r3, r4) = mac(0, self.0[0], self.0[3], carry);
-
-        let (r3, carry) = mac(r3, self.0[1], self.0[2], 0);
-        let (r4, r5) = mac(r4, self.0[1], self.0[3], carry);
-
-        let (r5, r6) = mac(r5, self.0[2], self.0[3], 0);
-
-        let r7 = r6 >> 63;
-        let r6 = (r6 << 1) | (r5 >> 63);
-        let r5 = (r5 << 1) | (r4 >> 63);
-        let r4 = (r4 << 1) | (r3 >> 63);
-        let r3 = (r3 << 1) | (r2 >> 63);
-        let r2 = (r2 << 1) | (r1 >> 63);
-        let r1 = r1 << 1;
-
-        let (r0, carry) = mac(0, self.0[0], self.0[0], 0);
-        let (r1, carry) = adc(0, r1, carry);
-        let (r2, carry) = mac(r2, self.0[1], self.0[1], carry);
-        let (r3, carry) = adc(0, r3, carry);
-        let (r4, carry) = mac(r4, self.0[2], self.0[2], carry);
-        let (r5, carry) = adc(0, r5, carry);
-        let (r6, carry) = mac(r6, self.0[3], self.0[3], carry);
-        let (r7, _) = adc(0, r7, carry);
-
-        [r0, r1, r2, r3, r4, r5, r6, r7]
+        portable::square_wide(&self.0)
     }
 }
 
@@ -858,6 +873,14 @@ impl SqrtTableHelpers for Fq {
         (0..4).fold(ss, |x, _| x.square_runtime()) // st
     }
 
+    fn sqr_n(&self, n: u32) -> Self {
+        self.sqr_n_runtime(n)
+    }
+
+    fn sqr_n_mul(&self, n: u32, by: &Self) -> Self {
+        self.sqr_n_mul_runtime(n, by)
+    }
+
     fn get_lower_32(&self) -> u32 {
         // TODO: don't reduce, just hash the Montgomery form. (Requires rebuilding perfect hash table.)
         let tmp = Fq::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
@@ -1052,6 +1075,68 @@ fn test_sqrt() {
 #[test]
 fn test_sqrt_32bit_overflow() {
     assert!((Fq::from(5)).sqrt().is_none().unwrap_u8() == 1);
+}
+
+#[test]
+fn sqr_n_mul_matches_eager_chain() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x71; 16]);
+
+    // The lazy chain must agree with squaring-and-canonicalizing at every
+    // step, including chains far longer than any caller uses.
+    for _ in 0..200 {
+        let a = <Fq as ff::Field>::random(&mut rng);
+        let by = <Fq as ff::Field>::random(&mut rng);
+
+        let mut eager = a;
+        for n in 1..=512u32 {
+            eager = eager.square();
+            assert_eq!(a.sqr_n_mul_runtime(n, &by), eager * by, "n = {}", n);
+        }
+    }
+}
+
+#[test]
+fn sqr_n_lazy_accumulator_stays_below_two_p() {
+    use rand::SeedableRng;
+
+    // `sqr_n_lazy` is only sound while the accumulator stays under
+    // `isqrt(R * p)`, which is `2p` minus the modulus' low half. Squaring
+    // pushes the bound towards `2p` as roughly `2 - 4/n`, so walk a long
+    // chain and check every step.
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x9d; 16]);
+
+    let two_p = {
+        let (d0, c) = (MODULUS.0[0]).overflowing_add(MODULUS.0[0]);
+        let (d1, c1) = (MODULUS.0[1]).overflowing_add(MODULUS.0[1]);
+        let (d1, c2) = d1.overflowing_add(c as u64);
+        let (d2, c3) = (MODULUS.0[2]).overflowing_add(MODULUS.0[2]);
+        let (d2, c4) = d2.overflowing_add((c1 | c2) as u64);
+        let (d3, _) = (MODULUS.0[3])
+            .overflowing_add(MODULUS.0[3])
+            .0
+            .overflowing_add((c3 | c4) as u64);
+        [d0, d1, d2, d3]
+    };
+    let below = |x: &[u64; 4]| {
+        let mut i = 4;
+        while i > 0 {
+            i -= 1;
+            if x[i] != two_p[i] {
+                return x[i] < two_p[i];
+            }
+        }
+        false
+    };
+
+    for _ in 0..100 {
+        let mut acc = <Fq as ff::Field>::random(&mut rng).0;
+        for n in 1..=2048u32 {
+            acc = super::portable::sqr_n_lazy(&acc, 1, MODULUS.0[0], MODULUS.0[1], INV);
+            assert!(below(&acc), "accumulator reached 2p after {} squarings", n);
+        }
+    }
 }
 
 #[test]
