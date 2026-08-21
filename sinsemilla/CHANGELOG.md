@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Weighted batch evaluation now uses the configured runtime field backend for
+  squaring.
 - Added `BatchHashWorkspace` and
   `UncheckedFixedLengthHashDomain::hash_words_batch_with_workspace` so callers
   can retain the weighted batch evaluator's temporary allocations.
