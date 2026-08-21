@@ -345,12 +345,13 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
             for (lane, message) in messages.iter().enumerate() {
                 let generator = usize::from(message[i]);
                 assert!(generator < GENERATOR_COUNT, "invalid Sinsemilla word");
-                let point = self.weighted_generator(exponent, generator);
-                let point = point
-                    .coordinates()
-                    .expect("weighted table entries are not the identity");
-                table_xs[lane] = *point.x();
-                table_ys[lane] = *point.y();
+                // Construction proves every table entry nonidentity, so the
+                // raw pair avoids repeating that check for each batch lane.
+                let (table_x, table_y) = self
+                    .weighted_generator(exponent, generator)
+                    .raw_coordinates();
+                table_xs[lane] = table_x;
+                table_ys[lane] = table_y;
                 dens[lane] = table_xs[lane] - xs[lane];
             }
 

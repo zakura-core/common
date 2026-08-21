@@ -26,6 +26,23 @@ use super::{Fp, Fq};
 #[cfg(feature = "alloc")]
 use crate::arithmetic::{Coordinates, CurveAffine, CurveExt};
 
+macro_rules! impl_raw_coordinates {
+    (glv, $name_affine:ident, $base:ident) => {
+        #[cfg(feature = "alloc")]
+        impl $name_affine {
+            /// Returns the stored coordinate pair without interpreting the
+            /// identity representation specially.
+            ///
+            /// Unlike [`CurveAffine::coordinates`], this always returns a
+            /// pair. The identity is represented as `(0, 0)`.
+            pub fn raw_coordinates(&self) -> ($base, $base) {
+                (self.x, self.y)
+            }
+        }
+    };
+    (native, $name_affine:ident, $base:ident) => {};
+}
+
 #[cfg(feature = "alloc")]
 macro_rules! impl_batch_mul_same_scalar_vartime {
     (glv, $name:ident) => {
@@ -82,6 +99,8 @@ macro_rules! new_curve_impl {
             x: $base,
             y: $base,
         }
+
+        impl_raw_coordinates!($same_scalar_mul, $name_affine, $base);
 
         impl fmt::Debug for $name_affine {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
