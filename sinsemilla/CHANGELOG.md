@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The fixed-length weighted evaluator precomputes its first addition and, for
+  the first eight possible leading words, its second addition. This removes
+  runtime batch-affine columns from the widest Orchard Merkle tree levels at
+  the cost of a 512 KiB larger weighted table.
 - Weighted batch evaluation now uses the configured runtime field backend for
   squaring.
 - Prepared the `1.0.0-rc.2` release.
