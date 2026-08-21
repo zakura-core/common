@@ -340,7 +340,13 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         let mut dens = vec![pallas::Base::zero(); n];
         let mut scratch = vec![pallas::Base::zero(); n];
 
-        for i in 0..N {
+        let Some(last_column) = N.checked_sub(1) else {
+            return xs;
+        };
+
+        // Every column except the last needs the complete affine point for
+        // the next chord addition.
+        for i in 0..last_column {
             let exponent = N - i - 1;
             for (lane, message) in messages.iter().enumerate() {
                 let generator = usize::from(message[i]);
@@ -376,6 +382,37 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
                 ys[a] = lambda * (xs[a] - x3) - ys[a];
                 xs[a] = x3;
             }
+        }
+
+        // The final hash is its x-coordinate, so the last column does not
+        // recover y. Keeping this as an explicit tail also leaves the hot
+        // complete-addition loop above free of a per-lane condition.
+        for (lane, message) in messages.iter().enumerate() {
+            let generator = usize::from(message[last_column]);
+            assert!(generator < GENERATOR_COUNT, "invalid Sinsemilla word");
+            let point = self.weighted_generator(0, generator);
+            let point = point
+                .coordinates()
+                .expect("weighted table entries are not the identity");
+            table_xs[lane] = *point.x();
+            table_ys[lane] = *point.y();
+            dens[lane] = table_xs[lane] - xs[lane];
+        }
+
+        batch_invert_nonzero(&mut dens, &mut scratch);
+
+        let pairs = n / 2;
+        for pair in 0..pairs {
+            let (a, b) = (2 * pair, 2 * pair + 1);
+            let lambda_a = (table_ys[a] - ys[a]) * dens[a];
+            let lambda_b = (table_ys[b] - ys[b]) * dens[b];
+            xs[a] = lambda_a.square() - xs[a] - table_xs[a];
+            xs[b] = lambda_b.square() - xs[b] - table_xs[b];
+        }
+        if n % 2 == 1 {
+            let a = n - 1;
+            let lambda = (table_ys[a] - ys[a]) * dens[a];
+            xs[a] = lambda.square() - xs[a] - table_xs[a];
         }
 
         xs
