@@ -1546,6 +1546,22 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             }
         }
 
+        fn leaf_chunk<'a, E, F: WithSmallOrderMulGroup<3>, B: BasisOps>(
+            leaf: &AstLeaf<E, B>,
+            ctx: &'a AstContext<'_, F, B>,
+            chunk_len: usize,
+        ) -> RotatedChunk<'a, F> {
+            let (first, second) = B::rotated_chunk(
+                ctx.domain,
+                ctx.chunk_size,
+                ctx.chunk_index,
+                &ctx.polys[leaf.index],
+                leaf.rotation,
+                chunk_len,
+            );
+            RotatedChunk { first, second }
+        }
+
         fn recurse_into<E, F: WithSmallOrderMulGroup<3>, B: BasisOps>(
             plan: &EvaluationPlan<E, F, B>,
             ctx: &AstContext<'_, F, B>,
@@ -1564,9 +1580,17 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                 ),
                 EvaluationPlan::Add(a, b) => {
                     recurse_into(a, ctx, output, cache, scratch);
-                    let (rhs_values, rhs_scratch) = scratch.split_at_mut(output.len());
                     if let EvaluationPlan::Scale(negated_rhs, scalar) = b.as_ref() {
                         if *scalar == ctx.minus_one {
+                            if let EvaluationPlan::Poly(leaf) = negated_rhs.as_ref() {
+                                let chunk = leaf_chunk(leaf, ctx, output.len());
+                                for (lhs, rhs) in output.iter_mut().zip(chunk.iter()) {
+                                    *lhs -= *rhs;
+                                }
+                                return;
+                            }
+
+                            let (rhs_values, rhs_scratch) = scratch.split_at_mut(output.len());
                             recurse_into(negated_rhs, ctx, rhs_values, cache, rhs_scratch);
                             for (lhs, rhs) in output.iter_mut().zip(rhs_values.iter()) {
                                 *lhs -= *rhs;
@@ -1575,6 +1599,15 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                         }
                     }
 
+                    if let EvaluationPlan::Poly(leaf) = b.as_ref() {
+                        let chunk = leaf_chunk(leaf, ctx, output.len());
+                        for (lhs, rhs) in output.iter_mut().zip(chunk.iter()) {
+                            *lhs += *rhs;
+                        }
+                        return;
+                    }
+
+                    let (rhs_values, rhs_scratch) = scratch.split_at_mut(output.len());
                     recurse_into(b, ctx, rhs_values, cache, rhs_scratch);
                     for (lhs, rhs) in output.iter_mut().zip(rhs_values.iter()) {
                         *lhs += *rhs;
@@ -1594,6 +1627,35 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                         }
                     }
 
+                    if let (EvaluationPlan::Poly(lhs), EvaluationPlan::Poly(rhs)) =
+                        (a.as_ref(), b.as_ref())
+                    {
+                        let lhs = leaf_chunk(lhs, ctx, output.len());
+                        let rhs = leaf_chunk(rhs, ctx, output.len());
+                        for ((output, lhs), rhs) in
+                            output.iter_mut().zip(lhs.iter()).zip(rhs.iter())
+                        {
+                            *output = *lhs * rhs;
+                        }
+                        return;
+                    }
+                    if let EvaluationPlan::Poly(rhs) = b.as_ref() {
+                        recurse_into(a, ctx, output, cache, scratch);
+                        let rhs = leaf_chunk(rhs, ctx, output.len());
+                        for (lhs, rhs) in output.iter_mut().zip(rhs.iter()) {
+                            *lhs *= rhs;
+                        }
+                        return;
+                    }
+                    if let EvaluationPlan::Poly(lhs) = a.as_ref() {
+                        recurse_into(b, ctx, output, cache, scratch);
+                        let lhs = leaf_chunk(lhs, ctx, output.len());
+                        for (rhs, lhs) in output.iter_mut().zip(lhs.iter()) {
+                            *rhs *= lhs;
+                        }
+                        return;
+                    }
+
                     recurse_into(a, ctx, output, cache, scratch);
                     let (rhs, rhs_scratch) = scratch.split_at_mut(output.len());
                     recurse_into(b, ctx, rhs, cache, rhs_scratch);
@@ -1602,12 +1664,26 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
                     }
                 }
                 EvaluationPlan::Square(inner) => {
+                    if let EvaluationPlan::Poly(leaf) = inner.as_ref() {
+                        let chunk = leaf_chunk(leaf, ctx, output.len());
+                        for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                            *output = value.square();
+                        }
+                        return;
+                    }
                     recurse_into(inner, ctx, output, cache, scratch);
                     for value in output.iter_mut() {
                         *value = value.square();
                     }
                 }
                 EvaluationPlan::Scale(a, scalar) => {
+                    if let EvaluationPlan::Poly(leaf) = a.as_ref() {
+                        let chunk = leaf_chunk(leaf, ctx, output.len());
+                        for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                            *output = *value * scalar;
+                        }
+                        return;
+                    }
                     if !recurse_small_scale_into(a, *scalar, ctx, output, cache, scratch) {
                         recurse_into(a, ctx, output, cache, scratch);
                         for lhs in output.iter_mut() {
@@ -1630,21 +1706,12 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
 
                     let (base_values, scratch) = scratch.split_at_mut(output.len());
                     recurse_into(base, ctx, base_values, cache, scratch);
-                    let (coefficient_values, _) = scratch.split_at_mut(output.len());
                     for coefficient in remaining.iter().rev() {
                         for (value, base) in output.iter_mut().zip(base_values.iter()) {
                             *value *= base;
                         }
-                        B::copy_rotated_chunk(
-                            ctx.domain,
-                            ctx.chunk_size,
-                            ctx.chunk_index,
-                            &ctx.polys[coefficient.index],
-                            coefficient.rotation,
-                            coefficient_values,
-                        );
-                        for (value, coefficient) in output.iter_mut().zip(coefficient_values.iter())
-                        {
+                        let coefficient = leaf_chunk(coefficient, ctx, output.len());
+                        for (value, coefficient) in output.iter_mut().zip(coefficient.iter()) {
                             *value += coefficient;
                         }
                     }
@@ -2000,7 +2067,71 @@ pub(crate) trait BasisOps: Basis {
         poly: &Polynomial<F, Self>,
         rotation: Rotation,
         output: &mut [F],
-    );
+    ) {
+        let (first_values, second_values) = Self::rotated_chunk(
+            domain,
+            chunk_size,
+            chunk_index,
+            poly,
+            rotation,
+            output.len(),
+        );
+        let (first, second) = output.split_at_mut(first_values.len());
+        first.copy_from_slice(first_values);
+        second.copy_from_slice(second_values);
+    }
+    fn rotated_chunk<'a, F: WithSmallOrderMulGroup<3>>(
+        domain: &EvaluationDomain<F>,
+        chunk_size: usize,
+        chunk_index: usize,
+        poly: &'a Polynomial<F, Self>,
+        rotation: Rotation,
+        chunk_len: usize,
+    ) -> (&'a [F], &'a [F]);
+}
+
+struct RotatedChunk<'a, F> {
+    first: &'a [F],
+    second: &'a [F],
+}
+
+impl<'a, F: Copy> RotatedChunk<'a, F> {
+    fn new(
+        values: &'a [F],
+        rotation_is_negative: bool,
+        rotation_abs: usize,
+        chunk_size: usize,
+        chunk_index: usize,
+        chunk_len: usize,
+    ) -> Self {
+        assert!(rotation_abs <= values.len());
+
+        let mid = if rotation_is_negative {
+            values.len() - rotation_abs
+        } else {
+            rotation_abs
+        };
+        let unwrapped_start = mid + chunk_size * chunk_index;
+        let source_start = if unwrapped_start >= values.len() {
+            unwrapped_start - values.len()
+        } else {
+            unwrapped_start
+        };
+
+        let first_len = chunk_len.min(values.len() - source_start);
+        Self {
+            first: &values[source_start..source_start + first_len],
+            second: &values[..chunk_len - first_len],
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &'a F> {
+        self.first.iter().chain(self.second)
+    }
+
+    fn into_slices(self) -> (&'a [F], &'a [F]) {
+        (self.first, self.second)
+    }
 }
 
 impl BasisOps for Coeff {
@@ -2040,14 +2171,14 @@ impl BasisOps for Coeff {
         }
     }
 
-    fn copy_rotated_chunk<F: WithSmallOrderMulGroup<3>>(
+    fn rotated_chunk<'a, F: WithSmallOrderMulGroup<3>>(
         _: &EvaluationDomain<F>,
         _: usize,
         _: usize,
-        _: &Polynomial<F, Self>,
+        _: &'a Polynomial<F, Self>,
         _: Rotation,
-        _: &mut [F],
-    ) {
+        _: usize,
+    ) -> (&'a [F], &'a [F]) {
         panic!("Can't rotate polynomials in the standard basis")
     }
 }
@@ -2080,15 +2211,23 @@ impl BasisOps for LagrangeCoeff {
         }
     }
 
-    fn copy_rotated_chunk<F: WithSmallOrderMulGroup<3>>(
+    fn rotated_chunk<'a, F: WithSmallOrderMulGroup<3>>(
         _: &EvaluationDomain<F>,
         chunk_size: usize,
         chunk_index: usize,
-        poly: &Polynomial<F, Self>,
+        poly: &'a Polynomial<F, Self>,
         rotation: Rotation,
-        output: &mut [F],
-    ) {
-        poly.copy_rotated_chunk(rotation, chunk_size, chunk_index, output)
+        chunk_len: usize,
+    ) -> (&'a [F], &'a [F]) {
+        RotatedChunk::new(
+            &poly.values,
+            rotation.0 < 0,
+            rotation.0.unsigned_abs() as usize,
+            chunk_size,
+            chunk_index,
+            chunk_len,
+        )
+        .into_slices()
     }
 }
 
@@ -2120,14 +2259,14 @@ impl BasisOps for ExtendedLagrangeCoeff {
         }
     }
 
-    fn copy_rotated_chunk<F: WithSmallOrderMulGroup<3>>(
+    fn rotated_chunk<'a, F: WithSmallOrderMulGroup<3>>(
         domain: &EvaluationDomain<F>,
         chunk_size: usize,
         chunk_index: usize,
-        poly: &Polynomial<F, Self>,
+        poly: &'a Polynomial<F, Self>,
         rotation: Rotation,
-        output: &mut [F],
-    ) {
+        chunk_len: usize,
+    ) -> (&'a [F], &'a [F]) {
         let rotation_scale = domain.get_quotient_poly_degree().next_power_of_two();
         debug_assert_eq!(poly.len() % rotation_scale, 0);
         let rotation_period = poly.len() / rotation_scale;
@@ -2135,13 +2274,15 @@ impl BasisOps for ExtendedLagrangeCoeff {
             .expect("rotation magnitude fits in usize")
             % rotation_period)
             * rotation_scale;
-        poly.copy_rotated_chunk_helper(
+        RotatedChunk::new(
+            &poly.values,
             rotation.0 < 0,
             rotation_abs,
             chunk_size,
             chunk_index,
-            output,
+            chunk_len,
         )
+        .into_slices()
     }
 }
 

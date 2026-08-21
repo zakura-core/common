@@ -219,6 +219,7 @@ impl<F: Field> Polynomial<F, LagrangeCoeff> {
     ///         .unwrap(),
     /// )
     /// ```
+    #[cfg(test)]
     fn copy_rotated_chunk(
         &self,
         rotation: Rotation,
@@ -237,6 +238,7 @@ impl<F: Field> Polynomial<F, LagrangeCoeff> {
 }
 
 impl<F: Clone + Copy, B> Polynomial<F, B> {
+    #[cfg(test)]
     fn copy_rotated_chunk_helper(
         &self,
         rotation_is_negative: bool,

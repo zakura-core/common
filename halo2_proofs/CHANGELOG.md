@@ -33,6 +33,8 @@ and this project adheres to Rust's notion of
 - Polynomial evaluation now caches repeated expressions whenever doing so
   avoids at least one field multiplication, and reuses cache buffers with
   disjoint lifetimes.
+- Polynomial evaluation now consumes rotated polynomial chunks through
+  borrowed slices when the surrounding operation can write its result directly.
 - Polynomial evaluation now uses field squaring for structurally repeated
   multiplication operands.
 - Polynomial evaluation now uses Horner's method for expanded fixed-base
