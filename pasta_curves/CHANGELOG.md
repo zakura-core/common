@@ -11,6 +11,10 @@ and this project adheres to Rust's notion of
 - Added the `multicore` feature and [`CurveExt::fft_vartime`] specialization
   hook. The Pasta implementation keeps public curve FFTs affine, decomposes
   their twiddles once with GLV, and batches each ladder column's inversions.
+- The Pasta curve FFT now replaces its bottom radix-2 layers with fused 8- and
+  16-point codelets. The 16-point transform uses 14 scalar multiplications
+  instead of 17 and shares repeated scalar schedules and affine inversion
+  stages across its subtransforms.
 - The GLV batch-affine ladder now interleaves its nonzero Montgomery batch
   inversion across even- and odd-indexed accumulator lanes. The three fixed
   extra multiplications per ladder column expose independent multiplication
