@@ -36,6 +36,19 @@ a handful of point additions with **no scalar-field arithmetic at all** — the 
 accumulation loop disappears. Because this is the non-circuit path, we are free to use complete
 addition and precompute without the incomplete-addition constraints the circuit must respect.
 
+## Feature flag
+
+The fused tables are gated by the opt-in `fused-pedersen` Cargo feature, matching
+Orchard's `weighted-merkle`. Without it, `pedersen_hash` keeps the original 8-bit
+exp-window tables. Enable the feature on the dependency:
+
+```toml
+sapling-crypto = { package = "zakura-sapling-crypto", features = ["fused-pedersen"] }
+```
+
+Both evaluators return the same prime-order `ExtendedPoint`; only the lookup tables
+and online arithmetic differ.
+
 ## Tables
 
 Two lazily-built tables in `src/constants.rs`, parameterised by
@@ -127,9 +140,9 @@ Guards:
 - Capacity tests verify that both a one-bit-oversized input and an infinite iterator are rejected
   after bounded consumption.
 
-Besides the return type (see above), the now-unused exp-window constants
-(`PEDERSEN_HASH_EXP_TABLE`, `PEDERSEN_HASH_EXP_WINDOW_SIZE`, and their builder) were removed from
-`src/constants.rs`.
+Besides the return type (see above), the exp-window constants
+(`PEDERSEN_HASH_EXP_TABLE`, `PEDERSEN_HASH_EXP_WINDOW_SIZE`, and their builder) remain the
+default and are omitted only when `fused-pedersen` is enabled.
 
 ## Considered and rejected
 
@@ -152,4 +165,6 @@ Besides the return type (see above), the now-unused exp-window constants
 ## Benchmarks
 
 `cargo bench --bench pedersen_hash` covers both `pedersen-hash` (raw 510-bit hash) and
-`merkle-hash` (the full `Node::combine` path via `merkle_hash`).
+`merkle-hash` (the full `Node::combine` path via `merkle_hash`). Pass
+`--features fused-pedersen` to measure the fused tables against the default
+exp-window path.

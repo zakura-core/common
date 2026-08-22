@@ -15,6 +15,18 @@ sapling-crypto = { package = "zakura-sapling-crypto", version = "0.7" }
 
 This crate contains an implementation of Zcash's "Sapling" cryptography.
 
+## Sapling Pedersen hashing
+
+The optional `fused-pedersen` feature caches fused chunk-block lookup tables
+(~1.4 MiB at the default block size) to speed up non-circuit Pedersen hashing.
+It is opt-in so that full-node applications can enable the higher-throughput
+evaluator, while wallets and other memory-sensitive applications keep the
+original 8-bit exp-window tables by default. Enable it on the dependency with
+`features = ["fused-pedersen"]`.
+
+Both evaluators return the same prime-order point; only the lookup tables and
+online arithmetic differ.
+
 ## `no_std` compatibility
 
 In order to take advantage of `no_std` builds, downstream users of this crate

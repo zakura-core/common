@@ -1,6 +1,13 @@
 //! Various constants used by the Sapling protocol.
 
 use alloc::vec::Vec;
+#[cfg(not(feature = "fused-pedersen"))]
+use ff::PrimeField;
+#[cfg(not(feature = "fused-pedersen"))]
+use group::Group;
+#[cfg(not(feature = "fused-pedersen"))]
+use jubjub::SubgroupPoint;
+#[cfg(feature = "fused-pedersen")]
 use jubjub::{AffineNielsPoint, ExtendedPoint, SubgroupPoint};
 use lazy_static::lazy_static;
 
@@ -231,6 +238,51 @@ pub const PEDERSEN_HASH_GENERATORS: &[SubgroupPoint] = &[
 /// The maximum number of chunks per segment of the Pedersen hash.
 pub const PEDERSEN_HASH_CHUNKS_PER_GENERATOR: usize = 63;
 
+/// The window size for exponentiation of Pedersen hash generators outside the circuit.
+#[cfg(not(feature = "fused-pedersen"))]
+pub const PEDERSEN_HASH_EXP_WINDOW_SIZE: u32 = 8;
+
+#[cfg(not(feature = "fused-pedersen"))]
+lazy_static! {
+    /// The exp table for [`PEDERSEN_HASH_GENERATORS`].
+    pub static ref PEDERSEN_HASH_EXP_TABLE: Vec<Vec<Vec<SubgroupPoint>>> =
+        generate_pedersen_hash_exp_table();
+}
+
+/// Creates the exp table for the Pedersen hash generators.
+#[cfg(not(feature = "fused-pedersen"))]
+fn generate_pedersen_hash_exp_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
+    let window = PEDERSEN_HASH_EXP_WINDOW_SIZE;
+
+    PEDERSEN_HASH_GENERATORS
+        .iter()
+        .cloned()
+        .map(|mut g| {
+            let mut tables = vec![];
+
+            let mut num_bits = 0;
+            while num_bits <= jubjub::Fr::NUM_BITS {
+                let mut table = Vec::with_capacity(1 << window);
+                let mut base = SubgroupPoint::identity();
+
+                for _ in 0..(1 << window) {
+                    table.push(base);
+                    base += g;
+                }
+
+                tables.push(table);
+                num_bits += window;
+
+                for _ in 0..window {
+                    g = g.double();
+                }
+            }
+
+            tables
+        })
+        .collect()
+}
+
 /// The number of 3-bit chunks folded into a single Pedersen hash table lookup outside the
 /// circuit.
 ///
@@ -254,8 +306,14 @@ pub const PEDERSEN_HASH_CHUNKS_PER_GENERATOR: usize = 63;
 /// `2` is the default: it delivers ~2x at the smallest memory footprint (below the original
 /// exp-table's). Larger values buy more speed for rapidly growing tables. Built lazily on first
 /// use.
+///
+/// Gated by the `fused-pedersen` feature; without it the original 8-bit exp-window tables
+/// are used instead.
+#[cfg(feature = "fused-pedersen")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fused-pedersen")))]
 pub const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 2;
 
+#[cfg(feature = "fused-pedersen")]
 lazy_static! {
     /// Per-generator, per-chunk-position precomputed Pedersen hash points.
     ///
@@ -266,6 +324,7 @@ lazy_static! {
     ///
     /// Stored as [`AffineNielsPoint`] for fast mixed addition into the [`ExtendedPoint`]
     /// accumulator.
+    #[cfg_attr(docsrs, doc(cfg(feature = "fused-pedersen")))]
     pub static ref PEDERSEN_HASH_SINGLE_TABLE: Vec<Vec<[AffineNielsPoint; 8]>> =
         generate_pedersen_hash_single_table();
 
@@ -276,12 +335,14 @@ lazy_static! {
     /// within segment `g`, indexed by their concatenated raw bits (chunk `k` occupies bits
     /// `3k..3k + 3`). Built from the same per-chunk multiples as [`PEDERSEN_HASH_SINGLE_TABLE`]
     /// so the two agree by construction, and likewise stored as [`AffineNielsPoint`].
+    #[cfg_attr(docsrs, doc(cfg(feature = "fused-pedersen")))]
     pub static ref PEDERSEN_HASH_BLOCK_TABLE: Vec<Vec<Vec<AffineNielsPoint>>> =
         generate_pedersen_hash_block_table();
 }
 
 /// The per-generator, per-position multiples `enc * 2^{4j} * G` as extended points, indexed by
 /// `raw = a | b << 1 | c << 2`. Shared by both table builders.
+#[cfg(feature = "fused-pedersen")]
 fn pedersen_hash_single_extended() -> Vec<Vec<[ExtendedPoint; 8]>> {
     PEDERSEN_HASH_GENERATORS
         .iter()
@@ -309,6 +370,7 @@ fn pedersen_hash_single_extended() -> Vec<Vec<[ExtendedPoint; 8]>> {
 
 /// Converts extended points into the precomputed-addition form used by the lookup tables, using
 /// a single batched field inversion ([`jubjub::batch_normalize`]).
+#[cfg(feature = "fused-pedersen")]
 fn to_niels(mut points: Vec<ExtendedPoint>) -> Vec<AffineNielsPoint> {
     jubjub::batch_normalize(&mut points)
         .map(|affine| affine.to_niels())
@@ -316,6 +378,7 @@ fn to_niels(mut points: Vec<ExtendedPoint>) -> Vec<AffineNielsPoint> {
 }
 
 /// Builds [`PEDERSEN_HASH_SINGLE_TABLE`].
+#[cfg(feature = "fused-pedersen")]
 fn generate_pedersen_hash_single_table() -> Vec<Vec<[AffineNielsPoint; 8]>> {
     pedersen_hash_single_extended()
         .iter()
@@ -334,6 +397,7 @@ fn generate_pedersen_hash_single_table() -> Vec<Vec<[AffineNielsPoint; 8]>> {
 
 /// Builds [`PEDERSEN_HASH_BLOCK_TABLE`] by summing the relevant per-chunk multiples for each
 /// block.
+#[cfg(feature = "fused-pedersen")]
 fn generate_pedersen_hash_block_table() -> Vec<Vec<Vec<AffineNielsPoint>>> {
     let single = pedersen_hash_single_extended();
     let chunks_per_block = PEDERSEN_HASH_CHUNKS_PER_BLOCK;

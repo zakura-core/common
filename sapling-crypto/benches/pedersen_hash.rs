@@ -1,3 +1,8 @@
+//! Pedersen and Merkle hashing microbenchmarks.
+//!
+//! Default features use the original 8-bit exp-window tables. Compare with:
+//! `cargo bench -p zakura-sapling-crypto --bench pedersen_hash --features fused-pedersen`
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use rand::Rng;
 use sapling_crypto::{

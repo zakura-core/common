@@ -5,7 +5,7 @@ pub(crate) mod test_vectors;
 
 use alloc::vec::Vec;
 
-use super::constants::{PEDERSEN_HASH_CHUNKS_PER_BLOCK, PEDERSEN_HASH_CHUNKS_PER_GENERATOR};
+use super::constants::PEDERSEN_HASH_CHUNKS_PER_GENERATOR;
 
 #[derive(Copy, Clone)]
 pub enum Personalization {
@@ -26,14 +26,34 @@ impl Personalization {
     }
 }
 
+/// Pedersen hash of `bits` under `personalization`.
+///
+/// The default implementation is the original 8-bit exp-window evaluation. Enable the
+/// `fused-pedersen` feature to use fused chunk-block lookup tables instead; both paths
+/// produce the same prime-order point.
 pub fn pedersen_hash<I>(personalization: Personalization, bits: I) -> jubjub::ExtendedPoint
 where
     I: IntoIterator<Item = bool>,
 {
-    // Buffer the bit stream so we know the exact chunk count up front, but stop after the fixed
-    // generator capacity. This keeps oversized or infinite public-API inputs from causing
-    // unbounded allocation. The trailing bits of the final chunk are zero-padded (matching
-    // Sapling's definition), but chunks beyond the message must never be added.
+    let bits = collect_bounded_bits(personalization, bits);
+
+    #[cfg(feature = "fused-pedersen")]
+    {
+        fused_pedersen_hash(&bits)
+    }
+    #[cfg(not(feature = "fused-pedersen"))]
+    {
+        windowed_pedersen_hash(&bits)
+    }
+}
+
+/// Buffer the bit stream so we know the exact length up front, but stop after the fixed
+/// generator capacity. This keeps oversized or infinite public-API inputs from causing
+/// unbounded allocation.
+fn collect_bounded_bits<I>(personalization: Personalization, bits: I) -> Vec<bool>
+where
+    I: IntoIterator<Item = bool>,
+{
     let max_bits =
         crate::constants::PEDERSEN_HASH_GENERATORS.len() * PEDERSEN_HASH_CHUNKS_PER_GENERATOR * 3;
     let bits: Vec<bool> = personalization
@@ -46,9 +66,107 @@ where
         bits.len() <= max_bits,
         "we don't have enough Pedersen hash generators"
     );
+    bits
+}
+
+#[cfg(not(feature = "fused-pedersen"))]
+fn windowed_pedersen_hash(bits: &[bool]) -> jubjub::ExtendedPoint {
+    use core::ops::{AddAssign, Neg};
+    use ff::{Field, PrimeField};
+    use group::Group;
+
+    use super::constants::PEDERSEN_HASH_EXP_WINDOW_SIZE;
+
+    let mut bits = bits.iter().copied();
+    let mut result = jubjub::SubgroupPoint::identity();
+    let mut generators = crate::constants::PEDERSEN_HASH_EXP_TABLE.iter();
+
+    loop {
+        let mut acc = jubjub::Fr::ZERO;
+        let mut cur = jubjub::Fr::ONE;
+        let mut chunks_remaining = PEDERSEN_HASH_CHUNKS_PER_GENERATOR;
+        let mut encountered_bits = false;
+
+        while let Some(a) = bits.next() {
+            encountered_bits = true;
+
+            let b = bits.next().unwrap_or(false);
+            let c = bits.next().unwrap_or(false);
+
+            let mut tmp = cur;
+            if a {
+                tmp.add_assign(&cur);
+            }
+            cur = cur.double();
+            if b {
+                tmp.add_assign(&cur);
+            }
+            if c {
+                tmp = tmp.neg();
+            }
+            acc.add_assign(&tmp);
+
+            chunks_remaining -= 1;
+            if chunks_remaining == 0 {
+                break;
+            } else {
+                cur = cur.double().double().double();
+            }
+        }
+
+        if !encountered_bits {
+            break;
+        }
+
+        let mut table: &[Vec<jubjub::SubgroupPoint>] =
+            generators.next().expect("we don't have enough generators");
+        let window = PEDERSEN_HASH_EXP_WINDOW_SIZE as usize;
+        let window_mask = (1u64 << window) - 1;
+
+        let acc = acc.to_repr();
+        let num_limbs: usize = acc.as_ref().len() / 8;
+        let mut limbs = vec![0u64; num_limbs + 1];
+        for (src, dst) in acc
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(limbs[..num_limbs].iter_mut())
+        {
+            *dst = u64::from_le_bytes(*src);
+        }
+
+        let mut tmp = jubjub::SubgroupPoint::identity();
+
+        let mut pos = 0;
+        while pos < jubjub::Fr::NUM_BITS as usize {
+            let u64_idx = pos / 64;
+            let bit_idx = pos % 64;
+            let i = (if bit_idx + window < 64 {
+                limbs[u64_idx] >> bit_idx
+            } else {
+                (limbs[u64_idx] >> bit_idx) | (limbs[u64_idx + 1] << (64 - bit_idx))
+            } & window_mask) as usize;
+
+            tmp += table[0][i];
+
+            pos += window;
+            table = &table[1..];
+        }
+
+        result += tmp;
+    }
+
+    jubjub::ExtendedPoint::from(result)
+}
+
+#[cfg(feature = "fused-pedersen")]
+fn fused_pedersen_hash(bits: &[bool]) -> jubjub::ExtendedPoint {
+    use super::constants::PEDERSEN_HASH_CHUNKS_PER_BLOCK;
+
+    // The trailing bits of the final chunk are zero-padded (matching Sapling's definition),
+    // but chunks beyond the message must never be added.
     let bit = |i: usize| -> usize { usize::from(bits.get(i).copied().unwrap_or(false)) };
 
-    // Number of 3-bit chunks, rounding up (the final chunk is zero-padded).
     let total_chunks = bits.len().div_ceil(3);
 
     let block_tables = &*crate::constants::PEDERSEN_HASH_BLOCK_TABLE;
