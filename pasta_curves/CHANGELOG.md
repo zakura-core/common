@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Fixed the crate manifest: the `multicore` feature was declared twice after
+  two independent changes each introduced it, which made the workspace fail
+  to load. The single declaration implies `glv` and enables Rayon.
 - Added the `multicore` feature and [`CurveExt::fft_vartime`] specialization
   hook. The Pasta implementation keeps public curve FFTs affine, decomposes
   their twiddles once with GLV, and batches each ladder column's inversions.

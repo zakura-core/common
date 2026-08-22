@@ -57,15 +57,12 @@ default = [
 ]
 deferred = []
 glv = ["alloc"]
-multicore = [
-    "alloc",
-    "dep:maybe-rayon",
-    "maybe-rayon/threads",
-]
 gpu = [
     "alloc",
     "ec-gpu",
 ]
+# Parallel evaluation of the GLV multiscalar windows and affine batches in
+# `glv.rs` through the Rayon pool; implies `glv` (and therefore `alloc`).
 multicore = [
     "glv",
     "dep:maybe-rayon",
