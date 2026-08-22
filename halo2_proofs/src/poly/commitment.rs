@@ -293,68 +293,90 @@ impl<C: CurveAffine> Params<C> {
     }
 }
 
+#[cfg(test)]
+const LAGRANGE_BASIS_HASH_LENGTH: usize = 32;
+
+#[cfg(test)]
+const EXPECTED_LAGRANGE_BASIS_HASHES: &[(u32, [u8; LAGRANGE_BASIS_HASH_LENGTH])] = &[
+    (
+        9,
+        [
+            0x6b, 0x3c, 0xb7, 0x0c, 0x4f, 0x39, 0x6e, 0x3e, 0xc3, 0x42, 0x06, 0x3e, 0x22, 0x02,
+            0xa7, 0x74, 0xb6, 0x08, 0x1c, 0x9b, 0x87, 0xa1, 0xce, 0x1d, 0xbf, 0x45, 0x40, 0xdc,
+            0x02, 0xab, 0xfa, 0x08,
+        ],
+    ),
+    (
+        10,
+        [
+            0x1f, 0x24, 0x05, 0xb6, 0x5b, 0xca, 0x87, 0xa7, 0x6a, 0xf8, 0xd0, 0x6d, 0x91, 0xa8,
+            0x90, 0xd9, 0x5f, 0xaf, 0x3c, 0xdf, 0xd0, 0x49, 0x42, 0x58, 0xe0, 0xff, 0xff, 0x3c,
+            0xac, 0xaa, 0xac, 0x38,
+        ],
+    ),
+    (
+        11,
+        [
+            0x28, 0xea, 0xc4, 0x0e, 0x45, 0x71, 0xee, 0xe8, 0x1f, 0xb1, 0xd9, 0xfe, 0xfc, 0xfb,
+            0xee, 0x18, 0x88, 0x64, 0x4d, 0xff, 0xb7, 0x8b, 0xc7, 0x72, 0x44, 0xaf, 0xf6, 0xff,
+            0x8b, 0xdd, 0x59, 0xce,
+        ],
+    ),
+];
+
+#[cfg(test)]
+fn lagrange_basis_hash<C: CurveAffine>(basis: &[C]) -> [u8; LAGRANGE_BASIS_HASH_LENGTH] {
+    use blake2b_simd::Params as Blake2bParams;
+
+    let mut hasher = Blake2bParams::new()
+        .hash_length(LAGRANGE_BASIS_HASH_LENGTH)
+        .personal(b"ZakuraOrchardFFT")
+        .to_state();
+    for point in basis {
+        hasher.update(point.to_bytes().as_ref());
+    }
+
+    hasher
+        .finalize()
+        .as_bytes()
+        .try_into()
+        .expect("configured digest length matches the output array")
+}
+
 #[test]
 fn lagrange_bases_k9_through_k11_are_stable() {
-    use blake2b_simd::Params as Blake2bParams;
-    use group::GroupEncoding;
-
     use crate::pasta::EqAffine;
-
-    const HASH_LENGTH: usize = 32;
-    const EXPECTED_HASHES: &[(u32, [u8; HASH_LENGTH])] = &[
-        (
-            9,
-            [
-                0x6b, 0x3c, 0xb7, 0x0c, 0x4f, 0x39, 0x6e, 0x3e, 0xc3, 0x42, 0x06, 0x3e, 0x22, 0x02,
-                0xa7, 0x74, 0xb6, 0x08, 0x1c, 0x9b, 0x87, 0xa1, 0xce, 0x1d, 0xbf, 0x45, 0x40, 0xdc,
-                0x02, 0xab, 0xfa, 0x08,
-            ],
-        ),
-        (
-            10,
-            [
-                0x1f, 0x24, 0x05, 0xb6, 0x5b, 0xca, 0x87, 0xa7, 0x6a, 0xf8, 0xd0, 0x6d, 0x91, 0xa8,
-                0x90, 0xd9, 0x5f, 0xaf, 0x3c, 0xdf, 0xd0, 0x49, 0x42, 0x58, 0xe0, 0xff, 0xff, 0x3c,
-                0xac, 0xaa, 0xac, 0x38,
-            ],
-        ),
-        (
-            11,
-            [
-                0x28, 0xea, 0xc4, 0x0e, 0x45, 0x71, 0xee, 0xe8, 0x1f, 0xb1, 0xd9, 0xfe, 0xfc, 0xfb,
-                0xee, 0x18, 0x88, 0x64, 0x4d, 0xff, 0xb7, 0x8b, 0xc7, 0x72, 0x44, 0xaf, 0xf6, 0xff,
-                0x8b, 0xdd, 0x59, 0xce,
-            ],
-        ),
-    ];
 
     // `g_lagrange` is the inverse curve-FFT output used to commit directly
     // to evaluation-form polynomials; k = 11 is Orchard's production size.
     // Pin canonical encodings at adjacent depths so an FFT optimization
     // cannot silently change the commitment basis.
-    let actual_hashes: Vec<_> = EXPECTED_HASHES
+    let actual_hashes: Vec<_> = EXPECTED_LAGRANGE_BASIS_HASHES
         .iter()
         .map(|(k, _)| {
             let params = Params::<EqAffine>::new(*k);
-            let mut hasher = Blake2bParams::new()
-                .hash_length(HASH_LENGTH)
-                .personal(b"ZakuraOrchardFFT")
-                .to_state();
-            for point in &params.g_lagrange {
-                hasher.update(point.to_bytes().as_ref());
-            }
-            (
-                *k,
-                <[u8; HASH_LENGTH]>::try_from(hasher.finalize().as_bytes()).unwrap(),
-            )
+            (*k, lagrange_basis_hash(&params.g_lagrange))
         })
         .collect();
 
     assert_eq!(
         actual_hashes.as_slice(),
-        EXPECTED_HASHES,
+        EXPECTED_LAGRANGE_BASIS_HASHES,
         "a pinned Lagrange commitment basis changed"
     );
+}
+
+#[test]
+fn incorrect_lagrange_basis_does_not_match_hash_pin() {
+    use crate::pasta::EqAffine;
+
+    let (k, expected_hash) = EXPECTED_LAGRANGE_BASIS_HASHES[0];
+    let params = Params::<EqAffine>::new(k);
+    let mut incorrect_basis = params.g_lagrange;
+    assert_ne!(incorrect_basis[0], incorrect_basis[1]);
+    incorrect_basis[0] = incorrect_basis[1];
+
+    assert_ne!(lagrange_basis_hash(&incorrect_basis), expected_hash);
 }
 
 #[cfg(feature = "batch")]
