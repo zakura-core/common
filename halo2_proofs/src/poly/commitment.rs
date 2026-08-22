@@ -322,6 +322,14 @@ const EXPECTED_LAGRANGE_BASIS_HASHES: &[(u32, [u8; LAGRANGE_BASIS_HASH_LENGTH])]
             0x8b, 0xdd, 0x59, 0xce,
         ],
     ),
+    (
+        13,
+        [
+            0xa8, 0x21, 0x0f, 0xb3, 0x76, 0x66, 0x6a, 0x02, 0x30, 0x56, 0x9d, 0x9c, 0xcd, 0x52,
+            0x08, 0x2a, 0xc6, 0x68, 0xd2, 0xa0, 0x2d, 0x8b, 0x51, 0xb1, 0x76, 0x26, 0xe7, 0x41,
+            0xad, 0xde, 0x37, 0xa4,
+        ],
+    ),
 ];
 
 #[cfg(test)]
@@ -344,13 +352,13 @@ fn lagrange_basis_hash<C: CurveAffine>(basis: &[C]) -> [u8; LAGRANGE_BASIS_HASH_
 }
 
 #[test]
-fn lagrange_bases_k9_through_k11_are_stable() {
+fn selected_lagrange_bases_are_stable() {
     use crate::pasta::EqAffine;
 
     // `g_lagrange` is the inverse curve-FFT output used to commit directly
     // to evaluation-form polynomials; k = 11 is Orchard's production size.
-    // Pin canonical encodings at adjacent depths so an FFT optimization
-    // cannot silently change the commitment basis.
+    // Pin canonical encodings at adjacent depths and k = 13 so an FFT
+    // optimization cannot silently change the commitment basis.
     let actual_hashes: Vec<_> = EXPECTED_LAGRANGE_BASIS_HASHES
         .iter()
         .map(|(k, _)| {
