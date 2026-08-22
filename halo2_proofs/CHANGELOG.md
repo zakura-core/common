@@ -12,7 +12,7 @@ and this project adheres to Rust's notion of
 - `Params::new` now normalizes its inverse curve FFT with parallel batched GLV
   scalar multiplication over the already-affine generators, reducing Orchard
   `k = 11` parameter generation by 7–9% on Apple aarch64.
-- The `k = 9`, `k = 10`, Orchard-sized `k = 11`, and `k = 13` Lagrange
+- The `k = 9`, `k = 10`, Orchard-sized `k = 11`, and `k = 12` Lagrange
   commitment bases are now hash-pinned so curve-FFT optimizations cannot
   silently change the bases used by verification keys.
 - The permutation- and lookup-argument provers' full-column batch inversions now
