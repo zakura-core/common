@@ -615,6 +615,24 @@ impl From<(bool, u128)> for SignedMagnitude {
     }
 }
 
+/// Converts decomposed halves into the representation used by the
+/// Signed-Booth MSM, rejecting values outside the decomposition bound.
+///
+/// This check must remain on the MSM path because it does not construct a
+/// [`Decomposed`], whose constructor enforces the same bound. Returning
+/// `None` lets the caller use the generic MSM instead of panicking. The
+/// rejection boundary is covered by
+/// `multiexp_component_guard_returns_none_out_of_bounds`.
+fn checked_signed_magnitudes(
+    (first, second): ((bool, u128), (bool, u128)),
+) -> Option<(SignedMagnitude, SignedMagnitude)> {
+    if first.1 >> GLV_COMPONENT_BITS == 0 && second.1 >> GLV_COMPONENT_BITS == 0 {
+        Some((first.into(), second.into()))
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BoothDigit {
     magnitude: usize,
@@ -758,8 +776,8 @@ pub(crate) fn try_multiexp<C: GlvParams>(
     let components = scalars
         .iter()
         .map(decompose::<C>)
-        .map(|(first, second)| (first.into(), second.into()))
-        .collect::<Vec<_>>();
+        .map(checked_signed_magnitudes)
+        .collect::<Option<Vec<_>>>()?;
     let endo_bases = bases
         .iter()
         .map(|base| {
@@ -1121,7 +1139,7 @@ impl<C: GlvParams> Decomposed<C> {
         // The i128 recoding coefficients and the digit-array bound rely on
         // the half-width guarantee; enforce it in every build profile.
         assert!(
-            a1 >> 127 == 0 && a2 >> 127 == 0,
+            a1 >> GLV_COMPONENT_BITS == 0 && a2 >> GLV_COMPONENT_BITS == 0,
             "GLV half exceeds 127 bits"
         );
         let a = if neg1 { -(a1 as i128) } else { a1 as i128 };
@@ -1179,6 +1197,17 @@ mod tests {
         // shorter components for this unchanged window width.
         assert!(!should_use_glv_multiexp::<pallas::Point>(1_000_000, 14));
         assert!(!should_use_glv_multiexp::<pallas::Point>(usize::MAX, 14));
+    }
+
+    #[test]
+    fn multiexp_component_guard_returns_none_out_of_bounds() {
+        let in_bounds = GLV_COMPONENT_BITS - 1;
+        let out_of_bounds = 1u128 << GLV_COMPONENT_BITS;
+
+        assert!(checked_signed_magnitudes(((false, 0), (true, 1))).is_some());
+        assert!(checked_signed_magnitudes(((false, 1u128 << in_bounds), (false, 0))).is_some());
+        assert!(checked_signed_magnitudes(((false, out_of_bounds), (false, 0))).is_none());
+        assert!(checked_signed_magnitudes(((false, 0), (true, out_of_bounds))).is_none());
     }
 
     #[test]
@@ -1298,7 +1327,7 @@ mod tests {
                 max_tail = max_tail.max(tail(a, b, &mut memo));
             }
         }
-        assert_eq!(max_tail, MAX_JOINT_DIGITS - 127);
+        assert_eq!(max_tail, MAX_JOINT_DIGITS - GLV_COMPONENT_BITS);
         // The box is closed under recoding: every reached state stays in it.
         for &(a, b) in memo.keys() {
             assert!(a.abs() <= 6 && b.abs() <= 6, "recoding escaped the box");
@@ -1465,8 +1494,8 @@ mod tests {
         let lambda = C::ScalarExt::ZETA;
         let check = |k: C::ScalarExt| {
             let ((neg1, a1), (neg2, a2)) = decompose::<C>(&k);
-            assert!(a1 >> 127 == 0, "k1 exceeds 127 bits");
-            assert!(a2 >> 127 == 0, "k2 exceeds 127 bits");
+            assert!(a1 >> GLV_COMPONENT_BITS == 0, "k1 exceeds 127 bits");
+            assert!(a2 >> GLV_COMPONENT_BITS == 0, "k2 exceeds 127 bits");
             let s1 = C::ScalarExt::from_u128(a1);
             let s1 = if neg1 { -s1 } else { s1 };
             let s2 = C::ScalarExt::from_u128(a2);
@@ -1640,7 +1669,7 @@ mod tests {
             lambda,
             -lambda,
             lambda + C::ScalarExt::ONE,
-            C::ScalarExt::from_u128((1u128 << 127) - 1),
+            C::ScalarExt::from_u128((1u128 << GLV_COMPONENT_BITS) - 1),
             scalars::<C::ScalarExt>(1).next().unwrap(),
         ];
         for size in sizes {
@@ -1821,9 +1850,9 @@ mod tests {
             -lambda,
             lambda + C::ScalarExt::ONE,
             C::ScalarExt::from(u64::MAX),
-            C::ScalarExt::from_u128((1u128 << 127) - 1),
-            C::ScalarExt::from_u128(1u128 << 127),
-            C::ScalarExt::from_u128((1u128 << 127) + 1),
+            C::ScalarExt::from_u128((1u128 << GLV_COMPONENT_BITS) - 1),
+            C::ScalarExt::from_u128(1u128 << GLV_COMPONENT_BITS),
+            C::ScalarExt::from_u128((1u128 << GLV_COMPONENT_BITS) + 1),
         ];
         let g = C::generator();
         let points = [g, g * (lambda + C::ScalarExt::from(42))];
@@ -1898,7 +1927,7 @@ mod tests {
         // In bounds, reconstructs, and multiplies correctly as shipped.
         let ((neg1, a1), (neg2, a2)) = decompose::<C>(&k);
         assert!(
-            a1 >> 127 == 0 && a2 >> 127 == 0,
+            a1 >> GLV_COMPONENT_BITS == 0 && a2 >> GLV_COMPONENT_BITS == 0,
             "witness must be in bounds"
         );
         let s1 = C::ScalarExt::from_u128(a1);
@@ -1930,7 +1959,7 @@ mod tests {
         );
         let mag = u128::from(mag[0]) | (u128::from(mag[1]) << 64);
         assert!(
-            mag >> 127 == 1,
+            mag >> GLV_COMPONENT_BITS == 1,
             "flipped G2 must push |k2| past 2^127 at this scalar"
         );
     }
@@ -2012,8 +2041,8 @@ mod tests {
                         #[test]
                         fn decompose_reconstructs(k in scalar_strategy::<Scalar>()) {
                             let ((neg1, a1), (neg2, a2)) = decompose::<$curve>(&k);
-                            prop_assert!(a1 >> 127 == 0);
-                            prop_assert!(a2 >> 127 == 0);
+                            prop_assert!(a1 >> GLV_COMPONENT_BITS == 0);
+                            prop_assert!(a2 >> GLV_COMPONENT_BITS == 0);
                             let s1 = Scalar::from_u128(a1);
                             let s1 = if neg1 { -s1 } else { s1 };
                             let s2 = Scalar::from_u128(a2);
