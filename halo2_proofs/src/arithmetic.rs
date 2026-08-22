@@ -935,6 +935,61 @@ fn test_multiexp_booth_boundaries() {
     assert_multiexp_matches_naive(&fq_coeffs, &fq_bases);
 }
 
+/// The GLV multiscalar backend parallelizes its Signed-Booth windows when the
+/// Rayon pool has more than one thread (`pasta_curves/multicore`, forwarded by
+/// this crate's `multicore` feature). `test_multiexp`'s sizes stop just past
+/// the GLV threshold, and the default CI feature set omits `multicore`, so
+/// exercise the parallel path explicitly: sizes the backend's cost model
+/// selects GLV for, run inside one-thread and three-thread pools, must both
+/// equal the naive sum and each other.
+#[cfg(feature = "multicore")]
+#[test]
+fn test_multiexp_parallel_glv_matches_naive() {
+    use maybe_rayon::ThreadPoolBuilder;
+
+    fn check<C: CurveAffine>(len: usize) {
+        let mut rng = rng();
+        let coeffs = (0..len)
+            .map(|_| C::Scalar::random(&mut rng))
+            .collect::<Vec<_>>();
+        let bases = (0..len)
+            .map(|_| C::from(C::Curve::random(&mut rng)))
+            .collect::<Vec<_>>();
+        let expected = coeffs
+            .iter()
+            .zip(&bases)
+            .map(|(coeff, base)| *base * coeff)
+            .fold(C::Curve::identity(), |acc, val| acc + val);
+
+        let mut results = Vec::new();
+        for threads in [1usize, 3] {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool");
+            let result = pool.install(|| {
+                assert_eq!(
+                    multicore::current_num_threads(),
+                    threads,
+                    "the multiexp must observe the installed pool"
+                );
+                best_multiexp(&coeffs, &bases)
+            });
+            assert_eq!(result, expected, "{len} terms on {threads} thread(s)");
+            results.push(result);
+        }
+        assert_eq!(results[0], results[1]);
+    }
+
+    // Sizes at which the backend's cost model selects GLV (see the
+    // `multiexp_window_bits` / `should_use_glv_multiexp` tests in
+    // `pasta_curves::glv`), so the parallel window path is what runs.
+    for len in [2_150, 4_300] {
+        check::<EqAffine>(len);
+        check::<EpAffine>(len);
+    }
+}
+
 #[test]
 fn test_multiexp_algorithm_selection() {
     assert!(!should_parallelize_multiexp(usize::MAX, 1));

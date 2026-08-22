@@ -532,6 +532,31 @@ jobs:
       - name: Verify working directory is clean
         run: git diff --exit-code
 
+  halo2-multicore-test:
+    name: halo2 / Test multicore multiexp on Linux
+    needs: changes
+    if: needs.changes.outputs.halo2 == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Run the multiexp tests with multicore
+        # `halo2-test` runs with `--no-default-features`, which drops
+        # `multicore`, so the parallel Pasta GLV multiscalar path
+        # (`pasta_curves/multicore`) never runs there. Rather than repeat the
+        # whole suite with one more feature, run only the multiexp tests —
+        # including `test_multiexp_parallel_glv_matches_naive`, which installs
+        # explicit one- and three-thread pools — with `multicore` enabled.
+        run: >-
+          cargo +stable test --verbose --release
+          -p zakura-halo2-proofs
+          --no-default-features
+          --features batch,dev-graph,gadget-traces,multicore
+          -- arithmetic::test_multiexp
+
   sinsemilla-weighted-test:
     name: sinsemilla / Test weighted Merkle evaluator on Linux
     needs: changes
@@ -1073,6 +1098,7 @@ jobs:
       - rust-checks
       - formatting
       - halo2-test
+      - halo2-multicore-test
       - halo2-platform-smoke
       - halo2-test-32-bit
       - halo2-build
@@ -1106,6 +1132,7 @@ jobs:
             rust-checks,
             formatting,
             halo2-test,
+            halo2-multicore-test,
             halo2-platform-smoke,
             halo2-test-32-bit,
             halo2-build,

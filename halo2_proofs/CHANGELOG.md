@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added a test running `best_multiexp` at GLV-selected sizes inside explicit
+  one- and three-thread Rayon pools, and a dedicated halo2 CI job that runs the
+  multiexp tests with `multicore`, so the parallel Pasta multiscalar path is
+  exercised by this crate's own suite.
 - Pasta-curve parameter generation now uses the affine GLV curve FFT and
   enables its layer-level parallelism through the `multicore` feature. For
   Orchard's `k = 11`, `Params::new` measured 3.4x faster single-threaded and
