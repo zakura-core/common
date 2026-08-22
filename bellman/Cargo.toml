@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.88"
 name = "zakura-bellman"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 authors = [
     "Dev Ojha <ValarDragon@users.noreply.github.com>",
     "Sean Bowe <ewillbefull@gmail.com>",
@@ -81,7 +81,7 @@ optional = true
 
 [dependencies.pairing]
 path = "../pairing"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 optional = true
 package = "zakura-pairing"
 
@@ -103,7 +103,7 @@ version = "2.2.1"
 
 [dev-dependencies.bls12_381]
 path = "../bls12_381"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 package = "zakura-bls12-381"
 
 [dev-dependencies.criterion]

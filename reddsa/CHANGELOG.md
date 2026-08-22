@@ -8,6 +8,7 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Updated to `group 0.14` and the Zakura Pasta and Jubjub forks, while retaining
   the `rand_core 0.6` boundary required by FROST.

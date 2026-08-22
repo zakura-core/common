@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Prepared the `1.0.0-rc.3` release.
+- `Params::new` now normalizes its inverse curve FFT with parallel batched GLV
+  scalar multiplication over the already-affine generators, reducing Orchard
+  `k = 11` parameter generation by 7–9% on Apple aarch64.
 - The permutation- and lookup-argument provers' full-column batch inversions now
   go through a shared `batch_invert_multi` helper that splits the Montgomery
   prefix-product and back-substitution chains into interleaved lanes, with

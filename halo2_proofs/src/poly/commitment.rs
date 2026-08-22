@@ -161,14 +161,15 @@ impl<C: CurveAffine> Params<C> {
         for _ in k..C::Scalar::S {
             alpha_inv = alpha_inv.square();
         }
-        let mut g_lagrange_projective = g_projective;
-        best_fft(&mut g_lagrange_projective, alpha_inv, k);
         let minv = C::Scalar::TWO_INV.pow_vartime([k as u64]);
-        parallelize(&mut g_lagrange_projective, |g, _| {
-            for g in g.iter_mut() {
-                *g *= minv;
-            }
+        let mut g_lagrange_projective = g_projective;
+        // Normalize the inverse FFT by scaling its inputs. The transform is
+        // linear, and `g` is already affine, so each worker can share the
+        // public scalar's precomputation across its generators.
+        parallelize(&mut g_lagrange_projective, |output, start| {
+            C::Curve::batch_mul_same_scalar_vartime(&g[start..start + output.len()], &minv, output);
         });
+        best_fft(&mut g_lagrange_projective, alpha_inv, k);
 
         let g_lagrange = {
             let mut g_lagrange = vec![C::identity(); n as usize];

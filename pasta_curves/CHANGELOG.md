@@ -8,6 +8,7 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Prepared the `1.0.0-rc.3` release.
 - `Curve::batch_normalize` now runs its Montgomery batch inversion as two
   interleaved even/odd accumulator lanes for batches of 32 or more points
   (three extra multiplications per batch, one shared inversion), preserving the
@@ -62,6 +63,11 @@ and this project adheres to Rust's notion of
 
 ### Changed
 
+- `Fp` and `Fq` square-root table lookups now hash their normalized
+  Montgomery representations directly with generated multiply-and-shift
+  perfect hashes. This removes four Montgomery reductions and four integer
+  remainders per square root, improving `Fp::sqrt` by 2.3% and `Fq::sqrt` by
+  1.8% on Apple AArch64 with the assembly backend.
 - The `aarch64-asm` backend now implements runtime multiplication and
   squaring as inline assembly with register operands instead of calls into
   the assembly file. This removes the per-operation call and memory

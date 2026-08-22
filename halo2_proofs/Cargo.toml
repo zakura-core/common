@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.88"
 name = "zakura-halo2-proofs"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 authors = [
     "Dev Ojha <ValarDragon@users.noreply.github.com>",
     "Sean Bowe <ewillbefull@gmail.com>",
@@ -156,7 +156,7 @@ version = "0.14"
 
 [dependencies.halo2_legacy_pdqsort]
 path = "../halo2_legacy_pdqsort"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 optional = true
 package = "zakura-halo2-legacy-pdqsort"
 
@@ -169,13 +169,13 @@ default-features = false
 
 [dependencies.pasta_curves]
 path = "../pasta_curves"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = ["deferred", "glv"]
 package = "zakura-pasta-curves"
 
 [target.'cfg(all(target_arch = "aarch64", target_vendor = "apple"))'.dependencies.pasta_curves]
 path = "../pasta_curves"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = ["aarch64-asm"]
 package = "zakura-pasta-curves"
 

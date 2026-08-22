@@ -6,7 +6,7 @@ replacement by renaming the dependency:
 
 ```toml
 [dependencies]
-bellman = { package = "zakura-bellman", version = "1.0.0-rc.2" }
+bellman = { package = "zakura-bellman", version = "1.0.0-rc.3" }
 ```
 
 # bellman
