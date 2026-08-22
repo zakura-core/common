@@ -81,6 +81,9 @@ and this project adheres to Rust's notion of
 
 ### Changed
 
+- The GLV Signed-Booth multiscalar backend caches each base's affine
+  coordinates, endomorphism x-coordinate, and identity flag once per MSM
+  instead of extracting them again for every window.
 - `Fp` and `Fq` square-root table lookups now hash their normalized
   Montgomery representations directly with generated multiply-and-shift
   perfect hashes. This removes four Montgomery reductions and four integer
