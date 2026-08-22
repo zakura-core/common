@@ -107,6 +107,21 @@ mod private {
                 *lhs *= rhs;
             }
         }
+
+        /// Finishes the two-chain back-substitution of a nonzero base-field
+        /// batch inversion.
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        fn batch_invert_backsub(
+            values: &mut [Self::Base],
+            prefixes: &[Self::Base],
+            acc0: Self::Base,
+            acc1: Self::Base,
+            token: CrateToken,
+        );
     }
 
     impl Sealed for crate::pallas::Point {
@@ -117,6 +132,32 @@ mod private {
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
             p.raw_xy()
         }
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        #[inline(always)]
+        fn mul_base_assign_pairs(lhs: &mut [Self::Base], rhs: &[Self::Base], _: CrateToken) {
+            crate::Fp::mul_assign_pairs_runtime(lhs, rhs)
+        }
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        #[inline(always)]
+        fn batch_invert_backsub(
+            values: &mut [Self::Base],
+            prefixes: &[Self::Base],
+            acc0: Self::Base,
+            acc1: Self::Base,
+            _: CrateToken,
+        ) {
+            crate::Fp::batch_invert_backsub_runtime(values, prefixes, acc0, acc1)
+        }
     }
 
     impl Sealed for crate::vesta::Point {
@@ -126,6 +167,32 @@ mod private {
 
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
             p.raw_xy()
+        }
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        #[inline(always)]
+        fn mul_base_assign_pairs(lhs: &mut [Self::Base], rhs: &[Self::Base], _: CrateToken) {
+            crate::Fq::mul_assign_pairs_runtime(lhs, rhs)
+        }
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        #[inline(always)]
+        fn batch_invert_backsub(
+            values: &mut [Self::Base],
+            prefixes: &[Self::Base],
+            acc0: Self::Base,
+            acc1: Self::Base,
+            _: CrateToken,
+        ) {
+            crate::Fq::batch_invert_backsub_runtime(values, prefixes, acc0, acc1)
         }
     }
 }
@@ -478,6 +545,68 @@ const TWIDDLE_MAJOR_MAX_CHUNK: usize = 2048;
 /// scratch; `Curve::batch_normalize` in `src/curves.rs` fuses the walk with
 /// the Jacobian-to-affine conversion. Keep the three in step when changing
 /// any of them.
+#[cfg(all(
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    target_vendor = "apple"
+))]
+fn batch_invert_nonzero<C: GlvParams>(values: &mut [C::Base], scratch: &mut [C::Base]) {
+    assert_eq!(values.len(), scratch.len());
+    assert!(!values.is_empty());
+    if values.len() == 1 {
+        scratch[0] = C::Base::ONE;
+        values[0] = values[0].invert().unwrap();
+        return;
+    }
+    // Two accumulator chains, stepped in (even, odd) pairs: the classic
+    // single-chain walk runs both passes at the field multiplication's
+    // dependency latency, while independent even/odd chains run at its
+    // throughput, for a fixed overhead of three extra multiplications per
+    // call (one join before the shared inversion, two lane-seed recoveries
+    // after). Each chain starts from its first value, avoiding a field
+    // multiplication by one. The ladder only calls this with
+    // `BATCH_AFFINE_MIN_POINTS` or more live lanes — at the measured two-lane
+    // crossover on both x86-64 (portable) and Apple aarch64 (assembly
+    // backend) — so no small-batch fallback is needed. A trailing element
+    // (odd length) has an even index and belongs to the first chain.
+    debug_assert!(!values[0].is_zero_vartime());
+    debug_assert!(!values[1].is_zero_vartime());
+    scratch[0] = C::Base::ONE;
+    scratch[1] = C::Base::ONE;
+    let mut acc0 = values[0];
+    let mut acc1 = values[1];
+    for (pair, slots) in values[2..]
+        .chunks_exact(2)
+        .zip(scratch[2..].chunks_exact_mut(2))
+    {
+        debug_assert!(!pair[0].is_zero_vartime());
+        debug_assert!(!pair[1].is_zero_vartime());
+        slots[0] = acc0;
+        acc0 *= pair[0];
+        slots[1] = acc1;
+        acc1 *= pair[1];
+    }
+    if let (Some(value), Some(slot)) = (
+        values.chunks_exact(2).remainder().first(),
+        scratch.chunks_exact_mut(2).into_remainder().first_mut(),
+    ) {
+        debug_assert!(!value.is_zero_vartime());
+        *slot = acc0;
+        acc0 *= value;
+    }
+
+    // A product of nonzero field elements is nonzero, so this cannot fail.
+    let inverse = (acc0 * acc1).invert().unwrap();
+    let seed0 = inverse * acc1;
+    let seed1 = inverse * acc0;
+    C::batch_invert_backsub(values, scratch, seed0, seed1, private::CrateToken(()));
+}
+
+#[cfg(not(all(
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    target_vendor = "apple"
+)))]
 fn batch_invert_nonzero<F: Field>(values: &mut [F], scratch: &mut [F]) {
     assert_eq!(values.len(), scratch.len());
     assert!(!values.is_empty());
@@ -1165,6 +1294,17 @@ impl<C: GlvParams> Table<C> {
                 for (a, y) in a.iter_mut().zip(&ys) {
                     *a = y.double();
                 }
+                #[cfg(all(
+                    feature = "aarch64-asm",
+                    target_arch = "aarch64",
+                    target_vendor = "apple"
+                ))]
+                batch_invert_nonzero::<C>(&mut a, &mut scratch);
+                #[cfg(not(all(
+                    feature = "aarch64-asm",
+                    target_arch = "aarch64",
+                    target_vendor = "apple"
+                )))]
                 batch_invert_nonzero(&mut a, &mut scratch);
                 for i in 0..n {
                     let xx = xs[i].square();
@@ -1197,6 +1337,17 @@ impl<C: GlvParams> Table<C> {
                 for i in 0..n {
                     a[i] -= r[i].square();
                 }
+                #[cfg(all(
+                    feature = "aarch64-asm",
+                    target_arch = "aarch64",
+                    target_vendor = "apple"
+                ))]
+                batch_invert_nonzero::<C>(&mut a, &mut scratch);
+                #[cfg(not(all(
+                    feature = "aarch64-asm",
+                    target_arch = "aarch64",
+                    target_vendor = "apple"
+                )))]
                 batch_invert_nonzero(&mut a, &mut scratch);
                 double_add_finish_batch::<C>(&ys, &mut h, &mut r, &mut h_squares, &mut a);
                 for i in 0..n {
@@ -1346,6 +1497,17 @@ impl<C: GlvParams> Table<C> {
 
             scratch.resize(denominators.len(), C::Base::ZERO);
             if !denominators.is_empty() {
+                #[cfg(all(
+                    feature = "aarch64-asm",
+                    target_arch = "aarch64",
+                    target_vendor = "apple"
+                ))]
+                batch_invert_nonzero::<C>(&mut denominators, &mut scratch);
+                #[cfg(not(all(
+                    feature = "aarch64-asm",
+                    target_arch = "aarch64",
+                    target_vendor = "apple"
+                )))]
                 batch_invert_nonzero(&mut denominators, &mut scratch);
             }
 
@@ -3059,6 +3221,17 @@ mod tests {
             }
             let expected: Vec<_> = values.iter().map(|value| value.invert().unwrap()).collect();
             let mut scratch = alloc::vec![C::Base::ZERO; len];
+            #[cfg(all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ))]
+            batch_invert_nonzero::<C>(&mut values, &mut scratch);
+            #[cfg(not(all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            )))]
             batch_invert_nonzero(&mut values, &mut scratch);
             assert_eq!(values, expected);
         }

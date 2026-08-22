@@ -82,6 +82,10 @@ and this project adheres to Rust's notion of
 
 ### Changed
 
+- The Apple AArch64 field backend now interleaves adjacent Montgomery
+  multiplications used by the GLV affine ladder. It supports exact in-place
+  aliasing for formula stages and finishes the even/odd batch-inversion chains
+  in paired assembly lanes.
 - `Fp` and `Fq` square-root table lookups now hash their normalized
   Montgomery representations directly with generated multiply-and-shift
   perfect hashes. This removes four Montgomery reductions and four integer
