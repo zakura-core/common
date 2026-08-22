@@ -452,6 +452,10 @@ fn joint_digits(mut a: i128, mut b: i128) -> ([u8; MAX_JOINT_DIGITS], usize) {
 /// was 512: the cheaper inversion moved break-even to 64, and dropping
 /// `ff::BatchInverter`'s per-element zero handling moved it to 32.)
 const BATCH_AFFINE_MIN_POINTS: usize = 32;
+// This range is tuned for the k = 11 parameter generation used by Orchard.
+// Larger domains retain the point-major schedule above the measured range.
+const TWIDDLE_MAJOR_MIN_CHUNK: usize = 16;
+const TWIDDLE_MAJOR_MAX_CHUNK: usize = 2048;
 
 /// Montgomery-batched inversion for a nonempty slice of provably nonzero
 /// values: prefix products into `scratch`, one shared field inversion,
@@ -1036,7 +1040,7 @@ impl<C: GlvParams> Table<C> {
                 if t.is_identity() {
                     C::identity()
                 } else {
-                    products.next().expect("one product per live table")
+                    C::from(products.next().expect("one product per live table"))
                 }
             })
             .collect()
@@ -1047,7 +1051,7 @@ impl<C: GlvParams> Table<C> {
     /// [`affine_ladder_safe`] (so no denominator below is zero and no
     /// accumulator is ever the identity).
     #[allow(clippy::needless_range_loop)]
-    fn batch_affine_ladder(live: &[&Self], k: &Decomposed<C>) -> Vec<C> {
+    fn batch_affine_ladder(live: &[&Self], k: &Decomposed<C>) -> Vec<C::AffineExt> {
         let n = live.len();
         // Affine accumulators (structure-of-arrays), initialized from the
         // top digit — the ladder's first column is the digit itself.
@@ -1119,8 +1123,37 @@ impl<C: GlvParams> Table<C> {
 
         xs.into_iter()
             .zip(ys)
-            .map(|(x, y)| C::from(C::affine_unchecked(x, y, private::CrateToken(()))))
+            .map(|(x, y)| C::affine_unchecked(x, y, private::CrateToken(())))
             .collect()
+    }
+
+    /// Multiplies one scalar by a contiguous batch of points, returning
+    /// affine results without an intermediate projective conversion.
+    fn mul_decomposed_same_scalar_affine(
+        points: &[C],
+        scalar: &Decomposed<C>,
+    ) -> Vec<C::AffineExt> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let tables = Self::batch(points);
+        let use_affine = tables.len() >= BATCH_AFFINE_MIN_POINTS
+            && tables.iter().all(|table| !table.is_identity())
+            && scalar.len > 0
+            && scalar.affine_ladder_safe;
+        if !use_affine {
+            let projective: Vec<_> = tables
+                .iter()
+                .map(|table| table.mul_decomposed(scalar))
+                .collect();
+            let mut affine = alloc::vec![C::AffineExt::identity(); projective.len()];
+            C::batch_normalize(&projective, &mut affine);
+            return affine;
+        }
+
+        let tables: Vec<_> = tables.iter().collect();
+        Self::batch_affine_ladder(&tables, scalar)
     }
 
     /// One affine product for each `(point, scalar)` pair. This is the FFT
@@ -1374,6 +1407,57 @@ pub(crate) fn fft_vartime<C: GlvParams>(
     let mut twiddle_stride = output.len() / 2;
     while chunk <= output.len() {
         let half = chunk / 2;
+        #[cfg(feature = "multicore")]
+        let use_twiddle_major = maybe_rayon::current_num_threads() > 1
+            && (TWIDDLE_MAJOR_MIN_CHUNK..=TWIDDLE_MAJOR_MAX_CHUNK).contains(&chunk);
+        #[cfg(not(feature = "multicore"))]
+        let use_twiddle_major = false;
+        // Transpose the point-major pairs into one contiguous batch per
+        // twiddle. This shares the scalar schedule and exposes each twiddle
+        // batch as an independent Rayon task. With one worker, the repeated
+        // table normalizations cost more than the transpose saves.
+        if use_twiddle_major {
+            #[cfg(feature = "multicore")]
+            let products: Vec<Vec<_>> = (1..half)
+                .into_par_iter()
+                .map(|j| {
+                    let points: Vec<_> = output
+                        .chunks(chunk)
+                        .map(|block| C::from(block[half + j]))
+                        .collect();
+                    Table::<C>::mul_decomposed_same_scalar_affine(
+                        &points,
+                        &twiddles[j * twiddle_stride],
+                    )
+                })
+                .collect();
+            #[cfg(not(feature = "multicore"))]
+            let products: Vec<Vec<_>> = (1..half)
+                .map(|j| {
+                    let points: Vec<_> = output
+                        .chunks(chunk)
+                        .map(|block| C::from(block[half + j]))
+                        .collect();
+                    Table::<C>::mul_decomposed_same_scalar_affine(
+                        &points,
+                        &twiddles[j * twiddle_stride],
+                    )
+                })
+                .collect();
+
+            let blocks = output.len() / chunk;
+            let mut right_scaled = Vec::with_capacity(output.len() / 2);
+            for (block_index, block) in output.chunks(chunk).enumerate() {
+                right_scaled.push(block[half]);
+                right_scaled.extend(products.iter().map(|products| products[block_index]));
+            }
+            debug_assert_eq!(blocks, products.first().map_or(0, Vec::len));
+            affine_twiddle_add_sub_layer::<C>(output, &right_scaled, chunk, &mut butterfly_scratch);
+            chunk *= 2;
+            twiddle_stride /= 2;
+            continue;
+        }
+
         let nontrivial = output.len() / 2 - output.len() / chunk;
         let mut points = Vec::with_capacity(nontrivial);
         let mut scalars = Vec::with_capacity(nontrivial);
