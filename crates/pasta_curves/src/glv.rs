@@ -23,12 +23,12 @@
 //! [`Table::mul_decomposed_batch`] additionally runs one scalar against many
 //! points on *affine* accumulators: the digit schedule is shared by the
 //! whole batch, so each ladder column batch-inverts its denominators with
-//! Montgomery's trick, and every nonzero-digit column is evaluated as a
-//! fused affine $2P + D$ (eliminating the intermediate y-coordinate and one
-//! multiplication/squaring pair relative to double-then-add). Exceptional
-//! column schedules — those that would hand an affine formula a zero
-//! denominator — depend only on the scalar, are checked exactly per batch,
-//! and fall back to the per-point ladder.
+//! Montgomery's trick, and every nonzero-digit column is evaluated with a
+//! direct affine $2P + D$ formula. Algebraically combining its two dependent
+//! chord denominators leaves one inversion batch for the whole column.
+//! Exceptional column schedules — those that would hand the affine formula a
+//! zero denominator — depend only on the scalar, are checked exactly per
+//! batch, and fall back to the per-point ladder.
 //!
 //! Small arbitrary-scalar MSMs (`try_multiexp`, reached through
 //! `CurveExt::try_multiexp_vartime`) use a GLV-Strauss ladder over the same
@@ -654,6 +654,78 @@ fn batch_invert_nonzero<F: Field>(values: &mut [F], scratch: &mut [F]) {
     }
     *first = acc0;
     *second = acc1;
+}
+
+/// Multiplies field values in place, stage by stage across a batch.
+#[inline(always)]
+fn mul_assign_batch<F: Field>(lhs: &mut [F], rhs: &[F]) {
+    assert_eq!(lhs.len(), rhs.len());
+    for (lhs, rhs) in lhs.iter_mut().zip(rhs) {
+        *lhs *= rhs;
+    }
+}
+
+/// Denominator and reusable square for the one-inversion affine `2P + Q`
+/// formula.
+#[cfg(test)]
+#[inline(always)]
+fn double_add_denominator<F: Field>(x: F, y: F, u: F, v: F) -> (F, F) {
+    let h = u - x;
+    let r = v - y;
+    let h_squared = h.square();
+    let denominator = h_squared * (x.double() + u) - r.square();
+    (denominator, h_squared)
+}
+
+/// Completes the one-inversion affine `2P + Q` formula from the inverse of
+/// [`double_add_denominator`].
+#[cfg(test)]
+#[inline(always)]
+fn double_add_finish<F: Field>(
+    x: F,
+    y: F,
+    u: F,
+    v: F,
+    h_squared: F,
+    denominator_inverse: F,
+) -> (F, F) {
+    let h = u - x;
+    let r = v - y;
+    let a = y * denominator_inverse;
+    let b = a * h;
+    let c = b * h_squared;
+    let lambda = c - r;
+    let x2 = u + (b * lambda).double().double();
+    let y2 = -y - (F::ONE + (a * lambda).double().double()) * (lambda + c);
+    (x2, y2)
+}
+
+/// Completes a batch of one-inversion affine `2P + Q` formulas stage by
+/// stage. Each intermediate overwrites an input after its final use.
+fn double_add_finish_batch<F: Field>(
+    y: &[F],
+    h: &mut [F],
+    r: &mut [F],
+    h_squared: &mut [F],
+    denominator_inverse: &mut [F],
+) {
+    mul_assign_batch(denominator_inverse, y);
+    mul_assign_batch(h, denominator_inverse);
+    mul_assign_batch(h_squared, h);
+    for i in 0..r.len() {
+        r[i] = h_squared[i] - r[i];
+    }
+    mul_assign_batch(h, r);
+    mul_assign_batch(denominator_inverse, r);
+    for ((factor, square), lambda) in denominator_inverse
+        .iter_mut()
+        .zip(h_squared.iter_mut())
+        .zip(r)
+    {
+        *factor = F::ONE + factor.double().double();
+        *square += *lambda;
+    }
+    mul_assign_batch(denominator_inverse, h_squared);
 }
 
 /// Small MSMs do not amortize GLV decomposition, affine endomorphism mapping,
@@ -2261,9 +2333,9 @@ impl<C: GlvParams> Table<C> {
     /// formulas' exceptional cases (checked exactly per call; random scalars
     /// fail the check with probability ~2^-124), the ladder runs on affine
     /// accumulators: each column batch-inverts its denominators via
-    /// Montgomery's trick and each nonzero-digit column is a fused affine
-    /// $2P + D$. Otherwise every table falls back to its own per-point
-    /// ladder.
+    /// Montgomery's trick and each nonzero-digit column uses a direct affine
+    /// $2P + D$ formula with one inversion batch. Otherwise every table falls
+    /// back to its own per-point ladder.
     pub fn mul_decomposed_batch(tables: &[&Self], k: &Decomposed<C>) -> Vec<C> {
         if k.len == 0 {
             // k = 0: every product is the identity.
@@ -2435,16 +2507,20 @@ fn batch_affine_ladder_pairs_raw<C: GlvParams, W: WindowCoords<C>>(
     let mut xs = alloc::vec![C::Base::ZERO; n];
     let mut ys = alloc::vec![C::Base::ZERO; n];
     let mut started = alloc::vec![false; n];
-    let mut slopes = alloc::vec![C::Base::ZERO; n];
-    let mut x1s = alloc::vec![C::Base::ZERO; n];
     let mut denominators = Vec::with_capacity(n);
     let mut scratch = Vec::with_capacity(n);
-    let mut operations = Vec::with_capacity(n);
+    let mut doublings = Vec::with_capacity(n);
     let mut additions = Vec::with_capacity(n);
+    let mut addition_ys = Vec::with_capacity(n);
+    let mut h = Vec::with_capacity(n);
+    let mut r = Vec::with_capacity(n);
+    let mut h_squares = Vec::with_capacity(n);
+    let mut a = Vec::with_capacity(n);
 
     for position in (0..max_len).rev() {
         denominators.clear();
-        operations.clear();
+        doublings.clear();
+        additions.clear();
         for (i, (table, scalar)) in tables.iter().zip(scalars).enumerate() {
             if position >= scalar.len {
                 continue;
@@ -2456,15 +2532,43 @@ fn batch_affine_ladder_pairs_raw<C: GlvParams, W: WindowCoords<C>>(
                 (xs[i], ys[i]) = table.window_digit_coords(code);
                 started[i] = true;
             } else {
-                let denominator = if code == 0 {
-                    ys[i].double()
+                if code == 0 {
+                    doublings.push(i);
                 } else {
-                    let (orbit, e, _) = decode_digit(code);
-                    table.window_xs()[e][orbit] - xs[i]
-                };
-                operations.push((i, code));
-                denominators.push(denominator);
+                    additions.push((i, code));
+                }
             }
+        }
+
+        denominators.extend(doublings.iter().map(|&i| ys[i].double()));
+        let addition_offset = denominators.len();
+        let addition_count = additions.len();
+        addition_ys.resize(addition_count, C::Base::ZERO);
+        h.resize(addition_count, C::Base::ZERO);
+        r.resize(addition_count, C::Base::ZERO);
+        h_squares.resize(addition_count, C::Base::ZERO);
+        a.resize(addition_count, C::Base::ZERO);
+        for (j, &(i, code)) in additions.iter().enumerate() {
+            let (orbit, e, negate) = decode_digit(code);
+            let u = tables[i].window_xs()[e][orbit];
+            let v = if negate {
+                -tables[i].window_ys()[orbit]
+            } else {
+                tables[i].window_ys()[orbit]
+            };
+            addition_ys[j] = ys[i];
+            h[j] = u - xs[i];
+            r[j] = v - ys[i];
+            h_squares[j] = h[j].square();
+            a[j] = xs[i].double() + u;
+        }
+        if addition_count != 0 {
+            mul_assign_batch(&mut a, &h_squares);
+            denominators.extend(
+                a.iter()
+                    .zip(&r)
+                    .map(|(product, difference)| *product - difference.square()),
+            );
         }
 
         scratch.resize(denominators.len(), C::Base::ZERO);
@@ -2472,40 +2576,29 @@ fn batch_affine_ladder_pairs_raw<C: GlvParams, W: WindowCoords<C>>(
             batch_invert_nonzero(&mut denominators, &mut scratch);
         }
 
-        additions.clear();
-        let mut second_denominators = Vec::with_capacity(operations.len());
-        for ((i, code), inverse) in operations.iter().copied().zip(&denominators) {
-            if code == 0 {
-                let xx = xs[i].square();
-                let slope = (xx.double() + xx) * inverse;
-                let x2 = slope.square() - xs[i].double();
-                ys[i] = slope * (xs[i] - x2) - ys[i];
-                xs[i] = x2;
-            } else {
-                let (orbit, e, negate) = decode_digit(code);
-                let u = tables[i].window_xs()[e][orbit];
-                let v = if negate {
-                    -tables[i].window_ys()[orbit]
-                } else {
-                    tables[i].window_ys()[orbit]
-                };
-                let slope = (v - ys[i]) * inverse;
-                x1s[i] = slope.square() - xs[i] - u;
-                slopes[i] = slope;
-                additions.push(i);
-                second_denominators.push(x1s[i] - xs[i]);
-            }
-        }
-
-        scratch.resize(second_denominators.len(), C::Base::ZERO);
-        if !second_denominators.is_empty() {
-            batch_invert_nonzero(&mut second_denominators, &mut scratch);
-        }
-        for (i, inverse) in additions.iter().copied().zip(second_denominators) {
-            let slope = -(slopes[i] + ys[i].double() * inverse);
-            let x2 = slope.square() - xs[i] - x1s[i];
+        for (&i, inverse) in doublings.iter().zip(&denominators) {
+            let xx = xs[i].square();
+            let slope = (xx.double() + xx) * inverse;
+            let x2 = slope.square() - xs[i].double();
             ys[i] = slope * (xs[i] - x2) - ys[i];
             xs[i] = x2;
+        }
+
+        if addition_count != 0 {
+            let addition_inverses = &mut denominators[addition_offset..];
+            double_add_finish_batch(
+                &addition_ys,
+                &mut h,
+                &mut r,
+                &mut h_squares,
+                addition_inverses,
+            );
+            for (j, &(i, code)) in additions.iter().enumerate() {
+                let (orbit, e, _) = decode_digit(code);
+                let u = tables[i].window_xs()[e][orbit];
+                xs[i] = u + h[j].double().double();
+                ys[i] = -addition_ys[j] - addition_inverses[j];
+            }
         }
     }
 
@@ -2587,39 +2680,36 @@ fn batch_affine_ladder_raw<C: GlvParams, W: WindowCoords<C>>(
         xs.push(x);
         ys.push(y);
     }
-    let mut den = alloc::vec![C::Base::ZERO; n];
     let mut scratch = alloc::vec![C::Base::ZERO; n];
-    let mut slopes = alloc::vec![C::Base::ZERO; n];
-    let mut x1s = alloc::vec![C::Base::ZERO; n];
+    let mut h_squares = alloc::vec![C::Base::ZERO; n];
+    let mut h = alloc::vec![C::Base::ZERO; n];
+    let mut r = alloc::vec![C::Base::ZERO; n];
+    let mut a = alloc::vec![C::Base::ZERO; n];
 
     for &code in k.digits[..k.len - 1].iter().rev() {
         if code == 0 {
             // Batched affine doubling: m = 3x²/(2y), x' = m² - 2x,
             // y' = m(x - x') - y. Asymptotically 5M + 2S per point
             // (2M + 2S here, 3M inside the shared inversion).
-            for (den, y) in den.iter_mut().zip(&ys) {
-                *den = y.double();
+            for (a, y) in a.iter_mut().zip(&ys) {
+                *a = y.double();
             }
-            batch_invert_nonzero(&mut den, &mut scratch);
+            batch_invert_nonzero(&mut a, &mut scratch);
             for i in 0..n {
                 let xx = xs[i].square();
-                let m = (xx.double() + xx) * den[i];
+                let m = (xx.double() + xx) * a[i];
                 let x2 = m.square() - xs[i].double();
                 ys[i] = m * (xs[i] - x2) - ys[i];
                 xs[i] = x2;
             }
         } else {
             let (orbit, e, negate) = decode_digit(code);
-            // Fused affine 2P + D (Eisenträger–Lauter–Montgomery): the
-            // y-coordinate of the intermediate P + D is never
-            // materialized. Asymptotically 9M + 2S per point, versus
-            // 10M + 3S for a separate doubling and addition.
-            //
-            // Phase 1: s = (v - y)/(u - x), x1 = x(P + D) = s² - x - u.
-            for (den, (x, t)) in den.iter_mut().zip(xs.iter().zip(live)) {
-                *den = t.window_xs()[e][orbit] - x;
-            }
-            batch_invert_nonzero(&mut den, &mut scratch);
+            // Direct affine 2P + D. Algebraically combining the two
+            // dependent chord denominators leaves one inversion batch
+            // and 7M + 2S of formula work per point. After Montgomery
+            // batching that is 10M + 2S, one multiplication more than
+            // the two-batch formula, but it removes the second pass and
+            // its intermediate slope and x-coordinate vectors.
             for i in 0..n {
                 let u = live[i].window_xs()[e][orbit];
                 let v = if negate {
@@ -2627,21 +2717,21 @@ fn batch_affine_ladder_raw<C: GlvParams, W: WindowCoords<C>>(
                 } else {
                     live[i].window_ys()[orbit]
                 };
-                let s = (v - ys[i]) * den[i];
-                x1s[i] = s.square() - xs[i] - u;
-                slopes[i] = s;
+                h[i] = u - xs[i];
+                r[i] = v - ys[i];
+                h_squares[i] = h[i].square();
+                a[i] = xs[i].double() + u;
             }
-            // Phase 2: t = -s - 2y/(x1 - x), x2 = t² - x - x1,
-            // y2 = t(x - x2) - y.
-            for (den, (x, x1)) in den.iter_mut().zip(xs.iter().zip(&x1s)) {
-                *den = *x1 - x;
-            }
-            batch_invert_nonzero(&mut den, &mut scratch);
+            mul_assign_batch(&mut a, &h_squares);
             for i in 0..n {
-                let t = -(slopes[i] + ys[i].double() * den[i]);
-                let x2 = t.square() - xs[i] - x1s[i];
-                ys[i] = t * (xs[i] - x2) - ys[i];
-                xs[i] = x2;
+                a[i] -= r[i].square();
+            }
+            batch_invert_nonzero(&mut a, &mut scratch);
+            double_add_finish_batch(&ys, &mut h, &mut r, &mut h_squares, &mut a);
+            for i in 0..n {
+                let u = live[i].window_xs()[e][orbit];
+                xs[i] = u + h[i].double().double();
+                ys[i] = -ys[i] - a[i];
             }
         }
     }
@@ -3046,13 +3136,12 @@ fn globalize_z<F: Field>(path: &mut [RawJacobian<F>], ratios: &[F]) {
 /// active-column check rules out `2s + d = 0`, so accumulators are never the
 /// identity and doubling columns are always safe (no 2-torsion means
 /// `2y != 0`). An active column computing `2P + D` with `P = [s]B`,
-/// `D = [d]B` is exceptional iff
-///
-/// - `d = ±s`: the first denominator `x(D) - x(P)` vanishes (this includes
-///   `D = -P`, where `P + D` is the identity), or
-/// - `d = -2s`: the second denominator `x(P + D) - x(P)` vanishes
-///   (`D = -2P`), which is also exactly when the column's output would be
-///   the identity.
+/// `D = [d]B` is exceptional iff `d = s` or `d = -2s`. These are exactly the
+/// cases where the direct formula's denominator
+/// `(x(D) - x(P))²(2x(P) + x(D)) - (y(D) - y(P))²` vanishes. In the latter
+/// case, the column output is the identity. Unlike the previous two-step
+/// formula, the direct formula handles `D = -P` without an intermediate
+/// identity.
 ///
 /// The conditions depend only on the scalar schedule, never on the points,
 /// so one exact check covers the entire batch. For the `ivk`-shaped scalars
@@ -3068,7 +3157,7 @@ fn affine_ladder_safe<C: GlvParams>(k: &Decomposed<C>) -> bool {
         } else {
             let d = digit_scalar::<C::ScalarExt>(code);
             let s2 = s.double();
-            if d == s || d == -s || d == -s2 {
+            if d == s || d == -s2 {
                 return false;
             }
             s = s2 + d;
@@ -5356,9 +5445,10 @@ mod tests {
 
         // Digit strings are lowest position first; code 1 = +1, code 2 = -1.
         // d == s: top digit +1 (s = 1), then an active column with d = +1,
-        // i.e. 2P + P — the first affine denominator x(D) - x(P) vanishes.
+        // i.e. 2P + P — the direct formula's denominator vanishes.
         let d_eq_s = craft(&[1, 1]);
-        // d == -s: 2P + (-P) — the intermediate P + D is the identity.
+        // d == -s: 2P + (-P) = P. The direct formula handles this even
+        // though the previous two-step formula's intermediate was identity.
         let d_eq_neg_s = craft(&[2, 1]);
 
         // d == -2s needs a mod-n lattice wraparound. Let L = v1 be the
@@ -5388,7 +5478,7 @@ mod tests {
         let safe = craft(&[2, 0, 1]);
 
         assert!(!affine_ladder_safe::<C>(&d_eq_s.0));
-        assert!(!affine_ladder_safe::<C>(&d_eq_neg_s.0));
+        assert!(affine_ladder_safe::<C>(&d_eq_neg_s.0));
         assert!(!affine_ladder_safe::<C>(&d_eq_neg_2s.0));
         assert!(affine_ladder_safe::<C>(&safe.0));
 
@@ -5527,6 +5617,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The direct one-inversion formula agrees with native group arithmetic
+    /// whenever its denominator is nonzero.
+    fn direct_double_add_matches_group<C: GlvParams>() {
+        let generator = C::generator();
+        let mut checked = 0;
+        for p_scalar in 1..=16 {
+            let p = generator * C::ScalarExt::from(p_scalar);
+            for q_scalar in 1..=16 {
+                let q = generator * C::ScalarExt::from(q_scalar);
+                let mut affine = [C::AffineExt::identity(); 2];
+                C::batch_normalize(&[p, q], &mut affine);
+                let (x, y) = C::affine_xy(&affine[0]);
+                let (u, v) = C::affine_xy(&affine[1]);
+                let (denominator, h_squared) = double_add_denominator(x, y, u, v);
+                let inverse = denominator.invert();
+                if bool::from(inverse.is_none()) {
+                    continue;
+                }
+                let (out_x, out_y) = double_add_finish(x, y, u, v, h_squared, inverse.unwrap());
+                let actual = C::from(C::affine_unchecked(out_x, out_y, private::CrateToken(())));
+                assert_eq!(actual, p.double() + q);
+                checked += 1;
+            }
+        }
+        assert!(checked > 200);
+
+        let p = generator * C::ScalarExt::from(17);
+        let q = -p;
+        let mut affine = [C::AffineExt::identity(); 2];
+        C::batch_normalize(&[p, q], &mut affine);
+        let (x, y) = C::affine_xy(&affine[0]);
+        let (u, v) = C::affine_xy(&affine[1]);
+        let (denominator, h_squared) = double_add_denominator(x, y, u, v);
+        let (out_x, out_y) =
+            double_add_finish(x, y, u, v, h_squared, denominator.invert().unwrap());
+        let actual = C::from(C::affine_unchecked(out_x, out_y, private::CrateToken(())));
+        assert_eq!(actual, p);
+
+        let q = p;
+        C::batch_normalize(&[p, q], &mut affine);
+        let (u, v) = C::affine_xy(&affine[1]);
+        assert!(bool::from(double_add_denominator(x, y, u, v).0.is_zero()));
+
+        let q = -p.double();
+        C::batch_normalize(&[p, q], &mut affine);
+        let (u, v) = C::affine_xy(&affine[1]);
+        assert!(bool::from(double_add_denominator(x, y, u, v).0.is_zero()));
     }
 
     fn assert_affine_bucket_results_match_native<C: GlvParams>(
@@ -5783,6 +5922,10 @@ mod tests {
                 #[test]
                 fn affine_fft() {
                     affine_fft_matches_projective::<$curve>();
+                }
+                #[test]
+                fn direct_double_add() {
+                    direct_double_add_matches_group::<$curve>();
                 }
                 #[test]
                 fn batch_affine_buckets() {
