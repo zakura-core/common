@@ -750,6 +750,14 @@ struct WindowAssignment {
     signed_bucket: isize,
 }
 
+#[derive(Clone, Copy)]
+struct MultiexpBase<F> {
+    x: F,
+    endo_x: F,
+    y: F,
+    identity: bool,
+}
+
 impl WindowAssignment {
     fn bucket(self) -> usize {
         self.signed_bucket.unsigned_abs() - 1
@@ -867,7 +875,7 @@ fn batch_invert_denominators<F: Field>(additions: &mut [PendingAffineAddition<F>
 /// Collects the nonzero signed points assigned to one Booth window.
 fn window_assignments<C>(
     components: &[(SignedMagnitude, SignedMagnitude)],
-    bases: &[C::AffineExt],
+    bases: &[MultiexpBase<C::Base>],
     window_bits: usize,
     window: usize,
 ) -> (Vec<WindowAssignment>, Vec<usize>)
@@ -879,7 +887,7 @@ where
     let mut counts = alloc::vec![0usize; bucket_count];
 
     for (base_index, ((first, second), base)) in components.iter().zip(bases).enumerate() {
-        if bool::from(base.is_identity()) {
+        if base.identity {
             continue;
         }
         for (component_offset, component) in [*first, *second].into_iter().enumerate() {
@@ -1032,8 +1040,7 @@ fn sum_buckets<C: GlvParams>(buckets: &[Option<AffinePoint<C::Base>>]) -> C {
 
 fn fill_window<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
-    bases: &[C::AffineExt],
-    endo_bases: &[C::AffineExt],
+    bases: &[MultiexpBase<C::Base>],
     window_bits: usize,
     window: usize,
 ) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
@@ -1056,17 +1063,21 @@ fn fill_window<C: GlvParams>(
     ];
     for assignment in assignments {
         let base_index = assignment.component / 2;
-        let base = if assignment.component & 1 == 0 {
-            bases[base_index]
+        let base = bases[base_index];
+        let x = if assignment.component & 1 == 0 {
+            base.x
         } else {
-            endo_bases[base_index]
+            base.endo_x
         };
         let bucket = assignment.bucket();
-        let (x, y) = C::affine_xy(&base);
         let position = positions[bucket];
         points[position] = AffinePoint {
             x,
-            y: if assignment.negative() { -y } else { y },
+            y: if assignment.negative() {
+                -base.y
+            } else {
+                base.y
+            },
         };
         positions[bucket] += 1;
     }
@@ -1076,8 +1087,7 @@ fn fill_window<C: GlvParams>(
 
 fn multiexp_serial<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
-    bases: &[C::AffineExt],
-    endo_bases: &[C::AffineExt],
+    bases: &[MultiexpBase<C::Base>],
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
@@ -1090,7 +1100,7 @@ fn multiexp_serial<C: GlvParams>(
             }
         }
 
-        let buckets = fill_window::<C>(components, bases, endo_bases, window_bits, window)?;
+        let buckets = fill_window::<C>(components, bases, window_bits, window)?;
         acc += sum_buckets::<C>(&buckets);
     }
     Some(acc)
@@ -1099,15 +1109,14 @@ fn multiexp_serial<C: GlvParams>(
 #[cfg(feature = "multicore")]
 fn multiexp_parallel<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
-    bases: &[C::AffineExt],
-    endo_bases: &[C::AffineExt],
+    bases: &[MultiexpBase<C::Base>],
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
     (0..window_count)
         .into_par_iter()
         .map(|window| {
-            let buckets = fill_window::<C>(components, bases, endo_bases, window_bits, window)?;
+            let buckets = fill_window::<C>(components, bases, window_bits, window)?;
             let mut sum = sum_buckets::<C>(&buckets);
             for _ in 0..window_bits * window {
                 sum = sum.double();
@@ -1122,25 +1131,38 @@ fn multiexp_parallel<C: GlvParams>(
 
 fn multiexp<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
-    bases: &[C::AffineExt],
-    endo_bases: &[C::AffineExt],
+    bases: &[MultiexpBase<C::Base>],
     window_bits: usize,
     num_threads: usize,
 ) -> Option<C> {
     debug_assert_eq!(components.len(), bases.len());
-    debug_assert_eq!(components.len(), endo_bases.len());
 
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
     #[cfg(feature = "multicore")]
     let acc = if num_threads > 1 {
-        multiexp_parallel::<C>(components, bases, endo_bases, window_bits)
+        multiexp_parallel::<C>(components, bases, window_bits)
     } else {
-        multiexp_serial::<C>(components, bases, endo_bases, window_bits)
+        multiexp_serial::<C>(components, bases, window_bits)
     };
     #[cfg(not(feature = "multicore"))]
-    let acc = multiexp_serial::<C>(components, bases, endo_bases, window_bits);
+    let acc = multiexp_serial::<C>(components, bases, window_bits);
     acc
+}
+
+fn multiexp_bases<C: GlvParams>(bases: &[C::AffineExt]) -> Vec<MultiexpBase<C::Base>> {
+    bases
+        .iter()
+        .map(|base| {
+            let (x, y) = C::affine_xy(base);
+            MultiexpBase {
+                x,
+                endo_x: x * C::Base::ZETA,
+                y,
+                identity: bool::from(base.is_identity()),
+            }
+        })
+        .collect()
 }
 
 /// Attempts a GLV Signed-Booth multiscalar multiplication for a large Pasta
@@ -1162,14 +1184,8 @@ pub(crate) fn try_multiexp<C: GlvParams>(
         .map(decompose::<C>)
         .map(checked_signed_magnitudes)
         .collect::<Option<Vec<_>>>()?;
-    let endo_bases = bases
-        .iter()
-        .map(|base| {
-            let (x, y) = C::affine_xy(base);
-            C::affine_unchecked(x * C::Base::ZETA, y, private::CrateToken(()))
-        })
-        .collect::<Vec<_>>();
-    multiexp(&components, bases, &endo_bases, window_bits, num_threads)
+    let bases = multiexp_bases::<C>(bases);
+    multiexp(&components, &bases, window_bits, num_threads)
 }
 
 /// The GLV digit window for one base point: the eight Eisenstein orbit
@@ -2680,14 +2696,8 @@ mod tests {
             .map(decompose::<C>)
             .map(|(first, second)| (first.into(), second.into()))
             .collect::<Vec<_>>();
-        let endo_bases = bases
-            .iter()
-            .map(|base| {
-                let (x, y) = C::affine_xy(base);
-                C::affine_unchecked(x * C::Base::ZETA, y, private::CrateToken(()))
-            })
-            .collect::<Vec<_>>();
-        let actual = multiexp_serial::<C>(&components, &bases, &endo_bases, WINDOW_BITS)
+        let bases = multiexp_bases::<C>(&bases);
+        let actual = multiexp_serial::<C>(&components, &bases, WINDOW_BITS)
             .expect("valid curve points have invertible affine denominators");
 
         assert_eq!(actual, expected, "serial c=10 GLV MSM mismatch");
@@ -3044,18 +3054,12 @@ mod tests {
             .map(checked_signed_magnitudes)
             .collect::<Option<Vec<_>>>()
             .expect("valid scalar decompositions fit the GLV component bound");
-        let endo_bases = bases
-            .iter()
-            .map(|base| {
-                let (x, y) = C::affine_xy(base);
-                C::affine_unchecked(x * C::Base::ZETA, y, private::CrateToken(()))
-            })
-            .collect::<Vec<_>>();
+        let bases = multiexp_bases::<C>(&bases);
 
         for window_bits in WINDOW_BITS {
             assert_eq!(
-                multiexp_parallel::<C>(&components, &bases, &endo_bases, window_bits),
-                multiexp_serial::<C>(&components, &bases, &endo_bases, window_bits),
+                multiexp_parallel::<C>(&components, &bases, window_bits),
+                multiexp_serial::<C>(&components, &bases, window_bits),
                 "parallel and serial MSMs differ at window width {window_bits}",
             );
         }
