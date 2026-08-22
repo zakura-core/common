@@ -1,9 +1,13 @@
 #[macro_use]
 extern crate criterion;
 
-use crate::arithmetic::best_fft;
-use crate::pasta::Fp;
-use group::ff::Field;
+use crate::arithmetic::{best_fft, CurveExt};
+use crate::pasta::{Eq, EqAffine, Fp};
+use crate::poly::commitment::Params;
+use group::{
+    ff::{Field, PrimeField},
+    Curve, CurveAffine,
+};
 use halo2_proofs::*;
 
 use criterion::{BatchSize, BenchmarkId, Criterion};
@@ -13,6 +17,50 @@ const ORCHARD_K: u32 = 11;
 const ORCHARD_EXTENDED_K: u32 = 14;
 
 fn criterion_benchmark(c: &mut Criterion) {
+    let params = Params::<EqAffine>::new(ORCHARD_K);
+    let minv = Fp::TWO_INV.pow_vartime([u64::from(ORCHARD_K)]);
+    let curve_fft_input: Vec<Eq> = params
+        .get_g()
+        .iter()
+        .map(|point| Eq::from(*point) * minv)
+        .collect::<Vec<_>>();
+    let mut omega = Fp::ROOT_OF_UNITY_INV;
+    for _ in ORCHARD_K..Fp::S {
+        omega = omega.square();
+    }
+
+    c.bench_function("curve-fft/native-k11", |b| {
+        b.iter_batched(
+            || curve_fft_input.clone(),
+            |mut points| {
+                best_fft(&mut points, omega, ORCHARD_K);
+                let mut affine = vec![EqAffine::identity(); points.len()];
+                Eq::batch_normalize(&points, &mut affine);
+                affine
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    c.bench_function("curve-fft/affine-eisenstein-k11", |b| {
+        b.iter_batched(
+            || {
+                (
+                    curve_fft_input.clone(),
+                    vec![EqAffine::identity(); curve_fft_input.len()],
+                )
+            },
+            |(points, mut affine)| {
+                assert!(Eq::fft_vartime(&points, &mut affine, omega, ORCHARD_K,));
+                affine
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    c.bench_function("params/new-k11", |b| {
+        b.iter(|| Params::<EqAffine>::new(ORCHARD_K));
+    });
+
     let mut group = c.benchmark_group("fft");
     for k in 3..19 {
         group.bench_function(BenchmarkId::new("k", k), |b| {

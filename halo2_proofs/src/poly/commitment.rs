@@ -169,16 +169,18 @@ impl<C: CurveAffine> Params<C> {
         parallelize(&mut g_lagrange_projective, |output, start| {
             C::Curve::batch_mul_same_scalar_vartime(&g[start..start + output.len()], &minv, output);
         });
-        best_fft(&mut g_lagrange_projective, alpha_inv, k);
 
         let g_lagrange = {
             let mut g_lagrange = vec![C::identity(); n as usize];
-            parallelize(&mut g_lagrange, |g_lagrange, starts| {
-                C::Curve::batch_normalize(
-                    &g_lagrange_projective[starts..(starts + g_lagrange.len())],
-                    g_lagrange,
-                );
-            });
+            if !C::Curve::fft_vartime(&g_lagrange_projective, &mut g_lagrange, alpha_inv, k) {
+                best_fft(&mut g_lagrange_projective, alpha_inv, k);
+                parallelize(&mut g_lagrange, |g_lagrange, starts| {
+                    C::Curve::batch_normalize(
+                        &g_lagrange_projective[starts..(starts + g_lagrange.len())],
+                        g_lagrange,
+                    );
+                });
+            }
             drop(g_lagrange_projective);
             g_lagrange
         };

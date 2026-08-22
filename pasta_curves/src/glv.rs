@@ -66,6 +66,8 @@ use core::marker::PhantomData;
 
 use ff::{Field, PrimeField, WithSmallOrderMulGroup};
 use group::CurveAffine as _;
+#[cfg(feature = "multicore")]
+use maybe_rayon::prelude::*;
 
 use crate::arithmetic::{mac, sbb, CurveExt};
 use crate::{pallas, vesta};
@@ -1024,7 +1026,7 @@ impl<C: GlvParams> Table<C> {
             .copied()
             .filter(|t| !t.is_identity())
             .collect();
-        if live.len() < BATCH_AFFINE_MIN_POINTS || !affine_ladder_safe::<C>(k) {
+        if live.len() < BATCH_AFFINE_MIN_POINTS || !k.affine_ladder_safe {
             return tables.iter().map(|t| t.mul_decomposed(k)).collect();
         }
         let mut products = Self::batch_affine_ladder(&live, k).into_iter();
@@ -1120,6 +1122,125 @@ impl<C: GlvParams> Table<C> {
             .map(|(x, y)| C::from(C::affine_unchecked(x, y, private::CrateToken(()))))
             .collect()
     }
+
+    /// One affine product for each `(point, scalar)` pair. This is the FFT
+    /// counterpart to [`Table::mul_decomposed_batch`]: tables and ladder
+    /// inversions are batched even though each point has a different scalar.
+    fn mul_decomposed_pairs_affine(points: &[C], scalars: &[&Decomposed<C>]) -> Vec<C::AffineExt> {
+        assert_eq!(points.len(), scalars.len());
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let tables = Self::batch(points);
+        let use_affine = tables.len() >= BATCH_AFFINE_MIN_POINTS
+            && tables.iter().all(|table| !table.is_identity())
+            && scalars
+                .iter()
+                .all(|scalar| scalar.len > 0 && scalar.affine_ladder_safe);
+        if !use_affine {
+            let projective: Vec<_> = tables
+                .iter()
+                .zip(scalars)
+                .map(|(table, scalar)| table.mul_decomposed(scalar))
+                .collect();
+            let mut affine = alloc::vec![C::AffineExt::identity(); projective.len()];
+            C::batch_normalize(&projective, &mut affine);
+            return affine;
+        }
+
+        Self::batch_affine_ladder_pairs(&tables, scalars)
+    }
+
+    /// Synchronized affine Eisenstein ladders with one independently recoded
+    /// scalar per table. Shorter recodings join when their top digit is
+    /// reached; all live accumulators share each column's inversions.
+    fn batch_affine_ladder_pairs(tables: &[Self], scalars: &[&Decomposed<C>]) -> Vec<C::AffineExt> {
+        let n = tables.len();
+        let max_len = scalars.iter().map(|scalar| scalar.len).max().unwrap_or(0);
+        let mut xs = alloc::vec![C::Base::ZERO; n];
+        let mut ys = alloc::vec![C::Base::ZERO; n];
+        let mut started = alloc::vec![false; n];
+        let mut slopes = alloc::vec![C::Base::ZERO; n];
+        let mut x1s = alloc::vec![C::Base::ZERO; n];
+        let mut denominators = Vec::with_capacity(n);
+        let mut scratch = Vec::with_capacity(n);
+        let mut operations = Vec::with_capacity(n);
+        let mut additions = Vec::with_capacity(n);
+
+        for position in (0..max_len).rev() {
+            denominators.clear();
+            operations.clear();
+            for (i, (table, scalar)) in tables.iter().zip(scalars).enumerate() {
+                if position >= scalar.len {
+                    continue;
+                }
+                let code = scalar.digits[position];
+                if !started[i] {
+                    debug_assert_eq!(position + 1, scalar.len);
+                    debug_assert_ne!(code, 0);
+                    (xs[i], ys[i]) = table.digit_coords(code);
+                    started[i] = true;
+                } else {
+                    let denominator = if code == 0 {
+                        ys[i].double()
+                    } else {
+                        let (orbit, e, _) = decode_digit(code);
+                        table.xs[e][orbit] - xs[i]
+                    };
+                    operations.push((i, code));
+                    denominators.push(denominator);
+                }
+            }
+
+            scratch.resize(denominators.len(), C::Base::ZERO);
+            if !denominators.is_empty() {
+                batch_invert_nonzero(&mut denominators, &mut scratch);
+            }
+
+            additions.clear();
+            let mut second_denominators = Vec::with_capacity(operations.len());
+            for ((i, code), inverse) in operations.iter().copied().zip(&denominators) {
+                if code == 0 {
+                    let xx = xs[i].square();
+                    let slope = (xx.double() + xx) * inverse;
+                    let x2 = slope.square() - xs[i].double();
+                    ys[i] = slope * (xs[i] - x2) - ys[i];
+                    xs[i] = x2;
+                } else {
+                    let (orbit, e, negate) = decode_digit(code);
+                    let u = tables[i].xs[e][orbit];
+                    let v = if negate {
+                        -tables[i].ys[orbit]
+                    } else {
+                        tables[i].ys[orbit]
+                    };
+                    let slope = (v - ys[i]) * inverse;
+                    x1s[i] = slope.square() - xs[i] - u;
+                    slopes[i] = slope;
+                    additions.push(i);
+                    second_denominators.push(x1s[i] - xs[i]);
+                }
+            }
+
+            scratch.resize(second_denominators.len(), C::Base::ZERO);
+            if !second_denominators.is_empty() {
+                batch_invert_nonzero(&mut second_denominators, &mut scratch);
+            }
+            for (i, inverse) in additions.iter().copied().zip(second_denominators) {
+                let slope = -(slopes[i] + ys[i].double() * inverse);
+                let x2 = slope.square() - xs[i] - x1s[i];
+                ys[i] = slope * (xs[i] - x2) - ys[i];
+                xs[i] = x2;
+            }
+        }
+
+        debug_assert!(started.iter().all(|started| *started));
+        xs.into_iter()
+            .zip(ys)
+            .map(|(x, y)| C::affine_unchecked(x, y, private::CrateToken(())))
+            .collect()
+    }
 }
 
 /// Whether the column schedule of `k` avoids every exceptional case of the
@@ -1177,6 +1298,8 @@ pub struct Decomposed<C: GlvParams> {
     digits: [u8; MAX_JOINT_DIGITS],
     /// Digit positions in use.
     len: usize,
+    /// Whether every denominator in the affine ladder schedule is nonzero.
+    affine_ladder_safe: bool,
     _curve: PhantomData<C>,
 }
 
@@ -1194,12 +1317,166 @@ impl<C: GlvParams> Decomposed<C> {
         let a = if neg1 { -(a1 as i128) } else { a1 as i128 };
         let b = if neg2 { -(a2 as i128) } else { a2 as i128 };
         let (digits, len) = joint_digits(a, b);
-        Decomposed {
+        let mut decomposed = Decomposed {
             digits,
             len,
+            affine_ladder_safe: false,
             _curve: PhantomData,
+        };
+        decomposed.affine_ladder_safe = decomposed.len > 0 && affine_ladder_safe::<C>(&decomposed);
+        decomposed
+    }
+}
+
+/// Computes an unnormalized radix-2 FFT over public curve points.
+///
+/// This prototype keeps the layer state affine. It decomposes each distinct
+/// twiddle once, batches the Eisenstein tables and affine ladders for all
+/// nontrivial scalar multiplications in a layer, and batch-inverts the shared
+/// denominator for each layer's affine butterflies.
+pub(crate) fn fft_vartime<C: GlvParams>(
+    input: &[C],
+    output: &mut [C::AffineExt],
+    omega: C::ScalarExt,
+    log_n: u32,
+) {
+    fn bitreverse(mut value: usize, bits: usize) -> usize {
+        let mut reversed = 0;
+        for _ in 0..bits {
+            reversed = (reversed << 1) | (value & 1);
+            value >>= 1;
+        }
+        reversed
+    }
+
+    assert_eq!(input.len(), output.len());
+    assert_eq!(input.len(), 1usize << log_n);
+    C::batch_normalize(input, output);
+
+    for i in 0..output.len() {
+        let reversed = bitreverse(i, log_n as usize);
+        if i < reversed {
+            output.swap(i, reversed);
         }
     }
+
+    let mut twiddle = C::ScalarExt::ONE;
+    let twiddles: Vec<_> = (0..output.len() / 2)
+        .map(|_| {
+            let decomposed = Decomposed::<C>::new(&twiddle);
+            twiddle *= omega;
+            decomposed
+        })
+        .collect();
+
+    let mut chunk = 2;
+    let mut twiddle_stride = output.len() / 2;
+    while chunk <= output.len() {
+        let half = chunk / 2;
+        let nontrivial = output.len() / 2 - output.len() / chunk;
+        let mut points = Vec::with_capacity(nontrivial);
+        let mut scalars = Vec::with_capacity(nontrivial);
+        for block in output.chunks(chunk) {
+            for j in 1..half {
+                points.push(C::from(block[half + j]));
+                scalars.push(&twiddles[j * twiddle_stride]);
+            }
+        }
+
+        #[cfg(feature = "multicore")]
+        let products = {
+            let threads = maybe_rayon::current_num_threads();
+            let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
+            let batches: Vec<Vec<_>> = points
+                .par_chunks(batch_len)
+                .zip(scalars.par_chunks(batch_len))
+                .map(|(points, scalars)| Table::<C>::mul_decomposed_pairs_affine(points, scalars))
+                .collect();
+            batches.into_iter().flatten().collect::<Vec<_>>()
+        };
+        #[cfg(not(feature = "multicore"))]
+        let products = Table::<C>::mul_decomposed_pairs_affine(&points, &scalars);
+        let mut products = products.into_iter();
+        let mut right_scaled = Vec::with_capacity(output.len() / 2);
+        for block in output.chunks(chunk) {
+            right_scaled.push(block[half]);
+            right_scaled.extend((1..half).map(|_| {
+                products
+                    .next()
+                    .expect("one product per nontrivial butterfly")
+            }));
+        }
+        assert!(products.next().is_none());
+
+        affine_butterfly_layer::<C>(output, &right_scaled, chunk);
+        chunk *= 2;
+        twiddle_stride /= 2;
+    }
+}
+
+fn affine_butterfly_layer<C: GlvParams>(
+    points: &mut [C::AffineExt],
+    right_scaled: &[C::AffineExt],
+    chunk: usize,
+) {
+    let half = chunk / 2;
+    assert_eq!(right_scaled.len(), points.len() / 2);
+
+    let mut denominators = Vec::with_capacity(right_scaled.len());
+    let mut safe = true;
+    for (block, scaled) in points.chunks(chunk).zip(right_scaled.chunks(half)) {
+        for (left, right) in block[..half].iter().zip(scaled) {
+            let (left_x, _) = C::affine_xy(left);
+            let (right_x, _) = C::affine_xy(right);
+            let denominator = right_x - left_x;
+            safe &= !bool::from(left.is_identity())
+                && !bool::from(right.is_identity())
+                && !denominator.is_zero_vartime();
+            denominators.push(denominator);
+        }
+    }
+
+    if !safe {
+        let mut projective = alloc::vec![C::identity(); points.len()];
+        for ((block, output), scaled) in points
+            .chunks(chunk)
+            .zip(projective.chunks_mut(chunk))
+            .zip(right_scaled.chunks(half))
+        {
+            for j in 0..half {
+                let left = C::from(block[j]);
+                let right = C::from(scaled[j]);
+                output[j] = left + right;
+                output[half + j] = left - right;
+            }
+        }
+        C::batch_normalize(&projective, points);
+        return;
+    }
+
+    let mut scratch = alloc::vec![C::Base::ZERO; denominators.len()];
+    batch_invert_nonzero(&mut denominators, &mut scratch);
+    let mut inverses = denominators.into_iter();
+    for (block, scaled) in points.chunks_mut(chunk).zip(right_scaled.chunks(half)) {
+        let (left, right_output) = block.split_at_mut(half);
+        for ((left, right_output), right) in left.iter_mut().zip(right_output).zip(scaled) {
+            let inverse = inverses.next().expect("one inverse per butterfly");
+            let (left_x, left_y) = C::affine_xy(left);
+            let (right_x, right_y) = C::affine_xy(right);
+
+            let plus_slope = (right_y - left_y) * inverse;
+            let plus_x = plus_slope.square() - left_x - right_x;
+            let plus_y = plus_slope * (left_x - plus_x) - left_y;
+
+            let minus_slope = (-right_y - left_y) * inverse;
+            let minus_x = minus_slope.square() - left_x - right_x;
+            let minus_y = minus_slope * (left_x - minus_x) - left_y;
+
+            *left = C::affine_unchecked(plus_x, plus_y, private::CrateToken(()));
+            *right_output = C::affine_unchecked(minus_x, minus_y, private::CrateToken(()));
+        }
+    }
+    assert!(inverses.next().is_none());
 }
 
 #[cfg(test)]
@@ -1762,14 +2039,14 @@ mod tests {
                     value += digit_scalar::<C::ScalarExt>(code);
                 }
             }
-            (
-                Decomposed::<C> {
-                    digits,
-                    len: positions.len(),
-                    _curve: PhantomData,
-                },
-                value,
-            )
+            let mut decomposed = Decomposed::<C> {
+                digits,
+                len: positions.len(),
+                affine_ladder_safe: false,
+                _curve: PhantomData,
+            };
+            decomposed.affine_ladder_safe = affine_ladder_safe::<C>(&decomposed);
+            (decomposed, value)
         };
 
         // Digit strings are lowest position first; code 1 = +1, code 2 = -1.
@@ -1820,6 +2097,79 @@ mod tests {
             let batched = Table::mul_decomposed_batch(&refs, &d);
             for (p, out) in points.iter().zip(&batched) {
                 assert_eq!(*out, *p * value, "crafted schedule must stay exact");
+            }
+        }
+    }
+
+    /// The affine FFT matches a direct projective radix-2 implementation,
+    /// including inputs that force the affine butterfly fallback.
+    fn affine_fft_matches_projective<C: GlvParams>() {
+        fn reference<C: GlvParams>(points: &mut [C], omega: C::ScalarExt, log_n: u32) {
+            fn bitreverse(mut value: usize, bits: usize) -> usize {
+                let mut reversed = 0;
+                for _ in 0..bits {
+                    reversed = (reversed << 1) | (value & 1);
+                    value >>= 1;
+                }
+                reversed
+            }
+
+            for i in 0..points.len() {
+                let reversed = bitreverse(i, log_n as usize);
+                if i < reversed {
+                    points.swap(i, reversed);
+                }
+            }
+
+            let mut chunk = 2;
+            let mut twiddle_stride = points.len() / 2;
+            while chunk <= points.len() {
+                let twiddle_step = omega.pow_vartime([twiddle_stride as u64]);
+                for block in points.chunks_mut(chunk) {
+                    let (left, right) = block.split_at_mut(chunk / 2);
+                    let mut twiddle = C::ScalarExt::ONE;
+                    for (left, right) in left.iter_mut().zip(right) {
+                        let scaled = *right * twiddle;
+                        let old_left = *left;
+                        *left = old_left + scaled;
+                        *right = old_left - scaled;
+                        twiddle *= twiddle_step;
+                    }
+                }
+                chunk *= 2;
+                twiddle_stride /= 2;
+            }
+        }
+
+        for log_n in 1..=7 {
+            let n = 1usize << log_n;
+            let mut omega = C::ScalarExt::ROOT_OF_UNITY_INV;
+            for _ in log_n..C::ScalarExt::S {
+                omega = omega.square();
+            }
+
+            let generator = C::generator();
+            let regular: Vec<C> = (0..n)
+                .map(|i| generator * C::ScalarExt::from(i as u64 + 1))
+                .collect();
+            let exceptional: Vec<C> = (0..n)
+                .map(|i| match i % 4 {
+                    0 => C::identity(),
+                    1 => generator,
+                    2 => -generator,
+                    _ => generator.double(),
+                })
+                .collect();
+
+            for input in [regular, exceptional] {
+                let mut expected = input.clone();
+                reference(&mut expected, omega, log_n);
+                let mut actual = alloc::vec![C::AffineExt::identity(); n];
+                fft_vartime(&input, &mut actual, omega, log_n);
+                assert!(actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| C::from(*actual) == expected));
             }
         }
     }
@@ -1876,6 +2226,10 @@ mod tests {
                 #[test]
                 fn exceptional_fallback() {
                     exceptional_schedules_fall_back::<$curve>();
+                }
+                #[test]
+                fn affine_fft() {
+                    affine_fft_matches_projective::<$curve>();
                 }
             }
         };

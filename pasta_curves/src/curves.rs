@@ -69,6 +69,17 @@ macro_rules! impl_batch_mul_same_scalar_vartime {
                 *output = product;
             }
         }
+
+        #[cfg(feature = "glv")]
+        fn fft_vartime(
+            input: &[Self],
+            output: &mut [Self::AffineExt],
+            omega: Self::ScalarExt,
+            log_n: u32,
+        ) -> bool {
+            crate::glv::fft_vartime(input, output, omega, log_n);
+            true
+        }
     };
     (native, $name:ident) => {};
 }

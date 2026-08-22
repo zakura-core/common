@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Pasta-curve parameter generation now uses the affine GLV curve FFT and
+  enables its layer-level parallelism through the `multicore` feature. For
+  Orchard's `k = 11`, `Params::new` measured 3.4x faster single-threaded and
+  4.8x faster with all cores on Apple aarch64.
 - Prepared the `1.0.0-rc.3` release.
 - `Params::new` now normalizes its inverse curve FFT with parallel batched GLV
   scalar multiplication over the already-affine generators, reducing Orchard

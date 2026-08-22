@@ -130,6 +130,27 @@ pub trait CurveExt:
     ) -> Option<Self> {
         None
     }
+
+    /// Attempts an affine, variable-time FFT specialized for this curve.
+    ///
+    /// `input` and `output` must have the same power-of-two length, equal to
+    /// `2^log_n`. The transform is unnormalized. Implementations return
+    /// `true` after writing the transform to `output`; the default returns
+    /// `false` without modifying `output`.
+    ///
+    /// # Security
+    ///
+    /// This method may run in variable time with respect to the points and
+    /// `omega`. Both must be public.
+    fn fft_vartime(
+        input: &[Self],
+        output: &mut [Self::AffineExt],
+        omega: Self::ScalarExt,
+        log_n: u32,
+    ) -> bool {
+        let _ = (input, output, omega, log_n);
+        false
+    }
 }
 
 /// This trait is the affine counterpart to `Curve` and is used for
