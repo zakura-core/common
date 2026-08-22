@@ -1407,8 +1407,12 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         .collect();
 
     let mut butterfly_scratch = AffineTwiddleScratch::new();
-    let mut chunk = 2;
-    let mut twiddle_stride = output.len() / 2;
+    let (mut chunk, mut twiddle_stride) = if output.len() >= 8 {
+        identity_free = fft8_multiplication_minimal_layer::<C>(output, omega, identity_free);
+        (16, output.len() / 16)
+    } else {
+        (2, output.len() / 2)
+    };
     while chunk <= output.len() {
         let half = chunk / 2;
         #[cfg(feature = "multicore")]
@@ -1512,6 +1516,263 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         );
         chunk *= 2;
         twiddle_stride /= 2;
+    }
+}
+
+/// Replaces the bottom three radix-2 layers with an eight-point codelet.
+/// Each block uses four constant scalar multiplications instead of five,
+/// at the cost of two additional group additions.
+fn fft8_multiplication_minimal_layer<C: GlvParams>(
+    points: &mut [C::AffineExt],
+    omega: C::ScalarExt,
+    mut identity_free: bool,
+) -> bool {
+    debug_assert_eq!(points.len() % 8, 0);
+    let root8 = omega.pow_vartime([(points.len() / 8) as u64]);
+    let root8_squared = root8.square();
+    let root8_cubed = root8_squared * root8;
+    let c = (root8 + root8_cubed) * C::ScalarExt::TWO_INV;
+    let d = (root8 - root8_cubed) * C::ScalarExt::TWO_INV;
+    let scalars = [
+        Decomposed::<C>::new(&root8_squared),
+        Decomposed::<C>::new(&c),
+        Decomposed::<C>::new(&d),
+    ];
+
+    let blocks = points.len() / 8;
+    let mut scratch = AffineTwiddleScratch::new();
+    let mut left = Vec::with_capacity(blocks * 4);
+    let mut right = Vec::with_capacity(blocks * 4);
+    for block in points.chunks(8) {
+        // The enclosing FFT has already bit-reversed the input. Undo the
+        // local three-bit reversal by pairing adjacent entries as
+        // (q0, q4), (q2, q6), (q1, q5), and (q3, q7).
+        for pair in block.chunks(2) {
+            left.push(pair[0]);
+            right.push(pair[1]);
+        }
+    }
+    let mut stage1_sum = alloc::vec![C::AffineExt::identity(); blocks * 4];
+    let mut stage1_difference = alloc::vec![C::AffineExt::identity(); blocks * 4];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut stage1_sum,
+        &mut stage1_difference,
+        &mut scratch,
+        identity_free,
+    );
+
+    left.clear();
+    right.clear();
+    left.reserve(blocks * 3);
+    right.reserve(blocks * 3);
+    for block in 0..blocks {
+        let offset = block * 4;
+        left.extend_from_slice(&[
+            stage1_sum[offset],
+            stage1_sum[offset + 2],
+            stage1_difference[offset + 2],
+        ]);
+        right.extend_from_slice(&[
+            stage1_sum[offset + 1],
+            stage1_sum[offset + 3],
+            stage1_difference[offset + 3],
+        ]);
+    }
+    let mut stage2_sum = alloc::vec![C::AffineExt::identity(); blocks * 3];
+    let mut stage2_difference = alloc::vec![C::AffineExt::identity(); blocks * 3];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut stage2_sum,
+        &mut stage2_difference,
+        &mut scratch,
+        identity_free,
+    );
+
+    let mut scalar_inputs: [Vec<C>; 3] = [
+        Vec::with_capacity(blocks * 2),
+        Vec::with_capacity(blocks),
+        Vec::with_capacity(blocks),
+    ];
+    for block in 0..blocks {
+        let stage1 = block * 4;
+        let stage2 = block * 3;
+        scalar_inputs[0].extend_from_slice(&[
+            C::from(stage2_difference[stage2 + 1]),
+            C::from(stage1_difference[stage1 + 1]),
+        ]);
+        scalar_inputs[1].push(C::from(stage2_sum[stage2 + 2]));
+        scalar_inputs[2].push(C::from(stage2_difference[stage2 + 2]));
+    }
+
+    #[cfg(feature = "multicore")]
+    let products: Vec<Vec<_>> = scalar_inputs
+        .into_par_iter()
+        .zip(scalars.par_iter())
+        .map(|(points, scalar)| {
+            let threads = maybe_rayon::current_num_threads();
+            let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
+            let batches: Vec<Vec<_>> = points
+                .par_chunks(batch_len)
+                .map(|points| Table::<C>::mul_decomposed_same_scalar_affine(points, scalar))
+                .collect();
+            batches.into_iter().flatten().collect()
+        })
+        .collect();
+    #[cfg(not(feature = "multicore"))]
+    let products: Vec<Vec<_>> = scalar_inputs
+        .into_iter()
+        .zip(scalars.iter())
+        .map(|(points, scalar)| Table::<C>::mul_decomposed_same_scalar_affine(&points, scalar))
+        .collect();
+
+    left.clear();
+    right.clear();
+    left.reserve(blocks * 4);
+    right.reserve(blocks * 4);
+    for block in 0..blocks {
+        let stage1 = block * 4;
+        let stage2 = block * 3;
+        let root8_squared_offset = block * 2;
+        left.extend_from_slice(&[
+            stage2_sum[stage2],
+            stage2_difference[stage2],
+            stage1_difference[stage1],
+            products[1][block],
+        ]);
+        right.extend_from_slice(&[
+            stage2_sum[stage2 + 1],
+            products[0][root8_squared_offset],
+            products[0][root8_squared_offset + 1],
+            products[2][block],
+        ]);
+    }
+    let mut stage3_sum = alloc::vec![C::AffineExt::identity(); blocks * 4];
+    let mut stage3_difference = alloc::vec![C::AffineExt::identity(); blocks * 4];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut stage3_sum,
+        &mut stage3_difference,
+        &mut scratch,
+        identity_free,
+    );
+
+    left.clear();
+    right.clear();
+    left.reserve(blocks * 2);
+    right.reserve(blocks * 2);
+    for block in 0..blocks {
+        let offset = block * 4;
+        left.extend_from_slice(&[stage3_sum[offset + 2], stage3_difference[offset + 2]]);
+        right.extend_from_slice(&[stage3_sum[offset + 3], stage3_difference[offset + 3]]);
+    }
+    let mut stage4_sum = alloc::vec![C::AffineExt::identity(); blocks * 2];
+    let mut stage4_difference = alloc::vec![C::AffineExt::identity(); blocks * 2];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut stage4_sum,
+        &mut stage4_difference,
+        &mut scratch,
+        identity_free,
+    );
+
+    for (block, output) in points.chunks_mut(8).enumerate() {
+        let stage3 = block * 4;
+        let stage4 = block * 2;
+        output[0] = stage3_sum[stage3];
+        output[4] = stage3_difference[stage3];
+        output[2] = stage3_sum[stage3 + 1];
+        output[6] = stage3_difference[stage3 + 1];
+        output[1] = stage4_sum[stage4];
+        output[5] = stage4_difference[stage4];
+        output[3] = stage4_sum[stage4 + 1];
+        output[7] = stage4_difference[stage4 + 1];
+    }
+    identity_free
+}
+
+/// Computes arbitrary affine `L + R` and `L - R` pairs with one shared
+/// inversion. This is the non-layer-shaped counterpart to
+/// [`affine_twiddle_add_sub_layer`].
+fn affine_add_sub_pairs<C: GlvParams>(
+    left: &[C::AffineExt],
+    right: &[C::AffineExt],
+    sums: &mut [C::AffineExt],
+    differences: &mut [C::AffineExt],
+    scratch: &mut AffineTwiddleScratch<C::Base>,
+    identity_free: bool,
+) -> bool {
+    assert_eq!(left.len(), right.len());
+    assert_eq!(left.len(), sums.len());
+    assert_eq!(left.len(), differences.len());
+
+    if !identity_free
+        && left
+            .iter()
+            .zip(right)
+            .any(|(left, right)| bool::from(left.is_identity()) || bool::from(right.is_identity()))
+    {
+        projective_add_sub_pairs::<C>(left, right, sums, differences);
+        return false;
+    }
+
+    scratch.denominators.resize(left.len(), C::Base::ZERO);
+    scratch.prefixes.resize(left.len(), C::Base::ZERO);
+    let mut acc = C::Base::ONE;
+    for (((left, right), denominator), prefix) in left
+        .iter()
+        .zip(right)
+        .zip(scratch.denominators.iter_mut())
+        .zip(scratch.prefixes.iter_mut())
+    {
+        let (left_x, _) = C::affine_xy(left);
+        let (right_x, _) = C::affine_xy(right);
+        *denominator = right_x - left_x;
+        *prefix = acc;
+        acc *= *denominator;
+    }
+
+    let inverse = acc.invert();
+    if !bool::from(inverse.is_some()) {
+        projective_add_sub_pairs::<C>(left, right, sums, differences);
+        return false;
+    }
+    acc = inverse.unwrap();
+    sums.copy_from_slice(left);
+    for i in (0..left.len()).rev() {
+        let denominator_inverse = acc * scratch.prefixes[i];
+        acc *= scratch.denominators[i];
+        apply_affine_twiddle::<C>(
+            &mut sums[i],
+            &mut differences[i],
+            &right[i],
+            denominator_inverse,
+        );
+    }
+    true
+}
+
+fn projective_add_sub_pairs<C: GlvParams>(
+    left: &[C::AffineExt],
+    right: &[C::AffineExt],
+    sums: &mut [C::AffineExt],
+    differences: &mut [C::AffineExt],
+) {
+    let mut projective = Vec::with_capacity(left.len() * 2);
+    for (left, right) in left.iter().zip(right) {
+        let left = C::from(*left);
+        let right = C::from(*right);
+        projective.extend_from_slice(&[left + right, left - right]);
+    }
+    let mut affine = alloc::vec![C::AffineExt::identity(); projective.len()];
+    C::batch_normalize(&projective, &mut affine);
+    for (i, pair) in affine.chunks(2).enumerate() {
+        sums[i] = pair[0];
+        differences[i] = pair[1];
     }
 }
 
@@ -2334,8 +2595,12 @@ mod tests {
                     _ => generator.double(),
                 })
                 .collect();
+            let hash_to_curve = C::hash_to_curve("z.cash:test-affine-fft");
+            let hashed: Vec<C> = (0..n)
+                .map(|i| hash_to_curve(&(i as u64).to_le_bytes()))
+                .collect();
 
-            for input in [regular, exceptional] {
+            for input in [regular, exceptional, hashed] {
                 let mut expected = input.clone();
                 reference(&mut expected, omega, log_n);
                 let mut actual = alloc::vec![C::AffineExt::identity(); n];
