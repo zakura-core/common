@@ -2037,7 +2037,11 @@ fn affine_add_sub_pairs<C: GlvParams>(
             denominator_inverse,
         );
     }
-    true
+    // A codelet can retain intermediates that are not part of this batch and
+    // feed them into a later batch. A successful batch therefore cannot
+    // strengthen the invariant for the entire codelet after an earlier
+    // exceptional fallback made it false.
+    identity_free
 }
 
 fn projective_add_sub_pairs<C: GlvParams>(
@@ -2884,7 +2888,34 @@ mod tests {
                 .map(|i| hash_to_curve(&(i as u64).to_le_bytes()))
                 .collect();
 
-            for input in [regular, exceptional, hashed] {
+            let mut inputs = alloc::vec![regular, exceptional, hashed];
+            if log_n == 3 {
+                // The first radix-2 stage produces an identity difference,
+                // which the fused FFT8 codelet retains while it processes a
+                // separate, identity-free branch. This checks that the clean
+                // branch does not incorrectly strengthen the invariant for
+                // the retained identity before the branches rejoin.
+                inputs.push(
+                    [1, 4, 2, 7, 1, 6, 3, 10]
+                        .map(|multiple| generator * C::ScalarExt::from(multiple))
+                        .into(),
+                );
+            }
+            if log_n == 4 {
+                // Exercise the analogous branch-and-rejoin path in the fused
+                // FFT16 codelet. The equal points at indices zero and eight
+                // produce an identity that the even-input branch omits.
+                inputs.push(
+                    [
+                        398_522, 248_420, 840_455, 798_528, 624_324, 663_377, 434_118, 357_938,
+                        398_522, 7_942, 752_351, 727_850, 16_691, 106_822, 861_757, 814_544,
+                    ]
+                    .map(|multiple| generator * C::ScalarExt::from(multiple))
+                    .into(),
+                );
+            }
+
+            for input in inputs {
                 let mut expected = input.clone();
                 reference(&mut expected, omega, log_n);
                 let mut actual = alloc::vec![C::AffineExt::identity(); n];
