@@ -47,8 +47,9 @@ and this project adheres to Rust's notion of
   width-3 NAF over the Eisenstein integers instead of two independent width-4 wNAFs,
   cutting the shared-doubling ladder from ~51 to ~39 mixed additions. `glv::Table`
   now stores the eight digit-orbit points with the x-coordinate in all three
-  endomorphism rotations (1 KiB per table, previously 512 B). The public `glv` API
-  and the native constant-time `Mul` are unchanged.
+  endomorphism rotations, deriving the third from $\zeta^2 = -\zeta - 1$ (1 KiB
+  per table, previously 512 B). The public `glv` API and the native constant-time
+  `Mul` are unchanged.
 - Added `glv::Table::mul_decomposed_batch`, which multiplies many points by one
   scalar on affine accumulators, batching each ladder column's field inversions
   across the batch and fusing nonzero-digit columns as affine `2P+Q`. Batches under

@@ -929,7 +929,8 @@ impl<C: GlvParams> Table<C> {
 
     /// Assembles a table from one normalized 8-entry window of orbit
     /// representatives, materializing the $\zeta$-rotations of each
-    /// x-coordinate (16 multiplications per table).
+    /// x-coordinate (eight multiplications per table). Since $\zeta$ is a
+    /// nontrivial cube root of unity, $\zeta^2x = -x - \zeta x$.
     fn from_window(w: &[C::AffineExt]) -> Self {
         let mut xs = [[C::Base::ZERO; 8]; 3];
         let mut ys = [C::Base::ZERO; 8];
@@ -938,7 +939,7 @@ impl<C: GlvParams> Table<C> {
             let xz = x * C::Base::ZETA;
             xs[0][i] = x;
             xs[1][i] = xz;
-            xs[2][i] = xz * C::Base::ZETA;
+            xs[2][i] = -x - xz;
             ys[i] = y;
         }
         Table { xs, ys }
