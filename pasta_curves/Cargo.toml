@@ -98,6 +98,12 @@ harness = false
 required-features = ["glv"]
 
 [[bench]]
+name = "glv_table"
+path = "benches/glv_table.rs"
+harness = false
+required-features = ["glv"]
+
+[[bench]]
 name = "hashtocurve"
 path = "benches/hashtocurve.rs"
 harness = false
