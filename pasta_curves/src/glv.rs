@@ -1369,6 +1369,7 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         })
         .collect();
 
+    let mut butterfly_scratch = AffineTwiddleScratch::new();
     let mut chunk = 2;
     let mut twiddle_stride = output.len() / 2;
     while chunk <= output.len() {
@@ -1408,22 +1409,69 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         }
         assert!(products.next().is_none());
 
-        affine_butterfly_layer::<C>(output, &right_scaled, chunk);
+        affine_twiddle_add_sub_layer::<C>(output, &right_scaled, chunk, &mut butterfly_scratch);
         chunk *= 2;
         twiddle_stride /= 2;
     }
 }
 
-fn affine_butterfly_layer<C: GlvParams>(
+#[inline(always)]
+fn apply_affine_twiddle<C: GlvParams>(
+    left: &mut C::AffineExt,
+    output: &mut C::AffineExt,
+    right: &C::AffineExt,
+    inverse: C::Base,
+) {
+    let (left_x, left_y) = C::affine_xy(left);
+    let (right_x, right_y) = C::affine_xy(right);
+
+    let plus_slope = (right_y - left_y) * inverse;
+    let minus_slope = (-right_y - left_y) * inverse;
+    let plus_x = plus_slope.square() - left_x - right_x;
+    let minus_x = minus_slope.square() - left_x - right_x;
+    let plus_y = plus_slope * (left_x - plus_x) - left_y;
+    let minus_y = minus_slope * (left_x - minus_x) - left_y;
+
+    *left = C::affine_unchecked(plus_x, plus_y, private::CrateToken(()));
+    *output = C::affine_unchecked(minus_x, minus_y, private::CrateToken(()));
+}
+
+struct AffineTwiddleScratch<F> {
+    denominators: Vec<F>,
+    prefixes: Vec<F>,
+}
+
+impl<F> AffineTwiddleScratch<F> {
+    fn new() -> Self {
+        Self {
+            denominators: Vec::new(),
+            prefixes: Vec::new(),
+        }
+    }
+}
+
+/// Computes every `L + R` and `L - R` pair in one FFT layer. Both affine
+/// chords share `x_R - x_L`, so each inverse is consumed directly during
+/// batch-inversion back-substitution.
+fn affine_twiddle_add_sub_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
     right_scaled: &[C::AffineExt],
     chunk: usize,
+    scratch: &mut AffineTwiddleScratch<C::Base>,
 ) {
     let half = chunk / 2;
     assert_eq!(right_scaled.len(), points.len() / 2);
 
-    let mut denominators = Vec::with_capacity(right_scaled.len());
+    scratch
+        .denominators
+        .resize(right_scaled.len(), C::Base::ZERO);
+    scratch.prefixes.resize(right_scaled.len(), C::Base::ZERO);
+    let mut acc = C::Base::ONE;
     let mut safe = true;
+    let mut slots = scratch
+        .denominators
+        .iter_mut()
+        .zip(scratch.prefixes.iter_mut());
     for (block, scaled) in points.chunks(chunk).zip(right_scaled.chunks(half)) {
         for (left, right) in block[..half].iter().zip(scaled) {
             let (left_x, _) = C::affine_xy(left);
@@ -1432,9 +1480,14 @@ fn affine_butterfly_layer<C: GlvParams>(
             safe &= !bool::from(left.is_identity())
                 && !bool::from(right.is_identity())
                 && !denominator.is_zero_vartime();
-            denominators.push(denominator);
+            let (denominator_slot, prefix_slot) =
+                slots.next().expect("one scratch slot per butterfly");
+            *denominator_slot = denominator;
+            *prefix_slot = acc;
+            acc *= denominator;
         }
     }
+    assert!(slots.next().is_none());
 
     if !safe {
         let mut projective = alloc::vec![C::identity(); points.len()];
@@ -1454,29 +1507,29 @@ fn affine_butterfly_layer<C: GlvParams>(
         return;
     }
 
-    let mut scratch = alloc::vec![C::Base::ZERO; denominators.len()];
-    batch_invert_nonzero(&mut denominators, &mut scratch);
-    let mut inverses = denominators.into_iter();
-    for (block, scaled) in points.chunks_mut(chunk).zip(right_scaled.chunks(half)) {
-        let (left, right_output) = block.split_at_mut(half);
-        for ((left, right_output), right) in left.iter_mut().zip(right_output).zip(scaled) {
-            let inverse = inverses.next().expect("one inverse per butterfly");
-            let (left_x, left_y) = C::affine_xy(left);
-            let (right_x, right_y) = C::affine_xy(right);
-
-            let plus_slope = (right_y - left_y) * inverse;
-            let plus_x = plus_slope.square() - left_x - right_x;
-            let plus_y = plus_slope * (left_x - plus_x) - left_y;
-
-            let minus_slope = (-right_y - left_y) * inverse;
-            let minus_x = minus_slope.square() - left_x - right_x;
-            let minus_y = minus_slope * (left_x - minus_x) - left_y;
-
-            *left = C::affine_unchecked(plus_x, plus_y, private::CrateToken(()));
-            *right_output = C::affine_unchecked(minus_x, minus_y, private::CrateToken(()));
+    // The product is nonzero because every denominator was checked above.
+    acc = acc.invert().unwrap();
+    let mut inversion_scratch = scratch
+        .denominators
+        .iter()
+        .zip(scratch.prefixes.iter())
+        .rev();
+    for (block, scaled) in points
+        .chunks_mut(chunk)
+        .zip(right_scaled.chunks(half))
+        .rev()
+    {
+        let (left, output) = block.split_at_mut(half);
+        for ((left, output), right) in left.iter_mut().zip(output).zip(scaled).rev() {
+            let (denominator, prefix) = inversion_scratch
+                .next()
+                .expect("one scratch slot per butterfly");
+            let denominator_inverse = acc * prefix;
+            acc *= denominator;
+            apply_affine_twiddle::<C>(left, output, right, denominator_inverse);
         }
     }
-    assert!(inverses.next().is_none());
+    assert!(inversion_scratch.next().is_none());
 }
 
 #[cfg(test)]
