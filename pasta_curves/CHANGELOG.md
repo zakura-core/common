@@ -92,6 +92,9 @@ and this project adheres to Rust's notion of
 - Hash-to-curve now avoids redundant release-mode curve-equation checks after
   the simplified SWU and isogeny formulas, while retaining debug assertions.
   Vesta hash-to-curve is about 5% faster on Apple aarch64.
+- The GLV Signed-Booth multiscalar backend stores each pending affine
+  addition's left operand in its eventual output slot, avoiding duplicate
+  coordinates in the batch-inversion workspace.
 - The GLV Signed-Booth multiscalar backend caches each base's affine
   coordinates, endomorphism x-coordinate, and identity flag once per MSM
   instead of extracting them again for every window.
