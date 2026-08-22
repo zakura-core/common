@@ -8,8 +8,12 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Prepared the `1.0.0-rc.3` release.
 - Orchard proving-key generation now uses precomputed fixed-base Lagrange
   coefficients instead of recomputing them during every circuit synthesis.
+  The generated table's header now carries its regeneration command, and both
+  the generator and the equivalence test take each base's window count from
+  its `FixedScalarKind`, as the `FixedPoint::lagrange_coeffs` default does.
 - The `merkle` benchmark gained `4096-leaves-distinct` and
   `4096-leaves-distinct-batch`: a 2^12-leaf tree of seeded pseudorandom leaves
   drawn with repeats rejected, so every leaf is distinct by construction,

@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.88"
 name = "zakura-sapling-crypto"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 authors = [
     "Dev Ojha <ValarDragon@users.noreply.github.com>",
     "Sean Bowe <ewillbefull@gmail.com>",
@@ -90,7 +90,7 @@ version = "0.8"
 
 [dependencies.bellman]
 path = "../bellman"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = ["groth16"]
 optional = true
 default-features = false
@@ -110,7 +110,7 @@ default-features = false
 
 [dependencies.bls12_381]
 path = "../bls12_381"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = ["alloc"]
 default-features = false
 package = "zakura-bls12-381"
@@ -151,7 +151,7 @@ default-features = false
 
 [dependencies.jubjub]
 path = "../jubjub"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = ["alloc"]
 default-features = false
 package = "zakura-jubjub"
@@ -182,7 +182,7 @@ package = "rand_core"
 
 [dependencies.redjubjub]
 path = "../redjubjub"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 default-features = false
 package = "zakura-redjubjub"
 

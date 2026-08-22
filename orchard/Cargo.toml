@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.88"
 name = "zakura-orchard"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 authors = [
     "Dev Ojha <ValarDragon@users.noreply.github.com>",
     "Sean Bowe <ewillbefull@gmail.com>",
@@ -160,14 +160,14 @@ version = "0.14"
 
 [dependencies.halo2_gadgets]
 path = "../halo2_gadgets"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 optional = true
 default-features = false
 package = "zakura-halo2-gadgets"
 
 [dependencies.halo2_proofs]
 path = "../halo2_proofs"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = [
     "batch",
     "floor-planner-v1-legacy-pdqsort",
@@ -201,7 +201,7 @@ default-features = false
 
 [dependencies.pasta_curves]
 path = "../pasta_curves"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = ["glv"]
 package = "zakura-pasta-curves"
 
@@ -211,7 +211,7 @@ optional = true
 
 [dependencies.poseidon]
 path = "../halo2_poseidon"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 package = "zakura-halo2-poseidon"
 
 [dependencies.proptest]
@@ -233,7 +233,7 @@ package = "rand_core"
 
 [dependencies.reddsa]
 path = "../reddsa"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 default-features = false
 package = "zakura-reddsa"
 
@@ -244,7 +244,7 @@ default-features = false
 
 [dependencies.sinsemilla]
 path = "../sinsemilla"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 package = "zakura-sinsemilla"
 
 [dependencies.subtle]
@@ -273,7 +273,7 @@ version = "0.4"
 
 [dev-dependencies.halo2_gadgets]
 path = "../halo2_gadgets"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = ["test-dependencies"]
 package = "zakura-halo2-gadgets"
 
@@ -300,7 +300,7 @@ version = "0.6"
 
 [dev-dependencies.sinsemilla]
 path = "../sinsemilla"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 features = ["test-dependencies"]
 package = "zakura-sinsemilla"
 

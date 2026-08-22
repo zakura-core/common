@@ -8,6 +8,7 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Updated to `ff 0.14`, `group 0.14`, `rand 0.10`, and the Zakura Groth16 and
   Jubjub forks.

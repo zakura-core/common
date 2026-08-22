@@ -6,7 +6,7 @@ replacement by renaming the dependency:
 
 ```toml
 [dependencies]
-pairing = { package = "zakura-pairing", version = "1.0.0-rc.2" }
+pairing = { package = "zakura-pairing", version = "1.0.0-rc.3" }
 ```
 
 # pairing
