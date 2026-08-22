@@ -793,8 +793,6 @@ struct AffinePoint<F> {
 
 struct PendingAffineAddition<F> {
     output: usize,
-    left_x: F,
-    left_y: F,
     x_sum: F,
     numerator: F,
     denominator: F,
@@ -934,14 +932,12 @@ fn reduce_affine_buckets<F: Field>(
                 };
 
                 let output = next_points.len();
-                next_points.push(AffinePoint {
-                    x: F::ZERO,
-                    y: F::ZERO,
-                });
+                // Preserve the left input in its result slot until the batch
+                // inversion completes. This avoids duplicating its coordinates
+                // in every pending addition.
+                next_points.push(left);
                 pending.push(PendingAffineAddition {
                     output,
-                    left_x: left.x,
-                    left_y: left.y,
                     x_sum: left.x + right.x,
                     numerator,
                     denominator,
@@ -960,12 +956,14 @@ fn reduce_affine_buckets<F: Field>(
         for pair in 0..pairs {
             let first = &pending[BATCH_INVERSION_LANES * pair];
             let second = &pending[BATCH_INVERSION_LANES * pair + 1];
+            let first_left = next_points[first.output];
+            let second_left = next_points[second.output];
             let first_slope = first.numerator * first.denominator;
             let second_slope = second.numerator * second.denominator;
             let first_x = first_slope.square() - first.x_sum;
             let second_x = second_slope.square() - second.x_sum;
-            let first_y = first_slope * (first.left_x - first_x) - first.left_y;
-            let second_y = second_slope * (second.left_x - second_x) - second.left_y;
+            let first_y = first_slope * (first_left.x - first_x) - first_left.y;
+            let second_y = second_slope * (second_left.x - second_x) - second_left.y;
             next_points[first.output] = AffinePoint {
                 x: first_x,
                 y: first_y,
@@ -977,9 +975,10 @@ fn reduce_affine_buckets<F: Field>(
         }
         if pending.len() % BATCH_INVERSION_LANES != 0 {
             let addition = &pending[pending.len() - 1];
+            let left = next_points[addition.output];
             let slope = addition.numerator * addition.denominator;
             let x = slope.square() - addition.x_sum;
-            let y = slope * (addition.left_x - x) - addition.left_y;
+            let y = slope * (left.x - x) - left.y;
             next_points[addition.output] = AffinePoint { x, y };
         }
 
@@ -2590,8 +2589,6 @@ mod tests {
             let mut additions = (0..length)
                 .map(|index| PendingAffineAddition {
                     output: index,
-                    left_x: F::ZERO,
-                    left_y: F::ZERO,
                     x_sum: F::ZERO,
                     numerator: F::ZERO,
                     denominator: F::from(u64::try_from(index + 1).unwrap()),
