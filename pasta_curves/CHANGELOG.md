@@ -81,6 +81,9 @@ and this project adheres to Rust's notion of
 
 ### Changed
 
+- The GLV Signed-Booth MSM now finishes batched affine additions while walking
+  inversion products backward, avoiding a separate pass over its pending
+  addition records.
 - The GLV Signed-Booth multiscalar backend stores each pending affine
   addition's left operand in its eventual output slot, avoiding duplicate
   coordinates in the batch-inversion workspace.
