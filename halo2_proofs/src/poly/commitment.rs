@@ -293,6 +293,35 @@ impl<C: CurveAffine> Params<C> {
     }
 }
 
+#[test]
+fn orchard_k11_lagrange_basis_is_stable() {
+    use blake2b_simd::Params as Blake2bParams;
+    use group::GroupEncoding;
+
+    use crate::pasta::EqAffine;
+
+    const ORCHARD_K: u32 = 11;
+    const EXPECTED_HASH: [u8; 32] = [
+        0x28, 0xea, 0xc4, 0x0e, 0x45, 0x71, 0xee, 0xe8, 0x1f, 0xb1, 0xd9, 0xfe, 0xfc, 0xfb, 0xee,
+        0x18, 0x88, 0x64, 0x4d, 0xff, 0xb7, 0x8b, 0xc7, 0x72, 0x44, 0xaf, 0xf6, 0xff, 0x8b, 0xdd,
+        0x59, 0xce,
+    ];
+
+    // `g_lagrange` is the inverse curve-FFT output used to commit directly
+    // to Orchard's evaluation-form polynomials. Pin its canonical encodings
+    // so an FFT optimization cannot silently change the commitment basis.
+    let params = Params::<EqAffine>::new(ORCHARD_K);
+    let mut hasher = Blake2bParams::new()
+        .hash_length(EXPECTED_HASH.len())
+        .personal(b"ZakuraOrchardFFT")
+        .to_state();
+    for point in &params.g_lagrange {
+        hasher.update(point.to_bytes().as_ref());
+    }
+
+    assert_eq!(hasher.finalize().as_bytes(), EXPECTED_HASH);
+}
+
 #[cfg(feature = "batch")]
 #[test]
 fn instance_window_cache_is_shared_by_clones_only() {
