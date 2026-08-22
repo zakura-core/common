@@ -1385,6 +1385,10 @@ pub(crate) fn fft_vartime<C: GlvParams>(
     assert_eq!(input.len(), output.len());
     assert_eq!(input.len(), 1usize << log_n);
     C::batch_normalize(input, output);
+    // If one layer starts without identities and every `x_R - x_L` is
+    // nonzero, both `L + R` and `L - R` are nonidentity. Carry that invariant
+    // across layers instead of checking both inputs to every butterfly.
+    let mut identity_free = output.iter().all(|point| !bool::from(point.is_identity()));
 
     for i in 0..output.len() {
         let reversed = bitreverse(i, log_n as usize);
@@ -1452,7 +1456,13 @@ pub(crate) fn fft_vartime<C: GlvParams>(
                 right_scaled.extend(products.iter().map(|products| products[block_index]));
             }
             debug_assert_eq!(blocks, products.first().map_or(0, Vec::len));
-            affine_twiddle_add_sub_layer::<C>(output, &right_scaled, chunk, &mut butterfly_scratch);
+            identity_free = affine_twiddle_add_sub_layer::<C>(
+                output,
+                &right_scaled,
+                chunk,
+                &mut butterfly_scratch,
+                identity_free,
+            );
             chunk *= 2;
             twiddle_stride /= 2;
             continue;
@@ -1493,7 +1503,13 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         }
         assert!(products.next().is_none());
 
-        affine_twiddle_add_sub_layer::<C>(output, &right_scaled, chunk, &mut butterfly_scratch);
+        identity_free = affine_twiddle_add_sub_layer::<C>(
+            output,
+            &right_scaled,
+            chunk,
+            &mut butterfly_scratch,
+            identity_free,
+        );
         chunk *= 2;
         twiddle_stride /= 2;
     }
@@ -1542,16 +1558,30 @@ fn affine_twiddle_add_sub_layer<C: GlvParams>(
     right_scaled: &[C::AffineExt],
     chunk: usize,
     scratch: &mut AffineTwiddleScratch<C::Base>,
-) {
+    identity_free: bool,
+) -> bool {
     let half = chunk / 2;
     assert_eq!(right_scaled.len(), points.len() / 2);
+
+    if !identity_free
+        && points
+            .chunks(chunk)
+            .zip(right_scaled.chunks(half))
+            .any(|(block, scaled)| {
+                block[..half].iter().zip(scaled).any(|(left, right)| {
+                    bool::from(left.is_identity()) || bool::from(right.is_identity())
+                })
+            })
+    {
+        projective_twiddle_add_sub_layer::<C>(points, right_scaled, chunk);
+        return false;
+    }
 
     scratch
         .denominators
         .resize(right_scaled.len(), C::Base::ZERO);
     scratch.prefixes.resize(right_scaled.len(), C::Base::ZERO);
     let mut acc = C::Base::ONE;
-    let mut safe = true;
     let mut slots = scratch
         .denominators
         .iter_mut()
@@ -1561,9 +1591,6 @@ fn affine_twiddle_add_sub_layer<C: GlvParams>(
             let (left_x, _) = C::affine_xy(left);
             let (right_x, _) = C::affine_xy(right);
             let denominator = right_x - left_x;
-            safe &= !bool::from(left.is_identity())
-                && !bool::from(right.is_identity())
-                && !denominator.is_zero_vartime();
             let (denominator_slot, prefix_slot) =
                 slots.next().expect("one scratch slot per butterfly");
             *denominator_slot = denominator;
@@ -1573,26 +1600,13 @@ fn affine_twiddle_add_sub_layer<C: GlvParams>(
     }
     assert!(slots.next().is_none());
 
-    if !safe {
-        let mut projective = alloc::vec![C::identity(); points.len()];
-        for ((block, output), scaled) in points
-            .chunks(chunk)
-            .zip(projective.chunks_mut(chunk))
-            .zip(right_scaled.chunks(half))
-        {
-            for j in 0..half {
-                let left = C::from(block[j]);
-                let right = C::from(scaled[j]);
-                output[j] = left + right;
-                output[half + j] = left - right;
-            }
-        }
-        C::batch_normalize(&projective, points);
-        return;
+    // One failed inversion detects every `x_L == x_R` exceptional case.
+    let inverse = acc.invert();
+    if !bool::from(inverse.is_some()) {
+        projective_twiddle_add_sub_layer::<C>(points, right_scaled, chunk);
+        return false;
     }
-
-    // The product is nonzero because every denominator was checked above.
-    acc = acc.invert().unwrap();
+    acc = inverse.unwrap();
     let mut inversion_scratch = scratch
         .denominators
         .iter()
@@ -1614,6 +1628,29 @@ fn affine_twiddle_add_sub_layer<C: GlvParams>(
         }
     }
     assert!(inversion_scratch.next().is_none());
+    true
+}
+
+fn projective_twiddle_add_sub_layer<C: GlvParams>(
+    points: &mut [C::AffineExt],
+    right_scaled: &[C::AffineExt],
+    chunk: usize,
+) {
+    let half = chunk / 2;
+    let mut projective = alloc::vec![C::identity(); points.len()];
+    for ((block, output), scaled) in points
+        .chunks(chunk)
+        .zip(projective.chunks_mut(chunk))
+        .zip(right_scaled.chunks(half))
+    {
+        for j in 0..half {
+            let left = C::from(block[j]);
+            let right = C::from(scaled[j]);
+            output[j] = left + right;
+            output[half + j] = left - right;
+        }
+    }
+    C::batch_normalize(&projective, points);
 }
 
 #[cfg(test)]
