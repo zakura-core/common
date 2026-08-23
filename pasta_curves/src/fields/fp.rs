@@ -396,6 +396,119 @@ impl Fp {
         }
     }
 
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ))]
+    #[inline]
+    pub(crate) fn mul_assign_pairs_runtime(lhs: &mut [Self], rhs: &[Self]) {
+        assert_eq!(lhs.len(), rhs.len());
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            let even_len = lhs.len() & !1;
+            if even_len != 0 {
+                super::aarch64_asm::mul_pairs(
+                    lhs.as_mut_ptr().cast(),
+                    lhs.as_ptr().cast(),
+                    rhs.as_ptr().cast(),
+                    even_len,
+                    &MODULUS.0,
+                    INV,
+                );
+            }
+            if even_len != lhs.len() {
+                lhs[even_len] *= rhs[even_len];
+            }
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            for (lhs, rhs) in lhs.iter_mut().zip(rhs) {
+                *lhs *= rhs;
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ))]
+    #[inline]
+    pub(crate) fn batch_invert_backsub_runtime(
+        values: &mut [Self],
+        prefixes: &[Self],
+        acc0: Self,
+        acc1: Self,
+    ) {
+        assert_eq!(values.len(), prefixes.len());
+        assert!(!values.is_empty());
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            let even_len = values.len() & !1;
+            let mut acc0 = acc0;
+            if even_len != values.len() {
+                let inverse = acc0 * prefixes[even_len];
+                acc0 *= values[even_len];
+                values[even_len] = inverse;
+            }
+            if even_len != 0 {
+                super::aarch64_asm::batch_invert_backsub(
+                    values.as_mut_ptr().cast(),
+                    prefixes.as_ptr().cast(),
+                    even_len,
+                    &acc0.0,
+                    &acc1.0,
+                    &MODULUS.0,
+                    INV,
+                );
+            }
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            let mut acc0 = acc0;
+            let mut acc1 = acc1;
+            if let (Some(value), Some(prefix)) = (
+                values.chunks_exact_mut(2).into_remainder().first_mut(),
+                prefixes.chunks_exact(2).remainder().first(),
+            ) {
+                let inverse = acc0 * prefix;
+                acc0 *= *value;
+                *value = inverse;
+            }
+            for (pair, prefix) in values
+                .chunks_exact_mut(2)
+                .zip(prefixes.chunks_exact(2))
+                .rev()
+            {
+                let inverse0 = acc0 * prefix[0];
+                let inverse1 = acc1 * prefix[1];
+                acc0 *= pair[0];
+                acc1 *= pair[1];
+                pair[0] = inverse0;
+                pair[1] = inverse1;
+            }
+        }
+    }
+
     #[inline]
     fn square_runtime(&self) -> Self {
         #[cfg(all(
