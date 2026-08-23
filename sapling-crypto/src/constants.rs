@@ -381,14 +381,10 @@ fn generate_pedersen_hash_single_table() -> Vec<Vec<[AffineNielsPoint; 8]>> {
             // Flatten all of the generator's entries into one batch-normalized inversion,
             // then split back into per-position arrays.
             let flat: Vec<ExtendedPoint> = generator.into_iter().flatten().collect();
-            to_niels(flat)
-                .chunks_exact(8)
-                .map(|entries| {
-                    entries
-                        .try_into()
-                        .expect("exactly 8 entries per chunk position")
-                })
-                .collect()
+            let niels = to_niels(flat);
+            let (positions, remainder) = niels.as_chunks::<8>();
+            assert!(remainder.is_empty(), "exactly 8 entries per chunk position");
+            positions.to_vec()
         })
         .collect()
 }
