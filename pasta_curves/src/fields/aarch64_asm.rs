@@ -535,6 +535,25 @@ pub(super) fn sqr_n_mul(
     out
 }
 
+/// Squares a canonical Montgomery residue `count` times (`count >= 1`) with
+/// the accumulator kept in registers and no canonicalization between the
+/// squarings (the chain stays below `2p` from a canonical start), then
+/// canonicalizes once. This is the `sqr_n_mul` routine entered with a null
+/// `rhs`, which selects its square-only tail.
+#[inline]
+pub(super) fn sqr_n(value: &Limbs, count: usize, modulus: &Limbs, inv: u64) -> Limbs {
+    assert!(count >= 1);
+    let mut out = Limbs::default();
+    // SAFETY: `value`, `modulus`, and `out` refer to four initialized `u64`
+    // limbs for the duration of the call; the null `rhs` is the documented
+    // sentinel for the square-only variant, which never dereferences it. The
+    // backend writes exactly four limbs to `out`.
+    unsafe {
+        pasta_curves_sqr_n_mul_mont_pasta(&mut out, value, count, core::ptr::null(), modulus, inv);
+    }
+    out
+}
+
 /// Converts a canonical Montgomery residue into its canonical integer.
 #[inline]
 pub(super) fn from_mont(value: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {

@@ -8,6 +8,12 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The square-root tables now run their squaring chains as fused
+  register-resident chains: `sqrt_ratio`'s `div^(2^S - 1)` ladder uses the
+  `sqr_n_mul` routine step by step, and the discrete-log step's three runs of
+  eight squarings use a new square-only variant of that routine (`sqr_n`, the
+  same assembly entered without a multiplier), so no intermediate result is
+  canonicalized. Differentially tested against repeated portable squaring.
 - Fixed the crate manifest: the `multicore` feature was declared twice after
   two independent changes each introduced it, which made the workspace fail
   to load. The single declaration implies `glv` and enables Rayon.
