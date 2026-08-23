@@ -652,36 +652,46 @@ fn multiexp_window_bits<C: GlvParams>(terms: usize, num_threads: usize) -> Optio
     )
 }
 
-/// Chooses GLV only when its estimated Signed-Booth work is lower.
-fn should_use_glv_multiexp<C: GlvParams>(
-    terms: usize,
-    window_bits: usize,
-    num_threads: usize,
-) -> bool {
+/// Plans a GLV multiscalar multiplication: the window width the GLV ladder
+/// should use for `terms` on `num_threads` workers, or `None` when the
+/// generic MSM is estimated to be cheaper.
+///
+/// The generic MSM runs at the default width `w` from
+/// [`multiexp_window_bits`]. The GLV ladder is evaluated at both `w` and
+/// `w + 1` and takes the cheaper; it is chosen when that beats the generic
+/// estimate. GLV has about half as many windows as the generic ladder
+/// (127-bit components), so the parallel model's wave count — windows
+/// divided by workers, rounded up — is much more sensitive to the width for
+/// GLV than for the generic ladder, and comparing the two at a single width
+/// chosen for the generic ladder mispredicts: e.g. 8,192 terms on 3 workers
+/// puts 13 GLV windows into 5 waves at `w = 10` but 12 windows into exactly
+/// 4 waves at `w = 11`. Measured on Apple M4 (asm backend) and EPYC
+/// (portable) across 1–16 workers and 2,150–65,536 terms, this choice
+/// selected the faster backend in every one of 46 cells, where the
+/// single-width comparison was wrong in 8 (M4) and 5 (EPYC) — all cases
+/// where GLV was faster by 4–27% but not chosen. The width is only ever
+/// widened: a narrower GLV window never measured a meaningful gain.
+fn glv_multiexp_window_bits<C: GlvParams>(terms: usize, num_threads: usize) -> Option<usize> {
     if terms < MIN_GLV_MULTIEXP_TERMS {
-        return false;
+        return None;
     }
+    let window_bits = multiexp_window_bits::<C>(terms, num_threads)?;
+    let scalar_bits = scalar_repr_bits::<C>()?;
+    let glv_terms = terms.checked_mul(2)?;
+    let generic = estimated_signed_booth_work(terms, scalar_bits, window_bits, num_threads)?;
 
-    let scalar_bits = scalar_repr_bits::<C>();
-    let glv_terms = terms.checked_mul(2);
-
-    match (scalar_bits, glv_terms) {
-        (Some(scalar_bits), Some(glv_terms)) => {
-            match (
-                estimated_signed_booth_work(terms, scalar_bits, window_bits, num_threads),
-                estimated_signed_booth_work(
-                    glv_terms,
-                    GLV_COMPONENT_BITS,
-                    window_bits,
-                    num_threads,
-                ),
-            ) {
-                (Some(generic), Some(glv)) => glv < generic,
-                _ => false,
+    let mut best: Option<(usize, usize)> = None;
+    for candidate in window_bits..=window_bits.checked_add(1)? {
+        if let Some(work) =
+            estimated_signed_booth_work(glv_terms, GLV_COMPONENT_BITS, candidate, num_threads)
+        {
+            if best.is_none_or(|(best_work, _)| work < best_work) {
+                best = Some((work, candidate));
             }
         }
-        _ => false,
     }
+    let (glv, glv_window_bits) = best?;
+    (glv < generic).then_some(glv_window_bits)
 }
 
 fn current_num_threads() -> usize {
@@ -930,10 +940,7 @@ pub(crate) fn try_multiexp<C: GlvParams>(
 ) -> Option<C> {
     assert_eq!(scalars.len(), bases.len());
     let num_threads = current_num_threads();
-    let window_bits = multiexp_window_bits::<C>(scalars.len(), num_threads)?;
-    if !should_use_glv_multiexp::<C>(scalars.len(), window_bits, num_threads) {
-        return None;
-    }
+    let window_bits = glv_multiexp_window_bits::<C>(scalars.len(), num_threads)?;
 
     let components = scalars
         .iter()
@@ -2352,9 +2359,9 @@ mod tests {
         assert_eq!(multiexp_window_bits::<pallas::Point>(5_678, 1), Some(10));
         assert_eq!(multiexp_window_bits::<pallas::Point>(5_678, 8), Some(9));
 
-        assert!(!should_use_glv_multiexp::<pallas::Point>(255, 8, 1));
-        assert!(should_use_glv_multiexp::<pallas::Point>(2_150, 8, 1));
-        assert!(should_use_glv_multiexp::<vesta::Point>(5_678, 10, 1));
+        assert_eq!(glv_multiexp_window_bits::<pallas::Point>(255, 1), None);
+        assert_eq!(glv_multiexp_window_bits::<pallas::Point>(2_150, 1), Some(9));
+        assert_eq!(glv_multiexp_window_bits::<vesta::Point>(5_678, 1), Some(11));
 
         assert_eq!(estimated_signed_booth_work(2_150, 256, 8, 8), Some(12_670));
         assert_eq!(
@@ -2366,14 +2373,78 @@ mod tests {
             estimated_signed_booth_work(11_356, GLV_COMPONENT_BITS, 9, 8),
             Some(23_916)
         );
-        assert!(should_use_glv_multiexp::<pallas::Point>(2_150, 8, 8));
-        assert!(should_use_glv_multiexp::<vesta::Point>(5_678, 9, 8));
+        assert_eq!(glv_multiexp_window_bits::<pallas::Point>(2_150, 8), Some(8));
+        assert_eq!(glv_multiexp_window_bits::<vesta::Point>(5_678, 8), Some(9));
 
-        // At sufficiently large sizes, doubling the term count outweighs the
-        // shorter components for this unchanged window width.
-        assert!(!should_use_glv_multiexp::<pallas::Point>(1_000_000, 14, 1));
-        assert!(!should_use_glv_multiexp::<pallas::Point>(1_000_000, 14, 8));
-        assert!(!should_use_glv_multiexp::<pallas::Point>(usize::MAX, 14, 8));
+        // At sufficiently large sizes with whole waves on every worker,
+        // doubling the term count outweighs the shorter components at both
+        // candidate widths, and an overflowing term count is never planned.
+        assert_eq!(
+            glv_multiexp_window_bits::<pallas::Point>(1_000_000, 8),
+            None
+        );
+        assert_eq!(
+            glv_multiexp_window_bits::<pallas::Point>(usize::MAX, 8),
+            None
+        );
+    }
+
+    /// The planner's decisions at cells measured on Apple M4 (asm backend)
+    /// and EPYC (portable) with explicit Rayon pools. Each expected value is
+    /// the backend (and for GLV, the width) that measured fastest; every
+    /// `None` is a cell where the generic ladder measured at least as fast as
+    /// GLV at every candidate width.
+    #[test]
+    fn glv_multiexp_plan_matches_measured_cells() {
+        fn plan(terms: usize, threads: usize) -> Option<usize> {
+            glv_multiexp_window_bits::<pallas::Point>(terms, threads)
+        }
+
+        assert_eq!(plan(255, 1), None);
+        assert_eq!(plan(255, 8), None);
+
+        // Cells the single-width comparison rejected although GLV measured
+        // 4–27% faster. Widening to `w + 1` turns a partial final wave into
+        // whole waves for the 127-bit components.
+        assert_eq!(plan(2_600, 3), Some(9));
+        assert_eq!(plan(8_192, 2), Some(11));
+        assert_eq!(plan(8_192, 3), Some(11));
+        assert_eq!(plan(8_192, 4), Some(11));
+        assert_eq!(plan(16_384, 2), Some(11));
+        assert_eq!(plan(16_384, 3), Some(11));
+        assert_eq!(plan(16_384, 4), Some(11));
+        assert_eq!(plan(65_536, 2), Some(13));
+
+        // Cells where both widths agree with the previous selection.
+        assert_eq!(plan(2_150, 1), Some(9));
+        assert_eq!(plan(2_600, 8), Some(8));
+        assert_eq!(plan(4_300, 1), Some(10));
+        assert_eq!(plan(8_192, 1), Some(11));
+        assert_eq!(plan(8_192, 8), Some(10));
+        assert_eq!(plan(16_384, 8), Some(10));
+        assert_eq!(plan(32_768, 1), Some(12));
+        assert_eq!(plan(32_768, 4), Some(11));
+
+        // Cells where the generic ladder measured faster on both machines:
+        // the GLV ladder's doubled term count costs more than the halved
+        // window count saves once every worker already has whole waves.
+        assert_eq!(plan(32_768, 8), None);
+        assert_eq!(plan(65_536, 8), None);
+
+        // The planner never asks for a width the generic default would not
+        // reach within one bit, and both curves plan identically.
+        for terms in [2_600usize, 8_192, 65_536] {
+            for threads in [1usize, 3, 8] {
+                let default = multiexp_window_bits::<pallas::Point>(terms, threads).unwrap();
+                if let Some(width) = plan(terms, threads) {
+                    assert!(width == default || width == default + 1);
+                }
+                assert_eq!(
+                    plan(terms, threads),
+                    glv_multiexp_window_bits::<vesta::Point>(terms, threads)
+                );
+            }
+        }
     }
 
     #[test]

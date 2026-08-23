@@ -8,6 +8,13 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The GLV multiscalar multiplication backend now plans its own window width.
+  It evaluates the GLV ladder at the generic default width and one bit wider,
+  runs at the cheaper, and is selected only when that beats the generic
+  estimate. The 127-bit GLV components have half as many windows as the
+  generic ladder, so the parallel wave count is more sensitive to the width;
+  comparing both backends at the generic width alone left the slower backend
+  selected in 13 of 46 measured (terms, workers) cells on Apple M4 and EPYC.
 - Fixed the crate manifest: the `multicore` feature was declared twice after
   two independent changes each introduced it, which made the workspace fail
   to load. The single declaration implies `glv` and enables Rayon.
