@@ -29,7 +29,6 @@ pub struct Pow5Config<F: Field, const WIDTH: usize, const RATE: usize> {
 
     half_full_rounds: usize,
     half_partial_rounds: usize,
-    alpha: [u64; 4],
     round_constants: Vec<[F; WIDTH]>,
     m_reg: Mds<F, WIDTH>,
 }
@@ -85,7 +84,6 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
         let s_partial = meta.selector();
         let s_pad_and_add = meta.selector();
 
-        let alpha = [5, 0, 0, 0];
         let pow_5 = |v: Expression<F>| {
             let v2 = v.clone() * v.clone();
             v2.clone() * v2 * v
@@ -195,7 +193,6 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
             s_pad_and_add,
             half_full_rounds,
             half_partial_rounds,
-            alpha,
             round_constants,
             m_reg,
         }
@@ -431,6 +428,11 @@ impl<F: Field> Var<F> for StateWord<F> {
 struct Pow5State<F: Field, const WIDTH: usize>([StateWord<F>; WIDTH]);
 
 impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
+    fn pow_5(value: F) -> F {
+        let value_2 = value.square();
+        value_2.square() * value
+    }
+
     fn full_round<const RATE: usize>(
         self,
         region: &mut Region<F>,
@@ -444,7 +446,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
                     .value()
                     .map(|v| *v + config.round_constants[round][idx])
             });
-            let r: Value<Vec<F>> = q.map(|q| q.map(|q| q.pow(config.alpha))).collect();
+            let r: Value<Vec<F>> = q.map(|q| q.map(Self::pow_5)).collect();
             let m = &config.m_reg;
             let state = m.iter().map(|m_i| {
                 r.as_ref().map(|r| {
@@ -470,7 +472,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
             let p: Value<Vec<_>> = self.0.iter().map(|word| word.0.value().cloned()).collect();
 
             let r: Value<Vec<_>> = p.map(|p| {
-                let r_0 = (p[0] + config.round_constants[round][0]).pow(config.alpha);
+                let r_0 = Self::pow_5(p[0] + config.round_constants[round][0]);
                 let r_i = p[1..]
                     .iter()
                     .enumerate()
@@ -510,7 +512,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
             }
 
             let r_mid: Value<Vec<_>> = p_mid.map(|p| {
-                let r_0 = (p[0] + config.round_constants[round + 1][0]).pow(config.alpha);
+                let r_0 = Self::pow_5(p[0] + config.round_constants[round + 1][0]);
                 let r_i = p[1..]
                     .iter()
                     .enumerate()
