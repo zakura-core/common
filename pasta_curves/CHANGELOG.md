@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Moved the portable (pure Rust) `Fp` and `Fq` arithmetic into a shared
+  `fields::portable` module written over limb arrays with the modulus and
+  Montgomery constant passed in. The two fields delegate to it instead of each
+  carrying its own copy. The routines and their generated code are unchanged.
 - The GLV multiscalar multiplication backend now plans its own window width.
   It evaluates the GLV ladder at the generic default width and one bit wider,
   runs at the cheaper, and is selected only when that beats the generic
