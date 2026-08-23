@@ -118,6 +118,7 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
 pub struct RegionShape {
     pub(super) region_index: RegionIndex,
     pub(super) columns: HashSet<RegionColumn>,
+    pub(super) last_column: Option<RegionColumn>,
     pub(super) row_count: usize,
 }
 
@@ -166,7 +167,15 @@ impl RegionShape {
         RegionShape {
             region_index,
             columns: HashSet::default(),
+            last_column: None,
             row_count: 0,
+        }
+    }
+
+    fn use_column(&mut self, column: RegionColumn) {
+        if self.last_column != Some(column) {
+            self.columns.insert(column);
+            self.last_column = Some(column);
         }
     }
 
@@ -194,7 +203,7 @@ impl<F: Field> RegionLayouter<F> for RegionShape {
         offset: usize,
     ) -> Result<(), Error> {
         // Track the selector's fixed column as part of the region's shape.
-        self.columns.insert((*selector).into());
+        self.use_column((*selector).into());
         self.row_count = cmp::max(self.row_count, offset + 1);
         Ok(())
     }
@@ -206,7 +215,7 @@ impl<F: Field> RegionLayouter<F> for RegionShape {
         offset: usize,
         _to: &'v mut (dyn FnMut() -> Value<Assigned<F>> + 'v),
     ) -> Result<Cell, Error> {
-        self.columns.insert(Column::<Any>::from(column).into());
+        self.use_column(Column::<Any>::from(column).into());
         self.row_count = cmp::max(self.row_count, offset + 1);
 
         Ok(Cell {
@@ -235,7 +244,7 @@ impl<F: Field> RegionLayouter<F> for RegionShape {
         advice: Column<Advice>,
         offset: usize,
     ) -> Result<(Cell, Value<F>), Error> {
-        self.columns.insert(Column::<Any>::from(advice).into());
+        self.use_column(Column::<Any>::from(advice).into());
         self.row_count = cmp::max(self.row_count, offset + 1);
 
         Ok((
@@ -263,7 +272,7 @@ impl<F: Field> RegionLayouter<F> for RegionShape {
         offset: usize,
         _to: &'v mut (dyn FnMut() -> Value<Assigned<F>> + 'v),
     ) -> Result<Cell, Error> {
-        self.columns.insert(Column::<Any>::from(column).into());
+        self.use_column(Column::<Any>::from(column).into());
         self.row_count = cmp::max(self.row_count, offset + 1);
 
         Ok(Cell {

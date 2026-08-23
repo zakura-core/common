@@ -252,6 +252,7 @@ fn test_slot_in() {
                 .into_iter()
                 .map(|a| a.into())
                 .collect(),
+            last_column: None,
             row_count: 15,
         },
         RegionShape {
@@ -260,6 +261,7 @@ fn test_slot_in() {
                 .into_iter()
                 .map(|a| a.into())
                 .collect(),
+            last_column: None,
             row_count: 10,
         },
         RegionShape {
@@ -268,6 +270,7 @@ fn test_slot_in() {
                 .into_iter()
                 .map(|a| a.into())
                 .collect(),
+            last_column: None,
             row_count: 10,
         },
     ];
