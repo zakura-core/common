@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added an Orchard `k = 11` proving-key construction benchmark, and made the
+  existing one-action prover benchmark opt in to reproducible multithreaded
+  measurements through `ORCHARD_K11_PROVER_THREADS`.
 - Prepared the `1.0.0-rc.3` release.
 - Orchard proving-key generation now uses precomputed fixed-base Lagrange
   coefficients instead of recomputing them during every circuit synthesis.
