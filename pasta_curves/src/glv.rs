@@ -2055,7 +2055,6 @@ fn finish_mixed_radix<C: GlvParams>(
 
 fn apply_low_multiplication_codelet<C: GlvParams>(
     points: &mut [C::AffineExt],
-    final_output: Option<&mut [C::AffineExt]>,
     radix: usize,
     scalars: &LowMultiplicationScalars<C>,
     butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
@@ -2065,7 +2064,6 @@ fn apply_low_multiplication_codelet<C: GlvParams>(
     match radix {
         8 => fft8_multiplication_minimal_layer::<C>(
             points,
-            final_output,
             &scalars.shared,
             butterfly_scratch,
             codelet_scratch,
@@ -2073,7 +2071,6 @@ fn apply_low_multiplication_codelet<C: GlvParams>(
         ),
         16 => fft16_low_multiplication_layer::<C>(
             points,
-            final_output,
             scalars,
             butterfly_scratch,
             codelet_scratch,
@@ -2105,7 +2102,6 @@ fn mixed_radix_fft<C: GlvParams>(
     prepare_mixed_radix_first_tier::<C>(output, &mut scratch, factors);
     identity_free = apply_low_multiplication_codelet::<C>(
         &mut scratch,
-        None,
         factors[0],
         &scalars,
         &mut butterfly_scratch,
@@ -2113,13 +2109,11 @@ fn mixed_radix_fft<C: GlvParams>(
         identity_free,
     );
     let mut source_is_scratch = true;
-    let mut final_written = false;
     for stage in 1..factors.len() {
         if source_is_scratch {
             mixed_radix_diagonal_transpose::<C>(&scratch, output, factors, stage, &mut powers);
             identity_free = apply_low_multiplication_codelet::<C>(
                 output,
-                None,
                 factors[stage],
                 &scalars,
                 &mut butterfly_scratch,
@@ -2128,15 +2122,8 @@ fn mixed_radix_fft<C: GlvParams>(
             );
         } else {
             mixed_radix_diagonal_transpose::<C>(output, &mut scratch, factors, stage, &mut powers);
-            let final_output = if stage + 1 == factors.len() {
-                final_written = true;
-                Some(&mut *output)
-            } else {
-                None
-            };
             identity_free = apply_low_multiplication_codelet::<C>(
                 &mut scratch,
-                final_output,
                 factors[stage],
                 &scalars,
                 &mut butterfly_scratch,
@@ -2147,9 +2134,7 @@ fn mixed_radix_fft<C: GlvParams>(
         source_is_scratch = !source_is_scratch;
     }
 
-    if final_written {
-        debug_assert!(source_is_scratch);
-    } else if source_is_scratch {
+    if source_is_scratch {
         finish_mixed_radix::<C>(&scratch, output, factors);
     } else {
         finish_mixed_radix::<C>(output, &mut scratch, factors);
@@ -2226,7 +2211,6 @@ pub(crate) fn fft_vartime<C: GlvParams>(
     let (mut chunk, mut twiddle_stride) = if output.len() >= 16 {
         identity_free = fft16_low_multiplication_layer::<C>(
             output,
-            None,
             codelet_scalars.as_ref().expect("DFT16 scalars"),
             &mut butterfly_scratch,
             &mut codelet_scratch,
@@ -2236,7 +2220,6 @@ pub(crate) fn fft_vartime<C: GlvParams>(
     } else if output.len() >= 8 {
         identity_free = fft8_multiplication_minimal_layer::<C>(
             output,
-            None,
             &codelet_scalars.as_ref().expect("DFT8 scalars").shared,
             &mut butterfly_scratch,
             &mut codelet_scratch,
@@ -2380,7 +2363,6 @@ fn resize_affine<C: GlvParams>(values: &mut Vec<C::AffineExt>, len: usize) {
 /// schedules.
 fn fft16_low_multiplication_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
-    final_output: Option<&mut [C::AffineExt]>,
     scalars: &LowMultiplicationScalars<C>,
     butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
     codelet_scratch: &mut LowMultiplicationScratch<C>,
@@ -2619,30 +2601,15 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         identity_free,
     );
 
-    if let Some(output) = final_output {
-        assert_eq!(output.len(), points.len());
-        for block in 0..blocks {
-            let even = &even_outputs[block * 8..][..8];
-            let odd_low = &odd_low[block * 4..][..4];
-            let odd_high = &odd_high[block * 4..][..4];
-            for i in 0..4 {
-                output[block + blocks * (i * 2)] = even[i];
-                output[block + blocks * (i * 2 + 1)] = odd_low[i];
-                output[block + blocks * (i * 2 + 8)] = even[i + 4];
-                output[block + blocks * (i * 2 + 9)] = odd_high[i];
-            }
-        }
-    } else {
-        for (block_index, output) in points.chunks_mut(16).enumerate() {
-            let even = &even_outputs[block_index * 8..][..8];
-            let odd_low = &odd_low[block_index * 4..][..4];
-            let odd_high = &odd_high[block_index * 4..][..4];
-            for i in 0..4 {
-                output[i * 2] = even[i];
-                output[i * 2 + 1] = odd_low[i];
-                output[i * 2 + 8] = even[i + 4];
-                output[i * 2 + 9] = odd_high[i];
-            }
+    for (block_index, output) in points.chunks_mut(16).enumerate() {
+        let even = &even_outputs[block_index * 8..][..8];
+        let odd_low = &odd_low[block_index * 4..][..4];
+        let odd_high = &odd_high[block_index * 4..][..4];
+        for i in 0..4 {
+            output[i * 2] = even[i];
+            output[i * 2 + 1] = odd_low[i];
+            output[i * 2 + 8] = even[i + 4];
+            output[i * 2 + 9] = odd_high[i];
         }
     }
     identity_free
@@ -2653,7 +2620,6 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
 /// at the cost of two additional group additions.
 fn fft8_multiplication_minimal_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
-    final_output: Option<&mut [C::AffineExt]>,
     scalars: &[Decomposed<C>; 3],
     butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
     codelet_scratch: &mut LowMultiplicationScratch<C>,
@@ -2788,33 +2754,17 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
         identity_free,
     );
 
-    if let Some(output) = final_output {
-        assert_eq!(output.len(), points.len());
-        for block in 0..blocks {
-            let stage3 = block * 4;
-            let stage4 = block * 2;
-            output[block] = stage3_sum[stage3];
-            output[block + blocks * 4] = stage3_difference[stage3];
-            output[block + blocks * 2] = stage3_sum[stage3 + 1];
-            output[block + blocks * 6] = stage3_difference[stage3 + 1];
-            output[block + blocks] = stage4_sum[stage4];
-            output[block + blocks * 5] = stage4_difference[stage4];
-            output[block + blocks * 3] = stage4_sum[stage4 + 1];
-            output[block + blocks * 7] = stage4_difference[stage4 + 1];
-        }
-    } else {
-        for (block, output) in points.chunks_mut(8).enumerate() {
-            let stage3 = block * 4;
-            let stage4 = block * 2;
-            output[0] = stage3_sum[stage3];
-            output[4] = stage3_difference[stage3];
-            output[2] = stage3_sum[stage3 + 1];
-            output[6] = stage3_difference[stage3 + 1];
-            output[1] = stage4_sum[stage4];
-            output[5] = stage4_difference[stage4];
-            output[3] = stage4_sum[stage4 + 1];
-            output[7] = stage4_difference[stage4 + 1];
-        }
+    for (block, output) in points.chunks_mut(8).enumerate() {
+        let stage3 = block * 4;
+        let stage4 = block * 2;
+        output[0] = stage3_sum[stage3];
+        output[4] = stage3_difference[stage3];
+        output[2] = stage3_sum[stage3 + 1];
+        output[6] = stage3_difference[stage3 + 1];
+        output[1] = stage4_sum[stage4];
+        output[5] = stage4_difference[stage4];
+        output[3] = stage4_sum[stage4 + 1];
+        output[7] = stage4_difference[stage4 + 1];
     }
     identity_free
 }
