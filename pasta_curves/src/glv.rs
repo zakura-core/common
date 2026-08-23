@@ -2786,20 +2786,74 @@ fn affine_add_sub_pairs<C: GlvParams>(
         projective_add_sub_pairs::<C>(left, right, sums, differences);
         return false;
     }
-    sums.copy_from_slice(left);
-    for i in 0..left.len() {
-        apply_affine_twiddle::<C>(
-            &mut sums[i],
-            &mut differences[i],
-            &right[i],
-            scratch.denominators[i],
-        );
-    }
+    apply_affine_twiddle_batch::<C>(left, right, sums, differences, scratch);
     // A codelet can retain intermediates that are not part of this batch and
     // feed them into a later batch. A successful batch therefore cannot
     // strengthen the invariant for the entire codelet after an earlier
     // exceptional fallback made it false.
     identity_free
+}
+
+/// Finishes a contiguous batch of affine `L + R` and `L - R` pairs in
+/// field-operation stages. Adjacent plus/minus products use the paired field
+/// backend where one is available.
+fn apply_affine_twiddle_batch<C: GlvParams>(
+    left: &[C::AffineExt],
+    right: &[C::AffineExt],
+    sums: &mut [C::AffineExt],
+    differences: &mut [C::AffineExt],
+    scratch: &mut AffineTwiddleScratch<C::Base>,
+) {
+    let pairs = left.len();
+    let coordinates = pairs * 2;
+    scratch.slopes.resize(coordinates, C::Base::ZERO);
+    scratch.output_xs.resize(coordinates, C::Base::ZERO);
+    scratch.output_ys.resize(coordinates, C::Base::ZERO);
+
+    for i in 0..pairs {
+        let (_, left_y) = C::affine_xy(&left[i]);
+        let (_, right_y) = C::affine_xy(&right[i]);
+        scratch.slopes[2 * i] = right_y - left_y;
+        scratch.slopes[2 * i + 1] = -right_y - left_y;
+        scratch.output_xs[2 * i] = scratch.denominators[i];
+        scratch.output_xs[2 * i + 1] = scratch.denominators[i];
+    }
+    C::mul_base_assign_pairs(
+        &mut scratch.slopes,
+        &scratch.output_xs,
+        private::CrateToken(()),
+    );
+
+    for i in 0..pairs {
+        let (left_x, _) = C::affine_xy(&left[i]);
+        let (right_x, _) = C::affine_xy(&right[i]);
+        let x_sum = left_x + right_x;
+        let plus_x = scratch.slopes[2 * i].square() - x_sum;
+        let minus_x = scratch.slopes[2 * i + 1].square() - x_sum;
+        scratch.output_xs[2 * i] = plus_x;
+        scratch.output_xs[2 * i + 1] = minus_x;
+        scratch.output_ys[2 * i] = left_x - plus_x;
+        scratch.output_ys[2 * i + 1] = left_x - minus_x;
+    }
+    C::mul_base_assign_pairs(
+        &mut scratch.output_ys,
+        &scratch.slopes,
+        private::CrateToken(()),
+    );
+
+    for i in 0..pairs {
+        let (_, left_y) = C::affine_xy(&left[i]);
+        sums[i] = C::affine_unchecked(
+            scratch.output_xs[2 * i],
+            scratch.output_ys[2 * i] - left_y,
+            private::CrateToken(()),
+        );
+        differences[i] = C::affine_unchecked(
+            scratch.output_xs[2 * i + 1],
+            scratch.output_ys[2 * i + 1] - left_y,
+            private::CrateToken(()),
+        );
+    }
 }
 
 fn projective_add_sub_pairs<C: GlvParams>(
@@ -2846,6 +2900,9 @@ fn apply_affine_twiddle<C: GlvParams>(
 struct AffineTwiddleScratch<F> {
     denominators: Vec<F>,
     prefixes: Vec<F>,
+    slopes: Vec<F>,
+    output_xs: Vec<F>,
+    output_ys: Vec<F>,
 }
 
 impl<F> AffineTwiddleScratch<F> {
@@ -2853,6 +2910,9 @@ impl<F> AffineTwiddleScratch<F> {
         Self {
             denominators: Vec::new(),
             prefixes: Vec::new(),
+            slopes: Vec::new(),
+            output_xs: Vec::new(),
+            output_ys: Vec::new(),
         }
     }
 }
