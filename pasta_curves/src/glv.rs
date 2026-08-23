@@ -2499,130 +2499,6 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
     identity_free
 }
 
-/// Computes the odd-frequency half of a 16-point DFT from eight inputs.
-///
-/// This is a skew DFT8: output `k` is evaluated at the odd sixteenth root
-/// `omega_16^(2k + 1)`. Splitting the even and odd inputs gives two skew
-/// DFT4s, followed by four odd-root products and four butterflies. Each
-/// block therefore costs ten point-scalar multiplications.
-fn skew_fft8_low_multiplication_layer<C: GlvParams>(
-    points: &mut [C::AffineExt],
-    scalars: &LowMultiplicationScalars<C>,
-    scratch: &mut AffineTwiddleScratch<C::Base>,
-    mut identity_free: bool,
-) -> bool {
-    debug_assert_eq!(points.len() % 8, 0);
-    let blocks = points.len() / 8;
-    let skew4_blocks = blocks * 2;
-    let mut left = Vec::with_capacity(skew4_blocks);
-    let mut right = Vec::with_capacity(skew4_blocks);
-
-    // Each locally bit-reversed skew DFT4 is [q0, q2, q1, q3].
-    for block in points.chunks(4) {
-        left.push(block[2]);
-        right.push(block[3]);
-    }
-    let mut stage1_sum = alloc::vec![C::AffineExt::identity(); skew4_blocks];
-    let mut stage1_difference = alloc::vec![C::AffineExt::identity(); skew4_blocks];
-    identity_free = affine_add_sub_pairs::<C>(
-        &left,
-        &right,
-        &mut stage1_sum,
-        &mut stage1_difference,
-        scratch,
-        identity_free,
-    );
-
-    let mut scalar_inputs: [Vec<C>; 3] = [
-        Vec::with_capacity(skew4_blocks),
-        Vec::with_capacity(skew4_blocks),
-        Vec::with_capacity(skew4_blocks),
-    ];
-    for (block_index, block) in points.chunks(4).enumerate() {
-        scalar_inputs[0].push(C::from(block[1]));
-        scalar_inputs[1].push(C::from(stage1_sum[block_index]));
-        scalar_inputs[2].push(C::from(stage1_difference[block_index]));
-    }
-    let products = mul_same_scalars_affine::<C>(scalar_inputs.into(), &scalars.shared);
-
-    left.clear();
-    right.clear();
-    left.reserve(skew4_blocks * 2);
-    right.reserve(skew4_blocks * 2);
-    for (block_index, block) in points.chunks(4).enumerate() {
-        left.extend_from_slice(&[block[0], products[1][block_index]]);
-        right.extend_from_slice(&[products[0][block_index], products[2][block_index]]);
-    }
-    let mut stage2_sum = alloc::vec![C::AffineExt::identity(); skew4_blocks * 2];
-    let mut stage2_difference = alloc::vec![C::AffineExt::identity(); skew4_blocks * 2];
-    identity_free = affine_add_sub_pairs::<C>(
-        &left,
-        &right,
-        &mut stage2_sum,
-        &mut stage2_difference,
-        scratch,
-        identity_free,
-    );
-
-    left.clear();
-    right.clear();
-    for block in 0..skew4_blocks {
-        let offset = block * 2;
-        left.extend_from_slice(&[stage2_sum[offset], stage2_difference[offset]]);
-        right.extend_from_slice(&[stage2_sum[offset + 1], stage2_difference[offset + 1]]);
-    }
-    let mut stage3_sum = alloc::vec![C::AffineExt::identity(); skew4_blocks * 2];
-    let mut stage3_difference = alloc::vec![C::AffineExt::identity(); skew4_blocks * 2];
-    identity_free = affine_add_sub_pairs::<C>(
-        &left,
-        &right,
-        &mut stage3_sum,
-        &mut stage3_difference,
-        scratch,
-        identity_free,
-    );
-
-    let mut skew4_outputs = alloc::vec![C::AffineExt::identity(); points.len()];
-    for block in 0..skew4_blocks {
-        let stage = block * 2;
-        let output = &mut skew4_outputs[block * 4..][..4];
-        output[0] = stage3_sum[stage];
-        output[1] = stage3_sum[stage + 1];
-        output[2] = stage3_difference[stage];
-        output[3] = stage3_difference[stage + 1];
-    }
-
-    let mut scalar_inputs: Vec<Vec<C>> = (0..4).map(|_| Vec::with_capacity(blocks)).collect();
-    for block in skew4_outputs.chunks(8) {
-        for (input, point) in scalar_inputs.iter_mut().zip(&block[4..]) {
-            input.push(C::from(*point));
-        }
-    }
-    let products = mul_same_scalars_affine::<C>(
-        scalar_inputs,
-        scalars.odd16.as_ref().expect("DFT16 odd-root scalars"),
-    );
-
-    left.clear();
-    right.clear();
-    left.reserve(blocks * 4);
-    right.reserve(blocks * 4);
-    for (block_index, block) in skew4_outputs.chunks(8).enumerate() {
-        left.extend_from_slice(&block[..4]);
-        right.extend(products.iter().map(|products| products[block_index]));
-    }
-    let mut low = alloc::vec![C::AffineExt::identity(); blocks * 4];
-    let mut high = alloc::vec![C::AffineExt::identity(); blocks * 4];
-    identity_free =
-        affine_add_sub_pairs::<C>(&left, &right, &mut low, &mut high, scratch, identity_free);
-
-    for (block_index, output) in points.chunks_mut(8).enumerate() {
-        output[..4].copy_from_slice(&low[block_index * 4..][..4]);
-        output[4..].copy_from_slice(&high[block_index * 4..][..4]);
-    }
-    identity_free
-}
-
 /// Replaces five radix-2 layers with a 32-point split-radix codelet.
 ///
 /// The even-frequency half is one DFT16. The odd-frequency half is two
@@ -2633,7 +2509,7 @@ fn fft32_low_multiplication_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
     scalars: &LowMultiplicationScalars<C>,
     scratch: &mut AffineTwiddleScratch<C::Base>,
-    identity_free: bool,
+    mut identity_free: bool,
 ) -> bool {
     debug_assert_eq!(points.len() % 32, 0);
     let blocks = points.len() / 32;
@@ -2647,7 +2523,7 @@ fn fft32_low_multiplication_layer<C: GlvParams>(
     }
     let mut even_inputs = alloc::vec![C::AffineExt::identity(); points.len() / 2];
     let mut odd_inputs = alloc::vec![C::AffineExt::identity(); points.len() / 2];
-    let split_identity_free = affine_add_sub_pairs::<C>(
+    identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
         &mut even_inputs,
@@ -2656,22 +2532,310 @@ fn fft32_low_multiplication_layer<C: GlvParams>(
         identity_free,
     );
 
-    let even_identity_free = fft16_low_multiplication_layer::<C>(
-        &mut even_inputs,
-        scalars,
+    // Split the even DFT16 while starting all four skew DFT4s used by the
+    // two odd skew DFT8s. These independent formulas share one inversion.
+    left.clear();
+    right.clear();
+    left.reserve(blocks * 12);
+    right.reserve(blocks * 12);
+    for block in even_inputs.chunks(16) {
+        for pair in block.chunks(2) {
+            left.push(pair[0]);
+            right.push(pair[1]);
+        }
+    }
+    for block in odd_inputs.chunks(4) {
+        left.push(block[2]);
+        right.push(block[3]);
+    }
+    let dft16_split_len = blocks * 8;
+    let skew4_blocks = blocks * 4;
+    let mut branch_sum = alloc::vec![C::AffineExt::identity(); blocks * 12];
+    let mut branch_difference = alloc::vec![C::AffineExt::identity(); blocks * 12];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut branch_sum,
+        &mut branch_difference,
         scratch,
-        split_identity_free,
-    );
-    let odd_identity_free = skew_fft8_low_multiplication_layer::<C>(
-        &mut odd_inputs,
-        scalars,
-        scratch,
-        split_identity_free,
+        identity_free,
     );
 
+    // Start the DFT8 and both skew DFT4s inside the even DFT16.
+    left.clear();
+    right.clear();
+    for block in branch_sum[..dft16_split_len].chunks(8) {
+        for pair in block.chunks(2) {
+            left.push(pair[0]);
+            right.push(pair[1]);
+        }
+    }
+    for block in branch_difference[..dft16_split_len].chunks(4) {
+        left.push(block[2]);
+        right.push(block[3]);
+    }
+    let mut dft16_stage1_sum = alloc::vec![C::AffineExt::identity(); blocks * 6];
+    let mut dft16_stage1_difference = alloc::vec![C::AffineExt::identity(); blocks * 6];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut dft16_stage1_sum,
+        &mut dft16_stage1_difference,
+        scratch,
+        identity_free,
+    );
+
+    left.clear();
+    right.clear();
+    for block in 0..blocks {
+        let offset = block * 4;
+        left.extend_from_slice(&[
+            dft16_stage1_sum[offset],
+            dft16_stage1_sum[offset + 2],
+            dft16_stage1_difference[offset + 2],
+        ]);
+        right.extend_from_slice(&[
+            dft16_stage1_sum[offset + 1],
+            dft16_stage1_sum[offset + 3],
+            dft16_stage1_difference[offset + 3],
+        ]);
+    }
+    let mut dft16_stage2_sum = alloc::vec![C::AffineExt::identity(); blocks * 3];
+    let mut dft16_stage2_difference = alloc::vec![C::AffineExt::identity(); blocks * 3];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut dft16_stage2_sum,
+        &mut dft16_stage2_difference,
+        scratch,
+        identity_free,
+    );
+
+    // The even DFT16 and both odd skew DFT8s use the same i, c, and d
+    // constants. Run one affine ladder per constant across all branches.
+    let dft16_odd_stage1_offset = blocks * 4;
+    let skew_stage1_offset = dft16_split_len;
+    let mut scalar_inputs: [Vec<C>; 3] = [
+        Vec::with_capacity(blocks * 8),
+        Vec::with_capacity(blocks * 7),
+        Vec::with_capacity(blocks * 7),
+    ];
+    for block in 0..blocks {
+        let stage1 = block * 4;
+        let stage2 = block * 3;
+        scalar_inputs[0].extend_from_slice(&[
+            C::from(dft16_stage2_difference[stage2 + 1]),
+            C::from(dft16_stage1_difference[stage1 + 1]),
+        ]);
+        scalar_inputs[1].push(C::from(dft16_stage2_sum[stage2 + 2]));
+        scalar_inputs[2].push(C::from(dft16_stage2_difference[stage2 + 2]));
+    }
+    for block in 0..blocks * 2 {
+        scalar_inputs[0].push(C::from(branch_difference[block * 4 + 1]));
+        scalar_inputs[1].push(C::from(dft16_stage1_sum[dft16_odd_stage1_offset + block]));
+        scalar_inputs[2].push(C::from(
+            dft16_stage1_difference[dft16_odd_stage1_offset + block],
+        ));
+    }
+    for block in 0..skew4_blocks {
+        scalar_inputs[0].push(C::from(odd_inputs[block * 4 + 1]));
+        scalar_inputs[1].push(C::from(branch_sum[skew_stage1_offset + block]));
+        scalar_inputs[2].push(C::from(branch_difference[skew_stage1_offset + block]));
+    }
+    let products = mul_same_scalars_affine::<C>(scalar_inputs.into(), &scalars.shared);
+
+    // Advance the DFT8 and all six skew DFT4 branches together.
+    left.clear();
+    right.clear();
+    left.reserve(blocks * 16);
+    right.reserve(blocks * 16);
+    for block in 0..blocks {
+        let stage1 = block * 4;
+        let stage2 = block * 3;
+        let root8_squared_offset = block * 2;
+        left.extend_from_slice(&[
+            dft16_stage2_sum[stage2],
+            dft16_stage2_difference[stage2],
+            dft16_stage1_difference[stage1],
+            products[1][block],
+        ]);
+        right.extend_from_slice(&[
+            dft16_stage2_sum[stage2 + 1],
+            products[0][root8_squared_offset],
+            products[0][root8_squared_offset + 1],
+            products[2][block],
+        ]);
+    }
+    for block in 0..blocks * 2 {
+        let scalar_offset = blocks + block;
+        left.extend_from_slice(&[branch_difference[block * 4], products[1][scalar_offset]]);
+        right.extend_from_slice(&[products[0][blocks * 2 + block], products[2][scalar_offset]]);
+    }
+    let skew_product0_offset = blocks * 4;
+    let skew_product12_offset = blocks * 3;
+    for block in 0..skew4_blocks {
+        left.extend_from_slice(&[
+            odd_inputs[block * 4],
+            products[1][skew_product12_offset + block],
+        ]);
+        right.extend_from_slice(&[
+            products[0][skew_product0_offset + block],
+            products[2][skew_product12_offset + block],
+        ]);
+    }
+    let mut stage3_sum = alloc::vec![C::AffineExt::identity(); blocks * 16];
+    let mut stage3_difference = alloc::vec![C::AffineExt::identity(); blocks * 16];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut stage3_sum,
+        &mut stage3_difference,
+        scratch,
+        identity_free,
+    );
+
+    left.clear();
+    right.clear();
+    left.reserve(blocks * 14);
+    right.reserve(blocks * 14);
+    for block in 0..blocks {
+        let offset = block * 4;
+        left.extend_from_slice(&[stage3_sum[offset + 2], stage3_difference[offset + 2]]);
+        right.extend_from_slice(&[stage3_sum[offset + 3], stage3_difference[offset + 3]]);
+    }
+    let dft16_odd_stage3_offset = blocks * 4;
+    for block in 0..blocks * 2 {
+        let offset = dft16_odd_stage3_offset + block * 2;
+        left.extend_from_slice(&[stage3_sum[offset], stage3_difference[offset]]);
+        right.extend_from_slice(&[stage3_sum[offset + 1], stage3_difference[offset + 1]]);
+    }
+    let skew_stage3_offset = blocks * 8;
+    for block in 0..skew4_blocks {
+        let offset = skew_stage3_offset + block * 2;
+        left.extend_from_slice(&[stage3_sum[offset], stage3_difference[offset]]);
+        right.extend_from_slice(&[stage3_sum[offset + 1], stage3_difference[offset + 1]]);
+    }
+    let mut stage4_sum = alloc::vec![C::AffineExt::identity(); blocks * 14];
+    let mut stage4_difference = alloc::vec![C::AffineExt::identity(); blocks * 14];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut stage4_sum,
+        &mut stage4_difference,
+        scratch,
+        identity_free,
+    );
+
+    let mut dft16_even_outputs = alloc::vec![C::AffineExt::identity(); blocks * 8];
+    for block in 0..blocks {
+        let stage3 = block * 4;
+        let stage4 = block * 2;
+        let output = &mut dft16_even_outputs[block * 8..][..8];
+        output[0] = stage3_sum[stage3];
+        output[4] = stage3_difference[stage3];
+        output[2] = stage3_sum[stage3 + 1];
+        output[6] = stage3_difference[stage3 + 1];
+        output[1] = stage4_sum[stage4];
+        output[5] = stage4_difference[stage4];
+        output[3] = stage4_sum[stage4 + 1];
+        output[7] = stage4_difference[stage4 + 1];
+    }
+
+    let dft16_odd_stage4_offset = blocks * 2;
+    let mut dft16_odd_roots = alloc::vec![C::AffineExt::identity(); blocks * 8];
+    for block in 0..blocks * 2 {
+        let stage4 = dft16_odd_stage4_offset + block * 2;
+        let output = &mut dft16_odd_roots[block * 4..][..4];
+        output[0] = stage4_sum[stage4];
+        output[1] = stage4_sum[stage4 + 1];
+        output[2] = stage4_difference[stage4];
+        output[3] = stage4_difference[stage4 + 1];
+    }
+
+    let skew_stage4_offset = blocks * 6;
+    let mut skew4_outputs = alloc::vec![C::AffineExt::identity(); blocks * 16];
+    for block in 0..skew4_blocks {
+        let stage4 = skew_stage4_offset + block * 2;
+        let output = &mut skew4_outputs[block * 4..][..4];
+        output[0] = stage4_sum[stage4];
+        output[1] = stage4_sum[stage4 + 1];
+        output[2] = stage4_difference[stage4];
+        output[3] = stage4_difference[stage4 + 1];
+    }
+
+    // Both the DFT16 and skew DFT8 finishes use the four odd sixteenth
+    // roots. Combine their same-scalar batches before the final additions.
+    let mut scalar_inputs: Vec<Vec<C>> = (0..4).map(|_| Vec::with_capacity(blocks * 3)).collect();
+    for block in dft16_odd_roots.chunks(8) {
+        for (input, point) in scalar_inputs.iter_mut().zip(&block[4..]) {
+            input.push(C::from(*point));
+        }
+    }
+    for block in skew4_outputs.chunks(8) {
+        for (input, point) in scalar_inputs.iter_mut().zip(&block[4..]) {
+            input.push(C::from(*point));
+        }
+    }
+    let products = mul_same_scalars_affine::<C>(
+        scalar_inputs,
+        scalars.odd16.as_ref().expect("DFT16 odd-root scalars"),
+    );
+
+    left.clear();
+    right.clear();
+    left.reserve(blocks * 12);
+    right.reserve(blocks * 12);
+    for (block_index, block) in dft16_odd_roots.chunks(8).enumerate() {
+        left.extend_from_slice(&block[..4]);
+        right.extend(products.iter().map(|products| products[block_index]));
+    }
+    for (block_index, block) in skew4_outputs.chunks(8).enumerate() {
+        left.extend_from_slice(&block[..4]);
+        right.extend(
+            products
+                .iter()
+                .map(|products| products[blocks + block_index]),
+        );
+    }
+    let mut stage5_sum = alloc::vec![C::AffineExt::identity(); blocks * 12];
+    let mut stage5_difference = alloc::vec![C::AffineExt::identity(); blocks * 12];
+    identity_free = affine_add_sub_pairs::<C>(
+        &left,
+        &right,
+        &mut stage5_sum,
+        &mut stage5_difference,
+        scratch,
+        identity_free,
+    );
+
+    let mut dft16_outputs = alloc::vec![C::AffineExt::identity(); blocks * 16];
+    for block in 0..blocks {
+        let even = &dft16_even_outputs[block * 8..][..8];
+        let odd_low = &stage5_sum[block * 4..][..4];
+        let odd_high = &stage5_difference[block * 4..][..4];
+        let output = &mut dft16_outputs[block * 16..][..16];
+        for i in 0..4 {
+            output[i * 2] = even[i];
+            output[i * 2 + 1] = odd_low[i];
+            output[i * 2 + 8] = even[i + 4];
+            output[i * 2 + 9] = odd_high[i];
+        }
+    }
+
+    let skew_stage5_offset = blocks * 4;
     let mut scalar_inputs: Vec<Vec<C>> = (0..8).map(|_| Vec::with_capacity(blocks)).collect();
-    for block in odd_inputs.chunks(16) {
-        for (input, point) in scalar_inputs.iter_mut().zip(&block[8..]) {
+    for block in 0..blocks {
+        let second_skew8 = skew_stage5_offset + (block * 2 + 1) * 4;
+        for (input, point) in scalar_inputs[..4]
+            .iter_mut()
+            .zip(&stage5_sum[second_skew8..][..4])
+        {
+            input.push(C::from(*point));
+        }
+        for (input, point) in scalar_inputs[4..]
+            .iter_mut()
+            .zip(&stage5_difference[second_skew8..][..4])
+        {
             input.push(C::from(*point));
         }
     }
@@ -2684,23 +2848,25 @@ fn fft32_low_multiplication_layer<C: GlvParams>(
     right.clear();
     left.reserve(blocks * 8);
     right.reserve(blocks * 8);
-    for (block_index, block) in odd_inputs.chunks(16).enumerate() {
-        left.extend_from_slice(&block[..8]);
-        right.extend(products.iter().map(|products| products[block_index]));
+    for block in 0..blocks {
+        let first_skew8 = skew_stage5_offset + block * 8;
+        left.extend_from_slice(&stage5_sum[first_skew8..][..4]);
+        left.extend_from_slice(&stage5_difference[first_skew8..][..4]);
+        right.extend(products.iter().map(|products| products[block]));
     }
     let mut odd_low = alloc::vec![C::AffineExt::identity(); blocks * 8];
     let mut odd_high = alloc::vec![C::AffineExt::identity(); blocks * 8];
-    let identity_free = affine_add_sub_pairs::<C>(
+    identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
         &mut odd_low,
         &mut odd_high,
         scratch,
-        even_identity_free && odd_identity_free,
+        identity_free,
     );
 
     for (block_index, output) in points.chunks_mut(32).enumerate() {
-        let even = &even_inputs[block_index * 16..][..16];
+        let even = &dft16_outputs[block_index * 16..][..16];
         let odd_low = &odd_low[block_index * 8..][..8];
         let odd_high = &odd_high[block_index * 8..][..8];
         for i in 0..8 {
@@ -3900,7 +4066,7 @@ mod tests {
                     8 => expected_batches.extend([4, 3, 4, 2].map(|width| width * blocks)),
                     16 => expected_batches.extend([8, 6, 3, 8, 6, 4].map(|width| width * blocks)),
                     32 => expected_batches
-                        .extend([16, 8, 6, 3, 8, 6, 4, 4, 8, 8, 8, 8].map(|width| width * blocks)),
+                        .extend([16, 12, 6, 3, 16, 14, 12, 8].map(|width| width * blocks)),
                     _ => unreachable!(),
                 }
             }
