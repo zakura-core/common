@@ -21,7 +21,12 @@ and this project adheres to Rust's notion of
 - The GLV batch-affine ladder now interleaves its nonzero Montgomery batch
   inversion across even- and odd-indexed accumulator lanes. The three fixed
   extra multiplications per ladder column expose independent multiplication
-  chains to out-of-order execution.
+  chains to out-of-order execution. Each chain is seeded from its first value,
+  avoiding two prefix multiplications by one.
+- The GLV batch-affine ladder now evaluates active `2P + Q` columns with a
+  direct one-inversion formula. This combines the two dependent inversion
+  batches, removes the intermediate slope and x-coordinate vectors, and
+  reuses five field-element workspaces across formula stages.
 - Prepared the `1.0.0-rc.3` release.
 - `Curve::batch_normalize` now runs its Montgomery batch inversion as two
   interleaved even/odd accumulator lanes for batches of 32 or more points
@@ -82,6 +87,10 @@ and this project adheres to Rust's notion of
 
 ### Changed
 
+- The Apple AArch64 field backend now interleaves adjacent Montgomery
+  multiplications used by the GLV affine ladder. It supports exact in-place
+  aliasing for formula stages and finishes the even/odd batch-inversion chains
+  in paired assembly lanes.
 - `Fp` and `Fq` square-root table lookups now hash their normalized
   Montgomery representations directly with generated multiply-and-shift
   perfect hashes. This removes four Montgomery reductions and four integer

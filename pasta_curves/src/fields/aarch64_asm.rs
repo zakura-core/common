@@ -1,9 +1,9 @@
 //! Private Apple AArch64 backend for the Pasta fields.
 //!
 //! Montgomery multiplication and squaring are implemented as inline `asm!`
-//! blocks below; the fused repeated-squaring chain and the canonical-form
-//! conversion remain in `src/asm/pasta_mul-armv8.S` and are reached through
-//! `extern "C"`.
+//! blocks below. The batched two-lane kernels, fused repeated-squaring chain,
+//! and canonical-form conversion remain in `src/asm/pasta_mul-armv8.S` and
+//! are reached through `extern "C"`.
 //!
 //! The inline blocks are register-renamed transcriptions of the upstream
 //! Semolina v0.1.4 routines (`mul_mont_pasta`, and the squaring loop body of
@@ -66,6 +66,23 @@ use core::arch::asm;
 type Limbs = [u64; 4];
 
 extern "C" {
+    fn pasta_curves_batch_invert_backsub_pasta(
+        values: *mut Limbs,
+        prefixes: *const Limbs,
+        pair_count: usize,
+        acc0: *const Limbs,
+        acc1: *const Limbs,
+        modulus: *const Limbs,
+        inv: u64,
+    );
+    fn pasta_curves_mul_pairs_mont_pasta(
+        out: *mut Limbs,
+        lhs: *const Limbs,
+        rhs: *const Limbs,
+        pair_count: usize,
+        modulus: *const Limbs,
+        inv: u64,
+    );
     fn pasta_curves_sqr_n_mul_mont_pasta(
         out: *mut Limbs,
         value: *const Limbs,
@@ -80,6 +97,59 @@ extern "C" {
         modulus: *const Limbs,
         inv: u64,
     );
+}
+
+/// Finishes an even number of elements from a two-chain batch inversion.
+#[inline]
+pub(super) fn batch_invert_backsub(
+    values: *mut Limbs,
+    prefixes: *const Limbs,
+    len: usize,
+    acc0: &Limbs,
+    acc1: &Limbs,
+    modulus: &Limbs,
+    inv: u64,
+) {
+    assert_ne!(len, 0);
+    assert_eq!(len & 1, 0);
+    // SAFETY: The caller guarantees that both pointers cover `len` elements,
+    // that `values` does not alias `prefixes`, and that every input is a
+    // canonical nonzero field element. The accumulators seed the independent
+    // even and odd chains. The backend writes `len` inverses.
+    unsafe {
+        pasta_curves_batch_invert_backsub_pasta(
+            values,
+            prefixes,
+            len / 2,
+            acc0,
+            acc1,
+            modulus,
+            inv,
+        );
+    }
+}
+
+/// Performs an even number of independent multiplications of canonical
+/// residues, interleaving each adjacent pair.
+#[inline]
+pub(super) fn mul_pairs(
+    out: *mut Limbs,
+    lhs: *const Limbs,
+    rhs: *const Limbs,
+    len: usize,
+    modulus: &Limbs,
+    inv: u64,
+) {
+    assert_ne!(len, 0);
+    assert_eq!(len & 1, 0);
+
+    // SAFETY: The caller guarantees that each pointer covers `len`
+    // initialized four-limb elements, that `out` is either disjoint from the
+    // inputs or exactly aliases `lhs`, and that both inputs are canonical. The
+    // backend loads each pair before writing it, then emits `len` outputs.
+    unsafe {
+        pasta_curves_mul_pairs_mont_pasta(out, lhs, rhs, len / 2, modulus, inv);
+    }
 }
 
 /// Whether `value < modulus` as little-endian 256-bit integers.
