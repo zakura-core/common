@@ -106,14 +106,10 @@ pub(super) const fn mul_wide(lhs: &[u64; 4], rhs: &[u64; 4]) -> [u64; 8] {
 }
 
 /// Squares a canonical element, returning the canonical square.
-///
-/// Uses the low-half reduction: the square's dependency graph is narrow
-/// enough that the shorter reduction chain shows, where the wider 4x4 product
-/// of a multiplication already hides the classical reduction's latency.
 #[cfg_attr(not(feature = "uninline-portable"), inline)]
 pub(super) const fn square(value: &[u64; 4], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
     canonicalize(
-        &montgomery_reduce_low_lazy(&square_wide(value), modulus, inv),
+        &reduce_square_lazy(&square_wide(value), modulus, inv),
         modulus,
     )
 }
@@ -218,6 +214,7 @@ pub(super) const fn montgomery_reduce(t: &[u64; 8], modulus: &[u64; 4], inv: u64
 ///
 /// `(t_lo + Q * modulus) / R <= modulus` and `t_hi < modulus`, so the sum is
 /// below `2 * modulus` and fits in four limbs.
+#[cfg(any(target_arch = "x86_64", test))]
 #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
 pub(super) const fn montgomery_reduce_low_lazy(
     t: &[u64; 8],
@@ -260,6 +257,28 @@ pub(super) const fn montgomery_reduce_low_lazy(
     let (r3, _) = adc(r3, t7, carry);
 
     [r0, r1, r2, r3]
+}
+
+/// Reduces the 512-bit product of a squaring to a value below `2 * modulus`.
+///
+/// On x86-64 this is the low-half reduction: with `mul` pinned to `rax:rdx`
+/// the classical form waits on the product's top limbs round by round, and
+/// overlapping the cancellation rounds with the product's tail measured a
+/// dependent squaring chain 10% faster (and every other mode faster too).
+/// On AArch64 the classical rounds were already scheduled well and the
+/// low-half form measured 6% slower on the same chain, so other targets keep
+/// the classical form. Both produce the same limbs.
+#[cfg_attr(not(feature = "uninline-portable"), inline(always))]
+const fn reduce_square_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        montgomery_reduce_low_lazy(t, modulus, inv)
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        montgomery_rounds!(t, modulus, inv)
+    }
 }
 
 /// Subtracts `modulus` from a value below `2 * modulus` if that does not
@@ -308,7 +327,7 @@ pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 
 pub(super) fn sqr_n_lazy(value: &[u64; 4], n: u32, modulus: &[u64; 4], inv: u64) -> [u64; 4] {
     let mut acc = *value;
     for _ in 0..n {
-        acc = montgomery_reduce_low_lazy(&square_wide(&acc), modulus, inv);
+        acc = reduce_square_lazy(&square_wide(&acc), modulus, inv);
     }
     acc
 }

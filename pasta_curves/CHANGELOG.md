@@ -17,10 +17,11 @@ and this project adheres to Rust's notion of
   `u32`) and the closing multiplication, or one final conditional
   subtraction, corrects it. `sqr_n_mul` and the new `sqr_n` use this, and the
   square-root tables' `sqrt_ratio`/`sqrt_alt` chains run through them.
-- Portable squaring reduces the low half of its product first and adds the
-  high half once, as the assembly backend does, keeping four limbs live
-  through the cancellation rounds instead of eight. Multiplication keeps the
-  classical reduction, which measures faster for its wider product.
+- Portable squaring on x86-64 reduces the low half of its product first and
+  adds the high half once, as the assembly backend does, keeping four limbs
+  live through the cancellation rounds instead of eight; a dependent chain
+  of squarings runs 10% faster. Other targets, where the form measured
+  slower, and multiplication everywhere keep the classical reduction.
 - The GLV multiscalar multiplication backend now plans its own window width.
   It evaluates the GLV ladder at the generic default width and one bit wider,
   runs at the cheaper, and is selected only when that beats the generic
