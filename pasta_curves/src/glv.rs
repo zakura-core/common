@@ -681,6 +681,100 @@ fn batch_invert_nonzero<F: Field>(values: &mut [F], scratch: &mut [F]) {
     }
 }
 
+/// Batch-inverts a possibly exceptional denominator set, returning `false`
+/// if any value is zero. Large batches use two independent product chains;
+/// small batches avoid their fixed three-multiplication overhead.
+fn batch_invert_or_zero<C: GlvParams>(values: &mut [C::Base], scratch: &mut [C::Base]) -> bool {
+    assert_eq!(values.len(), scratch.len());
+    if values.is_empty() {
+        return true;
+    }
+    if values.len() < BATCH_AFFINE_MIN_POINTS {
+        let mut acc = C::Base::ONE;
+        for (value, prefix) in values.iter().zip(scratch.iter_mut()) {
+            *prefix = acc;
+            acc *= value;
+        }
+        let inverse = acc.invert();
+        if !bool::from(inverse.is_some()) {
+            return false;
+        }
+        acc = inverse.unwrap();
+        for (value, prefix) in values.iter_mut().zip(scratch.iter()).rev() {
+            let inverted = acc * prefix;
+            acc *= *value;
+            *value = inverted;
+        }
+        return true;
+    }
+
+    scratch[0] = C::Base::ONE;
+    scratch[1] = C::Base::ONE;
+    let mut acc0 = values[0];
+    let mut acc1 = values[1];
+    for (pair, slots) in values[2..]
+        .chunks_exact(2)
+        .zip(scratch[2..].chunks_exact_mut(2))
+    {
+        slots[0] = acc0;
+        acc0 *= pair[0];
+        slots[1] = acc1;
+        acc1 *= pair[1];
+    }
+    if let (Some(value), Some(slot)) = (
+        values.chunks_exact(2).remainder().first(),
+        scratch.chunks_exact_mut(2).into_remainder().first_mut(),
+    ) {
+        *slot = acc0;
+        acc0 *= value;
+    }
+
+    let inverse = (acc0 * acc1).invert();
+    if !bool::from(inverse.is_some()) {
+        return false;
+    }
+    let inverse = inverse.unwrap();
+    let seed0 = inverse * acc1;
+    let seed1 = inverse * acc0;
+
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ))]
+    C::batch_invert_backsub(values, scratch, seed0, seed1, private::CrateToken(()));
+    #[cfg(not(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    )))]
+    {
+        let mut acc0 = seed0;
+        let mut acc1 = seed1;
+        if let (Some(value), Some(slot)) = (
+            values.chunks_exact_mut(2).into_remainder().first_mut(),
+            scratch.chunks_exact(2).remainder().first(),
+        ) {
+            let inverted = acc0 * slot;
+            acc0 *= *value;
+            *value = inverted;
+        }
+        for (pair, slots) in values
+            .chunks_exact_mut(2)
+            .zip(scratch.chunks_exact(2))
+            .rev()
+        {
+            let inverted0 = acc0 * slots[0];
+            let inverted1 = acc1 * slots[1];
+            acc0 *= pair[0];
+            acc1 *= pair[1];
+            pair[0] = inverted0;
+            pair[1] = inverted1;
+        }
+    }
+    true
+}
+
 /// Denominator and reusable square for the one-inversion affine `2P + Q`
 /// formula.
 #[cfg(test)]
@@ -2681,35 +2775,24 @@ fn affine_add_sub_pairs<C: GlvParams>(
     record_fft_affine_substage_batch(left.len());
     scratch.denominators.resize(left.len(), C::Base::ZERO);
     scratch.prefixes.resize(left.len(), C::Base::ZERO);
-    let mut acc = C::Base::ONE;
-    for (((left, right), denominator), prefix) in left
-        .iter()
-        .zip(right)
-        .zip(scratch.denominators.iter_mut())
-        .zip(scratch.prefixes.iter_mut())
+    for ((left, right), denominator) in left.iter().zip(right).zip(scratch.denominators.iter_mut())
     {
         let (left_x, _) = C::affine_xy(left);
         let (right_x, _) = C::affine_xy(right);
         *denominator = right_x - left_x;
-        *prefix = acc;
-        acc *= *denominator;
     }
 
-    let inverse = acc.invert();
-    if !bool::from(inverse.is_some()) {
+    if !batch_invert_or_zero::<C>(&mut scratch.denominators, &mut scratch.prefixes) {
         projective_add_sub_pairs::<C>(left, right, sums, differences);
         return false;
     }
-    acc = inverse.unwrap();
     sums.copy_from_slice(left);
-    for i in (0..left.len()).rev() {
-        let denominator_inverse = acc * scratch.prefixes[i];
-        acc *= scratch.denominators[i];
+    for i in 0..left.len() {
         apply_affine_twiddle::<C>(
             &mut sums[i],
             &mut differences[i],
             &right[i],
-            denominator_inverse,
+            scratch.denominators[i],
         );
     }
     // A codelet can retain intermediates that are not part of this batch and
@@ -2805,53 +2888,31 @@ fn affine_twiddle_add_sub_layer<C: GlvParams>(
         .denominators
         .resize(right_scaled.len(), C::Base::ZERO);
     scratch.prefixes.resize(right_scaled.len(), C::Base::ZERO);
-    let mut acc = C::Base::ONE;
-    let mut slots = scratch
-        .denominators
-        .iter_mut()
-        .zip(scratch.prefixes.iter_mut());
+    let mut slots = scratch.denominators.iter_mut();
     for (block, scaled) in points.chunks(chunk).zip(right_scaled.chunks(half)) {
         for (left, right) in block[..half].iter().zip(scaled) {
             let (left_x, _) = C::affine_xy(left);
             let (right_x, _) = C::affine_xy(right);
             let denominator = right_x - left_x;
-            let (denominator_slot, prefix_slot) =
-                slots.next().expect("one scratch slot per butterfly");
-            *denominator_slot = denominator;
-            *prefix_slot = acc;
-            acc *= denominator;
+            *slots.next().expect("one scratch slot per butterfly") = denominator;
         }
     }
     assert!(slots.next().is_none());
 
     // One failed inversion detects every `x_L == x_R` exceptional case.
-    let inverse = acc.invert();
-    if !bool::from(inverse.is_some()) {
+    if !batch_invert_or_zero::<C>(&mut scratch.denominators, &mut scratch.prefixes) {
         projective_twiddle_add_sub_layer::<C>(points, right_scaled, chunk);
         return false;
     }
-    acc = inverse.unwrap();
-    let mut inversion_scratch = scratch
-        .denominators
-        .iter()
-        .zip(scratch.prefixes.iter())
-        .rev();
-    for (block, scaled) in points
-        .chunks_mut(chunk)
-        .zip(right_scaled.chunks(half))
-        .rev()
-    {
+    let mut inverses = scratch.denominators.iter();
+    for (block, scaled) in points.chunks_mut(chunk).zip(right_scaled.chunks(half)) {
         let (left, output) = block.split_at_mut(half);
-        for ((left, output), right) in left.iter_mut().zip(output).zip(scaled).rev() {
-            let (denominator, prefix) = inversion_scratch
-                .next()
-                .expect("one scratch slot per butterfly");
-            let denominator_inverse = acc * prefix;
-            acc *= denominator;
-            apply_affine_twiddle::<C>(left, output, right, denominator_inverse);
+        for ((left, output), right) in left.iter_mut().zip(output).zip(scaled) {
+            let inverse = *inverses.next().expect("one inverse per butterfly");
+            apply_affine_twiddle::<C>(left, output, right, inverse);
         }
     }
-    assert!(inversion_scratch.next().is_none());
+    assert!(inverses.next().is_none());
     true
 }
 
