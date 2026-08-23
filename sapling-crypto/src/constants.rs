@@ -297,15 +297,15 @@ fn generate_pedersen_hash_exp_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
 /// |   4   |  ~3.5x  |       ~36 MB       |
 /// |   5   |  ~4.3x  |      ~227 MB       |
 ///
-/// `2` is the default: it delivers ~2x at the smallest memory footprint (below the original
-/// exp-table's). Larger values buy more speed for rapidly growing tables. Built lazily on first
-/// use.
+/// `3` is the default: ~3x at ~7 MB, the last cheap memory/speed jump for node-oriented
+/// `fused-pedersen` builds. `2` is smaller than the original exp table but leaves more serial
+/// mixed adds; `4` is ~36 MB for another ~1 us. Built lazily on first use.
 ///
 /// Gated by the `fused-pedersen` feature; without it the original 8-bit exp-window tables
 /// are used instead.
 #[cfg(feature = "fused-pedersen")]
 #[cfg_attr(docsrs, doc(cfg(feature = "fused-pedersen")))]
-pub const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 2;
+pub const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 3;
 
 #[cfg(feature = "fused-pedersen")]
 lazy_static! {

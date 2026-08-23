@@ -11,8 +11,8 @@ and this project adheres to Rust's notion of
 ### Added
 
 - Opt-in `fused-pedersen` feature, which caches fused chunk-block lookup tables
-  (~1.4 MiB at the default `PEDERSEN_HASH_CHUNKS_PER_BLOCK`) to speed up
-  non-circuit Pedersen hashing by about 2x. The default remains the original
+  (~7 MiB at the default `PEDERSEN_HASH_CHUNKS_PER_BLOCK` of 3) to speed up
+  non-circuit Pedersen hashing by about 3x. The default remains the original
   8-bit exp-window tables. When the feature is enabled, `sapling_crypto::constants`
   also exposes:
   - `PEDERSEN_HASH_CHUNKS_PER_BLOCK`
