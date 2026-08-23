@@ -327,15 +327,16 @@ lazy_static! {
     /// `PEDERSEN_HASH_BLOCK_TABLE[g][b][raw]` is the summed contribution of the
     /// [`PEDERSEN_HASH_CHUNKS_PER_BLOCK`] chunks starting at position `b * PEDERSEN_HASH_CHUNKS_PER_BLOCK`
     /// within segment `g`, indexed by their concatenated raw bits (chunk `k` occupies bits
-    /// `3k..3k + 3`). Built from the same per-chunk multiples as [`PEDERSEN_HASH_SINGLE_TABLE`]
-    /// so the two agree by construction, and likewise stored as [`AffineNielsPoint`].
+    /// `3k..3k + 3`). Built by summing the corresponding [`PEDERSEN_HASH_SINGLE_TABLE`]
+    /// entries, so the two agree by construction, and likewise stored as [`AffineNielsPoint`].
     #[cfg_attr(docsrs, doc(cfg(feature = "fused-pedersen")))]
     pub static ref PEDERSEN_HASH_BLOCK_TABLE: Vec<Vec<Vec<AffineNielsPoint>>> =
         generate_pedersen_hash_block_table();
 }
 
 /// The per-generator, per-position multiples `enc * 2^{4j} * G` as extended points, indexed by
-/// `raw = a | b << 1 | c << 2`. Shared by both table builders.
+/// `raw = a | b << 1 | c << 2`. Consumed by the single-table builder; the block table is then
+/// built from the normalized single table.
 #[cfg(feature = "fused-pedersen")]
 fn pedersen_hash_single_extended() -> Vec<Vec<[ExtendedPoint; 8]>> {
     PEDERSEN_HASH_GENERATORS
@@ -354,7 +355,7 @@ fn pedersen_hash_single_extended() -> Vec<Vec<[ExtendedPoint; 8]>> {
                     //   000:+1 001:+2 010:+3 011:+4 100:-1 101:-2 110:-3 111:-4
                     let entries = [base, double, triple, quad, -base, -double, -triple, -quad];
 
-                    base = base.double().double().double().double(); // 2^4 * base
+                    base = quad.double().double(); // 2^4 * base
                     entries
                 })
                 .collect()
@@ -363,7 +364,7 @@ fn pedersen_hash_single_extended() -> Vec<Vec<[ExtendedPoint; 8]>> {
 }
 
 /// Converts extended points into the precomputed-addition form used by the lookup tables, using
-/// a single batched field inversion ([`jubjub::batch_normalize`]).
+/// one batched field inversion ([`jubjub::batch_normalize`]) for the whole slice.
 #[cfg(feature = "fused-pedersen")]
 fn to_niels(mut points: Vec<ExtendedPoint>) -> Vec<AffineNielsPoint> {
     jubjub::batch_normalize(&mut points)
@@ -371,16 +372,19 @@ fn to_niels(mut points: Vec<ExtendedPoint>) -> Vec<AffineNielsPoint> {
         .collect()
 }
 
-/// Builds [`PEDERSEN_HASH_SINGLE_TABLE`].
+/// Builds [`PEDERSEN_HASH_SINGLE_TABLE`], batching the field inversions per generator.
 #[cfg(feature = "fused-pedersen")]
 fn generate_pedersen_hash_single_table() -> Vec<Vec<[AffineNielsPoint; 8]>> {
     pedersen_hash_single_extended()
-        .iter()
+        .into_iter()
         .map(|generator| {
-            generator
-                .iter()
+            // Flatten all of the generator's entries into one batch-normalized inversion,
+            // then split back into per-position arrays.
+            let flat: Vec<ExtendedPoint> = generator.into_iter().flatten().collect();
+            to_niels(flat)
+                .chunks_exact(8)
                 .map(|entries| {
-                    to_niels(entries.to_vec())
+                    entries
                         .try_into()
                         .expect("exactly 8 entries per chunk position")
                 })
@@ -389,33 +393,35 @@ fn generate_pedersen_hash_single_table() -> Vec<Vec<[AffineNielsPoint; 8]>> {
         .collect()
 }
 
-/// Builds [`PEDERSEN_HASH_BLOCK_TABLE`] by summing the relevant per-chunk multiples for each
-/// block.
+/// Builds [`PEDERSEN_HASH_BLOCK_TABLE`] by summing the relevant [`PEDERSEN_HASH_SINGLE_TABLE`]
+/// entries for each block, batching the field inversions per generator.
 #[cfg(feature = "fused-pedersen")]
 fn generate_pedersen_hash_block_table() -> Vec<Vec<Vec<AffineNielsPoint>>> {
-    let single = pedersen_hash_single_extended();
     let chunks_per_block = PEDERSEN_HASH_CHUNKS_PER_BLOCK;
     let blocks_per_generator = PEDERSEN_HASH_CHUNKS_PER_GENERATOR / chunks_per_block;
     let entries_per_block = 1usize << (3 * chunks_per_block);
 
-    single
+    PEDERSEN_HASH_SINGLE_TABLE
         .iter()
         .map(|generator| {
-            (0..blocks_per_generator)
-                .map(|block| {
+            // Sum every block's entries via mixed additions, then normalize the whole
+            // generator's sums with one batched inversion and split back into blocks.
+            let sums: Vec<ExtendedPoint> = (0..blocks_per_generator)
+                .flat_map(|block| {
                     let first_chunk = block * chunks_per_block;
-                    let sums: Vec<ExtendedPoint> = (0..entries_per_block)
-                        .map(|raw| {
-                            let mut acc = ExtendedPoint::identity();
-                            for k in 0..chunks_per_block {
-                                let chunk_bits = (raw >> (3 * k)) & 0b111;
-                                acc += generator[first_chunk + k][chunk_bits];
-                            }
-                            acc
-                        })
-                        .collect();
-                    to_niels(sums)
+                    (0..entries_per_block).map(move |raw| {
+                        let mut acc = ExtendedPoint::identity();
+                        for k in 0..chunks_per_block {
+                            let chunk_bits = (raw >> (3 * k)) & 0b111;
+                            acc += generator[first_chunk + k][chunk_bits];
+                        }
+                        acc
+                    })
                 })
+                .collect();
+            to_niels(sums)
+                .chunks_exact(entries_per_block)
+                .map(|entries| entries.to_vec())
                 .collect()
         })
         .collect()

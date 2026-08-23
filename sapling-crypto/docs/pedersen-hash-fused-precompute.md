@@ -68,7 +68,7 @@ Entries are stored in jubjub's **precomputed-addition (Niels) form, `AffineNiels
 (`(v+u, v−u, 2d·u·v)`, 96 bytes vs 160 for an extended point), and the accumulator is a plain
 `ExtendedPoint`. Each table lookup is then a **mixed addition** (7 field multiplications, no `Z`
 on the addend), which is both faster than extended+extended and, crucially, lower-latency on the
-sequential accumulator chain. Tables are built with one batched field inversion per block via
+sequential accumulator chain. Tables are built with one batched field inversion per generator via
 `jubjub::batch_normalize`, so lazy init stays cheap.
 
 ### Memory / speed tradeoff (`C`)
@@ -90,10 +90,11 @@ constant, so the operating point can be adjusted later.
 
 ## Algorithm (`pedersen_hash`)
 
-The input bit stream (personalization bits prepended) is buffered into a `Vec<bool>` so the
-exact chunk count `T = ⌈len/3⌉` is known up front. Collection is capped at one bit beyond the
-fixed six-generator capacity, so oversized or infinite public-API inputs fail without unbounded
-allocation. The hash then walks chunks segment by segment
+The input bit stream (personalization bits prepended) is buffered into a fixed-size stack
+buffer (sized to the six-generator capacity, ~1.1 KB, no heap allocation) so the exact chunk
+count `T = ⌈len/3⌉` is known up front. Collection panics as soon as a bit beyond that capacity
+arrives, so oversized or infinite public-API inputs fail after bounded consumption. The hash
+then walks chunks segment by segment
 (`PEDERSEN_HASH_CHUNKS_PER_GENERATOR = 63` chunks per generator):
 
 - Fold every full block of `C` chunks with one `PEDERSEN_HASH_BLOCK_TABLE` lookup + mixed add.
@@ -115,7 +116,7 @@ Caller impact is small:
 - `tree.rs` (`merkle_hash_field`) and the circuit's witness/test sites already wrapped the result
   in `ExtendedPoint::from(...)`; that wrap is now the identity and was removed.
 - `spec.rs::windowed_pedersen_commit` (the note commitment, computed once per note — off the hot
-  path) re-wraps the result into a `SubgroupPoint` with a single affine conversion, preserving its
+  path) re-wraps the result into a `SubgroupPoint` with a checked `into_subgroup()`, preserving its
   signature and everything downstream of it.
 
 ## Correctness

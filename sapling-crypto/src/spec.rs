@@ -149,11 +149,12 @@ where
     I: IntoIterator<Item = bool>,
 {
     let commitment = pedersen_hash(personalization, s) + (NOTE_COMMITMENT_RANDOMNESS_GENERATOR * r);
-    // `pedersen_hash` returns an `ExtendedPoint`; the commitment is in the prime-order subgroup,
-    // so re-wrap it as a `SubgroupPoint`. This is off the hot path (one note commitment per note),
-    // so the single inversion in the affine conversion is fine.
-    let affine = jubjub::AffinePoint::from(commitment);
-    jubjub::SubgroupPoint::from_raw_unchecked(affine.get_u(), affine.get_v())
+    // `pedersen_hash` returns an `ExtendedPoint`; both summands are prime-order, so the
+    // subgroup check can only fail if one of the evaluators is broken. This is off the hot
+    // path (one note commitment per note), so the checked conversion's cost is fine.
+    commitment
+        .into_subgroup()
+        .expect("both pedersen_hash and the randomness generator are prime-order")
 }
 
 /// Coordinate extractor for Jubjub.

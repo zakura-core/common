@@ -8,6 +8,16 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Prepared the `1.0.0-rc.3` release.
+- Prepared the `1.0.0-rc.2` release.
+- Updated to `ff 0.14`, `group 0.14`, `rand 0.10`, and the Zakura Groth16 and
+  Jubjub forks.
+- Forked from upstream `sapling-crypto` and renamed to `zakura-sapling-crypto`; this changelog starts
+  fresh for the Zakura fork's initial release.
+- Restarted the version lineage at 1.0.0, leaving behind the inherited upstream
+  version (0.7.0); the initial Zakura release will be preceded by `1.0.0-rc` release
+  candidates.
+
 ### Added
 
 - Opt-in `fused-pedersen` feature, which caches fused chunk-block lookup tables
@@ -24,15 +34,7 @@ and this project adheres to Rust's notion of
 - `sapling_crypto::pedersen_hash::pedersen_hash` now returns a
   `jubjub::ExtendedPoint` instead of a `jubjub::SubgroupPoint`. The returned
   point is still in the prime-order subgroup; callers that need a
-  `SubgroupPoint` can re-derive one (e.g. via `to_bytes`/`from_bytes`). With
-  `fused-pedersen`, this avoids an inversion on the mixed-addition hot path.
-
-- Prepared the `1.0.0-rc.3` release.
-- Prepared the `1.0.0-rc.2` release.
-- Updated to `ff 0.14`, `group 0.14`, `rand 0.10`, and the Zakura Groth16 and
-  Jubjub forks.
-- Forked from upstream `sapling-crypto` and renamed to `zakura-sapling-crypto`; this changelog starts
-  fresh for the Zakura fork's initial release.
-- Restarted the version lineage at 1.0.0, leaving behind the inherited upstream
-  version (0.7.0); the initial Zakura release will be preceded by `1.0.0-rc` release
-  candidates.
+  `SubgroupPoint` can re-derive one via
+  `group::cofactor::CofactorGroup::into_subgroup` (or `to_bytes`/`from_bytes`).
+  With `fused-pedersen`, this avoids an inversion on the mixed-addition hot
+  path.

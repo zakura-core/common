@@ -35,38 +35,45 @@ pub fn pedersen_hash<I>(personalization: Personalization, bits: I) -> jubjub::Ex
 where
     I: IntoIterator<Item = bool>,
 {
-    let bits = collect_bounded_bits(personalization, bits);
+    let mut buf = [false; MAX_PEDERSEN_HASH_BITS];
+    let len = collect_bounded_bits(personalization, bits, &mut buf);
+    let bits = &buf[..len];
 
     #[cfg(feature = "fused-pedersen")]
     {
-        fused_pedersen_hash(&bits)
+        fused_pedersen_hash(bits)
     }
     #[cfg(not(feature = "fused-pedersen"))]
     {
-        windowed_pedersen_hash(&bits)
+        windowed_pedersen_hash(bits)
     }
 }
 
-/// Buffer the bit stream so we know the exact length up front, but stop after the fixed
-/// generator capacity. This keeps oversized or infinite public-API inputs from causing
-/// unbounded allocation.
-fn collect_bounded_bits<I>(personalization: Personalization, bits: I) -> Vec<bool>
+/// The fixed six-generator input capacity of [`pedersen_hash`], in bits.
+const MAX_PEDERSEN_HASH_BITS: usize =
+    crate::constants::PEDERSEN_HASH_GENERATORS.len() * PEDERSEN_HASH_CHUNKS_PER_GENERATOR * 3;
+
+/// Buffer the bit stream into `buf` so we know the exact length up front, returning the number
+/// of bits written. Panics as soon as a bit beyond the fixed generator capacity arrives, so
+/// oversized or infinite public-API inputs fail after bounded consumption.
+fn collect_bounded_bits<I>(
+    personalization: Personalization,
+    bits: I,
+    buf: &mut [bool; MAX_PEDERSEN_HASH_BITS],
+) -> usize
 where
     I: IntoIterator<Item = bool>,
 {
-    let max_bits =
-        crate::constants::PEDERSEN_HASH_GENERATORS.len() * PEDERSEN_HASH_CHUNKS_PER_GENERATOR * 3;
-    let bits: Vec<bool> = personalization
-        .get_bits()
-        .into_iter()
-        .chain(bits)
-        .take(max_bits + 1)
-        .collect();
-    assert!(
-        bits.len() <= max_bits,
-        "we don't have enough Pedersen hash generators"
-    );
-    bits
+    let mut len = 0;
+    for bit in personalization.get_bits().into_iter().chain(bits) {
+        assert!(
+            len < MAX_PEDERSEN_HASH_BITS,
+            "we don't have enough Pedersen hash generators"
+        );
+        buf[len] = bit;
+        len += 1;
+    }
+    len
 }
 
 #[cfg(not(feature = "fused-pedersen"))]
@@ -320,7 +327,7 @@ pub mod test {
 
     #[test]
     fn matches_reference_across_boundaries() {
-        // Deterministic xorshift PRNG so the test needs no rng dependency.
+        // Small inline xorshift PRNG; the fixed seed keeps the covered inputs reproducible.
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next_bit = || {
             state ^= state << 13;
