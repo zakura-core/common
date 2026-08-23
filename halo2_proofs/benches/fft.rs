@@ -14,6 +14,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion};
 use rand::rng;
 
 const ORCHARD_K: u32 = 11;
+const EXTENDED_CURVE_FFT_K: u32 = 13;
 const ORCHARD_EXTENDED_K: u32 = 14;
 
 fn criterion_benchmark(c: &mut Criterion) {
@@ -51,6 +52,38 @@ fn criterion_benchmark(c: &mut Criterion) {
             },
             |(points, mut affine)| {
                 assert!(Eq::fft_vartime(&points, &mut affine, omega, ORCHARD_K,));
+                affine
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    let extended_params = Params::<EqAffine>::new(EXTENDED_CURVE_FFT_K);
+    let extended_minv = Fp::TWO_INV.pow_vartime([u64::from(EXTENDED_CURVE_FFT_K)]);
+    let extended_curve_fft_input: Vec<Eq> = extended_params
+        .get_g()
+        .iter()
+        .map(|point| Eq::from(*point) * extended_minv)
+        .collect();
+    let mut extended_omega = Fp::ROOT_OF_UNITY_INV;
+    for _ in EXTENDED_CURVE_FFT_K..Fp::S {
+        extended_omega = extended_omega.square();
+    }
+    c.bench_function("curve-fft/affine-eisenstein-k13", |b| {
+        b.iter_batched(
+            || {
+                (
+                    extended_curve_fft_input.clone(),
+                    vec![EqAffine::identity(); extended_curve_fft_input.len()],
+                )
+            },
+            |(points, mut affine)| {
+                assert!(Eq::fft_vartime(
+                    &points,
+                    &mut affine,
+                    extended_omega,
+                    EXTENDED_CURVE_FFT_K,
+                ));
                 affine
             },
             BatchSize::LargeInput,

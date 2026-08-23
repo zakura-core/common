@@ -15,6 +15,11 @@ and this project adheres to Rust's notion of
   16-point codelets. The 16-point transform uses 14 scalar multiplications
   instead of 17 and shares repeated scalar schedules and affine inversion
   stages across its subtransforms.
+- The Pasta curve FFT uses mixed DFT8/DFT16 Cooley–Tukey decompositions for
+  sizes 2^6 and above. Diagonal twiddles are grouped by scalar, their GLV
+  decompositions are reused across tiers, and explicit transposes keep every
+  codelet substage in one contiguous affine inversion batch. At the Orchard
+  size this reduces point-scalar multiplications from 8,833 to 8,193.
 - The GLV batch-affine ladder now interleaves its nonzero Montgomery batch
   inversion across even- and odd-indexed accumulator lanes. The three fixed
   extra multiplications per ladder column expose independent multiplication
