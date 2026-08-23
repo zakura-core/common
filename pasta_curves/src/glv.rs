@@ -70,6 +70,7 @@ use group::CurveAffine as _;
 use maybe_rayon::prelude::*;
 
 use crate::arithmetic::{mac, sbb, CurveExt};
+use crate::fields::lazy::{LazyElement, LazyField};
 use crate::{pallas, vesta};
 
 mod private {
@@ -783,14 +784,18 @@ struct AffinePoint<F> {
 // is already faster than projective bucket reduction, but the record's size
 // increases memory traffic. The intended final stacked implementation removes
 // it by fusing these phases.
-struct PendingAffineAddition<F> {
+struct PendingAffineAddition<F: LazyField> {
     output: usize,
     left_x: F,
     left_y: F,
     x_sum: F,
     numerator: F,
     denominator: F,
-    inversion_scratch: F,
+    /// The prefix product of the denominators before the batch inversion,
+    /// then this denominator's inverse after it. Lazy: each is a product
+    /// with a canonical operand, and the slope multiplication that consumes
+    /// the inverse takes it unreduced.
+    inversion_scratch: F::Lazy,
 }
 
 /// Inverts every denominator, returning `None` if their product is zero.
@@ -798,24 +803,25 @@ struct PendingAffineAddition<F> {
 /// The failure must propagate through [`try_multiexp`] so verifier callers can
 /// fall back to the generic MSM instead of panicking. The
 /// `batch_inversion_zero_denominator_returns_none` test covers this guard.
-fn batch_invert_denominators<F: Field>(additions: &mut [PendingAffineAddition<F>]) -> Option<()> {
+fn batch_invert_denominators<F: LazyField>(
+    additions: &mut [PendingAffineAddition<F>],
+) -> Option<()> {
     if additions.is_empty() {
         return Some(());
     }
 
-    let mut product = F::ONE;
+    let mut product = F::ONE.lazy();
     for addition in additions.iter_mut() {
         addition.inversion_scratch = product;
-        product *= addition.denominator;
+        product = product.mul(&addition.denominator);
     }
 
     // This MSM is already variable-time with respect to scalar digits; batch
     // inversion does not provide a constant-time guarantee.
-    let mut product_inverse = Option::<F>::from(product.invert())?;
+    let mut product_inverse = Option::<F>::from(product.reduce().invert())?;
     for addition in additions.iter_mut().rev() {
-        let denominator = addition.denominator;
-        addition.denominator = addition.inversion_scratch * product_inverse;
-        product_inverse *= denominator;
+        addition.inversion_scratch = addition.inversion_scratch.mul(&product_inverse);
+        product_inverse *= addition.denominator;
     }
     Some(())
 }
@@ -861,7 +867,7 @@ fn for_each_window_point<C, Visit>(
 /// from a single Pasta curve and skipping identity inputs before building the
 /// buckets. The function is generic over the field only for reuse between
 /// [`crate::Fp`] and [`crate::Fq`].
-fn reduce_affine_buckets<F: Field>(
+fn reduce_affine_buckets<F: LazyField>(
     mut points: Vec<AffinePoint<F>>,
     mut offsets: Vec<usize>,
 ) -> Option<Vec<Option<AffinePoint<F>>>> {
@@ -904,7 +910,7 @@ fn reduce_affine_buckets<F: Field>(
                     x_sum: left.x + right.x,
                     numerator,
                     denominator,
-                    inversion_scratch: F::ZERO,
+                    inversion_scratch: F::ZERO.lazy(),
                 });
             }
             if bucket.len() % 2 == 1 {
@@ -915,9 +921,14 @@ fn reduce_affine_buckets<F: Field>(
 
         batch_invert_denominators(&mut pending)?;
         for addition in pending {
-            let slope = addition.numerator * addition.denominator;
-            let x = slope.square() - addition.x_sum;
-            let y = slope * (addition.left_x - x) - addition.left_y;
+            // Every multiplication has one canonical operand, and the two
+            // coordinates are canonicalized once each at the end.
+            let slope = addition.inversion_scratch.mul(&addition.numerator);
+            let x = slope.square().sub(&addition.x_sum).reduce();
+            let y = slope
+                .mul(&(addition.left_x - x))
+                .sub(&addition.left_y)
+                .reduce();
             next_points[addition.output] = AffinePoint { x, y };
         }
 
@@ -935,7 +946,10 @@ fn reduce_affine_buckets<F: Field>(
     Some(buckets)
 }
 
-fn sum_buckets<C: GlvParams>(buckets: &[Option<AffinePoint<C::Base>>]) -> C {
+fn sum_buckets<C: GlvParams>(buckets: &[Option<AffinePoint<C::Base>>]) -> C
+where
+    C::Base: LazyField,
+{
     let mut running = C::identity();
     let mut sum = C::identity();
     for bucket in buckets.iter().rev() {
@@ -953,7 +967,10 @@ fn fill_window<C: GlvParams>(
     endo_bases: &[C::AffineExt],
     window_bits: usize,
     window: usize,
-) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
+) -> Option<Vec<Option<AffinePoint<C::Base>>>>
+where
+    C::Base: LazyField,
+{
     let bucket_count = 1 << (window_bits - 1);
     let mut counts = alloc::vec![0usize; bucket_count];
     for_each_window_point::<C, _>(
@@ -1004,7 +1021,10 @@ fn multiexp_serial<C: GlvParams>(
     bases: &[C::AffineExt],
     endo_bases: &[C::AffineExt],
     window_bits: usize,
-) -> Option<C> {
+) -> Option<C>
+where
+    C::Base: LazyField,
+{
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
     let mut acc = C::identity();
 
@@ -1027,7 +1047,10 @@ fn multiexp_parallel<C: GlvParams>(
     bases: &[C::AffineExt],
     endo_bases: &[C::AffineExt],
     window_bits: usize,
-) -> Option<C> {
+) -> Option<C>
+where
+    C::Base: LazyField,
+{
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
     (0..window_count)
         .into_par_iter()
@@ -1051,7 +1074,10 @@ fn multiexp<C: GlvParams>(
     endo_bases: &[C::AffineExt],
     window_bits: usize,
     num_threads: usize,
-) -> Option<C> {
+) -> Option<C>
+where
+    C::Base: LazyField,
+{
     debug_assert_eq!(components.len(), bases.len());
     debug_assert_eq!(components.len(), endo_bases.len());
 
@@ -1077,7 +1103,10 @@ fn multiexp<C: GlvParams>(
 pub(crate) fn try_multiexp<C: GlvParams>(
     scalars: &[C::ScalarExt],
     bases: &[C::AffineExt],
-) -> Option<C> {
+) -> Option<C>
+where
+    C::Base: LazyField,
+{
     assert_eq!(scalars.len(), bases.len());
     let num_threads = current_num_threads();
     let window_bits = glv_multiexp_window_bits::<C>(scalars.len(), num_threads)?;
@@ -2516,7 +2545,10 @@ mod tests {
         (scalars, bases, generator * expected_scalar)
     }
 
-    fn optimized_multiexp_matches_expected<C: GlvParams>() {
+    fn optimized_multiexp_matches_expected<C: GlvParams>()
+    where
+        C::Base: LazyField,
+    {
         let num_threads = current_num_threads();
         let mut selected = 0;
         for terms in VERIFIER_MULTIEXP_SIZES {
@@ -2537,7 +2569,10 @@ mod tests {
     }
 
     #[cfg(feature = "multicore")]
-    fn optimized_multiexp_matches_expected_at_thread_counts<C: GlvParams>() {
+    fn optimized_multiexp_matches_expected_at_thread_counts<C: GlvParams>()
+    where
+        C::Base: LazyField,
+    {
         const THREAD_COUNTS: [usize; 5] = [1, 2, 3, 8, 32];
 
         for num_threads in THREAD_COUNTS {
@@ -2552,7 +2587,10 @@ mod tests {
         }
     }
 
-    fn serial_c10_multiexp_matches_expected<C: GlvParams>() {
+    fn serial_c10_multiexp_matches_expected<C: GlvParams>()
+    where
+        C::Base: LazyField,
+    {
         const TERMS: usize = 5_678;
         const WINDOW_BITS: usize = 10;
 
@@ -2902,7 +2940,10 @@ mod tests {
     }
 
     #[cfg(feature = "multicore")]
-    fn parallel_multiexp_matches_serial<C: GlvParams>() {
+    fn parallel_multiexp_matches_serial<C: GlvParams>()
+    where
+        C::Base: LazyField,
+    {
         const TEST_TERMS: usize = 64;
         const WINDOW_BITS: [usize; 6] = [1, 3, 6, 8, 9, 10];
 
@@ -3443,7 +3484,10 @@ mod tests {
         }
     }
 
-    fn batch_affine_buckets_match_native<C: GlvParams>() {
+    fn batch_affine_buckets_match_native<C: GlvParams>()
+    where
+        C::Base: LazyField,
+    {
         let generator = C::generator();
         let two = generator.double();
         let three = two + generator;
@@ -3488,7 +3532,7 @@ mod tests {
         }
     }
 
-    fn batch_inversion_rejects_zero_denominator<F: Field>() {
+    fn batch_inversion_rejects_zero_denominator<F: LazyField>() {
         let mut additions = [F::ONE, F::ZERO, F::ONE.double()]
             .into_iter()
             .enumerate()
@@ -3499,7 +3543,7 @@ mod tests {
                 x_sum: F::ZERO,
                 numerator: F::ZERO,
                 denominator,
-                inversion_scratch: F::ZERO,
+                inversion_scratch: F::ZERO.lazy(),
             })
             .collect::<Vec<_>>();
 

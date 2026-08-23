@@ -3,6 +3,8 @@
 
 mod fp;
 mod fq;
+#[cfg(any(feature = "glv", test))]
+pub(crate) mod lazy;
 mod modinv62;
 mod portable;
 

@@ -11,6 +11,8 @@ use lazy_static::lazy_static;
 #[cfg(feature = "bits")]
 use ff::{FieldBits, PrimeFieldBits};
 
+#[cfg(any(feature = "glv", test))]
+use super::lazy::{LazyElement, LazyField};
 use super::portable;
 use crate::arithmetic::{sbb, SqrtTableHelpers};
 #[cfg(feature = "deferred")]
@@ -480,6 +482,104 @@ impl Fp {
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) const fn square_unreduced(&self) -> [u64; 8] {
         portable::square_wide(&self.0)
+    }
+}
+
+/// An `Fp` value below `2p`; see [`super::lazy`].
+///
+/// On the Apple AArch64 assembly backend the value is always canonical (the
+/// assembly routines canonicalize and require canonical inputs), so every
+/// operation here is the canonical one and `reduce` is free. On the portable
+/// backend the multiplications and squarings skip their final subtraction.
+#[cfg(any(feature = "glv", test))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FpLazy([u64; 4]);
+
+#[cfg(any(feature = "glv", test))]
+impl LazyField for Fp {
+    type Lazy = FpLazy;
+
+    #[inline]
+    fn lazy(self) -> FpLazy {
+        FpLazy(self.0)
+    }
+}
+
+#[cfg(any(feature = "glv", test))]
+impl LazyElement<Fp> for FpLazy {
+    #[inline]
+    fn mul(&self, rhs: &Fp) -> FpLazy {
+        debug_assert!(portable::is_below_twice(&self.0, &MODULUS.0));
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            // Canonical on this backend, so the assembly's input contract holds.
+            FpLazy(Fp(self.0).mul_runtime(rhs).0)
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            FpLazy(portable::mul_lazy(&self.0, &rhs.0, &MODULUS.0, INV))
+        }
+    }
+
+    #[inline]
+    fn square(&self) -> FpLazy {
+        debug_assert!(portable::is_below_twice(&self.0, &MODULUS.0));
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            FpLazy(Fp(self.0).square_runtime().0)
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            FpLazy(portable::square_lazy(&self.0, &MODULUS.0, INV))
+        }
+    }
+
+    #[inline]
+    fn sub(&self, rhs: &Fp) -> FpLazy {
+        FpLazy(portable::sub(&self.0, &rhs.0, &MODULUS.0))
+    }
+
+    #[inline]
+    fn reduce(self) -> Fp {
+        debug_assert!(portable::is_below_twice(&self.0, &MODULUS.0));
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            Fp(self.0)
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            Fp(portable::canonicalize(&self.0, &MODULUS.0))
+        }
     }
 }
 
@@ -1085,6 +1185,69 @@ fn low_half_reduction_matches_classical() {
         assert_eq!(low_half(t), classical(t));
     }
     assert_eq!(max.square(), classical(max.square_unreduced()));
+}
+
+#[test]
+fn lazy_arithmetic_matches_canonical() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x2a; 16]);
+    let below_two_p = |v: &FpLazy| portable::is_below_twice(&v.0, &MODULUS.0);
+
+    for _ in 0..5_000 {
+        let a = <Fp as ff::Field>::random(&mut rng);
+        let b = <Fp as ff::Field>::random(&mut rng);
+        let c = <Fp as ff::Field>::random(&mut rng);
+
+        let ab = a.lazy().mul(&b);
+        assert!(below_two_p(&ab));
+        assert_eq!(ab.reduce(), a * b);
+        assert_eq!(a.lazy().square().reduce(), a.square());
+        assert_eq!(a.lazy().reduce(), a);
+
+        // Chains with one canonical operand per step, canonicalized once.
+        let abc = ab.mul(&c);
+        assert!(below_two_p(&abc));
+        assert_eq!(abc.reduce(), a * b * c);
+        assert_eq!(abc.mul(&a).mul(&b).reduce(), a * b * c * a * b);
+        assert_eq!(ab.square().reduce(), (a * b).square());
+        assert_eq!(
+            ab.square().square().mul(&c).reduce(),
+            (a * b).square().square() * c
+        );
+        assert_eq!(ab.sub(&c).reduce(), a * b - c);
+        assert_eq!(
+            ab.sub(&c).square().sub(&a).reduce(),
+            (a * b - c).square() - a
+        );
+        assert!(below_two_p(&ab.sub(&c)));
+    }
+
+    // Extremes: the largest canonical element everywhere, and zero.
+    let max = -Fp::one();
+    assert_eq!(
+        max.lazy().mul(&max).mul(&max).square().sub(&max).reduce(),
+        (max * max * max).square() - max
+    );
+    assert_eq!(Fp::zero().lazy().mul(&max).sub(&max).reduce(), -max);
+    assert_eq!(max.lazy().sub(&max).reduce(), Fp::zero());
+
+    // On the portable backend, raw values in [p, 2p) are valid lazy inputs.
+    #[cfg(not(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    )))]
+    for _ in 0..5_000 {
+        let x = <Fp as ff::Field>::random(&mut rng);
+        let y = <Fp as ff::Field>::random(&mut rng);
+        let raw = FpLazy(portable::add(&x.0, &MODULUS.0, &[u64::MAX; 4]));
+        assert!(below_two_p(&raw) && !is_canonical(&Fp(raw.0)));
+        assert_eq!(raw.reduce(), x);
+        assert_eq!(raw.mul(&y).reduce(), x * y);
+        assert_eq!(raw.square().reduce(), x.square());
+        assert_eq!(raw.sub(&y).reduce(), x - y);
+    }
 }
 
 #[test]

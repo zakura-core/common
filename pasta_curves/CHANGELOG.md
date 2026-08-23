@@ -22,6 +22,13 @@ and this project adheres to Rust's notion of
   live through the cancellation rounds instead of eight; a dependent chain
   of squarings runs 10% faster. Other targets, where the form measured
   slower, and multiplication everywhere keep the classical reduction.
+- The GLV multiscalar multiplication's batch-affine bucket reduction keeps
+  its intermediate products unreduced (below `2p`): every multiplication has
+  one canonical operand, so the final conditional subtraction is skipped for
+  the prefix products and inverses of the batch inversion, the slope, its
+  square, and the `y` product, and each output coordinate is canonicalized
+  once. A crate-private lazy element type enforces the one-canonical-operand
+  rule; on the Apple assembly backend it degenerates to canonical arithmetic.
 - The GLV multiscalar multiplication backend now plans its own window width.
   It evaluates the GLV ladder at the generic default width and one bit wider,
   runs at the cheaper, and is selected only when that beats the generic

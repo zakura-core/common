@@ -40,8 +40,9 @@ pub(super) const fn double(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
 ///
 /// `lhs` may be any 256-bit value; `rhs` must be canonical or the modulus
 /// itself. The result is `lhs - rhs` when that does not underflow and
-/// `lhs - rhs + modulus` otherwise, which is canonical whenever `lhs` is below
-/// `2 * modulus` (the case the reductions rely on).
+/// `lhs - rhs + modulus` otherwise: canonical when `lhs` is canonical, below
+/// `2 * modulus` when `lhs` is (the case the reductions and the lazy
+/// arithmetic rely on).
 #[cfg_attr(not(feature = "uninline-portable"), inline)]
 pub(super) const fn sub(lhs: &[u64; 4], rhs: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
     let (d0, borrow) = sbb(lhs[0], rhs[0], 0);
@@ -269,7 +270,7 @@ pub(super) const fn montgomery_reduce_low_lazy(
 /// low-half form measured 6% slower on the same chain, so other targets keep
 /// the classical form. Both produce the same limbs.
 #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
-const fn reduce_square_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
+pub(super) const fn reduce_square_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
     #[cfg(target_arch = "x86_64")]
     {
         montgomery_reduce_low_lazy(t, modulus, inv)
@@ -279,6 +280,64 @@ const fn reduce_square_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64;
     {
         montgomery_rounds!(t, modulus, inv)
     }
+}
+
+/// Multiplies a value below `2 * modulus` by a canonical element, returning
+/// the product's reduction without its final conditional subtraction.
+///
+/// The product is below `2 * modulus^2 < R * modulus`, inside the reduction's
+/// domain, and the result is below `modulus + 2 * modulus^2 / R`, which is
+/// under `1.5 * modulus` for the Pasta moduli; so the result can feed another
+/// `mul_lazy` as its unreduced operand without ever being canonicalized.
+#[cfg(any(feature = "glv", test))]
+#[cfg_attr(not(feature = "uninline-portable"), inline)]
+#[cfg_attr(
+    all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ),
+    allow(dead_code)
+)]
+pub(super) const fn mul_lazy(
+    lhs: &[u64; 4],
+    rhs: &[u64; 4],
+    modulus: &[u64; 4],
+    inv: u64,
+) -> [u64; 4] {
+    let t = mul_wide(lhs, rhs);
+    montgomery_rounds!(&t, modulus, inv)
+}
+
+/// Squares a value below `2 * modulus`, returning a result below
+/// `2 * modulus` (the bound [`sqr_n_lazy`] establishes for chains of these).
+#[cfg(any(feature = "glv", test))]
+#[cfg_attr(not(feature = "uninline-portable"), inline)]
+#[cfg_attr(
+    all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ),
+    allow(dead_code)
+)]
+pub(super) const fn square_lazy(value: &[u64; 4], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
+    reduce_square_lazy(&square_wide(value), modulus, inv)
+}
+
+/// Whether `value < 2 * modulus`; the invariant of the lazy representation.
+#[cfg(any(feature = "glv", test))]
+pub(super) const fn is_below_twice(value: &[u64; 4], modulus: &[u64; 4]) -> bool {
+    // 2 * modulus as four limbs (it is below 2^256 for the Pasta moduli).
+    let (d0, c) = adc(modulus[0], modulus[0], 0);
+    let (d1, c) = adc(modulus[1], modulus[1], c);
+    let (d2, c) = adc(modulus[2], modulus[2], c);
+    let (d3, _) = adc(modulus[3], modulus[3], c);
+    let (_, borrow) = sbb(value[0], d0, 0);
+    let (_, borrow) = sbb(value[1], d1, borrow);
+    let (_, borrow) = sbb(value[2], d2, borrow);
+    let (_, borrow) = sbb(value[3], d3, borrow);
+    borrow != 0
 }
 
 /// Subtracts `modulus` from a value below `2 * modulus` if that does not
