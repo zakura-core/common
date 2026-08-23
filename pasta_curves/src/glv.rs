@@ -832,6 +832,13 @@ fn for_each_window_point<C, Visit>(
 /// each tree level, all independent additions share one inversion. Identity,
 /// doubling, and inverse pairs are handled explicitly because verifier MSM
 /// inputs are public but not trusted.
+///
+/// The doubling formula hardcodes the short-Weierstrass coefficient `a = 0`
+/// (its numerator is `3x^2`, with no `+ a` term) and `points` must not
+/// contain the identity, since affine formulas cannot represent it. Both
+/// hold for the Pasta curves and for this module's callers, which skip
+/// identity inputs before building the buckets; the function is generic
+/// over the field only for reuse between `Fp` and `Fq`.
 fn reduce_affine_buckets<F: Field>(
     mut points: Vec<AffinePoint<F>>,
     mut offsets: Vec<usize>,
