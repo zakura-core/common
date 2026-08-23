@@ -316,8 +316,7 @@ impl Fq {
     /// Squares this element.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn square(&self) -> Fq {
-        let u = self.square_unreduced();
-        Fq::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
+        Fq(portable::square(&self.0, &MODULUS.0, INV))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -475,6 +474,9 @@ impl Fq {
     }
 
     /// Squares this element, returning the unreduced 512-bit product.
+    /// `square` reduces the product's halves separately, so this only feeds
+    /// the `deferred` accumulator and the tests.
+    #[cfg_attr(not(feature = "deferred"), allow(dead_code))]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) const fn square_unreduced(&self) -> [u64; 8] {
         portable::square_wide(&self.0)
@@ -1027,6 +1029,54 @@ fn fq_sqrt_table_matches_tonelli_shanks() {
 #[test]
 fn test_sqrt_32bit_overflow() {
     assert!((Fq::from(5)).sqrt().is_none().unwrap_u8() == 1);
+}
+
+#[test]
+fn low_half_reduction_matches_classical() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x3c; 16]);
+    let classical =
+        |t: [u64; 8]| Fq::montgomery_reduce(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
+    let low_half = |t: [u64; 8]| {
+        Fq(super::portable::canonicalize(
+            &super::portable::montgomery_reduce_low_lazy(&t, &MODULUS.0, INV),
+            &MODULUS.0,
+        ))
+    };
+
+    // Any `t_lo + R * t_hi` with canonical `t_hi` is below `R * p`, the whole
+    // domain both reductions accept; squares and products are a subset.
+    for _ in 0..20_000 {
+        let hi = <Fq as ff::Field>::random(&mut rng);
+        let lo = <Fq as ff::Field>::random(&mut rng);
+        let t = [
+            lo.0[0], lo.0[1], lo.0[2], lo.0[3], hi.0[0], hi.0[1], hi.0[2], hi.0[3],
+        ];
+        assert_eq!(low_half(t), classical(t));
+
+        let a = <Fq as ff::Field>::random(&mut rng);
+        let u = a.square_unreduced();
+        assert_eq!(a.square(), classical(u));
+        assert_eq!(a.square(), low_half(u));
+    }
+
+    // Boundary values: zero, `R * (p - 1)`, an all-ones low half under both
+    // the largest canonical and a zero high half, and `(p - 1)^2`.
+    let max = -Fq::one();
+    let ones = [u64::MAX; 4];
+    for t in [
+        [0u64; 8],
+        [0, 0, 0, 0, max.0[0], max.0[1], max.0[2], max.0[3]],
+        [
+            ones[0], ones[1], ones[2], ones[3], max.0[0], max.0[1], max.0[2], max.0[3],
+        ],
+        [ones[0], ones[1], ones[2], ones[3], 0, 0, 0, 0],
+        max.square_unreduced(),
+    ] {
+        assert_eq!(low_half(t), classical(t));
+    }
+    assert_eq!(max.square(), classical(max.square_unreduced()));
 }
 
 #[test]

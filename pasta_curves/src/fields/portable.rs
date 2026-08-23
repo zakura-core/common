@@ -105,6 +105,19 @@ pub(super) const fn mul_wide(lhs: &[u64; 4], rhs: &[u64; 4]) -> [u64; 8] {
     [r0, r1, r2, r3, r4, r5, r6, r7]
 }
 
+/// Squares a canonical element, returning the canonical square.
+///
+/// Uses the low-half reduction: the square's dependency graph is narrow
+/// enough that the shorter reduction chain shows, where the wider 4x4 product
+/// of a multiplication already hides the classical reduction's latency.
+#[cfg_attr(not(feature = "uninline-portable"), inline)]
+pub(super) const fn square(value: &[u64; 4], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
+    canonicalize(
+        &montgomery_reduce_low_lazy(&square_wide(value), modulus, inv),
+        modulus,
+    )
+}
+
 /// Squares `value`, returning the unreduced 512-bit product.
 #[cfg_attr(not(feature = "uninline-portable"), inline)]
 pub(super) const fn square_wide(value: &[u64; 4]) -> [u64; 8] {
@@ -144,7 +157,7 @@ pub(super) const fn square_wide(value: &[u64; 4]) -> [u64; 8] {
 ///
 /// This is a macro rather than a helper function on purpose: an extra
 /// function layer here, even an `inline(always)` one, changes LLVM's
-/// inlining decisions for the multiplication and squaring that expand it.
+/// inlining decisions for the multiplication that expands it.
 macro_rules! montgomery_rounds {
     ($t:expr, $modulus:expr, $inv:expr) => {{
         let [r0, r1, r2, r3, r4, r5, r6, r7] = *$t;
@@ -191,30 +204,67 @@ pub(super) const fn montgomery_reduce(t: &[u64; 8], modulus: &[u64; 4], inv: u64
     sub(&montgomery_rounds!(t, modulus, inv), modulus, modulus)
 }
 
-/// Montgomery-reduces a 512-bit value `t < R * modulus`, returning a result
-/// below `2 * modulus` rather than a canonical one.
+/// Montgomery-reduces a 512-bit value `t < R * modulus` by cancelling its low
+/// half first, returning a result below `2 * modulus`.
 ///
-/// `(t + k * modulus) / R < (R * modulus + R * modulus) / R`, so the result
-/// is below `2 * modulus` and [`canonicalize`] finishes the job with one
-/// conditional subtraction. Callers that feed the result straight into
-/// another reduction can skip that step; see [`sqr_n_lazy`] for the bound
-/// that keeps a chain of such steps inside the reduction's domain.
+/// The Montgomery quotient `Q` depends only on the low 256 bits of `t`, and
+/// `(t + Q * modulus) / R == (t_lo + Q * modulus) / R + t_hi` exactly, so the
+/// four cancellation rounds can run over four live limbs instead of eight and
+/// the high half is added once at the end. This is how the assembly backend's
+/// squaring and its `mul_by_1` helper are structured. The value produced is
+/// the same as the classical reduction's, limb for limb; only the
+/// dependency graph differs, which is shorter for the narrow product of a
+/// squaring and measured slower for the wider product of a multiplication.
+///
+/// `(t_lo + Q * modulus) / R <= modulus` and `t_hi < modulus`, so the sum is
+/// below `2 * modulus` and fits in four limbs.
 #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
-pub(super) const fn montgomery_reduce_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
-    montgomery_rounds!(t, modulus, inv)
+pub(super) const fn montgomery_reduce_low_lazy(
+    t: &[u64; 8],
+    modulus: &[u64; 4],
+    inv: u64,
+) -> [u64; 4] {
+    let [r0, r1, r2, r3, t4, t5, t6, t7] = *t;
+
+    // Each round chooses k so that the lowest live limb plus k * modulus[0]
+    // vanishes modulo 2^64, adds k * modulus, and drops that limb. The
+    // carry out of the top limb becomes the new top limb.
+    let k = r0.wrapping_mul(inv);
+    let (_, carry) = mac(r0, k, modulus[0], 0);
+    let (r0, carry) = mac(r1, k, modulus[1], carry);
+    let (r1, carry) = mac(r2, k, modulus[2], carry);
+    let (r2, r3) = mac(r3, k, modulus[3], carry);
+
+    let k = r0.wrapping_mul(inv);
+    let (_, carry) = mac(r0, k, modulus[0], 0);
+    let (r0, carry) = mac(r1, k, modulus[1], carry);
+    let (r1, carry) = mac(r2, k, modulus[2], carry);
+    let (r2, r3) = mac(r3, k, modulus[3], carry);
+
+    let k = r0.wrapping_mul(inv);
+    let (_, carry) = mac(r0, k, modulus[0], 0);
+    let (r0, carry) = mac(r1, k, modulus[1], carry);
+    let (r1, carry) = mac(r2, k, modulus[2], carry);
+    let (r2, r3) = mac(r3, k, modulus[3], carry);
+
+    let k = r0.wrapping_mul(inv);
+    let (_, carry) = mac(r0, k, modulus[0], 0);
+    let (r0, carry) = mac(r1, k, modulus[1], carry);
+    let (r1, carry) = mac(r2, k, modulus[2], carry);
+    let (r2, r3) = mac(r3, k, modulus[3], carry);
+
+    // Add the high half; the sum is below 2 * modulus, so no carry out.
+    let (r0, carry) = adc(r0, t4, 0);
+    let (r1, carry) = adc(r1, t5, carry);
+    let (r2, carry) = adc(r2, t6, carry);
+    let (r3, _) = adc(r3, t7, carry);
+
+    [r0, r1, r2, r3]
 }
 
 /// Subtracts `modulus` from a value below `2 * modulus` if that does not
 /// underflow, which makes the value canonical.
 #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
-#[cfg_attr(
-    all(
-        feature = "aarch64-asm",
-        target_arch = "aarch64",
-        target_vendor = "apple"
-    ),
-    allow(dead_code)
-)]
 pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
     sub(value, modulus, modulus)
 }
@@ -258,7 +308,7 @@ pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 
 pub(super) fn sqr_n_lazy(value: &[u64; 4], n: u32, modulus: &[u64; 4], inv: u64) -> [u64; 4] {
     let mut acc = *value;
     for _ in 0..n {
-        acc = montgomery_reduce_lazy(&square_wide(&acc), modulus, inv);
+        acc = montgomery_reduce_low_lazy(&square_wide(&acc), modulus, inv);
     }
     acc
 }
