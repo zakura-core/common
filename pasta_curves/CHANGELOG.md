@@ -87,8 +87,9 @@ and this project adheres to Rust's notion of
   remainders per square root, improving `Fp::sqrt` by 2.3% and `Fq::sqrt` by
   1.8% on Apple AArch64 with the assembly backend.
 - The GLV Signed-Booth multiscalar backend reduces bucket trees with batched
-  affine additions, variable-time inversion of public denominators, and the
-  curve's native projective operations.
+  affine additions, variable-time inversion of their denominators, and the
+  curve's native projective operations. This backend is already variable-time
+  with respect to scalar digits and does not provide a constant-time guarantee.
 - The `aarch64-asm` backend now implements runtime multiplication and
   squaring as inline assembly with register operands instead of calls into
   the assembly file. This removes the per-operation call and memory

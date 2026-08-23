@@ -47,7 +47,9 @@ and this project adheres to Rust's notion of
 - Large multicore Pasta multiscalar multiplications now evaluate GLV
   signed-Booth windows in parallel when the backend cost model selects GLV.
 - Large Pasta multiscalar multiplications batch affine bucket additions and
-  invert their public denominators in variable time.
+  invert their denominators in variable time. These multiscalar
+  multiplications are already variable-time with respect to scalar digits and
+  do not provide a constant-time guarantee.
 - Batch verification now folds each proof's random batching scalar into its
   inner-product coefficient expansion.
 - Common evaluation-domain rotations now bypass general exponentiation.
