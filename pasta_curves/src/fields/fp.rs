@@ -11,7 +11,6 @@ use lazy_static::lazy_static;
 #[cfg(feature = "bits")]
 use ff::{FieldBits, PrimeFieldBits};
 
-#[cfg(any(feature = "glv", test))]
 use super::lazy::{LazyElement, LazyField};
 use super::portable;
 use crate::arithmetic::{sbb, SqrtTableHelpers};
@@ -116,6 +115,18 @@ const MODULUS: Fp = Fp([
     0x0000000000000000,
     0x4000000000000000,
 ]);
+
+/// `2p`, the exclusive bound of the lazy representation (unused by the
+/// Apple assembly backend, whose lazy values are canonical).
+#[cfg_attr(
+    all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ),
+    allow(dead_code)
+)]
+const TWO_MODULUS: [u64; 4] = portable::twice(&MODULUS.0);
 
 /// The modulus as u32 limbs.
 #[cfg(not(target_pointer_width = "64"))]
@@ -491,11 +502,9 @@ impl Fp {
 /// assembly routines canonicalize and require canonical inputs), so every
 /// operation here is the canonical one and `reduce` is free. On the portable
 /// backend the multiplications and squarings skip their final subtraction.
-#[cfg(any(feature = "glv", test))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FpLazy([u64; 4]);
 
-#[cfg(any(feature = "glv", test))]
 impl LazyField for Fp {
     type Lazy = FpLazy;
 
@@ -505,7 +514,6 @@ impl LazyField for Fp {
     }
 }
 
-#[cfg(any(feature = "glv", test))]
 impl LazyElement<Fp> for FpLazy {
     #[inline]
     fn mul(&self, rhs: &Fp) -> FpLazy {
@@ -555,8 +563,59 @@ impl LazyElement<Fp> for FpLazy {
     }
 
     #[inline]
+    fn add(&self, rhs: &Fp) -> FpLazy {
+        // The sum is below 3p; one conditional subtraction of p leaves it
+        // below 2p (and canonical when `self` was).
+        FpLazy(portable::add(&self.0, &rhs.0, &MODULUS.0))
+    }
+
+    #[inline]
+    fn add_lazy(&self, rhs: &FpLazy) -> FpLazy {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            FpLazy(Fp(self.0).add(&Fp(rhs.0)).0)
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            FpLazy(portable::add_lazy(&self.0, &rhs.0, &TWO_MODULUS))
+        }
+    }
+
+    #[inline]
     fn sub(&self, rhs: &Fp) -> FpLazy {
         FpLazy(portable::sub(&self.0, &rhs.0, &MODULUS.0))
+    }
+
+    #[inline]
+    fn sub_lazy(&self, rhs: &FpLazy) -> FpLazy {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            FpLazy(Fp(self.0).sub(&Fp(rhs.0)).0)
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            // The difference is above -2p; adding 2p back on underflow
+            // leaves it in [0, 2p).
+            FpLazy(portable::sub(&self.0, &rhs.0, &TWO_MODULUS))
+        }
     }
 
     #[inline]
@@ -1221,6 +1280,31 @@ fn lazy_arithmetic_matches_canonical() {
             (a * b - c).square() - a
         );
         assert!(below_two_p(&ab.sub(&c)));
+
+        // Additive operations between lazy values.
+        let bc = b.lazy().mul(&c);
+        assert_eq!(ab.add(&c).reduce(), a * b + c);
+        assert_eq!(ab.add_lazy(&bc).reduce(), a * b + b * c);
+        assert_eq!(ab.sub_lazy(&bc).reduce(), a * b - b * c);
+        assert_eq!(bc.sub_lazy(&ab).reduce(), b * c - a * b);
+        assert_eq!(ab.double().reduce(), (a * b).double());
+        assert_eq!(
+            ab.double().double().double().reduce(),
+            (a * b).double().double().double()
+        );
+        assert_eq!(
+            ab.add_lazy(&bc).mul(&a).sub_lazy(&ab.double()).reduce(),
+            (a * b + b * c) * a - (a * b).double()
+        );
+        for v in [
+            ab.add(&c),
+            ab.add_lazy(&bc),
+            ab.sub_lazy(&bc),
+            bc.sub_lazy(&ab),
+            ab.double(),
+        ] {
+            assert!(below_two_p(&v));
+        }
     }
 
     // Extremes: the largest canonical element everywhere, and zero.
@@ -1247,6 +1331,34 @@ fn lazy_arithmetic_matches_canonical() {
         assert_eq!(raw.mul(&y).reduce(), x * y);
         assert_eq!(raw.square().reduce(), x.square());
         assert_eq!(raw.sub(&y).reduce(), x - y);
+
+        // Both operands raw: sums reach 2^256 and differences underflow.
+        let raw_y = FpLazy(portable::add(&y.0, &MODULUS.0, &[u64::MAX; 4]));
+        assert!(below_two_p(&raw_y));
+        assert_eq!(raw.add(&y).reduce(), x + y);
+        assert_eq!(raw.add_lazy(&raw_y).reduce(), x + y);
+        assert_eq!(raw.sub_lazy(&raw_y).reduce(), x - y);
+        assert_eq!(raw_y.sub_lazy(&raw).reduce(), y - x);
+        assert_eq!(raw.double().reduce(), x.double());
+        assert_eq!(raw.double().double().reduce(), x.double().double());
+        for v in [
+            raw.add(&y),
+            raw.add_lazy(&raw_y),
+            raw.sub_lazy(&raw_y),
+            raw.double(),
+        ] {
+            assert!(below_two_p(&v));
+        }
+        // The largest lazy value, 2p - 1, added to itself carries out of
+        // 256 bits.
+        let top = FpLazy(portable::sub(&TWO_MODULUS, &[1, 0, 0, 0], &[0; 4]));
+        assert!(below_two_p(&top));
+        assert_eq!(
+            top.add_lazy(&top).reduce(),
+            Fp(portable::canonicalize(&top.0, &MODULUS.0)).double()
+        );
+        assert!(below_two_p(&top.add_lazy(&top)));
+        assert_eq!(top.sub_lazy(&top).reduce(), Fp::zero());
     }
 }
 

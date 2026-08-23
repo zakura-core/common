@@ -29,6 +29,13 @@ and this project adheres to Rust's notion of
   square, and the `y` product, and each output coordinate is canonicalized
   once. A crate-private lazy element type enforces the one-canonical-operand
   rule; on the Apple assembly backend it degenerates to canonical arithmetic.
+- The Jacobian point doubling, addition, and mixed addition (and the paired
+  mixed addition) keep their intermediate values unreduced with the same lazy
+  arithmetic, which gains lazy addition, subtraction, and doubling (one
+  correction by `2p` each, the same cost as the canonical forms). Only the
+  values compared for the exceptional cases, one multiplier, and the output
+  coordinates are canonicalized. The addition formulas compute `Z3` as
+  `2·Z1·Z2·H` and `2·Z1·H` rather than through the `(Z1 + Z2)^2` identity.
 - The GLV multiscalar multiplication backend now plans its own window width.
   It evaluates the GLV ladder at the generic default width and one bit wider,
   runs at the cheaper, and is selected only when that beats the generic

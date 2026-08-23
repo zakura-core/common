@@ -289,8 +289,11 @@ pub(super) const fn reduce_square_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u6
 /// domain, and the result is below `modulus + 2 * modulus^2 / R`, which is
 /// under `1.5 * modulus` for the Pasta moduli; so the result can feed another
 /// `mul_lazy` as its unreduced operand without ever being canonicalized.
-#[cfg(any(feature = "glv", test))]
-#[cfg_attr(not(feature = "uninline-portable"), inline)]
+///
+/// Always inlined, like the reduction inside `mul`: left to the inliner's
+/// judgement, the point formulas' many call sites made it an out-of-line
+/// call and cost more than the skipped subtraction saved.
+#[cfg_attr(not(feature = "uninline-portable"), inline(always))]
 #[cfg_attr(
     all(
         feature = "aarch64-asm",
@@ -311,8 +314,7 @@ pub(super) const fn mul_lazy(
 
 /// Squares a value below `2 * modulus`, returning a result below
 /// `2 * modulus` (the bound [`sqr_n_lazy`] establishes for chains of these).
-#[cfg(any(feature = "glv", test))]
-#[cfg_attr(not(feature = "uninline-portable"), inline)]
+#[cfg_attr(not(feature = "uninline-portable"), inline(always))]
 #[cfg_attr(
     all(
         feature = "aarch64-asm",
@@ -325,19 +327,58 @@ pub(super) const fn square_lazy(value: &[u64; 4], modulus: &[u64; 4], inv: u64) 
     reduce_square_lazy(&square_wide(value), modulus, inv)
 }
 
-/// Whether `value < 2 * modulus`; the invariant of the lazy representation.
-#[cfg(any(feature = "glv", test))]
-pub(super) const fn is_below_twice(value: &[u64; 4], modulus: &[u64; 4]) -> bool {
-    // 2 * modulus as four limbs (it is below 2^256 for the Pasta moduli).
+/// `2 * modulus` as four limbs; it is below `2^256` for the Pasta moduli.
+pub(super) const fn twice(modulus: &[u64; 4]) -> [u64; 4] {
     let (d0, c) = adc(modulus[0], modulus[0], 0);
     let (d1, c) = adc(modulus[1], modulus[1], c);
     let (d2, c) = adc(modulus[2], modulus[2], c);
     let (d3, _) = adc(modulus[3], modulus[3], c);
-    let (_, borrow) = sbb(value[0], d0, 0);
-    let (_, borrow) = sbb(value[1], d1, borrow);
-    let (_, borrow) = sbb(value[2], d2, borrow);
-    let (_, borrow) = sbb(value[3], d3, borrow);
+    [d0, d1, d2, d3]
+}
+
+/// Whether `value < 2 * modulus`; the invariant of the lazy representation.
+pub(super) const fn is_below_twice(value: &[u64; 4], modulus: &[u64; 4]) -> bool {
+    let two_modulus = twice(modulus);
+    let (_, borrow) = sbb(value[0], two_modulus[0], 0);
+    let (_, borrow) = sbb(value[1], two_modulus[1], borrow);
+    let (_, borrow) = sbb(value[2], two_modulus[2], borrow);
+    let (_, borrow) = sbb(value[3], two_modulus[3], borrow);
     borrow != 0
+}
+
+/// Adds two values below `2 * modulus`, returning a value below
+/// `2 * modulus`. The sum is below `4 * modulus`, which can exceed `2^256`,
+/// so the carry out of the addition joins the correction: `two_modulus`
+/// (which must be `2 * modulus`) is subtracted, and added back only when the
+/// subtraction underflowed without the sum having carried.
+#[cfg_attr(not(feature = "uninline-portable"), inline)]
+#[cfg_attr(
+    all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ),
+    allow(dead_code)
+)]
+pub(super) const fn add_lazy(lhs: &[u64; 4], rhs: &[u64; 4], two_modulus: &[u64; 4]) -> [u64; 4] {
+    let (d0, carry) = adc(lhs[0], rhs[0], 0);
+    let (d1, carry) = adc(lhs[1], rhs[1], carry);
+    let (d2, carry) = adc(lhs[2], rhs[2], carry);
+    let (d3, carry) = adc(lhs[3], rhs[3], carry);
+
+    let (d0, borrow) = sbb(d0, two_modulus[0], 0);
+    let (d1, borrow) = sbb(d1, two_modulus[1], borrow);
+    let (d2, borrow) = sbb(d2, two_modulus[2], borrow);
+    let (d3, borrow) = sbb(d3, two_modulus[3], borrow);
+
+    // `borrow` is all ones on underflow; the sum's carry (0 or 1) cancels it,
+    // since a sum that reached 2^256 was at least 2 * modulus.
+    let mask = borrow & carry.wrapping_sub(1);
+    let (d0, c) = adc(d0, two_modulus[0] & mask, 0);
+    let (d1, c) = adc(d1, two_modulus[1] & mask, c);
+    let (d2, c) = adc(d2, two_modulus[2] & mask, c);
+    let (d3, _) = adc(d3, two_modulus[3] & mask, c);
+    [d0, d1, d2, d3]
 }
 
 /// Subtracts `modulus` from a value below `2 * modulus` if that does not

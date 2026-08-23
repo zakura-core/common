@@ -25,6 +25,7 @@ use super::{Fp, Fq};
 
 #[cfg(feature = "alloc")]
 use crate::arithmetic::{Coordinates, CurveAffine, CurveExt};
+use crate::fields::lazy::{LazyElement, LazyField};
 
 macro_rules! impl_raw_coordinates {
     (glv, $name_affine:ident, $base:ident) => {
@@ -512,12 +513,18 @@ macro_rules! new_curve_impl {
                 } else if bool::from(rhs.is_identity()) {
                     *self
                 } else {
-                    let z1z1 = Field::square(&self.z);
-                    let z2z2 = Field::square(&rhs.z);
-                    let u1 = self.x * z2z2;
-                    let u2 = rhs.x * z1z1;
-                    let s1 = self.y * z2z2 * rhs.z;
-                    let s2 = rhs.y * z1z1 * self.z;
+                    // http://www.hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html#addition-add-2007-bl
+                    //
+                    // Intermediate values stay lazy (below 2p) wherever the
+                    // one-canonical-operand rule of `fields::lazy` allows;
+                    // the values compared for the exceptional cases and the
+                    // output coordinates are canonicalized.
+                    let z1z1 = self.z.lazy().square();
+                    let z2z2 = rhs.z.lazy().square();
+                    let u1 = z2z2.mul(&self.x).reduce();
+                    let u2 = z1z1.mul(&rhs.x).reduce();
+                    let s1 = z2z2.mul(&self.y).mul(&rhs.z).reduce();
+                    let s2 = z1z1.mul(&rhs.y).mul(&self.z).reduce();
 
                     if u1 == u2 {
                         if s1 == s2 {
@@ -527,17 +534,24 @@ macro_rules! new_curve_impl {
                         }
                     } else {
                         let h = u2 - u1;
-                        let i = Field::square(&(h + h));
-                        let j = h * i;
+                        let i = (h + h).lazy().square();
+                        let j = i.mul(&h);
                         let r = s2 - s1;
                         let r = r + r;
-                        let v = u1 * i;
-                        let x3 = Field::square(&r) - j - v - v;
-                        let s1 = s1 * j;
-                        let s1 = s1 + s1;
-                        let y3 = r * (v - x3) - s1;
-                        let z3 = Field::square(&(self.z + rhs.z)) - z1z1 - z2z2;
-                        let z3 = z3 * h;
+                        let v = i.mul(&u1);
+                        let x3 = r
+                            .lazy()
+                            .square()
+                            .sub_lazy(&j)
+                            .sub_lazy(&v.double())
+                            .reduce();
+                        let y3 = v
+                            .sub(&x3)
+                            .mul(&r)
+                            .sub_lazy(&j.mul(&s1).double())
+                            .reduce();
+                        // (Z1 + Z2)^2 - Z1Z1 - Z2Z2 = 2 Z1 Z2.
+                        let z3 = self.z.lazy().mul(&rhs.z).double().reduce() * h;
 
                         $name {
                             x: x3, y: y3, z: z3
@@ -556,9 +570,15 @@ macro_rules! new_curve_impl {
                 } else if bool::from(rhs.is_identity()) {
                     *self
                 } else {
-                    let z1z1 = Field::square(&self.z);
-                    let u2 = rhs.x * z1z1;
-                    let s2 = rhs.y * z1z1 * self.z;
+                    // http://www.hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html#addition-madd-2007-bl
+                    //
+                    // Intermediate values stay lazy (below 2p) wherever the
+                    // one-canonical-operand rule of `fields::lazy` allows;
+                    // the values compared for the exceptional cases and the
+                    // output coordinates are canonicalized.
+                    let z1z1 = self.z.lazy().square();
+                    let u2 = z1z1.mul(&rhs.x).reduce();
+                    let s2 = z1z1.mul(&rhs.y).mul(&self.z).reduce();
 
                     if self.x == u2 {
                         if self.y == s2 {
@@ -568,18 +588,24 @@ macro_rules! new_curve_impl {
                         }
                     } else {
                         let h = u2 - self.x;
-                        let hh = Field::square(&h);
-                        let i = hh + hh;
-                        let i = i + i;
-                        let j = h * i;
+                        let i = h.lazy().square().double().double();
+                        let j = i.mul(&h);
                         let r = s2 - self.y;
                         let r = r + r;
-                        let v = self.x * i;
-                        let x3 = Field::square(&r) - j - v - v;
-                        let j = self.y * j;
-                        let j = j + j;
-                        let y3 = r * (v - x3) - j;
-                        let z3 = Field::square(&(self.z + h)) - z1z1 - hh;
+                        let v = i.mul(&self.x);
+                        let x3 = r
+                            .lazy()
+                            .square()
+                            .sub_lazy(&j)
+                            .sub_lazy(&v.double())
+                            .reduce();
+                        let y3 = v
+                            .sub(&x3)
+                            .mul(&r)
+                            .sub_lazy(&j.mul(&self.y).double())
+                            .reduce();
+                        // (Z1 + H)^2 - Z1Z1 - HH = 2 Z1 H.
+                        let z3 = h.lazy().mul(&self.z).double().reduce();
 
                         $name {
                             x: x3, y: y3, z: z3
@@ -937,22 +963,20 @@ macro_rules! impl_projective_curve_specific {
             //
             // There are no points of order 2.
 
-            let a = Field::square(&self.x);
-            let b = Field::square(&self.y);
-            let c = Field::square(&b);
-            let d = self.x + b;
-            let d = Field::square(&d);
-            let d = d - a - c;
-            let d = d + d;
-            let e = a + a + a;
-            let f = Field::square(&e);
-            let z3 = self.z * self.y;
-            let z3 = z3 + z3;
-            let x3 = f - (d + d);
-            let c = c + c;
-            let c = c + c;
-            let c = c + c;
-            let y3 = e * (d - x3) - c;
+            // Intermediate values stay lazy (below 2p) wherever the
+            // one-canonical-operand rule of `fields::lazy` allows; only the
+            // multiplier `e` and the output coordinates are canonicalized.
+            let a = self.x.lazy().square();
+            let b = self.y.lazy().square();
+            let c = b.square();
+            let d = b.add(&self.x).square().sub_lazy(&a).sub_lazy(&c).double();
+            let e = a.double().add_lazy(&a);
+            let f = e.square();
+            let e = e.reduce();
+            let z3 = self.z.lazy().mul(&self.y).double().reduce();
+            let x3 = f.sub_lazy(&d.double()).reduce();
+            let c = c.double().double().double();
+            let y3 = d.sub(&x3).mul(&e).sub_lazy(&c).reduce();
 
             let tmp = $name {
                 x: x3,
@@ -1144,31 +1168,49 @@ impl Ep {
         lhs_1: &Self,
         rhs_1: &EpAffine,
     ) -> [Self; 2] {
-        let z1z1_0 = Field::square(&lhs_0.z);
-        let z1z1_1 = Field::square(&lhs_1.z);
-        let u2_0 = rhs_0.x * z1z1_0;
-        let u2_1 = rhs_1.x * z1z1_1;
-        let s2_0 = rhs_0.y * z1z1_0 * lhs_0.z;
-        let s2_1 = rhs_1.y * z1z1_1 * lhs_1.z;
+        // The lazy (below 2p) form of the mixed addition above; the inputs
+        // are nonidentity and distinct by contract, so nothing is compared.
+        let z1z1_0 = lhs_0.z.lazy().square();
+        let z1z1_1 = lhs_1.z.lazy().square();
+        let u2_0 = z1z1_0.mul(&rhs_0.x);
+        let u2_1 = z1z1_1.mul(&rhs_1.x);
+        let s2_0 = z1z1_0.mul(&rhs_0.y).mul(&lhs_0.z);
+        let s2_1 = z1z1_1.mul(&rhs_1.y).mul(&lhs_1.z);
 
-        let h_0 = u2_0 - lhs_0.x;
-        let h_1 = u2_1 - lhs_1.x;
-        let hh_0 = Field::square(&h_0);
-        let hh_1 = Field::square(&h_1);
-        let i_0 = hh_0.double().double();
-        let i_1 = hh_1.double().double();
-        let j_0 = h_0 * i_0;
-        let j_1 = h_1 * i_1;
-        let r_0 = (s2_0 - lhs_0.y).double();
-        let r_1 = (s2_1 - lhs_1.y).double();
-        let v_0 = lhs_0.x * i_0;
-        let v_1 = lhs_1.x * i_1;
-        let x3_0 = Field::square(&r_0) - j_0 - v_0.double();
-        let x3_1 = Field::square(&r_1) - j_1 - v_1.double();
-        let y3_0 = r_0 * (v_0 - x3_0) - (lhs_0.y * j_0).double();
-        let y3_1 = r_1 * (v_1 - x3_1) - (lhs_1.y * j_1).double();
-        let z3_0 = Field::square(&(lhs_0.z + h_0)) - z1z1_0 - hh_0;
-        let z3_1 = Field::square(&(lhs_1.z + h_1)) - z1z1_1 - hh_1;
+        let h_0 = u2_0.sub(&lhs_0.x).reduce();
+        let h_1 = u2_1.sub(&lhs_1.x).reduce();
+        let i_0 = h_0.lazy().square().double().double();
+        let i_1 = h_1.lazy().square().double().double();
+        let j_0 = i_0.mul(&h_0);
+        let j_1 = i_1.mul(&h_1);
+        let r_0 = s2_0.sub(&lhs_0.y).double().reduce();
+        let r_1 = s2_1.sub(&lhs_1.y).double().reduce();
+        let v_0 = i_0.mul(&lhs_0.x);
+        let v_1 = i_1.mul(&lhs_1.x);
+        let x3_0 = r_0
+            .lazy()
+            .square()
+            .sub_lazy(&j_0)
+            .sub_lazy(&v_0.double())
+            .reduce();
+        let x3_1 = r_1
+            .lazy()
+            .square()
+            .sub_lazy(&j_1)
+            .sub_lazy(&v_1.double())
+            .reduce();
+        let y3_0 = v_0
+            .sub(&x3_0)
+            .mul(&r_0)
+            .sub_lazy(&j_0.mul(&lhs_0.y).double())
+            .reduce();
+        let y3_1 = v_1
+            .sub(&x3_1)
+            .mul(&r_1)
+            .sub_lazy(&j_1.mul(&lhs_1.y).double())
+            .reduce();
+        let z3_0 = h_0.lazy().mul(&lhs_0.z).double().reduce();
+        let z3_1 = h_1.lazy().mul(&lhs_1.z).double().reduce();
 
         [
             Self {
