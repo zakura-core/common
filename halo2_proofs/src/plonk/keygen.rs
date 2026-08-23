@@ -287,15 +287,7 @@ where
             .map(|poly| vk.domain.lagrange_from_vec(poly)),
     );
 
-    let fixed_polys: Vec<_> = fixed
-        .iter()
-        .map(|poly| vk.domain.lagrange_to_coeff(poly.clone()))
-        .collect();
-
-    let fixed_cosets = fixed_polys
-        .iter()
-        .map(|poly| vk.domain.coeff_to_extended(poly.clone()))
-        .collect();
+    let (fixed_polys, fixed_cosets) = vk.domain.batch_lagrange_to_coeff_and_extended(&fixed);
 
     let permutation_pk = assembly
         .permutation

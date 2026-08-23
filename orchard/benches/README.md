@@ -37,6 +37,26 @@ Key generation and one genuine proof-verification preflight occur before the
 timed routine. The benchmark uses ten flat samples, a two-second warmup, and a
 15-second measurement interval.
 
+For a multicore run, set both thread-count variables to the same value:
+
+```console
+RAYON_NUM_THREADS=10 ORCHARD_K11_PROVER_THREADS=10 \
+    cargo +1.88 bench --locked \
+    -p zakura-orchard --features circuit \
+    --bench orchard_k11_prover
+```
+
+## Proving-key generation
+
+The proving-key benchmark uses the same Orchard circuit and Criterion timing
+configuration:
+
+```console
+RAYON_NUM_THREADS=10 cargo +1.88 bench --locked \
+    -p zakura-orchard --features circuit \
+    --bench orchard_k11_keygen
+```
+
 ## Batch verifier fixture corpus
 
 The batch-verifier harness is an ignored library test because it needs access
@@ -90,7 +110,8 @@ For final comparisons:
 2. Generate and hash the fixture corpus once, then reuse it byte-for-byte.
 3. Keep the machine on external power and free of competing build or benchmark
    processes.
-4. Set `RAYON_NUM_THREADS=1` for every preflight and timed leg.
+4. Set `RAYON_NUM_THREADS` explicitly for every preflight and timed leg. For
+   multicore prover runs, set `ORCHARD_K11_PROVER_THREADS` to the same value.
 5. Qualify the host with two control runs before comparing revisions.
 6. Run one balanced control/candidate/candidate/control bracket.
 7. Retain raw samples, binary and corpus hashes, source commits, feature sets,

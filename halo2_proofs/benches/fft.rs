@@ -15,6 +15,8 @@ use rand::rng;
 
 const ORCHARD_K: u32 = 11;
 const ORCHARD_EXTENDED_K: u32 = 14;
+const LARGE_ZERO_PADDED_K: u32 = 14;
+const LARGE_ZERO_PADDED_EXTENDED_K: u32 = 17;
 
 fn criterion_benchmark(c: &mut Criterion) {
     let params = Params::<EqAffine>::new(ORCHARD_K);
@@ -91,6 +93,21 @@ fn criterion_benchmark(c: &mut Criterion) {
             );
         },
     );
+
+    let extension = 1 << (LARGE_ZERO_PADDED_EXTENDED_K - LARGE_ZERO_PADDED_K);
+    let domain = poly::EvaluationDomain::<Fp>::new(extension + 1, LARGE_ZERO_PADDED_K);
+    assert_eq!(domain.extended_len(), 1 << LARGE_ZERO_PADDED_EXTENDED_K);
+    let coefficients = (0..(1 << LARGE_ZERO_PADDED_K))
+        .map(|_| Fp::random(&mut rng()))
+        .collect::<Vec<_>>();
+
+    group.bench_function(BenchmarkId::new("coeff_to_extended", "k14-to-k17"), |b| {
+        b.iter_batched(
+            || domain.coeff_from_vec(coefficients.clone()),
+            |coefficients| domain.coeff_to_extended(coefficients),
+            BatchSize::LargeInput,
+        );
+    });
 }
 
 criterion_group!(benches, criterion_benchmark);

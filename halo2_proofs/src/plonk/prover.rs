@@ -316,16 +316,8 @@ pub fn create_proof<
                 transcript.write_point(*commitment)?;
             }
 
-            let advice_polys: Vec<_> = advice
-                .clone()
-                .into_iter()
-                .map(|poly| domain.lagrange_to_coeff(poly))
-                .collect();
-
-            let advice_cosets: Vec<_> = advice_polys
-                .iter()
-                .map(|poly| domain.coeff_to_extended(poly.clone()))
-                .collect();
+            let (advice_polys, advice_cosets) =
+                domain.batch_lagrange_to_coeff_and_extended(&advice);
 
             Ok(AdviceSingle {
                 advice_values: advice,

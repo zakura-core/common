@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added a reproducible Orchard proving-key benchmark and configurable worker
+  counts for the one-Action prover benchmark.
 - Added `MerkleHashBatchWorkspace` and
   `MerkleHashOrchard::combine_batch_with_workspace` under the
   `weighted-merkle` feature so repeated batched tree hashing can retain its

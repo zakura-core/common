@@ -14,9 +14,17 @@ use group::ff::{BatchInvert, Field};
 
 use std::marker::PhantomData;
 
+#[cfg(feature = "multicore")]
+use maybe_rayon::prelude::*;
+
 /// The current Orchard circuit's last queried row is six rows behind the
 /// challenge point.
 const ORCHARD_LAST_ROTATION: i32 = -6;
+
+type PolynomialTransformBatch<F> = (
+    Vec<Polynomial<F, Coeff>>,
+    Vec<Polynomial<F, ExtendedLagrangeCoeff>>,
+);
 
 /// This structure contains precomputed constants and other details needed for
 /// performing operations on an evaluation domain of size $2^k$ and an extended
@@ -263,6 +271,87 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
     }
 
+    /// Converts several Lagrange polynomials to coefficient and
+    /// extended-coset form, parallelizing across polynomials.
+    ///
+    /// Every polynomial must have this domain's base length, which is not
+    /// encoded in [`Polynomial`]'s basis marker. The shared twiddle tables are
+    /// derived from this domain, remain immutable, and are dropped when the
+    /// batch completes. Each job owns its coefficient buffers, and collecting
+    /// the indexed parallel iterator preserves input order.
+    ///
+    /// Exact equivalence with the independent transforms, including base and
+    /// extended domains of size one and explicit one- and three-thread pools,
+    /// is covered by
+    /// `test_batched_lagrange_transforms_match_independent_transforms`.
+    pub(crate) fn batch_lagrange_to_coeff_and_extended(
+        &self,
+        polynomials: &[Polynomial<F, LagrangeCoeff>],
+    ) -> PolynomialTransformBatch<F> {
+        if polynomials.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let base_inverse_twiddles = twiddle_table(self.omega_inv, 1 << self.k);
+        let extended_forward_twiddles = if self.k == 0 {
+            Vec::new()
+        } else {
+            twiddle_table(self.extended_omega, self.extended_len())
+        };
+
+        // Rayon below schedules one complete pair of transforms per
+        // polynomial. The keygen and prover call sites expose fixed,
+        // permutation, or advice polynomials as coarse-grained jobs, so both
+        // FFTs disable nested Rayon joins and leave work stealing at the
+        // polynomial boundary. A depth of zero changes only scheduling: the
+        // butterflies retain their recursive, depth-first traversal for cache
+        // locality.
+        const INNER_PARALLEL_DEPTH: u32 = 0;
+
+        let transform = |polynomial: &Polynomial<F, LagrangeCoeff>| {
+            assert_eq!(polynomial.len(), 1 << self.k);
+
+            let mut values = polynomial.values.clone();
+            bitreverse_permute(&mut values, self.k);
+            recursive_butterfly_after_prefix(
+                &mut values,
+                1,
+                1,
+                &base_inverse_twiddles,
+                INNER_PARALLEL_DEPTH,
+            );
+            for value in &mut values {
+                *value *= &self.ifft_divisor;
+            }
+            let polynomial = Polynomial {
+                values,
+                _marker: PhantomData,
+            };
+
+            let mut extended = polynomial.clone();
+            self.distribute_powers_zeta_serial(&mut extended.values, true);
+            Self::fft_zero_padded_with_twiddles(
+                &mut extended.values,
+                self.k,
+                self.extended_k,
+                &extended_forward_twiddles,
+                INNER_PARALLEL_DEPTH,
+            );
+            let extended = Polynomial {
+                values: extended.values,
+                _marker: PhantomData,
+            };
+            (polynomial, extended)
+        };
+
+        #[cfg(feature = "multicore")]
+        let transformed = polynomials.par_iter().map(transform).collect::<Vec<_>>();
+        #[cfg(not(feature = "multicore"))]
+        let transformed = polynomials.iter().map(transform).collect::<Vec<_>>();
+
+        transformed.into_iter().unzip()
+    }
+
     /// Rotate the extended domain polynomial over the original domain.
     pub fn rotate_extended(
         &self,
@@ -360,6 +449,20 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         });
     }
 
+    fn distribute_powers_zeta_serial(&self, values: &mut [F], into_coset: bool) {
+        let coset_powers = if into_coset {
+            [self.g_coset, self.g_coset_inv]
+        } else {
+            [self.g_coset_inv, self.g_coset]
+        };
+        for (index, value) in values.iter_mut().enumerate() {
+            let power = index % (coset_powers.len() + 1);
+            if power != 0 {
+                *value *= &coset_powers[power - 1];
+            }
+        }
+    }
+
     fn ifft(a: &mut [F], omega_inv: F, log_n: u32, divisor: F) {
         best_fft(a, omega_inv, log_n);
         parallelize(a, |a, _| {
@@ -382,21 +485,43 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             best_fft(coefficients, omega, log_n);
             return;
         }
-
-        // A constant polynomial needs no butterfly arithmetic.
         if n == 1 {
             coefficients.resize(extended_n, coefficients[0]);
             return;
         }
 
-        let mut twiddles = Vec::with_capacity(extended_n / 2);
-        let mut twiddle = F::ONE;
-        for index in 0..extended_n / 2 {
-            twiddles.push(twiddle);
-            if index + 1 < extended_n / 2 {
-                twiddle *= &omega;
-            }
+        let twiddles = twiddle_table(omega, extended_n);
+        Self::fft_zero_padded_with_twiddles(
+            coefficients,
+            log_n,
+            extended_log_n,
+            &twiddles,
+            parallel_depth(),
+        );
+    }
+
+    fn fft_zero_padded_with_twiddles(
+        coefficients: &mut Vec<F>,
+        log_n: u32,
+        extended_log_n: u32,
+        twiddles: &[F],
+        parallel_depth: u32,
+    ) {
+        assert!(log_n <= extended_log_n);
+
+        let n = 1 << log_n;
+        let extended_n = 1 << extended_log_n;
+        let extension = extended_n / n;
+
+        assert_eq!(coefficients.len(), n);
+
+        // A constant polynomial needs no butterfly arithmetic.
+        if n == 1 {
+            assert!(twiddles.is_empty());
+            coefficients.resize(extended_n, coefficients[0]);
+            return;
         }
+        assert_eq!(twiddles.len(), extended_n / 2);
 
         // For an n-length input, bitreverse_extended(i) is
         // extension * bitreverse_n(i). The omitted radix-2 stages would copy
@@ -434,17 +559,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
         debug_assert_eq!(values.len(), extended_n);
 
-        let mut parallel_depth = 0;
-        let mut parallel_tasks = 1;
-        let threads = multicore::current_num_threads();
-        while parallel_tasks < threads {
-            parallel_depth += 1;
-            parallel_tasks <<= 1;
-        }
-
         // Each 2 * extension chunk contains the first retained stage. Continue
-        // with the other log_n - 1 butterfly stages.
-        recursive_butterfly_after_prefix(&mut values, 2 * extension, 1, &twiddles, parallel_depth);
+        // with the other log_n - 1 butterfly stages. A zero parallel depth
+        // still traverses recursively to retain cache locality.
+        recursive_butterfly_after_prefix(&mut values, 2 * extension, 1, twiddles, parallel_depth);
         *coefficients = values;
     }
 
@@ -563,6 +681,38 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     }
 }
 
+fn twiddle_table<F: Field>(omega: F, n: usize) -> Vec<F> {
+    let mut twiddles = Vec::with_capacity(n / 2);
+    let mut twiddle = F::ONE;
+    for index in 0..n / 2 {
+        twiddles.push(twiddle);
+        if index + 1 < n / 2 {
+            twiddle *= &omega;
+        }
+    }
+    twiddles
+}
+
+fn parallel_depth() -> u32 {
+    let mut depth = 0;
+    let mut tasks = 1;
+    let threads = multicore::current_num_threads();
+    while tasks < threads {
+        depth += 1;
+        tasks <<= 1;
+    }
+    depth
+}
+
+fn bitreverse_permute<F>(values: &mut [F], log_n: u32) {
+    for index in 0..values.len() {
+        let reversed = bitreverse(index, log_n);
+        if index < reversed {
+            values.swap(index, reversed);
+        }
+    }
+}
+
 fn bitreverse(value: usize, bits: u32) -> usize {
     if bits == 0 {
         0
@@ -676,6 +826,72 @@ fn test_zero_padded_fft_matches_best_fft() {
             assert_eq!(&actual[..], &expected);
         }
     }
+}
+
+#[test]
+fn test_batched_lagrange_transforms_match_independent_transforms() {
+    use crate::pasta::pallas::Scalar;
+
+    for k in 0..=8 {
+        for extension_log in 0..=4 {
+            let degree = if extension_log == 0 {
+                2
+            } else {
+                (1 << extension_log) + 1
+            };
+            let domain = EvaluationDomain::<Scalar>::new(degree, k);
+            let polynomials = (0..5)
+                .map(|polynomial| {
+                    let values = (0..1usize << k)
+                        .map(|coefficient| {
+                            Scalar::from(((polynomial + 1) * (coefficient + 2)) as u64)
+                        })
+                        .collect();
+                    domain.lagrange_from_vec(values)
+                })
+                .collect::<Vec<_>>();
+
+            let check = || {
+                let expected_coefficients = polynomials
+                    .iter()
+                    .cloned()
+                    .map(|polynomial| domain.lagrange_to_coeff(polynomial))
+                    .collect::<Vec<_>>();
+                let expected_extended = expected_coefficients
+                    .iter()
+                    .cloned()
+                    .map(|polynomial| domain.coeff_to_extended(polynomial))
+                    .collect::<Vec<_>>();
+                let (coefficients, extended) =
+                    domain.batch_lagrange_to_coeff_and_extended(&polynomials);
+
+                assert_eq!(coefficients.len(), expected_coefficients.len());
+                assert_eq!(extended.len(), expected_extended.len());
+                for (actual, expected) in coefficients.iter().zip(&expected_coefficients) {
+                    assert_eq!(&actual[..], &expected[..]);
+                }
+                for (actual, expected) in extended.iter().zip(&expected_extended) {
+                    assert_eq!(&actual[..], &expected[..]);
+                }
+            };
+
+            #[cfg(feature = "multicore")]
+            for threads in [1, 3] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(check);
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
+    let domain = EvaluationDomain::<Scalar>::new(9, 3);
+    let (coefficients, extended) = domain.batch_lagrange_to_coeff_and_extended(&[]);
+    assert!(coefficients.is_empty());
+    assert!(extended.is_empty());
 }
 
 #[test]
