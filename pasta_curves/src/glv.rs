@@ -1629,12 +1629,419 @@ impl<C: GlvParams> Decomposed<C> {
     }
 }
 
-/// Computes an unnormalized radix-2 FFT over public curve points.
+#[cfg(test)]
+const MIXED_RADIX_K10: [usize; 3] = [8, 8, 16];
+#[cfg(test)]
+const MIXED_RADIX_K11: [usize; 3] = [8, 16, 16];
+#[cfg(test)]
+const MIXED_RADIX_K12: [usize; 3] = [16, 16, 16];
+#[cfg(test)]
+const MIXED_RADIX_K13: [usize; 4] = [8, 8, 8, 16];
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct FftOperationCounts {
+    point_scalar_multiplications: usize,
+    curve_additions: usize,
+    twiddle_decompositions: usize,
+    layout_moves: usize,
+    affine_substage_batches: Vec<usize>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FFT_OPERATION_COUNTS: core::cell::RefCell<FftOperationCounts> =
+        core::cell::RefCell::new(FftOperationCounts::default());
+}
+
+#[inline]
+fn record_fft_scalar_multiplications(count: usize) {
+    #[cfg(test)]
+    FFT_OPERATION_COUNTS.with(|counts| {
+        counts.borrow_mut().point_scalar_multiplications += count;
+    });
+    #[cfg(not(test))]
+    let _ = count;
+}
+
+#[inline]
+fn record_fft_twiddle_decompositions(count: usize) {
+    #[cfg(test)]
+    FFT_OPERATION_COUNTS.with(|counts| {
+        counts.borrow_mut().twiddle_decompositions += count;
+    });
+    #[cfg(not(test))]
+    let _ = count;
+}
+
+#[inline]
+fn record_fft_layout_moves(count: usize) {
+    #[cfg(test)]
+    FFT_OPERATION_COUNTS.with(|counts| {
+        counts.borrow_mut().layout_moves += count;
+    });
+    #[cfg(not(test))]
+    let _ = count;
+}
+
+#[inline]
+fn record_fft_affine_substage_batch(width: usize) {
+    #[cfg(test)]
+    FFT_OPERATION_COUNTS.with(|counts| {
+        let mut counts = counts.borrow_mut();
+        counts.curve_additions += 2 * width;
+        counts.affine_substage_batches.push(width);
+    });
+    #[cfg(not(test))]
+    let _ = width;
+}
+
+#[cfg(test)]
+fn reset_fft_operation_counts() {
+    FFT_OPERATION_COUNTS.with(|counts| *counts.borrow_mut() = FftOperationCounts::default());
+}
+
+#[cfg(test)]
+fn fft_operation_counts() -> FftOperationCounts {
+    FFT_OPERATION_COUNTS.with(|counts| counts.borrow().clone())
+}
+
+fn mixed_radix_factors(log_n: u32) -> Option<Vec<usize>> {
+    // A single DFT8 or DFT16 is already the existing bottom codelet, while
+    // 2 * 16 at k = 5 has the same multiplication count as the current
+    // DFT16-plus-radix-2 schedule and would add transpose traffic. Every
+    // exponent from six upward is a sum of threes and fours.
+    if log_n < 6 {
+        return None;
+    }
+
+    let mut factors = Vec::<usize>::new();
+    let mut remaining = log_n;
+    match log_n % 4 {
+        0 => {}
+        1 => {
+            factors.extend([8, 8, 8]);
+            remaining -= 9;
+        }
+        2 => {
+            factors.extend([8, 8]);
+            remaining -= 6;
+        }
+        3 => {
+            factors.push(8);
+            remaining -= 3;
+        }
+        _ => unreachable!(),
+    }
+    factors.extend((0..remaining / 4).map(|_| 16));
+    debug_assert_eq!(
+        factors
+            .iter()
+            .map(|factor| factor.trailing_zeros())
+            .sum::<u32>(),
+        log_n
+    );
+    Some(factors)
+}
+
+fn bitreverse_radix(mut value: usize, radix: usize) -> usize {
+    debug_assert!(radix.is_power_of_two());
+    debug_assert!(value < radix);
+    let mut reversed = 0;
+    for _ in 0..radix.trailing_zeros() {
+        reversed = (reversed << 1) | (value & 1);
+        value >>= 1;
+    }
+    reversed
+}
+
+/// Returns the natural-order source for one slot of the first, contiguous
+/// codelet tier. The first radix is locally bit-reversed because the DFT8 and
+/// DFT16 codelets consume radix-2 DIT order.
+fn mixed_radix_initial_source(block: usize, local: usize, factors: &[usize]) -> usize {
+    let mut source = bitreverse_radix(local, factors[0]);
+    let mut higher = block;
+    for &radix in &factors[1..] {
+        let digit = higher % radix;
+        higher /= radix;
+        source = digit + radix * source;
+    }
+    debug_assert_eq!(higher, 0);
+    source
+}
+
+struct PowerTwiddleCache<C: GlvParams> {
+    omega: C::ScalarExt,
+    slots: Vec<usize>,
+    values: Vec<Decomposed<C>>,
+}
+
+impl<C: GlvParams> PowerTwiddleCache<C> {
+    fn new(omega: C::ScalarExt, n: usize) -> Self {
+        Self {
+            omega,
+            slots: alloc::vec![usize::MAX; n / 2],
+            values: Vec::new(),
+        }
+    }
+
+    fn get(&mut self, exponent: usize) -> Decomposed<C> {
+        assert!(exponent != 0 && exponent < self.slots.len());
+        let slot = self.slots[exponent];
+        if slot != usize::MAX {
+            return self.values[slot].clone();
+        }
+
+        let value = Decomposed::<C>::new(&self.omega.pow_vartime([exponent as u64]));
+        record_fft_twiddle_decompositions(1);
+        self.slots[exponent] = self.values.len();
+        self.values.push(value.clone());
+        value
+    }
+}
+
+struct LowMultiplicationScalars<C: GlvParams> {
+    shared: [Decomposed<C>; 3],
+    odd16: Option<[Decomposed<C>; 4]>,
+}
+
+impl<C: GlvParams> LowMultiplicationScalars<C> {
+    fn new(
+        omega: C::ScalarExt,
+        n: usize,
+        needs_fft16: bool,
+        powers: &mut PowerTwiddleCache<C>,
+    ) -> Self {
+        let root8 = omega.pow_vartime([(n / 8) as u64]);
+        let root8_cubed = root8.square() * root8;
+        let c = (root8 + root8_cubed) * C::ScalarExt::TWO_INV;
+        let d = (root8 - root8_cubed) * C::ScalarExt::TWO_INV;
+        record_fft_twiddle_decompositions(2);
+        let shared = [
+            powers.get(n / 4),
+            Decomposed::<C>::new(&c),
+            Decomposed::<C>::new(&d),
+        ];
+        let odd16 = needs_fft16.then(|| [1usize, 3, 5, 7].map(|odd| powers.get(odd * (n / 16))));
+        Self { shared, odd16 }
+    }
+}
+
+fn prepare_mixed_radix_first_tier<C: GlvParams>(
+    points: &[C::AffineExt],
+    codelets: &mut [C::AffineExt],
+    factors: &[usize],
+) {
+    assert_eq!(points.len(), factors.iter().product::<usize>());
+    assert_eq!(points.len(), codelets.len());
+    record_fft_layout_moves(points.len());
+    let radix = factors[0];
+    for block in 0..points.len() / radix {
+        for local in 0..radix {
+            codelets[block * radix + local] =
+                points[mixed_radix_initial_source(block, local, factors)];
+        }
+    }
+}
+
+/// Applies one Cooley–Tukey diagonal while transposing into contiguous
+/// codelets for the next radix. If `inner` lower frequencies have already
+/// been transformed, digit `d` is multiplied by
+/// `omega^((N / (inner * radix)) * frequency * d)` before the radix-point
+/// transform. The destination locally bit-reverses `d` for the DIT codelet.
+fn mixed_radix_diagonal_transpose<C: GlvParams>(
+    source: &[C::AffineExt],
+    target: &mut [C::AffineExt],
+    factors: &[usize],
+    stage: usize,
+    powers: &mut PowerTwiddleCache<C>,
+) {
+    assert!((1..factors.len()).contains(&stage));
+    assert_eq!(source.len(), target.len());
+    let n = source.len();
+    record_fft_layout_moves(n);
+    let previous_radix = factors[stage - 1];
+    let previous_inner = factors[..stage - 1].iter().product::<usize>();
+    let inner = previous_inner * previous_radix;
+    let radix = factors[stage];
+    let transform = inner * radix;
+    let remaining = n / transform;
+    let mut group_for_exponent = alloc::vec![usize::MAX; n / 2];
+    let group_capacity = ((inner - 1) * (radix - 1)).min(n / 2 - 1);
+    let mut scalar_inputs = Vec::<Vec<C>>::with_capacity(group_capacity);
+    let mut destinations = Vec::<Vec<(usize, bool)>>::with_capacity(group_capacity);
+    let mut scalars = Vec::with_capacity(group_capacity);
+
+    for outer in 0..remaining {
+        for digit in 0..radix {
+            let higher = digit + radix * outer;
+            let local = bitreverse_radix(digit, radix);
+            for lower in 0..previous_inner {
+                for previous_digit in 0..previous_radix {
+                    let frequency = lower + previous_inner * previous_digit;
+                    let source_index =
+                        (higher * previous_inner + lower) * previous_radix + previous_digit;
+                    let target_index = (outer * inner + frequency) * radix + local;
+                    let exponent = (n / transform) * frequency * digit;
+                    if exponent == 0 {
+                        target[target_index] = source[source_index];
+                        continue;
+                    }
+
+                    let (exponent, negate) = if exponent >= n / 2 {
+                        (exponent - n / 2, true)
+                    } else {
+                        (exponent, false)
+                    };
+                    if exponent == 0 {
+                        target[target_index] = -source[source_index];
+                        continue;
+                    }
+
+                    let mut group = group_for_exponent[exponent];
+                    if group == usize::MAX {
+                        group = scalar_inputs.len();
+                        group_for_exponent[exponent] = group;
+                        scalar_inputs.push(Vec::with_capacity(remaining));
+                        destinations.push(Vec::with_capacity(remaining));
+                        scalars.push(powers.get(exponent));
+                    }
+                    scalar_inputs[group].push(C::from(source[source_index]));
+                    destinations[group].push((target_index, negate));
+                }
+            }
+        }
+    }
+
+    let multiplication_count = scalar_inputs.iter().map(Vec::len).sum();
+    record_fft_scalar_multiplications(multiplication_count);
+    let mut points = Vec::with_capacity(multiplication_count);
+    let mut scalar_refs = Vec::with_capacity(multiplication_count);
+    let mut target_slots = Vec::with_capacity(multiplication_count);
+    for (group, (inputs, destinations)) in scalar_inputs.into_iter().zip(destinations).enumerate() {
+        scalar_refs.extend((0..inputs.len()).map(|_| &scalars[group]));
+        points.extend(inputs);
+        target_slots.extend(destinations);
+    }
+
+    #[cfg(feature = "multicore")]
+    let products = {
+        let threads = maybe_rayon::current_num_threads();
+        let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
+        let batches: Vec<Vec<_>> = points
+            .par_chunks(batch_len)
+            .zip(scalar_refs.par_chunks(batch_len))
+            .map(|(points, scalars)| Table::<C>::mul_decomposed_pairs_affine(points, scalars))
+            .collect();
+        batches.into_iter().flatten().collect::<Vec<_>>()
+    };
+    #[cfg(not(feature = "multicore"))]
+    let products = Table::<C>::mul_decomposed_pairs_affine(&points, &scalar_refs);
+    assert_eq!(products.len(), target_slots.len());
+    for (product, (target_index, negate)) in products.into_iter().zip(target_slots) {
+        target[target_index] = if negate { -product } else { product };
+    }
+}
+
+fn finish_mixed_radix<C: GlvParams>(
+    codelets: &[C::AffineExt],
+    output: &mut [C::AffineExt],
+    factors: &[usize],
+) {
+    assert_eq!(codelets.len(), output.len());
+    record_fft_layout_moves(codelets.len());
+    let (&radix, inner_factors) = factors.split_last().expect("at least one FFT tier");
+    let inner = inner_factors.iter().product::<usize>();
+    for lower in 0..inner {
+        for digit in 0..radix {
+            output[lower + inner * digit] = codelets[lower * radix + digit];
+        }
+    }
+}
+
+fn apply_low_multiplication_codelet<C: GlvParams>(
+    points: &mut [C::AffineExt],
+    radix: usize,
+    scalars: &LowMultiplicationScalars<C>,
+    scratch: &mut AffineTwiddleScratch<C::Base>,
+    identity_free: bool,
+) -> bool {
+    match radix {
+        8 => {
+            fft8_multiplication_minimal_layer::<C>(points, &scalars.shared, scratch, identity_free)
+        }
+        16 => fft16_low_multiplication_layer::<C>(points, scalars, scratch, identity_free),
+        _ => unreachable!("mixed-radix codelets are DFT8 or DFT16"),
+    }
+}
+
+fn mixed_radix_fft<C: GlvParams>(
+    output: &mut [C::AffineExt],
+    omega: C::ScalarExt,
+    factors: &[usize],
+    mut identity_free: bool,
+) {
+    let n = output.len();
+    assert_eq!(n, factors.iter().product::<usize>());
+    let mut powers = PowerTwiddleCache::<C>::new(omega, n);
+    let scalars = LowMultiplicationScalars::<C>::new(omega, n, factors.contains(&16), &mut powers);
+    // A standalone mixed-digit reversal would leave every upper codelet
+    // strided, requiring a gather and scatter at each tier. Instead, fuse the
+    // initial permutation, diagonal transposes, and final transpose into
+    // N-point layout passes. Every codelet input is contiguous, and this one
+    // affine vector alternates with `output` across all tiers.
+    let mut scratch = alloc::vec![C::AffineExt::identity(); n];
+    let mut butterfly_scratch = AffineTwiddleScratch::new();
+
+    prepare_mixed_radix_first_tier::<C>(output, &mut scratch, factors);
+    identity_free = apply_low_multiplication_codelet::<C>(
+        &mut scratch,
+        factors[0],
+        &scalars,
+        &mut butterfly_scratch,
+        identity_free,
+    );
+    let mut source_is_scratch = true;
+    for stage in 1..factors.len() {
+        if source_is_scratch {
+            mixed_radix_diagonal_transpose::<C>(&scratch, output, factors, stage, &mut powers);
+            identity_free = apply_low_multiplication_codelet::<C>(
+                output,
+                factors[stage],
+                &scalars,
+                &mut butterfly_scratch,
+                identity_free,
+            );
+        } else {
+            mixed_radix_diagonal_transpose::<C>(output, &mut scratch, factors, stage, &mut powers);
+            identity_free = apply_low_multiplication_codelet::<C>(
+                &mut scratch,
+                factors[stage],
+                &scalars,
+                &mut butterfly_scratch,
+                identity_free,
+            );
+        }
+        source_is_scratch = !source_is_scratch;
+    }
+
+    if source_is_scratch {
+        finish_mixed_radix::<C>(&scratch, output, factors);
+    } else {
+        finish_mixed_radix::<C>(output, &mut scratch, factors);
+        output.copy_from_slice(&scratch);
+        record_fft_layout_moves(n);
+    }
+}
+
+/// Computes an unnormalized FFT over public curve points.
 ///
 /// This prototype keeps the layer state affine. It decomposes each distinct
 /// twiddle once, batches the Eisenstein tables and affine ladders for all
 /// nontrivial scalar multiplications in a layer, and batch-inverts the shared
-/// denominator for each layer's affine butterflies.
+/// denominator for each layer's affine butterflies. The Orchard-adjacent
+/// sizes at k = 6 and above use mixed-radix DFT8/DFT16 tiers; smaller sizes
+/// keep the radix-2 schedule with one low-multiplication bottom codelet.
 pub(crate) fn fft_vartime<C: GlvParams>(
     input: &[C],
     output: &mut [C::AffineExt],
@@ -1658,6 +2065,11 @@ pub(crate) fn fft_vartime<C: GlvParams>(
     // across layers instead of checking both inputs to every butterfly.
     let mut identity_free = output.iter().all(|point| !bool::from(point.is_identity()));
 
+    if let Some(factors) = mixed_radix_factors(log_n) {
+        mixed_radix_fft::<C>(output, omega, &factors, identity_free);
+        return;
+    }
+
     for i in 0..output.len() {
         let reversed = bitreverse(i, log_n as usize);
         if i < reversed {
@@ -1675,11 +2087,32 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         .collect();
 
     let mut butterfly_scratch = AffineTwiddleScratch::new();
+    let codelet_scalars = if output.len() >= 8 {
+        let mut powers = PowerTwiddleCache::<C>::new(omega, output.len());
+        Some(LowMultiplicationScalars::<C>::new(
+            omega,
+            output.len(),
+            output.len() >= 16,
+            &mut powers,
+        ))
+    } else {
+        None
+    };
     let (mut chunk, mut twiddle_stride) = if output.len() >= 16 {
-        identity_free = fft16_low_multiplication_layer::<C>(output, omega, identity_free);
+        identity_free = fft16_low_multiplication_layer::<C>(
+            output,
+            codelet_scalars.as_ref().expect("DFT16 scalars"),
+            &mut butterfly_scratch,
+            identity_free,
+        );
         (32, output.len() / 32)
     } else if output.len() >= 8 {
-        identity_free = fft8_multiplication_minimal_layer::<C>(output, omega, identity_free);
+        identity_free = fft8_multiplication_minimal_layer::<C>(
+            output,
+            &codelet_scalars.as_ref().expect("DFT8 scalars").shared,
+            &mut butterfly_scratch,
+            identity_free,
+        );
         (16, output.len() / 16)
     } else {
         (2, output.len() / 2)
@@ -1796,17 +2229,17 @@ pub(crate) fn fft_vartime<C: GlvParams>(
 /// schedules.
 fn fft16_low_multiplication_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
-    omega: C::ScalarExt,
+    scalars: &LowMultiplicationScalars<C>,
+    scratch: &mut AffineTwiddleScratch<C::Base>,
     mut identity_free: bool,
 ) -> bool {
     debug_assert_eq!(points.len() % 16, 0);
     let blocks = points.len() / 16;
     let weighted_blocks = blocks * 2;
-    let mut scratch = AffineTwiddleScratch::new();
     let mut left = Vec::with_capacity(points.len() / 2);
     let mut right = Vec::with_capacity(points.len() / 2);
 
-    // The global bit reversal puts (q_j, q_{j + 8}) next to each other.
+    // The enclosing layout puts (q_j, q_{j + 8}) next to each other.
     for block in points.chunks(16) {
         for pair in block.chunks(2) {
             left.push(pair[0]);
@@ -1820,21 +2253,9 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         &right,
         &mut even_inputs,
         &mut odd_inputs,
-        &mut scratch,
+        scratch,
         identity_free,
     );
-
-    let root16 = omega.pow_vartime([(points.len() / 16) as u64]);
-    let root8 = root16.square();
-    let root8_squared = root8.square();
-    let root8_cubed = root8_squared * root8;
-    let c = (root8 + root8_cubed) * C::ScalarExt::TWO_INV;
-    let d = (root8 - root8_cubed) * C::ScalarExt::TWO_INV;
-    let shared_scalars = [
-        Decomposed::<C>::new(&root8_squared),
-        Decomposed::<C>::new(&c),
-        Decomposed::<C>::new(&d),
-    ];
 
     // Start the DFT8 on the sums and both odd-root DFT4s on the
     // differences in one inversion batch.
@@ -1859,7 +2280,7 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         &right,
         &mut stage1_sum,
         &mut stage1_difference,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -1888,7 +2309,7 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         &right,
         &mut stage2_sum,
         &mut stage2_difference,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -1915,7 +2336,7 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         scalar_inputs[1].push(C::from(stage1_sum[odd_stage1_offset + block]));
         scalar_inputs[2].push(C::from(stage1_difference[odd_stage1_offset + block]));
     }
-    let products = mul_same_scalars_affine::<C>(scalar_inputs.into(), &shared_scalars);
+    let products = mul_same_scalars_affine::<C>(scalar_inputs.into(), &scalars.shared);
 
     // Complete the next DFT8 stage and the middle odd-root DFT4 stage in
     // one denominator batch.
@@ -1952,7 +2373,7 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         &right,
         &mut stage3_sum,
         &mut stage3_difference,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -1979,7 +2400,7 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         &right,
         &mut stage4_sum,
         &mut stage4_difference,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -2009,22 +2430,16 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         output[3] = stage4_difference[stage4 + 1];
     }
 
-    let root16_squared = root16.square();
-    let mut odd_root = root16;
-    let odd_scalars: Vec<_> = (0..4)
-        .map(|_| {
-            let decomposed = Decomposed::<C>::new(&odd_root);
-            odd_root *= root16_squared;
-            decomposed
-        })
-        .collect();
     let mut scalar_inputs: Vec<Vec<C>> = (0..4).map(|_| Vec::with_capacity(blocks)).collect();
     for block in odd_roots.chunks(8) {
         for (input, point) in scalar_inputs.iter_mut().zip(&block[4..]) {
             input.push(C::from(*point));
         }
     }
-    let products = mul_same_scalars_affine::<C>(scalar_inputs, &odd_scalars);
+    let products = mul_same_scalars_affine::<C>(
+        scalar_inputs,
+        scalars.odd16.as_ref().expect("DFT16 odd-root scalars"),
+    );
 
     left.clear();
     right.clear();
@@ -2041,7 +2456,7 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         &right,
         &mut odd_low,
         &mut odd_high,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -2064,28 +2479,18 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
 /// at the cost of two additional group additions.
 fn fft8_multiplication_minimal_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
-    omega: C::ScalarExt,
+    scalars: &[Decomposed<C>; 3],
+    scratch: &mut AffineTwiddleScratch<C::Base>,
     mut identity_free: bool,
 ) -> bool {
     debug_assert_eq!(points.len() % 8, 0);
-    let root8 = omega.pow_vartime([(points.len() / 8) as u64]);
-    let root8_squared = root8.square();
-    let root8_cubed = root8_squared * root8;
-    let c = (root8 + root8_cubed) * C::ScalarExt::TWO_INV;
-    let d = (root8 - root8_cubed) * C::ScalarExt::TWO_INV;
-    let scalars = [
-        Decomposed::<C>::new(&root8_squared),
-        Decomposed::<C>::new(&c),
-        Decomposed::<C>::new(&d),
-    ];
 
     let blocks = points.len() / 8;
-    let mut scratch = AffineTwiddleScratch::new();
     let mut left = Vec::with_capacity(blocks * 4);
     let mut right = Vec::with_capacity(blocks * 4);
     for block in points.chunks(8) {
-        // The enclosing FFT has already bit-reversed the input. Undo the
-        // local three-bit reversal by pairing adjacent entries as
+        // The enclosing FFT has locally bit-reversed the input. Undo that
+        // three-bit reversal by pairing adjacent entries as
         // (q0, q4), (q2, q6), (q1, q5), and (q3, q7).
         for pair in block.chunks(2) {
             left.push(pair[0]);
@@ -2099,7 +2504,7 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
         &right,
         &mut stage1_sum,
         &mut stage1_difference,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -2127,7 +2532,7 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
         &right,
         &mut stage2_sum,
         &mut stage2_difference,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -2147,7 +2552,7 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
         scalar_inputs[2].push(C::from(stage2_difference[stage2 + 2]));
     }
 
-    let products = mul_same_scalars_affine::<C>(scalar_inputs.into(), &scalars);
+    let products = mul_same_scalars_affine::<C>(scalar_inputs.into(), scalars);
 
     left.clear();
     right.clear();
@@ -2177,7 +2582,7 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
         &right,
         &mut stage3_sum,
         &mut stage3_difference,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -2197,7 +2602,7 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
         &right,
         &mut stage4_sum,
         &mut stage4_difference,
-        &mut scratch,
+        scratch,
         identity_free,
     );
 
@@ -2221,6 +2626,7 @@ fn mul_same_scalars_affine<C: GlvParams>(
     scalars: &[Decomposed<C>],
 ) -> Vec<Vec<C::AffineExt>> {
     assert_eq!(scalar_inputs.len(), scalars.len());
+    record_fft_scalar_multiplications(scalar_inputs.iter().map(Vec::len).sum());
     #[cfg(feature = "multicore")]
     {
         scalar_inputs
@@ -2272,6 +2678,7 @@ fn affine_add_sub_pairs<C: GlvParams>(
         return false;
     }
 
+    record_fft_affine_substage_batch(left.len());
     scratch.denominators.resize(left.len(), C::Base::ZERO);
     scratch.prefixes.resize(left.len(), C::Base::ZERO);
     let mut acc = C::Base::ONE;
@@ -3093,6 +3500,174 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mixed_radix_permutations_are_bijections() {
+        assert!(mixed_radix_factors(5).is_none());
+        for log_n in 6..=16 {
+            let factors = mixed_radix_factors(log_n).expect("mixed-radix size");
+            let n = factors.iter().product::<usize>();
+            assert_eq!(n, 1usize << log_n);
+            assert!(factors.iter().all(|factor| matches!(factor, 8 | 16)));
+            let mut sources = alloc::vec![false; n];
+            for block in 0..n / factors[0] {
+                for local in 0..factors[0] {
+                    let source = mixed_radix_initial_source(block, local, &factors);
+                    assert!(source < n);
+                    assert!(!sources[source]);
+                    sources[source] = true;
+                }
+            }
+            assert!(sources.into_iter().all(|seen| seen));
+
+            for stage in 1..factors.len() {
+                let previous_radix = factors[stage - 1];
+                let previous_inner = factors[..stage - 1].iter().product::<usize>();
+                let inner = previous_inner * previous_radix;
+                let radix = factors[stage];
+                let remaining = n / (inner * radix);
+                let mut sources = alloc::vec![false; n];
+                let mut targets = alloc::vec![false; n];
+                for outer in 0..remaining {
+                    for digit in 0..radix {
+                        let higher = digit + radix * outer;
+                        let local = bitreverse_radix(digit, radix);
+                        for lower in 0..previous_inner {
+                            for previous_digit in 0..previous_radix {
+                                let frequency = lower + previous_inner * previous_digit;
+                                let source = (higher * previous_inner + lower) * previous_radix
+                                    + previous_digit;
+                                let target = (outer * inner + frequency) * radix + local;
+                                assert!(!sources[source]);
+                                assert!(!targets[target]);
+                                sources[source] = true;
+                                targets[target] = true;
+                            }
+                        }
+                    }
+                }
+                assert!(sources.into_iter().all(|seen| seen));
+                assert!(targets.into_iter().all(|seen| seen));
+            }
+
+            let (&radix, inner_factors) = factors
+                .split_last()
+                .expect("at least two mixed-radix tiers");
+            let inner = inner_factors.iter().product::<usize>();
+            let mut sources = alloc::vec![false; n];
+            let mut targets = alloc::vec![false; n];
+            for lower in 0..inner {
+                for digit in 0..radix {
+                    let source = lower * radix + digit;
+                    let target = lower + inner * digit;
+                    assert!(!sources[source]);
+                    assert!(!targets[target]);
+                    sources[source] = true;
+                    targets[target] = true;
+                }
+            }
+            assert!(sources.into_iter().all(|seen| seen));
+            assert!(targets.into_iter().all(|seen| seen));
+        }
+
+        assert_eq!(
+            mixed_radix_factors(10).as_deref(),
+            Some(&MIXED_RADIX_K10[..])
+        );
+        assert_eq!(
+            mixed_radix_factors(11).as_deref(),
+            Some(&MIXED_RADIX_K11[..])
+        );
+        assert_eq!(
+            mixed_radix_factors(12).as_deref(),
+            Some(&MIXED_RADIX_K12[..])
+        );
+        assert_eq!(
+            mixed_radix_factors(13).as_deref(),
+            Some(&MIXED_RADIX_K13[..])
+        );
+    }
+
+    #[test]
+    fn mixed_radix_operation_counts_match_factorization() {
+        for (
+            log_n,
+            factors,
+            expected_multiplications,
+            expected_current_multiplications,
+            expected_reduction,
+            expected_additions,
+            expected_decompositions,
+        ) in [
+            (10, &MIXED_RADIX_K10[..], 3_649, 3_905, 256, 11_136, 364),
+            (11, &MIXED_RADIX_K11[..], 8_193, 8_833, 640, 24_576, 740),
+            (
+                12,
+                &MIXED_RADIX_K12[..],
+                18_177,
+                19_713,
+                1_536,
+                53_760,
+                1_470,
+            ),
+            (
+                13,
+                &MIXED_RADIX_K13[..],
+                40_449,
+                43_521,
+                3_072,
+                115_712,
+                2_938,
+            ),
+        ] {
+            let n = 1usize << log_n;
+            let generator = <pallas::Point as group::Group>::generator();
+            let input: Vec<_> = scalars::<<pallas::Point as CurveExt>::ScalarExt>(n as u64)
+                .map(|scalar| generator * scalar)
+                .collect();
+            let mut omega = <pallas::Point as CurveExt>::ScalarExt::ROOT_OF_UNITY_INV;
+            for _ in log_n..<pallas::Point as CurveExt>::ScalarExt::S {
+                omega = omega.square();
+            }
+
+            reset_fft_operation_counts();
+            let mut output = alloc::vec![pallas::Affine::identity(); n];
+            fft_vartime(&input, &mut output, omega, log_n);
+            let counts = fft_operation_counts();
+            assert_eq!(
+                counts.point_scalar_multiplications,
+                expected_multiplications
+            );
+            assert_eq!(counts.curve_additions, expected_additions);
+            assert_eq!(counts.twiddle_decompositions, expected_decompositions);
+            let expected_layout_passes = factors.len() + 1 + usize::from(factors.len() % 2 == 0);
+            assert_eq!(counts.layout_moves, expected_layout_passes * n);
+
+            let mut current_multiplications = (n / 16) * 14;
+            let mut chunk = 32;
+            while chunk <= n {
+                current_multiplications += n / 2 - n / chunk;
+                chunk *= 2;
+            }
+            assert_eq!(current_multiplications, expected_current_multiplications);
+            assert_eq!(
+                current_multiplications - counts.point_scalar_multiplications,
+                expected_reduction
+            );
+
+            let mut expected_batches = Vec::new();
+            for &radix in factors {
+                let blocks = n / radix;
+                match radix {
+                    8 => expected_batches.extend([4, 3, 4, 2].map(|width| width * blocks)),
+                    16 => expected_batches.extend([8, 6, 3, 8, 6, 4].map(|width| width * blocks)),
+                    _ => unreachable!(),
+                }
+            }
+            assert_eq!(counts.affine_substage_batches, expected_batches);
+            println!("k={log_n}: {counts:?}; factors={factors:?}");
+        }
+    }
+
     /// The affine FFT matches a direct projective radix-2 implementation,
     /// including inputs that force the affine butterfly fallback.
     fn affine_fft_matches_projective<C: GlvParams>() {
@@ -3133,7 +3708,18 @@ mod tests {
             }
         }
 
-        for log_n in 1..=7 {
+        fn compare<C: GlvParams>(input: Vec<C>, omega: C::ScalarExt, log_n: u32) {
+            let mut expected = input.clone();
+            reference(&mut expected, omega, log_n);
+            let mut actual = alloc::vec![C::AffineExt::identity(); input.len()];
+            fft_vartime(&input, &mut actual, omega, log_n);
+            assert!(actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| C::from(*actual) == expected));
+        }
+
+        for log_n in 1..=13 {
             let n = 1usize << log_n;
             let mut omega = C::ScalarExt::ROOT_OF_UNITY_INV;
             for _ in log_n..C::ScalarExt::S {
@@ -3144,6 +3730,15 @@ mod tests {
             let regular: Vec<C> = (0..n)
                 .map(|i| generator * C::ScalarExt::from(i as u64 + 1))
                 .collect();
+            let mut inputs = alloc::vec![regular];
+            // One direct comparison on each curve is sufficient to cover
+            // the extra k = 13 tier. Keep the expensive adversarial matrix
+            // through k = 12, including the Orchard size.
+            if log_n == 13 {
+                compare(inputs.pop().expect("regular input"), omega, log_n);
+                continue;
+            }
+
             let exceptional: Vec<C> = (0..n)
                 .map(|i| match i % 4 {
                     0 => C::identity(),
@@ -3157,7 +3752,7 @@ mod tests {
                 .map(|i| hash_to_curve(&(i as u64).to_le_bytes()))
                 .collect();
 
-            let mut inputs = alloc::vec![regular, exceptional, hashed];
+            inputs.extend([exceptional, hashed]);
             if log_n == 3 {
                 // The first radix-2 stage produces an identity difference,
                 // which the fused FFT8 codelet retains while it processes a
@@ -3185,14 +3780,7 @@ mod tests {
             }
 
             for input in inputs {
-                let mut expected = input.clone();
-                reference(&mut expected, omega, log_n);
-                let mut actual = alloc::vec![C::AffineExt::identity(); n];
-                fft_vartime(&input, &mut actual, omega, log_n);
-                assert!(actual
-                    .iter()
-                    .zip(expected)
-                    .all(|(actual, expected)| C::from(*actual) == expected));
+                compare(input, omega, log_n);
             }
         }
     }
