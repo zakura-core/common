@@ -1422,6 +1422,193 @@ impl<C: GlvParams> Table<C> {
         Self::batch_affine_ladder_pairs(&tables, scalars)
     }
 
+    /// Multiplies contiguous scalar-major groups while sharing each column's
+    /// inversion across all groups.
+    fn mul_decomposed_scalar_groups_affine(
+        points: &[C],
+        groups: &[(&Decomposed<C>, usize)],
+    ) -> Vec<C::AffineExt> {
+        assert_eq!(
+            points.len(),
+            groups.iter().map(|(_, len)| *len).sum::<usize>()
+        );
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let tables = Self::batch(points);
+        let use_affine = tables.len() >= BATCH_AFFINE_MIN_POINTS
+            && tables.iter().all(|table| !table.is_identity())
+            && groups
+                .iter()
+                .all(|(scalar, _)| scalar.len > 0 && scalar.affine_ladder_safe);
+        if !use_affine {
+            let mut offset = 0;
+            let mut projective = Vec::with_capacity(points.len());
+            for &(scalar, len) in groups {
+                projective.extend(
+                    tables[offset..offset + len]
+                        .iter()
+                        .map(|table| table.mul_decomposed(scalar)),
+                );
+                offset += len;
+            }
+            let mut affine = alloc::vec![C::AffineExt::identity(); projective.len()];
+            C::batch_normalize(&projective, &mut affine);
+            return affine;
+        }
+
+        Self::batch_affine_ladder_scalar_groups(&tables, groups)
+    }
+
+    /// Synchronized affine ladders for a small number of scalar-major runs.
+    /// Each digit is decoded once per run, rather than once per point as in
+    /// [`Self::batch_affine_ladder_pairs`].
+    fn batch_affine_ladder_scalar_groups(
+        tables: &[Self],
+        groups: &[(&Decomposed<C>, usize)],
+    ) -> Vec<C::AffineExt> {
+        let n = tables.len();
+        let max_len = groups
+            .iter()
+            .map(|(scalar, _)| scalar.len)
+            .max()
+            .unwrap_or(0);
+        let mut xs = alloc::vec![C::Base::ZERO; n];
+        let mut ys = alloc::vec![C::Base::ZERO; n];
+        let mut started = alloc::vec![false; groups.len()];
+        let mut denominators = Vec::with_capacity(n);
+        let mut scratch = Vec::with_capacity(n);
+        let mut doublings = Vec::with_capacity(groups.len());
+        let mut additions = Vec::with_capacity(groups.len());
+        let mut addition_ys = Vec::with_capacity(n);
+        let mut h = Vec::with_capacity(n);
+        let mut r = Vec::with_capacity(n);
+        let mut h_squares = Vec::with_capacity(n);
+        let mut a = Vec::with_capacity(n);
+
+        for position in (0..max_len).rev() {
+            doublings.clear();
+            additions.clear();
+            let mut offset = 0;
+            for (group, &(scalar, len)) in groups.iter().enumerate() {
+                let end = offset + len;
+                if position < scalar.len {
+                    let code = scalar.digits[position];
+                    if !started[group] {
+                        debug_assert_eq!(position + 1, scalar.len);
+                        debug_assert_ne!(code, 0);
+                        for i in offset..end {
+                            (xs[i], ys[i]) = tables[i].digit_coords(code);
+                        }
+                        started[group] = true;
+                    } else if code == 0 {
+                        doublings.push((offset, end));
+                    } else {
+                        additions.push((offset, end, code));
+                    }
+                }
+                offset = end;
+            }
+
+            denominators.clear();
+            for &(start, end) in &doublings {
+                denominators.extend(ys[start..end].iter().map(|y| y.double()));
+            }
+            let addition_offset = denominators.len();
+            let addition_count = additions.iter().map(|(start, end, _)| end - start).sum();
+            addition_ys.resize(addition_count, C::Base::ZERO);
+            h.resize(addition_count, C::Base::ZERO);
+            r.resize(addition_count, C::Base::ZERO);
+            h_squares.resize(addition_count, C::Base::ZERO);
+            a.resize(addition_count, C::Base::ZERO);
+            let mut packed = 0;
+            for &(start, end, code) in &additions {
+                let (orbit, e, negate) = decode_digit(code);
+                for i in start..end {
+                    let u = tables[i].xs[e][orbit];
+                    let v = if negate {
+                        -tables[i].ys[orbit]
+                    } else {
+                        tables[i].ys[orbit]
+                    };
+                    addition_ys[packed] = ys[i];
+                    h[packed] = u - xs[i];
+                    r[packed] = v - ys[i];
+                    h_squares[packed] = h[packed].square();
+                    a[packed] = xs[i].double() + u;
+                    packed += 1;
+                }
+            }
+            debug_assert_eq!(packed, addition_count);
+            if addition_count != 0 {
+                C::mul_base_assign_pairs(&mut a, &h_squares, private::CrateToken(()));
+                denominators.extend(
+                    a.iter()
+                        .zip(&r)
+                        .map(|(product, difference)| *product - difference.square()),
+                );
+            }
+
+            scratch.resize(denominators.len(), C::Base::ZERO);
+            if !denominators.is_empty() {
+                #[cfg(all(
+                    feature = "aarch64-asm",
+                    target_arch = "aarch64",
+                    target_vendor = "apple"
+                ))]
+                batch_invert_nonzero::<C>(&mut denominators, &mut scratch);
+                #[cfg(not(all(
+                    feature = "aarch64-asm",
+                    target_arch = "aarch64",
+                    target_vendor = "apple"
+                )))]
+                batch_invert_nonzero(&mut denominators, &mut scratch);
+            }
+
+            let mut packed = 0;
+            for &(start, end) in &doublings {
+                for i in start..end {
+                    let xx = xs[i].square();
+                    let slope = (xx.double() + xx) * denominators[packed];
+                    let x2 = slope.square() - xs[i].double();
+                    ys[i] = slope * (xs[i] - x2) - ys[i];
+                    xs[i] = x2;
+                    packed += 1;
+                }
+            }
+            debug_assert_eq!(packed, addition_offset);
+
+            if addition_count != 0 {
+                let addition_inverses = &mut denominators[addition_offset..];
+                double_add_finish_batch::<C>(
+                    &addition_ys,
+                    &mut h,
+                    &mut r,
+                    &mut h_squares,
+                    addition_inverses,
+                );
+                let mut packed = 0;
+                for &(start, end, code) in &additions {
+                    let (orbit, e, _) = decode_digit(code);
+                    for i in start..end {
+                        let u = tables[i].xs[e][orbit];
+                        xs[i] = u + h[packed].double().double();
+                        ys[i] = -addition_ys[packed] - addition_inverses[packed];
+                        packed += 1;
+                    }
+                }
+                debug_assert_eq!(packed, addition_count);
+            }
+        }
+
+        debug_assert!(started.iter().all(|started| *started));
+        xs.into_iter()
+            .zip(ys)
+            .map(|(x, y)| C::affine_unchecked(x, y, private::CrateToken(())))
+            .collect()
+    }
+
     /// Synchronized affine Eisenstein ladders with one independently recoded
     /// scalar per table. Shorter recodings join when their top digit is
     /// reached; all live accumulators share each column's inversions.
@@ -2626,10 +2813,15 @@ fn mul_same_scalars_affine<C: GlvParams>(
     scalars: &[Decomposed<C>],
 ) -> Vec<Vec<C::AffineExt>> {
     assert_eq!(scalar_inputs.len(), scalars.len());
-    record_fft_scalar_multiplications(scalar_inputs.iter().map(Vec::len).sum());
-    #[cfg(feature = "multicore")]
-    {
-        scalar_inputs
+    let group_lengths: Vec<_> = scalar_inputs.iter().map(Vec::len).collect();
+    let multiplication_count = group_lengths.iter().sum();
+    record_fft_scalar_multiplications(multiplication_count);
+
+    // Keep the four odd-root products on their fixed-schedule ladders while
+    // measuring whether the larger three-scalar stage amortizes grouping.
+    if scalars.len() == 4 {
+        #[cfg(feature = "multicore")]
+        return scalar_inputs
             .into_par_iter()
             .zip(scalars.par_iter())
             .map(|(points, scalar)| {
@@ -2641,16 +2833,69 @@ fn mul_same_scalars_affine<C: GlvParams>(
                     .collect();
                 batches.into_iter().flatten().collect()
             })
-            .collect()
-    }
-    #[cfg(not(feature = "multicore"))]
-    {
-        scalar_inputs
+            .collect();
+        #[cfg(not(feature = "multicore"))]
+        return scalar_inputs
             .into_iter()
             .zip(scalars)
             .map(|(points, scalar)| Table::<C>::mul_decomposed_same_scalar_affine(&points, scalar))
-            .collect()
+            .collect();
     }
+
+    // Keep the inputs scalar-major, but synchronize every scalar group in one
+    // heterogeneous ladder. This retains the fixed-scalar locality while all
+    // groups share each digit column's batch inversion.
+    let mut points = Vec::with_capacity(multiplication_count);
+    for inputs in scalar_inputs {
+        points.extend(inputs);
+    }
+
+    #[cfg(feature = "multicore")]
+    let products = {
+        let threads = maybe_rayon::current_num_threads();
+        let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
+        let mut chunk_groups = Vec::with_capacity(points.len().div_ceil(batch_len));
+        for chunk_start in (0..points.len()).step_by(batch_len) {
+            let chunk_end = (chunk_start + batch_len).min(points.len());
+            let mut groups = Vec::with_capacity(scalars.len());
+            let mut group_start = 0;
+            for (scalar, &len) in scalars.iter().zip(&group_lengths) {
+                let group_end = group_start + len;
+                let overlap_start = chunk_start.max(group_start);
+                let overlap_end = chunk_end.min(group_end);
+                if overlap_start < overlap_end {
+                    groups.push((scalar, overlap_end - overlap_start));
+                }
+                group_start = group_end;
+            }
+            chunk_groups.push(groups);
+        }
+        let batches: Vec<Vec<_>> = points
+            .par_chunks(batch_len)
+            .zip(chunk_groups.into_par_iter())
+            .map(|(points, groups)| {
+                Table::<C>::mul_decomposed_scalar_groups_affine(points, &groups)
+            })
+            .collect();
+        batches.into_iter().flatten().collect::<Vec<_>>()
+    };
+    #[cfg(not(feature = "multicore"))]
+    let products = {
+        let groups: Vec<_> = scalars
+            .iter()
+            .zip(&group_lengths)
+            .map(|(scalar, &len)| (scalar, len))
+            .collect();
+        Table::<C>::mul_decomposed_scalar_groups_affine(&points, &groups)
+    };
+
+    let mut products = products.into_iter();
+    let groups = group_lengths
+        .into_iter()
+        .map(|len| products.by_ref().take(len).collect())
+        .collect();
+    debug_assert!(products.next().is_none());
+    groups
 }
 
 /// Computes arbitrary affine `L + R` and `L - R` pairs with one shared
