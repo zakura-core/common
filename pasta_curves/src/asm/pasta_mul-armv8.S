@@ -173,6 +173,10 @@ L$pasta_curves_mul_by_1_mont_pasta:
 //
 // The loop count is consumed with a decrement-then-test, so `count` = 0 would
 // wrap; callers must pass at least 1.
+//
+// A null `rhs` (x3 = 0) selects the square-only variant: after the loop the
+// accumulator, still below 2p, is canonicalized with the same single
+// conditional subtraction and stored, with no multiplication.
 
 .align 5
 _pasta_curves_sqr_n_mul_mont_pasta:
@@ -337,6 +341,7 @@ L$pasta_curves_sqr_n_mul_loop:
     adc x9,x13,x17          // Next-iteration a[3].
 
     cbnz x2,L$pasta_curves_sqr_n_mul_loop // Square again if count remains.
+    cbz x3,L$pasta_curves_sqr_n_canonicalize // No rhs: square-only variant.
 
     // Multiply the accumulator (x6..x9) by rhs, as the inline `mul` in
     // src/fields/aarch64_asm.rs does, but
@@ -517,6 +522,7 @@ L$pasta_curves_sqr_n_mul_loop:
     csel x12,x12,x21,lo     // Select canonical output limb 2.
     csel x13,x13,x22,lo     // Select canonical output limb 3.
 
+L$pasta_curves_sqr_n_mul_store:
     stp x10,x11,[x0]        // Store output limbs 0 and 1.
     stp x12,x13,[x0,#16]    // Store output limbs 2 and 3.
 
@@ -525,3 +531,19 @@ L$pasta_curves_sqr_n_mul_loop:
     ldp x23,x24,[x29,#48]   // Restore callee-saved x23 and x24.
     ldr x29,[sp],#80        // Restore frame pointer and release the frame.
     ret                     // Return; x30 still holds the caller's address.
+
+L$pasta_curves_sqr_n_canonicalize:
+    // Square-only variant: the accumulator x6..x9 is below 2p (see the
+    // bound above), so one conditional subtraction of p = [p0,p1,0,2^62]
+    // canonicalizes it. Same selection as the multiply tail, then share
+    // its store and epilogue.
+    subs x19,x6,x23         // Tentative result limb 0 = accumulator - p[0].
+    mov x22,#1<<62          // Materialize p[3] = 2^62.
+    sbcs x20,x7,x24         // Tentative result limb 1 minus p[1].
+    sbcs x21,x8,xzr         // Tentative result limb 2; p[2] is zero.
+    sbcs x22,x9,x22         // Tentative result limb 3 minus p[3].
+    csel x10,x6,x19,lo      // Select canonical output limb 0.
+    csel x11,x7,x20,lo      // Select canonical output limb 1.
+    csel x12,x8,x21,lo      // Select canonical output limb 2.
+    csel x13,x9,x22,lo      // Select canonical output limb 3.
+    b L$pasta_curves_sqr_n_mul_store // Store and return.

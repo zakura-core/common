@@ -445,6 +445,34 @@ impl Fq {
         }
     }
 
+    /// Squares `self` `n` times (`n` must be at least 1). The assembly
+    /// backend keeps the accumulator in registers and canonicalizes only the
+    /// final result.
+    #[inline]
+    fn sqr_n_runtime(&self, n: u32) -> Self {
+        assert!(n >= 1);
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            Fq(super::aarch64_asm::sqr_n(
+                &self.0, n as usize, &MODULUS.0, INV,
+            ))
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            (0..n).fold(*self, |acc, _| acc.square())
+        }
+    }
+
     /// Subtracts `rhs` from `self`, returning the result.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub const fn sub(&self, rhs: &Self) -> Self {
@@ -847,6 +875,14 @@ lazy_static! {
 }
 
 impl SqrtTableHelpers for Fq {
+    fn sqr_n(&self, n: u32) -> Self {
+        self.sqr_n_runtime(n)
+    }
+
+    fn sqr_n_mul(&self, n: u32, by: &Self) -> Self {
+        self.sqr_n_mul_runtime(n, by)
+    }
+
     fn pow_by_t_minus1_over2(&self) -> Self {
         let s10 = self.square_runtime();
         let s11 = s10 * self;
@@ -1065,6 +1101,58 @@ fn test_sqrt() {
 }
 
 #[cfg(feature = "sqrt-table")]
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    target_vendor = "apple"
+))]
+#[test]
+fn aarch64_asm_sqr_n_matches_portable() {
+    use rand::{Rng, SeedableRng};
+
+    // The square-only chain shares `sqr_n_mul`'s loop and skips every
+    // intermediate canonicalization; pin it against repeated portable
+    // squarings (and against `sqr_n_mul` with a separate multiplication) on
+    // the boundary residues and random inputs, for chain lengths spanning
+    // the square-root tables' 8-squaring runs and the long `pow` runs.
+    let max_montgomery_residue = Fq([MODULUS.0[0] - 1, MODULUS.0[1], MODULUS.0[2], MODULUS.0[3]]);
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x5e; 16]);
+    let mut inputs = alloc::vec![
+        Fq::zero(),
+        Fq::one(),
+        -Fq::one(),
+        Fq::from_raw([1, 0, 0, 0]),
+        max_montgomery_residue,
+        Fq::from_raw([u64::MAX; 4]),
+    ];
+    for _ in 0..64 {
+        let mut l = [0u64; 4];
+        for w in l.iter_mut() {
+            *w = rng.next_u64();
+        }
+        inputs.push(Fq::from_raw(l));
+    }
+    let by = Fq::from_raw([0x1234_5678_9abc_def0, 7, 11, 13]);
+    for x in inputs {
+        for n in [1u32, 2, 3, 7, 8, 16, 31, 32, 129, 300] {
+            let fused = x.sqr_n_runtime(n);
+            let portable = (0..n).fold(x, |acc, _| Fq::square(&acc));
+            assert_eq!(
+                fused, portable,
+                "sqr_n mismatch for n = {n}, x = {:x?}",
+                x.0
+            );
+            assert!(is_canonical(&fused), "sqr_n output must be canonical");
+            assert_eq!(
+                x.sqr_n_mul_runtime(n, &by),
+                Fq::mul(&fused, &by),
+                "sqr_n_mul must equal sqr_n followed by a multiplication"
+            );
+        }
+    }
+}
+
 #[test]
 fn fq_sqrt_table_hash_is_perfect() {
     FQ_TABLES.assert_hash_table_is_consistent();
