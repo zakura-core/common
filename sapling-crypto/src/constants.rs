@@ -1,14 +1,11 @@
 //! Various constants used by the Sapling protocol.
 
 use alloc::vec::Vec;
-#[cfg(not(feature = "fused-pedersen"))]
 use ff::PrimeField;
-#[cfg(not(feature = "fused-pedersen"))]
 use group::Group;
-#[cfg(not(feature = "fused-pedersen"))]
 use jubjub::SubgroupPoint;
 #[cfg(feature = "fused-pedersen")]
-use jubjub::{AffineNielsPoint, ExtendedPoint, SubgroupPoint};
+use jubjub::{AffineNielsPoint, ExtendedPoint};
 use lazy_static::lazy_static;
 
 /// First 64 bytes of the BLAKE2s input during group hash.
@@ -239,10 +236,8 @@ pub const PEDERSEN_HASH_GENERATORS: &[SubgroupPoint] = &[
 pub const PEDERSEN_HASH_CHUNKS_PER_GENERATOR: usize = 63;
 
 /// The window size for exponentiation of Pedersen hash generators outside the circuit.
-#[cfg(not(feature = "fused-pedersen"))]
 pub const PEDERSEN_HASH_EXP_WINDOW_SIZE: u32 = 8;
 
-#[cfg(not(feature = "fused-pedersen"))]
 lazy_static! {
     /// The exp table for [`PEDERSEN_HASH_GENERATORS`].
     pub static ref PEDERSEN_HASH_EXP_TABLE: Vec<Vec<Vec<SubgroupPoint>>> =
@@ -250,7 +245,6 @@ lazy_static! {
 }
 
 /// Creates the exp table for the Pedersen hash generators.
-#[cfg(not(feature = "fused-pedersen"))]
 fn generate_pedersen_hash_exp_table() -> Vec<Vec<Vec<SubgroupPoint>>> {
     let window = PEDERSEN_HASH_EXP_WINDOW_SIZE;
 

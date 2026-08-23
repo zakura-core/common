@@ -27,11 +27,6 @@ and this project adheres to Rust's notion of
   `SubgroupPoint` can re-derive one (e.g. via `to_bytes`/`from_bytes`). With
   `fused-pedersen`, this avoids an inversion on the mixed-addition hot path.
 
-### Removed
-
-- When `fused-pedersen` is enabled, `sapling_crypto::constants::PEDERSEN_HASH_EXP_TABLE`
-  and `PEDERSEN_HASH_EXP_WINDOW_SIZE` are not present.
-
 - Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Updated to `ff 0.14`, `group 0.14`, `rand 0.10`, and the Zakura Groth16 and

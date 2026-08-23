@@ -84,7 +84,7 @@ Measured against the previous 8-bit-window implementation on a raw 510-bit Peder
 |  5  |  4.9 µs |  4.3×   |      ~227 MB       |
 
 `C = 2` is the default: ~2× at the smallest memory footprint (below the original exp-table's).
-`C` is a one-line constant, so the operating point can be retuned later. Larger `C` gives
+`C` is a one-line constant, so the operating point can be adjusted later. Larger `C` gives
 diminishing returns for rapidly growing memory and lazy-init cost.
 
 ## Algorithm (`pedersen_hash`)
@@ -142,7 +142,8 @@ Guards:
 
 Besides the return type (see above), the exp-window constants
 (`PEDERSEN_HASH_EXP_TABLE`, `PEDERSEN_HASH_EXP_WINDOW_SIZE`, and their builder) remain the
-default and are omitted only when `fused-pedersen` is enabled.
+default. They remain available when `fused-pedersen` is enabled so Cargo feature unification
+does not remove existing public API, but the exp table is not initialized unless accessed.
 
 ## Considered and rejected
 
