@@ -1938,37 +1938,6 @@ fn prepare_mixed_radix_first_tier<C: GlvParams>(
     }
 }
 
-fn for_each_mixed_radix_diagonal(
-    n: usize,
-    factors: &[usize],
-    stage: usize,
-    mut visit: impl FnMut(usize, usize, usize),
-) {
-    let previous_radix = factors[stage - 1];
-    let previous_inner = factors[..stage - 1].iter().product::<usize>();
-    let inner = previous_inner * previous_radix;
-    let radix = factors[stage];
-    let transform = inner * radix;
-    let remaining = n / transform;
-
-    for outer in 0..remaining {
-        for digit in 0..radix {
-            let higher = digit + radix * outer;
-            let local = bitreverse_radix(digit, radix);
-            for lower in 0..previous_inner {
-                for previous_digit in 0..previous_radix {
-                    let frequency = lower + previous_inner * previous_digit;
-                    let source =
-                        (higher * previous_inner + lower) * previous_radix + previous_digit;
-                    let target = (outer * inner + frequency) * radix + local;
-                    let exponent = (n / transform) * frequency * digit;
-                    visit(source, target, exponent);
-                }
-            }
-        }
-    }
-}
-
 /// Applies one Cooley–Tukey diagonal while transposing into contiguous
 /// codelets for the next radix. If `inner` lower frequencies have already
 /// been transformed, digit `d` is multiplied by
@@ -1985,66 +1954,68 @@ fn mixed_radix_diagonal_transpose<C: GlvParams>(
     assert_eq!(source.len(), target.len());
     let n = source.len();
     record_fft_layout_moves(n);
+    let previous_radix = factors[stage - 1];
+    let previous_inner = factors[..stage - 1].iter().product::<usize>();
+    let inner = previous_inner * previous_radix;
+    let radix = factors[stage];
+    let transform = inner * radix;
+    let remaining = n / transform;
     let mut group_for_exponent = alloc::vec![usize::MAX; n / 2];
-    let mut group_counts = Vec::new();
-    let mut scalars = Vec::new();
-    let mut entries = Vec::new();
+    let group_capacity = ((inner - 1) * (radix - 1)).min(n / 2 - 1);
+    let mut scalar_inputs = Vec::<Vec<C>>::with_capacity(group_capacity);
+    let mut destinations = Vec::<Vec<(usize, bool)>>::with_capacity(group_capacity);
+    let mut scalars = Vec::with_capacity(group_capacity);
 
-    for_each_mixed_radix_diagonal(n, factors, stage, |source_index, target_index, exponent| {
-        if exponent == 0 {
-            target[target_index] = source[source_index];
-            return;
+    for outer in 0..remaining {
+        for digit in 0..radix {
+            let higher = digit + radix * outer;
+            let local = bitreverse_radix(digit, radix);
+            for lower in 0..previous_inner {
+                for previous_digit in 0..previous_radix {
+                    let frequency = lower + previous_inner * previous_digit;
+                    let source_index =
+                        (higher * previous_inner + lower) * previous_radix + previous_digit;
+                    let target_index = (outer * inner + frequency) * radix + local;
+                    let exponent = (n / transform) * frequency * digit;
+                    if exponent == 0 {
+                        target[target_index] = source[source_index];
+                        continue;
+                    }
+
+                    let (exponent, negate) = if exponent >= n / 2 {
+                        (exponent - n / 2, true)
+                    } else {
+                        (exponent, false)
+                    };
+                    if exponent == 0 {
+                        target[target_index] = -source[source_index];
+                        continue;
+                    }
+
+                    let mut group = group_for_exponent[exponent];
+                    if group == usize::MAX {
+                        group = scalar_inputs.len();
+                        group_for_exponent[exponent] = group;
+                        scalar_inputs.push(Vec::with_capacity(remaining));
+                        destinations.push(Vec::with_capacity(remaining));
+                        scalars.push(powers.get(exponent));
+                    }
+                    scalar_inputs[group].push(C::from(source[source_index]));
+                    destinations[group].push((target_index, negate));
+                }
+            }
         }
+    }
 
-        let (exponent, negate) = if exponent >= n / 2 {
-            (exponent - n / 2, true)
-        } else {
-            (exponent, false)
-        };
-        if exponent == 0 {
-            target[target_index] = -source[source_index];
-            return;
-        }
-
-        let mut group = group_for_exponent[exponent];
-        if group == usize::MAX {
-            group = group_counts.len();
-            group_for_exponent[exponent] = group;
-            group_counts.push(0);
-            scalars.push(powers.get(exponent));
-        }
-        group_counts[group] += 1;
-        entries.push((source_index, target_index, group, negate));
-    });
-
-    let multiplication_count = group_counts.iter().sum();
+    let multiplication_count = scalar_inputs.iter().map(Vec::len).sum();
     record_fft_scalar_multiplications(multiplication_count);
-    let mut group_offsets = Vec::with_capacity(group_counts.len());
-    let mut offset = 0;
-    for &count in &group_counts {
-        group_offsets.push(offset);
-        offset += count;
-    }
-    debug_assert_eq!(offset, multiplication_count);
-    let mut next_slots = group_offsets.clone();
-    let mut order = alloc::vec![0; multiplication_count];
-    for (entry, &(_, _, group, _)) in entries.iter().enumerate() {
-        let slot = next_slots[group];
-        order[slot] = entry;
-        next_slots[group] += 1;
-    }
-    for ((&next, &start), &count) in next_slots.iter().zip(&group_offsets).zip(&group_counts) {
-        debug_assert_eq!(next, start + count);
-    }
-
     let mut points = Vec::with_capacity(multiplication_count);
-    let mut target_slots = Vec::with_capacity(multiplication_count);
     let mut scalar_refs = Vec::with_capacity(multiplication_count);
-    for entry in order {
-        let (source_index, target_index, group, negate) = entries[entry];
-        points.push(C::from(source[source_index]));
-        target_slots.push((target_index, negate));
-        scalar_refs.push(&scalars[group]);
+    let mut target_slots = Vec::with_capacity(multiplication_count);
+    for (group, (inputs, destinations)) in scalar_inputs.into_iter().zip(destinations).enumerate() {
+        scalar_refs.extend((0..inputs.len()).map(|_| &scalars[group]));
+        points.extend(inputs);
+        target_slots.extend(destinations);
     }
 
     #[cfg(feature = "multicore")]
