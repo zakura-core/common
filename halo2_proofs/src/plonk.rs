@@ -11,7 +11,7 @@ use group::ff::{Field, FromUniformBytes, PrimeField};
 use crate::arithmetic::{best_multiexp, CurveAffine};
 use crate::poly::{
     commitment::Params, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff,
-    PinnedEvaluationDomain, Polynomial,
+    PinnedEvaluationDomain, Polynomial, ProvingKeyTwiddles,
 };
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript};
 
@@ -148,6 +148,9 @@ pub struct ProvingKey<C: CurveAffine> {
     fixed_polys: Vec<Polynomial<C::Scalar, Coeff>>,
     fixed_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     permutation: permutation::ProvingKey<C>,
+    /// Kept out of [`VerifyingKey`] so verifier-only users do not pay its
+    /// memory cost.
+    fft_twiddles: ProvingKeyTwiddles<C::Scalar>,
 }
 
 impl<C: CurveAffine> ProvingKey<C> {

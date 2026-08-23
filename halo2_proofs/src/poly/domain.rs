@@ -12,7 +12,7 @@ use super::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation};
 use ff::WithSmallOrderMulGroup;
 use group::ff::{BatchInvert, Field};
 
-use std::marker::PhantomData;
+use std::{fmt, marker::PhantomData, sync::Arc};
 
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
@@ -25,6 +25,38 @@ type PolynomialTransformBatch<F> = (
     Vec<Polynomial<F, Coeff>>,
     Vec<Polynomial<F, ExtendedLagrangeCoeff>>,
 );
+
+/// FFT twiddles retained by a proving key.
+///
+/// The table lengths bind these twiddles to an [`EvaluationDomain`]'s base and
+/// extended sizes. For a fixed field, those sizes uniquely determine the roots
+/// of unity used to build the tables. Each cached transform asserts those
+/// lengths before use so a cache cannot silently be used with another domain.
+/// The fields are private so caches can only be built by
+/// [`EvaluationDomain::proving_key_twiddles`] or cloned from one it built.
+///
+/// Clones share both allocations. This matters because [`ProvingKey`] is
+/// cloneable and these tables are intended to be retained, not rebuilt.
+/// Exact equivalence with the uncached transforms across the supported domain
+/// shapes is covered by
+/// `test_batched_lagrange_transforms_match_independent_transforms`.
+///
+/// [`ProvingKey`]: crate::plonk::ProvingKey
+#[derive(Clone)]
+pub(crate) struct ProvingKeyTwiddles<F> {
+    base_inverse: Arc<[F]>,
+    extended_forward: Arc<[F]>,
+}
+
+impl<F> fmt::Debug for ProvingKeyTwiddles<F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProvingKeyTwiddles")
+            .field("base_inverse_len", &self.base_inverse.len())
+            .field("extended_forward_len", &self.extended_forward.len())
+            .finish()
+    }
+}
 
 /// This structure contains precomputed constants and other details needed for
 /// performing operations on an evaluation domain of size $2^k$ and an extended
@@ -271,6 +303,69 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
     }
 
+    /// Builds the FFT twiddles retained by a proving key.
+    pub(crate) fn proving_key_twiddles(&self) -> ProvingKeyTwiddles<F> {
+        ProvingKeyTwiddles {
+            base_inverse: Arc::from(twiddle_table(self.omega_inv, 1 << self.k)),
+            extended_forward: Arc::from(twiddle_table(self.extended_omega, self.extended_len())),
+        }
+    }
+
+    /// Converts a Lagrange polynomial to coefficient form using proving-key
+    /// twiddles.
+    pub(crate) fn lagrange_to_coeff_with_twiddles(
+        &self,
+        mut polynomial: Polynomial<F, LagrangeCoeff>,
+        twiddles: &ProvingKeyTwiddles<F>,
+    ) -> Polynomial<F, Coeff> {
+        assert_eq!(polynomial.len(), 1 << self.k);
+        assert_eq!(twiddles.base_inverse.len(), (1 << self.k) / 2);
+
+        bitreverse_permute(&mut polynomial.values, self.k);
+        recursive_butterfly_after_prefix(
+            &mut polynomial.values,
+            1,
+            1,
+            &twiddles.base_inverse,
+            parallel_depth(),
+        );
+        parallelize(&mut polynomial.values, |values, _| {
+            for value in values {
+                *value *= &self.ifft_divisor;
+            }
+        });
+
+        Polynomial {
+            values: polynomial.values,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Converts a coefficient polynomial to extended-coset form using
+    /// proving-key twiddles.
+    pub(crate) fn coeff_to_extended_with_twiddles(
+        &self,
+        mut polynomial: Polynomial<F, Coeff>,
+        twiddles: &ProvingKeyTwiddles<F>,
+    ) -> Polynomial<F, ExtendedLagrangeCoeff> {
+        assert_eq!(polynomial.len(), 1 << self.k);
+        assert_eq!(twiddles.extended_forward.len(), self.extended_len() / 2);
+
+        self.distribute_powers_zeta(&mut polynomial.values, true);
+        Self::fft_zero_padded_with_twiddles(
+            &mut polynomial.values,
+            self.k,
+            self.extended_k,
+            &twiddles.extended_forward,
+            parallel_depth(),
+        );
+
+        Polynomial {
+            values: polynomial.values,
+            _marker: PhantomData,
+        }
+    }
+
     /// Converts several Lagrange polynomials to coefficient and
     /// extended-coset form, parallelizing across polynomials.
     ///
@@ -287,17 +382,14 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub(crate) fn batch_lagrange_to_coeff_and_extended(
         &self,
         polynomials: &[Polynomial<F, LagrangeCoeff>],
+        twiddles: &ProvingKeyTwiddles<F>,
     ) -> PolynomialTransformBatch<F> {
         if polynomials.is_empty() {
             return (Vec::new(), Vec::new());
         }
 
-        let base_inverse_twiddles = twiddle_table(self.omega_inv, 1 << self.k);
-        let extended_forward_twiddles = if self.k == 0 {
-            Vec::new()
-        } else {
-            twiddle_table(self.extended_omega, self.extended_len())
-        };
+        assert_eq!(twiddles.base_inverse.len(), (1 << self.k) / 2);
+        assert_eq!(twiddles.extended_forward.len(), self.extended_len() / 2);
 
         // Rayon below schedules one complete pair of transforms per
         // polynomial. The keygen and prover call sites expose fixed,
@@ -317,7 +409,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 &mut values,
                 1,
                 1,
-                &base_inverse_twiddles,
+                &twiddles.base_inverse,
                 INNER_PARALLEL_DEPTH,
             );
             for value in &mut values {
@@ -334,7 +426,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 &mut extended.values,
                 self.k,
                 self.extended_k,
-                &extended_forward_twiddles,
+                &twiddles.extended_forward,
                 INNER_PARALLEL_DEPTH,
             );
             let extended = Polynomial {
@@ -399,6 +491,44 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             .truncate((&self.n * self.quotient_poly_degree) as usize);
 
         a.values
+    }
+
+    /// Converts an extended-domain polynomial to coefficient form using the
+    /// proving key's forward twiddles.
+    ///
+    /// An inverse DFT is a forward DFT with every nonzero output index
+    /// reversed, followed by the usual scaling. This avoids retaining a
+    /// separate extended-inverse table. Exact equivalence with
+    /// [`EvaluationDomain::extended_to_coeff`] is covered by
+    /// `test_batched_lagrange_transforms_match_independent_transforms`,
+    /// including explicit one- and three-thread pools.
+    pub(crate) fn extended_to_coeff_with_twiddles(
+        &self,
+        mut polynomial: Polynomial<F, ExtendedLagrangeCoeff>,
+        twiddles: &ProvingKeyTwiddles<F>,
+    ) -> Vec<F> {
+        assert_eq!(polynomial.len(), self.extended_len());
+        assert_eq!(twiddles.extended_forward.len(), self.extended_len() / 2);
+
+        bitreverse_permute(&mut polynomial.values, self.extended_k);
+        recursive_butterfly_after_prefix(
+            &mut polynomial.values,
+            1,
+            1,
+            &twiddles.extended_forward,
+            parallel_depth(),
+        );
+        polynomial.values[1..].reverse();
+        parallelize(&mut polynomial.values, |values, _| {
+            for value in values {
+                *value *= &self.extended_ifft_divisor;
+            }
+        });
+        self.distribute_powers_zeta(&mut polynomial.values, false);
+        polynomial
+            .values
+            .truncate((&self.n * self.quotient_poly_degree) as usize);
+        polynomial.values
     }
 
     /// This divides the polynomial (in the extended domain) by the vanishing
@@ -514,20 +644,21 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         let extension = extended_n / n;
 
         assert_eq!(coefficients.len(), n);
+        assert_eq!(twiddles.len(), extended_n / 2);
 
         // A constant polynomial needs no butterfly arithmetic.
         if n == 1 {
-            assert!(twiddles.is_empty());
             coefficients.resize(extended_n, coefficients[0]);
             return;
         }
-        assert_eq!(twiddles.len(), extended_n / 2);
 
         // For an n-length input, bitreverse_extended(i) is
         // extension * bitreverse_n(i). The omitted radix-2 stages would copy
         // each live coefficient across an `extension`-sized chunk. Materialize
         // the first retained stage directly instead of writing and rereading
-        // those replicated chunks.
+        // those replicated chunks. Thus no butterfly multiplication has an
+        // implicit zero operand, and only log_n stages remain: O(N log n)
+        // arithmetic for extended-domain size N and coefficient count n.
         let mut values = Vec::with_capacity(extended_n);
         let mut right_values = vec![F::ZERO; extension];
         // `arithmetic::recursive_butterfly_arithmetic` uses twiddle stride
@@ -840,6 +971,7 @@ fn test_batched_lagrange_transforms_match_independent_transforms() {
                 (1 << extension_log) + 1
             };
             let domain = EvaluationDomain::<Scalar>::new(degree, k);
+            let twiddles = domain.proving_key_twiddles();
             let polynomials = (0..5)
                 .map(|polynomial| {
                     let values = (0..1usize << k)
@@ -863,16 +995,46 @@ fn test_batched_lagrange_transforms_match_independent_transforms() {
                     .map(|polynomial| domain.coeff_to_extended(polynomial))
                     .collect::<Vec<_>>();
                 let (coefficients, extended) =
-                    domain.batch_lagrange_to_coeff_and_extended(&polynomials);
+                    domain.batch_lagrange_to_coeff_and_extended(&polynomials, &twiddles);
 
                 assert_eq!(coefficients.len(), expected_coefficients.len());
                 assert_eq!(extended.len(), expected_extended.len());
-                for (actual, expected) in coefficients.iter().zip(&expected_coefficients) {
+                for ((polynomial, actual), expected) in polynomials
+                    .iter()
+                    .zip(&coefficients)
+                    .zip(&expected_coefficients)
+                {
                     assert_eq!(&actual[..], &expected[..]);
+                    let cached =
+                        domain.lagrange_to_coeff_with_twiddles(polynomial.clone(), &twiddles);
+                    assert_eq!(&cached[..], &expected[..]);
                 }
-                for (actual, expected) in extended.iter().zip(&expected_extended) {
+                for ((coefficient, actual), expected) in expected_coefficients
+                    .iter()
+                    .zip(&extended)
+                    .zip(&expected_extended)
+                {
                     assert_eq!(&actual[..], &expected[..]);
+                    let cached =
+                        domain.coeff_to_extended_with_twiddles(coefficient.clone(), &twiddles);
+                    assert_eq!(&cached[..], &expected[..]);
+
+                    let expected_back = domain.extended_to_coeff(expected.clone());
+                    let cached_coefficients =
+                        domain.extended_to_coeff_with_twiddles(expected.clone(), &twiddles);
+                    assert_eq!(cached_coefficients, expected_back);
                 }
+
+                // Quotient construction applies the inverse transform to
+                // arbitrary extended-domain evaluations, not only evaluations
+                // produced by the zero-padded forward transform above.
+                let mut arbitrary_extended = domain.empty_extended();
+                for (index, value) in arbitrary_extended.iter_mut().enumerate() {
+                    *value = Scalar::from((index + 1) as u64);
+                }
+                let expected = domain.extended_to_coeff(arbitrary_extended.clone());
+                let actual = domain.extended_to_coeff_with_twiddles(arbitrary_extended, &twiddles);
+                assert_eq!(actual, expected);
             };
 
             #[cfg(feature = "multicore")]
@@ -889,9 +1051,33 @@ fn test_batched_lagrange_transforms_match_independent_transforms() {
     }
 
     let domain = EvaluationDomain::<Scalar>::new(9, 3);
-    let (coefficients, extended) = domain.batch_lagrange_to_coeff_and_extended(&[]);
+    let twiddles = domain.proving_key_twiddles();
+    let (coefficients, extended) = domain.batch_lagrange_to_coeff_and_extended(&[], &twiddles);
     assert!(coefficients.is_empty());
     assert!(extended.is_empty());
+}
+
+#[test]
+fn test_orchard_proving_key_twiddle_cache_size_and_sharing() {
+    use crate::pasta::pallas::Scalar;
+
+    let domain = EvaluationDomain::<Scalar>::new(9, 11);
+    let twiddles = domain.proving_key_twiddles();
+    assert_eq!(std::mem::size_of::<Scalar>(), 32);
+    assert_eq!(twiddles.base_inverse.len(), 1 << 10);
+    assert_eq!(twiddles.extended_forward.len(), 1 << 13);
+    assert_eq!(
+        (twiddles.base_inverse.len() + twiddles.extended_forward.len())
+            * std::mem::size_of::<Scalar>(),
+        288 * 1024
+    );
+
+    let cloned = twiddles.clone();
+    assert!(Arc::ptr_eq(&twiddles.base_inverse, &cloned.base_inverse));
+    assert!(Arc::ptr_eq(
+        &twiddles.extended_forward,
+        &cloned.extended_forward
+    ));
 }
 
 #[test]

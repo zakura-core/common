@@ -12,6 +12,9 @@ and this project adheres to Rust's notion of
   repeated hash-table lookups during circuit measurement.
 - Independent polynomial transforms are now parallelized during proving-key
   generation and proof creation.
+- Proving keys now retain and reuse FFT twiddles for fixed, permutation,
+  advice, instance, lookup, and quotient transforms. At Orchard's `k = 11`,
+  the cache is 288 KiB and cloned proving keys share its allocations.
 - Added a test running `best_multiexp` at GLV-selected sizes inside explicit
   one- and three-thread Rayon pools, and a dedicated halo2 CI job that runs the
   multiexp tests with `multicore`, so the parallel Pasta multiscalar path is
