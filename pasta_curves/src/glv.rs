@@ -1808,7 +1808,6 @@ fn mixed_radix_factors(log_n: u32) -> Option<Vec<usize>> {
     if log_n < 6 {
         return None;
     }
-
     let mut factors = Vec::<usize>::new();
     let mut remaining = log_n;
     match log_n % 4 {
@@ -1918,23 +1917,6 @@ impl<C: GlvParams> LowMultiplicationScalars<C> {
         ];
         let odd16 = needs_fft16.then(|| [1usize, 3, 5, 7].map(|odd| powers.get(odd * (n / 16))));
         Self { shared, odd16 }
-    }
-}
-
-fn prepare_mixed_radix_first_tier<C: GlvParams>(
-    points: &[C::AffineExt],
-    codelets: &mut [C::AffineExt],
-    factors: &[usize],
-) {
-    assert_eq!(points.len(), factors.iter().product::<usize>());
-    assert_eq!(points.len(), codelets.len());
-    record_fft_layout_moves(points.len());
-    let radix = factors[0];
-    for block in 0..points.len() / radix {
-        for local in 0..radix {
-            codelets[block * radix + local] =
-                points[mixed_radix_initial_source(block, local, factors)];
-        }
     }
 }
 
@@ -2055,6 +2037,7 @@ fn finish_mixed_radix<C: GlvParams>(
 
 fn apply_low_multiplication_codelet<C: GlvParams>(
     points: &mut [C::AffineExt],
+    initial_source: Option<(&[C::AffineExt], &[usize])>,
     radix: usize,
     scalars: &LowMultiplicationScalars<C>,
     butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
@@ -2064,6 +2047,7 @@ fn apply_low_multiplication_codelet<C: GlvParams>(
     match radix {
         8 => fft8_multiplication_minimal_layer::<C>(
             points,
+            initial_source,
             &scalars.shared,
             butterfly_scratch,
             codelet_scratch,
@@ -2071,6 +2055,7 @@ fn apply_low_multiplication_codelet<C: GlvParams>(
         ),
         16 => fft16_low_multiplication_layer::<C>(
             points,
+            initial_source,
             scalars,
             butterfly_scratch,
             codelet_scratch,
@@ -2099,9 +2084,9 @@ fn mixed_radix_fft<C: GlvParams>(
     let mut butterfly_scratch = AffineTwiddleScratch::new();
     let mut codelet_scratch = LowMultiplicationScratch::new();
 
-    prepare_mixed_radix_first_tier::<C>(output, &mut scratch, factors);
     identity_free = apply_low_multiplication_codelet::<C>(
         &mut scratch,
+        Some((output, factors)),
         factors[0],
         &scalars,
         &mut butterfly_scratch,
@@ -2114,6 +2099,7 @@ fn mixed_radix_fft<C: GlvParams>(
             mixed_radix_diagonal_transpose::<C>(&scratch, output, factors, stage, &mut powers);
             identity_free = apply_low_multiplication_codelet::<C>(
                 output,
+                None,
                 factors[stage],
                 &scalars,
                 &mut butterfly_scratch,
@@ -2124,6 +2110,7 @@ fn mixed_radix_fft<C: GlvParams>(
             mixed_radix_diagonal_transpose::<C>(output, &mut scratch, factors, stage, &mut powers);
             identity_free = apply_low_multiplication_codelet::<C>(
                 &mut scratch,
+                None,
                 factors[stage],
                 &scalars,
                 &mut butterfly_scratch,
@@ -2211,6 +2198,7 @@ pub(crate) fn fft_vartime<C: GlvParams>(
     let (mut chunk, mut twiddle_stride) = if output.len() >= 16 {
         identity_free = fft16_low_multiplication_layer::<C>(
             output,
+            None,
             codelet_scalars.as_ref().expect("DFT16 scalars"),
             &mut butterfly_scratch,
             &mut codelet_scratch,
@@ -2220,6 +2208,7 @@ pub(crate) fn fft_vartime<C: GlvParams>(
     } else if output.len() >= 8 {
         identity_free = fft8_multiplication_minimal_layer::<C>(
             output,
+            None,
             &codelet_scalars.as_ref().expect("DFT8 scalars").shared,
             &mut butterfly_scratch,
             &mut codelet_scratch,
@@ -2363,6 +2352,7 @@ fn resize_affine<C: GlvParams>(values: &mut Vec<C::AffineExt>, len: usize) {
 /// schedules.
 fn fft16_low_multiplication_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
+    initial_source: Option<(&[C::AffineExt], &[usize])>,
     scalars: &LowMultiplicationScalars<C>,
     butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
     codelet_scratch: &mut LowMultiplicationScratch<C>,
@@ -2380,11 +2370,24 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
     left.reserve(points.len() / 2);
     right.reserve(points.len() / 2);
 
-    // The enclosing layout puts (q_j, q_{j + 8}) next to each other.
-    for block in points.chunks(16) {
-        for pair in block.chunks(2) {
-            left.push(pair[0]);
-            right.push(pair[1]);
+    // The enclosing layout puts (q_j, q_{j + 8}) next to each other. The
+    // first tier gathers those entries directly from natural input order,
+    // fusing the mixed-digit permutation into this codelet input pass.
+    if let Some((source, factors)) = initial_source {
+        assert_eq!(source.len(), points.len());
+        assert_eq!(factors[0], 16);
+        for block in 0..blocks {
+            for local in (0..16).step_by(2) {
+                left.push(source[mixed_radix_initial_source(block, local, factors)]);
+                right.push(source[mixed_radix_initial_source(block, local + 1, factors)]);
+            }
+        }
+    } else {
+        for block in points.chunks(16) {
+            for pair in block.chunks(2) {
+                left.push(pair[0]);
+                right.push(pair[1]);
+            }
         }
     }
     resize_affine::<C>(even_inputs, points.len() / 2);
@@ -2620,6 +2623,7 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
 /// at the cost of two additional group additions.
 fn fft8_multiplication_minimal_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
+    initial_source: Option<(&[C::AffineExt], &[usize])>,
     scalars: &[Decomposed<C>; 3],
     butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
     codelet_scratch: &mut LowMultiplicationScratch<C>,
@@ -2636,13 +2640,24 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
     right.clear();
     left.reserve(blocks * 4);
     right.reserve(blocks * 4);
-    for block in points.chunks(8) {
-        // The enclosing FFT has locally bit-reversed the input. Undo that
-        // three-bit reversal by pairing adjacent entries as
-        // (q0, q4), (q2, q6), (q1, q5), and (q3, q7).
-        for pair in block.chunks(2) {
-            left.push(pair[0]);
-            right.push(pair[1]);
+    if let Some((source, factors)) = initial_source {
+        assert_eq!(source.len(), points.len());
+        assert_eq!(factors[0], 8);
+        for block in 0..blocks {
+            for local in (0..8).step_by(2) {
+                left.push(source[mixed_radix_initial_source(block, local, factors)]);
+                right.push(source[mixed_radix_initial_source(block, local + 1, factors)]);
+            }
+        }
+    } else {
+        for block in points.chunks(8) {
+            // The enclosing FFT has locally bit-reversed the input. Undo that
+            // three-bit reversal by pairing adjacent entries as
+            // (q0, q4), (q2, q6), (q1, q5), and (q3, q7).
+            for pair in block.chunks(2) {
+                left.push(pair[0]);
+                right.push(pair[1]);
+            }
         }
     }
     resize_affine::<C>(stage1_sum, blocks * 4);
@@ -3754,7 +3769,7 @@ mod tests {
             );
             assert_eq!(counts.curve_additions, expected_additions);
             assert_eq!(counts.twiddle_decompositions, expected_decompositions);
-            let expected_layout_passes = factors.len() + 1 + usize::from(factors.len() % 2 == 0);
+            let expected_layout_passes = factors.len() + usize::from(factors.len() % 2 == 0);
             assert_eq!(counts.layout_moves, expected_layout_passes * n);
 
             let mut current_multiplications = (n / 16) * 14;
