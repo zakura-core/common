@@ -137,44 +137,128 @@ pub(super) const fn square_wide(value: &[u64; 4]) -> [u64; 8] {
     [r0, r1, r2, r3, r4, r5, r6, r7]
 }
 
+/// The four cancellation rounds of the Montgomery reduction of a 512-bit
+/// value `t < R * modulus` (Algorithm 14.32 in the Handbook of Applied
+/// Cryptography), yielding the surviving four limbs, a value below
+/// `2 * modulus`.
+///
+/// This is a macro rather than a helper function on purpose: an extra
+/// function layer here, even an `inline(always)` one, changes LLVM's
+/// inlining decisions for the multiplication and squaring that expand it.
+macro_rules! montgomery_rounds {
+    ($t:expr, $modulus:expr, $inv:expr) => {{
+        let [r0, r1, r2, r3, r4, r5, r6, r7] = *$t;
+        let modulus: &[u64; 4] = $modulus;
+        let inv: u64 = $inv;
+
+        let k = r0.wrapping_mul(inv);
+        let (_, carry) = mac(r0, k, modulus[0], 0);
+        let (r1, carry) = mac(r1, k, modulus[1], carry);
+        let (r2, carry) = mac(r2, k, modulus[2], carry);
+        let (r3, carry) = mac(r3, k, modulus[3], carry);
+        let (r4, carry2) = adc(r4, 0, carry);
+
+        let k = r1.wrapping_mul(inv);
+        let (_, carry) = mac(r1, k, modulus[0], 0);
+        let (r2, carry) = mac(r2, k, modulus[1], carry);
+        let (r3, carry) = mac(r3, k, modulus[2], carry);
+        let (r4, carry) = mac(r4, k, modulus[3], carry);
+        let (r5, carry2) = adc(r5, carry2, carry);
+
+        let k = r2.wrapping_mul(inv);
+        let (_, carry) = mac(r2, k, modulus[0], 0);
+        let (r3, carry) = mac(r3, k, modulus[1], carry);
+        let (r4, carry) = mac(r4, k, modulus[2], carry);
+        let (r5, carry) = mac(r5, k, modulus[3], carry);
+        let (r6, carry2) = adc(r6, carry2, carry);
+
+        let k = r3.wrapping_mul(inv);
+        let (_, carry) = mac(r3, k, modulus[0], 0);
+        let (r4, carry) = mac(r4, k, modulus[1], carry);
+        let (r5, carry) = mac(r5, k, modulus[2], carry);
+        let (r6, carry) = mac(r6, k, modulus[3], carry);
+        let (r7, _) = adc(r7, carry2, carry);
+
+        [r4, r5, r6, r7]
+    }};
+}
+
 /// Montgomery-reduces a 512-bit value `t < R * modulus` to a canonical
 /// element, where `inv = -modulus^{-1} mod 2^64`.
 #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
 pub(super) const fn montgomery_reduce(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
-    // The Montgomery reduction here is based on Algorithm 14.32 in
-    // Handbook of Applied Cryptography
-    // <http://cacr.uwaterloo.ca/hac/about/chap14.pdf>.
-
-    let [r0, r1, r2, r3, r4, r5, r6, r7] = *t;
-
-    let k = r0.wrapping_mul(inv);
-    let (_, carry) = mac(r0, k, modulus[0], 0);
-    let (r1, carry) = mac(r1, k, modulus[1], carry);
-    let (r2, carry) = mac(r2, k, modulus[2], carry);
-    let (r3, carry) = mac(r3, k, modulus[3], carry);
-    let (r4, carry2) = adc(r4, 0, carry);
-
-    let k = r1.wrapping_mul(inv);
-    let (_, carry) = mac(r1, k, modulus[0], 0);
-    let (r2, carry) = mac(r2, k, modulus[1], carry);
-    let (r3, carry) = mac(r3, k, modulus[2], carry);
-    let (r4, carry) = mac(r4, k, modulus[3], carry);
-    let (r5, carry2) = adc(r5, carry2, carry);
-
-    let k = r2.wrapping_mul(inv);
-    let (_, carry) = mac(r2, k, modulus[0], 0);
-    let (r3, carry) = mac(r3, k, modulus[1], carry);
-    let (r4, carry) = mac(r4, k, modulus[2], carry);
-    let (r5, carry) = mac(r5, k, modulus[3], carry);
-    let (r6, carry2) = adc(r6, carry2, carry);
-
-    let k = r3.wrapping_mul(inv);
-    let (_, carry) = mac(r3, k, modulus[0], 0);
-    let (r4, carry) = mac(r4, k, modulus[1], carry);
-    let (r5, carry) = mac(r5, k, modulus[2], carry);
-    let (r6, carry) = mac(r6, k, modulus[3], carry);
-    let (r7, _) = adc(r7, carry2, carry);
-
     // Result may be within modulus of the correct value
-    sub(&[r4, r5, r6, r7], modulus, modulus)
+    sub(&montgomery_rounds!(t, modulus, inv), modulus, modulus)
+}
+
+/// Montgomery-reduces a 512-bit value `t < R * modulus`, returning a result
+/// below `2 * modulus` rather than a canonical one.
+///
+/// `(t + k * modulus) / R < (R * modulus + R * modulus) / R`, so the result
+/// is below `2 * modulus` and [`canonicalize`] finishes the job with one
+/// conditional subtraction. Callers that feed the result straight into
+/// another reduction can skip that step; see [`sqr_n_lazy`] for the bound
+/// that keeps a chain of such steps inside the reduction's domain.
+#[cfg_attr(not(feature = "uninline-portable"), inline(always))]
+pub(super) const fn montgomery_reduce_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
+    montgomery_rounds!(t, modulus, inv)
+}
+
+/// Subtracts `modulus` from a value below `2 * modulus` if that does not
+/// underflow, which makes the value canonical.
+#[cfg_attr(not(feature = "uninline-portable"), inline(always))]
+#[cfg_attr(
+    all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ),
+    allow(dead_code)
+)]
+pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
+    sub(value, modulus, modulus)
+}
+
+/// Squares `value` `n` times, leaving the accumulator in `[0, 2 * modulus)`
+/// throughout instead of canonicalizing after every squaring. This is the
+/// portable form of the assembly backend's `sqr_n_mul` loop.
+///
+/// # Why the chain stays in the reduction's domain
+///
+/// A Montgomery reduction accepts any input below `R * p` and returns a value
+/// below `p + t_hi`, where `t_hi = t / R`. So if the accumulator is below
+/// `c * p`, its square is below `c^2 * p^2` and the next accumulator is below
+/// `(1 + c^2 * p / R) * p`. From a canonical start the multipliers are
+///
+/// ```text
+/// 1, 1.25, 1.390625, 1.483..., ...   (approaching 2 from below as ~2 - 4/n)
+/// ```
+///
+/// and a step is legal as long as `(c * p)^2 < R * p`, i.e. `c * p` is below
+/// `isqrt(R * p)`. For both Pasta moduli `isqrt(R * p) = 2p - (p mod 2^128) - 1`
+/// (since `p = 2^254 + c'` with `c' = p mod 2^128`), about `2^125` below
+/// `2p`, while the chain bound only closes on `2p` as `4p / n`: reaching the
+/// unsafe point would take about `2^131` squarings against a `u32` count.
+/// Iterating the exact integer bound `B <- p + floor(B^2 / R)` for forty
+/// million steps still gives `1.9999999 * p`.
+///
+/// The result must be canonicalized by the caller, either with
+/// [`canonicalize`] or by multiplying it with a canonical value: that product
+/// is below `2p * p < R * p`, so the multiplication's own reduction accepts it
+/// and returns a canonical result.
+#[cfg_attr(not(feature = "uninline-portable"), inline)]
+#[cfg_attr(
+    all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple"
+    ),
+    allow(dead_code)
+)]
+pub(super) fn sqr_n_lazy(value: &[u64; 4], n: u32, modulus: &[u64; 4], inv: u64) -> [u64; 4] {
+    let mut acc = *value;
+    for _ in 0..n {
+        acc = montgomery_reduce_lazy(&square_wide(&acc), modulus, inv);
+    }
+    acc
 }

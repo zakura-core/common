@@ -12,6 +12,11 @@ and this project adheres to Rust's notion of
   `fields::portable` module written over limb arrays with the modulus and
   Montgomery constant passed in. The two fields delegate to it instead of each
   carrying its own copy. The routines and their generated code are unchanged.
+- Portable squaring chains no longer canonicalize after every squaring: the
+  accumulator stays below `2p` (provably, for any chain length that fits a
+  `u32`) and the closing multiplication, or one final conditional
+  subtraction, corrects it. `sqr_n_mul` and the new `sqr_n` use this, and the
+  square-root tables' `sqrt_ratio`/`sqrt_alt` chains run through them.
 - The GLV multiscalar multiplication backend now plans its own window width.
   It evaluates the GLV ladder at the generic default width and one bit wider,
   runs at the cheaper, and is selected only when that beats the generic

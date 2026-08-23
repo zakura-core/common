@@ -412,7 +412,41 @@ impl Fq {
             target_vendor = "apple"
         )))]
         {
-            (0..n).fold(*self, |acc, _| acc.square()).mul(by)
+            // Leave the accumulator unreduced between squarings, as the
+            // assembly's `sqr_n_mul` loop does; the closing multiplication
+            // canonicalizes, since its product is below `2p * p < R * p`.
+            Fq(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul(by)
+        }
+    }
+
+    /// Squares `self` `n` times (`n` must be at least 1). Reached through
+    /// `SqrtTableHelpers`, which nothing uses without `sqrt-table`.
+    #[cfg_attr(not(feature = "sqrt-table"), allow(dead_code))]
+    #[inline]
+    fn sqr_n_runtime(&self, n: u32) -> Self {
+        assert!(n >= 1);
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            (0..n).fold(*self, |acc, _| acc.square_runtime())
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            // As in `sqr_n_mul_runtime`, but with no multiplication to fold
+            // the correction into, so canonicalize once at the end.
+            Fq(portable::canonicalize(
+                &portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV),
+                &MODULUS.0,
+            ))
         }
     }
 
@@ -768,6 +802,14 @@ impl SqrtTableHelpers for Fq {
         (0..4).fold(ss, |x, _| x.square_runtime()) // st
     }
 
+    fn sqr_n(&self, n: u32) -> Self {
+        self.sqr_n_runtime(n)
+    }
+
+    fn sqr_n_mul(&self, n: u32, by: &Self) -> Self {
+        self.sqr_n_mul_runtime(n, by)
+    }
+
     fn sqrt_hash_key(&self) -> u32 {
         self.0[0] as u32
     }
@@ -985,6 +1027,98 @@ fn fq_sqrt_table_matches_tonelli_shanks() {
 #[test]
 fn test_sqrt_32bit_overflow() {
     assert!((Fq::from(5)).sqrt().is_none().unwrap_u8() == 1);
+}
+
+#[test]
+fn sqr_n_chains_match_eager_squaring() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x71; 16]);
+
+    // The lazy chains must agree with squaring-and-canonicalizing at every
+    // length, including chains far longer than any caller uses (the longest
+    // in the crate is 129).
+    for _ in 0..100 {
+        let a = <Fq as ff::Field>::random(&mut rng);
+        let by = <Fq as ff::Field>::random(&mut rng);
+
+        let mut eager = a;
+        for n in 1..=512u32 {
+            eager = eager.square();
+            assert_eq!(a.sqr_n_runtime(n), eager, "sqr_n, n = {}", n);
+            assert_eq!(
+                a.sqr_n_mul_runtime(n, &by),
+                eager * by,
+                "sqr_n_mul, n = {}",
+                n
+            );
+        }
+    }
+
+    // Zero and one stay fixed, and the trait methods route to the same code.
+    assert_eq!(Fq::zero().sqr_n_runtime(7), Fq::zero());
+    assert_eq!(Fq::one().sqr_n_mul_runtime(7, &Fq::one()), Fq::one());
+    let a = <Fq as ff::Field>::random(&mut rng);
+    assert_eq!(a.sqr_n(9), a.sqr_n_runtime(9));
+    assert_eq!(a.sqr_n_mul(9, &a), a.sqr_n_mul_runtime(9, &a));
+}
+
+#[test]
+fn sqr_n_lazy_accumulator_stays_below_two_p() {
+    use rand::SeedableRng;
+
+    // `sqr_n_lazy` is sound while the accumulator stays below `isqrt(R * p)`,
+    // which is `2p - (p mod 2^128) - 1`. Squaring pushes the bound towards
+    // `2p` as roughly `2 - 4/n`, so walk long chains and check every step
+    // against the tighter `2p` limit that also keeps `canonicalize` correct.
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x9d; 16]);
+
+    let two_p = {
+        let (d0, c0) = MODULUS.0[0].overflowing_add(MODULUS.0[0]);
+        let (d1, c1) = MODULUS.0[1].overflowing_add(MODULUS.0[1]);
+        let (d1, c2) = d1.overflowing_add(c0 as u64);
+        let (d2, c3) = MODULUS.0[2].overflowing_add(MODULUS.0[2]);
+        let (d2, c4) = d2.overflowing_add((c1 | c2) as u64);
+        let d3 = MODULUS.0[3]
+            .wrapping_add(MODULUS.0[3])
+            .wrapping_add((c3 | c4) as u64);
+        [d0, d1, d2, d3]
+    };
+    let below_two_p = |x: &[u64; 4]| {
+        let mut i = 4;
+        while i > 0 {
+            i -= 1;
+            if x[i] != two_p[i] {
+                return x[i] < two_p[i];
+            }
+        }
+        false
+    };
+
+    // Random starts and the largest canonical start.
+    for i in 0..51 {
+        let start = if i < 50 {
+            <Fq as ff::Field>::random(&mut rng).0
+        } else {
+            (-Fq::one()).0
+        };
+        let mut acc = start;
+        for n in 1..=2048u32 {
+            acc = super::portable::sqr_n_lazy(&acc, 1, &MODULUS.0, INV);
+            assert!(
+                below_two_p(&acc),
+                "accumulator reached 2p after {} squarings",
+                n
+            );
+            // Canonicalizing at any point agrees with the eager chain.
+            if n.is_power_of_two() {
+                assert_eq!(
+                    Fq(super::portable::canonicalize(&acc, &MODULUS.0)),
+                    Fq(start).sqr_n_runtime(n)
+                );
+            }
+        }
+    }
 }
 
 #[test]
