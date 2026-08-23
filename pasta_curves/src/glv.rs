@@ -2057,14 +2057,25 @@ fn apply_low_multiplication_codelet<C: GlvParams>(
     points: &mut [C::AffineExt],
     radix: usize,
     scalars: &LowMultiplicationScalars<C>,
-    scratch: &mut AffineTwiddleScratch<C::Base>,
+    butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
+    codelet_scratch: &mut LowMultiplicationScratch<C>,
     identity_free: bool,
 ) -> bool {
     match radix {
-        8 => {
-            fft8_multiplication_minimal_layer::<C>(points, &scalars.shared, scratch, identity_free)
-        }
-        16 => fft16_low_multiplication_layer::<C>(points, scalars, scratch, identity_free),
+        8 => fft8_multiplication_minimal_layer::<C>(
+            points,
+            &scalars.shared,
+            butterfly_scratch,
+            codelet_scratch,
+            identity_free,
+        ),
+        16 => fft16_low_multiplication_layer::<C>(
+            points,
+            scalars,
+            butterfly_scratch,
+            codelet_scratch,
+            identity_free,
+        ),
         _ => unreachable!("mixed-radix codelets are DFT8 or DFT16"),
     }
 }
@@ -2086,6 +2097,7 @@ fn mixed_radix_fft<C: GlvParams>(
     // affine vector alternates with `output` across all tiers.
     let mut scratch = alloc::vec![C::AffineExt::identity(); n];
     let mut butterfly_scratch = AffineTwiddleScratch::new();
+    let mut codelet_scratch = LowMultiplicationScratch::new();
 
     prepare_mixed_radix_first_tier::<C>(output, &mut scratch, factors);
     identity_free = apply_low_multiplication_codelet::<C>(
@@ -2093,6 +2105,7 @@ fn mixed_radix_fft<C: GlvParams>(
         factors[0],
         &scalars,
         &mut butterfly_scratch,
+        &mut codelet_scratch,
         identity_free,
     );
     let mut source_is_scratch = true;
@@ -2104,6 +2117,7 @@ fn mixed_radix_fft<C: GlvParams>(
                 factors[stage],
                 &scalars,
                 &mut butterfly_scratch,
+                &mut codelet_scratch,
                 identity_free,
             );
         } else {
@@ -2113,6 +2127,7 @@ fn mixed_radix_fft<C: GlvParams>(
                 factors[stage],
                 &scalars,
                 &mut butterfly_scratch,
+                &mut codelet_scratch,
                 identity_free,
             );
         }
@@ -2181,6 +2196,7 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         .collect();
 
     let mut butterfly_scratch = AffineTwiddleScratch::new();
+    let mut codelet_scratch = LowMultiplicationScratch::new();
     let codelet_scalars = if output.len() >= 8 {
         let mut powers = PowerTwiddleCache::<C>::new(omega, output.len());
         Some(LowMultiplicationScalars::<C>::new(
@@ -2197,6 +2213,7 @@ pub(crate) fn fft_vartime<C: GlvParams>(
             output,
             codelet_scalars.as_ref().expect("DFT16 scalars"),
             &mut butterfly_scratch,
+            &mut codelet_scratch,
             identity_free,
         );
         (32, output.len() / 32)
@@ -2205,6 +2222,7 @@ pub(crate) fn fft_vartime<C: GlvParams>(
             output,
             &codelet_scalars.as_ref().expect("DFT8 scalars").shared,
             &mut butterfly_scratch,
+            &mut codelet_scratch,
             identity_free,
         );
         (16, output.len() / 16)
@@ -2317,6 +2335,28 @@ pub(crate) fn fft_vartime<C: GlvParams>(
     }
 }
 
+const CODELET_AFFINE_BUFFERS: usize = 14;
+
+struct LowMultiplicationScratch<C: GlvParams> {
+    left: Vec<C::AffineExt>,
+    right: Vec<C::AffineExt>,
+    intermediates: [Vec<C::AffineExt>; CODELET_AFFINE_BUFFERS],
+}
+
+impl<C: GlvParams> LowMultiplicationScratch<C> {
+    fn new() -> Self {
+        Self {
+            left: Vec::new(),
+            right: Vec::new(),
+            intermediates: core::array::from_fn(|_| Vec::new()),
+        }
+    }
+}
+
+fn resize_affine<C: GlvParams>(values: &mut Vec<C::AffineExt>, len: usize) {
+    values.resize(len, C::AffineExt::identity());
+}
+
 /// Replaces four radix-2 layers with a 16-point codelet that uses 14 scalar
 /// multiplications instead of 15. Its DFT8 and two odd-root DFT4
 /// subtransforms share their affine stages and repeated eighth-root scalar
@@ -2324,14 +2364,21 @@ pub(crate) fn fft_vartime<C: GlvParams>(
 fn fft16_low_multiplication_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
     scalars: &LowMultiplicationScalars<C>,
-    scratch: &mut AffineTwiddleScratch<C::Base>,
+    butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
+    codelet_scratch: &mut LowMultiplicationScratch<C>,
     mut identity_free: bool,
 ) -> bool {
     debug_assert_eq!(points.len() % 16, 0);
     let blocks = points.len() / 16;
     let weighted_blocks = blocks * 2;
-    let mut left = Vec::with_capacity(points.len() / 2);
-    let mut right = Vec::with_capacity(points.len() / 2);
+    let left = &mut codelet_scratch.left;
+    let right = &mut codelet_scratch.right;
+    let [even_inputs, odd_inputs, stage1_sum, stage1_difference, stage2_sum, stage2_difference, stage3_sum, stage3_difference, stage4_sum, stage4_difference, even_outputs, odd_roots, odd_low, odd_high] =
+        &mut codelet_scratch.intermediates;
+    left.clear();
+    right.clear();
+    left.reserve(points.len() / 2);
+    right.reserve(points.len() / 2);
 
     // The enclosing layout puts (q_j, q_{j + 8}) next to each other.
     for block in points.chunks(16) {
@@ -2340,14 +2387,14 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
             right.push(pair[1]);
         }
     }
-    let mut even_inputs = alloc::vec![C::AffineExt::identity(); points.len() / 2];
-    let mut odd_inputs = alloc::vec![C::AffineExt::identity(); points.len() / 2];
+    resize_affine::<C>(even_inputs, points.len() / 2);
+    resize_affine::<C>(odd_inputs, points.len() / 2);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut even_inputs,
-        &mut odd_inputs,
-        scratch,
+        even_inputs,
+        odd_inputs,
+        butterfly_scratch,
         identity_free,
     );
 
@@ -2367,14 +2414,14 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         left.push(block[2]);
         right.push(block[3]);
     }
-    let mut stage1_sum = alloc::vec![C::AffineExt::identity(); blocks * 6];
-    let mut stage1_difference = alloc::vec![C::AffineExt::identity(); blocks * 6];
+    resize_affine::<C>(stage1_sum, blocks * 6);
+    resize_affine::<C>(stage1_difference, blocks * 6);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut stage1_sum,
-        &mut stage1_difference,
-        scratch,
+        stage1_sum,
+        stage1_difference,
+        butterfly_scratch,
         identity_free,
     );
 
@@ -2396,14 +2443,14 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
             stage1_difference[offset + 3],
         ]);
     }
-    let mut stage2_sum = alloc::vec![C::AffineExt::identity(); blocks * 3];
-    let mut stage2_difference = alloc::vec![C::AffineExt::identity(); blocks * 3];
+    resize_affine::<C>(stage2_sum, blocks * 3);
+    resize_affine::<C>(stage2_difference, blocks * 3);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut stage2_sum,
-        &mut stage2_difference,
-        scratch,
+        stage2_sum,
+        stage2_difference,
+        butterfly_scratch,
         identity_free,
     );
 
@@ -2460,14 +2507,14 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         left.extend_from_slice(&[odd_inputs[block * 4], products[1][scalar_offset]]);
         right.extend_from_slice(&[products[0][blocks * 2 + block], products[2][scalar_offset]]);
     }
-    let mut stage3_sum = alloc::vec![C::AffineExt::identity(); blocks * 8];
-    let mut stage3_difference = alloc::vec![C::AffineExt::identity(); blocks * 8];
+    resize_affine::<C>(stage3_sum, blocks * 8);
+    resize_affine::<C>(stage3_difference, blocks * 8);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut stage3_sum,
-        &mut stage3_difference,
-        scratch,
+        stage3_sum,
+        stage3_difference,
+        butterfly_scratch,
         identity_free,
     );
 
@@ -2487,18 +2534,18 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         left.extend_from_slice(&[stage3_sum[offset], stage3_difference[offset]]);
         right.extend_from_slice(&[stage3_sum[offset + 1], stage3_difference[offset + 1]]);
     }
-    let mut stage4_sum = alloc::vec![C::AffineExt::identity(); blocks * 6];
-    let mut stage4_difference = alloc::vec![C::AffineExt::identity(); blocks * 6];
+    resize_affine::<C>(stage4_sum, blocks * 6);
+    resize_affine::<C>(stage4_difference, blocks * 6);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut stage4_sum,
-        &mut stage4_difference,
-        scratch,
+        stage4_sum,
+        stage4_difference,
+        butterfly_scratch,
         identity_free,
     );
 
-    let mut even_outputs = alloc::vec![C::AffineExt::identity(); blocks * 8];
+    resize_affine::<C>(even_outputs, blocks * 8);
     for block in 0..blocks {
         let stage3 = block * 4;
         let stage4 = block * 2;
@@ -2514,7 +2561,7 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
     }
 
     let odd_stage4_offset = blocks * 2;
-    let mut odd_roots = alloc::vec![C::AffineExt::identity(); blocks * 8];
+    resize_affine::<C>(odd_roots, blocks * 8);
     for block in 0..weighted_blocks {
         let stage4 = odd_stage4_offset + block * 2;
         let output = &mut odd_roots[block * 4..][..4];
@@ -2543,14 +2590,14 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
         left.extend_from_slice(&block[..4]);
         right.extend(products.iter().map(|products| products[block_index]));
     }
-    let mut odd_low = alloc::vec![C::AffineExt::identity(); blocks * 4];
-    let mut odd_high = alloc::vec![C::AffineExt::identity(); blocks * 4];
+    resize_affine::<C>(odd_low, blocks * 4);
+    resize_affine::<C>(odd_high, blocks * 4);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut odd_low,
-        &mut odd_high,
-        scratch,
+        odd_low,
+        odd_high,
+        butterfly_scratch,
         identity_free,
     );
 
@@ -2574,14 +2621,21 @@ fn fft16_low_multiplication_layer<C: GlvParams>(
 fn fft8_multiplication_minimal_layer<C: GlvParams>(
     points: &mut [C::AffineExt],
     scalars: &[Decomposed<C>; 3],
-    scratch: &mut AffineTwiddleScratch<C::Base>,
+    butterfly_scratch: &mut AffineTwiddleScratch<C::Base>,
+    codelet_scratch: &mut LowMultiplicationScratch<C>,
     mut identity_free: bool,
 ) -> bool {
     debug_assert_eq!(points.len() % 8, 0);
 
     let blocks = points.len() / 8;
-    let mut left = Vec::with_capacity(blocks * 4);
-    let mut right = Vec::with_capacity(blocks * 4);
+    let left = &mut codelet_scratch.left;
+    let right = &mut codelet_scratch.right;
+    let [stage1_sum, stage1_difference, stage2_sum, stage2_difference, stage3_sum, stage3_difference, stage4_sum, stage4_difference, _, _, _, _, _, _] =
+        &mut codelet_scratch.intermediates;
+    left.clear();
+    right.clear();
+    left.reserve(blocks * 4);
+    right.reserve(blocks * 4);
     for block in points.chunks(8) {
         // The enclosing FFT has locally bit-reversed the input. Undo that
         // three-bit reversal by pairing adjacent entries as
@@ -2591,14 +2645,14 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
             right.push(pair[1]);
         }
     }
-    let mut stage1_sum = alloc::vec![C::AffineExt::identity(); blocks * 4];
-    let mut stage1_difference = alloc::vec![C::AffineExt::identity(); blocks * 4];
+    resize_affine::<C>(stage1_sum, blocks * 4);
+    resize_affine::<C>(stage1_difference, blocks * 4);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut stage1_sum,
-        &mut stage1_difference,
-        scratch,
+        stage1_sum,
+        stage1_difference,
+        butterfly_scratch,
         identity_free,
     );
 
@@ -2619,14 +2673,14 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
             stage1_difference[offset + 3],
         ]);
     }
-    let mut stage2_sum = alloc::vec![C::AffineExt::identity(); blocks * 3];
-    let mut stage2_difference = alloc::vec![C::AffineExt::identity(); blocks * 3];
+    resize_affine::<C>(stage2_sum, blocks * 3);
+    resize_affine::<C>(stage2_difference, blocks * 3);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut stage2_sum,
-        &mut stage2_difference,
-        scratch,
+        stage2_sum,
+        stage2_difference,
+        butterfly_scratch,
         identity_free,
     );
 
@@ -2669,14 +2723,14 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
             products[2][block],
         ]);
     }
-    let mut stage3_sum = alloc::vec![C::AffineExt::identity(); blocks * 4];
-    let mut stage3_difference = alloc::vec![C::AffineExt::identity(); blocks * 4];
+    resize_affine::<C>(stage3_sum, blocks * 4);
+    resize_affine::<C>(stage3_difference, blocks * 4);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut stage3_sum,
-        &mut stage3_difference,
-        scratch,
+        stage3_sum,
+        stage3_difference,
+        butterfly_scratch,
         identity_free,
     );
 
@@ -2689,14 +2743,14 @@ fn fft8_multiplication_minimal_layer<C: GlvParams>(
         left.extend_from_slice(&[stage3_sum[offset + 2], stage3_difference[offset + 2]]);
         right.extend_from_slice(&[stage3_sum[offset + 3], stage3_difference[offset + 3]]);
     }
-    let mut stage4_sum = alloc::vec![C::AffineExt::identity(); blocks * 2];
-    let mut stage4_difference = alloc::vec![C::AffineExt::identity(); blocks * 2];
+    resize_affine::<C>(stage4_sum, blocks * 2);
+    resize_affine::<C>(stage4_difference, blocks * 2);
     identity_free = affine_add_sub_pairs::<C>(
         &left,
         &right,
-        &mut stage4_sum,
-        &mut stage4_difference,
-        scratch,
+        stage4_sum,
+        stage4_difference,
+        butterfly_scratch,
         identity_free,
     );
 
