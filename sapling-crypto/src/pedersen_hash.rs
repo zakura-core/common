@@ -247,7 +247,12 @@ pub mod test {
             // The 6 bits prefix is handled separately
             assert_eq!(v.personalization.get_bits(), &input_bools[..6]);
 
-            let p = pedersen_hash(v.personalization, input_bools.into_iter().skip(6)).to_affine();
+            let p = pedersen_hash(v.personalization, input_bools.into_iter().skip(6));
+            assert!(
+                bool::from(p.is_torsion_free()),
+                "pedersen_hash result must stay in the prime-order subgroup"
+            );
+            let p = p.to_affine();
 
             assert_eq!(p.get_u().to_string(), v.hash_u);
             assert_eq!(p.get_v().to_string(), v.hash_v);
@@ -339,8 +344,13 @@ pub mod test {
         ] {
             for &len in &lengths {
                 let input: Vec<bool> = (0..len).map(|_| next_bit()).collect();
+                let got = pedersen_hash(personalization, input.iter().copied());
+                assert!(
+                    bool::from(got.is_torsion_free()),
+                    "torsion at input length {len}",
+                );
                 assert_eq!(
-                    pedersen_hash(personalization, input.iter().copied()),
+                    got,
                     reference_pedersen_hash(personalization, &input),
                     "mismatch at input length {len}",
                 );
