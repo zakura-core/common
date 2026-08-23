@@ -353,28 +353,12 @@ where
             )?;
         }
 
-        // Message piece as K * piece.length bitstring
-        let bitstring: Value<Vec<bool>> = piece.field_elem().map(|value| {
-            value
-                .to_le_bits()
-                .into_iter()
-                .take(sinsemilla::K * piece.num_words())
-                .collect()
-        });
-
-        let words: Value<Vec<u32>> = bitstring.map(|bitstring| {
+        let words: Value<Vec<u32>> = piece.field_elem().map(|value| {
+            let bitstring = value.to_le_bits();
             bitstring
+                [..sinsemilla::K * piece.num_words()]
                 .chunks_exact(sinsemilla::K)
-                .map(|chunk| chunk.try_into().expect("correct length"))
-                .map(lebs2ip_k)
-                .collect()
-        });
-
-        // Get (x_p, y_p) for each word.
-        let generators: Value<Vec<(pallas::Base, pallas::Base)>> = words.clone().map(|words| {
-            words
-                .iter()
-                .map(|word| SINSEMILLA_S[*word as usize])
+                .map(|chunk| lebs2ip_k(std::array::from_fn(|i| chunk[i])))
                 .collect()
         });
 
@@ -424,9 +408,8 @@ where
         // The accumulator x-coordinate provided by the caller MUST have been assigned
         // within this region.
 
-        let generators = generators.transpose_vec(piece.num_words());
-
-        for (row, gen) in generators.iter().enumerate() {
+        for (row, word) in words.iter().enumerate() {
+            let gen = word.map(|word| SINSEMILLA_S[word as usize]);
             let x_p = gen.map(|gen| gen.0);
             let y_p = gen.map(|gen| gen.1);
 
@@ -454,7 +437,7 @@ where
             // Compute and assign `lambda_2`
             let lambda_2 = {
                 let lambda_2 =
-                    y_a.0 * pallas::Base::from(2) * (x_a.value() - x_r).invert() - lambda_1;
+                    y_a.0.double() * (x_a.value() - x_r).invert() - lambda_1;
 
                 region.assign_advice(
                     || "lambda_2",

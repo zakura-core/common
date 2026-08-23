@@ -338,7 +338,7 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
         let z_0 = {
             let z_0_val = z_1.value().zip(lsb).map(|(z_1, lsb)| {
                 let lsb = pallas::Base::from(lsb as u64);
-                z_1 * pallas::Base::from(2) + lsb
+                z_1.double() + lsb
             });
             let z_0_cell = region.assign_advice(
                 || "z_0",

@@ -302,7 +302,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             let z_val = z
                 .value()
                 .zip(k.as_ref())
-                .map(|(z_val, k)| pallas::Base::from(2) * z_val + pallas::Base::from(*k as u64));
+                .map(|(z_val, k)| z_val.double() + pallas::Base::from(*k as u64));
             z = region.assign_advice(|| "z", self.z, row + offset, || z_val)?;
             zs.push(Z(z.clone()));
 
@@ -367,7 +367,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
                     .zip(x_a.value())
                     .zip(x_r)
                     .map(|(((lambda1, y_a), x_a), x_r)| {
-                        y_a * pallas::Base::from(2) * (x_a - x_r).invert() - lambda1
+                        y_a.double() * (x_a - x_r).invert() - lambda1
                     });
             region.assign_advice(
                 || "lambda2",
