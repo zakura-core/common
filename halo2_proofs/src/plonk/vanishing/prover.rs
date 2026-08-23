@@ -12,7 +12,7 @@ use crate::{
         self,
         commitment::{Blind, Params},
         multiopen::ProverQuery,
-        Coeff, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial,
+        Coeff, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial, ProvingKeyTwiddles,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
@@ -78,6 +78,7 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         self,
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
+        fft_twiddles: &ProvingKeyTwiddles<C::Scalar>,
         evaluator: poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
         expressions: impl Iterator<Item = poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
         y: ChallengeY<C>,
@@ -93,7 +94,7 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         let h_poly = domain.divide_by_vanishing_poly(quotient_numerator);
 
         // Obtain the quotient polynomial h(X).
-        let h_poly = domain.extended_to_coeff(h_poly);
+        let h_poly = domain.extended_to_coeff_with_twiddles(h_poly, fft_twiddles);
 
         // Split h(X) up into pieces
         let h_pieces = h_poly

@@ -8,6 +8,12 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Proving keys now retain and reuse FFT twiddles for fixed, permutation,
+  advice, lookup, and quotient transforms. Batched fixed, permutation, and
+  advice transforms parallelize across polynomials. At Orchard's `k = 11`,
+  the cache is 288 KiB; proving-key construction measured about 23% faster on
+  Apple aarch64 and 27% faster on Linux x86-64, while multithreaded proving
+  measured 5.9–6.4% faster.
 - Added a test running `best_multiexp` at GLV-selected sizes inside explicit
   one- and three-thread Rayon pools, and a dedicated halo2 CI job that runs the
   multiexp tests with `multicore`, so the parallel Pasta multiscalar path is

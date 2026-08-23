@@ -25,12 +25,18 @@ const PROOF_SEED: [u8; 32] = [0x24; 32];
 const BENCHMARK_SAMPLES: usize = 10;
 const WARMUP_SECONDS: u64 = 2;
 const MEASUREMENT_SECONDS: u64 = 15;
+// One thread remains the default for comparable benchmark history. Set this
+// and `RAYON_NUM_THREADS` to the same value to measure multicore proving.
+const DEFAULT_BENCHMARK_THREADS: &str = "1";
+const BENCHMARK_THREADS_ENV: &str = "ORCHARD_K11_PROVER_THREADS";
 
 fn orchard_k11_prover(c: &mut Criterion) {
+    let expected_threads = std::env::var(BENCHMARK_THREADS_ENV)
+        .unwrap_or_else(|_| DEFAULT_BENCHMARK_THREADS.to_owned());
     assert_eq!(
         std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
-        Some("1"),
-        "run this benchmark with RAYON_NUM_THREADS=1",
+        Some(expected_threads.as_str()),
+        "set RAYON_NUM_THREADS to {expected_threads}",
     );
 
     // Orchard fixes its Action circuit size at k = 11. Key generation is

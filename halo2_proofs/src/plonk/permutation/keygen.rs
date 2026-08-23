@@ -9,7 +9,7 @@ use crate::{
     plonk::{Any, Column, Error},
     poly::{
         commitment::{Blind, Params},
-        EvaluationDomain,
+        EvaluationDomain, ProvingKeyTwiddles,
     },
 };
 
@@ -157,6 +157,7 @@ impl Assembly {
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
         p: &Argument,
+        fft_twiddles: &ProvingKeyTwiddles<C::Scalar>,
     ) -> ProvingKey<C> {
         // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
         let mut omega_powers = Vec::with_capacity(params.n as usize);
@@ -186,8 +187,6 @@ impl Assembly {
 
         // Compute permutation polynomials, convert to coset form.
         let mut permutations = vec![];
-        let mut polys = vec![];
-        let mut cosets = vec![];
         for i in 0..p.columns.len() {
             // Computes the permutation polynomial based on the permutation
             // description in the assembly.
@@ -197,12 +196,10 @@ impl Assembly {
                 *p = deltaomega[permuted_i][permuted_j];
             }
 
-            // Store permutation polynomial and precompute its coset evaluation
-            permutations.push(permutation_poly.clone());
-            let poly = domain.lagrange_to_coeff(permutation_poly);
-            polys.push(poly.clone());
-            cosets.push(domain.coeff_to_extended(poly));
+            permutations.push(permutation_poly);
         }
+        let (polys, cosets) =
+            domain.batch_lagrange_to_coeff_and_extended(&permutations, fft_twiddles);
         ProvingKey {
             permutations,
             polys,

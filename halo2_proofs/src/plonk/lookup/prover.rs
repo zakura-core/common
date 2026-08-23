@@ -199,7 +199,10 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
 
         // Closure to construct commitment to vector of values
         let mut commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>| {
-            let poly = pk.vk.domain.lagrange_to_coeff(values.clone());
+            let poly = pk
+                .vk
+                .domain
+                .lagrange_to_coeff_with_twiddles(values.clone(), &pk.fft_twiddles);
             let blind = Blind(C::Scalar::random(&mut rng));
             let commitment = params.commit_lagrange(values, blind).to_affine();
             (poly, blind, commitment)
@@ -219,10 +222,16 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // Hash permuted table commitment
         transcript.write_point(permuted_table_commitment)?;
 
-        let permuted_input_coset = coset_evaluator
-            .register_poly(pk.vk.domain.coeff_to_extended(permuted_input_poly.clone()));
-        let permuted_table_coset = coset_evaluator
-            .register_poly(pk.vk.domain.coeff_to_extended(permuted_table_poly.clone()));
+        let permuted_input_coset = coset_evaluator.register_poly(
+            pk.vk
+                .domain
+                .coeff_to_extended_with_twiddles(permuted_input_poly.clone(), &pk.fft_twiddles),
+        );
+        let permuted_table_coset = coset_evaluator.register_poly(
+            pk.vk
+                .domain
+                .coeff_to_extended_with_twiddles(permuted_table_poly.clone(), &pk.fft_twiddles),
+        );
 
         Ok(Permuted {
             compressed_input_expression,
@@ -375,8 +384,15 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
 
         let product_blind = Blind(C::Scalar::random(&mut rng));
         let product_commitment = params.commit_lagrange(&z, product_blind).to_affine();
-        let z = pk.vk.domain.lagrange_to_coeff(z);
-        let product_coset = evaluator.register_poly(pk.vk.domain.coeff_to_extended(z.clone()));
+        let z = pk
+            .vk
+            .domain
+            .lagrange_to_coeff_with_twiddles(z, &pk.fft_twiddles);
+        let product_coset = evaluator.register_poly(
+            pk.vk
+                .domain
+                .coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles),
+        );
 
         // Hash product commitment
         transcript.write_point(product_commitment)?;

@@ -108,13 +108,13 @@ pub fn create_proof<
                 .iter()
                 .map(|poly| {
                     let lagrange_vec = domain.lagrange_from_vec(poly.to_vec());
-                    domain.lagrange_to_coeff(lagrange_vec)
+                    domain.lagrange_to_coeff_with_twiddles(lagrange_vec, &pk.fft_twiddles)
                 })
                 .collect();
 
             let instance_cosets: Vec<_> = instance_polys
                 .iter()
-                .map(|poly| domain.coeff_to_extended(poly.clone()))
+                .map(|poly| domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles))
                 .collect();
 
             Ok(InstanceSingle {
@@ -316,16 +316,8 @@ pub fn create_proof<
                 transcript.write_point(*commitment)?;
             }
 
-            let advice_polys: Vec<_> = advice
-                .clone()
-                .into_iter()
-                .map(|poly| domain.lagrange_to_coeff(poly))
-                .collect();
-
-            let advice_cosets: Vec<_> = advice_polys
-                .iter()
-                .map(|poly| domain.coeff_to_extended(poly.clone()))
-                .collect();
+            let (advice_polys, advice_cosets) =
+                domain.batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles);
 
             Ok(AdviceSingle {
                 advice_values: advice,
@@ -590,6 +582,7 @@ pub fn create_proof<
     let vanishing = vanishing.construct_quotient(
         params,
         domain,
+        &pk.fft_twiddles,
         coset_evaluator,
         expressions,
         y,

@@ -127,6 +127,12 @@ path = "benches/orchard_k11_prover.rs"
 harness = false
 required-features = ["circuit"]
 
+[[bench]]
+name = "orchard_k11_keygen"
+path = "benches/orchard_k11_keygen.rs"
+harness = false
+required-features = ["circuit"]
+
 [dependencies.aes]
 version = "0.8"
 
