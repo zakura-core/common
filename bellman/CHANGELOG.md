@@ -8,6 +8,11 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Removed the `byteorder`, `crossbeam-channel`, `lazy_static`, `log`, and
+  `num_cpus` dependencies. The `multicore` worker pool now uses
+  `std::sync::mpsc` and `std::sync::LazyLock`, and no longer emits `log`
+  records; its observable behavior is otherwise unchanged.
+
 - Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Forked upstream `bellman` as `zakura-bellman` and updated to `ff 0.14`,

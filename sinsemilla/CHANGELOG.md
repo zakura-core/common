@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Replaced `lazy_static` (`spin_no_std`) with `once_cell` plus an
+  exactly-once initialization wrapper for the affine generator table,
+  removing the `spin` dependency.
+
 - Added `BatchHashWorkspace` and
   `UncheckedFixedLengthHashDomain::hash_words_batch_with_workspace` so callers
   can retain the weighted batch evaluator's temporary allocations.

@@ -28,6 +28,11 @@ and this project adheres to Rust's notion of
 - Internal proof-test helpers and benchmarks satisfy the `Sync` circuit /
   `Send` configuration bounds that `zakura-halo2-proofs`'s `create_proof` now
   requires; public gadget APIs are unchanged.
+- Removed the `bitvec` (unused), `lazy_static` (replaced by
+  `std::sync::LazyLock`), and `uint` (replaced by explicit unreduced limb
+  arithmetic in variable-base scalar decomposition) dependencies, and moved
+  the test-only `rand` dependency to dev-dependencies.
+
 - Poseidon, Sinsemilla, and ECC witness generation now use direct small-power,
   doubling, and word-extraction paths instead of generic exponentiation,
   multiplication by two, and intermediate allocations.

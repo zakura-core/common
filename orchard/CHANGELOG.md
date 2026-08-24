@@ -30,6 +30,14 @@ and this project adheres to Rust's notion of
   two, and four Actions.
 - Multi-Action proof creation now synthesizes independent Action witnesses in
   parallel when the `multicore` feature is enabled.
+- The `visibility` dependency is now optional and only enabled by the
+  `unstable-voting-circuits` feature, which is the only place it was used.
+- Replaced `lazy_static` with `once_cell` for the lazily-built Merkle CRH
+  domain, note commitment domain, and empty-roots tables, using an
+  exactly-once initialization wrapper so concurrent first use cannot build a
+  table more than once. This also fixes a latent bug where the crate
+  declared `lazy_static` without `spin_no_std` despite `#![no_std]`.
+
 - Added a reproducible Orchard proving-key benchmark and configurable worker
   counts for the one-, two-, and four-Action prover benchmarks.
 - Added `MerkleHashBatchWorkspace` and

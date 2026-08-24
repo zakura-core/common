@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Removed the unused `bls12_381` and `tracing` dependencies (`bls12_381`
+  was previously pulled into builds that did not enable the `sapling`
+  feature), and moved `group` (doc examples only) to dev-dependencies.
+
 - Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Replaced the upstream BLS12-381 and Jubjub dependencies with the Zakura

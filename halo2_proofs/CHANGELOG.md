@@ -93,6 +93,11 @@ and this project adheres to Rust's notion of
 - Proof creation now evaluates independent coefficient-form polynomials in
   parallel, reusing common-point power tables and Pasta wide-product
   accumulators.
+- Removed the `indexmap` dependency. The multi-opening argument now
+  deduplicates commitments with a first-seen-order `Vec` plus a std `HashMap`
+  index, preserving the exact iteration order (and therefore proof bytes)
+  with O(1) lookups.
+
 - The V1 floor planner now caches consecutive region-column writes, avoiding
   repeated hash-table lookups during circuit measurement.
 - Independent polynomial transforms are now parallelized during proving-key

@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Documented that the pinned `block-buffer` and `crypto-common`
+  dependencies are version pins for the pre-release RustCrypto stack pulled
+  in via `bip32`, not direct dependencies of this crate.
+
 - Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Updated the shielded-protocol dependencies to their `ff 0.14`-compatible

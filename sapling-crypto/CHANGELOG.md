@@ -8,6 +8,15 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Replaced `lazy_static` with `once_cell` plus an exactly-once
+  initialization wrapper for the lazily-built constant tables.
+- The public lazily-initialized constants are now accessor functions:
+  `constants::PEDERSEN_HASH_EXP_TABLE` is `constants::pedersen_hash_exp_table()`,
+  and the `circuit::constants` generator tables
+  (`PROOF_GENERATION_KEY_GENERATOR`, `NOTE_COMMITMENT_RANDOMNESS_GENERATOR`,
+  `NULLIFIER_POSITION_GENERATOR`, `VALUE_COMMITMENT_VALUE_GENERATOR`,
+  `VALUE_COMMITMENT_RANDOMNESS_GENERATOR`, `SPENDING_KEY_GENERATOR`) are now
+  snake_case functions returning `FixedGenerator`.
 - Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Updated to `ff 0.14`, `group 0.14`, `rand 0.10`, and the Zakura Groth16 and

@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Removed the `byteorder` dependency; non-adjacent-form limb loading now
+  uses `u64::from_le_bytes` with identical results.
+
 - Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Updated to `group 0.14` and the Zakura Pasta and Jubjub forks, while retaining

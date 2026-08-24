@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Updated `thiserror` to 2.0. The `Error` type and its variants are
+  unchanged.
+
 - Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Updated to `group 0.14`, `rand_core 0.10`, and the Zakura Jubjub fork.
