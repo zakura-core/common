@@ -3786,7 +3786,6 @@ name = "zakura-halo2-gadgets"
 version = "1.0.0-rc.3"
 dependencies = [
  "arrayvec",
- "bitvec",
  "criterion 0.3.6",
  "ff",
  "group",
