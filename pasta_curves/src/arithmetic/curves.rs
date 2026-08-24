@@ -151,6 +151,52 @@ pub trait CurveExt:
         let _ = (input, output, omega, log_n);
         false
     }
+
+    /// Attempts to build a reusable prepared zero-check over fixed `bases`
+    /// (see [`PreparedZeroCheck`]). Implementations without a prepared
+    /// backend return `None`; preparation can cost hundreds of
+    /// milliseconds and tens of mebibytes for a few thousand bases, so
+    /// callers should invoke this once and reuse the handle across checks.
+    ///
+    /// # Security
+    ///
+    /// The returned check runs in variable time with respect to scalars
+    /// and points. **All inputs must be public.**
+    fn try_prepare_zero_check(bases: &[Self::AffineExt]) -> Option<Box<dyn PreparedZeroCheck<Self>>> {
+        let _ = bases;
+        None
+    }
+}
+
+/// An object-safe handle to a prepared fixed-base multiscalar zero-check:
+/// whether $\sum_i \[k_i\] P_i + \sum_j \[s_j\] Q_j$ is the group identity,
+/// for the fixed bases $P_i$ captured at preparation plus per-check
+/// `extra` terms $(s_j, Q_j)$. Obtained from
+/// [`CurveExt::try_prepare_zero_check`]; the Pasta curves implement it
+/// with the prepared codebook backend (the `glv::zero` module, under the
+/// `glv` feature), and the check is exact — it accepts iff the sum is the
+/// identity.
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
+    /// The number of fixed bases this preparation covers; `scalars` below
+    /// must have exactly this length.
+    fn terms(&self) -> usize;
+
+    /// Whether $\sum_i \[k_i\] P_i + \sum_j \[s_j\] Q_j$ is the identity.
+    ///
+    /// # Security
+    ///
+    /// Variable-time in everything; all inputs must be public.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scalars.len()` differs from [`Self::terms`].
+    fn is_zero_with_terms_vartime(
+        &self,
+        scalars: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> bool;
 }
 
 /// Internal construction for coordinates produced by trusted curve formulas.

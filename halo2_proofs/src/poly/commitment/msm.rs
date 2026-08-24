@@ -165,6 +165,32 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
     pub fn eval(self) -> bool {
         let (g_scalars, w_scalar, u_scalar, other) = self.terms();
 
+        // A prepared fixed-base zero-check over [g..., w, u] (built by
+        // `Params::prepare_zero_checks`) evaluates the identity test
+        // directly, with the accumulated commitment terms as its extras.
+        // The decomposition evaluated here is the same `terms()` view the
+        // fallback below consumes.
+        if let Some(prepared) = self.params.zero_check() {
+            let n = self.params.n as usize;
+            if prepared.terms() == n + 2 {
+                let mut fixed = vec![C::Scalar::ZERO; n + 2];
+                if let Some(g_scalars) = g_scalars {
+                    fixed[..n].copy_from_slice(g_scalars);
+                }
+                if let Some(w_scalar) = w_scalar {
+                    fixed[n] = w_scalar;
+                }
+                if let Some(u_scalar) = u_scalar {
+                    fixed[n + 1] = u_scalar;
+                }
+                let extra: Vec<(C::Scalar, C)> = other
+                    .iter()
+                    .map(|(x, (scalar, y))| (*scalar, C::from_xy(*x, *y).unwrap()))
+                    .collect();
+                return prepared.is_zero_with_terms_vartime(&fixed, &extra);
+            }
+        }
+
         let len = g_scalars.map(<[_]>::len).unwrap_or(0)
             + w_scalar.map(|_| 1).unwrap_or(0)
             + u_scalar.map(|_| 1).unwrap_or(0)
@@ -227,11 +253,19 @@ mod tests {
 
     #[test]
     fn msm_arithmetic() {
+        // Once plain, once with the prepared fixed-base zero-check armed:
+        // `eval` must agree either way.
+        let params = Params::new(4);
+        exercise_msm_arithmetic(&params);
+        params.prepare_zero_checks();
+        exercise_msm_arithmetic(&params);
+    }
+
+    fn exercise_msm_arithmetic(params: &Params<EpAffine>) {
         let base = EpAffine::from_xy(-Fp::one(), Fp::from(2)).unwrap();
         let base_viol = (base + base).to_affine();
 
-        let params = Params::new(4);
-        let mut a: MSM<EpAffine> = MSM::new(&params);
+        let mut a: MSM<EpAffine> = MSM::new(params);
         a.append_term(Fq::one(), base);
         // a = [1] P
         assert!(!a.clone().eval());

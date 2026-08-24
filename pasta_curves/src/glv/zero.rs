@@ -534,6 +534,24 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     }
 }
 
+/// The object-safe surface [`crate::arithmetic::CurveExt::try_prepare_zero_check`]
+/// hands to generic callers (halo2's verifier reaches the prepared check
+/// through this, with the SRS as the fixed bases and the proof's own
+/// commitments as the extra terms).
+impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for PreparedZeroMsm<C> {
+    fn terms(&self) -> usize {
+        PreparedZeroMsm::terms(self)
+    }
+
+    fn is_zero_with_terms_vartime(
+        &self,
+        scalars: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> bool {
+        PreparedZeroMsm::is_zero_with_terms_vartime(self, scalars, extra)
+    }
+}
+
 /// A decomposed, rotation-ready extra term for the tail MSM.
 struct ExtraTerm<C: GlvParams> {
     components: (SignedMagnitude, SignedMagnitude),

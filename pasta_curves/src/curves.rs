@@ -98,6 +98,21 @@ macro_rules! impl_multiexp_vartime {
     (native, $name:ident) => {};
 }
 
+#[cfg(feature = "alloc")]
+macro_rules! impl_prepare_zero_check {
+    (glv, $name:ident) => {
+        #[cfg(feature = "glv")]
+        fn try_prepare_zero_check(
+            bases: &[Self::AffineExt],
+        ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<Self>>> {
+            Some(alloc::boxed::Box::new(
+                crate::glv::zero::PreparedZeroMsm::<$name>::prepare(bases),
+            ))
+        }
+    };
+    (native, $name:ident) => {};
+}
+
 macro_rules! new_curve_impl {
     (($($privacy:tt)*), $name:ident, $name_affine:ident, $iso:ident, $base:ident, $scalar:ident,
      $curve_id:literal, $a_raw:expr, $b_raw:expr, $curve_type:ident, $glv_backend:ident) => {
@@ -263,6 +278,7 @@ macro_rules! new_curve_impl {
 
             impl_batch_mul_same_scalar_vartime!($glv_backend, $name);
             impl_multiexp_vartime!($glv_backend, $name);
+            impl_prepare_zero_check!($glv_backend, $name);
         }
 
         impl group::Curve for $name {

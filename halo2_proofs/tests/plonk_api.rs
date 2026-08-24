@@ -23,8 +23,11 @@ use std::marker::PhantomData;
 fn plonk_api() {
     const K: u32 = 5;
 
-    // Initialize the polynomial commitment parameters
+    // Initialize the polynomial commitment parameters, with the prepared
+    // fixed-base zero-check armed so every verification below exercises
+    // the prepared final identity test.
     let params: Params<EqAffine> = Params::new(K);
+    params.prepare_zero_checks();
 
     #[derive(Clone)]
     struct PlonkConfig {
