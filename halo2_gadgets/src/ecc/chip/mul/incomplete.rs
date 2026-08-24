@@ -361,14 +361,11 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
                 .map(|((lambda1, x_a), x_p)| lambda1.square() - x_a - x_p);
 
             // λ2 = (2(y_A) / (x_A - x_R)) - λ1
-            let lambda2 =
-                lambda1
-                    .zip(y_a)
-                    .zip(x_a.value())
-                    .zip(x_r)
-                    .map(|(((lambda1, y_a), x_a), x_r)| {
-                        y_a.double() * (x_a - x_r).invert() - lambda1
-                    });
+            let lambda2 = lambda1
+                .zip(y_a)
+                .zip(x_a.value())
+                .zip(x_r)
+                .map(|(((lambda1, y_a), x_a), x_r)| y_a.double() * (x_a - x_r).invert() - lambda1);
             region.assign_advice(
                 || "lambda2",
                 self.double_and_add.lambda_2,

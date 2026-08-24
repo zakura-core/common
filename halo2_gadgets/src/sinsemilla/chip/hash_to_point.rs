@@ -355,8 +355,7 @@ where
 
         let words: Value<Vec<u32>> = piece.field_elem().map(|value| {
             let bitstring = value.to_le_bits();
-            bitstring
-                [..sinsemilla::K * piece.num_words()]
+            bitstring[..sinsemilla::K * piece.num_words()]
                 .chunks_exact(sinsemilla::K)
                 .map(|chunk| lebs2ip_k(std::array::from_fn(|i| chunk[i])))
                 .collect()
@@ -436,8 +435,7 @@ where
 
             // Compute and assign `lambda_2`
             let lambda_2 = {
-                let lambda_2 =
-                    y_a.0.double() * (x_a.value() - x_r).invert() - lambda_1;
+                let lambda_2 = y_a.0.double() * (x_a.value() - x_r).invert() - lambda_1;
 
                 region.assign_advice(
                     || "lambda_2",
