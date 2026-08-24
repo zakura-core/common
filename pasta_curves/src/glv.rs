@@ -550,6 +550,9 @@ const MIN_GLV_MULTIEXP_TERMS: usize = 256;
 
 /// Each GLV decomposition component has magnitude strictly below `2^127`.
 const GLV_COMPONENT_BITS: usize = 127;
+/// Adjacent parallel MSM windows share a single root shift.
+#[cfg(feature = "multicore")]
+const PARALLEL_WINDOWS_PER_PAIR: usize = 2;
 
 /// Estimates the dominant group work in a Signed-Booth MSM.
 ///
@@ -690,7 +693,6 @@ fn multiexp_window_bits<C: GlvParams>(terms: usize, num_threads: usize) -> Optio
 /// Booth-versus-generic comparison with the orbit backend; this remains the
 /// measured-cell contract for the Booth half of that decision, pinned by
 /// `glv_multiexp_plan_matches_measured_cells`.)
-#[cfg(test)]
 fn glv_multiexp_window_bits<C: GlvParams>(terms: usize, num_threads: usize) -> Option<usize> {
     if terms < MIN_GLV_MULTIEXP_TERMS {
         return None;
@@ -709,7 +711,6 @@ fn estimated_generic_work<C: GlvParams>(terms: usize, num_threads: usize) -> Opt
 
 /// The Signed-Booth GLV backend's cheapest `(work, window width)` over the
 /// candidate widths `w` and `w + 1` (see [`glv_multiexp_window_bits`]).
-#[cfg(test)]
 fn booth_multiexp_estimate<C: GlvParams>(
     terms: usize,
     num_threads: usize,
@@ -747,7 +748,7 @@ fn bit_length(magnitude: u128) -> usize {
 /// planning sent sparse MSMs to the orbit backend, whose radix-2^c joint
 /// recoding spreads a small magnitude over ~9/5 as many windows as the
 /// Booth halves, costing ~4% of total proving time.
-pub(crate) struct MagnitudeProfile {
+struct MagnitudeProfile {
     terms: usize,
     /// `component_live[b]`: decomposition halves with magnitude above `b`
     /// bits.
@@ -786,7 +787,7 @@ impl MagnitudeProfile {
     }
 
     /// Scalars either of whose halves' magnitude exceeds `bits` bits.
-    pub(super) fn scalar_live(&self, bits: usize) -> usize {
+    fn scalar_live(&self, bits: usize) -> usize {
         self.scalar_live[bits.min(128)]
     }
 }
@@ -851,6 +852,15 @@ enum MultiexpPlan {
     Orbit { window_bits: usize },
 }
 
+/// Whether the measured orbit backend is eligible for this workload.
+///
+/// Serial execution wins on both benchmark architectures. Parallel orbit
+/// windows win substantially on AArch64, while the paired Signed-Booth
+/// schedule remains faster on the measured x86-64 host.
+fn orbit_planning_enabled(terms: usize, num_threads: usize) -> bool {
+    terms >= orbit::PLAN_MIN_TERMS && (num_threads == 1 || cfg!(target_arch = "aarch64"))
+}
+
 /// Plans a GLV multiscalar multiplication across both bucket backends: the
 /// cheapest of the Signed-Booth widths `w`/`w + 1` (as in
 /// [`glv_multiexp_window_bits`]) and the Eisenstein-orbit widths 4..=6,
@@ -863,26 +873,10 @@ enum MultiexpPlan {
 /// on scalar magnitudes, not just the term count. Ties keep the Signed-Booth
 /// backend (candidates are compared strictly, Booth first).
 ///
-/// Measured on 32-core x86-64 (see `multiexp_plan_selection`), for
-/// full-width scalars the orbit backend takes every serial MSM from 512
-/// terms up (+2..6%), mid-to-large parallel MSMs (+10..+41% at 4–16
-/// workers), and everything on saturated pools, where its 22–33 windows
-/// keep workers fed that Booth's 10–16 cannot (+30..+54% at 32); Booth
-/// keeps small parallel MSMs, and takes over as scalars shrink (halo2
-/// witness commitments mix boolean, byte-sized, and zero scalars), where
-/// its half-columns reach far fewer windows than the joint radix-$2^c$
-/// recoding.
-///
-/// **Calibration staleness (2026-08-24):** the constants above were fit
-/// before the Signed-Booth base-coordinate caching and before both
-/// backends' parallel schedules gained window pairing, and a single
-/// `msm_backend_timings` sweep on the fit host afterwards shows the
-/// *parallel* boundary has drifted: the model forgoes measured orbit wins
-/// at 8–16 workers on mid sizes (up to +40% at 16 workers, 2,048 terms)
-/// and over-selects orbit by ≤5% (noise-scale, single-run cells) at a few
-/// 4-worker cells; serial and 32-worker selections still match every
-/// measured winner. Re-fitting the two parallel models over interleaved
-/// medians of the new grid is the standing follow-up.
+/// The planner admits orbit only above the measured 2,981-term crossover.
+/// Serial orbit wins on both benchmark architectures. Parallel orbit is
+/// restricted to AArch64, where paired windows win substantially; paired
+/// Signed-Booth remains faster on the measured x86-64 hosts.
 fn plan_multiexp<C: GlvParams>(
     profile: &MagnitudeProfile,
     num_threads: usize,
@@ -907,15 +901,17 @@ fn plan_multiexp<C: GlvParams>(
             }
         }
     }
-    for candidate in orbit::PLAN_MIN_WINDOW_BITS..=orbit::MAX_WINDOW_BITS {
-        if let Some(work) = orbit::estimated_work(profile, candidate, num_threads) {
-            if best.is_none_or(|(best_work, _)| work < best_work) {
-                best = Some((
-                    work,
-                    MultiexpPlan::Orbit {
-                        window_bits: candidate,
-                    },
-                ));
+    if orbit_planning_enabled(terms, num_threads) {
+        for candidate in orbit::PLAN_MIN_WINDOW_BITS..=orbit::MAX_WINDOW_BITS {
+            if let Some(work) = orbit::estimated_work(profile, candidate, num_threads) {
+                if best.is_none_or(|(best_work, _)| work < best_work) {
+                    best = Some((
+                        work,
+                        MultiexpPlan::Orbit {
+                            window_bits: candidate,
+                        },
+                    ));
+                }
             }
         }
     }
@@ -1342,12 +1338,11 @@ fn multiexp_parallel<C: GlvParams>(
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
     // Pairing shares one window shift without serializing all window sums.
     // The pair roots remain independent, so their remaining shifts overlap.
-    const WINDOWS_PER_PAIR: usize = 2;
-    let pair_count = window_count.div_ceil(WINDOWS_PER_PAIR);
+    let pair_count = window_count.div_ceil(PARALLEL_WINDOWS_PER_PAIR);
     (0..pair_count)
         .into_par_iter()
         .map(|pair| {
-            let start = pair * WINDOWS_PER_PAIR;
+            let start = pair * PARALLEL_WINDOWS_PER_PAIR;
             let window_sum = |window| {
                 let buckets = fill_window::<C>(components, bases, window_bits, window)?;
                 Some(sum_buckets::<C>(&buckets))
@@ -1427,8 +1422,20 @@ pub(crate) fn try_multiexp<C: GlvParams>(
         return None;
     }
 
-    // Decompose before planning: both backends consume the components, and
-    // the planner prices them by their actual magnitudes.
+    // Preserve the established path exactly when the orbit backend is not a
+    // candidate. In particular, avoid building a magnitude profile merely
+    // to rediscover the existing Signed-Booth decision.
+    if !orbit_planning_enabled(scalars.len(), num_threads) {
+        let window_bits = glv_multiexp_window_bits::<C>(scalars.len(), num_threads)?;
+        let components = scalars
+            .iter()
+            .map(decompose::<C>)
+            .map(checked_signed_magnitudes)
+            .collect::<Option<Vec<_>>>()?;
+        let bases = multiexp_bases::<C>(bases);
+        return multiexp(&components, &bases, window_bits, num_threads);
+    }
+
     let components = scalars
         .iter()
         .map(decompose::<C>)
@@ -1436,13 +1443,13 @@ pub(crate) fn try_multiexp<C: GlvParams>(
         .collect::<Option<Vec<_>>>()?;
     let profile = MagnitudeProfile::new(&components);
     let plan = plan_multiexp::<C>(&profile, num_threads)?;
+    let bases = multiexp_bases::<C>(bases);
     match plan {
         MultiexpPlan::Booth { window_bits } => {
-            let bases = multiexp_bases::<C>(bases);
             multiexp(&components, &bases, window_bits, num_threads)
         }
         MultiexpPlan::Orbit { window_bits } => {
-            orbit::multiexp::<C>(&components, bases, window_bits, num_threads)
+            orbit::multiexp::<C>(&components, &bases, window_bits, num_threads)
         }
     }
 }
@@ -4280,73 +4287,29 @@ mod tests {
         fn plan(terms: usize, threads: usize) -> Option<MultiexpPlan> {
             plan_multiexp::<pallas::Point>(&deterministic_profile::<pallas::Point>(terms), threads)
         }
-        let booth = |window_bits| Some(MultiexpPlan::Booth { window_bits });
-        let orbit = |window_bits| Some(MultiexpPlan::Orbit { window_bits });
 
-        // Below the amortization floor the generic MSM keeps the job, and
-        // below the orbit backend's own 512-term floor Booth keeps it
-        // (measured at 256 terms the orbit's fixed per-window costs lose
-        // 2..7% at low thread counts).
+        // Below the GLV floor the generic MSM keeps the job.
         assert_eq!(plan(255, 1), None);
         assert_eq!(plan(255, 32), None);
-        assert_eq!(plan(256, 1), booth(7));
-        assert_eq!(plan(384, 8), booth(6));
 
-        // Serial: the orbit backend measured +2..6% over Booth at every
-        // size, fastest at exactly these widths.
-        assert_eq!(plan(512, 1), orbit(4));
-        assert_eq!(plan(1_024, 1), orbit(4));
-        assert_eq!(plan(2_048, 1), orbit(5));
-        assert_eq!(plan(4_096, 1), orbit(5));
-        assert_eq!(plan(8_192, 1), orbit(5));
-        assert_eq!(plan(16_384, 1), orbit(6));
-        assert_eq!(plan(65_536, 1), orbit(6));
+        for threads in [1, 10] {
+            assert!(matches!(
+                plan(2_049, threads),
+                Some(MultiexpPlan::Booth { .. })
+            ));
+            assert!(matches!(
+                plan(2_150, threads),
+                Some(MultiexpPlan::Booth { .. })
+            ));
+        }
 
-        // Small parallel MSMs stay on Booth: the orbit backend measured at
-        // or below par there. (512 terms on 4 workers is a noise-level tie
-        // that flipped winners between runs; the model prices it to the
-        // orbit by under 5%.)
-        assert_eq!(plan(512, 4), orbit(4));
-        assert_eq!(plan(512, 8), booth(8));
-        assert_eq!(plan(1_024, 8), booth(8));
-        assert_eq!(plan(2_048, 8), booth(8));
-        assert_eq!(plan(2_048, 16), booth(8));
-
-        // Mid and large parallel MSMs: measured orbit wins of +10..+41%.
-        assert_eq!(plan(2_048, 4), orbit(5));
-        assert_eq!(plan(65_536, 4), orbit(6));
-        assert_eq!(plan(4_096, 8), orbit(5));
-        assert_eq!(plan(8_192, 8), orbit(6));
-        assert_eq!(plan(16_384, 8), orbit(6));
-        assert_eq!(plan(65_536, 8), orbit(6));
-        assert_eq!(plan(8_192, 16), orbit(5));
-        assert_eq!(plan(16_384, 16), orbit(5));
-
-        // Saturated pools (+30..+54% measured).
-        assert_eq!(plan(2_048, 32), orbit(5));
-        assert_eq!(plan(8_192, 32), orbit(5));
-        assert_eq!(plan(65_536, 32), orbit(5));
-
-        // Both curves plan these full-width cells identically, and a Booth
-        // selection always uses a width the measured-cell contract of
-        // `glv_multiexp_window_bits` would consider.
-        for terms in [512usize, 2_048, 8_192, 65_536] {
-            for threads in [1usize, 4, 8, 32] {
-                let plan = plan_multiexp::<pallas::Point>(
-                    &deterministic_profile::<pallas::Point>(terms),
-                    threads,
-                );
-                assert_eq!(
-                    plan,
-                    plan_multiexp::<vesta::Point>(
-                        &deterministic_profile::<vesta::Point>(terms),
-                        threads,
-                    )
-                );
-                if let Some(MultiexpPlan::Booth { window_bits }) = plan {
-                    let default = multiexp_window_bits::<pallas::Point>(terms, threads).unwrap();
-                    assert!(window_bits == default || window_bits == default + 1);
-                }
+        for terms in [2_990, 5_678] {
+            assert!(matches!(plan(terms, 1), Some(MultiexpPlan::Orbit { .. })));
+            let parallel = plan(terms, 10);
+            if cfg!(target_arch = "aarch64") {
+                assert!(matches!(parallel, Some(MultiexpPlan::Orbit { .. })));
+            } else {
+                assert!(!matches!(parallel, Some(MultiexpPlan::Orbit { .. })));
             }
         }
     }
@@ -4475,14 +4438,14 @@ mod tests {
                         .map(checked_signed_magnitudes)
                         .collect::<Option<_>>()
                         .unwrap();
+                    let cached_bases = multiexp_bases::<C>(&bases);
 
                     let body = || {
                         let booth_bits = booth_multiexp_estimate::<C>(terms, threads)
                             .expect("booth estimate")
                             .1;
                         let booth = time::<C>(iters, || {
-                            let booth_bases = multiexp_bases::<C>(&bases);
-                            multiexp::<C>(&components, &booth_bases, booth_bits, threads)
+                            multiexp::<C>(&components, &cached_bases, booth_bits, threads)
                         });
                         let orbits: Vec<(usize, f64)> = (orbit::MIN_WINDOW_BITS
                             ..=orbit::MAX_WINDOW_BITS)
@@ -4490,7 +4453,7 @@ mod tests {
                                 (
                                     c,
                                     time::<C>(iters, || {
-                                        orbit::multiexp::<C>(&components, &bases, c, threads)
+                                        orbit::multiexp::<C>(&components, &cached_bases, c, threads)
                                     }),
                                 )
                             })

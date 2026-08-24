@@ -68,11 +68,10 @@ and this project adheres to Rust's notion of
   $1 + \omega$, so the two-dimensional weighted sum telescopes to
   $A - \phi^2(H)$ in $2m - 2$ additions. Widths 4–6 are planned by a
   calibrated cost model (width 3 is implemented and tested but never
-  modeled ahead). Measured on 32-core x86-64 (portable backend) against the
-  Booth backend at its own planned width: +2..6% serially from 512 to
-  16,384 terms, +19..38% on 8 workers and +13..65% on 32 workers at
-  mid-to-large sizes — the orbit's 22–26 windows keep workers fed that
-  Booth's 10–16 cannot — while Booth is kept for small parallel MSMs.
+  modeled ahead). The planner keeps MSMs below 2,981 terms on Signed-Booth
+  and limits parallel orbit execution to AArch64, matching the measured
+  platform crossovers. At exact verifier sizes, 2,990 and 5,678-term serial
+  MSMs improve by 2–7%; Apple M4 ten-worker MSMs improve by about 40–45%.
 - The MSM planner now prices both GLV bucket backends from the input's
   *magnitude profile* (suffix counts of the decomposition halves' bit
   lengths) rather than the term count alone, and the orbit backend caps its
@@ -82,14 +81,9 @@ and this project adheres to Rust's notion of
   count-only planner sent such MSMs to the orbit backend (whose joint
   radix-$2^c$ recoding spreads a small magnitude over ~$2c/w$ as many
   windows as $w$-bit Booth halves), measurably regressing serial Orchard
-  proving; profiled planning keeps Booth on the sparse commitment shapes
-  and the orbit's wins on the full-width quotient/multiopen MSMs. With the
-  window capping the orbit backend in fact wins witness-shaped MSMs
-  outright too (+16..20% serial at 2,048–8,192 terms). End to end,
-  interleaved A/B runs of Orchard proving measured the finished planner
-  ~2.6% faster serially (k = 11, one action; faster in 3 of 3 matched
-  rounds) and ~8% faster on the default 32-thread pool (one-action bundle
-  449 ms → 415 ms).
+  proving. Profiled planning and the measured term threshold keep Booth on
+  the sparse commitment shapes and reserve orbit for larger full-width
+  verifier MSMs; one-action Orchard proving therefore remains unchanged.
 - Every backend (Booth, orbit, and the prepared zero-check below) reduces
   its buckets through the shared fused batched-affine reduction, one window
   at a time. A multi-window variant sharing one Montgomery inversion per

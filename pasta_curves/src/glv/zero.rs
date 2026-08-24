@@ -396,14 +396,13 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             // per-proof commitments) the tail is a substantial MSM of its
             // own, and running the two phases back to back would add its
             // latency instead of overlapping it.
-            const WINDOWS_PER_PAIR: usize = 2;
-            let pair_count = active.div_ceil(WINDOWS_PER_PAIR);
+            let pair_count = active.div_ceil(super::PARALLEL_WINDOWS_PER_PAIR);
             let (windows_part, tail) = maybe_rayon::join(
                 || {
                     (0..pair_count)
                         .into_par_iter()
                         .map(|pair| {
-                            let start = pair * WINDOWS_PER_PAIR;
+                            let start = pair * super::PARALLEL_WINDOWS_PER_PAIR;
                             let mut sum = if start + 1 == active {
                                 self.window_sum(recoded, start)?
                             } else {
@@ -625,7 +624,7 @@ fn decompose_extras<C: GlvParams>(
         .map(|(scalar, point)| ExtraTerm {
             components: checked_signed_magnitudes(decompose::<C>(&(*scalar * tail_unshift)))
                 .expect("GLV halves are within bound"),
-            rotated: orbit::rotate_base::<C>(point),
+            rotated: orbit::rotate_affine_base::<C>(point),
         })
         .collect()
 }
@@ -641,7 +640,8 @@ fn tail_multiexp<C: GlvParams>(
 ) -> Option<C> {
     debug_assert_eq!(components.len(), rotated.len());
     let width = params.window_stride();
-    let mut digits = alloc::vec![0u16; components.len() * width];
+    let digit_count = components.len().checked_mul(width)?;
+    let mut digits = alloc::vec![0u16; digit_count];
 
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
@@ -651,15 +651,13 @@ fn tail_multiexp<C: GlvParams>(
             .par_chunks_mut(width)
             .zip(components.par_iter())
             .map(|(row, &(first, second))| orbit::recode_row(params, first, second, row))
-            .max()
-            .unwrap_or(0);
+            .try_reduce(usize::default, |left, right| Some(left.max(right)))?;
         // Adjacent windows pair per task, as in the main-window schedule.
-        const WINDOWS_PER_PAIR: usize = 2;
-        let pair_count = active.div_ceil(WINDOWS_PER_PAIR);
+        let pair_count = active.div_ceil(super::PARALLEL_WINDOWS_PER_PAIR);
         return (0..pair_count)
             .into_par_iter()
             .map(|pair| {
-                let start = pair * WINDOWS_PER_PAIR;
+                let start = pair * super::PARALLEL_WINDOWS_PER_PAIR;
                 let window_sum =
                     |window| orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1);
                 let mut sum = if start + 1 == active {
@@ -688,7 +686,7 @@ fn tail_multiexp<C: GlvParams>(
 
     let mut active = 0;
     for (row, &(first, second)) in digits.chunks_exact_mut(width).zip(components) {
-        active = active.max(orbit::recode_row(params, first, second, row));
+        active = active.max(orbit::recode_row(params, first, second, row)?);
     }
     orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
 }

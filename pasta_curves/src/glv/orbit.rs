@@ -74,25 +74,21 @@
 //! affine tree reduction ([`super::reduce_affine_buckets`]); only the
 //! $2m - 2$ weighted additions here run on projective accumulators.
 //!
-//! This backend is selected by the cost model in [`super::plan_multiexp`].
-//! Measured against the Signed-Booth backend on 32-core x86-64 (portable
-//! field backend), it wins every serial MSM from 512 terms up by 2–6% —
-//! one visit per scalar per window and ~25% fewer bucket states outweigh
-//! its costlier weighted reducer — and much more under parallelism, where
-//! its 22–33 windows expose more independent tasks than Booth's 10–16:
-//! +10..+41% at 4–16 workers on mid-to-large sizes and +30..+54% on
-//! saturated 32-worker pools. Booth keeps small parallel MSMs.
+//! The parent planner limits this backend to the measured profitable
+//! schedules. Signed-Booth remains available for smaller, sparse, and
+//! platform-specific workloads.
 
 use alloc::vec::Vec;
 
 use ff::Field;
-use group::CurveAffine as _;
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
 
+#[cfg(feature = "multicore")]
+use super::PARALLEL_WINDOWS_PER_PAIR;
 use super::{
-    private, reduce_affine_buckets, AffinePoint, GlvParams, MagnitudeProfile, SignedMagnitude,
-    GLV_COMPONENT_BITS,
+    private, reduce_affine_buckets, AffinePoint, GlvParams, MagnitudeProfile, MultiexpBase,
+    SignedMagnitude, GLV_COMPONENT_BITS,
 };
 
 /// The window widths [`multiexp`] supports. Wider than 6 needs
@@ -107,16 +103,19 @@ pub(super) const MAX_WINDOW_BITS: usize = 6;
 /// hundred terms, where they measured 4–17% *behind* the Booth backend
 /// (per-window overhead dominates 200-odd visits); planning starts at 4.
 pub(super) const PLAN_MIN_WINDOW_BITS: usize = 4;
-/// The smallest MSM [`estimated_work`] will price for the planner. At 256
-/// terms the backend's fixed per-window costs measured it 2–7% behind
-/// Booth at low thread counts (sub-millisecond, noise-prone cells); from
-/// 512 terms up it wins. This gates on the *term count*, not liveness —
-/// sparse-but-large MSMs stay profitable (witness-shaped 2048-term inputs
-/// measured +16..20% over Booth).
-pub(super) const PLAN_MIN_TERMS: usize = 512;
+/// The smallest MSM [`estimated_work`] will price for the planner.
+///
+/// On Apple M4 with the current affine reducer, 2,049 and 2,150 terms lose
+/// 2–4% to Signed-Booth, while the verifier-sized 2,990-term MSM wins by 3%
+/// serially and 33% with ten workers. This threshold is the existing default
+/// window transition immediately below that measured crossover.
+pub(super) const PLAN_MIN_TERMS: usize = 2_981;
 
 /// Marks a wedge node whose reducer-tree parent is the origin.
 const WEDGE_ROOT: u16 = u16::MAX;
+
+/// Number of units in the Eisenstein integers.
+const EISENSTEIN_UNIT_COUNT: usize = 6;
 
 /// One canonical orbit representative $\delta = a + b\omega$ of the wedge,
 /// with its reducer-tree edge.
@@ -217,7 +216,10 @@ impl OrbitParams {
                 }
             }
         }
-        debug_assert_eq!(coeffs.len(), ((radix * radix + 2) / 6) as usize);
+        debug_assert_eq!(
+            coeffs.len(),
+            ((radix * radix + 2) / EISENSTEIN_UNIT_COUNT as i32) as usize
+        );
 
         let mut index = alloc::vec![WEDGE_ROOT; (radix * radix) as usize];
         for (i, &(a, b)) in coeffs.iter().enumerate() {
@@ -258,7 +260,7 @@ impl OrbitParams {
             (radix * radix) as usize
         ];
         for (orbit, &(a, b)) in coeffs.iter().enumerate() {
-            for unit in 0..6 {
+            for unit in 0..EISENSTEIN_UNIT_COUNT {
                 let (da, db) = unit_times(unit, a, b);
                 let slot = &mut residues
                     [((da.rem_euclid(radix) << window_bits) | db.rem_euclid(radix)) as usize];
@@ -266,11 +268,12 @@ impl OrbitParams {
                     *slot = ResidueDigit {
                         da: i8::try_from(da).expect("digit coefficient fits i8"),
                         db: i8::try_from(db).expect("digit coefficient fits i8"),
-                        code: u16::try_from(1 + orbit * 6 + unit).expect("digit code fits u16"),
+                        code: u16::try_from(1 + orbit * EISENSTEIN_UNIT_COUNT + unit)
+                            .expect("digit code fits u16"),
                     };
                 } else {
                     debug_assert_eq!(
-                        usize::from(slot.code - 1) / 6,
+                        usize::from(slot.code - 1) / EISENSTEIN_UNIT_COUNT,
                         orbit,
                         "colliding residues must share a bucket"
                     );
@@ -314,8 +317,8 @@ impl OrbitParams {
 }
 
 /// One base point's digit-ready coordinates: the three $\zeta$-rotations of
-/// x (one field multiplication; $\zeta^2 x = -x - \zeta x$) and y. A digit's
-/// unit picks `xs[e]` and a y sign, so bucket filling never multiplies.
+/// x ($\zeta^2 x = -x - \zeta x$) and y. A digit's unit picks `xs[e]` and a
+/// y sign, so bucket filling never multiplies.
 /// (Also the tail-MSM base representation of the prepared zero-check in
 /// [`super::zero`], which is why the fields are visible to the parent.)
 #[derive(Clone, Copy)]
@@ -324,17 +327,25 @@ pub(super) struct RotatedBase<F> {
     pub(super) y: F,
 }
 
-pub(super) fn rotate_base<C: GlvParams>(base: &C::AffineExt) -> RotatedBase<C::Base> {
-    let (x, y) = C::affine_xy(base);
-    let xz = x * <C::Base as ff::WithSmallOrderMulGroup<3>>::ZETA;
+fn rotate_base<C: GlvParams>(base: &MultiexpBase<C::Base>) -> RotatedBase<C::Base> {
     RotatedBase {
-        xs: [x, xz, -x - xz],
+        xs: [base.x, base.endo_x, -base.x - base.endo_x],
+        y: base.y,
+    }
+}
+
+/// Builds a rotation-ready base outside the ordinary MSM's shared base cache.
+pub(super) fn rotate_affine_base<C: GlvParams>(base: &C::AffineExt) -> RotatedBase<C::Base> {
+    let (x, y) = C::affine_xy(base);
+    let endo_x = x * <C::Base as ff::WithSmallOrderMulGroup<3>>::ZETA;
+    RotatedBase {
+        xs: [x, endo_x, -x - endo_x],
         y,
     }
 }
 
 fn rotated_bases<C: GlvParams>(
-    bases: &[C::AffineExt],
+    bases: &[MultiexpBase<C::Base>],
     num_threads: usize,
 ) -> Vec<RotatedBase<C::Base>> {
     #[cfg(not(feature = "multicore"))]
@@ -358,9 +369,11 @@ pub(super) fn recode_row(
     first: SignedMagnitude,
     second: SignedMagnitude,
     row: &mut [u16],
-) -> usize {
+) -> Option<usize> {
+    if first.magnitude >> GLV_COMPONENT_BITS != 0 || second.magnitude >> GLV_COMPONENT_BITS != 0 {
+        return None;
+    }
     let signed = |component: SignedMagnitude| {
-        debug_assert_eq!(component.magnitude >> GLV_COMPONENT_BITS, 0);
         if component.negative {
             -(component.magnitude as i128)
         } else {
@@ -372,15 +385,14 @@ pub(super) fn recode_row(
     let mask = (1i128 << params.window_bits) - 1;
     for (position, slot) in row.iter_mut().enumerate() {
         if a == 0 && b == 0 {
-            return position;
+            return Some(position);
         }
         let digit = params.residues[(((a & mask) << params.window_bits) | (b & mask)) as usize];
         *slot = digit.code;
         a = (a >> params.window_bits) + i128::from(digit.da < 0);
         b = (b >> params.window_bits) + i128::from(digit.db < 0);
     }
-    debug_assert!(a == 0 && b == 0, "recoding must fit the window bound");
-    row.len()
+    (a == 0 && b == 0).then_some(row.len())
 }
 
 /// The scalar-major digit matrix and the number of windows actually in use
@@ -392,11 +404,12 @@ pub(super) fn recode_row(
 fn digit_matrix<C: GlvParams>(
     params: &OrbitParams,
     components: &[(SignedMagnitude, SignedMagnitude)],
-    bases: &[C::AffineExt],
+    bases: &[MultiexpBase<C::Base>],
     num_threads: usize,
-) -> (Vec<u16>, usize) {
+) -> Option<(Vec<u16>, usize)> {
     let width = params.window_count;
-    let mut digits = alloc::vec![0u16; components.len() * width];
+    let digit_count = components.len().checked_mul(width)?;
+    let mut digits = alloc::vec![0u16; digit_count];
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
     #[cfg(feature = "multicore")]
@@ -405,26 +418,25 @@ fn digit_matrix<C: GlvParams>(
             .par_chunks_mut(width)
             .zip(components.par_iter().zip(bases.par_iter()))
             .map(|(row, (&(first, second), base))| {
-                if bool::from(base.is_identity()) {
-                    0
+                if base.identity {
+                    Some(0)
                 } else {
                     recode_row(params, first, second, row)
                 }
             })
-            .max()
-            .unwrap_or(0);
-        return (digits, active);
+            .try_reduce(usize::default, |left, right| Some(left.max(right)))?;
+        return Some((digits, active));
     }
     let mut active = 0;
     for (row, (&(first, second), base)) in digits
         .chunks_exact_mut(width)
         .zip(components.iter().zip(bases))
     {
-        if !bool::from(base.is_identity()) {
-            active = active.max(recode_row(params, first, second, row));
+        if !base.identity {
+            active = active.max(recode_row(params, first, second, row)?);
         }
     }
-    (digits, active)
+    Some((digits, active))
 }
 
 /// Stages one window's bucket contents: counts per orbit, then scatters
@@ -440,7 +452,7 @@ fn window_points<F: Field>(
     for row in digits.chunks_exact(width) {
         let code = row[window];
         if code != 0 {
-            counts[usize::from(code - 1) / 6] += 1;
+            counts[usize::from(code - 1) / EISENSTEIN_UNIT_COUNT] += 1;
         }
     }
 
@@ -463,7 +475,10 @@ fn window_points<F: Field>(
         if code == 0 {
             continue;
         }
-        let (orbit, unit) = ((code - 1) / 6, (code - 1) % 6);
+        let (orbit, unit) = (
+            (code - 1) / EISENSTEIN_UNIT_COUNT,
+            (code - 1) % EISENSTEIN_UNIT_COUNT,
+        );
         let position = positions[orbit];
         points[position] = AffinePoint {
             x: base.xs[unit >> 1],
@@ -550,12 +565,11 @@ fn multiexp_parallel<C: GlvParams>(
     rotated: &[RotatedBase<C::Base>],
     active_windows: usize,
 ) -> Option<C> {
-    const WINDOWS_PER_PAIR: usize = 2;
-    let pair_count = active_windows.div_ceil(WINDOWS_PER_PAIR);
+    let pair_count = active_windows.div_ceil(PARALLEL_WINDOWS_PER_PAIR);
     (0..pair_count)
         .into_par_iter()
         .map(|pair| {
-            let start = pair * WINDOWS_PER_PAIR;
+            let start = pair * PARALLEL_WINDOWS_PER_PAIR;
             let window_sum = |window| windows_sum::<C>(params, digits, rotated, window..window + 1);
             let mut sum = if start + 1 == active_windows {
                 window_sum(start)?
@@ -585,7 +599,7 @@ fn multiexp_parallel<C: GlvParams>(
 /// [`super::checked_signed_magnitudes`] enforces).
 pub(super) fn multiexp<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
-    bases: &[C::AffineExt],
+    bases: &[MultiexpBase<C::Base>],
     window_bits: usize,
     num_threads: usize,
 ) -> Option<C> {
@@ -594,7 +608,7 @@ pub(super) fn multiexp<C: GlvParams>(
     let rotated = rotated_bases::<C>(bases, num_threads);
     // Walk only the windows some scalar reaches: small-magnitude workloads
     // recode far below the full-width bound.
-    let (digits, active_windows) = digit_matrix::<C>(&params, components, bases, num_threads);
+    let (digits, active_windows) = digit_matrix::<C>(&params, components, bases, num_threads)?;
 
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
@@ -606,12 +620,8 @@ pub(super) fn multiexp<C: GlvParams>(
 }
 
 /// Estimates the dominant group work of the orbit backend for a profiled
-/// input, in units comparable to [`super::estimated_signed_booth_work`]'s,
-/// with two calibration constants fit to the `msm_backend_timings` harness
-/// against the Booth backend on 32-core x86-64 (portable field backend) —
-/// the unique pair (over eighths/sixteenths/thirty-seconds of a visit) that
-/// reproduces every measured serial backend-and-width preference from 512
-/// to 65,536 terms and flips no parallel cell against its measured winner:
+/// input, in units comparable to [`super::estimated_signed_booth_work`].
+/// Two calibration weights distinguish its work from Signed-Booth:
 ///
 /// - A point/window **visit** is priced at 27/32 of a Booth visit. Both are
 ///   one batched-affine bucket addition, but an orbit window makes a single
@@ -647,7 +657,8 @@ pub(super) fn estimated_work(
         return None;
     }
     let window_count = window_count(window_bits);
-    let buckets = (1usize.checked_shl(u32::try_from(2 * window_bits).ok()?)? + 2) / 6;
+    let buckets =
+        (1usize.checked_shl(u32::try_from(2 * window_bits).ok()?)? + 2) / EISENSTEIN_UNIT_COUNT;
 
     let mut raw_visits = 0usize;
     let mut active_windows = 0usize;
@@ -845,7 +856,8 @@ mod tests {
                             magnitude: second,
                         },
                         &mut row,
-                    );
+                    )
+                    .expect("the proven window bound must fit");
                     let used = row
                         .iter()
                         .rposition(|&code| code != 0)
@@ -861,6 +873,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recoding_rejects_an_exhausted_schedule() {
+        let params = OrbitParams::new(5);
+        let mut empty = [];
+        assert_eq!(
+            recode_row(
+                &params,
+                SignedMagnitude {
+                    negative: false,
+                    magnitude: 1,
+                },
+                SignedMagnitude {
+                    negative: false,
+                    magnitude: 0,
+                },
+                &mut empty,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn recoding_rejects_an_out_of_bound_component() {
+        let params = OrbitParams::new(5);
+        let mut row = alloc::vec![0; params.window_count];
+        assert_eq!(
+            recode_row(
+                &params,
+                SignedMagnitude {
+                    negative: false,
+                    magnitude: 1u128 << GLV_COMPONENT_BITS,
+                },
+                SignedMagnitude {
+                    negative: false,
+                    magnitude: 0,
+                },
+                &mut row,
+            ),
+            None
+        );
+    }
+
     /// The digits of a recoded scalar fold back to the scalar in the field:
     /// radix-B Horner with each digit mapped through ω → λ.
     fn recoding_reconstructs<C: GlvParams>() {
@@ -870,7 +924,8 @@ mod tests {
             let check = |k: C::ScalarExt| {
                 let (first, second) = decompose::<C>(&k);
                 let mut row = alloc::vec![0u16; params.window_count];
-                recode_row(&params, first.into(), second.into(), &mut row);
+                recode_row(&params, first.into(), second.into(), &mut row)
+                    .expect("the proven window bound must fit");
                 let mut acc = C::ScalarExt::ZERO;
                 for &code in row.iter().rev() {
                     acc *= radix;
@@ -973,6 +1028,7 @@ mod tests {
                     .map(super::super::checked_signed_magnitudes)
                     .collect::<Option<Vec<_>>>()
                     .expect("decompositions fit the component bound");
+                let bases = super::super::multiexp_bases::<C>(&bases);
                 let actual = multiexp::<C>(&components, &bases, window_bits, num_threads)
                     .expect("valid points have invertible denominators");
                 assert_eq!(
@@ -1087,7 +1143,8 @@ mod tests {
                                 let radix = Scalar::from(1u64 << window_bits);
                                 let (first, second) = decompose::<$curve>(&k);
                                 let mut row = alloc::vec![0u16; params.window_count];
-                                recode_row(&params, first.into(), second.into(), &mut row);
+                                recode_row(&params, first.into(), second.into(), &mut row)
+                                    .expect("the proven window bound must fit");
                                 let mut acc = Scalar::ZERO;
                                 for &code in row.iter().rev() {
                                     acc *= radix;
@@ -1158,18 +1215,18 @@ mod tests {
 
     #[test]
     fn estimated_work_model() {
+        const TERMS: usize = 2_990;
+
         // Serial, full width: every window live, so
-        // (27/32)·terms·W + 3(m - 1)·W + c(W - 1). At width 5: 44,928
-        // discounted visits, 510 weighted-bucket units per window, 26
-        // windows.
-        let full = saturated_profile(2_048);
+        // (27/32)·terms·W + 3(m - 1)·W + c(W - 1).
+        let full = saturated_profile(TERMS);
         assert_eq!(
             estimated_work(&full, 5, 1),
-            Some(26 * 2_048 * 27 / 32 + 3 * 170 * 26 + 5 * 25)
+            Some(26 * TERMS * 27 / 32 + 3 * 170 * 26 + 5 * 25)
         );
         assert_eq!(
             estimated_work(&full, 6, 1),
-            Some(22 * 2_048 * 27 / 32 + 3 * 682 * 22 + 6 * 21)
+            Some(22 * TERMS * 27 / 32 + 3 * 682 * 22 + 6 * 21)
         );
         // Out-of-range widths are rejected, not mispriced.
         assert_eq!(estimated_work(&full, 2, 1), None);
@@ -1178,22 +1235,28 @@ mod tests {
         assert_eq!(estimated_work(&full, 7, 1), None);
         // Parallel: max(balanced, critical worker). At width 5 on 8 workers
         // the critical worker binds: ceil(26/8) = 4 windows of peak density
-        // (1,728 discounted visits + 510 bucket units) plus the top
-        // window's 125 shift doublings.
-        assert_eq!(estimated_work(&full, 5, 8), Some(2_238 * 4 + 5 * 25));
+        // plus the top window's 125 shift doublings.
+        let work_per_window = (26 * TERMS * 27 / 32 + 3 * 170 * 26).div_ceil(26);
+        assert_eq!(
+            estimated_work(&full, 5, 8),
+            Some(work_per_window * 4 + 5 * 25)
+        );
         // On 4 workers the critical worker still binds: 7 windows + shift
-        // exceeds the balanced ceil((44,928 + 13,260 + 1,625)/4) = 14,954.
-        assert_eq!(estimated_work(&full, 5, 4), Some(2_238 * 7 + 5 * 25));
+        // exceeds the balanced estimate.
+        assert_eq!(
+            estimated_work(&full, 5, 4),
+            Some(work_per_window * 7 + 5 * 25)
+        );
 
         // Small magnitudes reach only their own windows: 32-bit scalars at
         // width 5 are live through window 6 (boundary 30), plus one carry
         // window — 8 windows of weighted reduction and Horner instead of 26.
-        let small = uniform_profile(2_048, 32);
+        let small = uniform_profile(TERMS, 32);
         assert_eq!(
             estimated_work(&small, 5, 1),
-            Some(7 * 2_048 * 27 / 32 + 3 * 170 * 8 + 5 * 7)
+            Some(7 * TERMS * 27 / 32 + 3 * 170 * 8 + 5 * 7)
         );
         // Zero scalars cost (almost) nothing.
-        assert_eq!(estimated_work(&uniform_profile(2_048, 0), 5, 1), Some(0));
+        assert_eq!(estimated_work(&uniform_profile(TERMS, 0), 5, 1), Some(0));
     }
 }
