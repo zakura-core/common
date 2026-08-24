@@ -58,15 +58,20 @@ lookup tables and online arithmetic differ.
 Two private, lazily-built tables in `src/pedersen_hash.rs` use three chunks per
 block (`C = 3`):
 
-- **`PEDERSEN_HASH_SINGLE_TABLE[g][j][raw]` = `enc · 2^{4j} · G_g`.**
-  Per generator `g` (6), per chunk position `j` (0..63), indexed by the chunk's 3 raw bits
+- **`PEDERSEN_HASH_SINGLE_TABLE[g][j][raw]` =
+  `8⁻¹ · enc · 2^{4j} · G_g`.** Here `8⁻¹` is the inverse Jubjub
+  cofactor in the scalar field. Per generator `g` (6), per chunk position `j`
+  (0..63), the table is indexed by the chunk's 3 raw bits
   `raw = a | b<<1 | c<<2` (8 entries). `enc` follows directly from `raw`:
-  `000:+1 001:+2 010:+3 011:+4 100:−1 101:−2 110:−3 111:−4`. Tiny (6·63·8 = 3024 points).
+  `000:+1 001:+2 010:+3 011:+4 100:−1 101:−2 110:−3 111:−4`. Tiny
+  (6·63·8 = 3024 points).
 
-- **`PEDERSEN_HASH_BLOCK_TABLE[g][b][raw]` = summed contribution of the `C` chunks of block
-  `b`.** Per generator, per block `b` (0..⌊63/C⌋), indexed by the block's `3C` concatenated raw
-  bits (chunk `k` occupies bits `3k..3k+3`). Built by **summing the relevant single-table
-  entries**, so the two tables agree by construction.
+- **`PEDERSEN_HASH_BLOCK_TABLE[g][b][raw]` = the summed,
+  inverse-cofactor-scaled contribution of the `C` chunks of block `b`.** Per
+  generator, per block `b` (0..⌊63/C⌋), the table is indexed by the block's
+  `3C` concatenated raw bits (chunk `k` occupies bits `3k..3k+3`). It is built
+  by **summing the relevant single-table entries**, so the two tables agree by
+  construction and carry the same `8⁻¹` scaling.
 
 Entries are stored in jubjub's **precomputed-addition (Niels) form, `AffineNielsPoint`**
 (`(v+u, v−u, 2d·u·v)`, 96 bytes vs 160 for an extended point), and the accumulator is a plain

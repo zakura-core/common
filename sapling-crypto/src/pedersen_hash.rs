@@ -285,12 +285,14 @@ const PEDERSEN_HASH_CHUNKS_PER_BLOCK: usize = 3;
 
 #[cfg(feature = "fused-pedersen")]
 lazy_static::lazy_static! {
-    // `SINGLE[g][j][raw]` is `enc * 2^{4j} * G_g`.
+    // `SINGLE[g][j][raw]` is `8^{-1} * enc * 2^{4j} * G_g`, where
+    // `8^{-1}` is the inverse Jubjub cofactor in the scalar field.
     static ref PEDERSEN_HASH_SINGLE_TABLE:
         Vec<Vec<[jubjub::AffineNielsPoint; 8]>> =
             generate_pedersen_hash_single_table();
 
-    // `BLOCK[g][b][raw]` sums one block's single-table entries.
+    // `BLOCK[g][b][raw]` sums one block's inverse-cofactor-scaled
+    // single-table entries.
     static ref PEDERSEN_HASH_BLOCK_TABLE:
         Vec<Vec<Vec<jubjub::AffineNielsPoint>>> =
             generate_pedersen_hash_block_table();
