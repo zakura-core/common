@@ -88,7 +88,7 @@ pub fn spending_key_generator() -> FixedGenerator {
         .get_or_init(|| generate_circuit_generator(crate::constants::SPENDING_KEY_GENERATOR))
 }
 
-static PEDERSEN_CIRCUIT_GENERATORS: OnceTable<Vec<Vec<Vec<(Scalar, Scalar)>>>> = OnceTable::new();
+static PEDERSEN_CIRCUIT_GENERATORS: OnceTable<Vec<FixedGeneratorOwned>> = OnceTable::new();
 
 /// The pre-computed window tables `[-4, 3, 2, 1, 1, 2, 3, 4]` of different magnitudes
 /// of the Pedersen hash segment generators.
