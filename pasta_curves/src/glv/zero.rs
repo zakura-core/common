@@ -1618,11 +1618,13 @@ mod tests {
                         // What upstream main's verifier runs for this check:
                         // its Booth-only try_multiexp (the code below is
                         // byte-identical to main's) plus the identity test.
-                        let start = Instant::now();
-                        let main_equivalent = {
-                            let window_bits =
-                                super::super::glv_multiexp_window_bits::<C>(scalars.len(), threads)
-                                    .expect("main plans GLV at these sizes");
+                        // At cells where main's model refuses GLV entirely
+                        // (running the generic MSM, which this harness does
+                        // not reimplement), the column is skipped.
+                        if let Some(window_bits) =
+                            super::super::glv_multiexp_window_bits::<C>(scalars.len(), threads)
+                        {
+                            let start = Instant::now();
                             let components = scalars
                                 .iter()
                                 .map(super::super::decompose::<C>)
@@ -1630,17 +1632,17 @@ mod tests {
                                 .collect::<Option<Vec<_>>>()
                                 .expect("bounded halves");
                             let booth_bases = super::super::multiexp_bases::<C>(&bases);
-                            super::super::multiexp::<C>(
+                            let main_equivalent = super::super::multiexp::<C>(
                                 &components,
                                 &booth_bases,
                                 window_bits,
                                 threads,
-                            )
-                        };
-                        main_samples.push(start.elapsed().as_secs_f64() * 1e3);
-                        assert!(bool::from(
-                            main_equivalent.expect("Booth runs").is_identity()
-                        ));
+                            );
+                            main_samples.push(start.elapsed().as_secs_f64() * 1e3);
+                            assert!(bool::from(
+                                main_equivalent.expect("Booth runs").is_identity()
+                            ));
+                        }
 
                         let start = Instant::now();
                         let control = super::super::try_multiexp::<C>(&scalars, &bases);
@@ -1663,12 +1665,18 @@ mod tests {
                             assert!(ok);
                         }
                     }
-                    let main_ms = median(main_samples);
+                    let main_ms = (!main_samples.is_empty()).then(|| median(main_samples));
                     let control = median(control_samples);
-                    let mut report = format!(
-                        "vesta terms={terms:>5} threads={threads:>2} main={main_ms:>7.3}ms \
-                         control={control:>7.3}ms "
-                    );
+                    let mut report = match main_ms {
+                        Some(main_ms) => format!(
+                            "vesta terms={terms:>5} threads={threads:>2} main={main_ms:>7.3}ms \
+                             control={control:>7.3}ms "
+                        ),
+                        None => format!(
+                            "vesta terms={terms:>5} threads={threads:>2} main=generic \
+                             control={control:>7.3}ms "
+                        ),
+                    };
                     let mut best: Option<(&str, f64)> = None;
                     for ((label, _), samples) in prepared_list
                         .iter()
@@ -1686,9 +1694,12 @@ mod tests {
                         report.push_str(&format!("{label}={ms:.3} "));
                     }
                     let (best_label, best_ms) = best.expect("some prepared mode ran");
+                    let vs_main = match main_ms {
+                        Some(main_ms) => format!("{:+.1}%", (main_ms / best_ms - 1.0) * 100.0),
+                        None => alloc::string::String::from("n/a"),
+                    };
                     println!(
-                        "{report}| best={best_label} vs-main={:+.1}% vs-control={:+.1}%",
-                        (main_ms / best_ms - 1.0) * 100.0,
+                        "{report}| best={best_label} vs-main={vs_main} vs-control={:+.1}%",
                         (control / best_ms - 1.0) * 100.0
                     );
                 };
