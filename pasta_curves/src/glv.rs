@@ -1264,12 +1264,17 @@ impl<C: GlvParams> Table<C> {
             .collect()
     }
 
-    /// The synchronized batch-affine ladder. Callers guarantee: `k.len > 0`,
-    /// every table is non-identity, and the schedule passed
+    /// The synchronized batch-affine ladder coordinates. Callers guarantee:
+    /// `k.len > 0`, every table is non-identity, and the schedule passed
     /// [`affine_ladder_safe`] (so no denominator below is zero and no
-    /// accumulator is ever the identity).
+    /// accumulator is ever the identity). When `skip_lowest_column` is set,
+    /// the returned accumulator still needs the scalar's final column.
     #[allow(clippy::needless_range_loop)]
-    fn batch_affine_ladder(live: &[&Self], k: &Decomposed<C>) -> Vec<C::AffineExt> {
+    fn batch_affine_ladder_coordinates(
+        live: &[&Self],
+        k: &Decomposed<C>,
+        skip_lowest_column: bool,
+    ) -> (Vec<C::Base>, Vec<C::Base>) {
         let n = live.len();
         // Affine accumulators (structure-of-arrays), initialized from the
         // top digit — the ladder's first column is the digit itself.
@@ -1286,7 +1291,9 @@ impl<C: GlvParams> Table<C> {
         let mut r = alloc::vec![C::Base::ZERO; n];
         let mut a = alloc::vec![C::Base::ZERO; n];
 
-        for &code in k.digits[..k.len - 1].iter().rev() {
+        let columns = &k.digits[..k.len - 1];
+        let first_column = usize::from(skip_lowest_column && !columns.is_empty());
+        for &code in columns[first_column..].iter().rev() {
             if code == 0 {
                 // Batched affine doubling: m = 3x²/(2y), x' = m² - 2x,
                 // y' = m(x - x') - y. Asymptotically 5M + 2S per point
@@ -1358,6 +1365,13 @@ impl<C: GlvParams> Table<C> {
             }
         }
 
+        (xs, ys)
+    }
+
+    /// The synchronized batch-affine ladder. Callers guarantee the
+    /// conditions documented by [`Table::batch_affine_ladder_coordinates`].
+    fn batch_affine_ladder(live: &[&Self], k: &Decomposed<C>) -> Vec<C::AffineExt> {
+        let (xs, ys) = Self::batch_affine_ladder_coordinates(live, k, false);
         xs.into_iter()
             .zip(ys)
             .map(|(x, y)| C::affine_unchecked(x, y, private::CrateToken(())))
@@ -1391,6 +1405,73 @@ impl<C: GlvParams> Table<C> {
 
         let tables: Vec<_> = tables.iter().collect();
         Self::batch_affine_ladder(&tables, scalar)
+    }
+
+    /// Computes one `left + scalar * point` and `left - scalar * point`
+    /// pair per input without normalizing the scalar product first.
+    ///
+    /// The affine ladder stops before its lowest column. That column and the
+    /// two additions to `left` run projectively, after which only the final
+    /// outputs are batch-normalized. This replaces the ladder's terminal
+    /// inversion plus a dependent affine butterfly inversion with one
+    /// normalization.
+    fn mul_decomposed_same_scalar_add_sub_affine(
+        points: &[C],
+        left: &[C::AffineExt],
+        scalar: &Decomposed<C>,
+    ) -> (Vec<C::AffineExt>, Vec<C::AffineExt>) {
+        assert_eq!(points.len(), left.len());
+        if points.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let tables = Self::batch(points);
+        let use_affine = tables.len() >= BATCH_AFFINE_MIN_POINTS
+            && tables.iter().all(|table| !table.is_identity())
+            && scalar.len > 0
+            && scalar.affine_ladder_safe;
+        let scaled = if use_affine {
+            let table_refs: Vec<_> = tables.iter().collect();
+            let (xs, ys) = Self::batch_affine_ladder_coordinates(&table_refs, scalar, true);
+            xs.into_iter()
+                .zip(ys)
+                .zip(&tables)
+                .map(|((x, y), table)| {
+                    let mut product = C::from(C::affine_unchecked(x, y, private::CrateToken(())));
+                    if scalar.len > 1 {
+                        product = product.double();
+                        let code = scalar.digits[0];
+                        if code != 0 {
+                            product += table.digit_point(code);
+                        }
+                    }
+                    product
+                })
+                .collect::<Vec<_>>()
+        } else {
+            tables
+                .iter()
+                .map(|table| table.mul_decomposed(scalar))
+                .collect()
+        };
+
+        let mut projective = Vec::with_capacity(points.len() * 2);
+        for (left, scaled) in left.iter().zip(scaled) {
+            let mut sum = scaled;
+            sum += *left;
+            let mut difference = -scaled;
+            difference += *left;
+            projective.extend_from_slice(&[sum, difference]);
+        }
+        let mut affine = alloc::vec![C::AffineExt::identity(); projective.len()];
+        C::batch_normalize(&projective, &mut affine);
+        let mut sums = Vec::with_capacity(points.len());
+        let mut differences = Vec::with_capacity(points.len());
+        for pair in affine.chunks_exact(2) {
+            sums.push(pair[0]);
+            differences.push(pair[1]);
+        }
+        (sums, differences)
     }
 
     /// One affine product for each `(point, scalar)` pair. This is the FFT
@@ -1645,6 +1726,7 @@ struct FftOperationCounts {
     curve_additions: usize,
     twiddle_decompositions: usize,
     layout_moves: usize,
+    fused_terminal_pairs: usize,
     affine_substage_batches: Vec<usize>,
 }
 
@@ -1694,6 +1776,18 @@ fn record_fft_affine_substage_batch(width: usize) {
     });
     #[cfg(not(test))]
     let _ = width;
+}
+
+#[inline]
+fn record_fft_fused_terminal_pairs(count: usize) {
+    #[cfg(test)]
+    FFT_OPERATION_COUNTS.with(|counts| {
+        let mut counts = counts.borrow_mut();
+        counts.curve_additions += 2 * count;
+        counts.fused_terminal_pairs += count;
+    });
+    #[cfg(not(test))]
+    let _ = count;
 }
 
 #[cfg(test)]
@@ -2824,7 +2918,10 @@ fn fft32_low_multiplication_layer<C: GlvParams>(
 
     let skew_stage5_offset = blocks * 4;
     let mut scalar_inputs: Vec<Vec<C>> = (0..8).map(|_| Vec::with_capacity(blocks)).collect();
+    let mut left_inputs: Vec<Vec<C::AffineExt>> =
+        (0..8).map(|_| Vec::with_capacity(blocks)).collect();
     for block in 0..blocks {
+        let first_skew8 = skew_stage5_offset + block * 8;
         let second_skew8 = skew_stage5_offset + (block * 2 + 1) * 4;
         for (input, point) in scalar_inputs[..4]
             .iter_mut()
@@ -2838,32 +2935,36 @@ fn fft32_low_multiplication_layer<C: GlvParams>(
         {
             input.push(C::from(*point));
         }
+        for (input, point) in left_inputs[..4]
+            .iter_mut()
+            .zip(&stage5_sum[first_skew8..][..4])
+        {
+            input.push(*point);
+        }
+        for (input, point) in left_inputs[4..]
+            .iter_mut()
+            .zip(&stage5_difference[first_skew8..][..4])
+        {
+            input.push(*point);
+        }
     }
-    let products = mul_same_scalars_affine::<C>(
+    let products = mul_same_scalars_add_sub_affine::<C>(
         scalar_inputs,
+        left_inputs,
         scalars.odd32.as_ref().expect("DFT32 odd-root scalars"),
     );
 
-    left.clear();
-    right.clear();
-    left.reserve(blocks * 8);
-    right.reserve(blocks * 8);
+    let mut odd_low = Vec::with_capacity(blocks * 8);
+    let mut odd_high = Vec::with_capacity(blocks * 8);
     for block in 0..blocks {
-        let first_skew8 = skew_stage5_offset + block * 8;
-        left.extend_from_slice(&stage5_sum[first_skew8..][..4]);
-        left.extend_from_slice(&stage5_difference[first_skew8..][..4]);
-        right.extend(products.iter().map(|products| products[block]));
+        odd_low.extend(products.iter().map(|(sums, _)| sums[block]));
+        odd_high.extend(products.iter().map(|(_, differences)| differences[block]));
     }
-    let mut odd_low = alloc::vec![C::AffineExt::identity(); blocks * 8];
-    let mut odd_high = alloc::vec![C::AffineExt::identity(); blocks * 8];
-    identity_free = affine_add_sub_pairs::<C>(
-        &left,
-        &right,
-        &mut odd_low,
-        &mut odd_high,
-        scratch,
-        identity_free,
-    );
+    identity_free = identity_free
+        && odd_low
+            .iter()
+            .chain(&odd_high)
+            .all(|point| !bool::from(point.is_identity()));
 
     for (block_index, output) in points.chunks_mut(32).enumerate() {
         let even = &dft16_outputs[block_index * 16..][..16];
@@ -3054,6 +3155,60 @@ fn mul_same_scalars_affine<C: GlvParams>(
             .into_iter()
             .zip(scalars)
             .map(|(points, scalar)| Table::<C>::mul_decomposed_same_scalar_affine(&points, scalar))
+            .collect()
+    }
+}
+
+/// Multiplies each point group by its shared scalar and immediately applies
+/// an affine `left + product` / `left - product` butterfly. The scalar
+/// ladder's terminal column and butterfly share their final normalization.
+fn mul_same_scalars_add_sub_affine<C: GlvParams>(
+    scalar_inputs: Vec<Vec<C>>,
+    left_inputs: Vec<Vec<C::AffineExt>>,
+    scalars: &[Decomposed<C>],
+) -> Vec<(Vec<C::AffineExt>, Vec<C::AffineExt>)> {
+    assert_eq!(scalar_inputs.len(), left_inputs.len());
+    assert_eq!(scalar_inputs.len(), scalars.len());
+    let count = scalar_inputs.iter().map(Vec::len).sum();
+    record_fft_scalar_multiplications(count);
+    record_fft_fused_terminal_pairs(count);
+
+    #[cfg(feature = "multicore")]
+    {
+        scalar_inputs
+            .into_par_iter()
+            .zip(left_inputs.into_par_iter())
+            .zip(scalars.par_iter())
+            .map(|((points, left), scalar)| {
+                assert_eq!(points.len(), left.len());
+                let threads = maybe_rayon::current_num_threads();
+                let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
+                let batches: Vec<_> = points
+                    .par_chunks(batch_len)
+                    .zip(left.par_chunks(batch_len))
+                    .map(|(points, left)| {
+                        Table::<C>::mul_decomposed_same_scalar_add_sub_affine(points, left, scalar)
+                    })
+                    .collect();
+                let mut sums = Vec::with_capacity(points.len());
+                let mut differences = Vec::with_capacity(points.len());
+                for (batch_sums, batch_differences) in batches {
+                    sums.extend(batch_sums);
+                    differences.extend(batch_differences);
+                }
+                (sums, differences)
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "multicore"))]
+    {
+        scalar_inputs
+            .into_iter()
+            .zip(left_inputs)
+            .zip(scalars)
+            .map(|((points, left), scalar)| {
+                Table::<C>::mul_decomposed_same_scalar_add_sub_affine(&points, &left, scalar)
+            })
             .collect()
     }
 }
@@ -4044,6 +4199,10 @@ mod tests {
             );
             assert_eq!(counts.curve_additions, expected_additions);
             assert_eq!(counts.twiddle_decompositions, expected_decompositions);
+            assert_eq!(
+                counts.fused_terminal_pairs,
+                usize::from(factors.contains(&32)) * n / 4
+            );
             let expected_layout_passes = factors.len() + 1 + usize::from(factors.len() % 2 == 0);
             assert_eq!(counts.layout_moves, expected_layout_passes * n);
 
@@ -4066,7 +4225,7 @@ mod tests {
                     8 => expected_batches.extend([4, 3, 4, 2].map(|width| width * blocks)),
                     16 => expected_batches.extend([8, 6, 3, 8, 6, 4].map(|width| width * blocks)),
                     32 => expected_batches
-                        .extend([16, 12, 6, 3, 16, 14, 12, 8].map(|width| width * blocks)),
+                        .extend([16, 12, 6, 3, 16, 14, 12].map(|width| width * blocks)),
                     _ => unreachable!(),
                 }
             }
@@ -4301,6 +4460,64 @@ mod tests {
         assert!(bool::from(double_add_denominator(x, y, u, v).0.is_zero()));
     }
 
+    /// The terminal scalar-butterfly fusion agrees with native scalar
+    /// multiplication and group addition across its affine and projective
+    /// fallback paths, including identity outputs.
+    fn fused_scalar_butterfly_matches_group<C: GlvParams>() {
+        fn check<C: GlvParams>(points: &[C], left: &[C], scalar: C::ScalarExt) {
+            let mut left_affine = alloc::vec![C::AffineExt::identity(); left.len()];
+            C::batch_normalize(left, &mut left_affine);
+            let decomposed = Decomposed::<C>::new(&scalar);
+            let (sums, differences) = Table::<C>::mul_decomposed_same_scalar_add_sub_affine(
+                points,
+                &left_affine,
+                &decomposed,
+            );
+            assert_eq!(sums.len(), points.len());
+            assert_eq!(differences.len(), points.len());
+            for (((point, left), sum), difference) in
+                points.iter().zip(left).zip(sums).zip(differences)
+            {
+                let scaled = *point * scalar;
+                assert_eq!(C::from(sum), *left + scaled);
+                assert_eq!(C::from(difference), *left - scaled);
+            }
+        }
+
+        let generator = C::generator();
+        let full_width = scalars::<C::ScalarExt>(1).next().unwrap();
+        let scalars = [
+            C::ScalarExt::ZERO,
+            C::ScalarExt::ONE,
+            -C::ScalarExt::ONE,
+            C::ScalarExt::ZETA + C::ScalarExt::ONE,
+            full_width,
+        ];
+        for size in [1, BATCH_AFFINE_MIN_POINTS - 1, BATCH_AFFINE_MIN_POINTS + 33] {
+            let points: Vec<C> = (0..size)
+                .map(|i| generator * C::ScalarExt::from(i as u64 + 1))
+                .collect();
+            let left: Vec<C> = (0..size)
+                .map(|i| generator * C::ScalarExt::from(i as u64 + 101))
+                .collect();
+            for scalar in scalars {
+                check(&points, &left, scalar);
+            }
+
+            let mut with_identity = points.clone();
+            with_identity[size / 2] = C::identity();
+            check(&with_identity, &left, full_width);
+        }
+
+        // Force every difference output to the identity while keeping the
+        // large, identity-free input batch on the affine prefix path.
+        let points: Vec<C> = (0..BATCH_AFFINE_MIN_POINTS + 33)
+            .map(|i| generator * C::ScalarExt::from(i as u64 + 1))
+            .collect();
+        let left: Vec<C> = points.iter().map(|point| *point * full_width).collect();
+        check(&points, &left, full_width);
+    }
+
     macro_rules! glv_tests {
         ($mod_name:ident, $curve:ty) => {
             mod $mod_name {
@@ -4369,6 +4586,10 @@ mod tests {
                 #[test]
                 fn direct_double_add() {
                     direct_double_add_matches_group::<$curve>();
+                }
+                #[test]
+                fn fused_scalar_butterfly() {
+                    fused_scalar_butterfly_matches_group::<$curve>();
                 }
             }
         };
