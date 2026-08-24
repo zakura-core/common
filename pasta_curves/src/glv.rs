@@ -801,16 +801,15 @@ struct AffinePoint<F> {
     y: F,
 }
 
-// This is deliberately a correctness-first staging representation: keeping the
-// chord terms and batch-inversion scratch together makes their association easy
-// to audit. The left operand now lives in its `points[output]` result slot,
-// which already reduces memory traffic while preserving that relationship.
-// This is faster than projective bucket reduction; the intended end state
-// removes the remaining record to save more memory traffic.
-struct PendingAffineAddition<F> {
+/// Cold chord data used only after the batch inversion has completed.
+struct PendingAffineChord<F> {
     output: usize,
     x_sum: F,
     numerator: F,
+}
+
+/// Hot data streamed by the forward and backward batch-inversion passes.
+struct PendingAffineInversion<F> {
     denominator: F,
     inversion_scratch: F,
 }
@@ -824,20 +823,22 @@ const BATCH_INVERSION_LANES: usize = 2;
 /// The outputs must be distinct. Returns `None` if the product of the
 /// denominators is zero, allowing [`try_multiexp`] to use the generic MSM.
 fn batch_invert_and_add<F: Field>(
-    additions: &mut [PendingAffineAddition<F>],
+    chords: &[PendingAffineChord<F>],
+    inversions: &mut [PendingAffineInversion<F>],
     points: &mut [AffinePoint<F>],
 ) -> Option<()> {
-    if additions.is_empty() {
+    assert_eq!(chords.len(), inversions.len());
+    if chords.is_empty() {
         return Some(());
     }
 
     // Compute two prefix lanes in lockstep. This retains one field inversion
     // for the entire batch while exposing independent multiplication chains.
     let mut lane_products = [F::ONE; BATCH_INVERSION_LANES];
-    for pair in additions.chunks_mut(BATCH_INVERSION_LANES) {
-        for (addition, product) in pair.iter_mut().zip(&mut lane_products) {
-            addition.inversion_scratch = *product;
-            *product *= addition.denominator;
+    for pair in inversions.chunks_mut(BATCH_INVERSION_LANES) {
+        for (inversion, product) in pair.iter_mut().zip(&mut lane_products) {
+            inversion.inversion_scratch = *product;
+            *product *= inversion.denominator;
         }
     }
 
@@ -853,11 +854,12 @@ fn batch_invert_and_add<F: Field>(
 
     // If the last pair is incomplete, consume its first lane before walking
     // the complete pairs backward.
-    let complete_pairs = additions.len() / BATCH_INVERSION_LANES;
-    if additions.len() % BATCH_INVERSION_LANES != 0 {
-        let addition = &additions[additions.len() - 1];
-        let denominator = addition.denominator;
-        let denominator_inverse = addition.inversion_scratch * lane_inverses[0];
+    let complete_pairs = inversions.len() / BATCH_INVERSION_LANES;
+    if inversions.len() % BATCH_INVERSION_LANES != 0 {
+        let addition = &chords[chords.len() - 1];
+        let inversion = &inversions[inversions.len() - 1];
+        let denominator = inversion.denominator;
+        let denominator_inverse = inversion.inversion_scratch * lane_inverses[0];
         lane_inverses[0] *= denominator;
 
         let left = points[addition.output];
@@ -866,16 +868,19 @@ fn batch_invert_and_add<F: Field>(
         let y = slope * (left.x - x) - left.y;
         points[addition.output] = AffinePoint { x, y };
     }
-    for pair in additions[..complete_pairs * BATCH_INVERSION_LANES]
+    for (addition_pair, inversion_pair) in chords[..complete_pairs * BATCH_INVERSION_LANES]
         .chunks(BATCH_INVERSION_LANES)
+        .zip(inversions[..complete_pairs * BATCH_INVERSION_LANES].chunks(BATCH_INVERSION_LANES))
         .rev()
     {
-        let first = &pair[0];
-        let second = &pair[1];
-        let first_inverse = first.inversion_scratch * lane_inverses[0];
-        let second_inverse = second.inversion_scratch * lane_inverses[1];
-        lane_inverses[0] *= first.denominator;
-        lane_inverses[1] *= second.denominator;
+        let first = &addition_pair[0];
+        let second = &addition_pair[1];
+        let first_inversion = &inversion_pair[0];
+        let second_inversion = &inversion_pair[1];
+        let first_inverse = first_inversion.inversion_scratch * lane_inverses[0];
+        let second_inverse = second_inversion.inversion_scratch * lane_inverses[1];
+        lane_inverses[0] *= first_inversion.denominator;
+        lane_inverses[1] *= second_inversion.denominator;
 
         // Complete each affine chord addition while its pending record is
         // already resident. Keep two independent field-operation lanes.
@@ -969,6 +974,7 @@ fn reduce_affine_buckets<F: Field>(
         let mut next_points = Vec::with_capacity((points.len() + bucket_count) / 2);
         let mut next_offsets = Vec::with_capacity(offsets.len());
         let mut pending = Vec::with_capacity(points.len() / 2);
+        let mut inversions = Vec::with_capacity(points.len() / 2);
         next_offsets.push(0);
 
         for range in offsets.windows(2) {
@@ -994,10 +1000,12 @@ fn reduce_affine_buckets<F: Field>(
                 // inversion completes. This avoids duplicating its coordinates
                 // in every pending addition.
                 next_points.push(left);
-                pending.push(PendingAffineAddition {
+                pending.push(PendingAffineChord {
                     output,
                     x_sum: left.x + right.x,
                     numerator,
+                });
+                inversions.push(PendingAffineInversion {
                     denominator,
                     inversion_scratch: F::ZERO,
                 });
@@ -1008,7 +1016,7 @@ fn reduce_affine_buckets<F: Field>(
             next_offsets.push(next_points.len());
         }
 
-        batch_invert_and_add(&mut pending, &mut next_points)?;
+        batch_invert_and_add(&pending, &mut inversions, &mut next_points)?;
 
         points = next_points;
         offsets = next_offsets;
@@ -2631,11 +2639,15 @@ mod tests {
         const LENGTHS: [usize; 13] = [0, 1, 2, 3, 31, 32, 33, 63, 64, 65, 255, 256, 257];
 
         for length in LENGTHS {
-            let mut additions = (0..length)
-                .map(|index| PendingAffineAddition {
+            let additions = (0..length)
+                .map(|index| PendingAffineChord {
                     output: index,
                     x_sum: F::from(u64::try_from(index + 3).unwrap()),
                     numerator: F::from(u64::try_from(index + 2).unwrap()),
+                })
+                .collect::<Vec<_>>();
+            let mut inversions = (0..length)
+                .map(|index| PendingAffineInversion {
                     denominator: F::from(u64::try_from(index + 1).unwrap()),
                     inversion_scratch: F::ZERO,
                 })
@@ -2648,16 +2660,17 @@ mod tests {
                 .collect::<Vec<_>>();
             let expected = additions
                 .iter()
+                .zip(&inversions)
                 .zip(&points)
-                .map(|(addition, left)| {
-                    let slope = addition.numerator * addition.denominator.invert().unwrap();
+                .map(|((addition, inversion), left)| {
+                    let slope = addition.numerator * inversion.denominator.invert().unwrap();
                     let x = slope.square() - addition.x_sum;
                     let y = slope * (left.x - x) - left.y;
                     AffinePoint { x, y }
                 })
                 .collect::<Vec<_>>();
 
-            batch_invert_and_add(&mut additions, &mut points)
+            batch_invert_and_add(&additions, &mut inversions, &mut points)
                 .expect("nonzero denominators must be invertible");
             for (index, (actual, expected)) in points.iter().zip(expected).enumerate() {
                 assert_eq!(
@@ -3639,13 +3652,16 @@ mod tests {
     }
 
     fn batch_inversion_rejects_zero_denominator<F: Field>() {
-        let mut additions = [F::ONE, F::ZERO, F::ONE.double()]
-            .into_iter()
-            .enumerate()
-            .map(|(output, denominator)| PendingAffineAddition {
+        let additions = (0..3)
+            .map(|output| PendingAffineChord {
                 output,
                 x_sum: F::ZERO,
                 numerator: F::ZERO,
+            })
+            .collect::<Vec<_>>();
+        let mut inversions = [F::ONE, F::ZERO, F::ONE.double()]
+            .into_iter()
+            .map(|denominator| PendingAffineInversion {
                 denominator,
                 inversion_scratch: F::ZERO,
             })
@@ -3658,7 +3674,7 @@ mod tests {
             additions.len()
         ];
 
-        assert!(batch_invert_and_add(&mut additions, &mut points).is_none());
+        assert!(batch_invert_and_add(&additions, &mut inversions, &mut points).is_none());
     }
 
     #[test]

@@ -102,6 +102,9 @@ and this project adheres to Rust's notion of
 - The GLV Signed-Booth multiscalar backend stores each pending affine
   addition's left operand in its eventual output slot, avoiding duplicate
   coordinates in the batch-inversion workspace.
+- GLV affine bucket reduction now keeps the batch inversion's hot denominator
+  and prefix-product data separate from the cold chord data, reducing cache
+  traffic during the forward and backward inversion walks.
 - The GLV Signed-Booth multiscalar backend caches each base's affine
   coordinates, endomorphism x-coordinate, and identity flag once per MSM
   instead of extracting them again for every window.
