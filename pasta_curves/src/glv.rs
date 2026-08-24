@@ -872,6 +872,17 @@ enum MultiexpPlan {
 /// witness commitments mix boolean, byte-sized, and zero scalars), where
 /// its half-columns reach far fewer windows than the joint radix-$2^c$
 /// recoding.
+///
+/// **Calibration staleness (2026-08-24):** the constants above were fit
+/// before the Signed-Booth base-coordinate caching and before both
+/// backends' parallel schedules gained window pairing, and a single
+/// `msm_backend_timings` sweep on the fit host afterwards shows the
+/// *parallel* boundary has drifted: the model forgoes measured orbit wins
+/// at 8–16 workers on mid sizes (up to +40% at 16 workers, 2,048 terms)
+/// and over-selects orbit by ≤5% (noise-scale, single-run cells) at a few
+/// 4-worker cells; serial and 32-worker selections still match every
+/// measured winner. Re-fitting the two parallel models over interleaved
+/// medians of the new grid is the standing follow-up.
 fn plan_multiexp<C: GlvParams>(
     profile: &MagnitudeProfile,
     num_threads: usize,
