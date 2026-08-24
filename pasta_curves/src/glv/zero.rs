@@ -1078,6 +1078,158 @@ mod tests {
         };
     }
 
+    /// Manual per-phase timing of the serial prepared path (§24's phase
+    /// breakdown): decomposition, recoding, window staging, batched-affine
+    /// reduction, coefficient integration, the tail MSM, and the Horner
+    /// doublings, plus the extra-terms overhead of a halo2-shaped check.
+    ///
+    /// ```text
+    /// cargo test --release --features multicore --lib -- \
+    ///     --ignored zero_check_phase_timings --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual timing harness; see the doc comment"]
+    fn zero_check_phase_timings() {
+        use group::Group as _;
+        use std::time::Instant;
+        use std::vec::Vec;
+
+        type C = vesta::Point;
+
+        let terms = 2_048;
+        let (scalars, bases) = testutil::zero_relation::<C>(terms, 99);
+        #[cfg(feature = "multicore")]
+        let pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("bench thread pool must build");
+
+        let body = || {
+            for mode in [
+                CodebookMode {
+                    window_bits: 7,
+                    beta_power: Some(8),
+                },
+                CodebookMode::alpha_only(7),
+            ] {
+                let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, mode);
+                let iters = 15;
+                let mut phases = [0.0f64; 7];
+                let mut extras_delta = 0.0f64;
+                // The scan finds the corpus's planted relations; fold them
+                // as the production path does (timed within "decompose").
+                let mut folded = scalars.clone();
+                for &(source, target, mu) in &prepared.merges {
+                    let contribution = folded[source] * mu;
+                    folded[target] += contribution;
+                    folded[source] = <C as crate::arithmetic::CurveExt>::ScalarExt::ZERO;
+                }
+                for _ in 0..iters {
+                    let mut mark = Instant::now();
+                    let mut lap = |slot: &mut f64| {
+                        let now = Instant::now();
+                        *slot += (now - mark).as_secs_f64() * 1e3;
+                        mark = now;
+                    };
+                    let components: Vec<_> = folded
+                        .iter()
+                        .enumerate()
+                        .map(|(index, k)| {
+                            if !prepared.live[index] {
+                                let zero = SignedMagnitude {
+                                    negative: false,
+                                    magnitude: 0,
+                                };
+                                return (zero, zero);
+                            }
+                            checked_signed_magnitudes(decompose::<C>(k)).expect("bounded")
+                        })
+                        .collect();
+                    lap(&mut phases[0]); // decompose
+                    let recoded = codebook::recode(&prepared.codebook, &components, 1);
+                    lap(&mut phases[1]); // recode
+                    let mut window_sums = Vec::with_capacity(recoded.active_windows);
+                    for window in 0..recoded.active_windows {
+                        let (points, offsets) = prepared.stage_window(&recoded, window);
+                        lap(&mut phases[2]); // stage (fetch + counting sort)
+                        let buckets =
+                            reduce_affine_buckets(points, offsets).expect("valid points");
+                        lap(&mut phases[3]); // batched-affine reduction
+                        window_sums.push(integrate_coefficients::<C>(
+                            prepared.codebook.program(),
+                            &buckets,
+                        ));
+                        lap(&mut phases[4]); // coefficient integration
+                    }
+                    let tail = prepared
+                        .tail_sum(&recoded.residuals, &[], 1)
+                        .expect("valid points");
+                    lap(&mut phases[5]); // tail MSM
+                    let window_bits = prepared.codebook.window_bits();
+                    let main_windows = prepared.codebook.main_windows();
+                    let mut acc = tail;
+                    if !bool::from(acc.is_identity()) {
+                        for _ in 0..window_bits * (main_windows - recoded.active_windows) {
+                            acc = acc.double();
+                        }
+                    }
+                    for sum in window_sums.into_iter().rev() {
+                        for _ in 0..window_bits {
+                            acc = acc.double();
+                        }
+                        acc += sum;
+                    }
+                    lap(&mut phases[6]); // Horner recombination
+                    assert!(bool::from(acc.is_identity()));
+
+                    // Extra-terms overhead: a halo2-shaped check carries a
+                    // few dozen per-proof commitments.
+                    let extra: Vec<_> = scalars[..48]
+                        .iter()
+                        .cloned()
+                        .zip(bases[..48].iter().cloned())
+                        .collect();
+                    let start = Instant::now();
+                    let with_extras = prepared.is_zero_with_terms_vartime(&scalars, &extra);
+                    let with_ms = start.elapsed().as_secs_f64() * 1e3;
+                    let start = Instant::now();
+                    let without = prepared.is_zero_vartime(&scalars);
+                    let without_ms = start.elapsed().as_secs_f64() * 1e3;
+                    assert!(!with_extras || without); // perturbed sums differ
+                    extras_delta += with_ms - without_ms;
+                }
+                let total: f64 = phases.iter().sum();
+                let labels = [
+                    "decompose",
+                    "recode",
+                    "stage",
+                    "reduce",
+                    "integrate",
+                    "tail",
+                    "horner",
+                ];
+                let mut report = std::string::String::new();
+                for (label, ms) in labels.iter().zip(phases) {
+                    report.push_str(&format!(
+                        "{label}={:.3}ms({:.0}%) ",
+                        ms / iters as f64,
+                        100.0 * ms / total
+                    ));
+                }
+                println!(
+                    "vesta terms={terms} serial {mode:?}: {report}total={:.3}ms \
+                     extras48-delta={:+.3}ms",
+                    total / iters as f64,
+                    extras_delta / iters as f64,
+                );
+            }
+        };
+        #[cfg(feature = "multicore")]
+        pool.install(body);
+        #[cfg(not(feature = "multicore"))]
+        body();
+    }
+
     /// Manual timing harness for the fixed-base zero-check candidates; used
     /// to pick the default prepared mode and calibrate [`plan_mode`]. Not
     /// part of the automated suite.
