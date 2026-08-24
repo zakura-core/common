@@ -105,9 +105,9 @@ macro_rules! impl_prepare_zero_check {
         fn try_prepare_zero_check(
             bases: &[Self::AffineExt],
         ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<Self>>> {
-            Some(alloc::boxed::Box::new(
-                crate::glv::zero::PreparedZeroMsm::<$name>::prepare(bases),
-            ))
+            Some(alloc::boxed::Box::new(crate::glv::zero::PreparedZeroMsm::<
+                $name,
+            >::prepare(bases)))
         }
     };
     (native, $name:ident) => {};

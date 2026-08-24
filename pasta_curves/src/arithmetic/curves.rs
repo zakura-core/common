@@ -162,7 +162,9 @@ pub trait CurveExt:
     ///
     /// The returned check runs in variable time with respect to scalars
     /// and points. **All inputs must be public.**
-    fn try_prepare_zero_check(bases: &[Self::AffineExt]) -> Option<Box<dyn PreparedZeroCheck<Self>>> {
+    fn try_prepare_zero_check(
+        bases: &[Self::AffineExt],
+    ) -> Option<Box<dyn PreparedZeroCheck<Self>>> {
         let _ = bases;
         None
     }

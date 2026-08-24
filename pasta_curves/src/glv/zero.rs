@@ -44,10 +44,34 @@
 //!
 //! Prepared tables are built in-process from the caller's bases; there is
 //! deliberately no deserialization path for them — a corrupted table would
-//! make the check unsound.
+//! make the check unsound. Should serialization ever be added, it must
+//! bind the table to the curve, the preparation-time bases digest (already
+//! computed and used by the batch challenge), the codebook mode and exact
+//! variant lifts, and the implementation version — and even then,
+//! rebuilding from the bases is the only trust story that needs no
+//! separate soundness argument.
 //!
 //! Everything here is variable-time in scalars and points; all inputs must
 //! be public.
+//!
+//! # Deferred by measurement
+//!
+//! Scalar-dependent CSE (reusing repeated transformed-point pairs across
+//! windows) stays out on counting grounds for this workload: with
+//! uniformly random scalars a base repeats its full digit label across a
+//! window pair with probability $B^{-2}$, and an *addition* is saved only
+//! when both members of a bucket-adjacent pair repeat and are paired
+//! together again — expected well below 0.1% of the additions at any
+//! supported width, less than the sort-and-match bookkeeping would cost.
+//! Revisit only for workloads with structured or repeated scalars.
+//!
+//! Every ranking here (mode preferences, tail widths, the planner list)
+//! was measured on one 32-core x86-64 host with the portable field
+//! backend. Re-fit on other targets — in particular aarch64 with the
+//! assembly backend, whose inversion/multiplication ratio differs — by
+//! rerunning the two ignored harnesses in this module's tests
+//! (`zero_check_timings`, `zero_check_phase_timings`) and the parent
+//! module's `msm_backend_timings`.
 
 use alloc::vec::Vec;
 
