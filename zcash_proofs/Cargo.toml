@@ -131,10 +131,6 @@ version = "1.0.0-rc.3"
 default-features = false
 package = "zakura-sapling-crypto"
 
-[dependencies.tracing]
-version = "0.1"
-default-features = false
-
 [dependencies.wagyu-zcash-parameters]
 version = "0.2"
 optional = true

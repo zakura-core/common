@@ -4023,7 +4023,6 @@ dependencies = [
  "minreq",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "tracing",
  "wagyu-zcash-parameters",
  "xdg",
  "zakura-bellman",
