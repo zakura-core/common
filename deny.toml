@@ -53,8 +53,6 @@ skip = [
     { name = "sha2", version = "=0.10.9" },
     { name = "syn", version = "=1.0.109" },
     { name = "syn", version = "=2.0.119" },
-    { name = "thiserror", version = "=1.0.69" },
-    { name = "thiserror-impl", version = "=1.0.69" },
     { name = "windows-sys", version = "=0.52.0" },
 ]
 
