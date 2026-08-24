@@ -8,6 +8,52 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The GLV multiscalar multiplication now plans between two bucket backends:
+  the existing Signed-Booth windows over the two decomposition halves, and a
+  new Eisenstein-orbit backend (`glv::orbit`) that recodes the joint value
+  $k_1 + k_2\omega$ in radix $2^c$ directly over $\mathbf{Z}[\omega]$ and
+  quotients every digit by the six units. Each window then holds one bucket
+  per unit *orbit* — $(4^c + 2)/6$ buckets drawn from a canonical hexagonal
+  wedge, against $2^{c-1}$ per half — and visits every scalar once instead of
+  twice; the unit acts on the stored point through one of three precomputed
+  $\zeta$-rotations of x and a y negation. Window sums are integrated by a
+  spanning-tree reducer on the wedge whose edges differ by $1$ or
+  $1 + \omega$, so the two-dimensional weighted sum telescopes to
+  $A - \phi^2(H)$ in $2m - 2$ additions. Widths 4–6 are planned by a
+  calibrated cost model (width 3 is implemented and tested but never
+  modeled ahead). Measured on 32-core x86-64 (portable backend) against the
+  Booth backend at its own planned width: +2..6% serially from 512 to
+  16,384 terms, +19..38% on 8 workers and +13..65% on 32 workers at
+  mid-to-large sizes — the orbit's 22–26 windows keep workers fed that
+  Booth's 10–16 cannot — while Booth is kept for small parallel MSMs.
+- The MSM planner now prices both GLV bucket backends from the input's
+  *magnitude profile* (suffix counts of the decomposition halves' bit
+  lengths) rather than the term count alone, and the orbit backend caps its
+  window walk at the highest window any scalar's recoding reaches. Real
+  proving MSMs are not uniformly full-width — halo2 witness commitments mix
+  boolean columns, byte-scale values, and zero padding rows, and an early
+  count-only planner sent such MSMs to the orbit backend (whose joint
+  radix-$2^c$ recoding spreads a small magnitude over ~$2c/w$ as many
+  windows as $w$-bit Booth halves), measurably regressing serial Orchard
+  proving; profiled planning keeps Booth on the sparse commitment shapes
+  and the orbit's wins on the full-width quotient/multiopen MSMs. With the
+  window capping the orbit backend in fact wins witness-shaped MSMs
+  outright too (+16..20% serial at 2,048–8,192 terms). End to end,
+  interleaved A/B runs of Orchard proving measured the finished planner
+  ~2.6% faster serially (k = 11, one action; faster in 3 of 3 matched
+  rounds) and ~8% faster on the default 32-thread pool (one-action bundle
+  449 ms → 415 ms).
+- The MSM bucket reduction is now a multi-window primitive
+  (`reduce_affine_buckets_multi`) that can share one Montgomery inversion
+  per tree level across a whole group of windows. Cross-window sharing
+  itself *measured as a net loss* and is disabled (the group size is one
+  window): with divstep inversion at I/M ≈ 77 the saved inversions are
+  worth microseconds per MSM, while staging many windows at once grows the
+  working set from a few hundred KiB (in L2) to several MiB swept per
+  reduction level — interleaved A/B runs of the serial Orchard k = 11
+  prover measured 32 MiB groups ~5% slower end-to-end. The group size
+  remains a documented knob for platforms with different memory
+  hierarchies.
 - The GLV multiscalar multiplication backend now plans its own window width.
   It evaluates the GLV ladder at the generic default width and one bit wider,
   runs at the cheaper, and is selected only when that beats the generic
