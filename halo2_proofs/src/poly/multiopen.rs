@@ -3,7 +3,8 @@
 //!
 //! [halo]: https://eprint.iacr.org/2019/1021
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::Hash;
 
 use super::*;
 use crate::{arithmetic::CurveAffine, transcript::ChallengeScalar};
@@ -102,6 +103,15 @@ impl<'r, 'params: 'r, C: CurveAffine> PartialEq for CommitmentReference<'r, 'par
 
 impl<'r, 'params: 'r, C: CurveAffine> Eq for CommitmentReference<'r, 'params, C> {}
 
+impl<'r, 'params: 'r, C: CurveAffine> Hash for CommitmentReference<'r, 'params, C> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match *self {
+            CommitmentReference::Commitment(a) => std::ptr::hash(a, state),
+            CommitmentReference::MSM(a) => std::ptr::hash(a, state),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct CommitmentData<F, T: PartialEq> {
     commitment: T,
@@ -122,7 +132,7 @@ impl<F, T: PartialEq> CommitmentData<F, T> {
 }
 
 trait Query<F>: Sized {
-    type Commitment: Eq + Copy;
+    type Commitment: Eq + Hash + Copy;
     type Eval: Clone + Default;
 
     fn get_point(&self) -> F;
@@ -146,10 +156,12 @@ where
     // Construct sets of unique commitments and corresponding information about
     // their queries. The vector is in first-seen order; the prover and verifier
     // both iterate the returned commitment data in this order, so it feeds the
-    // transcript and must be deterministic. Commitments are compared by
-    // pointer identity, and the number of distinct commitments is small, so a
-    // linear scan suffices.
+    // transcript and must be deterministic. The side index keeps lookups O(1):
+    // when many proof instances are batched into one call, both the query
+    // count and the number of distinct (pointer-identity) commitments grow
+    // with the instance count, and a linear scan would make this quadratic.
     let mut commitment_map: Vec<(Q::Commitment, CommitmentData<Q::Eval, ()>)> = Vec::new();
+    let mut commitment_indices: HashMap<Q::Commitment, usize> = HashMap::new();
 
     // Also construct mapping from a unique point to a point_index. This defines
     // an ordering on the points.
@@ -167,13 +179,10 @@ where
         });
 
         let commitment = query.get_commitment();
-        let commitment_idx = commitment_map
-            .iter()
-            .position(|(c, _)| *c == commitment)
-            .unwrap_or_else(|| {
-                commitment_map.push((commitment, CommitmentData::new(())));
-                commitment_map.len() - 1
-            });
+        let commitment_idx = *commitment_indices.entry(commitment).or_insert_with(|| {
+            commitment_map.push((commitment, CommitmentData::new(())));
+            commitment_map.len() - 1
+        });
         let commitment_data = &mut commitment_map[commitment_idx].1;
         if commitment_data.point_indices.contains(&point_idx) {
             // Caller tried to provide two evaluations for the same commitment
