@@ -300,18 +300,31 @@ impl OrbitParams {
     fn bucket_count(&self) -> usize {
         self.wedge.len()
     }
+
+    /// The exact recoding window bound for this width (the required row
+    /// stride of every digit matrix fed to [`windows_sum`]).
+    pub(super) fn window_stride(&self) -> usize {
+        self.window_count
+    }
+
+    /// The window width $c$ these parameters were built for.
+    pub(super) fn width(&self) -> usize {
+        self.window_bits
+    }
 }
 
 /// One base point's digit-ready coordinates: the three $\zeta$-rotations of
 /// x (one field multiplication; $\zeta^2 x = -x - \zeta x$) and y. A digit's
 /// unit picks `xs[e]` and a y sign, so bucket filling never multiplies.
+/// (Also the tail-MSM base representation of the prepared zero-check in
+/// [`super::zero`], which is why the fields are visible to the parent.)
 #[derive(Clone, Copy)]
-struct RotatedBase<F> {
-    xs: [F; 3],
-    y: F,
+pub(super) struct RotatedBase<F> {
+    pub(super) xs: [F; 3],
+    pub(super) y: F,
 }
 
-fn rotate_base<C: GlvParams>(base: &C::AffineExt) -> RotatedBase<C::Base> {
+pub(super) fn rotate_base<C: GlvParams>(base: &C::AffineExt) -> RotatedBase<C::Base> {
     let (x, y) = C::affine_xy(base);
     let xz = x * <C::Base as ff::WithSmallOrderMulGroup<3>>::ZETA;
     RotatedBase {
@@ -340,7 +353,7 @@ fn rotated_bases<C: GlvParams>(
 /// recoding continues). See the module docs for the exactness and overflow
 /// arguments; the row length is [`OrbitParams::window_count`], which the
 /// descent bound proves sufficient for any in-range pair.
-fn recode_row(
+pub(super) fn recode_row(
     params: &OrbitParams,
     first: SignedMagnitude,
     second: SignedMagnitude,
@@ -504,7 +517,7 @@ fn reduce_hex_weighted<C: GlvParams>(
 /// $\sum_{j \in \text{range}} B^{j - \text{range.start}} C_j$ by Horner over
 /// the range's windows, staging and reducing one window at a time through
 /// the parent module's fused batched-affine reduction.
-fn windows_sum<C: GlvParams>(
+pub(super) fn windows_sum<C: GlvParams>(
     params: &OrbitParams,
     digits: &[u16],
     rotated: &[RotatedBase<C::Base>],

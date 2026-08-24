@@ -85,6 +85,7 @@ use crate::arithmetic::{mac, sbb, CurveExt};
 use crate::{pallas, vesta};
 
 mod orbit;
+pub mod zero;
 
 mod private {
     use crate::arithmetic::CurveExt;
