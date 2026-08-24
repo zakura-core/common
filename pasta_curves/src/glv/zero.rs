@@ -391,37 +391,48 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         if num_threads > 1 {
             // Adjacent windows pair per task (joined subtasks, one shared
             // shift chain), mirroring the unprepared backends' schedule.
+            // The tail runs concurrently with the main windows: with many
+            // extra terms (batch verification accumulates thousands of
+            // per-proof commitments) the tail is a substantial MSM of its
+            // own, and running the two phases back to back would add its
+            // latency instead of overlapping it.
             const WINDOWS_PER_PAIR: usize = 2;
             let pair_count = active.div_ceil(WINDOWS_PER_PAIR);
-            let windows_part = (0..pair_count)
-                .into_par_iter()
-                .map(|pair| {
-                    let start = pair * WINDOWS_PER_PAIR;
-                    let mut sum = if start + 1 == active {
-                        self.window_sum(recoded, start)?
-                    } else {
-                        let (low, high) = maybe_rayon::join(
-                            || self.window_sum(recoded, start),
-                            || self.window_sum(recoded, start + 1),
-                        );
-                        let mut low = low?;
-                        let mut high = high?;
-                        for _ in 0..window_bits {
-                            high = high.double();
-                        }
-                        low += high;
-                        low
-                    };
-                    for _ in 0..window_bits * start {
-                        sum = sum.double();
-                    }
-                    Some(sum)
-                })
-                .try_reduce(C::identity, |mut left, right| {
-                    left += right;
-                    Some(left)
-                })?;
-            let mut tail = self.tail_sum(&recoded.residuals, extra, num_threads)?;
+            let (windows_part, tail) = maybe_rayon::join(
+                || {
+                    (0..pair_count)
+                        .into_par_iter()
+                        .map(|pair| {
+                            let start = pair * WINDOWS_PER_PAIR;
+                            let mut sum = if start + 1 == active {
+                                self.window_sum(recoded, start)?
+                            } else {
+                                let (low, high) = maybe_rayon::join(
+                                    || self.window_sum(recoded, start),
+                                    || self.window_sum(recoded, start + 1),
+                                );
+                                let mut low = low?;
+                                let mut high = high?;
+                                for _ in 0..window_bits {
+                                    high = high.double();
+                                }
+                                low += high;
+                                low
+                            };
+                            for _ in 0..window_bits * start {
+                                sum = sum.double();
+                            }
+                            Some(sum)
+                        })
+                        .try_reduce(C::identity, |mut left, right| {
+                            left += right;
+                            Some(left)
+                        })
+                },
+                || self.tail_sum(&recoded.residuals, extra, num_threads),
+            );
+            let windows_part = windows_part?;
+            let mut tail = tail?;
             if !bool::from(tail.is_identity()) {
                 for _ in 0..window_bits * main_windows {
                     tail = tail.double();
