@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Poseidon, Sinsemilla, and ECC witness generation now use direct small-power,
+  doubling, and word-extraction paths instead of generic exponentiation,
+  multiplication by two, and intermediate allocations.
 - Fixed-base multiplication witness generation now reconstructs window points
   from precomputed interpolation and coordinate constants instead of repeating
   curve arithmetic and batch normalization.
