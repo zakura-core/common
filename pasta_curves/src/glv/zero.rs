@@ -1610,10 +1610,38 @@ mod tests {
 
                 let iters = (1_200_000 / terms).clamp(5, 31) | 1;
                 let body = || {
+                    let mut main_samples = Vec::new();
                     let mut control_samples = Vec::new();
                     let mut prepared_samples = alloc::vec![Vec::new(); prepared_list.len()];
                     let mut subset_samples = alloc::vec![Vec::new(); subset_list.len()];
                     for _ in 0..iters {
+                        // What upstream main's verifier runs for this check:
+                        // its Booth-only try_multiexp (the code below is
+                        // byte-identical to main's) plus the identity test.
+                        let start = Instant::now();
+                        let main_equivalent = {
+                            let window_bits =
+                                super::super::glv_multiexp_window_bits::<C>(scalars.len(), threads)
+                                    .expect("main plans GLV at these sizes");
+                            let components = scalars
+                                .iter()
+                                .map(super::super::decompose::<C>)
+                                .map(super::super::checked_signed_magnitudes)
+                                .collect::<Option<Vec<_>>>()
+                                .expect("bounded halves");
+                            let booth_bases = super::super::multiexp_bases::<C>(&bases);
+                            super::super::multiexp::<C>(
+                                &components,
+                                &booth_bases,
+                                window_bits,
+                                threads,
+                            )
+                        };
+                        main_samples.push(start.elapsed().as_secs_f64() * 1e3);
+                        assert!(bool::from(
+                            main_equivalent.expect("Booth runs").is_identity()
+                        ));
+
                         let start = Instant::now();
                         let control = super::super::try_multiexp::<C>(&scalars, &bases);
                         control_samples.push(start.elapsed().as_secs_f64() * 1e3);
@@ -1635,9 +1663,11 @@ mod tests {
                             assert!(ok);
                         }
                     }
+                    let main_ms = median(main_samples);
                     let control = median(control_samples);
                     let mut report = format!(
-                        "vesta terms={terms:>5} threads={threads:>2} control={control:>7.3}ms "
+                        "vesta terms={terms:>5} threads={threads:>2} main={main_ms:>7.3}ms \
+                         control={control:>7.3}ms "
                     );
                     let mut best: Option<(&str, f64)> = None;
                     for ((label, _), samples) in prepared_list
@@ -1657,7 +1687,8 @@ mod tests {
                     }
                     let (best_label, best_ms) = best.expect("some prepared mode ran");
                     println!(
-                        "{report}| best={best_label} vs-control={:+.1}%",
+                        "{report}| best={best_label} vs-main={:+.1}% vs-control={:+.1}%",
+                        (main_ms / best_ms - 1.0) * 100.0,
                         (control / best_ms - 1.0) * 100.0
                     );
                 };
