@@ -8,6 +8,11 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Removed `local-prover` from the default feature set; the default features
+  are now just `multicore`. Consumers that locate the Sapling parameters on
+  disk (`~/.zcash-params` discovery via the `directories` machinery) must now
+  enable the `local-prover` (or `directories`/`download-params`) feature
+  explicitly. Consumers using `bundled-prover` are unaffected.
 - Prepared the `1.0.0-rc.3` release.
 - Prepared the `1.0.0-rc.2` release.
 - Replaced the upstream Bellman, BLS12-381, and Jubjub dependencies with the

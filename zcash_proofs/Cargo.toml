@@ -44,10 +44,7 @@ status = "actively-developed"
 
 [features]
 bundled-prover = ["dep:wagyu-zcash-parameters"]
-default = [
-    "local-prover",
-    "multicore",
-]
+default = ["multicore"]
 directories = [
     "dep:home",
     "dep:known-folders",
