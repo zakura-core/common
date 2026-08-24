@@ -713,8 +713,9 @@ pub fn combine_equations<C: GlvParams>(
 }
 
 /// Runs the static coefficient program over one window's bucket sums:
-/// $\sum_j [\delta_j] Q_j$ with $\phi$ applied per operand as an x-rotation
-/// (one multiplication) and empty buckets skipped.
+/// $\sum_j [\delta_j] Q_j$ with unit digits applied per operand as an
+/// x-rotation (one multiplication for $\zeta x$, plus an addition for
+/// $\zeta^2 x = -x - \zeta x$) and a y-negation; empty buckets skipped.
 fn integrate_coefficients<C: GlvParams>(
     program: &[CoeffOp],
     buckets: &[Option<AffinePoint<C::Base>>],
@@ -726,11 +727,15 @@ fn integrate_coefficients<C: GlvParams>(
             CoeffOp::Double => acc = acc.double(),
             CoeffOp::Add {
                 bucket,
-                rotate,
+                rotation,
                 negate,
             } => {
                 if let Some(point) = &buckets[usize::from(bucket)] {
-                    let x = if rotate { point.x * zeta } else { point.x };
+                    let x = match rotation {
+                        0 => point.x,
+                        1 => point.x * zeta,
+                        _ => -point.x - point.x * zeta,
+                    };
                     let y = if negate { -point.y } else { point.y };
                     acc += C::affine_unchecked(x, y, private::CrateToken(()));
                 }

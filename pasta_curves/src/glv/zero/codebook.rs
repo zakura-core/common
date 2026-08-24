@@ -40,11 +40,18 @@
 //! back to the caller for a small tail MSM over the unprepared backend.
 //!
 //! The bucket coefficients are integrated by a static straight-line
-//! [`CoeffOp`] program computing $\sum_j [\delta_j] Q_j$, generated here as
-//! a joint signed-binary (NAF) multi-exponentiation over the fixed
-//! coefficients: writing $\delta_j = a_j + b_j\omega$, the sum is
-//! $\sum_j [a_j]Q_j + \phi(\sum_j [b_j]Q_j)$ folded into one accumulator
-//! with $\phi$ applied per-operand as a free x-rotation.
+//! [`CoeffOp`] program computing $\sum_j [\delta_j] Q_j$, generated as a
+//! joint radix-2 multi-exponentiation whose digit set is $\{0\} \cup U_6$:
+//! every Eisenstein integer has such a recoding (mod 2 a nonzero value
+//! falls in one of three classes, each covered by a $\pm$ unit pair), and
+//! a unit digit costs one accumulator addition of $[\pm\omega^e]Q_j$ —
+//! an x-rotation and y-negation of the bucket sum, cheaper than the two
+//! separate coordinate digits a per-coordinate NAF would spend. Each
+//! coefficient's recoding is *minimal-weight*, from a 0-1 BFS over the
+//! finite state graph of the recoding recurrence, and the orbit
+//! representatives themselves are chosen to minimize that weight first
+//! (this is the coefficient-circuit optimization of the handoff's §12,
+//! scoped to the digit alphabet the free unit action provides).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -195,12 +202,13 @@ fn pack_code(bucket: usize, variant: usize, unit: usize) -> u32 {
 pub(crate) enum CoeffOp {
     /// `acc = 2·acc`.
     Double,
-    /// `acc += [±ω^rotate] Q_bucket` (skipped when the bucket is empty).
+    /// `acc += [±ω^rotation] Q_bucket` (skipped when the bucket is empty).
     Add {
         /// Which bucket sum to add.
         bucket: u16,
-        /// Apply φ (multiply the operand's x by ζ) before adding.
-        rotate: bool,
+        /// The φ power applied to the operand (0..=2): multiply the
+        /// operand's x by ζ^rotation (ζ²x = −x − ζx).
+        rotation: u8,
         /// Negate the operand's y before adding.
         negate: bool,
     },
@@ -352,10 +360,14 @@ impl Codebook {
 
         // Small exact lifts. Candidates are every nonzero lattice point of
         // the box [−B/2, B/2]² (every residue class has a lift there), in a
-        // deterministic best-first order: minimal max-norm first. Variant
-        // lifts break ties toward the fast-to-prepare shapes — integers
-        // (n, 0), then (n, −n) = nα — before Euclidean norm; coefficient
-        // lifts break ties by Euclidean norm (smaller NAF programs).
+        // deterministic best-first order. Variant lifts take minimal
+        // max-norm, breaking ties toward the fast-to-prepare shapes —
+        // integers (n, 0), then (n, −n) = nα — before Euclidean norm.
+        // Coefficient lifts minimize the integration program instead:
+        // fewest unit digits first (each is one accumulator addition),
+        // then max-norm (which bounds the digits and the recoding tail),
+        // then Euclidean norm.
+        let unit_weights = UnitDigitWeights::new(radix / 2);
         let mut candidates: Vec<Eis> = Vec::with_capacity(((radix + 1) * (radix + 1)) as usize);
         for a in -radix / 2..=radix / 2 {
             for b in -radix / 2..=radix / 2 {
@@ -376,7 +388,15 @@ impl Codebook {
         let mut variant_order = candidates.clone();
         variant_order.sort_by_key(|&v| (v.max_norm(), shape_rank(v), v.euclid_norm(), v.a, v.b));
         let mut coefficient_order = candidates;
-        coefficient_order.sort_by_key(|&v| (v.max_norm(), v.euclid_norm(), v.a, v.b));
+        coefficient_order.sort_by_key(|&v| {
+            (
+                unit_weights.weight(v),
+                v.max_norm(),
+                v.euclid_norm(),
+                v.a,
+                v.b,
+            )
+        });
 
         let mut variants = vec![Eis::ZERO; coset_count];
         let mut variants_found = 0usize;
@@ -466,7 +486,7 @@ impl Codebook {
         }
         let tail_bound = i64::try_from(bound).expect("tail bound is small");
 
-        let (program, program_cost) = coefficient_program(&coefficients);
+        let (program, program_cost) = coefficient_program(&coefficients, &unit_weights);
 
         Codebook {
             mode,
@@ -647,71 +667,141 @@ pub(crate) fn recode(
     }
 }
 
-/// Non-adjacent form of `value` as `(position, negate)` digits, ascending.
-fn naf(mut value: i64) -> Vec<(u32, bool)> {
-    let mut digits = Vec::new();
-    let mut position = 0u32;
-    while value != 0 {
-        if value & 1 != 0 {
-            // d ∈ {1, −1} with value ≡ d (mod 4), so (value − d)/2 is even.
-            let digit = 2 - value.rem_euclid(4);
-            digits.push((position, digit < 0));
-            value -= digit;
-        }
-        value >>= 1;
-        position += 1;
-    }
-    digits
+/// Minimal-weight radix-2 unit-digit recodings over a bounded coefficient
+/// box: for every $z$ with $\lVert z\rVert_\infty \le$ `radius`, the least
+/// number of nonzero digits in $z = \sum_t 2^t d_t$, $d_t \in \{0\}\cup U_6$.
+///
+/// The recoding recurrence is a walk on a finite graph — an even state
+/// must shift ($z \mapsto z/2$, no unit shares its parity class), an odd
+/// state spends one digit on either unit of its parity class
+/// ($z \mapsto (z - u)/2$) — and both moves stay inside the box
+/// ($|z'| \le (|z| + 1)/2$), so the minimal weights are exact shortest
+/// paths to zero, computed here by 0-1 BFS over the reversed edges.
+struct UnitDigitWeights {
+    radius: i64,
+    /// `weights[(a + radius) * side + (b + radius)]`, `u16::MAX` sentinel
+    /// for "unreached" (impossible inside the box once the BFS finishes).
+    weights: Vec<u16>,
 }
 
-/// Generates the static NAF program for $\sum_j [\delta_j] Q_j$ and its
-/// `(additions, doublings)` cost. MSB-first double-and-add over both
-/// coordinates of every coefficient jointly; leading doublings (before any
-/// addition) are elided.
-fn coefficient_program(coefficients: &[Eis]) -> (Vec<CoeffOp>, (usize, usize)) {
-    let mut per_position: Vec<Vec<CoeffOp>> = Vec::new();
-    let mut record = |position: u32, op: CoeffOp| {
-        let position = position as usize;
-        if per_position.len() <= position {
-            per_position.resize_with(position + 1, Vec::new);
+impl UnitDigitWeights {
+    fn new(radius: i64) -> Self {
+        let side = (2 * radius + 1) as usize;
+        let mut weights = vec![u16::MAX; side * side];
+        let index = |value: Eis| -> usize {
+            debug_assert!(value.max_norm() <= radius);
+            ((value.a + radius) as usize) * side + ((value.b + radius) as usize)
+        };
+        let units = exact_units();
+        let mut queue: alloc::collections::VecDeque<Eis> = alloc::collections::VecDeque::new();
+        weights[index(Eis::ZERO)] = 0;
+        queue.push_back(Eis::ZERO);
+        while let Some(state) = queue.pop_front() {
+            let weight = weights[index(state)];
+            // Zero-cost predecessor: 2·state (an even value that shifts to
+            // `state`).
+            let double = Eis {
+                a: 2 * state.a,
+                b: 2 * state.b,
+            };
+            if double.max_norm() <= radius && weights[index(double)] > weight {
+                weights[index(double)] = weight;
+                queue.push_front(double);
+            }
+            // Unit-cost predecessors: 2·state + u (odd values whose digit
+            // step lands on `state`).
+            for &unit in &units {
+                let pred = Eis {
+                    a: 2 * state.a + unit.a,
+                    b: 2 * state.b + unit.b,
+                };
+                if pred.max_norm() <= radius && weights[index(pred)] > weight + 1 {
+                    weights[index(pred)] = weight + 1;
+                    queue.push_back(pred);
+                }
+            }
         }
-        per_position[position].push(op);
-    };
+        UnitDigitWeights { radius, weights }
+    }
+
+    fn weight(&self, value: Eis) -> u16 {
+        let side = (2 * self.radius + 1) as usize;
+        let weight = self.weights
+            [((value.a + self.radius) as usize) * side + ((value.b + self.radius) as usize)];
+        debug_assert_ne!(weight, u16::MAX, "every in-box value has a recoding");
+        weight
+    }
+
+    /// One minimal-weight recoding of `value`, as ascending
+    /// `(position, unit-code)` digits (shared `[+1,-1,+ω,-ω,+ω²,-ω²]`
+    /// code order).
+    fn recode(&self, mut value: Eis) -> Vec<(u32, usize)> {
+        let units = exact_units();
+        let mut digits = Vec::new();
+        let mut position = 0u32;
+        while value != Eis::ZERO {
+            if value.a & 1 == 0 && value.b & 1 == 0 {
+                value = Eis {
+                    a: value.a >> 1,
+                    b: value.b >> 1,
+                };
+            } else {
+                let target = self.weight(value) - 1;
+                let (unit_code, next) = units
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, unit)| (value.a - unit.a) & 1 == 0 && (value.b - unit.b) & 1 == 0)
+                    .map(|(code, unit)| {
+                        (
+                            code,
+                            Eis {
+                                a: (value.a - unit.a) >> 1,
+                                b: (value.b - unit.b) >> 1,
+                            },
+                        )
+                    })
+                    .find(|&(_, next)| self.weight(next) == target)
+                    .expect("a digit on the shortest path exists");
+                digits.push((position, unit_code));
+                value = next;
+            }
+            position += 1;
+        }
+        digits
+    }
+}
+
+/// Generates the static program for $\sum_j [\delta_j] Q_j$ and its
+/// `(additions, doublings)` cost: MSB-first double-and-add over every
+/// coefficient's minimal unit-digit recoding jointly; leading doublings
+/// (before any addition) are elided.
+fn coefficient_program(
+    coefficients: &[Eis],
+    weights: &UnitDigitWeights,
+) -> (Vec<CoeffOp>, (usize, usize)) {
+    let mut per_position: Vec<Vec<CoeffOp>> = Vec::new();
     for (bucket, &delta) in coefficients.iter().enumerate() {
         let bucket = u16::try_from(bucket).expect("bucket fits u16");
-        for (position, negate) in naf(delta.a) {
-            record(
-                position,
-                CoeffOp::Add {
-                    bucket,
-                    rotate: false,
-                    negate,
-                },
-            );
-        }
-        for (position, negate) in naf(delta.b) {
-            record(
-                position,
-                CoeffOp::Add {
-                    bucket,
-                    rotate: true,
-                    negate,
-                },
-            );
+        for (position, unit_code) in weights.recode(delta) {
+            let position = position as usize;
+            if per_position.len() <= position {
+                per_position.resize_with(position + 1, Vec::new);
+            }
+            per_position[position].push(CoeffOp::Add {
+                bucket,
+                rotation: (unit_code >> 1) as u8,
+                negate: unit_code & 1 == 1,
+            });
         }
     }
 
     let mut program = Vec::new();
     let mut additions = 0usize;
     let mut doublings = 0usize;
-    for (position, ops) in per_position.iter().enumerate().rev() {
+    for ops in per_position.iter().rev() {
         if !program.is_empty() {
             program.push(CoeffOp::Double);
             doublings += 1;
-        } else if ops.is_empty() && position + 1 == per_position.len() {
-            // Unreachable (the top position is always occupied), but keep
-            // the elision logic obviously safe.
-            continue;
         }
         additions += ops.len();
         program.extend_from_slice(ops);
@@ -920,21 +1010,55 @@ mod tests {
         }
     }
 
+    /// Every in-box value's minimal unit-digit recoding reconstructs it
+    /// exactly, matches the tabulated weight, and never beats the trivial
+    /// lower bound; the weight also never exceeds the per-coordinate NAF
+    /// weight (the recoding it replaced), since coordinate NAF digits
+    /// embed into unit digits one-for-one when they don't share positions.
     #[test]
-    fn naf_is_nonadjacent_and_reconstructs() {
-        for value in -1000i64..=1000 {
-            let digits = naf(value);
-            let mut acc = 0i64;
-            let mut last: Option<u32> = None;
-            for &(position, negate) in &digits {
-                if let Some(last) = last {
-                    assert!(position > last + 1, "adjacent NAF digits at {value}");
+    fn unit_digit_recoding_is_minimal_and_exact() {
+        let radius = 64;
+        let weights = UnitDigitWeights::new(radius);
+        let naf_weight = |mut v: i64| -> u16 {
+            let mut weight = 0;
+            while v != 0 {
+                if v & 1 != 0 {
+                    v -= 2 - v.rem_euclid(4);
+                    weight += 1;
                 }
-                last = Some(position);
-                acc += if negate { -1i64 } else { 1 } << position;
+                v >>= 1;
             }
-            assert_eq!(acc, value);
+            weight
+        };
+        for a in -radius..=radius {
+            for b in -radius..=radius {
+                let value = Eis { a, b };
+                let digits = weights.recode(value);
+                assert_eq!(digits.len(), usize::from(weights.weight(value)));
+                let mut acc = Eis::ZERO;
+                for &(position, unit_code) in &digits {
+                    let unit = exact_units()[unit_code];
+                    acc = Eis {
+                        a: acc.a + (unit.a << position),
+                        b: acc.b + (unit.b << position),
+                    };
+                }
+                assert_eq!(acc, value, "digits must reconstruct {value:?}");
+                if value != Eis::ZERO {
+                    assert!(weights.weight(value) >= 1);
+                }
+                // At most one digit per position is spent, so two separate
+                // coordinate NAFs are always matchable.
+                assert!(
+                    weights.weight(value) <= naf_weight(a) + naf_weight(b),
+                    "unit digits must not lose to per-coordinate NAF at {value:?}"
+                );
+            }
         }
+        // Spot checks: units are single digits; α = 1 − ω needs two.
+        assert_eq!(weights.weight(Eis { a: 1, b: 1 }), 1); // −ω²
+        assert_eq!(weights.weight(Eis { a: 1, b: -1 }), 2); // α
+        assert_eq!(weights.weight(Eis { a: 8, b: 0 }), 1); // 2³
     }
 
     macro_rules! codebook_curve_tests {
