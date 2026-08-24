@@ -1,8 +1,8 @@
 # Orchard proving and verification benchmarks
 
-These harnesses exercise the complete one-Action Orchard proving and
-verification paths. They are intended for controlled comparisons between two
-already-built revisions, not for microbenchmarking isolated arithmetic.
+These harnesses exercise complete Orchard proving and verification paths. They
+are intended for controlled comparisons between two already-built revisions,
+not for microbenchmarking isolated arithmetic.
 
 ## Merkle hashing
 
@@ -23,7 +23,7 @@ cargo +1.88 bench --locked -p zakura-orchard --bench merkle
 
 In both cases leaf generation happens outside the timed routines.
 
-## One-Action prover
+## Prover
 
 Build or run the Criterion target with one Rayon worker:
 
@@ -33,9 +33,9 @@ RAYON_NUM_THREADS=1 cargo +1.88 bench --locked \
     --bench orchard_k11_prover
 ```
 
-Key generation and one genuine proof-verification preflight occur before the
-timed routine. The benchmark uses ten flat samples, a two-second warmup, and a
-15-second measurement interval.
+Key generation and genuine proof-verification preflights occur before the
+timed routines. The benchmark measures one-, two-, and four-Action proofs with
+ten flat samples, a two-second warmup, and a 15-second measurement interval.
 
 For a multicore run, set both thread-count variables to the same value:
 
