@@ -18,7 +18,7 @@ This crate contains an implementation of Zcash's "Sapling" cryptography.
 ## Sapling Pedersen hashing
 
 The optional `fused-pedersen` feature caches fused chunk-block lookup tables
-(~7 MiB at the default block size) to speed up non-circuit Pedersen hashing.
+(about 6.2 MiB) to speed up non-circuit Pedersen hashing.
 It is opt-in so that full-node applications can enable the higher-throughput
 evaluator, while wallets and other memory-sensitive applications keep the
 original 8-bit exp-window tables by default. Enable it on the dependency with

@@ -15,7 +15,11 @@ The previous implementation did two things per segment:
    and additions per chunk, ~172 chunks per hash.
 2. **Fixed-base multiply.** `acc · G` via an 8-bit windowed table
    (`PEDERSEN_HASH_EXP_WINDOW_SIZE = 8`), i.e. 32 windows → **32 point additions per segment
-   (~96 per Merkle hash)** against a ~3 MB precomputed table.
+   (~96 per Merkle hash)** against a 7.5 MiB precomputed table.
+
+The old-table size is derived from 6 generators × 32 windows × 256 entries ×
+160 bytes per `SubgroupPoint`, or 7,864,320 bytes. Point sizes were checked with
+`std::mem::size_of` on the 64-bit benchmark targets described below.
 
 Both the `Fr` accumulation and the ~96 point additions are on the hot path of every tree
 update and witness computation.
@@ -46,13 +50,13 @@ exp-window tables. Enable the feature on the dependency:
 sapling-crypto = { package = "zakura-sapling-crypto", features = ["fused-pedersen"] }
 ```
 
-Both evaluators return the same prime-order `ExtendedPoint`; only the lookup tables
-and online arithmetic differ.
+Both evaluators return the same `SubgroupPoint` through the public API; only the
+lookup tables and online arithmetic differ.
 
 ## Tables
 
-Two lazily-built tables in `src/constants.rs`, parameterised by
-`PEDERSEN_HASH_CHUNKS_PER_BLOCK` (`C`, default 3):
+Two private, lazily-built tables in `src/pedersen_hash.rs` use three chunks per
+block (`C = 3`):
 
 - **`PEDERSEN_HASH_SINGLE_TABLE[g][j][raw]` = `enc · 2^{4j} · G_g`.**
   Per generator `g` (6), per chunk position `j` (0..63), indexed by the chunk's 3 raw bits
@@ -71,30 +75,37 @@ on the addend), which is both faster than extended+extended and, crucially, lowe
 sequential accumulator chain. Tables are built with one batched field inversion per generator via
 `jubjub::batch_normalize`, so lazy init stays cheap.
 
+Table entries are also scaled by the inverse Jubjub cofactor. Three doublings
+of the final sum recover the exact hash. The public path obtains its
+`SubgroupPoint` through `clear_cofactor`, avoiding the full scalar
+multiplication required by a checked torsion test; the internal path uses
+`mul_by_cofactor` and retains the extended representation.
+
 ### Memory / speed tradeoff (`C`)
 
-Measured against the previous 8-bit-window implementation on a raw 510-bit Pedersen hash
-(~20.8 µs baseline), `cargo bench --bench pedersen_hash` (`pedersen-hash`):
+The sizes below are derived from entry counts and a 96-byte
+`AffineNielsPoint`. Addition counts are for a 510-bit Merkle input plus the
+six-bit personalization:
 
-| `C` | time    | speedup | approx. table size |
-|-----|---------|---------|--------------------|
-|  2  | 10.2 µs |  2.0×   |       ~1.4 MB      |
-|  3  |  6.9 µs |  3.0×   |       ~7 MB        |
-|  4  |  5.9 µs |  3.5×   |       ~36 MB       |
-|  5  |  4.9 µs |  4.3×   |      ~227 MB       |
+| `C` | mixed additions | fused table size |
+|-----|-----------------|------------------|
+|  2  |       87        |     1.37 MiB     |
+|  3  |       58        |     6.18 MiB     |
+|  4  |       49        |    34.03 MiB     |
+|  5  |       40        |   216.28 MiB     |
 
-`C = 3` is the default: ~3× at ~7 MB, the last cheap memory/speed jump for node-oriented
-`fused-pedersen` builds. A full 63-chunk segment divides evenly (21 blocks, no single-table
-tail). `C = 2` is ~2× at ~1.4 MB; `C = 4` is ~36 MB for another ~1 µs. `C` is a one-line
-constant, so the operating point can be adjusted later.
+`C = 3` is the shipped setting: it is the last inexpensive memory/speed jump
+for node-oriented `fused-pedersen` builds, and each full 63-chunk segment
+divides evenly into 21 blocks.
 
 ## Algorithm (`pedersen_hash`)
 
-The input bit stream (personalization bits prepended) is buffered into a fixed-size stack
-buffer (sized to the six-generator capacity, ~1.1 KB, no heap allocation) so the exact chunk
-count `T = ⌈len/3⌉` is known up front. Collection panics as soon as a bit beyond that capacity
-arrives, so oversized or infinite public-API inputs fail after bounded consumption. The hash
-then walks chunks segment by segment
+The fused evaluator buffers the input bit stream (with personalization bits
+prepended) into a fixed-size stack buffer so the exact chunk count
+`T = ⌈len/3⌉` is known up front. The default evaluator retains its streaming
+input path and does not allocate this buffer. Both paths panic as soon as a bit
+beyond the six-generator capacity arrives, so oversized or infinite inputs
+fail after bounded consumption. The hash then walks chunks segment by segment
 (`PEDERSEN_HASH_CHUNKS_PER_GENERATOR = 63` chunks per generator):
 
 - Fold every full block of `C` chunks with one `PEDERSEN_HASH_BLOCK_TABLE` lookup + mixed add.
@@ -104,20 +115,21 @@ then walks chunks segment by segment
 For `C = 3` this is ~58 mixed additions per Merkle hash (vs ~96 full additions + the whole `Fr`
 accumulation in the old code); `C = 2` is ~87 and `C = 4` is ~49.
 
-## Point representation & return type (breaking change)
+## Point representation and API compatibility
 
-To use the fast mixed addition the accumulator must be an `ExtendedPoint`, and there is no cheap
-`ExtendedPoint → SubgroupPoint` conversion in jubjub (only via `to_affine()`, a field
-inversion). Rather than pay an inversion on every hash, **`pedersen_hash` now returns
-`jubjub::ExtendedPoint`** instead of `SubgroupPoint`. This is a public API change.
+Fast mixed addition requires an `ExtendedPoint` accumulator, and a general
+checked conversion from `ExtendedPoint` to `SubgroupPoint` requires a full
+scalar multiplication for the torsion check. In this implementation, the
+inverse-cofactor table scaling described above makes the conversion three
+doublings instead. The public `pedersen_hash` API therefore retains its
+original `SubgroupPoint` return type and the guarantee encoded by that type.
 
-Caller impact is small:
-
-- `tree.rs` (`merkle_hash_field`) and the circuit's witness/test sites already wrapped the result
-  in `ExtendedPoint::from(...)`; that wrap is now the identity and was removed.
-- `spec.rs::windowed_pedersen_commit` (the note commitment, computed once per note — off the hot
-  path) re-wraps the result into a `SubgroupPoint` with a checked `into_subgroup()`, preserving its
-  signature and everything downstream of it.
+An internal `pedersen_hash_extended` helper avoids the conversion in the hot
+paths. `tree.rs` extracts the Merkle root coordinate directly, while
+`spec.rs::windowed_pedersen_commit` uses the helper under `fused-pedersen` to
+add the randomness term before performing one checked subgroup conversion.
+The default commitment path continues to operate on `SubgroupPoint`s. The
+fused tables and tuning constant remain private implementation details.
 
 ## Correctness
 
@@ -142,7 +154,7 @@ Guards:
 - Capacity tests verify that both a one-bit-oversized input and an infinite iterator are rejected
   after bounded consumption.
 
-Besides the return type (see above), the exp-window constants
+The exp-window constants
 (`PEDERSEN_HASH_EXP_TABLE`, `PEDERSEN_HASH_EXP_WINDOW_SIZE`, and their builder) remain the
 default. They remain available when `fused-pedersen` is enabled so Cargo feature unification
 does not remove existing public API, but the exp table is not initialized unless accessed.
@@ -167,10 +179,25 @@ does not remove existing public API, but the exp table is not initialized unless
 
 ## Benchmarks
 
-`cargo bench --bench pedersen_hash` covers raw Pedersen hashes for both the
-510-bit Merkle input and the 576-bit note-commitment input, plus the public
-`merkle_hash` path. Each case rotates through a fixed corpus of pseudorandom
-inputs so that feature-on and feature-off runs use the same data, do not
-measure per-iteration allocation, and do not repeatedly access the same
-lookup-table entries. Pass `--features fused-pedersen` to measure the fused
-tables against the default exp-window path.
+`cargo bench --bench pedersen_hash` covers the public `pedersen_hash` API for
+both the 510-bit Merkle input and the 576-bit note-commitment input, plus the
+production `merkle_hash` path. The public raw cases include construction of the
+`SubgroupPoint` result; the Merkle case exercises the internal extended path.
+Each case rotates through a fixed corpus of 1,024 pseudorandom inputs so
+feature-on and feature-off runs use identical data and do not measure
+per-iteration allocation. Pass `--features fused-pedersen` to compare the fused
+tables with the default exp-window path.
+
+Final measurements were taken on 2026-08-24 with Criterion 0.5.1's default
+three-second warm-up, 100 samples, and approximately five-second measurement
+window. Each feature mode used an optimized `cargo bench` build and the same
+fixed input corpus. Times are Criterion median point estimates:
+
+| Host and toolchain | Benchmark | Default | Fused | Speedup |
+|--------------------|-----------|---------|-------|---------|
+| AMD EPYC 9654 VM, x86_64, Rust 1.97.1 | public Merkle-sized raw | 37.296 µs | 13.782 µs | 2.71× |
+| AMD EPYC 9654 VM, x86_64, Rust 1.97.1 | public note-sized raw | 48.645 µs | 15.669 µs | 3.10× |
+| AMD EPYC 9654 VM, x86_64, Rust 1.97.1 | production `merkle_hash` | 48.153 µs | 25.061 µs | 1.92× |
+| Apple M4, arm64, Rust 1.98.0 | public Merkle-sized raw | 19.025 µs | 6.751 µs | 2.82× |
+| Apple M4, arm64, Rust 1.98.0 | public note-sized raw | 24.641 µs | 7.689 µs | 3.20× |
+| Apple M4, arm64, Rust 1.98.0 | production `merkle_hash` | 24.311 µs | 12.247 µs | 1.99× |

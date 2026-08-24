@@ -714,7 +714,7 @@ fn test_input_circuit_with_bls12_381() {
                 let lhs = lhs.to_le_bits();
                 let rhs = rhs.to_le_bits();
 
-                cur = pedersen_hash::pedersen_hash(
+                cur = jubjub::ExtendedPoint::from(pedersen_hash::pedersen_hash(
                     pedersen_hash::Personalization::MerkleTree(i),
                     lhs.iter()
                         .by_vals()
@@ -724,7 +724,7 @@ fn test_input_circuit_with_bls12_381() {
                                 .by_vals()
                                 .take(bls12_381::Scalar::NUM_BITS as usize),
                         ),
-                )
+                ))
                 .to_affine()
                 .get_u();
 
@@ -902,7 +902,7 @@ fn test_input_circuit_with_bls12_381_external_test_vectors() {
                 let lhs = lhs.to_le_bits();
                 let rhs = rhs.to_le_bits();
 
-                cur = pedersen_hash::pedersen_hash(
+                cur = jubjub::ExtendedPoint::from(pedersen_hash::pedersen_hash(
                     pedersen_hash::Personalization::MerkleTree(i),
                     lhs.iter()
                         .by_vals()
@@ -912,7 +912,7 @@ fn test_input_circuit_with_bls12_381_external_test_vectors() {
                                 .by_vals()
                                 .take(bls12_381::Scalar::NUM_BITS as usize),
                         ),
-                )
+                ))
                 .to_affine()
                 .get_u();
 

@@ -65,8 +65,8 @@ std = [
     "redjubjub/std",
 ]
 temporary-zcashd = []
-## Caches fused chunk-block Pedersen hash lookup tables (~7 MiB at the
-## default block size) to speed up non-circuit hashing. Opt-in so
+## Caches fused chunk-block Pedersen hash lookup tables (about 6.2 MiB) to
+## speed up non-circuit hashing. Opt-in so
 ## memory-sensitive applications keep the original 8-bit exp-window tables.
 fused-pedersen = []
 test-dependencies = [

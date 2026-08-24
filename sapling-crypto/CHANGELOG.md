@@ -21,20 +21,5 @@ and this project adheres to Rust's notion of
 ### Added
 
 - Opt-in `fused-pedersen` feature, which caches fused chunk-block lookup tables
-  (~7 MiB at the default `PEDERSEN_HASH_CHUNKS_PER_BLOCK` of 3) to speed up
-  non-circuit Pedersen hashing by about 3x. The default remains the original
-  8-bit exp-window tables. When the feature is enabled, `sapling_crypto::constants`
-  also exposes:
-  - `PEDERSEN_HASH_CHUNKS_PER_BLOCK`
-  - `PEDERSEN_HASH_SINGLE_TABLE`
-  - `PEDERSEN_HASH_BLOCK_TABLE`
-
-### Changed
-
-- `sapling_crypto::pedersen_hash::pedersen_hash` now returns a
-  `jubjub::ExtendedPoint` instead of a `jubjub::SubgroupPoint`. The returned
-  point is still in the prime-order subgroup; callers that need a
-  `SubgroupPoint` can re-derive one via
-  `group::cofactor::CofactorGroup::into_subgroup` (or `to_bytes`/`from_bytes`).
-  With `fused-pedersen`, this avoids an inversion on the mixed-addition hot
-  path.
+  (about 6.2 MiB) to speed up non-circuit Pedersen hashing. The default remains
+  the original 8-bit exp-window tables.
