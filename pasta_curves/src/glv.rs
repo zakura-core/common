@@ -1111,12 +1111,31 @@ fn multiexp_parallel<C: GlvParams>(
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
-    (0..window_count)
+    // Pairing shares one window shift without serializing all window sums.
+    // The pair roots remain independent, so their remaining shifts overlap.
+    const WINDOWS_PER_PAIR: usize = 2;
+    let pair_count = window_count.div_ceil(WINDOWS_PER_PAIR);
+    (0..pair_count)
         .into_par_iter()
-        .map(|window| {
-            let buckets = fill_window::<C>(components, bases, window_bits, window)?;
-            let mut sum = sum_buckets::<C>(&buckets);
-            for _ in 0..window_bits * window {
+        .map(|pair| {
+            let start = pair * WINDOWS_PER_PAIR;
+            let window_sum = |window| {
+                let buckets = fill_window::<C>(components, bases, window_bits, window)?;
+                Some(sum_buckets::<C>(&buckets))
+            };
+            let mut sum = if start + 1 == window_count {
+                window_sum(start)?
+            } else {
+                let (low, high) = maybe_rayon::join(|| window_sum(start), || window_sum(start + 1));
+                let mut low = low?;
+                let mut high = high?;
+                for _ in 0..window_bits {
+                    high = high.double();
+                }
+                low += high;
+                low
+            };
+            for _ in 0..window_bits * start {
                 sum = sum.double();
             }
             Some(sum)

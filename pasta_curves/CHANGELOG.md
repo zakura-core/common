@@ -89,6 +89,10 @@ and this project adheres to Rust's notion of
 
 ### Changed
 
+- Parallel GLV multiscalar multiplication now combines adjacent window sums
+  before shifting their independent pair roots. For the 16-window Orchard
+  commitment schedule, this cuts projective window-shift doublings from 960 to
+  512 while retaining one schedulable task per window.
 - Hash-to-curve now avoids redundant release-mode curve-equation checks after
   the simplified SWU and isogeny formulas, while retaining debug assertions.
   Vesta hash-to-curve is about 5% faster on Apple aarch64.
