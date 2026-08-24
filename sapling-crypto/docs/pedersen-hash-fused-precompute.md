@@ -167,7 +167,10 @@ does not remove existing public API, but the exp table is not initialized unless
 
 ## Benchmarks
 
-`cargo bench --bench pedersen_hash` covers both `pedersen-hash` (raw 510-bit hash) and
-`merkle-hash` (the full `Node::combine` path via `merkle_hash`). Pass
-`--features fused-pedersen` to measure the fused tables against the default
-exp-window path.
+`cargo bench --bench pedersen_hash` covers raw Pedersen hashes for both the
+510-bit Merkle input and the 576-bit note-commitment input, plus the public
+`merkle_hash` path. Each case rotates through a fixed corpus of pseudorandom
+inputs so that feature-on and feature-off runs use the same data, do not
+measure per-iteration allocation, and do not repeatedly access the same
+lookup-table entries. Pass `--features fused-pedersen` to measure the fused
+tables against the default exp-window path.
