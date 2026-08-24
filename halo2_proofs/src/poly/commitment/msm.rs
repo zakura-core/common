@@ -169,10 +169,15 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         // `Params::prepare_zero_checks`) evaluates the identity test
         // directly, with the accumulated commitment terms as its extras.
         // The decomposition evaluated here is the same `terms()` view the
-        // fallback below consumes.
+        // fallback below consumes. Very extras-heavy checks skip the
+        // prepared path: batch verification accumulates dozens of
+        // commitment terms per proof, and once they rival the fixed-base
+        // count the prepared check's tail MSM over them erases its edge —
+        // measured on end-to-end Ironwood batch validation, the crossover
+        // sits near half the fixed-base count at every worker count.
         if let Some(prepared) = self.params.zero_check() {
             let n = self.params.n as usize;
-            if prepared.terms() == n + 2 {
+            if prepared.terms() == n + 2 && other.len() <= n / 2 {
                 let mut fixed = vec![C::Scalar::ZERO; n + 2];
                 if let Some(g_scalars) = g_scalars {
                     fixed[..n].copy_from_slice(g_scalars);
