@@ -439,6 +439,54 @@ fn digit_matrix<C: GlvParams>(
     Some((digits, active))
 }
 
+/// A weighted-reducer partial sum that stays affine until its first genuine
+/// addition. This lets leaf propagation use mixed additions instead of
+/// eagerly promoting every nonempty bucket to projective form.
+#[derive(Clone, Copy)]
+enum WeightedPoint<C: GlvParams> {
+    Identity,
+    Affine(AffinePoint<C::Base>),
+    Projective(C),
+}
+
+impl<C: GlvParams> WeightedPoint<C> {
+    fn affine(point: AffinePoint<C::Base>) -> C::AffineExt {
+        C::affine_unchecked(point.x, point.y, private::CrateToken(()))
+    }
+
+    fn add_assign(&mut self, rhs: Self) {
+        *self = match (*self, rhs) {
+            (Self::Identity, rhs) => rhs,
+            (lhs, Self::Identity) => lhs,
+            (Self::Affine(lhs), Self::Affine(rhs)) => {
+                let mut sum = C::from(Self::affine(lhs));
+                sum += Self::affine(rhs);
+                Self::Projective(sum)
+            }
+            (Self::Projective(mut lhs), Self::Affine(rhs)) => {
+                lhs += Self::affine(rhs);
+                Self::Projective(lhs)
+            }
+            (Self::Affine(lhs), Self::Projective(mut rhs)) => {
+                rhs += Self::affine(lhs);
+                Self::Projective(rhs)
+            }
+            (Self::Projective(mut lhs), Self::Projective(rhs)) => {
+                lhs += rhs;
+                Self::Projective(lhs)
+            }
+        };
+    }
+
+    fn projective(self) -> C {
+        match self {
+            Self::Identity => C::identity(),
+            Self::Affine(point) => C::from(Self::affine(point)),
+            Self::Projective(point) => point,
+        }
+    }
+}
+
 /// Stages one window's bucket contents: counts per orbit, then scatters
 /// each nonzero digit's unit-rotated point into its orbit's range.
 fn window_points<F: Field>(
@@ -499,34 +547,30 @@ fn reduce_hex_weighted<C: GlvParams>(
     buckets: &[Option<AffinePoint<C::Base>>],
 ) -> C {
     debug_assert_eq!(buckets.len(), params.wedge.len());
-    let mut subtree: Vec<C> = buckets
+    let mut subtree: Vec<WeightedPoint<C>> = buckets
         .iter()
         .map(|bucket| match bucket {
-            Some(point) => C::from(C::affine_unchecked(
-                point.x,
-                point.y,
-                private::CrateToken(()),
-            )),
-            None => C::identity(),
+            Some(point) => WeightedPoint::Affine(*point),
+            None => WeightedPoint::Identity,
         })
         .collect();
 
-    let mut axial = C::identity();
-    let mut diagonal = C::identity();
+    let mut axial = WeightedPoint::Identity;
+    let mut diagonal = WeightedPoint::Identity;
     for k in 0..subtree.len() {
         // Nodes are ordered children-first, so `subtree[k]` is complete.
         let sum = subtree[k];
         let node = params.wedge[k];
         if node.diagonal {
-            diagonal += sum;
+            diagonal.add_assign(sum);
         } else {
-            axial += sum;
+            axial.add_assign(sum);
         }
         if node.parent != WEDGE_ROOT {
-            subtree[usize::from(node.parent)] += sum;
+            subtree[usize::from(node.parent)].add_assign(sum);
         }
     }
-    axial - diagonal.endo().endo()
+    axial.projective() - diagonal.projective().endo().endo()
 }
 
 /// $\sum_{j \in \text{range}} B^{j - \text{range.start}} C_j$ by Horner over

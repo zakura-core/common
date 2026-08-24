@@ -8,6 +8,11 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The Eisenstein-orbit weighted-bucket reducer now keeps partial sums affine
+  until their first addition. This lets leaves and unbranched paths use mixed
+  additions, improving exact 2,990 and 5,678-term MSMs by about 2% and 1%
+  respectively on both Apple M4 and x86-64 benchmark hosts. The crate's public
+  API is unchanged.
 - Added `glv::zero`: prepared fixed-base multiscalar **zero-checks** for the
   verifier-shaped workload where almost all bases are fixed across many
   checks (an SRS) and only the identity outcome is needed.
