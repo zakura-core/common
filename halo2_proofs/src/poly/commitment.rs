@@ -63,7 +63,10 @@ impl<C: CurveAffine> fmt::Debug for ZeroCheckCache<C> {
             .lock()
             .map(|prepared| prepared.is_some())
             .unwrap_or(false);
-        formatter.debug_tuple("ZeroCheckCache").field(&armed).finish()
+        formatter
+            .debug_tuple("ZeroCheckCache")
+            .field(&armed)
+            .finish()
     }
 }
 

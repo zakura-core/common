@@ -8,6 +8,19 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `circuit::VerifyingKey::prepare_batch_validation`, which builds and
+  caches a prepared fixed-base zero-check over the key's SRS (see
+  `halo2_proofs::poly::commitment::Params::prepare_zero_checks`). Long-lived
+  validators should call it once per key: the halo2 verifier's final
+  identity test then routes through the preparation, and a
+  `BatchValidator` batch pays a single such check. Measured end to end on
+  Ironwood bundle batch validation, arming the key speeds small batches
+  the most (about +22% at one bundle serially and +36% on a saturated
+  32-worker pool, tapering as per-proof transcript and signature work
+  dominates larger batches).
+- Added an ignored `ironwood_batch_timings` integration test: a manual
+  timing harness validating batches of real Ironwood bundles through
+  `BatchValidator` across batch sizes and worker counts.
 - Added a reproducible Orchard proving-key benchmark and configurable worker
   counts for the one-, two-, and four-Action prover benchmarks.
 - Added `MerkleHashBatchWorkspace` and
