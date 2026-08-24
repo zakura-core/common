@@ -39,8 +39,8 @@
 //! the digit set is not a canonical number system — and is instead handed
 //! back to the caller for a small tail MSM over the unprepared backend.
 //!
-//! The bucket coefficients are integrated by a static straight-line
-//! [`CoeffOp`] program computing $\sum_j [\delta_j] Q_j$, generated as a
+//! The bucket coefficients are integrated by a static position-major
+//! [`CoeffAdd`] program computing $\sum_j [\delta_j] Q_j$, generated as a
 //! joint radix-2 multi-exponentiation whose digit set is $\{0\} \cup U_6$:
 //! every Eisenstein integer has such a recoding (mod 2 a nonzero value
 //! falls in one of three classes, each covered by a $\pm$ unit pair), and
@@ -72,27 +72,82 @@ pub(crate) const MAX_WINDOW_BITS: usize = 9;
 const MAX_CLASSES: usize = 1024;
 
 /// A prepared codebook shape: the radix width $c$ (radix $B = 2^c$), and
-/// which subgroup of $R_B^\times$ is made free by preparation.
-///
-/// `beta_power: None` selects $G = \langle U_6, \alpha \rangle$ — $B/2$
-/// prepared point variants per base and $B/2$ coefficient buckets.
-/// `beta_power: Some(k)` adjoins $\beta^k$, trading a larger variant table
-/// for fewer buckets; `Some(1)` reaches the full unit group $R_B^\times$,
-/// whose orbits are the $c$ 2-adic valuation classes.
+/// which set of residues is made free by preparation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CodebookMode {
-    /// The window width $c$; supported range 5..=9.
-    pub window_bits: usize,
-    /// Adjoin $\beta^k$ to $\langle U_6, \alpha \rangle$ (`None` = α-only).
-    pub beta_power: Option<u32>,
+pub enum CodebookMode {
+    /// The prepared variants are the $U_6$-cosets of a subgroup
+    /// $G = \langle U_6, \alpha, \beta^k \rangle \subseteq R_B^\times$,
+    /// and the coefficient buckets its orbits on the nonzero residues.
+    ///
+    /// `beta_power: None` selects $G = \langle U_6, \alpha \rangle$ —
+    /// $B/2$ prepared point variants per base and $B/2$ coefficient
+    /// buckets. `beta_power: Some(k)` adjoins $\beta^k$, trading a larger
+    /// variant table for fewer buckets; `Some(1)` reaches the full unit
+    /// group $R_B^\times$, whose orbits are the $c$ 2-adic valuation
+    /// classes.
+    Subgroup {
+        /// The window width $c$; supported range 5..=9.
+        window_bits: usize,
+        /// Adjoin $\beta^k$ to $\langle U_6, \alpha \rangle$ (`None` =
+        /// α-only).
+        beta_power: Option<u32>,
+    },
+    /// A non-subgroup cover: the prepared variants are the rectangular
+    /// exponent box $\{\alpha^i\beta^j : i < I,\, j < J\}$ in the unit
+    /// quotient $R_B^\times / U_6$, and the coefficients tile the rest —
+    /// $\{2^v \alpha^{sI} \beta^{tJ}\}$ box translates, one set per 2-adic
+    /// valuation $v$ (every nonzero residue of the local ring
+    /// $\mathbf{Z}[\omega]/2^c$ is $2^v \cdot \text{unit}$, and the box's
+    /// projection modulo $2^{c-v}$ keeps covering as $v$ grows).
+    ///
+    /// A subgroup's variant/bucket tradeoff is quantized by the subgroup
+    /// lattice; a box of the same cardinality can pair the same variant
+    /// count with far fewer coefficient buckets (at $c = 8$, a
+    /// $16 \times 16$ box needs 47 buckets where $\beta^{32}$ needs 96),
+    /// trading coefficient-program size against bucket-fill additions.
+    /// The box need not be (and is not) closed under multiplication; the
+    /// constructor derives every structural claim by enumeration and
+    /// asserts it.
+    ///
+    /// **Measured (2,048 fixed bases, 32-core x86-64, 2026-08-24):** no
+    /// box beats the subgroup frontier. `x8_16x16` ties `β7^8` within
+    /// run noise (±1–2% across sweeps, occasionally the single best
+    /// parallel cell) at the same 48 MiB, slightly ahead of `β8^32` and
+    /// behind `β8^16`; `x7_16x8` matches `β7^8`'s window/fill/program
+    /// numbers in half the memory but runs ~5–6% behind it — the box's
+    /// lean cover has little factorization redundancy, so its
+    /// minimum-norm exact digits are several bits larger (tail bounds
+    /// 53–151 against the subgroups' 15–63), and every scalar's residual
+    /// then reaches one more tail window. The mode is kept as a
+    /// searchable point of the design space (and would be the shape to
+    /// revisit with a terminal-window recoding program that cancels
+    /// residuals), not as a planner default.
+    ExponentBox {
+        /// The window width $c$; supported range 5..=9.
+        window_bits: usize,
+        /// Box extent $I$ along $\alpha$: $1 \le I \le$ ord($\bar\alpha$)
+        /// (the constructor derives the order and asserts the range).
+        alpha_extent: u32,
+        /// Box extent $J$ along $\beta$: $1 \le J \le$ the index
+        /// $[R_B^\times/U_6 : \langle\bar\alpha\rangle]$.
+        beta_extent: u32,
+    },
 }
 
 impl CodebookMode {
-    /// α-only mode at width `window_bits`.
+    /// α-only subgroup mode at width `window_bits`.
     pub const fn alpha_only(window_bits: usize) -> Self {
-        CodebookMode {
+        CodebookMode::Subgroup {
             window_bits,
             beta_power: None,
+        }
+    }
+
+    /// The radix width $c$ of this mode.
+    pub const fn window_bits(&self) -> usize {
+        match self {
+            CodebookMode::Subgroup { window_bits, .. }
+            | CodebookMode::ExponentBox { window_bits, .. } => *window_bits,
         }
     }
 }
@@ -197,21 +252,23 @@ fn pack_code(bucket: usize, variant: usize, unit: usize) -> u32 {
     CODE_FLAG | (bucket as u32) | ((variant as u32) << 10) | ((unit as u32) << 20)
 }
 
-/// One instruction of the static coefficient-integration program.
+/// One addition operand of the static coefficient-integration program:
+/// $[\pm\omega^{\text{rotation}}]\,Q_{\text{bucket}}$ contributes to the
+/// binary position that owns it (skipped when the bucket is empty). The
+/// program is stored position-major — `program()[t]` lists position $t$'s
+/// operands — so the evaluator can reduce each position's operands through
+/// the shared batched-affine tree and finish with one short Horner pass
+/// $\sum_t 2^t S_t$, instead of paying a projective mixed addition per
+/// operand.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum CoeffOp {
-    /// `acc = 2·acc`.
-    Double,
-    /// `acc += [±ω^rotation] Q_bucket` (skipped when the bucket is empty).
-    Add {
-        /// Which bucket sum to add.
-        bucket: u16,
-        /// The φ power applied to the operand (0..=2): multiply the
-        /// operand's x by ζ^rotation (ζ²x = −x − ζx).
-        rotation: u8,
-        /// Negate the operand's y before adding.
-        negate: bool,
-    },
+pub(crate) struct CoeffAdd {
+    /// Which bucket sum the operand reads.
+    pub(crate) bucket: u16,
+    /// The φ power applied to the operand (0..=2): multiply the operand's
+    /// x by ζ^rotation (ζ²x = −x − ζx).
+    pub(crate) rotation: u8,
+    /// Negate the operand's y.
+    pub(crate) negate: bool,
 }
 
 /// A fully derived codebook: the scalar side of one prepared zero-check
@@ -234,12 +291,287 @@ pub(crate) struct Codebook {
     coefficients: Vec<Eis>,
     /// The $B^2$-entry residue table, indexed by `(a mod B) << c | (b mod B)`.
     entries: Vec<CodeEntry>,
-    /// The static coefficient-integration program.
-    program: Vec<CoeffOp>,
+    /// The static coefficient-integration program, position-major
+    /// (ascending binary position).
+    program: Vec<Vec<CoeffAdd>>,
     /// `program`'s operation counts `(additions, doublings)`, for planning
     /// and the benchmark harness's reporting.
     #[allow(dead_code)]
     program_cost: (usize, usize),
+}
+
+/// Derives a subgroup mode's class structure: `coset_of` (the $U_6$-coset
+/// classes of $G = \langle U_6, \alpha, \beta^k\rangle$, ascending residue
+/// order) and the coefficient classes (the $G$-orbits of every nonzero
+/// residue). Returns `(coset_of, coset_count, coeff_class_of, coeff_count)`.
+fn derive_subgroup_classes(
+    c: usize,
+    beta_power: Option<u32>,
+    table_len: usize,
+) -> (Vec<u16>, usize, Vec<u16>, usize) {
+    let radix = 1i64 << c;
+    let residue = |value: Eis| value.residue_index(c);
+    let reduce = |value: Eis| Eis {
+        a: value.a.rem_euclid(radix),
+        b: value.b.rem_euclid(radix),
+    };
+
+    // Subgroup closure of G = <U6, α, β^k> as residues mod B. α and β
+    // have odd norm (3 and 7), so they are units mod 2^c and the
+    // closure stays inside R_B^×.
+    let mut generators = vec![
+        Eis { a: 0, b: 1 },  // ω
+        Eis { a: -1, b: 0 }, // −1
+        Eis { a: 1, b: -1 }, // α = 1 − ω
+    ];
+    if let Some(k) = beta_power {
+        let beta = Eis { a: 2, b: -1 };
+        let mut power = Eis { a: 1, b: 0 };
+        for _ in 0..k {
+            power = reduce(power.mul(beta));
+        }
+        generators.push(power);
+    }
+    let generators: Vec<Eis> = generators.iter().map(|&g| reduce(g)).collect();
+
+    let mut in_group = vec![false; table_len];
+    let identity = Eis { a: 1, b: 0 };
+    in_group[residue(identity)] = true;
+    let mut frontier = vec![identity];
+    while let Some(element) = frontier.pop() {
+        for &generator in &generators {
+            let product = reduce(element.mul(generator));
+            let index = residue(product);
+            if !in_group[index] {
+                in_group[index] = true;
+                frontier.push(product);
+            }
+        }
+    }
+    let group_order = in_group.iter().filter(|&&m| m).count();
+    assert_eq!(group_order % 6, 0, "U6 must act freely on G");
+
+    // U6-coset classes of G (the variants), in ascending residue order.
+    let mut coset_of = vec![u16::MAX; table_len];
+    let mut coset_count: usize = 0;
+    for index in 0..table_len {
+        if !in_group[index] || coset_of[index] != u16::MAX {
+            continue;
+        }
+        let element = Eis {
+            a: (index >> c) as i64,
+            b: (index & (radix as usize - 1)) as i64,
+        };
+        for unit in 0..6 {
+            let rotated = residue(reduce(element.unit(unit)));
+            debug_assert!(in_group[rotated]);
+            coset_of[rotated] = u16::try_from(coset_count).expect("coset id fits u16");
+        }
+        coset_count += 1;
+    }
+    assert_eq!(coset_count * 6, group_order, "cosets must partition G");
+    assert!(coset_count <= MAX_CLASSES, "variant count exceeds packing");
+
+    // G-orbits of the nonzero residues (the buckets), ascending order.
+    let mut orbit_of = vec![u16::MAX; table_len];
+    let mut orbit_count: usize = 0;
+    let mut orbit_frontier: Vec<Eis> = Vec::new();
+    for index in 1..table_len {
+        if orbit_of[index] != u16::MAX {
+            continue;
+        }
+        let id = u16::try_from(orbit_count).expect("orbit id fits u16");
+        orbit_count += 1;
+        orbit_of[index] = id;
+        orbit_frontier.clear();
+        orbit_frontier.push(Eis {
+            a: (index >> c) as i64,
+            b: (index & (radix as usize - 1)) as i64,
+        });
+        while let Some(element) = orbit_frontier.pop() {
+            for &generator in &generators {
+                let product = reduce(element.mul(generator));
+                let product_index = residue(product);
+                debug_assert_ne!(product_index, 0, "unit multiples of nonzero are nonzero");
+                if orbit_of[product_index] == u16::MAX {
+                    orbit_of[product_index] = id;
+                    orbit_frontier.push(product);
+                }
+            }
+        }
+    }
+    assert!(orbit_count <= MAX_CLASSES, "bucket count exceeds packing");
+
+    (coset_of, coset_count, orbit_of, orbit_count)
+}
+
+/// Derives an exponent-box mode's class structure. The prepared variants
+/// are the box $A = \{\alpha^i\beta^j : i < I,\, j < J\}$ in the unit
+/// quotient $R_B^\times / U_6$; the coefficient classes are the greedy
+/// tiling $D \subseteq \{2^v\alpha^{sI}\beta^{tJ}\}$ that covers every
+/// nonzero residue of the local ring as $u \cdot a \cdot \delta$
+/// ($u \in U_6$, $a \in A$, $\delta \in D$). Everything structural —
+/// that $\bar\alpha$ and $\bar\beta$ generate the quotient independently
+/// (so the box's classes are distinct), and that the tiles cover — is
+/// established by enumeration here, not assumed from a formula.
+/// Returns `(coset_of, coset_count, coeff_class_of, coeff_count)`, with
+/// `coeff_class_of` marking exactly the |D| tile residues.
+fn derive_box_classes(
+    c: usize,
+    alpha_extent: usize,
+    beta_extent: usize,
+    table_len: usize,
+) -> (Vec<u16>, usize, Vec<u16>, usize) {
+    let radix = 1i64 << c;
+    let residue = |value: Eis| value.residue_index(c);
+    let reduce = |value: Eis| Eis {
+        a: value.a.rem_euclid(radix),
+        b: value.b.rem_euclid(radix),
+    };
+    let alpha = Eis { a: 1, b: -1 };
+    let beta = Eis { a: 2, b: -1 };
+
+    // Canonical representative (smallest residue index over the six unit
+    // rotations) of a value's U6-class, for quotient bookkeeping.
+    let class_rep = |value: Eis| -> usize {
+        (0..6)
+            .map(|unit| residue(reduce(value.unit(unit))))
+            .min()
+            .expect("six units")
+    };
+    let identity_rep = class_rep(Eis { a: 1, b: 0 });
+
+    // Order of ᾱ in the unit quotient, by iteration.
+    let quotient_order = |generator: Eis| -> usize {
+        let mut power = generator;
+        let mut order = 1usize;
+        while class_rep(power) != identity_rep {
+            power = reduce(power.mul(generator));
+            order += 1;
+            assert!(order <= table_len, "generator order search must terminate");
+        }
+        order
+    };
+    let ord_alpha = quotient_order(alpha);
+
+    // Exponent coordinates (i, j) with i < ord(ᾱ) and j < [Q : ⟨ᾱ⟩]: the
+    // coset decomposition of the quotient along powers of β̄. This is
+    // deliberately *not* ord(β̄) — measured here, ᾱ and β̄ both have
+    // order 2^{c-1} and their cyclic subgroups share a C₂, so the naive
+    // ⟨ᾱ⟩ × ⟨β̄⟩ coordinatization double-counts; the coset form is valid
+    // for any two generators, and the bijectivity sweep below *proves*
+    // the coordinates (and thereby that α and β generate the quotient)
+    // rather than trusting a structure formula. Units of the local ring
+    // Z[ω]/2^c are the residues odd somewhere (3/4 of all), so the
+    // quotient has 4^c·(3/4)/6 = 2^{2c-3} classes.
+    let unit_classes = table_len * 3 / 4 / 6;
+    assert_eq!(
+        unit_classes % ord_alpha,
+        0,
+        "⟨ᾱ⟩ must divide the unit quotient"
+    );
+    let beta_index = unit_classes / ord_alpha;
+    let mut seen = vec![false; table_len];
+    let mut distinct = 0usize;
+    let mut alpha_power = Eis { a: 1, b: 0 };
+    for _ in 0..ord_alpha {
+        let mut element = alpha_power;
+        for _ in 0..beta_index {
+            let rep = class_rep(element);
+            assert!(!seen[rep], "α^i β^j coordinates must be distinct");
+            seen[rep] = true;
+            distinct += 1;
+            element = reduce(element.mul(beta));
+        }
+        alpha_power = reduce(alpha_power.mul(alpha));
+    }
+    assert_eq!(distinct, unit_classes, "the box coordinates must be onto");
+
+    assert!(
+        (1..=ord_alpha).contains(&alpha_extent) && (1..=beta_index).contains(&beta_extent),
+        "box extents must fit the coordinate ranges ({ord_alpha} × {beta_index})"
+    );
+    let coset_count = alpha_extent * beta_extent;
+    assert!(coset_count <= MAX_CLASSES, "variant count exceeds packing");
+
+    // Variant classes: the box elements and their unit rotations.
+    let mut coset_of = vec![u16::MAX; table_len];
+    let mut box_elements = Vec::with_capacity(coset_count);
+    let mut alpha_power = Eis { a: 1, b: 0 };
+    for i in 0..alpha_extent {
+        let mut element = alpha_power;
+        for j in 0..beta_extent {
+            let id = u16::try_from(i * beta_extent + j).expect("coset id fits u16");
+            for unit in 0..6 {
+                let rotated = residue(reduce(element.unit(unit)));
+                // Distinctness was proved by the coordinate sweep.
+                debug_assert_eq!(coset_of[rotated], u16::MAX);
+                coset_of[rotated] = id;
+            }
+            box_elements.push(element);
+            element = reduce(element.mul(beta));
+        }
+        alpha_power = reduce(alpha_power.mul(alpha));
+    }
+
+    // Coefficient tiles: greedy over the 2^v·α^{sI}β^{tJ} translates in
+    // ascending (v, s, t) order. A translate joins D only if it covers a
+    // yet-uncovered residue — as v grows, the residue's unit part is only
+    // determined modulo 2^{c-v}, the box's projection widens relative to
+    // the shrinking quotient, and later translates collapse onto earlier
+    // ones and are dropped. The factorization pass re-derives coverage
+    // from the exact lifts and asserts it again.
+    let mut covered = vec![false; table_len];
+    covered[0] = true;
+    let mut coeff_class_of = vec![u16::MAX; table_len];
+    let mut coeff_count = 0usize;
+    for v in 0..c {
+        let mut alpha_translate = Eis { a: 1i64 << v, b: 0 };
+        let mut s = 0;
+        while s < ord_alpha {
+            let mut delta = alpha_translate;
+            let mut t = 0;
+            while t < beta_index {
+                let mut newly_covered = false;
+                for element in &box_elements {
+                    let product = reduce(delta.mul(*element));
+                    for unit in 0..6 {
+                        let index = residue(reduce(product.unit(unit)));
+                        if !covered[index] {
+                            covered[index] = true;
+                            newly_covered = true;
+                        }
+                    }
+                }
+                if newly_covered {
+                    let id = u16::try_from(coeff_count).expect("bucket id fits u16");
+                    let delta_index = residue(delta);
+                    assert_eq!(
+                        coeff_class_of[delta_index],
+                        u16::MAX,
+                        "tiles are distinct residues"
+                    );
+                    coeff_class_of[delta_index] = id;
+                    coeff_count += 1;
+                    assert!(coeff_count <= MAX_CLASSES, "bucket count exceeds packing");
+                }
+                for _ in 0..beta_extent {
+                    delta = reduce(delta.mul(beta));
+                }
+                t += beta_extent;
+            }
+            for _ in 0..alpha_extent {
+                alpha_translate = reduce(alpha_translate.mul(alpha));
+            }
+            s += alpha_extent;
+        }
+    }
+    assert!(
+        covered.iter().skip(1).all(|&covered| covered),
+        "the box cover must reach every nonzero residue"
+    );
+
+    (coset_of, coset_count, coeff_class_of, coeff_count)
 }
 
 /// The six units as exact Eisenstein values, in shared code order.
@@ -259,7 +591,7 @@ impl Codebook {
     /// Derives the codebook for `mode`. Panics (via assertions) if any
     /// structural property fails — a wrong codebook cannot be constructed.
     pub(crate) fn new(mode: CodebookMode) -> Self {
-        let c = mode.window_bits;
+        let c = mode.window_bits();
         assert!(
             (MIN_WINDOW_BITS..=MAX_WINDOW_BITS).contains(&c),
             "unsupported prepared window width {c}"
@@ -267,96 +599,29 @@ impl Codebook {
         let radix = 1i64 << c;
         let table_len = 1usize << (2 * c);
         let residue = |value: Eis| value.residue_index(c);
-        let reduce = |value: Eis| Eis {
-            a: value.a.rem_euclid(radix),
-            b: value.b.rem_euclid(radix),
+
+        // Class structure: `coset_of` marks each variant class's residues
+        // (one prepared point layer per class), `coeff_class_of` the
+        // coefficient classes (one bucket per class). A subgroup mode
+        // marks every nonzero residue with its G-orbit — the coefficient
+        // lift search may pick any orbit member — while an exponent box
+        // marks exactly its |D| tile representatives (each coefficient
+        // class is a single residue, so its lift is that residue's
+        // best in-box representative).
+        let (coset_of, coset_count, coeff_class_of, coeff_count) = match mode {
+            CodebookMode::Subgroup { beta_power, .. } => {
+                derive_subgroup_classes(c, beta_power, table_len)
+            }
+            CodebookMode::ExponentBox {
+                alpha_extent,
+                beta_extent,
+                ..
+            } => derive_box_classes(c, alpha_extent as usize, beta_extent as usize, table_len),
         };
-
-        // Subgroup closure of G = <U6, α, β^k> as residues mod B. α and β
-        // have odd norm (3 and 7), so they are units mod 2^c and the
-        // closure stays inside R_B^×.
-        let mut generators = vec![
-            Eis { a: 0, b: 1 },  // ω
-            Eis { a: -1, b: 0 }, // −1
-            Eis { a: 1, b: -1 }, // α = 1 − ω
-        ];
-        if let Some(k) = mode.beta_power {
-            let beta = Eis { a: 2, b: -1 };
-            let mut power = Eis { a: 1, b: 0 };
-            for _ in 0..k {
-                power = reduce(power.mul(beta));
-            }
-            generators.push(power);
-        }
-        let generators: Vec<Eis> = generators.iter().map(|&g| reduce(g)).collect();
-
-        let mut in_group = vec![false; table_len];
-        let identity = Eis { a: 1, b: 0 };
-        in_group[residue(identity)] = true;
-        let mut frontier = vec![identity];
-        while let Some(element) = frontier.pop() {
-            for &generator in &generators {
-                let product = reduce(element.mul(generator));
-                let index = residue(product);
-                if !in_group[index] {
-                    in_group[index] = true;
-                    frontier.push(product);
-                }
-            }
-        }
-        let group_order = in_group.iter().filter(|&&m| m).count();
-        assert_eq!(group_order % 6, 0, "U6 must act freely on G");
-
-        // U6-coset classes of G (the variants), in ascending residue order.
-        let mut coset_of = vec![u16::MAX; table_len];
-        let mut coset_count: usize = 0;
-        for index in 0..table_len {
-            if !in_group[index] || coset_of[index] != u16::MAX {
-                continue;
-            }
-            let element = Eis {
-                a: (index >> c) as i64,
-                b: (index & (radix as usize - 1)) as i64,
-            };
-            for unit in 0..6 {
-                let rotated = residue(reduce(element.unit(unit)));
-                debug_assert!(in_group[rotated]);
-                coset_of[rotated] = u16::try_from(coset_count).expect("coset id fits u16");
-            }
-            coset_count += 1;
-        }
-        assert_eq!(coset_count * 6, group_order, "cosets must partition G");
-        assert!(coset_count <= MAX_CLASSES, "variant count exceeds packing");
-
-        // G-orbits of the nonzero residues (the buckets), ascending order.
-        let mut orbit_of = vec![u16::MAX; table_len];
-        let mut orbit_count: usize = 0;
-        let mut orbit_frontier: Vec<Eis> = Vec::new();
-        for index in 1..table_len {
-            if orbit_of[index] != u16::MAX {
-                continue;
-            }
-            let id = u16::try_from(orbit_count).expect("orbit id fits u16");
-            orbit_count += 1;
-            orbit_of[index] = id;
-            orbit_frontier.clear();
-            orbit_frontier.push(Eis {
-                a: (index >> c) as i64,
-                b: (index & (radix as usize - 1)) as i64,
-            });
-            while let Some(element) = orbit_frontier.pop() {
-                for &generator in &generators {
-                    let product = reduce(element.mul(generator));
-                    let product_index = residue(product);
-                    debug_assert_ne!(product_index, 0, "unit multiples of nonzero are nonzero");
-                    if orbit_of[product_index] == u16::MAX {
-                        orbit_of[product_index] = id;
-                        orbit_frontier.push(product);
-                    }
-                }
-            }
-        }
-        assert!(orbit_count <= MAX_CLASSES, "bucket count exceeds packing");
+        // Only subgroup modes have the orbit invariant "a digit's residue
+        // lies in its bucket's orbit"; box factorizations may cover one
+        // residue from several tiles.
+        let orbit_invariant = matches!(mode, CodebookMode::Subgroup { .. });
 
         // Small exact lifts. Candidates are every nonzero lattice point of
         // the box [−B/2, B/2]² (every residue class has a lift there), in a
@@ -412,25 +677,30 @@ impl Codebook {
         }
         assert_eq!(variants_found, coset_count, "every variant class lifts");
 
-        let mut coefficients = vec![Eis::ZERO; orbit_count];
+        let mut coefficients = vec![Eis::ZERO; coeff_count];
         let mut coefficients_found = 0usize;
         for &candidate in &coefficient_order {
-            let orbit = orbit_of[residue(candidate)];
-            debug_assert_ne!(orbit, u16::MAX);
-            if coefficients[usize::from(orbit)] == Eis::ZERO {
-                coefficients[usize::from(orbit)] = candidate;
+            let class = coeff_class_of[residue(candidate)];
+            if class != u16::MAX && coefficients[usize::from(class)] == Eis::ZERO {
+                coefficients[usize::from(class)] = candidate;
                 coefficients_found += 1;
-                if coefficients_found == orbit_count {
+                if coefficients_found == coeff_count {
                     break;
                 }
             }
         }
-        assert_eq!(coefficients_found, orbit_count, "every orbit lifts");
+        assert_eq!(
+            coefficients_found, coeff_count,
+            "every coefficient class lifts"
+        );
 
         // Factorize every nonzero residue as u·η·δ, keeping the smallest
         // exact digit (max-norm; the enumeration order breaks ties
-        // deterministically). Coverage is guaranteed: a residue in orbit j
-        // is g·δ_j for some g ∈ G, and g = u·η_a for its coset's lift.
+        // deterministically). Coverage is guaranteed: for a subgroup, a
+        // residue in orbit j is g·δ_j for some g ∈ G with g = u·η_a for
+        // its coset's lift; for an exponent box, the tile derivation
+        // marked every nonzero residue as some u·a·δ product of the same
+        // classes lifted here.
         let units = exact_units();
         let mut best = vec![i64::MAX; table_len];
         let mut entries = vec![
@@ -449,9 +719,11 @@ impl Codebook {
                     let digit = rotated.mul(delta);
                     let index = residue(digit);
                     debug_assert_ne!(index, 0, "digits are nonzero mod B");
-                    // The factorization must respect the bucket structure:
-                    // the digit's residue lies in orbit `bucket`.
-                    debug_assert_eq!(usize::from(orbit_of[index]), bucket);
+                    // A subgroup factorization must respect the bucket
+                    // structure: the digit's residue lies in orbit
+                    // `bucket`. (Box tiles may overlap, so a residue can
+                    // legitimately factor through several buckets there.)
+                    debug_assert!(!orbit_invariant || usize::from(coeff_class_of[index]) == bucket);
                     let norm = digit.max_norm();
                     if norm < best[index] {
                         best[index] = norm;
@@ -506,7 +778,7 @@ impl Codebook {
     }
 
     pub(crate) fn window_bits(&self) -> usize {
-        self.mode.window_bits
+        self.mode.window_bits()
     }
 
     pub(crate) fn main_windows(&self) -> usize {
@@ -535,7 +807,7 @@ impl Codebook {
         self.coefficients.len()
     }
 
-    pub(crate) fn program(&self) -> &[CoeffOp] {
+    pub(crate) fn program(&self) -> &[Vec<CoeffAdd>] {
         &self.program
     }
 
@@ -568,7 +840,7 @@ impl Codebook {
     /// asserted against [`Self::tail_bound`].
     fn recode_pair(&self, mut a: i128, mut b: i128, row: &mut [u32]) -> (usize, (i64, i64)) {
         debug_assert_eq!(row.len(), self.main_windows);
-        let c = self.mode.window_bits;
+        let c = self.mode.window_bits();
         let mask = (1i128 << c) - 1;
         let mut top = 0;
         for (window, slot) in row.iter_mut().enumerate() {
@@ -595,8 +867,16 @@ impl Codebook {
 /// A recoded MSM input: the window-code matrix and the per-scalar
 /// residuals for the tail MSM.
 pub(crate) struct Recoded {
-    /// Row-major codes, `main_windows` per scalar; zero means "no digit".
+    /// Window-major codes, `codes[window * terms + base]`; zero means "no
+    /// digit". Window-major staging scans one contiguous run per window
+    /// instead of striding the whole matrix.
     pub(crate) codes: Vec<u32>,
+    /// Per-window bucket histograms of the nonzero codes,
+    /// `counts[window * bucket_count + bucket]`, produced during recoding
+    /// so staging skips its counting pass.
+    pub(crate) counts: Vec<u32>,
+    /// The number of recoded scalars (one code column per window).
+    pub(crate) terms: usize,
     /// Residuals as signed-magnitude component pairs, ready for the
     /// unprepared tail backend. Rows recoded to zero (including all rows
     /// the caller zeroed) have zero residuals.
@@ -621,6 +901,8 @@ pub(crate) fn recode(
     num_threads: usize,
 ) -> Recoded {
     let width = codebook.main_windows();
+    let terms = components.len();
+    let bucket_count = codebook.bucket_count();
     let signed = |component: SignedMagnitude| {
         debug_assert_eq!(component.magnitude >> GLV_COMPONENT_BITS, 0);
         if component.negative {
@@ -629,14 +911,19 @@ pub(crate) fn recode(
             component.magnitude as i128
         }
     };
-    let mut codes = vec![0u32; components.len() * width];
+    let mut codes = vec![0u32; terms * width];
+    let mut counts = vec![0u32; width * bucket_count];
 
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
     #[cfg(feature = "multicore")]
     if num_threads > 1 {
-        let mut residuals = vec![(signed_magnitude(0), signed_magnitude(0)); components.len()];
-        let active_windows = codes
+        // Recode into a row-major scratch matrix (rows are the natural
+        // parallel unit), then transpose per window; each transpose task
+        // owns one code column and its histogram slice.
+        let mut rows = vec![0u32; terms * width];
+        let mut residuals = vec![(signed_magnitude(0), signed_magnitude(0)); terms];
+        let active_windows = rows
             .par_chunks_mut(width)
             .zip(residuals.par_iter_mut().zip(components.par_iter()))
             .map(|(row, (residual, &(first, second)))| {
@@ -646,22 +933,52 @@ pub(crate) fn recode(
             })
             .max()
             .unwrap_or(0);
+        codes
+            .par_chunks_mut(terms)
+            .zip(counts.par_chunks_mut(bucket_count))
+            .enumerate()
+            .for_each(|(window, (column, window_counts))| {
+                if window >= active_windows {
+                    return;
+                }
+                for (base, row) in rows.chunks_exact(width).enumerate() {
+                    let code = row[window];
+                    if code != 0 {
+                        column[base] = code;
+                        window_counts[unpack_code(code).0] += 1;
+                    }
+                }
+            });
         return Recoded {
             codes,
+            counts,
+            terms,
             residuals,
             active_windows,
         };
     }
 
-    let mut residuals = Vec::with_capacity(components.len());
+    let mut residuals = Vec::with_capacity(terms);
     let mut active_windows = 0;
-    for (row, &(first, second)) in codes.chunks_exact_mut(width).zip(components) {
-        let (top, (ta, tb)) = codebook.recode_pair(signed(first), signed(second), row);
+    // The scratch row is only read below its returned `top`, and
+    // `recode_pair` writes every slot it passes before an early exit, so
+    // stale contents above `top` are never observed.
+    let mut row = vec![0u32; width];
+    for (base, &(first, second)) in components.iter().enumerate() {
+        let (top, (ta, tb)) = codebook.recode_pair(signed(first), signed(second), &mut row);
         residuals.push((signed_magnitude(ta), signed_magnitude(tb)));
         active_windows = active_windows.max(top);
+        for (window, &code) in row[..top].iter().enumerate() {
+            if code != 0 {
+                codes[window * terms + base] = code;
+                counts[window * bucket_count + unpack_code(code).0] += 1;
+            }
+        }
     }
     Recoded {
         codes,
+        counts,
+        terms,
         residuals,
         active_windows,
     }
@@ -772,14 +1089,16 @@ impl UnitDigitWeights {
 }
 
 /// Generates the static program for $\sum_j [\delta_j] Q_j$ and its
-/// `(additions, doublings)` cost: MSB-first double-and-add over every
-/// coefficient's minimal unit-digit recoding jointly; leading doublings
-/// (before any addition) are elided.
+/// `(additions, doublings)` cost, position-major: `program[t]` holds the
+/// unit digits of binary position $t$ across every coefficient's minimal
+/// unit-digit recoding, so the evaluator computes each position sum $S_t$
+/// batch-affine and Horner-folds $\sum_t 2^t S_t$ with one doubling per
+/// position step.
 fn coefficient_program(
     coefficients: &[Eis],
     weights: &UnitDigitWeights,
-) -> (Vec<CoeffOp>, (usize, usize)) {
-    let mut per_position: Vec<Vec<CoeffOp>> = Vec::new();
+) -> (Vec<Vec<CoeffAdd>>, (usize, usize)) {
+    let mut per_position: Vec<Vec<CoeffAdd>> = Vec::new();
     for (bucket, &delta) in coefficients.iter().enumerate() {
         let bucket = u16::try_from(bucket).expect("bucket fits u16");
         for (position, unit_code) in weights.recode(delta) {
@@ -787,7 +1106,7 @@ fn coefficient_program(
             if per_position.len() <= position {
                 per_position.resize_with(position + 1, Vec::new);
             }
-            per_position[position].push(CoeffOp::Add {
+            per_position[position].push(CoeffAdd {
                 bucket,
                 rotation: (unit_code >> 1) as u8,
                 negate: unit_code & 1 == 1,
@@ -795,18 +1114,9 @@ fn coefficient_program(
         }
     }
 
-    let mut program = Vec::new();
-    let mut additions = 0usize;
-    let mut doublings = 0usize;
-    for ops in per_position.iter().rev() {
-        if !program.is_empty() {
-            program.push(CoeffOp::Double);
-            doublings += 1;
-        }
-        additions += ops.len();
-        program.extend_from_slice(ops);
-    }
-    (program, (additions, doublings))
+    let additions = per_position.iter().map(Vec::len).sum();
+    let doublings = per_position.len().saturating_sub(1);
+    (per_position, (additions, doublings))
 }
 
 #[cfg(test)]
@@ -841,7 +1151,7 @@ mod tests {
             ((9, Some(64)), (512, 192)),
         ];
         for ((window_bits, beta_power), (variants, buckets)) in expect {
-            let codebook = Codebook::new(CodebookMode {
+            let codebook = Codebook::new(CodebookMode::Subgroup {
                 window_bits,
                 beta_power,
             });
@@ -849,6 +1159,35 @@ mod tests {
                 (codebook.variants().len(), codebook.bucket_count()),
                 (variants, buckets),
                 "counts diverge from the handoff table at c={window_bits}, β^{beta_power:?}"
+            );
+        }
+    }
+
+    /// Exponent-box class counts, re-derived: (c, I, J) → (variants,
+    /// buckets). The 16×16 box at c = 8 is the assessment's candidate:
+    /// 256 variants against only 47 coefficient tiles (32 + 8 + 2 + 1×5
+    /// across the eight 2-adic valuations), where the subgroup lattice
+    /// pays ≥96 buckets for 256 variants (β^32). Aspect ratios of one
+    /// cardinality tile differently; all are derived, never assumed.
+    #[test]
+    fn exponent_box_counts() {
+        let expect = [
+            ((8, 16, 16), (256, 47)),
+            ((8, 32, 8), (256, 47)),
+            ((8, 8, 32), (256, 47)),
+            ((7, 16, 8), (128, 25)),
+            ((6, 8, 8), (64, 14)),
+        ];
+        for ((window_bits, alpha_extent, beta_extent), (variants, buckets)) in expect {
+            let codebook = Codebook::new(CodebookMode::ExponentBox {
+                window_bits,
+                alpha_extent,
+                beta_extent,
+            });
+            assert_eq!(
+                (codebook.variants().len(), codebook.bucket_count()),
+                (variants, buckets),
+                "box counts diverge at c={window_bits}, {alpha_extent}x{beta_extent}"
             );
         }
     }
@@ -861,17 +1200,27 @@ mod tests {
             CodebookMode::alpha_only(7),
             CodebookMode::alpha_only(8),
             CodebookMode::alpha_only(9),
-            CodebookMode {
+            CodebookMode::Subgroup {
                 window_bits: 6,
                 beta_power: Some(1),
             },
-            CodebookMode {
+            CodebookMode::Subgroup {
                 window_bits: 6,
                 beta_power: Some(4),
             },
-            CodebookMode {
+            CodebookMode::Subgroup {
                 window_bits: 7,
                 beta_power: Some(8),
+            },
+            CodebookMode::ExponentBox {
+                window_bits: 6,
+                alpha_extent: 8,
+                beta_extent: 8,
+            },
+            CodebookMode::ExponentBox {
+                window_bits: 8,
+                alpha_extent: 16,
+                beta_extent: 16,
             },
         ]
     }
@@ -883,7 +1232,7 @@ mod tests {
     fn residue_factorizations_are_exact() {
         for mode in test_modes() {
             let codebook = Codebook::new(mode);
-            let c = mode.window_bits;
+            let c = mode.window_bits();
             let radix = 1i64 << c;
             let mut max_digit = 0i64;
             for (index, entry) in codebook.entries.iter().enumerate() {
@@ -913,7 +1262,10 @@ mod tests {
             }
             assert_eq!(max_digit, codebook.max_digit());
             // The α-only variant lifts have the fast-preparation shapes.
-            if mode.beta_power.is_none() {
+            if let CodebookMode::Subgroup {
+                beta_power: None, ..
+            } = mode
+            {
                 for &eta in codebook.variants() {
                     assert!(
                         (eta.b == 0 && eta.a > 0 && eta.a % 2 == 1 && eta.a < radix / 2)
@@ -938,7 +1290,7 @@ mod tests {
     fn recoding_reconstructs<C: GlvParams>() {
         for mode in test_modes() {
             let codebook = Codebook::new(mode);
-            let radix = C::ScalarExt::from(1u64 << mode.window_bits);
+            let radix = C::ScalarExt::from(1u64 << mode.window_bits());
             let signed = |v: i64| {
                 let m = C::ScalarExt::from(v.unsigned_abs());
                 if v < 0 {

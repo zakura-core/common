@@ -6,9 +6,13 @@
 //!
 //! Layout is variant-major (`layers[variant * terms + base]`): the builders
 //! naturally produce whole layers, and the tail MSM reads the trivial
-//! $\eta = 1$ layer as a contiguous base array. (The handoff also calls for
-//! benchmarking a base-major layout and a compact 64-byte representation;
-//! those are follow-ups once this layout's numbers are in.)
+//! $\eta = 1$ layer as a contiguous base array. The handoff's compact
+//! 64-byte representation and base-major layout are measured out: the
+//! phase-contention probes show batched-affine reduction — not table
+//! traffic — at ~3/4 of the runtime, with the small-table α6 mode
+//! inflating under contention exactly as the 48 MiB modes do, so table
+//! bytes are not the lever they appear to be (see the parent module's
+//! "Deferred by measurement").
 //!
 //! # Construction
 //!
@@ -324,7 +328,7 @@ mod tests {
         for mode in [
             CodebookMode::alpha_only(5),
             // β² at width 5 exercises the generic (non-chain) builder.
-            CodebookMode {
+            CodebookMode::Subgroup {
                 window_bits: 5,
                 beta_power: Some(2),
             },

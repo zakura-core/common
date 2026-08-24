@@ -21,7 +21,9 @@ and this project adheres to Rust's notion of
   per-window point visits, not bucket integration, set the cost. Recoding
   is fixed-length with an exactly bounded residual finished by the
   unprepared orbit machinery, per-check extra terms (a proof's own
-  commitments) ride in that tail with scalars pre-divided by $B^L$, and
+  commitments) run as their own multiscalar multiplication — the planned
+  GLV backends above a small count, a width-matched Signed-Booth pass
+  below it — concurrent with the prepared windows under parallelism, and
   every structural property of a codebook (subgroup closure, coset and
   orbit counts, minimal exact lifts, full residue coverage) is re-derived
   and asserted at construction. Preparation also merges bases related by
@@ -51,6 +53,26 @@ and this project adheres to Rust's notion of
   recurrence), and orbit representatives are chosen weight-first: 26–31%
   fewer program additions than per-coordinate NAF at every mode, with the
   full-unit mode's program collapsing to the plain valuation reducer.
+- The zero-check's recoding emits window-major codes and per-window bucket
+  histograms, so each window's staging is one contiguous placement pass
+  (the counting pass and the strided matrix walk drop out; parallel window
+  tasks stop striding the shared matrix), and the coefficient programs are
+  stored position-major: wide modes (over ~112 program additions) sum each
+  binary position through the shared batched-affine reduction tree and
+  Horner-fold the position sums, while small programs keep the cheaper
+  straight-line projective form.
+- `CodebookMode` is now an enum, adding `ExponentBox`: a non-subgroup
+  residue cover whose prepared variants are a rectangular
+  $\alpha^i\beta^j$ box in the unit quotient and whose coefficients tile
+  the rest per 2-adic valuation, derived and asserted entirely by
+  enumeration (the naive $\langle\bar\alpha\rangle \times
+  \langle\bar\beta\rangle$ coordinatization is provably wrong — the two
+  generators share a $C_2$ — so the box uses coset coordinates). The
+  16×16 box at $c = 8$ reaches 256 variants with only 47 buckets, a
+  point the subgroup lattice cannot express; measured, it ties the best
+  same-memory subgroup mode within noise without beating it (the lean
+  cover's exact digits are larger, costing one extra tail window), so it
+  ships as a searchable mode, not a planner default.
 - The orbit backend's parallel schedule and the zero-check's parallel
   drivers pair adjacent windows per task as joined subtasks (the schedule
   the Signed-Booth backend already uses), sharing one Horner shift chain

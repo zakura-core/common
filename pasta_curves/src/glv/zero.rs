@@ -65,6 +65,24 @@
 //! supported width, less than the sort-and-match bookkeeping would cost.
 //! Revisit only for workloads with structured or repeated scalars.
 //!
+//! Richer codebook geometry is measured out at the 2,048-base scale
+//! (2026-08-24 sweep, this module's harness): every ≤ 96 MiB mode —
+//! subgroup or [`CodebookMode::ExponentBox`] cover, 6 to 256 buckets,
+//! 15 to 22 windows — lands within ~5% of β7^8, because bucket-count
+//! and program-size trades no longer bind once integration is hybrid
+//! batch-affine and the per-window fills dominate. In particular β8^32
+//! (the subgroup with the box's variant count) trails β7^8 by 1–3% and
+//! the c = 8 boxes tie it within noise without ever beating the
+//! frontier, so the assessment's late-α factorization (β8^16's cosets
+//! paired under an online degree-3 map: the same fill count as β8^32
+//! plus a doubled coefficient program) and a late-β analogue are
+//! counted out without implementation — an online endomorphism plane
+//! can only reach frontier points the measured modes already bracket.
+//! Compact 64-byte prepared points and base-major layouts stay out on
+//! the phase-contention measurements (the reduce phase, not table
+//! traffic, is ~3/4 of the runtime, and the small-table α6 mode inflates
+//! under contention exactly as the 48 MiB modes do).
+//!
 //! Every ranking here (mode preferences, tail widths, the planner list)
 //! was measured on one 32-core x86-64 host with the portable field
 //! backend. Re-fit on other targets — in particular aarch64 with the
@@ -96,13 +114,19 @@ mod prepared;
 pub(crate) mod subset;
 
 pub use codebook::CodebookMode;
-use codebook::{unpack_code, Codebook, CoeffOp, Recoded};
+use codebook::{unpack_code, Codebook, CoeffAdd, Recoded};
 use prepared::{unit_coords, VariantTable};
 
-/// Widths the tail MSM chooses between (the residuals are tiny, so the
-/// small orbit wedges win; width 5 only pays off when full-width extra
-/// terms force the tail through every window).
+/// Widths the tail MSM chooses between. Only the residuals ride the tail
+/// (extra terms run as their own MSM), and residuals are tiny, so the
+/// small orbit wedges win; width 5 is kept for headroom.
 const TAIL_WIDTHS: [usize; 3] = [3, 4, 5];
+
+/// Extra-term count from which the extras MSM goes through the planned
+/// GLV backends ([`super::try_multiexp`]); below it, a per-term
+/// multiplication loop is cheaper than any bucket method's fixed
+/// per-window costs.
+const EXTRAS_PLANNED_MIN: usize = super::MIN_GLV_MULTIEXP_TERMS;
 
 /// Default prepared-memory ceiling for [`PreparedZeroMsm::prepare`]'s mode
 /// planning: 64 MiB of variant table.
@@ -132,10 +156,10 @@ pub struct PreparedZeroMsm<C: GlvParams> {
     tail_bases: Vec<orbit::RotatedBase<C::Base>>,
     /// Prebuilt tail wedge parameters for [`TAIL_WIDTHS`].
     tail_params: [orbit::OrbitParams; TAIL_WIDTHS.len()],
-    /// $B^{-L} \bmod r$: extra terms ride in the tail MSM, which the
-    /// Horner recombination multiplies by $B^L$, so their scalars are
-    /// pre-divided to compensate.
-    tail_unshift: C::ScalarExt,
+    /// Index into [`TAIL_WIDTHS`]/`tail_params` of the width chosen for the
+    /// residual tail (a pure function of the live count and the codebook's
+    /// tail bound, so it is fixed at preparation).
+    tail_width: usize,
     /// BLAKE2b-256 over the prepared bases, mixed into
     /// [`Self::is_zero_batch_vartime`]'s derived challenge (and available
     /// to any future table-trust story).
@@ -195,9 +219,8 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             })
             .collect();
         let tail_params = TAIL_WIDTHS.map(orbit::OrbitParams::new);
-        let shift_bits = codebook.window_bits() * codebook.main_windows();
-        let tail_unshift =
-            <C::ScalarExt as ff::PrimeField>::TWO_INV.pow_vartime([shift_bits as u64]);
+        let live_count = live.iter().filter(|&&l| l).count();
+        let tail_width = tail_width_index(live_count, codebook.tail_bound());
 
         let mut digest = blake2b_simd::Params::new()
             .hash_length(32)
@@ -219,7 +242,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             merges,
             tail_bases,
             tail_params,
-            tail_unshift,
+            tail_width,
             bases_digest,
         }
     }
@@ -254,8 +277,11 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// Whether $\sum_i \[k_i\] P_i + \sum_j \[s_j\] Q_j$ is the identity: the
     /// prepared bases with their scalars, plus per-check `extra`
     /// (scalar, point) terms for the non-fixed part of a verifier equation
-    /// (e.g. the proof's own commitments). The extras join the tail MSM,
-    /// so a handful of them cost far less than an unprepared check.
+    /// (e.g. the proof's own commitments). The extras run as their own
+    /// multiscalar multiplication — per-term below
+    /// [`EXTRAS_PLANNED_MIN`] terms, the planned GLV backends above it —
+    /// concurrent with the prepared windows under parallelism, so they
+    /// never widen the fixed residual tail.
     ///
     /// # Panics
     ///
@@ -314,8 +340,15 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
 
         let recoded = codebook::recode(&self.codebook, &components, num_threads);
 
-        let extra_terms = decompose_extras::<C>(extra, self.tail_unshift);
-        match self.evaluate(&recoded, &extra_terms, num_threads) {
+        // Extras with zero scalars or identity points contribute nothing.
+        let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
+            .iter()
+            .filter(|(scalar, point)| {
+                !bool::from(point.is_identity()) && !bool::from(scalar.is_zero())
+            })
+            .copied()
+            .collect();
+        match self.evaluate(&recoded, &extras, num_threads) {
             Some(sum) => bool::from(sum.is_identity()),
             // Unreachable for valid curve points (the batched-affine
             // reduction's inversions cannot actually hit zero), but never
@@ -379,8 +412,14 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         self.is_zero_vartime(&combine_equations::<C>(equations, challenge))
     }
 
-    /// $\sum_w B^w C_w + B^L T$: the main prepared windows plus the tail.
-    fn evaluate(&self, recoded: &Recoded, extra: &[ExtraTerm<C>], num_threads: usize) -> Option<C> {
+    /// $\sum_w B^w C_w + B^L T + E$: the main prepared windows, the shifted
+    /// residual tail, and the extra terms' own MSM.
+    fn evaluate(
+        &self,
+        recoded: &Recoded,
+        extras: &[(C::ScalarExt, C::AffineExt)],
+        num_threads: usize,
+    ) -> Option<C> {
         let window_bits = self.codebook.window_bits();
         let main_windows = self.codebook.main_windows();
         let active = recoded.active_windows;
@@ -391,45 +430,51 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         if num_threads > 1 {
             // Adjacent windows pair per task (joined subtasks, one shared
             // shift chain), mirroring the unprepared backends' schedule.
-            // The tail runs concurrently with the main windows: with many
-            // extra terms (batch verification accumulates thousands of
-            // per-proof commitments) the tail is a substantial MSM of its
-            // own, and running the two phases back to back would add its
-            // latency instead of overlapping it.
+            // The residual tail and the extras MSM run concurrently with
+            // the main windows: with many extra terms (batch verification
+            // accumulates thousands of per-proof commitments) the extras
+            // are a substantial MSM of their own, and running the phases
+            // back to back would add their latency instead of overlapping
+            // it.
             const WINDOWS_PER_PAIR: usize = 2;
             let pair_count = active.div_ceil(WINDOWS_PER_PAIR);
-            let (windows_part, tail) = maybe_rayon::join(
+            let (extras_part, (windows_part, tail)) = maybe_rayon::join(
+                || self.extras_sum(extras, num_threads),
                 || {
-                    (0..pair_count)
-                        .into_par_iter()
-                        .map(|pair| {
-                            let start = pair * WINDOWS_PER_PAIR;
-                            let mut sum = if start + 1 == active {
-                                self.window_sum(recoded, start)?
-                            } else {
-                                let (low, high) = maybe_rayon::join(
-                                    || self.window_sum(recoded, start),
-                                    || self.window_sum(recoded, start + 1),
-                                );
-                                let mut low = low?;
-                                let mut high = high?;
-                                for _ in 0..window_bits {
-                                    high = high.double();
-                                }
-                                low += high;
-                                low
-                            };
-                            for _ in 0..window_bits * start {
-                                sum = sum.double();
-                            }
-                            Some(sum)
-                        })
-                        .try_reduce(C::identity, |mut left, right| {
-                            left += right;
-                            Some(left)
-                        })
+                    maybe_rayon::join(
+                        || {
+                            (0..pair_count)
+                                .into_par_iter()
+                                .map(|pair| {
+                                    let start = pair * WINDOWS_PER_PAIR;
+                                    let mut sum = if start + 1 == active {
+                                        self.window_sum(recoded, start)?
+                                    } else {
+                                        let (low, high) = maybe_rayon::join(
+                                            || self.window_sum(recoded, start),
+                                            || self.window_sum(recoded, start + 1),
+                                        );
+                                        let mut low = low?;
+                                        let mut high = high?;
+                                        for _ in 0..window_bits {
+                                            high = high.double();
+                                        }
+                                        low += high;
+                                        low
+                                    };
+                                    for _ in 0..window_bits * start {
+                                        sum = sum.double();
+                                    }
+                                    Some(sum)
+                                })
+                                .try_reduce(C::identity, |mut left, right| {
+                                    left += right;
+                                    Some(left)
+                                })
+                        },
+                        || self.tail_sum(&recoded.residuals, num_threads),
+                    )
                 },
-                || self.tail_sum(&recoded.residuals, extra, num_threads),
             );
             let windows_part = windows_part?;
             let mut tail = tail?;
@@ -438,10 +483,10 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                     tail = tail.double();
                 }
             }
-            return Some(windows_part + tail);
+            return Some(windows_part + tail + extras_part?);
         }
 
-        let mut acc = self.tail_sum(&recoded.residuals, extra, num_threads)?;
+        let mut acc = self.tail_sum(&recoded.residuals, num_threads)?;
         if !bool::from(acc.is_identity()) {
             for _ in 0..window_bits * (main_windows - active) {
                 acc = acc.double();
@@ -453,7 +498,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             }
             acc += self.window_sum(recoded, window)?;
         }
-        Some(acc)
+        Some(acc + self.extras_sum(extras, num_threads)?)
     }
 
     /// One main window: stage the unit-rotated prepared points by bucket,
@@ -462,35 +507,30 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     fn window_sum(&self, recoded: &Recoded, window: usize) -> Option<C> {
         let (points, offsets) = self.stage_window(recoded, window);
         let buckets = reduce_affine_buckets(points, offsets)?;
-        Some(integrate_coefficients::<C>(
-            self.codebook.program(),
-            &buckets,
-        ))
+        integrate_coefficients::<C>(self.codebook.program(), &buckets)
     }
 
-    /// Counting-sorts one window's nonzero digits into per-bucket point
-    /// ranges, fetching each digit's prepared point and applying its unit.
+    /// Places one window's nonzero digits into per-bucket point ranges,
+    /// fetching each digit's prepared point and applying its unit. The
+    /// bucket histogram was produced during recoding and the codes are
+    /// window-major, so this is a single contiguous pass.
     fn stage_window(
         &self,
         recoded: &Recoded,
         window: usize,
     ) -> (Vec<AffinePoint<C::Base>>, Vec<usize>) {
-        let stride = self.codebook.main_windows();
-        let mut counts = alloc::vec![0usize; self.codebook.bucket_count()];
-        for row in recoded.codes.chunks_exact(stride) {
-            let code = row[window];
-            if code != 0 {
-                counts[unpack_code(code).0] += 1;
-            }
+        let terms = recoded.terms;
+        let bucket_count = self.codebook.bucket_count();
+        let counts = &recoded.counts[window * bucket_count..][..bucket_count];
+        let codes = &recoded.codes[window * terms..][..terms];
+
+        let mut offsets = Vec::with_capacity(bucket_count + 1);
+        offsets.push(0usize);
+        for &count in counts {
+            offsets.push(offsets.last().copied().unwrap() + count as usize);
         }
 
-        let mut offsets = Vec::with_capacity(counts.len() + 1);
-        offsets.push(0);
-        for count in counts {
-            offsets.push(offsets.last().copied().unwrap() + count);
-        }
-
-        let mut positions = offsets[..offsets.len() - 1].to_vec();
+        let mut positions = offsets[..bucket_count].to_vec();
         let mut points = alloc::vec![
             AffinePoint {
                 x: C::Base::ZERO,
@@ -498,8 +538,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             };
             *offsets.last().unwrap()
         ];
-        for (base, row) in recoded.codes.chunks_exact(stride).enumerate() {
-            let code = row[window];
+        for (base, &code) in codes.iter().enumerate() {
             if code == 0 {
                 continue;
             }
@@ -513,53 +552,73 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         (points, offsets)
     }
 
-    /// The tail MSM $T = \sum_i \[\tau_i\] P_i + \sum_j \[s_j\] Q_j$ over the
-    /// residuals (tiny) and the extra terms (full-width, few), via the
-    /// unprepared orbit machinery at a width chosen for that split.
+    /// The tail MSM $T = \sum_i \[\tau_i\] P_i$ over the (tiny) residuals,
+    /// via the unprepared orbit machinery at the width fixed at
+    /// preparation.
     fn tail_sum(
         &self,
         residuals: &[(SignedMagnitude, SignedMagnitude)],
-        extra: &[ExtraTerm<C>],
         num_threads: usize,
     ) -> Option<C> {
-        let params = &self.tail_params[self.tail_width_index(extra.len())];
-        if extra.is_empty() {
-            return tail_multiexp::<C>(params, residuals, &self.tail_bases, num_threads);
-        }
-        let mut components = Vec::with_capacity(residuals.len() + extra.len());
-        components.extend_from_slice(residuals);
-        let mut rotated = Vec::with_capacity(residuals.len() + extra.len());
-        rotated.extend_from_slice(&self.tail_bases);
-        for term in extra {
-            components.push(term.components);
-            rotated.push(term.rotated);
-        }
-        tail_multiexp::<C>(params, &components, &rotated, num_threads)
+        let params = &self.tail_params[self.tail_width];
+        tail_multiexp::<C>(params, residuals, &self.tail_bases, num_threads)
     }
 
-    /// Picks the tail width: residuals are `tail_bound`-sized, extras are
-    /// full-width, and the wedge reducer runs once per window any row
-    /// reaches. Same cost units as the orbit backend's model.
-    fn tail_width_index(&self, extras: usize) -> usize {
-        let live = self.live.iter().filter(|&&l| l).count();
-        let bound_bits = 64 - self.codebook.tail_bound().unsigned_abs().leading_zeros() as usize;
-        let mut best = (usize::MAX, 0);
-        for (index, &width) in TAIL_WIDTHS.iter().enumerate() {
-            let residual_windows = bound_bits.div_ceil(width) + 1;
-            let full_windows = orbit::window_count(width);
-            let windows = if extras > 0 {
-                full_windows
-            } else {
-                residual_windows
+    /// $E = \sum_j \[s_j\] Q_j$ over the per-check extra terms (already
+    /// filtered of zero scalars and identity points), as an independent
+    /// MSM: the planned GLV backends from [`EXTRAS_PLANNED_MIN`] terms up,
+    /// otherwise the Signed-Booth backend at a width matched to the small
+    /// count. Riding the extras in the residual tail — the previous
+    /// design — forced its tiny wedge from the residuals' 3–4 windows to
+    /// a full-width sweep over every row, which measured ~+1 ms per 48
+    /// extras; a dedicated small MSM prices only the extras, and large
+    /// extra sets (batch verification accumulates thousands) get a real
+    /// planner instead of a tail width.
+    fn extras_sum(&self, extras: &[(C::ScalarExt, C::AffineExt)], num_threads: usize) -> Option<C> {
+        if extras.is_empty() {
+            return Some(C::identity());
+        }
+        let scalars: Vec<C::ScalarExt> = extras.iter().map(|(s, _)| *s).collect();
+        let points: Vec<C::AffineExt> = extras.iter().map(|(_, q)| *q).collect();
+        if extras.len() >= EXTRAS_PLANNED_MIN {
+            if let Some(sum) = super::try_multiexp::<C>(&scalars, &points) {
+                return Some(sum);
+            }
+            // The planner declining (or an arithmetic guard failing) is
+            // unreachable for full-width verifier extras at these counts,
+            // but the paths below stay exact regardless.
+        }
+        // Small counts: Signed-Booth at a width from the bucket/visit
+        // balance (per-window bucket work dominates until the visit count
+        // catches up), run serially — this whole job is sub-millisecond
+        // and already overlaps the main windows inside its own join arm,
+        // so splitting its 30–40 tiny window tasks into a saturated pool
+        // costs more in scheduling than it recovers (measured −25% on the
+        // 32-worker single-bundle Ironwood cell). The constant-time
+        // per-term ladder is the exact fallback of last resort.
+        let _ = num_threads;
+        if let Some(components) = scalars
+            .iter()
+            .map(decompose::<C>)
+            .map(checked_signed_magnitudes)
+            .collect::<Option<Vec<_>>>()
+        {
+            let window_bits = match extras.len() {
+                ..=24 => 3,
+                25..=80 => 4,
+                81..=192 => 5,
+                _ => 6,
             };
-            let buckets = ((1usize << (2 * width)) + 2) / 6;
-            let visits = (live * residual_windows + extras * full_windows) * 27 / 32;
-            let units = visits + 3 * (buckets - 1) * windows;
-            if units < best.0 {
-                best = (units, index);
+            let booth_bases = super::multiexp_bases::<C>(&points);
+            if let Some(sum) = super::multiexp::<C>(&components, &booth_bases, window_bits, 1) {
+                return Some(sum);
             }
         }
-        best.1
+        let mut acc = C::identity();
+        for (scalar, point) in extras {
+            acc += C::from(*point) * scalar;
+        }
+        Some(acc)
     }
 
     /// Exact fallback evaluation (never taken in practice; see the caller).
@@ -606,28 +665,22 @@ impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for PreparedZeroMsm<C
     }
 }
 
-/// A decomposed, rotation-ready extra term for the tail MSM.
-struct ExtraTerm<C: GlvParams> {
-    components: (SignedMagnitude, SignedMagnitude),
-    rotated: orbit::RotatedBase<C::Base>,
-}
-
-/// Decomposes the per-check extra terms, dropping identities and zero
-/// scalars. `tail_unshift` pre-divides each scalar by $B^L$ because the
-/// Horner recombination multiplies the whole tail sum by $B^L$.
-fn decompose_extras<C: GlvParams>(
-    extra: &[(C::ScalarExt, C::AffineExt)],
-    tail_unshift: C::ScalarExt,
-) -> Vec<ExtraTerm<C>> {
-    extra
-        .iter()
-        .filter(|(scalar, point)| !bool::from(point.is_identity()) && !bool::from(scalar.is_zero()))
-        .map(|(scalar, point)| ExtraTerm {
-            components: checked_signed_magnitudes(decompose::<C>(&(*scalar * tail_unshift)))
-                .expect("GLV halves are within bound"),
-            rotated: orbit::rotate_base::<C>(point),
-        })
-        .collect()
+/// Picks the residual tail's orbit width: residuals are `tail_bound`-sized,
+/// so only their few low windows run, and the wedge reducer runs once per
+/// window any row reaches. Same cost units as the orbit backend's model.
+fn tail_width_index(live: usize, tail_bound: i64) -> usize {
+    let bound_bits = 64 - tail_bound.unsigned_abs().leading_zeros() as usize;
+    let mut best = (usize::MAX, 0);
+    for (index, &width) in TAIL_WIDTHS.iter().enumerate() {
+        let residual_windows = bound_bits.div_ceil(width) + 1;
+        let buckets = ((1usize << (2 * width)) + 2) / 6;
+        let visits = live * residual_windows * 27 / 32;
+        let units = visits + 3 * (buckets - 1) * residual_windows;
+        if units < best.0 {
+            best = (units, index);
+        }
+    }
+    best.1
 }
 
 /// The unprepared orbit MSM over already-rotated bases. The caller
@@ -721,7 +774,7 @@ fn scan_relations<C: GlvParams>(
     let live_indices: Vec<usize> = (0..bases.len()).filter(|&i| live[i]).collect();
     let live_affine: Vec<C::AffineExt> = live_indices.iter().map(|&i| bases[i]).collect();
     let alphas = isogeny::alpha_affine_batch::<C>(&live_affine);
-    let betas = isogeny::beta_affine_batch::<C>(&live_affine);
+    let betas = isogeny::beta_affine_batch_from_alphas::<C>(&live_affine, &alphas);
 
     let zeta = <C::Base as WithSmallOrderMulGroup<3>>::ZETA;
     let lambda = <C::ScalarExt as WithSmallOrderMulGroup<3>>::ZETA;
@@ -801,37 +854,85 @@ pub fn combine_equations<C: GlvParams>(
     combined
 }
 
+/// Operand count from which [`integrate_coefficients`] sums each binary
+/// position through the batched-affine tree. Below it, the tree's per-level
+/// batch inversions dominate (they amortize over too few additions) and the
+/// straight-line projective form is cheaper — measured on the phase
+/// harness: β7^8's 57-addition program lost ~0.1 ms/check batched, α7's
+/// ~130-addition program gained ~0.1 ms.
+const BATCH_INTEGRATE_MIN_ADDS: usize = 112;
+
 /// Runs the static coefficient program over one window's bucket sums:
 /// $\sum_j [\delta_j] Q_j$ with unit digits applied per operand as an
 /// x-rotation (one multiplication for $\zeta x$, plus an addition for
 /// $\zeta^2 x = -x - \zeta x$) and a y-negation; empty buckets skipped.
+///
+/// The program is position-major. Large programs (wide modes have hundreds
+/// of operands) sum each position's operands through the shared
+/// batched-affine reduction tree — the same reducer and per-addition cost
+/// as the bucket fills — and Horner-fold $\sum_t 2^t S_t$ over the
+/// ~⌈log₂ B⌉ position sums; small programs run straight-line, one
+/// projective mixed addition per operand, which beats the tree until its
+/// batch inversions amortize (see [`BATCH_INTEGRATE_MIN_ADDS`]).
 fn integrate_coefficients<C: GlvParams>(
-    program: &[CoeffOp],
+    program: &[Vec<CoeffAdd>],
     buckets: &[Option<AffinePoint<C::Base>>],
-) -> C {
+) -> Option<C> {
     let zeta = <C::Base as WithSmallOrderMulGroup<3>>::ZETA;
-    let mut acc = C::identity();
-    for op in program {
-        match *op {
-            CoeffOp::Double => acc = acc.double(),
-            CoeffOp::Add {
-                bucket,
-                rotation,
-                negate,
-            } => {
-                if let Some(point) = &buckets[usize::from(bucket)] {
-                    let x = match rotation {
+    let additions: usize = program.iter().map(Vec::len).sum();
+
+    if additions < BATCH_INTEGRATE_MIN_ADDS {
+        let mut acc = C::identity();
+        for ops in program.iter().rev() {
+            acc = acc.double();
+            for op in ops {
+                if let Some(point) = &buckets[usize::from(op.bucket)] {
+                    let x = match op.rotation {
                         0 => point.x,
                         1 => point.x * zeta,
                         _ => -point.x - point.x * zeta,
                     };
-                    let y = if negate { -point.y } else { point.y };
+                    let y = if op.negate { -point.y } else { point.y };
                     acc += C::affine_unchecked(x, y, private::CrateToken(()));
                 }
             }
         }
+        return Some(acc);
     }
-    acc
+
+    // ζx once per nonempty bucket; repeated rotated references share it.
+    let zeta_xs: Vec<C::Base> = buckets
+        .iter()
+        .map(|bucket| bucket.as_ref().map_or(C::Base::ZERO, |p| p.x * zeta))
+        .collect();
+
+    let mut points = Vec::with_capacity(additions);
+    let mut offsets = Vec::with_capacity(program.len() + 1);
+    offsets.push(0usize);
+    for ops in program {
+        for op in ops {
+            if let Some(point) = &buckets[usize::from(op.bucket)] {
+                let x = match op.rotation {
+                    0 => point.x,
+                    1 => zeta_xs[usize::from(op.bucket)],
+                    _ => -point.x - zeta_xs[usize::from(op.bucket)],
+                };
+                let y = if op.negate { -point.y } else { point.y };
+                points.push(AffinePoint { x, y });
+            }
+        }
+        offsets.push(points.len());
+    }
+
+    let position_sums = reduce_affine_buckets(points, offsets)?;
+    let mut acc = C::identity();
+    for sum in position_sums.iter().rev() {
+        acc = acc.double();
+        if let Some(point) = sum {
+            acc += C::affine_unchecked(point.x, point.y, private::CrateToken(()));
+        }
+    }
+    Some(acc)
 }
 
 /// Chooses a default codebook mode: an ordered preference list within
@@ -861,38 +962,47 @@ fn integrate_coefficients<C: GlvParams>(
 ///   larger memory (t = 12, 43 MiB: 11.7 ms and t = 14, 147 MiB: 10.3 ms,
 ///   against β7^8's 8.9 ms in 48 MiB, serial at 2,048 terms), with no
 ///   parallel path; it is not a candidate.
+/// - Wider c = 8 codebooks at the default budget — `β8^32` and the
+///   16×16 exponent box (256 variants against 96/47 buckets, both
+///   48 MiB) — measured 0–3% behind `β7^8` at 2,048 terms serially and
+///   inside the parallel noise band (2026-08-24 sweep), never ahead of
+///   it, so the list keeps β7^8 first; see the module docs for why
+///   richer geometry no longer pays.
 ///
 /// Benchmarks can pin any mode via [`PreparedZeroMsm::prepare_with_mode`].
 fn plan_mode(terms: usize, num_threads: usize, table_budget: usize) -> CodebookMode {
     let prefer_windows = num_threads >= 16;
-    let mut candidates: Vec<CodebookMode> = Vec::new();
+    // (mode, variant count): the counts come from the derived §6.3
+    // handoff table (re-asserted by `subgroup_table_matches_handoff`),
+    // not a closed formula. 96 bytes per prepared point.
+    let beta = |window_bits, k, variants| {
+        (
+            CodebookMode::Subgroup {
+                window_bits,
+                beta_power: Some(k),
+            },
+            variants,
+        )
+    };
+    let alpha = |window_bits: usize| {
+        (
+            CodebookMode::alpha_only(window_bits),
+            1usize << (window_bits - 1),
+        )
+    };
+    let mut candidates: Vec<(CodebookMode, usize)> = Vec::new();
     if prefer_windows {
         // Wide worker pools: more windows beat fewer visits.
-        candidates.push(CodebookMode {
-            window_bits: 6,
-            beta_power: Some(4),
-        });
+        candidates.push(beta(6, 4, 128));
     }
     candidates.extend([
-        CodebookMode {
-            window_bits: 7,
-            beta_power: Some(8),
-        },
-        CodebookMode {
-            window_bits: 6,
-            beta_power: Some(4),
-        },
-        CodebookMode::alpha_only(7),
-        CodebookMode::alpha_only(6),
-        CodebookMode::alpha_only(5),
+        beta(7, 8, 256),
+        beta(6, 4, 128),
+        alpha(7),
+        alpha(6),
+        alpha(5),
     ]);
-    for mode in candidates {
-        // Variant counts: β modes have 2^{c+1} (β7^8: 256, β6^4: 128);
-        // α-only has 2^{c-1}. 96 bytes per prepared point.
-        let variants = match mode.beta_power {
-            Some(_) => 1usize << (mode.window_bits + 1),
-            None => 1usize << (mode.window_bits - 1),
-        };
+    for (mode, variants) in candidates {
         if variants * terms * 96 <= table_budget {
             return mode;
         }
@@ -999,13 +1109,23 @@ mod tests {
             CodebookMode::alpha_only(7),
             CodebookMode::alpha_only(8),
             CodebookMode::alpha_only(9),
-            CodebookMode {
+            CodebookMode::Subgroup {
                 window_bits: 6,
                 beta_power: Some(4),
             },
-            CodebookMode {
+            CodebookMode::Subgroup {
                 window_bits: 6,
                 beta_power: Some(1),
+            },
+            CodebookMode::ExponentBox {
+                window_bits: 6,
+                alpha_extent: 8,
+                beta_extent: 8,
+            },
+            CodebookMode::ExponentBox {
+                window_bits: 8,
+                alpha_extent: 16,
+                beta_extent: 16,
             },
         ]
     }
@@ -1147,12 +1267,16 @@ mod tests {
     }
 
     /// The coefficient program computes Σ [δ_j] Q_j (§23.1), on real
-    /// bucket sums of every occupancy pattern.
+    /// bucket sums of every occupancy pattern. The mode list covers both
+    /// integration strategies: α6 and β6^1 run straight-line, α8's
+    /// 320-addition program crosses [`BATCH_INTEGRATE_MIN_ADDS`] into the
+    /// batched-affine tree.
     fn coefficient_program_matches_naive<C: GlvParams>() {
         let generator = C::generator();
         for mode in [
             CodebookMode::alpha_only(6),
-            CodebookMode {
+            CodebookMode::alpha_only(8),
+            CodebookMode::Subgroup {
                 window_bits: 6,
                 beta_power: Some(1),
             },
@@ -1198,7 +1322,8 @@ mod tests {
                     }
                 }
                 assert_eq!(
-                    integrate_coefficients::<C>(codebook.program(), &buckets),
+                    integrate_coefficients::<C>(codebook.program(), &buckets)
+                        .expect("valid bucket sums"),
                     expected,
                     "coefficient program mismatch ({mode:?}, pattern {pattern})"
                 );
@@ -1276,7 +1401,7 @@ mod tests {
 
         let body = || {
             for mode in [
-                CodebookMode {
+                CodebookMode::Subgroup {
                     window_bits: 7,
                     beta_power: Some(8),
                 },
@@ -1285,7 +1410,8 @@ mod tests {
                 let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, mode);
                 let iters = 15;
                 let mut phases = [0.0f64; 7];
-                let mut extras_delta = 0.0f64;
+                let mut extras_delta = [0.0f64; 2];
+                const EXTRAS_COUNTS: [usize; 2] = [48, 512];
                 // The scan finds the corpus's planted relations; fold them
                 // as the production path does (timed within "decompose").
                 let mut folded = scalars.clone();
@@ -1321,17 +1447,17 @@ mod tests {
                     let mut window_sums = Vec::with_capacity(recoded.active_windows);
                     for window in 0..recoded.active_windows {
                         let (points, offsets) = prepared.stage_window(&recoded, window);
-                        lap(&mut phases[2]); // stage (fetch + counting sort)
+                        lap(&mut phases[2]); // stage (fetch + placement)
                         let buckets = reduce_affine_buckets(points, offsets).expect("valid points");
                         lap(&mut phases[3]); // batched-affine reduction
-                        window_sums.push(integrate_coefficients::<C>(
-                            prepared.codebook.program(),
-                            &buckets,
-                        ));
+                        window_sums.push(
+                            integrate_coefficients::<C>(prepared.codebook.program(), &buckets)
+                                .expect("valid points"),
+                        );
                         lap(&mut phases[4]); // coefficient integration
                     }
                     let tail = prepared
-                        .tail_sum(&recoded.residuals, &[], 1)
+                        .tail_sum(&recoded.residuals, 1)
                         .expect("valid points");
                     lap(&mut phases[5]); // tail MSM
                     let window_bits = prepared.codebook.window_bits();
@@ -1352,20 +1478,23 @@ mod tests {
                     assert!(bool::from(acc.is_identity()));
 
                     // Extra-terms overhead: a halo2-shaped check carries a
-                    // few dozen per-proof commitments.
-                    let extra: Vec<_> = scalars[..48]
-                        .iter()
-                        .cloned()
-                        .zip(bases[..48].iter().cloned())
-                        .collect();
-                    let start = Instant::now();
-                    let with_extras = prepared.is_zero_with_terms_vartime(&scalars, &extra);
-                    let with_ms = start.elapsed().as_secs_f64() * 1e3;
-                    let start = Instant::now();
-                    let without = prepared.is_zero_vartime(&scalars);
-                    let without_ms = start.elapsed().as_secs_f64() * 1e3;
-                    assert!(!with_extras || without); // perturbed sums differ
-                    extras_delta += with_ms - without_ms;
+                    // few dozen per-proof commitments per proof (hundreds
+                    // under batch verification).
+                    for (count, delta) in EXTRAS_COUNTS.iter().zip(&mut extras_delta) {
+                        let extra: Vec<_> = scalars[..*count]
+                            .iter()
+                            .cloned()
+                            .zip(bases[..*count].iter().cloned())
+                            .collect();
+                        let start = Instant::now();
+                        let with_extras = prepared.is_zero_with_terms_vartime(&scalars, &extra);
+                        let with_ms = start.elapsed().as_secs_f64() * 1e3;
+                        let start = Instant::now();
+                        let without = prepared.is_zero_vartime(&scalars);
+                        let without_ms = start.elapsed().as_secs_f64() * 1e3;
+                        assert!(!with_extras || without); // perturbed sums differ
+                        *delta += with_ms - without_ms;
+                    }
                 }
                 let total: f64 = phases.iter().sum();
                 let labels = [
@@ -1387,9 +1516,10 @@ mod tests {
                 }
                 println!(
                     "vesta terms={terms} serial {mode:?}: {report}total={:.3}ms \
-                     extras48-delta={:+.3}ms",
+                     extras48-delta={:+.3}ms extras512-delta={:+.3}ms",
                     total / iters as f64,
-                    extras_delta / iters as f64,
+                    extras_delta[0] / iters as f64,
+                    extras_delta[1] / iters as f64,
                 );
             }
         };
@@ -1413,7 +1543,7 @@ mod tests {
             pool.install(|| {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 for mode in [
-                    CodebookMode {
+                    CodebookMode::Subgroup {
                         window_bits: 7,
                         beta_power: Some(8),
                     },
@@ -1464,7 +1594,7 @@ mod tests {
                                 let mut sum = integrate_coefficients::<C>(
                                     prepared.codebook.program(),
                                     &buckets,
-                                );
+                                )?;
                                 for _ in 0..window_bits * window {
                                     sum = sum.double();
                                 }
@@ -1479,7 +1609,7 @@ mod tests {
                             .expect("valid points");
                         wall += start.elapsed().as_secs_f64() * 1e3;
                         let mut tail = prepared
-                            .tail_sum(&recoded.residuals, &[], threads)
+                            .tail_sum(&recoded.residuals, threads)
                             .expect("valid points");
                         if !bool::from(tail.is_identity()) {
                             for _ in 0..window_bits * prepared.codebook.main_windows() {
@@ -1546,25 +1676,45 @@ mod tests {
                 CodebookMode::alpha_only(7),
                 CodebookMode::alpha_only(8),
                 CodebookMode::alpha_only(9),
-                CodebookMode {
+                CodebookMode::Subgroup {
                     window_bits: 6,
                     beta_power: Some(4),
                 },
-                CodebookMode {
+                CodebookMode::Subgroup {
                     window_bits: 7,
                     beta_power: Some(8),
                 },
-                CodebookMode {
+                CodebookMode::Subgroup {
                     window_bits: 8,
                     beta_power: Some(16),
                 },
             ];
             if terms <= 2_048 {
-                // Full units at B = 64: 512 variants; only affordable small.
-                modes.push(CodebookMode {
-                    window_bits: 6,
-                    beta_power: Some(1),
-                });
+                // The wider-geometry candidates (only affordable small):
+                // full units at B = 64 (512 variants), the box-cardinality
+                // subgroup β8^32, and the two most instructive exponent
+                // boxes — the assessment's 16×16 at c = 8 and the
+                // half-memory β7^8 analogue at c = 7.
+                modes.extend([
+                    CodebookMode::Subgroup {
+                        window_bits: 6,
+                        beta_power: Some(1),
+                    },
+                    CodebookMode::Subgroup {
+                        window_bits: 8,
+                        beta_power: Some(32),
+                    },
+                    CodebookMode::ExponentBox {
+                        window_bits: 8,
+                        alpha_extent: 16,
+                        beta_extent: 16,
+                    },
+                    CodebookMode::ExponentBox {
+                        window_bits: 7,
+                        alpha_extent: 16,
+                        beta_extent: 8,
+                    },
+                ]);
             }
 
             let mut prepared_list: Vec<(String, PreparedZeroMsm<C>)> = Vec::new();
@@ -1574,9 +1724,20 @@ mod tests {
                 let prep_ms = start.elapsed().as_secs_f64() * 1e3;
                 assert!(prepared.is_zero_vartime(&scalars));
                 assert!(!prepared.is_zero_vartime(&wrong));
-                let label = match mode.beta_power {
-                    None => format!("a{}", mode.window_bits),
-                    Some(k) => format!("b{}^{k}", mode.window_bits),
+                let label = match mode {
+                    CodebookMode::Subgroup {
+                        window_bits,
+                        beta_power: None,
+                    } => format!("a{window_bits}"),
+                    CodebookMode::Subgroup {
+                        window_bits,
+                        beta_power: Some(k),
+                    } => format!("b{window_bits}^{k}"),
+                    CodebookMode::ExponentBox {
+                        window_bits,
+                        alpha_extent,
+                        beta_extent,
+                    } => format!("x{window_bits}_{alpha_extent}x{beta_extent}"),
                 };
                 println!(
                     "vesta terms={terms:>5} prepare {label:>6}: {prep_ms:>8.1}ms \

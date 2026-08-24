@@ -92,18 +92,24 @@ pub(crate) fn alpha_affine_batch<C: GlvParams>(points: &[C::AffineExt]) -> Vec<C
     outputs
 }
 
-/// Batched affine $\beta(P) = P + \alpha(P)$. Identity maps to identity;
-/// exceptional inputs (never valid nonidentity points) fall back to the
-/// projective definition $2P - \phi(P)$.
-pub(crate) fn beta_affine_batch<C: GlvParams>(points: &[C::AffineExt]) -> Vec<C::AffineExt> {
-    let alphas = alpha_affine_batch::<C>(points);
+/// Batched affine $\beta(P) = P + \alpha(P)$ over an already computed
+/// $\alpha$ batch — the callers (the relation scan) always need both maps'
+/// images, so the second $\alpha$ evaluation and its shared inversion drop
+/// out. Identity maps to identity; exceptional inputs (never valid
+/// nonidentity points) fall back to the projective definition
+/// $2P - \phi(P)$.
+pub(crate) fn beta_affine_batch_from_alphas<C: GlvParams>(
+    points: &[C::AffineExt],
+    alphas: &[C::AffineExt],
+) -> Vec<C::AffineExt> {
+    debug_assert_eq!(points.len(), alphas.len());
     let mut outputs = alloc::vec![C::AffineExt::identity(); points.len()];
     // (input index, x, y, xα, yα).
     #[allow(clippy::type_complexity)]
     let mut regular: Vec<(usize, C::Base, C::Base, C::Base, C::Base)> =
         Vec::with_capacity(points.len());
     let mut fallback: Vec<usize> = Vec::new();
-    for (index, (point, alpha)) in points.iter().zip(&alphas).enumerate() {
+    for (index, (point, alpha)) in points.iter().zip(alphas).enumerate() {
         if bool::from(point.is_identity()) {
             continue;
         }
@@ -183,7 +189,7 @@ mod tests {
     /// β = P + α(P) equals 2P − φ(P) equals [2 − λ]P.
     fn beta_matches_definitions<C: GlvParams>() {
         let points = test_points::<C>();
-        let betas = beta_affine_batch::<C>(&points);
+        let betas = beta_affine_batch_from_alphas::<C>(&points, &alpha_affine_batch::<C>(&points));
         let lambda = C::ScalarExt::ZETA;
         for (point, beta) in points.iter().zip(&betas) {
             let p = C::from(*point);
