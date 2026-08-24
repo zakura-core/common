@@ -16,7 +16,6 @@ use group::Curve;
 use pasta_curves::{deferred::DeferredField, pallas, vesta};
 use rand_core::Rng;
 use std::any::{Any, TypeId};
-use std::hash::Hash;
 use std::io;
 use std::marker::PhantomData;
 
@@ -355,12 +354,6 @@ impl<'a, C: CurveAffine> PartialEq for PolynomialPointer<'a, C> {
 }
 
 impl<'a, C: CurveAffine> Eq for PolynomialPointer<'a, C> {}
-
-impl<'a, C: CurveAffine> Hash for PolynomialPointer<'a, C> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(self.poly, state)
-    }
-}
 
 impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
     type Commitment = PolynomialPointer<'a, C>;

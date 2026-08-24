@@ -3812,7 +3812,6 @@ dependencies = [
  "group",
  "gumdrop",
  "image",
- "indexmap",
  "maybe-rayon",
  "plotters",
  "proptest",

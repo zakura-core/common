@@ -169,9 +169,6 @@ version = "1.0.0-rc.3"
 optional = true
 package = "zakura-halo2-legacy-pdqsort"
 
-[dependencies.indexmap]
-version = "1"
-
 [dependencies.maybe-rayon]
 version = "0.1.0"
 default-features = false
