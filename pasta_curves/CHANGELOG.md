@@ -8,6 +8,53 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `glv::zero`: prepared fixed-base multiscalar **zero-checks** for the
+  verifier-shaped workload where almost all bases are fixed across many
+  checks (an SRS) and only the identity outcome is needed.
+  `PreparedZeroMsm::prepare[_with_mode]` precomputes, per fixed base, one
+  transformed point per $U_6$-coset of a subgroup
+  $G = \langle U_6, \alpha, \beta^k \rangle$ of the residue units of
+  $\mathbf{Z}[\omega]/2^c$ ($\alpha = 1 - \omega$, $\beta = 2 - \omega$),
+  so a radix-$2^c$ digit factors as $d = u\eta\delta$ through a static
+  residue codebook and a window needs one bucket per $G$-orbit instead of
+  the $(4^c + 2)/6$ unit orbits — letting the prepared radix widen until
+  per-window point visits, not bucket integration, set the cost. Recoding
+  is fixed-length with an exactly bounded residual finished by the
+  unprepared orbit machinery, per-check extra terms (a proof's own
+  commitments) ride in that tail with scalars pre-divided by $B^L$, and
+  every structural property of a codebook (subgroup closure, coset and
+  orbit counts, minimal exact lifts, full residue coverage) is re-derived
+  and asserted at construction. Preparation also merges bases related by
+  exact $u$/$u\alpha$/$u\beta$ relations, found with batched degree-3
+  isogeny evaluation. Measured on 32-core x86-64 (portable backend, Vesta,
+  interleaved medians on true zero relations, 2,048 fixed bases): the
+  check runs ~1.6x faster than the planned unprepared MSM serially
+  (13.4 → 8.4 ms best mode) and up to ~2.4x on 8–16 workers, winning
+  every swept cell from 512 to 8,192 terms with no regression at 32
+  workers; the classical subset-table baseline (implemented, test-gated),
+  given the same batched-affine reduction, stays 18–31% behind at
+  comparable-or-larger memory. Preparation costs ~0.1 s and ~10–50 MiB at
+  2,048 bases depending on mode (break-even after ~9–20 checks).
+- Several same-bases zero-checks batch probabilistically:
+  `is_zero_batch_vartime` derives its combining challenge by hashing a
+  preparation-time digest of the bases together with every equation, so
+  the challenge cannot precede the equations; an explicit-challenge
+  variant exists for protocols whose transcript owns the challenge, with
+  the $(m-1)/r$ soundness obligation documented.
+- Added `arithmetic::PreparedZeroCheck` and
+  `CurveExt::try_prepare_zero_check`, an object-safe hook through which
+  generic downstream code (halo2's verifier) obtains a prepared zero-check
+  without naming the backend; curves without one return `None`.
+- The zero-check's coefficient-integration programs recode each fixed
+  bucket coefficient in a minimal-weight radix-2 form over the digit set
+  $\{0\} \cup U_6$ (exact minimality via 0-1 BFS over the recoding
+  recurrence), and orbit representatives are chosen weight-first: 26–31%
+  fewer program additions than per-coordinate NAF at every mode, with the
+  full-unit mode's program collapsing to the plain valuation reducer.
+- The orbit backend's parallel schedule and the zero-check's parallel
+  drivers pair adjacent windows per task as joined subtasks (the schedule
+  the Signed-Booth backend already uses), sharing one Horner shift chain
+  per pair while keeping every window independently stealable.
 - The GLV multiscalar multiplication now plans between two bucket backends:
   the existing Signed-Booth windows over the two decomposition halves, and a
   new Eisenstein-orbit backend (`glv::orbit`) that recodes the joint value
@@ -43,17 +90,20 @@ and this project adheres to Rust's notion of
   ~2.6% faster serially (k = 11, one action; faster in 3 of 3 matched
   rounds) and ~8% faster on the default 32-thread pool (one-action bundle
   449 ms → 415 ms).
-- The MSM bucket reduction is now a multi-window primitive
-  (`reduce_affine_buckets_multi`) that can share one Montgomery inversion
-  per tree level across a whole group of windows. Cross-window sharing
-  itself *measured as a net loss* and is disabled (the group size is one
-  window): with divstep inversion at I/M ≈ 77 the saved inversions are
-  worth microseconds per MSM, while staging many windows at once grows the
-  working set from a few hundred KiB (in L2) to several MiB swept per
-  reduction level — interleaved A/B runs of the serial Orchard k = 11
-  prover measured 32 MiB groups ~5% slower end-to-end. The group size
-  remains a documented knob for platforms with different memory
-  hierarchies.
+- Every backend (Booth, orbit, and the prepared zero-check below) reduces
+  its buckets through the shared fused batched-affine reduction, one window
+  at a time. A multi-window variant sharing one Montgomery inversion per
+  tree level across window groups was built and *measured as a net loss*
+  at every group size above one window — with divstep inversion at
+  I/M ≈ 77 the saved inversions are worth microseconds per MSM, while
+  staging several windows at once grows the working set from a few hundred
+  KiB (in L2) to several MiB swept per reduction level; interleaved A/B
+  runs of the serial Orchard k = 11 prover measured 32 MiB groups ~5%
+  slower end-to-end — so the single-window primitive is the only shape
+  kept. A second experiment replacing the reduction's pending-addition
+  records with denominator-only staging and a completion re-walk measured
+  within a few percent of the landed fused pass (the records are
+  L2-resident within a level), and was likewise not kept.
 - The GLV multiscalar multiplication backend now plans its own window width.
   It evaluates the GLV ladder at the generic default width and one bit wider,
   runs at the cheaper, and is selected only when that beats the generic

@@ -8,6 +8,16 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- `Params::prepare_zero_checks` builds and caches a prepared fixed-base
+  zero-check over the SRS (`g`, `w`, `u`; see pasta's `glv::zero`), and
+  `MSM::eval` then routes the verifier's final identity test through it,
+  with the proof-specific commitment terms as the check's extra terms.
+  Preparation is explicit (hundreds of milliseconds and tens of MiB at
+  typical `k`, amortized across every verification with those params;
+  batch verification pays one prepared check per batch), is never
+  serialized, and is shared with clones taken after the call. On the
+  Pasta curves the prepared final check measured ~1.6x faster serially
+  and up to ~2.4x on 8–16 workers at `k = 11` scale.
 - The V1 floor planner now caches consecutive region-column writes, avoiding
   repeated hash-table lookups during circuit measurement.
 - Independent polynomial transforms are now parallelized during proving-key
