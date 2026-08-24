@@ -268,7 +268,6 @@ mod tests {
     use rand::rng;
     use std::convert::TryInto;
     use std::iter;
-    use uint::construct_uint;
 
     #[test]
     fn test_range_check() {
@@ -351,15 +350,9 @@ mod tests {
         }
     }
 
-    #[allow(clippy::assign_op_pattern)]
-    #[allow(clippy::ptr_offset_with_cast)]
     #[test]
     fn test_bitrange_subset() {
         let mut rng = rng();
-
-        construct_uint! {
-            struct U256(4);
-        }
 
         // Subset full range.
         {
@@ -407,15 +400,11 @@ mod tests {
             let mut num_bits = 0;
             for (idx, subset) in subsets.iter().skip(1).enumerate() {
                 // 2^num_bits
-                let range_shift: [u8; 32] = {
+                let range_shift = {
                     num_bits += ranges[idx].len();
-                    let mut range_shift = [0u8; 32];
-                    U256([2, 0, 0, 0])
-                        .pow(U256([num_bits as u64, 0, 0, 0]))
-                        .to_little_endian(&mut range_shift);
-                    range_shift
+                    pallas::Base::from(2).pow_vartime([num_bits as u64])
                 };
-                sum += subset * pallas::Base::from_repr(range_shift).unwrap();
+                sum += subset * range_shift;
             }
             assert_eq!(field_elem, sum);
         };

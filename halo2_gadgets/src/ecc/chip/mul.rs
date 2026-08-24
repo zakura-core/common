@@ -14,7 +14,6 @@ use halo2_proofs::{
     plonk::{Advice, Assigned, Column, ConstraintSystem, Constraints, Error, Selector},
     poly::Rotation,
 };
-use uint::construct_uint;
 
 use pasta_curves::pallas;
 
@@ -419,30 +418,32 @@ impl<F: Field> Deref for Z<F> {
 }
 
 // https://p.z.cash/halo2-0.1:ecc-var-mul-witness-scalar?partial
-#[allow(clippy::assign_op_pattern)]
-#[allow(clippy::ptr_offset_with_cast)]
 fn decompose_for_scalar_mul(scalar: Value<&pallas::Base>) -> Vec<Value<bool>> {
-    construct_uint! {
-        struct U256(4);
-    }
-
     let bitstring = scalar.map(|scalar| {
         // We use `k = scalar + t_q` in the double-and-add algorithm, where
         // the scalar field `F_q = 2^254 + t_q`.
-        // Note that the addition `scalar + t_q` is not reduced.
-        //
-        let scalar = U256::from_little_endian(&scalar.to_repr());
-        let t_q = U256::from_little_endian(&T_Q.to_le_bytes());
-        let k = scalar + t_q;
+        // Note that the addition `scalar + t_q` is not reduced, so it must be
+        // computed over 256-bit integers rather than in the field. The sum
+        // cannot overflow 256 bits: `scalar` is at most 255 bits and `t_q` is
+        // at most 127 bits.
+        let mut k = [0u64; 4];
+        let repr = scalar.to_repr();
+        for (limb, chunk) in k.iter_mut().zip(repr.chunks(8)) {
+            *limb = u64::from_le_bytes(chunk.try_into().unwrap());
+        }
+        let t_q = [T_Q as u64, (T_Q >> 64) as u64, 0, 0];
+        let mut carry = 0u128;
+        for (k_limb, t_q_limb) in k.iter_mut().zip(t_q) {
+            let sum = *k_limb as u128 + t_q_limb as u128 + carry;
+            *k_limb = sum as u64;
+            carry = sum >> 64;
+        }
 
         // Little-endian bit representation of `k`.
-        let bitstring = {
-            let mut le_bytes = [0u8; 32];
-            k.to_little_endian(&mut le_bytes);
-            le_bytes
-                .into_iter()
-                .flat_map(|byte| (0..8).map(move |shift| (byte >> shift) % 2 == 1))
-        };
+        let bitstring = k
+            .into_iter()
+            .flat_map(|limb| limb.to_le_bytes())
+            .flat_map(|byte| (0..8).map(move |shift| (byte >> shift) % 2 == 1));
 
         // Take the first 255 bits.
         bitstring

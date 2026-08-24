@@ -131,9 +131,6 @@ package = "zakura-sinsemilla"
 [dependencies.subtle]
 version = "2.3"
 
-[dependencies.uint]
-version = "0.9.2"
-
 [dev-dependencies.criterion]
 version = "0.3"
 

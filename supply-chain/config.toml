@@ -575,10 +575,6 @@ criteria = "safe-to-deploy"
 version = "0.3.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.indexmap]]
-version = "1.9.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.inferno]]
 version = "0.11.4"
 criteria = "safe-to-run"
@@ -1093,10 +1089,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.typenum]]
 version = "1.20.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.uint]]
-version = "0.9.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
