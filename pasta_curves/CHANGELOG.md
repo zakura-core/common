@@ -92,6 +92,10 @@ and this project adheres to Rust's notion of
 - Hash-to-curve now avoids redundant release-mode curve-equation checks after
   the simplified SWU and isogeny formulas, while retaining debug assertions.
   Vesta hash-to-curve is about 5% faster on Apple aarch64.
+- The GLV Signed-Booth affine reducer now keeps its inversion and chord
+  arithmetic in contiguous field-element passes, seeds both inversion lanes
+  from their first denominator, and uses paired Montgomery kernels on Apple
+  AArch64.
 - The GLV Signed-Booth MSM now finishes batched affine additions while walking
   inversion products backward, avoiding a separate pass over its pending
   addition records.

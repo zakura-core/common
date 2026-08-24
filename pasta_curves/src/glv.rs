@@ -98,6 +98,30 @@ mod private {
 
         /// The raw affine coordinates of `p` (`(0, 0)` for the identity).
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base);
+
+        /// Multiplies base-field values in place, interleaving adjacent pairs
+        /// where the backend supports it.
+        fn mul_base_assign_pairs(lhs: &mut [Self::Base], rhs: &[Self::Base], _: CrateToken) {
+            assert_eq!(lhs.len(), rhs.len());
+            for (lhs, rhs) in lhs.iter_mut().zip(rhs) {
+                *lhs *= rhs;
+            }
+        }
+
+        /// Finishes the two-chain back-substitution of a nonzero base-field
+        /// batch inversion.
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        fn batch_invert_backsub(
+            values: &mut [Self::Base],
+            prefixes: &[Self::Base],
+            acc0: Self::Base,
+            acc1: Self::Base,
+            token: CrateToken,
+        );
     }
 
     impl Sealed for crate::pallas::Point {
@@ -108,6 +132,30 @@ mod private {
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
             p.raw_xy()
         }
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        fn mul_base_assign_pairs(lhs: &mut [Self::Base], rhs: &[Self::Base], _: CrateToken) {
+            crate::Fp::mul_assign_pairs_runtime(lhs, rhs)
+        }
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        fn batch_invert_backsub(
+            values: &mut [Self::Base],
+            prefixes: &[Self::Base],
+            acc0: Self::Base,
+            acc1: Self::Base,
+            _: CrateToken,
+        ) {
+            crate::Fp::batch_invert_backsub_runtime(values, prefixes, acc0, acc1)
+        }
     }
 
     impl Sealed for crate::vesta::Point {
@@ -117,6 +165,30 @@ mod private {
 
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
             p.raw_xy()
+        }
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        fn mul_base_assign_pairs(lhs: &mut [Self::Base], rhs: &[Self::Base], _: CrateToken) {
+            crate::Fq::mul_assign_pairs_runtime(lhs, rhs)
+        }
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        fn batch_invert_backsub(
+            values: &mut [Self::Base],
+            prefixes: &[Self::Base],
+            acc0: Self::Base,
+            acc1: Self::Base,
+            _: CrateToken,
+        ) {
+            crate::Fq::batch_invert_backsub_runtime(values, prefixes, acc0, acc1)
         }
     }
 }
@@ -812,7 +884,6 @@ struct PendingAffineAddition<F> {
     x_sum: F,
     numerator: F,
     denominator: F,
-    inversion_scratch: F,
 }
 
 /// Independent multiplication lanes used by batch inversion.
@@ -823,78 +894,117 @@ const BATCH_INVERSION_LANES: usize = 2;
 /// Each `output` identifies the slot containing the addition's left operand.
 /// The outputs must be distinct. Returns `None` if the product of the
 /// denominators is zero, allowing [`try_multiexp`] to use the generic MSM.
-fn batch_invert_and_add<F: Field>(
-    additions: &mut [PendingAffineAddition<F>],
-    points: &mut [AffinePoint<F>],
+fn batch_invert_and_add<C: GlvParams>(
+    additions: &[PendingAffineAddition<C::Base>],
+    points: &mut [AffinePoint<C::Base>],
 ) -> Option<()> {
     if additions.is_empty() {
         return Some(());
     }
 
-    // Compute two prefix lanes in lockstep. This retains one field inversion
-    // for the entire batch while exposing independent multiplication chains.
-    let mut lane_products = [F::ONE; BATCH_INVERSION_LANES];
-    for pair in additions.chunks_mut(BATCH_INVERSION_LANES) {
-        for (addition, product) in pair.iter_mut().zip(&mut lane_products) {
-            addition.inversion_scratch = *product;
-            *product *= addition.denominator;
+    let mut values = additions
+        .iter()
+        .map(|addition| addition.denominator)
+        .collect::<Vec<_>>();
+    let mut scratch = alloc::vec![C::Base::ZERO; additions.len()];
+
+    if additions.len() == 1 {
+        values[0] = Option::<C::Base>::from(values[0].invert())?;
+    } else {
+        // Seed both chains from their first value. This avoids two prefix
+        // multiplications by one while preserving two independent lanes.
+        scratch[0] = C::Base::ONE;
+        scratch[1] = C::Base::ONE;
+        let mut acc0 = values[0];
+        let mut acc1 = values[1];
+        for (pair, prefixes) in values[2..]
+            .chunks_exact(BATCH_INVERSION_LANES)
+            .zip(scratch[2..].chunks_exact_mut(BATCH_INVERSION_LANES))
+        {
+            prefixes[0] = acc0;
+            prefixes[1] = acc1;
+            acc0 *= pair[0];
+            acc1 *= pair[1];
+        }
+        if let (Some(value), Some(prefix)) = (
+            values
+                .chunks_exact(BATCH_INVERSION_LANES)
+                .remainder()
+                .first(),
+            scratch
+                .chunks_exact_mut(BATCH_INVERSION_LANES)
+                .into_remainder()
+                .first_mut(),
+        ) {
+            *prefix = acc0;
+            acc0 *= value;
+        }
+
+        // This MSM is already variable-time with respect to scalar digits;
+        // batch inversion does not provide a constant-time guarantee.
+        let product_inverse = Option::<C::Base>::from((acc0 * acc1).invert())?;
+        let seed0 = product_inverse * acc1;
+        let seed1 = product_inverse * acc0;
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        C::batch_invert_backsub(&mut values, &scratch, seed0, seed1, private::CrateToken(()));
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            let mut acc0 = seed0;
+            let mut acc1 = seed1;
+            if let (Some(value), Some(prefix)) = (
+                values
+                    .chunks_exact_mut(BATCH_INVERSION_LANES)
+                    .into_remainder()
+                    .first_mut(),
+                scratch
+                    .chunks_exact(BATCH_INVERSION_LANES)
+                    .remainder()
+                    .first(),
+            ) {
+                let inverse = acc0 * prefix;
+                acc0 *= *value;
+                *value = inverse;
+            }
+            for (pair, prefixes) in values
+                .chunks_exact_mut(BATCH_INVERSION_LANES)
+                .zip(scratch.chunks_exact(BATCH_INVERSION_LANES))
+                .rev()
+            {
+                let inverse0 = acc0 * prefixes[0];
+                let inverse1 = acc1 * prefixes[1];
+                acc0 *= pair[0];
+                acc1 *= pair[1];
+                pair[0] = inverse0;
+                pair[1] = inverse1;
+            }
         }
     }
 
-    // Invert both lane products with one inversion.
-    let product = lane_products[0] * lane_products[1];
-    // This MSM is already variable-time with respect to scalar digits; batch
-    // inversion does not provide a constant-time guarantee.
-    let product_inverse = Option::<F>::from(product.invert())?;
-    let mut lane_inverses = [
-        lane_products[1] * product_inverse,
-        lane_products[0] * product_inverse,
-    ];
-
-    // If the last pair is incomplete, consume its first lane before walking
-    // the complete pairs backward.
-    let complete_pairs = additions.len() / BATCH_INVERSION_LANES;
-    if additions.len() % BATCH_INVERSION_LANES != 0 {
-        let addition = &additions[additions.len() - 1];
-        let denominator = addition.denominator;
-        let denominator_inverse = addition.inversion_scratch * lane_inverses[0];
-        lane_inverses[0] *= denominator;
-
-        let left = points[addition.output];
-        let slope = addition.numerator * denominator_inverse;
-        let x = slope.square() - addition.x_sum;
-        let y = slope * (left.x - x) - left.y;
-        points[addition.output] = AffinePoint { x, y };
+    // Convert the contiguous inverses to slopes with the paired field
+    // kernel, then reuse the prefix workspace for the final y products.
+    for (numerator, addition) in scratch.iter_mut().zip(additions) {
+        *numerator = addition.numerator;
     }
-    for pair in additions[..complete_pairs * BATCH_INVERSION_LANES]
-        .chunks(BATCH_INVERSION_LANES)
-        .rev()
-    {
-        let first = &pair[0];
-        let second = &pair[1];
-        let first_inverse = first.inversion_scratch * lane_inverses[0];
-        let second_inverse = second.inversion_scratch * lane_inverses[1];
-        lane_inverses[0] *= first.denominator;
-        lane_inverses[1] *= second.denominator;
-
-        // Complete each affine chord addition while its pending record is
-        // already resident. Keep two independent field-operation lanes.
-        let first_left = points[first.output];
-        let second_left = points[second.output];
-        let first_slope = first.numerator * first_inverse;
-        let second_slope = second.numerator * second_inverse;
-        let first_x = first_slope.square() - first.x_sum;
-        let second_x = second_slope.square() - second.x_sum;
-        let first_y = first_slope * (first_left.x - first_x) - first_left.y;
-        let second_y = second_slope * (second_left.x - second_x) - second_left.y;
-        points[first.output] = AffinePoint {
-            x: first_x,
-            y: first_y,
-        };
-        points[second.output] = AffinePoint {
-            x: second_x,
-            y: second_y,
-        };
+    C::mul_base_assign_pairs(&mut values, &scratch, private::CrateToken(()));
+    for ((factor, slope), addition) in scratch.iter_mut().zip(&values).zip(additions) {
+        let left = points[addition.output];
+        let x = slope.square() - addition.x_sum;
+        *factor = left.x - x;
+        points[addition.output].x = x;
+    }
+    C::mul_base_assign_pairs(&mut scratch, &values, private::CrateToken(()));
+    for (product, addition) in scratch.iter().zip(additions) {
+        points[addition.output].y = *product - points[addition.output].y;
     }
     Some(())
 }
@@ -956,12 +1066,12 @@ where
 ///
 /// The callers in this module establish these invariants by sourcing points
 /// from a single Pasta curve and skipping identity inputs before building the
-/// buckets. The function is generic over the field only for reuse between
-/// [`crate::Fp`] and [`crate::Fq`].
-fn reduce_affine_buckets<F: Field>(
-    mut points: Vec<AffinePoint<F>>,
+/// buckets. [`GlvParams`] is sealed to the Pallas and Vesta curve
+/// implementations.
+fn reduce_affine_buckets<C: GlvParams>(
+    mut points: Vec<AffinePoint<C::Base>>,
     mut offsets: Vec<usize>,
-) -> Option<Vec<Option<AffinePoint<F>>>> {
+) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
     debug_assert!(!offsets.is_empty());
     let bucket_count = offsets.len() - 1;
 
@@ -999,7 +1109,6 @@ fn reduce_affine_buckets<F: Field>(
                     x_sum: left.x + right.x,
                     numerator,
                     denominator,
-                    inversion_scratch: F::ZERO,
                 });
             }
             if bucket.len() % 2 == 1 {
@@ -1008,7 +1117,7 @@ fn reduce_affine_buckets<F: Field>(
             next_offsets.push(next_points.len());
         }
 
-        batch_invert_and_add(&mut pending, &mut next_points)?;
+        batch_invert_and_add::<C>(&pending, &mut next_points)?;
 
         points = next_points;
         offsets = next_offsets;
@@ -1080,7 +1189,7 @@ fn fill_window<C: GlvParams>(
         positions[bucket] += 1;
     }
 
-    reduce_affine_buckets(points, offsets)
+    reduce_affine_buckets::<C>(points, offsets)
 }
 
 fn multiexp_serial<C: GlvParams>(
@@ -2605,26 +2714,22 @@ mod tests {
         (scalars, bases, generator * expected_scalar)
     }
 
-    fn batch_invert_and_add_two_lanes_matches_individual<F>()
-    where
-        F: Field + From<u64>,
-    {
+    fn batch_invert_and_add_two_lanes_matches_individual<C: GlvParams>() {
         const LENGTHS: [usize; 13] = [0, 1, 2, 3, 31, 32, 33, 63, 64, 65, 255, 256, 257];
 
         for length in LENGTHS {
-            let mut additions = (0..length)
+            let additions = (0..length)
                 .map(|index| PendingAffineAddition {
                     output: index,
-                    x_sum: F::from(u64::try_from(index + 3).unwrap()),
-                    numerator: F::from(u64::try_from(index + 2).unwrap()),
-                    denominator: F::from(u64::try_from(index + 1).unwrap()),
-                    inversion_scratch: F::ZERO,
+                    x_sum: C::Base::from(u64::try_from(index + 3).unwrap()),
+                    numerator: C::Base::from(u64::try_from(index + 2).unwrap()),
+                    denominator: C::Base::from(u64::try_from(index + 1).unwrap()),
                 })
                 .collect::<Vec<_>>();
             let mut points = (0..length)
                 .map(|index| AffinePoint {
-                    x: F::from(u64::try_from(index + 5).unwrap()),
-                    y: F::from(u64::try_from(index + 7).unwrap()),
+                    x: C::Base::from(u64::try_from(index + 5).unwrap()),
+                    y: C::Base::from(u64::try_from(index + 7).unwrap()),
                 })
                 .collect::<Vec<_>>();
             let expected = additions
@@ -2638,7 +2743,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
-            batch_invert_and_add(&mut additions, &mut points)
+            batch_invert_and_add::<C>(&additions, &mut points)
                 .expect("nonzero denominators must be invertible");
             for (index, (actual, expected)) in points.iter().zip(expected).enumerate() {
                 assert_eq!(
@@ -2655,8 +2760,8 @@ mod tests {
 
     #[test]
     fn batch_invert_and_add_two_lanes() {
-        batch_invert_and_add_two_lanes_matches_individual::<crate::Fp>();
-        batch_invert_and_add_two_lanes_matches_individual::<crate::Fq>();
+        batch_invert_and_add_two_lanes_matches_individual::<pallas::Point>();
+        batch_invert_and_add_two_lanes_matches_individual::<vesta::Point>();
     }
 
     fn optimized_multiexp_matches_expected<C: GlvParams>() {
@@ -3602,7 +3707,7 @@ mod tests {
             offsets.push(points.len());
         }
 
-        let reduced = reduce_affine_buckets(points, offsets)
+        let reduced = reduce_affine_buckets::<C>(points, offsets)
             .expect("valid curve points have invertible affine denominators");
         assert_eq!(reduced.len(), source.len());
         for (actual, bucket) in reduced.into_iter().zip(source) {
@@ -3619,33 +3724,32 @@ mod tests {
         }
     }
 
-    fn batch_inversion_rejects_zero_denominator<F: Field>() {
-        let mut additions = [F::ONE, F::ZERO, F::ONE.double()]
+    fn batch_inversion_rejects_zero_denominator<C: GlvParams>() {
+        let additions = [C::Base::ONE, C::Base::ZERO, C::Base::ONE.double()]
             .into_iter()
             .enumerate()
             .map(|(output, denominator)| PendingAffineAddition {
                 output,
-                x_sum: F::ZERO,
-                numerator: F::ZERO,
+                x_sum: C::Base::ZERO,
+                numerator: C::Base::ZERO,
                 denominator,
-                inversion_scratch: F::ZERO,
             })
             .collect::<Vec<_>>();
         let mut points = alloc::vec![
             AffinePoint {
-                x: F::ZERO,
-                y: F::ZERO,
+                x: C::Base::ZERO,
+                y: C::Base::ZERO,
             };
             additions.len()
         ];
 
-        assert!(batch_invert_and_add(&mut additions, &mut points).is_none());
+        assert!(batch_invert_and_add::<C>(&additions, &mut points).is_none());
     }
 
     #[test]
     fn batch_inversion_zero_denominator_returns_none() {
-        batch_inversion_rejects_zero_denominator::<crate::Fp>();
-        batch_inversion_rejects_zero_denominator::<crate::Fq>();
+        batch_inversion_rejects_zero_denominator::<pallas::Point>();
+        batch_inversion_rejects_zero_denominator::<vesta::Point>();
     }
 
     macro_rules! glv_tests {
