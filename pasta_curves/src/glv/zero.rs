@@ -36,6 +36,11 @@
 //! false, the combined equation accepts with probability at most
 //! $(m - 1)/r$ over the challenge, which must be sampled (or
 //! Fiat–Shamir-derived) only after every equation is fixed.
+//! [`PreparedZeroMsm::is_zero_batch_vartime`] enforces that ordering by
+//! construction — it derives the challenge by hashing the prepared-bases
+//! digest and every equation — while
+//! [`PreparedZeroMsm::is_zero_batch_with_challenge_vartime`] leaves the
+//! obligation with the caller's transcript.
 //!
 //! Prepared tables are built in-process from the caller's bases; there is
 //! deliberately no deserialization path for them — a corrupted table would
@@ -46,7 +51,7 @@
 
 use alloc::vec::Vec;
 
-use ff::{Field, PrimeField, WithSmallOrderMulGroup};
+use ff::{Field, FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
 use group::CurveAffine as _;
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
@@ -107,6 +112,10 @@ pub struct PreparedZeroMsm<C: GlvParams> {
     /// Horner recombination multiplies by $B^L$, so their scalars are
     /// pre-divided to compensate.
     tail_unshift: C::ScalarExt,
+    /// BLAKE2b-256 over the prepared bases, mixed into
+    /// [`Self::is_zero_batch_vartime`]'s derived challenge (and available
+    /// to any future table-trust story).
+    bases_digest: [u8; 32],
 }
 
 impl<C: GlvParams> core::fmt::Debug for PreparedZeroMsm<C> {
@@ -166,6 +175,19 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let tail_unshift =
             <C::ScalarExt as ff::PrimeField>::TWO_INV.pow_vartime([shift_bits as u64]);
 
+        let mut digest = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"zakura-zero-base")
+            .to_state();
+        digest.update(&(bases.len() as u64).to_le_bytes());
+        for base in bases {
+            let (x, y) = C::affine_xy(base);
+            digest.update(x.to_repr().as_ref());
+            digest.update(y.to_repr().as_ref());
+        }
+        let mut bases_digest = [0u8; 32];
+        bases_digest.copy_from_slice(digest.finalize().as_bytes());
+
         PreparedZeroMsm {
             codebook,
             table,
@@ -174,6 +196,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             tail_bases,
             tail_params,
             tail_unshift,
+            bases_digest,
         }
     }
 
@@ -279,9 +302,52 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     }
 
     /// Checks several equations over the prepared bases at once through a
-    /// random linear combination: see [`combine_equations`] for the
-    /// soundness contract of `challenge`.
-    pub fn is_zero_batch_vartime(
+    /// random linear combination, deriving the combining challenge itself:
+    /// $\rho$ = BLAKE2b(prepared-bases digest, every equation's scalars),
+    /// mapped uniformly into the scalar field. Because $\rho$ is a hash of
+    /// the complete equation set, it cannot be known before the equations
+    /// are fixed, so the $(m - 1)/r$ false-accept bound of
+    /// [`combine_equations`] holds by construction (in the random-oracle
+    /// model; defeating it means grinding ~$r/(m-1)$ hashes).
+    ///
+    /// Protocols that already own a transcript should instead squeeze
+    /// their own challenge — *after absorbing every equation* — and call
+    /// [`Self::is_zero_batch_with_challenge_vartime`].
+    pub fn is_zero_batch_vartime(&self, equations: &[&[C::ScalarExt]]) -> bool
+    where
+        C::ScalarExt: ff::FromUniformBytes<64>,
+    {
+        if equations.is_empty() {
+            return true;
+        }
+        let mut state = blake2b_simd::Params::new()
+            .hash_length(64)
+            .personal(b"zakura-zero-rho\0")
+            .to_state();
+        state.update(&self.bases_digest);
+        state.update(&(equations.len() as u64).to_le_bytes());
+        for equation in equations {
+            for scalar in equation.iter() {
+                state.update(scalar.to_repr().as_ref());
+            }
+        }
+        let mut wide = [0u8; 64];
+        wide.copy_from_slice(state.finalize().as_bytes());
+        let challenge = C::ScalarExt::from_uniform_bytes(&wide);
+        self.is_zero_batch_with_challenge_vartime(equations, challenge)
+    }
+
+    /// [`Self::is_zero_batch_vartime`] with a caller-supplied challenge.
+    ///
+    /// # Soundness
+    ///
+    /// The $(m - 1)/r$ bound holds **only** if `challenge` was sampled or
+    /// Fiat–Shamir-derived *after every equation was fixed* and is never
+    /// reused across batches whose equations it did not absorb. A
+    /// challenge known in advance lets a prover construct false equations
+    /// that cancel in the combination. Prefer the self-deriving variant
+    /// unless a protocol transcript owns the challenge.
+    pub fn is_zero_batch_with_challenge_vartime(
         &self,
         equations: &[&[C::ScalarExt]],
         challenge: C::ScalarExt,
@@ -693,11 +759,14 @@ fn integrate_coefficients<C: GlvParams>(
 ///   variants cost in cache) but need 2–4× less memory: `α7` gave +47%
 ///   serial at 2,048 terms in 12 MiB, `α6` +36% in 6 MiB.
 /// - At 8,192 terms the wider radixes win serially (`β8^16`/`α8`/`α9`,
-///   +42..+47%), but their tables outgrow the default budget; within it
+///   +42..+51%), but their tables outgrow the default budget; within it
 ///   the ordering below still measured +18..+40%.
-/// - The subset-table baseline lost to the *unprepared* control at every
-///   size (its per-column additions form one dependent chain), so it is
-///   not a candidate.
+/// - The subset-table baseline — given the same batched-affine tree
+///   reduction as everything else — beats the unprepared control from
+///   t = 12 up but still trails the codebook by 18–31% at comparable or
+///   larger memory (t = 12, 43 MiB: 11.7 ms and t = 14, 147 MiB: 10.3 ms,
+///   against β7^8's 8.9 ms in 48 MiB, serial at 2,048 terms), with no
+///   parallel path; it is not a candidate.
 ///
 /// Benchmarks can pin any mode via [`PreparedZeroMsm::prepare_with_mode`].
 fn plan_mode(terms: usize, num_threads: usize, table_budget: usize) -> CodebookMode {
@@ -916,18 +985,25 @@ mod tests {
     }
 
     /// Probabilistic batching: all-true batches accept; any false member
-    /// rejects (for a fixed nonzero challenge, failure needs a specific
-    /// challenge collision of probability ~1/r).
-    fn batch_combination<C: GlvParams>() {
+    /// rejects (failure needs a challenge collision of probability ~1/r),
+    /// through both the self-deriving and explicit-challenge APIs.
+    fn batch_combination<C: GlvParams>()
+    where
+        C::ScalarExt: ff::FromUniformBytes<64>,
+    {
         let (mut equations, bases) = testutil::zero_relations::<C>(120, 1, 2);
         let scalars_b = equations.pop().unwrap();
         let scalars_a = equations.pop().unwrap();
         let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(6));
-        let challenge = C::ScalarExt::from(0xDEAD_BEEFu64).square() + C::ScalarExt::ONE;
-        assert!(prepared.is_zero_batch_vartime(&[&scalars_a, &scalars_b], challenge));
+        assert!(prepared.is_zero_batch_vartime(&[&scalars_a, &scalars_b]));
+        assert!(prepared.is_zero_batch_vartime(&[]));
         let mut broken = scalars_b.clone();
         broken[3] += C::ScalarExt::ONE;
-        assert!(!prepared.is_zero_batch_vartime(&[&scalars_a, &broken], challenge));
+        assert!(!prepared.is_zero_batch_vartime(&[&scalars_a, &broken]));
+
+        let challenge = C::ScalarExt::from(0xDEAD_BEEFu64).square() + C::ScalarExt::ONE;
+        assert!(prepared.is_zero_batch_with_challenge_vartime(&[&scalars_a, &scalars_b], challenge));
+        assert!(!prepared.is_zero_batch_with_challenge_vartime(&[&scalars_a, &broken], challenge));
     }
 
     /// The relation scan finds duplicates, negations, and endomorphic
@@ -1152,8 +1228,7 @@ mod tests {
                     for window in 0..recoded.active_windows {
                         let (points, offsets) = prepared.stage_window(&recoded, window);
                         lap(&mut phases[2]); // stage (fetch + counting sort)
-                        let buckets =
-                            reduce_affine_buckets(points, offsets).expect("valid points");
+                        let buckets = reduce_affine_buckets(points, offsets).expect("valid points");
                         lap(&mut phases[3]); // batched-affine reduction
                         window_sums.push(integrate_coefficients::<C>(
                             prepared.codebook.program(),
@@ -1228,6 +1303,111 @@ mod tests {
         pool.install(body);
         #[cfg(not(feature = "multicore"))]
         body();
+
+        // The same phase split under contention: per-window stage/reduce/
+        // integrate accumulated across parallel window tasks (CPU time
+        // summed over workers, so a phase whose *sum* grows with the
+        // worker count is losing to shared-cache contention). Contrasts a
+        // small table (α6, 12 MiB at 2,048 terms) against a large one
+        // (β7^8, 48 MiB).
+        #[cfg(feature = "multicore")]
+        for threads in [8usize, 32] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("bench thread pool must build");
+            pool.install(|| {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                for mode in [
+                    CodebookMode {
+                        window_bits: 7,
+                        beta_power: Some(8),
+                    },
+                    CodebookMode::alpha_only(6),
+                ] {
+                    let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, mode);
+                    let mut folded = scalars.clone();
+                    for &(source, target, mu) in &prepared.merges {
+                        let contribution = folded[source] * mu;
+                        folded[target] += contribution;
+                        folded[source] = <C as crate::arithmetic::CurveExt>::ScalarExt::ZERO;
+                    }
+                    let iters = 15;
+                    let stage_ns = AtomicU64::new(0);
+                    let reduce_ns = AtomicU64::new(0);
+                    let integrate_ns = AtomicU64::new(0);
+                    let mut wall = 0.0f64;
+                    for _ in 0..iters {
+                        let components: Vec<_> = folded
+                            .iter()
+                            .enumerate()
+                            .map(|(index, k)| {
+                                if !prepared.live[index] {
+                                    let zero = SignedMagnitude {
+                                        negative: false,
+                                        magnitude: 0,
+                                    };
+                                    return (zero, zero);
+                                }
+                                checked_signed_magnitudes(decompose::<C>(k)).expect("bounded")
+                            })
+                            .collect();
+                        let recoded = codebook::recode(&prepared.codebook, &components, threads);
+                        let window_bits = prepared.codebook.window_bits();
+                        let start = Instant::now();
+                        let windows_part = (0..recoded.active_windows)
+                            .into_par_iter()
+                            .map(|window| {
+                                let mark = Instant::now();
+                                let (points, offsets) = prepared.stage_window(&recoded, window);
+                                stage_ns
+                                    .fetch_add(mark.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                                let mark = Instant::now();
+                                let buckets = reduce_affine_buckets(points, offsets)?;
+                                reduce_ns
+                                    .fetch_add(mark.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                                let mark = Instant::now();
+                                let mut sum = integrate_coefficients::<C>(
+                                    prepared.codebook.program(),
+                                    &buckets,
+                                );
+                                for _ in 0..window_bits * window {
+                                    sum = sum.double();
+                                }
+                                integrate_ns
+                                    .fetch_add(mark.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                                Some(sum)
+                            })
+                            .try_reduce(C::identity, |mut left, right| {
+                                left += right;
+                                Some(left)
+                            })
+                            .expect("valid points");
+                        wall += start.elapsed().as_secs_f64() * 1e3;
+                        let mut tail = prepared
+                            .tail_sum(&recoded.residuals, &[], threads)
+                            .expect("valid points");
+                        if !bool::from(tail.is_identity()) {
+                            for _ in 0..window_bits * prepared.codebook.main_windows() {
+                                tail = tail.double();
+                            }
+                        }
+                        assert!(bool::from((windows_part + tail).is_identity()));
+                    }
+                    let per_iter =
+                        |ns: &AtomicU64| ns.load(Ordering::Relaxed) as f64 / 1e6 / iters as f64;
+                    println!(
+                        "vesta terms={terms} threads={threads} {mode:?}: \
+                         windows-wall={:.3}ms cpu-sums: stage={:.3}ms reduce={:.3}ms \
+                         integrate+shift={:.3}ms",
+                        wall / iters as f64,
+                        per_iter(&stage_ns),
+                        per_iter(&reduce_ns),
+                        per_iter(&integrate_ns),
+                    );
+                }
+            });
+        }
     }
 
     /// Manual timing harness for the fixed-base zero-check candidates; used
@@ -1259,7 +1439,7 @@ mod tests {
             samples[samples.len() / 2]
         }
 
-        const SIZES: [usize; 3] = [1_024, 2_048, 8_192];
+        const SIZES: [usize; 5] = [512, 1_024, 2_048, 4_096, 8_192];
         const THREADS: [usize; 6] = [1, 2, 4, 8, 16, 32];
 
         for terms in SIZES {
@@ -1317,8 +1497,8 @@ mod tests {
             }
 
             let mut subset_list: Vec<(String, subset::SubsetTable<C>)> = Vec::new();
-            for block_bits in [10usize, 12] {
-                if terms > 2_048 && block_bits > 10 {
+            for block_bits in [10usize, 12, 14] {
+                if (terms > 2_048 && block_bits > 10) || (terms != 2_048 && block_bits > 12) {
                     continue; // hundreds of MiB; not a useful tier
                 }
                 let start = Instant::now();
