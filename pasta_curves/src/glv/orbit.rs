@@ -537,11 +537,12 @@ pub(super) fn windows_sum<C: GlvParams>(
     Some(acc)
 }
 
-/// One rayon task per window, exactly like the Booth backend's parallel
-/// schedule: measured against contiguous window chunks on a 32-core x86-64
-/// host, per-window tasks won at every thread count from 4 up (work
-/// stealing balances the odd window counts, where chunks strand workers on
-/// partial waves).
+/// Adjacent windows paired per rayon task, as in the Booth backend's
+/// parallel schedule: the pair members are still computed as independent
+/// (joined) subtasks — so wide pools stay as occupied as with one task per
+/// window, which measured best against contiguous window chunks on a
+/// 32-core x86-64 host — but the pair shares one shift chain, halving the
+/// total Horner doublings the per-window schedule duplicated.
 #[cfg(feature = "multicore")]
 fn multiexp_parallel<C: GlvParams>(
     params: &OrbitParams,
@@ -549,11 +550,26 @@ fn multiexp_parallel<C: GlvParams>(
     rotated: &[RotatedBase<C::Base>],
     active_windows: usize,
 ) -> Option<C> {
-    (0..active_windows)
+    const WINDOWS_PER_PAIR: usize = 2;
+    let pair_count = active_windows.div_ceil(WINDOWS_PER_PAIR);
+    (0..pair_count)
         .into_par_iter()
-        .map(|window| {
-            let mut sum = windows_sum::<C>(params, digits, rotated, window..window + 1)?;
-            for _ in 0..params.window_bits * window {
+        .map(|pair| {
+            let start = pair * WINDOWS_PER_PAIR;
+            let window_sum = |window| windows_sum::<C>(params, digits, rotated, window..window + 1);
+            let mut sum = if start + 1 == active_windows {
+                window_sum(start)?
+            } else {
+                let (low, high) = maybe_rayon::join(|| window_sum(start), || window_sum(start + 1));
+                let mut low = low?;
+                let mut high = high?;
+                for _ in 0..params.window_bits {
+                    high = high.double();
+                }
+                low += high;
+                low
+            };
+            for _ in 0..params.window_bits * start {
                 sum = sum.double();
             }
             Some(sum)

@@ -389,11 +389,30 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let _ = num_threads;
         #[cfg(feature = "multicore")]
         if num_threads > 1 {
-            let windows_part = (0..active)
+            // Adjacent windows pair per task (joined subtasks, one shared
+            // shift chain), mirroring the unprepared backends' schedule.
+            const WINDOWS_PER_PAIR: usize = 2;
+            let pair_count = active.div_ceil(WINDOWS_PER_PAIR);
+            let windows_part = (0..pair_count)
                 .into_par_iter()
-                .map(|window| {
-                    let mut sum = self.window_sum(recoded, window)?;
-                    for _ in 0..window_bits * window {
+                .map(|pair| {
+                    let start = pair * WINDOWS_PER_PAIR;
+                    let mut sum = if start + 1 == active {
+                        self.window_sum(recoded, start)?
+                    } else {
+                        let (low, high) = maybe_rayon::join(
+                            || self.window_sum(recoded, start),
+                            || self.window_sum(recoded, start + 1),
+                        );
+                        let mut low = low?;
+                        let mut high = high?;
+                        for _ in 0..window_bits {
+                            high = high.double();
+                        }
+                        low += high;
+                        low
+                    };
+                    for _ in 0..window_bits * start {
                         sum = sum.double();
                     }
                     Some(sum)
@@ -623,12 +642,29 @@ fn tail_multiexp<C: GlvParams>(
             .map(|(row, &(first, second))| orbit::recode_row(params, first, second, row))
             .max()
             .unwrap_or(0);
-        return (0..active)
+        // Adjacent windows pair per task, as in the main-window schedule.
+        const WINDOWS_PER_PAIR: usize = 2;
+        let pair_count = active.div_ceil(WINDOWS_PER_PAIR);
+        return (0..pair_count)
             .into_par_iter()
-            .map(|window| {
-                let mut sum =
-                    orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1)?;
-                for _ in 0..window * params.width() {
+            .map(|pair| {
+                let start = pair * WINDOWS_PER_PAIR;
+                let window_sum =
+                    |window| orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1);
+                let mut sum = if start + 1 == active {
+                    window_sum(start)?
+                } else {
+                    let (low, high) =
+                        maybe_rayon::join(|| window_sum(start), || window_sum(start + 1));
+                    let mut low = low?;
+                    let mut high = high?;
+                    for _ in 0..params.width() {
+                        high = high.double();
+                    }
+                    low += high;
+                    low
+                };
+                for _ in 0..start * params.width() {
                     sum = sum.double();
                 }
                 Some(sum)
