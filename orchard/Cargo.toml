@@ -92,6 +92,11 @@ path = "src/lib.rs"
 bench = false
 
 [[test]]
+name = "ironwood_batch_timings"
+path = "tests/ironwood_batch_timings.rs"
+required-features = ["circuit"]
+
+[[test]]
 name = "builder"
 path = "tests/builder.rs"
 
@@ -292,6 +297,9 @@ features = ["test-dependencies"]
 
 [dev-dependencies.proptest]
 version = ">=1.0.0, <1.7.0"
+
+[dev-dependencies.rayon]
+version = "1"
 
 [dev-dependencies.rand]
 version = "0.10"
