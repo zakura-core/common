@@ -223,7 +223,7 @@ where
             mut acc: MSM<'params, C>,
             msm: MSM<'params, C>,
         ) -> MSM<'params, C> {
-            acc.add_msm(&msm);
+            acc.add_msm_batch(msm);
             acc
         }
 
