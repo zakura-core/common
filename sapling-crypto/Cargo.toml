@@ -156,8 +156,13 @@ features = ["alloc"]
 default-features = false
 package = "zakura-jubjub"
 
-[dependencies.lazy_static]
+[dependencies.once_cell]
 version = "1"
+features = [
+    "race",
+    "alloc",
+]
+default-features = false
 
 [dependencies.memuse]
 version = "0.2.2"

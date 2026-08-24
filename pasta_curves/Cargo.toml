@@ -80,7 +80,7 @@ serde = [
 ]
 sqrt-table = [
     "alloc",
-    "lazy_static",
+    "dep:once_cell",
 ]
 uninline-portable = []
 
@@ -154,10 +154,14 @@ features = [
 optional = true
 default-features = false
 
-[dependencies.lazy_static]
-version = "1.4.0"
-features = ["spin_no_std"]
+[dependencies.once_cell]
+version = "1"
+features = [
+    "race",
+    "alloc",
+]
 optional = true
+default-features = false
 
 [dependencies.maybe-rayon]
 version = "0.1.0"

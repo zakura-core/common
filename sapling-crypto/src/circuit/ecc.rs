@@ -633,7 +633,7 @@ mod test {
     use bellman::gadgets::test::*;
 
     use super::{fixed_base_multiplication, AllocatedNum, EdwardsPoint, MontgomeryPoint};
-    use crate::circuit::constants::{to_montgomery_coords, NOTE_COMMITMENT_RANDOMNESS_GENERATOR};
+    use crate::circuit::constants::{note_commitment_randomness_generator, to_montgomery_coords};
     use bellman::gadgets::boolean::{AllocatedBit, Boolean};
 
     #[test]
@@ -755,7 +755,7 @@ mod test {
 
             let q = fixed_base_multiplication(
                 cs.namespace(|| "multiplication"),
-                &NOTE_COMMITMENT_RANDOMNESS_GENERATOR,
+                note_commitment_randomness_generator(),
                 &s_bits,
             )
             .unwrap();

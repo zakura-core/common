@@ -1,5 +1,6 @@
 //! Types related to Orchard note commitment trees and anchors.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::iter;
 
@@ -23,7 +24,7 @@ use sinsemilla::weighted::{BatchHashWorkspace, UncheckedFixedLengthHashDomain};
 use sinsemilla::HashDomain;
 
 use ff::{Field, PrimeField, PrimeFieldBits};
-use lazy_static::lazy_static;
+use once_cell::race::OnceBox;
 use rand::Rng;
 use serde::de::{Deserializer, Error};
 use serde::ser::Serializer;
@@ -60,24 +61,34 @@ const CHILD_REMAINDER_MASK: u8 = (1 << MERKLE_CRH_CHILD_REMAINDER_BITS) - 1;
 const BYTE_BITS: usize = u8::BITS as usize;
 
 #[cfg(feature = "weighted-merkle")]
-lazy_static! {
-    static ref MERKLE_CRH_DOMAIN: UncheckedFixedLengthHashDomain<MERKLE_CRH_WORDS> =
-        UncheckedFixedLengthHashDomain::new(&HashDomain::new(MERKLE_CRH_PERSONALIZATION));
+static MERKLE_CRH_DOMAIN: OnceBox<UncheckedFixedLengthHashDomain<MERKLE_CRH_WORDS>> =
+    OnceBox::new();
+
+#[cfg(feature = "weighted-merkle")]
+fn merkle_crh_domain() -> &'static UncheckedFixedLengthHashDomain<MERKLE_CRH_WORDS> {
+    MERKLE_CRH_DOMAIN.get_or_init(|| {
+        Box::new(UncheckedFixedLengthHashDomain::new(&HashDomain::new(
+            MERKLE_CRH_PERSONALIZATION,
+        )))
+    })
 }
 
 #[cfg(not(feature = "weighted-merkle"))]
-lazy_static! {
-    static ref MERKLE_CRH_DOMAIN: HashDomain = HashDomain::new(MERKLE_CRH_PERSONALIZATION);
+static MERKLE_CRH_DOMAIN: OnceBox<HashDomain> = OnceBox::new();
+
+#[cfg(not(feature = "weighted-merkle"))]
+fn merkle_crh_domain() -> &'static HashDomain {
+    MERKLE_CRH_DOMAIN.get_or_init(|| Box::new(HashDomain::new(MERKLE_CRH_PERSONALIZATION)))
 }
 
 #[cfg(feature = "weighted-merkle")]
 fn merkle_crh(level: Level, left: &MerkleHashOrchard, right: &MerkleHashOrchard) -> pallas::Base {
-    MERKLE_CRH_DOMAIN.hash_words(&merkle_crh_words(level, left, right))
+    merkle_crh_domain().hash_words(&merkle_crh_words(level, left, right))
 }
 
 #[cfg(not(feature = "weighted-merkle"))]
 fn merkle_crh(level: Level, left: &MerkleHashOrchard, right: &MerkleHashOrchard) -> pallas::Base {
-    MERKLE_CRH_DOMAIN
+    merkle_crh_domain()
         .hash(merkle_crh_message(level, left, right))
         .unwrap_or(pallas::Base::zero())
 }
@@ -88,23 +99,31 @@ fn merkle_crh_to_point(
     left: &MerkleHashOrchard,
     right: &MerkleHashOrchard,
 ) -> CtOption<pallas::Point> {
-    MERKLE_CRH_DOMAIN.hash_to_point(merkle_crh_message(level, left, right))
+    merkle_crh_domain().hash_to_point(merkle_crh_message(level, left, right))
 }
 
-lazy_static! {
-    static ref UNCOMMITTED_ORCHARD: pallas::Base = pallas::Base::from(2);
-    pub(crate) static ref EMPTY_ROOTS: Vec<MerkleHashOrchard> = {
-        iter::empty()
-            .chain(Some(MerkleHashOrchard::empty_leaf()))
-            .chain(
-                (0..MERKLE_DEPTH_ORCHARD).scan(MerkleHashOrchard::empty_leaf(), |state, l| {
-                    let l = l as u8;
-                    *state = MerkleHashOrchard::combine(l.into(), state, state);
-                    Some(*state)
-                }),
-            )
-            .collect()
-    };
+fn uncommitted_orchard() -> pallas::Base {
+    pallas::Base::from(2)
+}
+
+static EMPTY_ROOTS: OnceBox<Vec<MerkleHashOrchard>> = OnceBox::new();
+
+pub(crate) fn empty_roots() -> &'static [MerkleHashOrchard] {
+    EMPTY_ROOTS.get_or_init(|| {
+        Box::new(
+            iter::empty()
+                .chain(Some(MerkleHashOrchard::empty_leaf()))
+                .chain((0..MERKLE_DEPTH_ORCHARD).scan(
+                    MerkleHashOrchard::empty_leaf(),
+                    |state, l| {
+                        let l = l as u8;
+                        *state = MerkleHashOrchard::combine(l.into(), state, state);
+                        Some(*state)
+                    },
+                ))
+                .collect(),
+        )
+    })
 }
 
 /// The root of an Orchard commitment tree. This must be a value
@@ -329,7 +348,7 @@ impl MerkleHashOrchard {
                 .into_iter()
                 .map(|(left, right)| merkle_crh_words(level, left, right)),
         );
-        let hashes = MERKLE_CRH_DOMAIN
+        let hashes = merkle_crh_domain()
             .hash_words_batch_with_workspace(&workspace.messages, &mut workspace.hash);
         output.clear();
         output.reserve(hashes.len());
@@ -401,7 +420,7 @@ impl ConditionallySelectable for MerkleHashOrchard {
 
 impl Hashable for MerkleHashOrchard {
     fn empty_leaf() -> Self {
-        MerkleHashOrchard(*UNCOMMITTED_ORCHARD)
+        MerkleHashOrchard(uncommitted_orchard())
     }
 
     /// Implements `MerkleCRH^Orchard` as defined in
@@ -419,7 +438,7 @@ impl Hashable for MerkleHashOrchard {
     }
 
     fn empty_root(level: Level) -> Self {
-        EMPTY_ROOTS[<usize>::from(level)]
+        empty_roots()[<usize>::from(level)]
     }
 }
 
@@ -486,7 +505,7 @@ mod tests {
     use {
         crate::{
             constants::{sinsemilla::MERKLE_CRH_PERSONALIZATION, MERKLE_DEPTH_ORCHARD},
-            tree::{merkle_crh_message, testing::arb_merkle_hash, MerkleHashOrchard, EMPTY_ROOTS},
+            tree::{empty_roots, merkle_crh_message, testing::arb_merkle_hash, MerkleHashOrchard},
         },
         alloc::vec::Vec,
         group::ff::{Field, PrimeField},
@@ -1299,7 +1318,7 @@ mod tests {
     fn test_vectors() {
         let tv_empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
 
-        for (height, root) in EMPTY_ROOTS.iter().enumerate() {
+        for (height, root) in empty_roots().iter().enumerate() {
             assert_eq!(tv_empty_roots[height], root.to_bytes());
         }
 
@@ -1324,7 +1343,7 @@ mod tests {
             assert_eq!(root.0, pallas::Base::from_repr(tv.root).unwrap());
 
             // Check paths for all leaves up to this point. The test vectors include paths
-            // for not-yet-appended leaves (using UNCOMMITTED_ORCHARD as the leaf value),
+            // for not-yet-appended leaves (using uncommitted_orchard() as the leaf value),
             // but BridgeTree doesn't encode these.
             for j in 0..=i {
                 let position = j.try_into().unwrap();

@@ -2193,7 +2193,7 @@ mod tests {
         note_encryption::OrchardDomain,
         pczt::{ProverError, VerifyError},
         rng_compat::OsRng,
-        tree::{MerklePath, EMPTY_ROOTS},
+        tree::{empty_roots, MerklePath},
         value::NoteValue,
         Address, Anchor, Note,
     };
@@ -2570,7 +2570,7 @@ mod tests {
             bundle_type,
             bundle_version,
             flags,
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .expect("flags are valid for the bundle version");
         builder
@@ -2627,7 +2627,7 @@ mod tests {
 
     #[test]
     fn coinbase_rejects_spends_enabled_flags() {
-        let anchor = EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into();
+        let anchor = empty_roots()[MERKLE_DEPTH_ORCHARD].into();
         let bundle_version = BundleVersion::ironwood_v3();
 
         // A coinbase bundle must disable spends; the builder rejects spends-enabled flags at
@@ -2659,7 +2659,7 @@ mod tests {
     #[test]
     fn free_bundle_rejects_coinbase_spends_enabled() {
         let mut rng = OsRng;
-        let anchor: Anchor = EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into();
+        let anchor: Anchor = empty_roots()[MERKLE_DEPTH_ORCHARD].into();
         let bundle_version = BundleVersion::ironwood_v3();
 
         // The coinbase-spends invariant is enforced on every build path, not just at
@@ -2687,7 +2687,7 @@ mod tests {
                 BundleType::DEFAULT,
                 bundle_version,
                 Flags::ENABLED,
-                EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+                empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
             ),
             Err(BuildError::UnrepresentableFlags)
         ));
@@ -2850,7 +2850,7 @@ mod tests {
             transactional(true),
             BundleVersion::orchard_v3(),
             BundleVersion::orchard_v3().default_flags(),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
 
@@ -2894,7 +2894,7 @@ mod tests {
                 transactional(false),
                 bundle_version,
                 bundle_version.default_flags(),
-                EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+                empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
                 vec![],
                 vec![OutputInfo::new(
                     None,
@@ -2922,7 +2922,7 @@ mod tests {
             transactional(false),
             bundle_version,
             bundle_version.default_flags(),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
             vec![],
             vec![],
             vec![change_output],
@@ -2968,7 +2968,7 @@ mod tests {
                 bundle_type,
                 bundle_version,
                 flags,
-                EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+                empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
                 vec![],
                 vec![],
                 vec![change_output],
@@ -3033,7 +3033,7 @@ mod tests {
                 BundleType::DEFAULT,
                 bundle_version,
                 bundle_version.default_flags(),
-                EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+                empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
                 vec![],
                 vec![output],
                 vec![],
@@ -3056,7 +3056,7 @@ mod tests {
                 BundleType::DEFAULT,
                 bundle_version,
                 bundle_version.default_flags(),
-                EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+                empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
                 vec![],
                 vec![],
                 vec![change],
@@ -3077,7 +3077,7 @@ mod tests {
             BundleType::DEFAULT,
             bundle_version,
             bundle_version.default_flags(),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
 
@@ -3124,7 +3124,7 @@ mod tests {
                 true,
                 bundle_version.permits_cross_address_transfers(),
             ),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
 
@@ -3197,7 +3197,7 @@ mod tests {
             transactional(false),
             BundleVersion::orchard_v3(),
             BundleVersion::orchard_v3().default_flags(),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
         builder
@@ -3296,7 +3296,7 @@ mod tests {
                 transactional(true),
                 BundleVersion::orchard_v3(),
                 BundleVersion::orchard_v3().default_flags(),
-                EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+                empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
             )
             .unwrap()
             .build::<i64>(rng)

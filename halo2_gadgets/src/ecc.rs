@@ -633,8 +633,8 @@ pub(crate) mod tests {
         dev::MockProver,
         plonk::{Circuit, ConstraintSystem, Error},
     };
-    use lazy_static::lazy_static;
     use pasta_curves::pallas;
+    use std::sync::LazyLock;
 
     use super::{
         chip::{
@@ -659,13 +659,12 @@ pub(crate) mod tests {
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub(crate) struct Short;
 
-    lazy_static! {
-        static ref BASE: pallas::Affine = pallas::Point::generator().to_affine();
-        static ref ZS_AND_US: Vec<(u64, [pallas::Base; H])> =
-            test_zs_and_us(*BASE, NUM_WINDOWS, "test_base_full_width");
-        static ref ZS_AND_US_SHORT: Vec<(u64, [pallas::Base; H])> =
-            test_zs_and_us(*BASE, NUM_WINDOWS_SHORT, "test_base_short");
-    }
+    static BASE: LazyLock<pallas::Affine> =
+        LazyLock::new(|| pallas::Point::generator().to_affine());
+    static ZS_AND_US: LazyLock<Vec<(u64, [pallas::Base; H])>> =
+        LazyLock::new(|| test_zs_and_us(*BASE, NUM_WINDOWS, "test_base_full_width"));
+    static ZS_AND_US_SHORT: LazyLock<Vec<(u64, [pallas::Base; H])>> =
+        LazyLock::new(|| test_zs_and_us(*BASE, NUM_WINDOWS_SHORT, "test_base_short"));
 
     impl FullWidth {
         pub(crate) fn from_pallas_generator() -> Self {

@@ -105,9 +105,6 @@ version = "1"
 [dev-dependencies.criterion]
 version = "0.5"
 
-[dev-dependencies.lazy_static]
-version = "1.4"
-
 [dev-dependencies.proptest]
 version = "1.0"
 

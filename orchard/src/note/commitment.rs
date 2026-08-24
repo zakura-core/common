@@ -6,11 +6,12 @@
 //! appearing in the commitment tree), and its randomness is
 //! [`NoteCommitTrapdoor`].
 
+use alloc::boxed::Box;
 use core::iter;
 
 use bitvec::{array::BitArray, order::Lsb0};
 use group::ff::{PrimeField, PrimeFieldBits};
-use lazy_static::lazy_static;
+use once_cell::race::OnceBox;
 use pasta_curves::pallas;
 use subtle::{ConstantTimeEq, CtOption};
 
@@ -20,13 +21,14 @@ use crate::{
     value::NoteValue,
 };
 
-lazy_static! {
-    static ref NOTE_COMMITMENT_DOMAIN: sinsemilla::CommitDomain =
-        sinsemilla::CommitDomain::new(NOTE_COMMITMENT_PERSONALIZATION);
-}
+static NOTE_COMMITMENT_DOMAIN: OnceBox<sinsemilla::CommitDomain> = OnceBox::new();
 
 fn note_commitment_domain() -> &'static sinsemilla::CommitDomain {
-    &NOTE_COMMITMENT_DOMAIN
+    NOTE_COMMITMENT_DOMAIN.get_or_init(|| {
+        Box::new(sinsemilla::CommitDomain::new(
+            NOTE_COMMITMENT_PERSONALIZATION,
+        ))
+    })
 }
 
 /// The trapdoor for a note commitment.

@@ -17,8 +17,8 @@ use halo2_proofs::{
     },
     poly::Rotation,
 };
-use lazy_static::lazy_static;
 use pasta_curves::{arithmetic::CurveAffine, pallas};
+use std::sync::LazyLock;
 #[cfg(test)]
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 
@@ -26,9 +26,7 @@ pub mod base_field_elem;
 pub mod full_width;
 pub mod short;
 
-lazy_static! {
-    static ref H_BASE: pallas::Base = pallas::Base::from(H as u64);
-}
+static H_BASE: LazyLock<pallas::Base> = LazyLock::new(|| pallas::Base::from(H as u64));
 
 /// Computes the points selected by a fixed-base scalar's windows.
 #[cfg(test)]

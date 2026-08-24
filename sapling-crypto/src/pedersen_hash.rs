@@ -36,7 +36,7 @@ where
     let mut bits = personalization.get_bits().into_iter().chain(bits);
 
     let mut result = jubjub::SubgroupPoint::identity();
-    let mut generators = crate::constants::PEDERSEN_HASH_EXP_TABLE.iter();
+    let mut generators = crate::constants::pedersen_hash_exp_table().iter();
 
     loop {
         let mut acc = jubjub::Fr::zero();

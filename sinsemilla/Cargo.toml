@@ -38,9 +38,12 @@ path = "src/lib.rs"
 [dependencies.group]
 version = "0.14"
 
-[dependencies.lazy_static]
+[dependencies.once_cell]
 version = "1"
-features = ["spin_no_std"]
+features = [
+    "race",
+    "alloc",
+]
 default-features = false
 
 [dependencies.pasta_curves]

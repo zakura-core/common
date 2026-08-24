@@ -6,7 +6,9 @@ use rand::TryRng;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 
 #[cfg(feature = "sqrt-table")]
-use lazy_static::lazy_static;
+use alloc::boxed::Box;
+#[cfg(feature = "sqrt-table")]
+use once_cell::race::OnceBox;
 
 #[cfg(feature = "bits")]
 use ff::{FieldBits, PrimeFieldBits};
@@ -626,7 +628,7 @@ impl ff::Field for Fp {
     fn sqrt_ratio(num: &Self, div: &Self) -> (Choice, Self) {
         #[cfg(feature = "sqrt-table")]
         {
-            FP_TABLES.sqrt_ratio(num, div)
+            fp_tables().sqrt_ratio(num, div)
         }
 
         #[cfg(not(feature = "sqrt-table"))]
@@ -635,14 +637,14 @@ impl ff::Field for Fp {
 
     #[cfg(feature = "sqrt-table")]
     fn sqrt_alt(&self) -> (Choice, Self) {
-        FP_TABLES.sqrt_alt(self)
+        fp_tables().sqrt_alt(self)
     }
 
     /// Computes the square root of this element, if it exists.
     fn sqrt(&self) -> CtOption<Self> {
         #[cfg(feature = "sqrt-table")]
         {
-            let (is_square, res) = FP_TABLES.sqrt_alt(self);
+            let (is_square, res) = fp_tables().sqrt_alt(self);
             CtOption::new(res, is_square)
         }
 
@@ -839,12 +841,14 @@ impl PrimeFieldBits for Fp {
 }
 
 #[cfg(feature = "sqrt-table")]
-lazy_static! {
-    // The perfect hash parameters were found by searching the normalized
-    // Montgomery representations of the order-256 subgroup. Construction and
-    // `fp_sqrt_table_hash_is_perfect` exhaustively check their safety invariant.
-    #[cfg_attr(docsrs, doc(cfg(feature = "sqrt-table")))]
-    static ref FP_TABLES: SqrtTables<Fp> = SqrtTables::new(0x54C11DB5);
+static FP_TABLES: OnceBox<SqrtTables<Fp>> = OnceBox::new();
+
+// The perfect hash parameters were found by searching the normalized
+// Montgomery representations of the order-256 subgroup. Construction and
+// `fp_sqrt_table_hash_is_perfect` exhaustively check their safety invariant.
+#[cfg(feature = "sqrt-table")]
+fn fp_tables() -> &'static SqrtTables<Fp> {
+    FP_TABLES.get_or_init(|| Box::new(SqrtTables::new(0x54C11DB5)))
 }
 
 impl SqrtTableHelpers for Fp {
@@ -1068,7 +1072,7 @@ fn test_sqrt() {
 #[cfg(feature = "sqrt-table")]
 #[test]
 fn fp_sqrt_table_hash_is_perfect() {
-    FP_TABLES.assert_hash_table_is_consistent();
+    fp_tables().assert_hash_table_is_consistent();
 }
 
 #[cfg(feature = "sqrt-table")]

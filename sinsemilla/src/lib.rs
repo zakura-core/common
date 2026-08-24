@@ -6,9 +6,10 @@
 #[macro_use]
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use group::{Curve, Wnaf};
-use lazy_static::lazy_static;
+use once_cell::race::OnceBox;
 use pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
     pallas,
@@ -21,11 +22,17 @@ mod sinsemilla_s;
 pub use sinsemilla_s::SINSEMILLA_S;
 pub mod weighted;
 
-lazy_static! {
-    static ref SINSEMILLA_S_AFFINE: Vec<pallas::Affine> = SINSEMILLA_S
-        .iter()
-        .map(|(x, y)| pallas::Affine::from_xy(*x, *y).unwrap())
-        .collect();
+static SINSEMILLA_S_AFFINE: OnceBox<Vec<pallas::Affine>> = OnceBox::new();
+
+fn sinsemilla_s_affine() -> &'static [pallas::Affine] {
+    SINSEMILLA_S_AFFINE.get_or_init(|| {
+        Box::new(
+            SINSEMILLA_S
+                .iter()
+                .map(|(x, y)| pallas::Affine::from_xy(*x, *y).unwrap())
+                .collect(),
+        )
+    })
 }
 
 /// Number of bits of each message piece in $\mathsf{SinsemillaHashToPoint}$
@@ -141,7 +148,7 @@ impl HashDomain {
 
     #[allow(non_snake_case)]
     fn hash_to_point_inner(&self, msg: impl Iterator<Item = bool>) -> IncompletePoint {
-        let generators = &*SINSEMILLA_S_AFFINE;
+        let generators = sinsemilla_s_affine();
         MessageWords::new(msg).fold(IncompletePoint::from(self.Q), |acc, word| {
             let S_chunk = generators[word as usize];
             acc.double_and_add(S_chunk)
@@ -256,7 +263,7 @@ mod tests {
     ) -> CtOption<pallas::Point> {
         MessageWords::new(msg)
             .fold(IncompletePoint::from(domain.Q), |acc, word| {
-                let generator = super::SINSEMILLA_S_AFFINE[word as usize];
+                let generator = super::sinsemilla_s_affine()[word as usize];
                 (acc + generator) + acc
             })
             .into()
@@ -355,7 +362,7 @@ mod tests {
             let actual = SINSEMILLA_S[j as usize];
             assert_eq!(computed, actual);
 
-            let decoded = super::SINSEMILLA_S_AFFINE[j as usize]
+            let decoded = super::sinsemilla_s_affine()[j as usize]
                 .coordinates()
                 .unwrap();
             assert_eq!((*decoded.x(), *decoded.y()), actual);

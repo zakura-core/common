@@ -65,7 +65,7 @@ use core::mem;
 use group::{Curve, CurveAffine as _, Group};
 use pasta_curves::{arithmetic::CurveAffine as _, pallas};
 
-use super::{HashDomain, MessageWords, C, K, SINSEMILLA_S_AFFINE};
+use super::{sinsemilla_s_affine, HashDomain, MessageWords, C, K};
 
 const GENERATOR_COUNT: usize = 1 << K;
 
@@ -232,12 +232,12 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
 
         let mut weighted_generators = Vec::with_capacity(N * GENERATOR_COUNT);
 
-        let mut projective_row: Vec<_> = SINSEMILLA_S_AFFINE
+        let mut projective_row: Vec<_> = sinsemilla_s_affine()
             .iter()
             .copied()
             .map(pallas::Point::from)
             .collect();
-        let mut affine_row: Vec<_> = SINSEMILLA_S_AFFINE.iter().copied().collect();
+        let mut affine_row: Vec<_> = sinsemilla_s_affine().iter().copied().collect();
 
         for exponent in 0..N {
             assert!(affine_row
@@ -664,7 +664,7 @@ mod tests {
     use subtle::CtOption;
 
     use super::{UncheckedFixedLengthHashDomain, GENERATOR_COUNT};
-    use crate::{HashDomain, K, SINSEMILLA_S_AFFINE};
+    use crate::{sinsemilla_s_affine, HashDomain, K};
 
     const MERKLE_WORDS: usize = 52;
     const MERKLE_DOMAIN: &str = "z.cash:Orchard-MerkleCRH";
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn unchecked_evaluator_deliberately_skips_incomplete_addition_failure() {
         let generator_index = 0;
-        let generator = SINSEMILLA_S_AFFINE[generator_index];
+        let generator = sinsemilla_s_affine()[generator_index];
         let generator_point = pallas::Point::from(generator);
         let domain = HashDomain::from_Q(generator_point);
         let unchecked = UncheckedFixedLengthHashDomain::<1>::new(&domain);
@@ -836,7 +836,7 @@ mod tests {
         for generator in 0..GENERATOR_COUNT {
             assert_eq!(
                 weighted.weighted_generator(0, generator),
-                SINSEMILLA_S_AFFINE[generator]
+                sinsemilla_s_affine()[generator]
             );
             for exponent in 0..MERKLE_WORDS - 1 {
                 let entry = weighted.weighted_generator(exponent, generator);

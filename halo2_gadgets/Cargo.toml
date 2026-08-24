@@ -109,9 +109,6 @@ version = "1.0.0-rc.3"
 default-features = false
 package = "zakura-halo2-proofs"
 
-[dependencies.lazy_static]
-version = "1"
-
 [dependencies.pasta_curves]
 path = "../pasta_curves"
 version = "1.0.0-rc.3"

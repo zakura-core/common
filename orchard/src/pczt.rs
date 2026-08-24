@@ -402,7 +402,7 @@ mod tests {
             Zip32Derivation,
         },
         primitives::redpallas::{self, SpendAuth},
-        tree::{MerkleHashOrchard, MerklePath, EMPTY_ROOTS},
+        tree::{empty_roots, MerkleHashOrchard, MerklePath},
         value::NoteValue,
         Note,
     };
@@ -478,7 +478,7 @@ mod tests {
             BundleType::DEFAULT,
             BundleVersion::orchard_v2(),
             BundleVersion::orchard_v2().default_flags(),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
         builder
@@ -499,7 +499,7 @@ mod tests {
             BundleType::DEFAULT,
             BundleVersion::ironwood_v3(),
             BundleVersion::ironwood_v3().default_flags(),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
         builder
@@ -528,7 +528,7 @@ mod tests {
             BundleType::DEFAULT,
             bundle_version,
             bundle_version.default_flags(),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
         builder
@@ -591,7 +591,7 @@ mod tests {
             BundleType::DEFAULT,
             BundleVersion::ironwood_v3(),
             BundleVersion::ironwood_v3().default_flags(),
-            EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into(),
+            empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
         builder
@@ -1200,7 +1200,7 @@ mod tests {
 
     #[test]
     fn parse_uses_bundle_version_for_flags() {
-        let anchor: crate::Anchor = EMPTY_ROOTS[MERKLE_DEPTH_ORCHARD].into();
+        let anchor: crate::Anchor = empty_roots()[MERKLE_DEPTH_ORCHARD].into();
 
         // Bit 2 is reserved pre-NU6.3, and rejected for Orchard post-NU6.3 (which mandates
         // the cross-address restriction); only Ironwood may set it.

@@ -63,10 +63,6 @@ version = "0.14"
 [dependencies.group]
 version = "0.14"
 
-[dependencies.lazy_static]
-version = "1.4.0"
-optional = true
-
 [dependencies.pairing]
 path = "../pairing"
 version = "1.0.0-rc.3"
@@ -116,7 +112,6 @@ default = [
 ]
 groth16 = ["pairing"]
 multicore = [
-    "lazy_static",
     "rayon",
     "rand",
 ]

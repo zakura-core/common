@@ -186,9 +186,6 @@ features = ["test-impl"]
 [dev-dependencies.hex]
 version = "0.4.3"
 
-[dev-dependencies.lazy_static]
-version = "1.5"
-
 [dev-dependencies.num-bigint]
 version = "0.4.6"
 

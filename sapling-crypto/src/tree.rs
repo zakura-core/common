@@ -1,9 +1,10 @@
 use bitvec::{order::Lsb0, view::AsBits};
 use group::{ff::PrimeField, Curve};
 use incrementalmerkletree::{Hashable, Level};
-use lazy_static::lazy_static;
+use once_cell::race::OnceBox;
 use subtle::CtOption;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -19,18 +20,21 @@ pub type IncrementalWitness =
     incrementalmerkletree::witness::IncrementalWitness<Node, NOTE_COMMITMENT_TREE_DEPTH>;
 pub type MerklePath = incrementalmerkletree::MerklePath<Node, NOTE_COMMITMENT_TREE_DEPTH>;
 
-lazy_static! {
-    static ref UNCOMMITTED_SAPLING: bls12_381::Scalar = bls12_381::Scalar::one();
-    static ref EMPTY_ROOTS: Vec<Node> = empty_roots();
+fn uncommitted_sapling() -> bls12_381::Scalar {
+    bls12_381::Scalar::one()
 }
 
-fn empty_roots() -> Vec<Node> {
-    let mut v = vec![Node::empty_leaf()];
-    for d in 0..NOTE_COMMITMENT_TREE_DEPTH {
-        let next = Node::combine(d.into(), &v[usize::from(d)], &v[usize::from(d)]);
-        v.push(next);
-    }
-    v
+static EMPTY_ROOTS: OnceBox<Vec<Node>> = OnceBox::new();
+
+fn empty_roots() -> &'static [Node] {
+    EMPTY_ROOTS.get_or_init(|| {
+        let mut v = vec![Node::empty_leaf()];
+        for d in 0..NOTE_COMMITMENT_TREE_DEPTH {
+            let next = Node::combine(d.into(), &v[usize::from(d)], &v[usize::from(d)]);
+            v.push(next);
+        }
+        Box::new(v)
+    })
 }
 
 /// Compute a parent node in the Sapling commitment tree given its two children.
@@ -155,7 +159,7 @@ impl Node {
 
 impl Hashable for Node {
     fn empty_leaf() -> Self {
-        Node(*UNCOMMITTED_SAPLING)
+        Node(uncommitted_sapling())
     }
 
     fn combine(level: Level, lhs: &Self, rhs: &Self) -> Self {
@@ -167,7 +171,7 @@ impl Hashable for Node {
     }
 
     fn empty_root(level: Level) -> Self {
-        EMPTY_ROOTS[<usize>::from(level)]
+        empty_roots()[<usize>::from(level)]
     }
 }
 

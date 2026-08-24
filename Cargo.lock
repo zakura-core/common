@@ -1824,9 +1824,6 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-dependencies = [
- "spin 0.9.9",
-]
 
 [[package]]
 name = "lebe"
@@ -3747,7 +3744,6 @@ dependencies = [
  "ff",
  "group",
  "hex-literal",
- "lazy_static",
  "rand 0.10.2",
  "rand_core 0.10.1",
  "rand_xorshift 0.5.0",
@@ -3787,7 +3783,6 @@ dependencies = [
  "ff",
  "group",
  "inferno",
- "lazy_static",
  "plotters",
  "pprof 0.8.0",
  "proptest",
@@ -3912,9 +3907,9 @@ dependencies = [
  "image",
  "incrementalmerkletree",
  "inferno",
- "lazy_static",
  "memuse",
  "nonempty",
+ "once_cell",
  "plotters",
  "pprof 0.11.1",
  "proptest",
@@ -3958,8 +3953,8 @@ dependencies = [
  "ff",
  "group",
  "hex",
- "lazy_static",
  "maybe-rayon",
+ "once_cell",
  "proptest",
  "rand 0.10.2",
  "rand_xorshift 0.5.0",
@@ -4041,7 +4036,6 @@ dependencies = [
  "frost-rerandomized",
  "group",
  "hex",
- "lazy_static",
  "num-bigint",
  "num-traits",
  "proptest",
@@ -4064,7 +4058,6 @@ version = "1.0.0-rc.3"
 dependencies = [
  "bincode",
  "criterion 0.5.1",
- "lazy_static",
  "proptest",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
@@ -4094,8 +4087,8 @@ dependencies = [
  "group",
  "hex",
  "incrementalmerkletree",
- "lazy_static",
  "memuse",
+ "once_cell",
  "pprof 0.15.0",
  "proptest",
  "rand 0.10.2",
@@ -4119,7 +4112,7 @@ version = "1.0.0-rc.3"
 dependencies = [
  "criterion 0.4.0",
  "group",
- "lazy_static",
+ "once_cell",
  "subtle",
  "zakura-pasta-curves",
 ]

@@ -8,7 +8,7 @@ use bellman::gadgets::boolean::Boolean;
 use bellman::gadgets::lookup::*;
 use bellman::{ConstraintSystem, SynthesisError};
 
-use super::constants::PEDERSEN_CIRCUIT_GENERATORS;
+use super::constants::pedersen_circuit_generators;
 
 fn get_constant_bools(person: &Personalization) -> Vec<Boolean> {
     person
@@ -31,7 +31,7 @@ where
 
     let mut edwards_result = None;
     let mut bits = personalization.iter().chain(bits.iter()).peekable();
-    let mut segment_generators = PEDERSEN_CIRCUIT_GENERATORS.iter();
+    let mut segment_generators = pedersen_circuit_generators().iter();
     let boolean_false = Boolean::constant(false);
 
     let mut segment_i = 0;
