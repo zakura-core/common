@@ -801,12 +801,12 @@ struct AffinePoint<F> {
     y: F,
 }
 
-// This is deliberately a correctness-first staging representation: keeping
-// every input to the deferred affine addition together makes its association
-// with the batch-inverted denominator explicit and easy to audit. This version
-// is already faster than projective bucket reduction, but the record's size
-// increases memory traffic. The intended final stacked implementation removes
-// it by fusing these phases.
+// This is deliberately a correctness-first staging representation: keeping the
+// chord terms and batch-inversion scratch together makes their association easy
+// to audit. The left operand now lives in its `points[output]` result slot,
+// which already reduces memory traffic while preserving that relationship.
+// This is faster than projective bucket reduction; the intended end state
+// removes the remaining record to save more memory traffic.
 struct PendingAffineAddition<F> {
     output: usize,
     x_sum: F,
