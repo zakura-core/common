@@ -26,6 +26,7 @@ extern crate std;
 mod address;
 pub mod builder;
 pub mod bundle;
+mod once;
 
 #[cfg(feature = "circuit")]
 pub mod circuit;

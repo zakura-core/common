@@ -1,11 +1,10 @@
 //! Various constants used by the Sapling protocol.
 
-use alloc::boxed::Box;
+use crate::once::OnceTable;
 use alloc::vec::Vec;
 use ff::PrimeField;
 use group::Group;
 use jubjub::SubgroupPoint;
-use once_cell::race::OnceBox;
 
 /// First 64 bytes of the BLAKE2s input during group hash.
 /// This is chosen to be some random string that we couldn't have anticipated when we designed
@@ -237,11 +236,11 @@ pub const PEDERSEN_HASH_CHUNKS_PER_GENERATOR: usize = 63;
 /// The window size for exponentiation of Pedersen hash generators outside the circuit.
 pub const PEDERSEN_HASH_EXP_WINDOW_SIZE: u32 = 8;
 
-static PEDERSEN_HASH_EXP_TABLE: OnceBox<Vec<Vec<Vec<SubgroupPoint>>>> = OnceBox::new();
+static PEDERSEN_HASH_EXP_TABLE: OnceTable<Vec<Vec<Vec<SubgroupPoint>>>> = OnceTable::new();
 
 /// The exp table for [`PEDERSEN_HASH_GENERATORS`].
 pub fn pedersen_hash_exp_table() -> &'static [Vec<Vec<SubgroupPoint>>] {
-    PEDERSEN_HASH_EXP_TABLE.get_or_init(|| Box::new(generate_pedersen_hash_exp_table()))
+    PEDERSEN_HASH_EXP_TABLE.get_or_init(generate_pedersen_hash_exp_table)
 }
 
 /// Creates the exp table for the Pedersen hash generators.

@@ -6,10 +6,8 @@
 #[macro_use]
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use group::{Curve, Wnaf};
-use once_cell::race::OnceBox;
 use pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
     pallas,
@@ -18,20 +16,20 @@ use subtle::CtOption;
 
 mod addition;
 use self::addition::IncompletePoint;
+mod once;
+use self::once::OnceTable;
 mod sinsemilla_s;
 pub use sinsemilla_s::SINSEMILLA_S;
 pub mod weighted;
 
-static SINSEMILLA_S_AFFINE: OnceBox<Vec<pallas::Affine>> = OnceBox::new();
+static SINSEMILLA_S_AFFINE: OnceTable<Vec<pallas::Affine>> = OnceTable::new();
 
 fn sinsemilla_s_affine() -> &'static [pallas::Affine] {
     SINSEMILLA_S_AFFINE.get_or_init(|| {
-        Box::new(
-            SINSEMILLA_S
-                .iter()
-                .map(|(x, y)| pallas::Affine::from_xy(*x, *y).unwrap())
-                .collect(),
-        )
+        SINSEMILLA_S
+            .iter()
+            .map(|(x, y)| pallas::Affine::from_xy(*x, *y).unwrap())
+            .collect()
     })
 }
 

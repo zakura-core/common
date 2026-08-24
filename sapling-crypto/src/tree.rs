@@ -1,10 +1,9 @@
+use crate::once::OnceTable;
 use bitvec::{order::Lsb0, view::AsBits};
 use group::{ff::PrimeField, Curve};
 use incrementalmerkletree::{Hashable, Level};
-use once_cell::race::OnceBox;
 use subtle::CtOption;
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -24,7 +23,7 @@ fn uncommitted_sapling() -> bls12_381::Scalar {
     bls12_381::Scalar::one()
 }
 
-static EMPTY_ROOTS: OnceBox<Vec<Node>> = OnceBox::new();
+static EMPTY_ROOTS: OnceTable<Vec<Node>> = OnceTable::new();
 
 fn empty_roots() -> &'static [Node] {
     EMPTY_ROOTS.get_or_init(|| {
@@ -33,7 +32,7 @@ fn empty_roots() -> &'static [Node] {
             let next = Node::combine(d.into(), &v[usize::from(d)], &v[usize::from(d)]);
             v.push(next);
         }
-        Box::new(v)
+        v
     })
 }
 

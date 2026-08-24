@@ -2,12 +2,11 @@
 
 use crate::constants::{PEDERSEN_HASH_CHUNKS_PER_GENERATOR, PEDERSEN_HASH_GENERATORS};
 
-use alloc::boxed::Box;
+use crate::once::OnceTable;
 use alloc::vec::Vec;
 use bls12_381::Scalar;
 use group::{ff::Field, Curve, Group};
 use jubjub::ExtendedPoint;
-use once_cell::race::OnceBox;
 
 /// The `d` constant of the twisted Edwards curve.
 pub(crate) const EDWARDS_D: Scalar = Scalar::from_raw([
@@ -43,72 +42,58 @@ pub type FixedGenerator = &'static [Vec<(Scalar, Scalar)>];
 /// Circuit version of a generator for fixed-base salar multiplication.
 pub type FixedGeneratorOwned = Vec<Vec<(Scalar, Scalar)>>;
 
-static PROOF_GENERATION_KEY_GENERATOR: OnceBox<FixedGeneratorOwned> = OnceBox::new();
+static PROOF_GENERATION_KEY_GENERATOR: OnceTable<FixedGeneratorOwned> = OnceTable::new();
 
 pub fn proof_generation_key_generator() -> FixedGenerator {
     PROOF_GENERATION_KEY_GENERATOR.get_or_init(|| {
-        Box::new(generate_circuit_generator(
-            crate::constants::PROOF_GENERATION_KEY_GENERATOR,
-        ))
+        generate_circuit_generator(crate::constants::PROOF_GENERATION_KEY_GENERATOR)
     })
 }
 
-static NOTE_COMMITMENT_RANDOMNESS_GENERATOR: OnceBox<FixedGeneratorOwned> = OnceBox::new();
+static NOTE_COMMITMENT_RANDOMNESS_GENERATOR: OnceTable<FixedGeneratorOwned> = OnceTable::new();
 
 pub fn note_commitment_randomness_generator() -> FixedGenerator {
     NOTE_COMMITMENT_RANDOMNESS_GENERATOR.get_or_init(|| {
-        Box::new(generate_circuit_generator(
-            crate::constants::NOTE_COMMITMENT_RANDOMNESS_GENERATOR,
-        ))
+        generate_circuit_generator(crate::constants::NOTE_COMMITMENT_RANDOMNESS_GENERATOR)
     })
 }
 
-static NULLIFIER_POSITION_GENERATOR: OnceBox<FixedGeneratorOwned> = OnceBox::new();
+static NULLIFIER_POSITION_GENERATOR: OnceTable<FixedGeneratorOwned> = OnceTable::new();
 
 pub fn nullifier_position_generator() -> FixedGenerator {
-    NULLIFIER_POSITION_GENERATOR.get_or_init(|| {
-        Box::new(generate_circuit_generator(
-            crate::constants::NULLIFIER_POSITION_GENERATOR,
-        ))
-    })
+    NULLIFIER_POSITION_GENERATOR
+        .get_or_init(|| generate_circuit_generator(crate::constants::NULLIFIER_POSITION_GENERATOR))
 }
 
-static VALUE_COMMITMENT_VALUE_GENERATOR: OnceBox<FixedGeneratorOwned> = OnceBox::new();
+static VALUE_COMMITMENT_VALUE_GENERATOR: OnceTable<FixedGeneratorOwned> = OnceTable::new();
 
 pub fn value_commitment_value_generator() -> FixedGenerator {
     VALUE_COMMITMENT_VALUE_GENERATOR.get_or_init(|| {
-        Box::new(generate_circuit_generator(
-            crate::constants::VALUE_COMMITMENT_VALUE_GENERATOR,
-        ))
+        generate_circuit_generator(crate::constants::VALUE_COMMITMENT_VALUE_GENERATOR)
     })
 }
 
-static VALUE_COMMITMENT_RANDOMNESS_GENERATOR: OnceBox<FixedGeneratorOwned> = OnceBox::new();
+static VALUE_COMMITMENT_RANDOMNESS_GENERATOR: OnceTable<FixedGeneratorOwned> = OnceTable::new();
 
 pub fn value_commitment_randomness_generator() -> FixedGenerator {
     VALUE_COMMITMENT_RANDOMNESS_GENERATOR.get_or_init(|| {
-        Box::new(generate_circuit_generator(
-            crate::constants::VALUE_COMMITMENT_RANDOMNESS_GENERATOR,
-        ))
+        generate_circuit_generator(crate::constants::VALUE_COMMITMENT_RANDOMNESS_GENERATOR)
     })
 }
 
-static SPENDING_KEY_GENERATOR: OnceBox<FixedGeneratorOwned> = OnceBox::new();
+static SPENDING_KEY_GENERATOR: OnceTable<FixedGeneratorOwned> = OnceTable::new();
 
 pub fn spending_key_generator() -> FixedGenerator {
-    SPENDING_KEY_GENERATOR.get_or_init(|| {
-        Box::new(generate_circuit_generator(
-            crate::constants::SPENDING_KEY_GENERATOR,
-        ))
-    })
+    SPENDING_KEY_GENERATOR
+        .get_or_init(|| generate_circuit_generator(crate::constants::SPENDING_KEY_GENERATOR))
 }
 
-static PEDERSEN_CIRCUIT_GENERATORS: OnceBox<Vec<Vec<Vec<(Scalar, Scalar)>>>> = OnceBox::new();
+static PEDERSEN_CIRCUIT_GENERATORS: OnceTable<Vec<Vec<Vec<(Scalar, Scalar)>>>> = OnceTable::new();
 
 /// The pre-computed window tables `[-4, 3, 2, 1, 1, 2, 3, 4]` of different magnitudes
 /// of the Pedersen hash segment generators.
 pub(crate) fn pedersen_circuit_generators() -> &'static [Vec<Vec<(Scalar, Scalar)>>] {
-    PEDERSEN_CIRCUIT_GENERATORS.get_or_init(|| Box::new(generate_pedersen_circuit_generators()))
+    PEDERSEN_CIRCUIT_GENERATORS.get_or_init(generate_pedersen_circuit_generators)
 }
 
 /// Creates the 3-bit window table `[0, 1, ..., 8]` for different magnitudes of a fixed

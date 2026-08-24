@@ -6,9 +6,7 @@ use rand::TryRng;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 
 #[cfg(feature = "sqrt-table")]
-use alloc::boxed::Box;
-#[cfg(feature = "sqrt-table")]
-use once_cell::race::OnceBox;
+use crate::once::OnceTable;
 
 #[cfg(feature = "bits")]
 use ff::{FieldBits, PrimeFieldBits};
@@ -841,14 +839,14 @@ impl PrimeFieldBits for Fp {
 }
 
 #[cfg(feature = "sqrt-table")]
-static FP_TABLES: OnceBox<SqrtTables<Fp>> = OnceBox::new();
+static FP_TABLES: OnceTable<SqrtTables<Fp>> = OnceTable::new();
 
 // The perfect hash parameters were found by searching the normalized
 // Montgomery representations of the order-256 subgroup. Construction and
 // `fp_sqrt_table_hash_is_perfect` exhaustively check their safety invariant.
 #[cfg(feature = "sqrt-table")]
 fn fp_tables() -> &'static SqrtTables<Fp> {
-    FP_TABLES.get_or_init(|| Box::new(SqrtTables::new(0x54C11DB5)))
+    FP_TABLES.get_or_init(|| SqrtTables::new(0x54C11DB5))
 }
 
 impl SqrtTableHelpers for Fp {

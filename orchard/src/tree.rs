@@ -1,6 +1,5 @@
 //! Types related to Orchard note commitment trees and anchors.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::iter;
 
@@ -23,8 +22,8 @@ use pasta_curves::pallas;
 use sinsemilla::weighted::{BatchHashWorkspace, UncheckedFixedLengthHashDomain};
 use sinsemilla::HashDomain;
 
+use crate::once::OnceTable;
 use ff::{Field, PrimeField, PrimeFieldBits};
-use once_cell::race::OnceBox;
 use rand::Rng;
 use serde::de::{Deserializer, Error};
 use serde::ser::Serializer;
@@ -61,24 +60,22 @@ const CHILD_REMAINDER_MASK: u8 = (1 << MERKLE_CRH_CHILD_REMAINDER_BITS) - 1;
 const BYTE_BITS: usize = u8::BITS as usize;
 
 #[cfg(feature = "weighted-merkle")]
-static MERKLE_CRH_DOMAIN: OnceBox<UncheckedFixedLengthHashDomain<MERKLE_CRH_WORDS>> =
-    OnceBox::new();
+static MERKLE_CRH_DOMAIN: OnceTable<UncheckedFixedLengthHashDomain<MERKLE_CRH_WORDS>> =
+    OnceTable::new();
 
 #[cfg(feature = "weighted-merkle")]
 fn merkle_crh_domain() -> &'static UncheckedFixedLengthHashDomain<MERKLE_CRH_WORDS> {
     MERKLE_CRH_DOMAIN.get_or_init(|| {
-        Box::new(UncheckedFixedLengthHashDomain::new(&HashDomain::new(
-            MERKLE_CRH_PERSONALIZATION,
-        )))
+        UncheckedFixedLengthHashDomain::new(&HashDomain::new(MERKLE_CRH_PERSONALIZATION))
     })
 }
 
 #[cfg(not(feature = "weighted-merkle"))]
-static MERKLE_CRH_DOMAIN: OnceBox<HashDomain> = OnceBox::new();
+static MERKLE_CRH_DOMAIN: OnceTable<HashDomain> = OnceTable::new();
 
 #[cfg(not(feature = "weighted-merkle"))]
 fn merkle_crh_domain() -> &'static HashDomain {
-    MERKLE_CRH_DOMAIN.get_or_init(|| Box::new(HashDomain::new(MERKLE_CRH_PERSONALIZATION)))
+    MERKLE_CRH_DOMAIN.get_or_init(|| HashDomain::new(MERKLE_CRH_PERSONALIZATION))
 }
 
 #[cfg(feature = "weighted-merkle")]
@@ -106,23 +103,20 @@ fn uncommitted_orchard() -> pallas::Base {
     pallas::Base::from(2)
 }
 
-static EMPTY_ROOTS: OnceBox<Vec<MerkleHashOrchard>> = OnceBox::new();
+static EMPTY_ROOTS: OnceTable<Vec<MerkleHashOrchard>> = OnceTable::new();
 
 pub(crate) fn empty_roots() -> &'static [MerkleHashOrchard] {
     EMPTY_ROOTS.get_or_init(|| {
-        Box::new(
-            iter::empty()
-                .chain(Some(MerkleHashOrchard::empty_leaf()))
-                .chain((0..MERKLE_DEPTH_ORCHARD).scan(
-                    MerkleHashOrchard::empty_leaf(),
-                    |state, l| {
-                        let l = l as u8;
-                        *state = MerkleHashOrchard::combine(l.into(), state, state);
-                        Some(*state)
-                    },
-                ))
-                .collect(),
-        )
+        iter::empty()
+            .chain(Some(MerkleHashOrchard::empty_leaf()))
+            .chain(
+                (0..MERKLE_DEPTH_ORCHARD).scan(MerkleHashOrchard::empty_leaf(), |state, l| {
+                    let l = l as u8;
+                    *state = MerkleHashOrchard::combine(l.into(), state, state);
+                    Some(*state)
+                }),
+            )
+            .collect()
     })
 }
 

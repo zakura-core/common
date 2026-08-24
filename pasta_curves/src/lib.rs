@@ -20,6 +20,8 @@ extern crate std;
 mod macros;
 mod curves;
 mod fields;
+#[cfg(feature = "sqrt-table")]
+mod once;
 
 pub mod arithmetic;
 #[cfg(feature = "deferred")]

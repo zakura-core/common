@@ -38,6 +38,7 @@ pub mod constants;
 pub mod keys;
 pub mod note;
 pub mod note_encryption;
+mod once;
 pub mod pczt;
 pub mod primitives;
 mod rng_compat;
