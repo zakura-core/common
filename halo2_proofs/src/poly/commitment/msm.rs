@@ -169,15 +169,21 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         // `Params::prepare_zero_checks`) evaluates the identity test
         // directly, with the accumulated commitment terms as its extras.
         // The decomposition evaluated here is the same `terms()` view the
-        // fallback below consumes. Very extras-heavy checks skip the
-        // prepared path: batch verification accumulates dozens of
-        // commitment terms per proof, and once they rival the fixed-base
-        // count the prepared check's tail MSM over them erases its edge —
-        // measured on end-to-end Ironwood batch validation, the crossover
-        // sits near half the fixed-base count at every worker count.
+        // fallback below consumes. The prepared check runs the extras as
+        // their own planned MSM (concurrent with its fixed windows), so
+        // extras-heavy checks — batch verification accumulates dozens of
+        // commitment terms per proof — stay ahead far longer than when
+        // the extras rode the prepared check's residual tail. They still
+        // do not stay ahead forever: once the extras outnumber the fixed
+        // bases, folding everything into one planned MSM prices the fixed
+        // bases at that larger MSM's (cheaper) marginal per-term cost.
+        // End-to-end Ironwood batch validation measures the prepared path
+        // ahead or even through extras ≈ 0.75n (32-bundle batches) and
+        // behind by ~5% on wide pools at extras ≈ 1.5n (64 bundles); the
+        // crossover sits at the fixed-base count itself.
         if let Some(prepared) = self.params.zero_check() {
             let n = self.params.n as usize;
-            if prepared.terms() == n + 2 && other.len() <= n / 2 {
+            if prepared.terms() == n + 2 && other.len() <= n {
                 let mut fixed = vec![C::Scalar::ZERO; n + 2];
                 if let Some(g_scalars) = g_scalars {
                     fixed[..n].copy_from_slice(g_scalars);

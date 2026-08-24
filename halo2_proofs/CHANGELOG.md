@@ -17,7 +17,11 @@ and this project adheres to Rust's notion of
   batch verification pays one prepared check per batch), is never
   serialized, and is shared with clones taken after the call. On the
   Pasta curves the prepared final check measured ~1.6x faster serially
-  and up to ~2.4x on 8–16 workers at `k = 11` scale.
+  and up to ~2.4x on 8–16 workers at `k = 11` scale. Since the prepared
+  check now runs the accumulated commitment terms as their own planned
+  MSM, `MSM::eval` uses it while those terms do not outnumber the fixed
+  bases (the measured crossover on Ironwood batch validation), instead
+  of the earlier half-the-fixed-bases cutoff.
 - The V1 floor planner now caches consecutive region-column writes, avoiding
   repeated hash-table lookups during circuit measurement.
 - Independent polynomial transforms are now parallelized during proving-key
