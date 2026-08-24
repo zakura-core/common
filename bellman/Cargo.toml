@@ -57,10 +57,6 @@ version = "1"
 [dependencies.byteorder]
 version = "1"
 
-[dependencies.crossbeam-channel]
-version = "0.5.1"
-optional = true
-
 [dependencies.ff]
 version = "0.14"
 
@@ -69,14 +65,6 @@ version = "0.14"
 
 [dependencies.lazy_static]
 version = "1.4.0"
-optional = true
-
-[dependencies.log]
-version = "0.4"
-optional = true
-
-[dependencies.num_cpus]
-version = "1"
 optional = true
 
 [dependencies.pairing]
@@ -128,10 +116,7 @@ default = [
 ]
 groth16 = ["pairing"]
 multicore = [
-    "crossbeam-channel",
     "lazy_static",
-    "log",
-    "num_cpus",
     "rayon",
     "rand",
 ]

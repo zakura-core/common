@@ -5,10 +5,9 @@
 #[cfg(feature = "multicore")]
 mod implementation {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{sync_channel, Receiver};
 
-    use crossbeam_channel::{bounded, Receiver};
     use lazy_static::lazy_static;
-    use log::{error, trace};
     use rayon::current_num_threads;
 
     static WORKER_SPAWN_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -35,7 +34,7 @@ mod implementation {
             F: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
-            let (sender, receiver) = bounded(1);
+            let (sender, receiver) = sync_channel(1);
 
             // We keep track here of how many times spawn has been called.
             // It can be called without limit, each time, putting a
@@ -54,12 +53,7 @@ mod implementation {
             // the growing work queue and minimize the chances of memory
             // exhaustion.
             if previous_count > *WORKER_SPAWN_MAX_COUNT {
-                let thread_index = rayon::current_thread_index().unwrap_or(0);
                 rayon::scope(move |_| {
-                    trace!("[{}] switching to scope to help clear backlog [threads: current {}, requested {}]",
-                        thread_index,
-                        current_num_threads(),
-                        WORKER_SPAWN_COUNTER.load(Ordering::SeqCst));
                     let res = f();
                     sender.send(res).unwrap();
                     WORKER_SPAWN_COUNTER.fetch_sub(1, Ordering::SeqCst);
@@ -101,8 +95,8 @@ mod implementation {
             // This will be Some if this thread is in the global thread pool.
             if rayon::current_thread_index().is_some() {
                 let msg = "wait() cannot be called from within a thread pool since that would lead to deadlocks";
-                // panic! doesn't necessarily kill the process, so we log as well.
-                error!("{}", msg);
+                // panic! doesn't necessarily kill the process, so we print as well.
+                eprintln!("{}", msg);
                 panic!("{}", msg);
             }
             self.receiver.recv().unwrap()
@@ -110,7 +104,7 @@ mod implementation {
 
         /// One-off sending.
         pub fn done(val: T) -> Self {
-            let (sender, receiver) = bounded(1);
+            let (sender, receiver) = sync_channel(1);
             sender.send(val).unwrap();
 
             Waiter { receiver }
