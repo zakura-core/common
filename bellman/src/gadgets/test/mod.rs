@@ -10,7 +10,6 @@ use crate::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use byteorder::{BigEndian, ByteOrder};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -95,18 +94,18 @@ fn hash_lc<Scalar: PrimeField>(terms: &[(Variable, Scalar)], h: &mut Blake2sStat
     let map = proc_lc::<Scalar>(terms);
 
     let mut buf = [0u8; 9 + 32];
-    BigEndian::write_u64(&mut buf[0..8], map.len() as u64);
+    buf[0..8].copy_from_slice(&(map.len() as u64).to_be_bytes());
     h.update(&buf[0..8]);
 
     for (var, coeff) in map {
         match var.0.get_unchecked() {
             Index::Input(i) => {
                 buf[0] = b'I';
-                BigEndian::write_u64(&mut buf[1..9], i as u64);
+                buf[1..9].copy_from_slice(&(i as u64).to_be_bytes());
             }
             Index::Aux(i) => {
                 buf[0] = b'A';
-                BigEndian::write_u64(&mut buf[1..9], i as u64);
+                buf[1..9].copy_from_slice(&(i as u64).to_be_bytes());
             }
         }
 
@@ -231,9 +230,9 @@ impl<Scalar: PrimeField> TestConstraintSystem<Scalar> {
         {
             let mut buf = [0u8; 24];
 
-            BigEndian::write_u64(&mut buf[0..8], self.inputs.len() as u64);
-            BigEndian::write_u64(&mut buf[8..16], self.aux.len() as u64);
-            BigEndian::write_u64(&mut buf[16..24], self.constraints.len() as u64);
+            buf[0..8].copy_from_slice(&(self.inputs.len() as u64).to_be_bytes());
+            buf[8..16].copy_from_slice(&(self.aux.len() as u64).to_be_bytes());
+            buf[16..24].copy_from_slice(&(self.constraints.len() as u64).to_be_bytes());
             h.update(&buf);
         }
 

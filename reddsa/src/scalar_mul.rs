@@ -95,13 +95,13 @@ pub trait NonAdjacentForm {
         // required so that the NAF digits fit in i8
         debug_assert!(w <= 8);
 
-        use byteorder::{ByteOrder, LittleEndian};
-
         let naf_length = Self::naf_length();
         let mut naf = vec![0; naf_length];
 
         let mut x_u64 = [0u64; 5];
-        LittleEndian::read_u64_into(&self.inner_to_bytes(), &mut x_u64[0..4]);
+        for (limb, chunk) in x_u64[0..4].iter_mut().zip(self.inner_to_bytes().chunks(8)) {
+            *limb = u64::from_le_bytes(chunk.try_into().unwrap());
+        }
 
         let width = 1 << w;
         let window_mask = width - 1;

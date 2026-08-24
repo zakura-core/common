@@ -116,10 +116,6 @@ harness = false
 version = "1"
 default-features = false
 
-[dependencies.byteorder]
-version = "1.5"
-default-features = false
-
 [dependencies.frost-rerandomized]
 version = "3.0.0"
 features = ["serialization"]

@@ -8,9 +8,14 @@ use pairing::{Engine, MultiMillerLoop};
 use crate::SynthesisError;
 
 use crate::multiexp::SourceBuilder;
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Read, Write};
 use std::sync::Arc;
+
+fn read_u32_be<R: Read>(reader: &mut R) -> io::Result<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_be_bytes(buf))
+}
 
 #[cfg(test)]
 mod tests;
@@ -148,7 +153,7 @@ impl<E: Engine> VerifyingKey<E> {
         writer.write_all(self.gamma_g2.to_uncompressed().as_ref())?;
         writer.write_all(self.delta_g1.to_uncompressed().as_ref())?;
         writer.write_all(self.delta_g2.to_uncompressed().as_ref())?;
-        writer.write_u32::<BigEndian>(self.ic.len() as u32)?;
+        writer.write_all(&(self.ic.len() as u32).to_be_bytes())?;
         for ic in &self.ic {
             writer.write_all(ic.to_uncompressed().as_ref())?;
         }
@@ -188,7 +193,7 @@ impl<E: Engine> VerifyingKey<E> {
         let delta_g1 = read_g1(&mut reader)?;
         let delta_g2 = read_g2(&mut reader)?;
 
-        let ic_len = reader.read_u32::<BigEndian>()? as usize;
+        let ic_len = read_u32_be(&mut reader)? as usize;
 
         let mut ic = vec![];
 
@@ -259,27 +264,27 @@ impl<E: Engine> Parameters<E> {
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         self.vk.write(&mut writer)?;
 
-        writer.write_u32::<BigEndian>(self.h.len() as u32)?;
+        writer.write_all(&(self.h.len() as u32).to_be_bytes())?;
         for g in &self.h[..] {
             writer.write_all(g.to_uncompressed().as_ref())?;
         }
 
-        writer.write_u32::<BigEndian>(self.l.len() as u32)?;
+        writer.write_all(&(self.l.len() as u32).to_be_bytes())?;
         for g in &self.l[..] {
             writer.write_all(g.to_uncompressed().as_ref())?;
         }
 
-        writer.write_u32::<BigEndian>(self.a.len() as u32)?;
+        writer.write_all(&(self.a.len() as u32).to_be_bytes())?;
         for g in &self.a[..] {
             writer.write_all(g.to_uncompressed().as_ref())?;
         }
 
-        writer.write_u32::<BigEndian>(self.b_g1.len() as u32)?;
+        writer.write_all(&(self.b_g1.len() as u32).to_be_bytes())?;
         for g in &self.b_g1[..] {
             writer.write_all(g.to_uncompressed().as_ref())?;
         }
 
-        writer.write_u32::<BigEndian>(self.b_g2.len() as u32)?;
+        writer.write_all(&(self.b_g2.len() as u32).to_be_bytes())?;
         for g in &self.b_g2[..] {
             writer.write_all(g.to_uncompressed().as_ref())?;
         }
@@ -353,35 +358,35 @@ impl<E: Engine> Parameters<E> {
         let mut b_g2 = vec![];
 
         {
-            let len = reader.read_u32::<BigEndian>()? as usize;
+            let len = read_u32_be(&mut reader)? as usize;
             for _ in 0..len {
                 h.push(read_g1(&mut reader)?);
             }
         }
 
         {
-            let len = reader.read_u32::<BigEndian>()? as usize;
+            let len = read_u32_be(&mut reader)? as usize;
             for _ in 0..len {
                 l.push(read_g1(&mut reader)?);
             }
         }
 
         {
-            let len = reader.read_u32::<BigEndian>()? as usize;
+            let len = read_u32_be(&mut reader)? as usize;
             for _ in 0..len {
                 a.push(read_g1(&mut reader)?);
             }
         }
 
         {
-            let len = reader.read_u32::<BigEndian>()? as usize;
+            let len = read_u32_be(&mut reader)? as usize;
             for _ in 0..len {
                 b_g1.push(read_g1(&mut reader)?);
             }
         }
 
         {
-            let len = reader.read_u32::<BigEndian>()? as usize;
+            let len = read_u32_be(&mut reader)? as usize;
             for _ in 0..len {
                 b_g2.push(read_g2(&mut reader)?);
             }

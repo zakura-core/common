@@ -317,8 +317,6 @@ pub fn blake2s<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
     input: &[Boolean],
     personalization: &[u8],
 ) -> Result<Vec<Boolean>, SynthesisError> {
-    use byteorder::{ByteOrder, LittleEndian};
-
     assert_eq!(personalization.len(), 8);
     assert!(input.len() % 8 == 0);
 
@@ -330,8 +328,12 @@ pub fn blake2s<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
         UInt32::constant(0x510E527F),
         UInt32::constant(0x9B05688C),
         // Personalization is stored here
-        UInt32::constant(0x1F83D9AB ^ LittleEndian::read_u32(&personalization[0..4])),
-        UInt32::constant(0x5BE0CD19 ^ LittleEndian::read_u32(&personalization[4..8])),
+        UInt32::constant(
+            0x1F83D9AB ^ u32::from_le_bytes(personalization[0..4].try_into().unwrap()),
+        ),
+        UInt32::constant(
+            0x5BE0CD19 ^ u32::from_le_bytes(personalization[4..8].try_into().unwrap()),
+        ),
     ];
 
     let mut blocks: Vec<Vec<UInt32>> = vec![];

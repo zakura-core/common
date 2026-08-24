@@ -3739,7 +3739,6 @@ version = "1.0.0-rc.3"
 dependencies = [
  "bitvec",
  "blake2s_simd",
- "byteorder",
  "criterion 0.4.0",
  "ff",
  "group",
@@ -4031,7 +4030,6 @@ version = "1.0.0-rc.3"
 dependencies = [
  "bincode",
  "blake2b_simd",
- "byteorder",
  "criterion 0.6.0",
  "frost-rerandomized",
  "group",

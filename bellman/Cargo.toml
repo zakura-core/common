@@ -54,9 +54,6 @@ version = "1"
 [dependencies.blake2s_simd]
 version = "1"
 
-[dependencies.byteorder]
-version = "1"
-
 [dependencies.ff]
 version = "0.14"
 
