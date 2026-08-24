@@ -3886,8 +3886,6 @@ dependencies = [
  "secp256k1",
  "secrecy",
  "subtle",
- "tracing",
- "zakura-bls12-381",
  "zakura-jubjub",
  "zakura-orchard",
  "zakura-sapling-crypto",

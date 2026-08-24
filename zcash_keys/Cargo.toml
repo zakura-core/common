@@ -98,11 +98,6 @@ default-features = false
 version = "1"
 default-features = false
 
-[dependencies.bls12_381]
-path = "../bls12_381"
-version = "1.0.0-rc.3"
-package = "zakura-bls12-381"
-
 [dependencies.bs58]
 version = "0.5"
 features = [
@@ -123,9 +118,6 @@ default-features = false
 [dependencies.document-features]
 version = "0.2"
 optional = true
-
-[dependencies.group]
-version = "0.14"
 
 [dependencies.memuse]
 version = "0.2.2"
@@ -175,10 +167,6 @@ version = "0.8"
 version = "2.2.3"
 default-features = false
 
-[dependencies.tracing]
-version = "0.1"
-default-features = false
-
 [dependencies.transparent]
 version = "0.10.0"
 default-features = false
@@ -207,6 +195,9 @@ default-features = false
 
 [dev-dependencies.assert_matches]
 version = "1.5"
+
+[dev-dependencies.group]
+version = "0.14"
 
 [dev-dependencies.hex]
 version = "0.4"
