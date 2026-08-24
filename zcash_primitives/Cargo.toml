@@ -95,6 +95,10 @@ harness = false
 version = "1"
 default-features = false
 
+# Not used directly: pins the pre-release RustCrypto stack pulled in by bip32
+# 0.6.0-pre.1 (via zcash_transparent/zcash_script) to versions known to
+# resolve together, since pre-release semver ranges do not unify reliably.
+# Remove once bip32 moves off pre-release digest/sha2.
 [dependencies.block-buffer]
 version = "=0.11.0-rc.3"
 
@@ -103,6 +107,7 @@ version = "0.1.1"
 features = ["alloc"]
 default-features = false
 
+# Not used directly: version pin, see block-buffer above.
 [dependencies.crypto-common]
 version = "=0.2.0-rc.1"
 
