@@ -50,6 +50,7 @@ struct ProjectivePoint {
     x: pallas::Base,
     y: pallas::Base,
     z: pallas::Base,
+    z_sq: pallas::Base,
 }
 
 #[derive(Clone, Copy)]
@@ -70,7 +71,7 @@ impl DoubleAndAddWitness {
     }
 
     fn x(&self) -> Assigned<pallas::Base> {
-        Assigned::Rational(self.point.x, self.point.z.square())
+        Assigned::Rational(self.point.x, self.point.z_sq)
     }
 }
 
@@ -81,6 +82,7 @@ impl ProjectivePoint {
             x: *coordinates.x(),
             y: *coordinates.y(),
             z: pallas::Base::ONE,
+            z_sq: pallas::Base::ONE,
         }
     }
 
@@ -89,9 +91,8 @@ impl ProjectivePoint {
     /// are the same affine values assigned by the circuit's existing witness
     /// flow.
     fn double_and_add(self, (x_p, y_p): (pallas::Base, pallas::Base)) -> DoubleAndAddWitness {
-        let z_sq = self.z.square();
-        let z_cubed = z_sq * self.z;
-        let h = x_p * z_sq - self.x;
+        let z_cubed = self.z_sq * self.z;
+        let h = x_p * self.z_sq - self.x;
         let r = y_p * z_cubed - self.y;
 
         let h_sq = h.square();
@@ -106,6 +107,7 @@ impl ProjectivePoint {
         let lambda_2_numerator = y_h_cubed.double() - r * d;
         let z_h = self.z * h;
         let z_new = z_h * d;
+        let z_new_sq = z_new.square();
 
         let x_h_sq_d_sq = x_h_sq * d_sq;
         let x_new = lambda_2_numerator.square() - (x_h_sq + x_r) * d_sq;
@@ -119,6 +121,7 @@ impl ProjectivePoint {
                 x: x_new,
                 y: y_new,
                 z: z_new,
+                z_sq: z_new_sq,
             },
         }
     }
@@ -372,10 +375,7 @@ where
         if let Some(point) = projective {
             point.error_if_known_and(|point| point.z.is_zero_vartime())?;
             y_a = point
-                .map(|point| {
-                    let z_sq = point.z.square();
-                    Assigned::Rational(point.y, z_sq * point.z)
-                })
+                .map(|point| Assigned::Rational(point.y, point.z_sq * point.z))
                 .into();
         }
 
@@ -776,6 +776,7 @@ mod tests {
             assert_eq!(witness.x().evaluate(), *coordinates.x());
 
             let z_sq = witness.point.z.square();
+            assert_eq!(witness.point.z_sq, z_sq);
             assert_eq!(witness.point.x, *coordinates.x() * z_sq);
             assert_eq!(witness.point.y, *coordinates.y() * z_sq * witness.point.z);
 
