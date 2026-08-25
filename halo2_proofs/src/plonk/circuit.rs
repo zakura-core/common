@@ -466,18 +466,21 @@ pub trait FloorPlanner {
     /// preserves the behavior of calling [`FloorPlanner::synthesize`] for
     /// every circuit. Implementations may assume that every circuit has the
     /// shape used to generate the same proving key.
+    ///
+    /// `assignments` and `circuits` must have the same length; a mismatch is
+    /// a caller bug (`create_proof` guarantees it), so this is debug-asserted
+    /// rather than reported through [`Error`], whose variants describe
+    /// circuit failures.
     fn synthesize_batch<F: Field, CS: Assignment<F>, C: Circuit<F>>(
         assignments: &mut [CS],
         circuits: &[C],
         config: C::Config,
-        constants: Vec<Column<Fixed>>,
+        constants: &[Column<Fixed>],
     ) -> Result<(), Error> {
-        if assignments.len() != circuits.len() {
-            return Err(Error::Synthesis);
-        }
+        debug_assert_eq!(assignments.len(), circuits.len());
 
         for (assignment, circuit) in assignments.iter_mut().zip(circuits) {
-            Self::synthesize(assignment, circuit, config.clone(), constants.clone())?;
+            Self::synthesize(assignment, circuit, config.clone(), constants.to_vec())?;
         }
 
         Ok(())

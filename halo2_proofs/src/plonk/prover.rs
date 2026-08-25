@@ -271,7 +271,7 @@ pub fn create_proof<
         &mut witnesses,
         circuits,
         config,
-        meta.constants.clone(),
+        &meta.constants,
     )?;
 
     let advice: Vec<AdviceSingle<C>> = witnesses

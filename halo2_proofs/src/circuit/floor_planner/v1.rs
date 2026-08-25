@@ -72,7 +72,7 @@ impl FloorPlanner for V1 {
         config: C::Config,
         constants: Vec<Column<Fixed>>,
     ) -> Result<(), Error> {
-        let layout = Self::plan::<F, CS, C>(circuit, config.clone(), constants)?;
+        let layout = Self::plan::<F, CS, C>(circuit, config.clone(), &constants)?;
         Self::assign(cs, circuit, config, &layout)
     }
 
@@ -80,11 +80,9 @@ impl FloorPlanner for V1 {
         assignments: &mut [CS],
         circuits: &[C],
         config: C::Config,
-        constants: Vec<Column<Fixed>>,
+        constants: &[Column<Fixed>],
     ) -> Result<(), Error> {
-        if assignments.len() != circuits.len() {
-            return Err(Error::Synthesis);
-        }
+        debug_assert_eq!(assignments.len(), circuits.len());
         let Some(first_circuit) = circuits.first() else {
             return Ok(());
         };
@@ -102,7 +100,7 @@ impl V1 {
     fn plan<F: Field, CS: Assignment<F>, C: Circuit<F>>(
         circuit: &C,
         config: C::Config,
-        constants: Vec<Column<Fixed>>,
+        constants: &[Column<Fixed>],
     ) -> Result<V1Layout, Error> {
         // First pass: measure the regions within the circuit.
         let mut measure = MeasurementPass::new();
@@ -125,8 +123,8 @@ impl V1 {
 
         // - Position the constants within those rows.
         let fixed_allocations = constants
-            .into_iter()
-            .map(|column| {
+            .iter()
+            .map(|&column| {
                 let allocation = column_allocations
                     .get(&Column::<Any>::from(column).into())
                     .cloned()

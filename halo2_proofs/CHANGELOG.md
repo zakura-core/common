@@ -11,6 +11,9 @@ and this project adheres to Rust's notion of
 - The V1 floor planner now measures and positions a circuit once when creating
   a proof for several instances of that circuit, then reuses the layout for
   each witness assignment.
+- `FloorPlanner::synthesize_batch` now borrows the global-constant columns and
+  debug-asserts the assignment/circuit pairing instead of reporting a caller
+  bug as a synthesis error.
 - Polynomial evaluation now indexes common-subexpression candidates by
   structural fingerprints, avoiding quadratic candidate scans while retaining
   exact structural matching.
