@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Multi-Action proof creation now synthesizes independent Action witnesses in
+  parallel when the `multicore` feature is enabled.
 - Added a reproducible Orchard proving-key benchmark and configurable worker
   counts for the one-, two-, and four-Action prover benchmarks.
 - Added `MerkleHashBatchWorkspace` and

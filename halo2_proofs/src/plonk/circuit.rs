@@ -485,6 +485,23 @@ pub trait FloorPlanner {
 
         Ok(())
     }
+
+    /// Synthesizes several instances of the same circuit shape in parallel.
+    ///
+    /// The default implementation calls [`FloorPlanner::synthesize_batch`].
+    /// Floor planners that can share immutable planning data across workers
+    /// may override this method.
+    fn synthesize_batch_parallel<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
+        assignments: &mut [CS],
+        circuits: &[C],
+        config: C::Config,
+        constants: &[Column<Fixed>],
+    ) -> Result<(), Error>
+    where
+        C::Config: Send,
+    {
+        Self::synthesize_batch(assignments, circuits, config, constants)
+    }
 }
 
 /// This is a trait that circuits provide implementations for so that the

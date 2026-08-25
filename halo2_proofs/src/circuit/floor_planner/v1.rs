@@ -1,6 +1,7 @@
 use std::fmt;
 
 use ff::Field;
+use maybe_rayon::prelude::*;
 
 use crate::{
     circuit::{
@@ -93,6 +94,37 @@ impl FloorPlanner for V1 {
         }
 
         Ok(())
+    }
+
+    fn synthesize_batch_parallel<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
+        assignments: &mut [CS],
+        circuits: &[C],
+        config: C::Config,
+        constants: &[Column<Fixed>],
+    ) -> Result<(), Error>
+    where
+        C::Config: Send,
+    {
+        debug_assert_eq!(assignments.len(), circuits.len());
+        let Some(first_circuit) = circuits.first() else {
+            return Ok(());
+        };
+
+        let layout = Self::plan::<F, CS, C>(first_circuit, config.clone(), constants)?;
+        if circuits.len() == 1 {
+            return Self::assign(&mut assignments[0], first_circuit, config, &layout);
+        }
+
+        let configs = (0..circuits.len())
+            .map(|_| config.clone())
+            .collect::<Vec<_>>();
+        assignments
+            .into_par_iter()
+            .zip(circuits.into_par_iter())
+            .zip(configs.into_par_iter())
+            .try_for_each(|((assignment, circuit), config)| {
+                Self::assign(assignment, circuit, config, &layout)
+            })
     }
 }
 

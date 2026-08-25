@@ -160,8 +160,87 @@ pub fn create_proof<
     pk: &ProvingKey<C>,
     circuits: &[ConcreteCircuit],
     instances: &[&[&[C::Scalar]]],
+    rng: R,
+    transcript: &mut T,
+) -> Result<(), Error> {
+    create_proof_with_synthesis(
+        params,
+        pk,
+        circuits,
+        instances,
+        rng,
+        transcript,
+        |assignments, circuits, config, constants| {
+            ConcreteCircuit::FloorPlanner::synthesize_batch(
+                assignments,
+                circuits,
+                config,
+                constants,
+            )
+        },
+    )
+}
+
+/// Creates a proof while synthesizing independent circuit witnesses in
+/// parallel.
+///
+/// This has the same behavior and requirements as [`create_proof`], with the
+/// additional requirements that the circuit can be shared between workers and
+/// its configuration can be sent between them.
+pub fn create_proof_parallel<
+    C: CurveAffine,
+    E: EncodedChallenge<C>,
+    R: Rng,
+    T: TranscriptWrite<C, E>,
+    ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
+>(
+    params: &Params<C>,
+    pk: &ProvingKey<C>,
+    circuits: &[ConcreteCircuit],
+    instances: &[&[&[C::ScalarExt]]],
+    rng: R,
+    transcript: &mut T,
+) -> Result<(), Error>
+where
+    <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
+{
+    create_proof_with_synthesis(
+        params,
+        pk,
+        circuits,
+        instances,
+        rng,
+        transcript,
+        |assignments, circuits, config, constants| {
+            ConcreteCircuit::FloorPlanner::synthesize_batch_parallel(
+                assignments,
+                circuits,
+                config,
+                constants,
+            )
+        },
+    )
+}
+
+fn create_proof_with_synthesis<
+    C: CurveAffine,
+    E: EncodedChallenge<C>,
+    R: Rng,
+    T: TranscriptWrite<C, E>,
+    ConcreteCircuit: Circuit<C::ScalarExt>,
+>(
+    params: &Params<C>,
+    pk: &ProvingKey<C>,
+    circuits: &[ConcreteCircuit],
+    instances: &[&[&[C::ScalarExt]]],
     mut rng: R,
     transcript: &mut T,
+    synthesize: impl FnOnce(
+        &mut [WitnessCollection<'_, C::ScalarExt>],
+        &[ConcreteCircuit],
+        <ConcreteCircuit as Circuit<C::ScalarExt>>::Config,
+        &[Column<Fixed>],
+    ) -> Result<(), Error>,
 ) -> Result<(), Error> {
     if circuits.len() != instances.len() {
         return Err(Error::InvalidInstances);
@@ -267,12 +346,7 @@ pub fn create_proof<
 
     // Synthesize every circuit while allowing its floor planner to share
     // circuit-shape-dependent work across the batch.
-    ConcreteCircuit::FloorPlanner::synthesize_batch(
-        &mut witnesses,
-        circuits,
-        config,
-        &meta.constants,
-    )?;
+    synthesize(&mut witnesses, circuits, config, &meta.constants)?;
 
     let advice: Vec<AdviceSingle<C>> = witnesses
         .into_iter()
@@ -842,10 +916,11 @@ fn v1_batch_reuses_measurement() {
         transcript::{Blake2bWrite, Challenge255},
     };
     use pasta_curves::EqAffine;
-    use rand::rng;
+    use rand::{rngs::StdRng, SeedableRng};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static MEASUREMENTS: AtomicUsize = AtomicUsize::new(0);
+    const PROOF_SEED: u64 = 0x5631_4241_5443_4802;
 
     #[derive(Clone, Copy)]
     struct MyCircuit;
@@ -881,9 +956,24 @@ fn v1_batch_reuses_measurement() {
         &pk,
         &[MyCircuit, MyCircuit, MyCircuit],
         &[&[], &[], &[]],
-        rng(),
+        StdRng::seed_from_u64(PROOF_SEED),
         &mut transcript,
     )
     .expect("proof generation should not fail");
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
+    let serial_proof = transcript.finalize();
+
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    MEASUREMENTS.store(0, Ordering::Relaxed);
+    create_proof_parallel(
+        &params,
+        &pk,
+        &[MyCircuit, MyCircuit, MyCircuit],
+        &[&[], &[], &[]],
+        StdRng::seed_from_u64(PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("parallel proof generation should not fail");
+    assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
+    assert_eq!(transcript.finalize(), serial_proof);
 }

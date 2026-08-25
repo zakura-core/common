@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `create_proof_parallel`, which lets compatible floor planners assign
+  independent circuit witnesses concurrently without adding a `Sync` bound to
+  `create_proof`.
 - The V1 floor planner now measures and positions a circuit once when creating
   a proof for several instances of that circuit, then reuses the layout for
   each witness assignment.
