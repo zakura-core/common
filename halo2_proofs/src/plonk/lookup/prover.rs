@@ -446,15 +446,20 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         }
 
         let product_blind = blinding.product_blind;
-        let product_commitment = params.commit_lagrange(&z, product_blind).to_affine();
-        let z = pk
-            .vk
-            .domain
-            .lagrange_to_coeff_with_twiddles(z, &pk.fft_twiddles);
-        let product_coset = pk
-            .vk
-            .domain
-            .coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles);
+        let (product_commitment, (z, product_coset)) = crate::multicore::join(
+            || params.commit_lagrange(&z, product_blind).to_affine(),
+            || {
+                let z = pk
+                    .vk
+                    .domain
+                    .lagrange_to_coeff_with_twiddles(z.clone(), &pk.fft_twiddles);
+                let coset = pk
+                    .vk
+                    .domain
+                    .coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles);
+                (z, coset)
+            },
+        );
 
         PreparedProduct {
             permuted: self,

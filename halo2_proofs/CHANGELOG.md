@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Proof creation now prepares independent commitments and polynomial transforms
+  concurrently, and batches transcript-adjacent polynomial evaluations while
+  preserving proof randomness and transcript ordering.
 - Quotient evaluation now shares repeated factors across non-consecutive
   constraint terms while retaining their original challenge powers.
 - IPA opening proofs now compute independent round terms in parallel and fuse

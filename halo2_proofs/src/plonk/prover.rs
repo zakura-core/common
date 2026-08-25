@@ -7,14 +7,17 @@ use std::ops::RangeTo;
 
 use super::{
     circuit::{
-        Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlan, FloorPlanner,
-        Instance, Selector,
+        Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
+        Selector,
     },
     commit_instance,
     evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
     lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
     ChallengeY, Error, ProvingKey,
 };
+
+#[cfg(test)]
+use super::circuit::FloorPlan;
 use crate::{
     arithmetic::CurveAffine,
     circuit::Value,
@@ -294,9 +297,11 @@ where
         pk.floor_plan.as_ref(),
     )?;
 
-    let advice: Vec<AdviceSingle<C>> = witnesses
+    // Consume randomness in circuit order before preparing the independent
+    // commitments and polynomial transforms in parallel.
+    let advice_witnesses = witnesses
         .into_iter()
-        .map(|witness| -> Result<AdviceSingle<C>, Error> {
+        .map(|witness| -> Result<_, Error> {
             let mut advice = batch_invert_assigned(witness.advice);
 
             // Add blinding factors to advice columns
@@ -311,31 +316,57 @@ where
                 .iter()
                 .map(|_| Blind(C::Scalar::random(&mut rng)))
                 .collect();
-            let advice_commitments_projective: Vec<_> = advice
-                .iter()
-                .zip(advice_blinds.iter())
-                .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                .collect();
-            let mut advice_commitments = vec![C::identity(); advice_commitments_projective.len()];
-            C::Curve::batch_normalize(&advice_commitments_projective, &mut advice_commitments);
-            let advice_commitments = advice_commitments;
-            drop(advice_commitments_projective);
-
-            for commitment in &advice_commitments {
-                transcript.write_point(*commitment)?;
-            }
-
-            let (advice_polys, advice_cosets) =
-                domain.batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles);
-
-            Ok(AdviceSingle {
-                advice_values: advice,
-                advice_polys,
-                advice_cosets,
-                advice_blinds,
-            })
+            Ok((advice, advice_blinds))
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    let prepared_advice = advice_witnesses
+        .into_par_iter()
+        .map(|(advice, advice_blinds)| {
+            let (advice_commitments, (advice_polys, advice_cosets)) = crate::multicore::join(
+                || {
+                    #[cfg(feature = "multicore")]
+                    let advice_commitments_projective: Vec<_> = advice
+                        .par_iter()
+                        .zip(advice_blinds.par_iter())
+                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                        .collect();
+                    #[cfg(not(feature = "multicore"))]
+                    let advice_commitments_projective: Vec<_> = advice
+                        .iter()
+                        .zip(advice_blinds.iter())
+                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                        .collect();
+                    let mut advice_commitments =
+                        vec![C::identity(); advice_commitments_projective.len()];
+                    C::Curve::batch_normalize(
+                        &advice_commitments_projective,
+                        &mut advice_commitments,
+                    );
+                    advice_commitments
+                },
+                || domain.batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles),
+            );
+
+            (
+                advice_commitments,
+                AdviceSingle::<C> {
+                    advice_values: advice,
+                    advice_polys,
+                    advice_cosets,
+                    advice_blinds,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut advice = Vec::with_capacity(prepared_advice.len());
+    for (advice_commitments, advice_single) in prepared_advice {
+        for commitment in advice_commitments {
+            transcript.write_point(commitment)?;
+        }
+        advice.push(advice_single);
+    }
 
     // Create polynomial evaluator context for values.
     let mut value_evaluator = poly::new_evaluator(|| {});
@@ -652,11 +683,7 @@ where
                 })
         })
         .collect::<Vec<_>>();
-    for evaluation in polynomial_evaluator.evaluate(&instance_queries) {
-        transcript.write_scalar(evaluation)?;
-    }
-
-    // Compute and hash advice evals for each circuit instance
+    // Collect advice evals for each circuit instance.
     let advice_queries = advice
         .iter()
         .flat_map(|advice| {
@@ -672,11 +699,7 @@ where
                 })
         })
         .collect::<Vec<_>>();
-    for evaluation in polynomial_evaluator.evaluate(&advice_queries) {
-        transcript.write_scalar(evaluation)?;
-    }
-
-    // Compute and hash fixed evals (shared across all circuit instances)
+    // Collect fixed evals, which are shared across all circuit instances.
     let fixed_queries = meta
         .fixed_queries
         .iter()
@@ -687,7 +710,15 @@ where
             }),
         })
         .collect::<Vec<_>>();
-    for evaluation in polynomial_evaluator.evaluate(&fixed_queries) {
+    // Evaluate all transcript-adjacent queries in one batch so that the
+    // parallel evaluator does not encounter an artificial barrier between
+    // instance, advice, and fixed polynomials.
+    let queries = instance_queries
+        .into_iter()
+        .chain(advice_queries)
+        .chain(fixed_queries)
+        .collect::<Vec<_>>();
+    for evaluation in polynomial_evaluator.evaluate(&queries) {
         transcript.write_scalar(evaluation)?;
     }
 

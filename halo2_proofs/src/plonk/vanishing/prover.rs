@@ -2,6 +2,8 @@ use std::iter;
 
 use ff::Field;
 use group::Curve;
+#[cfg(feature = "multicore")]
+use maybe_rayon::prelude::*;
 use rand_core::Rng;
 
 use super::Argument;
@@ -111,6 +113,13 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
             .collect();
 
         // Compute commitments to each h(X) piece
+        #[cfg(feature = "multicore")]
+        let h_commitments_projective: Vec<_> = h_pieces
+            .par_iter()
+            .zip(h_blinds.par_iter())
+            .map(|(h_piece, blind)| params.commit(h_piece, *blind))
+            .collect();
+        #[cfg(not(feature = "multicore"))]
         let h_commitments_projective: Vec<_> = h_pieces
             .iter()
             .zip(h_blinds.iter())

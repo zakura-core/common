@@ -173,13 +173,18 @@ impl Argument {
 
             let blind = Blind(C::Scalar::random(&mut rng));
 
-            let permutation_product_commitment_projective = params.commit_lagrange(&z, blind);
+            let (permutation_product_commitment_projective, (permutation_product_poly, coset)) =
+                crate::multicore::join(
+                    || params.commit_lagrange(&z, blind),
+                    || {
+                        let z = domain.lagrange_to_coeff_with_twiddles(z.clone(), &pk.fft_twiddles);
+                        let coset =
+                            domain.coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles);
+                        (z, coset)
+                    },
+                );
             let permutation_product_blind = blind;
-            let z = domain.lagrange_to_coeff_with_twiddles(z, &pk.fft_twiddles);
-            let permutation_product_poly = z.clone();
-
-            let permutation_product_coset = evaluator
-                .register_poly(domain.coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles));
+            let permutation_product_coset = evaluator.register_poly(coset);
 
             let permutation_product_commitment =
                 permutation_product_commitment_projective.to_affine();
