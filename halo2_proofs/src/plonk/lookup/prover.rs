@@ -391,20 +391,20 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
 
         // Compute the evaluations of the lookup product polynomial
         // over our domain, starting with z[0] = 1
-        let z = iter::once(C::Scalar::ONE)
-            .chain(lookup_product)
-            .scan(C::Scalar::ONE, |state, cur| {
-                *state *= &cur;
-                Some(*state)
-            })
-            // Take all rows including the "last" row which should
-            // be a boolean (and ideally 1, else soundness is broken)
-            .take(params.n as usize - blinding_factors)
-            // Chain random blinding factors.
-            .chain(blinding.rows)
-            .collect::<Vec<_>>();
-        assert_eq!(z.len(), params.n as usize);
-        let z = pk.vk.domain.lagrange_from_vec(z);
+        // Reuse the fraction vector for z instead of allocating a second
+        // domain-sized vector. This includes the "last" row, which should be
+        // a boolean (and ideally 1, else soundness is broken).
+        let usable_rows = params.n as usize - blinding_factors;
+        let mut state = C::Scalar::ONE;
+        for product in lookup_product.iter_mut().take(usable_rows) {
+            let current = *product;
+            *product = state;
+            state *= &current;
+        }
+        lookup_product.truncate(usable_rows);
+        lookup_product.extend(blinding.rows);
+        assert_eq!(lookup_product.len(), params.n as usize);
+        let z = pk.vk.domain.lagrange_from_vec(lookup_product);
 
         #[cfg(feature = "sanity-checks")]
         // This test works only with intermediate representations in this method.

@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Lookup grand-product preparation now reuses its fraction buffer for product
+  accumulation, avoiding one domain-sized allocation per lookup argument.
 - Parallel polynomial evaluation now uses eight chunks per worker for finer
   load balancing across uneven evaluator workloads.
 - Proof creation now prepares independent commitments and polynomial transforms
