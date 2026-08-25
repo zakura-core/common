@@ -779,9 +779,15 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
             Ast::Mul(AstMul(lhs, rhs)) if same_ast(lhs, rhs) => {
                 Self::Square(Box::new(Self::compile(lhs)))
             }
-            Ast::Mul(AstMul(lhs, rhs)) => {
-                Self::Mul(Box::new(Self::compile(lhs)), Box::new(Self::compile(rhs)))
-            }
+            Ast::Mul(AstMul(lhs, rhs)) => match (lhs.as_ref(), rhs.as_ref()) {
+                (Ast::ConstantTerm(scalar), _) => {
+                    Self::Scale(Box::new(Self::compile(rhs)), *scalar)
+                }
+                (_, Ast::ConstantTerm(scalar)) => {
+                    Self::Scale(Box::new(Self::compile(lhs)), *scalar)
+                }
+                _ => Self::Mul(Box::new(Self::compile(lhs)), Box::new(Self::compile(rhs))),
+            },
             Ast::Scale(inner, scalar) => Self::Scale(Box::new(Self::compile(inner)), *scalar),
             Ast::DistributePowers(terms, base) => Self::compile_distribute_powers(terms, *base),
             Ast::LinearTerm(scalar) => Self::LinearTerm(*scalar),
@@ -2531,6 +2537,7 @@ mod tests {
             let two = pallas::Base::ONE.double();
 
             for scalar in [
+                pallas::Base::ZERO,
                 -pallas::Base::ONE,
                 pallas::Base::ONE,
                 two,
@@ -2543,6 +2550,10 @@ mod tests {
 
                 for ast in [constant_lhs, constant_rhs] {
                     assert!(matches!(&ast, Ast::Mul(_)));
+                    assert!(matches!(
+                        EvaluationPlan::compile(&ast),
+                        EvaluationPlan::Scale(_, _)
+                    ));
 
                     let result = evaluator.evaluate(&ast, &domain);
                     assert!(result

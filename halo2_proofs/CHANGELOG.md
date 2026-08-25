@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Evaluation plans now compile products with a constant operand as scalar
+  scales, avoiding a full multiplication pass.
 - Polynomial evaluation now caches repeated squares when doing so avoids at
   least one field squaring.
 - The `fft` bench's curve-FFT and parameter-generation rows now also measure
