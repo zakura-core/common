@@ -4,6 +4,8 @@
 //! [halo]: https://eprint.iacr.org/2019/1021
 
 use super::{Coeff, LagrangeCoeff, Polynomial};
+#[cfg(feature = "orbits")]
+use crate::arithmetic::PreparedZeroCheck;
 use crate::arithmetic::{best_fft, best_multiexp, parallelize, CurveAffine, CurveExt};
 use crate::helpers::CurveRead;
 #[cfg(feature = "batch")]
@@ -12,7 +14,7 @@ use crate::{InstanceWindowTable, INSTANCE_WINDOW_ENTRIES_PER_BASE, MAX_CACHED_IN
 use ff::{Field, PrimeField};
 use group::{Curve, Group};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
-#[cfg(feature = "batch")]
+#[cfg(any(feature = "batch", feature = "orbits"))]
 use std::{
     fmt,
     sync::{Arc, Mutex},
@@ -40,6 +42,39 @@ pub struct Params<C: CurveAffine> {
     pub(crate) u: C,
     #[cfg(feature = "batch")]
     instance_window_cache: InstanceWindowCache<C>,
+    #[cfg(feature = "orbits")]
+    zero_check_cache: ZeroCheckCache<C>,
+}
+
+/// A lazily built prepared fixed-base zero-check over `[g..., w, u]` (see
+/// [`Params::prepare_zero_checks`]), shared across clones of the params
+/// that hold it. Never serialized; rebuilt on demand after `read`.
+#[cfg(feature = "orbits")]
+#[derive(Clone)]
+struct ZeroCheckCache<C: CurveAffine>(
+    #[allow(clippy::type_complexity)] Arc<Mutex<Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>>>>,
+);
+
+#[cfg(feature = "orbits")]
+impl<C: CurveAffine> Default for ZeroCheckCache<C> {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+}
+
+#[cfg(feature = "orbits")]
+impl<C: CurveAffine> fmt::Debug for ZeroCheckCache<C> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let armed = self
+            .0
+            .lock()
+            .map(|prepared| prepared.is_some())
+            .unwrap_or(false);
+        formatter
+            .debug_tuple("ZeroCheckCache")
+            .field(&armed)
+            .finish()
+    }
 }
 
 #[cfg(feature = "batch")]
@@ -198,6 +233,8 @@ impl<C: CurveAffine> Params<C> {
             u,
             #[cfg(feature = "batch")]
             instance_window_cache: InstanceWindowCache::default(),
+            #[cfg(feature = "orbits")]
+            zero_check_cache: ZeroCheckCache::default(),
         }
     }
 
@@ -291,7 +328,61 @@ impl<C: CurveAffine> Params<C> {
             u,
             #[cfg(feature = "batch")]
             instance_window_cache: InstanceWindowCache::default(),
+            #[cfg(feature = "orbits")]
+            zero_check_cache: ZeroCheckCache::default(),
         })
+    }
+
+    /// Builds and caches a prepared fixed-base zero-check over this SRS
+    /// (the generators `g` plus `w` and `u`), which [`MSM::eval`] then
+    /// routes its final identity test through — the proof-specific
+    /// commitment terms ride along as the check's extra terms. On the
+    /// Pasta curves this measured the verifier's final check ~1.5–2.4x
+    /// faster; other curves without a prepared backend make this a no-op.
+    ///
+    /// Preparation costs hundreds of milliseconds and tens of mebibytes
+    /// at typical `k`, amortized across every subsequent verification
+    /// with these params (batch verification folds many proofs into a
+    /// single final check, so it also pays just one). The cache is shared
+    /// with all clones of these params; it is never serialized, so call
+    /// this again after [`Params::read`].
+    ///
+    /// Returns whether a prepared check was actually built and cached.
+    /// `false` means arming was a no-op — the curve has no prepared
+    /// backend, the backend declined (its prepared table for this SRS
+    /// would exceed its internal memory budget; very large `k`), or the
+    /// `orbits` feature (enabled by default) is off — and verification
+    /// simply keeps evaluating the plain multiexp. Callers may ignore the
+    /// result; long-lived validators that expect the speedup can assert
+    /// or log it.
+    pub fn prepare_zero_checks(&self) -> bool {
+        #[cfg(feature = "orbits")]
+        {
+            let mut bases = Vec::with_capacity(self.g.len() + 2);
+            bases.extend_from_slice(&self.g);
+            bases.push(self.w);
+            bases.push(self.u);
+            if let Some(prepared) = C::CurveExt::try_prepare_zero_check(&bases) {
+                *self
+                    .zero_check_cache
+                    .0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::from(prepared));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The cached prepared zero-check, if [`Self::prepare_zero_checks`]
+    /// built one.
+    #[cfg(feature = "orbits")]
+    pub(crate) fn zero_check(&self) -> Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>> {
+        self.zero_check_cache
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 

@@ -23,8 +23,16 @@ use std::marker::PhantomData;
 fn plonk_api() {
     const K: u32 = 5;
 
-    // Initialize the polynomial commitment parameters
+    // Initialize the polynomial commitment parameters, with the prepared
+    // fixed-base zero-check armed. At this K the verifications carry more
+    // commitment terms than fixed bases, so `MSM::eval`'s guard falls back
+    // to the plain multiexp: what this arming exercises is exactly that
+    // armed-but-guarded interplay. The block at the end of the test runs
+    // the verifier at K = 7, where the guard holds and the prepared check
+    // itself is routed through (under the `orbits` feature; without it
+    // arming is a no-op and the plain multiexp runs everywhere).
     let params: Params<EqAffine> = Params::new(K);
+    let _armed = params.prepare_zero_checks();
 
     #[derive(Clone)]
     struct PlonkConfig {
@@ -1107,5 +1115,72 @@ fn plonk_api() {
     },
 }"#####
         );
+    }
+
+    // Real-verifier coverage of the prepared final identity test. At this
+    // test's pinned K = 5 the two-instance verifications above accumulate
+    // 63–64 commitment terms against n = 32, so `MSM::eval`'s
+    // extras-do-not-outnumber-the-fixed-bases guard falls back to the
+    // plain multiexp — the arming at the top exercises exactly that
+    // armed-but-guarded interplay. Here n = 128 comfortably clears a
+    // two-instance proof's ~72 extras, so these verifications route
+    // through the prepared check itself (under the `orbits` feature).
+    {
+        let params7: Params<EqAffine> = Params::new(7);
+        // Under `orbits` this arms (and returns true) on the Pasta curves;
+        // without the feature it is a no-op and this block still covers
+        // the plain path. Integration tests cannot see halo2's feature
+        // set, so the result is deliberately not asserted here — the
+        // in-crate msm tests assert arming under `orbits`.
+        let _armed = params7.prepare_zero_checks();
+        let vk7 = keygen_vk(&params7, &empty_circuit).expect("keygen_vk should not fail");
+        let pk7 = keygen_pk(&params7, vk7, &empty_circuit).expect("keygen_pk should not fail");
+
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof(
+            &params7,
+            &pk7,
+            &[circuit.clone(), circuit.clone()],
+            &[&[&[instance]], &[&[instance]]],
+            rng(),
+            &mut transcript,
+        )
+        .expect("proof generation should not fail");
+        let proof: Vec<u8> = transcript.finalize();
+
+        let strategy = SingleVerifier::new(&params7);
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+        assert!(verify_proof(
+            &params7,
+            pk7.get_vk(),
+            strategy,
+            &[&[&pubinputs[..]], &[&pubinputs[..]]],
+            &mut transcript,
+        )
+        .is_ok());
+
+        // The prepared route must also reject: same proof bytes against
+        // the wrong public inputs.
+        let wrong_pubinputs = [instance + Fp::ONE];
+        let strategy = SingleVerifier::new(&params7);
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+        assert!(verify_proof(
+            &params7,
+            pk7.get_vk(),
+            strategy,
+            &[&[&wrong_pubinputs[..]], &[&wrong_pubinputs[..]]],
+            &mut transcript,
+        )
+        .is_err());
+
+        // One proof per batch keeps the folded extras below n, so the
+        // batch verifier's single final check routes prepared too (a batch
+        // of two such proofs would exceed n again and fall back).
+        let mut batch = BatchVerifier::new();
+        batch.add_proof(
+            vec![vec![pubinputs.clone()], vec![pubinputs.clone()]],
+            proof.clone(),
+        );
+        assert!(batch.finalize(&params7, pk7.get_vk()));
     }
 }

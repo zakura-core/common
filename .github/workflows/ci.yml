@@ -357,7 +357,14 @@ jobs:
         env:
           STAGE_FEATURE: ${{ matrix.features }}
         run: |
-          features=batch,dev-graph,gadget-traces,test-dependencies
+          # `orbits` (a halo2_proofs default) is re-listed here so this
+          # job's runtime coverage includes the prepared zero-check path
+          # (the msm unit tests and plonk_api's K = 7 block route through
+          # it; plonk_api's pinned K = 5 verifications exceed the extras
+          # guard and cover the armed-but-guarded fallback); the 32-bit
+          # and platform-smoke jobs run without it and cover the
+          # orbits-off fallback.
+          features=batch,dev-graph,gadget-traces,test-dependencies,orbits
           if [[ -n "$STAGE_FEATURE" ]]; then
             features="$features,$STAGE_FEATURE"
           fi

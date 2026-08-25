@@ -14,6 +14,29 @@ and this project adheres to Rust's notion of
 - Public-instance commitments and polynomial transforms for independent proof
   circuits are now prepared in parallel when multicore support is enabled,
   while retaining transcript order.
+- Added a default-enabled `orbits` feature (forwarding `pasta_curves/orbits`)
+  gating the prepared zero-check integration below. Built without it,
+  `Params::prepare_zero_checks` is a no-op returning `false` and
+  `MSM::eval` always evaluates the plain multiexp, so the machinery can
+  be switched off — or later removed — without touching callers.
+- `Params::prepare_zero_checks` builds and caches a prepared fixed-base
+  zero-check over the SRS (`g`, `w`, `u`; see pasta's `glv::zero`), and
+  `MSM::eval` then routes the verifier's final identity test through it,
+  with the proof-specific commitment terms as the check's extra terms.
+  It returns whether a prepared check was actually armed: `false` when
+  the curve has no prepared backend, when the backend declines (its table
+  for this SRS would exceed its internal memory budget — very large `k`),
+  or without the `orbits` feature; verification then simply keeps the
+  plain multiexp. Preparation is explicit (hundreds of milliseconds and
+  tens of MiB at typical `k`, amortized across every verification with
+  those params; batch verification pays one prepared check per batch), is
+  never serialized, and is shared with all clones of the params. On the
+  Pasta curves the prepared final check measured ~1.6x faster serially
+  and up to ~2.4x on 8–16 workers at `k = 11` scale. Since the prepared
+  check now runs the accumulated commitment terms as their own planned
+  MSM, `MSM::eval` uses it while those terms do not outnumber the fixed
+  bases (the measured crossover on Ironwood batch validation), instead
+  of the earlier half-the-fixed-bases cutoff.
 - Proving keys now retain reusable floor-planning data produced during key
   generation. V1 proof creation consumes the cached layout instead of
   measuring and positioning the circuit again.

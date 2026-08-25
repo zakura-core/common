@@ -55,6 +55,7 @@ beta = []
 default = [
     "batch",
     "multicore",
+    "orbits",
 ]
 dev-graph = [
     "plotters",
@@ -70,6 +71,11 @@ nightly = [
     "beta",
     "unstable-verifier-fingerprint",
 ]
+# The Eisenstein-orbit MSM backend and the prepared fixed-base zero-check
+# (`Params::prepare_zero_checks`, routed through `MSM::eval`). Default-on;
+# disabling it reverts to the Signed-Booth-only planner and the plain final
+# identity test.
+orbits = ["pasta_curves/orbits"]
 sanity-checks = []
 test-dev-graph = [
     "dev-graph",

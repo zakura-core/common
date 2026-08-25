@@ -267,7 +267,69 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
     }
 
     /// Perform multiexp and check that it results in zero
-    pub fn eval(self) -> bool {
+    #[cfg_attr(not(feature = "orbits"), allow(unused_mut))]
+    pub fn eval(mut self) -> bool {
+        // A prepared fixed-base zero-check over [g..., w, u] (built by
+        // `Params::prepare_zero_checks`, under the default `orbits`
+        // feature) evaluates the identity test
+        // directly, with the accumulated commitment terms as its extras.
+        // The decomposition evaluated here is the same view the
+        // `multiexp` fallback below consumes, including the one-shot
+        // canonicalization of batch-reduced terms. The prepared check
+        // runs the extras as their own planned MSM (concurrent with its
+        // fixed windows), so extras-heavy checks — batch verification
+        // accumulates dozens of commitment terms per proof — stay ahead
+        // far longer than when the extras rode the prepared check's
+        // residual tail. They still do not stay ahead forever: once the
+        // extras outnumber the fixed bases, folding everything into one
+        // planned MSM prices the fixed bases at that larger MSM's
+        // (cheaper) marginal per-term cost. End-to-end Ironwood batch
+        // validation measures the prepared path ahead or even through
+        // extras ≈ 0.75n (32-bundle batches) and behind by ~5% on wide
+        // pools at extras ≈ 1.5n (64 bundles); the crossover sits at the
+        // fixed-base count itself.
+        #[cfg(feature = "orbits")]
+        if let Some(prepared) = self.params.zero_check() {
+            let n = self.params.n as usize;
+            if prepared.terms() == n + 2 {
+                if !self.batched_other.is_empty() {
+                    // Canonicalize in place rather than on a clone: the
+                    // merged view serves the prepared check's extras, and
+                    // if the guard below falls through, `multiexp`
+                    // re-canonicalizes the already-canonical buffer, which
+                    // is idempotent.
+                    let mut combined = std::mem::take(&mut self.batched_other);
+                    combined.extend(self.other.iter().map(|(x, values)| (*x, *values)));
+                    self.other.clear();
+                    self.batched_other = canonicalize_other::<C>(combined);
+                }
+                let extra: Vec<(C::Scalar, C)> = if self.batched_other.is_empty() {
+                    self.other
+                        .iter()
+                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(*x, *y).unwrap()))
+                        .collect()
+                } else {
+                    self.batched_other
+                        .iter()
+                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(*x, *y).unwrap()))
+                        .collect()
+                };
+                if extra.len() <= n {
+                    let mut fixed = vec![C::Scalar::ZERO; n + 2];
+                    if let Some(g_scalars) = &self.g_scalars {
+                        fixed[..n].copy_from_slice(g_scalars);
+                    }
+                    if let Some(w_scalar) = self.w_scalar {
+                        fixed[n] = w_scalar;
+                    }
+                    if let Some(u_scalar) = self.u_scalar {
+                        fixed[n + 1] = u_scalar;
+                    }
+                    return prepared.is_zero_with_terms_vartime(&fixed, &extra);
+                }
+            }
+        }
+
         bool::from(self.multiexp().is_identity())
     }
 
@@ -311,11 +373,20 @@ mod tests {
 
     #[test]
     fn msm_arithmetic() {
+        // Once plain, once with the prepared fixed-base zero-check armed
+        // (arming is a no-op without the `orbits` feature): `eval` must
+        // agree either way.
+        let params = Params::new(4);
+        exercise_msm_arithmetic(&params);
+        params.prepare_zero_checks();
+        exercise_msm_arithmetic(&params);
+    }
+
+    fn exercise_msm_arithmetic(params: &Params<EpAffine>) {
         let base = EpAffine::from_xy(-Fp::one(), Fp::from(2)).unwrap();
         let base_viol = (base + base).to_affine();
 
-        let params = Params::new(4);
-        let mut a: MSM<EpAffine> = MSM::new(&params);
+        let mut a: MSM<EpAffine> = MSM::new(params);
         a.append_term(Fq::one(), base);
         // a = [1] P
         assert!(!a.clone().eval());
@@ -349,6 +420,98 @@ mod tests {
         // Add two MSMs with bases that differ only in sign.
         a.add_msm(&c);
         assert!(a.eval());
+    }
+
+    /// Pins the prepared zero-check's fixed-scalar placement: `eval` hands
+    /// `g_scalars` to the preparation's first `n` slots and `w`/`u` to the
+    /// last two, matching `prepare_zero_checks`' base order, so cancelling
+    /// each fixed term against an extra term of the same point must accept
+    /// while cancelling against the *wrong* point must reject. Runs
+    /// unarmed first and armed second with identical verdicts (without the
+    /// `orbits` feature arming is a no-op and both runs take the plain
+    /// multiexp).
+    #[test]
+    fn eval_prepared_fixed_scalar_placement() {
+        let params = Params::<EpAffine>::new(4);
+        let n = params.n as usize;
+
+        exercise_fixed_scalar_placement(&params, n);
+        let armed = params.prepare_zero_checks();
+        #[cfg(feature = "orbits")]
+        {
+            // The guard preconditions of `eval`'s prepared branch: armed,
+            // and the preparation covers exactly [g..., w, u]. Every case
+            // below keeps its extras count at or below `n`, so each
+            // armed `eval` routes through the prepared check.
+            assert!(armed, "Pasta params must arm under the orbits feature");
+            let prepared = params.zero_check().expect("armed above");
+            assert_eq!(prepared.terms(), n + 2);
+        }
+        #[cfg(not(feature = "orbits"))]
+        assert!(!armed);
+        exercise_fixed_scalar_placement(&params, n);
+    }
+
+    fn exercise_fixed_scalar_placement(params: &Params<EpAffine>, n: usize) {
+        let s = Fq::from(0xC0FF_EE11);
+
+        // w cancelled against W accepts; against U rejects. Transposing
+        // the preparation's last two slots would swap these two verdicts.
+        let mut w_ok = MSM::new(params);
+        w_ok.add_to_w_scalar(s);
+        w_ok.append_term(-s, params.w);
+        assert!(w_ok.eval());
+        let mut w_swapped = MSM::new(params);
+        w_swapped.add_to_w_scalar(s);
+        w_swapped.append_term(-s, params.u);
+        assert!(!w_swapped.eval());
+
+        // u symmetric.
+        let mut u_ok = MSM::new(params);
+        u_ok.add_to_u_scalar(s);
+        u_ok.append_term(-s, params.u);
+        assert!(u_ok.eval());
+        let mut u_swapped = MSM::new(params);
+        u_swapped.add_to_u_scalar(s);
+        u_swapped.append_term(-s, params.w);
+        assert!(!u_swapped.eval());
+
+        // g scalars land on their own generators (start and end of the
+        // slice, catching any offset).
+        let mut g_scalars = vec![Fq::zero(); n];
+        g_scalars[0] = Fq::from(3);
+        g_scalars[n - 1] = Fq::from(7);
+        let mut g_ok = MSM::new(params);
+        g_ok.add_to_g_scalars(&g_scalars);
+        g_ok.append_term(-g_scalars[0], params.g[0]);
+        g_ok.append_term(-g_scalars[n - 1], params.g[n - 1]);
+        assert!(g_ok.eval());
+        let mut g_off = MSM::new(params);
+        let mut perturbed = g_scalars.clone();
+        perturbed[0] += Fq::one();
+        g_off.add_to_g_scalars(&perturbed);
+        g_off.append_term(-g_scalars[0], params.g[0]);
+        g_off.append_term(-g_scalars[n - 1], params.g[n - 1]);
+        assert!(!g_off.eval());
+
+        // All three fixed parts at once, accumulated through the batched
+        // buffer so `eval`'s in-place canonicalization path is covered.
+        let mut fixed_part = MSM::new(params);
+        fixed_part.add_to_g_scalars(&g_scalars);
+        fixed_part.add_to_w_scalar(s);
+        fixed_part.add_to_u_scalar(s + s);
+        let mut extras_part = MSM::new(params);
+        extras_part.append_term(-g_scalars[0], params.g[0]);
+        extras_part.append_term(-g_scalars[n - 1], params.g[n - 1]);
+        extras_part.append_term(-s, params.w);
+        extras_part.append_term(-(s + s), params.u);
+        let mut batched = MSM::new(params);
+        batched.add_msm_batch(fixed_part);
+        batched.add_msm_batch(extras_part);
+        let mut broken = batched.clone();
+        assert!(batched.eval());
+        broken.append_term(Fq::one(), params.g[1]);
+        assert!(!broken.eval());
     }
 
     #[test]
