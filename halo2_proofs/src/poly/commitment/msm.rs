@@ -404,4 +404,103 @@ mod tests {
 
         assert_eq!(expected, reduced.multiexp());
     }
+
+    /// Covers the interactions the batch-aggregation test does not reach:
+    /// `add_msm` reading a batched source, an MSM evaluating with both the
+    /// incremental map and the batched buffer populated, scaling after batch
+    /// accumulation, and coalescing that cancels a point's scalar exactly.
+    #[test]
+    fn batched_msm_interoperates_with_incremental_paths() {
+        let params = Params::<EpAffine>::new(4);
+
+        let make_components = || {
+            (0..6u64)
+                .map(|index| {
+                    let mut msm = MSM::new(&params);
+                    let g_scalars = (0..params.n)
+                        .map(|slot| Fq::from(slot + index + 1))
+                        .collect::<Vec<_>>();
+                    msm.add_to_g_scalars(&g_scalars);
+                    msm.add_to_w_scalar(Fq::from(2 * index + 1));
+                    msm.add_to_u_scalar(Fq::from(3 * index + 1));
+                    msm.append_term(Fq::from(index + 2), params.g[1]);
+                    // The same point in both orientations, with scalars that
+                    // cancel exactly once coalesced (three of each).
+                    if index % 2 == 0 {
+                        msm.append_term(Fq::from(5), params.g[2]);
+                    } else {
+                        msm.append_term(Fq::from(5), -params.g[2]);
+                    }
+                    msm.append_term(Fq::from(7 + index), params.g[3 + index as usize]);
+                    msm
+                })
+                .collect::<Vec<_>>()
+        };
+
+        fn incremental<'a>(
+            params: &'a Params<EpAffine>,
+            components: Vec<MSM<'a, EpAffine>>,
+        ) -> MSM<'a, EpAffine> {
+            let mut acc = MSM::new(params);
+            for component in &components {
+                acc.add_msm(component);
+            }
+            acc
+        }
+        fn batched<'a>(
+            params: &'a Params<EpAffine>,
+            components: Vec<MSM<'a, EpAffine>>,
+        ) -> MSM<'a, EpAffine> {
+            let mut acc = MSM::new(params);
+            for component in components {
+                acc.add_msm_batch(component);
+            }
+            acc
+        }
+        let expected = incremental(&params, make_components()).multiexp();
+
+        // `add_msm` must drain a source whose terms live in the batched
+        // buffer rather than the incremental map.
+        let mut via_add_msm = MSM::new(&params);
+        via_add_msm.add_msm(&batched(&params, make_components()));
+        assert_eq!(expected, via_add_msm.multiexp());
+
+        // Evaluation must merge both storages when terms were appended after
+        // batch accumulation, including a fresh x and a new orientation of an
+        // already-batched point.
+        let mut mixed = batched(&params, make_components());
+        mixed.append_term(Fq::from(23), params.g[4]);
+        mixed.append_term(Fq::from(29), -params.g[3]);
+        let mut mixed_reference = incremental(&params, make_components());
+        mixed_reference.append_term(Fq::from(23), params.g[4]);
+        mixed_reference.append_term(Fq::from(29), -params.g[3]);
+        assert_eq!(mixed_reference.multiexp(), mixed.multiexp());
+
+        // Scaling must reach the batched buffer.
+        let mut scaled = batched(&params, make_components());
+        scaled.scale(Fq::from(31));
+        let mut scaled_reference = incremental(&params, make_components());
+        scaled_reference.scale(Fq::from(31));
+        assert_eq!(scaled_reference.multiexp(), scaled.multiexp());
+
+        // The dev-only fingerprint must canonicalize the batched buffer to
+        // the exact view the incremental accumulation exports; the insertion
+        // order above pins the same first-encountered orientation for both.
+        #[cfg(feature = "unstable-verifier-fingerprint")]
+        assert_eq!(
+            batched(&params, make_components()).fingerprint_terms(),
+            incremental(&params, make_components()).fingerprint_terms(),
+        );
+
+        // A batch whose only terms cancel exactly still evaluates, and to
+        // the identity.
+        let mut first = MSM::new(&params);
+        first.append_term(Fq::from(21), params.g[1]);
+        let mut second = MSM::new(&params);
+        second.append_term(Fq::from(21), -params.g[1]);
+        let mut cancelled = MSM::new(&params);
+        cancelled.add_msm_batch(first);
+        cancelled.add_msm_batch(second);
+        assert!(cancelled.eval());
+    }
 }
