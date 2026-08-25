@@ -6,8 +6,11 @@ use rand_core::Rng;
 
 use super::Argument;
 use crate::{
-    arithmetic::{eval_polynomial, CurveAffine},
-    plonk::{ChallengeX, ChallengeY, Error},
+    arithmetic::CurveAffine,
+    plonk::{
+        evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+        ChallengeX, ChallengeY, Error,
+    },
     poly::{
         self,
         commitment::{Blind, Params},
@@ -133,9 +136,9 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
 impl<C: CurveAffine> ConstructedQuotient<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        x: ChallengeX<C>,
         xn: C::Scalar,
         domain: &EvaluationDomain<C::Scalar>,
+        evaluator: &PolynomialEvaluator<C::Scalar>,
         transcript: &mut T,
     ) -> Result<EvaluatedQuotient<C>, Error> {
         let h_poly = self
@@ -150,7 +153,10 @@ impl<C: CurveAffine> ConstructedQuotient<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
-        let random_eval = eval_polynomial(&self.random_poly.poly, *x);
+        let random_eval = evaluator.evaluate(&[EvaluationQuery {
+            polynomial: &self.random_poly.poly,
+            point: EvaluationPoint::Current,
+        }])[0];
         transcript.write_scalar(random_eval)?;
 
         Ok(EvaluatedQuotient {

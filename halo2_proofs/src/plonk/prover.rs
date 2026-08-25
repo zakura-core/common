@@ -9,11 +9,13 @@ use super::{
         Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
         Selector,
     },
-    commit_instance, lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta,
-    ChallengeX, ChallengeY, Error, ProvingKey,
+    commit_instance,
+    evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+    lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
+    ChallengeY, Error, ProvingKey,
 };
 use crate::{
-    arithmetic::{eval_polynomial, CurveAffine},
+    arithmetic::CurveAffine,
     circuit::Value,
     plonk::Assigned,
     poly::{
@@ -592,70 +594,83 @@ pub fn create_proof<
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = x.pow([params.n, 0, 0, 0]);
+    let polynomial_evaluator = PolynomialEvaluator::new(
+        [
+            *x,
+            domain.rotate_omega(*x, poly::Rotation::next()),
+            domain.rotate_omega(*x, poly::Rotation::prev()),
+            domain.rotate_omega(*x, poly::Rotation(-((meta.blinding_factors() + 1) as i32))),
+        ],
+        params.n as usize,
+        advice.len(),
+    );
 
     // Compute and hash instance evals for each circuit instance
-    for instance in instance.iter() {
-        // Evaluate polynomials at omega^i x
-        let instance_evals: Vec<_> = meta
-            .instance_queries
-            .iter()
-            .map(|&(column, at)| {
-                eval_polynomial(
-                    &instance.instance_polys[column.index()],
-                    domain.rotate_omega(*x, at),
-                )
-            })
-            .collect();
-
-        // Hash each instance column evaluation
-        for eval in instance_evals.iter() {
-            transcript.write_scalar(*eval)?;
-        }
+    let instance_queries = instance
+        .iter()
+        .flat_map(|instance| {
+            meta.instance_queries
+                .iter()
+                .map(move |&(column, rotation)| EvaluationQuery {
+                    polynomial: &instance.instance_polys[column.index()],
+                    point: EvaluationPoint::from_rotation(
+                        rotation,
+                        meta.blinding_factors(),
+                        || domain.rotate_omega(*x, rotation),
+                    ),
+                })
+        })
+        .collect::<Vec<_>>();
+    for evaluation in polynomial_evaluator.evaluate(&instance_queries) {
+        transcript.write_scalar(evaluation)?;
     }
 
     // Compute and hash advice evals for each circuit instance
-    for advice in advice.iter() {
-        // Evaluate polynomials at omega^i x
-        let advice_evals: Vec<_> = meta
-            .advice_queries
-            .iter()
-            .map(|&(column, at)| {
-                eval_polynomial(
-                    &advice.advice_polys[column.index()],
-                    domain.rotate_omega(*x, at),
-                )
-            })
-            .collect();
-
-        // Hash each advice column evaluation
-        for eval in advice_evals.iter() {
-            transcript.write_scalar(*eval)?;
-        }
+    let advice_queries = advice
+        .iter()
+        .flat_map(|advice| {
+            meta.advice_queries
+                .iter()
+                .map(move |&(column, rotation)| EvaluationQuery {
+                    polynomial: &advice.advice_polys[column.index()],
+                    point: EvaluationPoint::from_rotation(
+                        rotation,
+                        meta.blinding_factors(),
+                        || domain.rotate_omega(*x, rotation),
+                    ),
+                })
+        })
+        .collect::<Vec<_>>();
+    for evaluation in polynomial_evaluator.evaluate(&advice_queries) {
+        transcript.write_scalar(evaluation)?;
     }
 
     // Compute and hash fixed evals (shared across all circuit instances)
-    let fixed_evals: Vec<_> = meta
+    let fixed_queries = meta
         .fixed_queries
         .iter()
-        .map(|&(column, at)| {
-            eval_polynomial(&pk.fixed_polys[column.index()], domain.rotate_omega(*x, at))
+        .map(|&(column, rotation)| EvaluationQuery {
+            polynomial: &pk.fixed_polys[column.index()],
+            point: EvaluationPoint::from_rotation(rotation, meta.blinding_factors(), || {
+                domain.rotate_omega(*x, rotation)
+            }),
         })
-        .collect();
-
-    // Hash each fixed column evaluation
-    for eval in fixed_evals.iter() {
-        transcript.write_scalar(*eval)?;
+        .collect::<Vec<_>>();
+    for evaluation in polynomial_evaluator.evaluate(&fixed_queries) {
+        transcript.write_scalar(evaluation)?;
     }
 
-    let vanishing = vanishing.evaluate(x, xn, domain, transcript)?;
+    let vanishing = vanishing.evaluate(xn, domain, &polynomial_evaluator, transcript)?;
 
     // Evaluate common permutation data
-    pk.permutation.evaluate(x, transcript)?;
+    pk.permutation.evaluate(&polynomial_evaluator, transcript)?;
 
     // Evaluate the permutations, if any, at omega^i x.
     let permutations: Vec<permutation::prover::Evaluated<C>> = permutations
         .into_iter()
-        .map(|permutation| -> Result<_, _> { permutation.evaluate(pk, x, transcript) })
+        .map(|permutation| -> Result<_, _> {
+            permutation.evaluate(&polynomial_evaluator, transcript)
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     // Evaluate the lookups, if any, at omega^i x.
@@ -664,7 +679,7 @@ pub fn create_proof<
         .map(|lookups| -> Result<Vec<_>, _> {
             lookups
                 .into_iter()
-                .map(|p| p.evaluate(pk, x, transcript))
+                .map(|p| p.evaluate(&polynomial_evaluator, transcript))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;

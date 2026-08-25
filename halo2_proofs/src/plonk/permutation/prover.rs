@@ -3,13 +3,17 @@ use group::{
     Curve,
 };
 use rand_core::Rng;
-use std::iter::{self, ExactSizeIterator};
+use std::iter;
 
 use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
 use super::{Argument, ProvingKey};
 use crate::{
-    arithmetic::{eval_polynomial, parallelize, CurveAffine},
-    plonk::{self, Error},
+    arithmetic::{parallelize, CurveAffine},
+    plonk::{
+        self,
+        evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+        Error,
+    },
     poly::{
         self,
         commitment::{Blind, Params},
@@ -326,11 +330,19 @@ impl<C: CurveAffine> super::ProvingKey<C> {
 
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         &self,
-        x: ChallengeX<C>,
+        evaluator: &PolynomialEvaluator<C::Scalar>,
         transcript: &mut T,
     ) -> Result<(), Error> {
         // Hash permutation evals
-        for eval in self.polys.iter().map(|poly| eval_polynomial(poly, *x)) {
+        let queries = self
+            .polys
+            .iter()
+            .map(|polynomial| EvaluationQuery {
+                polynomial,
+                point: EvaluationPoint::Current,
+            })
+            .collect::<Vec<_>>();
+        for eval in evaluator.evaluate(&queries) {
             transcript.write_scalar(eval)?;
         }
 
@@ -341,44 +353,28 @@ impl<C: CurveAffine> super::ProvingKey<C> {
 impl<C: CurveAffine> Constructed<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        pk: &plonk::ProvingKey<C>,
-        x: ChallengeX<C>,
+        evaluator: &PolynomialEvaluator<C::Scalar>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, Error> {
-        let domain = &pk.vk.domain;
-        let blinding_factors = pk.vk.cs.blinding_factors();
-
-        {
-            let mut sets = self.sets.iter();
-
-            while let Some(set) = sets.next() {
-                let permutation_product_eval = eval_polynomial(&set.permutation_product_poly, *x);
-
-                let permutation_product_next_eval = eval_polynomial(
-                    &set.permutation_product_poly,
-                    domain.rotate_omega(*x, Rotation::next()),
-                );
-
-                // Hash permutation product evals
-                for eval in iter::empty()
-                    .chain(Some(&permutation_product_eval))
-                    .chain(Some(&permutation_product_next_eval))
-                {
-                    transcript.write_scalar(*eval)?;
-                }
-
-                // If we have any remaining sets to process, evaluate this set at omega^u
-                // so we can constrain the last value of its running product to equal the
-                // first value of the next set's running product, chaining them together.
-                if sets.len() > 0 {
-                    let permutation_product_last_eval = eval_polynomial(
-                        &set.permutation_product_poly,
-                        domain.rotate_omega(*x, Rotation(-((blinding_factors + 1) as i32))),
-                    );
-
-                    transcript.write_scalar(permutation_product_last_eval)?;
-                }
+        let mut queries = Vec::with_capacity(self.sets.len() * 3);
+        for (index, set) in self.sets.iter().enumerate() {
+            queries.push(EvaluationQuery {
+                polynomial: &set.permutation_product_poly,
+                point: EvaluationPoint::Current,
+            });
+            queries.push(EvaluationQuery {
+                polynomial: &set.permutation_product_poly,
+                point: EvaluationPoint::Next,
+            });
+            if index + 1 < self.sets.len() {
+                queries.push(EvaluationQuery {
+                    polynomial: &set.permutation_product_poly,
+                    point: EvaluationPoint::Last,
+                });
             }
+        }
+        for evaluation in evaluator.evaluate(&queries) {
+            transcript.write_scalar(evaluation)?;
         }
 
         Ok(Evaluated { constructed: self })

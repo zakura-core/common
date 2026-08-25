@@ -4,7 +4,8 @@ use super::super::{
 };
 use super::Argument;
 use crate::{
-    arithmetic::{eval_polynomial, parallelize, CurveAffine},
+    arithmetic::{parallelize, CurveAffine},
+    plonk::evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
     poly::{
         self,
         commitment::{Blind, Params},
@@ -494,29 +495,35 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
 impl<C: CurveAffine> Constructed<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        pk: &ProvingKey<C>,
-        x: ChallengeX<C>,
+        evaluator: &PolynomialEvaluator<C::Scalar>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, Error> {
-        let domain = &pk.vk.domain;
-        let x_inv = domain.rotate_omega(*x, Rotation::prev());
-        let x_next = domain.rotate_omega(*x, Rotation::next());
+        let queries = [
+            EvaluationQuery {
+                polynomial: &self.product_poly,
+                point: EvaluationPoint::Current,
+            },
+            EvaluationQuery {
+                polynomial: &self.product_poly,
+                point: EvaluationPoint::Next,
+            },
+            EvaluationQuery {
+                polynomial: &self.permuted_input_poly,
+                point: EvaluationPoint::Current,
+            },
+            EvaluationQuery {
+                polynomial: &self.permuted_input_poly,
+                point: EvaluationPoint::Previous,
+            },
+            EvaluationQuery {
+                polynomial: &self.permuted_table_poly,
+                point: EvaluationPoint::Current,
+            },
+        ];
 
-        let product_eval = eval_polynomial(&self.product_poly, *x);
-        let product_next_eval = eval_polynomial(&self.product_poly, x_next);
-        let permuted_input_eval = eval_polynomial(&self.permuted_input_poly, *x);
-        let permuted_input_inv_eval = eval_polynomial(&self.permuted_input_poly, x_inv);
-        let permuted_table_eval = eval_polynomial(&self.permuted_table_poly, *x);
-
-        // Hash each advice evaluation
-        for eval in iter::empty()
-            .chain(Some(product_eval))
-            .chain(Some(product_next_eval))
-            .chain(Some(permuted_input_eval))
-            .chain(Some(permuted_input_inv_eval))
-            .chain(Some(permuted_table_eval))
-        {
-            transcript.write_scalar(eval)?;
+        // Hash each advice evaluation.
+        for evaluation in evaluator.evaluate(&queries) {
+            transcript.write_scalar(evaluation)?;
         }
 
         Ok(Evaluated { constructed: self })
