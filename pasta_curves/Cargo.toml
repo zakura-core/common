@@ -68,6 +68,10 @@ multicore = [
     "dep:maybe-rayon",
     "maybe-rayon/threads",
 ]
+# The Eisenstein-orbit MSM backend (`glv::orbit`, planned against the
+# Signed-Booth backend per input). Without it the arbitrary-scalar MSM
+# plans the Signed-Booth backend alone.
+orbits = ["glv"]
 repr-c = []
 serde = [
     "hex",

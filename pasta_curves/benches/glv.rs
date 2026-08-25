@@ -8,6 +8,11 @@ use pasta_curves::{pallas, vesta};
 use rand::SeedableRng;
 use rand_xorshift::XorShiftRng;
 
+// Sizes bracketing the halo2 proving workloads (Orchard's k = 11 circuit
+// commits at 2^11..2^13); the backend planner switches representations
+// across this range.
+const MULTIEXP_SIZES: [usize; 5] = [1 << 9, 1 << 10, 1 << 11, 1 << 12, 1 << 13];
+
 // A k = 13 Halo generator collapse calls batches from 2^12 down to 2^0.
 const SAME_SCALAR_BATCH_SIZES: [usize; 13] =
     [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
@@ -92,6 +97,42 @@ fn glv_bench<C: GlvParams>(c: &mut Criterion, name: &str) {
                 }
             });
         });
+    }
+    group.finish();
+
+    // The arbitrary-scalar MSM through the public planner entry point
+    // (Signed-Booth or Eisenstein-orbit buckets, as the cost model picks
+    // for the current size and thread pool).
+    let mut group = c.benchmark_group(format!("{name}/multiexp"));
+    group.sample_size(10);
+    for size in MULTIEXP_SIZES {
+        group.throughput(Throughput::Elements(size as u64));
+        let mut rng = XorShiftRng::from_seed([0x42; 16]);
+        let msm_scalars: Vec<C::ScalarExt> =
+            (0..size).map(|_| C::ScalarExt::random(&mut rng)).collect();
+        let msm_bases: Vec<C::AffineExt> = (0..size)
+            .map(|i| (C::generator() * (k + C::ScalarExt::from(i as u64 + 1))).to_affine())
+            .collect();
+
+        // Without the `orbits` feature the count-only planner may hand a
+        // size to the generic MSM instead; skip it rather than panic.
+        if C::try_multiexp_vartime(&msm_scalars, &msm_bases).is_none() {
+            continue;
+        }
+
+        group.bench_with_input(
+            BenchmarkId::new("try_multiexp_vartime", size),
+            &size,
+            |b, _| {
+                b.iter(|| {
+                    C::try_multiexp_vartime(
+                        black_box(msm_scalars.as_slice()),
+                        black_box(msm_bases.as_slice()),
+                    )
+                    .expect("the planner selects a GLV backend at these sizes")
+                });
+            },
+        );
     }
     group.finish();
 }

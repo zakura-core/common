@@ -8,6 +8,69 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- All of this release's new MSM machinery — the Eisenstein-orbit backend
+  (`glv::orbit`) and the magnitude-profiled backend planner — sits behind
+  a new `orbits` feature (implying `glv`), so it can be disabled,
+  refactored, or removed wholesale. Without it the arbitrary-scalar MSM
+  plans the Signed-Booth backend against the generic estimate exactly as
+  before.
+- The orbit backend's parallel schedule pairs adjacent windows per task
+  as joined subtasks (the schedule the Signed-Booth backend already
+  uses), sharing one Horner shift chain per pair while keeping every
+  window independently stealable.
+- The GLV multiscalar multiplication now plans between two bucket backends:
+  the existing Signed-Booth windows over the two decomposition halves, and a
+  new Eisenstein-orbit backend (`glv::orbit`) that recodes the joint value
+  $k_1 + k_2\omega$ in radix $2^c$ directly over $\mathbf{Z}[\omega]$ and
+  quotients every digit by the six units. Each window then holds one bucket
+  per unit *orbit* — $(4^c + 2)/6$ buckets drawn from a canonical hexagonal
+  wedge, against $2^{c-1}$ per half — and visits every scalar once instead of
+  twice; the unit acts on the stored point through one of three precomputed
+  $\zeta$-rotations of x and a y negation. Window sums are integrated by a
+  spanning-tree reducer on the wedge whose edges differ by $1$ or
+  $1 + \omega$, so the two-dimensional weighted sum telescopes to
+  $A - \phi^2(H)$ in $2m - 2$ additions. Widths 4–6 are planned by a
+  calibrated cost model (width 3 is implemented and tested but never
+  modeled ahead). Measured on 32-core x86-64 (portable backend) against the
+  Booth backend at its own planned width, with interleaved samples (an
+  earlier sequential sweep read +2..6% serially through a harness
+  warm-up artifact; see `msm_backend_timings`): serial parity within ±2%
+  from 512 to 8,192 terms and +4..5% at 16,384, +19..38% on 8 workers
+  and +13..65% on 32 workers at mid-to-large sizes — the orbit's 22–26
+  windows keep workers fed that Booth's 10–16 cannot — while Booth is
+  kept for small parallel MSMs.
+- The MSM planner now prices both GLV bucket backends from the input's
+  *magnitude profile* (suffix counts of the decomposition halves' bit
+  lengths) rather than the term count alone, and the orbit backend caps its
+  window walk at the highest window any scalar's recoding reaches. Real
+  proving MSMs are not uniformly full-width — halo2 witness commitments mix
+  boolean columns, byte-scale values, and zero padding rows, and an early
+  count-only planner sent such MSMs to the orbit backend (whose joint
+  radix-$2^c$ recoding spreads a small magnitude over ~$2c/w$ as many
+  windows as $w$-bit Booth halves), measurably regressing serial Orchard
+  proving; profiled planning keeps Booth on the sparse commitment shapes
+  and the orbit's wins on the full-width quotient/multiopen MSMs. With the
+  window capping the orbit backend also measured ahead on witness-shaped
+  MSMs (+16..20% serial at 2,048–8,192 terms — a pre-correction sweep;
+  re-confirm with the interleaved `msm_backend_timings` before leaning on
+  the exact figure). End to end,
+  interleaved A/B runs of Orchard proving measured the finished planner
+  ~2.6% faster serially (k = 11, one action; faster in 3 of 3 matched
+  rounds) and ~8% faster on the default 32-thread pool (one-action bundle
+  449 ms → 415 ms).
+- Both GLV bucket backends (Booth and orbit) reduce their buckets through
+  the shared fused batched-affine reduction, one window at a time. A multi-window variant sharing one Montgomery inversion per
+  tree level across window groups was built and *measured as a net loss*
+  at every group size above one window — with divstep inversion at
+  I/M ≈ 77 the saved inversions are worth microseconds per MSM, while
+  staging several windows at once grows the working set from a few hundred
+  KiB (in L2) to several MiB swept per reduction level; interleaved A/B
+  runs of the serial Orchard k = 11 prover measured 32 MiB groups ~5%
+  slower end-to-end — so the single-window primitive is the only shape
+  kept. A second experiment replacing the reduction's pending-addition
+  records with denominator-only staging and a completion re-walk measured
+  within a few percent of the landed fused pass (the records are
+  L2-resident within a level), and was likewise not kept.
 - Deferred `Fp` and `Fq` product accumulation now fuses the portable
   schoolbook multiplication into the wide accumulator, avoiding a temporary
   eight-limb product and a second carry pass. Deferred inner products measured
