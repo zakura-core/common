@@ -54,11 +54,24 @@ struct ProjectivePoint {
 
 #[derive(Clone, Copy)]
 struct DoubleAndAddWitness {
-    lambda_1: Assigned<pallas::Base>,
-    lambda_2: Assigned<pallas::Base>,
-    x: Assigned<pallas::Base>,
+    lambda_1_numerator: pallas::Base,
+    lambda_1_denominator: pallas::Base,
+    lambda_2_numerator: pallas::Base,
     point: ProjectivePoint,
-    exceptional: bool,
+}
+
+impl DoubleAndAddWitness {
+    fn lambda_1(&self) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.lambda_1_numerator, self.lambda_1_denominator)
+    }
+
+    fn lambda_2(&self) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.lambda_2_numerator, self.point.z)
+    }
+
+    fn x(&self) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.point.x, self.point.z.square())
+    }
 }
 
 impl ProjectivePoint {
@@ -97,18 +110,16 @@ impl ProjectivePoint {
         let x_h_sq_d_sq = x_h_sq * d_sq;
         let x_new = lambda_2_numerator.square() - (x_h_sq + x_r) * d_sq;
         let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
-        let z_new_sq = z_new.square();
 
         DoubleAndAddWitness {
-            lambda_1: Assigned::Rational(r, z_h),
-            lambda_2: Assigned::Rational(lambda_2_numerator, z_new),
-            x: Assigned::Rational(x_new, z_new_sq),
+            lambda_1_numerator: r,
+            lambda_1_denominator: z_h,
+            lambda_2_numerator,
             point: Self {
                 x: x_new,
                 y: y_new,
                 z: z_new,
             },
-            exceptional: self.z.is_zero_vartime() || h.is_zero_vartime() || d.is_zero_vartime(),
         }
     }
 }
@@ -359,6 +370,7 @@ where
         // The projective path does not need an affine y-coordinate between
         // rounds. Derive it once, when the circuit finally assigns it.
         if let Some(point) = projective {
+            point.error_if_known_and(|point| point.z.is_zero_vartime())?;
             y_a = point
                 .map(|point| {
                     let z_sq = point.z.square();
@@ -527,9 +539,8 @@ where
 
             if let Some(point) = projective {
                 let witness = point.zip(gen).map(|(point, gen)| point.double_and_add(gen));
-                witness.error_if_known_and(|witness| witness.exceptional)?;
 
-                let lambda_1 = witness.as_ref().map(|witness| witness.lambda_1);
+                let lambda_1 = witness.as_ref().map(DoubleAndAddWitness::lambda_1);
                 region.assign_advice(
                     || "lambda_1",
                     config.double_and_add.lambda_1,
@@ -537,7 +548,7 @@ where
                     || lambda_1,
                 )?;
 
-                let lambda_2 = witness.as_ref().map(|witness| witness.lambda_2);
+                let lambda_2 = witness.as_ref().map(DoubleAndAddWitness::lambda_2);
                 region.assign_advice(
                     || "lambda_2",
                     config.double_and_add.lambda_2,
@@ -545,7 +556,7 @@ where
                     || lambda_2,
                 )?;
 
-                let x_a_new = witness.as_ref().map(|witness| witness.x);
+                let x_a_new = witness.as_ref().map(DoubleAndAddWitness::x);
                 let x_a_cell = region.assign_advice(
                     || "x_a",
                     config.double_and_add.x_a,
@@ -756,13 +767,13 @@ mod tests {
 
         for generator in SINSEMILLA_S.iter().copied() {
             let witness = point.double_and_add(generator);
-            assert!(!witness.exceptional);
+            assert!(!witness.point.z.is_zero_vartime());
 
             let generator = pallas::Affine::from_xy(generator.0, generator.1).unwrap();
             expected = expected.double() + pallas::Point::from(generator);
             let expected = expected.to_affine();
             let coordinates = expected.coordinates().unwrap();
-            assert_eq!(witness.x.evaluate(), *coordinates.x());
+            assert_eq!(witness.x().evaluate(), *coordinates.x());
 
             let z_sq = witness.point.z.square();
             assert_eq!(witness.point.x, *coordinates.x() * z_sq);
