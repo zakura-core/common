@@ -226,7 +226,7 @@ fn benchmark_witness_assignment() {
                     .expect("Orchard has one instance column")
                     .into_iter()
                     .collect(),
-                usable_rows: usable_rows.clone(),
+                usable_rows,
             })
             .collect::<Vec<_>>();
 

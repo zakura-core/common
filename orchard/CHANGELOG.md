@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Kept the cached-plan witness-assignment benchmark lint-clean on current Rust
+  toolchains.
 - Added a reusable cached-plan Orchard witness-assignment benchmark for one,
   two, and four Actions.
 - Multi-Action proof creation now synthesizes independent Action witnesses in
