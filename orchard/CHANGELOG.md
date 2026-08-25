@@ -10,6 +10,22 @@ and this project adheres to Rust's notion of
 
 - Kept the cached-plan witness-assignment benchmark lint-clean on current Rust
   toolchains.
+- Added `circuit::VerifyingKey::prepare_batch_validation`, which builds and
+  caches a prepared fixed-base zero-check over the key's SRS (see
+  `halo2_proofs::poly::commitment::Params::prepare_zero_checks`) and
+  returns whether one was actually armed (`false` when halo2 was built
+  without its default `orbits` feature or its backend declined).
+  Long-lived validators should call it once per key: the halo2 verifier's
+  final identity test then routes through the preparation, and a
+  `BatchValidator` batch pays a single such check. Measured end to end on
+  Ironwood bundle batch validation, arming the key speeds small batches
+  the most (about +22% at one bundle serially and +29% on an 8-worker
+  pool — 32-worker cells drift too much between processes to quote —
+  tapering as per-proof transcript and signature work dominates larger
+  batches).
+- Added an ignored `ironwood_batch_timings` integration test: a manual
+  timing harness validating batches of real Ironwood bundles through
+  `BatchValidator` across batch sizes and worker counts.
 - Added a reusable cached-plan Orchard witness-assignment benchmark for one,
   two, and four Actions.
 - Multi-Action proof creation now synthesizes independent Action witnesses in

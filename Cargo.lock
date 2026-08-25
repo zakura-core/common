@@ -3928,6 +3928,7 @@ dependencies = [
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "rand_core 0.6.4",
+ "rayon",
  "serde",
  "shardtree",
  "subtle",

@@ -1114,6 +1114,27 @@ impl VerifyingKey {
     pub fn supports_cross_address_restriction(&self) -> bool {
         self.circuit_version.supports_cross_address_restriction()
     }
+
+    /// Prepares this key for repeated proof verification: builds and caches
+    /// a prepared fixed-base zero-check over the key's SRS, which the halo2
+    /// verifier's final identity test then routes through (see
+    /// `halo2_proofs::poly::commitment::Params::prepare_zero_checks`).
+    ///
+    /// Preparation costs on the order of a hundred milliseconds and tens of
+    /// mebibytes, amortized across every subsequent verification with this
+    /// key — [`crate::bundle::BatchValidator`] included, which pays a single
+    /// final check per batch. Long-lived validators (nodes, wallet backends)
+    /// should call this once after constructing the key; one-shot verifiers
+    /// need not.
+    ///
+    /// Returns whether a prepared check was actually built and cached;
+    /// `false` means arming was a no-op (halo2 built without its default
+    /// `orbits` feature, or its backend declined) and verification simply
+    /// keeps its unprepared path. Callers may ignore the result; validators
+    /// that expect the speedup can assert or log it.
+    pub fn prepare_batch_validation(&self) -> bool {
+        self.params.prepare_zero_checks()
+    }
 }
 
 /// The proving key for the Orchard Action circuit.
