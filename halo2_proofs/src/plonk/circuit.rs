@@ -471,27 +471,11 @@ pub trait FloorPlanner {
     /// a caller bug (`create_proof` guarantees it), so this is debug-asserted
     /// rather than reported through [`Error`], whose variants describe
     /// circuit failures.
-    fn synthesize_batch<F: Field, CS: Assignment<F>, C: Circuit<F>>(
-        assignments: &mut [CS],
-        circuits: &[C],
-        config: C::Config,
-        constants: &[Column<Fixed>],
-    ) -> Result<(), Error> {
-        debug_assert_eq!(assignments.len(), circuits.len());
-
-        for (assignment, circuit) in assignments.iter_mut().zip(circuits) {
-            Self::synthesize(assignment, circuit, config.clone(), constants.to_vec())?;
-        }
-
-        Ok(())
-    }
-
-    /// Synthesizes several instances of the same circuit shape in parallel.
     ///
-    /// The default implementation calls [`FloorPlanner::synthesize_batch`].
-    /// Floor planners that can share immutable planning data across workers
-    /// may override this method.
-    fn synthesize_batch_parallel<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
+    /// The `Send` and `Sync` bounds let implementations synthesize the
+    /// independent circuit witnesses in parallel; the default implementation
+    /// is serial.
+    fn synthesize_batch<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
         assignments: &mut [CS],
         circuits: &[C],
         config: C::Config,
@@ -500,7 +484,13 @@ pub trait FloorPlanner {
     where
         C::Config: Send,
     {
-        Self::synthesize_batch(assignments, circuits, config, constants)
+        debug_assert_eq!(assignments.len(), circuits.len());
+
+        for (assignment, circuit) in assignments.iter_mut().zip(circuits) {
+            Self::synthesize(assignment, circuit, config.clone(), constants.to_vec())?;
+        }
+
+        Ok(())
     }
 }
 

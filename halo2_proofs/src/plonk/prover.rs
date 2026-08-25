@@ -149,45 +149,11 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
 ///
 /// Every element of `circuits` must have the circuit shape used to generate
 /// `pk`.
-pub fn create_proof<
-    C: CurveAffine,
-    E: EncodedChallenge<C>,
-    R: Rng,
-    T: TranscriptWrite<C, E>,
-    ConcreteCircuit: Circuit<C::Scalar>,
->(
-    params: &Params<C>,
-    pk: &ProvingKey<C>,
-    circuits: &[ConcreteCircuit],
-    instances: &[&[&[C::Scalar]]],
-    rng: R,
-    transcript: &mut T,
-) -> Result<(), Error> {
-    create_proof_with_synthesis(
-        params,
-        pk,
-        circuits,
-        instances,
-        rng,
-        transcript,
-        |assignments, circuits, config, constants| {
-            ConcreteCircuit::FloorPlanner::synthesize_batch(
-                assignments,
-                circuits,
-                config,
-                constants,
-            )
-        },
-    )
-}
-
-/// Creates a proof while synthesizing independent circuit witnesses in
-/// parallel.
 ///
-/// This has the same behavior and requirements as [`create_proof`], with the
-/// additional requirements that the circuit can be shared between workers and
-/// its configuration can be sent between them.
-pub fn create_proof_parallel<
+/// The circuit type must be `Sync` and its configuration `Send` so that
+/// compatible floor planners can synthesize independent circuit witnesses in
+/// parallel.
+pub fn create_proof<
     C: CurveAffine,
     E: EncodedChallenge<C>,
     R: Rng,
@@ -197,51 +163,13 @@ pub fn create_proof_parallel<
     params: &Params<C>,
     pk: &ProvingKey<C>,
     circuits: &[ConcreteCircuit],
-    instances: &[&[&[C::ScalarExt]]],
-    rng: R,
+    instances: &[&[&[C::Scalar]]],
+    mut rng: R,
     transcript: &mut T,
 ) -> Result<(), Error>
 where
     <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
 {
-    create_proof_with_synthesis(
-        params,
-        pk,
-        circuits,
-        instances,
-        rng,
-        transcript,
-        |assignments, circuits, config, constants| {
-            ConcreteCircuit::FloorPlanner::synthesize_batch_parallel(
-                assignments,
-                circuits,
-                config,
-                constants,
-            )
-        },
-    )
-}
-
-fn create_proof_with_synthesis<
-    C: CurveAffine,
-    E: EncodedChallenge<C>,
-    R: Rng,
-    T: TranscriptWrite<C, E>,
-    ConcreteCircuit: Circuit<C::ScalarExt>,
->(
-    params: &Params<C>,
-    pk: &ProvingKey<C>,
-    circuits: &[ConcreteCircuit],
-    instances: &[&[&[C::ScalarExt]]],
-    mut rng: R,
-    transcript: &mut T,
-    synthesize: impl FnOnce(
-        &mut [WitnessCollection<'_, C::ScalarExt>],
-        &[ConcreteCircuit],
-        <ConcreteCircuit as Circuit<C::ScalarExt>>::Config,
-        &[Column<Fixed>],
-    ) -> Result<(), Error>,
-) -> Result<(), Error> {
     if circuits.len() != instances.len() {
         return Err(Error::InvalidInstances);
     }
@@ -346,7 +274,12 @@ fn create_proof_with_synthesis<
 
     // Synthesize every circuit while allowing its floor planner to share
     // circuit-shape-dependent work across the batch.
-    synthesize(&mut witnesses, circuits, config, &meta.constants)?;
+    ConcreteCircuit::FloorPlanner::synthesize_batch(
+        &mut witnesses,
+        circuits,
+        config,
+        &meta.constants,
+    )?;
 
     let advice: Vec<AdviceSingle<C>> = witnesses
         .into_iter()
@@ -961,19 +894,34 @@ fn v1_batch_reuses_measurement() {
     )
     .expect("proof generation should not fail");
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
-    let serial_proof = transcript.finalize();
+    let first_proof = transcript.finalize();
 
-    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
-    MEASUREMENTS.store(0, Ordering::Relaxed);
-    create_proof_parallel(
-        &params,
-        &pk,
-        &[MyCircuit, MyCircuit, MyCircuit],
-        &[&[], &[], &[]],
-        StdRng::seed_from_u64(PROOF_SEED),
-        &mut transcript,
-    )
-    .expect("parallel proof generation should not fail");
-    assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
-    assert_eq!(transcript.finalize(), serial_proof);
+    // The proof bytes must not depend on the parallel schedule: re-create the
+    // proof under single- and multi-worker Rayon pools and require identical
+    // transcripts.
+    #[cfg(feature = "multicore")]
+    for threads in [1, 4] {
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        MEASUREMENTS.store(0, Ordering::Relaxed);
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                create_proof(
+                    &params,
+                    &pk,
+                    &[MyCircuit, MyCircuit, MyCircuit],
+                    &[&[], &[], &[]],
+                    StdRng::seed_from_u64(PROOF_SEED),
+                    &mut transcript,
+                )
+            })
+            .expect("proof generation should not fail");
+        assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
+        assert_eq!(transcript.finalize(), first_proof);
+    }
+
+    #[cfg(not(feature = "multicore"))]
+    let _ = first_proof;
 }

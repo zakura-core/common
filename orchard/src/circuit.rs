@@ -1340,25 +1340,14 @@ impl Proof {
         let instances: Vec<_> = instances.iter().map(|i| &i[..]).collect();
 
         let mut transcript = Blake2bWrite::<_, vesta::Affine, _>::init(vec![]);
-        if circuits.len() == 1 {
-            plonk::create_proof(
-                &pk.params,
-                &pk.pk,
-                circuits,
-                &instances,
-                &mut rng,
-                &mut transcript,
-            )?;
-        } else {
-            plonk::create_proof_parallel(
-                &pk.params,
-                &pk.pk,
-                circuits,
-                &instances,
-                &mut rng,
-                &mut transcript,
-            )?;
-        }
+        plonk::create_proof(
+            &pk.params,
+            &pk.pk,
+            circuits,
+            &instances,
+            &mut rng,
+            &mut transcript,
+        )?;
         Ok(Proof(transcript.finalize()))
     }
 

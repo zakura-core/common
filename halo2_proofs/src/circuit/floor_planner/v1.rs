@@ -77,26 +77,7 @@ impl FloorPlanner for V1 {
         Self::assign(cs, circuit, config, &layout)
     }
 
-    fn synthesize_batch<F: Field, CS: Assignment<F>, C: Circuit<F>>(
-        assignments: &mut [CS],
-        circuits: &[C],
-        config: C::Config,
-        constants: &[Column<Fixed>],
-    ) -> Result<(), Error> {
-        debug_assert_eq!(assignments.len(), circuits.len());
-        let Some(first_circuit) = circuits.first() else {
-            return Ok(());
-        };
-
-        let layout = Self::plan::<F, CS, C>(first_circuit, config.clone(), constants)?;
-        for (assignment, circuit) in assignments.iter_mut().zip(circuits) {
-            Self::assign(assignment, circuit, config.clone(), &layout)?;
-        }
-
-        Ok(())
-    }
-
-    fn synthesize_batch_parallel<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
+    fn synthesize_batch<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
         assignments: &mut [CS],
         circuits: &[C],
         config: C::Config,
@@ -115,6 +96,8 @@ impl FloorPlanner for V1 {
             return Self::assign(&mut assignments[0], first_circuit, config, &layout);
         }
 
+        // Workers share the immutable layout; each one owns its assignment
+        // target and a clone of the configuration.
         let configs = (0..circuits.len())
             .map(|_| config.clone())
             .collect::<Vec<_>>();
