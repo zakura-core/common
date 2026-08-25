@@ -238,6 +238,18 @@ fn deferred_inner_product<F: DeferredField>(polynomial: &[F], powers: &[F]) -> F
     F::reduce(accumulator)
 }
 
+#[cfg(feature = "deferred-bench")]
+/// Entry points for benchmarking deferred evaluation callers.
+pub mod deferred_bench {
+    use super::deferred_inner_product;
+    use pasta_curves::pallas;
+
+    /// Evaluates an inner product using the deferred accumulator path.
+    pub fn inner_product(polynomial: &[pallas::Base], powers: &[pallas::Base]) -> pallas::Base {
+        deferred_inner_product(polynomial, powers)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

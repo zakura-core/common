@@ -742,6 +742,28 @@ impl<'a, F: Field> PowerFold<'a, F> {
     }
 }
 
+#[cfg(feature = "deferred-bench")]
+/// Entry points for benchmarking deferred polynomial evaluation callers.
+pub mod deferred_bench {
+    use super::PowerFold;
+    use pasta_curves::pallas;
+
+    /// Folds terms with challenge powers using [`PowerFold`].
+    pub fn power_fold(
+        terms: &[Vec<pallas::Base>],
+        powers: &[pallas::Base],
+        output: &mut [pallas::Base],
+    ) {
+        assert_eq!(terms.len(), powers.len());
+        let mut fold = PowerFold::new(output);
+        for (terms, power) in terms.iter().zip(powers) {
+            fold.terms().copy_from_slice(terms);
+            fold.accumulate(*power);
+        }
+        fold.finish();
+    }
+}
+
 fn accumulate_deferred<T: DeferredField + 'static>(
     accumulators: &mut [T::Accumulator],
     seeded: &mut bool,

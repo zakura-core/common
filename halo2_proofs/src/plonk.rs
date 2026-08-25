@@ -19,6 +19,8 @@ mod assigned;
 mod circuit;
 mod error;
 mod evaluation;
+#[cfg(feature = "deferred-bench")]
+pub use evaluation::deferred_bench;
 mod keygen;
 mod lookup;
 pub(crate) mod permutation;

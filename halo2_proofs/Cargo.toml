@@ -78,6 +78,7 @@ test-dev-graph = [
     "plotters/ttf",
 ]
 unstable-verifier-fingerprint = []
+deferred-bench = []
 
 [lib]
 name = "halo2_proofs"
@@ -128,6 +129,12 @@ harness = false
 name = "hashtocurve"
 path = "benches/hashtocurve.rs"
 harness = false
+
+[[bench]]
+name = "deferred_callers"
+path = "benches/deferred_callers.rs"
+harness = false
+required-features = ["deferred-bench"]
 
 [[bench]]
 name = "msm"

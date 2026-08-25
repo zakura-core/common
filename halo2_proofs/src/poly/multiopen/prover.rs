@@ -146,6 +146,24 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
     }
 }
 
+#[cfg(feature = "deferred-bench")]
+/// Entry points for benchmarking deferred multi-opening callers.
+pub mod deferred_bench {
+    use super::fold_polynomial_range_deferred;
+    use crate::poly::{Coeff, Polynomial};
+    use pasta_curves::pallas;
+
+    /// Folds a multi-opening polynomial group with deferred products.
+    pub fn multiopen_fold(
+        values: &mut [pallas::Base],
+        polynomials: &[Polynomial<pallas::Base, Coeff>],
+        powers: &[pallas::Base],
+    ) {
+        let polynomials = polynomials.iter().collect::<Vec<_>>();
+        fold_polynomial_range_deferred(values, 0, &polynomials, powers);
+    }
+}
+
 fn collapse_polynomials_with<F: Field>(
     groups: &[Vec<&Polynomial<F, Coeff>>],
     fold_range: impl Fn(&mut [F], usize, &[&Polynomial<F, Coeff>]) + Copy + Send + Sync,

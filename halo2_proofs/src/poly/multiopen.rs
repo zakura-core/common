@@ -15,6 +15,8 @@ mod prover;
 mod verifier;
 
 pub use prover::create_proof;
+#[cfg(feature = "deferred-bench")]
+pub use prover::deferred_bench;
 pub use verifier::verify_proof;
 
 #[derive(Clone, Copy, Debug)]

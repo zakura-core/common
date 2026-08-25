@@ -14,6 +14,8 @@ use std::ops::{Add, Deref, DerefMut, Index, IndexMut, Mul, RangeFrom, RangeFull}
 pub mod commitment;
 mod domain;
 mod evaluator;
+#[cfg(feature = "deferred-bench")]
+pub use evaluator::deferred_bench;
 pub mod multiopen;
 
 pub use domain::*;
@@ -113,6 +115,16 @@ impl<F, B> DerefMut for Polynomial<F, B> {
 }
 
 impl<F, B> Polynomial<F, B> {
+    /// Constructs a polynomial from owned values for deferred-operation
+    /// benchmarks.
+    #[cfg(feature = "deferred-bench")]
+    pub fn from_values(values: Vec<F>) -> Self {
+        Self {
+            values,
+            _marker: PhantomData,
+        }
+    }
+
     /// Iterate over the values, which are either in coefficient or evaluation
     /// form depending on the basis `B`.
     pub fn iter(&self) -> impl Iterator<Item = &F> {
