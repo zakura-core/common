@@ -25,8 +25,12 @@ pub struct MSM<'a, C: CurveAffine> {
 }
 
 fn canonicalize_other<C: CurveAffine>(mut terms: Vec<ArbitraryTerm<C>>) -> Vec<ArbitraryTerm<C>> {
-    // This stable sort preserves the first point orientation used by the
-    // previous incremental BTreeMap accumulation.
+    // The stable sort keeps the first-encountered orientation for each
+    // x-coordinate. Which orientation that is depends on aggregation order
+    // (Rayon's reduction shape is not fixed), but the choice cannot affect
+    // the evaluated sum: `(scalar, P)` and `(-scalar, -P)` are the same term,
+    // and the coalescing below negates the scalar exactly when the stored
+    // orientation differs.
     terms.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut canonical = Vec::with_capacity(terms.len());
