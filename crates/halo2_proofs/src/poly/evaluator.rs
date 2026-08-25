@@ -1511,7 +1511,9 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         });
     }
 
-    fn replace_compressed_selectors(&self, ast: &Ast<E, F, B>) -> Ast<E, F, B>
+    // Returns `None` when this subtree needs no replacement, so its parent can
+    // retain the existing `Arc` instead of rebuilding it.
+    fn replace_compressed_selectors(&self, ast: &Ast<E, F, B>) -> Option<Ast<E, F, B>>
     where
         E: Copy,
     {
@@ -1521,34 +1523,67 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     && selector.combination_len == combination_len
                     && selector.assigned_root == assigned_root
             }) {
-                return Ast::Poly(selector.selector);
+                return Some(Ast::Poly(selector.selector));
             }
         }
 
         match ast {
-            Ast::Poly(leaf) => Ast::Poly(*leaf),
-            Ast::Add(lhs, rhs) => Ast::Add(
-                Arc::new(self.replace_compressed_selectors(lhs)),
-                Arc::new(self.replace_compressed_selectors(rhs)),
-            ),
-            Ast::Mul(AstMul(lhs, rhs)) => Ast::Mul(AstMul(
-                Arc::new(self.replace_compressed_selectors(lhs)),
-                Arc::new(self.replace_compressed_selectors(rhs)),
-            )),
-            Ast::Scale(inner, scalar) => {
-                Ast::Scale(Arc::new(self.replace_compressed_selectors(inner)), *scalar)
+            Ast::Poly(_) | Ast::LinearTerm(_) | Ast::ConstantTerm(_) => None,
+            Ast::Add(lhs, rhs) => {
+                let replaced_lhs = self.replace_compressed_selectors(lhs);
+                let replaced_rhs = self.replace_compressed_selectors(rhs);
+                if replaced_lhs.is_none() && replaced_rhs.is_none() {
+                    None
+                } else {
+                    Some(Ast::Add(
+                        replaced_lhs
+                            .map(Arc::new)
+                            .unwrap_or_else(|| Arc::clone(lhs)),
+                        replaced_rhs
+                            .map(Arc::new)
+                            .unwrap_or_else(|| Arc::clone(rhs)),
+                    ))
+                }
             }
-            Ast::DistributePowers(terms, base) => Ast::DistributePowers(
-                Arc::new(
-                    terms
-                        .iter()
-                        .map(|term| self.replace_compressed_selectors(term))
-                        .collect(),
-                ),
-                *base,
-            ),
-            Ast::LinearTerm(value) => Ast::LinearTerm(*value),
-            Ast::ConstantTerm(value) => Ast::ConstantTerm(*value),
+            Ast::Mul(AstMul(lhs, rhs)) => {
+                let replaced_lhs = self.replace_compressed_selectors(lhs);
+                let replaced_rhs = self.replace_compressed_selectors(rhs);
+                if replaced_lhs.is_none() && replaced_rhs.is_none() {
+                    None
+                } else {
+                    Some(Ast::Mul(AstMul(
+                        replaced_lhs
+                            .map(Arc::new)
+                            .unwrap_or_else(|| Arc::clone(lhs)),
+                        replaced_rhs
+                            .map(Arc::new)
+                            .unwrap_or_else(|| Arc::clone(rhs)),
+                    )))
+                }
+            }
+            Ast::Scale(inner, scalar) => self
+                .replace_compressed_selectors(inner)
+                .map(|inner| Ast::Scale(Arc::new(inner), *scalar)),
+            Ast::DistributePowers(terms, base) => {
+                let mut replaced_terms = None;
+                for (index, term) in terms.iter().enumerate() {
+                    match (
+                        replaced_terms.as_mut(),
+                        self.replace_compressed_selectors(term),
+                    ) {
+                        (None, None) => {}
+                        (None, Some(replacement)) => {
+                            let mut output = Vec::with_capacity(terms.len());
+                            output.extend_from_slice(&terms[..index]);
+                            output.push(replacement);
+                            replaced_terms = Some(output);
+                        }
+                        (Some(output), None) => output.push(term.clone()),
+                        (Some(output), Some(replacement)) => output.push(replacement),
+                    }
+                }
+                replaced_terms.map(|terms| Ast::DistributePowers(Arc::new(terms), *base))
+            }
         }
     }
 
@@ -2001,7 +2036,9 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         // polynomial.
         let minus_one = -F::ONE;
         let two = F::ONE.double();
-        let ast = self.replace_compressed_selectors(ast);
+        let ast = self
+            .replace_compressed_selectors(ast)
+            .unwrap_or_else(|| ast.clone());
         let mut plan = EvaluationPlan::compile(&ast);
         let cache_slots = plan.cache_common_subexpressions();
         let mut result = B::empty_poly(domain);
@@ -2480,7 +2517,7 @@ impl BasisOps for ExtendedLagrangeCoeff {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
+    use std::{borrow::Cow, sync::Arc};
 
     use group::ff::{Field, WithSmallOrderMulGroup};
     use pasta_curves::{pallas, vesta};
@@ -3508,6 +3545,39 @@ mod tests {
             root += F::ONE;
         }
         expression
+    }
+
+    #[test]
+    fn compressed_selector_replacement_reuses_unchanged_subtrees() {
+        const COMBINATION_LEN: usize = 4;
+
+        let domain = EvaluationDomain::new(3, 3);
+        let mut evaluator = new_evaluator::<_, pallas::Base, ExtendedLagrangeCoeff>(|| {});
+        let query = evaluator.register_poly(domain.empty_extended());
+        let selector = evaluator.register_poly(domain.empty_extended());
+        let unrelated = evaluator.register_poly(domain.empty_extended());
+        evaluator.register_compressed_selector(query, COMBINATION_LEN, 1, selector);
+
+        let unchanged = Arc::new(Ast::from(unrelated) + Ast::ConstantTerm(pallas::Base::ONE));
+        assert!(evaluator
+            .replace_compressed_selectors(unchanged.as_ref())
+            .is_none());
+
+        let ast = Ast::Add(
+            Arc::new(compressed_selector_expression(query, COMBINATION_LEN, 1)),
+            Arc::clone(&unchanged),
+        );
+        let replaced = evaluator
+            .replace_compressed_selectors(&ast)
+            .expect("the compressed selector should be replaced");
+
+        match replaced {
+            Ast::Add(lhs, rhs) => {
+                assert!(matches!(lhs.as_ref(), Ast::Poly(leaf) if *leaf == selector));
+                assert!(Arc::ptr_eq(&rhs, &unchanged));
+            }
+            _ => panic!("the replacement should preserve the root addition"),
+        }
     }
 
     fn compressed_selector_value<F: Field>(
