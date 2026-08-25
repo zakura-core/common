@@ -57,7 +57,6 @@ struct DoubleAndAddWitness {
     lambda_1: Assigned<pallas::Base>,
     lambda_2: Assigned<pallas::Base>,
     x: Assigned<pallas::Base>,
-    y: Assigned<pallas::Base>,
     point: ProjectivePoint,
     exceptional: bool,
 }
@@ -99,13 +98,11 @@ impl ProjectivePoint {
         let x_new = lambda_2_numerator.square() - (x_h_sq + x_r) * d_sq;
         let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
         let z_new_sq = z_new.square();
-        let z_new_cubed = z_new_sq * z_new;
 
         DoubleAndAddWitness {
             lambda_1: Assigned::Rational(r, z_h),
             lambda_2: Assigned::Rational(lambda_2_numerator, z_new),
             x: Assigned::Rational(x_new, z_new_sq),
-            y: Assigned::Rational(y_new, z_new_cubed),
             point: Self {
                 x: x_new,
                 y: y_new,
@@ -359,6 +356,17 @@ where
             zs_sum.push(zs);
         }
 
+        // The projective path does not need an affine y-coordinate between
+        // rounds. Derive it once, when the circuit finally assigns it.
+        if let Some(point) = projective {
+            y_a = point
+                .map(|point| {
+                    let z_sq = point.z.square();
+                    Assigned::Rational(point.y, z_sq * point.z)
+                })
+                .into();
+        }
+
         // Assign the final y_a.
         let y_a = {
             // Assign the final y_a.
@@ -546,7 +554,6 @@ where
                 )?;
 
                 x_a = x_a_cell.into();
-                y_a = witness.as_ref().map(|witness| witness.y).into();
                 projective = Some(witness.map(|witness| witness.point));
                 continue;
             }
@@ -756,7 +763,10 @@ mod tests {
             let expected = expected.to_affine();
             let coordinates = expected.coordinates().unwrap();
             assert_eq!(witness.x.evaluate(), *coordinates.x());
-            assert_eq!(witness.y.evaluate(), *coordinates.y());
+
+            let z_sq = witness.point.z.square();
+            assert_eq!(witness.point.x, *coordinates.x() * z_sq);
+            assert_eq!(witness.point.y, *coordinates.y() * z_sq * witness.point.z);
 
             point = witness.point;
         }
