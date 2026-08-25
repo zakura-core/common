@@ -13,7 +13,10 @@ use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
 use ff::Field;
 use group::Curve;
-use pasta_curves::{deferred::DeferredField, pallas, vesta};
+use pasta_curves::{
+    deferred::{DeferredAccumulator, DeferredField},
+    pallas, vesta,
+};
 use rand_core::Rng;
 use std::any::{Any, TypeId};
 use std::hash::Hash;
@@ -75,6 +78,19 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
         // Independent lanes shorten the multiply-accumulate dependency chain
         // while sharing each challenge-power load.
         let mut accumulators = [F::Accumulator::default(); DEFERRED_FOLD_LANES];
+        if let Some(coefficients) = last
+            .values
+            .get(coefficient_index..coefficient_index + DEFERRED_FOLD_LANES)
+        {
+            accumulators[0] = F::Accumulator::initialize(&coefficients[0]);
+            accumulators[1] = F::Accumulator::initialize(&coefficients[1]);
+        } else {
+            for (lane, accumulator) in accumulators.iter_mut().enumerate() {
+                if let Some(coefficient) = last.values.get(coefficient_index + lane) {
+                    *accumulator = F::Accumulator::initialize(coefficient);
+                }
+            }
+        }
         if let Some(coefficients) = first
             .values
             .get(coefficient_index..coefficient_index + DEFERRED_FOLD_LANES)
@@ -108,32 +124,18 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
 
         pair[0] = F::reduce(accumulators[0]);
         pair[1] = F::reduce(accumulators[1]);
-        if let Some(coefficients) = last
-            .values
-            .get(coefficient_index..coefficient_index + DEFERRED_FOLD_LANES)
-        {
-            pair[0] += &coefficients[0];
-            pair[1] += &coefficients[1];
-        } else {
-            for (lane, value) in pair.iter_mut().enumerate() {
-                if let Some(coefficient) = last.values.get(coefficient_index + lane) {
-                    *value += coefficient;
-                }
-            }
-        }
     }
 
     if let Some(value) = remainder.first_mut() {
         let coefficient_index = start + paired_len;
-        let mut accumulator = first
+        let mut accumulator = last
             .values
             .get(coefficient_index)
-            .map(|coefficient| {
-                let mut accumulator = F::Accumulator::default();
-                F::mul_accumulate(&mut accumulator, coefficient, first_power);
-                accumulator
-            })
+            .map(F::Accumulator::initialize)
             .unwrap_or_default();
+        if let Some(coefficient) = first.values.get(coefficient_index) {
+            F::mul_accumulate(&mut accumulator, coefficient, first_power);
+        }
         for (polynomial_index, polynomial) in products.iter().enumerate() {
             if let Some(coefficient) = polynomial.values.get(coefficient_index) {
                 let exponent = polynomials.len() - 2 - polynomial_index;
@@ -141,9 +143,6 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
             }
         }
         *value = F::reduce(accumulator);
-        if let Some(coefficient) = last.values.get(coefficient_index) {
-            *value += coefficient;
-        }
     }
 }
 

@@ -306,6 +306,19 @@ mod tests {
                 }
 
                 #[test]
+                fn initialized_accumulator_accepts_products() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    for _ in 0..100 {
+                        let value = <$F>::random(&mut rng);
+                        let a = <$F>::random(&mut rng);
+                        let b = <$F>::random(&mut rng);
+                        let mut acc = <$F as DeferredField>::Accumulator::initialize(&value);
+                        <$F>::mul_accumulate(&mut acc, &a, &b);
+                        assert_eq!(<$F>::reduce(acc), value + a * b);
+                    }
+                }
+
+                #[test]
                 fn square_accumulate_roundtrip() {
                     let mut rng = XorShiftRng::from_seed(SEED);
                     for _ in 0..100 {
