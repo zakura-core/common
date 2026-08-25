@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Parallel polynomial evaluation now uses eight chunks per worker for finer
+  load balancing across uneven evaluator workloads.
 - Proof creation now prepares independent commitments and polynomial transforms
   concurrently, and batches transcript-adjacent polynomial evaluations while
   preserving proof randomness and transcript ordering.

@@ -18,15 +18,17 @@ use super::{
 };
 use crate::multicore;
 
-/// Returns `(chunk_size, num_chunks)` suitable for processing the given polynomial length
-/// in the current parallelization environment.
+const EVALUATOR_CHUNKS_PER_THREAD: usize = 8;
+
+/// Returns `(chunk_size, num_chunks)` suitable for processing the given
+/// polynomial length in the current parallelization environment.
 fn get_chunk_params(poly_len: usize) -> (usize, usize) {
     // Check the level of parallelization we have available.
     let num_threads = multicore::current_num_threads();
-    // We scale the number of chunks by a constant factor, to ensure that if not all
-    // threads are available, we can achieve more uniform throughput and don't end up
-    // waiting on a couple of threads to process the last chunks.
-    let num_chunks = num_threads * 4;
+    // We scale the number of chunks by a constant factor, to ensure that if not
+    // all threads are available, we can achieve more uniform throughput and
+    // don't end up waiting on a couple of threads to process the last chunks.
+    let num_chunks = num_threads * EVALUATOR_CHUNKS_PER_THREAD;
     // Calculate the ideal chunk size for the desired throughput. We use ceiling
     // division to ensure the minimum chunk size is 1.
     //     chunk_size = ceil(poly_len / num_chunks)
