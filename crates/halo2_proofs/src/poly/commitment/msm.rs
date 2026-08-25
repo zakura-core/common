@@ -3,8 +3,6 @@ use crate::arithmetic::{CurveAffine, best_multiexp};
 use ff::Field;
 use group::Group;
 
-use std::collections::BTreeMap;
-
 /// The widest thread pool on which the prepared fixed-base routes stay
 /// engaged: [`MSM::eval`]'s identity test through the prepared zero-check,
 /// and `Params::commit` / `Params::commit_lagrange` through the prepared
@@ -36,11 +34,9 @@ pub struct MSM<'a, C: CurveAffine> {
     g_scalars: Option<Vec<C::Scalar>>,
     w_scalar: Option<C::Scalar>,
     u_scalar: Option<C::Scalar>,
-    // x-coordinate -> (scalar, y-coordinate)
-    other: BTreeMap<C::Base, (C::Scalar, C::Base)>,
-    // Batch reduction moves arbitrary terms here and canonicalizes them once
-    // before the final multiscalar multiplication.
-    batched_other: Vec<ArbitraryTerm<C>>,
+    // Arbitrary (x, (scalar, y)) terms, appended in order and coalesced once
+    // by `canonicalize_other` when the MSM is evaluated or exported.
+    other: Vec<ArbitraryTerm<C>>,
 }
 
 fn canonicalize_other<C: CurveAffine>(mut terms: Vec<ArbitraryTerm<C>>) -> Vec<ArbitraryTerm<C>> {
@@ -77,8 +73,7 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         let g_scalars = None;
         let w_scalar = None;
         let u_scalar = None;
-        let other = BTreeMap::new();
-        let batched_other = vec![];
+        let other = vec![];
 
         MSM {
             params,
@@ -86,32 +81,16 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             w_scalar,
             u_scalar,
             other,
-            batched_other,
         }
     }
 
     fn add_other(&mut self, x: C::Base, scalar: C::Scalar, y: C::Base) {
-        self.other
-            .entry(x)
-            .and_modify(|(our_scalar, our_y)| {
-                if *our_y == y {
-                    *our_scalar += scalar;
-                } else {
-                    assert!(*our_y == -y);
-                    *our_scalar -= scalar;
-                }
-            })
-            .or_insert((scalar, y));
+        self.other.push((x, (scalar, y)));
     }
 
     /// Add another multiexp into this one
     pub fn add_msm(&mut self, other: &Self) {
-        for (x, (scalar, y)) in other.other.iter() {
-            self.add_other(*x, *scalar, *y);
-        }
-        for (x, (scalar, y)) in other.batched_other.iter() {
-            self.add_other(*x, *scalar, *y);
-        }
+        self.other.extend(other.other.iter().copied());
 
         if let Some(g_scalars) = &other.g_scalars {
             self.add_to_g_scalars(g_scalars);
@@ -134,14 +113,10 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             w_scalar,
             u_scalar,
             other,
-            batched_other,
             ..
         } = other;
 
-        self.batched_other
-            .reserve(other.len() + batched_other.len());
-        self.batched_other.extend(other);
-        self.batched_other.extend(batched_other);
+        self.other.extend(other);
 
         if let Some(g_scalars) = g_scalars {
             if let Some(our_g_scalars) = &mut self.g_scalars {
@@ -218,10 +193,7 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             }
         }
 
-        for other in self.other.values_mut() {
-            other.0 *= factor;
-        }
-        for (_, (scalar, _)) in self.batched_other.iter_mut() {
+        for (_, (scalar, _)) in self.other.iter_mut() {
             *scalar *= factor;
         }
 
@@ -236,16 +208,10 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             w_scalar,
             u_scalar,
             other,
-            mut batched_other,
         } = self;
 
-        let other_len = if batched_other.is_empty() {
-            other.len()
-        } else {
-            batched_other.extend(other.iter().map(|(x, values)| (*x, *values)));
-            batched_other = canonicalize_other::<C>(batched_other);
-            batched_other.len()
-        };
+        let other = canonicalize_other::<C>(other);
+        let other_len = other.len();
         let len = g_scalars.as_deref().map(<[_]>::len).unwrap_or(0)
             + w_scalar.map(|_| 1).unwrap_or(0)
             + u_scalar.map(|_| 1).unwrap_or(0)
@@ -253,17 +219,8 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         let mut scalars: Vec<C::Scalar> = Vec::with_capacity(len);
         let mut bases: Vec<C> = Vec::with_capacity(len);
 
-        if batched_other.is_empty() {
-            scalars.extend(other.values().map(|(scalar, _)| *scalar));
-            bases.extend(other.iter().map(|(x, (_, y))| C::from_xy(*x, *y).unwrap()));
-        } else {
-            scalars.extend(batched_other.iter().map(|(_, (scalar, _))| *scalar));
-            bases.extend(
-                batched_other
-                    .iter()
-                    .map(|(x, (_, y))| C::from_xy(*x, *y).unwrap()),
-            );
-        }
+        scalars.extend(other.iter().map(|(_, (scalar, _))| *scalar));
+        bases.extend(other.iter().map(|(x, (_, y))| C::from_xy(*x, *y).unwrap()));
 
         if let Some(w_scalar) = w_scalar {
             scalars.push(w_scalar);
@@ -320,28 +277,16 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         {
             let n = self.params.n as usize;
             if prepared.terms() == n + 2 {
-                if !self.batched_other.is_empty() {
-                    // Canonicalize in place rather than on a clone: the
-                    // merged view serves the prepared check's extras, and
-                    // if the guard below falls through, `multiexp`
-                    // re-canonicalizes the already-canonical buffer, which
-                    // is idempotent.
-                    let mut combined = std::mem::take(&mut self.batched_other);
-                    combined.extend(self.other.iter().map(|(x, values)| (*x, *values)));
-                    self.other.clear();
-                    self.batched_other = canonicalize_other::<C>(combined);
-                }
-                let extra: Vec<(C::Scalar, C)> = if self.batched_other.is_empty() {
-                    self.other
-                        .iter()
-                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(*x, *y).unwrap()))
-                        .collect()
-                } else {
-                    self.batched_other
-                        .iter()
-                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(*x, *y).unwrap()))
-                        .collect()
-                };
+                // Canonicalize in place rather than on a clone: this view
+                // serves the prepared check's extras, and if the guard below
+                // falls through, `multiexp` re-canonicalizes the already-
+                // canonical buffer, which is idempotent.
+                self.other = canonicalize_other::<C>(std::mem::take(&mut self.other));
+                let extra: Vec<(C::Scalar, C)> = self
+                    .other
+                    .iter()
+                    .map(|(x, (scalar, y))| (*scalar, C::from_xy(*x, *y).unwrap()))
+                    .collect();
                 if extra.len() <= n {
                     let mut fixed = vec![C::Scalar::ZERO; n + 2];
                     if let Some(g_scalars) = &self.g_scalars {
@@ -361,8 +306,9 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         bool::from(self.multiexp().is_identity())
     }
 
-    /// The MSM's accumulated terms, exposed for capturing the verifier fingerprint without consuming
-    /// it: the `g_scalars`, `w_scalar`, `u_scalar`, and the `other` terms as `(scalar, x, y)` for each
+    /// The MSM's accumulated terms, exposed for capturing the verifier
+    /// fingerprint without consuming it: the `g_scalars`, `w_scalar`,
+    /// `u_scalar`, and the `other` terms as `(scalar, x, y)` for each
     /// accumulated commitment point. This uses the same canonicalization as
     /// [`eval`](Self::eval), so the exported fingerprint cannot drift from the
     /// evaluated view. The owned copies are confined to this dev-only path.
@@ -376,19 +322,10 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         Option<C::Scalar>,
         Vec<(C::Scalar, C::Base, C::Base)>,
     ) {
-        let mut other = self
-            .other
-            .iter()
-            .map(|(x, (scalar, y))| (*scalar, *x, *y))
-            .collect::<Vec<_>>();
-        if !self.batched_other.is_empty() {
-            let mut combined = self.batched_other.clone();
-            combined.extend(self.other.iter().map(|(x, values)| (*x, *values)));
-            other = canonicalize_other::<C>(combined)
-                .into_iter()
-                .map(|(x, (scalar, y))| (scalar, x, y))
-                .collect();
-        }
+        let other = canonicalize_other::<C>(self.other.clone())
+            .into_iter()
+            .map(|(x, (scalar, y))| (scalar, x, y))
+            .collect();
         (self.g_scalars.clone(), self.w_scalar, self.u_scalar, other)
     }
 }
@@ -539,8 +476,8 @@ mod tests {
         g_off.append_term(-g_scalars[n - 1], params.g[n - 1]);
         assert!(!g_off.eval());
 
-        // All three fixed parts at once, accumulated through the batched
-        // buffer so `eval`'s in-place canonicalization path is covered.
+        // All three fixed parts at once, accumulated through the owned batch
+        // path so `eval`'s in-place canonicalization is covered.
         let mut fixed_part = MSM::new(params);
         fixed_part.add_to_g_scalars(&g_scalars);
         fixed_part.add_to_w_scalar(s);
@@ -614,9 +551,9 @@ mod tests {
     }
 
     /// Covers the interactions the batch-aggregation test does not reach:
-    /// `add_msm` reading a batched source, an MSM evaluating with both the
-    /// incremental map and the batched buffer populated, scaling after batch
-    /// accumulation, and coalescing that cancels a point's scalar exactly.
+    /// `add_msm` reading an owned-batch result, appending terms after batch
+    /// accumulation, scaling after aggregation, and coalescing that cancels a
+    /// point's scalar exactly.
     #[test]
     fn batched_msm_interoperates_with_incremental_paths() {
         let params = Params::<EpAffine>::new(4);
@@ -667,15 +604,13 @@ mod tests {
         }
         let expected = incremental(&params, make_components()).multiexp();
 
-        // `add_msm` must drain a source whose terms live in the batched
-        // buffer rather than the incremental map.
+        // `add_msm` must copy every term from an owned-batch result.
         let mut via_add_msm = MSM::new(&params);
         via_add_msm.add_msm(&batched(&params, make_components()));
         assert_eq!(expected, via_add_msm.multiexp());
 
-        // Evaluation must merge both storages when terms were appended after
-        // batch accumulation, including a fresh x and a new orientation of an
-        // already-batched point.
+        // Evaluation must include terms appended after batch accumulation,
+        // including a fresh x and a new orientation of an existing point.
         let mut mixed = batched(&params, make_components());
         mixed.append_term(Fq::from(23), params.g[4]);
         mixed.append_term(Fq::from(29), -params.g[3]);
@@ -684,16 +619,16 @@ mod tests {
         mixed_reference.append_term(Fq::from(29), -params.g[3]);
         assert_eq!(mixed_reference.multiexp(), mixed.multiexp());
 
-        // Scaling must reach the batched buffer.
+        // Scaling must reach terms accumulated through the owned path.
         let mut scaled = batched(&params, make_components());
         scaled.scale(Fq::from(31));
         let mut scaled_reference = incremental(&params, make_components());
         scaled_reference.scale(Fq::from(31));
         assert_eq!(scaled_reference.multiexp(), scaled.multiexp());
 
-        // The dev-only fingerprint must canonicalize the batched buffer to
-        // the exact view the incremental accumulation exports; the insertion
-        // order above pins the same first-encountered orientation for both.
+        // The dev-only fingerprint must canonicalize owned and borrowed
+        // accumulation to the same view. The insertion order above pins the
+        // same first-encountered orientation for both.
         #[cfg(feature = "unstable-verifier-fingerprint")]
         assert_eq!(
             batched(&params, make_components()).fingerprint_terms(),
