@@ -1,5 +1,8 @@
 use ff::Field;
 use group::Curve;
+use maybe_rayon::prelude::IntoParallelIterator;
+#[cfg(feature = "multicore")]
+use maybe_rayon::prelude::ParallelIterator;
 use rand_core::Rng;
 use std::iter;
 use std::ops::RangeTo;
@@ -197,9 +200,9 @@ where
         pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
-    let instance: Vec<InstanceSingle<C>> = instances
-        .iter()
-        .map(|instance| -> Result<InstanceSingle<C>, Error> {
+    let prepared_instances = instances
+        .into_par_iter()
+        .map(|instance| -> Result<_, Error> {
             let instance_values = instance
                 .iter()
                 .map(|values| {
@@ -224,10 +227,6 @@ where
             let instance_commitments = instance_commitments;
             drop(instance_commitments_projective);
 
-            for commitment in &instance_commitments {
-                transcript.common_point(*commitment)?;
-            }
-
             let instance_polys: Vec<_> = instance_values
                 .iter()
                 .map(|poly| {
@@ -241,13 +240,28 @@ where
                 .map(|poly| domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles))
                 .collect();
 
-            Ok(InstanceSingle {
-                instance_values,
-                instance_polys,
-                instance_cosets,
-            })
+            Ok((
+                instance_commitments,
+                InstanceSingle::<C> {
+                    instance_values,
+                    instance_polys,
+                    instance_cosets,
+                },
+            ))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
+
+    // Prepare each circuit independently, then preserve circuit and column
+    // order while updating the transcript. Keeping each preparation result in
+    // order also preserves the transcript prefix before an instance error.
+    let mut instance = Vec::with_capacity(prepared_instances.len());
+    for prepared in prepared_instances {
+        let (instance_commitments, instance_single) = prepared?;
+        for commitment in instance_commitments {
+            transcript.common_point(commitment)?;
+        }
+        instance.push(instance_single);
+    }
 
     struct AdviceSingle<C: CurveAffine> {
         pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
@@ -840,6 +854,129 @@ fn test_create_proof() {
         &mut transcript,
     )
     .expect("proof generation should not fail");
+}
+
+#[test]
+fn instance_preparation_preserves_proof_and_error_order() {
+    use crate::{
+        circuit::SimpleFloorPlanner,
+        plonk::{keygen_pk, keygen_vk},
+        transcript::{Blake2bWrite, Challenge255, EncodedChallenge, Transcript},
+    };
+    use pasta_curves::{EqAffine, Fp};
+    use rand::{rngs::StdRng, SeedableRng};
+
+    const PROOF_SEED: u64 = 0x494e_5354_414e_4345;
+
+    #[derive(Clone, Copy)]
+    struct InstanceCircuit;
+
+    impl<F: Field> Circuit<F> for InstanceCircuit {
+        type Config = Column<Instance>;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            *self
+        }
+
+        fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
+            meta.instance_column()
+        }
+
+        fn synthesize(
+            &self,
+            _config: Self::Config,
+            _layouter: impl crate::circuit::Layouter<F>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    let params: Params<EqAffine> = Params::new(3);
+    let vk = keygen_vk(&params, &InstanceCircuit).expect("keygen_vk should not fail");
+    let pk = keygen_pk(&params, vk, &InstanceCircuit).expect("keygen_pk should not fail");
+    let circuits = [InstanceCircuit; 4];
+    let instance_values = [[Fp::from(1)], [Fp::from(2)], [Fp::from(3)], [Fp::from(4)]];
+    let instance_columns = instance_values
+        .iter()
+        .map(|values| vec![values.as_slice()])
+        .collect::<Vec<_>>();
+    let instances = instance_columns
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let create_seeded_proof = || {
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof(
+            &params,
+            &pk,
+            &circuits,
+            &instances,
+            StdRng::seed_from_u64(PROOF_SEED),
+            &mut transcript,
+        )
+        .expect("proof generation should not fail");
+        transcript.finalize()
+    };
+
+    let expected_proof = create_seeded_proof();
+    assert_eq!(create_seeded_proof(), expected_proof);
+
+    #[cfg(feature = "multicore")]
+    for threads in [1, 4] {
+        let proof = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(create_seeded_proof);
+        assert_eq!(proof, expected_proof);
+    }
+
+    let valid = [Fp::from(5)];
+    let oversized = vec![Fp::ZERO; params.n as usize];
+    let later = [Fp::from(7)];
+    let valid_columns = [valid.as_slice()];
+    let oversized_columns = [oversized.as_slice()];
+    let later_columns = [later.as_slice()];
+
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    let result = create_proof(
+        &params,
+        &pk,
+        &[InstanceCircuit; 3],
+        &[&valid_columns, &oversized_columns, &later_columns],
+        StdRng::seed_from_u64(PROOF_SEED),
+        &mut transcript,
+    );
+    assert!(matches!(result, Err(Error::InstanceTooLarge)));
+    let actual_prefix = transcript.squeeze_challenge().get_scalar();
+
+    let mut expected = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    pk.vk
+        .hash_into(&mut expected)
+        .expect("verification-key hashing should not fail");
+    expected
+        .common_point(commit_instance(&params, &valid).to_affine())
+        .expect("valid instance commitment should not fail");
+    assert_eq!(actual_prefix, expected.squeeze_challenge().get_scalar());
+
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    let result = create_proof(
+        &params,
+        &pk,
+        &[InstanceCircuit; 2],
+        &[&oversized_columns, &valid_columns],
+        StdRng::seed_from_u64(PROOF_SEED),
+        &mut transcript,
+    );
+    assert!(matches!(result, Err(Error::InstanceTooLarge)));
+    let actual_prefix = transcript.squeeze_challenge().get_scalar();
+
+    let mut expected = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    pk.vk
+        .hash_into(&mut expected)
+        .expect("verification-key hashing should not fail");
+    assert_eq!(actual_prefix, expected.squeeze_challenge().get_scalar());
 }
 
 #[test]

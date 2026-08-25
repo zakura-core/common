@@ -11,6 +11,9 @@ and this project adheres to Rust's notion of
 - IPA opening proofs now compute independent round terms in parallel and fuse
   the blinding and value terms into each round commitment's multiscalar
   multiplication.
+- Public-instance commitments and polynomial transforms for independent proof
+  circuits are now prepared in parallel when multicore support is enabled,
+  while retaining transcript order.
 - Proving keys now retain reusable floor-planning data produced during key
   generation. V1 proof creation consumes the cached layout instead of
   measuring and positioning the circuit again.
