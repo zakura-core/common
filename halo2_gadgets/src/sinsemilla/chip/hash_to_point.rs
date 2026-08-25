@@ -2,7 +2,7 @@ use super::super::{CommitDomains, HashDomains, SinsemillaInstructions};
 use super::{NonIdentityEccPoint, SinsemillaChip};
 use crate::{
     ecc::FixedPoints,
-    sinsemilla::primitives::{self as sinsemilla, lebs2ip_k, INV_TWO_POW_K, SINSEMILLA_S},
+    sinsemilla::primitives::{self as sinsemilla, INV_TWO_POW_K, SINSEMILLA_S},
     utilities::lookup_range_check::PallasLookupRangeCheck,
 };
 
@@ -12,10 +12,109 @@ use halo2_proofs::{
     plonk::{Assigned, Error},
 };
 
-use group::ff::{PrimeField, PrimeFieldBits};
+use group::ff::PrimeField;
 use pasta_curves::{arithmetic::CurveAffine, pallas};
 
 use std::ops::Deref;
+
+const FIELD_REPR_LIMBS: usize =
+    core::mem::size_of::<<pallas::Base as PrimeField>::Repr>() / core::mem::size_of::<u64>();
+
+fn decompose_words(value: pallas::Base, num_words: usize) -> Vec<u32> {
+    let repr = value.to_repr();
+    let mut limbs = [0_u64; FIELD_REPR_LIMBS];
+    for (limb, bytes) in limbs
+        .iter_mut()
+        .zip(repr.as_ref().chunks_exact(core::mem::size_of::<u64>()))
+    {
+        *limb = u64::from_le_bytes(bytes.try_into().unwrap());
+    }
+
+    let word_mask = (1_u64 << sinsemilla::K) - 1;
+    (0..num_words)
+        .map(|word| {
+            let bit_offset = word * sinsemilla::K;
+            let limb = bit_offset / u64::BITS as usize;
+            let shift = bit_offset % u64::BITS as usize;
+            let mut value = limbs[limb] >> shift;
+            if shift + sinsemilla::K > u64::BITS as usize {
+                value |= limbs[limb + 1] << (u64::BITS as usize - shift);
+            }
+            (value & word_mask) as u32
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct ProjectivePoint {
+    x: pallas::Base,
+    y: pallas::Base,
+    z: pallas::Base,
+}
+
+#[derive(Clone, Copy)]
+struct DoubleAndAddWitness {
+    lambda_1: Assigned<pallas::Base>,
+    lambda_2: Assigned<pallas::Base>,
+    x: Assigned<pallas::Base>,
+    y: Assigned<pallas::Base>,
+    point: ProjectivePoint,
+    exceptional: bool,
+}
+
+impl ProjectivePoint {
+    fn from_affine(point: pallas::Affine) -> Self {
+        let coordinates = point.coordinates().unwrap();
+        Self {
+            x: *coordinates.x(),
+            y: *coordinates.y(),
+            z: pallas::Base::ONE,
+        }
+    }
+
+    /// Computes witnesses for the incomplete addition `2A + P` while keeping
+    /// the accumulator in Jacobian coordinates. The returned rational values
+    /// are the same affine values assigned by the circuit's existing witness
+    /// flow.
+    fn double_and_add(self, (x_p, y_p): (pallas::Base, pallas::Base)) -> DoubleAndAddWitness {
+        let z_sq = self.z.square();
+        let z_cubed = z_sq * self.z;
+        let h = x_p * z_sq - self.x;
+        let r = y_p * z_cubed - self.y;
+
+        let h_sq = h.square();
+        let h_cubed = h_sq * h;
+        let x_h_sq = self.x * h_sq;
+        let x_r = r.square() - h_cubed - x_h_sq.double();
+        let d = x_h_sq - x_r;
+
+        let d_sq = d.square();
+        let d_cubed = d_sq * d;
+        let y_h_cubed = self.y * h_cubed;
+        let lambda_2_numerator = y_h_cubed.double() - r * d;
+        let z_h = self.z * h;
+        let z_new = z_h * d;
+
+        let x_h_sq_d_sq = x_h_sq * d_sq;
+        let x_new = lambda_2_numerator.square() - (x_h_sq + x_r) * d_sq;
+        let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
+        let z_new_sq = z_new.square();
+        let z_new_cubed = z_new_sq * z_new;
+
+        DoubleAndAddWitness {
+            lambda_1: Assigned::Rational(r, z_h),
+            lambda_2: Assigned::Rational(lambda_2_numerator, z_new),
+            x: Assigned::Rational(x_new, z_new_sq),
+            y: Assigned::Rational(y_new, z_new_cubed),
+            point: Self {
+                x: x_new,
+                y: y_new,
+                z: z_new,
+            },
+            exceptional: self.z.is_zero_vartime() || h.is_zero_vartime() || d.is_zero_vartime(),
+        }
+    }
+}
 
 /// `EccPointQ` can hold either a public or a private ECC Point
 #[cfg(test)]
@@ -50,9 +149,11 @@ where
         ),
         Error,
     > {
+        let projective = Value::known(ProjectivePoint::from_affine(Q));
         let (offset, x_a, y_a) = self.public_q_initialization(region, Q)?;
 
-        let (x_a, y_a, zs_sum) = self.hash_all_pieces(region, offset, message, x_a, y_a)?;
+        let (x_a, y_a, zs_sum) =
+            self.hash_all_pieces(region, offset, message, x_a, y_a, Some(projective))?;
 
         #[cfg(test)]
         self.check_hash_result(EccPointQ::PublicPoint(Q), message, &x_a, &y_a);
@@ -91,7 +192,7 @@ where
 
         let (offset, x_a, y_a) = self.private_q_initialization(region, Q)?;
 
-        let (x_a, y_a, zs_sum) = self.hash_all_pieces(region, offset, message, x_a, y_a)?;
+        let (x_a, y_a, zs_sum) = self.hash_all_pieces(region, offset, message, x_a, y_a, None)?;
 
         #[cfg(test)]
         self.check_hash_result(EccPointQ::PrivatePoint(Q.clone()), message, &x_a, &y_a);
@@ -226,6 +327,7 @@ where
         >>::Message,
         mut x_a: X<pallas::Base>,
         mut y_a: Y<pallas::Base>,
+        mut projective: Option<Value<ProjectivePoint>>,
     ) -> Result<
         (
             X<pallas::Base>,
@@ -243,7 +345,8 @@ where
             let final_piece = idx == message.len() - 1;
 
             // The value of the accumulator after this piece is processed.
-            let (x, y, zs) = self.hash_piece(region, offset, piece, x_a, y_a, final_piece)?;
+            let (x, y, zs, next_projective) =
+                self.hash_piece(region, offset, piece, x_a, y_a, final_piece, projective)?;
 
             // Since each message word takes one row to process, we increase
             // the offset by `piece.num_words` on each iteration.
@@ -252,6 +355,7 @@ where
             // Update the accumulator to the latest value.
             x_a = x;
             y_a = y;
+            projective = next_projective;
             zs_sum.push(zs);
         }
 
@@ -285,7 +389,7 @@ where
         Ok((x_a, y_a, zs_sum))
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     /// Hashes a message piece containing `piece.length` number of `K`-bit words.
     ///
     /// To avoid a duplicate assignment, the accumulator x-coordinate provided
@@ -304,11 +408,13 @@ where
         mut x_a: X<pallas::Base>,
         mut y_a: Y<pallas::Base>,
         final_piece: bool,
+        mut projective: Option<Value<ProjectivePoint>>,
     ) -> Result<
         (
             X<pallas::Base>,
             Y<pallas::Base>,
             Vec<AssignedCell<pallas::Base, pallas::Base>>,
+            Option<Value<ProjectivePoint>>,
         ),
         Error,
     > {
@@ -353,13 +459,9 @@ where
             )?;
         }
 
-        let words: Value<Vec<u32>> = piece.field_elem().map(|value| {
-            let bitstring = value.to_le_bits();
-            bitstring[..sinsemilla::K * piece.num_words()]
-                .chunks_exact(sinsemilla::K)
-                .map(|chunk| lebs2ip_k(std::array::from_fn(|i| chunk[i])))
-                .collect()
-        });
+        let words = piece
+            .field_elem()
+            .map(|value| decompose_words(value, piece.num_words()));
 
         // Convert `words` from `Value<Vec<u32>>` to `Vec<Value<u32>>`
         let words = words.transpose_vec(piece.num_words());
@@ -414,6 +516,40 @@ where
 
             // Assign `x_p`
             region.assign_advice(|| "x_p", config.double_and_add.x_p, offset + row, || x_p)?;
+
+            if let Some(point) = projective {
+                let witness = point.zip(gen).map(|(point, gen)| point.double_and_add(gen));
+                witness.error_if_known_and(|witness| witness.exceptional)?;
+
+                let lambda_1 = witness.as_ref().map(|witness| witness.lambda_1);
+                region.assign_advice(
+                    || "lambda_1",
+                    config.double_and_add.lambda_1,
+                    offset + row,
+                    || lambda_1,
+                )?;
+
+                let lambda_2 = witness.as_ref().map(|witness| witness.lambda_2);
+                region.assign_advice(
+                    || "lambda_2",
+                    config.double_and_add.lambda_2,
+                    offset + row,
+                    || lambda_2,
+                )?;
+
+                let x_a_new = witness.as_ref().map(|witness| witness.x);
+                let x_a_cell = region.assign_advice(
+                    || "x_a",
+                    config.double_and_add.x_a,
+                    offset + row + 1,
+                    || x_a_new,
+                )?;
+
+                x_a = x_a_cell.into();
+                y_a = witness.as_ref().map(|witness| witness.y).into();
+                projective = Some(witness.map(|witness| witness.point));
+                continue;
+            }
 
             // Compute and assign `lambda_1`
             let lambda_1 = {
@@ -470,7 +606,7 @@ where
             y_a = y_a_new;
         }
 
-        Ok((x_a, y_a, zs))
+        Ok((x_a, y_a, zs, projective))
     }
 
     #[cfg(test)]
@@ -488,8 +624,9 @@ where
     ) {
         // Check equivalence to result from primitives::sinsemilla::hash_to_point
         {
-            use crate::sinsemilla::primitives::{K, S_PERSONALIZATION};
+            use crate::sinsemilla::primitives::{lebs2ip_k, K, S_PERSONALIZATION};
 
+            use group::ff::PrimeFieldBits;
             use group::{Curve, CurveAffine as _};
             use pasta_curves::arithmetic::CurveExt;
 
@@ -570,5 +707,58 @@ impl<F: Field> Deref for Y<F> {
 
     fn deref(&self) -> &Value<Assigned<F>> {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decompose_words, ProjectivePoint};
+    use crate::sinsemilla::primitives::{lebs2ip_k, K, SINSEMILLA_S};
+
+    use group::{
+        ff::{Field, PrimeField, PrimeFieldBits},
+        Curve, Group,
+    };
+    use pasta_curves::{arithmetic::CurveAffine, pallas};
+
+    #[test]
+    fn word_decomposition_matches_bit_decomposition() {
+        let values = [
+            pallas::Base::ZERO,
+            pallas::Base::ONE,
+            pallas::Base::from_raw([u64::MAX, u64::MAX, u64::MAX, 0x1234]),
+        ];
+        let max_words = pallas::Base::CAPACITY as usize / K;
+
+        for value in values {
+            let bits = value.to_le_bits();
+            for num_words in [1, 2, max_words] {
+                let expected = bits[..K * num_words]
+                    .chunks_exact(K)
+                    .map(|chunk| lebs2ip_k(std::array::from_fn(|i| chunk[i])))
+                    .collect::<Vec<_>>();
+                assert_eq!(decompose_words(value, num_words), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn projective_witness_matches_curve_arithmetic() {
+        let mut expected = pallas::Point::generator();
+        let mut point = ProjectivePoint::from_affine(expected.to_affine());
+
+        for generator in SINSEMILLA_S.iter().copied() {
+            let witness = point.double_and_add(generator);
+            assert!(!witness.exceptional);
+
+            let generator = pallas::Affine::from_xy(generator.0, generator.1).unwrap();
+            expected = expected.double() + pallas::Point::from(generator);
+            let expected = expected.to_affine();
+            let coordinates = expected.coordinates().unwrap();
+            assert_eq!(witness.x.evaluate(), *coordinates.x());
+            assert_eq!(witness.y.evaluate(), *coordinates.y());
+
+            point = witness.point;
+        }
     }
 }
