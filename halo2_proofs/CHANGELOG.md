@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- IPA opening proofs now compute independent round terms in parallel and fuse
+  the blinding and value terms into each round commitment's multiscalar
+  multiplication.
 - Proving keys now retain reusable floor-planning data produced during key
   generation. V1 proof creation consumes the cached layout instead of
   measuring and positioning the circuit again.

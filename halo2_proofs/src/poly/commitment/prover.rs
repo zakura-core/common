@@ -13,6 +13,25 @@ use std::io;
 
 const MIN_GENERATOR_COLLAPSE_CHUNK: usize = 32;
 
+fn ipa_round_multiexp<C: CurveAffine>(
+    coeffs: &[C::Scalar],
+    bases: &[C],
+    value: C::Scalar,
+    randomness: C::Scalar,
+    params: &Params<C>,
+    z: C::Scalar,
+) -> C::Curve {
+    let mut round_coeffs = Vec::with_capacity(coeffs.len() + 2);
+    round_coeffs.extend_from_slice(coeffs);
+    round_coeffs.extend_from_slice(&[value * z, randomness]);
+
+    let mut round_bases = Vec::with_capacity(bases.len() + 2);
+    round_bases.extend_from_slice(bases);
+    round_bases.extend_from_slice(&[params.u, params.w]);
+
+    best_multiexp(&round_coeffs, &round_bases)
+}
+
 /// Create a polynomial commitment opening proof for the polynomial defined
 /// by the coefficients `px`, the blinding factor `blind` used for the
 /// polynomial commitment, and the point `x` that the polynomial is
@@ -97,28 +116,38 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
     for j in 0..params.k {
         let half = 1 << (params.k - j - 1); // half the length of `p_prime`, `b`, `G'`
 
-        // Compute L, R
-        //
-        // TODO: If we modify multiexp to take "extra" bases, we could speed
-        // this piece up a bit by combining the multiexps.
-        let ((l_j, r_j), (value_l_j, value_r_j)) = crate::multicore::join(
-            || {
-                crate::multicore::join(
-                    || best_multiexp(&p_prime[half..], &g_prime[0..half]),
-                    || best_multiexp(&p_prime[0..half], &g_prime[half..]),
-                )
-            },
-            || {
-                crate::multicore::join(
-                    || compute_inner_product(&p_prime[half..], &b[0..half]),
-                    || compute_inner_product(&p_prime[0..half], &b[half..]),
-                )
-            },
+        // Compute the scalar terms needed by L and R before their MSMs.
+        let (value_l_j, value_r_j) = crate::multicore::join(
+            || compute_inner_product(&p_prime[half..], &b[0..half]),
+            || compute_inner_product(&p_prime[0..half], &b[half..]),
         );
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
-        let l_j = l_j + &best_multiexp(&[value_l_j * &z, l_j_randomness], &[params.u, params.w]);
-        let r_j = r_j + &best_multiexp(&[value_r_j * &z, r_j_randomness], &[params.u, params.w]);
+
+        // Include the U and W terms in each main MSM so their doublings are
+        // shared with the round commitment.
+        let (l_j, r_j) = crate::multicore::join(
+            || {
+                ipa_round_multiexp(
+                    &p_prime[half..],
+                    &g_prime[0..half],
+                    value_l_j,
+                    l_j_randomness,
+                    params,
+                    z,
+                )
+            },
+            || {
+                ipa_round_multiexp(
+                    &p_prime[0..half],
+                    &g_prime[half..],
+                    value_r_j,
+                    r_j_randomness,
+                    params,
+                    z,
+                )
+            },
+        );
         let l_j = l_j.to_affine();
         let r_j = r_j.to_affine();
 
@@ -190,11 +219,46 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 
 #[cfg(test)]
 mod tests {
-    use super::parallel_generator_collapse;
-    use crate::arithmetic::CurveAffine;
+    use super::{ipa_round_multiexp, parallel_generator_collapse, Params};
+    use crate::arithmetic::{best_multiexp, CurveAffine};
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
+
+    fn full_width_scalar<C: CurveAffine>() -> C::Scalar {
+        (C::Scalar::from(0x9E37_79B9_7F4A_7C15u64).square()
+            + C::Scalar::from(0x0123_4567_89AB_CDEFu64))
+        .square()
+    }
+
+    fn round_multiexp_matches_split<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+    {
+        let params = Params::<C>::new(3);
+        let full_width = full_width_scalar::<C>();
+        let coeffs = [
+            C::Scalar::ZERO,
+            C::Scalar::ONE,
+            -C::Scalar::ONE,
+            C::Scalar::from(2),
+            full_width,
+        ];
+        let bases = &params.g[..coeffs.len()];
+
+        for (value, randomness, z) in [
+            (C::Scalar::ZERO, C::Scalar::ZERO, C::Scalar::ZERO),
+            (C::Scalar::ONE, -C::Scalar::ONE, C::Scalar::from(2)),
+            (full_width, full_width.square(), -C::Scalar::ONE),
+        ] {
+            let expected = best_multiexp(&coeffs, bases)
+                + best_multiexp(&[value * z, randomness], &[params.u, params.w]);
+            assert_eq!(
+                ipa_round_multiexp(&coeffs, bases, value, randomness, &params, z),
+                expected,
+            );
+        }
+    }
 
     fn generator_collapse_matches_native<C>()
     where
@@ -209,9 +273,7 @@ mod tests {
                 }
             })
             .collect();
-        let full_width = (C::Scalar::from(0x9E37_79B9_7F4A_7C15u64).square()
-            + C::Scalar::from(0x0123_4567_89AB_CDEFu64))
-        .square();
+        let full_width = full_width_scalar::<C>();
         let challenges = [
             C::Scalar::ZERO,
             C::Scalar::ONE,
@@ -244,5 +306,15 @@ mod tests {
     #[test]
     fn generator_collapse_matches_native_vesta() {
         generator_collapse_matches_native::<vesta::Affine>();
+    }
+
+    #[test]
+    fn round_multiexp_matches_split_pallas() {
+        round_multiexp_matches_split::<pallas::Affine>();
+    }
+
+    #[test]
+    fn round_multiexp_matches_split_vesta() {
+        round_multiexp_matches_split::<vesta::Affine>();
     }
 }
