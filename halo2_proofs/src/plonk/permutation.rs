@@ -8,6 +8,13 @@ pub(crate) mod keygen;
 pub(crate) mod prover;
 pub(crate) mod verifier;
 
+const PERMUTATION_PRODUCT_DEGREE_OVERHEAD: usize = 2;
+
+fn permutation_chunk_len(cs_degree: usize) -> usize {
+    assert!(cs_degree > PERMUTATION_PRODUCT_DEGREE_OVERHEAD);
+    cs_degree - PERMUTATION_PRODUCT_DEGREE_OVERHEAD
+}
+
 /// A permutation argument.
 #[derive(Debug, Clone)]
 pub(crate) struct Argument {

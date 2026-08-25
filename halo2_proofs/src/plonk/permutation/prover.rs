@@ -3,10 +3,10 @@ use group::{
     Curve,
 };
 use rand_core::Rng;
-use std::iter;
+use std::{convert::Infallible, iter};
 
 use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
-use super::{Argument, ProvingKey};
+use super::{permutation_chunk_len, Argument, ProvingKey};
 use crate::{
     arithmetic::{parallelize, CurveAffine},
     plonk::{
@@ -33,6 +33,26 @@ pub(crate) struct Committed<C: CurveAffine, Ev> {
     sets: Vec<CommittedSet<C, Ev>>,
 }
 
+struct SetBlinding<F: Field> {
+    rows: Vec<F>,
+    product_blind: Blind<F>,
+}
+
+pub(in crate::plonk) struct PermutationBlinding<F: Field> {
+    sets: Vec<SetBlinding<F>>,
+}
+
+struct PreparedSet<C: CurveAffine> {
+    permutation_product_poly: Polynomial<C::Scalar, Coeff>,
+    permutation_product_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    permutation_product_commitment: C,
+    permutation_product_blind: Blind<C::Scalar>,
+}
+
+pub(in crate::plonk) struct Prepared<C: CurveAffine> {
+    sets: Vec<PreparedSet<C>>,
+}
+
 pub struct ConstructedSet<C: CurveAffine> {
     permutation_product_poly: Polynomial<C::Scalar, Coeff>,
     permutation_product_blind: Blind<C::Scalar>,
@@ -47,6 +67,28 @@ pub(crate) struct Evaluated<C: CurveAffine> {
 }
 
 impl Argument {
+    pub(in crate::plonk) fn sample_blinding<C: CurveAffine, R: Rng>(
+        &self,
+        pk: &plonk::ProvingKey<C>,
+        mut rng: R,
+    ) -> PermutationBlinding<C::Scalar> {
+        let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
+        let blinding_factors = pk.vk.cs.blinding_factors();
+
+        PermutationBlinding {
+            sets: self
+                .columns
+                .chunks(chunk_len)
+                .map(|_| SetBlinding {
+                    rows: (0..blinding_factors)
+                        .map(|_| C::Scalar::random(&mut rng))
+                        .collect(),
+                    product_blind: Blind(C::Scalar::random(&mut rng)),
+                })
+                .collect(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(in crate::plonk) fn commit<
         C: CurveAffine,
@@ -68,14 +110,103 @@ impl Argument {
         mut rng: R,
         transcript: &mut T,
     ) -> Result<Committed<C, Ev>, Error> {
+        let mut sets = vec![];
+        self.prepare_sets(
+            params,
+            pk,
+            pkey,
+            advice,
+            fixed,
+            instance,
+            beta,
+            gamma,
+            |rows| {
+                for z in rows {
+                    *z = C::Scalar::random(&mut rng);
+                }
+                Blind(C::Scalar::random(&mut rng))
+            },
+            |set| {
+                let permutation_product_coset =
+                    evaluator.register_poly(set.permutation_product_coset);
+
+                // Hash the permutation product commitment
+                transcript.write_point(set.permutation_product_commitment)?;
+
+                sets.push(CommittedSet {
+                    permutation_product_poly: set.permutation_product_poly,
+                    permutation_product_coset,
+                    permutation_product_blind: set.permutation_product_blind,
+                });
+                Ok::<(), Error>(())
+            },
+        )?;
+
+        Ok(Committed { sets })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::plonk) fn prepare<C: CurveAffine>(
+        &self,
+        params: &Params<C>,
+        pk: &plonk::ProvingKey<C>,
+        pkey: &ProvingKey<C>,
+        advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        beta: ChallengeBeta<C>,
+        gamma: ChallengeGamma<C>,
+        blinding: PermutationBlinding<C::Scalar>,
+    ) -> Prepared<C> {
+        let mut blindings = blinding.sets.into_iter();
+        let mut sets = Vec::with_capacity(blindings.len());
+        let result: Result<(), Infallible> = self.prepare_sets(
+            params,
+            pk,
+            pkey,
+            advice,
+            fixed,
+            instance,
+            beta,
+            gamma,
+            |rows| {
+                let blinding = blindings
+                    .next()
+                    .expect("one blinding value set is sampled per permutation set");
+                rows.copy_from_slice(&blinding.rows);
+                blinding.product_blind
+            },
+            |set| {
+                sets.push(set);
+                Ok(())
+            },
+        );
+        result.unwrap_or_else(|never| match never {});
+
+        Prepared { sets }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_sets<C: CurveAffine, E>(
+        &self,
+        params: &Params<C>,
+        pk: &plonk::ProvingKey<C>,
+        pkey: &ProvingKey<C>,
+        advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        beta: ChallengeBeta<C>,
+        gamma: ChallengeGamma<C>,
+        mut set_blinding: impl FnMut(&mut [C::Scalar]) -> Blind<C::Scalar>,
+        mut finish_set: impl FnMut(PreparedSet<C>) -> Result<(), E>,
+    ) -> Result<(), E> {
         let domain = &pk.vk.domain;
 
         // How many columns can be included in a single permutation polynomial?
         // We need to multiply by z(X) and (1 - (l_last(X) + l_blind(X))). This
         // will never underflow because of the requirement of at least a degree
         // 3 circuit for the permutation argument.
-        assert!(pk.vk.cs_degree >= 3);
-        let chunk_len = pk.vk.cs_degree - 2;
+        let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         let blinding_factors = pk.vk.cs.blinding_factors();
 
         // Each column gets its own delta power.
@@ -83,8 +214,6 @@ impl Argument {
 
         // Track the "last" value from the previous column set
         let mut last_z = C::Scalar::ONE;
-
-        let mut sets = vec![];
 
         for (columns, permutations) in self
             .columns
@@ -165,13 +294,9 @@ impl Argument {
             }
             let mut z = domain.lagrange_from_vec(z);
             // Set blinding factors
-            for z in &mut z[params.n as usize - blinding_factors..] {
-                *z = C::Scalar::random(&mut rng);
-            }
+            let blind = set_blinding(&mut z[params.n as usize - blinding_factors..]);
             // Set new last_z
             last_z = z[params.n as usize - (blinding_factors + 1)];
-
-            let blind = Blind(C::Scalar::random(&mut rng));
 
             let (permutation_product_commitment_projective, (permutation_product_poly, coset)) =
                 crate::multicore::join(
@@ -184,18 +309,42 @@ impl Argument {
                     },
                 );
             let permutation_product_blind = blind;
-            let permutation_product_coset = evaluator.register_poly(coset);
-
             let permutation_product_commitment =
                 permutation_product_commitment_projective.to_affine();
 
+            finish_set(PreparedSet {
+                permutation_product_poly,
+                permutation_product_coset: coset,
+                permutation_product_commitment,
+                permutation_product_blind,
+            })?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<C: CurveAffine> Prepared<C> {
+    pub(in crate::plonk) fn commit<
+        E: EncodedChallenge<C>,
+        Ev: Copy + Send + Sync,
+        T: TranscriptWrite<C, E>,
+    >(
+        self,
+        evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
+        transcript: &mut T,
+    ) -> Result<Committed<C, Ev>, Error> {
+        let mut sets = Vec::with_capacity(self.sets.len());
+        for set in self.sets {
+            let permutation_product_coset = evaluator.register_poly(set.permutation_product_coset);
+
             // Hash the permutation product commitment
-            transcript.write_point(permutation_product_commitment)?;
+            transcript.write_point(set.permutation_product_commitment)?;
 
             sets.push(CommittedSet {
-                permutation_product_poly,
+                permutation_product_poly: set.permutation_product_poly,
                 permutation_product_coset,
-                permutation_product_blind,
+                permutation_product_blind: set.permutation_product_blind,
             });
         }
 
@@ -222,7 +371,7 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Committed<C, Ev> {
         Constructed<C>,
         impl Iterator<Item = poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>> + 'a,
     ) {
-        let chunk_len = pk.vk.cs_degree - 2;
+        let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         let blinding_factors = pk.vk.cs.blinding_factors();
         let last_rotation = Rotation(-((blinding_factors + 1) as i32));
 
@@ -431,5 +580,127 @@ impl<C: CurveAffine> Evaluated<C> {
                         })
                     }),
             )
+    }
+}
+
+#[cfg(all(test, feature = "multicore"))]
+mod tests {
+    use super::permutation_chunk_len;
+    use crate::{
+        circuit::{Layouter, SimpleFloorPlanner, Value},
+        plonk::{
+            create_proof, keygen_pk, keygen_vk, Advice, Circuit, Column, ConstraintSystem, Error,
+        },
+        poly::commitment::Params,
+        transcript::{Blake2bWrite, Challenge255},
+    };
+    use pasta_curves::{EqAffine, Fp};
+    use rand::{rngs::StdRng, SeedableRng};
+
+    const EQUALITY_COLUMNS: usize = 3;
+    const PROOF_CIRCUITS: usize = 4;
+    const PARALLEL_THREADS: usize = 8;
+    const PROOF_SEED: u64 = 0x5045_524d_5554_4508;
+
+    #[derive(Clone, Copy)]
+    struct PermutationConfig {
+        columns: [Column<Advice>; EQUALITY_COLUMNS],
+    }
+
+    #[derive(Clone, Copy)]
+    struct PermutationCircuit {
+        value: Fp,
+    }
+
+    impl Circuit<Fp> for PermutationCircuit {
+        type Config = PermutationConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self { value: Fp::from(0) }
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            let columns = std::array::from_fn(|_| meta.advice_column());
+            for column in columns.iter().copied() {
+                meta.enable_equality(column);
+            }
+            PermutationConfig { columns }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fp>,
+        ) -> Result<(), Error> {
+            layouter.assign_region(
+                || "permutation copies",
+                |mut region| {
+                    let mut cells = Vec::with_capacity(EQUALITY_COLUMNS);
+                    for (offset, column) in config.columns.iter().enumerate() {
+                        cells.push(
+                            region
+                                .assign_advice(
+                                    || "value",
+                                    *column,
+                                    offset,
+                                    || Value::known(self.value),
+                                )?
+                                .cell(),
+                        );
+                    }
+                    for cells in cells.windows(2) {
+                        region.constrain_equal(cells[0], cells[1])?;
+                    }
+                    Ok(())
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn proof_bytes_match_across_permutation_preparation_schedules() {
+        let params: Params<EqAffine> = Params::new(4);
+        let circuit = PermutationCircuit { value: Fp::from(0) };
+        let vk = keygen_vk(&params, &circuit).expect("keygen_vk should not fail");
+        let pk = keygen_pk(&params, vk, &circuit).expect("keygen_pk should not fail");
+
+        let columns = pk.vk.cs.permutation.get_columns();
+        assert_eq!(columns.len(), EQUALITY_COLUMNS);
+        assert!(
+            columns
+                .chunks(permutation_chunk_len(pk.vk.cs_degree))
+                .count()
+                > 1
+        );
+
+        let circuits: [PermutationCircuit; PROOF_CIRCUITS] =
+            std::array::from_fn(|index| PermutationCircuit {
+                value: Fp::from(index as u64 + 1),
+            });
+        let no_instance_columns: &[&[Fp]] = &[];
+        let instances = [no_instance_columns; PROOF_CIRCUITS];
+
+        let prove = |threads| {
+            let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+            maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    create_proof(
+                        &params,
+                        &pk,
+                        &circuits,
+                        &instances,
+                        StdRng::seed_from_u64(PROOF_SEED),
+                        &mut transcript,
+                    )
+                })
+                .expect("proof generation should not fail");
+            transcript.finalize()
+        };
+
+        assert_eq!(prove(1), prove(PARALLEL_THREADS));
     }
 }
