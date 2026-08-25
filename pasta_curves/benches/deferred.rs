@@ -18,8 +18,10 @@ fn benchmark_field<F: DeferredField>(criterion: &mut Criterion, field_name: &str
         group.throughput(Throughput::Elements(len));
         group.bench_with_input(BenchmarkId::from_parameter(len), &len, |bencher, _| {
             bencher.iter(|| {
-                let mut accumulator = F::Accumulator::default();
-                for (lhs, rhs) in lhs.iter().zip(&rhs) {
+                let mut products = lhs.iter().zip(&rhs);
+                let (lhs, rhs) = products.next().expect("benchmark input is nonempty");
+                let mut accumulator = F::mul_accumulator(black_box(lhs), black_box(rhs));
+                for (lhs, rhs) in products {
                     F::mul_accumulate(&mut accumulator, black_box(lhs), black_box(rhs));
                 }
                 black_box(F::reduce(accumulator))

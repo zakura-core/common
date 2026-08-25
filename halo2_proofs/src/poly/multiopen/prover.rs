@@ -64,6 +64,10 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
     let (last, products) = polynomials
         .split_last()
         .expect("point-set group is nonempty");
+    let (first, products) = products
+        .split_first()
+        .expect("deferred folding has at least two products");
+    let first_power = &powers[polynomials.len() - 1];
     let paired_len = values.len() - values.len() % DEFERRED_FOLD_LANES;
     let (pairs, remainder) = values.split_at_mut(paired_len);
     for (pair_index, pair) in pairs.chunks_exact_mut(DEFERRED_FOLD_LANES).enumerate() {
@@ -71,8 +75,21 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
         // Independent lanes shorten the multiply-accumulate dependency chain
         // while sharing each challenge-power load.
         let mut accumulators = [F::Accumulator::default(); DEFERRED_FOLD_LANES];
+        if let Some(coefficients) = first
+            .values
+            .get(coefficient_index..coefficient_index + DEFERRED_FOLD_LANES)
+        {
+            accumulators[0] = F::mul_accumulator(&coefficients[0], first_power);
+            accumulators[1] = F::mul_accumulator(&coefficients[1], first_power);
+        } else {
+            for (lane, accumulator) in accumulators.iter_mut().enumerate() {
+                if let Some(coefficient) = first.values.get(coefficient_index + lane) {
+                    *accumulator = F::mul_accumulator(coefficient, first_power);
+                }
+            }
+        }
         for (polynomial_index, polynomial) in products.iter().enumerate() {
-            let exponent = polynomials.len() - 1 - polynomial_index;
+            let exponent = polynomials.len() - 2 - polynomial_index;
             let power = &powers[exponent];
             if let Some(coefficients) = polynomial
                 .values
@@ -108,10 +125,14 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
 
     if let Some(value) = remainder.first_mut() {
         let coefficient_index = start + paired_len;
-        let mut accumulator = F::Accumulator::default();
+        let mut accumulator = first
+            .values
+            .get(coefficient_index)
+            .map(|coefficient| F::mul_accumulator(coefficient, first_power))
+            .unwrap_or_default();
         for (polynomial_index, polynomial) in products.iter().enumerate() {
             if let Some(coefficient) = polynomial.values.get(coefficient_index) {
-                let exponent = polynomials.len() - 1 - polynomial_index;
+                let exponent = polynomials.len() - 2 - polynomial_index;
                 F::mul_accumulate(&mut accumulator, coefficient, &powers[exponent]);
             }
         }

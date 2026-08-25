@@ -534,6 +534,7 @@ enum PowerFold<'a, F: Field> {
     },
     Pallas {
         accumulators: Vec<<pallas::Base as DeferredField>::Accumulator>,
+        seeded: bool,
         terms: Vec<F>,
         factors: Option<Vec<F>>,
         addends: Option<Vec<F>>,
@@ -541,6 +542,7 @@ enum PowerFold<'a, F: Field> {
     },
     Vesta {
         accumulators: Vec<<vesta::Base as DeferredField>::Accumulator>,
+        seeded: bool,
         terms: Vec<F>,
         factors: Option<Vec<F>>,
         addends: Option<Vec<F>>,
@@ -553,6 +555,7 @@ impl<'a, F: Field> PowerFold<'a, F> {
         if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
             Self::Pallas {
                 accumulators: vec![Default::default(); output.len()],
+                seeded: false,
                 terms: vec![F::ZERO; output.len()],
                 factors: None,
                 addends: None,
@@ -561,6 +564,7 @@ impl<'a, F: Field> PowerFold<'a, F> {
         } else if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
             Self::Vesta {
                 accumulators: vec![Default::default(); output.len()],
+                seeded: false,
                 terms: vec![F::ZERO; output.len()],
                 factors: None,
                 addends: None,
@@ -612,14 +616,16 @@ impl<'a, F: Field> PowerFold<'a, F> {
             }
             Self::Pallas {
                 accumulators,
+                seeded,
                 terms,
                 ..
-            } => accumulate_deferred::<pallas::Base>(accumulators, &*terms, &power),
+            } => accumulate_deferred::<pallas::Base>(accumulators, seeded, &*terms, &power),
             Self::Vesta {
                 accumulators,
+                seeded,
                 terms,
                 ..
-            } => accumulate_deferred::<vesta::Base>(accumulators, &*terms, &power),
+            } => accumulate_deferred::<vesta::Base>(accumulators, seeded, &*terms, &power),
         }
     }
 
@@ -665,11 +671,13 @@ impl<'a, F: Field> PowerFold<'a, F> {
             }
             Self::Pallas {
                 accumulators,
+                seeded,
                 terms,
                 factors,
                 ..
             } => accumulate_deferred_products::<pallas::Base>(
                 accumulators,
+                seeded,
                 &*terms,
                 factors
                     .as_ref()
@@ -677,11 +685,13 @@ impl<'a, F: Field> PowerFold<'a, F> {
             ),
             Self::Vesta {
                 accumulators,
+                seeded,
                 terms,
                 factors,
                 ..
             } => accumulate_deferred_products::<vesta::Base>(
                 accumulators,
+                seeded,
                 &*terms,
                 factors
                     .as_ref()
@@ -731,6 +741,7 @@ impl<'a, F: Field> PowerFold<'a, F> {
 
 fn accumulate_deferred<T: DeferredField + 'static>(
     accumulators: &mut [T::Accumulator],
+    seeded: &mut bool,
     terms: &dyn Any,
     power: &dyn Any,
 ) {
@@ -741,13 +752,21 @@ fn accumulate_deferred<T: DeferredField + 'static>(
     let power = power
         .downcast_ref::<T>()
         .expect("power matches the deferred field");
-    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
-        T::mul_accumulate(accumulator, term, power);
+    if *seeded {
+        for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+            T::mul_accumulate(accumulator, term, power);
+        }
+    } else {
+        for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+            *accumulator = T::mul_accumulator(term, power);
+        }
+        *seeded = true;
     }
 }
 
 fn accumulate_deferred_products<T: DeferredField + 'static>(
     accumulators: &mut [T::Accumulator],
+    seeded: &mut bool,
     terms: &dyn Any,
     factors: &dyn Any,
 ) {
@@ -757,8 +776,15 @@ fn accumulate_deferred_products<T: DeferredField + 'static>(
     let factors = factors
         .downcast_ref::<Vec<T>>()
         .expect("factor buffer matches the deferred field");
-    for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
-        T::mul_accumulate(accumulator, term, factor);
+    if *seeded {
+        for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
+            T::mul_accumulate(accumulator, term, factor);
+        }
+    } else {
+        for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
+            *accumulator = T::mul_accumulator(term, factor);
+        }
+        *seeded = true;
     }
 }
 

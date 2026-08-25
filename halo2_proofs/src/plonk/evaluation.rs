@@ -224,8 +224,12 @@ fn convert_point<F: Field, T: Field>(point: EvaluationPoint<F>) -> EvaluationPoi
 
 fn deferred_inner_product<F: DeferredField>(polynomial: &[F], powers: &[F]) -> F {
     debug_assert_eq!(polynomial.len(), powers.len());
-    let mut accumulator = F::Accumulator::default();
-    for (coefficient, power) in polynomial.iter().zip(powers) {
+    let mut products = polynomial.iter().zip(powers);
+    let Some((coefficient, power)) = products.next() else {
+        return F::ZERO;
+    };
+    let mut accumulator = F::mul_accumulator(coefficient, power);
+    for (coefficient, power) in products {
         F::mul_accumulate(&mut accumulator, coefficient, power);
     }
     F::reduce(accumulator)
@@ -245,7 +249,7 @@ mod tests {
     #[test]
     fn deferred_evaluation_matches_horner() {
         let mut rng = StdRng::seed_from_u64(0x706f_6c79_6576_616c);
-        for len in [1, 2, 3, 31, 32, 2_048] {
+        for len in [0, 1, 2, 3, 31, 32, 2_048] {
             let polynomial = (0..len)
                 .map(|_| pallas::Base::random(&mut rng))
                 .collect::<Vec<_>>();

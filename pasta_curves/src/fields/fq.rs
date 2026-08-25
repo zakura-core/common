@@ -560,6 +560,11 @@ impl DeferredField for Fq {
     type Accumulator = Product<Fq>;
 
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    fn mul_accumulator(a: &Fq, b: &Fq) -> Self::Accumulator {
+        Product::from_limbs(a.mul_unreduced(b))
+    }
+
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
     fn mul_accumulate(acc: &mut Self::Accumulator, a: &Fq, b: &Fq) {
         acc.mul_accumulate(&a.0, &b.0);
     }

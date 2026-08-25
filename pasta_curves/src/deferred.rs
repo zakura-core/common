@@ -13,13 +13,25 @@ use crate::arithmetic::{adc, mac};
 /// A trait for fields that support deferred reduction of products.
 ///
 /// Instead of reducing each multiplication result immediately, callers
-/// accumulate products into an [`Accumulator`](Self::Accumulator) via
+/// start an [`Accumulator`](Self::Accumulator) with
+/// [`mul_accumulator`](Self::mul_accumulator), accumulate further products via
 /// [`mul_accumulate`](Self::mul_accumulate) and
 /// [`square_accumulate`](Self::square_accumulate), then perform a single
 /// reduction at the end with [`reduce`](Self::reduce).
 pub trait DeferredField: ff::Field {
     /// A wide accumulator for unreduced products.
     type Accumulator: Copy + Clone + Debug + Default;
+
+    /// Multiplies `a` by `b` and returns the result in a fresh accumulator.
+    ///
+    /// Implementors can override this to avoid adding the first product to a
+    /// zero accumulator.
+    #[inline]
+    fn mul_accumulator(a: &Self, b: &Self) -> Self::Accumulator {
+        let mut accumulator = Self::Accumulator::default();
+        Self::mul_accumulate(&mut accumulator, a, b);
+        accumulator
+    }
 
     /// Multiplies `a` by `b` and adds the result into `acc`.
     fn mul_accumulate(acc: &mut Self::Accumulator, a: &Self, b: &Self);
@@ -59,6 +71,16 @@ impl<F> Product<F> {
         carry: 0,
         _marker: core::marker::PhantomData,
     };
+
+    /// Creates an accumulator from one raw 512-bit product.
+    #[inline]
+    pub(crate) const fn from_limbs(limbs: [u64; 8]) -> Self {
+        Self {
+            limbs,
+            carry: 0,
+            _marker: core::marker::PhantomData,
+        }
+    }
 
     /// Multiplies two raw 256-bit values and adds their 512-bit product into
     /// this accumulator.
@@ -274,6 +296,17 @@ mod tests {
                         let b = <$F>::random(&mut rng);
                         let mut acc = <$F as DeferredField>::Accumulator::default();
                         <$F>::mul_accumulate(&mut acc, &a, &b);
+                        assert_eq!(<$F>::reduce(acc), a * b);
+                    }
+                }
+
+                #[test]
+                fn mul_accumulator_roundtrip() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    for _ in 0..100 {
+                        let a = <$F>::random(&mut rng);
+                        let b = <$F>::random(&mut rng);
+                        let acc = <$F>::mul_accumulator(&a, &b);
                         assert_eq!(<$F>::reduce(acc), a * b);
                     }
                 }
