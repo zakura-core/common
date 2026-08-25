@@ -101,10 +101,20 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
         //
         // TODO: If we modify multiexp to take "extra" bases, we could speed
         // this piece up a bit by combining the multiexps.
-        let l_j = best_multiexp(&p_prime[half..], &g_prime[0..half]);
-        let r_j = best_multiexp(&p_prime[0..half], &g_prime[half..]);
-        let value_l_j = compute_inner_product(&p_prime[half..], &b[0..half]);
-        let value_r_j = compute_inner_product(&p_prime[0..half], &b[half..]);
+        let ((l_j, r_j), (value_l_j, value_r_j)) = crate::multicore::join(
+            || {
+                crate::multicore::join(
+                    || best_multiexp(&p_prime[half..], &g_prime[0..half]),
+                    || best_multiexp(&p_prime[0..half], &g_prime[half..]),
+                )
+            },
+            || {
+                crate::multicore::join(
+                    || compute_inner_product(&p_prime[half..], &b[0..half]),
+                    || compute_inner_product(&p_prime[0..half], &b[half..]),
+                )
+            },
+        );
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
         let l_j = l_j + &best_multiexp(&[value_l_j * &z, l_j_randomness], &[params.u, params.w]);
