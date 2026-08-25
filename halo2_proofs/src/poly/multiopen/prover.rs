@@ -17,6 +17,38 @@ use std::hash::Hash;
 use std::io;
 use std::marker::PhantomData;
 
+fn collapse_polynomials<F: Field>(
+    groups: &[Vec<&Polynomial<F, Coeff>>],
+    challenge: F,
+) -> Vec<Polynomial<F, Coeff>> {
+    groups
+        .iter()
+        .map(|group| {
+            let first = group.first().expect("point-set group is nonempty");
+            let mut values = first.values.clone();
+
+            for polynomial in &group[1..] {
+                let common_len = values.len().min(polynomial.values.len());
+                for (value, coefficient) in values[..common_len]
+                    .iter_mut()
+                    .zip(&polynomial.values[..common_len])
+                {
+                    *value *= challenge;
+                    *value += coefficient;
+                }
+                for value in &mut values[common_len..] {
+                    *value *= challenge;
+                }
+            }
+
+            Polynomial {
+                values,
+                _marker: PhantomData,
+            }
+        })
+        .collect()
+}
+
 /// Create a multi-opening proof.
 ///
 /// # Errors
@@ -51,39 +83,23 @@ where
 
     // Collapse openings at same point sets together into single openings using
     // x_1 challenge.
-    let mut q_polys: Vec<Option<Polynomial<C::Scalar, Coeff>>> = vec![None; point_sets.len()];
+    let mut polynomial_groups = vec![vec![]; point_sets.len()];
     let mut q_blinds = vec![Blind(C::Scalar::ZERO); point_sets.len()];
-
-    {
-        let mut accumulate =
-            |set_idx: usize, new_poly: &Polynomial<C::Scalar, Coeff>, blind: Blind<C::Scalar>| {
-                if let Some(poly) = &q_polys[set_idx] {
-                    q_polys[set_idx] = Some(poly.clone() * *x_1 + new_poly);
-                } else {
-                    q_polys[set_idx] = Some(new_poly.clone());
-                }
-                q_blinds[set_idx] *= *x_1;
-                q_blinds[set_idx] += blind;
-            };
-
-        for commitment_data in poly_map.into_iter() {
-            accumulate(
-                commitment_data.set_index,        // set_idx,
-                commitment_data.commitment.poly,  // poly,
-                commitment_data.commitment.blind, // blind,
-            );
-        }
+    for commitment_data in poly_map {
+        let set_index = commitment_data.set_index;
+        polynomial_groups[set_index].push(commitment_data.commitment.poly);
+        q_blinds[set_index] *= *x_1;
+        q_blinds[set_index] += commitment_data.commitment.blind;
     }
+    let q_polys = collapse_polynomials(&polynomial_groups, *x_1);
 
     let q_prime_poly = point_sets
         .iter()
         .zip(q_polys.iter())
         .fold(None, |q_prime_poly, (points, poly)| {
-            let mut poly = points
-                .iter()
-                .fold(poly.clone().unwrap().values, |poly, point| {
-                    kate_division(&poly, *point)
-                });
+            let mut poly = points.iter().fold(poly.clone().values, |poly, point| {
+                kate_division(&poly, *point)
+            });
             poly.resize(params.n as usize, C::Scalar::ZERO);
             let poly = Polynomial {
                 values: poly,
@@ -108,7 +124,7 @@ where
     // Prover sends u_i for all i, which correspond to the evaluation
     // of each Q polynomial commitment at x_3.
     for q_i_poly in &q_polys {
-        transcript.write_scalar(eval_polynomial(q_i_poly.as_ref().unwrap(), *x_3))?;
+        transcript.write_scalar(eval_polynomial(q_i_poly, *x_3))?;
     }
 
     let x_4: ChallengeX4<_> = transcript.squeeze_challenge_scalar();
@@ -117,7 +133,7 @@ where
         (q_prime_poly, q_prime_blind),
         |(q_prime_poly, q_prime_blind), (poly, blind)| {
             (
-                q_prime_poly * *x_4 + &poly.unwrap(),
+                q_prime_poly * *x_4 + &poly,
                 Blind((q_prime_blind.0 * &(*x_4)) + &blind.0),
             )
         },
@@ -159,6 +175,69 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
         PolynomialPointer {
             poly: self.poly,
             blind: self.blind,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collapse_polynomials, Coeff, Polynomial};
+    use ff::Field;
+    use pasta_curves::Fp;
+    use std::marker::PhantomData;
+
+    fn reference_collapse<F: Field>(
+        groups: &[Vec<&Polynomial<F, Coeff>>],
+        challenge: F,
+    ) -> Vec<Polynomial<F, Coeff>> {
+        groups
+            .iter()
+            .map(|group| {
+                group[1..]
+                    .iter()
+                    .fold(group[0].clone(), |accumulator, polynomial| {
+                        accumulator * challenge + polynomial
+                    })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_collapse_matches_operator_collapse() {
+        let lengths = [vec![8, 5, 10], vec![3], vec![6, 9]];
+        let groups = lengths
+            .iter()
+            .enumerate()
+            .map(|(group_index, lengths)| {
+                lengths
+                    .iter()
+                    .enumerate()
+                    .map(|(polynomial_index, length)| Polynomial {
+                        values: (0..*length)
+                            .map(|coefficient_index| {
+                                Fp::from(
+                                    100 * group_index as u64
+                                        + 10 * polynomial_index as u64
+                                        + coefficient_index as u64,
+                                )
+                            })
+                            .collect(),
+                        _marker: PhantomData,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let group_refs = groups
+            .iter()
+            .map(|group| group.iter().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+
+        let challenge = Fp::from(17);
+        let expected = reference_collapse(&group_refs, challenge);
+        let actual = collapse_polynomials(&group_refs, challenge);
+
+        for (expected, actual) in expected.iter().zip(&actual) {
+            assert_eq!(&expected[..], &actual[..]);
         }
     }
 }

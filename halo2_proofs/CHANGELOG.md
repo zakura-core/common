@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Multi-opening proofs now collapse polynomials in place, avoiding per-query
+  polynomial allocations and separate multiplication and addition passes.
 - The V1 floor planner now caches consecutive region-column writes, avoiding
   repeated hash-table lookups during circuit measurement.
 - Independent polynomial transforms are now parallelized during proving-key
