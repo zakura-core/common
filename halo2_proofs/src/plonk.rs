@@ -152,6 +152,8 @@ pub struct ProvingKey<C: CurveAffine> {
     /// Kept out of [`VerifyingKey`] so verifier-only users do not pay its
     /// memory cost.
     fft_twiddles: ProvingKeyTwiddles<C::Scalar>,
+    /// Circuit-type-erased floor-planning data produced during key generation.
+    floor_plan: Option<FloorPlan>,
 }
 
 impl<C: CurveAffine> ProvingKey<C> {

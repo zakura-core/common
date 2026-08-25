@@ -6,8 +6,8 @@ use std::ops::RangeTo;
 
 use super::{
     circuit::{
-        Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
-        Selector,
+        Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlan, FloorPlanner,
+        Instance, Selector,
     },
     commit_instance,
     evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
@@ -279,6 +279,7 @@ where
         circuits,
         config,
         &meta.constants,
+        pk.floor_plan.as_ref(),
     )?;
 
     let advice: Vec<AdviceSingle<C>> = witnesses
@@ -842,7 +843,7 @@ fn test_create_proof() {
 }
 
 #[test]
-fn v1_batch_reuses_measurement() {
+fn v1_proving_key_reuses_floor_plan() {
     use crate::{
         circuit::floor_planner::V1,
         plonk::{keygen_pk, keygen_vk},
@@ -880,7 +881,7 @@ fn v1_batch_reuses_measurement() {
 
     let params: Params<EqAffine> = Params::new(3);
     let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
-    let pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
+    let mut pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
 
     MEASUREMENTS.store(0, Ordering::Relaxed);
@@ -893,7 +894,9 @@ fn v1_batch_reuses_measurement() {
         &mut transcript,
     )
     .expect("proof generation should not fail");
-    assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
+    // The plan cached in the proving key is reused, so proving re-measures
+    // nothing.
+    assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
     let first_proof = transcript.finalize();
 
     // The proof bytes must not depend on the parallel schedule: re-create the
@@ -918,10 +921,24 @@ fn v1_batch_reuses_measurement() {
                 )
             })
             .expect("proof generation should not fail");
-        assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
+        assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
         assert_eq!(transcript.finalize(), first_proof);
     }
 
-    #[cfg(not(feature = "multicore"))]
-    let _ = first_proof;
+    // A plan produced by another floor planner is ignored safely: the V1
+    // planner re-measures once and still produces identical proof bytes.
+    pk.floor_plan = Some(FloorPlan::from_arc(std::sync::Arc::new(())));
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    MEASUREMENTS.store(0, Ordering::Relaxed);
+    create_proof(
+        &params,
+        &pk,
+        &[MyCircuit, MyCircuit, MyCircuit],
+        &[&[], &[], &[]],
+        StdRng::seed_from_u64(PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("proof generation with an incompatible plan should not fail");
+    assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
+    assert_eq!(transcript.finalize(), first_proof);
 }

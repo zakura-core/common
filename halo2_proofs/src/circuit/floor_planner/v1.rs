@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use ff::Field;
 use maybe_rayon::prelude::*;
@@ -10,8 +10,8 @@ use crate::{
         Cell, Layouter, Region, RegionIndex, RegionStart, Table, TableLayouter, Value,
     },
     plonk::{
-        Advice, Any, Assigned, Assignment, Circuit, Column, Error, Fixed, FloorPlanner, Instance,
-        Selector, TableColumn,
+        Advice, Any, Assigned, Assignment, Circuit, Column, Error, Fixed, FloorPlan, FloorPlanner,
+        Instance, Selector, TableColumn,
     },
 };
 
@@ -82,18 +82,22 @@ impl FloorPlanner for V1 {
         circuits: &[C],
         config: C::Config,
         constants: &[Column<Fixed>],
-    ) -> Result<(), Error>
+        floor_plan: Option<&FloorPlan>,
+    ) -> Result<Option<FloorPlan>, Error>
     where
         C::Config: Send,
     {
         debug_assert_eq!(assignments.len(), circuits.len());
         let Some(first_circuit) = circuits.first() else {
-            return Ok(());
+            return Ok(None);
         };
 
-        let layout = Self::plan::<F, CS, C>(first_circuit, config.clone(), constants)?;
+        let (layout, is_new) =
+            Self::cached_or_plan::<F, CS, C>(floor_plan, first_circuit, config.clone(), constants)?;
+        let new_plan = is_new.then(|| FloorPlan::from_arc(layout.clone()));
         if circuits.len() == 1 {
-            return Self::assign(&mut assignments[0], first_circuit, config, &layout);
+            Self::assign(&mut assignments[0], first_circuit, config, &layout)?;
+            return Ok(new_plan);
         }
 
         // Workers share the immutable layout; each one owns its assignment
@@ -107,11 +111,28 @@ impl FloorPlanner for V1 {
             .zip(configs.into_par_iter())
             .try_for_each(|((assignment, circuit), config)| {
                 Self::assign(assignment, circuit, config, &layout)
-            })
+            })?;
+
+        Ok(new_plan)
     }
 }
 
 impl V1 {
+    fn cached_or_plan<F: Field, CS: Assignment<F>, C: Circuit<F>>(
+        floor_plan: Option<&FloorPlan>,
+        circuit: &C,
+        config: C::Config,
+        constants: &[Column<Fixed>],
+    ) -> Result<(Arc<V1Layout>, bool), Error> {
+        if let Some(layout) = floor_plan.and_then(|plan| plan.downcast::<V1Layout>()) {
+            return Ok((layout, false));
+        }
+
+        Self::plan::<F, CS, C>(circuit, config, constants)
+            .map(Arc::new)
+            .map(|layout| (layout, true))
+    }
+
     fn plan<F: Field, CS: Assignment<F>, C: Circuit<F>>(
         circuit: &C,
         config: C::Config,

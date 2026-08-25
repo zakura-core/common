@@ -251,7 +251,8 @@ pub fn keygen_pk<C, ConcreteCircuit>(
 ) -> Result<ProvingKey<C>, Error>
 where
     C: CurveAffine,
-    ConcreteCircuit: Circuit<C::Scalar>,
+    ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
+    <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
 {
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
@@ -271,12 +272,13 @@ where
         _marker: std::marker::PhantomData,
     };
 
-    // Synthesize the circuit to obtain URS
-    ConcreteCircuit::FloorPlanner::synthesize(
-        &mut assembly,
-        circuit,
+    // Synthesize the circuit to obtain URS and retain reusable planning data.
+    let floor_plan = ConcreteCircuit::FloorPlanner::synthesize_batch(
+        core::slice::from_mut(&mut assembly),
+        core::slice::from_ref(circuit),
         config,
-        cs.constants.clone(),
+        &cs.constants,
+        None,
     )?;
 
     let mut fixed = batch_invert_assigned(assembly.fixed);
@@ -338,5 +340,6 @@ where
         fixed_cosets,
         permutation: permutation_pk,
         fft_twiddles,
+        floor_plan,
     })
 }

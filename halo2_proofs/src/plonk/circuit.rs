@@ -2,8 +2,10 @@ use core::cmp::max;
 use core::ops::{Add, Mul};
 use ff::Field;
 use std::{
+    any::Any as StdAny,
     convert::TryFrom,
     ops::{Neg, Sub},
+    sync::Arc,
 };
 
 use super::{lookup, permutation, Assigned, Error};
@@ -437,6 +439,26 @@ pub trait Assignment<F: Field> {
     fn pop_namespace(&mut self, gadget_name: Option<String>);
 }
 
+/// Opaque, immutable floor-planning data cached by a proving key.
+#[derive(Clone)]
+pub struct FloorPlan(Arc<dyn StdAny + Send + Sync>);
+
+impl FloorPlan {
+    pub(crate) fn from_arc<T: StdAny + Send + Sync>(plan: Arc<T>) -> Self {
+        Self(plan)
+    }
+
+    pub(crate) fn downcast<T: StdAny + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.0.clone().downcast().ok()
+    }
+}
+
+impl std::fmt::Debug for FloorPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("FloorPlan").field(&"..").finish()
+    }
+}
+
 /// A floor planning strategy for a circuit.
 ///
 /// The floor planner is chip-agnostic and applies its strategy to the circuit it is used
@@ -475,12 +497,17 @@ pub trait FloorPlanner {
     /// The `Send` and `Sync` bounds let implementations synthesize the
     /// independent circuit witnesses in parallel; the default implementation
     /// is serial.
+    /// `floor_plan` contains immutable planning data retained by the proving
+    /// key. Implementations must ignore plans they do not recognize. Built-in
+    /// floor planners can return a newly constructed plan for the proving key
+    /// to retain.
     fn synthesize_batch<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
         assignments: &mut [CS],
         circuits: &[C],
         config: C::Config,
         constants: &[Column<Fixed>],
-    ) -> Result<(), Error>
+        _floor_plan: Option<&FloorPlan>,
+    ) -> Result<Option<FloorPlan>, Error>
     where
         C::Config: Send,
     {
@@ -490,7 +517,7 @@ pub trait FloorPlanner {
             Self::synthesize(assignment, circuit, config.clone(), constants.to_vec())?;
         }
 
-        Ok(())
+        Ok(None)
     }
 }
 
