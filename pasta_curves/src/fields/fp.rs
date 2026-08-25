@@ -13,7 +13,7 @@ use ff::{FieldBits, PrimeFieldBits};
 
 use crate::arithmetic::{adc, mac, sbb, SqrtTableHelpers};
 #[cfg(feature = "deferred")]
-use crate::deferred::{DeferredField, Product};
+use crate::deferred::{DeferredAccumulator, DeferredField, Product};
 
 #[cfg(feature = "sqrt-table")]
 use crate::arithmetic::SqrtTables;
@@ -556,13 +556,16 @@ impl Fp {
 }
 
 #[cfg(feature = "deferred")]
-impl DeferredField for Fp {
-    type Accumulator = Product<Fp>;
-
+impl DeferredAccumulator<Fp> for Product<Fp> {
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
-    fn mul_accumulator(a: &Fp, b: &Fp) -> Self::Accumulator {
+    fn initialize(a: &Fp, b: &Fp) -> Self {
         Product::from_limbs(a.mul_unreduced(b))
     }
+}
+
+#[cfg(feature = "deferred")]
+impl DeferredField for Fp {
+    type Accumulator = Product<Fp>;
 
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     fn mul_accumulate(acc: &mut Self::Accumulator, a: &Fp, b: &Fp) {

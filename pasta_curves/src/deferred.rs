@@ -14,24 +14,13 @@ use crate::arithmetic::{adc, mac};
 ///
 /// Instead of reducing each multiplication result immediately, callers
 /// start an [`Accumulator`](Self::Accumulator) with
-/// [`mul_accumulator`](Self::mul_accumulator), accumulate further products via
+/// [`DeferredAccumulator::initialize`], accumulate further products via
 /// [`mul_accumulate`](Self::mul_accumulate) and
 /// [`square_accumulate`](Self::square_accumulate), then perform a single
 /// reduction at the end with [`reduce`](Self::reduce).
 pub trait DeferredField: ff::Field {
     /// A wide accumulator for unreduced products.
-    type Accumulator: Copy + Clone + Debug + Default;
-
-    /// Multiplies `a` by `b` and returns the result in a fresh accumulator.
-    ///
-    /// Implementors can override this to avoid adding the first product to a
-    /// zero accumulator.
-    #[inline]
-    fn mul_accumulator(a: &Self, b: &Self) -> Self::Accumulator {
-        let mut accumulator = Self::Accumulator::default();
-        Self::mul_accumulate(&mut accumulator, a, b);
-        accumulator
-    }
+    type Accumulator: DeferredAccumulator<Self>;
 
     /// Multiplies `a` by `b` and adds the result into `acc`.
     fn mul_accumulate(acc: &mut Self::Accumulator, a: &Self, b: &Self);
@@ -41,6 +30,12 @@ pub trait DeferredField: ff::Field {
 
     /// Reduces the accumulator to a canonical field element.
     fn reduce(acc: Self::Accumulator) -> Self;
+}
+
+/// Operations required from a deferred field accumulator.
+pub trait DeferredAccumulator<F: DeferredField>: Copy + Clone + Debug + Default {
+    /// Initializes an accumulator from one unreduced product.
+    fn initialize(a: &F, b: &F) -> Self;
 }
 
 /// A wide accumulator for unreduced Montgomery products over field `F`.
@@ -209,7 +204,7 @@ impl<F> Product<F> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeferredField, Product};
+    use super::{DeferredAccumulator, DeferredField, Product};
     use crate::arithmetic::mac;
     use ff::Field;
     use rand::{Rng, SeedableRng};
@@ -301,12 +296,12 @@ mod tests {
                 }
 
                 #[test]
-                fn mul_accumulator_roundtrip() {
+                fn accumulator_initialize_roundtrip() {
                     let mut rng = XorShiftRng::from_seed(SEED);
                     for _ in 0..100 {
                         let a = <$F>::random(&mut rng);
                         let b = <$F>::random(&mut rng);
-                        let acc = <$F>::mul_accumulator(&a, &b);
+                        let acc = <$F as DeferredField>::Accumulator::initialize(&a, &b);
                         assert_eq!(<$F>::reduce(acc), a * b);
                     }
                 }

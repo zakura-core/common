@@ -9,7 +9,10 @@ use std::{
 
 use ff::WithSmallOrderMulGroup;
 use group::ff::Field;
-use pasta_curves::{deferred::DeferredField, pallas, vesta};
+use pasta_curves::{
+    deferred::{DeferredAccumulator, DeferredField},
+    pallas, vesta,
+};
 
 use super::{
     Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
@@ -758,7 +761,7 @@ fn accumulate_deferred<T: DeferredField + 'static>(
         }
     } else {
         for (accumulator, term) in accumulators.iter_mut().zip(terms) {
-            *accumulator = T::mul_accumulator(term, power);
+            *accumulator = T::Accumulator::initialize(term, power);
         }
         *seeded = true;
     }
@@ -782,7 +785,7 @@ fn accumulate_deferred_products<T: DeferredField + 'static>(
         }
     } else {
         for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
-            *accumulator = T::mul_accumulator(term, factor);
+            *accumulator = T::Accumulator::initialize(term, factor);
         }
         *seeded = true;
     }
