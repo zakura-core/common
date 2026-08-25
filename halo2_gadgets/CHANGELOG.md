@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Internal proof-test helpers and benchmarks satisfy the `Sync` circuit /
+  `Send` configuration bounds that `zakura-halo2-proofs`'s `create_proof` now
+  requires; public gadget APIs are unchanged.
 - Poseidon, Sinsemilla, and ECC witness generation now use direct small-power,
   doubling, and word-extraction paths instead of generic exponentiation,
   multiplication by two, and intermediate allocations.
