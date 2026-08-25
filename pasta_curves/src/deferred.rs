@@ -70,30 +70,44 @@ impl<F> Product<F> {
     /// and adding it in a second pass.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) fn mul_accumulate(&mut self, lhs: &[u64; 4], rhs: &[u64; 4]) {
+        // Row 0 contributes lhs[0] * rhs at limbs 0 through 3. Starting the
+        // multiply-add chain from the stored limbs incorporates that part of
+        // the old accumulator. Its full-limb carry enters untouched limb 4;
+        // `overflow` is the resulting one-bit carry into limb 5.
         let (d0, carry) = mac(self.limbs[0], lhs[0], rhs[0], 0);
         let (d1, carry) = mac(self.limbs[1], lhs[0], rhs[1], carry);
         let (d2, carry) = mac(self.limbs[2], lhs[0], rhs[2], carry);
         let (d3, carry) = mac(self.limbs[3], lhs[0], rhs[3], carry);
         let (d4, overflow) = adc(self.limbs[4], carry, 0);
 
+        // Row 1 begins at limb 1 and updates the partially formed limbs 1
+        // through 4. Its full-limb carry and row 0's one-bit overflow are
+        // combined with untouched accumulator limb 5.
         let (d1, carry) = mac(d1, lhs[1], rhs[0], 0);
         let (d2, carry) = mac(d2, lhs[1], rhs[1], carry);
         let (d3, carry) = mac(d3, lhs[1], rhs[2], carry);
         let (d4, carry) = mac(d4, lhs[1], rhs[3], carry);
         let (d5, overflow) = adc(self.limbs[5], carry, overflow);
 
+        // Row 2 repeats the same carry handoff one limb higher, covering
+        // partially formed limbs 2 through 5 and untouched limb 6.
         let (d2, carry) = mac(d2, lhs[2], rhs[0], 0);
         let (d3, carry) = mac(d3, lhs[2], rhs[1], carry);
         let (d4, carry) = mac(d4, lhs[2], rhs[2], carry);
         let (d5, carry) = mac(d5, lhs[2], rhs[3], carry);
         let (d6, overflow) = adc(self.limbs[6], carry, overflow);
 
+        // Row 3 finishes the 256-by-256-bit product in limbs 3 through 6.
+        // Its carry and row 2's overflow are combined with the final stored
+        // accumulator limb.
         let (d3, carry) = mac(d3, lhs[3], rhs[0], 0);
         let (d4, carry) = mac(d4, lhs[3], rhs[1], carry);
         let (d5, carry) = mac(d5, lhs[3], rhs[2], carry);
         let (d6, carry) = mac(d6, lhs[3], rhs[3], carry);
         let (d7, overflow) = adc(self.limbs[7], carry, overflow);
 
+        // The final one-bit overflow is the only contribution beyond the
+        // 512-bit limb array. Fold it into the accumulator's external carry.
         self.limbs = [d0, d1, d2, d3, d4, d5, d6, d7];
         let (carry, carry_overflow) = self.carry.overflowing_add(overflow);
         debug_assert!(
