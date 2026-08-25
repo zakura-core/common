@@ -149,20 +149,36 @@ pub fn bitrange_subset<F: PrimeFieldBits>(field_elem: &F, bitrange: Range<usize>
     // field_elem.to_le_bits() returns canonical bitstrings.
     assert!(bitrange.end <= F::NUM_BITS as usize);
 
-    field_elem
-        .to_le_bits()
+    let bitrange_len = bitrange.len();
+    let bits = field_elem.to_le_bits();
+    let mut chunks = bits[bitrange].chunks(u64::BITS as usize).rev();
+    let Some(high_chunk) = chunks.next() else {
+        return F::ZERO;
+    };
+
+    let high_value = high_chunk
         .iter()
         .by_vals()
-        .skip(bitrange.start)
-        .take(bitrange.end - bitrange.start)
-        .rev()
-        .fold(F::ZERO, |acc, bit| {
-            if bit {
-                acc.double() + F::ONE
-            } else {
-                acc.double()
-            }
-        })
+        .enumerate()
+        .fold(0_u64, |value, (bit, set)| value | ((set as u64) << bit));
+    let mut subset = F::from(high_value);
+
+    if bitrange_len > u64::BITS as usize {
+        // Every remaining chunk contains exactly 64 less-significant bits.
+        // Build the subset in radix 2^64, reducing in the field after each
+        // chunk.
+        let radix = F::from(u64::MAX) + F::ONE;
+        for chunk in chunks {
+            let value = chunk
+                .iter()
+                .by_vals()
+                .enumerate()
+                .fold(0_u64, |value, (bit, set)| value | ((set as u64) << bit));
+            subset = subset * radix + F::from(value);
+        }
+    }
+
+    subset
 }
 
 /// Check that an expression is in the small range [0..range),
@@ -409,6 +425,14 @@ mod tests {
         decompose(pallas::Base::random(&mut rng), &[0..254, 254..255]);
         decompose(pallas::Base::random(&mut rng), &[0..127, 127..255]);
         decompose(pallas::Base::random(&mut rng), &[0..128, 128..255]);
+        decompose(
+            pallas::Base::random(&mut rng),
+            &[0..64, 64..128, 128..192, 192..255],
+        );
+        decompose(
+            pallas::Base::random(&mut rng),
+            &[0..63, 63..64, 64..65, 65..129, 129..255],
+        );
         decompose(
             pallas::Base::random(&mut rng),
             &[0..50, 50..100, 100..150, 150..200, 200..255],
