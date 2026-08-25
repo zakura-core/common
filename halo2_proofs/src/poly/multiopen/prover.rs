@@ -82,12 +82,12 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
             .values
             .get(coefficient_index..coefficient_index + DEFERRED_FOLD_LANES)
         {
-            accumulators[0] = F::Accumulator::initialize(&coefficients[0], first_power);
-            accumulators[1] = F::Accumulator::initialize(&coefficients[1], first_power);
+            accumulators[0] = F::Accumulator::initialize_product(&coefficients[0], first_power);
+            accumulators[1] = F::Accumulator::initialize_product(&coefficients[1], first_power);
         } else {
             for (lane, accumulator) in accumulators.iter_mut().enumerate() {
                 if let Some(coefficient) = first.values.get(coefficient_index + lane) {
-                    *accumulator = F::Accumulator::initialize(coefficient, first_power);
+                    *accumulator = F::Accumulator::initialize_product(coefficient, first_power);
                 }
             }
         }
@@ -131,7 +131,7 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
         let mut accumulator = first
             .values
             .get(coefficient_index)
-            .map(|coefficient| F::Accumulator::initialize(coefficient, first_power))
+            .map(|coefficient| F::Accumulator::initialize_product(coefficient, first_power))
             .unwrap_or_default();
         for (polynomial_index, polynomial) in products.iter().enumerate() {
             if let Some(coefficient) = polynomial.values.get(coefficient_index) {

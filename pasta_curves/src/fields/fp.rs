@@ -558,7 +558,12 @@ impl Fp {
 #[cfg(feature = "deferred")]
 impl DeferredAccumulator<Fp> for Product<Fp> {
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
-    fn initialize(a: &Fp, b: &Fp) -> Self {
+    fn initialize(value: &Fp) -> Self {
+        Product::from_limbs([0, 0, 0, 0, value.0[0], value.0[1], value.0[2], value.0[3]])
+    }
+
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    fn initialize_product(a: &Fp, b: &Fp) -> Self {
         Product::from_limbs(a.mul_unreduced(b))
     }
 }

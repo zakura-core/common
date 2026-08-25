@@ -14,7 +14,7 @@ use crate::arithmetic::{adc, mac};
 ///
 /// Instead of reducing each multiplication result immediately, callers
 /// start an [`Accumulator`](Self::Accumulator) with
-/// [`DeferredAccumulator::initialize`], accumulate further products via
+/// [`DeferredAccumulator::initialize_product`], accumulate further products via
 /// [`mul_accumulate`](Self::mul_accumulate) and
 /// [`square_accumulate`](Self::square_accumulate), then perform a single
 /// reduction at the end with [`reduce`](Self::reduce).
@@ -34,8 +34,11 @@ pub trait DeferredField: ff::Field {
 
 /// Operations required from a deferred field accumulator.
 pub trait DeferredAccumulator<F: DeferredField>: Copy + Clone + Debug + Default {
+    /// Initializes an accumulator from one already-reduced field element.
+    fn initialize(value: &F) -> Self;
+
     /// Initializes an accumulator from one unreduced product.
-    fn initialize(a: &F, b: &F) -> Self;
+    fn initialize_product(a: &F, b: &F) -> Self;
 }
 
 /// A wide accumulator for unreduced Montgomery products over field `F`.
@@ -300,8 +303,18 @@ mod tests {
                     let mut rng = XorShiftRng::from_seed(SEED);
                     for _ in 0..100 {
                         let a = <$F>::random(&mut rng);
+                        let acc = <$F as DeferredField>::Accumulator::initialize(&a);
+                        assert_eq!(<$F>::reduce(acc), a);
+                    }
+                }
+
+                #[test]
+                fn accumulator_initialize_product_roundtrip() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    for _ in 0..100 {
+                        let a = <$F>::random(&mut rng);
                         let b = <$F>::random(&mut rng);
-                        let acc = <$F as DeferredField>::Accumulator::initialize(&a, &b);
+                        let acc = <$F as DeferredField>::Accumulator::initialize_product(&a, &b);
                         assert_eq!(<$F>::reduce(acc), a * b);
                     }
                 }

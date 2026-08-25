@@ -8,9 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
-- Added [`DeferredAccumulator::initialize`], which initializes a wide
-  accumulator directly from one product. The `Fp` and `Fq` implementations
-  avoid adding that first product to a zero accumulator.
+- Added [`DeferredAccumulator::initialize`] for reduced elements and
+  [`DeferredAccumulator::initialize_product`] for seeding a wide accumulator
+  directly from one product. The `Fp` and `Fq` implementations avoid adding
+  that first product to a zero accumulator.
 - Deferred `Fp` and `Fq` product accumulation now fuses the portable
   schoolbook multiplication into the wide accumulator, avoiding a temporary
   eight-limb product and a second carry pass. Deferred inner products measured

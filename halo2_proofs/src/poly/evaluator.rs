@@ -761,7 +761,7 @@ fn accumulate_deferred<T: DeferredField + 'static>(
         }
     } else {
         for (accumulator, term) in accumulators.iter_mut().zip(terms) {
-            *accumulator = T::Accumulator::initialize(term, power);
+            *accumulator = T::Accumulator::initialize_product(term, power);
         }
         *seeded = true;
     }
@@ -785,7 +785,7 @@ fn accumulate_deferred_products<T: DeferredField + 'static>(
         }
     } else {
         for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
-            *accumulator = T::Accumulator::initialize(term, factor);
+            *accumulator = T::Accumulator::initialize_product(term, factor);
         }
         *seeded = true;
     }

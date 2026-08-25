@@ -231,7 +231,7 @@ fn deferred_inner_product<F: DeferredField>(polynomial: &[F], powers: &[F]) -> F
     let Some((coefficient, power)) = products.next() else {
         return F::ZERO;
     };
-    let mut accumulator = F::Accumulator::initialize(coefficient, power);
+    let mut accumulator = F::Accumulator::initialize_product(coefficient, power);
     for (coefficient, power) in products {
         F::mul_accumulate(&mut accumulator, coefficient, power);
     }
