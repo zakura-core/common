@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Polynomial evaluation now indexes common-subexpression candidates by
+  structural fingerprints, avoiding quadratic candidate scans while retaining
+  exact structural matching.
 - Single-worker Pasta multi-opening polynomial folds now interleave two wide
   product accumulators, shortening dependency chains while sharing cached
   challenge-power loads.

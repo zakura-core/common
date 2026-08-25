@@ -1,5 +1,6 @@
 use std::{
     any::{Any, TypeId},
+    collections::{hash_map::DefaultHasher, HashMap},
     fmt,
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -957,70 +958,109 @@ fn same_plan<E, F: Field, B: Basis>(
 struct PlanOccurrence<'a, E, F: Field, B: Basis> {
     plan: &'a EvaluationPlan<E, F, B>,
     end: usize,
+    fingerprint: u64,
+}
+
+fn fingerprint<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn scalar_id<F: Field>(scalars: &mut Vec<F>, scalar: F) -> usize {
+    match scalars.iter().position(|candidate| *candidate == scalar) {
+        Some(index) => index,
+        None => {
+            let index = scalars.len();
+            scalars.push(scalar);
+            index
+        }
+    }
 }
 
 fn collect_plan_occurrences<'a, E, F: Field, B: Basis>(
     plan: &'a EvaluationPlan<E, F, B>,
     nodes: &mut Vec<PlanOccurrence<'a, E, F, B>>,
-) {
+    scalars: &mut Vec<F>,
+) -> u64 {
     let index = nodes.len();
     nodes.push(PlanOccurrence {
         plan,
         end: usize::MAX,
+        fingerprint: 0,
     });
-    match plan {
+    let plan_fingerprint = match plan {
         EvaluationPlan::Add(lhs, rhs) | EvaluationPlan::Mul(lhs, rhs) => {
-            collect_plan_occurrences(lhs, nodes);
-            collect_plan_occurrences(rhs, nodes);
+            let lhs = collect_plan_occurrences(lhs, nodes, scalars);
+            let rhs = collect_plan_occurrences(rhs, nodes, scalars);
+            let tag = usize::from(matches!(plan, EvaluationPlan::Mul(_, _)));
+            fingerprint(&(tag, lhs, rhs))
         }
-        EvaluationPlan::Square(inner) | EvaluationPlan::Scale(inner, _) => {
-            collect_plan_occurrences(inner, nodes)
+        EvaluationPlan::Square(inner) => {
+            let inner = collect_plan_occurrences(inner, nodes, scalars);
+            fingerprint(&(2usize, inner))
         }
-        EvaluationPlan::Horner { base, .. } => collect_plan_occurrences(base, nodes),
+        EvaluationPlan::Scale(inner, scalar) => {
+            let inner = collect_plan_occurrences(inner, nodes, scalars);
+            fingerprint(&(3usize, inner, scalar_id(scalars, *scalar)))
+        }
+        EvaluationPlan::Horner { base, coefficients } => {
+            let base = collect_plan_occurrences(base, nodes, scalars);
+            fingerprint(&(4usize, base, coefficients.as_ref()))
+        }
         EvaluationPlan::DistributePowers { work, .. } => {
             for work in work {
                 match work {
-                    DistributionWork::Term { term, .. } => collect_plan_occurrences(term, nodes),
+                    DistributionWork::Term { term, .. } => {
+                        collect_plan_occurrences(term, nodes, scalars);
+                    }
                     DistributionWork::SharedFactor { factor, bodies, .. } => {
-                        collect_plan_occurrences(factor, nodes);
-                        collect_factor_body_occurrences(bodies, nodes);
+                        collect_plan_occurrences(factor, nodes, scalars);
+                        collect_factor_body_occurrences(bodies, nodes, scalars);
                     }
                     DistributionWork::SelectorFamily { runs, .. } => {
                         for run in runs.iter().rev() {
-                            collect_factor_body_occurrences(&run.bodies, nodes);
+                            collect_factor_body_occurrences(&run.bodies, nodes, scalars);
                         }
                     }
                 }
             }
+            // Distribution plans are never themselves cache candidates.
+            fingerprint(&(5usize, index))
         }
-        EvaluationPlan::Poly(_)
-        | EvaluationPlan::LinearTerm(_)
-        | EvaluationPlan::ConstantTerm(_) => {}
+        EvaluationPlan::Poly(leaf) => fingerprint(&(6usize, leaf)),
+        EvaluationPlan::LinearTerm(scalar) => fingerprint(&(7usize, scalar_id(scalars, *scalar))),
+        EvaluationPlan::ConstantTerm(scalar) => fingerprint(&(8usize, scalar_id(scalars, *scalar))),
         EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
             unreachable!("common-subexpression planning runs once")
         }
-    }
+    };
     nodes[index].end = nodes.len();
+    nodes[index].fingerprint = plan_fingerprint;
+    plan_fingerprint
 }
 
 fn collect_factor_body_occurrences<'a, E, F: Field, B: Basis>(
     plan: &'a FactorBodyPlan<E, F, B>,
     nodes: &mut Vec<PlanOccurrence<'a, E, F, B>>,
+    scalars: &mut Vec<F>,
 ) {
     match plan {
         FactorBodyPlan::Sequential(bodies) => {
             for body in bodies {
-                collect_plan_occurrences(body, nodes);
+                collect_plan_occurrences(body, nodes, scalars);
             }
         }
         FactorBodyPlan::Factored(work) => {
             for work in work {
                 match work {
-                    FactorBodyWork::Term(term) => collect_plan_occurrences(&term.term, nodes),
+                    FactorBodyWork::Term(term) => {
+                        collect_plan_occurrences(&term.term, nodes, scalars);
+                    }
                     FactorBodyWork::SharedFactor { factor, terms } => {
-                        collect_plan_occurrences(factor, nodes);
+                        collect_plan_occurrences(factor, nodes, scalars);
                         for term in terms {
-                            collect_plan_occurrences(&term.term, nodes);
+                            collect_plan_occurrences(&term.term, nodes, scalars);
                         }
                     }
                 }
@@ -1137,7 +1177,15 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
     fn cache_common_subexpressions(&mut self) -> usize {
         let (actions, cache_slots) = {
             let mut occurrences = vec![];
-            collect_plan_occurrences(self, &mut occurrences);
+            let mut scalars = vec![];
+            collect_plan_occurrences(self, &mut occurrences, &mut scalars);
+            let mut fingerprint_groups: HashMap<u64, Vec<usize>> = HashMap::new();
+            for (index, occurrence) in occurrences.iter().enumerate() {
+                fingerprint_groups
+                    .entry(occurrence.fingerprint)
+                    .or_default()
+                    .push(index);
+            }
             let mut grouped = vec![false; occurrences.len()];
             let mut shapes = vec![];
             let two = F::ONE.double();
@@ -1146,8 +1194,12 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
                 if grouped[index] {
                     continue;
                 }
-                let matching = (index..occurrences.len())
+                let matching = fingerprint_groups[&occurrences[index].fingerprint]
+                    .iter()
+                    .copied()
                     .filter(|candidate| {
+                        // A fingerprint collision can only add candidates to
+                        // this exact structural comparison.
                         !grouped[*candidate]
                             && same_plan(occurrences[index].plan, occurrences[*candidate].plan)
                     })
