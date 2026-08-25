@@ -9,15 +9,87 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 - All of this release's new MSM machinery — the Eisenstein-orbit backend
-  (`glv::orbit`) and the magnitude-profiled backend planner — sits behind
-  a new `orbits` feature (implying `glv`), so it can be disabled,
-  refactored, or removed wholesale. Without it the arbitrary-scalar MSM
-  plans the Signed-Booth backend against the generic estimate exactly as
-  before.
-- The orbit backend's parallel schedule pairs adjacent windows per task
-  as joined subtasks (the schedule the Signed-Booth backend already
-  uses), sharing one Horner shift chain per pair while keeping every
-  window independently stealable.
+  (`glv::orbit`), the magnitude-profiled backend planner, the prepared
+  zero-checks (`glv::zero`), and the `arithmetic::PreparedZeroCheck` /
+  `CurveExt::try_prepare_zero_check` hooks — sits behind a new `orbits`
+  feature (implying `glv`), so it can be disabled, refactored, or removed
+  wholesale. Without it the arbitrary-scalar MSM plans the Signed-Booth
+  backend against the generic estimate exactly as before.
+- Added `glv::zero`: prepared fixed-base multiscalar **zero-checks** for the
+  verifier-shaped workload where almost all bases are fixed across many
+  checks (an SRS) and only the identity outcome is needed.
+  `PreparedZeroMsm::prepare[_with_mode]` precomputes, per fixed base, one
+  transformed point per $U_6$-coset of a subgroup
+  $G = \langle U_6, \alpha, \beta^k \rangle$ of the residue units of
+  $\mathbf{Z}[\omega]/2^c$ ($\alpha = 1 - \omega$, $\beta = 2 - \omega$),
+  so a radix-$2^c$ digit factors as $d = u\eta\delta$ through a static
+  residue codebook and a window needs one bucket per $G$-orbit instead of
+  the $(4^c + 2)/6$ unit orbits — letting the prepared radix widen until
+  per-window point visits, not bucket integration, set the cost. Recoding
+  is fixed-length with an exactly bounded residual finished by the
+  unprepared orbit machinery, per-check extra terms (a proof's own
+  commitments) run as their own multiscalar multiplication — the planned
+  GLV backends above a small count, a width-matched Signed-Booth pass
+  below it — concurrent with the prepared windows under parallelism, and
+  every structural property of a codebook (subgroup closure, coset and
+  orbit counts, minimal exact lifts, full residue coverage) is re-derived
+  and asserted at construction. Preparation also merges bases related by
+  exact $u$/$u\alpha$/$u\beta$ relations, found with batched degree-3
+  isogeny evaluation. `PreparedZeroMsm::prepare` plans its mode within a
+  64 MiB prepared-table budget and returns `None` (and the
+  `try_prepare_zero_check` hook declines) when even the smallest mode
+  exceeds it — very large base sets — instead of silently allocating
+  past the budget; `prepare_with_mode` stays explicit and infallible.
+  Measured on 32-core x86-64 (portable backend, Vesta,
+  interleaved medians on true zero relations, 2,048 fixed bases): the
+  check runs ~1.6x faster than the planned unprepared MSM serially
+  (13.4 → 8.4 ms best mode) and up to ~2.4x on 8–16 workers, winning
+  every swept cell from 512 to 8,192 terms with no regression at 32
+  workers; the classical subset-table baseline (implemented, test-gated),
+  given the same batched-affine reduction, stays 18–31% behind at
+  comparable-or-larger memory. Preparation costs ~0.1 s and ~10–50 MiB at
+  2,048 bases depending on mode (break-even after ~9–20 checks).
+- Several same-bases zero-checks batch probabilistically:
+  `is_zero_batch_vartime` derives its combining challenge by hashing a
+  preparation-time digest of the bases together with every equation, so
+  the challenge cannot precede the equations; an explicit-challenge
+  variant exists for protocols whose transcript owns the challenge, with
+  the $(m-1)/r$ soundness obligation documented. Both variants accept an
+  empty batch vacuously.
+- Added `arithmetic::PreparedZeroCheck` and
+  `CurveExt::try_prepare_zero_check`, an object-safe hook through which
+  generic downstream code (halo2's verifier) obtains a prepared zero-check
+  without naming the backend; curves without one return `None`.
+- The zero-check's coefficient-integration programs recode each fixed
+  bucket coefficient in a minimal-weight radix-2 form over the digit set
+  $\{0\} \cup U_6$ (exact minimality via 0-1 BFS over the recoding
+  recurrence), and orbit representatives are chosen weight-first: 26–31%
+  fewer program additions than per-coordinate NAF at every mode, with the
+  full-unit mode's program collapsing to the plain valuation reducer.
+- The zero-check's recoding emits window-major codes and per-window bucket
+  histograms, so each window's staging is one contiguous placement pass
+  (the counting pass and the strided matrix walk drop out; parallel window
+  tasks stop striding the shared matrix), and the coefficient programs are
+  stored position-major: wide modes (over ~112 program additions) sum each
+  binary position through the shared batched-affine reduction tree and
+  Horner-fold the position sums, while small programs keep the cheaper
+  straight-line projective form.
+- `CodebookMode` is now an enum, adding `ExponentBox`: a non-subgroup
+  residue cover whose prepared variants are a rectangular
+  $\alpha^i\beta^j$ box in the unit quotient and whose coefficients tile
+  the rest per 2-adic valuation, derived and asserted entirely by
+  enumeration (the naive $\langle\bar\alpha\rangle \times
+  \langle\bar\beta\rangle$ coordinatization is provably wrong — the two
+  generators share a $C_2$ — so the box uses coset coordinates). The
+  16×16 box at $c = 8$ reaches 256 variants with only 47 buckets, a
+  point the subgroup lattice cannot express; measured, it ties the best
+  same-memory subgroup mode within noise without beating it (the lean
+  cover's exact digits are larger, costing one extra tail window), so it
+  ships as a searchable mode, not a planner default.
+- The orbit backend's parallel schedule and the zero-check's parallel
+  drivers pair adjacent windows per task as joined subtasks (the schedule
+  the Signed-Booth backend already uses), sharing one Horner shift chain
+  per pair while keeping every window independently stealable.
 - The GLV multiscalar multiplication now plans between two bucket backends:
   the existing Signed-Booth windows over the two decomposition halves, and a
   new Eisenstein-orbit backend (`glv::orbit`) that recodes the joint value
@@ -58,8 +130,9 @@ and this project adheres to Rust's notion of
   ~2.6% faster serially (k = 11, one action; faster in 3 of 3 matched
   rounds) and ~8% faster on the default 32-thread pool (one-action bundle
   449 ms → 415 ms).
-- Both GLV bucket backends (Booth and orbit) reduce their buckets through
-  the shared fused batched-affine reduction, one window at a time. A multi-window variant sharing one Montgomery inversion per
+- Every backend (Booth, orbit, and the prepared zero-check below) reduces
+  its buckets through the shared fused batched-affine reduction, one window
+  at a time. A multi-window variant sharing one Montgomery inversion per
   tree level across window groups was built and *measured as a net loss*
   at every group size above one window — with divstep inversion at
   I/M ≈ 77 the saved inversions are worth microseconds per MSM, while

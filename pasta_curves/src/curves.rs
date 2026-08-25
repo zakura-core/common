@@ -98,6 +98,25 @@ macro_rules! impl_multiexp_vartime {
     (native, $name:ident) => {};
 }
 
+#[cfg(feature = "alloc")]
+macro_rules! impl_prepare_zero_check {
+    (glv, $name:ident) => {
+        #[cfg(feature = "orbits")]
+        fn try_prepare_zero_check(
+            bases: &[Self::AffineExt],
+        ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<Self>>> {
+            // `prepare` declines (None) when no codebook mode fits its
+            // table budget — very large base sets — so callers fall back
+            // to unprepared checks instead of allocating past it.
+            crate::glv::zero::PreparedZeroMsm::<$name>::prepare(bases).map(|prepared| {
+                alloc::boxed::Box::new(prepared)
+                    as alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<Self>>
+            })
+        }
+    };
+    (native, $name:ident) => {};
+}
+
 macro_rules! new_curve_impl {
     (($($privacy:tt)*), $name:ident, $name_affine:ident, $iso:ident, $base:ident, $scalar:ident,
      $curve_id:literal, $a_raw:expr, $b_raw:expr, $curve_type:ident, $glv_backend:ident) => {
@@ -263,6 +282,7 @@ macro_rules! new_curve_impl {
 
             impl_batch_mul_same_scalar_vartime!($glv_backend, $name);
             impl_multiexp_vartime!($glv_backend, $name);
+            impl_prepare_zero_check!($glv_backend, $name);
         }
 
         impl group::Curve for $name {

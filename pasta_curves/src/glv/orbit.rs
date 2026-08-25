@@ -303,11 +303,24 @@ impl OrbitParams {
     fn bucket_count(&self) -> usize {
         self.wedge.len()
     }
+
+    /// The exact recoding window bound for this width (the required row
+    /// stride of every digit matrix fed to [`windows_sum`]).
+    pub(super) fn window_stride(&self) -> usize {
+        self.window_count
+    }
+
+    /// The window width $c$ these parameters were built for.
+    pub(super) fn width(&self) -> usize {
+        self.window_bits
+    }
 }
 
 /// One base point's digit-ready coordinates: the three $\zeta$-rotations of
 /// x (one field multiplication; $\zeta^2 x = -x - \zeta x$) and y. A digit's
 /// unit picks `xs[e]` and a y sign, so bucket filling never multiplies.
+/// (Also the tail-MSM base representation of the prepared zero-check in
+/// [`super::zero`], which is why the fields are visible to the parent.)
 #[derive(Clone, Copy)]
 pub(super) struct RotatedBase<F> {
     pub(super) xs: [F; 3],

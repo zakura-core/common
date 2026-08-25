@@ -40,9 +40,10 @@
 //! and integrates buckets with a hexagonal spanning-tree reducer. Both fill
 //! their buckets through the shared batched-affine tree reduction below
 //! (`reduce_affine_buckets`, one fused inversion-and-completion pass per
-//! tree level). The orbit backend and the planning step are gated behind
-//! the `orbits` feature; without it the MSM windows through the
-//! Signed-Booth backend alone.
+//! tree level). The orbit backend, the planning step, and the prepared
+//! zero-checks built on the same machinery (the `zero` submodule) are
+//! gated behind the `orbits` feature; without it the MSM windows through
+//! the Signed-Booth backend alone.
 //!
 //! This path is variable-time in the scalar (GLV decomposition plus digit
 //! recoding); the `_glv` naming distinguishes it from the native `Mul`
@@ -88,6 +89,9 @@ use crate::{pallas, vesta};
 
 #[cfg(feature = "orbits")]
 mod orbit;
+#[cfg(feature = "orbits")]
+#[cfg_attr(docsrs, doc(cfg(feature = "orbits")))]
+pub mod zero;
 
 mod private {
     use crate::arithmetic::CurveExt;
@@ -1358,7 +1362,8 @@ fn multiexp_serial<C: GlvParams>(
 /// one-task-per-window schedule duplicates. The pair roots remain
 /// independent, so their remaining shifts overlap. `None` from
 /// `window_sum` (an arithmetic guard) propagates out. Shared by the
-/// Signed-Booth and Eisenstein-orbit backends.
+/// Signed-Booth and Eisenstein-orbit backends and the prepared
+/// zero-check's main-window and tail drivers.
 #[cfg(feature = "multicore")]
 fn paired_windows_sum<C: GlvParams>(
     windows: usize,
