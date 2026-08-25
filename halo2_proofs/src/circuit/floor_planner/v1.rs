@@ -27,6 +27,15 @@ mod strategy;
 #[derive(Debug)]
 pub struct V1;
 
+struct V1Layout {
+    /// Stores the starting row for each region.
+    regions: Vec<RegionStart>,
+    /// Stores the occupied rows in each global-constant column.
+    fixed_allocations: Vec<(Column<Fixed>, strategy::Allocations)>,
+    /// Stores the first row after all planned regions.
+    first_unassigned_row: usize,
+}
+
 struct V1Plan<'a, F: Field, CS: Assignment<F> + 'a> {
     cs: &'a mut CS,
     /// Stores the starting row for each region.
@@ -45,10 +54,10 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for V1Plan<'a, F, CS> {
 
 impl<'a, F: Field, CS: Assignment<F>> V1Plan<'a, F, CS> {
     /// Creates a new v1 layouter.
-    pub fn new(cs: &'a mut CS) -> Result<Self, Error> {
+    fn new(cs: &'a mut CS, regions: Vec<RegionStart>) -> Result<Self, Error> {
         let ret = V1Plan {
             cs,
-            regions: vec![],
+            regions,
             constants: vec![],
             table_columns: vec![],
         };
@@ -63,8 +72,38 @@ impl FloorPlanner for V1 {
         config: C::Config,
         constants: Vec<Column<Fixed>>,
     ) -> Result<(), Error> {
-        let mut plan = V1Plan::new(cs)?;
+        let layout = Self::plan::<F, CS, C>(circuit, config.clone(), constants)?;
+        Self::assign(cs, circuit, config, &layout)
+    }
 
+    fn synthesize_batch<F: Field, CS: Assignment<F>, C: Circuit<F>>(
+        assignments: &mut [CS],
+        circuits: &[C],
+        config: C::Config,
+        constants: Vec<Column<Fixed>>,
+    ) -> Result<(), Error> {
+        if assignments.len() != circuits.len() {
+            return Err(Error::Synthesis);
+        }
+        let Some(first_circuit) = circuits.first() else {
+            return Ok(());
+        };
+
+        let layout = Self::plan::<F, CS, C>(first_circuit, config.clone(), constants)?;
+        for (assignment, circuit) in assignments.iter_mut().zip(circuits) {
+            Self::assign(assignment, circuit, config.clone(), &layout)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl V1 {
+    fn plan<F: Field, CS: Assignment<F>, C: Circuit<F>>(
+        circuit: &C,
+        config: C::Config,
+        constants: Vec<Column<Fixed>>,
+    ) -> Result<V1Layout, Error> {
         // First pass: measure the regions within the circuit.
         let mut measure = MeasurementPass::new();
         {
@@ -77,8 +116,6 @@ impl FloorPlanner for V1 {
         // Planning:
         // - Position the regions.
         let (regions, column_allocations) = strategy::slot_in_biggest_advice_first(measure.regions);
-        plan.regions = regions;
-
         // - Determine how many rows our planned circuit will require.
         let first_unassigned_row = column_allocations
             .values()
@@ -87,25 +124,31 @@ impl FloorPlanner for V1 {
             .unwrap_or(0);
 
         // - Position the constants within those rows.
-        let fixed_allocations: Vec<_> = constants
+        let fixed_allocations = constants
             .into_iter()
-            .map(|c| {
-                (
-                    c,
-                    column_allocations
-                        .get(&Column::<Any>::from(c).into())
-                        .cloned()
-                        .unwrap_or_default(),
-                )
+            .map(|column| {
+                let allocation = column_allocations
+                    .get(&Column::<Any>::from(column).into())
+                    .cloned()
+                    .unwrap_or_default();
+                (column, allocation)
             })
             .collect();
-        let constant_positions = || {
-            fixed_allocations.iter().flat_map(|(c, a)| {
-                let c = *c;
-                a.free_intervals(0, Some(first_unassigned_row))
-                    .flat_map(move |e| e.range().unwrap().map(move |i| (c, i)))
-            })
-        };
+
+        Ok(V1Layout {
+            regions,
+            fixed_allocations,
+            first_unassigned_row,
+        })
+    }
+
+    fn assign<F: Field, CS: Assignment<F>, C: Circuit<F>>(
+        cs: &mut CS,
+        circuit: &C,
+        config: C::Config,
+        layout: &V1Layout,
+    ) -> Result<(), Error> {
+        let mut plan = V1Plan::new(cs, layout.regions.clone())?;
 
         // Second pass:
         // - Assign the regions.
@@ -116,6 +159,17 @@ impl FloorPlanner for V1 {
         }
 
         // - Assign the constants.
+        let constant_positions = || {
+            layout
+                .fixed_allocations
+                .iter()
+                .flat_map(|(column, allocation)| {
+                    let column = *column;
+                    allocation
+                        .free_intervals(0, Some(layout.first_unassigned_row))
+                        .flat_map(move |empty| empty.range().unwrap().map(move |row| (column, row)))
+                })
+        };
         if constant_positions().count() < plan.constants.len() {
             return Err(Error::NotEnoughColumnsForConstants);
         }

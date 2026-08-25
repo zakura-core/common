@@ -458,6 +458,30 @@ pub trait FloorPlanner {
         config: C::Config,
         constants: Vec<Column<Fixed>>,
     ) -> Result<(), Error>;
+
+    /// Synthesizes several instances of the same circuit shape.
+    ///
+    /// Floor planners may override this to reuse setup or measurement work
+    /// that depends only on the circuit shape. The default implementation
+    /// preserves the behavior of calling [`FloorPlanner::synthesize`] for
+    /// every circuit. Implementations may assume that every circuit has the
+    /// shape used to generate the same proving key.
+    fn synthesize_batch<F: Field, CS: Assignment<F>, C: Circuit<F>>(
+        assignments: &mut [CS],
+        circuits: &[C],
+        config: C::Config,
+        constants: Vec<Column<Fixed>>,
+    ) -> Result<(), Error> {
+        if assignments.len() != circuits.len() {
+            return Err(Error::Synthesis);
+        }
+
+        for (assignment, circuit) in assignments.iter_mut().zip(circuits) {
+            Self::synthesize(assignment, circuit, config.clone(), constants.clone())?;
+        }
+
+        Ok(())
+    }
 }
 
 /// This is a trait that circuits provide implementations for so that the

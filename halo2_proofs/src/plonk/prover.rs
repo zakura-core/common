@@ -30,10 +30,125 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
+struct WitnessCollection<'a, F: Field> {
+    k: u32,
+    advice: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
+    instances: &'a [&'a [F]],
+    usable_rows: RangeTo<usize>,
+    _marker: std::marker::PhantomData<F>,
+}
+
+impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
+    fn enter_region<NR, N>(&mut self, _: N)
+    where
+        NR: Into<String>,
+        N: FnOnce() -> NR,
+    {
+        // Do nothing; we don't care about regions in this context.
+    }
+
+    fn exit_region(&mut self) {
+        // Do nothing; we don't care about regions in this context.
+    }
+
+    fn enable_selector<A, AR>(&mut self, _: A, _: &Selector, _: usize) -> Result<(), Error>
+    where
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        // We only care about advice columns here.
+        Ok(())
+    }
+
+    fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
+        if !self.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(self.k));
+        }
+
+        self.instances
+            .get(column.index())
+            .and_then(|column| column.get(row))
+            .map(|v| Value::known(*v))
+            .ok_or(Error::BoundsFailure)
+    }
+
+    fn assign_advice<V, VR, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnOnce() -> Value<VR>,
+        VR: Into<Assigned<F>>,
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        if !self.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(self.k));
+        }
+
+        *self
+            .advice
+            .get_mut(column.index())
+            .and_then(|values| values.get_mut(row))
+            .ok_or(Error::BoundsFailure)? = to().into_field().assign()?;
+
+        Ok(())
+    }
+
+    fn assign_fixed<V, VR, A, AR>(
+        &mut self,
+        _: A,
+        _: Column<Fixed>,
+        _: usize,
+        _: V,
+    ) -> Result<(), Error>
+    where
+        V: FnOnce() -> Value<VR>,
+        VR: Into<Assigned<F>>,
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        // We only care about advice columns here.
+        Ok(())
+    }
+
+    fn copy(&mut self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
+        // We only care about advice columns here.
+        Ok(())
+    }
+
+    fn fill_from_row(
+        &mut self,
+        _: Column<Fixed>,
+        _: usize,
+        _: Value<Assigned<F>>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn push_namespace<NR, N>(&mut self, _: N)
+    where
+        NR: Into<String>,
+        N: FnOnce() -> NR,
+    {
+        // Do nothing; we don't care about namespaces in this context.
+    }
+
+    fn pop_namespace(&mut self, _: Option<String>) {
+        // Do nothing; we don't care about namespaces in this context.
+    }
+}
+
 /// This creates a proof for the provided `circuit` when given the public
 /// parameters `params` and the proving key [`ProvingKey`] that was
 /// generated previously for the same circuit. The provided `instances`
 /// are zero-padded internally.
+///
+/// Every element of `circuits` must have the circuit shape used to generate
+/// `pk`.
 pub fn create_proof<
     C: CurveAffine,
     E: EncodedChallenge<C>,
@@ -134,162 +249,34 @@ pub fn create_proof<
         pub advice_blinds: Vec<Blind<C::Scalar>>,
     }
 
-    let advice: Vec<AdviceSingle<C>> = circuits
+    let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
+    let mut witnesses = instances
         .iter()
-        .zip(instances.iter())
-        .map(|(circuit, instances)| -> Result<AdviceSingle<C>, Error> {
-            struct WitnessCollection<'a, F: Field> {
-                k: u32,
-                pub advice: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
-                instances: &'a [&'a [F]],
-                usable_rows: RangeTo<usize>,
-                _marker: std::marker::PhantomData<F>,
-            }
+        .map(|instances| WitnessCollection {
+            k: params.k,
+            advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
+            instances,
+            // The prover will not be allowed to assign values to advice
+            // cells that exist within inactive rows, which include some
+            // number of blinding factors and an extra row for use in the
+            // permutation argument.
+            usable_rows: ..unusable_rows_start,
+            _marker: std::marker::PhantomData,
+        })
+        .collect::<Vec<_>>();
 
-            impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
-                fn enter_region<NR, N>(&mut self, _: N)
-                where
-                    NR: Into<String>,
-                    N: FnOnce() -> NR,
-                {
-                    // Do nothing; we don't care about regions in this context.
-                }
+    // Synthesize every circuit while allowing its floor planner to share
+    // circuit-shape-dependent work across the batch.
+    ConcreteCircuit::FloorPlanner::synthesize_batch(
+        &mut witnesses,
+        circuits,
+        config,
+        meta.constants.clone(),
+    )?;
 
-                fn exit_region(&mut self) {
-                    // Do nothing; we don't care about regions in this context.
-                }
-
-                fn enable_selector<A, AR>(
-                    &mut self,
-                    _: A,
-                    _: &Selector,
-                    _: usize,
-                ) -> Result<(), Error>
-                where
-                    A: FnOnce() -> AR,
-                    AR: Into<String>,
-                {
-                    // We only care about advice columns here
-
-                    Ok(())
-                }
-
-                fn query_instance(
-                    &self,
-                    column: Column<Instance>,
-                    row: usize,
-                ) -> Result<Value<F>, Error> {
-                    if !self.usable_rows.contains(&row) {
-                        return Err(Error::not_enough_rows_available(self.k));
-                    }
-
-                    self.instances
-                        .get(column.index())
-                        .and_then(|column| column.get(row))
-                        .map(|v| Value::known(*v))
-                        .ok_or(Error::BoundsFailure)
-                }
-
-                fn assign_advice<V, VR, A, AR>(
-                    &mut self,
-                    _: A,
-                    column: Column<Advice>,
-                    row: usize,
-                    to: V,
-                ) -> Result<(), Error>
-                where
-                    V: FnOnce() -> Value<VR>,
-                    VR: Into<Assigned<F>>,
-                    A: FnOnce() -> AR,
-                    AR: Into<String>,
-                {
-                    if !self.usable_rows.contains(&row) {
-                        return Err(Error::not_enough_rows_available(self.k));
-                    }
-
-                    *self
-                        .advice
-                        .get_mut(column.index())
-                        .and_then(|v| v.get_mut(row))
-                        .ok_or(Error::BoundsFailure)? = to().into_field().assign()?;
-
-                    Ok(())
-                }
-
-                fn assign_fixed<V, VR, A, AR>(
-                    &mut self,
-                    _: A,
-                    _: Column<Fixed>,
-                    _: usize,
-                    _: V,
-                ) -> Result<(), Error>
-                where
-                    V: FnOnce() -> Value<VR>,
-                    VR: Into<Assigned<F>>,
-                    A: FnOnce() -> AR,
-                    AR: Into<String>,
-                {
-                    // We only care about advice columns here
-
-                    Ok(())
-                }
-
-                fn copy(
-                    &mut self,
-                    _: Column<Any>,
-                    _: usize,
-                    _: Column<Any>,
-                    _: usize,
-                ) -> Result<(), Error> {
-                    // We only care about advice columns here
-
-                    Ok(())
-                }
-
-                fn fill_from_row(
-                    &mut self,
-                    _: Column<Fixed>,
-                    _: usize,
-                    _: Value<Assigned<F>>,
-                ) -> Result<(), Error> {
-                    Ok(())
-                }
-
-                fn push_namespace<NR, N>(&mut self, _: N)
-                where
-                    NR: Into<String>,
-                    N: FnOnce() -> NR,
-                {
-                    // Do nothing; we don't care about namespaces in this context.
-                }
-
-                fn pop_namespace(&mut self, _: Option<String>) {
-                    // Do nothing; we don't care about namespaces in this context.
-                }
-            }
-
-            let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
-
-            let mut witness = WitnessCollection {
-                k: params.k,
-                advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
-                instances,
-                // The prover will not be allowed to assign values to advice
-                // cells that exist within inactive rows, which include some
-                // number of blinding factors and an extra row for use in the
-                // permutation argument.
-                usable_rows: ..unusable_rows_start,
-                _marker: std::marker::PhantomData,
-            };
-
-            // Synthesize the circuit to obtain the witness and other information.
-            ConcreteCircuit::FloorPlanner::synthesize(
-                &mut witness,
-                circuit,
-                config.clone(),
-                meta.constants.clone(),
-            )?;
-
+    let advice: Vec<AdviceSingle<C>> = witnesses
+        .into_iter()
+        .map(|witness| -> Result<AdviceSingle<C>, Error> {
             let mut advice = batch_invert_assigned(witness.advice);
 
             // Add blinding factors to advice columns
@@ -845,4 +832,58 @@ fn test_create_proof() {
         &mut transcript,
     )
     .expect("proof generation should not fail");
+}
+
+#[test]
+fn v1_batch_reuses_measurement() {
+    use crate::{
+        circuit::floor_planner::V1,
+        plonk::{keygen_pk, keygen_vk},
+        transcript::{Blake2bWrite, Challenge255},
+    };
+    use pasta_curves::EqAffine;
+    use rand::rng;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static MEASUREMENTS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Clone, Copy)]
+    struct MyCircuit;
+
+    impl<F: Field> Circuit<F> for MyCircuit {
+        type Config = ();
+        type FloorPlanner = V1;
+
+        fn without_witnesses(&self) -> Self {
+            MEASUREMENTS.fetch_add(1, Ordering::Relaxed);
+            *self
+        }
+
+        fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {}
+
+        fn synthesize(
+            &self,
+            _config: Self::Config,
+            _layouter: impl crate::circuit::Layouter<F>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    let params: Params<EqAffine> = Params::new(3);
+    let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
+    let pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+
+    MEASUREMENTS.store(0, Ordering::Relaxed);
+    create_proof(
+        &params,
+        &pk,
+        &[MyCircuit, MyCircuit, MyCircuit],
+        &[&[], &[], &[]],
+        rng(),
+        &mut transcript,
+    )
+    .expect("proof generation should not fail");
+    assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
 }
