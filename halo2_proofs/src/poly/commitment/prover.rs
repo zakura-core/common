@@ -4,12 +4,14 @@ use rand_core::Rng;
 use super::super::{Coeff, Polynomial};
 use super::{Blind, Params};
 use crate::arithmetic::{
-    best_multiexp, compute_inner_product, eval_polynomial, parallelize, CurveAffine, CurveExt,
+    best_multiexp, compute_inner_product, eval_polynomial, CurveAffine, CurveExt,
 };
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
 use group::{Curve, Group};
 use std::io;
+
+const MIN_GENERATOR_COLLAPSE_CHUNK: usize = 32;
 
 /// Create a polynomial commitment opening proof for the polynomial defined
 /// by the coefficients `px`, the blinding factor `blind` used for the
@@ -149,17 +151,30 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
 fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar) {
     let len = g.len() / 2;
     let (g_lo, g_hi) = g.split_at_mut(len);
+    let g_hi: &[C] = g_hi;
+    let chunk_size = len
+        .div_ceil(crate::multicore::current_num_threads())
+        .max(MIN_GENERATOR_COLLAPSE_CHUNK);
 
-    parallelize(g_lo, |g_lo, start| {
-        let g_hi = &g_hi[start..start + g_lo.len()];
-        let mut scaled = vec![C::Curve::identity(); g_hi.len()];
-        // The Fiat-Shamir challenge is public, so variable-time scalar
-        // multiplication is appropriate here.
-        <C::Curve as CurveExt>::batch_mul_same_scalar_vartime(g_hi, &challenge, &mut scaled);
-        for (scaled, g_lo) in scaled.iter_mut().zip(g_lo.iter()) {
-            *scaled += *g_lo;
+    crate::multicore::scope(|scope| {
+        for (chunk_index, g_lo) in g_lo.chunks_mut(chunk_size).enumerate() {
+            let start = chunk_index * chunk_size;
+            scope.spawn(move |_| {
+                let g_hi = &g_hi[start..start + g_lo.len()];
+                let mut scaled = vec![C::Curve::identity(); g_hi.len()];
+                // The Fiat-Shamir challenge is public, so variable-time
+                // scalar multiplication is appropriate here.
+                <C::Curve as CurveExt>::batch_mul_same_scalar_vartime(
+                    g_hi,
+                    &challenge,
+                    &mut scaled,
+                );
+                for (scaled, g_lo) in scaled.iter_mut().zip(g_lo.iter()) {
+                    *scaled += *g_lo;
+                }
+                C::Curve::batch_normalize(&scaled, g_lo);
+            });
         }
-        C::Curve::batch_normalize(&scaled, g_lo);
     });
 }
 

@@ -28,6 +28,8 @@ and this project adheres to Rust's notion of
 - Lookup permutation construction now sorts input and table values concurrently
   and merges them, reducing Orchard prover time in one- and four-Action
   benchmarks.
+- IPA generator folding now uses smaller parallel chunks during later rounds
+  while retaining affine same-scalar multiplication batching.
 - Single-worker Pasta multi-opening polynomial folds now interleave two wide
   product accumulators, shortening dependency chains while sharing cached
   challenge-power loads.
