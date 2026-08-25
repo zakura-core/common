@@ -5,10 +5,7 @@ use std::{
 
 use ff::Field;
 use maybe_rayon::prelude::*;
-use pasta_curves::{
-    deferred::{DeferredAccumulator, DeferredField},
-    pallas, vesta,
-};
+use pasta_curves::{deferred::DeferredField, pallas, vesta};
 
 use crate::{
     arithmetic::eval_polynomial,
@@ -227,12 +224,8 @@ fn convert_point<F: Field, T: Field>(point: EvaluationPoint<F>) -> EvaluationPoi
 
 fn deferred_inner_product<F: DeferredField>(polynomial: &[F], powers: &[F]) -> F {
     debug_assert_eq!(polynomial.len(), powers.len());
-    let mut products = polynomial.iter().zip(powers);
-    let Some((coefficient, power)) = products.next() else {
-        return F::ZERO;
-    };
-    let mut accumulator = F::Accumulator::initialize_product(coefficient, power);
-    for (coefficient, power) in products {
+    let mut accumulator = F::Accumulator::default();
+    for (coefficient, power) in polynomial.iter().zip(powers) {
         F::mul_accumulate(&mut accumulator, coefficient, power);
     }
     F::reduce(accumulator)
