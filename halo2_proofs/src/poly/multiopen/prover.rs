@@ -23,6 +23,7 @@ use std::marker::PhantomData;
 // Amortize task scheduling over at least this many field multiply-adds per
 // worker.
 const MIN_PARALLEL_FOLDS_PER_THREAD: usize = 1 << 10;
+const DEFERRED_FOLD_LANES: usize = 2;
 
 fn fold_polynomial_range<F: Field>(
     values: &mut [F],
@@ -63,8 +64,50 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
     let (last, products) = polynomials
         .split_last()
         .expect("point-set group is nonempty");
-    for (offset, value) in values.iter_mut().enumerate() {
-        let coefficient_index = start + offset;
+    let paired_len = values.len() - values.len() % DEFERRED_FOLD_LANES;
+    let (pairs, remainder) = values.split_at_mut(paired_len);
+    for (pair_index, pair) in pairs.chunks_exact_mut(DEFERRED_FOLD_LANES).enumerate() {
+        let coefficient_index = start + pair_index * DEFERRED_FOLD_LANES;
+        // Independent lanes shorten the multiply-accumulate dependency chain
+        // while sharing each challenge-power load.
+        let mut accumulators = [F::Accumulator::default(); DEFERRED_FOLD_LANES];
+        for (polynomial_index, polynomial) in products.iter().enumerate() {
+            let exponent = polynomials.len() - 1 - polynomial_index;
+            let power = &powers[exponent];
+            if let Some(coefficients) = polynomial
+                .values
+                .get(coefficient_index..coefficient_index + DEFERRED_FOLD_LANES)
+            {
+                F::mul_accumulate(&mut accumulators[0], &coefficients[0], power);
+                F::mul_accumulate(&mut accumulators[1], &coefficients[1], power);
+            } else {
+                for (lane, accumulator) in accumulators.iter_mut().enumerate() {
+                    if let Some(coefficient) = polynomial.values.get(coefficient_index + lane) {
+                        F::mul_accumulate(accumulator, coefficient, power);
+                    }
+                }
+            }
+        }
+
+        pair[0] = F::reduce(accumulators[0]);
+        pair[1] = F::reduce(accumulators[1]);
+        if let Some(coefficients) = last
+            .values
+            .get(coefficient_index..coefficient_index + DEFERRED_FOLD_LANES)
+        {
+            pair[0] += &coefficients[0];
+            pair[1] += &coefficients[1];
+        } else {
+            for (lane, value) in pair.iter_mut().enumerate() {
+                if let Some(coefficient) = last.values.get(coefficient_index + lane) {
+                    *value += coefficient;
+                }
+            }
+        }
+    }
+
+    if let Some(value) = remainder.first_mut() {
+        let coefficient_index = start + paired_len;
         let mut accumulator = F::Accumulator::default();
         for (polynomial_index, polynomial) in products.iter().enumerate() {
             if let Some(coefficient) = polynomial.values.get(coefficient_index) {
@@ -72,7 +115,6 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
                 F::mul_accumulate(&mut accumulator, coefficient, &powers[exponent]);
             }
         }
-
         *value = F::reduce(accumulator);
         if let Some(coefficient) = last.values.get(coefficient_index) {
             *value += coefficient;
@@ -364,7 +406,7 @@ mod tests {
     where
         F: Field + From<u64> + Debug,
     {
-        let long = MIN_PARALLEL_FOLDS_PER_THREAD * 2;
+        let long = MIN_PARALLEL_FOLDS_PER_THREAD * 2 + 1;
         let lengths = [
             vec![long, long - 1, long + 1, long, long],
             vec![3],

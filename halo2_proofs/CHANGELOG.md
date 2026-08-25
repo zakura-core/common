@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Single-worker Pasta multi-opening polynomial folds now interleave two wide
+  product accumulators, shortening dependency chains while sharing cached
+  challenge-power loads.
 - Batch verification now merges arbitrary final-MSM terms in a contiguous
   buffer and canonicalizes them once, while retaining positional accumulation
   for the IPA generator coefficients.
