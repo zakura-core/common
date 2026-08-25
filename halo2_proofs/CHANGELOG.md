@@ -25,6 +25,9 @@ and this project adheres to Rust's notion of
 - Polynomial evaluation now indexes common-subexpression candidates by
   structural fingerprints, avoiding quadratic candidate scans while retaining
   exact structural matching.
+- Proof creation now borrows existing value and coset polynomials when
+  registering them with polynomial evaluators, avoiding redundant
+  domain-sized clones.
 - Lookup permutation construction now sorts input and table values concurrently
   and merges them, reducing Orchard prover time in one- and four-Action
   benchmarks.

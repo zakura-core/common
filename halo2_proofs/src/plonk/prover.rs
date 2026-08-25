@@ -332,7 +332,7 @@ where
     let fixed_values: Vec<_> = pk
         .fixed_values
         .iter()
-        .map(|poly| value_evaluator.register_poly(poly.clone()))
+        .map(|poly| value_evaluator.register_poly_ref(poly))
         .collect();
 
     // Register advice values with the polynomial evaluator.
@@ -342,7 +342,7 @@ where
             advice
                 .advice_values
                 .iter()
-                .map(|poly| value_evaluator.register_poly(poly.clone()))
+                .map(|poly| value_evaluator.register_poly_ref(poly))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -354,7 +354,7 @@ where
             instance
                 .instance_values
                 .iter()
-                .map(|poly| value_evaluator.register_poly(poly.clone()))
+                .map(|poly| value_evaluator.register_poly_ref(poly))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -366,7 +366,7 @@ where
     let fixed_cosets: Vec<_> = pk
         .fixed_cosets
         .iter()
-        .map(|poly| coset_evaluator.register_poly(poly.clone()))
+        .map(|poly| coset_evaluator.register_poly_ref(poly))
         .collect();
 
     // Register advice cosets with the polynomial evaluator.
@@ -376,7 +376,7 @@ where
             advice
                 .advice_cosets
                 .iter()
-                .map(|poly| coset_evaluator.register_poly(poly.clone()))
+                .map(|poly| coset_evaluator.register_poly_ref(poly))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -388,7 +388,7 @@ where
             instance
                 .instance_cosets
                 .iter()
-                .map(|poly| coset_evaluator.register_poly(poly.clone()))
+                .map(|poly| coset_evaluator.register_poly_ref(poly))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -398,13 +398,13 @@ where
         .permutation
         .cosets
         .iter()
-        .map(|poly| coset_evaluator.register_poly(poly.clone()))
+        .map(|poly| coset_evaluator.register_poly_ref(poly))
         .collect();
 
     // Register boundary polynomials used in the lookup and permutation arguments.
-    let l0 = coset_evaluator.register_poly(pk.l0.clone());
-    let l_blind = coset_evaluator.register_poly(pk.l_blind.clone());
-    let l_last = coset_evaluator.register_poly(pk.l_last.clone());
+    let l0 = coset_evaluator.register_poly_ref(&pk.l0);
+    let l_blind = coset_evaluator.register_poly_ref(&pk.l_blind);
+    let l_last = coset_evaluator.register_poly_ref(&pk.l_last);
 
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();

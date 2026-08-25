@@ -1,5 +1,6 @@
 use std::{
     any::{Any, TypeId},
+    borrow::Cow,
     collections::{hash_map::DefaultHasher, HashMap},
     fmt,
     hash::{Hash, Hasher},
@@ -94,8 +95,12 @@ impl<E, B: Basis> AstLeaf<E, B> {
 /// - The references are then used to build up a [`Ast`] that represents the overall
 ///   operations to be applied to the polynomials.
 /// - Finally, we call [`Evaluator::evaluate`] passing in the [`Ast`].
-pub(crate) struct Evaluator<E, F: Field, B: Basis> {
-    polys: Vec<Polynomial<F, B>>,
+///
+/// Polynomials registered with [`Evaluator::register_poly`] are owned by the
+/// evaluator. Polynomials registered with [`Evaluator::register_poly_ref`] are
+/// borrowed and must outlive it.
+pub(crate) struct Evaluator<'poly, E, F: Field, B: Basis> {
+    polys: Vec<Cow<'poly, Polynomial<F, B>>>,
     _context: E,
 }
 
@@ -105,7 +110,9 @@ pub(crate) struct Evaluator<E, F: Field, B: Basis> {
 /// an evaluator will only be used to evaluate [`Ast`]s containing [`AstLeaf`]s obtained
 /// from itself. It should be set to the empty closure `|| {}`, because anonymous closures
 /// all have unique types.
-pub(crate) fn new_evaluator<E: Fn() + Clone, F: Field, B: Basis>(context: E) -> Evaluator<E, F, B> {
+pub(crate) fn new_evaluator<'poly, E: Fn() + Clone, F: Field, B: Basis>(
+    context: E,
+) -> Evaluator<'poly, E, F, B> {
     Evaluator {
         polys: vec![],
         _context: context,
@@ -1468,14 +1475,29 @@ impl<E: Copy, F: Field, B: Basis> DistributionWork<E, F, B> {
     }
 }
 
-impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
+impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
     /// Registers the given polynomial for use in this evaluation context.
     ///
     /// This API treats each registered polynomial as unique, even if the same polynomial
     /// is added multiple times.
     pub(crate) fn register_poly(&mut self, poly: Polynomial<F, B>) -> AstLeaf<E, B> {
         let index = self.polys.len();
-        self.polys.push(poly);
+        self.polys.push(Cow::Owned(poly));
+
+        AstLeaf {
+            index,
+            rotation: Rotation::cur(),
+            _evaluator: PhantomData,
+        }
+    }
+
+    /// Registers a borrowed polynomial for use in this evaluation context.
+    ///
+    /// This API treats each registered polynomial as unique, even if the same
+    /// polynomial is added multiple times.
+    pub(crate) fn register_poly_ref(&mut self, poly: &'poly Polynomial<F, B>) -> AstLeaf<E, B> {
+        let index = self.polys.len();
+        self.polys.push(Cow::Borrowed(poly));
 
         AstLeaf {
             index,
@@ -1503,7 +1525,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
             domain: &'a EvaluationDomain<F>,
             chunk_size: usize,
             chunk_index: usize,
-            polys: &'a [Polynomial<F, B>],
+            polys: &'a [Cow<'a, Polynomial<F, B>>],
             minus_one: F,
             two: F,
         }
@@ -2429,6 +2451,8 @@ impl BasisOps for ExtendedLagrangeCoeff {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use group::ff::{Field, WithSmallOrderMulGroup};
     use pasta_curves::{pallas, vesta};
 
@@ -2476,6 +2500,33 @@ mod tests {
         test_case(k, new_evaluator::<_, _, Coeff>(|| {}));
         test_case(k, new_evaluator::<_, _, LagrangeCoeff>(|| {}));
         test_case(k, new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {}));
+    }
+
+    #[test]
+    fn borrowed_and_owned_polynomials_evaluate_together() {
+        const K: u32 = 4;
+
+        let domain = EvaluationDomain::new(1, K);
+        let poly = domain.lagrange_from_vec(
+            (0..1 << K)
+                .map(|value| pallas::Base::from(value as u64))
+                .collect(),
+        );
+
+        let mut evaluator = new_evaluator(|| {});
+        let borrowed_leaf = evaluator.register_poly_ref(&poly);
+        assert!(matches!(
+            &evaluator.polys[borrowed_leaf.index],
+            Cow::Borrowed(stored) if std::ptr::eq(*stored, &poly)
+        ));
+
+        let owned_leaf = evaluator.register_poly(poly.clone());
+        assert!(matches!(&evaluator.polys[owned_leaf.index], Cow::Owned(_)));
+
+        let mixed = evaluator.evaluate(&(Ast::from(borrowed_leaf) + owned_leaf), &domain);
+        let expected = domain.lagrange_from_vec(poly.iter().map(|value| value.double()).collect());
+
+        assert!(expected.iter().eq(mixed.iter()));
     }
 
     #[test]
