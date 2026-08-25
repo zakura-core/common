@@ -147,6 +147,7 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
 }
 
 #[cfg(feature = "deferred-bench")]
+#[allow(dead_code)]
 /// Entry points for benchmarking deferred multi-opening callers.
 pub mod deferred_bench {
     use super::fold_polynomial_range_deferred;
