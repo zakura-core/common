@@ -151,7 +151,7 @@ impl<F: Field> PolynomialEvaluator<F> {
     pub(super) fn evaluate(&self, queries: &[EvaluationQuery<'_, F>]) -> Vec<F> {
         match &self.inner {
             PolynomialEvaluatorInner::Horner { points } => queries
-                .par_iter()
+                .into_par_iter()
                 .map(|query| {
                     let point = match PowerTables::<F>::point_index(query.point) {
                         Some(index) => points[index],
@@ -186,7 +186,7 @@ fn evaluate_deferred<F: Field, T: DeferredField + 'static>(
     queries: &[EvaluationQuery<'_, F>],
 ) -> Vec<F> {
     let values = queries
-        .par_iter()
+        .into_par_iter()
         .map(|query| {
             let polynomial = (query.polynomial as &dyn Any)
                 .downcast_ref::<Polynomial<T, Coeff>>()
