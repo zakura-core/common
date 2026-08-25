@@ -6,8 +6,8 @@ use group::{Curve, GroupEncoding};
 use halo2_proofs::{
     circuit::{floor_planner, Layouter, Value},
     plonk::{
-        self, Advice, BatchVerifier, Column, Constraints, Expression, Instance as InstanceColumn,
-        Selector, SingleVerifier,
+        self, Advice, BatchVerifier, Column, Constraints, Expression, Fixed,
+        Instance as InstanceColumn, Selector, SingleVerifier,
     },
     poly::Rotation,
     transcript::{Blake2bRead, Blake2bWrite},
@@ -95,6 +95,7 @@ const DISABLE_CROSS_ADDRESS: usize = 9;
 #[derive(Clone, Debug)]
 pub struct Config {
     primary: Column<InstanceColumn>,
+    constant: Column<Fixed>,
     q_orchard: Selector,
     advices: [Column<Advice>; 10],
     add_config: AddConfig,
@@ -486,6 +487,7 @@ impl Config {
 
         Config {
             primary,
+            constant: lagrange_coeffs[0],
             q_orchard,
             advices,
             add_config,
@@ -1440,7 +1442,7 @@ mod tests {
 
     /// Generates a circuit and instance whose output note is addressed to an expanded
     /// receiver distinct from the spent note's.
-    fn generate_circuit_instance<R: Rng>(
+    pub(super) fn generate_circuit_instance<R: Rng>(
         rng: R,
         circuit_version: OrchardCircuitVersion,
     ) -> (Circuit, Instance) {

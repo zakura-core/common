@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added a reusable cached-plan Orchard witness-assignment benchmark for one,
+  two, and four Actions.
 - Multi-Action proof creation now synthesizes independent Action witnesses in
   parallel when the `multicore` feature is enabled.
 - Added a reproducible Orchard proving-key benchmark and configurable worker

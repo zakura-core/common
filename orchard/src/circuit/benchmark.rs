@@ -1,20 +1,30 @@
 //! Manual benchmarks for the complete Orchard proving and verification paths.
 
 use alloc::vec::Vec;
-use ff::PrimeField;
-use halo2_proofs::plonk::BatchVerifier;
-use pasta_curves::vesta;
+use ff::{Field, PrimeField};
+use halo2_proofs::{
+    circuit::{floor_planner, Value},
+    plonk::{
+        Advice, Any, Assigned, Assignment, BatchVerifier, Circuit as PlonkCircuit, Column,
+        ConstraintSystem, Error, Fixed, FloorPlanner, Instance as InstanceColumn, Selector,
+    },
+};
+use pasta_curves::{pallas, vesta};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
+    hint::black_box,
     io::Write,
+    ops::RangeTo,
     println,
-    time::Instant,
+    string::String,
+    time::{Duration, Instant},
 };
 
 use super::{
-    Instance, OrchardCircuitVersion, ProvingKey, VerifyingKey, INSTANCE_COLUMNS, INSTANCE_ROWS, K,
+    tests::generate_circuit_instance, Circuit, Instance, OrchardCircuitVersion, ProvingKey,
+    VerifyingKey, INSTANCE_COLUMNS, INSTANCE_ROWS, K,
 };
 use crate::{
     builder::{Builder, BundleType},
@@ -33,6 +43,9 @@ const BATCH_BENCH_WARMUPS: usize = 3;
 const BATCH_BENCH_SAMPLES: usize = 15;
 const BATCH_SCREEN_WARMUPS: usize = 1;
 const BATCH_SCREEN_SAMPLES: usize = 7;
+const WITNESS_BENCH_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
+const WITNESS_BENCH_WARMUPS: usize = 50;
+const WITNESS_BENCH_SAMPLES: usize = 1_000;
 
 const FIXTURE_ACTIONS: usize = 1;
 const FIXTURE_ADDRESS_INDEX: u32 = 0;
@@ -47,6 +60,220 @@ const PROOF_SEED_DOMAIN: u8 = 0x24;
 const INDEX_SEED_BYTES: usize = core::mem::size_of::<u64>();
 
 const BATCH_FIXTURE_MAGIC: &[u8] = b"ZAKURA_ORCHARD_BATCH_CORPUS_V1";
+
+// Benchmark analogue of halo2_proofs' private WitnessCollection. This follows
+// its advice, instance, and row-bound behavior while leaving fixed columns and
+// copy constraints to the already-cached floor plan. A BTreeMap identifies
+// advice columns because Column::index is intentionally not public API.
+struct BenchmarkWitness<F: Field> {
+    k: u32,
+    advice: BTreeMap<Column<Advice>, Vec<Assigned<F>>>,
+    primary: Column<InstanceColumn>,
+    instance: Vec<F>,
+    usable_rows: RangeTo<usize>,
+}
+
+impl<F: Field> Assignment<F> for BenchmarkWitness<F> {
+    fn enter_region<NR, N>(&mut self, _: N)
+    where
+        NR: Into<String>,
+        N: FnOnce() -> NR,
+    {
+    }
+
+    fn exit_region(&mut self) {}
+
+    fn enable_selector<A, AR>(&mut self, _: A, _: &Selector, _: usize) -> Result<(), Error>
+    where
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        Ok(())
+    }
+
+    fn query_instance(
+        &self,
+        column: Column<InstanceColumn>,
+        row: usize,
+    ) -> Result<Value<F>, Error> {
+        if !self.usable_rows.contains(&row) {
+            return Err(Error::NotEnoughRowsAvailable { current_k: self.k });
+        }
+
+        if column != self.primary {
+            return Err(Error::BoundsFailure);
+        }
+
+        self.instance
+            .get(row)
+            .copied()
+            .map(Value::known)
+            .ok_or(Error::BoundsFailure)
+    }
+
+    fn assign_advice<V, VR, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnOnce() -> Value<VR>,
+        VR: Into<Assigned<F>>,
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        if !self.usable_rows.contains(&row) {
+            return Err(Error::NotEnoughRowsAvailable { current_k: self.k });
+        }
+
+        let target = self
+            .advice
+            .get_mut(&column)
+            .and_then(|column| column.get_mut(row))
+            .ok_or(Error::BoundsFailure)?;
+        let mut assigned = false;
+        let _ = to().into_field().map(|value| {
+            *target = value;
+            assigned = true;
+        });
+        if assigned {
+            Ok(())
+        } else {
+            Err(Error::Synthesis)
+        }
+    }
+
+    fn assign_fixed<V, VR, A, AR>(
+        &mut self,
+        _: A,
+        _: Column<Fixed>,
+        _: usize,
+        _: V,
+    ) -> Result<(), Error>
+    where
+        V: FnOnce() -> Value<VR>,
+        VR: Into<Assigned<F>>,
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        Ok(())
+    }
+
+    fn copy(&mut self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn fill_from_row(
+        &mut self,
+        _: Column<Fixed>,
+        _: usize,
+        _: Value<Assigned<F>>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn push_namespace<NR, N>(&mut self, _: N)
+    where
+        NR: Into<String>,
+        N: FnOnce() -> NR,
+    {
+    }
+
+    fn pop_namespace(&mut self, _: Option<String>) {}
+}
+
+#[test]
+#[ignore = "manual witness-assignment performance benchmark"]
+fn benchmark_witness_assignment() {
+    let worker_count = std::env::var("RAYON_NUM_THREADS")
+        .expect("set RAYON_NUM_THREADS explicitly for this benchmark");
+    let worker_count = worker_count
+        .parse::<usize>()
+        .expect("RAYON_NUM_THREADS must be a positive integer");
+    assert_ne!(worker_count, 0, "RAYON_NUM_THREADS must be nonzero");
+
+    let mut meta = ConstraintSystem::<pallas::Base>::default();
+    let config = <Circuit as PlonkCircuit<pallas::Base>>::configure(&mut meta);
+    let constants = [config.constant];
+    let row_count = 1_usize << K;
+    let usable_rows = ..row_count - (meta.blinding_factors() + 1);
+
+    for action_count in WITNESS_BENCH_ACTION_COUNTS {
+        let (circuits, instances): (Vec<_>, Vec<_>) = (0..action_count)
+            .map(|index| {
+                generate_circuit_instance(
+                    benchmark_rng(FIXTURE_SEED_DOMAIN, index),
+                    OrchardCircuitVersion::FixedPostNu6_2,
+                )
+            })
+            .unzip();
+        let mut witnesses = instances
+            .iter()
+            .map(|instance| BenchmarkWitness {
+                k: K,
+                advice: config
+                    .advices
+                    .into_iter()
+                    .map(|column| (column, vec![Assigned::Zero; row_count]))
+                    .collect(),
+                primary: config.primary,
+                instance: instance
+                    .to_halo2_instance()
+                    .into_iter()
+                    .next()
+                    .expect("Orchard has one instance column")
+                    .into_iter()
+                    .collect(),
+                usable_rows: usable_rows.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let floor_plan = floor_planner::V1::synthesize_batch(
+            &mut witnesses,
+            &circuits,
+            config.clone(),
+            &constants,
+            None,
+        )
+        .unwrap()
+        .expect("the first synthesis creates a floor plan");
+
+        for _ in 0..WITNESS_BENCH_WARMUPS {
+            floor_planner::V1::synthesize_batch(
+                &mut witnesses,
+                &circuits,
+                config.clone(),
+                &constants,
+                Some(&floor_plan),
+            )
+            .unwrap();
+        }
+
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..WITNESS_BENCH_SAMPLES {
+            let sample_config = config.clone();
+            let started = Instant::now();
+            floor_planner::V1::synthesize_batch(
+                &mut witnesses,
+                &circuits,
+                sample_config,
+                &constants,
+                Some(&floor_plan),
+            )
+            .unwrap();
+            elapsed += started.elapsed();
+        }
+        black_box(&witnesses);
+
+        println!(
+            "ORCHARD_WITNESS_ASSIGNMENT workers={worker_count} actions={action_count} \
+             ns_per_synthesis={}",
+            elapsed.as_nanos() / WITNESS_BENCH_SAMPLES as u128,
+        );
+    }
+}
 
 fn benchmark_rng(domain: u8, index: usize) -> StdRng {
     let mut seed = [domain; 32];

@@ -57,6 +57,26 @@ RAYON_NUM_THREADS=10 cargo +1.88 bench --locked \
     --bench orchard_k11_keygen
 ```
 
+## Witness assignment
+
+The ignored witness-assignment benchmark uses the production Orchard circuit,
+reuses its V1 floor plan, and writes every generated advice value to benchmark
+storage. Circuit configuration, fixture generation, floor planning, and
+per-sample configuration cloning are outside the timed regions. It measures
+one-, two-, and four-Action synthesis with 50 warmups and 1,000 samples:
+
+```console
+RAYON_NUM_THREADS=10 cargo +1.88 test --locked --release \
+    -p zakura-orchard --features circuit --lib \
+    circuit::benchmark::benchmark_witness_assignment \
+    -- --ignored --exact --nocapture
+```
+
+Set `RAYON_NUM_THREADS=1` for a serial comparison. The benchmark backend uses
+a `BTreeMap` to identify advice columns because column indices are intentionally
+not public API; compare revisions with the same harness instead of treating its
+absolute timings as complete-prover phase measurements.
+
 ## Batch verifier fixture corpus
 
 The batch-verifier harness is an ignored library test because it needs access
