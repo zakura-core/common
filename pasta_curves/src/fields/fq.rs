@@ -561,7 +561,7 @@ impl DeferredField for Fq {
 
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     fn mul_accumulate(acc: &mut Self::Accumulator, a: &Fq, b: &Fq) {
-        acc.accumulate(a.mul_unreduced(b));
+        acc.mul_accumulate(&a.0, &b.0);
     }
 
     #[cfg_attr(not(feature = "uninline-portable"), inline)]

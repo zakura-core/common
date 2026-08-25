@@ -60,6 +60,49 @@ impl<F> Product<F> {
         _marker: core::marker::PhantomData,
     };
 
+    /// Multiplies two raw 256-bit values and adds their 512-bit product into
+    /// this accumulator.
+    ///
+    /// Each multiplication row starts from the corresponding accumulator
+    /// limbs. The row's full-limb carry and the preceding one-bit overflow are
+    /// then added to the next untouched limb. This incorporates every
+    /// accumulator limb exactly once, without first materializing the product
+    /// and adding it in a second pass.
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub(crate) fn mul_accumulate(&mut self, lhs: &[u64; 4], rhs: &[u64; 4]) {
+        let (d0, carry) = mac(self.limbs[0], lhs[0], rhs[0], 0);
+        let (d1, carry) = mac(self.limbs[1], lhs[0], rhs[1], carry);
+        let (d2, carry) = mac(self.limbs[2], lhs[0], rhs[2], carry);
+        let (d3, carry) = mac(self.limbs[3], lhs[0], rhs[3], carry);
+        let (d4, overflow) = adc(self.limbs[4], carry, 0);
+
+        let (d1, carry) = mac(d1, lhs[1], rhs[0], 0);
+        let (d2, carry) = mac(d2, lhs[1], rhs[1], carry);
+        let (d3, carry) = mac(d3, lhs[1], rhs[2], carry);
+        let (d4, carry) = mac(d4, lhs[1], rhs[3], carry);
+        let (d5, overflow) = adc(self.limbs[5], carry, overflow);
+
+        let (d2, carry) = mac(d2, lhs[2], rhs[0], 0);
+        let (d3, carry) = mac(d3, lhs[2], rhs[1], carry);
+        let (d4, carry) = mac(d4, lhs[2], rhs[2], carry);
+        let (d5, carry) = mac(d5, lhs[2], rhs[3], carry);
+        let (d6, overflow) = adc(self.limbs[6], carry, overflow);
+
+        let (d3, carry) = mac(d3, lhs[3], rhs[0], 0);
+        let (d4, carry) = mac(d4, lhs[3], rhs[1], carry);
+        let (d5, carry) = mac(d5, lhs[3], rhs[2], carry);
+        let (d6, carry) = mac(d6, lhs[3], rhs[3], carry);
+        let (d7, overflow) = adc(self.limbs[7], carry, overflow);
+
+        self.limbs = [d0, d1, d2, d3, d4, d5, d6, d7];
+        let (carry, carry_overflow) = self.carry.overflowing_add(overflow);
+        debug_assert!(
+            !carry_overflow,
+            "carry overflow: too many accumulated products"
+        );
+        self.carry = carry;
+    }
+
     /// Adds a raw 512-bit product (8 limbs) into this accumulator.
     ///
     /// Each call contributes at most 1 to `carry`; overflow of the 64-bit
@@ -130,9 +173,10 @@ impl<F> Product<F> {
 
 #[cfg(test)]
 mod tests {
-    use super::DeferredField;
+    use super::{DeferredField, Product};
+    use crate::arithmetic::mac;
     use ff::Field;
-    use rand::SeedableRng;
+    use rand::{Rng, SeedableRng};
     use rand_xorshift::XorShiftRng;
     use std::vec::Vec;
 
@@ -147,6 +191,60 @@ mod tests {
             F::mul_accumulate(&mut acc, x, y);
         }
         F::reduce(acc)
+    }
+
+    fn mul_unreduced(lhs: &[u64; 4], rhs: &[u64; 4]) -> [u64; 8] {
+        let (r0, carry) = mac(0, lhs[0], rhs[0], 0);
+        let (r1, carry) = mac(0, lhs[0], rhs[1], carry);
+        let (r2, carry) = mac(0, lhs[0], rhs[2], carry);
+        let (r3, r4) = mac(0, lhs[0], rhs[3], carry);
+
+        let (r1, carry) = mac(r1, lhs[1], rhs[0], 0);
+        let (r2, carry) = mac(r2, lhs[1], rhs[1], carry);
+        let (r3, carry) = mac(r3, lhs[1], rhs[2], carry);
+        let (r4, r5) = mac(r4, lhs[1], rhs[3], carry);
+
+        let (r2, carry) = mac(r2, lhs[2], rhs[0], 0);
+        let (r3, carry) = mac(r3, lhs[2], rhs[1], carry);
+        let (r4, carry) = mac(r4, lhs[2], rhs[2], carry);
+        let (r5, r6) = mac(r5, lhs[2], rhs[3], carry);
+
+        let (r3, carry) = mac(r3, lhs[3], rhs[0], 0);
+        let (r4, carry) = mac(r4, lhs[3], rhs[1], carry);
+        let (r5, carry) = mac(r5, lhs[3], rhs[2], carry);
+        let (r6, r7) = mac(r6, lhs[3], rhs[3], carry);
+
+        [r0, r1, r2, r3, r4, r5, r6, r7]
+    }
+
+    #[test]
+    fn fused_mul_accumulate_matches_two_pass() {
+        let mut rng = XorShiftRng::from_seed(SEED);
+        let max = [u64::MAX; 4];
+        for case in 0..=10_000 {
+            let (lhs, rhs) = if case == 0 {
+                (max, max)
+            } else {
+                (
+                    core::array::from_fn(|_| rng.next_u64()),
+                    core::array::from_fn(|_| rng.next_u64()),
+                )
+            };
+            let limbs = core::array::from_fn(|_| rng.next_u64());
+            let carry = rng.next_u64() >> 1;
+            let mut two_pass = Product::<()> {
+                limbs,
+                carry,
+                _marker: core::marker::PhantomData,
+            };
+            let mut fused = two_pass;
+
+            two_pass.accumulate(mul_unreduced(&lhs, &rhs));
+            fused.mul_accumulate(&lhs, &rhs);
+
+            assert_eq!(fused.limbs, two_pass.limbs);
+            assert_eq!(fused.carry, two_pass.carry);
+        }
     }
 
     macro_rules! deferred_field_tests {
