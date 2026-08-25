@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Quotient evaluation now shares repeated factors across non-consecutive
+  constraint terms while retaining their original challenge powers.
 - IPA opening proofs now compute independent round terms in parallel and fuse
   the blinding and value terms into each round commitment's multiscalar
   multiplication.

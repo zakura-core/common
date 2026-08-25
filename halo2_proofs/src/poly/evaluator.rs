@@ -171,28 +171,6 @@ fn factor_terms<E, F: Field, B: Basis>(
     })
 }
 
-fn shared_factor_run<E, F: Field, B: Basis>(
-    terms: &[Ast<E, F, B>],
-    end: usize,
-) -> Option<(usize, &Ast<E, F, B>, FactorSide)> {
-    for side in [FactorSide::Left, FactorSide::Right] {
-        let (factor, _) = factor_terms(&terms[end - 1], side)?;
-        let mut start = end - 1;
-        while start > 0 {
-            match factor_terms(&terms[start - 1], side) {
-                Some((candidate, _)) if same_ast(factor, candidate) => start -= 1,
-                _ => break,
-            }
-        }
-
-        if end - start > 1 {
-            return Some((start, factor, side));
-        }
-    }
-
-    None
-}
-
 struct FactorGroup<'a, E, F: Field, B: Basis> {
     factor: &'a Ast<E, F, B>,
     terms: Vec<(usize, &'a Ast<E, F, B>)>,
@@ -423,10 +401,9 @@ enum DistributionWork<E, F: Field, B: Basis> {
         term: EvaluationPlan<E, F, B>,
         power: F,
     },
-    SharedFactor {
+    WeightedSharedFactor {
         factor: EvaluationPlan<E, F, B>,
-        bodies: FactorBodyPlan<E, F, B>,
-        power: F,
+        terms: Vec<WeightedTerm<E, F, B>>,
     },
     SelectorFamily {
         query: AstLeaf<E, B>,
@@ -852,46 +829,46 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
                     });
                 }
 
-                let mut end = terms.len();
+                // Group matching factors even when other constraint terms
+                // separate them. Retaining each body's absolute challenge
+                // power preserves the original transcript-defined ordering.
+                let available_positions = claimed
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, claimed)| (!claimed).then_some(position))
+                    .collect::<Vec<_>>();
+                let available_terms = available_positions
+                    .iter()
+                    .map(|position| &terms[*position])
+                    .collect::<Vec<_>>();
+                for group in factor_groups(&available_terms) {
+                    let terms = group
+                        .terms
+                        .into_iter()
+                        .map(|(available_position, term)| {
+                            let position = available_positions[available_position];
+                            claimed[position] = true;
+                            WeightedTerm {
+                                term: EvaluationPlan::compile(term),
+                                power: powers[terms.len() - 1 - position],
+                            }
+                        })
+                        .collect();
+                    work.push(DistributionWork::WeightedSharedFactor {
+                        factor: Self::compile(group.factor),
+                        terms,
+                    });
+                }
 
-                // Traverse from the lowest original challenge power to the
-                // highest, preserving every term's exact weight.
-                while end > 0 {
-                    if claimed[end - 1] {
-                        end -= 1;
-                        continue;
-                    }
-
-                    let unclaimed_start = claimed[..end]
-                        .iter()
-                        .rposition(|value| *value)
-                        .map(|position| position + 1)
-                        .unwrap_or(0);
-                    let shared_run =
-                        shared_factor_run(&terms[unclaimed_start..end], end - unclaimed_start)
-                            .map(|(start, factor, side)| (unclaimed_start + start, factor, side));
-                    if let Some((start, factor, side)) = shared_run {
-                        let bodies = terms[start..end]
-                            .iter()
-                            .map(|term| {
-                                let (_, body) = factor_terms(term, side)
-                                    .expect("a shared-factor run only contains products");
-                                body
-                            })
-                            .collect::<Vec<_>>();
-                        debug_assert!(bodies.len() > 1);
-                        work.push(DistributionWork::SharedFactor {
-                            factor: Self::compile(factor),
-                            bodies: FactorBodyPlan::compile(&bodies, base),
-                            power: powers[terms.len() - end],
-                        });
-                        end = start;
-                    } else {
+                // Every repeated factor was claimed above, so append the
+                // remaining independent terms from the lowest original
+                // challenge power to the highest.
+                for position in (0..terms.len()).rev() {
+                    if !claimed[position] {
                         work.push(DistributionWork::Term {
-                            term: Self::compile(&terms[end - 1]),
-                            power: powers[terms.len() - end],
+                            term: Self::compile(&terms[position]),
+                            power: powers[terms.len() - 1 - position],
                         });
-                        end -= 1;
                     }
                 }
 
@@ -1021,9 +998,11 @@ fn collect_plan_occurrences<'a, E, F: Field, B: Basis>(
                     DistributionWork::Term { term, .. } => {
                         collect_plan_occurrences(term, nodes, scalars);
                     }
-                    DistributionWork::SharedFactor { factor, bodies, .. } => {
+                    DistributionWork::WeightedSharedFactor { factor, terms } => {
                         collect_plan_occurrences(factor, nodes, scalars);
-                        collect_factor_body_occurrences(bodies, nodes, scalars);
+                        for term in terms {
+                            collect_plan_occurrences(&term.term, nodes, scalars);
+                        }
                     }
                     DistributionWork::SelectorFamily { runs, .. } => {
                         for run in runs.iter().rev() {
@@ -1306,9 +1285,11 @@ fn apply_cache_actions<E, F: Field, B: Basis>(
                     DistributionWork::Term { term, .. } => {
                         apply_cache_actions(term, actions, occurrence)
                     }
-                    DistributionWork::SharedFactor { factor, bodies, .. } => {
+                    DistributionWork::WeightedSharedFactor { factor, terms } => {
                         apply_cache_actions(factor, actions, occurrence);
-                        apply_factor_body_cache_actions(bodies, actions, occurrence);
+                        for term in terms {
+                            apply_cache_actions(&mut term.term, actions, occurrence);
+                        }
                     }
                     DistributionWork::SelectorFamily { runs, .. } => {
                         for run in runs.iter_mut().rev() {
@@ -1453,13 +1434,13 @@ impl<E: Copy, F: Field, B: Basis> DistributionWork<E, F, B> {
     fn required_scratch_slots(&self) -> usize {
         match self {
             Self::Term { term, .. } => term.required_scratch_slots(),
-            Self::SharedFactor { factor, bodies, .. } => {
-                // One slot retains the factor while the body plan is
-                // evaluated into the output.
-                1 + factor
-                    .required_scratch_slots()
-                    .max(bodies.required_scratch_slots())
-            }
+            Self::WeightedSharedFactor { factor, terms } => factor.required_scratch_slots().max(
+                terms
+                    .iter()
+                    .map(|term| term.term.required_scratch_slots())
+                    .max()
+                    .unwrap_or(0),
+            ),
             Self::SelectorFamily { runs, .. } => {
                 // The selector product tree occupies at most one more slot
                 // than its leaves.
@@ -1880,7 +1861,6 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     }
                 }
                 EvaluationPlan::DistributePowers { work, base } => {
-                    let output_len = output.len();
                     let mut fold = PowerFold::new(output);
                     for work in work {
                         match work {
@@ -1888,30 +1868,13 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                                 recurse_into(term, ctx, fold.terms(), cache, scratch);
                                 fold.accumulate(*power);
                             }
-                            DistributionWork::SharedFactor {
-                                factor,
-                                bodies,
-                                power,
-                            } => {
-                                let (factor_values, body_scratch) =
-                                    scratch.split_at_mut(output_len);
-                                recurse_into(factor, ctx, factor_values, cache, body_scratch);
+                            DistributionWork::WeightedSharedFactor { factor, terms } => {
+                                recurse_into(factor, ctx, fold.factors(), cache, scratch);
                                 {
-                                    let terms = fold.terms();
-                                    recurse_factor_body(
-                                        bodies,
-                                        *base,
-                                        ctx,
-                                        terms,
-                                        cache,
-                                        body_scratch,
-                                    );
-                                    for (term, factor) in terms.iter_mut().zip(factor_values.iter())
-                                    {
-                                        *term *= factor;
-                                    }
+                                    let body_values = fold.terms();
+                                    recurse_weighted_terms(terms, ctx, body_values, cache, scratch);
                                 }
-                                fold.accumulate(*power);
+                                fold.accumulate_products();
                             }
                             DistributionWork::SelectorFamily { query, runs } => {
                                 accumulate_selector_family(
@@ -2459,7 +2422,7 @@ mod tests {
     use super::{
         compressed_selector, get_chunk_params, new_evaluator, reuse_cache_slots,
         selector_family_matches, Ast, AstLeaf, BasisOps, CacheAction, DistributionWork,
-        EvaluationPlan, Evaluator, FactorBodyPlan, FactorBodyWork, FactorSide,
+        EvaluationPlan, Evaluator, FactorBodyPlan, FactorSide,
     };
     use crate::poly::{Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Rotation};
 
@@ -3225,7 +3188,7 @@ mod tests {
         }
     }
 
-    fn check_shared_factor_runs<F>()
+    fn check_shared_factor_groups<F>()
     where
         F: WithSmallOrderMulGroup<3> + From<u64>,
     {
@@ -3261,25 +3224,11 @@ mod tests {
             common_factor.clone() * Ast::from(bodies[5]),
         ];
 
-        assert!(matches!(
-            super::shared_factor_run(&terms, terms.len()),
-            Some((3, _, FactorSide::Left))
-        ));
-        assert!(super::shared_factor_run(&terms, 3).is_none());
-        assert!(matches!(
-            super::shared_factor_run(&terms, 2),
-            Some((0, _, FactorSide::Left))
-        ));
-
         let right_terms = bodies
             .iter()
             .take(4)
             .map(|body| Ast::from(*body) * common_factor.clone())
             .collect::<Vec<_>>();
-        assert!(matches!(
-            super::shared_factor_run(&right_terms, right_terms.len()),
-            Some((0, _, FactorSide::Right))
-        ));
 
         let base = F::from(9);
         let planned_ast = Ast::distribute_powers(terms.clone(), base);
@@ -3289,31 +3238,19 @@ mod tests {
             _ => panic!("multiple terms compile to distributed work"),
         };
         match work.as_slice() {
-            [DistributionWork::SharedFactor {
-                bodies: low_bodies,
-                power: low_power,
-                ..
-            }, DistributionWork::Term {
+            [DistributionWork::WeightedSharedFactor { terms, .. }, DistributionWork::Term {
                 power: middle_power,
                 ..
-            }, DistributionWork::SharedFactor {
-                bodies: high_bodies,
-                power: high_power,
-                ..
             }] => {
-                assert!(matches!(
-                    low_bodies,
-                    FactorBodyPlan::Sequential(bodies) if bodies.len() == 3
-                ));
-                assert!(matches!(
-                    high_bodies,
-                    FactorBodyPlan::Sequential(bodies) if bodies.len() == 2
-                ));
-                assert_eq!(*low_power, F::ONE);
+                assert_eq!(terms.len(), 5);
+                assert_eq!(terms[0].power, base.pow_vartime([5]));
+                assert_eq!(terms[1].power, base.pow_vartime([4]));
+                assert_eq!(terms[2].power, base.square());
+                assert_eq!(terms[3].power, base);
+                assert_eq!(terms[4].power, F::ONE);
                 assert_eq!(*middle_power, base * base * base);
-                assert_eq!(*high_power, base * base * base * base);
             }
-            _ => panic!("shared-factor runs compile to disjoint work"),
+            _ => panic!("disjoint runs sharing a factor compile to shared work"),
         }
 
         for base in [F::ZERO, F::ONE, F::from(9)] {
@@ -3347,9 +3284,9 @@ mod tests {
     }
 
     #[test]
-    fn shared_factor_runs_match_generic_evaluation() {
-        check_shared_factor_runs::<pallas::Base>();
-        check_shared_factor_runs::<vesta::Base>();
+    fn shared_factor_groups_match_generic_evaluation() {
+        check_shared_factor_groups::<pallas::Base>();
+        check_shared_factor_groups::<vesta::Base>();
     }
 
     fn check_nested_shared_factor_groups<F>()
@@ -3388,41 +3325,16 @@ mod tests {
 
         let base = F::from(13);
         let plan = EvaluationPlan::compile(&Ast::distribute_powers(terms.clone(), base));
-        let body_work = match &plan {
+        let weighted_terms = match &plan {
             EvaluationPlan::DistributePowers { work, .. } => match work.as_slice() {
-                [DistributionWork::SharedFactor { bodies, .. }] => match bodies {
-                    FactorBodyPlan::Factored(work) => work,
-                    FactorBodyPlan::Sequential(_) => {
-                        panic!("nested repeated factors should be planned")
-                    }
-                },
+                [DistributionWork::WeightedSharedFactor { terms, .. }] => terms,
                 _ => panic!("the common outer factor should be planned"),
             },
             _ => panic!("multiple terms compile to distributed work"),
         };
-        assert_eq!(body_work.len(), 3);
-        match &body_work[0] {
-            FactorBodyWork::SharedFactor { terms, .. } => {
-                assert_eq!(terms.len(), 3);
-                assert_eq!(terms[0].power, base.pow_vartime([5]));
-                assert_eq!(terms[1].power, base.pow_vartime([4]));
-                assert_eq!(terms[2].power, base.square());
-            }
-            FactorBodyWork::Term(_) => panic!("the repeated left factor should be planned"),
-        }
-        match &body_work[1] {
-            FactorBodyWork::SharedFactor { terms, .. } => {
-                assert_eq!(terms.len(), 2);
-                assert_eq!(terms[0].power, base);
-                assert_eq!(terms[1].power, F::ONE);
-            }
-            FactorBodyWork::Term(_) => panic!("the repeated right factor should be planned"),
-        }
-        match &body_work[2] {
-            FactorBodyWork::Term(term) => assert_eq!(term.power, base.pow_vartime([3])),
-            FactorBodyWork::SharedFactor { .. } => {
-                panic!("the unrelated body should remain independent")
-            }
+        assert_eq!(weighted_terms.len(), 6);
+        for (index, term) in weighted_terms.iter().enumerate() {
+            assert_eq!(term.power, base.pow_vartime([(5 - index) as u64]));
         }
 
         for base in [F::ZERO, F::ONE, F::from(13)] {
@@ -3647,30 +3559,29 @@ mod tests {
         );
 
         let nested_plan = EvaluationPlan::compile(&candidate);
-        let shared_bodies = match &nested_plan {
+        let shared_terms = match &nested_plan {
             EvaluationPlan::DistributePowers { work, .. } => work
                 .iter()
                 .find_map(|work| match work {
-                    DistributionWork::SharedFactor { bodies, .. } => Some(bodies),
+                    DistributionWork::WeightedSharedFactor { terms, .. } => Some(terms),
                     _ => None,
                 })
                 .expect("the outer shared factor is planned"),
             _ => panic!("the outer terms compile to distributed work"),
         };
-        let shared_bodies = match shared_bodies {
-            FactorBodyPlan::Sequential(bodies) => bodies,
-            FactorBodyPlan::Factored(_) => panic!("unrelated bodies remain sequential"),
-        };
-        let nested_work = match &shared_bodies[0] {
+        assert_eq!(shared_terms.len(), 2);
+        assert_eq!(shared_terms[0].power, outer_base);
+        assert_eq!(shared_terms[1].power, F::ONE);
+        let nested_work = match &shared_terms[0].term {
             EvaluationPlan::DistributePowers { work, .. } => work,
             _ => panic!("the first shared-factor body is distributed work"),
         };
         assert!(nested_work
             .iter()
             .any(|work| matches!(work, DistributionWork::SelectorFamily { .. })));
-        // Five selector runs need eight slots, and the outer shared-factor
-        // evaluation adds two more.
-        assert_eq!(nested_plan.required_scratch_slots(), COMBINATION_LEN + 5);
+        // Five selector runs need eight slots. The outer shared factor uses
+        // the distribution fold's buffers without adding scratch slots.
+        assert_eq!(nested_plan.required_scratch_slots(), COMBINATION_LEN + 3);
 
         let actual = evaluator.evaluate(&candidate, &domain);
         let generic = evaluator.evaluate(&control, &domain);
