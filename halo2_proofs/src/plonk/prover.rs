@@ -421,55 +421,51 @@ where
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
-    let prepared_lookups = instance_values
-        .iter()
-        .zip(instance_cosets.iter())
-        .zip(advice_values.iter())
-        .zip(advice_cosets.iter())
-        .map(|(((instance_values, instance_cosets), advice_values), advice_cosets)| -> Result<Vec<_>, Error> {
-            // Draw each lookup's blinding values in transcript order before
-            // preparing the independent lookup arguments in parallel.
-            let blindings = pk
-                .vk
-                .cs
-                .lookups
-                .iter()
-                .map(|_| lookup::prover::sample_permuted_blinding(pk, &mut rng))
-                .collect::<Vec<_>>();
+    let lookup_count = pk.vk.cs.lookups.len();
+    let mut lookup_tasks = Vec::new();
+    // Draw all blinding values in circuit-major, lookup-major order before
+    // preparing the independent lookup arguments in parallel.
+    for circuit_index in 0..instance_values.len() {
+        for lookup_index in 0..lookup_count {
+            let blinding = lookup::prover::sample_permuted_blinding(pk, &mut rng);
+            lookup_tasks.push((circuit_index, lookup_index, blinding));
+        }
+    }
 
-            // Construct and commit to permuted values for each lookup
-            (0..pk.vk.cs.lookups.len())
-                .into_par_iter()
-                .zip(blindings.into_par_iter())
-                .map(|(lookup_index, blinding)| {
-                    pk.vk.cs.lookups[lookup_index].prepare_permuted(
-                        pk,
-                        params,
-                        domain,
-                        &value_evaluator,
-                        theta,
-                        advice_values,
-                        &fixed_values,
-                        instance_values,
-                        advice_cosets,
-                        &fixed_cosets,
-                        instance_cosets,
-                        blinding,
-                    )
+    let prepared_lookups = lookup_tasks
+        .into_par_iter()
+        .map(|(circuit_index, lookup_index, blinding)| {
+            pk.vk.cs.lookups[lookup_index].prepare_permuted(
+                pk,
+                params,
+                domain,
+                &value_evaluator,
+                theta,
+                &advice_values[circuit_index],
+                &fixed_values,
+                &instance_values[circuit_index],
+                &advice_cosets[circuit_index],
+                &fixed_cosets,
+                &instance_cosets[circuit_index],
+                blinding,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut prepared_lookups = prepared_lookups.into_iter();
+    let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = (0..instance_values.len())
+        .map(|_| {
+            (0..lookup_count)
+                .map(|_| {
+                    prepared_lookups
+                        .next()
+                        .expect("one prepared lookup per task")
+                        .finalize(&mut coset_evaluator, transcript)
                 })
                 .collect()
         })
         .collect::<Result<Vec<_>, _>>()?;
-
-    let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = prepared_lookups
-        .into_iter()
-        .map(|lookups| {
-            lookups
-                .into_iter()
-                .map(|lookup| lookup.finalize(&mut coset_evaluator, transcript))
-                .collect()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    debug_assert!(prepared_lookups.next().is_none());
 
     // Sample beta challenge
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
