@@ -12,7 +12,8 @@ and this project adheres to Rust's notion of
   buffer and canonicalizes them once, while retaining positional accumulation
   for the IPA generator coefficients.
 - Multi-opening polynomial collapse now partitions coefficient ranges by
-  estimated field-operation work in one parallel scope.
+  estimated field-operation work in one parallel scope. Single-worker Pasta
+  folds use cached challenge powers with wide-product accumulators.
 - Multi-opening proofs now collapse polynomials in place, avoiding per-query
   polynomial allocations and separate multiplication and addition passes.
 - Proof creation now evaluates independent coefficient-form polynomials in
