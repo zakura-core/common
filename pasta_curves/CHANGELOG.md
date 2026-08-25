@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Deferred `Fp` and `Fq` product accumulation now fuses the portable
+  schoolbook multiplication into the wide accumulator, avoiding a temporary
+  eight-limb product and a second carry pass. Deferred inner products measured
+  3–5% faster on Apple arm64 and 8–12% faster on x86-64.
 - The GLV multiscalar multiplication backend now plans its own window width.
   It evaluates the GLV ladder at the generic default width and one bit wider,
   runs at the cheaper, and is selected only when that beats the generic
