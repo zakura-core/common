@@ -53,6 +53,9 @@ and this project adheres to Rust's notion of
 - `FloorPlanner::synthesize_batch` now borrows the global-constant columns and
   debug-asserts the assignment/circuit pairing instead of reporting a caller
   bug as a synthesis error.
+- Independent lookup grand-product polynomials and commitments are now
+  prepared in parallel across circuits while preserving proof randomness and
+  transcript ordering.
 - Independent lookup arguments now prepare their permutation polynomials and
   commitments in parallel while preserving proof randomness and transcript
   ordering.

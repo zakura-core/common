@@ -494,26 +494,37 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let lookups: Vec<Vec<lookup::prover::Committed<C, _>>> = lookups
-        .into_iter()
-        .map(|lookups| -> Result<Vec<_>, _> {
-            // Construct and commit to products for each lookup
-            lookups
-                .into_iter()
-                .map(|lookup| {
-                    lookup.commit_product(
-                        pk,
-                        params,
-                        beta,
-                        gamma,
-                        &mut coset_evaluator,
-                        &mut rng,
-                        transcript,
-                    )
+    let circuit_count = lookups.len();
+    let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
+    // Draw all blinding values in circuit-major, lookup-major order before
+    // preparing the independent lookup products in parallel.
+    for circuit_lookups in lookups {
+        debug_assert_eq!(circuit_lookups.len(), lookup_count);
+        for lookup in circuit_lookups {
+            let blinding = lookup::prover::sample_product_blinding(pk, &mut rng);
+            lookup_product_tasks.push((lookup, blinding));
+        }
+    }
+
+    let prepared_lookup_products = lookup_product_tasks
+        .into_par_iter()
+        .map(|(lookup, blinding)| lookup.prepare_product(pk, params, beta, gamma, blinding))
+        .collect::<Vec<_>>();
+
+    let mut prepared_lookup_products = prepared_lookup_products.into_iter();
+    let lookups: Vec<Vec<lookup::prover::Committed<C, _>>> = (0..circuit_count)
+        .map(|_| {
+            (0..lookup_count)
+                .map(|_| {
+                    prepared_lookup_products
+                        .next()
+                        .expect("one prepared lookup product per task")
+                        .finalize(&mut coset_evaluator, transcript)
                 })
-                .collect::<Result<Vec<_>, _>>()
+                .collect()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    debug_assert!(prepared_lookup_products.next().is_none());
 
     // Commit to the random polynomial that masks the folded quotient
     // evaluation in the multiopening argument.

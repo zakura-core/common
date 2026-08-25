@@ -83,6 +83,19 @@ pub(in crate::plonk) struct PreparedPermuted<C: CurveAffine, Ev> {
     permuted_table_blind: Blind<C::Scalar>,
 }
 
+pub(in crate::plonk) struct ProductBlinding<F: Field> {
+    rows: Vec<F>,
+    product_blind: Blind<F>,
+}
+
+pub(in crate::plonk) struct PreparedProduct<C: CurveAffine, Ev> {
+    permuted: Permuted<C, Ev>,
+    product_poly: Polynomial<C::Scalar, Coeff>,
+    product_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    product_commitment: C,
+    product_blind: Blind<C::Scalar>,
+}
+
 pub(in crate::plonk) fn sample_permuted_blinding<C: CurveAffine, R: Rng>(
     pk: &ProvingKey<C>,
     mut rng: R,
@@ -97,6 +110,18 @@ pub(in crate::plonk) fn sample_permuted_blinding<C: CurveAffine, R: Rng>(
             .collect(),
         input_blind: Blind(C::Scalar::random(&mut rng)),
         table_blind: Blind(C::Scalar::random(&mut rng)),
+    }
+}
+
+pub(in crate::plonk) fn sample_product_blinding<C: CurveAffine, R: Rng>(
+    pk: &ProvingKey<C>,
+    mut rng: R,
+) -> ProductBlinding<C::Scalar> {
+    ProductBlinding {
+        rows: (0..pk.vk.cs.blinding_factors())
+            .map(|_| C::Scalar::random(&mut rng))
+            .collect(),
+        product_blind: Blind(C::Scalar::random(&mut rng)),
     }
 }
 
@@ -299,27 +324,17 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedPermuted<C, Ev> {
 }
 
 impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
-    /// Given a Lookup with input expressions, table expressions, and the permuted
-    /// input expression and permuted table expression, this method constructs the
-    /// grand product polynomial over the lookup. The grand product polynomial
-    /// is used to populate the Product<C> struct. The Product<C> struct is
-    /// added to the Lookup and finally returned by the method.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::plonk) fn commit_product<
-        E: EncodedChallenge<C>,
-        R: Rng,
-        T: TranscriptWrite<C, E>,
-    >(
+    /// Constructs the grand product polynomial for this lookup.
+    pub(in crate::plonk) fn prepare_product(
         self,
         pk: &ProvingKey<C>,
         params: &Params<C>,
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
-        evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
-        mut rng: R,
-        transcript: &mut T,
-    ) -> Result<Committed<C, Ev>, Error> {
+        blinding: ProductBlinding<C::Scalar>,
+    ) -> PreparedProduct<C, Ev> {
         let blinding_factors = pk.vk.cs.blinding_factors();
+        assert_eq!(blinding.rows.len(), blinding_factors);
         // Goal is to compute the products of fractions
         //
         // Numerator: (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
@@ -386,7 +401,7 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
             // be a boolean (and ideally 1, else soundness is broken)
             .take(params.n as usize - blinding_factors)
             // Chain random blinding factors.
-            .chain((0..blinding_factors).map(|_| C::Scalar::random(&mut rng)))
+            .chain(blinding.rows)
             .collect::<Vec<_>>();
         assert_eq!(z.len(), params.n as usize);
         let z = pk.vk.domain.lagrange_from_vec(z);
@@ -430,26 +445,44 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
             assert_eq!(z[u], C::Scalar::ONE);
         }
 
-        let product_blind = Blind(C::Scalar::random(&mut rng));
+        let product_blind = blinding.product_blind;
         let product_commitment = params.commit_lagrange(&z, product_blind).to_affine();
         let z = pk
             .vk
             .domain
             .lagrange_to_coeff_with_twiddles(z, &pk.fft_twiddles);
-        let product_coset = evaluator.register_poly(
-            pk.vk
-                .domain
-                .coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles),
-        );
+        let product_coset = pk
+            .vk
+            .domain
+            .coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles);
 
-        // Hash product commitment
-        transcript.write_point(product_commitment)?;
-
-        Ok(Committed::<C, _> {
+        PreparedProduct {
             permuted: self,
             product_poly: z,
             product_coset,
+            product_commitment,
             product_blind,
+        }
+    }
+}
+
+impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedProduct<C, Ev> {
+    /// Writes the product commitment and registers its coset in circuit order.
+    pub(in crate::plonk) fn finalize<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+        self,
+        evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
+        transcript: &mut T,
+    ) -> Result<Committed<C, Ev>, Error> {
+        let product_coset = evaluator.register_poly(self.product_coset);
+
+        // Hash product commitment.
+        transcript.write_point(self.product_commitment)?;
+
+        Ok(Committed {
+            permuted: self.permuted,
+            product_poly: self.product_poly,
+            product_coset,
+            product_blind: self.product_blind,
         })
     }
 }
