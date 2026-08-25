@@ -53,6 +53,9 @@ and this project adheres to Rust's notion of
 - `FloorPlanner::synthesize_batch` now borrows the global-constant columns and
   debug-asserts the assignment/circuit pairing instead of reporting a caller
   bug as a synthesis error.
+- Independent lookup arguments now prepare their permutation polynomials and
+  commitments in parallel while preserving proof randomness and transcript
+  ordering.
 - Polynomial evaluation now indexes common-subexpression candidates by
   structural fingerprints, avoiding quadratic candidate scans while retaining
   exact structural matching.

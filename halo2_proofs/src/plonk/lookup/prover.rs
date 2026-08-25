@@ -59,43 +59,69 @@ pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
     constructed: Constructed<C>,
 }
 
+pub(in crate::plonk) struct PermutedBlinding<F: Field> {
+    input_rows: Vec<F>,
+    table_rows: Vec<F>,
+    input_blind: Blind<F>,
+    table_blind: Blind<F>,
+}
+
+pub(in crate::plonk) struct PreparedPermuted<C: CurveAffine, Ev> {
+    compressed_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    permuted_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    compressed_input_coset: poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>,
+    permuted_input_poly: Polynomial<C::Scalar, Coeff>,
+    permuted_input_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    permuted_input_commitment: C,
+    permuted_input_blind: Blind<C::Scalar>,
+    compressed_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    compressed_table_coset: poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>,
+    permuted_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    permuted_table_poly: Polynomial<C::Scalar, Coeff>,
+    permuted_table_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    permuted_table_commitment: C,
+    permuted_table_blind: Blind<C::Scalar>,
+}
+
+pub(in crate::plonk) fn sample_permuted_blinding<C: CurveAffine, R: Rng>(
+    pk: &ProvingKey<C>,
+    mut rng: R,
+) -> PermutedBlinding<C::Scalar> {
+    let blind_rows = pk.vk.cs.blinding_factors() + 1;
+    PermutedBlinding {
+        input_rows: (0..blind_rows)
+            .map(|_| C::Scalar::random(&mut rng))
+            .collect(),
+        table_rows: (0..blind_rows)
+            .map(|_| C::Scalar::random(&mut rng))
+            .collect(),
+        input_blind: Blind(C::Scalar::random(&mut rng)),
+        table_blind: Blind(C::Scalar::random(&mut rng)),
+    }
+}
+
 impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
-    /// Given a Lookup with input expressions [A_0, A_1, ..., A_{m-1}] and table expressions
-    /// [S_0, S_1, ..., S_{m-1}], this method
-    /// - constructs A_compressed = \theta^{m-1} A_0 + theta^{m-2} A_1 + ... + \theta A_{m-2} + A_{m-1}
-    ///   and S_compressed = \theta^{m-1} S_0 + theta^{m-2} S_1 + ... + \theta S_{m-2} + S_{m-1},
-    /// - permutes A_compressed and S_compressed using permute_expression_pair() helper,
-    ///   obtaining A' and S', and
-    /// - constructs Permuted<C> struct using permuted_input_value = A', and
-    ///   permuted_table_expression = S'.
+    /// Prepares the compressed, permuted input and table polynomials.
     ///
-    /// The Permuted<C> struct is used to update the Lookup, and is then returned.
+    /// This phase does not mutate the shared evaluator or transcript, so
+    /// independent lookup arguments can run in parallel. The caller must pass
+    /// the result to [`PreparedPermuted::finalize`] in circuit order.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::plonk) fn commit_permuted<
-        'a,
-        C,
-        E: EncodedChallenge<C>,
-        Ev: Copy + Send + Sync,
-        Ec: Copy + Send + Sync,
-        R: Rng,
-        T: TranscriptWrite<C, E>,
-    >(
+    pub(in crate::plonk) fn prepare_permuted<C, Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
         &self,
         pk: &ProvingKey<C>,
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
         value_evaluator: &poly::Evaluator<Ev, C::Scalar, LagrangeCoeff>,
-        coset_evaluator: &mut poly::Evaluator<Ec, C::Scalar, ExtendedLagrangeCoeff>,
         theta: ChallengeTheta<C>,
-        advice_values: &'a [poly::AstLeaf<Ev, LagrangeCoeff>],
-        fixed_values: &'a [poly::AstLeaf<Ev, LagrangeCoeff>],
-        instance_values: &'a [poly::AstLeaf<Ev, LagrangeCoeff>],
-        advice_cosets: &'a [poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
-        fixed_cosets: &'a [poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
-        instance_cosets: &'a [poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
-        mut rng: R,
-        transcript: &mut T,
-    ) -> Result<Permuted<C, Ec>, Error>
+        advice_values: &[poly::AstLeaf<Ev, LagrangeCoeff>],
+        fixed_values: &[poly::AstLeaf<Ev, LagrangeCoeff>],
+        instance_values: &[poly::AstLeaf<Ev, LagrangeCoeff>],
+        advice_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
+        fixed_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
+        instance_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
+        blinding: PermutedBlinding<C::Scalar>,
+    ) -> Result<PreparedPermuted<C, Ec>, Error>
     where
         C: CurveAffine<ScalarExt = F>,
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
@@ -188,64 +214,86 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             compress_expressions(&self.table_expressions);
 
         // Permute compressed (InputExpression, TableExpression) pair
-        let (permuted_input_expression, permuted_table_expression) = permute_expression_pair::<C, _>(
+        let (permuted_input_expression, permuted_table_expression) = permute_expression_pair::<C>(
             pk,
             params,
             domain,
-            &mut rng,
+            &blinding.input_rows,
+            &blinding.table_rows,
             &compressed_input_expression,
             &compressed_table_expression,
         )?;
 
-        // Closure to construct commitment to vector of values
-        let mut commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>| {
+        let permuted_input_blind = blinding.input_blind;
+        let permuted_table_blind = blinding.table_blind;
+
+        // Convert and commit to the input and table permutations concurrently.
+        let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>,
+                             blind: Blind<C::Scalar>| {
             let poly = pk
                 .vk
                 .domain
                 .lagrange_to_coeff_with_twiddles(values.clone(), &pk.fft_twiddles);
-            let blind = Blind(C::Scalar::random(&mut rng));
+            let coset = pk
+                .vk
+                .domain
+                .coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles);
             let commitment = params.commit_lagrange(values, blind).to_affine();
-            (poly, blind, commitment)
+            (poly, coset, commitment)
         };
-
-        // Commit to permuted input expression
-        let (permuted_input_poly, permuted_input_blind, permuted_input_commitment) =
-            commit_values(&permuted_input_expression);
-
-        // Commit to permuted table expression
-        let (permuted_table_poly, permuted_table_blind, permuted_table_commitment) =
-            commit_values(&permuted_table_expression);
-
-        // Hash permuted input commitment
-        transcript.write_point(permuted_input_commitment)?;
-
-        // Hash permuted table commitment
-        transcript.write_point(permuted_table_commitment)?;
-
-        let permuted_input_coset = coset_evaluator.register_poly(
-            pk.vk
-                .domain
-                .coeff_to_extended_with_twiddles(permuted_input_poly.clone(), &pk.fft_twiddles),
-        );
-        let permuted_table_coset = coset_evaluator.register_poly(
-            pk.vk
-                .domain
-                .coeff_to_extended_with_twiddles(permuted_table_poly.clone(), &pk.fft_twiddles),
+        let (
+            (permuted_input_poly, permuted_input_coset, permuted_input_commitment),
+            (permuted_table_poly, permuted_table_coset, permuted_table_commitment),
+        ) = crate::multicore::join(
+            || commit_values(&permuted_input_expression, permuted_input_blind),
+            || commit_values(&permuted_table_expression, permuted_table_blind),
         );
 
-        Ok(Permuted {
+        Ok(PreparedPermuted {
             compressed_input_expression,
             compressed_input_coset,
             permuted_input_expression,
             permuted_input_poly,
             permuted_input_coset,
+            permuted_input_commitment,
             permuted_input_blind,
             compressed_table_expression,
             compressed_table_coset,
             permuted_table_expression,
             permuted_table_poly,
             permuted_table_coset,
+            permuted_table_commitment,
             permuted_table_blind,
+        })
+    }
+}
+
+impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedPermuted<C, Ev> {
+    /// Writes commitments and registers cosets in circuit order.
+    pub(in crate::plonk) fn finalize<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+        self,
+        evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
+        transcript: &mut T,
+    ) -> Result<Permuted<C, Ev>, Error> {
+        transcript.write_point(self.permuted_input_commitment)?;
+        transcript.write_point(self.permuted_table_commitment)?;
+
+        let permuted_input_coset = evaluator.register_poly(self.permuted_input_coset);
+        let permuted_table_coset = evaluator.register_poly(self.permuted_table_coset);
+
+        Ok(Permuted {
+            compressed_input_expression: self.compressed_input_expression,
+            permuted_input_expression: self.permuted_input_expression,
+            compressed_input_coset: self.compressed_input_coset,
+            permuted_input_poly: self.permuted_input_poly,
+            permuted_input_coset,
+            permuted_input_blind: self.permuted_input_blind,
+            compressed_table_expression: self.compressed_table_expression,
+            compressed_table_coset: self.compressed_table_coset,
+            permuted_table_expression: self.permuted_table_expression,
+            permuted_table_poly: self.permuted_table_poly,
+            permuted_table_coset,
+            permuted_table_blind: self.permuted_table_blind,
         })
     }
 }
@@ -634,16 +682,18 @@ fn permute_usable_values<F: Field + Ord>(
 ///   that has the corresponding value in S'.
 ///
 /// This method returns (A', S') if no errors are encountered.
-fn permute_expression_pair<C: CurveAffine, R: Rng>(
+fn permute_expression_pair<C: CurveAffine>(
     pk: &ProvingKey<C>,
     params: &Params<C>,
     domain: &EvaluationDomain<C::Scalar>,
-    mut rng: R,
+    input_blinds: &[C::Scalar],
+    table_blinds: &[C::Scalar],
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
 ) -> Result<ExpressionPair<C::Scalar>, Error> {
     let blinding_factors = pk.vk.cs.blinding_factors();
-    let usable_rows = params.n as usize - (blinding_factors + 1);
+    let blind_rows = blinding_factors + 1;
+    let usable_rows = params.n as usize - blind_rows;
 
     let mut input_values = input_expression.to_vec();
     input_values.truncate(usable_rows);
@@ -651,9 +701,10 @@ fn permute_expression_pair<C: CurveAffine, R: Rng>(
     let (mut permuted_input_expression, mut permuted_table_coeffs) =
         permute_usable_values(input_values, table_values)?;
 
-    permuted_input_expression
-        .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::random(&mut rng)));
-    permuted_table_coeffs.extend((0..(blinding_factors + 1)).map(|_| C::Scalar::random(&mut rng)));
+    assert_eq!(input_blinds.len(), blind_rows);
+    assert_eq!(table_blinds.len(), blind_rows);
+    permuted_input_expression.extend_from_slice(input_blinds);
+    permuted_table_coeffs.extend_from_slice(table_blinds);
     assert_eq!(permuted_input_expression.len(), params.n as usize);
     assert_eq!(permuted_table_coeffs.len(), params.n as usize);
 

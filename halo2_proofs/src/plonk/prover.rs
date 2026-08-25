@@ -1,8 +1,6 @@
 use ff::Field;
 use group::Curve;
-use maybe_rayon::prelude::IntoParallelIterator;
-#[cfg(feature = "multicore")]
-use maybe_rayon::prelude::ParallelIterator;
+use maybe_rayon::prelude::*;
 use rand_core::Rng;
 use std::iter;
 use std::ops::RangeTo;
@@ -423,24 +421,32 @@ where
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
-    let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = instance_values
+    let prepared_lookups = instance_values
         .iter()
         .zip(instance_cosets.iter())
         .zip(advice_values.iter())
         .zip(advice_cosets.iter())
         .map(|(((instance_values, instance_cosets), advice_values), advice_cosets)| -> Result<Vec<_>, Error> {
-            // Construct and commit to permuted values for each lookup
-            pk.vk
+            // Draw each lookup's blinding values in transcript order before
+            // preparing the independent lookup arguments in parallel.
+            let blindings = pk
+                .vk
                 .cs
                 .lookups
                 .iter()
-                .map(|lookup| {
-                    lookup.commit_permuted(
+                .map(|_| lookup::prover::sample_permuted_blinding(pk, &mut rng))
+                .collect::<Vec<_>>();
+
+            // Construct and commit to permuted values for each lookup
+            (0..pk.vk.cs.lookups.len())
+                .into_par_iter()
+                .zip(blindings.into_par_iter())
+                .map(|(lookup_index, blinding)| {
+                    pk.vk.cs.lookups[lookup_index].prepare_permuted(
                         pk,
                         params,
                         domain,
                         &value_evaluator,
-                        &mut coset_evaluator,
                         theta,
                         advice_values,
                         &fixed_values,
@@ -448,10 +454,19 @@ where
                         advice_cosets,
                         &fixed_cosets,
                         instance_cosets,
-                        &mut rng,
-                        transcript,
+                        blinding,
                     )
                 })
+                .collect()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = prepared_lookups
+        .into_iter()
+        .map(|lookups| {
+            lookups
+                .into_iter()
+                .map(|lookup| lookup.finalize(&mut coset_evaluator, transcript))
                 .collect()
         })
         .collect::<Result<Vec<_>, _>>()?;
