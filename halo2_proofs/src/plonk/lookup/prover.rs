@@ -18,7 +18,6 @@ use ff::WithSmallOrderMulGroup;
 use group::{ff::Field, Curve};
 use rand_core::Rng;
 use std::{
-    collections::BTreeMap,
     iter,
     ops::{Mul, MulAssign},
 };
@@ -575,6 +574,59 @@ impl<C: CurveAffine> Evaluated<C> {
 
 type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCoeff>);
 
+fn permute_usable_values<F: Field + Ord>(
+    mut input_values: Vec<F>,
+    mut table_values: Vec<F>,
+) -> Result<(Vec<F>, Vec<F>), Error> {
+    assert_eq!(input_values.len(), table_values.len());
+
+    crate::multicore::join(
+        || input_values.sort_unstable(),
+        || table_values.sort_unstable(),
+    );
+
+    let usable_rows = input_values.len();
+    let mut permuted_table_values = vec![F::ZERO; usable_rows];
+    let mut consumed_table_rows = Vec::new();
+    let mut table_row = 0;
+
+    let mut repeated_input_rows = input_values
+        .iter()
+        .zip(permuted_table_values.iter_mut())
+        .enumerate()
+        .filter_map(|(row, (input_value, table_value))| {
+            if row == 0 || *input_value != input_values[row - 1] {
+                *table_value = *input_value;
+                while table_row < usable_rows && table_values[table_row] < *input_value {
+                    table_row += 1;
+                }
+                if table_values.get(table_row) == Some(input_value) {
+                    consumed_table_rows.push(table_row);
+                    table_row += 1;
+                    None
+                } else {
+                    Some(Err(Error::ConstraintSystemFailure))
+                }
+            } else {
+                Some(Ok(row))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut consumed_table_rows = consumed_table_rows.into_iter().peekable();
+    for (row, value) in table_values.into_iter().enumerate() {
+        if consumed_table_rows.peek() == Some(&row) {
+            consumed_table_rows.next();
+        } else {
+            permuted_table_values[repeated_input_rows.pop().unwrap()] = value;
+        }
+    }
+    assert!(consumed_table_rows.next().is_none());
+    assert!(repeated_input_rows.is_empty());
+
+    Ok((input_values, permuted_table_values))
+}
+
 /// Given a vector of input values A and a vector of table values S,
 /// this method permutes A and S to produce A' and S', such that:
 /// - like values in A' are vertically adjacent to each other; and
@@ -593,53 +645,11 @@ fn permute_expression_pair<C: CurveAffine, R: Rng>(
     let blinding_factors = pk.vk.cs.blinding_factors();
     let usable_rows = params.n as usize - (blinding_factors + 1);
 
-    let mut permuted_input_expression: Vec<C::Scalar> = input_expression.to_vec();
-    permuted_input_expression.truncate(usable_rows);
-
-    // Sort input lookup expression values
-    permuted_input_expression.sort();
-
-    // A BTreeMap of each unique element in the table expression and its count
-    let mut leftover_table_map: BTreeMap<C::Scalar, u32> = table_expression
-        .iter()
-        .take(usable_rows)
-        .fold(BTreeMap::new(), |mut acc, coeff| {
-            *acc.entry(*coeff).or_insert(0) += 1;
-            acc
-        });
-    let mut permuted_table_coeffs = vec![C::Scalar::ZERO; usable_rows];
-
-    let mut repeated_input_rows = permuted_input_expression
-        .iter()
-        .zip(permuted_table_coeffs.iter_mut())
-        .enumerate()
-        .filter_map(|(row, (input_value, table_value))| {
-            // If this is the first occurrence of `input_value` in the input expression
-            if row == 0 || *input_value != permuted_input_expression[row - 1] {
-                *table_value = *input_value;
-                // Remove one instance of input_value from leftover_table_map
-                if let Some(count) = leftover_table_map.get_mut(input_value) {
-                    assert!(*count > 0);
-                    *count -= 1;
-                    None
-                } else {
-                    // Return error if input_value not found
-                    Some(Err(Error::ConstraintSystemFailure))
-                }
-            // If input value is repeated
-            } else {
-                Some(Ok(row))
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Populate permuted table at unfilled rows with leftover table elements
-    for (coeff, count) in leftover_table_map.iter() {
-        for _ in 0..*count {
-            permuted_table_coeffs[repeated_input_rows.pop().unwrap()] = *coeff;
-        }
-    }
-    assert!(repeated_input_rows.is_empty());
+    let mut input_values = input_expression.to_vec();
+    input_values.truncate(usable_rows);
+    let table_values = table_expression.iter().take(usable_rows).copied().collect();
+    let (mut permuted_input_expression, mut permuted_table_coeffs) =
+        permute_usable_values(input_values, table_values)?;
 
     permuted_input_expression
         .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::random(&mut rng)));
@@ -666,4 +676,126 @@ fn permute_expression_pair<C: CurveAffine, R: Rng>(
         domain.lagrange_from_vec(permuted_input_expression),
         domain.lagrange_from_vec(permuted_table_coeffs),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use pasta_curves::pallas;
+
+    use super::*;
+
+    const TEST_ALPHABET_SIZE: usize = 3;
+
+    // This is the previous BTreeMap implementation, retained as an oracle for
+    // exact output ordering and error behavior.
+    fn reference_permutation<F: Field + Ord>(
+        mut input_values: Vec<F>,
+        table_values: Vec<F>,
+    ) -> Result<(Vec<F>, Vec<F>), Error> {
+        input_values.sort();
+        let mut leftovers = table_values
+            .into_iter()
+            .fold(BTreeMap::new(), |mut counts, value| {
+                *counts.entry(value).or_insert(0_u32) += 1;
+                counts
+            });
+        let mut permuted_table_values = vec![F::ZERO; input_values.len()];
+        let mut repeated_input_rows = input_values
+            .iter()
+            .zip(permuted_table_values.iter_mut())
+            .enumerate()
+            .filter_map(|(row, (input_value, table_value))| {
+                if row == 0 || *input_value != input_values[row - 1] {
+                    *table_value = *input_value;
+                    if let Some(count) = leftovers.get_mut(input_value) {
+                        assert!(*count > 0);
+                        *count -= 1;
+                        None
+                    } else {
+                        Some(Err(Error::ConstraintSystemFailure))
+                    }
+                } else {
+                    Some(Ok(row))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (value, count) in leftovers {
+            for _ in 0..count {
+                permuted_table_values[repeated_input_rows.pop().unwrap()] = value;
+            }
+        }
+        assert!(repeated_input_rows.is_empty());
+
+        Ok((input_values, permuted_table_values))
+    }
+
+    fn values(values: &[u64]) -> Vec<pallas::Scalar> {
+        values.iter().copied().map(pallas::Scalar::from).collect()
+    }
+
+    fn small_vectors(len: usize) -> Vec<Vec<pallas::Scalar>> {
+        (0..TEST_ALPHABET_SIZE.pow(u32::try_from(len).expect("test length fits in u32")))
+            .map(|mut encoded| {
+                (0..len)
+                    .map(|_| {
+                        let value = u64::try_from(encoded % TEST_ALPHABET_SIZE)
+                            .expect("test alphabet values fit in u64");
+                        encoded /= TEST_ALPHABET_SIZE;
+                        pallas::Scalar::from(value)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sorted_lookup_permutation_matches_reference_exhaustively() {
+        for len in 0..=4 {
+            let vectors = small_vectors(len);
+            for input in &vectors {
+                for table in &vectors {
+                    let actual = permute_usable_values(input.clone(), table.clone());
+                    match reference_permutation(input.clone(), table.clone()) {
+                        Ok(expected) => assert_eq!(actual.unwrap(), expected),
+                        Err(Error::ConstraintSystemFailure) => {
+                            assert!(matches!(actual, Err(Error::ConstraintSystemFailure)))
+                        }
+                        Err(_) => panic!("reference returned an unexpected error"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sorted_lookup_permutation_preserves_output_order() {
+        let input = values(&[2, 2, 5, 1, 7, 2, 6, 4]);
+        let table = values(&[5, 1, 2, 3, 2, 4, 6, 7]);
+
+        assert_eq!(
+            permute_usable_values(input, table).unwrap(),
+            (
+                values(&[1, 2, 2, 2, 4, 5, 6, 7]),
+                values(&[1, 2, 3, 2, 4, 5, 6, 7]),
+            )
+        );
+    }
+
+    #[test]
+    fn sorted_lookup_permutation_rejects_missing_value() {
+        let input = values(&[1, 2, 2, 7]);
+        let table = values(&[1, 2, 3, 4]);
+
+        assert!(matches!(
+            permute_usable_values(input.clone(), table.clone()),
+            Err(Error::ConstraintSystemFailure)
+        ));
+        assert!(matches!(
+            reference_permutation(input, table),
+            Err(Error::ConstraintSystemFailure)
+        ));
+    }
 }
