@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Pasta polynomial evaluation and single-worker multi-opening folds now seed
+  each wide accumulator directly from its first product, avoiding an addition
+  to zero for every output lane.
 - Single-worker Pasta multi-opening polynomial folds now interleave two wide
   product accumulators, shortening dependency chains while sharing cached
   challenge-power loads.

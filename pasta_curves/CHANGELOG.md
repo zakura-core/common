@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added [`DeferredField::mul_accumulator`], which initializes a wide
+  accumulator directly from one product. The `Fp` and `Fq` implementations
+  avoid adding that first product to a zero accumulator.
 - Deferred `Fp` and `Fq` product accumulation now fuses the portable
   schoolbook multiplication into the wide accumulator, avoiding a temporary
   eight-limb product and a second carry pass. Deferred inner products measured
