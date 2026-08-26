@@ -148,7 +148,7 @@ pub struct ProvingKey<C: CurveAffine> {
     fixed_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     fixed_polys: Vec<Polynomial<C::Scalar, Coeff>>,
     fixed_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-    compressed_selector_cosets: Arc<[CompressedSelectorCoset<C::Scalar>]>,
+    cached_selector_families: Arc<[CachedSelectorFamily<C::Scalar>]>,
     permutation: permutation::ProvingKey<C>,
     /// Kept out of [`VerifyingKey`] so verifier-only users do not pay its
     /// memory cost.
@@ -158,11 +158,11 @@ pub struct ProvingKey<C: CurveAffine> {
 }
 
 #[derive(Debug)]
-struct CompressedSelectorCoset<F> {
+struct CachedSelectorFamily<F> {
+    // The source entry in `fixed_cosets` stores the selector for root one.
     column_index: usize,
-    combination_len: usize,
-    assigned_root: usize,
-    selector: Polynomial<F, ExtendedLagrangeCoeff>,
+    // The remaining entries correspond to roots two through the family size.
+    selectors: Box<[Polynomial<F, ExtendedLagrangeCoeff>]>,
 }
 
 impl<C: CurveAffine> ProvingKey<C> {

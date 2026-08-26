@@ -104,6 +104,7 @@ impl<E, B: Basis> AstLeaf<E, B> {
 pub(crate) struct Evaluator<'poly, E, F: Field, B: Basis> {
     polys: Vec<Cow<'poly, Polynomial<F, B>>>,
     compressed_selectors: Vec<CompressedSelectorLeaf<E, B>>,
+    reused_compressed_selector_sources: Vec<usize>,
     _context: E,
 }
 
@@ -126,6 +127,7 @@ pub(crate) fn new_evaluator<'poly, E: Fn() + Clone, F: Field, B: Basis>(
     Evaluator {
         polys: vec![],
         compressed_selectors: vec![],
+        reused_compressed_selector_sources: vec![],
         _context: context,
     }
 }
@@ -1503,6 +1505,13 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         assigned_root: usize,
         selector: AstLeaf<E, B>,
     ) {
+        if query.index == selector.index
+            && !self
+                .reused_compressed_selector_sources
+                .contains(&query.index)
+        {
+            self.reused_compressed_selector_sources.push(query.index);
+        }
         self.compressed_selectors.push(CompressedSelectorLeaf {
             query,
             combination_len,
@@ -1528,7 +1537,20 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         }
 
         match ast {
-            Ast::Poly(_) | Ast::LinearTerm(_) | Ast::ConstantTerm(_) => None,
+            Ast::Poly(query) => {
+                // A selector family may reuse its source polynomial as the
+                // first precomputed selector. Reaching that source outside a
+                // recognized selector subtree would evaluate the wrong
+                // polynomial, so fail closed if the matcher ever misses one.
+                assert!(
+                    !self
+                        .reused_compressed_selector_sources
+                        .contains(&query.index),
+                    "reused compressed-selector source was not replaced"
+                );
+                None
+            }
+            Ast::LinearTerm(_) | Ast::ConstantTerm(_) => None,
             Ast::Add(lhs, rhs) => {
                 let replaced_lhs = self.replace_compressed_selectors(lhs);
                 let replaced_rhs = self.replace_compressed_selectors(rhs);
@@ -2523,7 +2545,7 @@ mod tests {
     use pasta_curves::{pallas, vesta};
 
     use super::{
-        Ast, AstLeaf, BasisOps, CacheAction, DistributionWork, EvaluationPlan, Evaluator,
+        Ast, AstLeaf, AstMul, BasisOps, CacheAction, DistributionWork, EvaluationPlan, Evaluator,
         FactorBodyPlan, FactorSide, compressed_selector, get_chunk_params, new_evaluator,
         reuse_cache_slots, selector_family_matches,
     };
@@ -3578,6 +3600,70 @@ mod tests {
             }
             _ => panic!("the replacement should preserve the root addition"),
         }
+    }
+
+    #[test]
+    fn compressed_selector_replacement_handles_every_ast_container() {
+        const COMBINATION_LEN: usize = 4;
+
+        let domain = EvaluationDomain::new(3, 3);
+        let mut evaluator = new_evaluator::<_, pallas::Base, ExtendedLagrangeCoeff>(|| {});
+        let query_and_first_selector = evaluator.register_poly(domain.empty_extended());
+        let unrelated = evaluator.register_poly(domain.empty_extended());
+        evaluator.register_compressed_selector(
+            query_and_first_selector,
+            COMBINATION_LEN,
+            1,
+            query_and_first_selector,
+        );
+
+        let compressed =
+            || compressed_selector_expression(query_and_first_selector, COMBINATION_LEN, 1);
+        let unrelated = || Ast::from(unrelated);
+        let cases = [
+            compressed(),
+            Ast::Add(Arc::new(compressed()), Arc::new(unrelated())),
+            Ast::Add(Arc::new(unrelated()), Arc::new(compressed())),
+            Ast::Mul(AstMul(Arc::new(compressed()), Arc::new(unrelated()))),
+            Ast::Mul(AstMul(Arc::new(unrelated()), Arc::new(compressed()))),
+            Ast::Scale(Arc::new(compressed()), pallas::Base::from(5)),
+            Ast::DistributePowers(
+                Arc::new(vec![unrelated(), compressed()]),
+                pallas::Base::from(7),
+            ),
+            Ast::DistributePowers(
+                Arc::new(vec![compressed(), unrelated()]),
+                pallas::Base::from(11),
+            ),
+        ];
+
+        for case in cases {
+            assert!(evaluator.replace_compressed_selectors(&case).is_some());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "reused compressed-selector source was not replaced")]
+    fn compressed_selector_replacement_rejects_unmatched_reused_source() {
+        const COMBINATION_LEN: usize = 4;
+
+        let domain = EvaluationDomain::new(3, 3);
+        let mut evaluator = new_evaluator::<_, pallas::Base, ExtendedLagrangeCoeff>(|| {});
+        let query_and_first_selector = evaluator.register_poly(domain.empty_extended());
+        let unrelated = evaluator.register_poly(domain.empty_extended());
+        evaluator.register_compressed_selector(
+            query_and_first_selector,
+            COMBINATION_LEN,
+            1,
+            query_and_first_selector,
+        );
+
+        evaluator.replace_compressed_selectors(&Ast::Add(
+            Arc::new(Ast::from(unrelated)),
+            Arc::new(Ast::from(
+                query_and_first_selector.with_rotation(Rotation::next()),
+            )),
+        ));
     }
 
     fn compressed_selector_value<F: Field>(
