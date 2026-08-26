@@ -504,14 +504,24 @@ where
         .map(|poly| coset_evaluator.register_poly_ref(poly))
         .collect();
 
-    for selector in pk.compressed_selector_cosets.iter() {
-        let precomputed = coset_evaluator.register_poly_ref(&selector.selector);
+    for family in pk.cached_selector_families.iter() {
+        let query_and_first_selector = fixed_cosets[family.column_index];
+        let combination_len = family.selectors.len() + 1;
         coset_evaluator.register_compressed_selector(
-            fixed_cosets[selector.column_index],
-            selector.combination_len,
-            selector.assigned_root,
-            precomputed,
+            query_and_first_selector,
+            combination_len,
+            1,
+            query_and_first_selector,
         );
+        for (assigned_root, selector) in (2..).zip(family.selectors.iter()) {
+            let precomputed = coset_evaluator.register_poly_ref(selector);
+            coset_evaluator.register_compressed_selector(
+                query_and_first_selector,
+                combination_len,
+                assigned_root,
+                precomputed,
+            );
+        }
     }
 
     // Register advice cosets with the polynomial evaluator.
@@ -1429,17 +1439,25 @@ fn compressed_selector_cache_preserves_proof() {
         keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail")
     };
     let pk = create_pk();
+    assert_eq!(pk.cached_selector_families.len(), 1);
     assert_eq!(
-        pk.compressed_selector_cosets.len(),
+        pk.cached_selector_families[0].selectors.len() + 1,
         crate::MIN_SELECTOR_FAMILY_LEN
     );
 
     let mut uncached_pk = pk.clone();
     assert!(std::sync::Arc::ptr_eq(
-        &pk.compressed_selector_cosets,
-        &uncached_pk.compressed_selector_cosets,
+        &pk.cached_selector_families,
+        &uncached_pk.cached_selector_families,
     ));
-    uncached_pk.compressed_selector_cosets = Default::default();
+    for family in pk.cached_selector_families.iter() {
+        let column_index = family.column_index;
+        uncached_pk.fixed_cosets[column_index] = uncached_pk
+            .vk
+            .domain
+            .coeff_to_extended(uncached_pk.fixed_polys[column_index].clone());
+    }
+    uncached_pk.cached_selector_families = Default::default();
 
     assert_eq!(create(&pk, &params), create(&uncached_pk, &params));
 
@@ -1457,18 +1475,23 @@ fn compressed_selector_cache_preserves_proof() {
         let parallel_pk = parallel_pool.install(create_pk);
 
         assert_eq!(
-            single_pk.compressed_selector_cosets.len(),
-            parallel_pk.compressed_selector_cosets.len()
+            single_pk.cached_selector_families.len(),
+            parallel_pk.cached_selector_families.len()
         );
         for (single, parallel) in single_pk
-            .compressed_selector_cosets
+            .cached_selector_families
             .iter()
-            .zip(parallel_pk.compressed_selector_cosets.iter())
+            .zip(parallel_pk.cached_selector_families.iter())
         {
             assert_eq!(single.column_index, parallel.column_index);
-            assert_eq!(single.combination_len, parallel.combination_len);
-            assert_eq!(single.assigned_root, parallel.assigned_root);
-            assert_eq!(&single.selector[..], &parallel.selector[..]);
+            assert_eq!(
+                &single_pk.fixed_cosets[single.column_index][..],
+                &parallel_pk.fixed_cosets[parallel.column_index][..]
+            );
+            assert_eq!(single.selectors.len(), parallel.selectors.len());
+            for (single, parallel) in single.selectors.iter().zip(parallel.selectors.iter()) {
+                assert_eq!(&single[..], &parallel[..]);
+            }
         }
 
         let single_proof = single_pool.install(|| create(&single_pk, &params));

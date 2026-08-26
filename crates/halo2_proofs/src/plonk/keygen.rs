@@ -140,31 +140,36 @@ fn group_compressed_selectors(
 }
 
 fn evaluate_compressed_selector_family<F: Field + From<u64>>(
-    query: &[F],
+    query_and_first_selector: &mut [F],
     mut selectors: Vec<&mut [F]>,
     min_chunk_len: usize,
 ) {
-    assert!(selectors.len() >= 2);
+    let combination_len = selectors.len() + 1;
+    assert!(combination_len >= crate::MIN_SELECTOR_FAMILY_LEN);
     assert!(selectors
         .iter()
-        .all(|selector| selector.len() == query.len()));
+        .all(|selector| selector.len() == query_and_first_selector.len()));
 
-    if query.len() <= min_chunk_len {
-        let combination_len = selectors.len();
-        for (offset, query) in query.iter().enumerate() {
+    if query_and_first_selector.len() <= min_chunk_len {
+        for offset in 0..query_and_first_selector.len() {
+            let query = query_and_first_selector[offset];
             // For root `a`, combine the shared products
             //
             // q * product_{r < a}(r - q) * product_{r > a}(r - q).
-            let mut prefix = *query;
-            selectors[0][offset] = prefix;
+            let mut prefix = query;
+            query_and_first_selector[offset] = prefix;
             for assigned_root in 1..combination_len {
                 prefix *= F::from(assigned_root as u64) - query;
-                selectors[assigned_root][offset] = prefix;
+                selectors[assigned_root - 1][offset] = prefix;
             }
 
             let mut suffix = F::from(combination_len as u64) - query;
             for assigned_root in (0..combination_len - 1).rev() {
-                selectors[assigned_root][offset] *= suffix;
+                if assigned_root == 0 {
+                    query_and_first_selector[offset] *= suffix;
+                } else {
+                    selectors[assigned_root - 1][offset] *= suffix;
+                }
                 if assigned_root > 0 {
                     suffix *= F::from((assigned_root + 1) as u64) - query;
                 }
@@ -173,8 +178,8 @@ fn evaluate_compressed_selector_family<F: Field + From<u64>>(
         return;
     }
 
-    let midpoint = query.len() / 2;
-    let (query_left, query_right) = query.split_at(midpoint);
+    let midpoint = query_and_first_selector.len() / 2;
+    let (query_left, query_right) = query_and_first_selector.split_at_mut(midpoint);
     let (selector_left, selector_right) = selectors
         .into_iter()
         .map(|selector| selector.split_at_mut(midpoint))
@@ -422,14 +427,29 @@ where
     );
 
     let fft_twiddles = vk.domain.proving_key_twiddles();
-    let (fixed_polys, fixed_cosets) = vk
+    let (fixed_polys, mut fixed_cosets) = vk
         .domain
         .batch_lagrange_to_coeff_and_extended(&fixed, &fft_twiddles);
 
-    let compressed_selector_cosets = group_compressed_selectors(compressed_selectors)
-        .into_par_iter()
-        .map(|family| {
-            let mut selectors = (0..family.combination_len)
+    let mut selector_families_by_column = std::iter::repeat_with(|| None)
+        .take(fixed_cosets.len())
+        .collect::<Vec<_>>();
+    for family in group_compressed_selectors(compressed_selectors) {
+        let column_index = family.column_index;
+        assert!(selector_families_by_column[column_index]
+            .replace(family)
+            .is_none());
+    }
+
+    // Compressed-selector columns are allocated internally and only occur in
+    // the gate expressions replaced by the evaluator. Reuse each source coset
+    // as the first cached selector so a family retains only m - 1 new cosets.
+    let cached_selector_families = fixed_cosets
+        .par_iter_mut()
+        .zip(selector_families_by_column.into_par_iter())
+        .filter_map(|(query_and_first_selector, family)| {
+            let family = family?;
+            let mut selectors = (1..family.combination_len)
                 .map(|_| vk.domain.empty_extended())
                 .collect::<Vec<_>>();
             let selector_slices = selectors
@@ -437,30 +457,20 @@ where
                 .map(|selector| &mut selector[..])
                 .collect();
             let min_chunk_len = std::cmp::max(
-                fixed_cosets[family.column_index].len() / crate::multicore::current_num_threads(),
+                query_and_first_selector.len() / crate::multicore::current_num_threads(),
                 1,
             );
             evaluate_compressed_selector_family(
-                &fixed_cosets[family.column_index],
+                query_and_first_selector,
                 selector_slices,
                 min_chunk_len,
             );
 
-            family
-                .assigned_roots
-                .into_iter()
-                .zip(selectors)
-                .map(|(assigned_root, selector)| super::CompressedSelectorCoset {
-                    column_index: family.column_index,
-                    combination_len: family.combination_len,
-                    assigned_root,
-                    selector,
-                })
-                .collect::<Vec<_>>()
+            Some(super::CachedSelectorFamily {
+                column_index: family.column_index,
+                selectors: selectors.into_boxed_slice(),
+            })
         })
-        .collect::<Vec<Vec<_>>>()
-        .into_iter()
-        .flatten()
         .collect::<Vec<_>>();
 
     let permutation_pk =
@@ -507,7 +517,7 @@ where
         fixed_values: fixed,
         fixed_polys,
         fixed_cosets,
-        compressed_selector_cosets: compressed_selector_cosets.into(),
+        cached_selector_families: cached_selector_families.into(),
         permutation: permutation_pk,
         fft_twiddles,
         floor_plan,
@@ -545,7 +555,7 @@ mod tests {
     fn check_compressed_selector_family<F: Field + From<u64>>() {
         const COMBINATION_LEN: usize = 7;
 
-        let query = [
+        let original_query = [
             F::ZERO,
             F::ONE,
             F::from(2),
@@ -553,17 +563,24 @@ mod tests {
             -F::ONE,
             F::from(19),
         ];
-        let mut actual = vec![vec![F::ZERO; query.len()]; COMBINATION_LEN];
-        let selector_slices = actual
+        let mut query_and_first_selector = original_query;
+        let mut remaining_selectors =
+            vec![vec![F::ZERO; original_query.len()]; COMBINATION_LEN - 1];
+        let selector_slices = remaining_selectors
             .iter_mut()
             .map(|selector| &mut selector[..])
             .collect();
 
         // A one-element chunk exercises the parallel splitting path.
-        evaluate_compressed_selector_family(&query, selector_slices, 1);
+        evaluate_compressed_selector_family(&mut query_and_first_selector, selector_slices, 1);
 
-        for (assigned_root, selector) in actual.iter().enumerate() {
-            for (query, actual) in query.iter().zip(selector) {
+        for assigned_root in 0..COMBINATION_LEN {
+            let selector = if assigned_root == 0 {
+                &query_and_first_selector[..]
+            } else {
+                &remaining_selectors[assigned_root - 1]
+            };
+            for (query, actual) in original_query.iter().zip(selector) {
                 let expected = (1..=COMBINATION_LEN)
                     .filter(|root| *root != assigned_root + 1)
                     .fold(*query, |product, root| {
