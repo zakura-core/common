@@ -56,22 +56,16 @@ struct ProjectivePoint {
 #[derive(Clone, Copy)]
 struct DoubleAndAddWitness {
     lambda_1_numerator: pallas::Base,
-    lambda_1_denominator: pallas::Base,
     lambda_2_numerator: pallas::Base,
-    point: ProjectivePoint,
 }
 
 impl DoubleAndAddWitness {
-    fn lambda_1(&self) -> Assigned<pallas::Base> {
-        Assigned::Rational(self.lambda_1_numerator, self.lambda_1_denominator)
+    fn lambda_1(&self, point: &ProjectivePoint) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.lambda_1_numerator, point.z)
     }
 
-    fn lambda_2(&self) -> Assigned<pallas::Base> {
-        Assigned::Rational(self.lambda_2_numerator, self.point.z)
-    }
-
-    fn x(&self) -> Assigned<pallas::Base> {
-        Assigned::Rational(self.point.x, self.point.z_sq)
+    fn lambda_2(&self, point: &ProjectivePoint) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.lambda_2_numerator, point.z)
     }
 }
 
@@ -90,7 +84,7 @@ impl ProjectivePoint {
     /// the accumulator in Jacobian coordinates. The returned rational values
     /// are the same affine values assigned by the circuit's existing witness
     /// flow.
-    fn double_and_add(self, (x_p, y_p): (pallas::Base, pallas::Base)) -> DoubleAndAddWitness {
+    fn double_and_add(&mut self, (x_p, y_p): (pallas::Base, pallas::Base)) -> DoubleAndAddWitness {
         let z_cubed = self.z_sq * self.z;
         let h = x_p * self.z_sq - self.x;
         let r = y_p * z_cubed - self.y;
@@ -104,25 +98,30 @@ impl ProjectivePoint {
         let d_sq = d.square();
         let d_cubed = d_sq * d;
         let y_h_cubed = self.y * h_cubed;
-        let lambda_2_numerator = y_h_cubed.double() - r * d;
+        // Scale lambda_1 by d so it shares z_new as its denominator with
+        // lambda_2. The product is also needed for lambda_2's numerator.
+        let r_d = r * d;
+        let lambda_2_numerator = y_h_cubed.double() - r_d;
         let z_h = self.z * h;
         let z_new = z_h * d;
         let z_new_sq = z_new.square();
 
         let x_h_sq_d_sq = x_h_sq * d_sq;
-        let x_new = lambda_2_numerator.square() - (x_h_sq + x_r) * d_sq;
+        // Since d = x_h_sq - x_r, this saves a field multiplication over
+        // computing (x_h_sq + x_r) * d_sq directly.
+        let x_new = lambda_2_numerator.square() - x_h_sq_d_sq.double() + d_cubed;
         let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
 
+        *self = Self {
+            x: x_new,
+            y: y_new,
+            z: z_new,
+            z_sq: z_new_sq,
+        };
+
         DoubleAndAddWitness {
-            lambda_1_numerator: r,
-            lambda_1_denominator: z_h,
+            lambda_1_numerator: r_d,
             lambda_2_numerator,
-            point: Self {
-                x: x_new,
-                y: y_new,
-                z: z_new,
-                z_sq: z_new_sq,
-            },
         }
     }
 }
@@ -537,10 +536,16 @@ where
             // Assign `x_p`
             region.assign_advice(|| "x_p", config.double_and_add.x_p, offset + row, || x_p)?;
 
-            if let Some(point) = projective {
-                let witness = point.zip(gen).map(|(point, gen)| point.double_and_add(gen));
+            if let Some(point) = projective.as_mut() {
+                let witness = point
+                    .as_mut()
+                    .zip(gen)
+                    .map(|(point, gen)| point.double_and_add(gen));
 
-                let lambda_1 = witness.as_ref().map(DoubleAndAddWitness::lambda_1);
+                let lambda_1 = witness
+                    .as_ref()
+                    .zip(point.as_ref())
+                    .map(|(witness, point)| witness.lambda_1(point));
                 region.assign_advice(
                     || "lambda_1",
                     config.double_and_add.lambda_1,
@@ -548,7 +553,10 @@ where
                     || lambda_1,
                 )?;
 
-                let lambda_2 = witness.as_ref().map(DoubleAndAddWitness::lambda_2);
+                let lambda_2 = witness
+                    .as_ref()
+                    .zip(point.as_ref())
+                    .map(|(witness, point)| witness.lambda_2(point));
                 region.assign_advice(
                     || "lambda_2",
                     config.double_and_add.lambda_2,
@@ -556,7 +564,9 @@ where
                     || lambda_2,
                 )?;
 
-                let x_a_new = witness.as_ref().map(DoubleAndAddWitness::x);
+                let x_a_new = point
+                    .as_ref()
+                    .map(|point| Assigned::Rational(point.x, point.z_sq));
                 let x_a_cell = region.assign_advice(
                     || "x_a",
                     config.double_and_add.x_a,
@@ -565,7 +575,6 @@ where
                 )?;
 
                 x_a = x_a_cell.into();
-                projective = Some(witness.map(|witness| witness.point));
                 continue;
             }
 
@@ -737,6 +746,7 @@ mod tests {
         ff::{Field, PrimeField, PrimeFieldBits},
         Curve, Group,
     };
+    use halo2_proofs::plonk::Assigned;
     use pasta_curves::{arithmetic::CurveAffine, pallas};
 
     #[test]
@@ -766,21 +776,37 @@ mod tests {
         let mut point = ProjectivePoint::from_affine(expected.to_affine());
 
         for generator in SINSEMILLA_S.iter().copied() {
-            let witness = point.double_and_add(generator);
-            assert!(!witness.point.z.is_zero_vartime());
-
+            let accumulator = expected.to_affine();
+            let accumulator = accumulator.coordinates().unwrap();
             let generator = pallas::Affine::from_xy(generator.0, generator.1).unwrap();
+            let generator_coordinates = generator.coordinates().unwrap();
+            let lambda_1 = (*generator_coordinates.y() - *accumulator.y())
+                * (*generator_coordinates.x() - *accumulator.x())
+                    .invert()
+                    .unwrap();
+            let intermediate = (expected + pallas::Point::from(generator)).to_affine();
+            let intermediate = intermediate.coordinates().unwrap();
+            let lambda_2 = (*accumulator.y() - *intermediate.y())
+                * (*accumulator.x() - *intermediate.x()).invert().unwrap();
+
+            let witness =
+                point.double_and_add((*generator_coordinates.x(), *generator_coordinates.y()));
+            assert!(!point.z.is_zero_vartime());
+            assert_eq!(witness.lambda_1(&point).evaluate(), lambda_1);
+            assert_eq!(witness.lambda_2(&point).evaluate(), lambda_2);
+
             expected = expected.double() + pallas::Point::from(generator);
             let expected = expected.to_affine();
             let coordinates = expected.coordinates().unwrap();
-            assert_eq!(witness.x().evaluate(), *coordinates.x());
+            assert_eq!(
+                Assigned::Rational(point.x, point.z_sq).evaluate(),
+                *coordinates.x()
+            );
 
-            let z_sq = witness.point.z.square();
-            assert_eq!(witness.point.z_sq, z_sq);
-            assert_eq!(witness.point.x, *coordinates.x() * z_sq);
-            assert_eq!(witness.point.y, *coordinates.y() * z_sq * witness.point.z);
-
-            point = witness.point;
+            let z_sq = point.z.square();
+            assert_eq!(point.z_sq, z_sq);
+            assert_eq!(point.x, *coordinates.x() * z_sq);
+            assert_eq!(point.y, *coordinates.y() * z_sq * point.z);
         }
     }
 }
