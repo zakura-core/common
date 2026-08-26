@@ -91,14 +91,43 @@ struct WindowWitness {
     u: pallas::Base,
 }
 
-fn evaluate_lagrange_polynomial(coefficients: &[pallas::Base; H], window: usize) -> pallas::Base {
-    let window = pallas::Base::from(window as u64);
+fn evaluate_lagrange_polynomial_for_window<const WINDOW: usize>(
+    coefficients: &[pallas::Base; H],
+) -> pallas::Base {
     coefficients
         .iter()
         .rev()
         .copied()
-        .reduce(|accumulator, coefficient| accumulator * window + coefficient)
+        .reduce(|accumulator, coefficient| {
+            let product = match WINDOW {
+                1 => accumulator,
+                2 => accumulator.double(),
+                3 => accumulator.double() + accumulator,
+                4 => accumulator.double().double(),
+                5 => accumulator.double().double() + accumulator,
+                6 => (accumulator.double() + accumulator).double(),
+                7 => accumulator.double().double().double() - accumulator,
+                _ => unreachable!("window is a nonzero three-bit value"),
+            };
+            product + coefficient
+        })
         .expect("a fixed-base interpolation polynomial is non-empty")
+}
+
+fn evaluate_lagrange_polynomial(coefficients: &[pallas::Base; H], window: usize) -> pallas::Base {
+    // Witness generation is not required to be constant-time. Specializing on
+    // the three-bit window avoids full field multiplications in the Horner loop.
+    match window {
+        0 => coefficients[0],
+        1 => evaluate_lagrange_polynomial_for_window::<1>(coefficients),
+        2 => evaluate_lagrange_polynomial_for_window::<2>(coefficients),
+        3 => evaluate_lagrange_polynomial_for_window::<3>(coefficients),
+        4 => evaluate_lagrange_polynomial_for_window::<4>(coefficients),
+        5 => evaluate_lagrange_polynomial_for_window::<5>(coefficients),
+        6 => evaluate_lagrange_polynomial_for_window::<6>(coefficients),
+        7 => evaluate_lagrange_polynomial_for_window::<7>(coefficients),
+        _ => panic!("fixed-base window must fit in three bits"),
+    }
 }
 
 fn reconstruct_window_witnesses(
