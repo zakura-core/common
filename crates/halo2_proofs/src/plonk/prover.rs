@@ -1445,6 +1445,8 @@ fn compressed_selector_cache_preserves_proof() {
         crate::MIN_SELECTOR_FAMILY_LEN
     );
 
+    // A family omitted by the cache budget retains its source coset and takes
+    // the generic evaluator path. Restore that state for every cached family.
     let mut uncached_pk = pk.clone();
     assert!(std::sync::Arc::ptr_eq(
         &pk.cached_selector_families,
