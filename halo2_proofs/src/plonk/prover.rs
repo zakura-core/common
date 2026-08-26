@@ -1,4 +1,4 @@
-use ff::{BatchInvert, Field};
+use ff::Field;
 use group::Curve;
 use maybe_rayon::prelude::*;
 use rand_core::Rng;
@@ -20,7 +20,7 @@ use super::{
 use super::circuit::FloorPlan;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 use crate::{
-    arithmetic::CurveAffine,
+    arithmetic::{batch_invert_multi, CurveAffine},
     circuit::Value,
     plonk::Assigned,
     poly::{
@@ -111,7 +111,7 @@ impl<F: Field> AdviceWitness<F> {
     }
 
     fn evaluate(mut self) -> Vec<Polynomial<F, LagrangeCoeff>> {
-        self.denominators.iter_mut().batch_invert();
+        batch_invert_multi(&mut self.denominators);
         for (cell, denominator_inverse) in self.denominator_cells.into_iter().zip(self.denominators)
         {
             let column = cell / self.row_count;
