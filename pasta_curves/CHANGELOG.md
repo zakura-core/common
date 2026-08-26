@@ -47,10 +47,13 @@ and this project adheres to Rust's notion of
   the same canonicity contract. Requires BMI2 and ADX (Intel Broadwell /
   AMD Zen or newer; enabling it on an older CPU faults at runtime), and is
   a no-op on other architectures. Measured on Skylake-X: field
-  multiplication ~1.25x faster than the portable path and squaring (routed
-  through the multiplication) ~1.05x; a dedicated assembly squaring is left
-  as measured headroom (the AArch64 inline squaring runs 5-6% ahead of its
-  multiplication).
+  multiplication ~1.25x faster than the portable path and a dedicated
+  assembly squaring ~1.05-1.10x (2-5% ahead of squaring through the
+  multiplication, mirroring the AArch64 backend's own square-over-mul
+  margin). Two slower schedulings are pinned in the module docs so they
+  are not retried: squaring routed through the multiplication, and
+  interleaved-ADCX/ADOX Montgomery reduction sweeps (~10% slower than the
+  two short sequential sweeps on Skylake-X).
 - Fixed the `fp`/`fq` benches' `square` cell to call `Field::square`
   explicitly: the inherent (always-portable) `square` shadowed the
   runtime-dispatched trait method, so the cell measured the portable path
