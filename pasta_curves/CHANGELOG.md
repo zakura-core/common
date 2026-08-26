@@ -47,9 +47,15 @@ and this project adheres to Rust's notion of
   the same canonicity contract. Requires BMI2 and ADX (Intel Broadwell /
   AMD Zen or newer; enabling it on an older CPU faults at runtime), and is
   a no-op on other architectures. Measured on Skylake-X: field
-  multiplication ~1.25x faster than the portable path; squaring unchanged
-  (the portable dedicated squaring already matches the assembly product
-  there).
+  multiplication ~1.25x faster than the portable path and squaring (routed
+  through the multiplication) ~1.05x; a dedicated assembly squaring is left
+  as measured headroom (the AArch64 inline squaring runs 5-6% ahead of its
+  multiplication).
+- Fixed the `fp`/`fq` benches' `square` cell to call `Field::square`
+  explicitly: the inherent (always-portable) `square` shadowed the
+  runtime-dispatched trait method, so the cell measured the portable path
+  even under the assembly features and once mis-sized an assembly squaring
+  decision.
 - All of this release's new MSM machinery — the Eisenstein-orbit backend
   (`glv::orbit`), the magnitude-profiled backend planner, the prepared
   zero-checks (`glv::zero`), and the `arithmetic::PreparedZeroCheck` /

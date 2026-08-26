@@ -117,7 +117,12 @@ fn bench_fq_square(b: &mut Bencher) {
     let mut count = 0;
     b.iter(|| {
         let mut tmp = v[count];
-        tmp = tmp.square();
+        // The inherent (always-portable) `Fq::square` shadows
+        // `Field::square`, the runtime-dispatched production path; call the
+        // trait method explicitly so the assembly backends are what gets
+        // measured. A shadowed cell here once mis-sized an assembly
+        // squaring decision.
+        tmp = Field::square(&tmp);
         count = (count + 1) % SAMPLES;
         tmp
     });

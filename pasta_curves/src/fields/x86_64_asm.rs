@@ -2,12 +2,15 @@
 //!
 //! Montgomery multiplication is implemented as one inline `asm!` block using
 //! MULX (BMI2) with dual ADCX/ADOX carry chains (ADX). Squaring routes
-//! through the multiplication: on wide out-of-order cores the extra
-//! multiplier throughput of the plain product beats a dedicated
-//! cross-product/doubling squaring's longer dependency chains (measured on
-//! Apple silicon, where the dedicated inline squaring lost to the
-//! multiplication it was meant to beat), and one carefully-verified block is
-//! a smaller correctness surface than two.
+//! through the multiplication: one carefully-verified block is a smaller
+//! correctness surface than two, and the routed square still beats the
+//! portable dedicated squaring (21.0 vs 21.9 ns measured on Skylake-X). A
+//! dedicated assembly squaring is measured *headroom*, not a wash — the
+//! AArch64 backend's inline square runs 5–6% ahead of its multiplication
+//! (an earlier contrary reading came from a benchmark cell in which the
+//! inherent portable `square` shadowed `Field::square`; the fp/fq benches
+//! now call the trait path explicitly) — and is the natural follow-up
+//! alongside tighter scheduling of this block.
 //!
 //! The round structure is a transcription of the AArch64 backend
 //! (`aarch64_asm.rs`), which is itself the upstream Semolina
