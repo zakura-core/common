@@ -16,6 +16,11 @@ mod portable;
 ))]
 mod aarch64_asm;
 
+// Same containment for the x86-64 inline-assembly backend.
+#[allow(unsafe_code)]
+#[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+mod x86_64_asm;
+
 pub use fp::*;
 pub use fq::*;
 

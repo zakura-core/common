@@ -41,6 +41,15 @@ and this project adheres to Rust's notion of
 - Moved the portable (pure Rust) `Fp` and `Fq` wide-squaring routine into a
   shared `fields::portable` module. Both fields delegate to the same limb-array
   implementation; the algorithm and generated operations are unchanged.
+- Added an `x86_64-asm` feature: MULX/ADCX/ADOX Montgomery multiplication
+  for the Pasta fields on x86-64 (squaring routes through it), a
+  transcription of the `aarch64-asm` backend's five-limb CIOS rounds with
+  the same canonicity contract. Requires BMI2 and ADX (Intel Broadwell /
+  AMD Zen or newer; enabling it on an older CPU faults at runtime), and is
+  a no-op on other architectures. Measured on Skylake-X: field
+  multiplication ~1.25x faster than the portable path; squaring unchanged
+  (the portable dedicated squaring already matches the assembly product
+  there).
 - All of this release's new MSM machinery — the Eisenstein-orbit backend
   (`glv::orbit`), the magnitude-profiled backend planner, the prepared
   zero-checks (`glv::zero`), and the `arithmetic::PreparedZeroCheck` /
