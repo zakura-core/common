@@ -28,6 +28,10 @@ and this project adheres to Rust's notion of
   validated on interleaved `msm_backend_timings` grids on x86-64 over
   both the portable and assembly field arithmetic; summed planner cell
   losses roughly halve on both.
+- Portable squaring on x86-64 reduces the low half of its product first and
+  adds the high half once, as the assembly backend does, keeping four limbs
+  live through the cancellation rounds instead of eight. Other targets retain
+  their existing classical reduction, and multiplication is unchanged.
 - Moved the portable (pure Rust) `Fp` and `Fq` wide-squaring routine into a
   shared `fields::portable` module. Both fields delegate to the same limb-array
   implementation; the algorithm and generated operations are unchanged.
