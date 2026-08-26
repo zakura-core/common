@@ -8,6 +8,24 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added an `x86_64-asm` feature: MULX/ADCX/ADOX Montgomery multiplication
+  and a dedicated squaring for the Pasta fields on x86-64, a
+  transcription of the `aarch64-asm` backend's five-limb CIOS rounds with
+  the same canonicity contract. Requires BMI2 and ADX (Intel Broadwell /
+  AMD Zen or newer; enabling it on an older CPU faults at runtime), and is
+  a no-op on other architectures. Measured on Skylake-X: field
+  multiplication ~1.25x faster than the portable path and a dedicated
+  assembly squaring ~1.05-1.10x (2-5% ahead of squaring through the
+  multiplication, mirroring the AArch64 backend's own square-over-mul
+  margin). Two slower schedulings are pinned in the module docs so they
+  are not retried: squaring routed through the multiplication, and
+  interleaved-ADCX/ADOX Montgomery reduction sweeps (~10% slower than the
+  two short sequential sweeps on Skylake-X).
+- Fixed the `fp`/`fq` benches' `square` cell to call `Field::square`
+  explicitly: the inherent (always-portable) `square` shadowed the
+  runtime-dispatched trait method, so the cell measured the portable path
+  even under the assembly features and once mis-sized an assembly squaring
+  decision.
 - All of this release's new MSM machinery — the Eisenstein-orbit backend
   (`glv::orbit`), the magnitude-profiled backend planner, the prepared
   zero-checks (`glv::zero`), and the `arithmetic::PreparedZeroCheck` /
