@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- IPA opening proofs now keep late generator-fold rounds parallel instead of
+  forcing chunks of at least 32 points.
 - Lookup grand-product preparation now reuses its fraction buffer for product
   accumulation, avoiding one domain-sized allocation per lookup argument.
 - Parallel polynomial evaluation now uses eight chunks per worker for finer

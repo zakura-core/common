@@ -11,8 +11,6 @@ use crate::transcript::{EncodedChallenge, TranscriptWrite};
 use group::{Curve, Group};
 use std::io;
 
-const MIN_GENERATOR_COLLAPSE_CHUNK: usize = 32;
-
 fn ipa_round_multiexp<C: CurveAffine>(
     coeffs: &[C::Scalar],
     bases: &[C],
@@ -191,9 +189,7 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
     let len = g.len() / 2;
     let (g_lo, g_hi) = g.split_at_mut(len);
     let g_hi: &[C] = g_hi;
-    let chunk_size = len
-        .div_ceil(crate::multicore::current_num_threads())
-        .max(MIN_GENERATOR_COLLAPSE_CHUNK);
+    let chunk_size = len.div_ceil(crate::multicore::current_num_threads());
 
     crate::multicore::scope(|scope| {
         for (chunk_index, g_lo) in g_lo.chunks_mut(chunk_size).enumerate() {
