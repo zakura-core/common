@@ -48,8 +48,8 @@ and this project adheres to Rust's notion of
   while retaining transcript order.
 - Added an opt-in (default-off) `orbits` feature (forwarding `pasta_curves/orbits`)
 - Permutation product polynomials for independent proof circuits are now
-  prepared in parallel on pools with at least eight workers; smaller pools keep
-  the serial circuit path.
+  prepared in parallel when the worker pool has capacity for both outer
+  circuit tasks and their nested commitment and transform work.
   gating the prepared zero-check integration below. Built without it,
   `Params::prepare_zero_checks` is a no-op returning `false` and
   `MSM::eval` always evaluates the plain multiexp, so the machinery can

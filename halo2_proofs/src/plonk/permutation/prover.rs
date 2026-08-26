@@ -599,7 +599,7 @@ mod tests {
 
     const EQUALITY_COLUMNS: usize = 3;
     const PROOF_CIRCUITS: usize = 4;
-    const PARALLEL_THREADS: usize = 8;
+    const MULTICORE_THREADS: usize = 6;
     const PROOF_SEED: u64 = 0x5045_524d_5554_4508;
 
     #[derive(Clone, Copy)]
@@ -701,6 +701,6 @@ mod tests {
             transcript.finalize()
         };
 
-        assert_eq!(prove(1), prove(PARALLEL_THREADS));
+        assert_eq!(prove(1), prove(MULTICORE_THREADS));
     }
 }
