@@ -283,16 +283,20 @@ impl Argument {
             // where i is the index into modified_values, for the jth column in
             // the permutation
 
-            // Compute the evaluations of the permutation product polynomial
-            // over our domain, starting with z[0] = 1
-            let mut z = vec![last_z];
-            for row in 1..(params.n as usize) {
-                let mut tmp = z[row - 1];
-
-                tmp *= &modified_values[row - 1];
-                z.push(tmp);
+            // Compute the product polynomial in the fraction buffer, starting
+            // with the preceding set's final value (or one for the first set).
+            let usable_rows = params.n as usize - blinding_factors;
+            let mut state = last_z;
+            let (last, prefix) = modified_values[..usable_rows]
+                .split_last_mut()
+                .expect("the usable evaluation domain is non-empty");
+            for value in prefix {
+                let current = *value;
+                *value = state;
+                state *= &current;
             }
-            let mut z = domain.lagrange_from_vec(z);
+            *last = state;
+            let mut z = domain.lagrange_from_vec(modified_values);
             // Set blinding factors
             let blind = set_blinding(&mut z[params.n as usize - blinding_factors..]);
             // Set new last_z
