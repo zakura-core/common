@@ -9,7 +9,7 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 - Added an `x86_64-asm` feature: MULX/ADCX/ADOX Montgomery multiplication
-  for the Pasta fields on x86-64 (squaring routes through it), a
+  and a dedicated squaring for the Pasta fields on x86-64, a
   transcription of the `aarch64-asm` backend's five-limb CIOS rounds with
   the same canonicity contract. Requires BMI2 and ADX (Intel Broadwell /
   AMD Zen or newer; enabling it on an older CPU faults at runtime), and is

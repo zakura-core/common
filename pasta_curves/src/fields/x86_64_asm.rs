@@ -31,13 +31,18 @@
 //! allocatable registers with twelve limbs pinned. The loads are L1 hits off
 //! the multiplier's critical path.
 //!
-//! Canonicity contract (same as the AArch64 backend): `rhs` must be
-//! canonical (below the modulus) — the five-limb accumulator drops the
-//! candidate's would-be fifth limb, and for `rhs >= R - p` the result would
-//! be an incorrect residue that still looks canonical. `lhs` may be an
+//! Canonicity contract (same as the AArch64 backend): `rhs` in `mul` and
+//! the input of `square` must be canonical (below the modulus) — the
+//! five-limb accumulator drops the candidate's would-be fifth limb, and
+//! for `rhs >= R - p` the result would be an incorrect residue that still
+//! looks canonical. Both routines debug-assert that precondition, and with
+//! both operands canonical they are always safe. `lhs` in `mul` may be an
 //! unreduced 256-bit value only if every `rhs` limb is at most `2^64 - 4`
-//! (the accumulator no-wrap bound). Both requirements are debug-asserted at
-//! the boundary a canonical caller crosses; outputs are canonical.
+//! (the accumulator no-wrap bound) — a condition that is *not* asserted:
+//! no current caller passes an unreduced `lhs` (`from_u512`, the one place
+//! that produces one, uses the portable path), and the
+//! `x86_64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable` tests
+//! in `fp.rs`/`fq.rs` pin the allowance. Outputs are canonical.
 //!
 //! The block is straight-line: no branches, no data-dependent memory
 //! addresses, and a CMOV-based final conditional subtraction, so the code is
