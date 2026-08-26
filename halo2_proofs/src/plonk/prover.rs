@@ -4,6 +4,7 @@ use maybe_rayon::prelude::*;
 use rand_core::Rng;
 use std::iter;
 use std::ops::RangeTo;
+use std::time::{Duration, Instant};
 
 use super::{
     circuit::{
@@ -227,6 +228,95 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
     fn pop_namespace(&mut self, _: Option<String>) {
         // Do nothing; we don't care about namespaces in this context.
     }
+}
+
+/// Timings and output from the production advice-witness path.
+///
+/// This is only present on diagnostic benchmark branches.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct AdviceWitnessGenerationBenchmark<F: Field> {
+    /// Final evaluated advice polynomials.
+    pub advice: Vec<Vec<Polynomial<F, LagrangeCoeff>>>,
+    /// Time spent allocating and initializing the witness collectors.
+    pub allocation: Duration,
+    /// Time spent synthesizing the circuits into the collectors.
+    pub synthesis: Duration,
+    /// Time spent resolving rational advice values.
+    pub resolution: Duration,
+    /// Total time from collector allocation through rational resolution.
+    pub total: Duration,
+}
+
+/// Runs the production advice-witness path without the rest of the prover.
+///
+/// This is only present on diagnostic benchmark branches.
+#[doc(hidden)]
+pub fn benchmark_advice_witness_generation<
+    C: CurveAffine,
+    ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
+>(
+    params: &Params<C>,
+    pk: &ProvingKey<C>,
+    circuits: &[ConcreteCircuit],
+    instances: &[&[&[C::Scalar]]],
+) -> Result<AdviceWitnessGenerationBenchmark<C::Scalar>, Error>
+where
+    <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
+{
+    if circuits.len() != instances.len()
+        || instances
+            .iter()
+            .any(|instance| instance.len() != pk.vk.cs.num_instance_columns)
+    {
+        return Err(Error::InvalidInstances);
+    }
+
+    let domain = &pk.vk.domain;
+    let mut configured_meta = ConstraintSystem::default();
+    let config = ConcreteCircuit::configure(&mut configured_meta);
+    let meta = &pk.vk.cs;
+    let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
+
+    let total_started = Instant::now();
+    let allocation_started = Instant::now();
+    let mut witnesses = instances
+        .iter()
+        .map(|instances| WitnessCollection {
+            k: params.k,
+            advice: AdviceWitness::new(vec![domain.empty_lagrange(); meta.num_advice_columns]),
+            instances,
+            usable_rows: ..unusable_rows_start,
+            _marker: std::marker::PhantomData,
+        })
+        .collect::<Vec<_>>();
+    let allocation = allocation_started.elapsed();
+
+    let synthesis_started = Instant::now();
+    ConcreteCircuit::FloorPlanner::synthesize_batch(
+        &mut witnesses,
+        circuits,
+        config,
+        &meta.constants,
+        pk.floor_plan.as_ref(),
+    )?;
+    let synthesis = synthesis_started.elapsed();
+
+    let resolution_started = Instant::now();
+    let advice = witnesses
+        .into_iter()
+        .map(|witness| witness.advice.evaluate())
+        .collect();
+    let resolution = resolution_started.elapsed();
+    let total = total_started.elapsed();
+
+    Ok(AdviceWitnessGenerationBenchmark {
+        advice,
+        allocation,
+        synthesis,
+        resolution,
+        total,
+    })
 }
 
 /// This creates a proof for the provided `circuit` when given the public
