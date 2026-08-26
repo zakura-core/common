@@ -450,7 +450,38 @@ impl Fq {
             target_vendor = "apple"
         )))]
         {
-            (0..n).fold(*self, |acc, _| acc.square()).mul(by)
+            // Leave the accumulator unreduced between squarings. The closing
+            // multiplication canonicalizes its result.
+            Fq(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul(by)
+        }
+    }
+
+    /// Squares `self` `n` times (`n` must be at least 1). Reached through
+    /// [`SqrtTableHelpers`], which nothing uses without `sqrt-table`.
+    #[cfg_attr(not(feature = "sqrt-table"), allow(dead_code))]
+    #[inline]
+    fn sqr_n_runtime(&self, n: u32) -> Self {
+        assert!(n >= 1);
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        ))]
+        {
+            (0..n).fold(*self, |acc, _| acc.square_runtime())
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
+        )))]
+        {
+            Fq(portable::canonicalize(
+                &portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV),
+                &MODULUS.0,
+            ))
         }
     }
 
@@ -686,9 +717,9 @@ impl ff::Field for Fq {
             Some(res) => res,
             None => return Self::one(),
         };
-        // Flush the squarings for any trailing zero bits.
-        for _ in 0..squares {
-            res = res.square_runtime();
+        // Flush any trailing zero bits as one lazy squaring chain.
+        if squares != 0 {
+            res = res.sqr_n_runtime(squares);
         }
         res
     }
@@ -864,7 +895,15 @@ impl SqrtTableHelpers for Fq {
         let sq = sp.sqr_n_mul_runtime(4, &s111);
         let sr = sq.sqr_n_mul_runtime(5, &s1011);
         let ss = sr.sqr_n_mul_runtime(3, self);
-        (0..4).fold(ss, |x, _| x.square_runtime()) // st
+        ss.sqr_n_runtime(4) // st
+    }
+
+    fn sqr_n(&self, n: u32) -> Self {
+        self.sqr_n_runtime(n)
+    }
+
+    fn sqr_n_mul(&self, n: u32, by: &Self) -> Self {
+        self.sqr_n_mul_runtime(n, by)
     }
 
     fn sqrt_hash_key(&self) -> u32 {
@@ -1099,7 +1138,6 @@ fn low_half_reduction_matches_classical() {
             &MODULUS.0,
         ))
     };
-
     // Any `t_lo + R * t_hi` with canonical `t_hi` is below `R * q`, the whole
     // domain both reductions accept; squares and products are a subset.
     for _ in 0..20_000 {
@@ -1109,7 +1147,6 @@ fn low_half_reduction_matches_classical() {
             lo.0[0], lo.0[1], lo.0[2], lo.0[3], hi.0[0], hi.0[1], hi.0[2], hi.0[3],
         ];
         assert_eq!(low_half(t), classical(t));
-
         let a = <Fq as ff::Field>::random(&mut rng);
         let u = a.square_unreduced();
         assert_eq!(a.square(), classical(u));
@@ -1132,6 +1169,85 @@ fn low_half_reduction_matches_classical() {
         assert_eq!(low_half(t), classical(t));
     }
     assert_eq!(max.square(), classical(max.square_unreduced()));
+}
+
+#[test]
+fn sqr_n_chains_match_eager_squaring() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x71; 16]);
+
+    // Test chains much longer than any production caller uses.
+    for _ in 0..100 {
+        let a = <Fq as ff::Field>::random(&mut rng);
+        let by = <Fq as ff::Field>::random(&mut rng);
+
+        let mut eager = a;
+        for n in 1..=512u32 {
+            eager = eager.square();
+            assert_eq!(a.sqr_n_runtime(n), eager, "sqr_n, n = {n}");
+            assert_eq!(
+                a.sqr_n_mul_runtime(n, &by),
+                eager * by,
+                "sqr_n_mul, n = {n}"
+            );
+        }
+    }
+
+    assert_eq!(Fq::zero().sqr_n_runtime(7), Fq::zero());
+    assert_eq!(Fq::one().sqr_n_mul_runtime(7, &Fq::one()), Fq::one());
+    let a = <Fq as ff::Field>::random(&mut rng);
+    assert_eq!(a.sqr_n(9), a.sqr_n_runtime(9));
+    assert_eq!(a.sqr_n_mul(9, &a), a.sqr_n_mul_runtime(9, &a));
+}
+
+#[test]
+fn sqr_n_lazy_accumulator_stays_below_two_q() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x9d; 16]);
+
+    let two_q = {
+        let (d0, c0) = MODULUS.0[0].overflowing_add(MODULUS.0[0]);
+        let (d1, c1) = MODULUS.0[1].overflowing_add(MODULUS.0[1]);
+        let (d1, c2) = d1.overflowing_add(c0 as u64);
+        let (d2, c3) = MODULUS.0[2].overflowing_add(MODULUS.0[2]);
+        let (d2, c4) = d2.overflowing_add((c1 | c2) as u64);
+        let d3 = MODULUS.0[3]
+            .wrapping_add(MODULUS.0[3])
+            .wrapping_add((c3 | c4) as u64);
+        [d0, d1, d2, d3]
+    };
+    let below_two_q = |x: &[u64; 4]| {
+        let mut i = 4;
+        while i > 0 {
+            i -= 1;
+            if x[i] != two_q[i] {
+                return x[i] < two_q[i];
+            }
+        }
+        false
+    };
+
+    // Exercise random starts and the largest canonical value.
+    for i in 0..51 {
+        let start = if i < 50 {
+            <Fq as ff::Field>::random(&mut rng).0
+        } else {
+            (-Fq::one()).0
+        };
+        let mut acc = start;
+        for n in 1..=2048u32 {
+            acc = portable::sqr_n_lazy(&acc, 1, &MODULUS.0, INV);
+            assert!(below_two_q(&acc), "accumulator reached 2q at step {n}");
+            if n.is_power_of_two() {
+                assert_eq!(
+                    Fq(portable::canonicalize(&acc, &MODULUS.0)),
+                    Fq(start).sqr_n_runtime(n)
+                );
+            }
+        }
+    }
 }
 
 #[test]

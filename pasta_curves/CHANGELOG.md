@@ -28,6 +28,11 @@ and this project adheres to Rust's notion of
   validated on interleaved `msm_backend_timings` grids on x86-64 over
   both the portable and assembly field arithmetic; summed planner cell
   losses roughly halve on both.
+- Portable squaring chains no longer canonicalize after every squaring,
+  including trailing squarings in variable-time exponentiation. The x86-64
+  path overlaps upper-half products with reduction specialized to the sparse
+  Pasta modulus limbs. Square-root tables use the chains on every
+  architecture; Apple AArch64 keeps its existing assembly paths.
 - Portable squaring on x86-64 reduces the low half of its product first and
   adds the high half once, as the assembly backend does, keeping four limbs
   live through the cancellation rounds instead of eight. Other targets retain
