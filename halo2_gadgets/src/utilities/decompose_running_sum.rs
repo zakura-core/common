@@ -29,7 +29,7 @@ use halo2_proofs::{
     poly::Rotation,
 };
 
-use super::range_check;
+use super::{inverse_power_of_two, range_check};
 
 use std::marker::PhantomData;
 
@@ -175,7 +175,7 @@ impl<F: PrimeFieldBits, const WINDOW_NUM_BITS: usize> RunningSumConfig<F, WINDOW
         // Assign running sum `z_{i+1}` = (z_i - k_i) / (2^K) for i = 0..=n-1.
         // Outside of this helper, z_0 = alpha must have already been loaded into the
         // `z` column at `offset`.
-        let two_pow_k_inv = Value::known(F::from(1 << WINDOW_NUM_BITS as u64).invert().unwrap());
+        let two_pow_k_inv = Value::known(inverse_power_of_two::<F>(WINDOW_NUM_BITS));
         for (i, word) in words.iter().enumerate() {
             // z_next = (z_cur - word) / (2^K)
             let z_next = {

@@ -207,7 +207,7 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
         // For `element` = a_0 + 2^10 a_1 + ... + 2^{120} a_{12}}, initialize z_0 = `element`.
         // If `element` fits in 130 bits, we end up with z_{13} = 0.
         let mut z = element;
-        let inv_two_pow_k = F::from(1u64 << K).invert().unwrap();
+        let inv_two_pow_k = inverse_power_of_two::<F>(K);
         for (idx, word) in words.iter().enumerate() {
             // Enable q_lookup on this row
             self.config().q_lookup.enable(region, idx)?;
@@ -478,7 +478,7 @@ impl<F: PrimeFieldBits, const K: usize> LookupRangeCheck<F, K> for LookupRangeCh
         )?;
 
         // Assign 2^{-num_bits} from a fixed column.
-        let inv_two_pow_s = F::from(1 << num_bits).invert().unwrap();
+        let inv_two_pow_s = inverse_power_of_two::<F>(num_bits);
         region.assign_advice_from_constant(
             || format!("2^(-{})", num_bits),
             self.running_sum,
@@ -860,7 +860,7 @@ impl PallasLookupRangeCheck for PallasLookupRangeCheck4_5BConfig {}
 
 #[cfg(test)]
 mod tests {
-    use super::super::lebs2ip;
+    use super::super::{inverse_power_of_two, lebs2ip};
 
     use ff::{Field, PrimeFieldBits};
     use halo2_proofs::{
@@ -944,7 +944,7 @@ mod tests {
                         .collect::<Vec<_>>()
                 };
                 let expected_zs = {
-                    let inv_two_pow_k = F::from(1 << K).invert().unwrap();
+                    let inv_two_pow_k = inverse_power_of_two::<F>(K);
                     chunks.iter().fold(vec![element], |mut zs, a_i| {
                         // z_{i + 1} = (z_i - a_i) / 2^{K}
                         let z = (zs[zs.len() - 1] - a_i) * inv_two_pow_k;
@@ -1196,10 +1196,7 @@ mod tests {
         let shifted = pallas::Base::from((1 << num_bits) - 1);
         // Recall that shifted = element * 2^{K-s}
         //          => element = shifted * 2^{s-K}
-        let element = shifted
-            * pallas::Base::from(1 << (K as u64 - num_bits))
-                .invert()
-                .unwrap();
+        let element = shifted * inverse_power_of_two::<pallas::Base>(K - num_bits as usize);
         let error = Err(vec![VerifyFailure::Lookup {
             lookup_index: 0,
             location: FailureLocation::InRegion {

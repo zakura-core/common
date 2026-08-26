@@ -13,6 +13,11 @@ pub mod cond_swap;
 pub mod decompose_running_sum;
 pub mod lookup_range_check;
 
+fn inverse_power_of_two<F: PrimeField>(exponent: usize) -> F {
+    let exponent = u64::try_from(exponent).expect("the exponent fits into u64");
+    F::TWO_INV.pow_vartime([exponent])
+}
+
 /// A type that has a value at either keygen or proving time.
 pub trait FieldValue<F: Field> {
     /// Returns the value of this type.
@@ -268,6 +273,17 @@ mod tests {
     use rand::rng;
     use std::convert::TryInto;
     use std::iter;
+
+    #[test]
+    fn inverse_power_of_two_matches_multiplicative_inverse() {
+        for exponent in 0..=16 {
+            let power = pallas::Base::from(2).pow_vartime([exponent]);
+            assert_eq!(
+                inverse_power_of_two::<pallas::Base>(exponent as usize) * power,
+                pallas::Base::ONE
+            );
+        }
+    }
 
     #[test]
     fn test_range_check() {

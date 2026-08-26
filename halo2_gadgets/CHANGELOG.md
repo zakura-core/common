@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Range-check running-sum witnesses now derive inverse powers of two from the
+  field's existing `TWO_INV` constant instead of repeating field inversions.
 - Sinsemilla witness generation now uses the configured field backend for
   projective squares and reuses precomputed first-word witnesses for Orchard
   MerkleCRH hashing.
