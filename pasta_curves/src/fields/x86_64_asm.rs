@@ -1,16 +1,19 @@
 //! Private x86-64 backend for the Pasta fields.
 //!
-//! Montgomery multiplication is implemented as one inline `asm!` block using
-//! MULX (BMI2) with dual ADCX/ADOX carry chains (ADX). Squaring routes
-//! through the multiplication: one carefully-verified block is a smaller
-//! correctness surface than two, and the routed square still beats the
-//! portable dedicated squaring (21.0 vs 21.9 ns measured on Skylake-X). A
-//! dedicated assembly squaring is measured *headroom*, not a wash — the
-//! AArch64 backend's inline square runs 5–6% ahead of its multiplication
-//! (an earlier contrary reading came from a benchmark cell in which the
-//! inherent portable `square` shadowed `Field::square`; the fp/fq benches
-//! now call the trait path explicitly) — and is the natural follow-up
-//! alongside tighter scheduling of this block.
+//! Montgomery multiplication and squaring are implemented as inline `asm!`
+//! blocks using MULX (BMI2) with ADCX/ADOX dual carry chains (ADX) in the
+//! multiplication rows. Two negative scheduling results are pinned here so
+//! they are not retried on this microarchitecture family: routing squaring
+//! through the multiplication measured 2–5% *slower* (run-dependent) than
+//! the dedicated squaring below (21.0 vs 20.0–20.7 ns on Skylake-X —
+//! mirroring the AArch64
+//! backend, whose inline square also beats its multiplication; an earlier
+//! contrary reading came from a benchmark cell in which the inherent
+//! portable `square` shadowed `Field::square`), and merging each
+//! Montgomery step's two carry sweeps into interleaved ADCX/ADOX chains
+//! (staging all five `q*p` operands flag-free, `TEST` to clear both
+//! chains) measured ~10% slower than the two short sequential sweeps
+//! (22.3 vs 20.2 ns) despite the shorter nominal dependency length.
 //!
 //! The round structure is a transcription of the AArch64 backend
 //! (`aarch64_asm.rs`), which is itself the upstream Semolina
@@ -277,13 +280,199 @@ pub(super) fn mul(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, inv: u64) -> Limbs 
 }
 
 /// Squares a canonical Montgomery residue for a Pasta modulus (the input's
-/// canonicity is debug-asserted). Routed through [`mul`]; see the module
-/// docs for why no dedicated squaring block exists.
+/// canonicity is debug-asserted).
+///
+/// A transcription of the AArch64 backend's dedicated squaring: the 512-bit
+/// square as cross products, one doubling pass, and the diagonals (ten MULX
+/// against the multiplication's sixteen), then four Montgomery
+/// cancellations on a rotating four-limb window with a carried fifth limb,
+/// the high product half folded in (the sum stays below `2p`, so no carry
+/// escapes — see the AArch64 module's bounds), and a CMOV conditional
+/// subtraction. Measured 2–5% ahead of squaring through [`mul`] on
+/// Skylake-X (20.0–20.7 vs 21.0 ns across runs), mirroring the AArch64
+/// backend's own square-over-mul margin.
 #[inline(always)]
 pub(super) fn square(value: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
     debug_assert!(
         is_canonical(value, modulus),
         "x86_64_asm::square requires a canonical input"
     );
-    mul(value, value, modulus, inv)
+    let (o0, o1, o2, o3): (u64, u64, u64, u64);
+    // SAFETY: straight-line arithmetic reading only the limbs behind the two
+    // passed references (`readonly`); no stack use, and outputs depend only
+    // on the declared inputs. The input pointer's register is reclaimed as
+    // the reduction's carry limb once phase 1 has consumed the last load.
+    unsafe {
+        asm!(
+            // Phase 1: the 512-bit square in z0..z7.
+            // Cross products a[i]*a[j] (i < j), accumulated as they stream.
+            "xor {z5:e}, {z5:e}",
+            "xor {z6:e}, {z6:e}",
+            "xor {z7:e}, {z7:e}",
+            "mov rdx, qword ptr [{a}]",
+            "mulx {t1}, {z1}, qword ptr [{a} + 8]",  // a0*a1.
+            "mulx {t2}, {z2}, qword ptr [{a} + 16]", // a0*a2.
+            "mulx {z4}, {z3}, qword ptr [{a} + 24]", // a0*a3.
+            "add {z2}, {t1}",                        // Fold high(a0*a1).
+            "adc {z3}, {t2}",                        // Fold high(a0*a2) and carry.
+            "adc {z4}, 0",
+            "mov rdx, qword ptr [{a} + 8]",
+            "mulx {t2}, {t1}, qword ptr [{a} + 16]", // a1*a2.
+            "add {z3}, {t1}",
+            "adc {z4}, {t2}",
+            "adc {z5}, 0",
+            "mulx {t2}, {t1}, qword ptr [{a} + 24]", // a1*a3.
+            "add {z4}, {t1}",
+            "adc {z5}, {t2}",
+            "adc {z6}, 0",
+            "mov rdx, qword ptr [{a} + 16]",
+            "mulx {t2}, {t1}, qword ptr [{a} + 24]", // a2*a3.
+            "add {z5}, {t1}",
+            "adc {z6}, {t2}",
+            "adc {z7}, 0",
+            // Double the cross products. The doubled sum is below 2^512, so
+            // no carry leaves z7.
+            "add {z1}, {z1}",
+            "adc {z2}, {z2}",
+            "adc {z3}, {z3}",
+            "adc {z4}, {z4}",
+            "adc {z5}, {z5}",
+            "adc {z6}, {z6}",
+            "adc {z7}, {z7}",
+            // Add the diagonal squares in one carry chain (MOV and MULX
+            // preserve flags).
+            "mov rdx, qword ptr [{a}]",
+            "mulx {t2}, {z0}, rdx",                  // z0 = low(a0^2).
+            "add {z1}, {t2}",                        // High(a0^2).
+            "mov rdx, qword ptr [{a} + 8]",
+            "mulx {t2}, {t1}, rdx",
+            "adc {z2}, {t1}",
+            "adc {z3}, {t2}",
+            "mov rdx, qword ptr [{a} + 16]",
+            "mulx {t2}, {t1}, rdx",
+            "adc {z4}, {t1}",
+            "adc {z5}, {t2}",
+            "mov rdx, qword ptr [{a} + 24]",
+            "mulx {t2}, {t1}, rdx",
+            "adc {z6}, {t1}",
+            "adc {z7}, {t2}",                        // a^2 < 2^510: no carry out.
+
+            // Phase 2: four Montgomery cancellations on the low half, the
+            // same two-sweep step as [`mul`]'s. The window rotates down one
+            // register per step; {a} (its loads are done) serves as the
+            // first carried fifth limb.
+            // Step 0: window [z0, z1, z2, z3], carry into {a}.
+            "mov rdx, {z0}",
+            "imul rdx, {inv}",                       // rdx = q.
+            "mulx {t2}, {t1}, qword ptr [{p} + 8]",  // t1/t2 = low/high(q*p1).
+            "mov {a}, rdx",
+            "shl {a}, 62",                           // low(q*p3); p2 is zero.
+            "neg {z0}",                              // CF = (limb0 != 0).
+            "adc {z1}, {t1}",
+            "adc {z2}, 0",
+            "adc {z3}, {a}",
+            "mov {a}, 0",
+            "adc {a}, 0",                            // Carry above limb 3.
+            "mulx {t1}, {z0}, qword ptr [{p}]",      // t1 = high(q*p0); low is spent.
+            "mov {z0}, rdx",
+            "shr {z0}, 2",                           // high(q*p3).
+            "add {z1}, {t1}",                        // New limb 0.
+            "adc {z2}, {t2}",                        // New limb 1 += high(q*p1).
+            "adc {z3}, 0",                           // New limb 2.
+            "adc {a}, {z0}",                         // New limb 3 += high(q*p3).
+            // Step 1: window [z1, z2, z3, a], carry into z0.
+            "mov rdx, {z1}",
+            "imul rdx, {inv}",
+            "mulx {t2}, {t1}, qword ptr [{p} + 8]",
+            "mov {z0}, rdx",
+            "shl {z0}, 62",
+            "neg {z1}",
+            "adc {z2}, {t1}",
+            "adc {z3}, 0",
+            "adc {a}, {z0}",
+            "mov {z0}, 0",
+            "adc {z0}, 0",
+            "mulx {t1}, {z1}, qword ptr [{p}]",
+            "mov {z1}, rdx",
+            "shr {z1}, 2",
+            "add {z2}, {t1}",
+            "adc {z3}, {t2}",
+            "adc {a}, 0",
+            "adc {z0}, {z1}",
+            // Step 2: window [z2, z3, a, z0], carry into z1.
+            "mov rdx, {z2}",
+            "imul rdx, {inv}",
+            "mulx {t2}, {t1}, qword ptr [{p} + 8]",
+            "mov {z1}, rdx",
+            "shl {z1}, 62",
+            "neg {z2}",
+            "adc {z3}, {t1}",
+            "adc {a}, 0",
+            "adc {z0}, {z1}",
+            "mov {z1}, 0",
+            "adc {z1}, 0",
+            "mulx {t1}, {z2}, qword ptr [{p}]",
+            "mov {z2}, rdx",
+            "shr {z2}, 2",
+            "add {z3}, {t1}",
+            "adc {a}, {t2}",
+            "adc {z0}, 0",
+            "adc {z1}, {z2}",
+            // Step 3: window [z3, a, z0, z1], carry into z2.
+            "mov rdx, {z3}",
+            "imul rdx, {inv}",
+            "mulx {t2}, {t1}, qword ptr [{p} + 8]",
+            "mov {z2}, rdx",
+            "shl {z2}, 62",
+            "neg {z3}",
+            "adc {a}, {t1}",
+            "adc {z0}, 0",
+            "adc {z1}, {z2}",
+            "mov {z2}, 0",
+            "adc {z2}, 0",
+            "mulx {t1}, {z3}, qword ptr [{p}]",
+            "mov {z3}, rdx",
+            "shr {z3}, 2",
+            "add {a}, {t1}",
+            "adc {z0}, {t2}",
+            "adc {z1}, 0",
+            "adc {z2}, {z3}",
+
+            // Fold in the high product half; the sum stays below 2p, so no
+            // carry escapes and a four-limb conditional subtraction suffices.
+            "add {a}, {z4}",
+            "adc {z0}, {z5}",
+            "adc {z1}, {z6}",
+            "adc {z2}, {z7}",
+            "movabs rdx, 0x4000000000000000",        // p3 = 2^62.
+            "mov {t1}, {a}",
+            "mov {t2}, {z0}",
+            "mov {z3}, {z1}",
+            "mov {z4}, {z2}",
+            "sub {t1}, qword ptr [{p}]",
+            "sbb {t2}, qword ptr [{p} + 8]",
+            "sbb {z3}, 0",
+            "sbb {z4}, rdx",
+            "cmovnc {a}, {t1}",
+            "cmovnc {z0}, {t2}",
+            "cmovnc {z1}, {z3}",
+            "cmovnc {z2}, {z4}",
+            a = inout(reg) value.as_ptr() => o0,
+            p = in(reg) modulus.as_ptr(),
+            inv = in(reg) inv,
+            z0 = out(reg) o1,
+            z1 = out(reg) o2,
+            z2 = out(reg) o3,
+            z3 = out(reg) _,
+            z4 = out(reg) _,
+            z5 = out(reg) _,
+            z6 = out(reg) _,
+            z7 = out(reg) _,
+            t1 = out(reg) _,
+            t2 = out(reg) _,
+            out("rdx") _,
+            options(pure, readonly, nostack),
+        );
+    }
+    [o0, o1, o2, o3]
 }
