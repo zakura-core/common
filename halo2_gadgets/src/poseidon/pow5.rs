@@ -257,7 +257,7 @@ impl<F: Field, S: Spec<F, WIDTH, RATE>, const WIDTH: usize, const RATE: usize>
                     )
                 })?;
 
-                Ok(state.0)
+                Ok(state.words)
             },
         )
     }
@@ -425,7 +425,10 @@ impl<F: Field> Var<F> for StateWord<F> {
 }
 
 #[derive(Debug)]
-struct Pow5State<F: Field, const WIDTH: usize>([StateWord<F>; WIDTH]);
+struct Pow5State<F: Field, const WIDTH: usize> {
+    words: [StateWord<F>; WIDTH],
+    values: Value<[F; WIDTH]>,
+}
 
 impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
     fn pow_5(value: F) -> F {
@@ -441,22 +444,15 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         offset: usize,
     ) -> Result<Self, Error> {
         Self::round(region, config, round, offset, config.s_full, |_| {
-            let q = self.0.iter().enumerate().map(|(idx, word)| {
-                word.0
-                    .value()
-                    .map(|v| *v + config.round_constants[round][idx])
-            });
-            let r: Value<Vec<F>> = q.map(|q| q.map(Self::pow_5)).collect();
             let m = &config.m_reg;
-            let state = m.iter().map(|m_i| {
-                r.as_ref().map(|r| {
-                    r.iter()
-                        .enumerate()
-                        .fold(F::ZERO, |acc, (j, r_j)| acc + m_i[j] * r_j)
-                })
+            let state = self.values.map(|state| {
+                let r: [F; WIDTH] = std::array::from_fn(|idx| {
+                    Self::pow_5(state[idx] + config.round_constants[round][idx])
+                });
+                std::array::from_fn(|i| (0..WIDTH).fold(F::ZERO, |acc, j| acc + m[i][j] * r[j]))
             });
 
-            Ok((round + 1, state.collect::<Vec<_>>().try_into().unwrap()))
+            Ok((round + 1, state))
         })
     }
 
@@ -469,34 +465,36 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
     ) -> Result<Self, Error> {
         Self::round(region, config, round, offset, config.s_partial, |region| {
             let m = &config.m_reg;
-            let p: Value<Vec<_>> = self.0.iter().map(|word| word.0.value().cloned()).collect();
-
-            let r: Value<Vec<_>> = p.map(|p| {
-                let r_0 = Self::pow_5(p[0] + config.round_constants[round][0]);
-                let r_i = p[1..]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p_i)| *p_i + config.round_constants[round][i + 1]);
-                std::iter::empty().chain(Some(r_0)).chain(r_i).collect()
+            let round_values = self.values.map(|state| {
+                let r: [F; WIDTH] = std::array::from_fn(|i| {
+                    if i == 0 {
+                        Self::pow_5(state[i] + config.round_constants[round][i])
+                    } else {
+                        state[i] + config.round_constants[round][i]
+                    }
+                });
+                let p_mid: [F; WIDTH] = std::array::from_fn(|i| {
+                    (0..WIDTH).fold(F::ZERO, |acc, j| acc + m[i][j] * r[j])
+                });
+                let r_mid: [F; WIDTH] = std::array::from_fn(|i| {
+                    if i == 0 {
+                        Self::pow_5(p_mid[i] + config.round_constants[round + 1][i])
+                    } else {
+                        p_mid[i] + config.round_constants[round + 1][i]
+                    }
+                });
+                let state = std::array::from_fn(|i| {
+                    (0..WIDTH).fold(F::ZERO, |acc, j| acc + m[i][j] * r_mid[j])
+                });
+                (r[0], state)
             });
 
             region.assign_advice(
                 || format!("round_{} partial_sbox", round),
                 config.partial_sbox,
                 offset,
-                || r.as_ref().map(|r| r[0]),
+                || round_values.as_ref().map(|(partial_sbox, _)| *partial_sbox),
             )?;
-
-            let p_mid: Value<Vec<_>> = m
-                .iter()
-                .map(|m_i| {
-                    r.as_ref().map(|r| {
-                        m_i.iter()
-                            .zip(r.iter())
-                            .fold(F::ZERO, |acc, (m_ij, r_j)| acc + *m_ij * r_j)
-                    })
-                })
-                .collect();
 
             // Load the second round constants.
             let mut load_round_constant = |i: usize| {
@@ -511,27 +509,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
                 load_round_constant(i)?;
             }
 
-            let r_mid: Value<Vec<_>> = p_mid.map(|p| {
-                let r_0 = Self::pow_5(p[0] + config.round_constants[round + 1][0]);
-                let r_i = p[1..]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p_i)| *p_i + config.round_constants[round + 1][i + 1]);
-                std::iter::empty().chain(Some(r_0)).chain(r_i).collect()
-            });
-
-            let state: Vec<Value<_>> = m
-                .iter()
-                .map(|m_i| {
-                    r_mid.as_ref().map(|r| {
-                        m_i.iter()
-                            .zip(r.iter())
-                            .fold(F::ZERO, |acc, (m_ij, r_j)| acc + *m_ij * r_j)
-                    })
-                })
-                .collect();
-
-            Ok((round + 2, state.try_into().unwrap()))
+            Ok((round + 2, round_values.map(|(_, state)| state)))
         })
     }
 
@@ -548,7 +526,17 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         };
 
         let state: Result<Vec<_>, _> = (0..WIDTH).map(load_state_word).collect();
-        state.map(|state| Pow5State(state.try_into().unwrap()))
+        state.map(|state| {
+            let words: [StateWord<F>; WIDTH] = state.try_into().unwrap();
+            let mut values = Value::known([F::ZERO; WIDTH]);
+            for (index, word) in words.iter().enumerate() {
+                values = values.zip(word.value()).map(|(mut state, value)| {
+                    state[index] = value;
+                    state
+                });
+            }
+            Pow5State { words, values }
+        })
     }
 
     fn round<const RATE: usize>(
@@ -557,7 +545,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         round: usize,
         offset: usize,
         round_gate: Selector,
-        round_fn: impl FnOnce(&mut Region<F>) -> Result<(usize, [Value<F>; WIDTH]), Error>,
+        round_fn: impl FnOnce(&mut Region<F>) -> Result<(usize, Value<[F; WIDTH]>), Error>,
     ) -> Result<Self, Error> {
         // Enable the required gate.
         round_gate.enable(region, offset)?;
@@ -576,10 +564,10 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         }
 
         // Compute the next round's state.
-        let (next_round, next_state) = round_fn(region)?;
+        let (next_round, next_values) = round_fn(region)?;
 
         let next_state_word = |i: usize| {
-            let value = next_state[i];
+            let value = next_values.as_ref().map(|state| state[i]);
             let var = region.assign_advice(
                 || format!("round_{} state_{}", next_round, i),
                 config.state[i],
@@ -590,7 +578,10 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         };
 
         let next_state: Result<Vec<_>, _> = (0..WIDTH).map(next_state_word).collect();
-        next_state.map(|next_state| Pow5State(next_state.try_into().unwrap()))
+        next_state.map(|words| Pow5State {
+            words: words.try_into().unwrap(),
+            values: next_values,
+        })
     }
 }
 
