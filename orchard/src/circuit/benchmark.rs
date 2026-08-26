@@ -23,7 +23,7 @@ use std::{
 };
 
 use super::{
-    tests::generate_circuit_instance, Circuit, Instance, OrchardCircuitVersion, ProvingKey,
+    tests::generate_circuit_instance, Circuit, Instance, OrchardCircuitVersion, Proof, ProvingKey,
     VerifyingKey, INSTANCE_COLUMNS, INSTANCE_ROWS, K,
 };
 use crate::{
@@ -46,6 +46,9 @@ const BATCH_SCREEN_SAMPLES: usize = 7;
 const WITNESS_BENCH_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
 const WITNESS_BENCH_WARMUPS: usize = 50;
 const WITNESS_BENCH_SAMPLES: usize = 1_000;
+const PROVER_BENCH_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
+const PROVER_BENCH_WARMUPS: usize = 3;
+const PROVER_BENCH_SAMPLES: usize = 15;
 
 const FIXTURE_ACTIONS: usize = 1;
 const FIXTURE_ADDRESS_INDEX: u32 = 0;
@@ -271,6 +274,63 @@ fn benchmark_witness_assignment() {
             "ORCHARD_WITNESS_ASSIGNMENT workers={worker_count} actions={action_count} \
              ns_per_synthesis={}",
             elapsed.as_nanos() / WITNESS_BENCH_SAMPLES as u128,
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual Orchard prover performance benchmark"]
+fn benchmark_orchard_prover() {
+    let worker_count = std::env::var("RAYON_NUM_THREADS")
+        .expect("set RAYON_NUM_THREADS explicitly for this benchmark");
+    let worker_count = worker_count
+        .parse::<usize>()
+        .expect("RAYON_NUM_THREADS must be a positive integer");
+    assert_ne!(worker_count, 0, "RAYON_NUM_THREADS must be nonzero");
+
+    let version = OrchardCircuitVersion::FixedPostNu6_2;
+    let pk = ProvingKey::build(version);
+    let vk = pk.verifying_key();
+
+    for action_count in PROVER_BENCH_ACTION_COUNTS {
+        let (circuits, instances): (Vec<_>, Vec<_>) = (0..action_count)
+            .map(|index| {
+                generate_circuit_instance(benchmark_rng(FIXTURE_SEED_DOMAIN, index), version)
+            })
+            .unzip();
+
+        for sample in 0..PROVER_BENCH_WARMUPS {
+            black_box(
+                Proof::create(
+                    &pk,
+                    &circuits,
+                    &instances,
+                    benchmark_rng(PROOF_SEED_DOMAIN, sample),
+                )
+                .unwrap(),
+            );
+        }
+
+        let mut samples_ns = Vec::with_capacity(PROVER_BENCH_SAMPLES);
+        for sample in 0..PROVER_BENCH_SAMPLES {
+            let started = Instant::now();
+            let proof = Proof::create(
+                &pk,
+                &circuits,
+                &instances,
+                benchmark_rng(PROOF_SEED_DOMAIN, sample + PROVER_BENCH_WARMUPS),
+            )
+            .unwrap();
+            samples_ns.push(started.elapsed().as_nanos());
+            if sample == 0 {
+                proof.verify(&vk, &instances).unwrap();
+            }
+            black_box(proof);
+        }
+
+        println!(
+            "ORCHARD_PROVER workers={worker_count} actions={action_count} \
+             samples_ns={samples_ns:?}",
         );
     }
 }
