@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use super::NonIdentityEccPoint;
 use halo2_proofs::{
-    circuit::Region,
-    plonk::{Advice, Column, ConstraintSystem, Constraints, Error, Selector},
+    circuit::{Region, Value},
+    plonk::{Advice, Assigned, Column, ConstraintSystem, Constraints, Error, Selector},
     poly::Rotation,
 };
 use pasta_curves::pallas;
@@ -86,6 +86,38 @@ impl Config {
         offset: usize,
         region: &mut Region<'_, pallas::Base>,
     ) -> Result<NonIdentityEccPoint, Error> {
+        let (x_p, y_p) = (p.x.value(), p.y.value());
+        let (x_q, y_q) = (q.x.value(), q.y.value());
+        let result = x_p
+            .zip(y_p)
+            .zip(x_q)
+            .zip(y_q)
+            .map(|(((x_p, y_p), x_q), y_q)| {
+                // lambda = (y_q - y_p)/(x_q - x_p)
+                let lambda = (y_q - y_p) * (x_q - x_p).invert();
+                // x_r = lambda^2 - x_p - x_q
+                let x_r = lambda.square() - x_p - x_q;
+                // y_r = lambda(x_p - x_r) - y_p
+                let y_r = lambda * (x_p - x_r) - y_p;
+                (x_r, y_r)
+            });
+
+        self.assign_region_with_result(p, q, result, offset, region)
+    }
+
+    /// Assigns an externally computed witness for `p + q`.
+    ///
+    /// The incomplete-addition constraints enforce that `result` is the sum of
+    /// `p` and `q`; this method only permits the caller to choose how the
+    /// witness is computed.
+    pub(super) fn assign_region_with_result(
+        &self,
+        p: &NonIdentityEccPoint,
+        q: &NonIdentityEccPoint,
+        result: Value<(Assigned<pallas::Base>, Assigned<pallas::Base>)>,
+        offset: usize,
+        region: &mut Region<'_, pallas::Base>,
+    ) -> Result<NonIdentityEccPoint, Error> {
         // Enable `q_add_incomplete` selector
         self.q_add_incomplete.enable(region, offset)?;
 
@@ -112,28 +144,11 @@ impl Config {
         q.x.copy_advice(|| "x_q", region, self.x_qr, offset)?;
         q.y.copy_advice(|| "y_q", region, self.y_qr, offset)?;
 
-        // Compute the sum `P + Q = R`
-        let r = x_p
-            .zip(y_p)
-            .zip(x_q)
-            .zip(y_q)
-            .map(|(((x_p, y_p), x_q), y_q)| {
-                {
-                    // λ = (y_q - y_p)/(x_q - x_p)
-                    let lambda = (y_q - y_p) * (x_q - x_p).invert();
-                    // x_r = λ^2 - x_p - x_q
-                    let x_r = lambda.square() - x_p - x_q;
-                    // y_r = λ(x_p - x_r) - y_p
-                    let y_r = lambda * (x_p - x_r) - y_p;
-                    (x_r, y_r)
-                }
-            });
-
         // Assign the sum to `x_qr`, `y_qr` columns in the next row
-        let x_r = r.map(|r| r.0);
+        let x_r = result.as_ref().map(|result| result.0);
         let x_r_var = region.assign_advice(|| "x_r", self.x_qr, offset + 1, || x_r)?;
 
-        let y_r = r.map(|r| r.1);
+        let y_r = result.map(|result| result.1);
         let y_r_var = region.assign_advice(|| "y_r", self.y_qr, offset + 1, || y_r)?;
 
         let result = NonIdentityEccPoint::from_coordinates_unchecked(x_r_var, y_r_var);

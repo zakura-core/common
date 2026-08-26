@@ -6,14 +6,14 @@ use crate::utilities::decompose_running_sum::RunningSumConfig;
 
 use std::marker::PhantomData;
 
-use group::ff::{PrimeField, PrimeFieldBits};
+use group::ff::{Field, PrimeField, PrimeFieldBits};
 #[cfg(test)]
 use group::{Curve, CurveAffine as _, Group};
 use halo2_proofs::{
     circuit::{AssignedCell, Region, Value},
     plonk::{
-        Advice, Column, ConstraintSystem, Constraints, Error, Expression, Fixed, Selector,
-        VirtualCells,
+        Advice, Assigned, Column, ConstraintSystem, Constraints, Error, Expression, Fixed,
+        Selector, VirtualCells,
     },
     poly::Rotation,
 };
@@ -89,6 +89,55 @@ struct WindowWitness {
     x: pallas::Base,
     y: pallas::Base,
     u: pallas::Base,
+}
+
+#[derive(Clone, Copy)]
+struct WindowAccumulator {
+    x: pallas::Base,
+    y: pallas::Base,
+    z: pallas::Base,
+    z_sq: pallas::Base,
+    z_cubed: pallas::Base,
+}
+
+impl WindowAccumulator {
+    fn from_affine(point: WindowWitness) -> Self {
+        Self {
+            x: point.x,
+            y: point.y,
+            z: pallas::Base::ONE,
+            z_sq: pallas::Base::ONE,
+            z_cubed: pallas::Base::ONE,
+        }
+    }
+
+    fn add_mixed(
+        &mut self,
+        point: WindowWitness,
+    ) -> (Assigned<pallas::Base>, Assigned<pallas::Base>) {
+        let x_p = point.x * self.z_sq;
+        let y_p = point.y * self.z_cubed;
+        let h = x_p - self.x;
+        let r = y_p - self.y;
+        let h_sq = h.square();
+        let h_cubed = h_sq * h;
+        let x_h_sq = self.x * h_sq;
+        let x = r.square() - h_cubed - x_h_sq.double();
+        let y = r * (x_h_sq - x) - self.y * h_cubed;
+        let z = self.z * h;
+        let z_sq = z.square();
+        let z_cubed = z_sq * z;
+
+        *self = Self {
+            x,
+            y,
+            z,
+            z_sq,
+            z_cubed,
+        };
+
+        (Assigned::Rational(x, z_sq), Assigned::Rational(y, z_cubed))
+    }
 }
 
 fn evaluate_lagrange_polynomial_for_window<const WINDOW: usize>(
@@ -323,10 +372,17 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
             .transpose_vec(NUM_WINDOWS);
 
         // Initialize accumulator
+        let mut accumulator = window_witnesses[0].map(WindowAccumulator::from_affine);
         let acc = self.process_window(region, offset, 0, window_witnesses[0])?;
 
         // Process all windows excluding least and most significant windows
-        let acc = self.add_incomplete::<NUM_WINDOWS>(region, offset, acc, &window_witnesses)?;
+        let acc = self.add_incomplete::<NUM_WINDOWS>(
+            region,
+            offset,
+            acc,
+            &window_witnesses,
+            &mut accumulator,
+        )?;
 
         // Process most significant window
         let mul_b = self.process_window(
@@ -432,6 +488,7 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
         offset: usize,
         mut acc: NonIdentityEccPoint,
         window_witnesses: &[Value<WindowWitness>],
+        accumulator: &mut Value<WindowAccumulator>,
     ) -> Result<NonIdentityEccPoint, Error> {
         for w in (0..NUM_WINDOWS)
             // The MSB is processed separately.
@@ -445,13 +502,22 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
             // the incomplete addition gate, which will then copy them into themselves.
             let mul_b = self.process_window(region, offset, w, window_witnesses[w])?;
 
+            let result = accumulator
+                .as_mut()
+                .zip(window_witnesses[w])
+                .map(|(accumulator, point)| accumulator.add_mixed(point));
+
             // Add to the accumulator.
             //
             // After the first loop, the accumulator will already be in the input cells
             // for the incomplete addition gate, and will be copied into themselves.
-            acc = self
-                .add_incomplete_config
-                .assign_region(&mul_b, &acc, offset + w, region)?;
+            acc = self.add_incomplete_config.assign_region_with_result(
+                &mul_b,
+                &acc,
+                result,
+                offset + w,
+                region,
+            )?;
         }
         Ok(acc)
     }
@@ -552,8 +618,6 @@ mod tests {
     use super::*;
     use crate::ecc::chip::{NUM_WINDOWS, NUM_WINDOWS_SHORT};
     use crate::ecc::tests::{FullWidth, Short};
-    use group::ff::Field;
-
     /// Offset applied to non-MSB windows to avoid identity points.
     const WINDOW_OFFSET: usize = 2;
 
@@ -634,5 +698,39 @@ mod tests {
     fn reconstructed_window_witnesses_match_curve_points() {
         assert_reconstructed_window_witnesses(FullWidth::from_pallas_generator(), NUM_WINDOWS);
         assert_reconstructed_window_witnesses(Short, NUM_WINDOWS_SHORT);
+    }
+
+    #[test]
+    fn window_accumulator_matches_curve_addition() {
+        let base = pallas::Point::generator().to_affine();
+
+        for num_windows in [NUM_WINDOWS_SHORT, NUM_WINDOWS] {
+            let windows = (0..num_windows)
+                .map(|window| window % H)
+                .collect::<Vec<_>>();
+            let points = compute_window_points(base, &windows);
+            let first = points[0].coordinates().unwrap();
+            let mut accumulator = WindowAccumulator::from_affine(WindowWitness {
+                x: *first.x(),
+                y: *first.y(),
+                u: pallas::Base::ZERO,
+            });
+            let mut expected = points[0].to_curve();
+
+            for point in points.iter().take(num_windows - 1).skip(1) {
+                let coordinates = point.coordinates().unwrap();
+                expected += point.to_curve();
+                let (x, y) = accumulator.add_mixed(WindowWitness {
+                    x: *coordinates.x(),
+                    y: *coordinates.y(),
+                    u: pallas::Base::ZERO,
+                });
+
+                assert_eq!(
+                    pallas::Affine::from_xy(x.evaluate(), y.evaluate()).unwrap(),
+                    expected.to_affine(),
+                );
+            }
+        }
     }
 }

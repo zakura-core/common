@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Fixed-base multiplication witness generation now accumulates incomplete
+  additions in mixed Jacobian coordinates, deferring affine inversions through
+  the existing rational advice representation.
 - Fixed-base witness interpolation now specializes its Horner multiplication
   for each three-bit window digit, replacing full field multiplications with
   short doubling and addition chains.
