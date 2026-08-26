@@ -46,6 +46,11 @@ rustdoc-args = [
 
 [features]
 aarch64-asm = ["dep:cc"]
+# MULX/ADCX/ADOX Montgomery multiplication for the Pasta fields on x86-64.
+# Requires a CPU with the BMI2 and ADX extensions (Intel Broadwell / AMD Zen
+# or later); enabling it on an older CPU faults at runtime. A no-op on other
+# architectures.
+x86_64-asm = []
 alloc = [
     "group/alloc",
     "blake2b_simd",

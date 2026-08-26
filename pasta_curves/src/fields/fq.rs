@@ -386,10 +386,18 @@ impl Fq {
             Fq(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple"
+        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+        {
+            Fq(super::x86_64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ),
+            all(feature = "x86_64-asm", target_arch = "x86_64")
         )))]
         {
             self.mul(rhs)
@@ -407,10 +415,18 @@ impl Fq {
             Fq(super::aarch64_asm::square(&self.0, &MODULUS.0, INV))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple"
+        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+        {
+            Fq(super::x86_64_asm::square(&self.0, &MODULUS.0, INV))
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ),
+            all(feature = "x86_64-asm", target_arch = "x86_64")
         )))]
         {
             self.square()
@@ -441,7 +457,12 @@ impl Fq {
             target_vendor = "apple"
         )))]
         {
-            (0..n).fold(*self, |acc, _| acc.square()).mul(by)
+            // Route through the runtime dispatchers so backends without a
+            // fused chain (the x86-64 one) still square and multiply in
+            // assembly.
+            (0..n)
+                .fold(*self, |acc, _| acc.square_runtime())
+                .mul_runtime(by)
         }
     }
 
@@ -1519,6 +1540,111 @@ fn aarch64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
 #[test]
 #[should_panic(expected = "requires a canonical rhs")]
 fn aarch64_asm_mul_rejects_non_canonical_rhs_in_debug() {
+    // The modulus itself is the smallest non-canonical value.
+    let _ = Fq::one().mul_runtime(&MODULUS);
+}
+
+#[cfg(all(test, feature = "x86_64-asm", target_arch = "x86_64"))]
+#[test]
+fn x86_64_asm_mul_matches_portable() {
+    use rand::{Rng, SeedableRng};
+
+    // Random canonical pairs through the inline block against the portable
+    // multiplication, and the squaring route against the portable squaring.
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x2a; 16]);
+    for _ in 0..100_000 {
+        let a = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+        let b = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+        let asm = a.mul_runtime(&b);
+        assert_eq!(asm, Fq::mul(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
+        assert!(is_canonical(&asm));
+        assert_eq!(a.square_runtime(), Fq::square(&a), "value {:x?}", a.0);
+    }
+
+    // Edge operands: zero, one, the largest canonical value, and dense
+    // all-ones-shaped canonical limbs.
+    let mut max_canonical = MODULUS;
+    max_canonical.0[0] -= 1;
+    let mut dense_canonical = Fq([u64::MAX - 3; 4]);
+    dense_canonical.0[3] = MODULUS.0[3] - 1;
+    let edges = [
+        Fq::zero(),
+        Fq::one(),
+        max_canonical,
+        dense_canonical,
+        R2,
+        R3,
+    ];
+    for a in edges {
+        for b in edges {
+            assert_eq!(
+                a.mul_runtime(&b),
+                Fq::mul(&a, &b),
+                "lhs {:x?} rhs {:x?}",
+                a.0,
+                b.0
+            );
+        }
+        assert_eq!(a.square_runtime(), Fq::square(&a), "value {:x?}", a.0);
+    }
+}
+
+#[cfg(all(test, feature = "x86_64-asm", target_arch = "x86_64"))]
+#[test]
+fn x86_64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
+    use rand::{Rng, SeedableRng};
+
+    // Same contract and five-limb structure as the AArch64 block: the final
+    // shift omits the fifth candidate limb because
+    // `(lhs * rhs + m * modulus) / R < 2 * modulus < R` once the rhs is
+    // canonical. Stress the bound where it is tightest: lhs with its top bit
+    // set, rhs within a few limbs of the modulus (kept canonical, and within
+    // the per-limb no-wrap condition that an unreduced lhs separately
+    // requires).
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x35; 16]);
+    let mut n = 0u32;
+    while n < 100_000 {
+        let lhs = Fq([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64() | (1 << 63),
+        ]);
+        let mut rhs = MODULUS;
+        rhs.0[0] = rhs.0[0].wrapping_sub(rng.next_u64() >> (rng.next_u32() % 64));
+        if rng.next_u32() & 1 == 1 {
+            rhs.0[1] = rhs.0[1].wrapping_sub(rng.next_u64() >> 60);
+        }
+        if !is_canonical(&rhs) || rhs.0.iter().any(|&l| l > u64::MAX - 3) {
+            continue;
+        }
+        n += 1;
+        let asm = lhs.mul_runtime(&rhs);
+        assert_eq!(
+            asm,
+            Fq::mul(&lhs, &rhs),
+            "lhs {:x?} rhs {:x?}",
+            lhs.0,
+            rhs.0
+        );
+        assert!(is_canonical(&asm));
+    }
+}
+
+#[cfg(all(test, debug_assertions, feature = "x86_64-asm", target_arch = "x86_64"))]
+#[test]
+#[should_panic(expected = "requires a canonical rhs")]
+fn x86_64_asm_mul_rejects_non_canonical_rhs_in_debug() {
     // The modulus itself is the smallest non-canonical value.
     let _ = Fq::one().mul_runtime(&MODULUS);
 }
