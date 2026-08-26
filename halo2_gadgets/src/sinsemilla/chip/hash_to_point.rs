@@ -145,12 +145,7 @@ impl ProjectivePoint {
 /// Returns whether `initial_q` is the Orchard MerkleCRH domain point whose
 /// first-word witnesses are precomputed in [`first_word_witnesses`].
 fn has_merkle_initial_q(initial_q: pallas::Affine) -> bool {
-    let coordinates = initial_q.coordinates();
-    if !bool::from(coordinates.is_some()) {
-        return false;
-    }
-    let coordinates = coordinates.unwrap();
-    (*coordinates.x(), *coordinates.y()) == MERKLE_INITIAL_Q
+    initial_q.raw_coordinates() == MERKLE_INITIAL_Q
 }
 
 /// `EccPointQ` can hold either a public or a private ECC Point
