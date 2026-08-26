@@ -1,4 +1,4 @@
-use ff::Field;
+use ff::{BatchInvert, Field};
 use group::Curve;
 use maybe_rayon::prelude::*;
 use rand_core::Rng;
@@ -18,6 +18,7 @@ use super::{
 
 #[cfg(test)]
 use super::circuit::FloorPlan;
+use crate::transcript::{EncodedChallenge, TranscriptWrite};
 use crate::{
     arithmetic::CurveAffine,
     circuit::Value,
@@ -29,14 +30,101 @@ use crate::{
         Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial,
     },
 };
-use crate::{
-    poly::batch_invert_assigned,
-    transcript::{EncodedChallenge, TranscriptWrite},
-};
+
+const NO_DENOMINATOR: u32 = u32::MAX;
+
+struct AdviceWitness<F: Field> {
+    values: Vec<Polynomial<F, LagrangeCoeff>>,
+    denominator_cells: Vec<usize>,
+    denominators: Vec<F>,
+    denominator_slots: Vec<Vec<u32>>,
+    row_count: usize,
+}
+
+impl<F: Field> AdviceWitness<F> {
+    fn new(values: Vec<Polynomial<F, LagrangeCoeff>>) -> Self {
+        let row_count = values.first().map_or(0, |column| column.len());
+        assert!(values.iter().all(|column| column.len() == row_count));
+
+        Self {
+            denominator_slots: vec![vec![NO_DENOMINATOR; row_count]; values.len()],
+            values,
+            denominator_cells: Vec::new(),
+            denominators: Vec::new(),
+            row_count,
+        }
+    }
+
+    fn assign(&mut self, column: usize, row: usize, assigned: Assigned<F>) -> Result<(), Error> {
+        if self
+            .values
+            .get(column)
+            .and_then(|values| values.get(row))
+            .is_none()
+        {
+            return Err(Error::BoundsFailure);
+        }
+
+        match assigned {
+            Assigned::Zero => {
+                self.remove_denominator(column, row);
+                self.values[column][row] = F::ZERO;
+            }
+            Assigned::Trivial(value) => {
+                self.remove_denominator(column, row);
+                self.values[column][row] = value;
+            }
+            Assigned::Rational(numerator, denominator) => {
+                let slot = self.denominator_slots[column][row];
+                if slot == NO_DENOMINATOR {
+                    let slot = u32::try_from(self.denominators.len())
+                        .expect("the number of advice cells fits into u32");
+                    self.denominator_slots[column][row] = slot;
+                    self.denominator_cells.push(column * self.row_count + row);
+                    self.denominators.push(denominator);
+                } else {
+                    self.denominators[slot as usize] = denominator;
+                }
+                self.values[column][row] = numerator;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn remove_denominator(&mut self, column: usize, row: usize) {
+        let slot = self.denominator_slots[column][row];
+        if slot == NO_DENOMINATOR {
+            return;
+        }
+
+        self.denominator_slots[column][row] = NO_DENOMINATOR;
+        let slot = slot as usize;
+        self.denominator_cells.swap_remove(slot);
+        self.denominators.swap_remove(slot);
+
+        if let Some(&moved_cell) = self.denominator_cells.get(slot) {
+            let moved_column = moved_cell / self.row_count;
+            let moved_row = moved_cell % self.row_count;
+            self.denominator_slots[moved_column][moved_row] = slot as u32;
+        }
+    }
+
+    fn evaluate(mut self) -> Vec<Polynomial<F, LagrangeCoeff>> {
+        self.denominators.iter_mut().batch_invert();
+        for (cell, denominator_inverse) in self.denominator_cells.into_iter().zip(self.denominators)
+        {
+            let column = cell / self.row_count;
+            let row = cell % self.row_count;
+            self.values[column][row] *= denominator_inverse;
+        }
+        self.values
+    }
+}
 
 struct WitnessCollection<'a, F: Field> {
     k: u32,
-    advice: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
+    advice: AdviceWitness<F>,
     instances: &'a [&'a [F]],
     usable_rows: RangeTo<usize>,
     _marker: std::marker::PhantomData<F>,
@@ -93,13 +181,8 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        *self
-            .advice
-            .get_mut(column.index())
-            .and_then(|values| values.get_mut(row))
-            .ok_or(Error::BoundsFailure)? = to().into_field().assign()?;
-
-        Ok(())
+        self.advice
+            .assign(column.index(), row, to().into_field().assign()?)
     }
 
     fn assign_fixed<V, VR, A, AR>(
@@ -276,7 +359,7 @@ where
         .iter()
         .map(|instances| WitnessCollection {
             k: params.k,
-            advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
+            advice: AdviceWitness::new(vec![domain.empty_lagrange(); meta.num_advice_columns]),
             instances,
             // The prover will not be allowed to assign values to advice
             // cells that exist within inactive rows, which include some
@@ -302,7 +385,7 @@ where
     let advice_witnesses = witnesses
         .into_iter()
         .map(|witness| -> Result<_, Error> {
-            let mut advice = batch_invert_assigned(witness.advice);
+            let mut advice = witness.advice.evaluate();
 
             // Add blinding factors to advice columns
             for advice in &mut advice {
@@ -907,6 +990,55 @@ fn test_create_proof() {
         &mut transcript,
     )
     .expect("proof generation should not fail");
+}
+
+#[test]
+fn advice_witness_evaluates_rationals_and_reassignments() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2]);
+
+    advice
+        .assign(0, 0, Assigned::Rational(Fp::from(6), Fp::from(3)))
+        .unwrap();
+    advice
+        .assign(1, 1, Assigned::Rational(Fp::from(8), Fp::from(2)))
+        .unwrap();
+
+    // Removing the first denominator moves the second into its slot. Updating
+    // that cell exercises the repaired sparse index after `swap_remove`.
+    advice.assign(0, 0, Assigned::Trivial(Fp::from(5))).unwrap();
+    advice
+        .assign(1, 1, Assigned::Rational(Fp::from(9), Fp::from(3)))
+        .unwrap();
+    advice
+        .assign(0, 2, Assigned::Rational(Fp::from(7), Fp::ZERO))
+        .unwrap();
+    advice.assign(0, 3, Assigned::Zero).unwrap();
+    advice
+        .assign(1, 4, Assigned::Trivial(Fp::from(11)))
+        .unwrap();
+    advice
+        .assign(0, 5, Assigned::Rational(Fp::ZERO, Fp::from(7)))
+        .unwrap();
+
+    assert!(matches!(
+        advice.assign(2, 0, Assigned::Zero),
+        Err(Error::BoundsFailure)
+    ));
+    assert!(matches!(
+        advice.assign(0, 8, Assigned::Zero),
+        Err(Error::BoundsFailure)
+    ));
+
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(5));
+    assert_eq!(advice[0][2], Fp::ZERO);
+    assert_eq!(advice[0][3], Fp::ZERO);
+    assert_eq!(advice[0][5], Fp::ZERO);
+    assert_eq!(advice[1][1], Fp::from(3));
+    assert_eq!(advice[1][4], Fp::from(11));
 }
 
 #[test]
