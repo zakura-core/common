@@ -4,6 +4,7 @@ use maybe_rayon::prelude::*;
 use rand_core::Rng;
 use std::iter;
 use std::ops::RangeTo;
+use std::time::{Duration, Instant};
 
 use super::{
     circuit::{
@@ -29,6 +30,8 @@ use crate::{
         Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial,
     },
 };
+
+const ADVICE_TIMING_ENV: &str = "ZAKURA_ADVICE_TIMINGS";
 use crate::{
     poly::batch_invert_assigned,
     transcript::{EncodedChallenge, TranscriptWrite},
@@ -289,6 +292,7 @@ where
 
     // Synthesize every circuit while allowing its floor planner to share
     // circuit-shape-dependent work across the batch.
+    let synthesis_started = Instant::now();
     ConcreteCircuit::FloorPlanner::synthesize_batch(
         &mut witnesses,
         circuits,
@@ -296,13 +300,18 @@ where
         &meta.constants,
         pk.floor_plan.as_ref(),
     )?;
+    let synthesis_elapsed = synthesis_started.elapsed();
 
     // Consume randomness in circuit order before preparing the independent
     // commitments and polynomial transforms in parallel.
+    let action_count = witnesses.len();
+    let mut resolution_elapsed = Duration::ZERO;
     let advice_witnesses = witnesses
         .into_iter()
         .map(|witness| -> Result<_, Error> {
+            let resolution_started = Instant::now();
             let mut advice = batch_invert_assigned(witness.advice);
+            resolution_elapsed += resolution_started.elapsed();
 
             // Add blinding factors to advice columns
             for advice in &mut advice {
@@ -320,6 +329,7 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let preparation_started = Instant::now();
     let prepared_advice = advice_witnesses
         .into_par_iter()
         .map(|(advice, advice_blinds)| {
@@ -359,6 +369,17 @@ where
             )
         })
         .collect::<Vec<_>>();
+    let preparation_elapsed = preparation_started.elapsed();
+
+    if std::env::var_os(ADVICE_TIMING_ENV).is_some() {
+        eprintln!(
+            "ADVICE_PREPARATION actions={action_count} synthesis_ns={} \
+             resolution_ns={} commitments_fft_ns={}",
+            synthesis_elapsed.as_nanos(),
+            resolution_elapsed.as_nanos(),
+            preparation_elapsed.as_nanos(),
+        );
+    }
 
     let mut advice = Vec::with_capacity(prepared_advice.len());
     for (advice_commitments, advice_single) in prepared_advice {
