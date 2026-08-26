@@ -443,7 +443,7 @@ impl Fp {
     }
 
     /// Squares `self` `n` times (`n` must be at least 1), then multiplies the
-    /// result by `by`. The assembly backend keeps the accumulator in
+    /// result by `by`. The AArch64 assembly backend keeps the accumulator in
     /// registers for the whole chain.
     #[inline]
     fn sqr_n_mul_runtime(&self, n: u32, by: &Self) -> Self {
