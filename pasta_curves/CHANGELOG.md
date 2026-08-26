@@ -28,6 +28,9 @@ and this project adheres to Rust's notion of
   validated on interleaved `msm_backend_timings` grids on x86-64 over
   both the portable and assembly field arithmetic; summed planner cell
   losses roughly halve on both.
+- Moved the portable (pure Rust) `Fp` and `Fq` wide-squaring routine into a
+  shared `fields::portable` module. Both fields delegate to the same limb-array
+  implementation; the algorithm and generated operations are unchanged.
 - All of this release's new MSM machinery — the Eisenstein-orbit backend
   (`glv::orbit`), the magnitude-profiled backend planner, the prepared
   zero-checks (`glv::zero`), and the `arithmetic::PreparedZeroCheck` /
