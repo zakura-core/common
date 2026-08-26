@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Sinsemilla witness generation now uses the configured field backend for
+  projective squares and reuses precomputed first-word witnesses for Orchard
+  MerkleCRH hashing.
 - Fixed-base multiplication witness generation now accumulates incomplete
   additions in mixed Jacobian coordinates, deferring affine inversions through
   the existing rational advice representation.

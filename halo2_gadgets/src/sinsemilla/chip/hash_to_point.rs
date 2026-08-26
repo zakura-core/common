@@ -17,8 +17,18 @@ use pasta_curves::{arithmetic::CurveAffine, pallas};
 
 use std::ops::Deref;
 
+mod first_word_witnesses;
+use first_word_witnesses::{MERKLE_FIRST_WORD_WITNESSES, MERKLE_INITIAL_Q};
+
 const FIELD_REPR_LIMBS: usize =
     core::mem::size_of::<<pallas::Base as PrimeField>::Repr>() / core::mem::size_of::<u64>();
+
+#[inline(always)]
+fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
+    // Method syntax selects `pallas::Base`'s portable inherent square.
+    // Trait dispatch selects the configured runtime backend instead.
+    Field::square(value)
+}
 
 fn decompose_words(value: pallas::Base, num_words: usize) -> Vec<u32> {
     let repr = value.to_repr();
@@ -59,6 +69,12 @@ struct DoubleAndAddWitness {
     lambda_2_numerator: pallas::Base,
 }
 
+#[derive(Clone, Copy)]
+struct CachedFirstWordWitness {
+    point: ProjectivePoint,
+    witness: DoubleAndAddWitness,
+}
+
 impl DoubleAndAddWitness {
     fn lambda_1(&self, point: &ProjectivePoint) -> Assigned<pallas::Base> {
         Assigned::Rational(self.lambda_1_numerator, point.z)
@@ -89,28 +105,28 @@ impl ProjectivePoint {
         let h = x_p * self.z_sq - self.x;
         let r = y_p * z_cubed - self.y;
 
-        let h_sq = h.square();
+        let h_sq = square_with_runtime_backend(&h);
         let h_cubed = h_sq * h;
         let x_h_sq = self.x * h_sq;
-        let x_r = r.square() - h_cubed - x_h_sq.double();
+        let x_r = square_with_runtime_backend(&r) - h_cubed - x_h_sq.double();
         let d = x_h_sq - x_r;
 
-        let d_sq = d.square();
+        let d_sq = square_with_runtime_backend(&d);
         let d_cubed = d_sq * d;
         let y_h_cubed = self.y * h_cubed;
         // Scale lambda_1 by d so it shares z_new as its denominator with
         // lambda_2. The product is also needed for lambda_2's numerator.
         let r_d = r * d;
         let lambda_2_numerator = y_h_cubed.double() - r_d;
-        let z_h = self.z * h;
-        let z_new = z_h * d;
-        let z_new_sq = z_new.square();
 
         let x_h_sq_d_sq = x_h_sq * d_sq;
         // Since d = x_h_sq - x_r, this saves a field multiplication over
         // computing (x_h_sq + x_r) * d_sq directly.
-        let x_new = lambda_2_numerator.square() - x_h_sq_d_sq.double() + d_cubed;
+        let x_new =
+            square_with_runtime_backend(&lambda_2_numerator) - x_h_sq_d_sq.double() + d_cubed;
         let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
+        let z_new = self.z * h * d;
+        let z_new_sq = square_with_runtime_backend(&z_new);
 
         *self = Self {
             x: x_new,
@@ -124,6 +140,17 @@ impl ProjectivePoint {
             lambda_2_numerator,
         }
     }
+}
+
+/// Returns whether `initial_q` is the Orchard MerkleCRH domain point whose
+/// first-word witnesses are precomputed in [`first_word_witnesses`].
+fn has_merkle_initial_q(initial_q: pallas::Affine) -> bool {
+    let coordinates = initial_q.coordinates();
+    if !bool::from(coordinates.is_some()) {
+        return false;
+    }
+    let coordinates = coordinates.unwrap();
+    (*coordinates.x(), *coordinates.y()) == MERKLE_INITIAL_Q
 }
 
 /// `EccPointQ` can hold either a public or a private ECC Point
@@ -160,10 +187,20 @@ where
         Error,
     > {
         let projective = Value::known(ProjectivePoint::from_affine(Q));
+        // An Orchard MerkleCRH message starts with the 10-bit encoding of its
+        // layer index, so its first Sinsemilla word is cached.
+        let cache_first_word = has_merkle_initial_q(Q);
         let (offset, x_a, y_a) = self.public_q_initialization(region, Q)?;
 
-        let (x_a, y_a, zs_sum) =
-            self.hash_all_pieces(region, offset, message, x_a, y_a, Some(projective))?;
+        let (x_a, y_a, zs_sum) = self.hash_all_pieces(
+            region,
+            offset,
+            message,
+            x_a,
+            y_a,
+            Some(projective),
+            cache_first_word,
+        )?;
 
         #[cfg(test)]
         self.check_hash_result(EccPointQ::PublicPoint(Q), message, &x_a, &y_a);
@@ -202,7 +239,8 @@ where
 
         let (offset, x_a, y_a) = self.private_q_initialization(region, Q)?;
 
-        let (x_a, y_a, zs_sum) = self.hash_all_pieces(region, offset, message, x_a, y_a, None)?;
+        let (x_a, y_a, zs_sum) =
+            self.hash_all_pieces(region, offset, message, x_a, y_a, None, false)?;
 
         #[cfg(test)]
         self.check_hash_result(EccPointQ::PrivatePoint(Q.clone()), message, &x_a, &y_a);
@@ -338,6 +376,7 @@ where
         mut x_a: X<pallas::Base>,
         mut y_a: Y<pallas::Base>,
         mut projective: Option<Value<ProjectivePoint>>,
+        mut cache_first_word: bool,
     ) -> Result<
         (
             X<pallas::Base>,
@@ -355,8 +394,17 @@ where
             let final_piece = idx == message.len() - 1;
 
             // The value of the accumulator after this piece is processed.
-            let (x, y, zs, next_projective) =
-                self.hash_piece(region, offset, piece, x_a, y_a, final_piece, projective)?;
+            let (x, y, zs, next_projective) = self.hash_piece(
+                region,
+                offset,
+                piece,
+                x_a,
+                y_a,
+                final_piece,
+                projective,
+                cache_first_word,
+            )?;
+            cache_first_word = false;
 
             // Since each message word takes one row to process, we increase
             // the offset by `piece.num_words` on each iteration.
@@ -428,6 +476,7 @@ where
         mut y_a: Y<pallas::Base>,
         final_piece: bool,
         mut projective: Option<Value<ProjectivePoint>>,
+        cache_first_word: bool,
     ) -> Result<
         (
             X<pallas::Base>,
@@ -537,10 +586,33 @@ where
             region.assign_advice(|| "x_p", config.double_and_add.x_p, offset + row, || x_p)?;
 
             if let Some(point) = projective.as_mut() {
-                let witness = point
-                    .as_mut()
-                    .zip(gen)
-                    .map(|(point, gen)| point.double_and_add(gen));
+                let witness = if row == 0 && cache_first_word {
+                    let (next_point, witness) = point
+                        .as_ref()
+                        .zip(*word)
+                        .zip(gen)
+                        .map(|((point, word), gen)| {
+                            MERKLE_FIRST_WORD_WITNESSES
+                                .get(word as usize)
+                                .copied()
+                                .unwrap_or_else(|| {
+                                    // Preserve generic behavior if the Merkle
+                                    // domain is used with another message.
+                                    let mut point = *point;
+                                    let witness = point.double_and_add(gen);
+                                    CachedFirstWordWitness { point, witness }
+                                })
+                        })
+                        .map(|cached| (cached.point, cached.witness))
+                        .unzip();
+                    *point = next_point;
+                    witness
+                } else {
+                    point
+                        .as_mut()
+                        .zip(gen)
+                        .map(|(point, gen)| point.double_and_add(gen))
+                };
 
                 let lambda_1 = witness
                     .as_ref()
@@ -739,7 +811,11 @@ impl<F: Field> Deref for Y<F> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decompose_words, ProjectivePoint};
+    use super::{
+        decompose_words,
+        first_word_witnesses::{MERKLE_FIRST_WORD_COUNT, MERKLE_FIRST_WORD_WITNESSES},
+        has_merkle_initial_q, ProjectivePoint,
+    };
     use crate::sinsemilla::primitives::{lebs2ip_k, K, SINSEMILLA_S};
 
     use group::{
@@ -748,6 +824,36 @@ mod tests {
     };
     use halo2_proofs::plonk::Assigned;
     use pasta_curves::{arithmetic::CurveAffine, pallas};
+
+    #[test]
+    fn cached_merkle_first_word_witnesses_match_arithmetic() {
+        use crate::sinsemilla::{merkle::MERKLE_CRH_PERSONALIZATION, primitives::HashDomain};
+
+        let initial_q = HashDomain::new(MERKLE_CRH_PERSONALIZATION).Q().to_affine();
+        assert!(has_merkle_initial_q(initial_q));
+        assert!(!has_merkle_initial_q(
+            pallas::Point::generator().to_affine()
+        ));
+        assert!(!has_merkle_initial_q(pallas::Point::identity().to_affine()));
+
+        for (word, cached) in MERKLE_FIRST_WORD_WITNESSES.iter().enumerate() {
+            let mut point = ProjectivePoint::from_affine(initial_q);
+            let witness = point.double_and_add(SINSEMILLA_S[word]);
+            assert_eq!(cached.point.x, point.x);
+            assert_eq!(cached.point.y, point.y);
+            assert_eq!(cached.point.z, point.z);
+            assert_eq!(cached.point.z_sq, point.z_sq);
+            assert_eq!(
+                cached.witness.lambda_1_numerator,
+                witness.lambda_1_numerator
+            );
+            assert_eq!(
+                cached.witness.lambda_2_numerator,
+                witness.lambda_2_numerator
+            );
+        }
+        assert_eq!(MERKLE_FIRST_WORD_WITNESSES.len(), MERKLE_FIRST_WORD_COUNT);
+    }
 
     #[test]
     fn word_decomposition_matches_bit_decomposition() {
