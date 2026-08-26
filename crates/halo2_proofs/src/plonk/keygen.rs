@@ -4,6 +4,7 @@ use std::ops::Range;
 
 use ff::{Field, FromUniformBytes};
 use group::Curve;
+use maybe_rayon::prelude::*;
 
 use super::{
     Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
@@ -334,29 +335,36 @@ where
         .domain
         .batch_lagrange_to_coeff_and_extended(&fixed, &fft_twiddles);
 
-    let mut compressed_selector_cosets = vec![];
-    for (column_index, combination_len, assigned_root) in compressed_selectors
-        .into_iter()
-        .filter(|(_, combination_len, _)| *combination_len >= crate::MIN_SELECTOR_FAMILY_LEN)
-    {
-        let mut selector = fixed_cosets[column_index].clone();
-        for value in selector.iter_mut() {
-            let query = *value;
-            let mut result = query;
-            for root in 1..=combination_len {
-                if root != assigned_root {
-                    result *= C::Scalar::from(root as u64) - query;
-                }
+    let compressed_selector_cosets = compressed_selectors
+        .into_par_iter()
+        .map(|(column_index, combination_len, assigned_root)| {
+            if combination_len < crate::MIN_SELECTOR_FAMILY_LEN {
+                return None;
             }
-            *value = result;
-        }
-        compressed_selector_cosets.push(super::CompressedSelectorCoset {
-            column_index,
-            combination_len,
-            assigned_root,
-            selector,
-        });
-    }
+
+            let mut selector = fixed_cosets[column_index].clone();
+            for value in selector.iter_mut() {
+                let query = *value;
+                let mut result = query;
+                for root in 1..=combination_len {
+                    if root != assigned_root {
+                        result *= C::Scalar::from(root as u64) - query;
+                    }
+                }
+                *value = result;
+            }
+
+            Some(super::CompressedSelectorCoset {
+                column_index,
+                combination_len,
+                assigned_root,
+                selector,
+            })
+        })
+        .collect::<Vec<Option<_>>>()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
     let permutation_pk =
         assembly
