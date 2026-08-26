@@ -94,6 +94,97 @@ struct Assembly<F: Field> {
     _marker: std::marker::PhantomData<F>,
 }
 
+#[derive(Debug)]
+struct CompressedSelectorFamily {
+    column_index: usize,
+    combination_len: usize,
+    assigned_roots: Vec<usize>,
+}
+
+fn group_compressed_selectors(
+    compressed_selectors: Vec<(usize, usize, usize)>,
+) -> Vec<CompressedSelectorFamily> {
+    let mut families: Vec<CompressedSelectorFamily> = vec![];
+
+    for (column_index, combination_len, assigned_root) in compressed_selectors {
+        if combination_len < crate::MIN_CACHED_SELECTOR_FAMILY_LEN {
+            continue;
+        }
+
+        match families
+            .iter_mut()
+            .find(|family| family.column_index == column_index)
+        {
+            Some(family) => {
+                assert_eq!(family.combination_len, combination_len);
+                family.assigned_roots.push(assigned_root);
+            }
+            None => families.push(CompressedSelectorFamily {
+                column_index,
+                combination_len,
+                assigned_roots: vec![assigned_root],
+            }),
+        }
+    }
+
+    for family in &families {
+        assert_eq!(family.assigned_roots.len(), family.combination_len);
+        assert!(family
+            .assigned_roots
+            .iter()
+            .copied()
+            .eq(1..=family.combination_len));
+    }
+
+    families
+}
+
+fn evaluate_compressed_selector_family<F: Field + From<u64>>(
+    query: &[F],
+    mut selectors: Vec<&mut [F]>,
+    min_chunk_len: usize,
+) {
+    assert!(selectors.len() >= 2);
+    assert!(selectors
+        .iter()
+        .all(|selector| selector.len() == query.len()));
+
+    if query.len() <= min_chunk_len {
+        let combination_len = selectors.len();
+        for (offset, query) in query.iter().enumerate() {
+            // For root `a`, combine the shared products
+            //
+            // q * product_{r < a}(r - q) * product_{r > a}(r - q).
+            let mut prefix = *query;
+            selectors[0][offset] = prefix;
+            for assigned_root in 1..combination_len {
+                prefix *= F::from(assigned_root as u64) - query;
+                selectors[assigned_root][offset] = prefix;
+            }
+
+            let mut suffix = F::from(combination_len as u64) - query;
+            for assigned_root in (0..combination_len - 1).rev() {
+                selectors[assigned_root][offset] *= suffix;
+                if assigned_root > 0 {
+                    suffix *= F::from((assigned_root + 1) as u64) - query;
+                }
+            }
+        }
+        return;
+    }
+
+    let midpoint = query.len() / 2;
+    let (query_left, query_right) = query.split_at(midpoint);
+    let (selector_left, selector_right) = selectors
+        .into_iter()
+        .map(|selector| selector.split_at_mut(midpoint))
+        .unzip();
+    crate::multicore::join(
+        || evaluate_compressed_selector_family(query_left, selector_left, min_chunk_len),
+        || evaluate_compressed_selector_family(query_right, selector_right, min_chunk_len),
+    );
+}
+
 impl<F: Field> Assignment<F> for Assembly<F> {
     fn enter_region<NR, N>(&mut self, _: N)
     where
@@ -335,33 +426,39 @@ where
         .domain
         .batch_lagrange_to_coeff_and_extended(&fixed, &fft_twiddles);
 
-    let compressed_selector_cosets = compressed_selectors
+    let compressed_selector_cosets = group_compressed_selectors(compressed_selectors)
         .into_par_iter()
-        .map(|(column_index, combination_len, assigned_root)| {
-            if combination_len < crate::MIN_SELECTOR_FAMILY_LEN {
-                return None;
-            }
+        .map(|family| {
+            let mut selectors = (0..family.combination_len)
+                .map(|_| vk.domain.empty_extended())
+                .collect::<Vec<_>>();
+            let selector_slices = selectors
+                .iter_mut()
+                .map(|selector| &mut selector[..])
+                .collect();
+            let min_chunk_len = std::cmp::max(
+                fixed_cosets[family.column_index].len() / crate::multicore::current_num_threads(),
+                1,
+            );
+            evaluate_compressed_selector_family(
+                &fixed_cosets[family.column_index],
+                selector_slices,
+                min_chunk_len,
+            );
 
-            let mut selector = fixed_cosets[column_index].clone();
-            for value in selector.iter_mut() {
-                let query = *value;
-                let mut result = query;
-                for root in 1..=combination_len {
-                    if root != assigned_root {
-                        result *= C::Scalar::from(root as u64) - query;
-                    }
-                }
-                *value = result;
-            }
-
-            Some(super::CompressedSelectorCoset {
-                column_index,
-                combination_len,
-                assigned_root,
-                selector,
-            })
+            family
+                .assigned_roots
+                .into_iter()
+                .zip(selectors)
+                .map(|(assigned_root, selector)| super::CompressedSelectorCoset {
+                    column_index: family.column_index,
+                    combination_len: family.combination_len,
+                    assigned_root,
+                    selector,
+                })
+                .collect::<Vec<_>>()
         })
-        .collect::<Vec<Option<_>>>()
+        .collect::<Vec<Vec<_>>>()
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
@@ -416,10 +513,9 @@ where
         floor_plan,
     })
 }
-
 #[cfg(test)]
 mod tests {
-    use super::commit_fixed_lagrange;
+    use super::{commit_fixed_lagrange, evaluate_compressed_selector_family};
     use crate::{
         pasta::{EqAffine, Fp},
         poly::{
@@ -427,6 +523,8 @@ mod tests {
             commitment::{Blind, Params},
         },
     };
+    use ff::Field;
+    use pasta_curves::{pallas, vesta};
 
     #[test]
     fn sparse_fixed_commitment_matches_generic_commitment() {
@@ -442,5 +540,43 @@ mod tests {
             commit_fixed_lagrange(&params, &polynomial),
             params.commit_lagrange(&polynomial, Blind::default())
         );
+    }
+
+    fn check_compressed_selector_family<F: Field + From<u64>>() {
+        const COMBINATION_LEN: usize = 7;
+
+        let query = [
+            F::ZERO,
+            F::ONE,
+            F::from(2),
+            F::from(COMBINATION_LEN as u64),
+            -F::ONE,
+            F::from(19),
+        ];
+        let mut actual = vec![vec![F::ZERO; query.len()]; COMBINATION_LEN];
+        let selector_slices = actual
+            .iter_mut()
+            .map(|selector| &mut selector[..])
+            .collect();
+
+        // A one-element chunk exercises the parallel splitting path.
+        evaluate_compressed_selector_family(&query, selector_slices, 1);
+
+        for (assigned_root, selector) in actual.iter().enumerate() {
+            for (query, actual) in query.iter().zip(selector) {
+                let expected = (1..=COMBINATION_LEN)
+                    .filter(|root| *root != assigned_root + 1)
+                    .fold(*query, |product, root| {
+                        product * (F::from(root as u64) - query)
+                    });
+                assert_eq!(*actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn compressed_selector_prefix_suffix_matches_independent_products() {
+        check_compressed_selector_family::<pallas::Base>();
+        check_compressed_selector_family::<vesta::Base>();
     }
 }
