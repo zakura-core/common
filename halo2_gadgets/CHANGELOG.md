@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Poseidon Pow5 witness generation now caches fixed-size raw round states,
+  eliminating per-round temporary vector allocations.
 - Fixed-base witness interpolation now specializes its Horner multiplication
   for each three-bit window digit, replacing full field multiplications with
   short doubling and addition chains.
