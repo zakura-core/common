@@ -1,6 +1,6 @@
 #![allow(clippy::int_plus_one)]
 
-use std::ops::Range;
+use std::{cmp::Reverse, mem::size_of, ops::Range};
 
 use ff::{Field, FromUniformBytes};
 use group::Curve;
@@ -101,13 +101,32 @@ struct CompressedSelectorFamily {
     assigned_roots: Vec<usize>,
 }
 
+impl CompressedSelectorFamily {
+    fn additional_cached_polynomials(&self) -> Option<usize> {
+        // The root-one output reuses the family's source coset.
+        self.combination_len.checked_sub(1)
+    }
+}
+
+// This bounds only field-element payload newly retained for
+// compressed-selector cosets beyond the proving key's existing polynomials.
+// Allocator rounding and the small `Box`/polynomial metadata are not included.
+const MEBIBYTE: usize = 1024 * 1024;
+const MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES: usize = 21 * MEBIBYTE;
+
+#[derive(Debug)]
+struct CompressedSelectorCachePlan {
+    families: Vec<CompressedSelectorFamily>,
+    additional_payload_bytes: usize,
+}
+
 fn group_compressed_selectors(
     compressed_selectors: Vec<(usize, usize, usize)>,
 ) -> Vec<CompressedSelectorFamily> {
     let mut families: Vec<CompressedSelectorFamily> = vec![];
 
     for (column_index, combination_len, assigned_root) in compressed_selectors {
-        if combination_len < crate::MIN_CACHED_SELECTOR_FAMILY_LEN {
+        if combination_len < crate::MIN_SELECTOR_FAMILY_LEN {
             continue;
         }
 
@@ -137,6 +156,44 @@ fn group_compressed_selectors(
     }
 
     families
+}
+
+fn plan_compressed_selector_cache(
+    families: Vec<CompressedSelectorFamily>,
+    selector_len: usize,
+    element_size: usize,
+    max_payload_bytes: usize,
+) -> CompressedSelectorCachePlan {
+    // The enumeration index makes the tie-break explicit instead of relying
+    // on the sort implementation's stability.
+    let mut families = families.into_iter().enumerate().collect::<Vec<_>>();
+    families.sort_by_key(|(index, family)| (Reverse(family.combination_len), *index));
+
+    let mut selected = Vec::new();
+    let mut additional_payload_bytes = 0usize;
+    for (_, family) in families {
+        let Some(family_payload_bytes) = family
+            .additional_cached_polynomials()
+            .and_then(|polynomials| polynomials.checked_mul(selector_len))
+            .and_then(|elements| elements.checked_mul(element_size))
+        else {
+            // An unrepresentable payload cannot fit in a `usize` budget.
+            continue;
+        };
+        let Some(next_payload_bytes) = additional_payload_bytes.checked_add(family_payload_bytes)
+        else {
+            continue;
+        };
+        if next_payload_bytes <= max_payload_bytes {
+            additional_payload_bytes = next_payload_bytes;
+            selected.push(family);
+        }
+    }
+
+    CompressedSelectorCachePlan {
+        families: selected,
+        additional_payload_bytes,
+    }
 }
 
 fn evaluate_compressed_selector_family<F: Field + From<u64>>(
@@ -431,10 +488,18 @@ where
         .domain
         .batch_lagrange_to_coeff_and_extended(&fixed, &fft_twiddles);
 
+    let cache_plan = plan_compressed_selector_cache(
+        group_compressed_selectors(compressed_selectors),
+        vk.domain.extended_len(),
+        size_of::<C::Scalar>(),
+        MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES,
+    );
+    assert!(cache_plan.additional_payload_bytes <= MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES);
+
     let mut selector_families_by_column = std::iter::repeat_with(|| None)
         .take(fixed_cosets.len())
         .collect::<Vec<_>>();
-    for family in group_compressed_selectors(compressed_selectors) {
+    for family in cache_plan.families {
         let column_index = family.column_index;
         assert!(selector_families_by_column[column_index]
             .replace(family)
@@ -525,7 +590,10 @@ where
 }
 #[cfg(test)]
 mod tests {
-    use super::{commit_fixed_lagrange, evaluate_compressed_selector_family};
+    use super::{
+        commit_fixed_lagrange, evaluate_compressed_selector_family, plan_compressed_selector_cache,
+        CompressedSelectorFamily, MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES,
+    };
     use crate::{
         pasta::{EqAffine, Fp},
         poly::{
@@ -549,6 +617,135 @@ mod tests {
         assert_eq!(
             commit_fixed_lagrange(&params, &polynomial),
             params.commit_lagrange(&polynomial, Blind::default())
+        );
+    }
+
+    fn family(column_index: usize, combination_len: usize) -> CompressedSelectorFamily {
+        CompressedSelectorFamily {
+            column_index,
+            combination_len,
+            assigned_roots: (1..=combination_len).collect(),
+        }
+    }
+
+    #[test]
+    fn compressed_selector_cache_plan_is_bounded_and_whole_family() {
+        let plan = plan_compressed_selector_cache(
+            vec![
+                family(0, 5),
+                family(1, 7),
+                family(2, 5),
+                family(3, 6),
+                CompressedSelectorFamily {
+                    column_index: 4,
+                    combination_len: usize::MAX,
+                    assigned_roots: vec![],
+                },
+            ],
+            1,
+            8,
+            80,
+        );
+
+        assert_eq!(plan.additional_payload_bytes, 80);
+        assert_eq!(
+            plan.families
+                .iter()
+                .map(|family| family.column_index)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert!(plan
+            .families
+            .iter()
+            .all(|family| family.assigned_roots.len() == family.combination_len));
+    }
+
+    #[test]
+    fn compressed_selector_cache_plan_rejects_checked_arithmetic_overflow() {
+        // A malformed empty family cannot underflow the reuse discount.
+        let plan = plan_compressed_selector_cache(vec![family(0, 0)], 1, 1, usize::MAX);
+        assert!(plan.families.is_empty());
+        assert_eq!(plan.additional_payload_bytes, 0);
+
+        // Overflow while counting field elements in one family.
+        let plan = plan_compressed_selector_cache(vec![family(0, 3)], usize::MAX, 1, usize::MAX);
+        assert!(plan.families.is_empty());
+        assert_eq!(plan.additional_payload_bytes, 0);
+
+        // Overflow while converting a field-element count to bytes.
+        let plan = plan_compressed_selector_cache(vec![family(0, 2)], usize::MAX, 2, usize::MAX);
+        assert!(plan.families.is_empty());
+        assert_eq!(plan.additional_payload_bytes, 0);
+
+        // Overflow while adding another whole family to the running total.
+        let plan = plan_compressed_selector_cache(
+            vec![family(0, 3), family(1, 2)],
+            usize::MAX / 2,
+            1,
+            usize::MAX,
+        );
+        assert_eq!(plan.families.len(), 1);
+        assert_eq!(plan.families[0].column_index, 0);
+        assert_eq!(plan.additional_payload_bytes, usize::MAX - 1);
+    }
+
+    #[test]
+    fn compressed_selector_cache_plan_is_deterministic_and_tie_stable() {
+        let make_families = || vec![family(10, 5), family(20, 7), family(11, 5), family(21, 7)];
+        let selected_columns = |plan: super::CompressedSelectorCachePlan| {
+            plan.families
+                .into_iter()
+                .map(|family| family.column_index)
+                .collect::<Vec<_>>()
+        };
+
+        let first = plan_compressed_selector_cache(make_families(), 1, 1, 16);
+        let second = plan_compressed_selector_cache(make_families(), 1, 1, 16);
+        assert_eq!(selected_columns(first), [20, 21, 10]);
+        assert_eq!(selected_columns(second), [20, 21, 10]);
+    }
+
+    #[test]
+    fn orchard_compressed_selectors_use_20_5_mib_of_additional_payload() {
+        const ORCHARD_EXTENDED_LEN: usize = 1 << 14;
+        const ORCHARD_SELECTOR_FAMILY_LENGTHS: [usize; 9] = [6, 4, 5, 4, 4, 6, 7, 7, 7];
+        const ORCHARD_ADDITIONAL_CACHE_BYTES: usize = 20 * super::MEBIBYTE + super::MEBIBYTE / 2;
+
+        let plan = plan_compressed_selector_cache(
+            ORCHARD_SELECTOR_FAMILY_LENGTHS
+                .into_iter()
+                .enumerate()
+                .map(|(column_index, combination_len)| family(column_index, combination_len))
+                .collect(),
+            ORCHARD_EXTENDED_LEN,
+            size_of::<pallas::Base>(),
+            MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES,
+        );
+
+        assert_eq!(
+            plan.families
+                .iter()
+                .map(|family| family.combination_len)
+                .sum::<usize>(),
+            50
+        );
+        assert_eq!(
+            plan.families
+                .iter()
+                .map(|family| family
+                    .additional_cached_polynomials()
+                    .expect("selected selector families are nonempty"))
+                .sum::<usize>(),
+            41
+        );
+        assert_eq!(
+            plan.additional_payload_bytes,
+            ORCHARD_ADDITIONAL_CACHE_BYTES
+        );
+        assert_eq!(
+            MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES - plan.additional_payload_bytes,
+            super::MEBIBYTE / 2
         );
     }
 
