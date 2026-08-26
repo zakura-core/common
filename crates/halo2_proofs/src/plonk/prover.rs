@@ -1424,8 +1424,11 @@ fn compressed_selector_cache_preserves_proof() {
     }
 
     let params = Params::new(4);
-    let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
-    let pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
+    let create_pk = || {
+        let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
+        keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail")
+    };
+    let pk = create_pk();
     assert_eq!(
         pk.compressed_selector_cosets.len(),
         crate::MIN_SELECTOR_FAMILY_LEN
@@ -1439,4 +1442,37 @@ fn compressed_selector_cache_preserves_proof() {
     uncached_pk.compressed_selector_cosets = Default::default();
 
     assert_eq!(create(&pk, &params), create(&uncached_pk, &params));
+
+    #[cfg(feature = "multicore")]
+    {
+        let single_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let parallel_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let single_pk = single_pool.install(create_pk);
+        let parallel_pk = parallel_pool.install(create_pk);
+
+        assert_eq!(
+            single_pk.compressed_selector_cosets.len(),
+            parallel_pk.compressed_selector_cosets.len()
+        );
+        for (single, parallel) in single_pk
+            .compressed_selector_cosets
+            .iter()
+            .zip(parallel_pk.compressed_selector_cosets.iter())
+        {
+            assert_eq!(single.column_index, parallel.column_index);
+            assert_eq!(single.combination_len, parallel.combination_len);
+            assert_eq!(single.assigned_root, parallel.assigned_root);
+            assert_eq!(&single.selector[..], &parallel.selector[..]);
+        }
+
+        let single_proof = single_pool.install(|| create(&single_pk, &params));
+        let parallel_proof = parallel_pool.install(|| create(&parallel_pk, &params));
+        assert_eq!(single_proof, parallel_proof);
+    }
 }
