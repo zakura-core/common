@@ -386,6 +386,111 @@ fn test_roundtrip() {
 }
 
 #[test]
+fn point_set_quotients_preserve_proof_across_workers() {
+    use group::Curve;
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use super::commitment::{Blind, Params};
+    use crate::arithmetic::eval_polynomial;
+    use crate::pasta::{EqAffine, Fp};
+    use crate::transcript::Challenge255;
+
+    const K: u32 = 11;
+    const PROOF_SEED: u64 = 0x5150_5249_4d45_5046;
+
+    let params: Params<EqAffine> = Params::new(K);
+    let domain = EvaluationDomain::new(1, K);
+    let mut ax = domain.empty_coeff();
+    let mut bx = domain.empty_coeff();
+    let mut cx = domain.empty_coeff();
+    for (index, coefficient) in ax.iter_mut().enumerate() {
+        *coefficient = Fp::from(10 + index as u64);
+    }
+    for (index, coefficient) in bx.iter_mut().enumerate() {
+        *coefficient = Fp::from(100 + index as u64);
+    }
+    for (index, coefficient) in cx.iter_mut().enumerate() {
+        *coefficient = Fp::from(1_000 + index as u64);
+    }
+
+    let blind = Blind(Fp::from(7));
+    let x = Fp::from(13);
+    let y = Fp::from(29);
+    let a = params.commit(&ax, blind).to_affine();
+    let b = params.commit(&bx, blind).to_affine();
+    let c = params.commit(&cx, blind).to_affine();
+
+    let create_seeded_proof = || {
+        let mut transcript = crate::transcript::Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof(
+            &params,
+            StdRng::seed_from_u64(PROOF_SEED),
+            &mut transcript,
+            [
+                ProverQuery {
+                    point: x,
+                    poly: &ax,
+                    blind,
+                },
+                ProverQuery {
+                    point: x,
+                    poly: &bx,
+                    blind,
+                },
+                ProverQuery {
+                    point: y,
+                    poly: &bx,
+                    blind,
+                },
+                ProverQuery {
+                    point: y,
+                    poly: &cx,
+                    blind,
+                },
+            ],
+        )
+        .expect("proof generation should not fail");
+        transcript.finalize()
+    };
+
+    #[cfg(feature = "multicore")]
+    let expected = maybe_rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(|| create_seeded_proof());
+    #[cfg(not(feature = "multicore"))]
+    let expected = create_seeded_proof();
+
+    assert_eq!(create_seeded_proof(), expected);
+    #[cfg(feature = "multicore")]
+    {
+        let parallel = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(create_seeded_proof);
+        assert_eq!(parallel, expected);
+    }
+
+    let mut proof = expected.as_slice();
+    let mut transcript = crate::transcript::Blake2bRead::<_, _, Challenge255<_>>::init(&mut proof);
+    let guard = verify_proof(
+        &params,
+        &mut transcript,
+        [
+            VerifierQuery::new_commitment(&a, x, eval_polynomial(&ax, x)),
+            VerifierQuery::new_commitment(&b, x, eval_polynomial(&bx, x)),
+            VerifierQuery::new_commitment(&b, y, eval_polynomial(&bx, y)),
+            VerifierQuery::new_commitment(&c, y, eval_polynomial(&cx, y)),
+        ],
+        params.empty_msm(),
+    )
+    .expect("proof verification should not fail");
+    assert!(guard.use_challenges().eval());
+}
+
+#[test]
 fn test_identical_queries() {
     use assert_matches::assert_matches;
     use group::Curve;
