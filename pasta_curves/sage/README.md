@@ -28,9 +28,9 @@ pip-installable distribution of SageMath (see `pyproject.toml` /
 `uv.lock`). From this directory:
 
 ```console
-$ uv run sage glv_constants.sage
-$ uv run sage glv_boundary_scalars.sage
-$ uv run sage effective_affine_chain.sage
+uv run sage glv_constants.sage
+uv run sage glv_boundary_scalars.sage
+uv run sage effective_affine_chain.sage
 ```
 
 Any reasonably recent standalone SageMath installation works too:
