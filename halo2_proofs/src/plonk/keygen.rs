@@ -13,7 +13,7 @@ use super::{
     permutation, Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
 };
 use crate::{
-    arithmetic::CurveAffine,
+    arithmetic::{best_multiexp, CurveAffine},
     circuit::Value,
     poly::{
         batch_invert_assigned,
@@ -21,6 +21,44 @@ use crate::{
         EvaluationDomain,
     },
 };
+
+// Compacting pays for its scan and allocation once at least a quarter of a
+// fixed polynomial's terms are zero.
+const SPARSE_FIXED_COMMITMENT_ZERO_FRACTION_DENOMINATOR: usize = 4;
+
+fn commit_fixed_lagrange<C: CurveAffine>(
+    params: &Params<C>,
+    polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
+) -> C::Curve {
+    #[cfg(feature = "orbits")]
+    if params.lagrange_table().is_some() {
+        return params.commit_lagrange(polynomial, Blind::default());
+    }
+
+    let zero_count = polynomial
+        .iter()
+        .filter(|scalar| bool::from(scalar.is_zero()))
+        .count();
+
+    if polynomial.len() == params.g_lagrange.len()
+        && zero_count * SPARSE_FIXED_COMMITMENT_ZERO_FRACTION_DENOMINATOR >= polynomial.len()
+    {
+        let mut scalars = Vec::with_capacity(polynomial.len() - zero_count + 1);
+        let mut bases = Vec::with_capacity(scalars.capacity());
+        for (scalar, base) in polynomial.iter().zip(&params.g_lagrange) {
+            if !bool::from(scalar.is_zero()) {
+                scalars.push(*scalar);
+                bases.push(*base);
+            }
+        }
+        scalars.push(Blind::default().0);
+        bases.push(params.w);
+
+        best_multiexp::<C>(&scalars, &bases)
+    } else {
+        params.commit_lagrange(polynomial, Blind::default())
+    }
+}
 
 pub(crate) fn create_domain<C, ConcreteCircuit>(
     params: &Params<C>,
@@ -230,10 +268,12 @@ where
         .permutation
         .build_vk(params, &domain, &cs.permutation);
 
-    let fixed_commitments = fixed
+    let fixed_commitments_projective = fixed
         .iter()
-        .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
-        .collect();
+        .map(|polynomial| commit_fixed_lagrange(params, polynomial))
+        .collect::<Vec<_>>();
+    let mut fixed_commitments = vec![C::identity(); fixed_commitments_projective.len()];
+    C::Curve::batch_normalize(&fixed_commitments_projective, &mut fixed_commitments);
 
     Ok(VerifyingKey::from_parts(
         domain,
@@ -342,4 +382,32 @@ where
         fft_twiddles,
         floor_plan,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::commit_fixed_lagrange;
+    use crate::{
+        pasta::{EqAffine, Fp},
+        poly::{
+            commitment::{Blind, Params},
+            EvaluationDomain,
+        },
+    };
+
+    #[test]
+    fn sparse_fixed_commitment_matches_generic_commitment() {
+        const K: u32 = 4;
+
+        let params = Params::<EqAffine>::new(K);
+        let domain = EvaluationDomain::new(1, K);
+        let mut polynomial = domain.empty_lagrange();
+        polynomial[0] = Fp::from(3);
+        polynomial[5] = Fp::from(7);
+
+        assert_eq!(
+            commit_fixed_lagrange(&params, &polynomial),
+            params.commit_lagrange(&polynomial, Blind::default())
+        );
+    }
 }

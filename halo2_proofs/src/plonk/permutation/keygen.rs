@@ -132,7 +132,7 @@ impl Assembly {
         }
 
         // Pre-compute commitments for the URS.
-        let mut commitments = Vec::with_capacity(p.columns.len());
+        let mut permutation_polys = Vec::with_capacity(p.columns.len());
         for i in 0..p.columns.len() {
             // Computes the permutation polynomial based on the permutation
             // description in the assembly.
@@ -142,13 +142,15 @@ impl Assembly {
                 *p = deltaomega[permuted_i][permuted_j];
             }
 
-            // Compute commitment to permutation polynomial
-            commitments.push(
-                params
-                    .commit_lagrange(&permutation_poly, Blind::default())
-                    .to_affine(),
-            );
+            permutation_polys.push(permutation_poly);
         }
+
+        let commitments_projective = permutation_polys
+            .iter()
+            .map(|polynomial| params.commit_lagrange(polynomial, Blind::default()))
+            .collect::<Vec<_>>();
+        let mut commitments = vec![C::identity(); commitments_projective.len()];
+        C::Curve::batch_normalize(&commitments_projective, &mut commitments);
         VerifyingKey { commitments }
     }
 

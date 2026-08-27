@@ -9,7 +9,7 @@ use halo2_proofs::{
         self, Advice, BatchVerifier, Column, Constraints, Expression, Fixed,
         Instance as InstanceColumn, Selector, SingleVerifier,
     },
-    poly::Rotation,
+    poly::{commitment::Params, Rotation},
     transcript::{Blake2bRead, Blake2bWrite},
 };
 use pasta_curves::{arithmetic::CurveAffine, pallas, vesta};
@@ -74,6 +74,20 @@ pub use crate::Proof;
 
 /// Size of the Orchard circuit.
 const K: u32 = 11;
+
+/// Canonical encoding of [`Params::new`] for [`vesta::Affine`] at [`K`].
+const ORCHARD_K11_PARAMS: &[u8] = include_bytes!("circuit_data/orchard_k11_params.bin");
+
+fn orchard_k11_params() -> Params<vesta::Affine> {
+    let mut encoded = ORCHARD_K11_PARAMS;
+    let params = Params::read(&mut encoded).expect("embedded Orchard parameters must decode");
+    assert!(
+        encoded.is_empty(),
+        "embedded Orchard parameters have trailing data"
+    );
+    assert_eq!(params.k(), K, "embedded Orchard parameters use the wrong k");
+    params
+}
 
 /// Shape of the public instance consumed by one Orchard Action proof.
 const INSTANCE_COLUMNS: usize = 1;
@@ -1093,7 +1107,7 @@ impl VerifyingKey {
     ///
     /// See [`OrchardCircuitVersion`] for which version to use.
     pub fn build(circuit_version: OrchardCircuitVersion) -> Self {
-        let params = halo2_proofs::poly::commitment::Params::new(K);
+        let params = orchard_k11_params();
         let circuit = Circuit::empty(circuit_version);
 
         let vk = plonk::keygen_vk(&params, &circuit).unwrap();
@@ -1180,7 +1194,7 @@ impl ProvingKey {
     ///
     /// See [`OrchardCircuitVersion`] for which version to use.
     pub fn build(circuit_version: OrchardCircuitVersion) -> Self {
-        let params = halo2_proofs::poly::commitment::Params::new(K);
+        let params = orchard_k11_params();
         let circuit = Circuit::empty(circuit_version);
 
         let vk = plonk::keygen_vk(&params, &circuit).unwrap();
@@ -1473,13 +1487,16 @@ mod tests {
     use core::iter;
 
     use ff::Field;
-    use halo2_proofs::{circuit::Value, dev::MockProver};
+    use halo2_proofs::{circuit::Value, dev::MockProver, poly::commitment::Params};
     use pasta_curves::{pallas, vesta};
     use rand::Rng;
 
     use crate::rng_compat::OsRng;
 
-    use super::{Circuit, Instance, OrchardCircuitVersion, Proof, VerifyingKey, K};
+    use super::{
+        orchard_k11_params, Circuit, Instance, OrchardCircuitVersion, Proof, VerifyingKey, K,
+        ORCHARD_K11_PARAMS,
+    };
     use crate::{
         bundle::{BundleVersion, Flags},
         keys::SpendValidatingKey,
@@ -1487,6 +1504,17 @@ mod tests {
         tree::MerklePath,
         value::{ValueCommitTrapdoor, ValueCommitment},
     };
+
+    #[test]
+    fn embedded_orchard_params_match_generation() {
+        let mut generated = Vec::new();
+        Params::<vesta::Affine>::new(K)
+            .write(&mut generated)
+            .unwrap();
+
+        assert_eq!(generated, ORCHARD_K11_PARAMS);
+        assert_eq!(orchard_k11_params().k(), K);
+    }
 
     /// Generates a circuit and instance whose output note is addressed to an expanded
     /// receiver distinct from the spent note's.
