@@ -16,8 +16,9 @@
 //! group message is independently blinded, the mask's only effect on the
 //! transcript distribution is through the revealed scalar $c$, which it
 //! makes either uniformly random or publicly zero, with the case decided by
-//! public challenges alone. A mask supported on $k+1$ chosen coefficients
-//! gives $c$ the identical distribution. The argument is as follows.
+//! public challenges alone. The following mask, supported on $k+1$
+//! carefully chosen coefficients, gives $c$ the identical distribution. The
+//! argument is as follows.
 //!
 //! Let $n = 2^k$, and let $u_0, \ldots, u_{k-1}$ be the nonzero IPA folding
 //! challenges in their transcript order. After all folds, the prover reveals
@@ -73,13 +74,17 @@
 //!
 //! This argument uses the standard nonzero challenge space from BCMS20, and
 //! the overall zero-knowledge distance is governed by ordinary transcript
-//! events rather than by the folding-challenge coincidence above (which is
-//! simulatable, not exceptional). The implementation aborts if any
-//! $u_j = 0$, since it must invert each; a transcript encoding that samples
-//! the whole field therefore contributes its existing $O(k/|\mathbb F|)$
-//! abort probability, and the event $\xi = 0$ adds at most $1/|\mathbb F|$.
-//! The honest-verifier statistical distance is thus $O(k/|\mathbb F|)$, and
-//! no claim smaller than that is meaningful for the scheme as implemented.
+//! events — zero challenges and unencodable identity points — rather than
+//! by the folding-challenge coincidence above (which is simulatable, not
+//! exceptional). The implementation aborts if any $u_j = 0$, since it must
+//! invert each; a transcript encoding that samples the whole field
+//! therefore contributes its existing $O(k/|\mathbb F|)$ abort probability.
+//! The event $\xi = 0$ adds at most $1/|\mathbb F|$, and each of the $2k+1$
+//! independently blinded group messages — the mask commitment and the $k$
+//! left and right points — is the identity, which the transcript refuses to
+//! encode, with probability $1/|\mathbb F|$. The honest-verifier
+//! statistical distance is thus $O(k/|\mathbb F|)$, and no claim smaller
+//! than that is meaningful for the scheme as implemented.
 //!
 //! [BCMS20]: https://eprint.iacr.org/2020/499
 

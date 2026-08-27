@@ -41,10 +41,14 @@ fn ipa_masking_commitment<C: CurveAffine>(
     blind: Blind<C::Scalar>,
     params: &Params<C>,
 ) -> C::Curve {
-    // A mask sampled for a smaller domain would leave early IPA rounds
-    // unmasked without failing any later check, so require exactly the
-    // k + 1 support terms for these params.
+    // A mask on any other support could leave IPA rounds unmasked without
+    // failing any later check, so require exactly the constant plus each
+    // power-of-two index for these params.
     assert_eq!(coefficients.len(), params.k as usize + 1);
+    assert_eq!(coefficients[0].0, 0);
+    for (t, (index, _)) in coefficients[1..].iter().enumerate() {
+        assert_eq!(*index, 1 << t);
+    }
 
     let mut scalars = Vec::with_capacity(coefficients.len() + 1);
     let mut bases = Vec::with_capacity(coefficients.len() + 1);
@@ -355,7 +359,7 @@ mod tests {
         s[0]
     }
 
-    fn masking_polynomial_folds_to_zero_only_in_the_zero_case<C>()
+    fn masking_basis_detects_every_non_evaluation_fold<C>()
     where
         C: CurveAffine + core::fmt::Debug,
     {
@@ -363,13 +367,6 @@ mod tests {
         let n = 1usize << K;
         let x = full_width_scalar::<C>();
         let mut rng = rng();
-
-        // The mask's contribution to the revealed scalar `c` is its own
-        // collapse under the same challenges.
-        let mut mask = vec![C::Scalar::ZERO; n];
-        for (index, coefficient) in sample_ipa_masking_polynomial(K, x, &mut rng) {
-            mask[index] = coefficient;
-        }
 
         // The challenge pattern that selects the parent module's zero case:
         // u_{k-1-t} = x^{-2^t} for every t.
@@ -390,19 +387,39 @@ mod tests {
             eval_polynomial(&dense, x),
         );
 
-        // In particular the mask, which evaluates to zero at x, folds to
-        // exactly zero: the revealed scalar is the public value zero.
-        assert_eq!(collapsed_scalar(mask.clone(), &zero_case), C::Scalar::ZERO);
+        // The sampled mask is a linear combination of the basis vectors
+        // s_t(X) = X^{2^t} - x^{2^t}, and each basis vector folds to the
+        // linear-functional coefficient u_{k-1-t}^{-1} - x^{2^t} from the
+        // parent module. Check deterministically that this coefficient is
+        // zero under the zero-case pattern and nonzero the moment the one
+        // challenge controlling index 2^t deviates: the functional's
+        // coefficients all vanish exactly in the zero case, so the folded
+        // mask is uniform whenever any challenge deviates. A
+        // prefix-supported mask has no basis vector at large 2^t, so
+        // early-round deviations go undetected there.
+        let two = C::Scalar::from(2);
+        let mut x_power = x;
+        for t in 0..K as usize {
+            let mut basis_mask = vec![C::Scalar::ZERO; n];
+            basis_mask[0] = -x_power;
+            basis_mask[1 << t] = C::Scalar::ONE;
 
-        // A single deviating challenge in any round — a fresh random value,
-        // which revisits the zero case only with negligible probability —
-        // leaves the folded mask a nonzero linear form in the mask
-        // randomness, so the revealed scalar is uniform. A prefix-supported
-        // mask fails this for early rounds.
-        for deviating in 0..K as usize {
+            assert_eq!(
+                collapsed_scalar(basis_mask.clone(), &zero_case),
+                C::Scalar::ZERO,
+            );
+
+            // Deviate deterministically in the one challenge controlling
+            // index 2^t.
+            let j = K as usize - 1 - t;
             let mut challenges = zero_case.clone();
-            challenges[deviating] = C::Scalar::random(&mut rng);
-            assert_ne!(collapsed_scalar(mask.clone(), &challenges), C::Scalar::ZERO);
+            challenges[j] *= two;
+
+            let expected = challenges[j].invert().unwrap() - x_power;
+            assert_ne!(expected, C::Scalar::ZERO);
+            assert_eq!(collapsed_scalar(basis_mask, &challenges), expected);
+
+            x_power = x_power.square();
         }
     }
 
@@ -475,12 +492,12 @@ mod tests {
     }
 
     #[test]
-    fn masking_polynomial_folds_to_zero_only_in_the_zero_case_pallas() {
-        masking_polynomial_folds_to_zero_only_in_the_zero_case::<pallas::Affine>();
+    fn masking_basis_detects_every_non_evaluation_fold_pallas() {
+        masking_basis_detects_every_non_evaluation_fold::<pallas::Affine>();
     }
 
     #[test]
-    fn masking_polynomial_folds_to_zero_only_in_the_zero_case_vesta() {
-        masking_polynomial_folds_to_zero_only_in_the_zero_case::<vesta::Affine>();
+    fn masking_basis_detects_every_non_evaluation_fold_vesta() {
+        masking_basis_detects_every_non_evaluation_fold::<vesta::Affine>();
     }
 }
