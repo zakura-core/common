@@ -156,7 +156,8 @@ pub trait CurveExt:
     /// (see [`PreparedZeroCheck`]). Implementations without a prepared
     /// backend return `None`, and implementations may also decline —
     /// the Pasta backend returns `None` when its prepared table for this
-    /// many bases would exceed its internal memory budget. Preparation
+    /// many bases would exceed its internal table-footprint budget.
+    /// Preparation
     /// can cost hundreds of milliseconds and tens of mebibytes for a few
     /// thousand bases, so callers should invoke this once and reuse the
     /// handle across checks.
