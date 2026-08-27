@@ -424,6 +424,42 @@ fn digit_scalar<F: WithSmallOrderMulGroup<3>>(code: u8) -> F {
     signed(da) + signed(db) * F::ZETA
 }
 
+/// The effective-affine table builder's fixed addition chain, derived and
+/// proved minimal by `sage/effective_affine_chain.sage` and re-derived from
+/// first principles by the `effective_chain_derivation` test: starting from
+/// $q_0 = P$, each step adds $D = 2P$ with an incomplete mixed addition and
+/// then applies an Eisenstein unit,
+///
+/// $q_{i+1} = u_i(q_i + 2)$,
+///
+/// so the eight stored points visit the eight [`DELTA`] unit orbits exactly
+/// once and no pre-addition state is $\pm 2$ (the incomplete formula's
+/// exceptional case). Units are encoded like the [`JOINT_DIGITS`] unit
+/// index — `[+1, -1, +ω, -ω, +ω², -ω²]`, `unit >> 1` the rotation exponent
+/// and `unit & 1` the negation. Four of the seven units have a nontrivial
+/// rotation (one x-coordinate multiplication each in the builder), the
+/// exhaustive-search minimum: of the 54 valid seven-step chains, four
+/// attain it, and this is the lexicographically least code sequence.
+const EFFECTIVE_CHAIN_UNITS: [u8; 7] = [2, 0, 5, 2, 4, 0, 0];
+
+/// How each chain path point relates to its canonical orbit representative:
+/// `(slot, rotation, negate)` means
+/// $q_i = \pm\omega^{\text{rotation}}\Delta_{\text{slot}}$ (`negate` for the
+/// minus sign). The path visits every slot exactly once, so scattering the
+/// chain into a table is a permutation:
+/// `xs[e][slot] = ζ^((e - rotation) mod 3) · x(q_i)` and
+/// `ys[slot] = ±y(q_i)`.
+const EFFECTIVE_CHAIN_RELATIONS: [(u8, u8, bool); 8] = [
+    (0, 0, false),
+    (4, 1, false),
+    (3, 1, false),
+    (5, 1, false),
+    (6, 2, false),
+    (1, 1, false),
+    (2, 2, true),
+    (7, 2, true),
+];
+
 /// Joint width-3 NAF recoding of $a + b\omega$ over the Eisenstein integers,
 /// lowest position first: while the value is nonzero, emit 0 if it is
 /// divisible by 2 (both coefficients even), else the unique $U\Delta$ digit
@@ -3379,6 +3415,138 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Exhaustively re-derives [`EFFECTIVE_CHAIN_UNITS`] and
+    /// [`EFFECTIVE_CHAIN_RELATIONS`] from [`DELTA`] and the unit code
+    /// order, mirroring `sage/effective_affine_chain.sage`: over all 6^7
+    /// unit sequences there are exactly 54 valid chains (every stored
+    /// point in a distinct unit orbit, no pre-addition state ±2), the
+    /// minimal nontrivial-rotation count is 4 with exactly 4 chains
+    /// attaining it, and the pinned chain is the lexicographically least
+    /// of those. Also checks the group-level nonexceptionality for both
+    /// Pasta scalar fields: no pre-addition state maps to 0 or ±2 mod n.
+    #[test]
+    fn effective_chain_derivation() {
+        // Eisenstein arithmetic on (a, b) = a + bω, with ω² = -1 - ω.
+        fn emul(x: (i32, i32), y: (i32, i32)) -> (i32, i32) {
+            (x.0 * y.0 - x.1 * y.1, x.0 * y.1 + x.1 * y.0 - x.1 * y.1)
+        }
+        fn enorm(x: (i32, i32)) -> i32 {
+            x.0 * x.0 - x.0 * x.1 + x.1 * x.1
+        }
+        // The units in code order [+1, -1, +ω, -ω, +ω², -ω²].
+        const UNITS: [(i32, i32); 6] = [(1, 0), (-1, 0), (0, 1), (0, -1), (-1, -1), (1, 1)];
+
+        // value = ±ω^rotation · Δ_slot, if value is in a target orbit.
+        let relation_of = |value: (i32, i32)| -> Option<(u8, u8, bool)> {
+            for (slot, &(da, db)) in DELTA.iter().enumerate() {
+                for (code, &unit) in UNITS.iter().enumerate() {
+                    if emul(unit, (i32::from(da), i32::from(db))) == value {
+                        return Some((slot as u8, (code >> 1) as u8, code & 1 == 1));
+                    }
+                }
+            }
+            None
+        };
+
+        // The chain walk; `None` when a pre-addition state is ±2 (the
+        // incomplete mixed addition's exceptional case).
+        let walk = |codes: &[usize; 7]| -> Option<[(i32, i32); 8]> {
+            let mut q = (1, 0);
+            let mut path = [(0, 0); 8];
+            path[0] = q;
+            for (step, &code) in codes.iter().enumerate() {
+                if q == (2, 0) || q == (-2, 0) {
+                    return None;
+                }
+                q = emul(UNITS[code], (q.0 + 2, q.1));
+                path[step + 1] = q;
+            }
+            Some(path)
+        };
+
+        let mut valid = 0usize;
+        let mut best_rotations = usize::MAX;
+        let mut minimal: Vec<([usize; 7], [(u8, u8, bool); 8], [(i32, i32); 8])> = Vec::new();
+        for index in 0..6usize.pow(7) {
+            // Base-6 digits of `index`, most significant first, so
+            // increasing `index` walks code sequences lexicographically.
+            let mut codes = [0usize; 7];
+            for (slot, code) in codes.iter_mut().enumerate() {
+                *code = (index / 6usize.pow(6 - slot as u32)) % 6;
+            }
+            let Some(path) = walk(&codes) else { continue };
+            let mut slots_seen = [false; 8];
+            let mut relations = [(0u8, 0u8, false); 8];
+            let ok = path.iter().enumerate().all(|(i, &q)| match relation_of(q) {
+                Some(relation) if !slots_seen[usize::from(relation.0)] => {
+                    slots_seen[usize::from(relation.0)] = true;
+                    relations[i] = relation;
+                    true
+                }
+                _ => false,
+            });
+            if !ok {
+                continue;
+            }
+            valid += 1;
+            let rotations = codes.iter().filter(|&&code| code >> 1 != 0).count();
+            if rotations < best_rotations {
+                best_rotations = rotations;
+                minimal.clear();
+            }
+            if rotations == best_rotations {
+                minimal.push((codes, relations, path));
+            }
+        }
+        assert_eq!(valid, 54, "expected 54 valid seven-step chains");
+        assert_eq!(best_rotations, 4, "expected a four-rotation minimum");
+        assert_eq!(minimal.len(), 4, "expected 4 chains at the minimum");
+
+        let (codes, relations, path) = minimal[0];
+        assert_eq!(
+            codes.map(|code| code as u8),
+            EFFECTIVE_CHAIN_UNITS,
+            "pinned units must be the least minimal chain"
+        );
+        assert_eq!(relations, EFFECTIVE_CHAIN_RELATIONS, "pinned relations");
+
+        // Group-level nonexceptionality: every pre-addition state q and
+        // its offsets q ∓ 2 have small nonzero Eisenstein norm, so their
+        // scalar-field images a + bλ are nonzero mod both group orders
+        // (N(a + bω) = (a + bλ)(a + bλ̄) mod n, and 0 < N < n). Check the
+        // norms and, directly, the images for both Pasta scalar fields.
+        fn images_nonzero<F: WithSmallOrderMulGroup<3>>(states: &[(i32, i32)]) {
+            let image = |v: (i32, i32)| {
+                let signed = |c: i32| {
+                    let m = F::from(u64::from(c.unsigned_abs()));
+                    if c < 0 {
+                        -m
+                    } else {
+                        m
+                    }
+                };
+                signed(v.0) + signed(v.1) * F::ZETA
+            };
+            for &q in states {
+                for offset in [0, 2, -2] {
+                    let shifted = (q.0 + offset, q.1);
+                    assert!(
+                        !bool::from(image(shifted).is_zero()),
+                        "chain state maps to an exceptional point"
+                    );
+                }
+            }
+        }
+        for &q in &path[..7] {
+            for offset in [0, 2, -2] {
+                let norm = enorm((q.0 + offset, q.1));
+                assert!(norm != 0 && norm < 100, "norms must be small and nonzero");
+            }
+        }
+        images_nonzero::<crate::Fp>(&path[..7]);
+        images_nonzero::<crate::Fq>(&path[..7]);
     }
 
     #[test]

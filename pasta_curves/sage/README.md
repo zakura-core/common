@@ -10,6 +10,11 @@ them in the exact shape of the Rust code so the two can be diffed:
 - `glv_boundary_scalars.sage` — the `*_BOUNDARY_SCALAR` witnesses used
   by the `babai_boundary_*` and `native_vs_glv_boundary_*` regression
   tests in `src/glv.rs`.
+- `effective_affine_chain.sage` — the fixed seven-addition Eisenstein
+  chain behind the effective-affine table builder in `src/glv.rs`
+  (`EFFECTIVE_CHAIN_UNITS`, `EFFECTIVE_CHAIN_RELATIONS`), re-derived by
+  exhaustive search with exactness, minimality, and nonexceptionality
+  proofs.
 
 The scripts use exact integer/rational arithmetic and hand-rolled
 lattice reduction only, so their output is deterministic and does not
@@ -25,6 +30,7 @@ pip-installable distribution of SageMath (see `pyproject.toml` /
 ```console
 $ uv run sage glv_constants.sage
 $ uv run sage glv_boundary_scalars.sage
+$ uv run sage effective_affine_chain.sage
 ```
 
 Any reasonably recent standalone SageMath installation works too:
