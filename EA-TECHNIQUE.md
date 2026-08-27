@@ -189,6 +189,42 @@ build-cost saving does not move the ladder-vs-Jacobian crossover out of
 the (16, 32] interval, so the sidecar keeps the existing
 `BATCH_AFFINE_MIN_POINTS = 32` gate — no separate threshold constant.
 
+### Backend note (measurement discipline)
+
+`cargo bench -p zakura-pasta-curves --features glv` does NOT enable
+`aarch64-asm` (only halo2's Apple-target dependency turns it on), so
+every pasta micro row above is the **portable** backend on the M4 Max —
+internally consistent (the baseline ran identically), but not the
+decision platform. The halo2 `curve-fft`/`params/new` gates are
+asm-backend. Decision-platform pasta micro numbers come from a separate
+`--features glv,aarch64-asm` pass of the forced same-build rows (see
+below); the two-backend agreement also serves as the portability guard
+in lieu of an x86-64 host.
+
+### Commit 6 — FFT routing: end-to-end gates REGRESSED on asm
+
+Raw log: scratchpad `commit6-fft.txt`. With the FFT layers routed to
+effective tables (and the commit-4 hook routing active), halo2 gates on
+the decision platform (aarch64-asm, multicore) vs the clean-main
+baseline:
+
+| gate | baseline | commit 6 | Δ |
+|---|---:|---:|---:|
+| `curve-fft/native-k11` | 182.9 ms | 183.7 ms | noise (p = 0.61) |
+| `curve-fft/affine-eisenstein-k11` | 20.06 ms | 20.97 ms | **+4.6%** |
+| `params/new-k11` | 25.57 ms | 26.57 ms | **+3.9%** |
+
+New scaling rows (no baseline): affine-eisenstein k12 41.85 ms,
+k13 86.54 ms; params/new k12 51.25 ms, k13 105.1 ms.
+
+Meanwhile the forced FFT-layer rows (portable, serial) show effective
+*winning*: 4096 Pallas 84.63 vs 85.67 ms (−1.2%), 1024 −1.7%, 64 −2.3%.
+Contradiction ⇒ the portable-vs-asm backend difference (or the
+multicore shape) flips the balance. Investigating: (1) forced rows
+under `--features glv,aarch64-asm`; (2) if needed, bisect the halo2
+gates across commits eae5bdc (kernel genericization only) and a10cd05
+(hook routing, no FFT routing).
+
 ## Verdict
 
 [pending]
