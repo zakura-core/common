@@ -2684,9 +2684,9 @@ mod tests {
     use super::{
         Ast, AstLeaf, AstMul, BasisOps, CacheAction, DistributionWork, EvaluationPlan, Evaluator,
         FactorBodyPlan, FactorSide, LinearTermCacheBudget, LinearTermCacheOccupancy,
-        MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_LINEAR_TERM_CACHE_ENTRIES,
-        compressed_selector, get_chunk_params, linear_term_cache_budget, new_evaluator,
-        reuse_cache_slots, selector_family_matches,
+        MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_LINEAR_TERM_CACHE_ENTRIES, compressed_selector,
+        get_chunk_params, linear_term_cache_budget, new_evaluator, reuse_cache_slots,
+        selector_family_matches,
     };
     use crate::poly::{Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Rotation};
 
@@ -3361,7 +3361,10 @@ mod tests {
         let ast = square.clone() + square;
 
         let mut plan = EvaluationPlan::compile(&ast);
-        assert_eq!(plan.cache_common_subexpressions(), 1);
+        assert_eq!(
+            plan.cache_common_subexpressions(LinearTermCacheBudget::default()),
+            1
+        );
         match plan {
             EvaluationPlan::Add(lhs, rhs) => match (*lhs, *rhs) {
                 (
@@ -3391,7 +3394,7 @@ mod tests {
         check_repeated_squares_are_cached::<vesta::Base>();
     }
 
-    fn check_common_subexpressions_are_cached<F>()
+    fn check_nested_arithmetic_and_linear_common_subexpressions_are_cached<F>()
     where
         F: WithSmallOrderMulGroup<3> + From<u64>,
     {
@@ -3411,16 +3414,23 @@ mod tests {
             .collect::<Vec<_>>();
 
         let repeated = (Ast::from(leaves[0]) + leaves[1]) * (Ast::from(leaves[2]) + leaves[3]);
+        let linear_scalar = F::from(13);
         let terms = (5..9)
-            .map(|constant| repeated.clone() + Ast::ConstantTerm(F::from(constant)))
+            .map(|constant| {
+                repeated.clone()
+                    + Ast::ConstantTerm(F::from(constant))
+                    + Ast::LinearTerm(linear_scalar)
+            })
             .collect::<Vec<_>>();
         let base = F::from(11);
         let ast = Ast::distribute_powers(terms.clone(), base);
 
         let mut plan = EvaluationPlan::compile(&ast);
         assert_eq!(
-            plan.cache_common_subexpressions(LinearTermCacheBudget::default()),
-            1
+            plan.cache_common_subexpressions(linear_term_cache_budget::<F, ExtendedLagrangeCoeff>(
+                values[0].len()
+            )),
+            2
         );
 
         let mut single_saved_multiplication =
@@ -3442,19 +3452,21 @@ mod tests {
         );
 
         let actual = evaluator.evaluate(&ast, &domain);
+        let mut linear_value = linear_scalar * F::ZETA;
         for row in 0..actual.len() {
             let repeated = (values[0][row] + values[1][row]) * (values[2][row] + values[3][row]);
             let expected = (5..9).fold(F::ZERO, |accumulator, constant| {
-                accumulator * base + repeated + F::from(constant)
+                accumulator * base + repeated + F::from(constant) + linear_value
             });
             assert_eq!(actual[row], expected);
+            linear_value *= domain.get_extended_omega();
         }
     }
 
     #[test]
-    fn common_subexpressions_are_cached() {
-        check_common_subexpressions_are_cached::<pallas::Base>();
-        check_common_subexpressions_are_cached::<vesta::Base>();
+    fn nested_arithmetic_and_linear_common_subexpressions_are_cached() {
+        check_nested_arithmetic_and_linear_common_subexpressions_are_cached::<pallas::Base>();
+        check_nested_arithmetic_and_linear_common_subexpressions_are_cached::<vesta::Base>();
     }
 
     #[test]
