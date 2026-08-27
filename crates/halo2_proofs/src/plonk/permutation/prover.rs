@@ -745,15 +745,17 @@ mod tests {
     use crate::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
         plonk::{
-            Advice, Circuit, Column, ConstraintSystem, Error, create_proof, keygen_pk, keygen_vk,
+            Advice, Circuit, Column, ConstraintSystem, Error, SingleVerifier, create_proof,
+            keygen_pk, keygen_vk, verify_proof,
         },
         poly::commitment::Params,
-        transcript::{Blake2bWrite, Challenge255},
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
     use pasta_curves::{EqAffine, Fp};
     use rand::{SeedableRng, rngs::StdRng};
 
     const EQUALITY_COLUMNS: usize = 3;
+    const MINIMUM_DEGREE: usize = 4;
     const MAX_PROOF_CIRCUITS: usize = 4;
     const PROOF_CIRCUIT_COUNTS: [usize; 3] = [1, 2, MAX_PROOF_CIRCUITS];
     const PROOF_THREAD_COUNTS: [usize; 2] = [6, 10];
@@ -778,6 +780,7 @@ mod tests {
         }
 
         fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            meta.set_minimum_degree(MINIMUM_DEGREE);
             let columns = std::array::from_fn(|_| meta.advice_column());
             for column in columns.iter().copied() {
                 meta.enable_equality(column);
@@ -824,11 +827,15 @@ mod tests {
 
         let columns = pk.vk.cs.permutation.get_columns();
         assert_eq!(columns.len(), EQUALITY_COLUMNS);
+        let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         assert!(
-            columns
-                .chunks(permutation_chunk_len(pk.vk.cs_degree))
-                .count()
-                > 1
+            columns.chunks(chunk_len).count() > 1,
+            "the test requires several permutation sets",
+        );
+        assert_ne!(
+            columns.len() % chunk_len,
+            0,
+            "the test requires a partial final permutation set",
         );
 
         let circuits: [PermutationCircuit; MAX_PROOF_CIRCUITS] =
@@ -858,10 +865,26 @@ mod tests {
             transcript.finalize()
         };
 
+        let verify = |proof: &[u8], circuit_count| {
+            let strategy = SingleVerifier::new(&params);
+            let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(proof);
+            verify_proof(
+                &params,
+                pk.get_vk(),
+                strategy,
+                &instances[..circuit_count],
+                &mut transcript,
+            )
+            .expect("proof verification should not fail");
+        };
+
         for circuit_count in PROOF_CIRCUIT_COUNTS {
             let serial = prove(circuit_count, 1);
+            verify(&serial, circuit_count);
             for threads in PROOF_THREAD_COUNTS {
-                assert_eq!(serial, prove(circuit_count, threads));
+                let parallel = prove(circuit_count, threads);
+                assert_eq!(serial, parallel);
+                verify(&parallel, circuit_count);
             }
         }
     }

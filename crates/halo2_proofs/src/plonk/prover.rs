@@ -125,9 +125,33 @@ impl<F: Field> AdviceWitness<F> {
 // Leave capacity for that nested work instead of consuming the whole pool
 // with outer tasks.
 const PERMUTATION_INNER_WORKER_HEADROOM: usize = 2;
+// Bound the temporary storage added by preparing more than one set at once.
+// This estimate conservatively covers four scalar buffers and one affine-base
+// buffer per additional set. Retained polynomial outputs are excluded because
+// both schedules retain them until transcript commitment.
+const PERMUTATION_PARALLEL_SCRATCH_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+const PERMUTATION_PARALLEL_SCALAR_BUFFERS: usize = 4;
 
 fn prepare_permutations_in_parallel(task_count: usize, worker_count: usize) -> bool {
     task_count > 1 && worker_count.saturating_sub(task_count) >= PERMUTATION_INNER_WORKER_HEADROOM
+}
+
+fn prepare_permutation_sets_in_parallel<C: CurveAffine>(
+    set_count: usize,
+    worker_count: usize,
+    domain_size: usize,
+) -> bool {
+    if !prepare_permutations_in_parallel(set_count, worker_count) {
+        return false;
+    }
+
+    let scratch_bytes_per_row = std::mem::size_of::<C>()
+        + PERMUTATION_PARALLEL_SCALAR_BUFFERS * std::mem::size_of::<C::Scalar>();
+    set_count
+        .saturating_sub(1)
+        .checked_mul(domain_size)
+        .and_then(|rows| rows.checked_mul(scratch_bytes_per_row))
+        .is_some_and(|bytes| bytes <= PERMUTATION_PARALLEL_SCRATCH_BUDGET_BYTES)
 }
 
 struct WitnessCollection<'a, F: Field> {
@@ -618,8 +642,11 @@ where
     let permutation_workers = crate::multicore::current_num_threads();
     let permutation_set_count = pk.vk.cs.permutation.set_count(pk.vk.cs_degree);
     let permutations: Vec<permutation::prover::Committed<C, _>> = if instance.len() == 1
-        && prepare_permutations_in_parallel(permutation_set_count, permutation_workers)
-    {
+        && prepare_permutation_sets_in_parallel::<C>(
+            permutation_set_count,
+            permutation_workers,
+            params.n as usize,
+        ) {
         // A single circuit cannot use circuit-level permutation parallelism.
         // Prepare its independent sets concurrently, then retain transcript
         // writes in set order.
@@ -1008,6 +1035,30 @@ fn permutation_outer_parallelism_reserves_inner_capacity() {
             expected
         );
     }
+}
+
+#[test]
+fn permutation_set_parallelism_limits_scratch() {
+    use pasta_curves::EqAffine;
+
+    const SMALL_DOMAIN_SIZE: usize = 1 << 11;
+    const LARGE_DOMAIN_SIZE: usize = 1 << 15;
+
+    assert!(prepare_permutation_sets_in_parallel::<EqAffine>(
+        3,
+        6,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_permutation_sets_in_parallel::<EqAffine>(
+        3,
+        4,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_permutation_sets_in_parallel::<EqAffine>(
+        3,
+        6,
+        LARGE_DOMAIN_SIZE,
+    ));
 }
 
 #[test]
