@@ -9,6 +9,12 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 - Advice-witness denominators now use the prover's two-lane batch inversion.
+- IPA opening proofs now sample their zero-evaluation masking polynomial at
+  degree at most 64 and commit its short coefficient prefix directly, instead
+  of sampling and committing a full domain-sized polynomial. The accompanying
+  HVZK argument shows that a 13-coefficient MSM already gives an exceptional
+  challenge probability below $2^{-1016}$ on Pasta; degree 64 deliberately
+  pads this to below $2^{-1778}$ while accelerating proof creation.
 - Added `Params::prepare_commitments`: builds prepared fixed-base multiexp
   tables over `[g..., w, u]` (shared with `prepare_zero_checks`) and
   `[g_lagrange..., w, u]`; when armed, `Params::commit` and

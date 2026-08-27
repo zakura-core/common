@@ -11,6 +11,52 @@ use crate::transcript::{EncodedChallenge, TranscriptWrite};
 use group::{Curve, Group};
 use std::io;
 
+/// Degree of the IPA polynomial that masks the final folded scalar.
+///
+/// The HVZK argument in the parent module shows that degree 11, together with
+/// the independent commitment blind, already gives a 13-coefficient MSM and
+/// a folding-challenge exception below $2^{-1016}$ on Pasta. Degree 64 is
+/// deliberate conservative padding; it still makes the opening mask
+/// commitment tiny compared with the supported polynomial at production
+/// domain sizes.
+const IPA_BLINDING_POLYNOMIAL_DEGREE: usize = 64;
+
+fn sample_ipa_blinding_polynomial<F: Field, R: Rng>(
+    polynomial_len: usize,
+    x: F,
+    rng: &mut R,
+) -> Vec<F> {
+    let coefficient_count = polynomial_len.min(IPA_BLINDING_POLYNOMIAL_DEGREE + 1);
+    let mut coefficients = vec![F::ZERO; coefficient_count];
+
+    // Sampling coefficients 1..=degree and deriving the constant coefficient
+    // samples uniformly from the selected polynomial subspace with root x.
+    for coefficient in coefficients.iter_mut().skip(1) {
+        *coefficient = F::random(&mut *rng);
+    }
+    coefficients[0] = -eval_polynomial(&coefficients, x);
+
+    coefficients
+}
+
+fn ipa_blinding_commitment<C: CurveAffine>(
+    coefficients: &[C::Scalar],
+    blind: Blind<C::Scalar>,
+    params: &Params<C>,
+) -> C::Curve {
+    assert!(coefficients.len() <= params.g.len());
+
+    let mut scalars = Vec::with_capacity(coefficients.len() + 1);
+    scalars.extend_from_slice(coefficients);
+    scalars.push(blind.0);
+
+    let mut bases = Vec::with_capacity(coefficients.len() + 1);
+    bases.extend_from_slice(&params.g[..coefficients.len()]);
+    bases.push(params.w);
+
+    best_multiexp(&scalars, &bases)
+}
+
 fn ipa_round_multiexp<C: CurveAffine>(
     coeffs: &[C::Scalar],
     bases: &[C],
@@ -54,21 +100,13 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
     // We're limited to polynomials of degree n - 1.
     assert_eq!(p_poly.len(), params.n as usize);
 
-    // Sample a random polynomial (of same degree) that has a root at x_3, first
-    // by setting all coefficients to random values.
-    let mut s_poly = (*p_poly).clone();
-    for coeff in s_poly.iter_mut() {
-        *coeff = C::Scalar::random(&mut rng);
-    }
-    // Evaluate the random polynomial at x_3
-    let s_at_x3 = eval_polynomial(&s_poly[..], x_3);
-    // Subtract constant coefficient to get a random polynomial with a root at x_3
-    s_poly[0] -= &s_at_x3;
-    // And sample a random blind
+    // Sample a bounded-degree random polynomial with a root at x_3. See the
+    // parent module's sparse-masking HVZK proof.
+    let s_poly = sample_ipa_blinding_polynomial(p_poly.len(), x_3, &mut rng);
     let s_poly_blind = Blind(C::Scalar::random(&mut rng));
 
-    // Write a commitment to the random polynomial to the transcript
-    let s_poly_commitment = params.commit(&s_poly, s_poly_blind).to_affine();
+    // Commit only the nonzero-capable prefix and the independent blind.
+    let s_poly_commitment = ipa_blinding_commitment(&s_poly, s_poly_blind, params).to_affine();
     transcript.write_point(s_poly_commitment)?;
 
     // Challenge that will ensure that the prover cannot change P but can only
@@ -82,7 +120,10 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
 
     // We'll be opening `P' = P - [v] G_0 + [ξ] S` to ensure it has a root at
     // zero.
-    let mut p_prime_poly = s_poly * xi + p_poly;
+    let mut p_prime_poly = p_poly.clone();
+    for (coefficient, mask) in p_prime_poly.iter_mut().zip(&s_poly) {
+        *coefficient += *mask * xi;
+    }
     let v = eval_polynomial(&p_prime_poly, x_3);
     p_prime_poly[0] -= &v;
     let p_prime_blind = s_poly_blind * Blind(xi) + p_blind;
@@ -215,11 +256,16 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 
 #[cfg(test)]
 mod tests {
-    use super::{ipa_round_multiexp, parallel_generator_collapse, Params};
-    use crate::arithmetic::{best_multiexp, CurveAffine};
+    use super::{
+        ipa_blinding_commitment, ipa_round_multiexp, parallel_generator_collapse,
+        sample_ipa_blinding_polynomial, Params, IPA_BLINDING_POLYNOMIAL_DEGREE,
+    };
+    use crate::arithmetic::{best_multiexp, eval_polynomial, CurveAffine};
+    use crate::poly::{commitment::Blind, EvaluationDomain};
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
+    use rand::rng;
 
     fn full_width_scalar<C: CurveAffine>() -> C::Scalar {
         (C::Scalar::from(0x9E37_79B9_7F4A_7C15u64).square()
@@ -252,6 +298,42 @@ mod tests {
             assert_eq!(
                 ipa_round_multiexp(&coeffs, bases, value, randomness, &params, z),
                 expected,
+            );
+        }
+    }
+
+    fn blinding_polynomial_is_sparse_and_commits_correctly<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+    {
+        const FULL_MASK_K: u32 = 6;
+        const SPARSE_MASK_K: u32 = 7;
+
+        for k in [FULL_MASK_K, SPARSE_MASK_K] {
+            let params = Params::<C>::new(k);
+            let domain = EvaluationDomain::new(1, k);
+            let x = full_width_scalar::<C>();
+            let mut rng = rng();
+            let coefficients = sample_ipa_blinding_polynomial(params.n as usize, x, &mut rng);
+
+            assert_eq!(
+                coefficients.len(),
+                (params.n as usize).min(IPA_BLINDING_POLYNOMIAL_DEGREE + 1),
+            );
+            assert_eq!(eval_polynomial(&coefficients, x), C::Scalar::ZERO);
+
+            let mut full = domain.empty_coeff();
+            for (full, coefficient) in full.iter_mut().zip(&coefficients) {
+                *full = *coefficient;
+            }
+            assert!(full[coefficients.len()..]
+                .iter()
+                .all(|coefficient| *coefficient == C::Scalar::ZERO));
+
+            let blind = Blind(C::Scalar::random(&mut rng));
+            assert_eq!(
+                ipa_blinding_commitment(&coefficients, blind, &params),
+                params.commit(&full, blind),
             );
         }
     }
@@ -312,5 +394,15 @@ mod tests {
     #[test]
     fn round_multiexp_matches_split_vesta() {
         round_multiexp_matches_split::<vesta::Affine>();
+    }
+
+    #[test]
+    fn blinding_polynomial_is_sparse_and_commits_correctly_pallas() {
+        blinding_polynomial_is_sparse_and_commits_correctly::<pallas::Affine>();
+    }
+
+    #[test]
+    fn blinding_polynomial_is_sparse_and_commits_correctly_vesta() {
+        blinding_polynomial_is_sparse_and_commits_correctly::<vesta::Affine>();
     }
 }

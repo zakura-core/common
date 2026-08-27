@@ -2,6 +2,74 @@
 //! described in the [Halo][halo] paper.
 //!
 //! [halo]: https://eprint.iacr.org/2019/1021
+//!
+//! # Sparse IPA masking polynomial
+//!
+//! The hiding transformation used by [`create_proof`] comes from
+//! `PC_DL.Open` in Appendix A.2 of [BCMS20]. Before the inner-product
+//! argument (IPA), the prover commits to a random polynomial $s(X)$ such that
+//! $s(x) = 0$, receives a nonzero challenge $\xi$, and folds
+//!
+//! $$p'(X) = p(X) - p(x) + \xi s(X).$$
+//!
+//! BCMS20 samples $s$ across the entire supported degree range. Only a short
+//! prefix is needed for honest-verifier zero knowledge, however. The argument
+//! is as follows.
+//!
+//! Let $n = 2^k$, and let $u_0, \ldots, u_{k-1}$ be the nonzero IPA folding
+//! challenges in their transcript order. After all folds, the prover reveals
+//!
+//! $$c = \langle p', \lambda \rangle,$$
+//!
+//! where, writing $i = \sum_t i_t 2^t$ in binary,
+//!
+//! $$\lambda_i = \prod_{t=0}^{k-1} u_{k-1-t}^{-i_t}.$$
+//!
+//! Sample $s_1, \ldots, s_{m-1}$ uniformly, set
+//! $s_0 = -\sum_{i=1}^{m-1} s_i x^i$, and set all coefficients from $m$
+//! onward to zero. This samples $s$ uniformly from
+//!
+//! $$V_m = \{s \in \mathbb F^m :
+//! \langle s,(1,x,\ldots,x^{m-1})\rangle=0\}.$$
+//!
+//! The scalar $c$ is uniform unless the linear functional $\lambda$ vanishes
+//! on $V_m$. The annihilator of $V_m$ is spanned by
+//! $(1,x,\ldots,x^{m-1})$. Since $\lambda_0 = 1$, the exceptional case is
+//! therefore exactly
+//!
+//! $$\lambda_i = x^i \quad\text{for every }0 \leq i < m.$$
+//!
+//! For each power of two $2^t < m$, this equality requires the independent
+//! challenge equation $u_{k-1-t}^{-1} = x^{2^t}$. These equations are also
+//! sufficient, by the product formula for $\lambda_i$. Thus, for independent
+//! uniform challenges in $\mathbb F^*$, the exceptional probability is
+//!
+//! $$(|\mathbb F|-1)^{-\lceil\log_2 m\rceil}.$$
+//!
+//! All group messages before $c$ are independently Pedersen-blinded. Outside
+//! the exceptional event, the usual honest-verifier simulator samples $c$ and
+//! the final combined blind uniformly, samples all but one group message, and
+//! solves the verifier equation for the remaining message using $\xi^{-1}$.
+//! This gives the honest transcript distribution. The same random-oracle
+//! programming argument as BCMS20 Appendix A.3.1 applies after Fiat-Shamir.
+//!
+//! In particular, an MSM with twelve polynomial coefficients and one
+//! commitment blind has thirteen scalar coefficients. Here $m=12$, so four
+//! independent challenge equations would all need to hold. For either Pasta
+//! scalar field, whose order is greater than $2^{254}$, this probability is
+//! below $2^{-1016}$. The implementation deliberately pads the mask to degree
+//! 64 ($m=65$, plus the commitment blind), requiring seven equations and
+//! lowering the bound below $2^{-1778}$. If $n \leq 65$ it instead samples the
+//! full available polynomial; then the exceptional functional is the public
+//! evaluation functional and reveals nothing.
+//!
+//! This argument uses the standard nonzero challenge space from BCMS20. The
+//! implementation already requires every $u_j$ to be nonzero in order to
+//! invert it. If a transcript encoding samples the whole field, including its
+//! negligible zero event adds its existing $O(k/|\mathbb F|)$ abort probability
+//! and the event $\xi=0$ adds at most $1/|\mathbb F|$ to the privacy distance.
+//!
+//! [BCMS20]: https://eprint.iacr.org/2020/499
 
 use super::{Coeff, LagrangeCoeff, Polynomial};
 #[cfg(feature = "orbits")]
