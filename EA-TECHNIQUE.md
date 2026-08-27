@@ -161,6 +161,34 @@ these rows is ~±0.3%. The refactored generic ladder kernel itself
 measured −1..−3% vs baseline on the production `batch hook` rows
 (parity or slightly better), so none of the above is kernel drift.
 
+### Commit 4/5 — routed grid and gate refit (M4 Max, asm, serial)
+
+Raw logs: scratchpad `commit4-same-scalar-grid.txt`,
+`commit5-gate-refit.txt`.
+
+Routed `batch hook` (effective sidecar at ≥ 32 live) vs same-build
+`forced normalized`, medians over the 8-scalar corpus per iteration:
+
+| size | Pallas routed | Pallas norm | Δ | Vesta routed | Vesta norm | Δ |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 5.745 ms | 5.854 ms | −1.9% | 5.872 ms | 6.016 ms | −2.4% |
+| 256 | 39.21 ms | 39.83 ms | −1.6% | 40.03 ms | 41.06 ms | −2.5% |
+| 1024 | 154.6 ms | 156.2 ms | −1.0% | 157.0 ms | 161.9 ms | −3.1% |
+| 4096 | 618.9 ms | 626.9 ms | −1.3% | 630.1 ms | 647.9 ms | −2.7% |
+
+Effective wins at every gated size on both curves; sub-gate rows are
+identical code and differ by noise only. Row-to-row noise on long rows
+is ~1–2%, so the per-row magnitudes are soft but the sign is uniform
+across 16 gated cells.
+
+Gate refit (forced build+mul across the gate; normalized = production
+fallback with per-point Jacobian ladders below 32, effective = batched
+kernel forced at every size): at 4 points effective is +110%, at 8
++46%, at 16 +13%, at 32 −1.4%, at 64 −1.9% (both curves agree). The
+build-cost saving does not move the ladder-vs-Jacobian crossover out of
+the (16, 32] interval, so the sidecar keeps the existing
+`BATCH_AFFINE_MIN_POINTS = 32` gate — no separate threshold constant.
+
 ## Verdict
 
 [pending]

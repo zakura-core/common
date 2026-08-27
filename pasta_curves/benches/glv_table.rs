@@ -21,9 +21,12 @@ const RNG_SEED: [u8; 16] = [0x42; 16];
 // global-Z chain) construction, and construction-plus-consumption so a
 // builder win cannot be reported without its downstream cost.
 const FORCED_BUILD_SIZES: [usize; 11] = [1, 8, 16, 32, 50, 64, 128, 256, 512, 2048, 4096];
-// Build-plus-use only at sizes where both backends run the batch-affine
-// ladder kernel, so the rows differ in table representation alone.
-const FORCED_BUILD_MUL_SIZES: [usize; 5] = [32, 64, 256, 1024, 4096];
+// Build-plus-use across the routing gate: at 32 and above both backends
+// run the batch-affine ladder kernel, so those rows differ in table
+// representation alone; below 32 the normalized route falls back to
+// per-point Jacobian ladders while the forced effective row still runs
+// the batched kernel — the gate-refit comparison.
+const FORCED_BUILD_MUL_SIZES: [usize; 8] = [4, 8, 16, 32, 64, 256, 1024, 4096];
 
 fn criterion_benchmark(c: &mut Criterion) {
     table_bench::<pallas::Point>(c, "Pallas");
