@@ -12,9 +12,13 @@
 //!
 //! $$p'(X) = p(X) - p(x) + \xi s(X).$$
 //!
-//! BCMS20 samples $s$ across the entire supported degree range. Only a short
-//! prefix is needed for honest-verifier zero knowledge, however. The argument
-//! is as follows.
+//! BCMS20 samples $s$ across the entire supported degree range. Since every
+//! group message is independently blinded, the mask's only effect on the
+//! transcript distribution is through the revealed scalar $c$, which it
+//! makes either uniformly random or publicly zero, with the case decided by
+//! public challenges alone. The following mask, supported on $k+1$
+//! carefully chosen coefficients, gives $c$ the identical distribution. The
+//! argument is as follows.
 //!
 //! Let $n = 2^k$, and let $u_0, \ldots, u_{k-1}$ be the nonzero IPA folding
 //! challenges in their transcript order. After all folds, the prover reveals
@@ -25,49 +29,62 @@
 //!
 //! $$\lambda_i = \prod_{t=0}^{k-1} u_{k-1-t}^{-i_t}.$$
 //!
-//! Sample $s_1, \ldots, s_{m-1}$ uniformly, set
-//! $s_0 = -\sum_{i=1}^{m-1} s_i x^i$, and set all coefficients from $m$
-//! onward to zero. This samples $s$ uniformly from
+//! Sample $\alpha_0, \ldots, \alpha_{k-1}$ uniformly and set
 //!
-//! $$V_m = \{s \in \mathbb F^m :
-//! \langle s,(1,x,\ldots,x^{m-1})\rangle=0\}.$$
+//! $$s(X) = \sum_{t=0}^{k-1} \alpha_t (X^{2^t} - x^{2^t}),$$
 //!
-//! The scalar $c$ is uniform unless the linear functional $\lambda$ vanishes
-//! on $V_m$. The annihilator of $V_m$ is spanned by
-//! $(1,x,\ldots,x^{m-1})$. Since $\lambda_0 = 1$, the exceptional case is
-//! therefore exactly
+//! so that $s(x) = 0$ for every choice of the $\alpha_t$, and $s$ is
+//! supported on the $k+1$ indices $\{0, 1, 2, 4, \ldots, 2^{k-1}\}$. Since
+//! $\lambda_0 = 1$ and $\lambda_{2^t} = u_{k-1-t}^{-1}$,
 //!
-//! $$\lambda_i = x^i \quad\text{for every }0 \leq i < m.$$
+//! $$\langle s, \lambda \rangle
+//! = \sum_{t=0}^{k-1} \alpha_t (u_{k-1-t}^{-1} - x^{2^t}).$$
 //!
-//! For each power of two $2^t < m$, this equality requires the independent
-//! challenge equation $u_{k-1-t}^{-1} = x^{2^t}$. These equations are also
-//! sufficient, by the product formula for $\lambda_i$. Thus, for independent
-//! uniform challenges in $\mathbb F^*$, the exceptional probability is
+//! All group messages before $c$ are independently Pedersen-blinded, so
+//! conditioned on the challenges and the group messages, the $\alpha_t$
+//! remain uniform. Two cases follow.
 //!
-//! $$(|\mathbb F|-1)^{-\lceil\log_2 m\rceil}.$$
+//! If $u_{k-1-t}^{-1} \neq x^{2^t}$ for some $t$, then
+//! $\langle s, \lambda \rangle$ is a nonzero linear form in the $\alpha_t$,
+//! so $c = \langle p, \lambda \rangle - v + \xi \langle s, \lambda \rangle$
+//! is uniform.
 //!
-//! All group messages before $c$ are independently Pedersen-blinded. Outside
-//! the exceptional event, the usual honest-verifier simulator samples $c$ and
-//! the final combined blind uniformly, samples all but one group message, and
-//! solves the verifier equation for the remaining message using $\xi^{-1}$.
-//! This gives the honest transcript distribution. The same random-oracle
-//! programming argument as BCMS20 Appendix A.3.1 applies after Fiat-Shamir.
+//! If instead $u_{k-1-t}^{-1} = x^{2^t}$ for every $t$ — the zero case —
+//! the product formula gives $\lambda_i = x^i$ for every $i < n$: $\lambda$
+//! is the public evaluation functional, and $c = p(x) - v = 0$
+//! deterministically.
 //!
-//! In particular, an MSM with twelve polynomial coefficients and one
-//! commitment blind has thirteen scalar coefficients. Here $m=12$, so four
-//! independent challenge equations would all need to hold. For either Pasta
-//! scalar field, whose order is greater than $2^{254}$, this probability is
-//! below $2^{-1016}$. The implementation deliberately pads the mask to degree
-//! 64 ($m=65$, plus the commitment blind), requiring seven equations and
-//! lowering the bound below $2^{-1778}$. If $n \leq 65$ it instead samples the
-//! full available polynomial; then the exceptional functional is the public
-//! evaluation functional and reveals nothing.
+//! In both cases $c$ reveals nothing about the witness, and which case
+//! occurs is decided by public challenges alone, exactly as with a mask
+//! sampled across the full degree range. The honest-verifier simulator
+//! checks which case the challenges select, setting $c = 0$ in the zero case
+//! and sampling $c$ uniformly otherwise; it then samples the final combined
+//! blind uniformly, samples all but one group message, and solves the
+//! verifier equation for the remaining message using $\xi^{-1}$. This gives
+//! the honest transcript distribution. The same random-oracle programming
+//! argument as BCMS20 Appendix A.3.1 applies after Fiat-Shamir.
 //!
-//! This argument uses the standard nonzero challenge space from BCMS20. The
-//! implementation already requires every $u_j$ to be nonzero in order to
-//! invert it. If a transcript encoding samples the whole field, including its
-//! negligible zero event adds its existing $O(k/|\mathbb F|)$ abort probability
-//! and the event $\xi=0$ adds at most $1/|\mathbb F|$ to the privacy distance.
+//! By contrast, a mask supported only on a coefficient prefix of length
+//! $m < n$ has a genuinely exceptional event: $\lambda_i = x^i$ for $i < m$
+//! only, in which $\langle s, \lambda \rangle = 0$ while $\lambda$ is not
+//! the evaluation functional, so $c$ is a nontrivial function of the
+//! witness. The power-of-two support removes that event at the same cost:
+//! the masking commitment is a $(k+2)$-term MSM ($k+1$ coefficients plus one
+//! Pedersen blind), thirteen terms for $k = 11$.
+//!
+//! This argument uses the standard nonzero challenge space from BCMS20, and
+//! the overall zero-knowledge distance is governed by ordinary transcript
+//! events — zero challenges and unencodable identity points — rather than
+//! by the folding-challenge coincidence above (which is simulatable, not
+//! exceptional). The implementation aborts if any $u_j = 0$, since it must
+//! invert each; a transcript encoding that samples the whole field
+//! therefore contributes its existing $O(k/|\mathbb F|)$ abort probability.
+//! The event $\xi = 0$ adds at most $1/|\mathbb F|$, and each of the $2k+1$
+//! independently blinded group messages — the mask commitment and the $k$
+//! left and right points — is the identity, which the transcript refuses to
+//! encode, with probability $1/|\mathbb F|$. The honest-verifier
+//! statistical distance is thus $O(k/|\mathbb F|)$, and no claim smaller
+//! than that is meaningful for the scheme as implemented.
 //!
 //! [BCMS20]: https://eprint.iacr.org/2020/499
 
