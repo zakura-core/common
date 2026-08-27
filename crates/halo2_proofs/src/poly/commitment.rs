@@ -96,14 +96,17 @@ use crate::helpers::CurveRead;
 #[cfg(feature = "batch")]
 use crate::{INSTANCE_WINDOW_ENTRIES_PER_BASE, InstanceWindowTable, MAX_CACHED_INSTANCE_ROWS};
 
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use core::panic::AssertUnwindSafe;
 use ff::{Field, PrimeField};
 use group::{Curve, Group};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
+#[cfg(feature = "batch")]
+use std::sync::Mutex;
+#[cfg(feature = "orbits")]
+use std::sync::OnceLock;
 #[cfg(any(feature = "batch", feature = "orbits"))]
-use std::{
-    fmt,
-    sync::{Arc, Mutex},
-};
+use std::{fmt, sync::Arc};
 
 mod msm;
 mod prover;
@@ -136,29 +139,48 @@ pub struct Params<C: CurveAffine> {
 /// A lazily built prepared fixed-base multiexp table — over `[g..., w, u]`
 /// for [`Params::prepare_zero_checks`], or `[g_lagrange..., w, u]` for the
 /// Lagrange half of [`Params::prepare_commitments`] — shared across clones
-/// of the params that hold it. Never serialized; rebuilt on demand after
-/// `read`.
+/// of the params that hold it. The first non-panicking result (including a
+/// backend decline) is retained. Never serialized; rebuilt on demand after
+/// `read`. The cached handle is marked unwind-safe because [`OnceLock`] does
+/// not publish a panicking initializer and the cache never mutates or replaces
+/// a published handle.
 #[cfg(feature = "orbits")]
 #[derive(Clone)]
 struct ZeroCheckCache<C: CurveAffine>(
-    #[allow(clippy::type_complexity)] Arc<Mutex<Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>>>>,
+    #[allow(clippy::type_complexity)]
+    Arc<OnceLock<Option<AssertUnwindSafe<Arc<dyn PreparedZeroCheck<C::CurveExt>>>>>>,
 );
 
 #[cfg(feature = "orbits")]
 impl<C: CurveAffine> Default for ZeroCheckCache<C> {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(None)))
+        Self(Arc::new(OnceLock::new()))
+    }
+}
+
+#[cfg(feature = "orbits")]
+impl<C: CurveAffine> ZeroCheckCache<C> {
+    fn initialize(
+        &self,
+        initialize: impl FnOnce() -> Option<Box<dyn PreparedZeroCheck<C::CurveExt>>>,
+    ) -> bool {
+        self.0
+            .get_or_init(|| initialize().map(|prepared| AssertUnwindSafe(Arc::from(prepared))))
+            .is_some()
+    }
+
+    fn get(&self) -> Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>> {
+        self.0
+            .get()
+            .and_then(Option::as_ref)
+            .map(|prepared| Arc::clone(&prepared.0))
     }
 }
 
 #[cfg(feature = "orbits")]
 impl<C: CurveAffine> fmt::Debug for ZeroCheckCache<C> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let armed = self
-            .0
-            .lock()
-            .map(|prepared| prepared.is_some())
-            .unwrap_or(false);
+        let armed = matches!(self.0.get(), Some(Some(_)));
         formatter
             .debug_tuple("ZeroCheckCache")
             .field(&armed)
@@ -483,8 +505,13 @@ impl<C: CurveAffine> Params<C> {
     /// at typical `k`, amortized across every subsequent verification
     /// with these params (batch verification folds many proofs into a
     /// single final check, so it also pays just one). The cache is shared
-    /// with all clones of these params; it is never serialized, so call
-    /// this again after [`Params::read`].
+    /// with all clones of these params. Concurrent and repeat calls share
+    /// the same initialization attempt, including a backend decline. The
+    /// cache is never serialized, so call this again after [`Params::read`].
+    /// Call this once before entering concurrent Rayon work that uses these
+    /// params. Concurrent callers outside that pool safely wait for and share
+    /// the same attempt; fanning a cold call out across the worker pool can
+    /// occupy its other workers and serialize the initializer's parallel work.
     ///
     /// Returns whether a prepared check was actually built and cached.
     /// `false` means arming was a no-op — the curve has no prepared
@@ -497,31 +524,25 @@ impl<C: CurveAffine> Params<C> {
     pub fn prepare_zero_checks(&self) -> bool {
         #[cfg(feature = "orbits")]
         {
-            let mut bases = Vec::with_capacity(self.g.len() + 2);
-            bases.extend_from_slice(&self.g);
-            bases.push(self.w);
-            bases.push(self.u);
-            if let Some(prepared) = C::CurveExt::try_prepare_zero_check(&bases) {
-                *self
-                    .zero_check_cache
-                    .0
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::from(prepared));
-                return true;
-            }
+            self.zero_check_cache.initialize(|| {
+                let mut bases = Vec::with_capacity(self.g.len() + 2);
+                bases.extend_from_slice(&self.g);
+                bases.push(self.w);
+                bases.push(self.u);
+                C::CurveExt::try_prepare_zero_check(&bases)
+            })
         }
-        false
+        #[cfg(not(feature = "orbits"))]
+        {
+            false
+        }
     }
 
     /// The cached prepared zero-check, if [`Self::prepare_zero_checks`]
     /// built one.
     #[cfg(feature = "orbits")]
     pub(crate) fn zero_check(&self) -> Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>> {
-        self.zero_check_cache
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.zero_check_cache.get()
     }
 
     /// Builds and caches prepared fixed-base multiexp tables for the
@@ -540,50 +561,45 @@ impl<C: CurveAffine> Params<C> {
     ///
     /// Costs roughly twice [`Self::prepare_zero_checks`] (two tables, each
     /// hundreds of milliseconds and tens of mebibytes at typical `k`),
-    /// amortized across every subsequent proof with these params; a table
-    /// that is already armed is kept, so repeat calls are free. The caches
-    /// are shared with all clones and never serialized; call again after
-    /// [`Params::read`]. Returns whether both tables are armed (`false`
-    /// when the `orbits` feature is off or the backend declined — a commit
-    /// route without its table simply keeps the planned multiexp).
+    /// amortized across every subsequent proof with these params. Concurrent
+    /// and repeat calls share each table's same initialization attempt,
+    /// including a backend decline. The caches are shared with all clones
+    /// and never serialized; call again after [`Params::read`]. Returns
+    /// whether both tables are armed (`false` when the `orbits` feature is
+    /// off or the backend declined — a commit route without its table simply
+    /// keeps the planned multiexp).
+    ///
+    /// Call this once before entering concurrent Rayon work that uses these
+    /// params. Concurrent callers outside that pool safely wait for and share
+    /// the same attempt; fanning a cold call out across the worker pool can
+    /// occupy its other workers and serialize the initializer's parallel work.
     pub fn prepare_commitments(&self) -> bool {
         #[cfg(feature = "orbits")]
         {
-            // The tables depend only on the immutable bases, so a table
-            // that is already armed is kept rather than rebuilt.
-            if !(self.zero_check().is_some() || self.prepare_zero_checks()) {
+            if !self.prepare_zero_checks() {
                 // Both tables have the same term count, so a coefficient
                 // decline means the Lagrange build would decline too.
                 return false;
             }
-            if self.lagrange_table().is_some() {
-                return true;
-            }
-            let mut bases = Vec::with_capacity(self.g_lagrange.len() + 2);
-            bases.extend_from_slice(&self.g_lagrange);
-            bases.push(self.w);
-            bases.push(self.u);
-            if let Some(prepared) = C::CurveExt::try_prepare_zero_check(&bases) {
-                *self
-                    .lagrange_table_cache
-                    .0
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::from(prepared));
-                return true;
-            }
+            self.lagrange_table_cache.initialize(|| {
+                let mut bases = Vec::with_capacity(self.g_lagrange.len() + 2);
+                bases.extend_from_slice(&self.g_lagrange);
+                bases.push(self.w);
+                bases.push(self.u);
+                C::CurveExt::try_prepare_zero_check(&bases)
+            })
         }
-        false
+        #[cfg(not(feature = "orbits"))]
+        {
+            false
+        }
     }
 
     /// The cached Lagrange-basis prepared table, if
     /// [`Self::prepare_commitments`] built one.
     #[cfg(feature = "orbits")]
     pub(crate) fn lagrange_table(&self) -> Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>> {
-        self.lagrange_table_cache
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.lagrange_table_cache.get()
     }
 }
 
@@ -738,6 +754,122 @@ fn instance_window_cache_is_shared_by_clones_only() {
 
     let deserialized_table = deserialized.instance_window_table(BASE_COUNT);
     assert!(!Arc::ptr_eq(&larger_table, &deserialized_table));
+}
+
+#[cfg(feature = "orbits")]
+#[test]
+fn prepared_caches_initialize_once_across_clones() {
+    const K: u32 = 4;
+    const CALLERS: usize = 4;
+
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::pasta::{Eq, EqAffine};
+
+    let params = Arc::new(Params::<EqAffine>::new(K));
+    let mut bases = Vec::with_capacity(params.g.len() + 2);
+    bases.extend_from_slice(&params.g);
+    bases.push(params.w);
+    bases.push(params.u);
+    let bases = Arc::new(bases);
+    let attempts = AtomicUsize::new(0);
+    let start = Barrier::new(CALLERS);
+
+    let prepared = std::thread::scope(|scope| {
+        (0..CALLERS)
+            .map(|_| {
+                let bases = Arc::clone(&bases);
+                let cache = params.zero_check_cache.clone();
+                let attempts = &attempts;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    assert!(cache.initialize(|| {
+                        attempts.fetch_add(1, Ordering::Relaxed);
+                        Eq::try_prepare_zero_check(bases.as_slice())
+                    }));
+                    cache.get().expect("the preparation succeeded")
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    assert!(
+        prepared
+            .iter()
+            .skip(1)
+            .all(|other| Arc::ptr_eq(&prepared[0], other))
+    );
+
+    // The coefficient preparation above is shared through `Params::clone`.
+    // Racing full preparation then initializes only the Lagrange table.
+    let cloned = Arc::new(params.as_ref().clone());
+    let start = Barrier::new(CALLERS);
+    let tables = std::thread::scope(|scope| {
+        (0..CALLERS)
+            .map(|_| {
+                let cloned = Arc::clone(&cloned);
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    assert!(cloned.prepare_commitments());
+                    (
+                        cloned.zero_check().expect("coefficient table is armed"),
+                        cloned.lagrange_table().expect("Lagrange table is armed"),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(tables.iter().skip(1).all(|(coefficient, lagrange)| {
+        Arc::ptr_eq(&tables[0].0, coefficient) && Arc::ptr_eq(&tables[0].1, lagrange)
+    }));
+
+    let coefficient = cloned.zero_check().unwrap();
+    let lagrange = cloned.lagrange_table().unwrap();
+    assert!(cloned.prepare_commitments());
+    assert!(Arc::ptr_eq(&coefficient, &cloned.zero_check().unwrap()));
+    assert!(Arc::ptr_eq(&lagrange, &cloned.lagrange_table().unwrap()));
+}
+
+#[cfg(feature = "orbits")]
+#[test]
+fn prepared_cache_memoizes_decline_and_retries_panic() {
+    use std::{
+        panic::catch_unwind,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::pasta::EqAffine;
+
+    fn assert_unwind_safe<T: std::panic::RefUnwindSafe + std::panic::UnwindSafe>() {}
+
+    assert_unwind_safe::<Params<EqAffine>>();
+
+    let declined = ZeroCheckCache::<EqAffine>::default();
+    let attempts = AtomicUsize::new(0);
+    for _ in 0..2 {
+        assert!(!declined.initialize(|| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            None
+        }));
+    }
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    assert!(declined.get().is_none());
+
+    let panicked = ZeroCheckCache::<EqAffine>::default();
+    let result = catch_unwind(|| panicked.initialize(|| panic!()));
+    assert!(result.is_err());
+    assert!(!panicked.initialize(|| None));
 }
 
 /// Wrapper type around a blinding factor.

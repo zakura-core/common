@@ -1182,6 +1182,11 @@ impl ProvingKey {
     /// down. One-shot provers need not: preparation costs hundreds of
     /// milliseconds and tens of mebibytes, amortized across proofs.
     ///
+    /// Call this once before entering concurrent Rayon proving work.
+    /// Concurrent callers outside that pool safely wait for and share the same
+    /// attempt; fanning a cold call out across the worker pool can occupy its
+    /// other workers and serialize the initializer's parallel work.
+    ///
     /// Returns whether the tables were actually built and cached; `false`
     /// means arming was a no-op (Orchard was built without its opt-in
     /// `orbits` feature, or its backend declined) and proving simply keeps
