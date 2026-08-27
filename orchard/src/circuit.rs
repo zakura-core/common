@@ -1128,10 +1128,10 @@ impl VerifyingKey {
     /// need not.
     ///
     /// Returns whether a prepared check was actually built and cached;
-    /// `false` means arming was a no-op (halo2 built without its opt-in
-    /// `orbits` feature, or its backend declined) and verification simply
-    /// keeps its unprepared path. Callers may ignore the result; validators
-    /// that expect the speedup can assert or log it.
+    /// `false` means arming was a no-op (Orchard was built without its
+    /// opt-in `orbits` feature, or its backend declined) and verification
+    /// simply keeps its unprepared path. Callers may ignore the result;
+    /// validators that expect the speedup can assert or log it.
     ///
     /// The prepared path is used only on bounded-width pools (currently
     /// eight effective threads) — past that the unprepared planner
@@ -1169,9 +1169,9 @@ impl ProvingKey {
     /// milliseconds and tens of mebibytes, amortized across proofs.
     ///
     /// Returns whether the tables were actually built and cached; `false`
-    /// means arming was a no-op (halo2 built without its opt-in `orbits`
-    /// feature, or its backend declined) and proving simply keeps its
-    /// unprepared path. Callers may ignore the result.
+    /// means arming was a no-op (Orchard was built without its opt-in
+    /// `orbits` feature, or its backend declined) and proving simply keeps
+    /// its unprepared path. Callers may ignore the result.
     pub fn prepare_proving(&self) -> bool {
         self.params.prepare_commitments()
     }

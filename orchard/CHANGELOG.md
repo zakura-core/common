@@ -14,6 +14,9 @@ and this project adheres to Rust's notion of
   Long-lived provers should call it once per key; arming never slows
   proving down (the prepared route is used only on pools of at most eight
   effective threads, where it wins).
+- Added an opt-in `orbits` feature that enables halo2's prepared fixed-base
+  MSM backend. With the feature enabled, the Orchard prover benchmark arms
+  `circuit::ProvingKey::prepare_proving` before its timed routine.
 - Kept the cached-plan witness-assignment benchmark lint-clean on current Rust
   toolchains.
 - Added `circuit::VerifyingKey::prepare_batch_validation`, which builds and

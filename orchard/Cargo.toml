@@ -68,6 +68,7 @@ dev-graph = [
     "plotters",
 ]
 multicore = ["halo2_proofs?/multicore"]
+orbits = ["halo2_proofs?/orbits"]
 std = [
     "corez/std",
     "group/wnaf-memuse",

@@ -44,6 +44,12 @@ fn orchard_k11_prover(c: &mut Criterion) {
     let version = OrchardCircuitVersion::FixedPostNu6_2;
     let vk = VerifyingKey::build(version);
     let pk = ProvingKey::build(version);
+    // Keep the one-time table build outside the timed proving routine.
+    #[cfg(feature = "orbits")]
+    assert!(
+        pk.prepare_proving(),
+        "Pasta commitment tables must prepare with the orbits feature",
+    );
 
     let mut group = c.benchmark_group("orchard-k11");
     group.sample_size(BENCHMARK_SAMPLES);
