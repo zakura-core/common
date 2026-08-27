@@ -790,6 +790,33 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "invalid Sinsemilla word")]
+    fn first_word_hash_rejects_invalid_first_word() {
+        let domain = HashDomain::new(MERKLE_DOMAIN);
+        let weighted = UncheckedFixedLengthHashDomain::<1>::new(&domain);
+
+        weighted.hash_with_first_word(GENERATOR_COUNT as u16, core::iter::empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected Sinsemilla word count")]
+    fn first_word_hash_rejects_too_few_suffix_words() {
+        let domain = HashDomain::new(MERKLE_DOMAIN);
+        let weighted = UncheckedFixedLengthHashDomain::<2>::new(&domain);
+
+        weighted.hash_with_first_word(0, core::iter::empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected Sinsemilla word count")]
+    fn first_word_hash_rejects_too_many_suffix_words() {
+        let domain = HashDomain::new(MERKLE_DOMAIN);
+        let weighted = UncheckedFixedLengthHashDomain::<2>::new(&domain);
+
+        weighted.hash_with_first_word(0, core::iter::repeat_n(false, 2 * K));
+    }
+
+    #[test]
     fn batch_matches_individual_word_evaluation() {
         let domain = HashDomain::new(MERKLE_DOMAIN);
         let weighted = UncheckedFixedLengthHashDomain::<MERKLE_WORDS>::new(&domain);
