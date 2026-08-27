@@ -1925,7 +1925,10 @@ fn x86_64_lazy_arithmetic_matches_canonical() {
     let top = FpLazy(lazy::sub(&TWO_MODULUS, &[1, 0, 0, 0], &[0, 0, 0, 0]));
     let top_canonical = Fp(lazy::canonicalize(&top.0, &MODULUS.0));
     assert!(below_two_p(&top));
-    assert_eq!(top_canonical, -Fp::one());
+    assert_eq!(
+        top_canonical.0,
+        lazy::sub(&MODULUS.0, &[1, 0, 0, 0], &[0, 0, 0, 0])
+    );
     let top_square = top.square();
     assert!(below_two_p(&top_square));
     assert_eq!(top_square.reduce(), top_canonical.square());
