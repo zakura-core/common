@@ -8,6 +8,26 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The Eisenstein digit tables behind `batch_mul_same_scalar_vartime` and the
+  curve FFT's multiplication layers are now built without any field
+  inversion on batches that run the batch-affine ladder (at least 32 live
+  points, safe schedule): each table is one projective doubling plus a fixed
+  chain of seven incomplete mixed additions by `2P` on the isomorphic curve
+  `y² = x³ + 5·Z(2P)⁶`, brought to one shared Jacobian denominator by a
+  backward pass over the recorded Z-ratios (the chain is derived and proved
+  minimal by `sage/effective_affine_chain.sage` and re-derived by a unit
+  test). The ladder consumes the raw table coordinates unchanged — its
+  `a = 0` affine formulas never read the curve constant, and lanes only
+  share batched inversions — and same-scalar products restore the
+  denominator directly into their projective outputs; the FFT layers
+  batch-normalize the `n` final products instead of all `8n` table entries.
+  Sub-gate and exceptional-schedule batches keep the previous normalized
+  path. Measured on Apple M4 Max (assembly backend): table construction
+  −20% at every batch size (−13% portable), `batch_mul_same_scalar_vartime`
+  −2..−3% at gated sizes, prebuilt-table multiplication unchanged, and in
+  interleaved main-versus-branch rounds halo2's `params/new-k11` −1.0..−2.8%
+  with `curve-fft/affine-eisenstein-k11` −0.3..−0.5%. Public `Table`s are
+  still built fully normalized.
 - Prepared the `1.0.0-rc.4` release.
 - `PreparedZeroCheck` (and `glv::zero::PreparedZeroMsm`) gained
   `multiexp_with_terms_vartime`: the exact multiscalar multiplication the

@@ -225,6 +225,97 @@ under `--features glv,aarch64-asm`; (2) if needed, bisect the halo2
 gates across commits eae5bdc (kernel genericization only) and a10cd05
 (hook routing, no FFT routing).
 
+### Interleaved A/B gates (decision-platform, final)
+
+Raw log: scratchpad `ab-gates.txt`. Three rounds alternating clean
+`main` and the branch in one session (fresh build + 45 s settle before
+each measurement), `curve-fft/native-k11` as the untouched control:
+
+| round | control main→branch | affine-fft-k11 main→branch | params-k11 main→branch |
+|---|---|---|---|
+| 1 | 176.8 → 182.3 ms | 20.448 → 20.364 (−0.4%) | 26.120 → 25.398 (−2.8%) |
+| 2 | 179.8 → 182.0 ms | 20.086 → 19.984 (−0.5%) | 25.481 → 25.221 (−1.0%) |
+| 3 | 182.1 → 180.4 ms | 20.073 → 20.011 (−0.3%) | 25.676 → 25.263 (−1.6%) |
+
+The control wanders ±1.5% with no code difference (which is what
+produced the earlier phantom "+4.6% regression" against a cold-machine
+baseline); the gates are uniformly negative in every paired round, with
+non-overlapping Criterion CIs for `params/new-k11` in rounds 2–3.
+
+Assembly spot-check (asm-backend `glv_table` binary): the monomorphized
+`EffectiveTable::new` is straight-line inlined field code — 43 `mul` +
+11 `square` call sites, one projective double, and **zero** inversion
+calls; static counts are consistent with the rolled 7-step chain and
+backward-ratio loops, and the measured build saving (−20% asm) tracks
+the operation-count prediction (−24%).
+
 ## Verdict
 
-[pending]
+**SHIP** (Phases A and B).
+
+- Primary performance gate: PASS — build-plus-one-use improves at every
+  gated production size (asm −2..−2.9%), `batch_mul_same_scalar_vartime`
+  improves at the routed sizes, `curve-fft/affine-eisenstein-k11` does
+  not regress (−0.3..−0.5%), `params/new-k11` improves beyond run noise
+  (−1.0..−2.8%, all interleaved rounds negative).
+- Reuse gate: PASS — prebuilt-table batch multiplication at parity
+  (−0.2..−1.0%); public `Table` untouched.
+- Correctness gate: PASS — all 241 tests under `--all-features` and the
+  `--no-default-features` matrix, MSRV 1.88 check (default and
+  all-features), debug-profile runs exercising the on-curve and
+  ratio-consistency asserts, Sage derivation printing the Rust
+  constants verbatim.
+- Allocation gate: PASS by construction — the routed paths drop the
+  `8n`-projective (≈3 MiB @4096) and `8n`-affine (≈2 MiB) temporaries;
+  no allocator probe was run (nominal sizes only).
+- Portability gate: portable-backend forced rows also favor the
+  effective path (build −13%, build+mul −1.6..−2.0%, FFT layer
+  −1.2..−1.7%); x86-64 was not available locally — CI's portable and
+  32-bit jobs are the remaining guard.
+
+Threshold: the sidecar shares `BATCH_AFFINE_MIN_POINTS = 32`; measured
+crossover stayed inside (16, 32] (see commit-5 section), so no separate
+constant.
+
+Phase C decision: **keep two representations.** Public `Table` remains
+fully normalized (reuse-heavy callers see no change and no size
+growth); `EffectiveTable` stays crate-private for build-and-consume
+batch paths. No `z` field is added to `Table`, and no complete
+raw-Jacobian fallback ladder was needed since the sidecar declines
+sub-gate and exceptional batches outright.
+
+## Deferred roadmap (Phase D and beyond)
+
+Not attempted in this pass; measured premises above make these the
+next candidates, in order:
+
+1. **Prepared zero-check odd-multiple chains**
+   (`glv/zero/prepared.rs::odd_multiple_layers`): replace the
+   one-shared-inversion-per-step affine chains with per-seed effective
+   chains (record Z-ratios, globalize per seed, one final
+   batch-normalize over requested layers). The primary win is
+   eliminating the serial inversion rounds during preparation; the
+   dependency shape flips from per-step-parallel to per-seed-parallel,
+   so benchmark serial and multicore preparation separately, and keep
+   `PreparedPoint` storage normalized (online bucket mixing needs
+   original-curve affine points).
+2. **Projective α helper** (`glv/zero/isogeny.rs`): a private
+   `(x³+4b, y(x³−8b), sx)` numerator form to seed effective chains
+   without the `alpha_affine_batch` inversion; keep the affine API for
+   callers that need true affine points.
+3. **Generic prepared variants** (`VariantTable::build`): compare one
+   normalized table build reused across variants vs an effective build
+   plus one per-variant output normalization — reuse may amortize away
+   the builder win; measure before routing.
+4. **Out of scope until profiles demand it**: carrying effective
+   coordinates across FFT butterfly layers (denominator classes differ
+   per product) and global-Z prepared storage (online buckets mix
+   bases, forcing one global denominator across all bases/variants).
+
+Rejected variants (measured or reasoned, this pass): AoS
+`EffectiveTable` with embedded `z` was implemented and is fine (reuse
+parity), so the separate-`z` SoA layout was not needed; the generic
+prefix/suffix global-Z conversion (handoff §14) was not implemented —
+the chain's adjacent-ratio structure is the whole win and
+`batch_normalize` already serves arbitrary slices; a sub-32 effective
+gate was measured and rejected (+13% at 16 points, +46% at 8).
