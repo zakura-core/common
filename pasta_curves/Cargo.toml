@@ -51,6 +51,9 @@ aarch64-asm = ["dep:cc"]
 # or later); enabling it on an older CPU faults at runtime. A no-op on other
 # architectures.
 x86_64-asm = []
+# Keep point-formula intermediates below 2p and use lazy-output BMI2/ADX
+# multiplication and squaring. This is experimental and implies x86_64-asm.
+x86_64-lazy-asm = ["x86_64-asm"]
 alloc = [
     "group/alloc",
     "blake2b_simd",

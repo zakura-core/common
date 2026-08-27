@@ -26,6 +26,18 @@ and this project adheres to Rust's notion of
   runtime-dispatched trait method, so the cell measured the portable path
   even under the assembly features and once mis-sized an assembly squaring
   decision.
+ - Portable squaring chains no longer canonicalize after every squaring,
+  including trailing squarings in variable-time exponentiation. The x86-64
+  path overlaps upper-half products with reduction specialized to the sparse
+  Pasta modulus limbs. Square-root tables use the chains on every
+  architecture; Apple AArch64 keeps its existing assembly paths.
+- Portable squaring on x86-64 reduces the low half of its product first and
+  adds the high half once, as the assembly backend does, keeping four limbs
+  live through the cancellation rounds instead of eight. Other targets retain
+  their existing classical reduction, and multiplication is unchanged.
+ - Moved the portable (pure Rust) `Fp` and `Fq` wide-squaring routine into a
+   shared `fields::portable` module. Both fields delegate to the same limb-array
+   implementation; the algorithm and generated operations are unchanged.
 - All of this release's new MSM machinery — the Eisenstein-orbit backend
   (`glv::orbit`), the magnitude-profiled backend planner, the prepared
   zero-checks (`glv::zero`), and the `arithmetic::PreparedZeroCheck` /
