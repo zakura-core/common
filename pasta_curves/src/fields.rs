@@ -3,6 +3,8 @@
 
 mod fp;
 mod fq;
+#[cfg(all(feature = "x86_64-lazy-asm", target_arch = "x86_64"))]
+pub(crate) mod lazy;
 mod modinv62;
 mod portable;
 

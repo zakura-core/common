@@ -1,0 +1,223 @@
+name: Temporary lazy point-assembly experiment
+
+on:
+  push:
+    branches:
+      - pasta-lazy-point-asm-experiment
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-and-benchmark:
+    name: Validate lazy arithmetic and compare with PR 222
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Record host features
+        id: host
+        shell: bash
+        run: |
+          set -euo pipefail
+          lscpu
+          flags="$(sed -n 's/^flags[[:space:]]*: //p' /proc/cpuinfo | head -1)"
+          if grep -qw bmi2 <<<"$flags" && grep -qw adx <<<"$flags"; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo '### Native host'
+            echo
+            echo '```text'
+            lscpu | sed -n '/Model name:/p;/CPU max MHz:/p'
+            for feature in bmi2 adx avx2 avx512f avx512ifma; do
+              if grep -qw "$feature" <<<"$flags"; then value=yes; else value=no; fi
+              printf '%-12s %s\n' "$feature" "$value"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Test lazy field ranges and point formulas
+        if: steps.host.outputs.supported == 'true'
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-cpu=native
+        run: |
+          set -euo pipefail
+          cargo test -p zakura-pasta-curves \
+            --features x86_64-lazy-asm,alloc \
+            --lib
+
+      - name: Build control and lazy point benchmarks
+        if: steps.host.outputs.supported == 'true'
+        id: point
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-cpu=native
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR=target/pr222 cargo bench \
+            -p zakura-pasta-curves \
+            --bench point \
+            --features x86_64-asm,alloc \
+            --no-run \
+            --message-format=json \
+            > point-pr222.json
+          control="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "point") | .executable // empty' point-pr222.json | tail -1)"
+          test -n "$control"
+          test -x "$control"
+
+          CARGO_TARGET_DIR=target/lazy cargo bench \
+            -p zakura-pasta-curves \
+            --bench point \
+            --features x86_64-lazy-asm,alloc \
+            --no-run \
+            --message-format=json \
+            > point-lazy.json
+          lazy="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "point") | .executable // empty' point-lazy.json | tail -1)"
+          test -n "$lazy"
+          test -x "$lazy"
+          echo "control=$control" >> "$GITHUB_OUTPUT"
+          echo "lazy=$lazy" >> "$GITHUB_OUTPUT"
+
+      - name: Check generated BMI2 and ADX instructions
+        if: steps.host.outputs.supported == 'true'
+        shell: bash
+        env:
+          CONTROL: ${{ steps.point.outputs.control }}
+          LAZY: ${{ steps.point.outputs.lazy }}
+        run: |
+          set -euo pipefail
+          objdump -d "$CONTROL" > point-pr222.disassembly
+          objdump -d "$LAZY" > point-lazy.disassembly
+          for instruction in mulx adcx adox; do
+            control_count="$(grep -Ec "[[:space:]]${instruction}[[:space:]]" point-pr222.disassembly)"
+            lazy_count="$(grep -Ec "[[:space:]]${instruction}[[:space:]]" point-lazy.disassembly)"
+            test "$control_count" -gt 0
+            test "$lazy_count" -gt 0
+            printf '%s control=%s lazy=%s\n' "$instruction" "$control_count" "$lazy_count"
+          done
+
+      - name: Benchmark point formulas against PR 222
+        if: steps.host.outputs.supported == 'true'
+        shell: bash
+        env:
+          CONTROL: ${{ steps.point.outputs.control }}
+          LAZY: ${{ steps.point.outputs.lazy }}
+        run: |
+          set -euo pipefail
+          taskset --cpu-list 0 "$CONTROL" \
+            --bench \
+            --warm-up-time 1 \
+            --measurement-time 4 \
+            --sample-size 50 \
+            --noplot \
+            --save-baseline pr222 \
+            | tee point-pr222.txt
+          taskset --cpu-list 0 "$LAZY" \
+            --bench \
+            --warm-up-time 1 \
+            --measurement-time 4 \
+            --sample-size 50 \
+            --noplot \
+            --baseline pr222 \
+            | tee point-lazy.txt
+          {
+            echo
+            echo '### Point-formula benchmark'
+            echo
+            echo 'The change intervals below are lazy assembly relative to the PR 222 control build.'
+            echo
+            echo '```text'
+            cat point-lazy.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build control and lazy GLV benchmarks
+        if: steps.host.outputs.supported == 'true'
+        id: glv
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-cpu=native
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR=target/pr222 cargo bench \
+            -p zakura-pasta-curves \
+            --bench glv \
+            --features x86_64-asm,alloc,glv \
+            --no-run \
+            --message-format=json \
+            > glv-pr222.json
+          control="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "glv") | .executable // empty' glv-pr222.json | tail -1)"
+          test -n "$control"
+          test -x "$control"
+
+          CARGO_TARGET_DIR=target/lazy cargo bench \
+            -p zakura-pasta-curves \
+            --bench glv \
+            --features x86_64-lazy-asm,alloc,glv \
+            --no-run \
+            --message-format=json \
+            > glv-lazy.json
+          lazy="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "glv") | .executable // empty' glv-lazy.json | tail -1)"
+          test -n "$lazy"
+          test -x "$lazy"
+          echo "control=$control" >> "$GITHUB_OUTPUT"
+          echo "lazy=$lazy" >> "$GITHUB_OUTPUT"
+
+      - name: Benchmark scalar multiplication and MSM against PR 222
+        if: steps.host.outputs.supported == 'true'
+        shell: bash
+        env:
+          CONTROL: ${{ steps.glv.outputs.control }}
+          LAZY: ${{ steps.glv.outputs.lazy }}
+        run: |
+          set -euo pipefail
+          filter='native mul|mul_glv one-shot|table build|try_multiexp_vartime'
+          taskset --cpu-list 0 "$CONTROL" "$filter" \
+            --bench \
+            --warm-up-time 1 \
+            --measurement-time 3 \
+            --sample-size 30 \
+            --noplot \
+            --save-baseline pr222-glv \
+            | tee glv-pr222.txt
+          taskset --cpu-list 0 "$LAZY" "$filter" \
+            --bench \
+            --warm-up-time 1 \
+            --measurement-time 3 \
+            --sample-size 30 \
+            --noplot \
+            --baseline pr222-glv \
+            | tee glv-lazy.txt
+          {
+            echo
+            echo '### Scalar multiplication and MSM benchmark'
+            echo
+            echo 'The change intervals below are lazy assembly relative to the PR 222 control build.'
+            echo
+            echo '```text'
+            cat glv-lazy.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report unavailable native comparison
+        if: steps.host.outputs.supported != 'true'
+        shell: bash
+        run: |
+          {
+            echo
+            echo '### Native benchmark'
+            echo
+            echo 'Blocked: this runner does not expose both BMI2 and ADX.'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -11,6 +11,8 @@ use crate::once::OnceTable;
 #[cfg(feature = "bits")]
 use ff::{FieldBits, PrimeFieldBits};
 
+#[cfg(all(feature = "x86_64-lazy-asm", target_arch = "x86_64"))]
+use super::lazy::{self, LazyElement, LazyField};
 use super::portable;
 use crate::arithmetic::{adc, mac, sbb, SqrtTableHelpers};
 #[cfg(feature = "deferred")]
@@ -114,6 +116,9 @@ const MODULUS: Fp = Fp([
     0x0000000000000000,
     0x4000000000000000,
 ]);
+
+#[cfg(all(feature = "x86_64-lazy-asm", target_arch = "x86_64"))]
+const TWO_MODULUS: [u64; 4] = lazy::twice(&MODULUS.0);
 
 /// The modulus as u32 limbs.
 #[cfg(not(target_pointer_width = "64"))]
@@ -466,12 +471,9 @@ impl Fp {
             target_vendor = "apple"
         )))]
         {
-            // Route through the runtime dispatchers so backends without a
-            // fused chain (the x86-64 one) still square and multiply in
-            // assembly.
-            (0..n)
-                .fold(*self, |acc, _| acc.square_runtime())
-                .mul_runtime(by)
+            // Leave the accumulator unreduced between squarings. The closing
+            // multiplication canonicalizes its result.
+            Fp(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul(by)
         }
     }
 
@@ -491,24 +493,16 @@ impl Fp {
             (0..n).fold(*self, |acc, _| acc.square_runtime())
         }
 
-        #[cfg(not(any(
-            all(
-                feature = "aarch64-asm",
-                target_arch = "aarch64",
-                target_vendor = "apple"
-            ),
-            all(feature = "x86_64-asm", target_arch = "x86_64")
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple"
         )))]
         {
             Fp(portable::canonicalize(
                 &portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV),
                 &MODULUS.0,
             ))
-        }
-
-        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
-        {
-            (0..n).fold(*self, |acc, _| acc.square_runtime())
         }
     }
 
@@ -599,6 +593,63 @@ impl Fp {
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) const fn square_unreduced(&self) -> [u64; 8] {
         portable::square_wide(&self.0)
+    }
+}
+
+#[cfg(all(feature = "x86_64-lazy-asm", target_arch = "x86_64"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FpLazy([u64; 4]);
+
+#[cfg(all(feature = "x86_64-lazy-asm", target_arch = "x86_64"))]
+impl LazyField for Fp {
+    type Lazy = FpLazy;
+
+    #[inline(always)]
+    fn lazy(self) -> FpLazy {
+        FpLazy(self.0)
+    }
+}
+
+#[cfg(all(feature = "x86_64-lazy-asm", target_arch = "x86_64"))]
+impl LazyElement<Fp> for FpLazy {
+    #[inline(always)]
+    fn mul(&self, rhs: &Fp) -> FpLazy {
+        debug_assert!(lazy::is_below_twice(&self.0, &TWO_MODULUS));
+        FpLazy(super::x86_64_asm::mul_lazy(
+            &self.0, &rhs.0, &MODULUS.0, INV,
+        ))
+    }
+
+    #[inline(always)]
+    fn square(&self) -> FpLazy {
+        debug_assert!(lazy::is_below_twice(&self.0, &TWO_MODULUS));
+        FpLazy(super::x86_64_asm::square_lazy(&self.0, &MODULUS.0, INV))
+    }
+
+    #[inline(always)]
+    fn add(&self, rhs: &Fp) -> FpLazy {
+        FpLazy(lazy::add(&self.0, &rhs.0, &MODULUS.0))
+    }
+
+    #[inline(always)]
+    fn add_lazy(&self, rhs: &FpLazy) -> FpLazy {
+        FpLazy(lazy::add_lazy(&self.0, &rhs.0, &TWO_MODULUS))
+    }
+
+    #[inline(always)]
+    fn sub(&self, rhs: &Fp) -> FpLazy {
+        FpLazy(lazy::sub(&self.0, &rhs.0, &MODULUS.0))
+    }
+
+    #[inline(always)]
+    fn sub_lazy(&self, rhs: &FpLazy) -> FpLazy {
+        FpLazy(lazy::sub(&self.0, &rhs.0, &TWO_MODULUS))
+    }
+
+    #[inline(always)]
+    fn reduce(self) -> Fp {
+        debug_assert!(lazy::is_below_twice(&self.0, &TWO_MODULUS));
+        Fp(lazy::canonicalize(&self.0, &MODULUS.0))
     }
 }
 
@@ -1807,4 +1858,86 @@ fn x86_64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
 fn x86_64_asm_mul_rejects_non_canonical_rhs_in_debug() {
     // The modulus itself is the smallest non-canonical value.
     let _ = Fp::one().mul_runtime(&MODULUS);
+}
+#[cfg(all(test, feature = "x86_64-lazy-asm", target_arch = "x86_64"))]
+#[test]
+fn x86_64_lazy_arithmetic_matches_canonical() {
+    use rand::SeedableRng;
+
+    let add_modulus = |value: &[u64; 4]| {
+        let (d0, carry) = adc(value[0], MODULUS.0[0], 0);
+        let (d1, carry) = adc(value[1], MODULUS.0[1], carry);
+        let (d2, carry) = adc(value[2], MODULUS.0[2], carry);
+        let (d3, carry) = adc(value[3], MODULUS.0[3], carry);
+        assert_eq!(carry, 0);
+        [d0, d1, d2, d3]
+    };
+    let below_two_p = |value: &FpLazy| lazy::is_below_twice(&value.0, &TWO_MODULUS);
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x6d; 16]);
+    for _ in 0..20_000 {
+        let a = Fp::random(&mut rng);
+        let b = Fp::random(&mut rng);
+        let c = Fp::random(&mut rng);
+
+        let ab = a.lazy().mul(&b);
+        assert!(below_two_p(&ab));
+        assert_eq!(ab.reduce(), a * b);
+
+        let ab_c = ab.mul(&c);
+        assert!(below_two_p(&ab_c));
+        assert_eq!(ab_c.reduce(), a * b * c);
+
+        let ab_squared = ab.square();
+        assert!(below_two_p(&ab_squared));
+        assert_eq!(ab_squared.reduce(), (a * b).square());
+
+        // Exercise the whole raw half of [p, 2p), including canonical rhs
+        // limbs that do not satisfy the older arbitrary-lhs restriction.
+        let raw_a = FpLazy(add_modulus(&a.0));
+        let raw_b = FpLazy(add_modulus(&b.0));
+        assert!(below_two_p(&raw_a));
+        assert!(below_two_p(&raw_b));
+        assert_eq!(raw_a.reduce(), a);
+        assert_eq!(raw_a.mul(&b).reduce(), a * b);
+        assert_eq!(raw_a.square().reduce(), a.square());
+        assert_eq!(raw_a.add(&b).reduce(), a + b);
+        assert_eq!(raw_a.add_lazy(&raw_b).reduce(), a + b);
+        assert_eq!(raw_a.sub(&b).reduce(), a - b);
+        assert_eq!(raw_a.sub_lazy(&raw_b).reduce(), a - b);
+        assert_eq!(raw_a.double().reduce(), a.double());
+
+        for value in [
+            raw_a.mul(&b),
+            raw_a.square(),
+            raw_a.add(&b),
+            raw_a.add_lazy(&raw_b),
+            raw_a.sub(&b),
+            raw_a.sub_lazy(&raw_b),
+            raw_a.double(),
+        ] {
+            assert!(below_two_p(&value));
+        }
+    }
+
+    // Pin both ends of the lazy interval, including the square and sum of
+    // 2p - 1, where loose Montgomery and carry bounds are tightest.
+    let top = FpLazy(lazy::sub(&TWO_MODULUS, &[1, 0, 0, 0], &[0, 0, 0, 0]));
+    let top_canonical = Fp(lazy::canonicalize(&top.0, &MODULUS.0));
+    assert!(below_two_p(&top));
+    assert_eq!(top_canonical, -Fp::one());
+    let top_square = top.square();
+    assert!(below_two_p(&top_square));
+    assert_eq!(top_square.reduce(), top_canonical.square());
+    let top_double = top.double();
+    assert!(below_two_p(&top_double));
+    assert_eq!(top_double.reduce(), top_canonical.double());
+
+    let mut max_canonical = MODULUS;
+    max_canonical.0[0] -= 1;
+    for rhs in [Fp::zero(), Fp::one(), max_canonical, R2, R3] {
+        let product = top.mul(&rhs);
+        assert!(below_two_p(&product));
+        assert_eq!(product.reduce(), top_canonical * rhs);
+    }
 }
