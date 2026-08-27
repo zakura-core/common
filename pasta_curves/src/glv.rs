@@ -1889,8 +1889,40 @@ impl<C: GlvParams> Table<C> {
     }
 
     /// Multiplies one scalar by a contiguous batch of points, returning
-    /// affine results without an intermediate projective conversion.
+    /// affine results.
+    ///
+    /// Large identity-free batches with a safe schedule build *effective*
+    /// tables (no inversion, no `8n`-entry table normalization), run the
+    /// ladder kernel, and batch-normalize only the `n` final products;
+    /// everything else takes the normalized route.
     fn mul_decomposed_same_scalar_affine(
+        points: &[C],
+        scalar: &Decomposed<C>,
+    ) -> Vec<C::AffineExt> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let use_affine = points.len() >= BATCH_AFFINE_MIN_POINTS
+            && points.iter().all(|point| !bool::from(point.is_identity()))
+            && scalar.len > 0
+            && scalar.affine_ladder_safe;
+        if !use_affine {
+            return Self::mul_decomposed_same_scalar_affine_normalized(points, scalar);
+        }
+
+        let tables = EffectiveTable::batch(points);
+        let refs: Vec<&EffectiveTable<C>> = tables.iter().collect();
+        let (xs, ys) = batch_affine_ladder_raw(&refs, scalar);
+        restore_and_normalize(xs, ys, &tables)
+    }
+
+    /// The normalized same-scalar route: batched table build with one
+    /// shared normalization over all `8n` entries, then the affine ladder
+    /// (which needs no output conversion) or, off the gate, per-table
+    /// ladders plus one output normalization. Retained as the sub-gate
+    /// fallback and as the forced benchmark backend.
+    fn mul_decomposed_same_scalar_affine_normalized(
         points: &[C],
         scalar: &Decomposed<C>,
     ) -> Vec<C::AffineExt> {
@@ -1919,9 +1951,34 @@ impl<C: GlvParams> Table<C> {
 
     /// One affine product for each `(point, scalar)` pair. This is the FFT
     /// counterpart to [`Table::mul_decomposed_batch`]: tables and ladder
-    /// inversions are batched even though each point has a different scalar.
+    /// inversions are batched even though each point has a different
+    /// scalar. Routed like [`Table::mul_decomposed_same_scalar_affine`].
     fn mul_decomposed_pairs_affine(points: &[C], scalars: &[&Decomposed<C>]) -> Vec<C::AffineExt> {
         assert_eq!(points.len(), scalars.len());
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let use_affine = points.len() >= BATCH_AFFINE_MIN_POINTS
+            && points.iter().all(|point| !bool::from(point.is_identity()))
+            && scalars
+                .iter()
+                .all(|scalar| scalar.len > 0 && scalar.affine_ladder_safe);
+        if !use_affine {
+            return Self::mul_decomposed_pairs_affine_normalized(points, scalars);
+        }
+
+        let tables = EffectiveTable::batch(points);
+        let (xs, ys) = batch_affine_ladder_pairs_raw(&tables, scalars);
+        restore_and_normalize(xs, ys, &tables)
+    }
+
+    /// The normalized pairs route (see
+    /// [`Table::mul_decomposed_same_scalar_affine_normalized`]).
+    fn mul_decomposed_pairs_affine_normalized(
+        points: &[C],
+        scalars: &[&Decomposed<C>],
+    ) -> Vec<C::AffineExt> {
         if points.is_empty() {
             return Vec::new();
         }
@@ -1943,98 +2000,105 @@ impl<C: GlvParams> Table<C> {
             return affine;
         }
 
-        Self::batch_affine_ladder_pairs(&tables, scalars)
-    }
-
-    /// Synchronized affine Eisenstein ladders with one independently recoded
-    /// scalar per table. Shorter recodings join when their top digit is
-    /// reached; all live accumulators share each column's inversions.
-    fn batch_affine_ladder_pairs(tables: &[Self], scalars: &[&Decomposed<C>]) -> Vec<C::AffineExt> {
-        let n = tables.len();
-        let max_len = scalars.iter().map(|scalar| scalar.len).max().unwrap_or(0);
-        let mut xs = alloc::vec![C::Base::ZERO; n];
-        let mut ys = alloc::vec![C::Base::ZERO; n];
-        let mut started = alloc::vec![false; n];
-        let mut slopes = alloc::vec![C::Base::ZERO; n];
-        let mut x1s = alloc::vec![C::Base::ZERO; n];
-        let mut denominators = Vec::with_capacity(n);
-        let mut scratch = Vec::with_capacity(n);
-        let mut operations = Vec::with_capacity(n);
-        let mut additions = Vec::with_capacity(n);
-
-        for position in (0..max_len).rev() {
-            denominators.clear();
-            operations.clear();
-            for (i, (table, scalar)) in tables.iter().zip(scalars).enumerate() {
-                if position >= scalar.len {
-                    continue;
-                }
-                let code = scalar.digits[position];
-                if !started[i] {
-                    debug_assert_eq!(position + 1, scalar.len);
-                    debug_assert_ne!(code, 0);
-                    (xs[i], ys[i]) = table.digit_coords(code);
-                    started[i] = true;
-                } else {
-                    let denominator = if code == 0 {
-                        ys[i].double()
-                    } else {
-                        let (orbit, e, _) = decode_digit(code);
-                        table.xs[e][orbit] - xs[i]
-                    };
-                    operations.push((i, code));
-                    denominators.push(denominator);
-                }
-            }
-
-            scratch.resize(denominators.len(), C::Base::ZERO);
-            if !denominators.is_empty() {
-                batch_invert_nonzero(&mut denominators, &mut scratch);
-            }
-
-            additions.clear();
-            let mut second_denominators = Vec::with_capacity(operations.len());
-            for ((i, code), inverse) in operations.iter().copied().zip(&denominators) {
-                if code == 0 {
-                    let xx = xs[i].square();
-                    let slope = (xx.double() + xx) * inverse;
-                    let x2 = slope.square() - xs[i].double();
-                    ys[i] = slope * (xs[i] - x2) - ys[i];
-                    xs[i] = x2;
-                } else {
-                    let (orbit, e, negate) = decode_digit(code);
-                    let u = tables[i].xs[e][orbit];
-                    let v = if negate {
-                        -tables[i].ys[orbit]
-                    } else {
-                        tables[i].ys[orbit]
-                    };
-                    let slope = (v - ys[i]) * inverse;
-                    x1s[i] = slope.square() - xs[i] - u;
-                    slopes[i] = slope;
-                    additions.push(i);
-                    second_denominators.push(x1s[i] - xs[i]);
-                }
-            }
-
-            scratch.resize(second_denominators.len(), C::Base::ZERO);
-            if !second_denominators.is_empty() {
-                batch_invert_nonzero(&mut second_denominators, &mut scratch);
-            }
-            for (i, inverse) in additions.iter().copied().zip(second_denominators) {
-                let slope = -(slopes[i] + ys[i].double() * inverse);
-                let x2 = slope.square() - xs[i] - x1s[i];
-                ys[i] = slope * (xs[i] - x2) - ys[i];
-                xs[i] = x2;
-            }
-        }
-
-        debug_assert!(started.iter().all(|started| *started));
+        let (xs, ys) = batch_affine_ladder_pairs_raw(&tables, scalars);
         xs.into_iter()
             .zip(ys)
             .map(|(x, y)| C::affine_unchecked(x, y, private::CrateToken(())))
             .collect()
     }
+
+}
+
+/// Synchronized affine Eisenstein ladders with one independently recoded
+/// scalar per window. Shorter recodings join when their top digit is
+/// reached; all live accumulators share each column's inversions. Like
+/// [`batch_affine_ladder_raw`], this is the raw kernel: callers finalize
+/// the returned accumulator coordinates for their window representation.
+fn batch_affine_ladder_pairs_raw<C: GlvParams, W: WindowCoords<C>>(
+    tables: &[W],
+    scalars: &[&Decomposed<C>],
+) -> (Vec<C::Base>, Vec<C::Base>) {
+    let n = tables.len();
+    let max_len = scalars.iter().map(|scalar| scalar.len).max().unwrap_or(0);
+    let mut xs = alloc::vec![C::Base::ZERO; n];
+    let mut ys = alloc::vec![C::Base::ZERO; n];
+    let mut started = alloc::vec![false; n];
+    let mut slopes = alloc::vec![C::Base::ZERO; n];
+    let mut x1s = alloc::vec![C::Base::ZERO; n];
+    let mut denominators = Vec::with_capacity(n);
+    let mut scratch = Vec::with_capacity(n);
+    let mut operations = Vec::with_capacity(n);
+    let mut additions = Vec::with_capacity(n);
+
+    for position in (0..max_len).rev() {
+        denominators.clear();
+        operations.clear();
+        for (i, (table, scalar)) in tables.iter().zip(scalars).enumerate() {
+            if position >= scalar.len {
+                continue;
+            }
+            let code = scalar.digits[position];
+            if !started[i] {
+                debug_assert_eq!(position + 1, scalar.len);
+                debug_assert_ne!(code, 0);
+                (xs[i], ys[i]) = table.window_digit_coords(code);
+                started[i] = true;
+            } else {
+                let denominator = if code == 0 {
+                    ys[i].double()
+                } else {
+                    let (orbit, e, _) = decode_digit(code);
+                    table.window_xs()[e][orbit] - xs[i]
+                };
+                operations.push((i, code));
+                denominators.push(denominator);
+            }
+        }
+
+        scratch.resize(denominators.len(), C::Base::ZERO);
+        if !denominators.is_empty() {
+            batch_invert_nonzero(&mut denominators, &mut scratch);
+        }
+
+        additions.clear();
+        let mut second_denominators = Vec::with_capacity(operations.len());
+        for ((i, code), inverse) in operations.iter().copied().zip(&denominators) {
+            if code == 0 {
+                let xx = xs[i].square();
+                let slope = (xx.double() + xx) * inverse;
+                let x2 = slope.square() - xs[i].double();
+                ys[i] = slope * (xs[i] - x2) - ys[i];
+                xs[i] = x2;
+            } else {
+                let (orbit, e, negate) = decode_digit(code);
+                let u = tables[i].window_xs()[e][orbit];
+                let v = if negate {
+                    -tables[i].window_ys()[orbit]
+                } else {
+                    tables[i].window_ys()[orbit]
+                };
+                let slope = (v - ys[i]) * inverse;
+                x1s[i] = slope.square() - xs[i] - u;
+                slopes[i] = slope;
+                additions.push(i);
+                second_denominators.push(x1s[i] - xs[i]);
+            }
+        }
+
+        scratch.resize(second_denominators.len(), C::Base::ZERO);
+        if !second_denominators.is_empty() {
+            batch_invert_nonzero(&mut second_denominators, &mut scratch);
+        }
+        for (i, inverse) in additions.iter().copied().zip(second_denominators) {
+            let slope = -(slopes[i] + ys[i].double() * inverse);
+            let x2 = slope.square() - xs[i] - x1s[i];
+            ys[i] = slope * (xs[i] - x2) - ys[i];
+            xs[i] = x2;
+        }
+    }
+
+    debug_assert!(started.iter().all(|started| *started));
+    (xs, ys)
 }
 
 /// Raw digit-window coordinate access shared by [`Table`] and
@@ -2291,6 +2355,26 @@ fn effective_batch_affine_ladder<C: GlvParams>(
         .collect()
 }
 
+/// Restores each ladder lane's omitted denominator into an ordinary
+/// projective point and batch-normalizes the `n` final products — the
+/// effective FFT route's only normalization, versus the `8n` table
+/// entries the normalized route converts up front.
+fn restore_and_normalize<C: GlvParams>(
+    xs: Vec<C::Base>,
+    ys: Vec<C::Base>,
+    tables: &[EffectiveTable<C>],
+) -> Vec<C::AffineExt> {
+    let projective: Vec<C> = xs
+        .into_iter()
+        .zip(ys)
+        .zip(tables)
+        .map(|((x, y), t)| C::projective_unchecked(x, y, t.z, private::CrateToken(())))
+        .collect();
+    let mut affine = alloc::vec![C::AffineExt::identity(); projective.len()];
+    C::batch_normalize(&projective, &mut affine);
+    affine
+}
+
 /// Serves a same-scalar batch through the effective-affine sidecar when
 /// the batch-affine ladder's own gate is met — at least
 /// [`BATCH_AFFINE_MIN_POINTS`] live points and a safe column schedule —
@@ -2418,6 +2502,22 @@ pub mod bench_internals {
             super::try_batch_mul_same_scalar_effective(&Decomposed::new(k), output),
             "the sidecar gate declined this benchmark batch"
         );
+    }
+
+    /// The FFT same-scalar multiplication layer, forced through the
+    /// normalized backend (8n-entry table normalization, ladder output
+    /// used directly as affine).
+    pub fn fft_mul_layer_normalized<C: GlvParams>(
+        points: &[C],
+        k: &Decomposed<C>,
+    ) -> Vec<C::AffineExt> {
+        Table::mul_decomposed_same_scalar_affine_normalized(points, k)
+    }
+
+    /// The FFT same-scalar multiplication layer as routed (on gate-met
+    /// batches: effective tables, ladder, one n-point normalization).
+    pub fn fft_mul_layer_routed<C: GlvParams>(points: &[C], k: &Decomposed<C>) -> Vec<C::AffineExt> {
+        Table::mul_decomposed_same_scalar_affine(points, k)
     }
 }
 
@@ -4631,6 +4731,63 @@ mod tests {
         }
     }
 
+    /// The routed FFT multiplication layers (same-scalar and pairs)
+    /// against their normalized backends and native multiplication, across
+    /// the gate and with an identity lane forcing the fallback.
+    fn fft_mul_layers_match<C: GlvParams>() {
+        let g = C::generator();
+        let lambda = C::ScalarExt::ZETA;
+        let sizes = [1usize, 31, 32, 33, 65, 128];
+        let scalar_pool: Vec<Decomposed<C>> = scalars::<C::ScalarExt>(128)
+            .map(|k| Decomposed::new(&k))
+            .collect();
+        let k0_scalar = scalars::<C::ScalarExt>(1).next().unwrap();
+        let k0 = Decomposed::<C>::new(&k0_scalar);
+        for size in sizes {
+            for with_identity in [false, true] {
+                let points: Vec<C> = (0..size)
+                    .map(|i| {
+                        if with_identity && size > 2 && i == size / 2 {
+                            C::identity()
+                        } else {
+                            g * (C::ScalarExt::from(i as u64 + 1) + lambda)
+                        }
+                    })
+                    .collect();
+
+                let routed = Table::mul_decomposed_same_scalar_affine(&points, &k0);
+                let normalized =
+                    Table::mul_decomposed_same_scalar_affine_normalized(&points, &k0);
+                assert_eq!(routed, normalized, "same-scalar layer routes must agree");
+                for (p, out) in points.iter().zip(&routed) {
+                    assert_eq!(
+                        C::from(*out),
+                        *p * k0_scalar,
+                        "same-scalar layer != native at size {size}"
+                    );
+                }
+
+                let pair_scalars: Vec<&Decomposed<C>> =
+                    scalar_pool.iter().take(size).collect();
+                let routed = Table::mul_decomposed_pairs_affine(&points, &pair_scalars);
+                let normalized =
+                    Table::mul_decomposed_pairs_affine_normalized(&points, &pair_scalars);
+                assert_eq!(routed, normalized, "pairs layer routes must agree");
+                for ((p, out), k) in points
+                    .iter()
+                    .zip(&routed)
+                    .zip(scalars::<C::ScalarExt>(size as u64))
+                {
+                    assert_eq!(
+                        C::from(*out),
+                        *p * k,
+                        "pairs layer != native at size {size}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Hand-crafted digit strings whose column schedules hit the affine
     /// ladder's exceptional cases: the batch entry must detect them and take
     /// the per-point fallback, keeping results exact. (Real recodings reach
@@ -4938,6 +5095,10 @@ mod tests {
                 #[test]
                 fn same_scalar_routing() {
                     same_scalar_routing_matches_native::<$curve>();
+                }
+                #[test]
+                fn fft_mul_layers() {
+                    fft_mul_layers_match::<$curve>();
                 }
                 #[test]
                 fn table_mul() {

@@ -2,6 +2,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ff::Field;
+use pasta_curves::group::CurveAffine as _;
 use pasta_curves::glv::{bench_internals, Decomposed, GlvParams, Table};
 use pasta_curves::{pallas, vesta};
 use rand::SeedableRng;
@@ -133,6 +134,52 @@ fn forced_backend_bench<C: GlvParams>(c: &mut Criterion, curve_name: &str) {
                 let tables = bench_internals::effective_table_batch(black_box(&points[..size]));
                 black_box(bench_internals::effective_mul_decomposed_batch(
                     &tables,
+                    black_box(&decomposed),
+                ))
+            })
+        });
+    }
+    group.finish();
+
+    // Isolates the effective FFT layer's output-normalization step: the
+    // same effective products, returned projective (as the same-scalar
+    // hook does) versus normalized to affine (as the FFT layer must).
+    let mut group = c.benchmark_group(format!("{curve_name}/forced fft decompose"));
+    group.sample_size(20);
+    {
+        let size = 4096;
+        let tables = bench_internals::effective_table_batch(&points[..size]);
+        let products = bench_internals::effective_mul_decomposed_batch(&tables, &decomposed);
+        group.bench_function("normalize products only/4096", |b| {
+            b.iter(|| {
+                let mut affine = vec![C::AffineExt::identity(); products.len()];
+                C::batch_normalize(black_box(&products), &mut affine);
+                black_box(affine)
+            })
+        });
+    }
+    group.finish();
+
+    // The FFT same-scalar multiplication layer: normalized (8n-entry
+    // table normalization, ladder output used directly) versus routed
+    // effective (no table normalization, one n-point output
+    // normalization), both returning true affine products.
+    let mut group = c.benchmark_group(format!("{curve_name}/forced fft mul layer"));
+    group.sample_size(20);
+    for size in [64usize, 1024, 4096] {
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input(BenchmarkId::new("normalized", size), &size, |b, _| {
+            b.iter(|| {
+                black_box(bench_internals::fft_mul_layer_normalized(
+                    black_box(&points[..size]),
+                    black_box(&decomposed),
+                ))
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("effective", size), &size, |b, _| {
+            b.iter(|| {
+                black_box(bench_internals::fft_mul_layer_routed(
+                    black_box(&points[..size]),
                     black_box(&decomposed),
                 ))
             })
