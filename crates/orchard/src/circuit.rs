@@ -1175,12 +1175,12 @@ impl ProvingKey {
     /// `halo2_proofs::poly::commitment::Params::prepare_commitments`).
     /// Long-lived provers (wallet backends, proving services) should call
     /// this once after constructing the key: the prover's polynomial
-    /// commitments then evaluate through the preparations on bounded-width
-    /// pools (currently eight effective threads; measured 1.2–1.8x per
-    /// commitment there) and keep their usual multiexp on wider pools —
-    /// halo2 falls back automatically — so arming never slows proving
-    /// down. One-shot provers need not: preparation costs hundreds of
-    /// milliseconds and tens of mebibytes, amortized across proofs.
+    /// commitments then evaluate through the preparations on pools of at
+    /// most eight effective threads, extended to ten on AArch64 macOS for
+    /// Orchard's `k = 11` SRS (measured end to end on Apple M4). Wider pools
+    /// retain their usual multiexp. One-shot provers need not prepare:
+    /// setup costs hundreds of milliseconds and tens of mebibytes,
+    /// amortized across proofs.
     ///
     /// Returns whether the tables were actually built and cached; `false`
     /// means arming was a no-op (Orchard was built without its opt-in

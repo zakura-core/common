@@ -5,22 +5,18 @@ use group::Group;
 
 use std::collections::BTreeMap;
 
-/// The widest thread pool on which the prepared fixed-base routes stay
-/// engaged: [`MSM::eval`]'s identity test through the prepared zero-check,
-/// and `Params::commit` / `Params::commit_lagrange` through the prepared
-/// commitment tables. The prepared evaluation stops scaling past this
-/// width — its wide-radix codebook has fewer window tasks than the
-/// unprepared orbit backend, and under contention its reduction inflates
-/// in total work — while the unprepared planner keeps scaling, so on full
-/// pools the prepared path measures *slower* despite its large low-thread
-/// wins. Measured end-to-end on the Orchard-shaped verifier (k = 11,
+/// The widest thread pool on which the prepared verifier zero-check stays
+/// engaged. The prepared evaluation stops scaling past this width — its
+/// wide-radix codebook has fewer window tasks than the unprepared orbit
+/// backend, and under contention its reduction inflates in total work —
+/// while the unprepared planner keeps scaling, so on full pools the
+/// prepared path measures *slower* despite its large low-thread wins.
+/// Measured end-to-end on the Orchard-shaped verifier (k = 11,
 /// within-process interleaved cells): armed vs unarmed at 1 action is
 /// −22% at 4 threads and −8% at 8 threads (prepared wins), but +15% at
 /// 16 threads (Apple M4 Max) and +22–27% at a 32-thread pool
 /// (32-hw-thread Skylake-X) — the crossover sits between 8 and 16 on both
-/// architectures, on the assembly and portable field backends alike. The
-/// prepared prover commitments cross over in the same band (1.2–1.8x
-/// wins at 1–8 threads, losses on full pools, on both hosts).
+/// architectures, on the assembly and portable field backends alike.
 #[cfg(feature = "orbits")]
 pub(crate) const PREPARED_MSM_MAX_THREADS: usize = 8;
 
