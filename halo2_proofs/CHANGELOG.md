@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- The `fft` bench's curve-FFT and parameter-generation rows now also measure
+  `k = 12` and `k = 13` (`curve-fft/affine-eisenstein-k{12,13}`,
+  `params/new-k{12,13}`); the `k = 11` benchmark IDs are unchanged.
 - Prepared the `1.0.0-rc.4` release.
 - Verifying-key generation now omits zero terms from sufficiently sparse fixed
   polynomial commitments and batch-normalizes fixed and permutation

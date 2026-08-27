@@ -2,8 +2,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ff::Field;
-use pasta_curves::group::CurveAffine as _;
 use pasta_curves::glv::{bench_internals, Decomposed, GlvParams, Table};
+use pasta_curves::group::CurveAffine as _;
 use pasta_curves::{pallas, vesta};
 use rand::SeedableRng;
 use rand_xorshift::XorShiftRng;

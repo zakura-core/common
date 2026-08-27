@@ -108,16 +108,20 @@ fn glv_bench<C: GlvParams>(c: &mut Criterion, name: &str) {
         // where its gate admits the batch (at those sizes the routed
         // "batch hook" row above takes the same path).
         let projective: Vec<C> = points.iter().map(|point| C::from(*point)).collect();
-        group.bench_with_input(BenchmarkId::new("forced normalized", size), &size, |b, _| {
-            b.iter(|| {
-                let scalars = black_box(scalars.as_slice());
-                for scalar in scalars {
-                    output.copy_from_slice(black_box(projective.as_slice()));
-                    bench_internals::batch_mul_same_scalar_normalized(&mut output, scalar);
-                    black_box(output.as_slice());
-                }
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("forced normalized", size),
+            &size,
+            |b, _| {
+                b.iter(|| {
+                    let scalars = black_box(scalars.as_slice());
+                    for scalar in scalars {
+                        output.copy_from_slice(black_box(projective.as_slice()));
+                        bench_internals::batch_mul_same_scalar_normalized(&mut output, scalar);
+                        black_box(output.as_slice());
+                    }
+                });
+            },
+        );
         if size >= FORCED_EFFECTIVE_MIN_POINTS {
             group.bench_with_input(BenchmarkId::new("forced effective", size), &size, |b, _| {
                 b.iter(|| {

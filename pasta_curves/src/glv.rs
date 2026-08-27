@@ -144,7 +144,12 @@ mod private {
             p.raw_xy()
         }
 
-        fn projective_unchecked(x: Self::Base, y: Self::Base, z: Self::Base, _: CrateToken) -> Self {
+        fn projective_unchecked(
+            x: Self::Base,
+            y: Self::Base,
+            z: Self::Base,
+            _: CrateToken,
+        ) -> Self {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
         }
@@ -159,7 +164,12 @@ mod private {
             p.raw_xy()
         }
 
-        fn projective_unchecked(x: Self::Base, y: Self::Base, z: Self::Base, _: CrateToken) -> Self {
+        fn projective_unchecked(
+            x: Self::Base,
+            y: Self::Base,
+            z: Self::Base,
+            _: CrateToken,
+        ) -> Self {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
         }
@@ -2006,7 +2016,6 @@ impl<C: GlvParams> Table<C> {
             .map(|(x, y)| C::affine_unchecked(x, y, private::CrateToken(())))
             .collect()
     }
-
 }
 
 /// Synchronized affine Eisenstein ladders with one independently recoded
@@ -2516,7 +2525,10 @@ pub mod bench_internals {
 
     /// The FFT same-scalar multiplication layer as routed (on gate-met
     /// batches: effective tables, ladder, one n-point normalization).
-    pub fn fft_mul_layer_routed<C: GlvParams>(points: &[C], k: &Decomposed<C>) -> Vec<C::AffineExt> {
+    pub fn fft_mul_layer_routed<C: GlvParams>(
+        points: &[C],
+        k: &Decomposed<C>,
+    ) -> Vec<C::AffineExt> {
         Table::mul_decomposed_same_scalar_affine(points, k)
     }
 }
@@ -2571,7 +2583,14 @@ fn add_mixed_with_ratio_nonexceptional<F: Field>(
     let y3 = r * (v - x3) - (q.y * j).double();
     let zr = h.double();
     let z3 = q.z * zr;
-    (RawJacobian { x: x3, y: y3, z: z3 }, zr)
+    (
+        RawJacobian {
+            x: x3,
+            y: y3,
+            z: z3,
+        },
+        zr,
+    )
 }
 
 /// Applies an Eisenstein unit (encoded as in [`JOINT_DIGITS`]: `unit >> 1`
@@ -4423,7 +4442,11 @@ mod tests {
             let (bx, by) = C::affine_xy(&b_affine[0]);
 
             let (ax, ay, az) = a.jacobian_coordinates();
-            let q = RawJacobian { x: ax, y: ay, z: az };
+            let q = RawJacobian {
+                x: ax,
+                y: ay,
+                z: az,
+            };
             let d = EffectiveAffine { x: bx, y: by };
             let (sum, ratio) = add_mixed_with_ratio_nonexceptional(&q, &d);
             assert_eq!(sum.z, az * ratio, "Z3 must equal Z1 * ratio");
@@ -4756,8 +4779,7 @@ mod tests {
                     .collect();
 
                 let routed = Table::mul_decomposed_same_scalar_affine(&points, &k0);
-                let normalized =
-                    Table::mul_decomposed_same_scalar_affine_normalized(&points, &k0);
+                let normalized = Table::mul_decomposed_same_scalar_affine_normalized(&points, &k0);
                 assert_eq!(routed, normalized, "same-scalar layer routes must agree");
                 for (p, out) in points.iter().zip(&routed) {
                     assert_eq!(
@@ -4767,8 +4789,7 @@ mod tests {
                     );
                 }
 
-                let pair_scalars: Vec<&Decomposed<C>> =
-                    scalar_pool.iter().take(size).collect();
+                let pair_scalars: Vec<&Decomposed<C>> = scalar_pool.iter().take(size).collect();
                 let routed = Table::mul_decomposed_pairs_affine(&points, &pair_scalars);
                 let normalized =
                     Table::mul_decomposed_pairs_affine_normalized(&points, &pair_scalars);
@@ -4870,7 +4891,10 @@ mod tests {
             // on the same-shape safe one.
             let mut sidecar = points.clone();
             if try_batch_mul_same_scalar_effective(&d, &mut sidecar) {
-                assert!(d.affine_ladder_safe, "sidecar must decline unsafe schedules");
+                assert!(
+                    d.affine_ladder_safe,
+                    "sidecar must decline unsafe schedules"
+                );
                 for (p, out) in points.iter().zip(&sidecar) {
                     assert_eq!(*out, *p * value, "sidecar must stay exact");
                 }
