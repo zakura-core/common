@@ -443,8 +443,8 @@ impl Fp {
     }
 
     /// Squares `self` `n` times (`n` must be at least 1), then multiplies the
-    /// result by `by`. The AArch64 assembly backend keeps the accumulator in
-    /// registers for the whole chain.
+    /// result by `by`. Assembly backends leave the accumulator lazily reduced
+    /// until the closing multiplication.
     #[inline]
     fn sqr_n_mul_runtime(&self, n: u32, by: &Self) -> Self {
         assert!(n >= 1);
@@ -460,10 +460,24 @@ impl Fp {
             ))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple"
+        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+        {
+            if n >= super::x86_64_asm::LAZY_SQUARE_THRESHOLD {
+                Fp(super::x86_64_asm::sqr_n_mul(
+                    &self.0, n, &by.0, &MODULUS.0, INV,
+                ))
+            } else {
+                Fp(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul_runtime(by)
+            }
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ),
+            all(feature = "x86_64-asm", target_arch = "x86_64")
         )))]
         {
             // Leave the accumulator unreduced between squarings. The closing
@@ -489,10 +503,23 @@ impl Fp {
             (0..n).fold(*self, |acc, _| acc.square_runtime())
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple"
+        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+        {
+            let lazy = if n >= super::x86_64_asm::LAZY_SQUARE_THRESHOLD {
+                super::x86_64_asm::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)
+            } else {
+                portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)
+            };
+            Fp(portable::canonicalize(&lazy, &MODULUS.0))
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple"
+            ),
+            all(feature = "x86_64-asm", target_arch = "x86_64")
         )))]
         {
             Fp(portable::canonicalize(
@@ -1702,7 +1729,7 @@ fn x86_64_asm_mul_matches_portable() {
     // Random canonical pairs through the inline block against the portable
     // multiplication, and the squaring route against the portable squaring.
     let mut rng = rand_xorshift::XorShiftRng::from_seed([0x2a; 16]);
-    for _ in 0..100_000 {
+    for case in 0..100_000 {
         let a = Fp::from_raw([
             rng.next_u64(),
             rng.next_u64(),
@@ -1719,6 +1746,19 @@ fn x86_64_asm_mul_matches_portable() {
         assert_eq!(asm, Fp::mul(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
         assert!(is_canonical(&asm));
         assert_eq!(a.square_runtime(), Fp::square(&a), "value {:x?}", a.0);
+
+        if case < 256 {
+            for n in [1, 2, 7, 129] {
+                let asm_lazy = super::x86_64_asm::sqr_n_lazy(&a.0, n, &MODULUS.0, INV);
+                let portable_lazy = portable::sqr_n_lazy(&a.0, n, &MODULUS.0, INV);
+                assert_eq!(asm_lazy, portable_lazy, "lazy square, n = {n}");
+                assert_eq!(
+                    a.sqr_n_mul_runtime(n, &b),
+                    Fp(portable::canonicalize(&portable_lazy, &MODULUS.0)).mul(&b),
+                    "lazy square-and-multiply, n = {n}"
+                );
+            }
+        }
     }
 
     // Edge operands: zero, one, the largest canonical value, and dense
@@ -1736,6 +1776,14 @@ fn x86_64_asm_mul_matches_portable() {
         R3,
     ];
     for a in edges {
+        for n in [1, 2, 7, 129, 512] {
+            assert_eq!(
+                super::x86_64_asm::sqr_n_lazy(&a.0, n, &MODULUS.0, INV),
+                portable::sqr_n_lazy(&a.0, n, &MODULUS.0, INV),
+                "edge lazy square, value {:x?}, n = {n}",
+                a.0
+            );
+        }
         for b in edges {
             assert_eq!(
                 a.mul_runtime(&b),
@@ -1744,6 +1792,14 @@ fn x86_64_asm_mul_matches_portable() {
                 a.0,
                 b.0
             );
+            for n in [1, 129] {
+                let eager = (0..n).fold(a, |acc, _| Fp::square(&acc));
+                assert_eq!(
+                    a.sqr_n_mul_runtime(n, &b),
+                    Fp::mul(&eager, &b),
+                    "edge lazy square-and-multiply, n = {n}"
+                );
+            }
         }
         assert_eq!(a.square_runtime(), Fp::square(&a), "value {:x?}", a.0);
     }

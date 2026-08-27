@@ -1,11 +1,27 @@
-#[cfg(feature = "aarch64-asm")]
+#[cfg(any(feature = "aarch64-asm", feature = "x86_64-asm"))]
 use std::env;
 
 fn main() {
     println!("cargo:rerun-if-changed=src/asm/pasta_mul-armv8.S");
+    println!("cargo:rerun-if-changed=src/asm/pasta_lazy_square-x86_64.S");
 
     #[cfg(feature = "aarch64-asm")]
     build_aarch64_asm();
+
+    #[cfg(feature = "x86_64-asm")]
+    build_x86_64_asm();
+}
+
+#[cfg(feature = "x86_64-asm")]
+fn build_x86_64_asm() {
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let target_family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap();
+
+    if target_arch == "x86_64" && target_family == "unix" {
+        cc::Build::new()
+            .file("src/asm/pasta_lazy_square-x86_64.S")
+            .compile("pasta_curves_x86_64_lazy_square");
+    }
 }
 
 #[cfg(feature = "aarch64-asm")]

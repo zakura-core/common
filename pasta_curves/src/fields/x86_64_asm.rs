@@ -1,8 +1,11 @@
 //! Private x86-64 backend for the Pasta fields.
 //!
-//! Montgomery multiplication and squaring are implemented as inline `asm!`
-//! blocks using MULX (BMI2) with ADCX/ADOX dual carry chains (ADX) in the
-//! multiplication rows. Two negative scheduling results are pinned here so
+//! Montgomery multiplication and single squaring are implemented as inline
+//! `asm!` blocks using MULX (BMI2) with ADCX/ADOX dual carry chains (ADX) in
+//! the multiplication rows. Repeated lazy squaring uses the interleaved #218
+//! schedule in `pasta_lazy_square-x86_64.S`; it retains the accumulator across
+//! iterations and fuses the optional closing multiplication. Two negative
+//! scheduling results are pinned here so
 //! they are not retried on this microarchitecture family: routing squaring
 //! through the multiplication measured 2–5% *slower* (run-dependent) than
 //! the dedicated squaring below (21.0 vs 20.0–20.7 ns on Skylake-X —
@@ -38,15 +41,19 @@
 //! looks canonical. Both routines debug-assert that precondition, and with
 //! both operands canonical they are always safe. `lhs` in `mul` may be an
 //! unreduced 256-bit value only if every `rhs` limb is at most `2^64 - 4`
-//! (the accumulator no-wrap bound) — a condition that is *not* asserted:
-//! no current caller passes an unreduced `lhs` (`from_u512`, the one place
-//! that produces one, uses the portable path), and the
+//! (the accumulator no-wrap bound) — a condition that is *not* asserted.
+//! The lazy squaring chain is the one narrower exception: its `lhs` stays
+//! below `2p < 2^255`, so its top bit is clear and the same five-limb
+//! accumulator cannot wrap even for an arbitrary canonical `rhs`.
+//! `from_u512`, the other place that produces an unreduced value, continues
+//! to use the portable path. The
 //! `x86_64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable` tests
 //! in `fp.rs`/`fq.rs` pin the allowance. Outputs are canonical.
 //!
-//! The block is straight-line: no branches, no data-dependent memory
-//! addresses, and a CMOV-based final conditional subtraction, so the code is
-//! constant-time.
+//! The direct-operation blocks are straight-line. The lazy chain branches only
+//! on its public iteration count and whether a public closing multiplier was
+//! supplied. There are no data-dependent branches or memory addresses, and
+//! final conditional subtraction uses CMOV, so the code is constant-time.
 //!
 //! ISA requirement: MULX needs BMI2 and ADCX/ADOX need ADX (Intel Broadwell
 //! / AMD Zen or newer). The feature is opt-in precisely because this is not
@@ -56,6 +63,10 @@
 use core::arch::asm;
 
 type Limbs = [u64; 4];
+
+/// The fused assembly path wins even for the shortest measured chains, so all
+/// nonempty chains use it.
+pub(super) const LAZY_SQUARE_THRESHOLD: u32 = 1;
 
 /// Whether `value < modulus` as little-endian 256-bit integers.
 #[inline(always)]
@@ -67,7 +78,6 @@ fn is_canonical(value: &Limbs, modulus: &Limbs) -> bool {
     }
     false
 }
-
 /// Multiplies two Montgomery residues for a Pasta modulus. `rhs` must be
 /// canonical (debug-asserted; a violation yields an incorrect residue, see
 /// the module docs). `lhs` may be unreduced only if every `rhs` limb is at
@@ -480,4 +490,94 @@ pub(super) fn square(value: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
         );
     }
     [o0, o1, o2, o3]
+}
+
+#[cfg(target_family = "unix")]
+extern "C" {
+    fn pasta_x86_64_sqr_n(
+        out: *mut u64,
+        value: *const u64,
+        n: u32,
+        by: *const u64,
+        modulus: *const u64,
+        inv: u64,
+    );
+}
+
+/// Runs the interleaved lazy-squaring schedule in one assembly leaf function.
+/// A null `by` returns the lazy accumulator; otherwise the same assembly block
+/// performs the closing multiplication and its single conditional correction.
+#[cfg(target_family = "unix")]
+#[inline(always)]
+fn run_lazy_square_chain(
+    value: &Limbs,
+    n: u32,
+    by: *const u64,
+    modulus: &Limbs,
+    inv: u64,
+) -> Limbs {
+    let mut out = [0; 4];
+    // SAFETY: the assembly reads four limbs from `value`, `modulus`, and from
+    // `by` when it is non-null, then initializes all four limbs of `out`.
+    // Its stack-relative accesses stay within the SysV red zone; the build
+    // script only links it on Unix x86-64 targets where that ABI applies.
+    unsafe {
+        pasta_x86_64_sqr_n(
+            out.as_mut_ptr(),
+            value.as_ptr(),
+            n,
+            by,
+            modulus.as_ptr(),
+            inv,
+        );
+    }
+    out
+}
+
+/// Squares a canonical starting value `n` times with #218's interleaved lazy
+/// schedule, keeping its four-limb accumulator live across loop iterations.
+#[inline(always)]
+pub(super) fn sqr_n_lazy(value: &Limbs, n: u32, modulus: &Limbs, inv: u64) -> Limbs {
+    debug_assert!(n >= 1);
+    debug_assert!(
+        is_canonical(value, modulus),
+        "x86_64_asm::sqr_n_lazy requires a canonical starting value"
+    );
+
+    #[cfg(target_family = "unix")]
+    {
+        run_lazy_square_chain(value, n, core::ptr::null(), modulus, inv)
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        super::portable::sqr_n_lazy(value, n, modulus, inv)
+    }
+}
+
+/// Runs the fused x86 assembly lazy-squaring chain, then performs the closing
+/// multiplication and the chain's only conditional correction in that same
+/// assembly leaf function.
+#[inline(always)]
+pub(super) fn sqr_n_mul(value: &Limbs, n: u32, by: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
+    debug_assert!(n >= 1);
+    debug_assert!(
+        is_canonical(value, modulus),
+        "x86_64_asm::sqr_n_mul requires a canonical starting value"
+    );
+    debug_assert!(
+        is_canonical(by, modulus),
+        "x86_64_asm::sqr_n_mul requires a canonical multiplier"
+    );
+
+    #[cfg(target_family = "unix")]
+    {
+        run_lazy_square_chain(value, n, by.as_ptr(), modulus, inv)
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        let acc = super::portable::sqr_n_lazy(value, n, modulus, inv);
+        mul(&acc, by, modulus, inv)
+    }
 }
