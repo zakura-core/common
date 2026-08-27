@@ -42,16 +42,23 @@ only.
 ## Phase plan
 
 - **Commit 1** — Sage derivation (`sage/effective_affine_chain.sage`) +
-  Rust constants test. No behavior change. [DONE — script written,
-  Sage run pending uv install; math verified by independent Python
-  harness: 54 valid chains, 4 minimal at 4 rotations, pinned chain is
-  the lexicographically least minimal one.]
+  Rust constants test. No behavior change. [DONE d1bacf4 — Sage run
+  (passagemath via uv) prints the Rust constants verbatim and all
+  assertions pass; the `effective_chain_derivation` test re-derives the
+  chain exhaustively in Rust.]
 - **Commit 2** — raw effective arithmetic: `RawJacobian`,
   `EffectiveAffine`, incomplete mixed add with ratio, unit application,
   backward global-Z pass, sealed `projective_unchecked`. Differential
-  tests. No routing.
+  tests. No routing. [DONE 4f36193 — tests pass in release and debug
+  (debug exercises the on-curve and ratio-consistency asserts).]
 - **Commit 3** — `EffectiveTable` builder (+ batch) with entry tests and
-  forced build benchmarks.
+  forced build benchmarks. [IN PROGRESS — builder + generic
+  `batch_affine_ladder_raw` kernel (shared by `Table` and
+  `EffectiveTable` through the private `WindowCoords` trait) +
+  `bench_internals` hooks landed; all 237 tests pass under
+  --all-features; the refactored kernel measured −1..−3% (parity or
+  better) vs baseline on `batch hook/256|4096`, both curves. Forced
+  build/build+mul/reuse benches running.]
 - **Commit 4** — same-scalar sidecar: `try_batch_mul_same_scalar_effective`
   gated exactly by the existing batch-affine conditions; forced-backend
   benches.
@@ -128,6 +135,31 @@ Raw log: scratchpad `baseline-main-72f2190.txt` (Criterion medians).
 (Each `same-scalar batch` iteration runs the whole 8-scalar corpus, so
 per-point per-scalar cost at 4096 is ≈ 19.0 µs; the native loop at the
 same size is ≈ 72 µs.)
+
+### Commit 3 — forced same-build comparison (M4 Max, asm, serial)
+
+Raw log: scratchpad `commit3-forced-tables.txt`. Medians, Pallas
+(Vesta within ~1%):
+
+| size | build norm | build eff | Δ build | build+mul norm | build+mul eff | Δ |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 3.269 µs | 2.197 µs | −32.8% | — | — | — |
+| 32 | 80.61 µs | 69.62 µs | −13.6% | 735.6 µs | 721.3 µs | −1.9% |
+| 256 | 643.3 µs | 559.5 µs | −13.0% | 5.002 ms | 4.909 ms | −1.9% |
+| 1024 | — | — | — | 19.61 ms | 19.30 ms | −1.6% |
+| 4096 | 10.289 ms | 9.002 ms | −12.5% | 78.46 ms | 77.15 ms | −1.7% |
+
+Reuse (prebuilt 256 tables × 16 scalars, ladder only): parity
+(Pallas +0.1%, Vesta +0.5% — the effective representation does not slow
+the ladder; reuse gate holds).
+
+Reading: the effective builder is a reproducible ~13% cheaper than the
+shared-normalization builder at scale (and 33% solo), but a table build
+is only ~13% of build-plus-one-use, so the end-to-end same-scalar win
+is ~1.6–2.0%. Consistent across both curves and all sizes; noise on
+these rows is ~±0.3%. The refactored generic ladder kernel itself
+measured −1..−3% vs baseline on the production `batch hook` rows
+(parity or slightly better), so none of the above is kernel drift.
 
 ## Verdict
 
