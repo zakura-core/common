@@ -20,6 +20,13 @@ use crate::multicore;
 
 const EVALUATOR_CHUNKS_PER_THREAD: usize = 8;
 
+// Repeated linear terms save an evaluation-domain walk, but every additional
+// physical cache slot retains one field element per polynomial row. Bound both
+// the number of logical entries and the payload of physical slots that cannot
+// reuse gaps in the existing cache lifetimes.
+const MAX_LINEAR_TERM_CACHE_ENTRIES: usize = 16;
+const MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Returns `(chunk_size, num_chunks)` suitable for processing the given
 /// polynomial length in the current parallelization environment.
 fn get_chunk_params(poly_len: usize) -> (usize, usize) {
@@ -38,6 +45,31 @@ fn get_chunk_params(poly_len: usize) -> (usize, usize) {
     let num_chunks = (poly_len + chunk_size - 1) / chunk_size;
 
     (chunk_size, num_chunks)
+}
+
+#[derive(Clone, Copy, Default)]
+struct LinearTermCacheBudget {
+    max_entries: usize,
+    max_additional_slots: usize,
+}
+
+fn linear_term_cache_budget<F: Field, B: BasisOps>(poly_len: usize) -> LinearTermCacheBudget {
+    if !B::CACHE_REPEATED_LINEAR_TERMS {
+        return LinearTermCacheBudget::default();
+    }
+
+    let max_additional_slots = poly_len
+        .checked_mul(std::mem::size_of::<F>())
+        .filter(|bytes_per_slot| *bytes_per_slot != 0)
+        .map(|bytes_per_slot| {
+            (MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES / bytes_per_slot)
+                .min(MAX_LINEAR_TERM_CACHE_ENTRIES)
+        })
+        .unwrap_or(0);
+    LinearTermCacheBudget {
+        max_entries: MAX_LINEAR_TERM_CACHE_ENTRIES,
+        max_additional_slots,
+    }
 }
 
 /// A reference to a polynomial registered with an [`Evaluator`].
@@ -1117,9 +1149,10 @@ struct CacheAction {
     end: usize,
 }
 
-// Reuses physical cache buffers whose traversal-order lifetimes do not
-// overlap. Cache stores and loads remain unchanged.
-fn reuse_cache_slots(actions: &mut [Option<CacheAction>], cache_slots: usize) -> usize {
+fn cache_slot_intervals(
+    actions: &[Option<CacheAction>],
+    cache_slots: usize,
+) -> Vec<(usize, usize)> {
     let mut intervals = vec![(usize::MAX, 0); cache_slots];
     for (occurrence, action) in actions.iter().enumerate() {
         if let Some(action) = action {
@@ -1130,7 +1163,14 @@ fn reuse_cache_slots(actions: &mut [Option<CacheAction>], cache_slots: usize) ->
             interval.1 = occurrence;
         }
     }
+    debug_assert!(intervals.iter().all(|(start, _)| *start != usize::MAX));
+    intervals
+}
 
+// Reuses physical cache buffers whose traversal-order lifetimes do not
+// overlap. Cache stores and loads remain unchanged.
+fn reuse_cache_slots(actions: &mut [Option<CacheAction>], cache_slots: usize) -> usize {
+    let intervals = cache_slot_intervals(actions, cache_slots);
     let mut order = (0..cache_slots).collect::<Vec<_>>();
     order.sort_unstable_by_key(|slot| intervals[*slot].0);
     let mut remap = vec![0; cache_slots];
@@ -1163,6 +1203,61 @@ fn reuse_cache_slots(actions: &mut [Option<CacheAction>], cache_slots: usize) ->
     next_slot
 }
 
+struct LinearTermCacheOccupancy {
+    active_slots: Vec<usize>,
+    max_allowed_slots: usize,
+    remaining_entries: usize,
+}
+
+impl LinearTermCacheOccupancy {
+    fn new(
+        actions: &[Option<CacheAction>],
+        cache_slots: usize,
+        budget: LinearTermCacheBudget,
+    ) -> Self {
+        let mut starts = vec![0usize; actions.len()];
+        let mut ends = vec![0usize; actions.len() + 1];
+        for (start, end) in cache_slot_intervals(actions, cache_slots) {
+            starts[start] += 1;
+            ends[end + 1] += 1;
+        }
+
+        let mut active = 0usize;
+        let active_slots = starts
+            .into_iter()
+            .zip(ends)
+            .map(|(starting, ending)| {
+                active -= ending;
+                active += starting;
+                active
+            })
+            .collect::<Vec<_>>();
+        let baseline_max = active_slots.iter().copied().max().unwrap_or(0);
+
+        Self {
+            active_slots,
+            max_allowed_slots: baseline_max.saturating_add(budget.max_additional_slots),
+            remaining_entries: budget.max_entries,
+        }
+    }
+
+    fn try_reserve(&mut self, start: usize, end: usize) -> bool {
+        if self.remaining_entries == 0
+            || self.active_slots[start..=end]
+                .iter()
+                .any(|active| *active >= self.max_allowed_slots)
+        {
+            return false;
+        }
+
+        for active in &mut self.active_slots[start..=end] {
+            *active += 1;
+        }
+        self.remaining_entries -= 1;
+        true
+    }
+}
+
 struct RepeatShape {
     saved_multiplications: usize,
     saved_visits: usize,
@@ -1171,7 +1266,7 @@ struct RepeatShape {
 }
 
 impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
-    fn cache_common_subexpressions(&mut self) -> usize {
+    fn cache_common_subexpressions(&mut self, linear_term_budget: LinearTermCacheBudget) -> usize {
         let (actions, cache_slots) = {
             let mut occurrences = vec![];
             let mut scalars = vec![];
@@ -1225,6 +1320,7 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
             let mut actions = vec![None; occurrences.len()];
             let mut covered = vec![false; occurrences.len()];
             let mut cache_slots = 0;
+            let mut linear_term_occupancy = None;
             for shape in shapes {
                 let matching = shape
                     .occurrences
@@ -1240,8 +1336,22 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
                 }
 
                 let cost = plan_cost(occurrences[matching[0]].plan, two);
-                if (matching.len() - 1) * cost.0 < MIN_CSE_SAVED_MULTIPLICATIONS {
+                let is_linear_term =
+                    matches!(occurrences[matching[0]].plan, EvaluationPlan::LinearTerm(_));
+                if is_linear_term {
+                    // Cacheable arithmetic shapes have positive multiplication
+                    // cost and sort before linear terms, so this occupancy
+                    // includes every existing CSE lifetime.
+                    let occupancy = linear_term_occupancy.get_or_insert_with(|| {
+                        LinearTermCacheOccupancy::new(&actions, cache_slots, linear_term_budget)
+                    });
+                    if !occupancy.try_reserve(matching[0], *matching.last().unwrap()) {
+                        continue;
+                    }
+                } else if (matching.len() - 1) * cost.0 < MIN_CSE_SAVED_MULTIPLICATIONS {
                     continue;
+                } else {
+                    debug_assert!(linear_term_occupancy.is_none());
                 }
 
                 let slot = cache_slots;
@@ -2078,7 +2188,8 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             .replace_compressed_selectors(ast)
             .unwrap_or_else(|| ast.clone());
         let mut plan = EvaluationPlan::compile(&ast);
-        let cache_slots = plan.cache_common_subexpressions();
+        let cache_slots =
+            plan.cache_common_subexpressions(linear_term_cache_budget::<F, B>(poly_len));
         let mut result = B::empty_poly(domain);
         let scratch_slots = plan.required_scratch_slots();
         multicore::scope(|scope| {
@@ -2316,6 +2427,10 @@ impl<E: Clone, F: Field> MulAssign for Ast<E, F, ExtendedLagrangeCoeff> {
 
 /// Operations which can be performed over a given basis.
 pub(crate) trait BasisOps: Basis {
+    /// Whether repeated dense evaluations of [`Ast::LinearTerm`] are worth
+    /// retaining in the evaluator's bounded cache.
+    const CACHE_REPEATED_LINEAR_TERMS: bool;
+
     fn empty_poly<F: WithSmallOrderMulGroup<3>>(
         domain: &EvaluationDomain<F>,
     ) -> Polynomial<F, Self>;
@@ -2402,6 +2517,8 @@ impl<'a, F: Copy> RotatedChunk<'a, F> {
 }
 
 impl BasisOps for Coeff {
+    const CACHE_REPEATED_LINEAR_TERMS: bool = false;
+
     fn empty_poly<F: WithSmallOrderMulGroup<3>>(
         domain: &EvaluationDomain<F>,
     ) -> Polynomial<F, Self> {
@@ -2451,6 +2568,8 @@ impl BasisOps for Coeff {
 }
 
 impl BasisOps for LagrangeCoeff {
+    const CACHE_REPEATED_LINEAR_TERMS: bool = true;
+
     fn empty_poly<F: WithSmallOrderMulGroup<3>>(
         domain: &EvaluationDomain<F>,
     ) -> Polynomial<F, Self> {
@@ -2499,6 +2618,8 @@ impl BasisOps for LagrangeCoeff {
 }
 
 impl BasisOps for ExtendedLagrangeCoeff {
+    const CACHE_REPEATED_LINEAR_TERMS: bool = true;
+
     fn empty_poly<F: WithSmallOrderMulGroup<3>>(
         domain: &EvaluationDomain<F>,
     ) -> Polynomial<F, Self> {
@@ -2562,7 +2683,9 @@ mod tests {
 
     use super::{
         Ast, AstLeaf, AstMul, BasisOps, CacheAction, DistributionWork, EvaluationPlan, Evaluator,
-        FactorBodyPlan, FactorSide, compressed_selector, get_chunk_params, new_evaluator,
+        FactorBodyPlan, FactorSide, LinearTermCacheBudget, LinearTermCacheOccupancy,
+        MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_LINEAR_TERM_CACHE_ENTRIES,
+        compressed_selector, get_chunk_params, linear_term_cache_budget, new_evaluator,
         reuse_cache_slots, selector_family_matches,
     };
     use crate::poly::{Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Rotation};
@@ -3295,18 +3418,28 @@ mod tests {
         let ast = Ast::distribute_powers(terms.clone(), base);
 
         let mut plan = EvaluationPlan::compile(&ast);
-        assert_eq!(plan.cache_common_subexpressions(), 1);
+        assert_eq!(
+            plan.cache_common_subexpressions(LinearTermCacheBudget::default()),
+            1
+        );
 
         let mut single_saved_multiplication =
             EvaluationPlan::compile(&Ast::distribute_powers(terms.into_iter().take(2), base));
-        assert_eq!(single_saved_multiplication.cache_common_subexpressions(), 1);
+        assert_eq!(
+            single_saved_multiplication
+                .cache_common_subexpressions(LinearTermCacheBudget::default()),
+            1
+        );
 
         let repeated_copy = Ast::from(leaves[0]);
         let mut copy_only = EvaluationPlan::compile(&Ast::distribute_powers(
             [repeated_copy.clone(), repeated_copy],
             base,
         ));
-        assert_eq!(copy_only.cache_common_subexpressions(), 0);
+        assert_eq!(
+            copy_only.cache_common_subexpressions(LinearTermCacheBudget::default()),
+            0
+        );
 
         let actual = evaluator.evaluate(&ast, &domain);
         for row in 0..actual.len() {
@@ -3322,6 +3455,143 @@ mod tests {
     fn common_subexpressions_are_cached() {
         check_common_subexpressions_are_cached::<pallas::Base>();
         check_common_subexpressions_are_cached::<vesta::Base>();
+    }
+
+    #[test]
+    fn repeated_linear_terms_respect_cache_limits() {
+        fn repeated_terms() -> Ast<fn(), pallas::Base, ExtendedLagrangeCoeff> {
+            let scalars = [2, 3, 5].map(pallas::Base::from);
+            Ast::distribute_powers(
+                scalars.into_iter().chain(scalars).map(Ast::LinearTerm),
+                pallas::Base::from(7),
+            )
+        }
+
+        for (limit, expected_slots) in [(0, 0), (1, 1), (2, 2), (3, 3), (8, 3)] {
+            let mut plan = EvaluationPlan::compile(&repeated_terms());
+            assert_eq!(
+                plan.cache_common_subexpressions(LinearTermCacheBudget {
+                    max_entries: limit,
+                    max_additional_slots: limit,
+                }),
+                expected_slots
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_linear_terms_prefer_more_reuse() {
+        let less_reused = pallas::Base::from(2);
+        let more_reused = pallas::Base::from(3);
+        let ast: Ast<fn(), _, ExtendedLagrangeCoeff> = Ast::distribute_powers(
+            [
+                less_reused,
+                more_reused,
+                more_reused,
+                less_reused,
+                more_reused,
+            ]
+            .map(Ast::LinearTerm),
+            pallas::Base::from(5),
+        );
+        let mut plan = EvaluationPlan::compile(&ast);
+        assert_eq!(
+            plan.cache_common_subexpressions(LinearTermCacheBudget {
+                max_entries: 1,
+                max_additional_slots: 1,
+            }),
+            1
+        );
+
+        let stored_scalar = match plan {
+            EvaluationPlan::DistributePowers { work, .. } => work.into_iter().find_map(|work| {
+                if let DistributionWork::Term {
+                    term: EvaluationPlan::CacheStore { inner, .. },
+                    ..
+                } = work
+                {
+                    if let EvaluationPlan::LinearTerm(scalar) = *inner {
+                        return Some(scalar);
+                    }
+                }
+                None
+            }),
+            _ => None,
+        };
+        assert_eq!(stored_scalar, Some(more_reused));
+    }
+
+    fn check_repeated_linear_term_evaluation<F, B>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+        B: BasisOps,
+    {
+        fn context() {}
+
+        let domain = EvaluationDomain::new(3, 4);
+        let mut evaluator = new_evaluator::<fn(), F, B>(context);
+        evaluator.register_poly(B::empty_poly(&domain));
+
+        let second = F::from(3);
+        let base = F::from(5);
+        for first in [F::ZERO, F::from(2)] {
+            let scalars = [first, second, first, second];
+            let ast = Ast::distribute_powers(scalars.map(Ast::LinearTerm), base);
+            let actual = evaluator.evaluate(&ast, &domain);
+            let direct =
+                [first, second].map(|scalar| evaluator.evaluate(&Ast::LinearTerm(scalar), &domain));
+
+            for (row, actual) in actual.iter().enumerate() {
+                let expected = scalars.iter().fold(F::ZERO, |accumulator, scalar| {
+                    let direct = if *scalar == first {
+                        direct[0][row]
+                    } else {
+                        direct[1][row]
+                    };
+                    accumulator * base + direct
+                });
+                assert_eq!(*actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_linear_term_evaluation_matches_direct_values() {
+        check_repeated_linear_term_evaluation::<pallas::Base, LagrangeCoeff>();
+        check_repeated_linear_term_evaluation::<pallas::Base, ExtendedLagrangeCoeff>();
+        check_repeated_linear_term_evaluation::<vesta::Base, LagrangeCoeff>();
+        check_repeated_linear_term_evaluation::<vesta::Base, ExtendedLagrangeCoeff>();
+    }
+
+    #[test]
+    fn linear_term_cache_budget_is_bounded_to_evaluation_bases() {
+        // Orchard's k = 11 quotient evaluation uses a 2^14-row extended
+        // domain, so each Pasta-field slot retains 512 KiB.
+        let poly_len = 1 << 14;
+        let bytes_per_slot = poly_len * std::mem::size_of::<pallas::Base>();
+        let expected_additional_slots = (MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES / bytes_per_slot)
+            .min(MAX_LINEAR_TERM_CACHE_ENTRIES);
+        assert_eq!(expected_additional_slots, 8);
+
+        assert_eq!(
+            linear_term_cache_budget::<pallas::Base, Coeff>(poly_len).max_entries,
+            0,
+        );
+        for budget in [
+            linear_term_cache_budget::<pallas::Base, LagrangeCoeff>(poly_len),
+            linear_term_cache_budget::<pallas::Base, ExtendedLagrangeCoeff>(poly_len),
+        ] {
+            assert_eq!(budget.max_entries, MAX_LINEAR_TERM_CACHE_ENTRIES);
+            assert_eq!(budget.max_additional_slots, expected_additional_slots);
+            assert!(
+                budget.max_additional_slots * bytes_per_slot
+                    <= MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES
+            );
+        }
+
+        let overflow = linear_term_cache_budget::<pallas::Base, ExtendedLagrangeCoeff>(usize::MAX);
+        assert_eq!(overflow.max_entries, MAX_LINEAR_TERM_CACHE_ENTRIES);
+        assert_eq!(overflow.max_additional_slots, 0);
     }
 
     #[test]
@@ -3363,6 +3633,55 @@ mod tests {
         assert_eq!(actions[3].unwrap().slot, actions[4].unwrap().slot);
         assert_eq!(actions[0].unwrap().slot, actions[3].unwrap().slot);
         assert_ne!(actions[0].unwrap().slot, actions[1].unwrap().slot);
+    }
+
+    #[test]
+    fn linear_term_cache_reuses_free_lifetime_gaps() {
+        let mut actions = vec![None; 8];
+        actions[0] = Some(CacheAction {
+            slot: 0,
+            store: true,
+            end: 1,
+        });
+        actions[7] = Some(CacheAction {
+            slot: 0,
+            store: false,
+            end: 8,
+        });
+        actions[2] = Some(CacheAction {
+            slot: 1,
+            store: true,
+            end: 3,
+        });
+        actions[3] = Some(CacheAction {
+            slot: 1,
+            store: false,
+            end: 4,
+        });
+
+        let mut occupancy = LinearTermCacheOccupancy::new(
+            &actions,
+            2,
+            LinearTermCacheBudget {
+                max_entries: 2,
+                max_additional_slots: 0,
+            },
+        );
+        assert!(occupancy.try_reserve(4, 5));
+        assert!(!occupancy.try_reserve(5, 6));
+    }
+
+    #[test]
+    fn linear_term_cache_prunes_physical_slots_beyond_byte_budget() {
+        let bytes_per_slot = MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES / 2;
+        let poly_len = bytes_per_slot / std::mem::size_of::<pallas::Base>();
+        let budget = linear_term_cache_budget::<pallas::Base, ExtendedLagrangeCoeff>(poly_len);
+        assert_eq!(budget.max_additional_slots, 2);
+
+        let mut occupancy = LinearTermCacheOccupancy::new(&[None; 5], 0, budget);
+        assert!(occupancy.try_reserve(0, 4));
+        assert!(occupancy.try_reserve(1, 3));
+        assert!(!occupancy.try_reserve(2, 2));
     }
 
     #[test]
