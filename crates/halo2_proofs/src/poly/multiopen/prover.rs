@@ -7,7 +7,7 @@ use super::{
     construct_intermediate_sets,
 };
 
-use crate::arithmetic::{CurveAffine, eval_polynomial, kate_division};
+use crate::arithmetic::{CurveAffine, eval_polynomial};
 use crate::multicore;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
@@ -248,6 +248,17 @@ fn collapse_polynomials<F: Field>(
     }
 }
 
+fn kate_division_in_place<F: Field>(polynomial: &mut Vec<F>, point: F) {
+    let mut quotient = polynomial
+        .pop()
+        .expect("a polynomial divided by a linear factor is nonempty");
+    for coefficient in polynomial.iter_mut().rev() {
+        let remainder = *coefficient + quotient * point;
+        *coefficient = quotient;
+        quotient = remainder;
+    }
+}
+
 /// Create a multi-opening proof.
 ///
 /// # Errors
@@ -296,8 +307,9 @@ where
         .iter()
         .zip(q_polys.iter())
         .fold(None, |q_prime_poly, (points, poly)| {
-            let mut poly = points.iter().fold(poly.clone().values, |poly, point| {
-                kate_division(&poly, *point)
+            let mut poly = points.iter().fold(poly.clone().values, |mut poly, point| {
+                kate_division_in_place(&mut poly, *point);
+                poly
             });
             poly.resize(params.n as usize, C::Scalar::ZERO);
             let poly = Polynomial {
@@ -380,7 +392,11 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Coeff, MIN_PARALLEL_FOLDS_PER_THREAD, Polynomial, collapse_polynomials};
+    use super::{
+        Coeff, MIN_PARALLEL_FOLDS_PER_THREAD, Polynomial, collapse_polynomials,
+        kate_division_in_place,
+    };
+    use crate::arithmetic::kate_division;
     use ff::Field;
     use pasta_curves::{Fp, Fq};
     use std::fmt::Debug;
@@ -461,6 +477,28 @@ mod tests {
         }
     }
 
+    fn in_place_kate_division_matches_allocating<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        for (coefficients, points) in [
+            (vec![F::from(9)], vec![F::ZERO]),
+            (
+                (0..8).map(|value| F::from(value + 1)).collect(),
+                vec![F::ZERO, F::ONE, -F::ONE, F::from(7)],
+            ),
+        ] {
+            let expected = points.iter().fold(coefficients.clone(), |poly, point| {
+                kate_division(&poly, *point)
+            });
+            let actual = points.iter().fold(coefficients, |mut poly, point| {
+                kate_division_in_place(&mut poly, *point);
+                poly
+            });
+            assert_eq!(expected, actual);
+        }
+    }
+
     #[test]
     fn streaming_collapse_matches_operator_collapse_fp() {
         streaming_collapse_matches_operator_collapse::<Fp>();
@@ -469,5 +507,15 @@ mod tests {
     #[test]
     fn streaming_collapse_matches_operator_collapse_fq() {
         streaming_collapse_matches_operator_collapse::<Fq>();
+    }
+
+    #[test]
+    fn in_place_kate_division_matches_allocating_fp() {
+        in_place_kate_division_matches_allocating::<Fp>();
+    }
+
+    #[test]
+    fn in_place_kate_division_matches_allocating_fq() {
+        in_place_kate_division_matches_allocating::<Fq>();
     }
 }
