@@ -313,6 +313,28 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         extract(self.hash_words_to_point(words))
     }
 
+    /// Evaluates a pre-decoded first word followed by a bit-encoded suffix.
+    ///
+    /// `first_word` is used directly as the message's first complete [`K`]-bit
+    /// Sinsemilla word. `remaining_bits` are then decoded into zero-padded
+    /// [`K`]-bit words. This avoids making callers encode an already-decoded
+    /// prefix back into bits when the rest of their message is naturally
+    /// represented as a bit iterator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `first_word` is not a valid [`K`]-bit Sinsemilla word, or if
+    /// the complete message does not contain exactly `N` words after padding.
+    pub fn hash_with_first_word(
+        &self,
+        first_word: u16,
+        remaining_bits: impl Iterator<Item = bool>,
+    ) -> pallas::Base {
+        let remaining_words = MessageWords::new(remaining_bits)
+            .map(|word| u16::try_from(word).expect("a Sinsemilla word fits into u16"));
+        extract(self.evaluate(core::iter::once(first_word).chain(remaining_words)))
+    }
+
     /// Evaluates a batch of `N`-word messages position-first and returns their
     /// extracted Sinsemilla hashes.
     ///
@@ -745,8 +767,26 @@ mod tests {
             assert!(bool::from(expected.is_some()));
             let expected = expected.unwrap();
             assert_eq!(expected, weighted.hash_words(&words));
+            assert_eq!(
+                expected,
+                weighted.hash_with_first_word(words[0], words_to_bits(&words[1..]).into_iter())
+            );
             assert_eq!(expected, weighted.hash(bits.iter().copied()));
         }
+    }
+
+    #[test]
+    fn first_word_hash_zero_pads_the_remaining_bits() {
+        let domain = HashDomain::new(MERKLE_DOMAIN);
+        let weighted = UncheckedFixedLengthHashDomain::<2>::new(&domain);
+        let first_word = 7;
+        let second_word = 5;
+        let remaining_bits = [true, false, true];
+
+        assert_eq!(
+            weighted.hash_with_first_word(first_word, remaining_bits.into_iter()),
+            weighted.hash_words(&[first_word, second_word]),
+        );
     }
 
     #[test]
