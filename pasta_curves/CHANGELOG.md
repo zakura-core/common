@@ -9,6 +9,11 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 - Prepared the `1.0.0-rc.4` release.
+- Small arbitrary-scalar MSMs now use a joint-Eisenstein GLV-Strauss backend:
+  up to 16 terms on one worker, and benchmark-tuned leaves through 66 terms on
+  multicore builds. Parallel calls reserve half the ambient Rayon workers so
+  halo2's concurrent late IPA L/R commitments progress together instead of
+  competing for the whole pool.
 - `PreparedZeroCheck` (and `glv::zero::PreparedZeroMsm`) gained
   `multiexp_with_terms_vartime`: the exact multiscalar multiplication the
   zero-check already evaluates, with the group element returned instead of

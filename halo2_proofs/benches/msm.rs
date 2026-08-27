@@ -10,6 +10,44 @@ use halo2_proofs::*;
 use rand::rng;
 
 fn criterion_benchmark(c: &mut Criterion) {
+    let params = Params::<EqAffine>::new(8);
+    let bases = params.get_g();
+    let mut late_ipa = c.benchmark_group("late IPA MSM");
+    late_ipa.sample_size(30);
+    for terms in [1, 2, 4, 8, 16, 32, 64, 128, 256] {
+        late_ipa.bench_function(BenchmarkId::new("terms", terms), |b| {
+            let coeffs = (0..terms)
+                .map(|_| Fp::random(&mut rng()))
+                .collect::<Vec<_>>();
+
+            b.iter(|| best_multiexp(&coeffs, &bases[..terms]))
+        });
+    }
+    late_ipa.finish();
+
+    let mut late_ipa_round = c.benchmark_group("late IPA round");
+    late_ipa_round.sample_size(30);
+    // An IPA half has power-of-two terms, then the round MSM adds U and W.
+    for terms in [3, 4, 6, 10, 18, 34, 66] {
+        late_ipa_round.bench_function(BenchmarkId::new("terms per side", terms), |b| {
+            let left_coeffs = (0..terms)
+                .map(|_| Fp::random(&mut rng()))
+                .collect::<Vec<_>>();
+            let right_coeffs = (0..terms)
+                .map(|_| Fp::random(&mut rng()))
+                .collect::<Vec<_>>();
+            let (left_bases, right_bases) = bases[..terms * 2].split_at(terms);
+
+            b.iter(|| {
+                maybe_rayon::join(
+                    || best_multiexp(&left_coeffs, left_bases),
+                    || best_multiexp(&right_coeffs, right_bases),
+                )
+            })
+        });
+    }
+    late_ipa_round.finish();
+
     let mut group = c.benchmark_group("msm");
     for k in 8..16 {
         group

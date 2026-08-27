@@ -9,6 +9,10 @@ and this project adheres to Rust's notion of
 ## [Unreleased]
 
 - Prepared the `1.0.0-rc.4` release.
+- Late IPA L/R commitments now use balanced GLV-Strauss leaves on Pasta
+  curves. With six workers, paired 66-term round MSM latency fell from about
+  906 to 511 microseconds on the x86-64 benchmark host; full IPA opening time
+  fell by 41% at `k = 8` and 15% at `k = 11`.
 - Verifying-key generation now omits zero terms from sufficiently sparse fixed
   polynomial commitments and batch-normalizes fixed and permutation
   commitments.

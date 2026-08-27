@@ -30,20 +30,22 @@
 //! denominator — depend only on the scalar, are checked exactly per batch,
 //! and fall back to the per-point ladder.
 //!
-//! The arbitrary-scalar MSM (`try_multiexp`, reached through
-//! `CurveExt::try_multiexp_vartime`) plans between two GLV bucket backends
-//! with `plan_multiexp`: the Signed-Booth backend here, which windows the
-//! two decomposition halves independently, and the Eisenstein-orbit backend
-//! in the `orbit` submodule, which windows the joint value $k_1 + k_2\omega$
-//! over $\mathbf{Z}[\omega]$, quotients every digit by the six units (so a
-//! window stores one bucket per unit *orbit* and visits each scalar once),
-//! and integrates buckets with a hexagonal spanning-tree reducer. Both fill
-//! their buckets through the shared batched-affine tree reduction below
-//! (`reduce_affine_buckets`, one fused inversion-and-completion pass per
-//! tree level). The orbit backend, the planning step, and the prepared
-//! zero-checks built on the same machinery (the `zero` submodule) are
-//! gated behind the `orbits` feature; without it the MSM windows through
-//! the Signed-Booth backend alone.
+//! Small arbitrary-scalar MSMs (`try_multiexp`, reached through
+//! `CurveExt::try_multiexp_vartime`) use a GLV-Strauss ladder over the same
+//! joint digits and [`Table`]s, sharing the ~127 doublings across every term.
+//! Larger MSMs plan between two GLV bucket backends with `plan_multiexp`: the
+//! Signed-Booth backend here, which windows the two decomposition halves
+//! independently, and the Eisenstein-orbit backend in the `orbit` submodule,
+//! which windows the joint value $k_1 + k_2\omega$ over
+//! $\mathbf{Z}[\omega]$, quotients every digit by the six units (so a window
+//! stores one bucket per unit *orbit* and visits each scalar once), and
+//! integrates buckets with a hexagonal spanning-tree reducer. Both fill their
+//! buckets through the shared batched-affine tree reduction below
+//! (`reduce_affine_buckets`, one fused inversion-and-completion pass per tree
+//! level). The orbit backend, the planning step, and the prepared zero-checks
+//! built on the same machinery (the `zero` submodule) are gated behind the
+//! `orbits` feature; without it large MSMs window through the Signed-Booth
+//! backend alone.
 //!
 //! This path is variable-time in the scalar (GLV decomposition plus digit
 //! recoding); the `_glv` naming distinguishes it from the native `Mul`
@@ -553,6 +555,22 @@ fn batch_invert_nonzero<F: Field>(values: &mut [F], scratch: &mut [F]) {
 /// Small MSMs do not amortize GLV decomposition, affine endomorphism mapping,
 /// and the two temporary vectors.
 const MIN_GLV_MULTIEXP_TERMS: usize = 256;
+
+/// Largest serial leaf in the GLV-Strauss backend. The crossover is
+/// benchmark-tuned against halo2's generic Signed-Booth fallback at the
+/// power-of-two sizes reached by the late IPA rounds.
+const STRAUSS_LEAF_TERMS: usize = 16;
+
+/// Smallest MSM worth splitting across an IPA side's worker budget.
+#[cfg(feature = "multicore")]
+const MIN_PARALLEL_STRAUSS_TERMS: usize = 3;
+
+/// Largest parallel MSM split into [`STRAUSS_LEAF_TERMS`]-or-smaller Strauss
+/// leaves. This includes a 64-term late IPA half plus its two auxiliary terms.
+/// Above this, the generic or GLV bucket backends amortize their bucket setup
+/// and use the worker pool more efficiently.
+#[cfg(feature = "multicore")]
+const MAX_PARALLEL_STRAUSS_TERMS: usize = 66;
 
 /// Each GLV decomposition component has magnitude strictly below `2^127`.
 const GLV_COMPONENT_BITS: usize = 127;
@@ -1071,6 +1089,98 @@ fn current_num_threads() -> usize {
     }
 }
 
+/// A small MSM through one shared doubling ladder over jointly recoded GLV
+/// scalars. Each point's eight orbit representatives are batch-normalized with
+/// every other table, then each nonzero digit contributes one mixed addition.
+///
+/// This is Strauss' algorithm with the existing joint width-3 Eisenstein NAF
+/// in place of two independent integer wNAFs. It retains the ~127-column GLV
+/// ladder while averaging fewer additions and one table per input point.
+fn strauss_multiexp<C: GlvParams>(scalars: &[C::ScalarExt], bases: &[C::AffineExt]) -> C {
+    debug_assert_eq!(scalars.len(), bases.len());
+
+    let mut decomposed = Vec::with_capacity(scalars.len());
+    let mut points = Vec::with_capacity(bases.len());
+    for (scalar, base) in scalars.iter().zip(bases) {
+        let scalar = Decomposed::<C>::new(scalar);
+        if scalar.len == 0 || bool::from(base.is_identity()) {
+            continue;
+        }
+        decomposed.push(scalar);
+        points.push(base.to_curve());
+    }
+    if decomposed.is_empty() {
+        return C::identity();
+    }
+
+    let tables = Table::batch(&points);
+    let columns = decomposed
+        .iter()
+        .map(|scalar| scalar.len)
+        .max()
+        .expect("at least one nonzero scalar");
+    let mut acc = C::identity();
+    for column in (0..columns).rev() {
+        if column + 1 < columns {
+            acc = acc.double();
+        }
+        for (scalar, table) in decomposed.iter().zip(&tables) {
+            let code = scalar.digits[column];
+            if code != 0 {
+                acc += table.digit_point(code);
+            }
+        }
+    }
+    acc
+}
+
+#[cfg(feature = "multicore")]
+fn strauss_multiexp_leaves<C: GlvParams>(scalars: &[C::ScalarExt], bases: &[C::AffineExt]) -> C {
+    scalars
+        .chunks(STRAUSS_LEAF_TERMS)
+        .zip(bases.chunks(STRAUSS_LEAF_TERMS))
+        .map(|(scalars, bases)| strauss_multiexp::<C>(scalars, bases))
+        .fold(C::identity(), |left, right| left + right)
+}
+
+fn planned_strauss_multiexp<C: GlvParams>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+    num_threads: usize,
+) -> Option<C> {
+    #[cfg(feature = "multicore")]
+    if (MIN_PARALLEL_STRAUSS_TERMS..=MAX_PARALLEL_STRAUSS_TERMS).contains(&scalars.len())
+        && num_threads > 1
+    {
+        // Late IPA evaluates L and R together. Give this side at most half the
+        // pool, so both commitments make progress at once. Each worker retains
+        // the measured leaf crossover internally rather than building one wide
+        // table for its entire share.
+        let worker_jobs = num_threads.div_ceil(2).min(scalars.len());
+        if worker_jobs == 1 {
+            return Some(strauss_multiexp_leaves::<C>(scalars, bases));
+        }
+        return Some(
+            (0..worker_jobs)
+                .into_par_iter()
+                .map(|job| {
+                    let start = scalars.len() * job / worker_jobs;
+                    let end = scalars.len() * (job + 1) / worker_jobs;
+                    strauss_multiexp_leaves::<C>(&scalars[start..end], &bases[start..end])
+                })
+                .reduce(C::identity, |left, right| left + right),
+        );
+    }
+
+    if scalars.len() <= STRAUSS_LEAF_TERMS {
+        return Some(strauss_multiexp::<C>(scalars, bases));
+    }
+
+    #[cfg(not(feature = "multicore"))]
+    let _ = num_threads;
+    None
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SignedMagnitude {
     negative: bool,
@@ -1579,6 +1689,9 @@ pub(crate) fn try_multiexp<C: GlvParams>(
 ) -> Option<C> {
     assert_eq!(scalars.len(), bases.len());
     let num_threads = current_num_threads();
+    if let Some(result) = planned_strauss_multiexp::<C>(scalars, bases, num_threads) {
+        return Some(result);
+    }
 
     #[cfg(feature = "orbits")]
     {
@@ -3131,9 +3244,75 @@ mod tests {
         );
     }
 
+    fn strauss_multiexp_matches_expected<C: GlvParams>() {
+        const TERM_COUNTS: [usize; 10] = [0, 1, 2, 3, 8, 16, 32, 64, 66, 256];
+
+        for terms in TERM_COUNTS {
+            let (scalars, bases, expected) = verifier_multiexp_inputs::<C>(terms);
+            assert_eq!(
+                strauss_multiexp::<C>(&scalars, &bases),
+                expected,
+                "GLV-Strauss MSM mismatch at {terms} terms",
+            );
+        }
+    }
+
+    #[test]
+    fn strauss_multiexp_matches_expected_pallas() {
+        strauss_multiexp_matches_expected::<pallas::Point>();
+    }
+
+    #[test]
+    fn strauss_multiexp_matches_expected_vesta() {
+        strauss_multiexp_matches_expected::<vesta::Point>();
+    }
+
+    #[cfg(feature = "multicore")]
+    fn planned_strauss_multiexp_matches_expected_at_thread_counts<C: GlvParams>() {
+        const THREAD_COUNTS: [usize; 4] = [2, 3, 6, 8];
+        const TERM_COUNTS: [usize; 9] = [3, 4, 6, 10, 16, 18, 34, 64, 66];
+
+        for num_threads in THREAD_COUNTS {
+            maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .expect("test thread pool must build")
+                .install(|| {
+                    for terms in TERM_COUNTS {
+                        let (scalars, bases, expected) = verifier_multiexp_inputs::<C>(terms);
+                        assert_eq!(
+                            planned_strauss_multiexp::<C>(&scalars, &bases, num_threads),
+                            Some(expected),
+                            "planned GLV-Strauss MSM mismatch at {terms} terms \
+                             with {num_threads} threads",
+                        );
+                    }
+
+                    let (scalars, bases, _) =
+                        verifier_multiexp_inputs::<C>(MAX_PARALLEL_STRAUSS_TERMS + 1);
+                    assert_eq!(
+                        planned_strauss_multiexp::<C>(&scalars, &bases, num_threads),
+                        None,
+                    );
+                });
+        }
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn planned_strauss_multiexp_matches_expected_pallas() {
+        planned_strauss_multiexp_matches_expected_at_thread_counts::<pallas::Point>();
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn planned_strauss_multiexp_matches_expected_vesta() {
+        planned_strauss_multiexp_matches_expected_at_thread_counts::<vesta::Point>();
+    }
+
     #[cfg(feature = "multicore")]
     fn optimized_multiexp_matches_expected_at_thread_counts<C: GlvParams>() {
-        const THREAD_COUNTS: [usize; 5] = [1, 2, 3, 8, 32];
+        const THREAD_COUNTS: [usize; 6] = [1, 2, 3, 6, 8, 32];
 
         for num_threads in THREAD_COUNTS {
             maybe_rayon::ThreadPoolBuilder::new()
