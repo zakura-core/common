@@ -51,6 +51,9 @@ aarch64-asm = ["dep:cc"]
 # or later); enabling it on an older CPU faults at runtime. A no-op on other
 # architectures.
 x86_64-asm = []
+# Benchmark-only eight-way radix-2^52 Montgomery multiplication using
+# AVX-512IFMA. This is intentionally not wired into the field API.
+avx512ifma-experiment = []
 alloc = [
     "group/alloc",
     "blake2b_simd",
@@ -102,6 +105,14 @@ harness = false
 name = "fq"
 path = "benches/fq.rs"
 harness = false
+
+[[bench]]
+name = "avx512ifma"
+path = "benches/avx512ifma.rs"
+harness = false
+required-features = [
+    "avx512ifma-experiment",
+]
 
 [[bench]]
 name = "deferred"

@@ -1,0 +1,127 @@
+name: Temporary AVX-512IFMA experiment
+
+on:
+  push:
+    branches:
+      - avx512ifma-batch-experiment
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-and-benchmark:
+    name: Validate IFMA and compare with PR 222
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Record host features
+        id: host
+        shell: bash
+        run: |
+          set -euo pipefail
+          lscpu
+          flags="$(sed -n 's/^flags[[:space:]]*: //p' /proc/cpuinfo | head -1)"
+          if grep -qw avx512ifma <<<"$flags"; then
+            echo "ifma=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ifma=false" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo '### Native host'
+            echo
+            echo '```text'
+            lscpu | sed -n '/Model name:/p;/CPU max MHz:/p'
+            for feature in avx512f avx512ifma avx512vl bmi2 adx; do
+              if grep -qw "$feature" <<<"$flags"; then value=yes; else value=no; fi
+              printf '%-12s %s\n' "$feature" "$value"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build PR 222 plus the IFMA benchmark
+        if: steps.host.outputs.ifma == 'true'
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo bench \
+            -p zakura-pasta-curves \
+            --bench avx512ifma \
+            --features avx512ifma-experiment,x86_64-asm \
+            --no-run \
+            --message-format=json \
+            > build-messages.json
+          binary="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "avx512ifma") | .executable // empty' build-messages.json | tail -1)"
+          test -n "$binary"
+          test -x "$binary"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+
+      - name: Check generated IFMA and BMI2/ADX instructions
+        if: steps.host.outputs.ifma == 'true'
+        shell: bash
+        env:
+          BINARY: ${{ steps.build.outputs.binary }}
+        run: |
+          set -euo pipefail
+          objdump -d "$BINARY" > benchmark-disassembly.txt
+          ifma_count="$(grep -Ec 'vpmadd52(l|h)uq' benchmark-disassembly.txt)"
+          mulx_count="$(grep -Ec '[[:space:]]mulx[[:space:]]' benchmark-disassembly.txt)"
+          adcx_count="$(grep -Ec '[[:space:]]adcx[[:space:]]' benchmark-disassembly.txt)"
+          adox_count="$(grep -Ec '[[:space:]]adox[[:space:]]' benchmark-disassembly.txt)"
+          test "$ifma_count" -ge 95
+          test "$mulx_count" -gt 0
+          test "$adcx_count" -gt 0
+          test "$adox_count" -gt 0
+          {
+            echo '### Generated instruction census'
+            echo
+            echo '| instruction | static occurrences |'
+            echo '|---|---:|'
+            echo "| VPMADD52LUQ/HUQ | $ifma_count |"
+            echo "| MULX | $mulx_count |"
+            echo "| ADCX | $adcx_count |"
+            echo "| ADOX | $adox_count |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Benchmark native IFMA against PR 222
+        if: steps.host.outputs.ifma == 'true'
+        shell: bash
+        env:
+          BINARY: ${{ steps.build.outputs.binary }}
+        run: |
+          set -euo pipefail
+          taskset --cpu-list 0 "$BINARY" \
+            --bench \
+            --warm-up-time 1 \
+            --measurement-time 3 \
+            --sample-size 50 \
+            --noplot \
+            | tee benchmark-results.txt
+          {
+            echo
+            echo '### Native benchmark'
+            echo
+            echo '```text'
+            cat benchmark-results.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report unavailable native comparison
+        if: steps.host.outputs.ifma != 'true'
+        shell: bash
+        run: |
+          {
+            echo
+            echo '### Native benchmark'
+            echo
+            echo 'Blocked: this GitHub-hosted CPU does not expose AVX-512IFMA. The installed QEMU also cannot execute VPMADD52, and emulated timing would not be a hardware benchmark.'
+          } >> "$GITHUB_STEP_SUMMARY"
