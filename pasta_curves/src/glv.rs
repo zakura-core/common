@@ -119,6 +119,20 @@ mod private {
 
         /// The raw affine coordinates of `p` (`(0, 0)` for the identity).
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base);
+
+        /// Constructs a projective (Jacobian) point directly from raw
+        /// coordinates, with no on-curve check in release builds; `z = 0`
+        /// is the identity. The effective-affine machinery uses this to
+        /// restore a table's omitted denominator into an ordinary point of
+        /// the original curve without an inversion — the coordinates must
+        /// satisfy $y^2 = x^3 + bz^6$, which the underlying constructor
+        /// `debug_assert!`s.
+        fn projective_unchecked(
+            x: Self::Base,
+            y: Self::Base,
+            z: Self::Base,
+            token: CrateToken,
+        ) -> Self;
     }
 
     impl Sealed for crate::pallas::Point {
@@ -129,6 +143,11 @@ mod private {
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
             p.raw_xy()
         }
+
+        fn projective_unchecked(x: Self::Base, y: Self::Base, z: Self::Base, _: CrateToken) -> Self {
+            use crate::arithmetic::CurveExtUnchecked as _;
+            Self::new_jacobian_unchecked(x, y, z)
+        }
     }
 
     impl Sealed for crate::vesta::Point {
@@ -138,6 +157,11 @@ mod private {
 
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
             p.raw_xy()
+        }
+
+        fn projective_unchecked(x: Self::Base, y: Self::Base, z: Self::Base, _: CrateToken) -> Self {
+            use crate::arithmetic::CurveExtUnchecked as _;
+            Self::new_jacobian_unchecked(x, y, z)
         }
     }
 }
@@ -2089,6 +2113,101 @@ impl<C: GlvParams> Table<C> {
     }
 }
 
+/// Raw affine coordinates on an *effective* curve $y^2 = x^3 + bZ^6$ for
+/// some omitted Jacobian denominator $Z$ tracked by the caller. Deliberately
+/// distinct from `C::AffineExt`, which asserts membership of the original
+/// curve ($Z = 1$): never convert one into the other without restoring the
+/// denominator.
+#[derive(Clone, Copy, Debug)]
+struct EffectiveAffine<F> {
+    x: F,
+    y: F,
+}
+
+/// Raw Jacobian coordinates, on an effective curve tracked by the caller.
+/// `z` here is *relative* to that curve's omitted denominator: the point on
+/// the original curve is $(x, y, Z_{\text{omitted}} \cdot z)$.
+#[derive(Clone, Copy, Debug)]
+struct RawJacobian<F> {
+    x: F,
+    y: F,
+    z: F,
+}
+
+/// Incomplete mixed addition `q + d` on one effective curve (the a = 0
+/// affine/Jacobian formulas never read the curve constant, so any common
+/// omitted denominator works), returning the sum and the Z-*ratio*
+/// `Z(sum)/Z(q) = 2H`: the sum's Z is computed as $Z_3 = Z_1 \cdot 2H$
+/// (one multiplication instead of the squaring in `curves.rs`'s
+/// $(Z_1 + H)^2 - Z_1^2 - H^2$), which is exactly what the backward
+/// global-Z pass consumes. 8M + 3S.
+///
+/// Incomplete *by design*: the caller must guarantee `q` is nonidentity and
+/// `x(q) != x(d)` (i.e. `q != ±d`) — for the table chain the
+/// `effective_chain_derivation` test proves both for every step. Keep this
+/// private and out of general group arithmetic.
+fn add_mixed_with_ratio_nonexceptional<F: Field>(
+    q: &RawJacobian<F>,
+    d: &EffectiveAffine<F>,
+) -> (RawJacobian<F>, F) {
+    let z1z1 = q.z.square();
+    let u2 = d.x * z1z1;
+    let s2 = d.y * z1z1 * q.z;
+    let h = u2 - q.x;
+    let hh = h.square();
+    let i = hh.double().double();
+    let j = h * i;
+    let r = (s2 - q.y).double();
+    let v = q.x * i;
+    let x3 = r.square() - j - v.double();
+    let y3 = r * (v - x3) - (q.y * j).double();
+    let zr = h.double();
+    let z3 = q.z * zr;
+    (RawJacobian { x: x3, y: y3, z: z3 }, zr)
+}
+
+/// Applies an Eisenstein unit (encoded as in [`JOINT_DIGITS`]: `unit >> 1`
+/// the ζ-rotation exponent, `unit & 1` the negation) to raw Jacobian
+/// coordinates: rotation multiplies x by $\zeta^e$ (with
+/// $\zeta^2 x = -x - \zeta x$), negation flips y, and z never changes.
+fn apply_chain_unit<F: WithSmallOrderMulGroup<3>>(
+    mut p: RawJacobian<F>,
+    unit: u8,
+) -> RawJacobian<F> {
+    match unit >> 1 {
+        0 => {}
+        1 => p.x *= F::ZETA,
+        _ => {
+            let xz = p.x * F::ZETA;
+            p.x = -p.x - xz;
+        }
+    }
+    if unit & 1 == 1 {
+        p.y = -p.y;
+    }
+    p
+}
+
+/// Rescales every earlier chain point to the last one's Jacobian
+/// denominator ("global Z"), inversion-free: given
+/// `Z(path[i + 1]) = Z(path[i]) * ratios[i]`, walks backward maintaining
+/// the cumulative product `s_i = Z(path.last())/Z(path[i])` and scales
+/// $(x_i, y_i) \mapsto (s_i^2 x_i, s_i^3 y_i)$. The `z` fields are left
+/// untouched (they become meaningless; the caller keeps only the shared
+/// final denominator).
+fn globalize_z<F: Field>(path: &mut [RawJacobian<F>], ratios: &[F]) {
+    debug_assert_eq!(path.len(), ratios.len() + 1);
+    let global = path[ratios.len()].z;
+    let mut scale = F::ONE;
+    for (p, ratio) in path.iter_mut().zip(ratios).rev() {
+        scale *= *ratio;
+        debug_assert_eq!(p.z * scale, global, "inconsistent chain ratios");
+        let scale2 = scale.square();
+        p.x *= scale2;
+        p.y *= scale2 * scale;
+    }
+}
+
 /// Whether the column schedule of `k` avoids every exceptional case of the
 /// batch-affine ladder, by tracking the scalar `s` that multiplies the base
 /// point in the shared accumulator.
@@ -3878,6 +3997,83 @@ mod tests {
         }
     }
 
+    /// The raw effective-coordinate helpers against the native group law:
+    /// the incomplete mixed addition (with `z_out == z_in * ratio`), the
+    /// chain-unit application against `endo` and negation, and the backward
+    /// global-Z pass on a real ratio-linked chain.
+    fn effective_raw_ops_match_native<C: GlvParams>() {
+        let g = C::generator();
+        let token = || private::CrateToken(());
+
+        for (i, k) in scalars::<C::ScalarExt>(8).enumerate() {
+            // Distinct positive multiples of g, so a != ±b and neither is
+            // the identity; native `Mul` leaves a with a nontrivial Z.
+            let a = g * (k + C::ScalarExt::ONE);
+            let b = g * (k + C::ScalarExt::from(2 + i as u64));
+            let mut b_affine = [C::AffineExt::identity(); 1];
+            C::batch_normalize(&[b], &mut b_affine);
+            let (bx, by) = C::affine_xy(&b_affine[0]);
+
+            let (ax, ay, az) = a.jacobian_coordinates();
+            let q = RawJacobian { x: ax, y: ay, z: az };
+            let d = EffectiveAffine { x: bx, y: by };
+            let (sum, ratio) = add_mixed_with_ratio_nonexceptional(&q, &d);
+            assert_eq!(sum.z, az * ratio, "Z3 must equal Z1 * ratio");
+            assert_eq!(
+                C::projective_unchecked(sum.x, sum.y, sum.z, token()),
+                a + b,
+                "incomplete mixed addition must match native addition"
+            );
+
+            for unit in 0..6u8 {
+                let rotated = apply_chain_unit(q, unit);
+                let mut expected = a;
+                for _ in 0..(unit >> 1) {
+                    expected = expected.endo();
+                }
+                if unit & 1 == 1 {
+                    expected = -expected;
+                }
+                assert_eq!(rotated.z, az, "units must not touch z");
+                assert_eq!(
+                    C::projective_unchecked(rotated.x, rotated.y, rotated.z, token()),
+                    expected,
+                    "unit {unit} must act as endo/negation"
+                );
+            }
+        }
+
+        // The backward global-Z pass on a chain whose ratios are real
+        // (five mixed additions by one step point): every rescaled entry,
+        // read with the final denominator, must keep its group value.
+        let step_point = g * C::ScalarExt::from(5);
+        let mut step_affine = [C::AffineExt::identity(); 1];
+        C::batch_normalize(&[step_point], &mut step_affine);
+        let (sx, sy) = C::affine_xy(&step_affine[0]);
+        let step = EffectiveAffine { x: sx, y: sy };
+
+        let start = g * scalars::<C::ScalarExt>(1).next().unwrap();
+        let (x, y, z) = start.jacobian_coordinates();
+        let mut chain = [RawJacobian { x, y, z }; 6];
+        let mut ratios = [C::Base::ONE; 5];
+        let mut expected = [start; 6];
+        for i in 0..5 {
+            let (sum, ratio) = add_mixed_with_ratio_nonexceptional(&chain[i], &step);
+            chain[i + 1] = sum;
+            ratios[i] = ratio;
+            expected[i + 1] = expected[i] + step_point;
+        }
+        let global = chain[5].z;
+        globalize_z(&mut chain, &ratios);
+        for (raw, expected) in chain.iter().zip(expected) {
+            assert_eq!(
+                C::projective_unchecked(raw.x, raw.y, global, token()),
+                expected,
+                "globalized entries must keep their group value"
+            );
+        }
+    }
+
     /// Table-based multiplication matches the group's native `Mul`.
     fn table_mul_matches_group_mul<C: GlvParams>() {
         let g = C::generator();
@@ -4283,6 +4479,10 @@ mod tests {
                 #[test]
                 fn orbit_points() {
                     orbit_points_match_native::<$curve>();
+                }
+                #[test]
+                fn effective_raw_ops() {
+                    effective_raw_ops_match_native::<$curve>();
                 }
                 #[test]
                 fn table_mul() {
