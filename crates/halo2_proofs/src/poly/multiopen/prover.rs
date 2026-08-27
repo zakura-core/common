@@ -387,6 +387,61 @@ fn prepare_q_prime<F: Field>(
     accumulator
 }
 
+fn evaluate_polynomials<F: Field>(polynomials: &[Polynomial<F, Coeff>], point: F) -> Vec<F> {
+    if polynomials.is_empty() {
+        return Vec::new();
+    }
+
+    let worker_count = multicore::current_num_threads().min(polynomials.len());
+    let total_work = polynomials.iter().fold(0usize, |total, polynomial| {
+        total.saturating_add(polynomial.len())
+    });
+    if worker_count <= 1
+        || total_work.div_ceil(worker_count) < MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD
+    {
+        return polynomials
+            .iter()
+            .map(|polynomial| eval_polynomial(polynomial, point))
+            .collect();
+    }
+
+    let mut evaluations = vec![F::ZERO; polynomials.len()];
+    let polynomials_per_task = polynomials.len().div_ceil(worker_count);
+    multicore::scope(|scope| {
+        for (polynomials, evaluations) in polynomials
+            .chunks(polynomials_per_task)
+            .zip(evaluations.chunks_mut(polynomials_per_task))
+        {
+            scope.spawn(move |_| {
+                for (polynomial, evaluation) in polynomials.iter().zip(evaluations) {
+                    *evaluation = eval_polynomial(polynomial, point);
+                }
+            });
+        }
+    });
+    evaluations
+}
+
+fn scale_and_add_polynomial<F: Field>(
+    polynomial: Polynomial<F, Coeff>,
+    scale: F,
+    addend: &Polynomial<F, Coeff>,
+) -> Polynomial<F, Coeff> {
+    if multicore::current_num_threads() == 1 {
+        return polynomial * scale + addend;
+    }
+
+    debug_assert_eq!(polynomial.len(), addend.len());
+    let mut polynomial = polynomial;
+    crate::arithmetic::parallelize(&mut polynomial.values, |values, start| {
+        for (value, addend) in values.iter_mut().zip(&addend.values[start..]) {
+            *value *= scale;
+            *value += addend;
+        }
+    });
+    polynomial
+}
+
 /// Create a multi-opening proof.
 ///
 /// # Errors
@@ -440,10 +495,9 @@ where
 
     let x_3: ChallengeX3<_> = transcript.squeeze_challenge_scalar();
 
-    // Prover sends u_i for all i, which correspond to the evaluation
-    // of each Q polynomial commitment at x_3.
-    for q_i_poly in &q_polys {
-        transcript.write_scalar(eval_polynomial(q_i_poly, *x_3))?;
+    // The evaluations are independent, but their transcript order is fixed.
+    for evaluation in evaluate_polynomials(&q_polys, *x_3) {
+        transcript.write_scalar(evaluation)?;
     }
 
     let x_4: ChallengeX4<_> = transcript.squeeze_challenge_scalar();
@@ -452,7 +506,7 @@ where
         (q_prime_poly, q_prime_blind),
         |(q_prime_poly, q_prime_blind), (poly, blind)| {
             (
-                q_prime_poly * *x_4 + &poly,
+                scale_and_add_polynomial(q_prime_poly, *x_4, &poly),
                 Blind((q_prime_blind.0 * &(*x_4)) + &blind.0),
             )
         },
@@ -502,9 +556,9 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 mod tests {
     use super::{
         Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial, collapse_polynomials,
-        kate_division_in_place, prepare_q_prime,
+        evaluate_polynomials, kate_division_in_place, prepare_q_prime, scale_and_add_polynomial,
     };
-    use crate::arithmetic::kate_division;
+    use crate::arithmetic::{eval_polynomial, kate_division};
     use ff::Field;
     use pasta_curves::{Fp, Fq};
     use std::fmt::Debug;
@@ -680,6 +734,84 @@ mod tests {
         }
     }
 
+    fn parallel_evaluations_match_serial_order<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        let empty = Vec::<Polynomial<F, Coeff>>::new();
+        assert!(evaluate_polynomials(&empty, F::from(17)).is_empty());
+
+        let polynomial_len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
+        let polynomials = (0..5)
+            .map(|polynomial_index| Polynomial {
+                values: (0..polynomial_len)
+                    .map(|coefficient_index| {
+                        F::from(
+                            1 + polynomial_index as u64 * polynomial_len as u64
+                                + coefficient_index as u64,
+                        )
+                    })
+                    .collect(),
+                _marker: PhantomData,
+            })
+            .collect::<Vec<_>>();
+
+        for point in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let expected = polynomials
+                .iter()
+                .map(|polynomial| eval_polynomial(polynomial, point))
+                .collect::<Vec<_>>();
+            let check = || assert_eq!(evaluate_polynomials(&polynomials, point), expected);
+
+            #[cfg(feature = "multicore")]
+            for thread_count in [1, 4, 10] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(thread_count)
+                    .build()
+                    .unwrap()
+                    .install(check);
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
+    fn scale_and_add_matches_operators<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        let len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
+        let polynomial = Polynomial {
+            values: (0..len).map(|index| F::from(index as u64 + 1)).collect(),
+            _marker: PhantomData,
+        };
+        let addend = Polynomial {
+            values: (0..len)
+                .map(|index| F::from(index as u64 * 3 + 2))
+                .collect(),
+            _marker: PhantomData,
+        };
+
+        for scale in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let expected = polynomial.clone() * scale + &addend;
+            let check = || {
+                let actual = scale_and_add_polynomial(polynomial.clone(), scale, &addend);
+                assert_eq!(&expected[..], &actual[..]);
+            };
+
+            #[cfg(feature = "multicore")]
+            for thread_count in [1, 4, 10] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(thread_count)
+                    .build()
+                    .unwrap()
+                    .install(check);
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
     #[test]
     fn streaming_collapse_matches_operator_collapse_fp() {
         streaming_collapse_matches_operator_collapse::<Fp>();
@@ -689,7 +821,6 @@ mod tests {
     fn streaming_collapse_matches_operator_collapse_fq() {
         streaming_collapse_matches_operator_collapse::<Fq>();
     }
-
     #[test]
     fn in_place_kate_division_matches_allocating_fp() {
         in_place_kate_division_matches_allocating::<Fp>();
@@ -708,5 +839,25 @@ mod tests {
     #[test]
     fn parallel_q_prime_matches_ordered_operator_fold_fq() {
         parallel_q_prime_matches_ordered_operator_fold::<Fq>();
+    }
+
+    #[test]
+    fn parallel_evaluations_match_serial_order_fp() {
+        parallel_evaluations_match_serial_order::<Fp>();
+    }
+
+    #[test]
+    fn parallel_evaluations_match_serial_order_fq() {
+        parallel_evaluations_match_serial_order::<Fq>();
+    }
+
+    #[test]
+    fn scale_and_add_matches_operators_fp() {
+        scale_and_add_matches_operators::<Fp>();
+    }
+
+    #[test]
+    fn scale_and_add_matches_operators_fq() {
+        scale_and_add_matches_operators::<Fq>();
     }
 }
