@@ -59,15 +59,7 @@ macro_rules! impl_batch_mul_same_scalar_vartime {
             for (point, output) in points.iter().zip(output.iter_mut()) {
                 *output = group::CurveAffine::to_curve(point);
             }
-            let scalar = crate::glv::Decomposed::<$name>::new(scalar);
-            let tables = crate::glv::Table::batch(output);
-            let tables: alloc::vec::Vec<&crate::glv::Table<$name>> = tables.iter().collect();
-            for (output, product) in output
-                .iter_mut()
-                .zip(crate::glv::Table::mul_decomposed_batch(&tables, &scalar))
-            {
-                *output = product;
-            }
+            crate::glv::batch_mul_same_scalar_in_place::<$name>(output, scalar);
         }
 
         #[cfg(feature = "glv")]

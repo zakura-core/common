@@ -3,10 +3,15 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use ff::Field;
-use pasta_curves::glv::{Decomposed, GlvParams, Table};
+use pasta_curves::glv::{bench_internals, Decomposed, GlvParams, Table};
 use pasta_curves::{pallas, vesta};
 use rand::SeedableRng;
 use rand_xorshift::XorShiftRng;
+
+// The effective-affine sidecar's same-scalar gate (mirrors
+// BATCH_AFFINE_MIN_POINTS): forced-effective rows below this size would
+// panic on the gate.
+const FORCED_EFFECTIVE_MIN_POINTS: usize = 32;
 
 // Sizes bracketing the halo2 proving workloads (Orchard's k = 11 circuit
 // commits at 2^11..2^13); the backend planner switches representations
@@ -97,6 +102,34 @@ fn glv_bench<C: GlvParams>(c: &mut Criterion, name: &str) {
                 }
             });
         });
+
+        // Forced same-build backends behind the hook: the normalized
+        // (pre-sidecar) route at every size, and the effective sidecar
+        // where its gate admits the batch (at those sizes the routed
+        // "batch hook" row above takes the same path).
+        let projective: Vec<C> = points.iter().map(|point| C::from(*point)).collect();
+        group.bench_with_input(BenchmarkId::new("forced normalized", size), &size, |b, _| {
+            b.iter(|| {
+                let scalars = black_box(scalars.as_slice());
+                for scalar in scalars {
+                    output.copy_from_slice(black_box(projective.as_slice()));
+                    bench_internals::batch_mul_same_scalar_normalized(&mut output, scalar);
+                    black_box(output.as_slice());
+                }
+            });
+        });
+        if size >= FORCED_EFFECTIVE_MIN_POINTS {
+            group.bench_with_input(BenchmarkId::new("forced effective", size), &size, |b, _| {
+                b.iter(|| {
+                    let scalars = black_box(scalars.as_slice());
+                    for scalar in scalars {
+                        output.copy_from_slice(black_box(projective.as_slice()));
+                        bench_internals::batch_mul_same_scalar_effective(&mut output, scalar);
+                        black_box(output.as_slice());
+                    }
+                });
+            });
+        }
     }
     group.finish();
 

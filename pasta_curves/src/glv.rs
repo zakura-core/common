@@ -2291,6 +2291,70 @@ fn effective_batch_affine_ladder<C: GlvParams>(
         .collect()
 }
 
+/// Serves a same-scalar batch through the effective-affine sidecar when
+/// the batch-affine ladder's own gate is met — at least
+/// [`BATCH_AFFINE_MIN_POINTS`] live points and a safe column schedule —
+/// writing the products over the input points in `output` and leaving
+/// identity lanes untouched (`k·O = O`). Returns `false`, with `output`
+/// unmodified, when the gate is not met.
+///
+/// Compared with the normalized route this builds each live point's
+/// window with no inversion and no `8n`-entry normalization, runs the
+/// same ladder kernel, and restores each lane's omitted denominator
+/// directly into the projective output.
+fn try_batch_mul_same_scalar_effective<C: GlvParams>(k: &Decomposed<C>, output: &mut [C]) -> bool {
+    if k.len == 0 || !k.affine_ladder_safe {
+        return false;
+    }
+    let live = |p: &&C| !bool::from(p.is_identity());
+    if output.iter().filter(live).count() < BATCH_AFFINE_MIN_POINTS {
+        return false;
+    }
+    let tables: Vec<EffectiveTable<C>> = output
+        .iter()
+        .filter(live)
+        .map(EffectiveTable::new)
+        .collect();
+    let refs: Vec<&EffectiveTable<C>> = tables.iter().collect();
+    let mut products = effective_batch_affine_ladder(&refs, k).into_iter();
+    for lane in output.iter_mut() {
+        if !bool::from(lane.is_identity()) {
+            *lane = products.next().expect("one product per live lane");
+        }
+    }
+    debug_assert!(products.next().is_none());
+    true
+}
+
+/// The GLV implementation behind `CurveExt::batch_mul_same_scalar_vartime`
+/// (see `impl_batch_mul_same_scalar_vartime!` in `curves.rs`): multiplies
+/// every point in `output` by `k`, in place. Batches that would run the
+/// batch-affine ladder take the effective-affine sidecar; everything else
+/// (small or exceptional-schedule batches, `k = 0`) takes the normalized
+/// tables and [`Table::mul_decomposed_batch`], whose own gate then falls
+/// back to per-point ladders.
+pub(crate) fn batch_mul_same_scalar_in_place<C: GlvParams>(output: &mut [C], k: &C::ScalarExt) {
+    let k = Decomposed::<C>::new(k);
+    if try_batch_mul_same_scalar_effective(&k, output) {
+        return;
+    }
+    batch_mul_same_scalar_normalized(output, &k);
+}
+
+/// The normalized same-scalar route: batched table build with one shared
+/// normalization, then [`Table::mul_decomposed_batch`] (whose own gate
+/// falls back to per-point ladders on small or exceptional batches).
+fn batch_mul_same_scalar_normalized<C: GlvParams>(output: &mut [C], k: &Decomposed<C>) {
+    let tables = Table::batch(output);
+    let tables: Vec<&Table<C>> = tables.iter().collect();
+    for (output, product) in output
+        .iter_mut()
+        .zip(Table::mul_decomposed_batch(&tables, k))
+    {
+        *output = product;
+    }
+}
+
 /// Benchmark-only hooks for the effective-affine experiment: forced
 /// construction and multiplication through each backend inside one build,
 /// so comparisons cannot be confounded by unrelated codegen or dependency
@@ -2336,6 +2400,24 @@ pub mod bench_internals {
             })
             .collect();
         effective_batch_affine_ladder(&live, k)
+    }
+
+    /// The normalized (pre-sidecar) same-scalar route, forced.
+    pub fn batch_mul_same_scalar_normalized<C: GlvParams>(output: &mut [C], k: &C::ScalarExt) {
+        super::batch_mul_same_scalar_normalized(output, &Decomposed::new(k));
+    }
+
+    /// The effective-affine same-scalar sidecar, forced.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sidecar's gate declines the batch; benchmark inputs
+    /// must be large, live, and affine-ladder safe.
+    pub fn batch_mul_same_scalar_effective<C: GlvParams>(output: &mut [C], k: &C::ScalarExt) {
+        assert!(
+            super::try_batch_mul_same_scalar_effective(&Decomposed::new(k), output),
+            "the sidecar gate declined this benchmark batch"
+        );
     }
 }
 
@@ -4488,6 +4570,67 @@ mod tests {
         }
     }
 
+    /// The routed same-scalar batch entry (effective sidecar with the
+    /// normalized fallback) against native multiplication and both forced
+    /// backends, across batch sizes straddling the sidecar gate (with an
+    /// identity lane mixed in) and edge-case plus full-width scalars.
+    fn same_scalar_routing_matches_native<C: GlvParams>() {
+        let g = C::generator();
+        let lambda = C::ScalarExt::ZETA;
+        let small_sizes = [
+            0usize, 1, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
+        ];
+        let large_sizes = [512usize, 2048];
+        let ks = [
+            C::ScalarExt::ZERO,
+            C::ScalarExt::ONE,
+            -C::ScalarExt::ONE,
+            C::ScalarExt::from(2),
+            lambda,
+            -lambda,
+            lambda + C::ScalarExt::ONE,
+            C::ScalarExt::from(u64::MAX),
+            C::ScalarExt::from_u128((1u128 << GLV_COMPONENT_BITS) - 1),
+            C::ScalarExt::from_u128(1u128 << GLV_COMPONENT_BITS),
+            scalars::<C::ScalarExt>(1).next().unwrap(),
+        ];
+        let mut check = |size: usize, ks: &[C::ScalarExt]| {
+            let points: Vec<C> = (0..size)
+                .map(|i| {
+                    if size > 2 && i == size / 2 {
+                        C::identity()
+                    } else {
+                        g * (C::ScalarExt::from(i as u64 + 1) + lambda)
+                    }
+                })
+                .collect();
+            for &k in ks {
+                let mut routed = points.clone();
+                batch_mul_same_scalar_in_place(&mut routed, &k);
+                for (p, out) in points.iter().zip(&routed) {
+                    assert_eq!(*out, *p * k, "routed batch != native at size {size}");
+                }
+
+                let mut normalized = points.clone();
+                batch_mul_same_scalar_normalized(&mut normalized, &Decomposed::new(&k));
+                assert_eq!(normalized, routed, "forced normalized != routed");
+
+                let mut effective = points.clone();
+                if try_batch_mul_same_scalar_effective(&Decomposed::new(&k), &mut effective) {
+                    assert_eq!(effective, routed, "forced effective != routed");
+                } else {
+                    assert_eq!(effective, points, "a declined batch must be untouched");
+                }
+            }
+        };
+        for size in small_sizes {
+            check(size, &ks);
+        }
+        for size in large_sizes {
+            check(size, &ks[8..]);
+        }
+    }
+
     /// Hand-crafted digit strings whose column schedules hit the affine
     /// ladder's exceptional cases: the batch entry must detect them and take
     /// the per-point fallback, keeping results exact. (Real recodings reach
@@ -4563,6 +4706,20 @@ mod tests {
             let batched = Table::mul_decomposed_batch(&refs, &d);
             for (p, out) in points.iter().zip(&batched) {
                 assert_eq!(*out, *p * value, "crafted schedule must stay exact");
+            }
+
+            // The effective-affine sidecar shares the same gate: it must
+            // decline every exceptional schedule untouched and stay exact
+            // on the same-shape safe one.
+            let mut sidecar = points.clone();
+            if try_batch_mul_same_scalar_effective(&d, &mut sidecar) {
+                assert!(d.affine_ladder_safe, "sidecar must decline unsafe schedules");
+                for (p, out) in points.iter().zip(&sidecar) {
+                    assert_eq!(*out, *p * value, "sidecar must stay exact");
+                }
+            } else {
+                assert!(!d.affine_ladder_safe);
+                assert_eq!(sidecar, points, "a declined batch must be untouched");
             }
         }
     }
@@ -4777,6 +4934,10 @@ mod tests {
                 #[test]
                 fn effective_table() {
                     effective_table_matches_native::<$curve>();
+                }
+                #[test]
+                fn same_scalar_routing() {
+                    same_scalar_routing_matches_native::<$curve>();
                 }
                 #[test]
                 fn table_mul() {
