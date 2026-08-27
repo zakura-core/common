@@ -616,9 +616,26 @@ where
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
+    let permutation_workers = crate::multicore::current_num_threads();
     let permutations: Vec<permutation::prover::Committed<C, _>> =
-        if prepare_permutations_in_parallel(instance.len(), crate::multicore::current_num_threads())
-        {
+        if instance.len() == 1 && permutation_workers > 1 {
+            // A single circuit cannot use circuit-level permutation parallelism.
+            // Prepare its independent sets concurrently, then retain transcript
+            // writes in set order.
+            let blinding = pk.vk.cs.permutation.sample_blinding(pk, &mut rng);
+            let prepared = pk.vk.cs.permutation.prepare_sets_in_parallel(
+                params,
+                pk,
+                &pk.permutation,
+                &advice[0].advice_values,
+                &pk.fixed_values,
+                &instance[0].instance_values,
+                beta,
+                gamma,
+                blinding,
+            );
+            vec![prepared.commit(&mut coset_evaluator, transcript)?]
+        } else if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
             // Draw every permutation's blinding values in circuit and set
             // order before preparing the independent arguments in parallel.
             let permutation_blindings = (0..instance.len())
@@ -648,8 +665,8 @@ where
                 .map(|permutation| permutation.commit(&mut coset_evaluator, transcript))
                 .collect::<Result<Vec<_>, _>>()?
         } else {
-            // Keep each circuit's preparation and commitment together on
-            // smaller pools to avoid competing for cache across circuits.
+            // Keep each circuit's preparation and commitment together on smaller
+            // pools to avoid competing for cache across circuits.
             instance
                 .iter()
                 .zip(advice.iter())

@@ -2,6 +2,7 @@ use group::{
     Curve,
     ff::{Field, PrimeField},
 };
+use maybe_rayon::prelude::*;
 use rand_core::Rng;
 use std::{convert::Infallible, iter};
 
@@ -33,6 +34,16 @@ pub(crate) struct Committed<C: CurveAffine, Ev> {
 
 struct SetBlinding<F: Field> {
     rows: Vec<F>,
+    product_blind: Blind<F>,
+}
+
+struct PreparedRatios<F: Field> {
+    values: Vec<F>,
+    blinding: SetBlinding<F>,
+}
+
+struct UntransformedSet<F: Field> {
+    product: Polynomial<F, LagrangeCoeff>,
     product_blind: Blind<F>,
 }
 
@@ -184,6 +195,101 @@ impl Argument {
         Prepared { sets }
     }
 
+    /// Prepares one circuit's permutation sets concurrently without mutating
+    /// the transcript or the shared polynomial evaluator.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::plonk) fn prepare_sets_in_parallel<C: CurveAffine>(
+        &self,
+        params: &Params<C>,
+        pk: &plonk::ProvingKey<C>,
+        pkey: &ProvingKey<C>,
+        advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        beta: ChallengeBeta<C>,
+        gamma: ChallengeGamma<C>,
+        blinding: PermutationBlinding<C::Scalar>,
+    ) -> Prepared<C> {
+        if blinding.sets.len() <= 1 {
+            return self.prepare(
+                params, pk, pkey, advice, fixed, instance, beta, gamma, blinding,
+            );
+        }
+
+        let domain = &pk.vk.domain;
+        let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
+        let blinding_factors = pk.vk.cs.blinding_factors();
+
+        // Record the initial delta power for each set. The numerator ratios
+        // are then independent across sets.
+        let mut deltaomega = C::Scalar::ONE;
+        let set_inputs = self
+            .columns
+            .chunks(chunk_len)
+            .zip(pkey.permutations.chunks(chunk_len))
+            .map(|(columns, permutations)| {
+                let initial_deltaomega = deltaomega;
+                for _ in columns {
+                    deltaomega *= &C::Scalar::DELTA;
+                }
+                (columns, permutations, initial_deltaomega)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(set_inputs.len(), blinding.sets.len());
+
+        // Indexed collection preserves set order for the dependent prefix
+        // chain and eventual transcript writes.
+        let prepared_ratios = set_inputs
+            .into_par_iter()
+            .zip(blinding.sets.into_par_iter())
+            .map(
+                |((columns, permutations, initial_deltaomega), blinding)| PreparedRatios {
+                    values: prepare_ratios(
+                        params,
+                        domain,
+                        columns,
+                        permutations,
+                        advice,
+                        fixed,
+                        instance,
+                        beta,
+                        gamma,
+                        initial_deltaomega,
+                    )
+                    .0,
+                    blinding,
+                },
+            )
+            .collect::<Vec<_>>();
+
+        // Each set starts with the preceding set's final product, so this
+        // short prefix chain remains serial.
+        let mut last_z = C::Scalar::ONE;
+        let products = prepared_ratios
+            .into_iter()
+            .map(|prepared| {
+                let blinding = prepared.blinding;
+                build_product::<C>(
+                    domain,
+                    blinding_factors,
+                    &mut last_z,
+                    prepared.values,
+                    |rows| {
+                        rows.copy_from_slice(&blinding.rows);
+                        blinding.product_blind
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let sets = products
+            .into_par_iter()
+            .map(|set| prepare_product(params, pk, set))
+            .collect();
+
+        Prepared { sets }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare_sets<C: CurveAffine, E>(
         &self,
@@ -218,111 +324,145 @@ impl Argument {
             .chunks(chunk_len)
             .zip(pkey.permutations.chunks(chunk_len))
         {
-            // Goal is to compute the products of fractions
-            //
-            // (p_j(\omega^i) + \delta^j \omega^i \beta + \gamma) /
-            // (p_j(\omega^i) + \beta s_j(\omega^i) + \gamma)
-            //
-            // where p_j(X) is the jth column in this permutation,
-            // and i is the ith row of the column.
-
-            let mut modified_values = vec![C::Scalar::ONE; params.n as usize];
-
-            // Iterate over each column of the permutation
-            for (&column, permuted_column_values) in columns.iter().zip(permutations.iter()) {
-                let values = match column.column_type() {
-                    Any::Advice => advice,
-                    Any::Fixed => fixed,
-                    Any::Instance => instance,
-                };
-                parallelize(&mut modified_values, |modified_values, start| {
-                    for ((modified_values, value), permuted_value) in modified_values
-                        .iter_mut()
-                        .zip(values[column.index()][start..].iter())
-                        .zip(permuted_column_values[start..].iter())
-                    {
-                        *modified_values *= &(*beta * permuted_value + &*gamma + value);
-                    }
+            let (ratios, next_deltaomega) = prepare_ratios(
+                params,
+                domain,
+                columns,
+                permutations,
+                advice,
+                fixed,
+                instance,
+                beta,
+                gamma,
+                deltaomega,
+            );
+            deltaomega = next_deltaomega;
+            let product =
+                build_product::<C>(domain, blinding_factors, &mut last_z, ratios, |rows| {
+                    set_blinding(rows)
                 });
-            }
-
-            // Invert to obtain the denominator for the permutation product polynomial
-            crate::arithmetic::batch_invert_multi(&mut modified_values);
-
-            // Iterate over each column again, this time finishing the computation
-            // of the entire fraction by computing the numerators
-            for &column in columns.iter() {
-                let omega = domain.get_omega();
-                let values = match column.column_type() {
-                    Any::Advice => advice,
-                    Any::Fixed => fixed,
-                    Any::Instance => instance,
-                };
-                parallelize(&mut modified_values, |modified_values, start| {
-                    let mut deltaomega = deltaomega * &omega.pow_vartime([start as u64]);
-                    for (modified_values, value) in modified_values
-                        .iter_mut()
-                        .zip(values[column.index()][start..].iter())
-                    {
-                        // Multiply by p_j(\omega^i) + \delta^j \omega^i \beta
-                        *modified_values *= &(deltaomega * &*beta + &*gamma + value);
-                        deltaomega *= &omega;
-                    }
-                });
-                deltaomega *= &C::Scalar::DELTA;
-            }
-
-            // The modified_values vector is a vector of products of fractions
-            // of the form
-            //
-            // (p_j(\omega^i) + \delta^j \omega^i \beta + \gamma) /
-            // (p_j(\omega^i) + \beta s_j(\omega^i) + \gamma)
-            //
-            // where i is the index into modified_values, for the jth column in
-            // the permutation
-
-            // Compute the product polynomial in the fraction buffer, starting
-            // with the preceding set's final value (or one for the first set).
-            let usable_rows = params.n as usize - blinding_factors;
-            let mut state = last_z;
-            let (last, prefix) = modified_values[..usable_rows]
-                .split_last_mut()
-                .expect("the usable evaluation domain is non-empty");
-            for value in prefix {
-                let current = *value;
-                *value = state;
-                state *= &current;
-            }
-            *last = state;
-            let mut z = domain.lagrange_from_vec(modified_values);
-            // Set blinding factors
-            let blind = set_blinding(&mut z[params.n as usize - blinding_factors..]);
-            // Set new last_z
-            last_z = z[params.n as usize - (blinding_factors + 1)];
-
-            let (permutation_product_commitment_projective, (permutation_product_poly, coset)) =
-                crate::multicore::join(
-                    || params.commit_lagrange(&z, blind),
-                    || {
-                        let z = domain.lagrange_to_coeff_with_twiddles(z.clone(), &pk.fft_twiddles);
-                        let coset =
-                            domain.coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles);
-                        (z, coset)
-                    },
-                );
-            let permutation_product_blind = blind;
-            let permutation_product_commitment =
-                permutation_product_commitment_projective.to_affine();
-
-            finish_set(PreparedSet {
-                permutation_product_poly,
-                permutation_product_coset: coset,
-                permutation_product_commitment,
-                permutation_product_blind,
-            })?;
+            finish_set(prepare_product(params, pk, product))?;
         }
 
         Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_ratios<C: CurveAffine>(
+    params: &Params<C>,
+    domain: &poly::EvaluationDomain<C::Scalar>,
+    columns: &[plonk::Column<Any>],
+    permutations: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    beta: ChallengeBeta<C>,
+    gamma: ChallengeGamma<C>,
+    mut deltaomega: C::Scalar,
+) -> (Vec<C::Scalar>, C::Scalar) {
+    let mut ratios = vec![C::Scalar::ONE; params.n as usize];
+
+    // Compute the product of denominators for this permutation set.
+    for (&column, permuted_column_values) in columns.iter().zip(permutations.iter()) {
+        let values = match column.column_type() {
+            Any::Advice => advice,
+            Any::Fixed => fixed,
+            Any::Instance => instance,
+        };
+        parallelize(&mut ratios, |ratios, start| {
+            for ((ratio, value), permuted_value) in ratios
+                .iter_mut()
+                .zip(values[column.index()][start..].iter())
+                .zip(permuted_column_values[start..].iter())
+            {
+                *ratio *= &(*beta * permuted_value + &*gamma + value);
+            }
+        });
+    }
+
+    crate::arithmetic::batch_invert_multi(&mut ratios);
+
+    // Multiply by the product of numerators for this permutation set.
+    for &column in columns {
+        let omega = domain.get_omega();
+        let values = match column.column_type() {
+            Any::Advice => advice,
+            Any::Fixed => fixed,
+            Any::Instance => instance,
+        };
+        parallelize(&mut ratios, |ratios, start| {
+            let mut row_deltaomega = deltaomega * &omega.pow_vartime([start as u64]);
+            for (ratio, value) in ratios
+                .iter_mut()
+                .zip(values[column.index()][start..].iter())
+            {
+                *ratio *= &(row_deltaomega * &*beta + &*gamma + value);
+                row_deltaomega *= &omega;
+            }
+        });
+        deltaomega *= &C::Scalar::DELTA;
+    }
+
+    (ratios, deltaomega)
+}
+
+fn build_product<C: CurveAffine>(
+    domain: &poly::EvaluationDomain<C::Scalar>,
+    blinding_factors: usize,
+    last_z: &mut C::Scalar,
+    mut ratios: Vec<C::Scalar>,
+    set_blinding: impl FnOnce(&mut [C::Scalar]) -> Blind<C::Scalar>,
+) -> UntransformedSet<C::Scalar> {
+    let usable_rows = ratios.len() - blinding_factors;
+    let mut state = *last_z;
+    let (last, prefix) = ratios[..usable_rows]
+        .split_last_mut()
+        .expect("the usable evaluation domain is non-empty");
+    for value in prefix {
+        let current = *value;
+        *value = state;
+        state *= &current;
+    }
+    *last = state;
+
+    let mut product = domain.lagrange_from_vec(ratios);
+    let product_blind = set_blinding(&mut product[usable_rows..]);
+    *last_z = product[usable_rows - 1];
+
+    UntransformedSet {
+        product,
+        product_blind,
+    }
+}
+
+fn prepare_product<C: CurveAffine>(
+    params: &Params<C>,
+    pk: &plonk::ProvingKey<C>,
+    set: UntransformedSet<C::Scalar>,
+) -> PreparedSet<C> {
+    let blind = set.product_blind;
+    let z = set.product;
+    let (commitment, (polynomial, coset)) = crate::multicore::join(
+        || params.commit_lagrange(&z, blind),
+        || {
+            let polynomial = pk
+                .vk
+                .domain
+                .lagrange_to_coeff_with_twiddles(z.clone(), &pk.fft_twiddles);
+            let coset = pk
+                .vk
+                .domain
+                .coeff_to_extended_with_twiddles(polynomial.clone(), &pk.fft_twiddles);
+            (polynomial, coset)
+        },
+    );
+
+    PreparedSet {
+        permutation_product_poly: polynomial,
+        permutation_product_coset: coset,
+        permutation_product_commitment: commitment.to_affine(),
+        permutation_product_blind: blind,
     }
 }
 
@@ -614,8 +754,9 @@ mod tests {
     use rand::{SeedableRng, rngs::StdRng};
 
     const EQUALITY_COLUMNS: usize = 3;
-    const PROOF_CIRCUITS: usize = 4;
-    const MULTICORE_THREADS: usize = 6;
+    const MAX_PROOF_CIRCUITS: usize = 4;
+    const PROOF_CIRCUIT_COUNTS: [usize; 3] = [1, 2, MAX_PROOF_CIRCUITS];
+    const PROOF_THREAD_COUNTS: [usize; 2] = [6, 10];
     const PROOF_SEED: u64 = 0x5045_524d_5554_4508;
 
     #[derive(Clone, Copy)]
@@ -690,14 +831,14 @@ mod tests {
                 > 1
         );
 
-        let circuits: [PermutationCircuit; PROOF_CIRCUITS] =
+        let circuits: [PermutationCircuit; MAX_PROOF_CIRCUITS] =
             std::array::from_fn(|index| PermutationCircuit {
                 value: Fp::from(index as u64 + 1),
             });
         let no_instance_columns: &[&[Fp]] = &[];
-        let instances = [no_instance_columns; PROOF_CIRCUITS];
+        let instances = [no_instance_columns; MAX_PROOF_CIRCUITS];
 
-        let prove = |threads| {
+        let prove = |circuit_count, threads| {
             let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
             maybe_rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
@@ -707,8 +848,8 @@ mod tests {
                     create_proof(
                         &params,
                         &pk,
-                        &circuits,
-                        &instances,
+                        &circuits[..circuit_count],
+                        &instances[..circuit_count],
                         StdRng::seed_from_u64(PROOF_SEED),
                         &mut transcript,
                     )
@@ -717,6 +858,11 @@ mod tests {
             transcript.finalize()
         };
 
-        assert_eq!(prove(1), prove(MULTICORE_THREADS));
+        for circuit_count in PROOF_CIRCUIT_COUNTS {
+            let serial = prove(circuit_count, 1);
+            for threads in PROOF_THREAD_COUNTS {
+                assert_eq!(serial, prove(circuit_count, threads));
+            }
+        }
     }
 }
