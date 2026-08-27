@@ -11,7 +11,7 @@ use crate::{
     arithmetic::{parallelize, CurveAffine},
     plonk::{
         ChallengeX, ChallengeY, Error,
-        evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+        evaluation::{EvaluationPoint, EvaluationQuery},
     },
     poly::{
         self, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial, ProvingKeyTwiddles,
@@ -165,11 +165,18 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
 }
 
 impl<C: CurveAffine> ConstructedQuotient<C> {
+    pub(in crate::plonk) fn evaluation_query(&self) -> EvaluationQuery<'_, C::Scalar> {
+        EvaluationQuery {
+            polynomial: &self.random_poly.poly,
+            point: EvaluationPoint::Current,
+        }
+    }
+
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
         xn: C::Scalar,
         domain: &EvaluationDomain<C::Scalar>,
-        evaluator: &PolynomialEvaluator<C::Scalar>,
+        random_eval: C::Scalar,
         transcript: &mut T,
     ) -> Result<EvaluatedQuotient<C>, Error> {
         let h_poly = fold_quotient_pieces(domain, self.h_pieces, xn);
@@ -180,10 +187,6 @@ impl<C: CurveAffine> ConstructedQuotient<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
-        let random_eval = evaluator.evaluate(&[EvaluationQuery {
-            polynomial: &self.random_poly.poly,
-            point: EvaluationPoint::Current,
-        }])[0];
         transcript.write_scalar(random_eval)?;
 
         Ok(EvaluatedQuotient {

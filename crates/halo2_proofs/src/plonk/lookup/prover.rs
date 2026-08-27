@@ -5,7 +5,7 @@ use super::super::{
 use super::Argument;
 use crate::{
     arithmetic::{CurveAffine, parallelize},
-    plonk::evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+    plonk::evaluation::{EvaluationPoint, EvaluationQuery},
     poly::{
         self, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
         commitment::{Blind, Params},
@@ -577,12 +577,8 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
 }
 
 impl<C: CurveAffine> Constructed<C> {
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
-        self,
-        evaluator: &PolynomialEvaluator<C::Scalar>,
-        transcript: &mut T,
-    ) -> Result<Evaluated<C>, Error> {
-        let queries = [
+    pub(in crate::plonk) fn evaluation_queries(&self) -> [EvaluationQuery<'_, C::Scalar>; 5] {
+        [
             EvaluationQuery {
                 polynomial: &self.product_poly,
                 point: EvaluationPoint::Current,
@@ -603,10 +599,19 @@ impl<C: CurveAffine> Constructed<C> {
                 polynomial: &self.permuted_table_poly,
                 point: EvaluationPoint::Current,
             },
-        ];
+        ]
+    }
 
+    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+        self,
+        evaluations: &mut impl Iterator<Item = C::Scalar>,
+        transcript: &mut T,
+    ) -> Result<Evaluated<C>, Error> {
         // Hash each advice evaluation.
-        for evaluation in evaluator.evaluate(&queries) {
+        for _ in 0..self.evaluation_queries().len() {
+            let evaluation = evaluations
+                .next()
+                .expect("one result is returned for every lookup evaluation query");
             transcript.write_scalar(evaluation)?;
         }
 

@@ -11,7 +11,7 @@ use crate::{
     arithmetic::{CurveAffine, parallelize},
     plonk::{
         self, Error,
-        evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+        evaluation::{EvaluationPoint, EvaluationQuery},
     },
     poly::{
         self, Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
@@ -484,21 +484,25 @@ impl<C: CurveAffine> super::ProvingKey<C> {
         })
     }
 
+    pub(in crate::plonk) fn evaluation_queries(
+        &self,
+    ) -> impl Iterator<Item = EvaluationQuery<'_, C::Scalar>> {
+        self.polys.iter().map(|polynomial| EvaluationQuery {
+            polynomial,
+            point: EvaluationPoint::Current,
+        })
+    }
+
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         &self,
-        evaluator: &PolynomialEvaluator<C::Scalar>,
+        evaluations: &mut impl Iterator<Item = C::Scalar>,
         transcript: &mut T,
     ) -> Result<(), Error> {
         // Hash permutation evals
-        let queries = self
-            .polys
-            .iter()
-            .map(|polynomial| EvaluationQuery {
-                polynomial,
-                point: EvaluationPoint::Current,
-            })
-            .collect::<Vec<_>>();
-        for eval in evaluator.evaluate(&queries) {
+        for _ in &self.polys {
+            let eval = evaluations
+                .next()
+                .expect("one result is returned for every permutation-key evaluation query");
             transcript.write_scalar(eval)?;
         }
 
@@ -507,29 +511,39 @@ impl<C: CurveAffine> super::ProvingKey<C> {
 }
 
 impl<C: CurveAffine> Constructed<C> {
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
-        self,
-        evaluator: &PolynomialEvaluator<C::Scalar>,
-        transcript: &mut T,
-    ) -> Result<Evaluated<C>, Error> {
-        let mut queries = Vec::with_capacity(self.sets.len() * 3);
-        for (index, set) in self.sets.iter().enumerate() {
-            queries.push(EvaluationQuery {
-                polynomial: &set.permutation_product_poly,
-                point: EvaluationPoint::Current,
-            });
-            queries.push(EvaluationQuery {
-                polynomial: &set.permutation_product_poly,
-                point: EvaluationPoint::Next,
-            });
-            if index + 1 < self.sets.len() {
-                queries.push(EvaluationQuery {
+    pub(in crate::plonk) fn evaluation_queries(
+        &self,
+    ) -> impl Iterator<Item = EvaluationQuery<'_, C::Scalar>> {
+        self.sets.iter().enumerate().flat_map(|(index, set)| {
+            [
+                Some(EvaluationQuery {
+                    polynomial: &set.permutation_product_poly,
+                    point: EvaluationPoint::Current,
+                }),
+                Some(EvaluationQuery {
+                    polynomial: &set.permutation_product_poly,
+                    point: EvaluationPoint::Next,
+                }),
+                (index + 1 < self.sets.len()).then_some(EvaluationQuery {
                     polynomial: &set.permutation_product_poly,
                     point: EvaluationPoint::Last,
-                });
-            }
-        }
-        for evaluation in evaluator.evaluate(&queries) {
+                }),
+            ]
+            .into_iter()
+            .flatten()
+        })
+    }
+
+    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+        self,
+        evaluations: &mut impl Iterator<Item = C::Scalar>,
+        transcript: &mut T,
+    ) -> Result<Evaluated<C>, Error> {
+        let evaluation_count = self.evaluation_queries().count();
+        for _ in 0..evaluation_count {
+            let evaluation = evaluations
+                .next()
+                .expect("one result is returned for every permutation evaluation query");
             transcript.write_scalar(evaluation)?;
         }
 
