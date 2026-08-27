@@ -488,12 +488,12 @@ impl<C: CurveAffine> Params<C> {
     ///
     /// Returns whether a prepared check was actually built and cached.
     /// `false` means arming was a no-op — the curve has no prepared
-    /// backend, the backend declined (its prepared table for this SRS
-    /// would exceed its internal memory budget; very large `k`), or the
-    /// `orbits` feature (disabled by default) is off — and verification
-    /// simply keeps evaluating the plain multiexp. Callers may ignore the
-    /// result; long-lived validators that expect the speedup can assert
-    /// or log it.
+    /// backend, the backend declined (its prepared table for this SRS would
+    /// exceed its internal footprint budget; on Pasta this begins at
+    /// `k = 13`), or the `orbits` feature (disabled by default) is off — and
+    /// verification simply keeps evaluating the plain multiexp. Callers may
+    /// ignore the result; long-lived validators that expect the speedup can
+    /// assert or log it.
     pub fn prepare_zero_checks(&self) -> bool {
         #[cfg(feature = "orbits")]
         {

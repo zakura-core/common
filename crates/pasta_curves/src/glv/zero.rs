@@ -128,9 +128,11 @@ const TAIL_WIDTHS: [usize; 3] = [3, 4, 5];
 /// per-window costs.
 const EXTRAS_PLANNED_MIN: usize = super::MIN_GLV_MULTIEXP_TERMS;
 
-/// Default prepared-memory ceiling for [`PreparedZeroMsm::prepare`]'s mode
-/// planning: 64 MiB of variant table.
-const DEFAULT_TABLE_BUDGET: usize = 64 << 20;
+/// Default per-table ceiling for the large allocations accounted by
+/// [`PreparedZeroMsm::prepared_bytes`]. A 13 MiB ceiling selects the α7
+/// mode for an Orchard-sized SRS; its two prover tables account for about
+/// 24.8 MiB in total, plus small metadata and allocator overhead.
+const DEFAULT_TABLE_FOOTPRINT_BUDGET: usize = 13 << 20;
 
 /// A prepared fixed-base zero-check: reusable tables for testing
 /// $\sum_i \[k_i\] P_i \stackrel{?}{=} \mathcal{O}$ against the bases given
@@ -180,14 +182,18 @@ impl<C: GlvParams> core::fmt::Debug for PreparedZeroMsm<C> {
 impl<C: GlvParams> PreparedZeroMsm<C> {
     /// Prepares zero-checks against `bases`, choosing the codebook mode by
     /// the operation model at the current thread-pool width, within a
-    /// 64 MiB prepared-table budget — or `None` when even the smallest
-    /// mode's table would exceed that budget (very large base sets),
-    /// declining rather than silently allocating past it. Use
+    /// 13 MiB per-table accounted-footprint budget — or `None` when even
+    /// the smallest mode would exceed that budget (from roughly $2^{13}$
+    /// Pasta bases), declining rather than silently allocating past it. Use
     /// [`Self::prepare_with_mode`] to pin a mode explicitly and accept its
     /// memory regardless of the budget.
     pub fn prepare(bases: &[C::AffineExt]) -> Option<Self> {
-        plan_mode(bases.len(), current_num_threads(), DEFAULT_TABLE_BUDGET)
-            .map(|mode| Self::prepare_with_mode(bases, mode))
+        plan_mode::<C>(
+            bases.len(),
+            current_num_threads(),
+            DEFAULT_TABLE_FOOTPRINT_BUDGET,
+        )
+        .map(|mode| Self::prepare_with_mode(bases, mode))
     }
 
     /// Prepares zero-checks against `bases` with an explicit codebook mode.
@@ -258,8 +264,11 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         self.live.len()
     }
 
-    /// Prepared memory in bytes (variant table, tail bases, and the
-    /// codebook's residue table).
+    /// Accounted table footprint in bytes: the variant table, tail bases,
+    /// residue entries, and codebook lifts. This intentionally excludes
+    /// small live/merge vectors, the coefficient program, object and
+    /// allocator overhead, and transient setup scratch; it is an estimate
+    /// of the dominant retained payload rather than a heap or RSS total.
     pub fn prepared_bytes(&self) -> usize {
         self.table.bytes()
             + self.tail_bases.len() * core::mem::size_of::<orbit::RotatedBase<C::Base>>()
@@ -926,7 +935,8 @@ fn integrate_coefficients<C: GlvParams>(
 }
 
 /// Chooses a default codebook mode: an ordered preference list within
-/// `table_budget` bytes of prepared points, fit to the `zero_check_timings`
+/// `table_footprint_budget` bytes as reported by
+/// [`PreparedZeroMsm::prepared_bytes`], fit to the `zero_check_timings`
 /// measurements on 32-core x86-64 (portable field backend, Vesta,
 /// 2026-08-24; medians of interleaved rounds against the unprepared
 /// `try_multiexp` control on true zero relations):
@@ -944,62 +954,132 @@ fn integrate_coefficients<C: GlvParams>(
 ///   variants cost in cache) but need 2–4× less memory: `α7` gave +47%
 ///   serial at 2,048 terms in 12 MiB, `α6` +36% in 6 MiB.
 /// - At 8,192 terms the wider radixes win serially (`β8^16`/`α8`/`α9`,
-///   +42..+51%), but their tables outgrow the default budget; within it
-///   the ordering below still measured +18..+40%.
+///   +42..+51%), but every measured mode exceeds the current 13 MiB default.
+///   Default preparation therefore declines at that size; explicit
+///   [`PreparedZeroMsm::prepare_with_mode`] remains available to callers that
+///   accept the larger footprint.
 /// - The subset-table baseline — given the same batched-affine tree
 ///   reduction as everything else — beats the unprepared control from
 ///   t = 12 up but still trails the codebook by 18–31% at comparable or
 ///   larger memory (t = 12, 43 MiB: 11.7 ms and t = 14, 147 MiB: 10.3 ms,
 ///   against β7^8's 8.9 ms in 48 MiB, serial at 2,048 terms), with no
 ///   parallel path; it is not a candidate.
-/// - Wider c = 8 codebooks at the default budget — `β8^32` and the
-///   16×16 exponent box (256 variants against 96/47 buckets, both
-///   48 MiB) — measured 0–3% behind `β7^8` at 2,048 terms serially and
-///   inside the parallel noise band (2026-08-24 sweep), never ahead of
-///   it, so the list keeps β7^8 first; see the module docs for why
-///   richer geometry no longer pays.
+/// - In the 2026-08-24 48 MiB sweep, wider c = 8 codebooks — `β8^32` and
+///   the 16×16 exponent box (256 variants against 96/47 buckets) — measured
+///   0–3% behind `β7^8` at 2,048 terms serially and inside the parallel
+///   noise band, never ahead of it. They therefore are not candidates under
+///   the tighter default; see the module docs for why richer geometry no
+///   longer pays.
 ///
-/// Returns `None` when even the smallest candidate's table would exceed
-/// `table_budget` (very large base sets — at the default budget, from
-/// roughly 2^16 bases up), so the caller declines to prepare instead of
+/// Returns `None` when even the smallest candidate would exceed
+/// `table_footprint_budget` (large base sets — at the default budget, from
+/// roughly 2^13 Pasta bases up), so the caller declines to prepare instead of
 /// silently allocating past the budget.
 ///
 /// Benchmarks can pin any mode via [`PreparedZeroMsm::prepare_with_mode`].
-fn plan_mode(terms: usize, num_threads: usize, table_budget: usize) -> Option<CodebookMode> {
-    let prefer_windows = num_threads >= 16;
-    // (mode, variant count): the counts come from the derived §6.3
-    // handoff table (re-asserted by `subgroup_table_matches_handoff`),
-    // not a closed formula. 96 bytes per prepared point.
-    let beta = |window_bits, k, variants| {
-        (
-            CodebookMode::Subgroup {
-                window_bits,
-                beta_power: Some(k),
-            },
-            variants,
-        )
-    };
-    let alpha = |window_bits: usize| {
-        (
-            CodebookMode::alpha_only(window_bits),
-            1usize << (window_bits - 1),
-        )
-    };
-    let mut candidates: Vec<(CodebookMode, usize)> = Vec::new();
-    if prefer_windows {
+#[derive(Clone, Copy)]
+struct ModeCandidate {
+    mode: CodebookMode,
+    variants: usize,
+    buckets: usize,
+}
+
+const BETA_SEVEN_POWER_EIGHT: ModeCandidate = ModeCandidate {
+    mode: CodebookMode::Subgroup {
+        window_bits: 7,
+        beta_power: Some(8),
+    },
+    variants: 256,
+    buckets: 32,
+};
+const BETA_SIX_POWER_FOUR: ModeCandidate = ModeCandidate {
+    mode: CodebookMode::Subgroup {
+        window_bits: 6,
+        beta_power: Some(4),
+    },
+    variants: 128,
+    buckets: 16,
+};
+const ALPHA_SEVEN: ModeCandidate = ModeCandidate {
+    mode: CodebookMode::alpha_only(7),
+    variants: 64,
+    buckets: 64,
+};
+const ALPHA_SIX: ModeCandidate = ModeCandidate {
+    mode: CodebookMode::alpha_only(6),
+    variants: 32,
+    buckets: 32,
+};
+const ALPHA_FIVE: ModeCandidate = ModeCandidate {
+    mode: CodebookMode::alpha_only(5),
+    variants: 16,
+    buckets: 16,
+};
+
+const DEFAULT_MODE_CANDIDATES: [ModeCandidate; 5] = [
+    BETA_SEVEN_POWER_EIGHT,
+    BETA_SIX_POWER_FOUR,
+    ALPHA_SEVEN,
+    ALPHA_SIX,
+    ALPHA_FIVE,
+];
+const WIDE_MODE_CANDIDATES: [ModeCandidate; 5] = [
+    BETA_SIX_POWER_FOUR,
+    BETA_SEVEN_POWER_EIGHT,
+    ALPHA_SEVEN,
+    ALPHA_SIX,
+    ALPHA_FIVE,
+];
+
+fn plan_mode<C: GlvParams>(
+    terms: usize,
+    num_threads: usize,
+    table_footprint_budget: usize,
+) -> Option<CodebookMode> {
+    // These counts come from the derived §6.3 handoff table (re-asserted
+    // by `subgroup_table_matches_handoff`), not a closed formula.
+    let candidates = if num_threads >= 16 {
         // Wide worker pools: more windows beat fewer visits (and β6⁴
         // needs half β7⁸'s memory, so the reordering never loses a fit).
-        candidates.push(beta(6, 4, 128));
-        candidates.push(beta(7, 8, 256));
+        &WIDE_MODE_CANDIDATES
     } else {
-        candidates.push(beta(7, 8, 256));
-        candidates.push(beta(6, 4, 128));
-    }
-    candidates.extend([alpha(7), alpha(6), alpha(5)]);
+        &DEFAULT_MODE_CANDIDATES
+    };
     candidates
-        .into_iter()
-        .find(|&(_, variants)| variants * terms * 96 <= table_budget)
-        .map(|(mode, _)| mode)
+        .iter()
+        .find(|candidate| {
+            estimated_table_footprint::<C>(
+                terms,
+                candidate.mode.window_bits(),
+                candidate.variants,
+                candidate.buckets,
+            )
+            .is_some_and(|bytes| bytes <= table_footprint_budget)
+        })
+        .map(|candidate| candidate.mode)
+}
+
+/// Computes the allocation classes included by
+/// [`PreparedZeroMsm::prepared_bytes`] without first building the table.
+fn estimated_table_footprint<C: GlvParams>(
+    terms: usize,
+    window_bits: usize,
+    variants: usize,
+    buckets: usize,
+) -> Option<usize> {
+    let variant_table = terms
+        .checked_mul(variants)?
+        .checked_mul(core::mem::size_of::<prepared::PreparedPoint<C::Base>>())?;
+    let tail_bases = terms.checked_mul(core::mem::size_of::<orbit::RotatedBase<C::Base>>())?;
+    let residue_entries =
+        (1usize << (2 * window_bits)).checked_mul(core::mem::size_of::<codebook::CodeEntry>())?;
+    let lifts = variants
+        .checked_add(buckets)?
+        .checked_mul(core::mem::size_of::<codebook::Eis>())?;
+    variant_table
+        .checked_add(tail_bases)?
+        .checked_add(residue_entries)?
+        .checked_add(lifts)
 }
 
 #[cfg(test)]
@@ -1314,18 +1394,62 @@ mod tests {
         let prepared =
             PreparedZeroMsm::<C>::prepare(&bases).expect("600 bases fit the default budget");
         assert!(prepared.is_zero_vartime(&scalars));
-        assert!(prepared.prepared_bytes() > 0);
+        let estimate = estimated_table_footprint::<C>(
+            bases.len(),
+            prepared.mode().window_bits(),
+            prepared.codebook.variants().len(),
+            prepared.codebook.bucket_count(),
+        )
+        .expect("the table-footprint estimate fits usize");
+        assert_eq!(estimate, prepared.prepared_bytes());
     }
 
-    /// The default mode planner stays within its table budget and declines
-    /// (rather than over-allocating) when no candidate fits.
+    /// The default mode planner stays within its table-footprint budget and
+    /// declines (rather than over-allocating) when no candidate fits.
     #[test]
     fn plan_mode_respects_budget() {
         for threads in [1usize, 32] {
-            assert!(plan_mode(2_048, threads, DEFAULT_TABLE_BUDGET).is_some());
-            // At 2^17 bases even α5's 16-variant table (~200 MiB) exceeds
-            // the 64 MiB default budget.
-            assert_eq!(plan_mode(1 << 17, threads, DEFAULT_TABLE_BUDGET), None);
+            let mode = plan_mode::<pallas::Point>(2_050, threads, DEFAULT_TABLE_FOOTPRINT_BUDGET);
+            assert_eq!(mode, Some(CodebookMode::alpha_only(7)));
+            let bytes = estimated_table_footprint::<pallas::Point>(
+                2_050,
+                ALPHA_SEVEN.mode.window_bits(),
+                ALPHA_SEVEN.variants,
+                ALPHA_SEVEN.buckets,
+            )
+            .expect("the Orchard-sized estimate fits usize");
+            assert!(bytes <= DEFAULT_TABLE_FOOTPRINT_BUDGET);
+
+            let fixed = estimated_table_footprint::<pallas::Point>(
+                0,
+                ALPHA_FIVE.mode.window_bits(),
+                ALPHA_FIVE.variants,
+                ALPHA_FIVE.buckets,
+            )
+            .unwrap();
+            let one = estimated_table_footprint::<pallas::Point>(
+                1,
+                ALPHA_FIVE.mode.window_bits(),
+                ALPHA_FIVE.variants,
+                ALPHA_FIVE.buckets,
+            )
+            .unwrap();
+            let largest = (DEFAULT_TABLE_FOOTPRINT_BUDGET - fixed) / (one - fixed);
+            let fits = plan_mode::<pallas::Point>(largest, threads, DEFAULT_TABLE_FOOTPRINT_BUDGET);
+            let too_large =
+                plan_mode::<pallas::Point>(largest + 1, threads, DEFAULT_TABLE_FOOTPRINT_BUDGET);
+            assert!(fits.is_some());
+            assert_eq!(too_large, None);
+        }
+    }
+
+    /// Planner metadata stays synchronized with constructed codebooks.
+    #[test]
+    fn default_candidate_shapes_match_codebooks() {
+        for candidate in DEFAULT_MODE_CANDIDATES {
+            let codebook = Codebook::new(candidate.mode);
+            assert_eq!(candidate.variants, codebook.variants().len());
+            assert_eq!(candidate.buckets, codebook.bucket_count());
         }
     }
 

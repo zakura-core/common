@@ -97,9 +97,9 @@ macro_rules! impl_prepare_zero_check {
         fn try_prepare_zero_check(
             bases: &[Self::AffineExt],
         ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<Self>>> {
-            // `prepare` declines (None) when no codebook mode fits its
-            // table budget — very large base sets — so callers fall back
-            // to unprepared checks instead of allocating past it.
+            // `prepare` declines (None) when no codebook mode fits its 13 MiB
+            // accounted-footprint budget — from roughly 2^13 Pasta bases — so
+            // callers fall back instead of allocating past it.
             crate::glv::zero::PreparedZeroMsm::<$name>::prepare(bases).map(|prepared| {
                 alloc::boxed::Box::new(prepared)
                     as alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<Self>>
