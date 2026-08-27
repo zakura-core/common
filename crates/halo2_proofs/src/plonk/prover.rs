@@ -856,29 +856,53 @@ where
             }),
         })
         .collect::<Vec<_>>();
-    // Evaluate all transcript-adjacent queries in one batch so that the
-    // parallel evaluator does not encounter an artificial barrier between
-    // instance, advice, and fixed polynomials.
     let queries = instance_queries
         .into_iter()
         .chain(advice_queries)
         .chain(fixed_queries)
         .collect::<Vec<_>>();
-    for evaluation in polynomial_evaluator.evaluate(&queries) {
+    let initial_evaluation_count = queries.len();
+    let mut queries = queries;
+    queries.push(vanishing.evaluation_query());
+    queries.extend(pk.permutation.evaluation_queries());
+    for permutation in &permutations {
+        queries.extend(permutation.evaluation_queries());
+    }
+    for lookups in &lookups {
+        for lookup in lookups {
+            queries.extend(lookup.evaluation_queries());
+        }
+    }
+
+    // All evaluations below depend only on x. Evaluate them as one batch so
+    // that small argument-local query sets share the same worker wave, then
+    // preserve the protocol's transcript order while consuming the results.
+    let evaluations = polynomial_evaluator.evaluate(&queries);
+    drop(queries);
+    let mut evaluations = evaluations.into_iter();
+    for _ in 0..initial_evaluation_count {
+        let evaluation = evaluations
+            .next()
+            .expect("one result is returned for every initial evaluation query");
         transcript.write_scalar(evaluation)?;
     }
 
-    let vanishing = vanishing.evaluate(xn, domain, &polynomial_evaluator, transcript)?;
+    let vanishing = vanishing.evaluate(
+        xn,
+        domain,
+        evaluations
+            .next()
+            .expect("one random-polynomial evaluation is queued"),
+        transcript,
+    )?;
 
     // Evaluate common permutation data
-    pk.permutation.evaluate(&polynomial_evaluator, transcript)?;
+    pk.permutation.evaluate(&mut evaluations, transcript)?;
 
     // Evaluate the permutations, if any, at omega^i x.
     let permutations: Vec<permutation::prover::Evaluated<C>> = permutations
         .into_iter()
-        .map(|permutation| -> Result<_, _> {
-            permutation.evaluate(&polynomial_evaluator, transcript)
-        })
+        .map(|permutation| -> Result<_, _> { permutation.evaluate(&mut evaluations, transcript) })
         .collect::<Result<Vec<_>, _>>()?;
 
     // Evaluate the lookups, if any, at omega^i x.
@@ -887,10 +911,14 @@ where
         .map(|lookups| -> Result<Vec<_>, _> {
             lookups
                 .into_iter()
-                .map(|p| p.evaluate(&polynomial_evaluator, transcript))
+                .map(|p| p.evaluate(&mut evaluations, transcript))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        evaluations.next().is_none(),
+        "one result is consumed for every batched polynomial evaluation query",
+    );
 
     let instances = instance
         .iter()
