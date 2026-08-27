@@ -19,14 +19,14 @@ use std::io;
 /// deliberate conservative padding; it still makes the opening mask
 /// commitment tiny compared with the supported polynomial at production
 /// domain sizes.
-const IPA_BLINDING_POLYNOMIAL_DEGREE: usize = 64;
+const IPA_MASKING_POLYNOMIAL_DEGREE: usize = 64;
 
-fn sample_ipa_blinding_polynomial<F: Field, R: Rng>(
+fn sample_ipa_masking_polynomial<F: Field, R: Rng>(
     polynomial_len: usize,
     x: F,
     rng: &mut R,
 ) -> Vec<F> {
-    let coefficient_count = polynomial_len.min(IPA_BLINDING_POLYNOMIAL_DEGREE + 1);
+    let coefficient_count = polynomial_len.min(IPA_MASKING_POLYNOMIAL_DEGREE + 1);
     let mut coefficients = vec![F::ZERO; coefficient_count];
 
     // Sampling coefficients 1..=degree and deriving the constant coefficient
@@ -39,7 +39,7 @@ fn sample_ipa_blinding_polynomial<F: Field, R: Rng>(
     coefficients
 }
 
-fn ipa_blinding_commitment<C: CurveAffine>(
+fn ipa_masking_commitment<C: CurveAffine>(
     coefficients: &[C::Scalar],
     blind: Blind<C::Scalar>,
     params: &Params<C>,
@@ -102,11 +102,11 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
 
     // Sample a bounded-degree random polynomial with a root at x_3. See the
     // parent module's sparse-masking HVZK proof.
-    let s_poly = sample_ipa_blinding_polynomial(p_poly.len(), x_3, &mut rng);
+    let s_poly = sample_ipa_masking_polynomial(p_poly.len(), x_3, &mut rng);
     let s_poly_blind = Blind(C::Scalar::random(&mut rng));
 
     // Commit only the nonzero-capable prefix and the independent blind.
-    let s_poly_commitment = ipa_blinding_commitment(&s_poly, s_poly_blind, params).to_affine();
+    let s_poly_commitment = ipa_masking_commitment(&s_poly, s_poly_blind, params).to_affine();
     transcript.write_point(s_poly_commitment)?;
 
     // Challenge that will ensure that the prover cannot change P but can only
@@ -257,8 +257,8 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 #[cfg(test)]
 mod tests {
     use super::{
-        ipa_blinding_commitment, ipa_round_multiexp, parallel_generator_collapse,
-        sample_ipa_blinding_polynomial, Params, IPA_BLINDING_POLYNOMIAL_DEGREE,
+        ipa_masking_commitment, ipa_round_multiexp, parallel_generator_collapse,
+        sample_ipa_masking_polynomial, Params, IPA_MASKING_POLYNOMIAL_DEGREE,
     };
     use crate::arithmetic::{best_multiexp, eval_polynomial, CurveAffine};
     use crate::poly::{commitment::Blind, EvaluationDomain};
@@ -302,7 +302,7 @@ mod tests {
         }
     }
 
-    fn blinding_polynomial_is_sparse_and_commits_correctly<C>()
+    fn masking_polynomial_is_sparse_and_commits_correctly<C>()
     where
         C: CurveAffine + core::fmt::Debug,
     {
@@ -314,11 +314,11 @@ mod tests {
             let domain = EvaluationDomain::new(1, k);
             let x = full_width_scalar::<C>();
             let mut rng = rng();
-            let coefficients = sample_ipa_blinding_polynomial(params.n as usize, x, &mut rng);
+            let coefficients = sample_ipa_masking_polynomial(params.n as usize, x, &mut rng);
 
             assert_eq!(
                 coefficients.len(),
-                (params.n as usize).min(IPA_BLINDING_POLYNOMIAL_DEGREE + 1),
+                (params.n as usize).min(IPA_MASKING_POLYNOMIAL_DEGREE + 1),
             );
             assert_eq!(eval_polynomial(&coefficients, x), C::Scalar::ZERO);
 
@@ -332,7 +332,7 @@ mod tests {
 
             let blind = Blind(C::Scalar::random(&mut rng));
             assert_eq!(
-                ipa_blinding_commitment(&coefficients, blind, &params),
+                ipa_masking_commitment(&coefficients, blind, &params),
                 params.commit(&full, blind),
             );
         }
@@ -397,12 +397,12 @@ mod tests {
     }
 
     #[test]
-    fn blinding_polynomial_is_sparse_and_commits_correctly_pallas() {
-        blinding_polynomial_is_sparse_and_commits_correctly::<pallas::Affine>();
+    fn masking_polynomial_is_sparse_and_commits_correctly_pallas() {
+        masking_polynomial_is_sparse_and_commits_correctly::<pallas::Affine>();
     }
 
     #[test]
-    fn blinding_polynomial_is_sparse_and_commits_correctly_vesta() {
-        blinding_polynomial_is_sparse_and_commits_correctly::<vesta::Affine>();
+    fn masking_polynomial_is_sparse_and_commits_correctly_vesta() {
+        masking_polynomial_is_sparse_and_commits_correctly::<vesta::Affine>();
     }
 }
