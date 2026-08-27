@@ -74,6 +74,13 @@ impl Argument {
     pub(crate) fn get_columns(&self) -> Vec<Column<Any>> {
         self.columns.clone()
     }
+
+    /// Returns the number of product-polynomial sets at the circuit degree.
+    pub(super) fn set_count(&self, cs_degree: usize) -> usize {
+        self.columns
+            .chunks(permutation_chunk_len(cs_degree))
+            .count()
+    }
 }
 
 /// The verifying key for a single permutation argument.

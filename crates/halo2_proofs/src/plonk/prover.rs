@@ -121,14 +121,13 @@ impl<F: Field> AdviceWitness<F> {
     }
 }
 
-// Each outer circuit task contains a two-way commitment/transform join. Leave
-// capacity for that nested work instead of consuming the whole pool with
-// circuit tasks.
+// Each outer permutation task contains a two-way commitment/transform join.
+// Leave capacity for that nested work instead of consuming the whole pool
+// with outer tasks.
 const PERMUTATION_INNER_WORKER_HEADROOM: usize = 2;
 
-fn prepare_permutations_in_parallel(circuit_count: usize, worker_count: usize) -> bool {
-    circuit_count > 1
-        && worker_count.saturating_sub(circuit_count) >= PERMUTATION_INNER_WORKER_HEADROOM
+fn prepare_permutations_in_parallel(task_count: usize, worker_count: usize) -> bool {
+    task_count > 1 && worker_count.saturating_sub(task_count) >= PERMUTATION_INNER_WORKER_HEADROOM
 }
 
 struct WitnessCollection<'a, F: Field> {
@@ -617,76 +616,78 @@ where
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
     let permutation_workers = crate::multicore::current_num_threads();
-    let permutations: Vec<permutation::prover::Committed<C, _>> =
-        if instance.len() == 1 && permutation_workers > 1 {
-            // A single circuit cannot use circuit-level permutation parallelism.
-            // Prepare its independent sets concurrently, then retain transcript
-            // writes in set order.
-            let blinding = pk.vk.cs.permutation.sample_blinding(pk, &mut rng);
-            let prepared = pk.vk.cs.permutation.prepare_sets_in_parallel(
-                params,
-                pk,
-                &pk.permutation,
-                &advice[0].advice_values,
-                &pk.fixed_values,
-                &instance[0].instance_values,
-                beta,
-                gamma,
-                blinding,
-            );
-            vec![prepared.commit(&mut coset_evaluator, transcript)?]
-        } else if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
-            // Draw every permutation's blinding values in circuit and set
-            // order before preparing the independent arguments in parallel.
-            let permutation_blindings = (0..instance.len())
-                .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
-                .collect::<Vec<_>>();
+    let permutation_set_count = pk.vk.cs.permutation.set_count(pk.vk.cs_degree);
+    let permutations: Vec<permutation::prover::Committed<C, _>> = if instance.len() == 1
+        && prepare_permutations_in_parallel(permutation_set_count, permutation_workers)
+    {
+        // A single circuit cannot use circuit-level permutation parallelism.
+        // Prepare its independent sets concurrently, then retain transcript
+        // writes in set order.
+        let blinding = pk.vk.cs.permutation.sample_blinding(pk, &mut rng);
+        let prepared = pk.vk.cs.permutation.prepare_sets_in_parallel(
+            params,
+            pk,
+            &pk.permutation,
+            &advice[0].advice_values,
+            &pk.fixed_values,
+            &instance[0].instance_values,
+            beta,
+            gamma,
+            blinding,
+        );
+        vec![prepared.commit(&mut coset_evaluator, transcript)?]
+    } else if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
+        // Draw every permutation's blinding values in circuit and set
+        // order before preparing the independent arguments in parallel.
+        let permutation_blindings = (0..instance.len())
+            .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
+            .collect::<Vec<_>>();
 
-            let prepared_permutations = (0..instance.len())
-                .into_par_iter()
-                .zip(permutation_blindings.into_par_iter())
-                .map(|(circuit_index, blinding)| {
-                    pk.vk.cs.permutation.prepare(
-                        params,
-                        pk,
-                        &pk.permutation,
-                        &advice[circuit_index].advice_values,
-                        &pk.fixed_values,
-                        &instance[circuit_index].instance_values,
-                        beta,
-                        gamma,
-                        blinding,
-                    )
-                })
-                .collect::<Vec<_>>();
+        let prepared_permutations = (0..instance.len())
+            .into_par_iter()
+            .zip(permutation_blindings.into_par_iter())
+            .map(|(circuit_index, blinding)| {
+                pk.vk.cs.permutation.prepare(
+                    params,
+                    pk,
+                    &pk.permutation,
+                    &advice[circuit_index].advice_values,
+                    &pk.fixed_values,
+                    &instance[circuit_index].instance_values,
+                    beta,
+                    gamma,
+                    blinding,
+                )
+            })
+            .collect::<Vec<_>>();
 
-            prepared_permutations
-                .into_iter()
-                .map(|permutation| permutation.commit(&mut coset_evaluator, transcript))
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            // Keep each circuit's preparation and commitment together on smaller
-            // pools to avoid competing for cache across circuits.
-            instance
-                .iter()
-                .zip(advice.iter())
-                .map(|(instance, advice)| {
-                    pk.vk.cs.permutation.commit(
-                        params,
-                        pk,
-                        &pk.permutation,
-                        &advice.advice_values,
-                        &pk.fixed_values,
-                        &instance.instance_values,
-                        beta,
-                        gamma,
-                        &mut coset_evaluator,
-                        &mut rng,
-                        transcript,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        prepared_permutations
+            .into_iter()
+            .map(|permutation| permutation.commit(&mut coset_evaluator, transcript))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        // Keep each circuit's preparation and commitment together on smaller
+        // pools to avoid competing for cache across circuits.
+        instance
+            .iter()
+            .zip(advice.iter())
+            .map(|(instance, advice)| {
+                pk.vk.cs.permutation.commit(
+                    params,
+                    pk,
+                    &pk.permutation,
+                    &advice.advice_values,
+                    &pk.fixed_values,
+                    &instance.instance_values,
+                    beta,
+                    gamma,
+                    &mut coset_evaluator,
+                    &mut rng,
+                    transcript,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
 
     let circuit_count = lookups.len();
     let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
@@ -994,6 +995,10 @@ fn permutation_outer_parallelism_reserves_inner_capacity() {
         (2, 2, false),
         (2, 3, false),
         (2, 4, true),
+        (3, 4, false),
+        (3, 5, true),
+        (3, 6, true),
+        (3, 10, true),
         (4, 5, false),
         (4, 6, true),
         (4, 10, true),
