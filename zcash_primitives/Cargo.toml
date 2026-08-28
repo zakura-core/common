@@ -183,6 +183,8 @@ version = "0.10"
 default-features = false
 
 [dependencies.transparent]
+git = "https://github.com/zcash/librustzcash.git"
+rev = "91f448b5b1eacba09607faefd39e2204e4bb342d"
 version = "0.10.0"
 default-features = false
 package = "zcash_transparent"
@@ -196,7 +198,9 @@ version = "0.4.1"
 features = ["pre-zip-212"]
 
 [dependencies.zcash_protocol]
-version = "0.10.0"
+git = "https://github.com/zcash/librustzcash.git"
+rev = "91f448b5b1eacba09607faefd39e2204e4bb342d"
+version = "0.10.5"
 default-features = false
 
 [dependencies.zcash_script]
@@ -249,13 +253,17 @@ default-features = false
 package = "zakura-sapling-crypto"
 
 [dev-dependencies.transparent]
+git = "https://github.com/zcash/librustzcash.git"
+rev = "91f448b5b1eacba09607faefd39e2204e4bb342d"
 version = "0.10.0"
 features = ["test-dependencies"]
 default-features = false
 package = "zcash_transparent"
 
 [dev-dependencies.zcash_protocol]
-version = "0.10.0"
+git = "https://github.com/zcash/librustzcash.git"
+rev = "91f448b5b1eacba09607faefd39e2204e4bb342d"
+version = "0.10.5"
 features = [
     "local-consensus",
     "test-dependencies",
@@ -278,6 +286,6 @@ level = "warn"
 priority = 0
 check-cfg = [
     "cfg(tokio_unstable)",
-    'cfg(zcash_unstable, values("nu7"))',
+    'cfg(zcash_unstable, values("nu7", "nutachyon"))',
     "cfg(live_network_tests)",
 ]
