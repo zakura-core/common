@@ -552,7 +552,7 @@ mod tests {
             Advice, Circuit, Column, ConstraintSystem, Error, SingleVerifier, TableColumn,
             create_proof, keygen_pk, keygen_vk, verify_proof,
         },
-        poly::{commitment::Params, Rotation},
+        poly::{Rotation, commitment::Params},
         transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
     use pasta_curves::{EqAffine, Fp};
