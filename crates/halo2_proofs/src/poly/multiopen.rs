@@ -388,7 +388,7 @@ fn test_roundtrip() {
 #[test]
 fn point_set_quotients_preserve_proof_across_workers() {
     use group::Curve;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::commitment::{Blind, Params};
     use crate::arithmetic::eval_polynomial;

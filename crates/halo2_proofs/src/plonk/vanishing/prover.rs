@@ -8,7 +8,7 @@ use rand_core::Rng;
 
 use super::Argument;
 use crate::{
-    arithmetic::{parallelize, CurveAffine},
+    arithmetic::{CurveAffine, parallelize},
     plonk::{
         ChallengeX, ChallengeY, Error,
         evaluation::{EvaluationPoint, EvaluationQuery},
