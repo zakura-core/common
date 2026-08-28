@@ -862,6 +862,16 @@ jobs:
           --all-features
           --verbose
           --release
+      - name: Run default-feature library tests
+        # fused-pedersen is not in the crate defaults, so the --all-features
+        # run above never exercises the original 8-bit exp-window tables.
+        # They live in the library target, so --lib re-runs only the cheap
+        # lib suite without the feature rather than repeating the whole stack.
+        run: >-
+          cargo +stable test -p zakura-sapling-crypto
+          --lib
+          --verbose
+          --release
       - name: Verify working directory is clean
         run: git diff --exit-code
 

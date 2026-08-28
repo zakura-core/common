@@ -9,7 +9,7 @@ use core::fmt;
 
 use super::{
     note::ExtractedNoteCommitment,
-    pedersen_hash::{pedersen_hash, Personalization},
+    pedersen_hash::{pedersen_hash_extended, Personalization},
 };
 
 pub const NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
@@ -58,7 +58,7 @@ fn merkle_hash_field(depth: usize, lhs: &[u8; 32], rhs: &[u8; 32]) -> jubjub::Ba
         tmp
     };
 
-    jubjub::ExtendedPoint::from(pedersen_hash(
+    pedersen_hash_extended(
         Personalization::MerkleTree(depth),
         lhs.iter()
             .copied()
@@ -68,10 +68,13 @@ fn merkle_hash_field(depth: usize, lhs: &[u8; 32], rhs: &[u8; 32]) -> jubjub::Ba
                     .copied()
                     .take(bls12_381::Scalar::NUM_BITS as usize),
             ),
-    ))
+    )
     .to_affine()
     .get_u()
 }
+
+#[cfg(test)]
+mod test_vectors;
 
 /// The root of a Sapling commitment tree.
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
@@ -208,6 +211,24 @@ pub(super) mod testing {
     impl Distribution<Node> for StandardUniform {
         fn sample<R: RandRng + ?Sized>(&self, rng: &mut R) -> Node {
             Node::from_scalar(bls12_381::Scalar::random(rng))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use incrementalmerkletree::Hashable;
+
+    use super::{test_vectors::HEX_EMPTY_ROOTS, Node};
+
+    #[test]
+    fn empty_roots_match_protocol_vectors() {
+        for (level, expected) in HEX_EMPTY_ROOTS.iter().enumerate() {
+            assert_eq!(
+                hex::encode(Node::empty_root((level as u8).into()).to_bytes()),
+                *expected,
+                "empty root mismatch at level {level}",
+            );
         }
     }
 }

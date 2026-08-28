@@ -27,3 +27,9 @@ and this project adheres to Rust's notion of
 - Restarted the version lineage at 1.0.0, leaving behind the inherited upstream
   version (0.7.0); the initial Zakura release will be preceded by `1.0.0-rc` release
   candidates.
+
+### Added
+
+- Opt-in `fused-pedersen` feature, which caches fused chunk-block lookup tables
+  (about 6.2 MiB) to speed up non-circuit Pedersen hashing. The default remains
+  the original 8-bit exp-window tables.

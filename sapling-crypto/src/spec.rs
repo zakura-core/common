@@ -9,7 +9,7 @@ use super::{
         NOTE_COMMITMENT_RANDOMNESS_GENERATOR, NULLIFIER_POSITION_GENERATOR, PRF_NF_PERSONALIZATION,
     },
     group_hash::group_hash,
-    pedersen_hash::{pedersen_hash, Personalization},
+    pedersen_hash::Personalization,
 };
 
 const PREPARED_WINDOW_SIZE: usize = 4;
@@ -148,7 +148,21 @@ pub(crate) fn windowed_pedersen_commit<I>(
 where
     I: IntoIterator<Item = bool>,
 {
-    pedersen_hash(personalization, s) + (NOTE_COMMITMENT_RANDOMNESS_GENERATOR * r)
+    #[cfg(feature = "fused-pedersen")]
+    {
+        let commitment = crate::pedersen_hash::pedersen_hash_extended(personalization, s)
+            + (NOTE_COMMITMENT_RANDOMNESS_GENERATOR * r);
+        // Both summands are prime-order, so the subgroup check can only fail
+        // if one of the evaluators is broken.
+        commitment
+            .into_subgroup()
+            .expect("both Pedersen commitment terms are prime-order")
+    }
+    #[cfg(not(feature = "fused-pedersen"))]
+    {
+        crate::pedersen_hash::pedersen_hash(personalization, s)
+            + (NOTE_COMMITMENT_RANDOMNESS_GENERATOR * r)
+    }
 }
 
 /// Coordinate extractor for Jubjub.
