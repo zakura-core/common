@@ -543,7 +543,7 @@ impl<C: CurveAffine> Evaluated<C> {
     }
 }
 
-#[cfg(all(test, feature = "multicore"))]
+#[cfg(test)]
 mod tests {
     use super::permutation_chunk_len;
     use crate::{

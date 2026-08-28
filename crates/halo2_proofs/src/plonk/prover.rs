@@ -657,8 +657,8 @@ where
                     })
                     .collect::<Vec<_>>()
             } else {
-                // Keep preparation serial on smaller pools to avoid competing
-                // for cache across circuits.
+                // Keep outer circuit preparation serial on smaller pools to
+                // avoid competing for cache across circuits.
                 instance
                     .iter()
                     .zip(advice.iter())
