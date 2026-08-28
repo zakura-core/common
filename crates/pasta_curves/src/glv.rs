@@ -1654,9 +1654,9 @@ fn multiexp_serial<C: GlvParams>(
 /// one-task-per-window schedule duplicates. The pair roots remain
 /// independent, so their remaining shifts overlap. `None` from
 /// `window_sum` (an arithmetic guard) propagates out. Shared by the
-/// Signed-Booth and Eisenstein-orbit backends and the prepared
-/// zero-check's main-window and tail drivers.
-#[cfg(feature = "multicore")]
+/// Eisenstein-orbit backend and the prepared zero-check's main-window and
+/// tail drivers.
+#[cfg(all(feature = "multicore", feature = "orbits"))]
 fn paired_windows_sum<C: GlvParams>(
     windows: usize,
     window_bits: usize,
@@ -1691,6 +1691,32 @@ fn paired_windows_sum<C: GlvParams>(
         })
 }
 
+/// Evaluates each Signed-Booth window independently through Rayon, then
+/// combines the ordered sums with one Horner fold. This keeps the expensive
+/// window reductions parallel without duplicating the shift chain.
+#[cfg(feature = "multicore")]
+fn parallel_windows_sum<C: GlvParams>(
+    windows: usize,
+    window_bits: usize,
+    window_sum: impl Fn(usize) -> Option<C> + Sync,
+) -> Option<C> {
+    let window_sums: Option<Vec<C>> = (0..windows)
+        .into_par_iter()
+        .map(|window| window_sum(window))
+        .collect();
+    let window_sums = window_sums?;
+    let mut acc = C::identity();
+    for (window, sum) in window_sums.into_iter().enumerate().rev() {
+        if window + 1 != windows {
+            for _ in 0..window_bits {
+                acc = acc.double();
+            }
+        }
+        acc += sum;
+    }
+    Some(acc)
+}
+
 #[cfg(feature = "multicore")]
 fn multiexp_parallel<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
@@ -1698,7 +1724,7 @@ fn multiexp_parallel<C: GlvParams>(
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
-    paired_windows_sum::<C>(window_count, window_bits, |window| {
+    parallel_windows_sum::<C>(window_count, window_bits, |window| {
         let buckets = fill_window::<C>(components, bases, window_bits, window)?;
         Some(sum_buckets::<C>(&buckets))
     })
