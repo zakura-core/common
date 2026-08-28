@@ -27,7 +27,9 @@
 #   layer between Zakura and the proving stack (reddsa carries the
 #   pasta_curves dependency that drags in the Sapling-side crates).
 # - zcash_primitives, zcash_keys: the librustzcash members Zakura consumes
-#   that depend on the crates above.
+#   that depend on the crates above. Their protocol, address, and transparent
+#   dependencies stay on an exact upstream librustzcash revision so those
+#   source-identical components do not need Zakura forks.
 
 [workspace]
 resolver = "2"
