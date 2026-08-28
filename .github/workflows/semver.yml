@@ -95,7 +95,7 @@ jobs:
         with:
           toolchain: stable
           cache: false
-      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           # Match Zakura's deliberate exception to tool-version pinning:
           # cargo-semver-checks must track stable rustdoc format changes.
