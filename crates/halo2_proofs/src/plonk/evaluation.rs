@@ -292,12 +292,20 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let actual = evaluator.evaluate(&queries);
-        for (query, actual) in queries.iter().zip(actual) {
+        for (query, actual) in queries.iter().zip(actual.iter().copied()) {
             assert_eq!(
                 actual,
                 eval_polynomial(query.polynomial, point_value(query.point, points)),
             );
         }
+
+        // Combining independently evaluated query batches must preserve the
+        // exact scalar order consumed by the transcript.
+        let separately = queries
+            .chunks(3)
+            .flat_map(|batch| evaluator.evaluate(batch))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, separately);
     }
 
     #[test]

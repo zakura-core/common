@@ -616,65 +616,18 @@ where
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
-    let permutations: Vec<permutation::prover::Committed<C, _>> =
-        if prepare_permutations_in_parallel(instance.len(), crate::multicore::current_num_threads())
-        {
-            // Draw every permutation's blinding values in circuit and set
-            // order before preparing the independent arguments in parallel.
-            let permutation_blindings = (0..instance.len())
-                .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
-                .collect::<Vec<_>>();
-
-            let prepared_permutations = (0..instance.len())
-                .into_par_iter()
-                .zip(permutation_blindings.into_par_iter())
-                .map(|(circuit_index, blinding)| {
-                    pk.vk.cs.permutation.prepare(
-                        params,
-                        pk,
-                        &pk.permutation,
-                        &advice[circuit_index].advice_values,
-                        &pk.fixed_values,
-                        &instance[circuit_index].instance_values,
-                        beta,
-                        gamma,
-                        blinding,
-                    )
-                })
-                .collect::<Vec<_>>();
-
-            prepared_permutations
-                .into_iter()
-                .map(|permutation| permutation.commit(&mut coset_evaluator, transcript))
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            // Keep each circuit's preparation and commitment together on
-            // smaller pools to avoid competing for cache across circuits.
-            instance
-                .iter()
-                .zip(advice.iter())
-                .map(|(instance, advice)| {
-                    pk.vk.cs.permutation.commit(
-                        params,
-                        pk,
-                        &pk.permutation,
-                        &advice.advice_values,
-                        &pk.fixed_values,
-                        &instance.instance_values,
-                        beta,
-                        gamma,
-                        &mut coset_evaluator,
-                        &mut rng,
-                        transcript,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
+    let permutation_workers = crate::multicore::current_num_threads();
+    // Draw every permutation's blinding values in circuit and set order before
+    // drawing the lookup grand-product blindings. This preserves the RNG
+    // order while allowing both argument families to prepare concurrently.
+    let permutation_blindings = (0..instance.len())
+        .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
+        .collect::<Vec<_>>();
 
     let circuit_count = lookups.len();
     let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
     // Draw all blinding values in circuit-major, lookup-major order before
-    // preparing the independent lookup products in parallel.
+    // preparing the independent lookup grand products in parallel.
     for circuit_lookups in lookups {
         debug_assert_eq!(circuit_lookups.len(), lookup_count);
         for lookup in circuit_lookups {
@@ -683,10 +636,61 @@ where
         }
     }
 
-    let prepared_lookup_products = lookup_product_tasks
-        .into_par_iter()
-        .map(|(lookup, blinding)| lookup.prepare_product(pk, params, beta, gamma, blinding))
-        .collect::<Vec<_>>();
+    let (prepared_permutations, prepared_lookup_products) = crate::multicore::join(
+        || {
+            if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
+                (0..instance.len())
+                    .into_par_iter()
+                    .zip(permutation_blindings.into_par_iter())
+                    .map(|(circuit_index, blinding)| {
+                        pk.vk.cs.permutation.prepare(
+                            params,
+                            pk,
+                            &pk.permutation,
+                            &advice[circuit_index].advice_values,
+                            &pk.fixed_values,
+                            &instance[circuit_index].instance_values,
+                            beta,
+                            gamma,
+                            blinding,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                // Keep outer circuit preparation serial on smaller pools to
+                // avoid competing for cache across circuits.
+                instance
+                    .iter()
+                    .zip(advice.iter())
+                    .zip(permutation_blindings)
+                    .map(|((instance, advice), blinding)| {
+                        pk.vk.cs.permutation.prepare(
+                            params,
+                            pk,
+                            &pk.permutation,
+                            &advice.advice_values,
+                            &pk.fixed_values,
+                            &instance.instance_values,
+                            beta,
+                            gamma,
+                            blinding,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+        },
+        || {
+            lookup_product_tasks
+                .into_par_iter()
+                .map(|(lookup, blinding)| lookup.prepare_product(pk, params, beta, gamma, blinding))
+                .collect::<Vec<_>>()
+        },
+    );
+
+    let permutations = prepared_permutations
+        .into_iter()
+        .map(|permutation| permutation.commit(&mut coset_evaluator, transcript))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut prepared_lookup_products = prepared_lookup_products.into_iter();
     let lookups: Vec<Vec<lookup::prover::Committed<C, _>>> = (0..circuit_count)
@@ -695,7 +699,7 @@ where
                 .map(|_| {
                     prepared_lookup_products
                         .next()
-                        .expect("one prepared lookup product per task")
+                        .expect("one prepared lookup grand product per task")
                         .finalize(&mut coset_evaluator, transcript)
                 })
                 .collect()
@@ -856,29 +860,53 @@ where
             }),
         })
         .collect::<Vec<_>>();
-    // Evaluate all transcript-adjacent queries in one batch so that the
-    // parallel evaluator does not encounter an artificial barrier between
-    // instance, advice, and fixed polynomials.
     let queries = instance_queries
         .into_iter()
         .chain(advice_queries)
         .chain(fixed_queries)
         .collect::<Vec<_>>();
-    for evaluation in polynomial_evaluator.evaluate(&queries) {
+    let initial_evaluation_count = queries.len();
+    let mut queries = queries;
+    queries.push(vanishing.evaluation_query());
+    queries.extend(pk.permutation.evaluation_queries());
+    for permutation in &permutations {
+        queries.extend(permutation.evaluation_queries());
+    }
+    for lookups in &lookups {
+        for lookup in lookups {
+            queries.extend(lookup.evaluation_queries());
+        }
+    }
+
+    // All evaluations below depend only on x. Evaluate them as one batch so
+    // that small argument-local query sets share the same worker wave, then
+    // preserve the protocol's transcript order while consuming the results.
+    let evaluations = polynomial_evaluator.evaluate(&queries);
+    drop(queries);
+    let mut evaluations = evaluations.into_iter();
+    for _ in 0..initial_evaluation_count {
+        let evaluation = evaluations
+            .next()
+            .expect("one result is returned for every initial evaluation query");
         transcript.write_scalar(evaluation)?;
     }
 
-    let vanishing = vanishing.evaluate(xn, domain, &polynomial_evaluator, transcript)?;
+    let vanishing = vanishing.evaluate(
+        xn,
+        domain,
+        evaluations
+            .next()
+            .expect("one random-polynomial evaluation is queued"),
+        transcript,
+    )?;
 
     // Evaluate common permutation data
-    pk.permutation.evaluate(&polynomial_evaluator, transcript)?;
+    pk.permutation.evaluate(&mut evaluations, transcript)?;
 
     // Evaluate the permutations, if any, at omega^i x.
     let permutations: Vec<permutation::prover::Evaluated<C>> = permutations
         .into_iter()
-        .map(|permutation| -> Result<_, _> {
-            permutation.evaluate(&polynomial_evaluator, transcript)
-        })
+        .map(|permutation| -> Result<_, _> { permutation.evaluate(&mut evaluations, transcript) })
         .collect::<Result<Vec<_>, _>>()?;
 
     // Evaluate the lookups, if any, at omega^i x.
@@ -887,10 +915,14 @@ where
         .map(|lookups| -> Result<Vec<_>, _> {
             lookups
                 .into_iter()
-                .map(|p| p.evaluate(&polynomial_evaluator, transcript))
+                .map(|p| p.evaluate(&mut evaluations, transcript))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        evaluations.next().is_none(),
+        "one result is consumed for every batched polynomial evaluation query",
+    );
 
     let instances = instance
         .iter()

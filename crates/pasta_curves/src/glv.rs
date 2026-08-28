@@ -1483,9 +1483,10 @@ where
 /// Reduces every affine bucket through shared Montgomery batch inversions.
 ///
 /// `offsets` partitions `points` into one contiguous range per bucket. At
-/// each tree level, all independent additions share one inversion. Identity,
-/// doubling, and inverse pairs are handled explicitly because affine formulas
-/// have exceptional cases.
+/// each tree level, all independent additions share one inversion. The normal
+/// route uses incomplete chord additions without per-pair coordinate checks;
+/// a zero batch product restarts that level with complete handling for
+/// identity, doubling, and inverse pairs.
 ///
 /// # Invariants
 ///
@@ -1500,16 +1501,26 @@ where
 /// buckets. The function is generic over the field only for reuse between
 /// [`crate::Fp`] and [`crate::Fq`].
 fn reduce_affine_buckets<F: Field>(
+    points: Vec<AffinePoint<F>>,
+    offsets: Vec<usize>,
+) -> Option<Vec<Option<AffinePoint<F>>>> {
+    reduce_affine_buckets_inner::<F, false>(points, offsets)
+}
+
+fn reduce_affine_buckets_inner<F: Field, const COMPLETE: bool>(
     mut points: Vec<AffinePoint<F>>,
     mut offsets: Vec<usize>,
 ) -> Option<Vec<Option<AffinePoint<F>>>> {
     debug_assert!(!offsets.is_empty());
     let bucket_count = offsets.len() - 1;
+    let mut next_points = Vec::with_capacity((points.len() + bucket_count) / 2);
+    let mut next_offsets = Vec::with_capacity(offsets.len());
+    let mut pending = Vec::with_capacity(points.len() / 2);
 
     while offsets.windows(2).any(|range| range[1] - range[0] > 1) {
-        let mut next_points = Vec::with_capacity((points.len() + bucket_count) / 2);
-        let mut next_offsets = Vec::with_capacity(offsets.len());
-        let mut pending = Vec::with_capacity(points.len() / 2);
+        next_points.clear();
+        next_offsets.clear();
+        pending.clear();
         next_offsets.push(0);
 
         for range in offsets.windows(2) {
@@ -1518,7 +1529,7 @@ fn reduce_affine_buckets<F: Field>(
                 let left = pair[0];
                 let right = pair[1];
 
-                let (numerator, denominator) = if left.x == right.x {
+                let (numerator, denominator) = if COMPLETE && left.x == right.x {
                     if left.y != right.y || bool::from(left.y.is_zero()) {
                         // The points are inverses, or this is a point of order
                         // two. Their sum is the identity, which is omitted.
@@ -1549,10 +1560,18 @@ fn reduce_affine_buckets<F: Field>(
             next_offsets.push(next_points.len());
         }
 
-        batch_invert_and_add(&mut pending, &mut next_points)?;
+        if batch_invert_and_add(&mut pending, &mut next_points).is_none() {
+            if !COMPLETE {
+                // An incomplete chord was exceptional. `points` and
+                // `offsets` are unchanged, so retry this level and finish the
+                // reduction with complete affine formulas.
+                return reduce_affine_buckets_inner::<F, true>(points, offsets);
+            }
+            return None;
+        }
 
-        points = next_points;
-        offsets = next_offsets;
+        core::mem::swap(&mut points, &mut next_points);
+        core::mem::swap(&mut offsets, &mut next_offsets);
     }
 
     let mut buckets = alloc::vec![None; bucket_count];
@@ -1654,9 +1673,9 @@ fn multiexp_serial<C: GlvParams>(
 /// one-task-per-window schedule duplicates. The pair roots remain
 /// independent, so their remaining shifts overlap. `None` from
 /// `window_sum` (an arithmetic guard) propagates out. Shared by the
-/// Signed-Booth and Eisenstein-orbit backends and the prepared
-/// zero-check's main-window and tail drivers.
-#[cfg(feature = "multicore")]
+/// Eisenstein-orbit backend and the prepared zero-check's main-window and
+/// tail drivers.
+#[cfg(all(feature = "multicore", feature = "orbits"))]
 fn paired_windows_sum<C: GlvParams>(
     windows: usize,
     window_bits: usize,
@@ -1691,6 +1710,32 @@ fn paired_windows_sum<C: GlvParams>(
         })
 }
 
+/// Evaluates each Signed-Booth window independently through Rayon, then
+/// combines the ordered sums with one Horner fold. This keeps the expensive
+/// window reductions parallel without duplicating the shift chain.
+#[cfg(feature = "multicore")]
+fn parallel_windows_sum<C: GlvParams>(
+    windows: usize,
+    window_bits: usize,
+    window_sum: impl Fn(usize) -> Option<C> + Sync,
+) -> Option<C> {
+    let window_sums: Option<Vec<C>> = (0..windows)
+        .into_par_iter()
+        .map(|window| window_sum(window))
+        .collect();
+    let window_sums = window_sums?;
+    let mut acc = C::identity();
+    for (window, sum) in window_sums.into_iter().enumerate().rev() {
+        if window + 1 != windows {
+            for _ in 0..window_bits {
+                acc = acc.double();
+            }
+        }
+        acc += sum;
+    }
+    Some(acc)
+}
+
 #[cfg(feature = "multicore")]
 fn multiexp_parallel<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
@@ -1698,7 +1743,7 @@ fn multiexp_parallel<C: GlvParams>(
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
-    paired_windows_sum::<C>(window_count, window_bits, |window| {
+    parallel_windows_sum::<C>(window_count, window_bits, |window| {
         let buckets = fill_window::<C>(components, bases, window_bits, window)?;
         Some(sum_buckets::<C>(&buckets))
     })

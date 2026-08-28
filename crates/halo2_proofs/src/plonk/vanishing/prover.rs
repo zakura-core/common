@@ -1,6 +1,6 @@
 use std::iter;
 
-use ff::Field;
+use ff::{Field, WithSmallOrderMulGroup};
 use group::Curve;
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
@@ -8,10 +8,10 @@ use rand_core::Rng;
 
 use super::Argument;
 use crate::{
-    arithmetic::CurveAffine,
+    arithmetic::{CurveAffine, parallelize},
     plonk::{
         ChallengeX, ChallengeY, Error,
-        evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+        evaluation::{EvaluationPoint, EvaluationQuery},
     },
     poly::{
         self, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial, ProvingKeyTwiddles,
@@ -20,6 +20,29 @@ use crate::{
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
+
+fn fold_quotient_pieces<F: WithSmallOrderMulGroup<3>>(
+    domain: &EvaluationDomain<F>,
+    mut pieces: Vec<Polynomial<F, Coeff>>,
+    xn: F,
+) -> Polynomial<F, Coeff> {
+    // Pieces are ordered from least to most significant. Move the highest
+    // allocation into the accumulator, then consume the rest in Horner order.
+    let Some(mut accumulator) = pieces.pop() else {
+        return domain.empty_coeff();
+    };
+
+    while let Some(piece) = pieces.pop() {
+        debug_assert_eq!(accumulator.len(), piece.len());
+        parallelize(&mut accumulator, |accumulator, start| {
+            for (accumulator, piece) in accumulator.iter_mut().zip(&piece[start..]) {
+                *accumulator = *accumulator * xn + *piece;
+            }
+        });
+    }
+
+    accumulator
+}
 
 pub(in crate::plonk) struct CommittedRandomPolynomial<C: CurveAffine> {
     poly: Polynomial<C::Scalar, Coeff>,
@@ -142,18 +165,21 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
 }
 
 impl<C: CurveAffine> ConstructedQuotient<C> {
+    pub(in crate::plonk) fn evaluation_query(&self) -> EvaluationQuery<'_, C::Scalar> {
+        EvaluationQuery {
+            polynomial: &self.random_poly.poly,
+            point: EvaluationPoint::Current,
+        }
+    }
+
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
         xn: C::Scalar,
         domain: &EvaluationDomain<C::Scalar>,
-        evaluator: &PolynomialEvaluator<C::Scalar>,
+        random_eval: C::Scalar,
         transcript: &mut T,
     ) -> Result<EvaluatedQuotient<C>, Error> {
-        let h_poly = self
-            .h_pieces
-            .iter()
-            .rev()
-            .fold(domain.empty_coeff(), |acc, eval| acc * xn + eval);
+        let h_poly = fold_quotient_pieces(domain, self.h_pieces, xn);
 
         let h_blind = self
             .h_blinds
@@ -161,10 +187,6 @@ impl<C: CurveAffine> ConstructedQuotient<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
-        let random_eval = evaluator.evaluate(&[EvaluationQuery {
-            polynomial: &self.random_poly.poly,
-            point: EvaluationPoint::Current,
-        }])[0];
         transcript.write_scalar(random_eval)?;
 
         Ok(EvaluatedQuotient {
@@ -191,5 +213,55 @@ impl<C: CurveAffine> EvaluatedQuotient<C> {
                 poly: &self.random_poly.poly,
                 blind: self.random_poly.blind,
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fold_quotient_pieces;
+    use crate::poly::{Coeff, EvaluationDomain, Polynomial};
+    use ff::{Field, WithSmallOrderMulGroup};
+    use pasta_curves::Fp;
+
+    fn allocating_fold<F: WithSmallOrderMulGroup<3>>(
+        domain: &EvaluationDomain<F>,
+        pieces: &[Polynomial<F, Coeff>],
+        xn: F,
+    ) -> Polynomial<F, Coeff> {
+        pieces
+            .iter()
+            .rev()
+            .fold(domain.empty_coeff(), |accumulator, piece| {
+                accumulator * xn + piece
+            })
+    }
+
+    #[test]
+    fn quotient_piece_fold_matches_allocating_horner_fold() {
+        let domain = EvaluationDomain::new(3, 3);
+        let domain_size = domain.empty_coeff().len();
+
+        for piece_count in 0..=4 {
+            for xn in [Fp::ZERO, Fp::ONE, Fp::from(7)] {
+                let pieces = (0..piece_count)
+                    .map(|piece| {
+                        domain.coeff_from_vec(
+                            (0..domain_size)
+                                .map(|coefficient| Fp::from((piece * 17 + coefficient + 1) as u64))
+                                .collect(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let highest_allocation = pieces.last().map(|piece| piece.as_ptr());
+                let expected = allocating_fold(&domain, &pieces, xn);
+
+                let actual = fold_quotient_pieces(&domain, pieces, xn);
+
+                assert!(actual.iter().eq(expected.iter()));
+                if let Some(highest_allocation) = highest_allocation {
+                    assert_eq!(actual.as_ptr(), highest_allocation);
+                }
+            }
+        }
     }
 }

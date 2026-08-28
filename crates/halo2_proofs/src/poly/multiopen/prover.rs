@@ -7,7 +7,7 @@ use super::{
     construct_intermediate_sets,
 };
 
-use crate::arithmetic::{CurveAffine, eval_polynomial, kate_division};
+use crate::arithmetic::{CurveAffine, eval_polynomial};
 use crate::multicore;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
@@ -20,9 +20,12 @@ use std::hash::Hash;
 use std::io;
 use std::marker::PhantomData;
 
-// Amortize task scheduling over at least this many field multiply-adds per
+// Amortize task scheduling over at least this many field operations per
 // worker.
-const MIN_PARALLEL_FOLDS_PER_THREAD: usize = 1 << 10;
+const MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD: usize = 1 << 10;
+// Bound the field payload retained for simultaneous point-set quotient terms.
+// This excludes `Vec` metadata and allocator rounding.
+const MAX_PARALLEL_Q_PRIME_FIELD_BYTES: usize = 8 * 1024 * 1024;
 const DEFERRED_FOLD_LANES: usize = 2;
 
 fn fold_polynomial_range<F: Field>(
@@ -148,7 +151,9 @@ fn collapse_polynomials_with<F: Field>(
         })
         .sum::<usize>();
     let thread_count = multicore::current_num_threads();
-    if thread_count == 1 || total_work.div_ceil(thread_count) < MIN_PARALLEL_FOLDS_PER_THREAD {
+    if thread_count == 1
+        || total_work.div_ceil(thread_count) < MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD
+    {
         for (polynomial, group) in collapsed.iter_mut().zip(groups) {
             fold_range(&mut polynomial.values, 0, group);
         }
@@ -248,6 +253,195 @@ fn collapse_polynomials<F: Field>(
     }
 }
 
+fn kate_division_in_place<F: Field>(polynomial: &mut Vec<F>, point: F) {
+    let mut quotient = polynomial
+        .pop()
+        .expect("a polynomial divided by a linear factor is nonempty");
+    for coefficient in polynomial.iter_mut().rev() {
+        let remainder = *coefficient + quotient * point;
+        *coefficient = quotient;
+        quotient = remainder;
+    }
+}
+
+fn prepare_q_prime_term<F: Field>(
+    polynomial: &Polynomial<F, Coeff>,
+    points: &[F],
+    domain_len: usize,
+) -> Polynomial<F, Coeff> {
+    let mut values = polynomial.values.clone();
+    for point in points {
+        kate_division_in_place(&mut values, *point);
+    }
+    values.resize(domain_len, F::ZERO);
+    Polynomial {
+        values,
+        _marker: PhantomData,
+    }
+}
+
+fn fold_q_prime_range<F: Field>(
+    accumulator: &mut [F],
+    start: usize,
+    terms: &[Polynomial<F, Coeff>],
+    challenge: F,
+) {
+    for (offset, accumulator) in accumulator.iter_mut().enumerate() {
+        let coefficient_index = start + offset;
+        for term in terms {
+            *accumulator *= challenge;
+            *accumulator += term.values[coefficient_index];
+        }
+    }
+}
+
+fn parallel_q_prime_terms_fit<F: Field>(
+    polynomials: &[Polynomial<F, Coeff>],
+    domain_len: usize,
+) -> bool {
+    polynomials
+        .iter()
+        .try_fold(0usize, |total, polynomial| {
+            polynomial
+                .len()
+                .max(domain_len)
+                .checked_mul(std::mem::size_of::<F>())
+                .and_then(|bytes| total.checked_add(bytes))
+        })
+        .is_some_and(|bytes| bytes <= MAX_PARALLEL_Q_PRIME_FIELD_BYTES)
+}
+
+fn prepare_q_prime<F: Field>(
+    point_sets: &[Vec<F>],
+    polynomials: &[Polynomial<F, Coeff>],
+    challenge: F,
+    domain_len: usize,
+) -> Polynomial<F, Coeff> {
+    debug_assert_eq!(point_sets.len(), polynomials.len());
+
+    let division_work =
+        point_sets
+            .iter()
+            .zip(polynomials)
+            .fold(0usize, |total, (points, polynomial)| {
+                total.saturating_add(points.len().saturating_mul(polynomial.len()))
+            });
+    let division_workers = multicore::current_num_threads().min(point_sets.len());
+    let prepare_in_parallel = division_workers > 1
+        && division_work.div_ceil(division_workers) >= MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD
+        && parallel_q_prime_terms_fit(polynomials, domain_len);
+
+    if !prepare_in_parallel {
+        let mut accumulator: Option<Polynomial<F, Coeff>> = None;
+        for (points, polynomial) in point_sets.iter().zip(polynomials) {
+            let term = prepare_q_prime_term(polynomial, points, domain_len);
+            if let Some(accumulator) = accumulator.as_mut() {
+                fold_q_prime_range(
+                    &mut accumulator.values,
+                    0,
+                    std::slice::from_ref(&term),
+                    challenge,
+                );
+            } else {
+                accumulator = Some(term);
+            }
+        }
+        return accumulator.expect("there is at least one multi-opening point set");
+    }
+
+    let mut terms = (0..point_sets.len()).map(|_| None).collect::<Vec<_>>();
+    multicore::scope(|scope| {
+        for ((points, polynomial), output) in point_sets.iter().zip(polynomials).zip(&mut terms) {
+            scope.spawn(move |_| {
+                *output = Some(prepare_q_prime_term(polynomial, points, domain_len));
+            });
+        }
+    });
+    let terms = terms
+        .into_iter()
+        .map(|term| term.expect("each point-set quotient task completed"))
+        .collect::<Vec<_>>();
+
+    let mut terms = terms.into_iter();
+    let mut accumulator = terms
+        .next()
+        .expect("there is at least one multi-opening point set");
+    let terms = terms.as_slice();
+    let fold_work = accumulator.len().saturating_mul(terms.len());
+    let fold_workers =
+        multicore::current_num_threads().min(fold_work / MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD);
+    if terms.is_empty() || fold_workers <= 1 {
+        fold_q_prime_range(&mut accumulator.values, 0, terms, challenge);
+        return accumulator;
+    }
+
+    let work_per_task = fold_work.div_ceil(fold_workers);
+    let chunk_size = work_per_task.div_ceil(terms.len()).max(1);
+    multicore::scope(|scope| {
+        for (chunk_index, values) in accumulator.values.chunks_mut(chunk_size).enumerate() {
+            let start = chunk_index * chunk_size;
+            scope.spawn(move |_| fold_q_prime_range(values, start, terms, challenge));
+        }
+    });
+
+    accumulator
+}
+
+fn evaluate_polynomials<F: Field>(polynomials: &[Polynomial<F, Coeff>], point: F) -> Vec<F> {
+    if polynomials.is_empty() {
+        return Vec::new();
+    }
+
+    let worker_count = multicore::current_num_threads().min(polynomials.len());
+    let total_work = polynomials.iter().fold(0usize, |total, polynomial| {
+        total.saturating_add(polynomial.len())
+    });
+    if worker_count <= 1
+        || total_work.div_ceil(worker_count) < MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD
+    {
+        return polynomials
+            .iter()
+            .map(|polynomial| eval_polynomial(polynomial, point))
+            .collect();
+    }
+
+    let mut evaluations = vec![F::ZERO; polynomials.len()];
+    let polynomials_per_task = polynomials.len().div_ceil(worker_count);
+    multicore::scope(|scope| {
+        for (polynomials, evaluations) in polynomials
+            .chunks(polynomials_per_task)
+            .zip(evaluations.chunks_mut(polynomials_per_task))
+        {
+            scope.spawn(move |_| {
+                for (polynomial, evaluation) in polynomials.iter().zip(evaluations) {
+                    *evaluation = eval_polynomial(polynomial, point);
+                }
+            });
+        }
+    });
+    evaluations
+}
+
+fn scale_and_add_polynomial<F: Field>(
+    polynomial: Polynomial<F, Coeff>,
+    scale: F,
+    addend: &Polynomial<F, Coeff>,
+) -> Polynomial<F, Coeff> {
+    if multicore::current_num_threads() == 1 {
+        return polynomial * scale + addend;
+    }
+
+    debug_assert_eq!(polynomial.len(), addend.len());
+    let mut polynomial = polynomial;
+    crate::arithmetic::parallelize(&mut polynomial.values, |values, start| {
+        for (value, addend) in values.iter_mut().zip(&addend.values[start..]) {
+            *value *= scale;
+            *value += addend;
+        }
+    });
+    polynomial
+}
+
 /// Create a multi-opening proof.
 ///
 /// # Errors
@@ -292,26 +486,7 @@ where
     }
     let q_polys = collapse_polynomials(&polynomial_groups, *x_1);
 
-    let q_prime_poly = point_sets
-        .iter()
-        .zip(q_polys.iter())
-        .fold(None, |q_prime_poly, (points, poly)| {
-            let mut poly = points.iter().fold(poly.clone().values, |poly, point| {
-                kate_division(&poly, *point)
-            });
-            poly.resize(params.n as usize, C::Scalar::ZERO);
-            let poly = Polynomial {
-                values: poly,
-                _marker: PhantomData,
-            };
-
-            if q_prime_poly.is_none() {
-                Some(poly)
-            } else {
-                q_prime_poly.map(|q_prime_poly| q_prime_poly * *x_2 + &poly)
-            }
-        })
-        .unwrap();
+    let q_prime_poly = prepare_q_prime(&point_sets, &q_polys, *x_2, params.n as usize);
 
     let q_prime_blind = Blind(C::Scalar::random(&mut rng));
     let q_prime_commitment = params.commit(&q_prime_poly, q_prime_blind).to_affine();
@@ -320,10 +495,9 @@ where
 
     let x_3: ChallengeX3<_> = transcript.squeeze_challenge_scalar();
 
-    // Prover sends u_i for all i, which correspond to the evaluation
-    // of each Q polynomial commitment at x_3.
-    for q_i_poly in &q_polys {
-        transcript.write_scalar(eval_polynomial(q_i_poly, *x_3))?;
+    // The evaluations are independent, but their transcript order is fixed.
+    for evaluation in evaluate_polynomials(&q_polys, *x_3) {
+        transcript.write_scalar(evaluation)?;
     }
 
     let x_4: ChallengeX4<_> = transcript.squeeze_challenge_scalar();
@@ -332,7 +506,7 @@ where
         (q_prime_poly, q_prime_blind),
         |(q_prime_poly, q_prime_blind), (poly, blind)| {
             (
-                q_prime_poly * *x_4 + &poly,
+                scale_and_add_polynomial(q_prime_poly, *x_4, &poly),
                 Blind((q_prime_blind.0 * &(*x_4)) + &blind.0),
             )
         },
@@ -380,7 +554,11 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Coeff, MIN_PARALLEL_FOLDS_PER_THREAD, Polynomial, collapse_polynomials};
+    use super::{
+        Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial, collapse_polynomials,
+        evaluate_polynomials, kate_division_in_place, prepare_q_prime, scale_and_add_polynomial,
+    };
+    use crate::arithmetic::{eval_polynomial, kate_division};
     use ff::Field;
     use pasta_curves::{Fp, Fq};
     use std::fmt::Debug;
@@ -406,7 +584,7 @@ mod tests {
     where
         F: Field + From<u64> + Debug,
     {
-        let long = MIN_PARALLEL_FOLDS_PER_THREAD * 2 + 1;
+        let long = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
         let lengths = [
             vec![long, long - 1, long + 1, long, long],
             vec![3],
@@ -461,6 +639,179 @@ mod tests {
         }
     }
 
+    fn in_place_kate_division_matches_allocating<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        for (coefficients, points) in [
+            (vec![F::from(9)], vec![F::ZERO]),
+            (
+                (0..8).map(|value| F::from(value + 1)).collect(),
+                vec![F::ZERO, F::ONE, -F::ONE, F::from(7)],
+            ),
+        ] {
+            let expected = points.iter().fold(coefficients.clone(), |poly, point| {
+                kate_division(&poly, *point)
+            });
+            let actual = points.iter().fold(coefficients, |mut poly, point| {
+                kate_division_in_place(&mut poly, *point);
+                poly
+            });
+            assert_eq!(expected, actual);
+        }
+    }
+
+    fn reference_q_prime<F: Field>(
+        point_sets: &[Vec<F>],
+        polynomials: &[Polynomial<F, Coeff>],
+        challenge: F,
+        domain_len: usize,
+    ) -> Polynomial<F, Coeff> {
+        point_sets
+            .iter()
+            .zip(polynomials)
+            .fold(None, |accumulator, (points, polynomial)| {
+                let mut values = points
+                    .iter()
+                    .fold(polynomial.values.clone(), |values, point| {
+                        kate_division(&values, *point)
+                    });
+                values.resize(domain_len, F::ZERO);
+                let term = Polynomial {
+                    values,
+                    _marker: PhantomData,
+                };
+                Some(match accumulator {
+                    Some(accumulator) => accumulator * challenge + &term,
+                    None => term,
+                })
+            })
+            .expect("the test has point sets")
+    }
+
+    fn parallel_q_prime_matches_ordered_operator_fold<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        // This size crosses both parallel-work thresholds with four workers.
+        let domain_len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
+        let point_sets = vec![
+            vec![F::from(2)],
+            vec![F::from(3), F::from(5)],
+            vec![F::ZERO, -F::ONE, F::from(11)],
+        ];
+        let polynomials = (0..point_sets.len())
+            .map(|polynomial_index| Polynomial {
+                values: (0..domain_len)
+                    .map(|coefficient_index| {
+                        F::from(
+                            1 + polynomial_index as u64 * domain_len as u64
+                                + coefficient_index as u64,
+                        )
+                    })
+                    .collect(),
+                _marker: PhantomData,
+            })
+            .collect::<Vec<_>>();
+
+        for challenge in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let expected = reference_q_prime(&point_sets, &polynomials, challenge, domain_len);
+            let check = || {
+                let actual = prepare_q_prime(&point_sets, &polynomials, challenge, domain_len);
+                assert_eq!(&actual[..], &expected[..]);
+            };
+
+            #[cfg(feature = "multicore")]
+            for thread_count in [1, 4] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(thread_count)
+                    .build()
+                    .unwrap()
+                    .install(|| check());
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
+    fn parallel_evaluations_match_serial_order<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        let empty = Vec::<Polynomial<F, Coeff>>::new();
+        assert!(evaluate_polynomials(&empty, F::from(17)).is_empty());
+
+        let polynomial_len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
+        let polynomials = (0..5)
+            .map(|polynomial_index| Polynomial {
+                values: (0..polynomial_len)
+                    .map(|coefficient_index| {
+                        F::from(
+                            1 + polynomial_index as u64 * polynomial_len as u64
+                                + coefficient_index as u64,
+                        )
+                    })
+                    .collect(),
+                _marker: PhantomData,
+            })
+            .collect::<Vec<_>>();
+
+        for point in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let expected = polynomials
+                .iter()
+                .map(|polynomial| eval_polynomial(polynomial, point))
+                .collect::<Vec<_>>();
+            let check = || assert_eq!(evaluate_polynomials(&polynomials, point), expected);
+
+            #[cfg(feature = "multicore")]
+            for thread_count in [1, 4, 10] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(thread_count)
+                    .build()
+                    .unwrap()
+                    .install(check);
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
+    fn scale_and_add_matches_operators<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        let len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
+        let polynomial = Polynomial {
+            values: (0..len).map(|index| F::from(index as u64 + 1)).collect(),
+            _marker: PhantomData,
+        };
+        let addend = Polynomial {
+            values: (0..len)
+                .map(|index| F::from(index as u64 * 3 + 2))
+                .collect(),
+            _marker: PhantomData,
+        };
+
+        for scale in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let expected = polynomial.clone() * scale + &addend;
+            let check = || {
+                let actual = scale_and_add_polynomial(polynomial.clone(), scale, &addend);
+                assert_eq!(&expected[..], &actual[..]);
+            };
+
+            #[cfg(feature = "multicore")]
+            for thread_count in [1, 4, 10] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(thread_count)
+                    .build()
+                    .unwrap()
+                    .install(check);
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
     #[test]
     fn streaming_collapse_matches_operator_collapse_fp() {
         streaming_collapse_matches_operator_collapse::<Fp>();
@@ -469,5 +820,44 @@ mod tests {
     #[test]
     fn streaming_collapse_matches_operator_collapse_fq() {
         streaming_collapse_matches_operator_collapse::<Fq>();
+    }
+    #[test]
+    fn in_place_kate_division_matches_allocating_fp() {
+        in_place_kate_division_matches_allocating::<Fp>();
+    }
+
+    #[test]
+    fn in_place_kate_division_matches_allocating_fq() {
+        in_place_kate_division_matches_allocating::<Fq>();
+    }
+
+    #[test]
+    fn parallel_q_prime_matches_ordered_operator_fold_fp() {
+        parallel_q_prime_matches_ordered_operator_fold::<Fp>();
+    }
+
+    #[test]
+    fn parallel_q_prime_matches_ordered_operator_fold_fq() {
+        parallel_q_prime_matches_ordered_operator_fold::<Fq>();
+    }
+
+    #[test]
+    fn parallel_evaluations_match_serial_order_fp() {
+        parallel_evaluations_match_serial_order::<Fp>();
+    }
+
+    #[test]
+    fn parallel_evaluations_match_serial_order_fq() {
+        parallel_evaluations_match_serial_order::<Fq>();
+    }
+
+    #[test]
+    fn scale_and_add_matches_operators_fp() {
+        scale_and_add_matches_operators::<Fp>();
+    }
+
+    #[test]
+    fn scale_and_add_matches_operators_fq() {
+        scale_and_add_matches_operators::<Fq>();
     }
 }
