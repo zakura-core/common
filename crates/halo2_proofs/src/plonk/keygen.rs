@@ -148,11 +148,13 @@ fn group_compressed_selectors(
 
     for family in &families {
         assert_eq!(family.assigned_roots.len(), family.combination_len);
-        assert!(family
-            .assigned_roots
-            .iter()
-            .copied()
-            .eq(1..=family.combination_len));
+        assert!(
+            family
+                .assigned_roots
+                .iter()
+                .copied()
+                .eq(1..=family.combination_len)
+        );
     }
 
     families
@@ -203,9 +205,11 @@ fn evaluate_compressed_selector_family<F: Field + From<u64>>(
 ) {
     let combination_len = selectors.len() + 1;
     assert!(combination_len >= crate::MIN_SELECTOR_FAMILY_LEN);
-    assert!(selectors
-        .iter()
-        .all(|selector| selector.len() == query_and_first_selector.len()));
+    assert!(
+        selectors
+            .iter()
+            .all(|selector| selector.len() == query_and_first_selector.len())
+    );
 
     if query_and_first_selector.len() <= min_chunk_len {
         for offset in 0..query_and_first_selector.len() {
@@ -501,9 +505,11 @@ where
         .collect::<Vec<_>>();
     for family in cache_plan.families {
         let column_index = family.column_index;
-        assert!(selector_families_by_column[column_index]
-            .replace(family)
-            .is_none());
+        assert!(
+            selector_families_by_column[column_index]
+                .replace(family)
+                .is_none()
+        );
     }
 
     // Compressed-selector columns are allocated internally and only occur in
@@ -591,8 +597,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_fixed_lagrange, evaluate_compressed_selector_family, plan_compressed_selector_cache,
         CompressedSelectorFamily, MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES,
+        commit_fixed_lagrange, evaluate_compressed_selector_family, plan_compressed_selector_cache,
     };
     use crate::{
         pasta::{EqAffine, Fp},
@@ -655,10 +661,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 0]
         );
-        assert!(plan
-            .families
-            .iter()
-            .all(|family| family.assigned_roots.len() == family.combination_len));
+        assert!(
+            plan.families
+                .iter()
+                .all(|family| family.assigned_roots.len() == family.combination_len)
+        );
     }
 
     #[test]

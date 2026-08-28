@@ -3581,9 +3581,11 @@ mod tests {
         evaluator.register_compressed_selector(query, COMBINATION_LEN, 1, selector);
 
         let unchanged = Arc::new(Ast::from(unrelated) + Ast::ConstantTerm(pallas::Base::ONE));
-        assert!(evaluator
-            .replace_compressed_selectors(unchanged.as_ref())
-            .is_none());
+        assert!(
+            evaluator
+                .replace_compressed_selectors(unchanged.as_ref())
+                .is_none()
+        );
 
         let ast = Ast::Add(
             Arc::new(compressed_selector_expression(query, COMBINATION_LEN, 1)),

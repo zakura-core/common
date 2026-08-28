@@ -1350,12 +1350,12 @@ fn v1_proving_key_reuses_floor_plan() {
 fn compressed_selector_cache_preserves_proof() {
     use crate::{
         circuit::{Layouter, SimpleFloorPlanner},
-        plonk::{keygen_pk, keygen_vk, Expression},
+        plonk::{Expression, keygen_pk, keygen_vk},
         poly::Rotation,
         transcript::{Blake2bWrite, Challenge255},
     };
     use pasta_curves::EqAffine;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     const PROOF_SEED: u64 = 0x5345_4c45_4354_4f52;
 
