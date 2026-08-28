@@ -1833,6 +1833,21 @@ pub fn cached_orchard_proving_key(
     cell.get_or_init(|| ProvingKey::build(circuit_version))
 }
 
+/// Eagerly initializes the process-wide Orchard proving key cache.
+///
+/// This initializes the same cache used by [`Builder::build`] and
+/// [`cached_orchard_proving_key`], allowing callers to move the expensive first
+/// key construction ahead of the first transaction proof. The function blocks
+/// the calling thread until the key is ready; applications should schedule it
+/// on a worker thread when warming the cache from a user-interface lifecycle.
+///
+/// Repeated and concurrent calls are safe. A key is built at most once per
+/// [`orchard::circuit::OrchardCircuitVersion`] for the lifetime of the process.
+#[cfg(all(feature = "circuits", feature = "std"))]
+pub fn warm_orchard_proving_key(circuit_version: orchard::circuit::OrchardCircuitVersion) {
+    let _ = cached_orchard_proving_key(circuit_version);
+}
+
 #[cfg(feature = "circuits")]
 fn authorize_transparent(
     b: &transparent::bundle::Bundle<transparent::builder::Unauthorized>,
@@ -3098,5 +3113,23 @@ mod tests {
         // Distinct circuit versions are cached independently.
         let other = cached_orchard_proving_key(OrchardCircuitVersion::PostNu6_3);
         assert!(!ptr::eq(first, other));
+    }
+
+    #[cfg(all(feature = "circuits", feature = "std"))]
+    #[test]
+    fn orchard_proving_key_warmup_initializes_the_builder_cache() {
+        use core::ptr;
+        use orchard::circuit::OrchardCircuitVersion;
+
+        use super::{cached_orchard_proving_key, warm_orchard_proving_key};
+
+        let circuit_version = OrchardCircuitVersion::PostNu6_3;
+        warm_orchard_proving_key(circuit_version);
+        let warmed = cached_orchard_proving_key(circuit_version);
+
+        // Warming an initialized version is idempotent and leaves the builder
+        // pointed at the same process-lifetime key.
+        warm_orchard_proving_key(circuit_version);
+        assert!(ptr::eq(warmed, cached_orchard_proving_key(circuit_version)));
     }
 }

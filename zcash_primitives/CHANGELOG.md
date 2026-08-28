@@ -8,6 +8,9 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Added `transaction::builder::warm_orchard_proving_key`, which eagerly
+  initializes the process-wide Orchard proving key cache so applications can
+  move cold key construction ahead of the first transaction proof.
 - Prepared the `1.0.0-rc.4` release.
 - Documented that the pinned `block-buffer` and `crypto-common`
   dependencies are version pins for the pre-release RustCrypto stack pulled
