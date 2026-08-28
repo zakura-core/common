@@ -655,6 +655,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `--all-features` includes `x86_64-asm`, so this lane (and the
+        # platform-smoke jobs below) executes the assembly field backend,
+        # which requires ADX/BMI2 on the runner's CPU — true of GitHub's
+        # current fleet. A SIGILL here means the runner lacks ADX.
         features: [--all-features, --no-default-features]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
