@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Polynomial evaluation now caches repeated squares when doing so avoids at
+  least one field squaring.
 - The `fft` bench's curve-FFT and parameter-generation rows now also measure
   `k = 12` and `k = 13` (`curve-fft/affine-eisenstein-k{12,13}`,
   `params/new-k{12,13}`); the `k = 11` benchmark IDs are unchanged.

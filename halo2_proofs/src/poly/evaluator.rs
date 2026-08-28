@@ -1074,7 +1074,7 @@ fn plan_cost<E, F: Field, B: Basis>(plan: &EvaluationPlan<E, F, B>, two: F) -> (
         }
         EvaluationPlan::Square(inner) => {
             let inner = plan_cost(inner, two);
-            (inner.0, 1 + inner.1)
+            (1 + inner.0, 1 + inner.1)
         }
         EvaluationPlan::Scale(inner, scalar) => {
             let inner = plan_cost(inner, two);
@@ -3024,6 +3024,51 @@ mod tests {
         check_repeated_subexpressions_use_squares::<pallas::Base, ExtendedLagrangeCoeff>();
         check_repeated_subexpressions_use_squares::<vesta::Base, LagrangeCoeff>();
         check_repeated_subexpressions_use_squares::<vesta::Base, ExtendedLagrangeCoeff>();
+    }
+
+    fn check_repeated_squares_are_cached<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(3, 4);
+        let mut values = domain.empty_extended();
+        for (index, value) in values.iter_mut().enumerate() {
+            *value = F::from(index as u64 + 3);
+        }
+
+        let mut evaluator = new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {});
+        let leaf = evaluator.register_poly(values.clone());
+        let value = Ast::from(leaf);
+        let square = value.clone() * value;
+        let ast = square.clone() + square;
+
+        let mut plan = EvaluationPlan::compile(&ast);
+        assert_eq!(plan.cache_common_subexpressions(), 1);
+        match plan {
+            EvaluationPlan::Add(lhs, rhs) => match (*lhs, *rhs) {
+                (
+                    EvaluationPlan::CacheStore { slot, inner },
+                    EvaluationPlan::CacheLoad { slot: loaded },
+                ) => {
+                    assert_eq!(slot, loaded);
+                    assert!(matches!(*inner, EvaluationPlan::Square(_)));
+                }
+                _ => panic!("repeated square uses one cache store and one cache load"),
+            },
+            _ => panic!("repeated square preserves the addition plan"),
+        }
+
+        let actual = evaluator.evaluate(&ast, &domain);
+        assert!(actual
+            .iter()
+            .zip(values.iter())
+            .all(|(actual, value)| *actual == value.square().double()));
+    }
+
+    #[test]
+    fn repeated_squares_are_cached() {
+        check_repeated_squares_are_cached::<pallas::Base>();
+        check_repeated_squares_are_cached::<vesta::Base>();
     }
 
     fn check_common_subexpressions_are_cached<F>()
