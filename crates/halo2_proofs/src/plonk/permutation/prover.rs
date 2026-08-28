@@ -88,62 +88,6 @@ impl Argument {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::plonk) fn commit<
-        C: CurveAffine,
-        E: EncodedChallenge<C>,
-        Ev: Copy + Send + Sync,
-        R: Rng,
-        T: TranscriptWrite<C, E>,
-    >(
-        &self,
-        params: &Params<C>,
-        pk: &plonk::ProvingKey<C>,
-        pkey: &ProvingKey<C>,
-        advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
-        fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
-        instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
-        beta: ChallengeBeta<C>,
-        gamma: ChallengeGamma<C>,
-        evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
-        mut rng: R,
-        transcript: &mut T,
-    ) -> Result<Committed<C, Ev>, Error> {
-        let mut sets = vec![];
-        self.prepare_sets(
-            params,
-            pk,
-            pkey,
-            advice,
-            fixed,
-            instance,
-            beta,
-            gamma,
-            |rows| {
-                for z in rows {
-                    *z = C::Scalar::random(&mut rng);
-                }
-                Blind(C::Scalar::random(&mut rng))
-            },
-            |set| {
-                let permutation_product_coset =
-                    evaluator.register_poly(set.permutation_product_coset);
-
-                // Hash the permutation product commitment
-                transcript.write_point(set.permutation_product_commitment)?;
-
-                sets.push(CommittedSet {
-                    permutation_product_poly: set.permutation_product_poly,
-                    permutation_product_coset,
-                    permutation_product_blind: set.permutation_product_blind,
-                });
-                Ok::<(), Error>(())
-            },
-        )?;
-
-        Ok(Committed { sets })
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::plonk) fn prepare<C: CurveAffine>(
         &self,
         params: &Params<C>,
@@ -591,31 +535,35 @@ mod tests {
     use crate::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
         plonk::{
-            Advice, Circuit, Column, ConstraintSystem, Error, create_proof, keygen_pk, keygen_vk,
+            Advice, Circuit, Column, ConstraintSystem, Error, SingleVerifier, TableColumn,
+            create_proof, keygen_pk, keygen_vk, verify_proof,
         },
-        poly::commitment::Params,
-        transcript::{Blake2bWrite, Challenge255},
+        poly::{commitment::Params, Rotation},
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
     use pasta_curves::{EqAffine, Fp};
     use rand::{SeedableRng, rngs::StdRng};
 
     const EQUALITY_COLUMNS: usize = 3;
-    const PROOF_CIRCUITS: usize = 4;
-    const MULTICORE_THREADS: usize = 6;
+    const MINIMUM_DEGREE: usize = 4;
+    const MAX_PROOF_CIRCUITS: usize = 4;
+    const PROOF_CIRCUIT_COUNTS: [usize; 3] = [1, 2, MAX_PROOF_CIRCUITS];
+    const PROOF_THREAD_COUNTS: [usize; 2] = [6, 10];
     const PROOF_SEED: u64 = 0x5045_524d_5554_4508;
 
     #[derive(Clone, Copy)]
-    struct PermutationConfig {
+    struct GrandProductConfig {
         columns: [Column<Advice>; EQUALITY_COLUMNS],
+        table: TableColumn,
     }
 
     #[derive(Clone, Copy)]
-    struct PermutationCircuit {
+    struct GrandProductCircuit {
         value: Fp,
     }
 
-    impl Circuit<Fp> for PermutationCircuit {
-        type Config = PermutationConfig;
+    impl Circuit<Fp> for GrandProductCircuit {
+        type Config = GrandProductConfig;
         type FloorPlanner = SimpleFloorPlanner;
 
         fn without_witnesses(&self) -> Self {
@@ -623,11 +571,14 @@ mod tests {
         }
 
         fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            meta.set_minimum_degree(MINIMUM_DEGREE);
             let columns = std::array::from_fn(|_| meta.advice_column());
             for column in columns.iter().copied() {
                 meta.enable_equality(column);
             }
-            PermutationConfig { columns }
+            let table = meta.lookup_table_column();
+            meta.lookup(|meta| vec![(meta.query_advice(columns[0], Rotation::cur()), table)]);
+            GrandProductConfig { columns, table }
         }
 
         fn synthesize(
@@ -635,6 +586,22 @@ mod tests {
             config: Self::Config,
             mut layouter: impl Layouter<Fp>,
         ) -> Result<(), Error> {
+            layouter.assign_table(
+                || "lookup table",
+                |mut table| {
+                    (0..=MAX_PROOF_CIRCUITS)
+                        .map(|value| {
+                            table.assign_cell(
+                                || "value",
+                                config.table,
+                                value,
+                                || Value::known(Fp::from(value as u64)),
+                            )
+                        })
+                        .try_fold((), |(), result| result)
+                },
+            )?;
+
             layouter.assign_region(
                 || "permutation copies",
                 |mut region| {
@@ -661,29 +628,34 @@ mod tests {
     }
 
     #[test]
-    fn proof_bytes_match_across_permutation_preparation_schedules() {
+    fn proof_bytes_match_across_grand_product_preparation_schedules() {
         let params: Params<EqAffine> = Params::new(4);
-        let circuit = PermutationCircuit { value: Fp::from(0) };
+        let circuit = GrandProductCircuit { value: Fp::from(0) };
         let vk = keygen_vk(&params, &circuit).expect("keygen_vk should not fail");
         let pk = keygen_pk(&params, vk, &circuit).expect("keygen_pk should not fail");
+        assert_eq!(pk.vk.cs.lookups.len(), 1);
 
         let columns = pk.vk.cs.permutation.get_columns();
         assert_eq!(columns.len(), EQUALITY_COLUMNS);
+        let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         assert!(
-            columns
-                .chunks(permutation_chunk_len(pk.vk.cs_degree))
-                .count()
-                > 1
+            columns.chunks(chunk_len).count() > 1,
+            "the test requires several permutation sets",
+        );
+        assert_ne!(
+            columns.len() % chunk_len,
+            0,
+            "the test requires a partial final permutation set",
         );
 
-        let circuits: [PermutationCircuit; PROOF_CIRCUITS] =
-            std::array::from_fn(|index| PermutationCircuit {
+        let circuits: [GrandProductCircuit; MAX_PROOF_CIRCUITS] =
+            std::array::from_fn(|index| GrandProductCircuit {
                 value: Fp::from(index as u64 + 1),
             });
         let no_instance_columns: &[&[Fp]] = &[];
-        let instances = [no_instance_columns; PROOF_CIRCUITS];
+        let instances = [no_instance_columns; MAX_PROOF_CIRCUITS];
 
-        let prove = |threads| {
+        let prove = |circuit_count, threads| {
             let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
             maybe_rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
@@ -693,8 +665,8 @@ mod tests {
                     create_proof(
                         &params,
                         &pk,
-                        &circuits,
-                        &instances,
+                        &circuits[..circuit_count],
+                        &instances[..circuit_count],
                         StdRng::seed_from_u64(PROOF_SEED),
                         &mut transcript,
                     )
@@ -703,6 +675,27 @@ mod tests {
             transcript.finalize()
         };
 
-        assert_eq!(prove(1), prove(MULTICORE_THREADS));
+        let verify = |proof: &[u8], circuit_count| {
+            let strategy = SingleVerifier::new(&params);
+            let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(proof);
+            verify_proof(
+                &params,
+                pk.get_vk(),
+                strategy,
+                &instances[..circuit_count],
+                &mut transcript,
+            )
+            .expect("proof verification should not fail");
+        };
+
+        for circuit_count in PROOF_CIRCUIT_COUNTS {
+            let serial = prove(circuit_count, 1);
+            verify(&serial, circuit_count);
+            for threads in PROOF_THREAD_COUNTS {
+                let parallel = prove(circuit_count, threads);
+                assert_eq!(serial, parallel);
+                verify(&parallel, circuit_count);
+            }
+        }
     }
 }
