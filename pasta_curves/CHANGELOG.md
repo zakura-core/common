@@ -54,6 +54,10 @@ and this project adheres to Rust's notion of
   validated on interleaved `msm_backend_timings` grids on x86-64 over
   both the portable and assembly field arithmetic; summed planner cell
   losses roughly halve on both.
+- Apple AArch64 repeated-squaring chains now keep their lazy accumulator in
+  registers and canonicalize only once. On Apple M4, chains of 2–128 squares
+  are 6–13% faster; the existing fused square-and-multiply chains, B1/B64
+  Orchard verifier, and one-Action Orchard prover are unchanged.
 - Portable squaring chains no longer canonicalize after every squaring,
   including trailing squarings in variable-time exponentiation. The x86-64
   path overlaps upper-half products with reduction specialized to the sparse
