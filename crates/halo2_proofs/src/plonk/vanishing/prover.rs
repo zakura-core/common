@@ -12,7 +12,7 @@ use rand_core::Rng;
 
 use super::Argument;
 use crate::{
-    arithmetic::{CurveAffine, parallelize},
+    arithmetic::{CurveAffine, best_multiexp, parallelize},
     plonk::{
         ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
         evaluation::{EvaluationPoint, EvaluationQuery},
@@ -133,6 +133,45 @@ fn fold_quotient_pieces_pasta<
         .expect("the folded quotient matches its input field")
 }
 
+// The random polynomial masks two evaluations: its value at the PLONK
+// challenge is revealed, while its later value at the multi-opening challenge
+// hides the corresponding quotient evaluation. Two random coefficients are
+// sufficient because the evaluation map at two distinct points has full rank.
+const QUOTIENT_EVALUATION_MASK_COEFFICIENTS: usize = 2;
+
+fn sample_quotient_evaluation_mask<F: WithSmallOrderMulGroup<3>, R: Rng>(
+    domain: &EvaluationDomain<F>,
+    mut rng: R,
+) -> Polynomial<F, Coeff> {
+    let mut polynomial = domain.empty_coeff();
+    assert!(polynomial.len() >= QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
+    for coefficient in polynomial
+        .iter_mut()
+        .take(QUOTIENT_EVALUATION_MASK_COEFFICIENTS)
+    {
+        *coefficient = F::random(&mut rng);
+    }
+    polynomial
+}
+
+fn commit_quotient_evaluation_mask<C: CurveAffine>(
+    params: &Params<C>,
+    polynomial: &Polynomial<C::Scalar, Coeff>,
+    blind: Blind<C::Scalar>,
+) -> C::Curve {
+    assert_eq!(polynomial.len(), params.n as usize);
+    debug_assert!(
+        polynomial[QUOTIENT_EVALUATION_MASK_COEFFICIENTS..]
+            .iter()
+            .all(|coefficient| *coefficient == C::Scalar::ZERO)
+    );
+
+    let scalars = [polynomial[0], polynomial[1], blind.0];
+    let bases = [params.g[0], params.g[1], params.w];
+
+    best_multiexp(&scalars, &bases)
+}
+
 pub(in crate::plonk) struct CommittedRandomPolynomial<C: CurveAffine> {
     poly: Polynomial<C::Scalar, Coeff>,
     blind: Blind<C::Scalar>,
@@ -152,7 +191,7 @@ pub(in crate::plonk) struct EvaluatedQuotient<C: CurveAffine> {
 
 impl<C: CurveAffine> Argument<C> {
     /// Commits to the random polynomial that masks the folded quotient
-    /// evaluation in the multiopening argument.
+    /// evaluation in the multi-opening argument.
     pub(in crate::plonk) fn commit_random_polynomial<
         E: EncodedChallenge<C>,
         R: Rng,
@@ -163,16 +202,19 @@ impl<C: CurveAffine> Argument<C> {
         mut rng: R,
         transcript: &mut T,
     ) -> Result<CommittedRandomPolynomial<C>, Error> {
-        // Sample a random polynomial of degree n - 1
-        let mut random_poly = domain.empty_coeff();
-        for coeff in random_poly.iter_mut() {
-            *coeff = C::Scalar::random(&mut rng);
-        }
+        // Sample a random linear polynomial. If the PLONK and multi-opening
+        // evaluation points are distinct, its values at those two points are
+        // independent and uniform: the evaluation matrix has determinant
+        // equal to the difference of the points. The multi-opening verifier
+        // rejects the exceptional point collision, which is the same
+        // negligible honest-abort event under the previous dense mask.
+        let random_poly = sample_quotient_evaluation_mask(domain, &mut rng);
         // Sample a random blinding factor
         let random_blind = Blind(C::Scalar::random(&mut rng));
 
         // Commit
-        let random_poly_commitment = params.commit(&random_poly, random_blind).to_affine();
+        let random_poly_commitment =
+            commit_quotient_evaluation_mask(params, &random_poly, random_blind).to_affine();
         transcript.write_point(random_poly_commitment)?;
 
         Ok(CommittedRandomPolynomial {
@@ -307,6 +349,9 @@ impl<C: CurveAffine> EvaluatedQuotient<C> {
         &self,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'_, C>> + Clone {
+        // Keep the random polynomial after h(X). The multi-opening fold gives
+        // the last polynomial in a point-set group unit weight, so its later
+        // evaluation masks h(x_3) without relying on x_1 being nonzero.
         iter::empty()
             .chain(Some(ProverQuery {
                 point: *x,
@@ -320,13 +365,19 @@ impl<C: CurveAffine> EvaluatedQuotient<C> {
             }))
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use super::fold_quotient_pieces;
-    use crate::poly::{Coeff, EvaluationDomain, Polynomial};
-    use ff::WithSmallOrderMulGroup;
-    use pasta_curves::{Fp, Fq};
+    use super::{
+        QUOTIENT_EVALUATION_MASK_COEFFICIENTS, commit_quotient_evaluation_mask,
+        fold_quotient_pieces, sample_quotient_evaluation_mask,
+    };
+    use crate::{
+        arithmetic::CurveAffine,
+        poly::{Coeff, EvaluationDomain, Polynomial, commitment::Blind},
+    };
+    use ff::{Field, WithSmallOrderMulGroup};
+    use pasta_curves::{Fp, Fq, pallas, vesta};
+    use rand::{SeedableRng, rngs::StdRng};
 
     fn allocating_fold<F: WithSmallOrderMulGroup<3>>(
         domain: &EvaluationDomain<F>,
@@ -368,10 +419,70 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn quotient_piece_fold_matches_allocating_horner_fold() {
         check_quotient_piece_fold::<Fp>();
         check_quotient_piece_fold::<Fq>();
+    }
+
+    fn sparse_commitment_matches_dense<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+    {
+        let domain = EvaluationDomain::new(1, 3);
+        let params = crate::poly::commitment::Params::<C>::new(3);
+        let mut rng = StdRng::seed_from_u64(0x7175_6f74_6965_6e74);
+        let polynomial = sample_quotient_evaluation_mask(&domain, &mut rng);
+        assert!(
+            polynomial[QUOTIENT_EVALUATION_MASK_COEFFICIENTS..]
+                .iter()
+                .all(|coefficient| *coefficient == C::Scalar::ZERO)
+        );
+
+        let blind = Blind(C::Scalar::random(&mut rng));
+        assert_eq!(
+            commit_quotient_evaluation_mask(&params, &polynomial, blind),
+            params.commit(&polynomial, blind),
+        );
+    }
+
+    fn two_evaluations_have_full_masking_rank<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64> + core::fmt::Debug,
+    {
+        let first_point = F::from(5);
+        let later_point = F::from(9);
+        let first_evaluation = F::from(17);
+        let point_difference_inverse = (later_point - first_point).invert().unwrap();
+
+        // For every desired later evaluation there is exactly one linear
+        // polynomial with the fixed first evaluation. Thus a uniform random
+        // linear polynomial leaves the later evaluation uniform.
+        for later_evaluation in [F::ZERO, F::ONE, F::from(29)] {
+            let linear = (later_evaluation - first_evaluation) * point_difference_inverse;
+            let constant = first_evaluation - linear * first_point;
+            assert_eq!(constant + linear * first_point, first_evaluation);
+            assert_eq!(constant + linear * later_point, later_evaluation);
+        }
+    }
+
+    #[test]
+    fn sparse_commitment_matches_dense_pallas() {
+        sparse_commitment_matches_dense::<pallas::Affine>();
+    }
+
+    #[test]
+    fn sparse_commitment_matches_dense_vesta() {
+        sparse_commitment_matches_dense::<vesta::Affine>();
+    }
+
+    #[test]
+    fn two_evaluations_have_full_masking_rank_fp() {
+        two_evaluations_have_full_masking_rank::<pallas::Base>();
+    }
+
+    #[test]
+    fn two_evaluations_have_full_masking_rank_fq() {
+        two_evaluations_have_full_masking_rank::<vesta::Base>();
     }
 }

@@ -1174,7 +1174,7 @@ where
     debug_assert!(prepared_lookup_products.next().is_none());
 
     // Commit to the random polynomial that masks the folded quotient
-    // evaluation in the multiopening argument.
+    // evaluation in the multi-opening argument.
     let vanishing =
         vanishing::Argument::commit_random_polynomial(params, domain, &mut rng, transcript)?;
 
