@@ -2834,12 +2834,17 @@ impl<C: GlvParams> Decomposed<C> {
 /// twiddle once, batches the Eisenstein tables and affine ladders for all
 /// nontrivial scalar multiplications in a layer, and batch-inverts the shared
 /// denominator for each layer's affine butterflies.
+///
+/// The fused 8- and 16-point layers use factorization identities that hold
+/// only when `omega` has exact multiplicative order `2^log_n`. If it does
+/// not, this returns `false` without modifying `output` so the caller can
+/// fall back to a generic implementation.
 pub(crate) fn fft_vartime<C: GlvParams>(
     input: &[C],
     output: &mut [C::AffineExt],
     omega: C::ScalarExt,
     log_n: u32,
-) {
+) -> bool {
     fn bitreverse(mut value: usize, bits: usize) -> usize {
         let mut reversed = 0;
         for _ in 0..bits {
@@ -2851,6 +2856,22 @@ pub(crate) fn fft_vartime<C: GlvParams>(
 
     assert_eq!(input.len(), output.len());
     assert_eq!(input.len(), 1usize << log_n);
+
+    // `omega` has exact order `2^log_n` iff `omega^(2^(log_n - 1)) == -1`
+    // (for `log_n == 0`, iff `omega == 1`).
+    let exact_order = if log_n == 0 {
+        omega == C::ScalarExt::ONE
+    } else {
+        let mut half_order_power = omega;
+        for _ in 0..log_n - 1 {
+            half_order_power = half_order_power.square();
+        }
+        half_order_power == -C::ScalarExt::ONE
+    };
+    if !exact_order {
+        return false;
+    }
+
     C::batch_normalize(input, output);
     // If one layer starts without identities and every `x_R - x_L` is
     // nonzero, both `L + R` and `L - R` are nonidentity. Carry that invariant
@@ -2987,6 +3008,7 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         chunk *= 2;
         twiddle_stride /= 2;
     }
+    true
 }
 
 /// Replaces four radix-2 layers with a 16-point codelet that uses 14 scalar
@@ -5170,7 +5192,7 @@ mod tests {
                 let mut expected = input.clone();
                 reference(&mut expected, omega, log_n);
                 let mut actual = alloc::vec![C::AffineExt::identity(); n];
-                fft_vartime(&input, &mut actual, omega, log_n);
+                assert!(fft_vartime(&input, &mut actual, omega, log_n));
                 assert!(
                     actual
                         .iter()
@@ -5178,6 +5200,47 @@ mod tests {
                         .all(|(actual, expected)| C::from(*actual) == expected)
                 );
             }
+        }
+    }
+
+    /// The affine FFT declines any `omega` whose multiplicative order is not
+    /// exactly `2^log_n` without modifying the output, including at the 8-
+    /// and 16-point fused-codelet thresholds whose factorizations require a
+    /// primitive root.
+    fn affine_fft_declines_non_exact_order_omega<C: GlvParams>() {
+        for log_n in [1, 2, 3, 4, 5] {
+            let n = 1usize << log_n;
+            let mut omega = C::ScalarExt::ROOT_OF_UNITY_INV;
+            for _ in log_n..C::ScalarExt::S {
+                omega = omega.square();
+            }
+
+            let generator = C::generator();
+            let input: Vec<C> = (0..n)
+                .map(|i| generator * C::ScalarExt::from(i as u64 + 1))
+                .collect();
+            let untouched = alloc::vec![C::AffineExt::from(generator); n];
+
+            // A root of exact order `2^(log_n - 1)`, a higher-order root of
+            // exact order `2^(log_n + 1)`, and `omega = 1` must all be
+            // declined; only the exact-order root is accepted.
+            for bad_omega in [omega.square(), C::ScalarExt::ONE] {
+                let mut output = untouched.clone();
+                assert!(!fft_vartime(&input, &mut output, bad_omega, log_n));
+                assert_eq!(output, untouched, "a declined FFT must not write");
+            }
+            if log_n < C::ScalarExt::S {
+                let mut higher_order = C::ScalarExt::ROOT_OF_UNITY_INV;
+                for _ in log_n + 1..C::ScalarExt::S {
+                    higher_order = higher_order.square();
+                }
+                let mut output = untouched.clone();
+                assert!(!fft_vartime(&input, &mut output, higher_order, log_n));
+                assert_eq!(output, untouched, "a declined FFT must not write");
+            }
+
+            let mut output = untouched.clone();
+            assert!(fft_vartime(&input, &mut output, omega, log_n));
         }
     }
 
@@ -5327,6 +5390,10 @@ mod tests {
                 #[test]
                 fn affine_fft() {
                     affine_fft_matches_projective::<$curve>();
+                }
+                #[test]
+                fn affine_fft_decline() {
+                    affine_fft_declines_non_exact_order_omega::<$curve>();
                 }
                 #[test]
                 fn batch_affine_buckets() {

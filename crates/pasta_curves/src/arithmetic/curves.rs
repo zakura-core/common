@@ -135,8 +135,10 @@ pub trait CurveExt:
     ///
     /// `input` and `output` must have the same power-of-two length, equal to
     /// `2^log_n`. The transform is unnormalized. Implementations return
-    /// `true` after writing the transform to `output`; the default returns
-    /// `false` without modifying `output`.
+    /// `true` after writing the transform to `output`, and return `false`
+    /// without modifying `output` for inputs they do not support — for
+    /// example, when `omega` does not have exact multiplicative order
+    /// `2^log_n`. The default returns `false` for every input.
     ///
     /// # Security
     ///
