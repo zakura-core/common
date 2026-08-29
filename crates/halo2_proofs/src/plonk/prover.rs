@@ -1358,7 +1358,6 @@ where
         .collect::<Vec<_>>();
     let initial_evaluation_count = queries.len();
     let mut queries = queries;
-    queries.push(vanishing.evaluation_query());
     queries.extend(pk.permutation.evaluation_queries());
     for permutation in &permutations {
         queries.extend(permutation.evaluation_queries());
@@ -1382,14 +1381,7 @@ where
         transcript.write_scalar(evaluation)?;
     }
 
-    let vanishing = vanishing.evaluate(
-        xn,
-        domain,
-        evaluations
-            .next()
-            .expect("one random-polynomial evaluation is queued"),
-        transcript,
-    )?;
+    let vanishing = vanishing.evaluate(*x, xn, domain, transcript)?;
 
     // Evaluate common permutation data
     pk.permutation.evaluate(&mut evaluations, transcript)?;
