@@ -621,9 +621,11 @@ impl<C: CurveAffine> Params<C> {
         {
             let n = self.n as usize;
             if prepared.terms() == n && poly.len() == n {
-                let mut commitment = prepared.multiexp_with_terms_vartime(poly, &[]);
-                commitment += blind_table.multiply(r.0);
-                return commitment;
+                let (commitment, blind) = crate::multicore::join(
+                    || prepared.multiexp_with_terms_vartime(poly, &[]),
+                    || blind_table.multiply(r.0),
+                );
+                return commitment + blind;
             }
         }
 
@@ -671,9 +673,11 @@ impl<C: CurveAffine> Params<C> {
         {
             let n = self.n as usize;
             if prepared.terms() == n && poly.len() == n {
-                let mut commitment = prepared.multiexp_with_terms_vartime(poly, &[]);
-                commitment += blind_table.multiply(r.0);
-                return commitment;
+                let (commitment, blind) = crate::multicore::join(
+                    || prepared.multiexp_with_terms_vartime(poly, &[]),
+                    || blind_table.multiply(r.0),
+                );
+                return commitment + blind;
             }
         }
 
