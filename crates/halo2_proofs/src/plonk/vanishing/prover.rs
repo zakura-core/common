@@ -15,7 +15,6 @@ use crate::{
     arithmetic::{CurveAffine, best_multiexp, parallelize},
     plonk::{
         ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
-        evaluation::{EvaluationPoint, EvaluationQuery},
     },
     poly::{
         self, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial, ProvingKeyTwiddles,
@@ -191,6 +190,17 @@ fn commit_quotient_evaluation_mask<C: CurveAffine>(
     best_multiexp(&scalars, &bases)
 }
 
+fn evaluate_quotient_evaluation_mask<F: Field>(polynomial: &Polynomial<F, Coeff>, point: F) -> F {
+    assert!(polynomial.len() >= QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
+    debug_assert!(
+        polynomial[QUOTIENT_EVALUATION_MASK_COEFFICIENTS..]
+            .iter()
+            .all(|coefficient| *coefficient == F::ZERO)
+    );
+
+    polynomial[0] + polynomial[1] * point
+}
+
 pub(in crate::plonk) struct CommittedRandomPolynomial<C: CurveAffine> {
     poly: Polynomial<C::Scalar, Coeff>,
     blind: Blind<C::Scalar>,
@@ -331,18 +341,11 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
 }
 
 impl<C: CurveAffine> ConstructedQuotient<C> {
-    pub(in crate::plonk) fn evaluation_query(&self) -> EvaluationQuery<'_, C::Scalar> {
-        EvaluationQuery {
-            polynomial: &self.random_poly.poly,
-            point: EvaluationPoint::Current,
-        }
-    }
-
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
+        x: C::Scalar,
         xn: C::Scalar,
         domain: &EvaluationDomain<C::Scalar>,
-        random_eval: C::Scalar,
         transcript: &mut T,
     ) -> Result<EvaluatedQuotient<C>, Error> {
         let h_poly = fold_quotient_pieces(domain, self.h_pieces, xn);
@@ -353,6 +356,7 @@ impl<C: CurveAffine> ConstructedQuotient<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
+        let random_eval = evaluate_quotient_evaluation_mask(&self.random_poly.poly, x);
         transcript.write_scalar(random_eval)?;
 
         Ok(EvaluatedQuotient {
@@ -389,10 +393,11 @@ impl<C: CurveAffine> EvaluatedQuotient<C> {
 mod tests {
     use super::{
         QUOTIENT_EVALUATION_MASK_COEFFICIENTS, commit_quotient_evaluation_mask,
-        fold_quotient_pieces, sample_quotient_evaluation_mask,
+        evaluate_quotient_evaluation_mask, fold_quotient_pieces,
+        sample_quotient_evaluation_mask,
     };
     use crate::{
-        arithmetic::CurveAffine,
+        arithmetic::{CurveAffine, eval_polynomial},
         plonk::ChallengeX,
         poly::{Coeff, EvaluationDomain, Polynomial, commitment::Blind},
         transcript::{Blake2bWrite, Challenge255, Transcript},
@@ -465,6 +470,12 @@ mod tests {
         assert_eq!(
             commit_quotient_evaluation_mask(&params, &polynomial, blind),
             params.commit(&polynomial, blind),
+        );
+
+        let point = C::Scalar::random(&mut rng);
+        assert_eq!(
+            evaluate_quotient_evaluation_mask(&polynomial, point),
+            eval_polynomial(&polynomial, point),
         );
     }
 
