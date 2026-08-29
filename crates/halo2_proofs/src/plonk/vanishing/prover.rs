@@ -117,17 +117,16 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         let quotient_numerator = poly::Ast::distribute_powers(expressions, *y);
         let quotient_numerator = evaluator.evaluate(&quotient_numerator, domain);
 
-        // Move the numerator to coefficient form and divide by
-        // t(X) = X^{params.n} - 1 using its sparse block inverse.
-        let h_poly =
-            domain.quotient_numerator_to_coeff_with_twiddles(quotient_numerator, fft_twiddles);
-
-        // Split h(X) up into pieces
-        let h_pieces = h_poly
-            .chunks_exact(params.n as usize)
-            .map(|v| domain.coeff_from_vec(v.to_vec()))
-            .collect::<Vec<_>>();
-        drop(h_poly);
+        // Move the numerator to coefficient form, divide by
+        // t(X) = X^{params.n} - 1 using its sparse block inverse, and construct
+        // the coefficient-form quotient pieces in the same pass.
+        let h_pieces =
+            domain.quotient_numerator_to_pieces_with_twiddles(quotient_numerator, fft_twiddles);
+        debug_assert!(
+            h_pieces
+                .iter()
+                .all(|piece| piece.len() == params.n as usize)
+        );
         let h_blinds: Vec<_> = h_pieces
             .iter()
             .map(|_| Blind(C::Scalar::random(&mut rng)))
