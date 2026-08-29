@@ -500,19 +500,21 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             // per-proof commitments) the extras are a substantial MSM of
             // their own, and running the phases back to back would add
             // their latency instead of overlapping it.
-            let (extras_part, (windows_part, tail)) = maybe_rayon::join(
-                || self.extras_sum(extras),
-                || {
-                    maybe_rayon::join(
-                        || {
-                            super::paired_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum(recoded, window)
-                            })
-                        },
-                        || self.tail_sum(&recoded.residuals, num_threads),
-                    )
-                },
-            );
+            let main = || {
+                maybe_rayon::join(
+                    || {
+                        super::paired_windows_sum::<C>(active, window_bits, |window| {
+                            self.window_sum(recoded, window)
+                        })
+                    },
+                    || self.tail_sum(&recoded.residuals, num_threads),
+                )
+            };
+            let (extras_part, (windows_part, tail)) = if extras.is_empty() {
+                (Some(C::identity()), main())
+            } else {
+                maybe_rayon::join(|| self.extras_sum(extras), main)
+            };
             let windows_part = windows_part?;
             let mut tail = tail?;
             if !bool::from(tail.is_identity()) {
