@@ -502,8 +502,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         a.values
     }
 
-    /// Converts a quotient numerator from the extended evaluation domain to
-    /// coefficient form, then divides it by the vanishing polynomial.
+    /// Converts a quotient numerator from the extended evaluation domain into
+    /// the coefficient-form quotient pieces.
     ///
     /// If the extended domain has size `N = m * n`, its coset coefficient ring
     /// is `F[X] / (X^N - c)` for `c = g^N`. In that ring,
@@ -514,17 +514,65 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     ///
     /// Applying this sparse inverse blockwise replaces `N` pointwise field
     /// multiplications with `n` fixed-constant multiplications and block
-    /// additions. This is equivalent for arbitrary numerator evaluations, not
+    /// additions. The output permutation, inverse-FFT normalization, sparse
+    /// division, and construction of quotient pieces are fused so the full
+    /// coefficient buffer is not reversed, normalized, divided, and copied in
+    /// separate passes. Independent coefficient columns are processed in
+    /// parallel. This is equivalent for arbitrary numerator evaluations, not
     /// only for numerators that are polynomially divisible by `X^n - 1`.
-    pub(crate) fn quotient_numerator_to_coeff_with_twiddles(
+    pub(crate) fn quotient_numerator_to_pieces_with_twiddles(
         &self,
-        polynomial: Polynomial<F, ExtendedLagrangeCoeff>,
+        mut polynomial: Polynomial<F, ExtendedLagrangeCoeff>,
         twiddles: &ProvingKeyTwiddles<F>,
-    ) -> Vec<F> {
-        let mut coefficients = self.extended_to_coeff_full_with_twiddles(polynomial, twiddles);
-        self.divide_by_vanishing_poly_in_coeffs(&mut coefficients);
-        coefficients.truncate((&self.n * self.quotient_poly_degree) as usize);
-        coefficients
+    ) -> Vec<Polynomial<F, Coeff>> {
+        assert_eq!(polynomial.len(), self.extended_len());
+        assert_eq!(twiddles.extended_forward.len(), self.extended_len() / 2);
+
+        if self.quotient_poly_degree == 0 {
+            return Vec::new();
+        }
+
+        bitreverse_permute(&mut polynomial.values, self.extended_k);
+        recursive_butterfly_after_prefix(
+            &mut polynomial.values,
+            1,
+            1,
+            &twiddles.extended_forward,
+            parallel_depth(),
+        );
+
+        let block_len = self.n as usize;
+        let block_count = self.extended_len() / block_len;
+        let piece_count = self.quotient_poly_degree as usize;
+        assert!(piece_count <= block_count);
+
+        let mut piece_values = (0..piece_count)
+            .map(|_| vec![F::ZERO; block_len])
+            .collect::<Vec<_>>();
+        let output_blocks = piece_values
+            .iter_mut()
+            .map(Vec::as_mut_slice)
+            .collect::<Vec<_>>();
+        let quotient_columns = QuotientColumnContext {
+            transform: &polynomial.values,
+            block_len,
+            block_count,
+            scales: [
+                self.extended_ifft_divisor,
+                self.extended_ifft_divisor * self.g_coset_inv,
+                self.extended_ifft_divisor * self.g_coset,
+            ],
+            sparse_vanishing_divisor: self.sparse_vanishing_divisor,
+        };
+        quotient_columns.write(output_blocks, 0, parallel_depth());
+
+        piece_values
+            .into_iter()
+            .map(|values| Polynomial {
+                values,
+                _marker: PhantomData,
+            })
+            .collect()
     }
 
     /// Converts an extended-domain polynomial to untruncated coefficient form
@@ -536,6 +584,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// [`EvaluationDomain::extended_to_coeff`] is covered by
     /// `test_batched_lagrange_transforms_match_independent_transforms`,
     /// including explicit one- and three-thread pools.
+    #[cfg(test)]
     fn extended_to_coeff_full_with_twiddles(
         &self,
         mut polynomial: Polynomial<F, ExtendedLagrangeCoeff>,
@@ -568,39 +617,6 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             }
         });
         polynomial.values
-    }
-
-    fn divide_by_vanishing_poly_in_coeffs(&self, coefficients: &mut [F]) {
-        assert_eq!(coefficients.len(), self.extended_len());
-
-        let block_len = self.n as usize;
-        let block_count = coefficients.len() / block_len;
-        debug_assert_eq!(block_count, 1 << (self.extended_k - self.k));
-
-        // Write the quotient blocks directly over the numerator blocks. For a
-        // fixed coefficient position, retain the numerator coefficient that
-        // the descending recurrence will need before overwriting its block.
-        for column in 0..block_len {
-            let mut block_sum = coefficients[column];
-            for block in 1..block_count {
-                block_sum += &coefficients[block * block_len + column];
-            }
-
-            let h_last = block_sum * self.sparse_vanishing_divisor;
-            let mut h_next = h_last;
-            let mut numerator = coefficients[(block_count - 1) * block_len + column];
-
-            for block in (1..block_count).rev() {
-                let output = (block - 1) * block_len + column;
-                let previous_numerator = coefficients[output];
-                let h_previous = numerator + h_next;
-                coefficients[output] = h_previous;
-                numerator = previous_numerator;
-                h_next = h_previous;
-            }
-
-            coefficients[(block_count - 1) * block_len + column] = h_last;
-        }
     }
 
     /// This divides the polynomial (in the extended domain) by the vanishing
@@ -994,6 +1010,81 @@ fn recursive_butterfly_after_prefix<F: Field>(
     }
 }
 
+struct QuotientColumnContext<'a, F> {
+    transform: &'a [F],
+    block_len: usize,
+    block_count: usize,
+    scales: [F; 3],
+    sparse_vanishing_divisor: F,
+}
+
+impl<F: Field> QuotientColumnContext<'_, F> {
+    /// Converts aligned coefficient columns from a forward-transform result
+    /// into quotient-piece columns. An inverse transform reads output zero
+    /// unchanged and every other output in reverse order; indexing that
+    /// permutation here avoids reversing the full transform buffer first.
+    fn write(&self, mut output_blocks: Vec<&mut [F]>, column_offset: usize, parallel_depth: u32) {
+        debug_assert!(!output_blocks.is_empty());
+        let column_len = output_blocks[0].len();
+        debug_assert!(
+            output_blocks
+                .iter()
+                .all(|output| output.len() == column_len)
+        );
+        debug_assert_eq!(self.transform.len(), self.block_len * self.block_count);
+
+        if parallel_depth > 0 && column_len > 1 {
+            let middle = column_len / 2;
+            let mut left_outputs = Vec::with_capacity(output_blocks.len());
+            let mut right_outputs = Vec::with_capacity(output_blocks.len());
+            for output in output_blocks {
+                let (left, right) = output.split_at_mut(middle);
+                left_outputs.push(left);
+                right_outputs.push(right);
+            }
+
+            multicore::join(
+                || self.write(left_outputs, column_offset, parallel_depth - 1),
+                || self.write(right_outputs, column_offset + middle, parallel_depth - 1),
+            );
+            return;
+        }
+
+        let transform_len = self.transform.len();
+        let piece_count = output_blocks.len();
+        let mut numerators = vec![F::ZERO; self.block_count];
+        let mut local_column = 0;
+        while local_column < column_len {
+            let column = column_offset + local_column;
+            let mut numerator_sum = F::ZERO;
+            for (block, numerator) in numerators.iter_mut().enumerate() {
+                let coefficient_index = block * self.block_len + column;
+                let transform_index = if coefficient_index == 0 {
+                    0
+                } else {
+                    transform_len - coefficient_index
+                };
+                *numerator = self.transform[transform_index]
+                    * self.scales[coefficient_index % self.scales.len()];
+                numerator_sum += &*numerator;
+            }
+
+            let mut h_next = numerator_sum * self.sparse_vanishing_divisor;
+            if self.block_count - 1 < piece_count {
+                output_blocks[self.block_count - 1][local_column] = h_next;
+            }
+            for block in (1..self.block_count).rev() {
+                let h_previous = numerators[block] + h_next;
+                if block - 1 < piece_count {
+                    output_blocks[block - 1][local_column] = h_previous;
+                }
+                h_next = h_previous;
+            }
+            local_column += 1;
+        }
+    }
+}
+
 /// Represents the minimal parameters that determine an `EvaluationDomain`.
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -1137,10 +1228,10 @@ fn test_sparse_quotient_division_matches_pointwise_division() {
     use crate::pasta::pallas::Scalar;
 
     let check = || {
-        // Cover every extended-domain ratio through Orchard's, a ratio-one
-        // domain, a non-power-of-two quotient degree that is truncated after
-        // division, and the next larger ratio.
-        for &(max_degree, k) in &[(2, 0), (3, 3), (4, 3), (6, 4), (9, 11), (10, 4)] {
+        // Cover the empty quotient, every extended-domain ratio through
+        // Orchard's, a ratio-one domain, a non-power-of-two quotient degree
+        // that is truncated after division, and the next larger ratio.
+        for &(max_degree, k) in &[(1, 3), (2, 0), (3, 3), (4, 3), (6, 4), (9, 11), (10, 4)] {
             let domain = EvaluationDomain::<Scalar>::new(max_degree, k);
             let twiddles = domain.proving_key_twiddles();
             let mut numerator = domain.empty_extended();
@@ -1153,7 +1244,11 @@ fn test_sparse_quotient_division_matches_pointwise_division() {
             // inverse transform and its separate coset untwist.
             let expected =
                 domain.extended_to_coeff(domain.divide_by_vanishing_poly(numerator.clone()));
-            let actual = domain.quotient_numerator_to_coeff_with_twiddles(numerator, &twiddles);
+            let actual = domain
+                .quotient_numerator_to_pieces_with_twiddles(numerator, &twiddles)
+                .into_iter()
+                .flat_map(|piece| piece.values)
+                .collect::<Vec<_>>();
             assert_eq!(actual, expected);
         }
     };
@@ -1179,6 +1274,7 @@ fn test_sparse_quotient_division_matches_pointwise_on_basis_vectors() {
         // standard basis vector therefore covers every possible numerator for
         // these small domains, without relying on a single dense fixture.
         for &(max_degree, k) in &[
+            (1, 3),
             (2, 0),
             (2, 3),
             (3, 3),
@@ -1197,7 +1293,11 @@ fn test_sparse_quotient_division_matches_pointwise_on_basis_vectors() {
 
                 let expected =
                     domain.extended_to_coeff(domain.divide_by_vanishing_poly(numerator.clone()));
-                let actual = domain.quotient_numerator_to_coeff_with_twiddles(numerator, &twiddles);
+                let actual = domain
+                    .quotient_numerator_to_pieces_with_twiddles(numerator, &twiddles)
+                    .into_iter()
+                    .flat_map(|piece| piece.values)
+                    .collect::<Vec<_>>();
                 assert_eq!(
                     actual, expected,
                     "max_degree={max_degree}, k={k}, basis_index={basis_index}"
