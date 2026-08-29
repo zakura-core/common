@@ -76,6 +76,7 @@ pub struct EvaluationDomain<F: Field> {
     quotient_poly_degree: u64,
     ifft_divisor: F,
     extended_ifft_divisor: F,
+    sparse_vanishing_divisor: F,
     t_evaluations: Vec<F>,
     barycentric_weight: F,
 }
@@ -159,6 +160,12 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         let mut ifft_divisor = F::from(1 << k); // Inversion computed later
         let mut extended_ifft_divisor = F::from(1 << extended_k); // Inversion computed later
 
+        // In coefficient form, division by X^n - 1 over the extended coset
+        // requires division by g^N - 1, where N is the extended domain size.
+        let mut sparse_vanishing_divisor = g_coset.pow_vartime([1u64 << extended_k]);
+        sparse_vanishing_divisor -= F::ONE;
+        debug_assert!(!bool::from(sparse_vanishing_divisor.is_zero()));
+
         // The barycentric weight of 1 over the evaluation domain
         // 1 / \prod_{i != 0} (1 - omega^i)
         let mut barycentric_weight = F::from(n); // Inversion computed later
@@ -168,6 +175,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             .iter_mut()
             .chain(Some(&mut ifft_divisor))
             .chain(Some(&mut extended_ifft_divisor))
+            .chain(Some(&mut sparse_vanishing_divisor))
             .chain(Some(&mut barycentric_weight))
             .chain(Some(&mut extended_omega_inv))
             .chain(Some(&mut omega_inv))
@@ -190,6 +198,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             quotient_poly_degree,
             ifft_divisor,
             extended_ifft_divisor,
+            sparse_vanishing_divisor,
             t_evaluations,
             barycentric_weight,
         }
@@ -493,8 +502,33 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         a.values
     }
 
-    /// Converts an extended-domain polynomial to coefficient form using the
-    /// proving key's forward twiddles.
+    /// Converts a quotient numerator from the extended evaluation domain to
+    /// coefficient form, then divides it by the vanishing polynomial.
+    ///
+    /// If the extended domain has size `N = m * n`, its coset coefficient ring
+    /// is `F[X] / (X^N - c)` for `c = g^N`. In that ring,
+    ///
+    /// ```text
+    /// (X^n - 1)^-1 = (1 + X^n + ... + X^((m - 1)n)) / (c - 1).
+    /// ```
+    ///
+    /// Applying this sparse inverse blockwise replaces `N` pointwise field
+    /// multiplications with `n` fixed-constant multiplications and block
+    /// additions. This is equivalent for arbitrary numerator evaluations, not
+    /// only for numerators that are polynomially divisible by `X^n - 1`.
+    pub(crate) fn quotient_numerator_to_coeff_with_twiddles(
+        &self,
+        polynomial: Polynomial<F, ExtendedLagrangeCoeff>,
+        twiddles: &ProvingKeyTwiddles<F>,
+    ) -> Vec<F> {
+        let mut coefficients = self.extended_to_coeff_full_with_twiddles(polynomial, twiddles);
+        self.divide_by_vanishing_poly_in_coeffs(&mut coefficients);
+        coefficients.truncate((&self.n * self.quotient_poly_degree) as usize);
+        coefficients
+    }
+
+    /// Converts an extended-domain polynomial to untruncated coefficient form
+    /// using the proving key's forward twiddles.
     ///
     /// An inverse DFT is a forward DFT with every nonzero output index
     /// reversed, followed by the usual scaling. This avoids retaining a
@@ -502,7 +536,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// [`EvaluationDomain::extended_to_coeff`] is covered by
     /// `test_batched_lagrange_transforms_match_independent_transforms`,
     /// including explicit one- and three-thread pools.
-    pub(crate) fn extended_to_coeff_with_twiddles(
+    fn extended_to_coeff_full_with_twiddles(
         &self,
         mut polynomial: Polynomial<F, ExtendedLagrangeCoeff>,
         twiddles: &ProvingKeyTwiddles<F>,
@@ -519,16 +553,54 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             parallel_depth(),
         );
         polynomial.values[1..].reverse();
-        parallelize(&mut polynomial.values, |values, _| {
+
+        // Combine inverse-FFT normalization with removal of the coset twist,
+        // so each coefficient requires exactly one field multiplication.
+        let scales = [
+            self.extended_ifft_divisor,
+            self.extended_ifft_divisor * self.g_coset_inv,
+            self.extended_ifft_divisor * self.g_coset,
+        ];
+        parallelize(&mut polynomial.values, |values, mut index| {
             for value in values {
-                *value *= &self.extended_ifft_divisor;
+                *value *= &scales[index % scales.len()];
+                index += 1;
             }
         });
-        self.distribute_powers_zeta(&mut polynomial.values, false);
-        polynomial
-            .values
-            .truncate((&self.n * self.quotient_poly_degree) as usize);
         polynomial.values
+    }
+
+    fn divide_by_vanishing_poly_in_coeffs(&self, coefficients: &mut [F]) {
+        assert_eq!(coefficients.len(), self.extended_len());
+
+        let block_len = self.n as usize;
+        let block_count = coefficients.len() / block_len;
+        debug_assert_eq!(block_count, 1 << (self.extended_k - self.k));
+
+        // Write the quotient blocks directly over the numerator blocks. For a
+        // fixed coefficient position, retain the numerator coefficient that
+        // the descending recurrence will need before overwriting its block.
+        for column in 0..block_len {
+            let mut block_sum = coefficients[column];
+            for block in 1..block_count {
+                block_sum += &coefficients[block * block_len + column];
+            }
+
+            let h_last = block_sum * self.sparse_vanishing_divisor;
+            let mut h_next = h_last;
+            let mut numerator = coefficients[(block_count - 1) * block_len + column];
+
+            for block in (1..block_count).rev() {
+                let output = (block - 1) * block_len + column;
+                let previous_numerator = coefficients[output];
+                let h_previous = numerator + h_next;
+                coefficients[output] = h_previous;
+                numerator = previous_numerator;
+                h_next = h_previous;
+            }
+
+            coefficients[(block_count - 1) * block_len + column] = h_last;
+        }
     }
 
     /// This divides the polynomial (in the extended domain) by the vanishing
@@ -1020,8 +1092,9 @@ fn test_batched_lagrange_transforms_match_independent_transforms() {
                     assert_eq!(&cached[..], &expected[..]);
 
                     let expected_back = domain.extended_to_coeff(expected.clone());
-                    let cached_coefficients =
-                        domain.extended_to_coeff_with_twiddles(expected.clone(), &twiddles);
+                    let mut cached_coefficients =
+                        domain.extended_to_coeff_full_with_twiddles(expected.clone(), &twiddles);
+                    cached_coefficients.truncate(expected_back.len());
                     assert_eq!(cached_coefficients, expected_back);
                 }
 
@@ -1033,7 +1106,9 @@ fn test_batched_lagrange_transforms_match_independent_transforms() {
                     *value = Scalar::from((index + 1) as u64);
                 }
                 let expected = domain.extended_to_coeff(arbitrary_extended.clone());
-                let actual = domain.extended_to_coeff_with_twiddles(arbitrary_extended, &twiddles);
+                let mut actual =
+                    domain.extended_to_coeff_full_with_twiddles(arbitrary_extended, &twiddles);
+                actual.truncate(expected.len());
                 assert_eq!(actual, expected);
             };
 
@@ -1055,6 +1130,44 @@ fn test_batched_lagrange_transforms_match_independent_transforms() {
     let (coefficients, extended) = domain.batch_lagrange_to_coeff_and_extended(&[], &twiddles);
     assert!(coefficients.is_empty());
     assert!(extended.is_empty());
+}
+
+#[test]
+fn test_sparse_quotient_division_matches_pointwise_division() {
+    use crate::pasta::pallas::Scalar;
+
+    let check = || {
+        // Cover every extended-domain ratio through Orchard's, a ratio-one
+        // domain, a non-power-of-two quotient degree that is truncated after
+        // division, and the next larger ratio.
+        for &(max_degree, k) in &[(2, 0), (3, 3), (4, 3), (6, 4), (9, 11), (10, 4)] {
+            let domain = EvaluationDomain::<Scalar>::new(max_degree, k);
+            let twiddles = domain.proving_key_twiddles();
+            let mut numerator = domain.empty_extended();
+            for (index, value) in numerator.iter_mut().enumerate() {
+                *value = Scalar::from(((index as u64) + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            }
+
+            // The existing path is an independent reference: pointwise
+            // division in the evaluation domain followed by the uncached
+            // inverse transform and its separate coset untwist.
+            let expected =
+                domain.extended_to_coeff(domain.divide_by_vanishing_poly(numerator.clone()));
+            let actual = domain.quotient_numerator_to_coeff_with_twiddles(numerator, &twiddles);
+            assert_eq!(actual, expected);
+        }
+    };
+
+    #[cfg(feature = "multicore")]
+    for threads in [1, 3] {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(check);
+    }
+    #[cfg(not(feature = "multicore"))]
+    check();
 }
 
 #[test]

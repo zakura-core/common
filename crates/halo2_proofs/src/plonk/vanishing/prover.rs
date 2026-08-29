@@ -117,11 +117,10 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         let quotient_numerator = poly::Ast::distribute_powers(expressions, *y);
         let quotient_numerator = evaluator.evaluate(&quotient_numerator, domain);
 
-        // Divide by t(X) = X^{params.n} - 1.
-        let h_poly = domain.divide_by_vanishing_poly(quotient_numerator);
-
-        // Obtain the quotient polynomial h(X).
-        let h_poly = domain.extended_to_coeff_with_twiddles(h_poly, fft_twiddles);
+        // Move the numerator to coefficient form and divide by
+        // t(X) = X^{params.n} - 1 using its sparse block inverse.
+        let h_poly =
+            domain.quotient_numerator_to_coeff_with_twiddles(quotient_numerator, fft_twiddles);
 
         // Split h(X) up into pieces
         let h_pieces = h_poly
