@@ -1363,7 +1363,11 @@ const BATCH_INVERSION_LANES: usize = 2;
 ///
 /// Each `output` identifies the slot containing the addition's left operand.
 /// The outputs must be distinct. Returns `None` if the product of the
-/// denominators is zero, allowing [`try_multiexp`] to use the generic MSM.
+/// denominators is zero. In that case, this function has not written to
+/// `points`: the prefix pass changes only disposable inversion scratch, and
+/// the output pass starts only after the product is successfully inverted.
+/// [`reduce_affine_buckets`] combines this failure-atomic behavior with
+/// separate level staging before it retries an exceptional level.
 fn batch_invert_and_add<F: Field>(
     additions: &mut [PendingAffineAddition<F>],
     points: &mut [AffinePoint<F>],
@@ -1382,7 +1386,11 @@ fn batch_invert_and_add<F: Field>(
         }
     }
 
-    // Invert both lane products with one inversion.
+    // Invert both lane products with one inversion. A field has no zero
+    // divisors, so this product is zero exactly when at least one affine
+    // denominator is zero. No output point has been written yet; `?` therefore
+    // makes failure atomic with respect to `points`. Writes to
+    // `inversion_scratch` are discarded by the caller on failure.
     let product = lane_products[0] * lane_products[1];
     // This MSM is already variable-time with respect to scalar digits; batch
     // inversion does not provide a constant-time guarantee.
@@ -1488,6 +1496,18 @@ where
 /// a zero batch product restarts that level with complete handling for
 /// identity, doubling, and inverse pairs.
 ///
+/// For valid points on a short-Weierstrass curve over an odd-prime field,
+/// equal x-coordinates imply equal or opposite y-coordinates. Thus the only
+/// zero-denominator cases omitted by the incomplete chord formula are a
+/// doubling and an inverse pair. The latter includes the y = 0 overlap, which
+/// is a point of order two and sums with itself to the identity.
+///
+/// Each level is built in `next_points` and `next_offsets`, while `points` and
+/// `offsets` continue to hold its unchanged inputs. The vectors are swapped
+/// only after every addition succeeds. An exceptional incomplete level can
+/// therefore discard its staging and safely retry the same inputs with the
+/// complete formulas.
+///
 /// # Invariants
 ///
 /// - Every coordinate in `points` represents a valid, non-identity point on
@@ -1530,6 +1550,9 @@ fn reduce_affine_buckets_inner<F: Field, const COMPLETE: bool>(
                 let right = pair[1];
 
                 let (numerator, denominator) = if COMPLETE && left.x == right.x {
+                    // Valid curve points with the same x-coordinate have the
+                    // same or opposite y-coordinate. Handle both branches
+                    // before asking the batch inverter to divide.
                     if left.y != right.y || bool::from(left.y.is_zero()) {
                         // The points are inverses, or this is a point of order
                         // two. Their sum is the identity, which is omitted.
@@ -1562,11 +1585,19 @@ fn reduce_affine_buckets_inner<F: Field, const COMPLETE: bool>(
 
         if batch_invert_and_add(&mut pending, &mut next_points).is_none() {
             if !COMPLETE {
-                // An incomplete chord was exceptional. `points` and
-                // `offsets` are unchanged, so retry this level and finish the
-                // reduction with complete affine formulas.
+                // At least one incomplete chord had equal x-coordinates. The
+                // failed batch has not overwritten any staged point, and the
+                // source vectors are not swapped until success, so `points`
+                // and `offsets` are still the exact inputs to this level.
+                // Retry them and keep complete formulas enabled for every
+                // remaining level; this prevents a later exceptional pair
+                // from entering an incomplete formula too.
                 return reduce_affine_buckets_inner::<F, true>(points, offsets);
             }
+            // Complete formulas cannot produce a zero denominator under the
+            // invariants above. If the guard nevertheless fails, propagate
+            // `None` so the verifier caller uses the generic MSM instead of a
+            // potentially incomplete result.
             return None;
         }
 
@@ -5245,7 +5276,7 @@ mod tests {
         }
     }
 
-    fn batch_inversion_rejects_zero_denominator<F: Field>() {
+    fn batch_inversion_zero_denominator_is_failure_atomic_for<F: Field>() {
         let mut additions = [F::ONE, F::ZERO, F::ONE.double()]
             .into_iter()
             .enumerate()
@@ -5259,19 +5290,24 @@ mod tests {
             .collect::<Vec<_>>();
         let mut points = alloc::vec![
             AffinePoint {
-                x: F::ZERO,
-                y: F::ZERO,
+                x: F::ONE,
+                y: F::ONE,
             };
             additions.len()
         ];
+        let original_points = points.clone();
 
         assert!(batch_invert_and_add(&mut additions, &mut points).is_none());
+        for (actual, original) in points.iter().zip(original_points) {
+            assert_eq!(actual.x, original.x);
+            assert_eq!(actual.y, original.y);
+        }
     }
 
     #[test]
-    fn batch_inversion_zero_denominator_returns_none() {
-        batch_inversion_rejects_zero_denominator::<crate::Fp>();
-        batch_inversion_rejects_zero_denominator::<crate::Fq>();
+    fn batch_inversion_zero_denominator_is_failure_atomic() {
+        batch_inversion_zero_denominator_is_failure_atomic_for::<crate::Fp>();
+        batch_inversion_zero_denominator_is_failure_atomic_for::<crate::Fq>();
     }
 
     macro_rules! glv_tests {
