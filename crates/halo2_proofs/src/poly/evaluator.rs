@@ -1945,8 +1945,24 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 EvaluationPlan::Scale(a, scalar) => {
                     if let EvaluationPlan::Poly(leaf) = a.as_ref() {
                         let chunk = leaf_chunk(leaf, ctx, output.len());
-                        for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                            *output = *value * scalar;
+                        // Retain the borrowed-leaf path while using the same
+                        // cheap operations as compound small scales.
+                        if *scalar == ctx.two {
+                            for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                                *output = value.double();
+                            }
+                        } else if *scalar == ctx.minus_one {
+                            for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                                *output = -*value;
+                            }
+                        } else if *scalar == F::ONE {
+                            for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                                *output = *value;
+                            }
+                        } else {
+                            for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                                *output = *value * scalar;
+                            }
                         }
                         return;
                     }
@@ -2632,6 +2648,50 @@ mod tests {
             let result = evaluator.evaluate(&(Ast::ConstantTerm(value) * scalar), &domain);
             assert!(result.iter().all(|result| *result == expected));
         }
+    }
+
+    #[test]
+    fn scale_polynomials_by_small_values() {
+        fn check<B: BasisOps>() {
+            fn context() {}
+
+            let domain = EvaluationDomain::new(1, 4);
+            let mut poly = B::empty_poly(&domain);
+            for (index, value) in poly.iter_mut().enumerate() {
+                *value = pallas::Base::from(index as u64 + 7);
+            }
+            let mut evaluator = new_evaluator::<fn(), _, B>(context);
+            let leaf = evaluator.register_poly(poly);
+
+            for rotation in [Rotation::cur(), Rotation::prev(), Rotation::next()] {
+                let leaf = leaf.with_rotation(rotation);
+                let expected = evaluator.evaluate(&Ast::from(leaf), &domain);
+                for scalar in [
+                    -pallas::Base::ONE,
+                    pallas::Base::ONE,
+                    pallas::Base::ONE.double(),
+                    pallas::Base::from(7),
+                ] {
+                    let ast = Ast::from(leaf) * scalar;
+                    assert!(matches!(
+                        EvaluationPlan::compile(&ast),
+                        EvaluationPlan::Scale(inner, _)
+                            if matches!(inner.as_ref(), EvaluationPlan::Poly(_))
+                    ));
+
+                    let result = evaluator.evaluate(&ast, &domain);
+                    assert!(
+                        result
+                            .iter()
+                            .zip(expected.iter())
+                            .all(|(result, value)| *result == *value * scalar)
+                    );
+                }
+            }
+        }
+
+        check::<LagrangeCoeff>();
+        check::<ExtendedLagrangeCoeff>();
     }
 
     #[test]
