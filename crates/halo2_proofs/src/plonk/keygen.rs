@@ -31,7 +31,7 @@ fn commit_fixed_lagrange<C: CurveAffine>(
     params: &Params<C>,
     polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
 ) -> C::Curve {
-    #[cfg(feature = "orbits")]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     if params.lagrange_table().is_some() {
         return params.commit_lagrange(polynomial, Blind::default());
     }

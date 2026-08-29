@@ -55,9 +55,10 @@ gpu = ["alloc", "ec-gpu"]
 # `glv.rs` through the Rayon pool; implies `glv` (and therefore `alloc`).
 multicore = ["glv", "dep:maybe-rayon", "maybe-rayon/threads"]
 # The Eisenstein-orbit MSM backend (`glv::orbit`, planned against the
-# Signed-Booth backend per input) and the prepared fixed-base zero-checks
-# (`glv::zero`, exposed through `CurveExt::try_prepare_zero_check`).
-# Without it the arbitrary-scalar MSM plans the Signed-Booth backend alone.
+# Signed-Booth backend per input) and public prepared zero-check module
+# (`glv::zero`). Without it arbitrary-scalar MSMs plan only the Signed-Booth
+# backend; multicore callers can still use the private prepared evaluator
+# through `CurveExt::try_prepare_zero_check`.
 orbits = ["glv"]
 repr-c = []
 serde = ["hex", "serde_crate"]

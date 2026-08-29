@@ -51,8 +51,11 @@
 //! rebuilding from the bases is the only trust story that needs no
 //! separate soundness argument.
 //!
-//! Everything here is variable-time in scalars and points; all inputs must
-//! be public.
+//! Everything here is variable-time in scalars and points. Inputs to the
+//! zero-check APIs must be public. The point-returning
+//! [`PreparedZeroMsm::multiexp_with_terms_vartime`] may process secret scalars
+//! only when the caller explicitly accepts a variable-time MSM's timing side
+//! channel.
 //!
 //! # Deferred by measurement
 //!
@@ -93,7 +96,9 @@
 
 use alloc::vec::Vec;
 
-use ff::{Field, FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
+#[cfg(any(test, feature = "orbits"))]
+use ff::FromUniformBytes;
+use ff::{Field, PrimeField, WithSmallOrderMulGroup};
 use group::CurveAffine as _;
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
@@ -141,8 +146,10 @@ const DEFAULT_TABLE_FOOTPRINT_BUDGET: usize = 13 << 20;
 ///
 /// Preparation cost and memory scale with the mode's variant count (see
 /// [`CodebookMode`]); [`Self::prepared_bytes`] reports the footprint. The
-/// check itself is exact — see the module docs for the soundness story —
-/// and variable-time in everything, so all inputs must be public.
+/// check itself is exact — see the module docs for the soundness story — and
+/// variable-time in everything. Inputs to zero-check methods must be public;
+/// the point-returning MSM follows its separately documented side-channel
+/// contract.
 pub struct PreparedZeroMsm<C: GlvParams> {
     codebook: Codebook,
     table: VariantTable<C>,
@@ -165,6 +172,7 @@ pub struct PreparedZeroMsm<C: GlvParams> {
     /// BLAKE2b-256 over the prepared bases, mixed into
     /// [`Self::is_zero_batch_vartime`]'s derived challenge (and available
     /// to any future table-trust story).
+    #[cfg(any(test, feature = "orbits"))]
     bases_digest: [u8; 32],
 }
 
@@ -229,18 +237,22 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let live_count = live.iter().filter(|&&l| l).count();
         let tail_width = tail_width_index(live_count, codebook.tail_bound());
 
-        let mut digest = blake2b_simd::Params::new()
-            .hash_length(32)
-            .personal(b"zakura-zero-base")
-            .to_state();
-        digest.update(&(bases.len() as u64).to_le_bytes());
-        for base in bases {
-            let (x, y) = C::affine_xy(base);
-            digest.update(x.to_repr().as_ref());
-            digest.update(y.to_repr().as_ref());
-        }
-        let mut bases_digest = [0u8; 32];
-        bases_digest.copy_from_slice(digest.finalize().as_bytes());
+        #[cfg(any(test, feature = "orbits"))]
+        let bases_digest = {
+            let mut digest = blake2b_simd::Params::new()
+                .hash_length(32)
+                .personal(b"zakura-zero-base")
+                .to_state();
+            digest.update(&(bases.len() as u64).to_le_bytes());
+            for base in bases {
+                let (x, y) = C::affine_xy(base);
+                digest.update(x.to_repr().as_ref());
+                digest.update(y.to_repr().as_ref());
+            }
+            let mut bases_digest = [0u8; 32];
+            bases_digest.copy_from_slice(digest.finalize().as_bytes());
+            bases_digest
+        };
 
         PreparedZeroMsm {
             codebook,
@@ -250,11 +262,13 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             tail_bases,
             tail_params,
             tail_width,
+            #[cfg(any(test, feature = "orbits"))]
             bases_digest,
         }
     }
 
     /// The codebook mode this preparation uses.
+    #[cfg(any(test, feature = "orbits"))]
     pub fn mode(&self) -> CodebookMode {
         self.codebook.mode()
     }
@@ -280,6 +294,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// # Panics
     ///
     /// Panics if `scalars.len()` differs from the prepared base count.
+    #[cfg(any(test, feature = "orbits"))]
     pub fn is_zero_vartime(&self, scalars: &[C::ScalarExt]) -> bool {
         self.is_zero_with_terms_vartime(scalars, &[])
     }
@@ -415,6 +430,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// Protocols that already own a transcript should instead squeeze
     /// their own challenge — *after absorbing every equation* — and call
     /// [`Self::is_zero_batch_with_challenge_vartime`].
+    #[cfg(any(test, feature = "orbits"))]
     pub fn is_zero_batch_vartime(&self, equations: &[&[C::ScalarExt]]) -> bool
     where
         C::ScalarExt: ff::FromUniformBytes<64>,
@@ -449,6 +465,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// challenge known in advance lets a prover construct false equations
     /// that cancel in the combination. Prefer the self-deriving variant
     /// unless a protocol transcript owns the challenge.
+    #[cfg(any(test, feature = "orbits"))]
     pub fn is_zero_batch_with_challenge_vartime(
         &self,
         equations: &[&[C::ScalarExt]],
@@ -833,6 +850,7 @@ fn scan_relations<C: GlvParams>(
 /// # Panics
 ///
 /// Panics if the equations have differing lengths.
+#[cfg(any(test, feature = "orbits"))]
 pub fn combine_equations<C: GlvParams>(
     equations: &[&[C::ScalarExt]],
     challenge: C::ScalarExt,

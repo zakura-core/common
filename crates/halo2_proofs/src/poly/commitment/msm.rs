@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 /// 16 threads (Apple M4 Max) and +22–27% at a 32-thread pool
 /// (32-hw-thread Skylake-X) — the crossover sits between 8 and 16 on both
 /// architectures, on the assembly and portable field backends alike.
-#[cfg(feature = "orbits")]
+#[cfg(any(feature = "multicore", feature = "orbits"))]
 pub(crate) const PREPARED_MSM_MAX_THREADS: usize = 8;
 
 type ArbitraryTerm<C> = (

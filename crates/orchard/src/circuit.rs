@@ -1172,15 +1172,15 @@ pub struct ProvingKey {
 impl ProvingKey {
     /// Builds and caches prepared fixed-base commitment tables over this
     /// key's SRS (see
-    /// `halo2_proofs::poly::commitment::Params::prepare_commitments`).
+    /// [`halo2_proofs::poly::commitment::Params::prepare_commitments`]).
     /// Long-lived provers (wallet backends, proving services) should call
     /// this once after constructing the key: the prover's polynomial
     /// commitments then evaluate through the preparations on pools of at
     /// most eight effective threads, extended to ten on AArch64 macOS for
     /// Orchard's `k = 11` SRS (measured end to end on Apple M4). Wider pools
-    /// retain their usual multiexp. One-shot provers need not prepare:
-    /// setup costs hundreds of milliseconds and tens of mebibytes,
-    /// amortized across proofs.
+    /// retain their usual multiexp. One-shot provers need not prepare: at
+    /// `k = 11`, the two tables account for about 24.8 MiB and took about
+    /// 34 ms to build on the benchmarked M4, amortized across proofs.
     ///
     /// Call this once before entering concurrent Rayon proving work.
     /// Concurrent callers outside that pool safely wait for and share the same
@@ -1188,9 +1188,9 @@ impl ProvingKey {
     /// other workers and serialize the initializer's parallel work.
     ///
     /// Returns whether the tables were actually built and cached; `false`
-    /// means arming was a no-op (Orchard was built without its opt-in
-    /// `orbits` feature, or its backend declined) and proving simply keeps
-    /// its unprepared path. Callers may ignore the result.
+    /// means arming was a no-op (Orchard was built with neither `multicore`
+    /// nor `orbits`, or its backend declined) and proving simply keeps its
+    /// unprepared path. Callers may ignore the result.
     pub fn prepare_proving(&self) -> bool {
         self.params.prepare_commitments()
     }

@@ -122,6 +122,7 @@ pub enum CodebookMode {
     /// searchable point of the design space (and would be the shape to
     /// revisit with a terminal-window recoding program that cancels
     /// residuals), not as a planner default.
+    #[cfg(any(test, feature = "orbits"))]
     ExponentBox {
         /// The window width $c$; supported range 5..=9.
         window_bits: usize,
@@ -146,8 +147,9 @@ impl CodebookMode {
     /// The radix width $c$ of this mode.
     pub const fn window_bits(&self) -> usize {
         match self {
-            CodebookMode::Subgroup { window_bits, .. }
-            | CodebookMode::ExponentBox { window_bits, .. } => *window_bits,
+            CodebookMode::Subgroup { window_bits, .. } => *window_bits,
+            #[cfg(any(test, feature = "orbits"))]
+            CodebookMode::ExponentBox { window_bits, .. } => *window_bits,
         }
     }
 }
@@ -416,6 +418,7 @@ fn derive_subgroup_classes(
 /// established by enumeration here, not assumed from a formula.
 /// Returns `(coset_of, coset_count, coeff_class_of, coeff_count)`, with
 /// `coeff_class_of` marking exactly the |D| tile residues.
+#[cfg(any(test, feature = "orbits"))]
 fn derive_box_classes(
     c: usize,
     alpha_extent: usize,
@@ -612,6 +615,7 @@ impl Codebook {
             CodebookMode::Subgroup { beta_power, .. } => {
                 derive_subgroup_classes(c, beta_power, table_len)
             }
+            #[cfg(any(test, feature = "orbits"))]
             CodebookMode::ExponentBox {
                 alpha_extent,
                 beta_extent,

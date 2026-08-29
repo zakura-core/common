@@ -89,13 +89,15 @@
 use alloc::vec::Vec;
 
 use ff::Field;
+#[cfg(feature = "orbits")]
 use group::CurveAffine as _;
-#[cfg(feature = "multicore")]
+#[cfg(all(feature = "multicore", feature = "orbits"))]
 use maybe_rayon::prelude::*;
 
+#[cfg(feature = "orbits")]
+use super::MagnitudeProfile;
 use super::{
-    AffinePoint, GLV_COMPONENT_BITS, GlvParams, MagnitudeProfile, SignedMagnitude, private,
-    reduce_affine_buckets,
+    AffinePoint, GLV_COMPONENT_BITS, GlvParams, SignedMagnitude, private, reduce_affine_buckets,
 };
 
 /// The window widths [`multiexp`] supports. Wider than 6 needs
@@ -109,6 +111,7 @@ pub(super) const MAX_WINDOW_BITS: usize = 6;
 /// $(4^3 + 2)/6 = 11$ buckets only ever modeled ahead on MSMs of a few
 /// hundred terms, where they measured 4–17% *behind* the Booth backend
 /// (per-window overhead dominates 200-odd visits); planning starts at 4.
+#[cfg(feature = "orbits")]
 pub(super) const PLAN_MIN_WINDOW_BITS: usize = 4;
 /// The smallest MSM [`estimated_costs`] will price for the planner. At 256
 /// terms the backend's fixed per-window costs measured it 2–7% behind
@@ -116,6 +119,7 @@ pub(super) const PLAN_MIN_WINDOW_BITS: usize = 4;
 /// 512 terms up it wins. This gates on the *term count*, not liveness —
 /// sparse-but-large MSMs stay profitable (witness-shaped 2048-term inputs
 /// measured +16..20% over Booth).
+#[cfg(feature = "orbits")]
 pub(super) const PLAN_MIN_TERMS: usize = 512;
 
 /// Marks a wedge node whose reducer-tree parent is the origin.
@@ -311,6 +315,7 @@ impl OrbitParams {
     }
 
     /// The window width $c$ these parameters were built for.
+    #[cfg(feature = "multicore")]
     pub(super) fn width(&self) -> usize {
         self.window_bits
     }
@@ -327,6 +332,7 @@ pub(super) struct RotatedBase<F> {
     pub(super) y: F,
 }
 
+#[cfg(feature = "orbits")]
 pub(super) fn rotate_base<C: GlvParams>(base: &C::AffineExt) -> RotatedBase<C::Base> {
     let (x, y) = C::affine_xy(base);
     let xz = x * <C::Base as ff::WithSmallOrderMulGroup<3>>::ZETA;
@@ -336,6 +342,7 @@ pub(super) fn rotate_base<C: GlvParams>(base: &C::AffineExt) -> RotatedBase<C::B
     }
 }
 
+#[cfg(feature = "orbits")]
 fn rotated_bases<C: GlvParams>(
     bases: &[C::AffineExt],
     num_threads: usize,
@@ -392,6 +399,7 @@ pub(super) fn recode_row(
 /// zero so the window fills never test bases again. Small-magnitude
 /// workloads recode to far fewer active windows than the bound, and the
 /// drivers walk only those.
+#[cfg(feature = "orbits")]
 fn digit_matrix<C: GlvParams>(
     params: &OrbitParams,
     components: &[(SignedMagnitude, SignedMagnitude)],
@@ -545,6 +553,7 @@ pub(super) fn windows_sum<C: GlvParams>(
 /// [`super::checked_signed_magnitudes`] enforces). Parallel runs schedule
 /// the windows through the shared paired-window driver
 /// ([`super::paired_windows_sum`]).
+#[cfg(feature = "orbits")]
 pub(super) fn multiexp<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
     bases: &[C::AffineExt],
@@ -570,7 +579,7 @@ pub(super) fn multiexp<C: GlvParams>(
 }
 
 /// Test convenience: the work component of [`estimated_costs`].
-#[cfg(test)]
+#[cfg(all(test, feature = "orbits"))]
 pub(super) fn estimated_work(
     profile: &MagnitudeProfile,
     window_bits: usize,
@@ -616,6 +625,7 @@ pub(super) fn estimated_work(
 /// (its $\lceil W/\text{workers}\rceil$ windows plus the top window's shift
 /// doublings) — work stealing achieves the former at low worker counts;
 /// the latter binds when workers exceed half the window count.
+#[cfg(feature = "orbits")]
 pub(super) fn estimated_costs(
     profile: &MagnitudeProfile,
     window_bits: usize,
@@ -676,7 +686,7 @@ pub(super) fn estimated_costs(
     Some((balanced.max(quantized), traffic))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "orbits"))]
 mod tests {
     use super::super::{GlvParams, decompose, digit_scalar, testutil};
     use super::*;

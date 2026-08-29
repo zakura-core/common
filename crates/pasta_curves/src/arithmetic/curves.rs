@@ -157,17 +157,18 @@ pub trait CurveExt:
     /// backend return `None`, and implementations may also decline —
     /// the Pasta backend returns `None` when its prepared table for this
     /// many bases would exceed its internal table-footprint budget.
-    /// Preparation
-    /// can cost hundreds of milliseconds and tens of mebibytes for a few
-    /// thousand bases, so callers should invoke this once and reuse the
-    /// handle across checks.
+    /// Preparation can cost hundreds of milliseconds and tens of mebibytes
+    /// for a few thousand bases, so callers should invoke this once and
+    /// reuse the handle across checks.
     ///
     /// # Security
     ///
-    /// The returned check runs in variable time with respect to scalars
-    /// and points. **All inputs must be public.**
-    #[cfg(feature = "orbits")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "orbits")))]
+    /// The returned handle runs in variable time with respect to scalars and
+    /// points. Inputs to its zero-check methods must be public. Callers using
+    /// [`PreparedZeroCheck::multiexp_with_terms_vartime`] with secret scalars
+    /// must explicitly accept the timing side channel of a variable-time MSM.
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "multicore", feature = "orbits"))))]
     fn try_prepare_zero_check(
         bases: &[Self::AffineExt],
     ) -> Option<Box<dyn PreparedZeroCheck<Self>>> {
@@ -181,10 +182,10 @@ pub trait CurveExt:
 /// for the fixed bases $P_i$ captured at preparation plus per-check
 /// `extra` terms $(s_j, Q_j)$. Obtained from
 /// [`CurveExt::try_prepare_zero_check`]; the Pasta curves implement it
-/// with the prepared codebook backend (the `glv::zero` module), and the
-/// check is exact — it accepts iff the sum is the identity.
-#[cfg(feature = "orbits")]
-#[cfg_attr(docsrs, doc(cfg(feature = "orbits")))]
+/// with an internal prepared codebook backend, and the check is exact — it
+/// accepts iff the sum is the identity.
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "multicore", feature = "orbits"))))]
 pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
     /// The number of fixed bases this preparation covers; `scalars` below
     /// must have exactly this length.

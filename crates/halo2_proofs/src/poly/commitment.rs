@@ -89,7 +89,7 @@
 //! [BCMS20]: https://eprint.iacr.org/2020/499
 
 use super::{Coeff, LagrangeCoeff, Polynomial};
-#[cfg(feature = "orbits")]
+#[cfg(any(feature = "multicore", feature = "orbits"))]
 use crate::arithmetic::PreparedZeroCheck;
 use crate::arithmetic::{CurveAffine, CurveExt, best_fft, best_multiexp, parallelize};
 use crate::helpers::CurveRead;
@@ -103,9 +103,9 @@ use group::{Curve, Group};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 #[cfg(feature = "batch")]
 use std::sync::Mutex;
-#[cfg(feature = "orbits")]
+#[cfg(any(feature = "multicore", feature = "orbits"))]
 use std::sync::OnceLock;
-#[cfg(any(feature = "batch", feature = "orbits"))]
+#[cfg(any(feature = "batch", feature = "multicore", feature = "orbits"))]
 use std::{fmt, sync::Arc};
 
 mod msm;
@@ -113,16 +113,24 @@ mod prover;
 
 /// The `k = 11` SRS shape, whose current Pasta α7 tables remain ahead
 /// through all ten cores on the benchmarked Apple M4 systems.
-#[cfg(all(feature = "orbits", target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(
+    any(feature = "multicore", feature = "orbits"),
+    target_arch = "aarch64",
+    target_os = "macos"
+))]
 const APPLE_TEN_WORKER_PREPARED_COMMITMENT_K: u32 = 11;
-#[cfg(all(feature = "orbits", target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(
+    any(feature = "multicore", feature = "orbits"),
+    target_arch = "aarch64",
+    target_os = "macos"
+))]
 const APPLE_PREPARED_COMMITMENT_MAX_THREADS: usize = 10;
 
 /// The widest measured pool for prepared prover commitments at `k`.
 /// Unmeasured SRS shapes keep the verifier's conservative eight-worker
 /// bound. This applies to every prepared backend at `k = 11`; Pasta is
 /// currently the only such backend.
-#[cfg(feature = "orbits")]
+#[cfg(any(feature = "multicore", feature = "orbits"))]
 fn prepared_commitment_max_threads(k: u32) -> usize {
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     if k == APPLE_TEN_WORKER_PREPARED_COMMITMENT_K {
@@ -153,6 +161,8 @@ pub struct Params<C: CurveAffine> {
     instance_window_cache: InstanceWindowCache<C>,
     #[cfg(feature = "orbits")]
     zero_check_cache: ZeroCheckCache<C>,
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    commitment_tables_cache: CommitmentTablesCache<C>,
     #[cfg(feature = "orbits")]
     lagrange_table_cache: ZeroCheckCache<C>,
 }
@@ -204,6 +214,80 @@ impl<C: CurveAffine> fmt::Debug for ZeroCheckCache<C> {
         let armed = matches!(self.0.get(), Some(Some(_)));
         formatter
             .debug_tuple("ZeroCheckCache")
+            .field(&armed)
+            .finish()
+    }
+}
+
+/// The no-orbits prover's exact-`n` coefficient and Lagrange preparations.
+/// One lock makes their initialization atomic and prevents concurrent calls
+/// from duplicating the two large table builds. The cached handles are marked
+/// unwind-safe because [`OnceLock`] does not publish a panicking initializer and
+/// the cache never mutates or replaces published handles.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[derive(Clone)]
+struct CommitmentTablesCache<C: CurveAffine>(
+    #[allow(clippy::type_complexity)]
+    Arc<
+        OnceLock<
+            Option<(
+                AssertUnwindSafe<Arc<dyn PreparedZeroCheck<C::CurveExt>>>,
+                AssertUnwindSafe<Arc<dyn PreparedZeroCheck<C::CurveExt>>>,
+            )>,
+        >,
+    >,
+);
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+impl<C: CurveAffine> Default for CommitmentTablesCache<C> {
+    fn default() -> Self {
+        Self(Arc::new(OnceLock::new()))
+    }
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+impl<C: CurveAffine> CommitmentTablesCache<C> {
+    #[allow(clippy::type_complexity)]
+    fn initialize(
+        &self,
+        initialize: impl FnOnce() -> Option<(
+            Box<dyn PreparedZeroCheck<C::CurveExt>>,
+            Box<dyn PreparedZeroCheck<C::CurveExt>>,
+        )>,
+    ) -> bool {
+        self.0
+            .get_or_init(|| {
+                initialize().map(|(coefficient, lagrange)| {
+                    (
+                        AssertUnwindSafe(Arc::from(coefficient)),
+                        AssertUnwindSafe(Arc::from(lagrange)),
+                    )
+                })
+            })
+            .is_some()
+    }
+
+    fn coefficient(&self) -> Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>> {
+        self.0
+            .get()
+            .and_then(Option::as_ref)
+            .map(|(coefficient, _)| Arc::clone(&coefficient.0))
+    }
+
+    fn lagrange(&self) -> Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>> {
+        self.0
+            .get()
+            .and_then(Option::as_ref)
+            .map(|(_, lagrange)| Arc::clone(&lagrange.0))
+    }
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+impl<C: CurveAffine> fmt::Debug for CommitmentTablesCache<C> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let armed = matches!(self.0.get(), Some(Some(_)));
+        formatter
+            .debug_tuple("CommitmentTablesCache")
             .field(&armed)
             .finish()
     }
@@ -367,6 +451,8 @@ impl<C: CurveAffine> Params<C> {
             instance_window_cache: InstanceWindowCache::default(),
             #[cfg(feature = "orbits")]
             zero_check_cache: ZeroCheckCache::default(),
+            #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+            commitment_tables_cache: CommitmentTablesCache::default(),
             #[cfg(feature = "orbits")]
             lagrange_table_cache: ZeroCheckCache::default(),
         }
@@ -393,6 +479,18 @@ impl<C: CurveAffine> Params<C> {
                 fixed.push(r.0);
                 fixed.push(C::Scalar::ZERO);
                 return prepared.multiexp_with_terms_vartime(&fixed, &[]);
+            }
+        }
+
+        // Without `orbits`, the prepared table covers exactly `g`; the blind
+        // remains one extra term, so the polynomial is borrowed directly.
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
+            && let Some(prepared) = self.commitment_table()
+        {
+            let n = self.n as usize;
+            if prepared.terms() == n && poly.len() == n {
+                return prepared.multiexp_with_terms_vartime(poly, &[(r.0, self.w)]);
             }
         }
 
@@ -430,6 +528,17 @@ impl<C: CurveAffine> Params<C> {
                 fixed.push(r.0);
                 fixed.push(C::Scalar::ZERO);
                 return prepared.multiexp_with_terms_vartime(&fixed, &[]);
+            }
+        }
+
+        // The exact-`n` Lagrange table mirrors the coefficient route above.
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
+            && let Some(prepared) = self.lagrange_table()
+        {
+            let n = self.n as usize;
+            if prepared.terms() == n && poly.len() == n {
+                return prepared.multiexp_with_terms_vartime(poly, &[(r.0, self.w)]);
             }
         }
 
@@ -501,6 +610,8 @@ impl<C: CurveAffine> Params<C> {
             instance_window_cache: InstanceWindowCache::default(),
             #[cfg(feature = "orbits")]
             zero_check_cache: ZeroCheckCache::default(),
+            #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+            commitment_tables_cache: CommitmentTablesCache::default(),
             #[cfg(feature = "orbits")]
             lagrange_table_cache: ZeroCheckCache::default(),
         })
@@ -557,6 +668,11 @@ impl<C: CurveAffine> Params<C> {
         }
     }
 
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn commitment_table(&self) -> Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>> {
+        self.commitment_tables_cache.coefficient()
+    }
+
     /// The cached prepared zero-check, if [`Self::prepare_zero_checks`]
     /// built one.
     #[cfg(feature = "orbits")]
@@ -564,27 +680,28 @@ impl<C: CurveAffine> Params<C> {
         self.zero_check_cache.get()
     }
 
-    /// Builds and caches prepared fixed-base multiexp tables for the
-    /// prover's commitments: the coefficient-basis table over `[g..., w, u]`
-    /// (shared with [`Self::prepare_zero_checks`] — [`Self::commit`] and the
-    /// verifier's final check use the same bases) and a second table over
-    /// `[g_lagrange..., w, u]` for [`Self::commit_lagrange`]. When armed,
-    /// both commit methods evaluate through the prepared tables on pools of
-    /// at most eight effective threads. Orchard-sized (`k = 11`) tables on
-    /// AArch64 macOS extend that bound to ten, where end-to-end proving stays
-    /// ahead on the benchmarked M4 system. Wider pools and unmeasured SRS
-    /// shapes keep the planned multiexp. Measurements covered full-width and
-    /// witness-like (boolean, byte, zero-padded) coefficient distributions.
+    /// Builds and caches prepared fixed-base multiexp tables for the prover's
+    /// commitments. With `orbits`, the coefficient table over `[g..., w, u]`
+    /// is shared with [`Self::prepare_zero_checks`], and the Lagrange table
+    /// covers `[g_lagrange..., w, u]`. Without `orbits`, the two tables cover
+    /// exactly `g` and `g_lagrange`; each blind remains a one-term addition,
+    /// so the polynomial slice is borrowed without an `n + 2` copy.
     ///
-    /// Costs roughly twice [`Self::prepare_zero_checks`] (two tables, each
-    /// hundreds of milliseconds and tens of mebibytes at typical `k`),
-    /// amortized across every subsequent proof with these params. Concurrent
-    /// and repeat calls share each table's same initialization attempt,
-    /// including a backend decline. The caches are shared with all clones
-    /// and never serialized; call again after [`Params::read`]. Returns
-    /// whether both tables are armed (`false` when the `orbits` feature is
-    /// off or the backend declined — a commit route without its table simply
-    /// keeps the planned multiexp).
+    /// Both commit methods use the tables on pools of at most eight effective
+    /// threads. Orchard-sized (`k = 11`) tables on AArch64 macOS extend that
+    /// bound to ten, where end-to-end proving stays ahead on the benchmarked
+    /// M4 system. Wider pools and unmeasured SRS shapes keep the planned
+    /// multiexp. Measurements covered full-width and witness-like (boolean,
+    /// byte, zero-padded) coefficient distributions.
+    ///
+    /// The two α7 tables account for about 24.8 MiB at `k = 11`, amortized
+    /// across every subsequent proof with these params. Concurrent and repeat
+    /// calls share their initialization attempts, including a backend decline.
+    /// Without `orbits`, one paired initialization prevents either table from
+    /// being exposed until both have built. The caches are shared with all
+    /// clones and never serialized, so call again after [`Params::read`].
+    /// Returns whether both tables are armed. Without `orbits`, preparation
+    /// also requires the default `multicore` feature.
     ///
     /// Call this once before entering concurrent Rayon work that uses these
     /// params. Concurrent callers outside that pool safely wait for and share
@@ -606,7 +723,15 @@ impl<C: CurveAffine> Params<C> {
                 C::CurveExt::try_prepare_zero_check(&bases)
             })
         }
-        #[cfg(not(feature = "orbits"))]
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        {
+            self.commitment_tables_cache.initialize(|| {
+                let coefficient = C::CurveExt::try_prepare_zero_check(&self.g)?;
+                let lagrange = C::CurveExt::try_prepare_zero_check(&self.g_lagrange)?;
+                Some((coefficient, lagrange))
+            })
+        }
+        #[cfg(all(not(feature = "multicore"), not(feature = "orbits")))]
         {
             false
         }
@@ -614,9 +739,16 @@ impl<C: CurveAffine> Params<C> {
 
     /// The cached Lagrange-basis prepared table, if
     /// [`Self::prepare_commitments`] built one.
-    #[cfg(feature = "orbits")]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     pub(crate) fn lagrange_table(&self) -> Option<Arc<dyn PreparedZeroCheck<C::CurveExt>>> {
-        self.lagrange_table_cache.get()
+        #[cfg(feature = "orbits")]
+        {
+            self.lagrange_table_cache.get()
+        }
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        {
+            self.commitment_tables_cache.lagrange()
+        }
     }
 }
 
@@ -889,6 +1021,99 @@ fn prepared_cache_memoizes_decline_and_retries_panic() {
     assert!(!panicked.initialize(|| None));
 }
 
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn commitment_tables_cache_initializes_once_across_clones() {
+    const K: u32 = 4;
+    const CALLERS: usize = 4;
+
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::pasta::{Eq, EqAffine};
+
+    let params = Params::<EqAffine>::new(K);
+    let coefficient_bases = Arc::new(params.g.clone());
+    let lagrange_bases = Arc::new(params.g_lagrange.clone());
+    let cache = params.commitment_tables_cache.clone();
+    let attempts = AtomicUsize::new(0);
+    let start = Barrier::new(CALLERS);
+
+    let tables = std::thread::scope(|scope| {
+        (0..CALLERS)
+            .map(|_| {
+                let coefficient_bases = Arc::clone(&coefficient_bases);
+                let lagrange_bases = Arc::clone(&lagrange_bases);
+                let cache = cache.clone();
+                let attempts = &attempts;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    assert!(cache.initialize(|| {
+                        attempts.fetch_add(1, Ordering::Relaxed);
+                        let coefficient = Eq::try_prepare_zero_check(coefficient_bases.as_slice())?;
+                        let lagrange = Eq::try_prepare_zero_check(lagrange_bases.as_slice())?;
+                        Some((coefficient, lagrange))
+                    }));
+                    (
+                        cache.coefficient().expect("coefficient table is armed"),
+                        cache.lagrange().expect("Lagrange table is armed"),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    assert!(tables.iter().skip(1).all(|(coefficient, lagrange)| {
+        Arc::ptr_eq(&tables[0].0, coefficient) && Arc::ptr_eq(&tables[0].1, lagrange)
+    }));
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn commitment_tables_cache_memoizes_decline_and_retries_panic() {
+    use std::{
+        panic::catch_unwind,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::pasta::{Eq, EqAffine};
+
+    fn assert_unwind_safe<T: std::panic::RefUnwindSafe + std::panic::UnwindSafe>() {}
+
+    assert_unwind_safe::<Params<EqAffine>>();
+
+    let declined = CommitmentTablesCache::<EqAffine>::default();
+    let attempts = AtomicUsize::new(0);
+    for _ in 0..2 {
+        assert!(!declined.initialize(|| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            None
+        }));
+    }
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    assert!(declined.coefficient().is_none());
+    assert!(declined.lagrange().is_none());
+
+    let params = Params::<EqAffine>::new(4);
+    let panicked = CommitmentTablesCache::<EqAffine>::default();
+    let result = catch_unwind(|| panicked.initialize(|| panic!("test initialization panic")));
+    assert!(result.is_err());
+    assert!(panicked.initialize(|| {
+        let coefficient = Eq::try_prepare_zero_check(&params.g)?;
+        let lagrange = Eq::try_prepare_zero_check(&params.g_lagrange)?;
+        Some((coefficient, lagrange))
+    }));
+    assert!(panicked.coefficient().is_some());
+    assert!(panicked.lagrange().is_some());
+}
+
 /// Wrapper type around a blinding factor.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct Blind<F>(pub F);
@@ -1009,8 +1234,22 @@ fn prepared_commitments_match_unprepared() {
         assert!(armed.zero_check().is_some());
         assert!(armed.lagrange_table().is_some());
     }
-    #[cfg(not(feature = "orbits"))]
-    assert!(!armed_ok);
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    {
+        assert!(armed_ok, "Pasta commitment tables must prepare");
+        assert!(!armed.prepare_zero_checks());
+        let coefficient = armed.commitment_table().unwrap();
+        let lagrange = armed.lagrange_table().unwrap();
+        let cloned = armed.clone();
+        assert!(cloned.prepare_commitments());
+        assert!(Arc::ptr_eq(
+            &coefficient,
+            &cloned.commitment_table().unwrap()
+        ));
+        assert!(Arc::ptr_eq(&lagrange, &cloned.lagrange_table().unwrap()));
+    }
+    #[cfg(all(not(feature = "multicore"), not(feature = "orbits")))]
+    assert!(!armed_ok, "preparation stays disabled without multicore");
 
     let mut rng = rng();
     let exercise = |armed: &Params<EqAffine>, unarmed: &Params<EqAffine>, seed: u64| {
@@ -1040,7 +1279,7 @@ fn prepared_commitments_match_unprepared() {
     // Two capped pools: one within the thread gate pins the prepared route
     // itself, and one just past it pins the armed fall-through to the
     // planned multiexp — both regardless of the host's width.
-    #[cfg(all(feature = "orbits", feature = "multicore"))]
+    #[cfg(feature = "multicore")]
     for num_threads in [
         prepared_commitment_max_threads(armed.k),
         prepared_commitment_max_threads(armed.k) + 1,
@@ -1053,7 +1292,7 @@ fn prepared_commitments_match_unprepared() {
     }
 }
 
-#[cfg(feature = "orbits")]
+#[cfg(any(feature = "multicore", feature = "orbits"))]
 #[test]
 fn prepared_commitment_thread_policy_is_scoped() {
     assert_eq!(
@@ -1096,10 +1335,10 @@ fn test_opening_proof() {
     let mut params_buffer = vec![];
     params.write(&mut params_buffer).unwrap();
     let params: Params<EpAffine> = Params::read::<_>(&mut &params_buffer[..]).unwrap();
-    // Arm the prepared commitment tables (a no-op without `orbits`): on
-    // hosts within the thread gate this routes the commitment below and the
-    // verifier's final check through the preparations, so the round trip
-    // covers the prepared prover and verifier paths against each other.
+    // Arm the prepared commitment tables. Within the thread gate, multicore
+    // builds route the commitment below through them; with `orbits`, the
+    // verifier's final check is prepared too, while without it the verifier
+    // keeps its plain path. Either way the round trip covers the armed prover.
     params.prepare_commitments();
 
     let domain = EvaluationDomain::new(1, K);

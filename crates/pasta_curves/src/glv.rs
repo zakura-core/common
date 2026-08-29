@@ -42,10 +42,11 @@
 //! integrates buckets with a hexagonal spanning-tree reducer. Both fill their
 //! buckets through the shared batched-affine tree reduction below
 //! (`reduce_affine_buckets`, one fused inversion-and-completion pass per tree
-//! level). The orbit backend, the planning step, and the prepared zero-checks
-//! built on the same machinery (the `zero` submodule) are gated behind the
-//! `orbits` feature; without it large MSMs window through the Signed-Booth
-//! backend alone.
+//! level). The orbit backend, its planning step, and the public `zero`
+//! submodule are gated behind the `orbits` feature. Without it,
+//! large MSMs use the Signed-Booth backend alone. Multicore builds still
+//! compile the prepared evaluator privately for fixed-base callers through
+//! [`CurveExt::try_prepare_zero_check`].
 //!
 //! This path is variable-time in the scalar (GLV decomposition plus digit
 //! recoding); the `_glv` naming distinguishes it from the native `Mul`
@@ -89,11 +90,13 @@ use maybe_rayon::prelude::*;
 use crate::arithmetic::{CurveExt, mac, sbb};
 use crate::{pallas, vesta};
 
-#[cfg(feature = "orbits")]
+#[cfg(any(feature = "multicore", feature = "orbits"))]
 mod orbit;
 #[cfg(feature = "orbits")]
 #[cfg_attr(docsrs, doc(cfg(feature = "orbits")))]
 pub mod zero;
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+mod zero;
 
 mod private {
     use crate::arithmetic::CurveExt;
@@ -176,6 +179,18 @@ mod private {
             Self::new_jacobian_unchecked(x, y, z)
         }
     }
+}
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+pub(super) fn prepare_zero_check<C: GlvParams>(
+    bases: &[C::AffineExt],
+) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<C>>> {
+    // `prepare` declines when no codebook mode fits its 13 MiB
+    // accounted-footprint budget.
+    zero::PreparedZeroMsm::<C>::prepare(bases).map(|prepared| {
+        alloc::boxed::Box::new(prepared)
+            as alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<C>>
+    })
 }
 
 /// Per-curve GLV constants: a short basis for the lattice
@@ -543,7 +558,9 @@ fn joint_digits(mut a: i128, mut b: i128) -> ([u8; MAX_JOINT_DIGITS], usize) {
 const BATCH_AFFINE_MIN_POINTS: usize = 32;
 // This range is tuned for the k = 11 parameter generation used by Orchard.
 // Larger domains retain the point-major schedule above the measured range.
+#[cfg(feature = "multicore")]
 const TWIDDLE_MAJOR_MIN_CHUNK: usize = 16;
+#[cfg(feature = "multicore")]
 const TWIDDLE_MAJOR_MAX_CHUNK: usize = 2048;
 
 /// Montgomery-batched inversion for a nonempty slice of provably nonzero
@@ -1765,7 +1782,7 @@ fn multiexp_serial<C: GlvParams>(
 /// `window_sum` (an arithmetic guard) propagates out. Shared by the
 /// Eisenstein-orbit backend and the prepared zero-check's main-window and
 /// tail drivers.
-#[cfg(all(feature = "multicore", feature = "orbits"))]
+#[cfg(feature = "multicore")]
 fn paired_windows_sum<C: GlvParams>(
     windows: usize,
     window_bits: usize,
