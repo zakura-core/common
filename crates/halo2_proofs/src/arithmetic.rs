@@ -218,7 +218,11 @@ impl<C: CurveAffine> BoothBuckets<C> {
 
 /// Performs a small multi-exponentiation operation.
 /// Uses the double-and-add algorithm with doublings shared across points.
+///
+/// This function will panic if coeffs and bases have a different length.
 pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    assert_eq!(coeffs.len(), bases.len());
+
     let coeffs: Vec<_> = coeffs.iter().map(|a| a.to_repr()).collect();
     let mut acc = C::Curve::identity();
 
@@ -788,6 +792,39 @@ fn test_multiexp() {
 
         assert_multiexp_matches_naive(&coeffs, &bases);
     }
+}
+
+#[test]
+fn test_small_multiexp() {
+    let mut rng = rng();
+    for len in [0, 1, 2, 3, 4] {
+        let coeffs = (0..len).map(|_| Fq::random(&mut rng)).collect::<Vec<_>>();
+        let bases = (0..len)
+            .map(|_| EpAffine::from(Ep::random(&mut rng)))
+            .collect::<Vec<_>>();
+
+        let expected = coeffs
+            .iter()
+            .zip(&bases)
+            .map(|(coeff, base)| *base * coeff)
+            .fold(Ep::identity(), |acc, val| acc + val);
+
+        assert_eq!(small_multiexp(&coeffs, &bases), expected);
+    }
+}
+
+#[test]
+#[should_panic(expected = "left == right")]
+fn test_small_multiexp_rejects_extra_base() {
+    let base = EpAffine::from(Ep::generator());
+    small_multiexp(&[Fq::ONE], &[base, base]);
+}
+
+#[test]
+#[should_panic(expected = "left == right")]
+fn test_small_multiexp_rejects_missing_base() {
+    let base = EpAffine::from(Ep::generator());
+    small_multiexp(&[Fq::ONE, Fq::ZERO], &[base]);
 }
 
 #[test]
