@@ -386,23 +386,36 @@ mod tests {
     use std::fmt::Debug;
     use std::marker::PhantomData;
 
+    // A group's collapse keeps the first polynomial's length: shorter group
+    // members are zero-extended and longer ones truncated to it, matching
+    // `fold_polynomial_range`'s treatment of absent coefficients. Polynomial
+    // addition itself requires equal lengths, so fold each coefficient
+    // directly.
     fn reference_collapse<F: Field>(
         groups: &[Vec<&Polynomial<F, Coeff>>],
         challenge: F,
     ) -> Vec<Polynomial<F, Coeff>> {
         groups
             .iter()
-            .map(|group| {
-                group[1..]
-                    .iter()
-                    .fold(group[0].clone(), |accumulator, polynomial| {
-                        accumulator * challenge + polynomial
+            .map(|group| Polynomial {
+                values: (0..group[0].values.len())
+                    .map(|coefficient_index| {
+                        group.iter().fold(F::ZERO, |accumulator, polynomial| {
+                            accumulator * challenge
+                                + polynomial
+                                    .values
+                                    .get(coefficient_index)
+                                    .copied()
+                                    .unwrap_or(F::ZERO)
+                        })
                     })
+                    .collect(),
+                _marker: PhantomData,
             })
             .collect()
     }
 
-    fn streaming_collapse_matches_operator_collapse<F>()
+    fn streaming_collapse_matches_reference<F>()
     where
         F: Field + From<u64> + Debug,
     {
@@ -462,12 +475,12 @@ mod tests {
     }
 
     #[test]
-    fn streaming_collapse_matches_operator_collapse_fp() {
-        streaming_collapse_matches_operator_collapse::<Fp>();
+    fn streaming_collapse_matches_reference_fp() {
+        streaming_collapse_matches_reference::<Fp>();
     }
 
     #[test]
-    fn streaming_collapse_matches_operator_collapse_fq() {
-        streaming_collapse_matches_operator_collapse::<Fq>();
+    fn streaming_collapse_matches_reference_fq() {
+        streaming_collapse_matches_reference::<Fq>();
     }
 }
