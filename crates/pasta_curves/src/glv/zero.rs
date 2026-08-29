@@ -1071,8 +1071,10 @@ fn estimated_table_footprint<C: GlvParams>(
         .checked_mul(variants)?
         .checked_mul(core::mem::size_of::<prepared::PreparedPoint<C::Base>>())?;
     let tail_bases = terms.checked_mul(core::mem::size_of::<orbit::RotatedBase<C::Base>>())?;
-    let residue_entries =
-        (1usize << (2 * window_bits)).checked_mul(core::mem::size_of::<codebook::CodeEntry>())?;
+    let residue_bits = u32::try_from(window_bits.checked_mul(2)?).ok()?;
+    let residue_entries = 1usize
+        .checked_shl(residue_bits)?
+        .checked_mul(core::mem::size_of::<codebook::CodeEntry>())?;
     let lifts = variants
         .checked_add(buckets)?
         .checked_mul(core::mem::size_of::<codebook::Eis>())?;
@@ -1174,6 +1176,8 @@ pub(crate) mod testutil {
 mod tests {
     use super::*;
     use crate::{pallas, vesta};
+
+    const ORCHARD_PREPARED_TERMS: usize = 2_050;
 
     fn modes_under_test() -> Vec<CodebookMode> {
         vec![
@@ -1409,10 +1413,14 @@ mod tests {
     #[test]
     fn plan_mode_respects_budget() {
         for threads in [1usize, 32] {
-            let mode = plan_mode::<pallas::Point>(2_050, threads, DEFAULT_TABLE_FOOTPRINT_BUDGET);
+            let mode = plan_mode::<pallas::Point>(
+                ORCHARD_PREPARED_TERMS,
+                threads,
+                DEFAULT_TABLE_FOOTPRINT_BUDGET,
+            );
             assert_eq!(mode, Some(CodebookMode::alpha_only(7)));
             let bytes = estimated_table_footprint::<pallas::Point>(
-                2_050,
+                ORCHARD_PREPARED_TERMS,
                 ALPHA_SEVEN.mode.window_bits(),
                 ALPHA_SEVEN.variants,
                 ALPHA_SEVEN.buckets,

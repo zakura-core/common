@@ -541,9 +541,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             parallel_depth(),
         );
 
-        let block_len = self.n as usize;
+        let block_len = usize::try_from(self.n).expect("domain length fits usize");
         let block_count = self.extended_len() / block_len;
-        let piece_count = self.quotient_poly_degree as usize;
+        let piece_count = usize::try_from(self.quotient_poly_degree)
+            .expect("quotient polynomial degree fits usize");
         assert!(piece_count <= block_count);
 
         let mut piece_values = (0..piece_count)
