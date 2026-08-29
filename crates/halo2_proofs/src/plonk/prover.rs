@@ -1459,7 +1459,8 @@ where
                 }),
         )
         .chain(pk.permutation.open(x))
-        // We query the h(X) polynomial at x
+        // Keep these last among queries at x: the linear quotient-evaluation
+        // mask must have unit coefficient in its point-set fold at x_3.
         .chain(vanishing.open(x));
 
     multiopen::create_proof(params, rng, transcript, instances).map_err(|_| Error::Opening)
