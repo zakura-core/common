@@ -101,7 +101,7 @@ use maybe_rayon::prelude::*;
 use super::orbit;
 use super::{
     AffinePoint, GlvParams, SignedMagnitude, checked_signed_magnitudes, current_num_threads,
-    decompose, private, reduce_affine_buckets,
+    decompose, private, reduce_affine_buckets, reduce_affine_buckets_in_place,
 };
 
 mod codebook;
@@ -526,7 +526,10 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// program over the bucket sums.
     fn window_sum(&self, recoded: &Recoded, window: usize) -> Option<C> {
         let (points, offsets) = self.stage_window(recoded, window);
-        let buckets = reduce_affine_buckets(points, offsets)?;
+        let buckets = reduce_affine_buckets_in_place(points, offsets).or_else(|| {
+            let (points, offsets) = self.stage_window(recoded, window);
+            reduce_affine_buckets(points, offsets)
+        })?;
         integrate_coefficients::<C>(self.codebook.program(), &buckets)
     }
 

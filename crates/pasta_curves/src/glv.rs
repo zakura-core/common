@@ -1527,6 +1527,65 @@ fn reduce_affine_buckets<F: Field>(
     reduce_affine_buckets_inner::<F, false>(points, offsets)
 }
 
+/// Destructively compacts every incomplete affine reduction level into its
+/// input buffer. This is for callers that can reconstruct the original points
+/// if a zero denominator declines the incomplete formulas.
+#[cfg(any(test, feature = "multicore", feature = "orbits"))]
+// The multicore-only caller is enabled by the dependent no-orbits backend.
+#[cfg_attr(all(feature = "multicore", not(feature = "orbits")), allow(dead_code))]
+fn reduce_affine_buckets_in_place<F: Field>(
+    mut points: Vec<AffinePoint<F>>,
+    mut offsets: Vec<usize>,
+) -> Option<Vec<Option<AffinePoint<F>>>> {
+    debug_assert!(!offsets.is_empty());
+    let bucket_count = offsets.len() - 1;
+    let mut next_offsets = Vec::with_capacity(offsets.len());
+    let mut pending = Vec::with_capacity(points.len() / 2);
+
+    while offsets.windows(2).any(|range| range[1] - range[0] > 1) {
+        next_offsets.clear();
+        pending.clear();
+        next_offsets.push(0);
+        let mut output = 0;
+
+        for range in offsets.windows(2) {
+            let mut input = range[0];
+            while input + 1 < range[1] {
+                let left = points[input];
+                let right = points[input + 1];
+                points[output] = left;
+                pending.push(PendingAffineAddition {
+                    output,
+                    x_sum: left.x + right.x,
+                    numerator: right.y - left.y,
+                    denominator: right.x - left.x,
+                    inversion_scratch: F::ZERO,
+                });
+                input += 2;
+                output += 1;
+            }
+            if input < range[1] {
+                points[output] = points[input];
+                output += 1;
+            }
+            next_offsets.push(output);
+        }
+
+        batch_invert_and_add(&mut pending, &mut points)?;
+        points.truncate(output);
+        core::mem::swap(&mut offsets, &mut next_offsets);
+    }
+
+    let mut buckets = alloc::vec![None; bucket_count];
+    for (bucket, range) in buckets.iter_mut().zip(offsets.windows(2)) {
+        if range[0] != range[1] {
+            debug_assert_eq!(range[1] - range[0], 1);
+            *bucket = Some(points[range[0]]);
+        }
+    }
+    Some(buckets)
+}
+
 fn reduce_affine_buckets_inner<F: Field, const COMPLETE: bool>(
     mut points: Vec<AffinePoint<F>>,
     mut offsets: Vec<usize>,
@@ -5269,6 +5328,26 @@ mod tests {
         }
     }
 
+    fn assert_affine_bucket_results_match_native<C: GlvParams>(
+        case: &str,
+        reduced: Vec<Option<AffinePoint<C::Base>>>,
+        source: &[Vec<C>],
+    ) {
+        assert_eq!(reduced.len(), source.len());
+        for (actual, bucket) in reduced.into_iter().zip(source) {
+            let actual = match actual {
+                Some(point) => C::from(C::affine_unchecked(
+                    point.x,
+                    point.y,
+                    private::CrateToken(()),
+                )),
+                None => C::identity(),
+            };
+            let expected = bucket.iter().copied().sum::<C>();
+            assert_eq!(actual, expected, "affine reduction mismatch in case {case}");
+        }
+    }
+
     fn assert_batch_affine_buckets_match_native<C: GlvParams>(case: &str, source: &[Vec<C>]) {
         let mut points = Vec::new();
         let mut offsets = Vec::with_capacity(source.len() + 1);
@@ -5282,20 +5361,14 @@ mod tests {
             offsets.push(points.len());
         }
 
-        let reduced = reduce_affine_buckets(points, offsets)
+        let reduced = reduce_affine_buckets(points.clone(), offsets.clone())
             .unwrap_or_else(|| panic!("valid curve points must reduce in case {case}"));
-        assert_eq!(reduced.len(), source.len());
-        for (actual, bucket) in reduced.into_iter().zip(source) {
-            let actual = match actual {
-                Some(point) => C::from(C::affine_unchecked(
-                    point.x,
-                    point.y,
-                    private::CrateToken(()),
-                )),
-                None => C::identity(),
-            };
-            let expected = bucket.iter().copied().sum::<C>();
-            assert_eq!(actual, expected, "affine reduction mismatch in case {case}");
+        let in_place = reduce_affine_buckets_in_place(points.clone(), offsets.clone())
+            .or_else(|| reduce_affine_buckets(points, offsets))
+            .unwrap_or_else(|| panic!("valid curve points must reduce in case {case}"));
+
+        for reduced in [reduced, in_place] {
+            assert_affine_bucket_results_match_native::<C>(case, reduced, source);
         }
     }
 
@@ -5348,6 +5421,44 @@ mod tests {
         for (case, source) in cases {
             assert_batch_affine_buckets_match_native::<C>(case, &source);
         }
+
+        // Powers of two keep every intermediate pair distinct, so this
+        // exercises successful in-place reduction without its fallback.
+        let clean_source = [
+            Vec::new(),
+            alloc::vec![generator],
+            alloc::vec![generator, two],
+            alloc::vec![generator, two, four],
+            (0..9)
+                .map(|bit| generator * C::ScalarExt::from(1u64 << bit))
+                .collect(),
+        ];
+        let mut clean_points = Vec::new();
+        let mut clean_offsets = Vec::with_capacity(clean_source.len() + 1);
+        clean_offsets.push(0);
+        for bucket in &clean_source {
+            for point in bucket {
+                let affine = C::AffineExt::from(*point);
+                let (x, y) = C::affine_xy(&affine);
+                clean_points.push(AffinePoint { x, y });
+            }
+            clean_offsets.push(clean_points.len());
+        }
+        let clean_reduced = reduce_affine_buckets_in_place(clean_points, clean_offsets)
+            .expect("distinct points should use the in-place reducer");
+        assert_affine_bucket_results_match_native::<C>(
+            "direct successful in-place reduction",
+            clean_reduced,
+            &clean_source,
+        );
+
+        let affine = C::AffineExt::from(generator);
+        let (x, y) = C::affine_xy(&affine);
+        let duplicate = AffinePoint { x, y };
+        assert!(
+            reduce_affine_buckets_in_place(alloc::vec![duplicate, duplicate], alloc::vec![0, 2],)
+                .is_none()
+        );
     }
 
     fn batch_inversion_zero_denominator_is_failure_atomic_for<F: Field>() {
