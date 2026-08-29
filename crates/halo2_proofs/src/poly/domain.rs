@@ -1171,6 +1171,46 @@ fn test_sparse_quotient_division_matches_pointwise_division() {
 }
 
 #[test]
+fn test_sparse_quotient_division_matches_pointwise_on_basis_vectors() {
+    use crate::pasta::{pallas, vesta};
+
+    fn check<F: WithSmallOrderMulGroup<3>>() {
+        // Both division paths are linear in the numerator. Equality on every
+        // standard basis vector therefore covers every possible numerator for
+        // these small domains, without relying on a single dense fixture.
+        for &(max_degree, k) in &[
+            (2, 0),
+            (2, 3),
+            (3, 3),
+            (4, 3),
+            (5, 3),
+            (6, 3),
+            (9, 3),
+            (10, 3),
+        ] {
+            let domain = EvaluationDomain::<F>::new(max_degree, k);
+            let twiddles = domain.proving_key_twiddles();
+
+            for basis_index in 0..domain.extended_len() {
+                let mut numerator = domain.empty_extended();
+                numerator[basis_index] = F::ONE;
+
+                let expected =
+                    domain.extended_to_coeff(domain.divide_by_vanishing_poly(numerator.clone()));
+                let actual = domain.quotient_numerator_to_coeff_with_twiddles(numerator, &twiddles);
+                assert_eq!(
+                    actual, expected,
+                    "max_degree={max_degree}, k={k}, basis_index={basis_index}"
+                );
+            }
+        }
+    }
+
+    check::<pallas::Scalar>();
+    check::<vesta::Scalar>();
+}
+
+#[test]
 fn test_orchard_proving_key_twiddle_cache_size_and_sharing() {
     use crate::pasta::pallas::Scalar;
 
