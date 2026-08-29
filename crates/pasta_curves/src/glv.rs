@@ -3871,6 +3871,21 @@ mod tests {
         );
     }
 
+    fn duplicate_base_multiexp_matches_expected<C: GlvParams>() {
+        let terms = VERIFIER_MULTIEXP_SIZES[0];
+        let scalar = scalars::<C::ScalarExt>(1)
+            .next()
+            .expect("the deterministic scalar corpus is nonempty");
+        let msm_scalars = alloc::vec![scalar; terms];
+        let bases = alloc::vec![C::generator().to_affine(); terms];
+        let expected =
+            C::generator() * (scalar * C::ScalarExt::from(u64::try_from(terms).unwrap()));
+
+        let actual = try_multiexp::<C>(&msm_scalars, &bases)
+            .expect("a verifier-sized duplicate-base MSM must use the optimized path");
+        assert_eq!(actual, expected);
+    }
+
     fn strauss_multiexp_matches_expected<C: GlvParams>() {
         const TERM_COUNTS: [usize; 10] = [0, 1, 2, 3, 8, 16, 32, 64, 66, 256];
 
@@ -5231,26 +5246,11 @@ mod tests {
         }
     }
 
-    fn batch_affine_buckets_match_native<C: GlvParams>() {
-        let generator = C::generator();
-        let two = generator.double();
-        let three = two + generator;
-        let four = three + generator;
-        let five = four + generator;
-        let source = [
-            Vec::new(),
-            alloc::vec![generator],
-            alloc::vec![generator, generator],
-            alloc::vec![generator, -generator],
-            alloc::vec![generator, two, three],
-            alloc::vec![generator, two, -three],
-            alloc::vec![generator, two, three, four, five],
-        ];
-
+    fn assert_batch_affine_buckets_match_native<C: GlvParams>(case: &str, source: &[Vec<C>]) {
         let mut points = Vec::new();
         let mut offsets = Vec::with_capacity(source.len() + 1);
         offsets.push(0);
-        for bucket in &source {
+        for bucket in source {
             for point in bucket {
                 let affine = C::AffineExt::from(*point);
                 let (x, y) = C::affine_xy(&affine);
@@ -5260,7 +5260,7 @@ mod tests {
         }
 
         let reduced = reduce_affine_buckets(points, offsets)
-            .expect("valid curve points have invertible affine denominators");
+            .unwrap_or_else(|| panic!("valid curve points must reduce in case {case}"));
         assert_eq!(reduced.len(), source.len());
         for (actual, bucket) in reduced.into_iter().zip(source) {
             let actual = match actual {
@@ -5271,36 +5271,102 @@ mod tests {
                 )),
                 None => C::identity(),
             };
-            let expected = bucket.into_iter().sum::<C>();
-            assert_eq!(actual, expected);
+            let expected = bucket.iter().copied().sum::<C>();
+            assert_eq!(actual, expected, "affine reduction mismatch in case {case}");
+        }
+    }
+
+    fn batch_affine_buckets_match_native<C: GlvParams>() {
+        let generator = C::generator();
+        let two = generator.double();
+        let three = two + generator;
+        let four = three + generator;
+        let five = four + generator;
+        let cases = [
+            ("empty bucket", alloc::vec![Vec::new()]),
+            ("singleton bucket", alloc::vec![alloc::vec![generator]]),
+            (
+                "first-level doubling",
+                alloc::vec![alloc::vec![generator, generator]],
+            ),
+            (
+                "first-level inverse pair",
+                alloc::vec![alloc::vec![generator, -generator]],
+            ),
+            // The first level adds G + 2G, then pairs the resulting 3G
+            // with the carried 3G. The fallback therefore first occurs at
+            // the second level, after the first level has been committed.
+            (
+                "second-level doubling",
+                alloc::vec![alloc::vec![generator, two, three]],
+            ),
+            // As above, but the carried point is -3G, so the second-level
+            // exceptional pair cancels to the identity.
+            (
+                "second-level inverse pair",
+                alloc::vec![alloc::vec![generator, two, -three]],
+            ),
+            (
+                "odd bucket",
+                alloc::vec![alloc::vec![generator, two, three, four, five]],
+            ),
+            (
+                "one exceptional pair in a shared batch",
+                alloc::vec![
+                    Vec::new(),
+                    alloc::vec![generator],
+                    alloc::vec![generator, two],
+                    alloc::vec![generator, generator],
+                    alloc::vec![three, four, five],
+                ],
+            ),
+        ];
+
+        for (case, source) in cases {
+            assert_batch_affine_buckets_match_native::<C>(case, &source);
         }
     }
 
     fn batch_inversion_zero_denominator_is_failure_atomic_for<F: Field>() {
-        let mut additions = [F::ONE, F::ZERO, F::ONE.double()]
-            .into_iter()
-            .enumerate()
-            .map(|(output, denominator)| PendingAffineAddition {
-                output,
-                x_sum: F::ZERO,
-                numerator: F::ZERO,
-                denominator,
-                inversion_scratch: F::ZERO,
-            })
-            .collect::<Vec<_>>();
-        let mut points = alloc::vec![
-            AffinePoint {
-                x: F::ONE,
-                y: F::ONE,
-            };
-            additions.len()
+        let cases = [
+            ("single first lane", alloc::vec![F::ZERO]),
+            ("first lane", alloc::vec![F::ZERO, F::ONE]),
+            ("second lane", alloc::vec![F::ONE, F::ZERO]),
+            (
+                "odd trailing first lane",
+                alloc::vec![F::ONE, F::ONE, F::ZERO],
+            ),
         ];
-        let original_points = points.clone();
 
-        assert!(batch_invert_and_add(&mut additions, &mut points).is_none());
-        for (actual, original) in points.iter().zip(original_points) {
-            assert_eq!(actual.x, original.x);
-            assert_eq!(actual.y, original.y);
+        for (case, denominators) in cases {
+            let mut additions = denominators
+                .into_iter()
+                .enumerate()
+                .map(|(output, denominator)| PendingAffineAddition {
+                    output,
+                    x_sum: F::ZERO,
+                    numerator: F::ZERO,
+                    denominator,
+                    inversion_scratch: F::ZERO,
+                })
+                .collect::<Vec<_>>();
+            let mut points = alloc::vec![
+                AffinePoint {
+                    x: F::ONE,
+                    y: F::ONE,
+                };
+                additions.len()
+            ];
+            let original_points = points.clone();
+
+            assert!(
+                batch_invert_and_add(&mut additions, &mut points).is_none(),
+                "zero denominator was accepted in case {case}"
+            );
+            for (actual, original) in points.iter().zip(original_points) {
+                assert_eq!(actual.x, original.x, "x changed in case {case}");
+                assert_eq!(actual.y, original.y, "y changed in case {case}");
+            }
         }
     }
 
@@ -5393,6 +5459,10 @@ mod tests {
                     optimized_multiexp_matches_expected::<$curve>();
                     #[cfg(feature = "multicore")]
                     optimized_multiexp_matches_expected_at_thread_counts::<$curve>();
+                }
+                #[test]
+                fn duplicate_base_multiexp() {
+                    duplicate_base_multiexp_matches_expected::<$curve>();
                 }
                 #[test]
                 fn serial_c10_multiexp() {
@@ -5589,6 +5659,15 @@ mod tests {
             })
         }
 
+        fn nonzero_small_multiple() -> impl Strategy<Value = i8> {
+            // A deliberately small signed range produces frequent duplicate
+            // and inverse points, so random bucket trees exercise exceptional
+            // affine additions instead of almost always taking the fast path.
+            (-8i8..=8).prop_filter("the affine reducer omits identities", |multiple| {
+                *multiple != 0
+            })
+        }
+
         macro_rules! glv_pbt {
             ($mod_name:ident, $curve:ty) => {
                 mod $mod_name {
@@ -5650,6 +5729,44 @@ mod tests {
                                 prop_assert_eq!(table.mul(&k), Table::new(p).mul(&k));
                                 prop_assert_eq!(table.mul(&k), *p * k);
                             }
+                        }
+
+                        /// Arbitrary collision-heavy bucket partitions agree
+                        /// with the native group law.
+                        #[test]
+                        fn batch_affine_buckets_match_native(
+                            multiples in proptest::collection::vec(
+                                proptest::collection::vec(
+                                    nonzero_small_multiple(),
+                                    0..16,
+                                ),
+                                1..8,
+                            ),
+                        ) {
+                            let generator = <$curve>::generator();
+                            let source: alloc::vec::Vec<alloc::vec::Vec<$curve>> = multiples
+                                .into_iter()
+                                .map(|bucket| {
+                                    bucket
+                                        .into_iter()
+                                        .map(|multiple| {
+                                            let point = generator
+                                                * Scalar::from(u64::from(
+                                                    multiple.unsigned_abs(),
+                                                ));
+                                            if multiple.is_negative() {
+                                                -point
+                                            } else {
+                                                point
+                                            }
+                                        })
+                                        .collect()
+                                })
+                                .collect();
+                            assert_batch_affine_buckets_match_native::<$curve>(
+                                "property-generated buckets",
+                                &source,
+                            );
                         }
 
                         /// For all k reused across points: hoisted decomposition == fresh.
