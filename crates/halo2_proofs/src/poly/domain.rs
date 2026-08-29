@@ -861,7 +861,16 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         let common = (xn - F::ONE) * self.barycentric_weight;
         for (rotation, result) in rotations.into_iter().zip(results.iter_mut()) {
             let rotation = Rotation(rotation);
-            *result = self.rotate_omega(*result * common, rotation);
+            *result = if result.is_zero_vartime() {
+                // The denominator `x - omega^i` was zero and survived batch
+                // inversion as zero: `x` is this basis polynomial's own
+                // domain point, so the shared numerator `xn - 1` vanishes
+                // too and the removable singularity cancels to
+                // `l_i(omega^i) = 1`.
+                F::ONE
+            } else {
+                self.rotate_omega(*result * common, rotation)
+            };
         }
 
         results
@@ -1329,6 +1338,41 @@ fn test_l_i() {
         assert_eq!(eval_polynomial(&l[i][..], x), evaluations[7 + i]);
         assert_eq!(eval_polynomial(&l[(8 - i) % 8][..], x), evaluations[7 - i]);
     }
+}
+
+#[test]
+fn test_l_i_at_domain_points() {
+    use crate::pasta::pallas::Scalar;
+    let domain = EvaluationDomain::<Scalar>::new(1, 3);
+
+    for j in 0..8u64 {
+        let x = domain.get_omega().pow([j]);
+        let xn = x.pow([8]);
+        assert_eq!(xn, Scalar::ONE);
+
+        // Rotations are periodic modulo the domain size, so every rotation
+        // in -7..=7 congruent to j (two of them, except for j = 0) must
+        // evaluate to one, and every other rotation to zero.
+        let evaluations = domain.l_i_range(x, xn, -7i32..=7);
+        for (evaluation, rotation) in evaluations.iter().zip(-7i32..=7) {
+            let expected = if rotation.rem_euclid(8) as u64 == j {
+                Scalar::ONE
+            } else {
+                Scalar::ZERO
+            };
+            assert_eq!(*evaluation, expected, "rotation {rotation} at omega^{j}");
+        }
+    }
+
+    // A domain point whose own basis polynomial is not requested makes
+    // every requested basis polynomial evaluate to zero.
+    let x = domain.get_omega().pow([5]);
+    let evaluations = domain.l_i_range(x, Scalar::ONE, 0..=3);
+    assert!(
+        evaluations
+            .iter()
+            .all(|evaluation| *evaluation == Scalar::ZERO)
+    );
 }
 
 #[test]
