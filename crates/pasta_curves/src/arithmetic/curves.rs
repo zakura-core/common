@@ -51,6 +51,16 @@ pub trait CurveExt:
     ///
     /// This method is suitable for use as a random oracle.
     ///
+    /// # Panics
+    ///
+    /// The returned closure panics when invoked if the encoded
+    /// domain-separation tag,
+    /// `domain_prefix || "-" || Self::CURVE_ID || "_XMD:BLAKE2b_SSWU_RO_"`,
+    /// is longer than 255 bytes — that is, if `domain_prefix` is longer
+    /// than `233 - Self::CURVE_ID.len()` bytes (227 bytes for Pallas,
+    /// 228 bytes for Vesta). Constructing the hasher does not validate
+    /// `domain_prefix`; the panic occurs on the first message.
+    ///
     /// # Example
     ///
     /// ```
