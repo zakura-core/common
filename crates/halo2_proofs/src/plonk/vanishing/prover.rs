@@ -133,10 +133,29 @@ fn fold_quotient_pieces_pasta<
         .expect("the folded quotient matches its input field")
 }
 
-// The random polynomial masks two evaluations: its value at the PLONK
-// challenge is revealed, while its later value at the multi-opening challenge
-// hides the corresponding quotient evaluation. Two random coefficients are
-// sufficient because the evaluation map at two distinct points has full rank.
+// The random polynomial r(X) masks two evaluations in the multi-opening
+// transcript. Its independently blinded commitment R is written before y. The
+// prover later reveals r(x), then commits with a fresh blind to the
+// multi-opening quotient q'. Only after that commitment does it sample x_3 and
+// reveal the Q polynomial for the {x} point-set group at x_3. The vanishing
+// queries place r after h in that group, so Horner folding gives it unit
+// coefficient:
+//
+//     Q_x(x_3) = (... + x_1 h(x_3)) + r(x_3).
+//
+// For r(X) = a + bX, the map from (a, b) to (r(x), r(x_3)) has determinant
+// x_3 - x. Conditioned on the revealed r(x), r(x_3) is therefore uniform when
+// the points are distinct. The verifier rejects x_3 equal to any queried
+// point. The independently Pedersen-blinded group messages hide the
+// coefficients before each challenge, while the commitment scheme's separate
+// IPA mask hides its final folded scalar. This commitment participates in one
+// multi-opening, and the verifier sees only r(x) and its single affine
+// contribution r(x_3). Exposing r at another independent point would require
+// revisiting the two-coefficient argument. Thus two random coefficients give
+// the same HVZK masking role as the previous dense polynomial, up to the
+// scheme's existing negligible challenge-collision and transcript-abort
+// events. Soundness does not depend on an honest prover sampling r from either
+// distribution.
 const QUOTIENT_EVALUATION_MASK_COEFFICIENTS: usize = 2;
 
 fn sample_quotient_evaluation_mask<F: WithSmallOrderMulGroup<3>, R: Rng>(
@@ -365,6 +384,7 @@ impl<C: CurveAffine> EvaluatedQuotient<C> {
             }))
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -373,7 +393,9 @@ mod tests {
     };
     use crate::{
         arithmetic::CurveAffine,
+        plonk::ChallengeX,
         poly::{Coeff, EvaluationDomain, Polynomial, commitment::Blind},
+        transcript::{Blake2bWrite, Challenge255, Transcript},
     };
     use ff::{Field, WithSmallOrderMulGroup};
     use pasta_curves::{Fp, Fq, pallas, vesta};
@@ -464,6 +486,32 @@ mod tests {
             assert_eq!(constant + linear * first_point, first_evaluation);
             assert_eq!(constant + linear * later_point, later_evaluation);
         }
+    }
+
+    #[test]
+    fn quotient_evaluation_mask_is_the_last_vanishing_query() {
+        let domain = EvaluationDomain::new(1, 3);
+        let mut h_poly = domain.empty_coeff();
+        h_poly[0] = pallas::Base::from(3);
+        let mut mask_poly = domain.empty_coeff();
+        mask_poly[0] = pallas::Base::from(5);
+
+        let evaluated = super::EvaluatedQuotient::<vesta::Affine> {
+            h_poly,
+            h_blind: Blind(pallas::Base::from(7)),
+            random_poly: super::CommittedRandomPolynomial {
+                poly: mask_poly,
+                blind: Blind(pallas::Base::from(11)),
+            },
+        };
+        type MaskTranscript = Blake2bWrite<Vec<u8>, vesta::Affine, Challenge255<vesta::Affine>>;
+        let mut transcript = MaskTranscript::init(Vec::new());
+        let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
+        let queries = evaluated.open(x).collect::<Vec<_>>();
+
+        assert_eq!(queries.len(), 2);
+        assert!(core::ptr::eq(queries[0].poly, &evaluated.h_poly));
+        assert!(core::ptr::eq(queries[1].poly, &evaluated.random_poly.poly));
     }
 
     #[test]
