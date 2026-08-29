@@ -250,10 +250,15 @@ fn collapse_polynomials<F: Field>(
 
 /// Create a multi-opening proof.
 ///
+/// A queried polynomial with fewer coefficients than the parameters' domain
+/// size is treated as zero-extended to that size.
+///
 /// # Errors
 ///
-/// Returns [`std::io::ErrorKind::InvalidInput`] if `queries` is empty or
-/// contains more than one query for the same commitment at the same point.
+/// Returns [`std::io::ErrorKind::InvalidInput`] if `queries` is empty,
+/// contains more than one query for the same commitment at the same point,
+/// or queries a polynomial with more coefficients than the parameters'
+/// domain size.
 pub fn create_proof<
     'a,
     I,
@@ -286,11 +291,24 @@ where
     let mut q_blinds = vec![Blind(C::Scalar::ZERO); point_sets.len()];
     for commitment_data in poly_map {
         let set_index = commitment_data.set_index;
+        if commitment_data.commitment.poly.num_coeffs() > params.n as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "query polynomial has more coefficients than the parameters' domain size",
+            ));
+        }
         polynomial_groups[set_index].push(commitment_data.commitment.poly);
         q_blinds[set_index] *= *x_1;
         q_blinds[set_index] += commitment_data.commitment.blind;
     }
-    let q_polys = collapse_polynomials(&polynomial_groups, *x_1);
+    let mut q_polys = collapse_polynomials(&polynomial_groups, *x_1);
+    // Each collapsed polynomial keeps its group head's length. Zero-extend to
+    // the parameters' length — absent high coefficients read as zero, exactly
+    // as the polynomial's commitment treats them — so the final combination
+    // below folds equal-length operands.
+    for q_poly in &mut q_polys {
+        q_poly.values.resize(params.n as usize, C::Scalar::ZERO);
+    }
 
     let q_prime_poly = point_sets
         .iter()
@@ -386,23 +404,36 @@ mod tests {
     use std::fmt::Debug;
     use std::marker::PhantomData;
 
+    // A group's collapse keeps the first polynomial's length: shorter group
+    // members are zero-extended and longer ones truncated to it, matching
+    // `fold_polynomial_range`'s treatment of absent coefficients. Polynomial
+    // addition itself requires equal lengths, so fold each coefficient
+    // directly.
     fn reference_collapse<F: Field>(
         groups: &[Vec<&Polynomial<F, Coeff>>],
         challenge: F,
     ) -> Vec<Polynomial<F, Coeff>> {
         groups
             .iter()
-            .map(|group| {
-                group[1..]
-                    .iter()
-                    .fold(group[0].clone(), |accumulator, polynomial| {
-                        accumulator * challenge + polynomial
+            .map(|group| Polynomial {
+                values: (0..group[0].values.len())
+                    .map(|coefficient_index| {
+                        group.iter().fold(F::ZERO, |accumulator, polynomial| {
+                            accumulator * challenge
+                                + polynomial
+                                    .values
+                                    .get(coefficient_index)
+                                    .copied()
+                                    .unwrap_or(F::ZERO)
+                        })
                     })
+                    .collect(),
+                _marker: PhantomData,
             })
             .collect()
     }
 
-    fn streaming_collapse_matches_operator_collapse<F>()
+    fn streaming_collapse_matches_reference<F>()
     where
         F: Field + From<u64> + Debug,
     {
@@ -462,12 +493,125 @@ mod tests {
     }
 
     #[test]
-    fn streaming_collapse_matches_operator_collapse_fp() {
-        streaming_collapse_matches_operator_collapse::<Fp>();
+    fn streaming_collapse_matches_reference_fp() {
+        streaming_collapse_matches_reference::<Fp>();
     }
 
     #[test]
-    fn streaming_collapse_matches_operator_collapse_fq() {
-        streaming_collapse_matches_operator_collapse::<Fq>();
+    fn streaming_collapse_matches_reference_fq() {
+        streaming_collapse_matches_reference::<Fq>();
+    }
+
+    #[test]
+    fn short_query_polynomial_proves_and_verifies() {
+        use crate::arithmetic::eval_polynomial;
+        use crate::pasta::EpAffine;
+        use crate::poly::commitment::{Blind, Params};
+        use crate::poly::multiopen::{ProverQuery, VerifierQuery, create_proof, verify_proof};
+        use crate::transcript::{
+            Blake2bRead, Blake2bWrite, Challenge255, TranscriptRead, TranscriptWrite,
+        };
+        use group::Curve;
+        use rand::rng;
+
+        let mut rng = rng();
+        let params = Params::<EpAffine>::new(1);
+
+        // A one-coefficient query polynomial is zero-extended to the
+        // parameters' length, so its commitment is that of the padded copy.
+        let short = Polynomial::<Fq, Coeff> {
+            values: vec![Fq::from(5)],
+            _marker: PhantomData,
+        };
+        let padded = Polynomial::<Fq, Coeff> {
+            values: vec![Fq::from(5), Fq::ZERO],
+            _marker: PhantomData,
+        };
+        let full = Polynomial::<Fq, Coeff> {
+            values: vec![Fq::from(3), Fq::from(4)],
+            _marker: PhantomData,
+        };
+        let short_blind = Blind(Fq::random(&mut rng));
+        let full_blind = Blind(Fq::random(&mut rng));
+        let short_commitment = params.commit(&padded, short_blind).to_affine();
+        let full_commitment = params.commit(&full, full_blind).to_affine();
+
+        let short_point = Fq::from(97);
+        let full_point = Fq::from(43);
+        let short_eval = eval_polynomial(&short[..], short_point);
+        let full_eval = eval_polynomial(&full[..], full_point);
+
+        let mut transcript =
+            Blake2bWrite::<Vec<u8>, EpAffine, Challenge255<EpAffine>>::init(vec![]);
+        transcript.write_point(short_commitment).unwrap();
+        transcript.write_point(full_commitment).unwrap();
+        transcript.write_scalar(short_eval).unwrap();
+        transcript.write_scalar(full_eval).unwrap();
+        create_proof(
+            &params,
+            rng,
+            &mut transcript,
+            vec![
+                ProverQuery {
+                    point: short_point,
+                    poly: &short,
+                    blind: short_blind,
+                },
+                ProverQuery {
+                    point: full_point,
+                    poly: &full,
+                    blind: full_blind,
+                },
+            ],
+        )
+        .unwrap();
+        let proof = transcript.finalize();
+
+        let mut transcript =
+            Blake2bRead::<&[u8], EpAffine, Challenge255<EpAffine>>::init(&proof[..]);
+        assert_eq!(transcript.read_point().unwrap(), short_commitment);
+        assert_eq!(transcript.read_point().unwrap(), full_commitment);
+        assert_eq!(transcript.read_scalar().unwrap(), short_eval);
+        assert_eq!(transcript.read_scalar().unwrap(), full_eval);
+        let guard = verify_proof(
+            &params,
+            &mut transcript,
+            vec![
+                VerifierQuery::new_commitment(&short_commitment, short_point, short_eval),
+                VerifierQuery::new_commitment(&full_commitment, full_point, full_eval),
+            ],
+            params.empty_msm(),
+        )
+        .unwrap();
+        assert!(guard.use_challenges().eval());
+    }
+
+    #[test]
+    fn oversized_query_polynomial_is_rejected() {
+        use crate::pasta::EpAffine;
+        use crate::poly::commitment::{Blind, Params};
+        use crate::poly::multiopen::{ProverQuery, create_proof};
+        use crate::transcript::{Blake2bWrite, Challenge255};
+        use rand::rng;
+
+        let params = Params::<EpAffine>::new(1);
+        let oversized = Polynomial::<Fq, Coeff> {
+            values: vec![Fq::ONE; 4],
+            _marker: PhantomData,
+        };
+
+        let mut transcript =
+            Blake2bWrite::<Vec<u8>, EpAffine, Challenge255<EpAffine>>::init(vec![]);
+        let result = create_proof(
+            &params,
+            rng(),
+            &mut transcript,
+            vec![ProverQuery {
+                point: Fq::from(97),
+                poly: &oversized,
+                blind: Blind(Fq::ZERO),
+            }],
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
     }
 }

@@ -182,7 +182,10 @@ impl<F: Field> Polynomial<Assigned<F>, LagrangeCoeff> {
 impl<'a, F: Field, B: Basis> Add<&'a Polynomial<F, B>> for Polynomial<F, B> {
     type Output = Polynomial<F, B>;
 
+    /// This function will panic if the operands have different lengths,
+    /// i.e. were created for different domain sizes.
     fn add(mut self, rhs: &'a Polynomial<F, B>) -> Polynomial<F, B> {
+        assert_eq!(self.values.len(), rhs.values.len());
         parallelize(&mut self.values, |lhs, start| {
             for (lhs, rhs) in lhs.iter_mut().zip(rhs.values[start..].iter()) {
                 *lhs += *rhs;
@@ -314,6 +317,38 @@ mod tests {
     use rand::rng;
 
     use super::{EvaluationDomain, Rotation};
+
+    #[test]
+    fn test_polynomial_addition() {
+        let domain = EvaluationDomain::<pallas::Base>::new(1, 2);
+        let lhs = domain.coeff_from_vec([1, 2, 3, 4].map(pallas::Base::from).to_vec());
+        let rhs = domain.coeff_from_vec([10, 20, 30, 40].map(pallas::Base::from).to_vec());
+
+        let sum = lhs + &rhs;
+        assert_eq!(&sum[..], [11, 22, 33, 44].map(pallas::Base::from));
+    }
+
+    #[test]
+    #[should_panic(expected = "left == right")]
+    fn test_polynomial_addition_rejects_larger_rhs() {
+        let small_domain = EvaluationDomain::<pallas::Base>::new(1, 1);
+        let large_domain = EvaluationDomain::<pallas::Base>::new(1, 2);
+        let small = small_domain.coeff_from_vec([1, 2].map(pallas::Base::from).to_vec());
+        let large = large_domain.coeff_from_vec([10, 20, 30, 40].map(pallas::Base::from).to_vec());
+
+        let _ = small + &large;
+    }
+
+    #[test]
+    #[should_panic(expected = "left == right")]
+    fn test_polynomial_addition_rejects_smaller_rhs() {
+        let small_domain = EvaluationDomain::<pallas::Base>::new(1, 1);
+        let large_domain = EvaluationDomain::<pallas::Base>::new(1, 2);
+        let small = small_domain.coeff_from_vec([1, 2].map(pallas::Base::from).to_vec());
+        let large = large_domain.coeff_from_vec([10, 20, 30, 40].map(pallas::Base::from).to_vec());
+
+        let _ = large + &small;
+    }
 
     #[test]
     fn test_copy_rotated_chunk() {

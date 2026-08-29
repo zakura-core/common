@@ -238,15 +238,18 @@ pub fn write_incremental_witness<Node: HashSer, W: Write, const DEPTH: u8>(
 pub fn merkle_path_from_slice<Node: HashSer, const DEPTH: u8>(
     mut witness: &[u8],
 ) -> io::Result<MerklePath<Node, DEPTH>> {
-    // Skip the first byte, which should be DEPTH to signify the length of
-    // the following vector of Pedersen hashes.
-    if witness[0] != DEPTH {
+    // The first byte should be DEPTH, the length of the following vector of
+    // Pedersen hashes.
+    let (&encoded_depth, rest) = witness
+        .split_first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing Merkle path depth"))?;
+    if encoded_depth != DEPTH {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "depth is not as expected",
         ));
     }
-    witness = &witness[1..];
+    witness = rest;
 
     // Begin to construct the authentication path
     let (chunks, remainder) = witness.as_chunks::<33>();
@@ -881,6 +884,32 @@ mod tests {
         assert!(tree.append(node).is_err());
         for (witness, _) in witnesses.as_mut_slice() {
             assert!(witness.append(node).is_err());
+        }
+    }
+
+    #[test]
+    fn merkle_path_from_slice_rejects_truncated_input() {
+        const DEPTH: u8 = 4;
+
+        // A valid encoding: the depth byte, DEPTH length-prefixed 32-byte
+        // nodes, and an 8-byte little-endian position.
+        let mut encoded = vec![DEPTH];
+        for _ in 0..DEPTH {
+            encoded.push(32);
+            encoded.extend_from_slice(&[0u8; 32]);
+        }
+        encoded.extend_from_slice(&7u64.to_le_bytes());
+
+        assert_matches!(merkle_path_from_slice::<Node, DEPTH>(&encoded), Ok(_));
+
+        // Every strict prefix — including the empty slice, a missing node
+        // byte, and a truncated position — must return an error rather
+        // than panicking.
+        for len in 0..encoded.len() {
+            assert_matches!(
+                merkle_path_from_slice::<Node, DEPTH>(&encoded[..len]),
+                Err(_)
+            );
         }
     }
 

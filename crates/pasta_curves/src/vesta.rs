@@ -89,3 +89,26 @@ fn test_hash_to_curve() {
         format!("{:?}", z) == "0x1b58d4aa4d68c3f4d9916b77c79ff9911597a27f2ee46244e98eb9615172d2ad"
     );
 }
+
+// "vesta" is 5 bytes, so the longest domain prefix whose encoded
+// domain-separation tag fits in 255 bytes is 228 bytes.
+#[cfg(feature = "alloc")]
+#[test]
+fn test_hash_to_curve_domain_prefix_length_bound() {
+    use crate::arithmetic::CurveExt;
+
+    let domain_prefix = "x".repeat(228);
+    let hash = Point::hash_to_curve(&domain_prefix);
+    assert!(bool::from(hash(b"message").is_on_curve()));
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+#[should_panic(expected = "22 + curve_id.len() + domain_prefix.len()")]
+fn test_hash_to_curve_domain_prefix_too_long_panics() {
+    use crate::arithmetic::CurveExt;
+
+    let domain_prefix = "x".repeat(229);
+    let hash = Point::hash_to_curve(&domain_prefix);
+    let _ = hash(b"message");
+}

@@ -69,8 +69,7 @@ macro_rules! impl_batch_mul_same_scalar_vartime {
             omega: Self::ScalarExt,
             log_n: u32,
         ) -> bool {
-            crate::glv::fft_vartime(input, output, omega, log_n);
-            true
+            crate::glv::fft_vartime(input, output, omega, log_n)
         }
     };
     (native, $name:ident) => {};
