@@ -373,8 +373,7 @@ impl<C: CurveAffine> EvaluatedQuotient<C> {
 mod tests {
     use super::{
         QUOTIENT_EVALUATION_MASK_COEFFICIENTS, commit_quotient_evaluation_mask,
-        evaluate_quotient_evaluation_mask, fold_quotient_pieces,
-        sample_quotient_evaluation_mask,
+        evaluate_quotient_evaluation_mask, fold_quotient_pieces, sample_quotient_evaluation_mask,
     };
     use crate::{
         arithmetic::{CurveAffine, eval_polynomial},
