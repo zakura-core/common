@@ -33,6 +33,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "benchmarks/ios-orchard",
     "crates/bellman",
     "crates/bls12_381",
     "crates/halo2_gadgets",

@@ -1,0 +1,196 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		010000000000000000000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000001 /* AppDelegate.swift */; };
+		010000000000000000000002 /* OrchardBenchmarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000002 /* OrchardBenchmarkTests.swift */; };
+		010000000000000000000003 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 020000000000000000000005 /* XCTest.framework */; };
+		010000000000000000000004 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 020000000000000000000006 /* Security.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		030000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 090000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 080000000000000000000001;
+			remoteInfo = OrchardBenchmark;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		020000000000000000000001 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		020000000000000000000002 /* OrchardBenchmarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrchardBenchmarkTests.swift; sourceTree = "<group>"; };
+		020000000000000000000003 /* OrchardBenchmark.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OrchardBenchmark.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		020000000000000000000004 /* OrchardBenchmarkTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OrchardBenchmarkTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		020000000000000000000005 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+		020000000000000000000006 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		040000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		040000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				010000000000000000000004 /* Security.framework in Frameworks */,
+				010000000000000000000003 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		050000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				050000000000000000000002 /* App */,
+				050000000000000000000003 /* Tests */,
+				050000000000000000000005 /* Frameworks */,
+				050000000000000000000004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		050000000000000000000002 /* App */ = {
+			isa = PBXGroup;
+			children = (020000000000000000000001 /* AppDelegate.swift */);
+			path = App;
+			sourceTree = "<group>";
+		};
+		050000000000000000000003 /* Tests */ = {
+			isa = PBXGroup;
+			children = (020000000000000000000002 /* OrchardBenchmarkTests.swift */);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		050000000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				020000000000000000000003 /* OrchardBenchmark.app */,
+				020000000000000000000004 /* OrchardBenchmarkTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		050000000000000000000005 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				020000000000000000000005 /* XCTest.framework */,
+				020000000000000000000006 /* Security.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		080000000000000000000001 /* OrchardBenchmark */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0A0000000000000000000002 /* Build configuration list for PBXNativeTarget "OrchardBenchmark" */;
+			buildPhases = (
+				060000000000000000000001 /* Sources */,
+				040000000000000000000001 /* Frameworks */,
+				070000000000000000000001 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = OrchardBenchmark;
+			productName = OrchardBenchmark;
+			productReference = 020000000000000000000003 /* OrchardBenchmark.app */;
+			productType = "com.apple.product-type.application";
+		};
+		080000000000000000000002 /* OrchardBenchmarkTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0A0000000000000000000003 /* Build configuration list for PBXNativeTarget "OrchardBenchmarkTests" */;
+			buildPhases = (
+				060000000000000000000002 /* Sources */,
+				040000000000000000000002 /* Frameworks */,
+				070000000000000000000002 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = (0B0000000000000000000001 /* PBXTargetDependency */);
+			name = OrchardBenchmarkTests;
+			productName = OrchardBenchmarkTests;
+			productReference = 020000000000000000000004 /* OrchardBenchmarkTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		090000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2620;
+				LastUpgradeCheck = 2620;
+				TargetAttributes = {
+					080000000000000000000001 = {CreatedOnToolsVersion = 26.2;};
+					080000000000000000000002 = {CreatedOnToolsVersion = 26.2; TestTargetID = 080000000000000000000001;};
+				};
+			};
+			buildConfigurationList = 0A0000000000000000000001 /* Build configuration list for PBXProject "OrchardBenchmark" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = 050000000000000000000001;
+			productRefGroup = 050000000000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				080000000000000000000001 /* OrchardBenchmark */,
+				080000000000000000000002 /* OrchardBenchmarkTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		070000000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+		070000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		060000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (010000000000000000000001 /* AppDelegate.swift in Sources */);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		060000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (010000000000000000000002 /* OrchardBenchmarkTests.swift in Sources */);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0B0000000000000000000001 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = 080000000000000000000001 /* OrchardBenchmark */; targetProxy = 030000000000000000000001 /* PBXContainerItemProxy */;};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0C0000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; ORCHARD_RUST_TARGET = aarch64-apple-ios; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;}; name = Debug;};
+		0C0000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; ORCHARD_RUST_TARGET = aarch64-apple-ios; SDKROOT = iphoneos; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0; VALIDATE_PRODUCT = YES;}; name = Release;};
+		0C0000000000000000000011 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; INFOPLIST_FILE = App/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = org.zakura.OrchardBenchmark; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = iphoneos; TARGETED_DEVICE_FAMILY = 1;}; name = Debug;};
+		0C0000000000000000000012 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; INFOPLIST_FILE = App/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = org.zakura.OrchardBenchmark; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = iphoneos; TARGETED_DEVICE_FAMILY = 1;}; name = Release;};
+		0C0000000000000000000021 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; INFOPLIST_FILE = Tests/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; LIBRARY_SEARCH_PATHS = "$(inherited) $(SRCROOT)/../../../target/$(ORCHARD_RUST_TARGET)/release"; OTHER_LDFLAGS = "$(inherited) -lorchard_ios_benchmark -framework Security"; PRODUCT_BUNDLE_IDENTIFIER = org.zakura.OrchardBenchmark.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = iphoneos; SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/../include/orchard_ios_benchmark.h"; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OrchardBenchmark.app/OrchardBenchmark";}; name = Debug;};
+		0C0000000000000000000022 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; INFOPLIST_FILE = Tests/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; LIBRARY_SEARCH_PATHS = "$(inherited) $(SRCROOT)/../../../target/$(ORCHARD_RUST_TARGET)/release"; OTHER_LDFLAGS = "$(inherited) -lorchard_ios_benchmark -framework Security"; PRODUCT_BUNDLE_IDENTIFIER = org.zakura.OrchardBenchmark.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = iphoneos; SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/../include/orchard_ios_benchmark.h"; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OrchardBenchmark.app/OrchardBenchmark";}; name = Release;};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0A0000000000000000000001 /* Build configuration list for PBXProject "OrchardBenchmark" */ = {isa = XCConfigurationList; buildConfigurations = (0C0000000000000000000001 /* Debug */, 0C0000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		0A0000000000000000000002 /* Build configuration list for PBXNativeTarget "OrchardBenchmark" */ = {isa = XCConfigurationList; buildConfigurations = (0C0000000000000000000011 /* Debug */, 0C0000000000000000000012 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		0A0000000000000000000003 /* Build configuration list for PBXNativeTarget "OrchardBenchmarkTests" */ = {isa = XCConfigurationList; buildConfigurations = (0C0000000000000000000021 /* Debug */, 0C0000000000000000000022 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+/* End XCConfigurationList section */
+	};
+	rootObject = 090000000000000000000001 /* Project object */;
+}
