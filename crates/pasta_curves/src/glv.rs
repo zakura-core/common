@@ -185,9 +185,14 @@ mod private {
 pub(super) fn prepare_zero_check<C: GlvParams>(
     bases: &[C::AffineExt],
 ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<C>>> {
-    // `prepare` declines when no codebook mode fits its 13 MiB
-    // accounted-footprint budget.
-    zero::PreparedZeroMsm::<C>::prepare(bases).map(|prepared| {
+    #[cfg(feature = "orbits")]
+    let prepared = zero::PreparedZeroMsm::<C>::prepare(bases);
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    let prepared = zero::PreparedZeroMsm::<C>::prepare_no_orbits(bases);
+
+    // Preparation declines when no codebook mode fits the path's accounted
+    // table-footprint budget.
+    prepared.map(|prepared| {
         alloc::boxed::Box::new(prepared)
             as alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<C>>
     })
