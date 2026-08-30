@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- `DeferredField` now exposes serial `inner_product` and `weighted_sum` bulk
+  operations. On AArch64, the Pasta implementations privately use four-limb
+  block kernels that shorten carry dependency chains; other targets retain
+  scalar default implementations.
 - `PreparedZeroCheck` (and `glv::zero::PreparedZeroMsm`) gained
   `multiexp_with_terms_vartime`: the exact multiscalar multiplication the
   zero-check already evaluates, with the group element returned instead of

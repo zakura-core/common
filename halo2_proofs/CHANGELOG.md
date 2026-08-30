@@ -8,6 +8,10 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Pasta deferred-product loops now use serial bulk inner-product and
+  weighted-sum APIs, leaving parallelism at the query, expression-chunk,
+  polynomial-group, and paired-IPA levels. Their AArch64 implementations use
+  private paired block accumulation; other targets retain their scalar loops.
 - Advice-witness denominators now use the prover's two-lane batch inversion.
 - Added `Params::prepare_commitments`: builds prepared fixed-base multiexp
   tables over `[g..., w, u]` (shared with `prepare_zero_checks`) and

@@ -78,8 +78,11 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
                 .values
                 .get(coefficient_index..coefficient_index + DEFERRED_FOLD_LANES)
             {
-                F::mul_accumulate(&mut accumulators[0], &coefficients[0], power);
-                F::mul_accumulate(&mut accumulators[1], &coefficients[1], power);
+                F::weighted_sum(
+                    &mut accumulators,
+                    coefficients,
+                    core::slice::from_ref(power),
+                );
             } else {
                 for (lane, accumulator) in accumulators.iter_mut().enumerate() {
                     if let Some(coefficient) = polynomial.values.get(coefficient_index + lane) {
