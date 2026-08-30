@@ -897,13 +897,27 @@ fn signed_magnitude(value: i64) -> SignedMagnitude {
 /// Recodes every component pair. Rows whose bases are dead (identity or
 /// merged away) must arrive as zero components; they recode to all-zero
 /// codes and zero residuals.
-pub(crate) fn recode(
+#[cfg(test)]
+pub(super) fn recode(
     codebook: &Codebook,
     components: &[(SignedMagnitude, SignedMagnitude)],
     num_threads: usize,
 ) -> Recoded {
+    try_recode_with(codebook, components.len(), num_threads, |index| {
+        Some(components[index])
+    })
+    .expect("component slices cannot decline recoding")
+}
+
+/// Recodes components produced on demand, so prepared evaluations can fuse
+/// scalar decomposition into the row-major recoding pass.
+pub(super) fn try_recode_with(
+    codebook: &Codebook,
+    terms: usize,
+    num_threads: usize,
+    component_at: impl Fn(usize) -> Option<(SignedMagnitude, SignedMagnitude)> + Sync,
+) -> Option<Recoded> {
     let width = codebook.main_windows();
-    let terms = components.len();
     let bucket_count = codebook.bucket_count();
     let signed = |component: SignedMagnitude| {
         debug_assert_eq!(component.magnitude >> GLV_COMPONENT_BITS, 0);
@@ -927,14 +941,15 @@ pub(crate) fn recode(
         let mut residuals = vec![(signed_magnitude(0), signed_magnitude(0)); terms];
         let active_windows = rows
             .par_chunks_mut(width)
-            .zip(residuals.par_iter_mut().zip(components.par_iter()))
-            .map(|(row, (residual, &(first, second)))| {
+            .zip(residuals.par_iter_mut())
+            .enumerate()
+            .map(|(index, (row, residual))| {
+                let (first, second) = component_at(index)?;
                 let (top, (ta, tb)) = codebook.recode_pair(signed(first), signed(second), row);
                 *residual = (signed_magnitude(ta), signed_magnitude(tb));
-                top
+                Some(top)
             })
-            .max()
-            .unwrap_or(0);
+            .try_reduce(|| 0, |left, right| Some(left.max(right)))?;
         codes
             .par_chunks_mut(terms)
             .zip(counts.par_chunks_mut(bucket_count))
@@ -951,13 +966,13 @@ pub(crate) fn recode(
                     }
                 }
             });
-        return Recoded {
+        return Some(Recoded {
             codes,
             counts,
             terms,
             residuals,
             active_windows,
-        };
+        });
     }
 
     let mut residuals = Vec::with_capacity(terms);
@@ -966,7 +981,8 @@ pub(crate) fn recode(
     // `recode_pair` writes every slot it passes before an early exit, so
     // stale contents above `top` are never observed.
     let mut row = vec![0u32; width];
-    for (base, &(first, second)) in components.iter().enumerate() {
+    for base in 0..terms {
+        let (first, second) = component_at(base)?;
         let (top, (ta, tb)) = codebook.recode_pair(signed(first), signed(second), &mut row);
         residuals.push((signed_magnitude(ta), signed_magnitude(tb)));
         active_windows = active_windows.max(top);
@@ -977,13 +993,13 @@ pub(crate) fn recode(
             }
         }
     }
-    Recoded {
+    Some(Recoded {
         codes,
         counts,
         terms,
         residuals,
         active_windows,
-    }
+    })
 }
 
 /// Minimal-weight radix-2 unit-digit recodings over a bounded coefficient
@@ -1225,6 +1241,31 @@ mod tests {
                 beta_extent: 16,
             },
         ]
+    }
+
+    #[test]
+    fn callback_recoding_handles_serial_rows_and_declines() {
+        let codebook = Codebook::new(CodebookMode::alpha_only(7));
+        let zero = SignedMagnitude {
+            negative: false,
+            magnitude: 0,
+        };
+        let recoded = try_recode_with(&codebook, 4, 1, |_| Some((zero, zero)))
+            .expect("zero rows can be recoded");
+        assert_eq!(recoded.terms, 4);
+        assert_eq!(recoded.active_windows, 0);
+        assert!(recoded.codes.iter().all(|&code| code == 0));
+        assert!(recoded.counts.iter().all(|&count| count == 0));
+        assert!(recoded.residuals.iter().all(|&pair| pair == (zero, zero)));
+
+        for num_threads in [1, 2] {
+            assert!(
+                try_recode_with(&codebook, 4, num_threads, |index| {
+                    (index != 2).then_some((zero, zero))
+                })
+                .is_none()
+            );
+        }
     }
 
     /// Every nonzero residue's entry factors exactly: unpacking

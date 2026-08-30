@@ -627,6 +627,13 @@ jobs:
           --no-default-features
           --features batch,dev-graph,gadget-traces,multicore
           -- arithmetic::test_multiexp
+      - name: Run the prepared commitment test with multicore
+        run: >-
+          cargo +stable test --verbose --release
+          -p zakura-halo2-proofs
+          --no-default-features
+          --features batch,dev-graph,gadget-traces,multicore
+          -- prepared_commitments_match_unprepared
 
   sinsemilla-weighted-test:
     name: sinsemilla / Test weighted Merkle evaluator on Linux
@@ -719,7 +726,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [--all-features, --no-default-features]
+        features: [--all-features, --no-default-features, --features=multicore]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

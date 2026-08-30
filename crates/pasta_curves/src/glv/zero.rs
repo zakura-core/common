@@ -371,7 +371,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         // strict 2^127 bound), but rather than trust that with a panic the
         // whole check degrades to the exact naive evaluation, matching
         // `try_multiexp`'s posture toward the same guard.
-        let decompose_checked = |(index, k): (usize, &C::ScalarExt)| {
+        let decompose_checked = |index: usize| {
             if !self.live[index] {
                 let zero = SignedMagnitude {
                     negative: false,
@@ -379,26 +379,16 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 };
                 return Some((zero, zero));
             }
-            checked_signed_magnitudes(decompose::<C>(k))
+            checked_signed_magnitudes(decompose::<C>(&scalars[index]))
         };
-        #[cfg(not(feature = "multicore"))]
-        let components: Option<Vec<_>> =
-            scalars.iter().enumerate().map(decompose_checked).collect();
-        #[cfg(feature = "multicore")]
-        let components: Option<Vec<_>> = if num_threads > 1 {
-            scalars
-                .par_iter()
-                .enumerate()
-                .map(decompose_checked)
-                .collect()
-        } else {
-            scalars.iter().enumerate().map(decompose_checked).collect()
-        };
-        let Some(components) = components else {
+        let Some(recoded) = codebook::try_recode_with(
+            &self.codebook,
+            scalars.len(),
+            num_threads,
+            decompose_checked,
+        ) else {
             return self.naive_multiexp(scalars, extra);
         };
-
-        let recoded = codebook::recode(&self.codebook, &components, num_threads);
 
         // Extras with zero scalars or identity points contribute nothing.
         let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
