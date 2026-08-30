@@ -737,9 +737,7 @@ fn accumulate_deferred<T: DeferredField + 'static>(
     let power = power
         .downcast_ref::<T>()
         .expect("power matches the deferred field");
-    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
-        T::mul_accumulate(accumulator, term, power);
-    }
+    T::weighted_sum(accumulators, terms, core::slice::from_ref(power));
 }
 
 fn accumulate_deferred_products<T: DeferredField + 'static>(
@@ -753,9 +751,7 @@ fn accumulate_deferred_products<T: DeferredField + 'static>(
     let factors = factors
         .downcast_ref::<Vec<T>>()
         .expect("factor buffer matches the deferred field");
-    for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
-        T::mul_accumulate(accumulator, term, factor);
-    }
+    T::weighted_sum(accumulators, terms, factors);
 }
 
 fn reduce_deferred<T: DeferredField + 'static, F: Field>(

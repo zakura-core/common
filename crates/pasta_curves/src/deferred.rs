@@ -16,13 +16,63 @@ use crate::arithmetic::{adc, mac};
 /// accumulate products into an [`Accumulator`](Self::Accumulator) via
 /// [`mul_accumulate`](Self::mul_accumulate) and
 /// [`square_accumulate`](Self::square_accumulate), then perform a single
-/// reduction at the end with [`reduce`](Self::reduce).
+/// reduction at the end with [`reduce`](Self::reduce). The
+/// [`inner_product`](Self::inner_product) and
+/// [`weighted_sum`](Self::weighted_sum) operations manage their own serial
+/// block structure.
 pub trait DeferredField: ff::Field {
     /// A wide accumulator for unreduced products.
     type Accumulator: Copy + Clone + Debug + Default;
 
     /// Multiplies `a` by `b` and adds the result into `acc`.
     fn mul_accumulate(acc: &mut Self::Accumulator, a: &Self, b: &Self);
+
+    /// Computes the inner product of `lhs` and `rhs`.
+    ///
+    /// This method is serial. Callers should parallelize independent work at
+    /// the highest level that cleanly exposes it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lhs` and `rhs` have different lengths.
+    #[inline]
+    fn inner_product(lhs: &[Self], rhs: &[Self]) -> Self {
+        assert_eq!(lhs.len(), rhs.len());
+        let mut accumulator = Self::Accumulator::default();
+        for (lhs, rhs) in lhs.iter().zip(rhs) {
+            Self::mul_accumulate(&mut accumulator, lhs, rhs);
+        }
+        Self::reduce(accumulator)
+    }
+
+    /// Adds `terms[i] * weights[i]` to each independent accumulator.
+    ///
+    /// A single weight is broadcast across every term. Otherwise, `weights`
+    /// must have the same length as `terms`. This method is serial; callers
+    /// should parallelize independent weighted sums at a higher level.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `accumulators` and `terms` have different lengths, or if
+    /// `weights` contains neither one element nor one element per term.
+    #[inline]
+    fn weighted_sum(accumulators: &mut [Self::Accumulator], terms: &[Self], weights: &[Self]) {
+        assert_eq!(accumulators.len(), terms.len());
+        match weights {
+            [weight] => {
+                for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+                    Self::mul_accumulate(accumulator, term, weight);
+                }
+            }
+            weights => {
+                assert_eq!(terms.len(), weights.len());
+                for ((accumulator, term), weight) in accumulators.iter_mut().zip(terms).zip(weights)
+                {
+                    Self::mul_accumulate(accumulator, term, weight);
+                }
+            }
+        }
+    }
 
     /// Squares `a` and adds the result into `acc`.
     fn square_accumulate(acc: &mut Self::Accumulator, a: &Self);
@@ -117,6 +167,139 @@ impl<F> Product<F> {
         self.carry = carry;
     }
 
+    /// Multiplies two pairs of raw 256-bit values and adds both 512-bit
+    /// products into this accumulator.
+    #[cfg(target_arch = "aarch64")]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub(crate) fn mul_accumulate_pair(
+        &mut self,
+        lhs0: &[u64; 4],
+        rhs0: &[u64; 4],
+        lhs1: &[u64; 4],
+        rhs1: &[u64; 4],
+    ) {
+        macro_rules! add_pair {
+            ($column:ident, $lhs_limb:literal, $rhs_limb:literal) => {{
+                add_product(&mut $column, lhs0[$lhs_limb], rhs0[$rhs_limb]);
+                add_product(&mut $column, lhs1[$lhs_limb], rhs1[$rhs_limb]);
+            }};
+        }
+
+        // Comba columns let the two products share each carry handoff. The
+        // third limb is sufficient because a column contains at most eight
+        // 128-bit products.
+        let mut column = [self.limbs[0], 0, 0];
+        add_pair!(column, 0, 0);
+        self.limbs[0] = column[0];
+
+        column = start_column(self.limbs[1], column[1], column[2]);
+        add_pair!(column, 0, 1);
+        add_pair!(column, 1, 0);
+        self.limbs[1] = column[0];
+
+        column = start_column(self.limbs[2], column[1], column[2]);
+        add_pair!(column, 0, 2);
+        add_pair!(column, 1, 1);
+        add_pair!(column, 2, 0);
+        self.limbs[2] = column[0];
+
+        column = start_column(self.limbs[3], column[1], column[2]);
+        add_pair!(column, 0, 3);
+        add_pair!(column, 1, 2);
+        add_pair!(column, 2, 1);
+        add_pair!(column, 3, 0);
+        self.limbs[3] = column[0];
+
+        column = start_column(self.limbs[4], column[1], column[2]);
+        add_pair!(column, 1, 3);
+        add_pair!(column, 2, 2);
+        add_pair!(column, 3, 1);
+        self.limbs[4] = column[0];
+
+        column = start_column(self.limbs[5], column[1], column[2]);
+        add_pair!(column, 2, 3);
+        add_pair!(column, 3, 2);
+        self.limbs[5] = column[0];
+
+        column = start_column(self.limbs[6], column[1], column[2]);
+        add_pair!(column, 3, 3);
+        self.limbs[6] = column[0];
+
+        column = start_column(self.limbs[7], column[1], column[2]);
+        self.limbs[7] = column[0];
+        debug_assert_eq!(column[2], 0);
+        let (carry, overflow) = self.carry.overflowing_add(column[1]);
+        debug_assert!(!overflow, "carry overflow: too many accumulated products");
+        self.carry = carry;
+    }
+
+    /// Updates two independent accumulators with raw 256-bit products.
+    #[cfg(target_arch = "aarch64")]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub(crate) fn mul_accumulate_lanes(
+        &mut self,
+        lhs0: &[u64; 4],
+        rhs0: &[u64; 4],
+        other: &mut Self,
+        lhs1: &[u64; 4],
+        rhs1: &[u64; 4],
+    ) {
+        let (d0, carry0) = mac(self.limbs[0], lhs0[0], rhs0[0], 0);
+        let (e0, carry1) = mac(other.limbs[0], lhs1[0], rhs1[0], 0);
+        let (d1, carry0) = mac(self.limbs[1], lhs0[0], rhs0[1], carry0);
+        let (e1, carry1) = mac(other.limbs[1], lhs1[0], rhs1[1], carry1);
+        let (d2, carry0) = mac(self.limbs[2], lhs0[0], rhs0[2], carry0);
+        let (e2, carry1) = mac(other.limbs[2], lhs1[0], rhs1[2], carry1);
+        let (d3, carry0) = mac(self.limbs[3], lhs0[0], rhs0[3], carry0);
+        let (e3, carry1) = mac(other.limbs[3], lhs1[0], rhs1[3], carry1);
+        let (d4, overflow0) = adc(self.limbs[4], carry0, 0);
+        let (e4, overflow1) = adc(other.limbs[4], carry1, 0);
+
+        let (d1, carry0) = mac(d1, lhs0[1], rhs0[0], 0);
+        let (e1, carry1) = mac(e1, lhs1[1], rhs1[0], 0);
+        let (d2, carry0) = mac(d2, lhs0[1], rhs0[1], carry0);
+        let (e2, carry1) = mac(e2, lhs1[1], rhs1[1], carry1);
+        let (d3, carry0) = mac(d3, lhs0[1], rhs0[2], carry0);
+        let (e3, carry1) = mac(e3, lhs1[1], rhs1[2], carry1);
+        let (d4, carry0) = mac(d4, lhs0[1], rhs0[3], carry0);
+        let (e4, carry1) = mac(e4, lhs1[1], rhs1[3], carry1);
+        let (d5, overflow0) = adc(self.limbs[5], carry0, overflow0);
+        let (e5, overflow1) = adc(other.limbs[5], carry1, overflow1);
+
+        let (d2, carry0) = mac(d2, lhs0[2], rhs0[0], 0);
+        let (e2, carry1) = mac(e2, lhs1[2], rhs1[0], 0);
+        let (d3, carry0) = mac(d3, lhs0[2], rhs0[1], carry0);
+        let (e3, carry1) = mac(e3, lhs1[2], rhs1[1], carry1);
+        let (d4, carry0) = mac(d4, lhs0[2], rhs0[2], carry0);
+        let (e4, carry1) = mac(e4, lhs1[2], rhs1[2], carry1);
+        let (d5, carry0) = mac(d5, lhs0[2], rhs0[3], carry0);
+        let (e5, carry1) = mac(e5, lhs1[2], rhs1[3], carry1);
+        let (d6, overflow0) = adc(self.limbs[6], carry0, overflow0);
+        let (e6, overflow1) = adc(other.limbs[6], carry1, overflow1);
+
+        let (d3, carry0) = mac(d3, lhs0[3], rhs0[0], 0);
+        let (e3, carry1) = mac(e3, lhs1[3], rhs1[0], 0);
+        let (d4, carry0) = mac(d4, lhs0[3], rhs0[1], carry0);
+        let (e4, carry1) = mac(e4, lhs1[3], rhs1[1], carry1);
+        let (d5, carry0) = mac(d5, lhs0[3], rhs0[2], carry0);
+        let (e5, carry1) = mac(e5, lhs1[3], rhs1[2], carry1);
+        let (d6, carry0) = mac(d6, lhs0[3], rhs0[3], carry0);
+        let (e6, carry1) = mac(e6, lhs1[3], rhs1[3], carry1);
+        let (d7, overflow0) = adc(self.limbs[7], carry0, overflow0);
+        let (e7, overflow1) = adc(other.limbs[7], carry1, overflow1);
+
+        self.limbs = [d0, d1, d2, d3, d4, d5, d6, d7];
+        other.limbs = [e0, e1, e2, e3, e4, e5, e6, e7];
+        let (carry0, carry_overflow0) = self.carry.overflowing_add(overflow0);
+        let (carry1, carry_overflow1) = other.carry.overflowing_add(overflow1);
+        debug_assert!(
+            !carry_overflow0 && !carry_overflow1,
+            "carry overflow: too many accumulated products"
+        );
+        self.carry = carry0;
+        other.carry = carry1;
+    }
+
     /// Adds a raw 512-bit product (8 limbs) into this accumulator.
     ///
     /// Each call contributes at most 1 to `carry`; overflow of the 64-bit
@@ -185,6 +368,27 @@ impl<F> Product<F> {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn add_product(column: &mut [u64; 3], lhs: u64, rhs: u64) {
+    let product = (lhs as u128) * (rhs as u128);
+    let (low, low_carry) = column[0].overflowing_add(product as u64);
+    let (middle, high_carry) = column[1].overflowing_add((product >> 64) as u64);
+    let (middle, middle_carry) = middle.overflowing_add(low_carry as u64);
+    let carry = high_carry as u64 + middle_carry as u64;
+    let (high, overflow) = column[2].overflowing_add(carry);
+    debug_assert!(!overflow);
+    *column = [low, middle, high];
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn start_column(accumulator: u64, carry_low: u64, carry_high: u64) -> [u64; 3] {
+    let (low, carry) = accumulator.overflowing_add(carry_low);
+    let (middle, high) = carry_high.overflowing_add(carry as u64);
+    [low, middle, high as u64]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DeferredField, Product};
@@ -198,14 +402,6 @@ mod tests {
         0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
         0xe5,
     ];
-
-    fn inner_product<F: DeferredField>(a: &[F], b: &[F]) -> F {
-        let mut acc = F::Accumulator::default();
-        for (x, y) in a.iter().zip(b.iter()) {
-            F::mul_accumulate(&mut acc, x, y);
-        }
-        F::reduce(acc)
-    }
 
     fn mul_unreduced(lhs: &[u64; 4], rhs: &[u64; 4]) -> [u64; 8] {
         let (r0, carry) = mac(0, lhs[0], rhs[0], 0);
@@ -261,6 +457,82 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn paired_mul_accumulate_matches_scalar_calls() {
+        let mut rng = XorShiftRng::from_seed(SEED);
+        let max = [u64::MAX; 4];
+        for case in 0..=10_000 {
+            let (lhs0, rhs0, lhs1, rhs1) = if case == 0 {
+                (max, max, max, max)
+            } else {
+                (
+                    core::array::from_fn(|_| rng.next_u64()),
+                    core::array::from_fn(|_| rng.next_u64()),
+                    core::array::from_fn(|_| rng.next_u64()),
+                    core::array::from_fn(|_| rng.next_u64()),
+                )
+            };
+            let limbs = core::array::from_fn(|_| rng.next_u64());
+            let carry = rng.next_u64() >> 1;
+            let mut scalar = Product::<()> {
+                limbs,
+                carry,
+                _marker: core::marker::PhantomData,
+            };
+            let mut paired = scalar;
+
+            scalar.mul_accumulate(&lhs0, &rhs0);
+            scalar.mul_accumulate(&lhs1, &rhs1);
+            paired.mul_accumulate_pair(&lhs0, &rhs0, &lhs1, &rhs1);
+
+            assert_eq!(paired.limbs, scalar.limbs);
+            assert_eq!(paired.carry, scalar.carry);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn lane_mul_accumulate_matches_scalar_calls() {
+        let mut rng = XorShiftRng::from_seed(SEED);
+        let max = [u64::MAX; 4];
+        for case in 0..=10_000 {
+            let (lhs0, rhs0, lhs1, rhs1) = if case == 0 {
+                (max, max, max, max)
+            } else {
+                (
+                    core::array::from_fn(|_| rng.next_u64()),
+                    core::array::from_fn(|_| rng.next_u64()),
+                    core::array::from_fn(|_| rng.next_u64()),
+                    core::array::from_fn(|_| rng.next_u64()),
+                )
+            };
+            let limbs0 = core::array::from_fn(|_| rng.next_u64());
+            let limbs1 = core::array::from_fn(|_| rng.next_u64());
+            let mut scalar0 = Product::<()> {
+                limbs: limbs0,
+                carry: rng.next_u64() >> 1,
+                _marker: core::marker::PhantomData,
+            };
+            let mut scalar1 = Product::<()> {
+                limbs: limbs1,
+                carry: rng.next_u64() >> 1,
+                _marker: core::marker::PhantomData,
+            };
+            let mut lanes0 = scalar0;
+            let mut lanes1 = scalar1;
+
+            scalar0.mul_accumulate(&lhs0, &rhs0);
+            scalar1.mul_accumulate(&lhs1, &rhs1);
+            lanes0.mul_accumulate_lanes(&lhs0, &rhs0, &mut lanes1, &lhs1, &rhs1);
+
+            assert_eq!(lanes0.limbs, scalar0.limbs);
+            assert_eq!(lanes0.carry, scalar0.carry);
+            assert_eq!(lanes1.limbs, scalar1.limbs);
+            assert_eq!(lanes1.carry, scalar1.carry);
+        }
+    }
+
     macro_rules! deferred_field_tests {
         ($F:ty, $mod:ident, $adversarial_a:expr_2021, $adversarial_b:expr_2021) => {
             mod $mod {
@@ -297,9 +569,38 @@ mod tests {
                         let b: Vec<$F> = (0..len).map(|_| <$F>::random(&mut rng)).collect();
 
                         let eager: $F = a.iter().zip(b.iter()).map(|(x, y)| *x * *y).sum();
-                        let lazy = inner_product(&a, &b);
+                        let lazy = <$F>::inner_product(&a, &b);
 
                         assert_eq!(eager, lazy, "mismatch at len={len}");
+                    }
+                }
+
+                #[test]
+                fn weighted_sum_roundtrip() {
+                    let mut rng = XorShiftRng::from_seed(SEED);
+                    for len in [0, 1, 2, 3, 4, 7, 8, 31, 32, 255, 256, 10_000] {
+                        let terms: Vec<$F> = (0..len).map(|_| <$F>::random(&mut rng)).collect();
+                        let weights: Vec<$F> = (0..len).map(|_| <$F>::random(&mut rng)).collect();
+                        let broadcast = <$F>::random(&mut rng);
+                        let mut accumulators =
+                            vec![<$F as DeferredField>::Accumulator::default(); len];
+
+                        <$F>::weighted_sum(&mut accumulators, &terms, &weights);
+                        <$F>::weighted_sum(
+                            &mut accumulators,
+                            &terms,
+                            core::slice::from_ref(&broadcast),
+                        );
+
+                        for (index, ((accumulator, term), weight)) in
+                            accumulators.into_iter().zip(terms).zip(weights).enumerate()
+                        {
+                            assert_eq!(
+                                <$F>::reduce(accumulator),
+                                term * weight + term * broadcast,
+                                "mismatch at len={len}, index={index}",
+                            );
+                        }
                     }
                 }
 
@@ -353,7 +654,7 @@ mod tests {
                     let b_arr = [b; 100];
 
                     let eager: $F = a_arr.iter().zip(b_arr.iter()).map(|(x, y)| *x * *y).sum();
-                    let lazy = inner_product(&a_arr, &b_arr);
+                    let lazy = <$F>::inner_product(&a_arr, &b_arr);
 
                     assert_eq!(eager, lazy, "inner_product returned non-canonical result");
                 }

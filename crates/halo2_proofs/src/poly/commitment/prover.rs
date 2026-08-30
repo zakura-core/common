@@ -9,6 +9,11 @@ use crate::arithmetic::{
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
 use group::{Curve, Group};
+#[cfg(target_arch = "aarch64")]
+use pasta_curves::{deferred::DeferredField, pallas, vesta};
+use std::any::Any;
+#[cfg(target_arch = "aarch64")]
+use std::any::TypeId;
 use std::io;
 
 /// Samples the sparse polynomial that masks the final folded IPA scalar,
@@ -79,6 +84,61 @@ fn ipa_round_multiexp<C: CurveAffine>(
     round_bases.extend_from_slice(&[params.u, params.w]);
 
     best_multiexp(&round_coeffs, &round_bases)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn compute_ipa_inner_products_deferred<F: Field + 'static, T: DeferredField + 'static>(
+    a: &dyn Any,
+    b: &dyn Any,
+    half: usize,
+) -> (F, F) {
+    let a = a
+        .downcast_ref::<Vec<T>>()
+        .expect("the inner-product field was checked before conversion");
+    let b = b
+        .downcast_ref::<Vec<T>>()
+        .expect("the inner-product field was checked before conversion");
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), half * 2);
+    let result = crate::multicore::join(
+        || T::inner_product(&a[half..], &b[..half]),
+        || T::inner_product(&a[..half], &b[half..]),
+    );
+    let result: Box<dyn Any> = Box::new(result);
+    *result
+        .downcast::<(F, F)>()
+        .expect("the inner-product output matches its input field")
+}
+
+fn compute_ipa_inner_products_pasta<F: Field + 'static>(
+    a: &dyn Any,
+    b: &dyn Any,
+    half: usize,
+) -> (F, F) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
+            return compute_ipa_inner_products_deferred::<F, pallas::Base>(a, b, half);
+        }
+        if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
+            return compute_ipa_inner_products_deferred::<F, vesta::Base>(a, b, half);
+        }
+    }
+
+    // Downcasting the complete owned buffers is safe and avoids per-element
+    // type checks in the specialized path.
+    let a = a
+        .downcast_ref::<Vec<F>>()
+        .expect("the inner-product input has the expected field");
+    let b = b
+        .downcast_ref::<Vec<F>>()
+        .expect("the inner-product input has the expected field");
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), half * 2);
+    crate::multicore::join(
+        || compute_inner_product(&a[half..], &b[..half]),
+        || compute_inner_product(&a[..half], &b[half..]),
+    )
 }
 
 /// Create a polynomial commitment opening proof for the polynomial defined
@@ -162,10 +222,8 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
         let half = 1 << (params.k - j - 1); // half the length of `p_prime`, `b`, `G'`
 
         // Compute the scalar terms needed by L and R before their MSMs.
-        let (value_l_j, value_r_j) = crate::multicore::join(
-            || compute_inner_product(&p_prime[half..], &b[0..half]),
-            || compute_inner_product(&p_prime[0..half], &b[half..]),
-        );
+        let (value_l_j, value_r_j) =
+            compute_ipa_inner_products_pasta::<C::Scalar>(&p_prime, &b, half);
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
 
@@ -263,10 +321,10 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 #[cfg(test)]
 mod tests {
     use super::{
-        Params, ipa_masking_commitment, ipa_round_multiexp, parallel_generator_collapse,
-        sample_ipa_masking_polynomial,
+        Params, compute_ipa_inner_products_pasta, ipa_masking_commitment, ipa_round_multiexp,
+        parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
-    use crate::arithmetic::{CurveAffine, best_multiexp, eval_polynomial};
+    use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
     use crate::poly::{EvaluationDomain, commitment::Blind};
     use ff::Field;
     use group::{Curve, Group};
@@ -461,6 +519,27 @@ mod tests {
         }
     }
 
+    fn deferred_inner_product_matches_eager<F: Field + From<u64> + 'static>() {
+        for half in [0, 1, 2, 3, 31, 32, 2_048] {
+            let a = (0..half * 2)
+                .scan(F::from(7), |value, index| {
+                    *value = value.square() + F::from(index as u64 + 1);
+                    Some(*value)
+                })
+                .collect::<Vec<_>>();
+            let b = (0..half * 2)
+                .scan(F::from(11), |value, index| {
+                    *value = value.square() + F::from(index as u64 + 3);
+                    Some(*value)
+                })
+                .collect::<Vec<_>>();
+
+            let (left, right) = compute_ipa_inner_products_pasta::<F>(&a, &b, half);
+            assert_eq!(left, compute_inner_product(&a[half..], &b[..half]));
+            assert_eq!(right, compute_inner_product(&a[..half], &b[half..]));
+        }
+    }
+
     #[test]
     fn generator_collapse_matches_native_pallas() {
         generator_collapse_matches_native::<pallas::Affine>();
@@ -480,7 +559,6 @@ mod tests {
     fn round_multiexp_matches_split_vesta() {
         round_multiexp_matches_split::<vesta::Affine>();
     }
-
     #[test]
     fn masking_polynomial_is_sparse_and_commits_correctly_pallas() {
         masking_polynomial_is_sparse_and_commits_correctly::<pallas::Affine>();
@@ -499,5 +577,15 @@ mod tests {
     #[test]
     fn masking_basis_detects_every_non_evaluation_fold_vesta() {
         masking_basis_detects_every_non_evaluation_fold::<vesta::Affine>();
+    }
+
+    #[test]
+    fn deferred_inner_product_matches_eager_pallas_base() {
+        deferred_inner_product_matches_eager::<pallas::Base>();
+    }
+
+    #[test]
+    fn deferred_inner_product_matches_eager_vesta_base() {
+        deferred_inner_product_matches_eager::<vesta::Base>();
     }
 }
