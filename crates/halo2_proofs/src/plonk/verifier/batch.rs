@@ -280,7 +280,10 @@ where
             );
 
         match final_msm {
-            Ok(msm) => msm.eval(),
+            // Each contribution passed through the IPA challenge expansion,
+            // which normally produces random-like, full-width coefficients,
+            // before being scaled into the batch.
+            Ok(msm) => msm.eval_full_width(),
             Err(_) => false,
         }
     }
