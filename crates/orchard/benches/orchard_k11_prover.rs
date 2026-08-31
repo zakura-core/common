@@ -125,7 +125,9 @@ fn orchard_k11_prover(c: &mut Criterion) {
             .expect("the benchmark proof must verify");
     }
 
-    let mut steady = c.benchmark_group("orchard-k11-steady");
+    // Preserve the historical group ID used by baseline directories and
+    // result parsers. Its cases are deliberately steady-state.
+    let mut steady = c.benchmark_group("orchard-k11");
     steady.sample_size(BENCHMARK_SAMPLES);
     steady.sampling_mode(SamplingMode::Flat);
     steady.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
