@@ -432,32 +432,39 @@ mod tests {
     fn block_mul_accumulate_matches_scalar_calls() {
         let mut rng = XorShiftRng::from_seed(SEED);
         let max = [u64::MAX; 4];
-        for case in 0..=10_000 {
-            let (lhs0, rhs0, lhs1, rhs1) = if case == 0 {
-                (max, max, max, max)
-            } else {
-                (
-                    core::array::from_fn(|_| rng.next_u64()),
-                    core::array::from_fn(|_| rng.next_u64()),
-                    core::array::from_fn(|_| rng.next_u64()),
-                    core::array::from_fn(|_| rng.next_u64()),
-                )
-            };
-            let limbs = core::array::from_fn(|_| rng.next_u64());
-            let carry = rng.next_u64() >> 1;
-            let mut scalar = Product::<()> {
-                limbs,
-                carry,
-                _marker: core::marker::PhantomData,
-            };
-            let mut paired = scalar;
+        for len in [0, 1, 2, 3, 4, 5, 31, 32] {
+            for case in 0..=1_000 {
+                let lhs = if case == 0 {
+                    vec![max; len]
+                } else {
+                    (0..len)
+                        .map(|_| core::array::from_fn(|_| rng.next_u64()))
+                        .collect::<Vec<_>>()
+                };
+                let rhs = if case == 0 {
+                    vec![max; len]
+                } else {
+                    (0..len)
+                        .map(|_| core::array::from_fn(|_| rng.next_u64()))
+                        .collect::<Vec<_>>()
+                };
+                let limbs = core::array::from_fn(|_| rng.next_u64());
+                let carry = rng.next_u64() >> 1;
+                let mut scalar = Product::<()> {
+                    limbs,
+                    carry,
+                    _marker: core::marker::PhantomData,
+                };
+                let mut blocked = scalar;
 
-            scalar.mul_accumulate(&lhs0, &rhs0);
-            scalar.mul_accumulate(&lhs1, &rhs1);
-            paired.mul_accumulate_block(&[lhs0, lhs1], &[rhs0, rhs1], raw_limbs);
+                for (lhs, rhs) in lhs.iter().zip(&rhs) {
+                    scalar.mul_accumulate(lhs, rhs);
+                }
+                blocked.mul_accumulate_block(&lhs, &rhs, raw_limbs);
 
-            assert_eq!(paired.limbs, scalar.limbs);
-            assert_eq!(paired.carry, scalar.carry);
+                assert_eq!(blocked.limbs, scalar.limbs, "len={len}, case={case}");
+                assert_eq!(blocked.carry, scalar.carry, "len={len}, case={case}");
+            }
         }
     }
 
