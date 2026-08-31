@@ -201,14 +201,12 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
         y: ChallengeY<C>,
-        cache_layout: Option<&poly::EvaluationCacheLayout>,
         compiled_plan: Option<&poly::CompiledEvaluationPlan<C::Scalar, ExtendedLagrangeCoeff>>,
         mut rng: R,
         transcript: &mut T,
     ) -> Result<
         (
             ConstructedQuotient<C>,
-            Option<poly::EvaluationCacheLayout>,
             Option<poly::CompiledEvaluationPlan<C::Scalar, ExtendedLagrangeCoeff>>,
         ),
         Error,
@@ -216,14 +214,12 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         // Fold the constraint expressions into the quotient numerator using
         // the y challenge, then evaluate the numerator.
         let challenges = poly::EvaluationChallenges::new(*theta, *beta, *gamma, *y);
-        let (quotient_numerator, prepared_layout, prepared_plan) = evaluator
-            .evaluate_quotient_with_compiled_plan(
-                expressions,
-                domain,
-                cache_layout,
-                compiled_plan,
-                challenges,
-            );
+        let (quotient_numerator, prepared_plan) = evaluator.evaluate_quotient_with_compiled_plan(
+            expressions,
+            domain,
+            compiled_plan,
+            challenges,
+        );
 
         // Move the numerator to coefficient form, divide by
         // t(X) = X^{params.n} - 1 using its sparse block inverse, and construct
@@ -268,7 +264,6 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
                 h_blinds,
                 random_poly: self,
             },
-            prepared_layout,
             prepared_plan,
         ))
     }

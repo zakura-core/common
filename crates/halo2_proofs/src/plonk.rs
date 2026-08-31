@@ -158,7 +158,7 @@ pub struct ProvingKey<C: CurveAffine> {
     floor_plan: Option<FloorPlan>,
     /// Bounded, prover-only quotient evaluator programs prepared during
     /// keygen and replaced lazily if exact validation rejects them.
-    quotient_cache_layouts: Arc<evaluator_schedule::QuotientCacheLayouts<C::Scalar>>,
+    quotient_plans: Arc<evaluator_schedule::QuotientPlans<C::Scalar>>,
 }
 
 #[derive(Debug)]

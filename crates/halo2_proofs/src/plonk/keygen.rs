@@ -592,9 +592,9 @@ where
         permutation: permutation_pk,
         fft_twiddles,
         floor_plan,
-        quotient_cache_layouts: Arc::new(Default::default()),
+        quotient_plans: Arc::new(Default::default()),
     };
-    super::evaluator_schedule::prepare_quotient_cache_layouts(&pk);
+    super::evaluator_schedule::prepare_quotient_plans(&pk);
     Ok(pk)
 }
 #[cfg(test)]

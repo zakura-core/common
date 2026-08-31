@@ -9,14 +9,11 @@ use maybe_rayon::prelude::*;
 use super::{ProvingKey, circuit::Expression, lookup, permutation};
 use crate::{
     arithmetic::CurveAffine,
-    poly::{
-        self, Ast, AstLeaf, CompiledEvaluationPlan, EvaluationCacheLayout, ExtendedLagrangeCoeff,
-    },
+    poly::{self, Ast, AstLeaf, CompiledEvaluationPlan, ExtendedLagrangeCoeff},
 };
 
 const RETAINED_QUOTIENT_CIRCUIT_COUNTS: [usize; 3] = [1, 2, 4];
-const MAX_RETAINED_QUOTIENT_CACHE_LAYOUT_BYTES: usize = 64 * 1024;
-const MAX_RETAINED_COMPILED_PLAN_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RETAINED_QUOTIENT_PLAN_BYTES: usize = 2 * 1024 * 1024;
 
 struct LookupTopology<E, F: WithSmallOrderMulGroup<3>> {
     compressed_input: Ast<E, F, ExtendedLagrangeCoeff>,
@@ -56,80 +53,48 @@ fn expression_ast<E: Copy, F: WithSmallOrderMulGroup<3>>(
     )
 }
 
-pub(super) struct QuotientCacheLayouts<F: Field> {
-    layouts: Mutex<[Option<Arc<EvaluationCacheLayout>>; RETAINED_QUOTIENT_CIRCUIT_COUNTS.len()]>,
-    compiled_plans: Mutex<
+pub(super) struct QuotientPlans<F: Field> {
+    plans: Mutex<
         [Option<Arc<CompiledEvaluationPlan<F, ExtendedLagrangeCoeff>>>;
             RETAINED_QUOTIENT_CIRCUIT_COUNTS.len()],
     >,
 }
 
-impl<F: Field> Default for QuotientCacheLayouts<F> {
+impl<F: Field> Default for QuotientPlans<F> {
     fn default() -> Self {
         Self {
-            layouts: Mutex::new(std::array::from_fn(|_| None)),
-            compiled_plans: Mutex::new(std::array::from_fn(|_| None)),
+            plans: Mutex::new(std::array::from_fn(|_| None)),
         }
     }
 }
 
-impl<F: Field> fmt::Debug for QuotientCacheLayouts<F> {
+impl<F: Field> fmt::Debug for QuotientPlans<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("QuotientCacheLayouts")
+            .debug_struct("QuotientPlans")
             .finish_non_exhaustive()
     }
 }
 
-impl<F: Field> QuotientCacheLayouts<F> {
+impl<F: Field> QuotientPlans<F> {
     fn index(circuit_count: usize) -> Option<usize> {
         RETAINED_QUOTIENT_CIRCUIT_COUNTS
             .iter()
             .position(|count| *count == circuit_count)
     }
 
-    pub(super) fn get(&self, circuit_count: usize) -> Option<Arc<EvaluationCacheLayout>> {
-        let index = Self::index(circuit_count)?;
-        self.layouts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())[index]
-            .clone()
-    }
-
-    pub(super) fn get_compiled_plan(
+    pub(super) fn get(
         &self,
         circuit_count: usize,
     ) -> Option<Arc<CompiledEvaluationPlan<F, ExtendedLagrangeCoeff>>> {
         let index = Self::index(circuit_count)?;
-        self.compiled_plans
+        self.plans
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())[index]
             .clone()
     }
 
-    pub(super) fn retain(&self, circuit_count: usize, layout: EvaluationCacheLayout) {
-        let Some(index) = Self::index(circuit_count) else {
-            return;
-        };
-        let mut layouts = self
-            .layouts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let existing_bytes = layouts
-            .iter()
-            .enumerate()
-            .filter(|(candidate, _)| *candidate != index)
-            .filter_map(|(_, layout)| layout.as_ref())
-            .map(|layout| layout.payload_bytes())
-            .sum::<usize>();
-        if existing_bytes.saturating_add(layout.payload_bytes())
-            <= MAX_RETAINED_QUOTIENT_CACHE_LAYOUT_BYTES
-        {
-            layouts[index] = Some(Arc::new(layout));
-        }
-    }
-
-    pub(super) fn retain_compiled_plan(
+    pub(super) fn retain(
         &self,
         circuit_count: usize,
         plan: CompiledEvaluationPlan<F, ExtendedLagrangeCoeff>,
@@ -138,7 +103,7 @@ impl<F: Field> QuotientCacheLayouts<F> {
             return;
         };
         let mut plans = self
-            .compiled_plans
+            .plans
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let existing_bytes = plans
@@ -148,14 +113,14 @@ impl<F: Field> QuotientCacheLayouts<F> {
             .filter_map(|(_, plan)| plan.as_ref())
             .map(|plan| plan.payload_bytes())
             .sum::<usize>();
-        if existing_bytes.saturating_add(plan.payload_bytes()) <= MAX_RETAINED_COMPILED_PLAN_BYTES {
+        if existing_bytes.saturating_add(plan.payload_bytes()) <= MAX_RETAINED_QUOTIENT_PLAN_BYTES {
             plans[index] = Some(Arc::new(plan));
         }
     }
 }
 
-/// Prepares bounded quotient schedules from proving-key topology alone.
-pub(super) fn prepare_quotient_cache_layouts<C: CurveAffine>(pk: &ProvingKey<C>) {
+/// Prepares bounded quotient programs from proving-key topology alone.
+pub(super) fn prepare_quotient_plans<C: CurveAffine>(pk: &ProvingKey<C>) {
     let cs = &pk.vk.cs;
     let permutation_set_count = cs.permutation.set_count(pk.vk.cs_degree);
 
@@ -308,8 +273,7 @@ pub(super) fn prepare_quotient_cache_layouts<C: CurveAffine>(pk: &ProvingKey<C>)
         .collect::<Vec<_>>();
     // Retain in circuit-count order even though construction is parallel.
     for (circuit_count, plan) in plans {
-        pk.quotient_cache_layouts
-            .retain_compiled_plan(circuit_count, plan);
+        pk.quotient_plans.retain(circuit_count, plan);
     }
 }
 
@@ -320,7 +284,6 @@ mod tests {
     #[test]
     fn retained_counts_are_bounded() {
         assert_eq!(RETAINED_QUOTIENT_CIRCUIT_COUNTS, [1, 2, 4]);
-        assert_eq!(MAX_RETAINED_QUOTIENT_CACHE_LAYOUT_BYTES, 64 * 1024);
-        assert_eq!(MAX_RETAINED_COMPILED_PLAN_BYTES, 2 * 1024 * 1024);
+        assert_eq!(MAX_RETAINED_QUOTIENT_PLAN_BYTES, 2 * 1024 * 1024);
     }
 }

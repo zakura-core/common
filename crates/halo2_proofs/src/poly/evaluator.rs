@@ -1719,7 +1719,7 @@ struct CacheEvent {
 }
 
 /// A sparse, circuit-count-specific evaluator cache schedule.
-pub(crate) struct EvaluationCacheLayout {
+struct EvaluationCacheLayout {
     events: Box<[CacheEvent]>,
     occurrence_count: u32,
     cache_slots: u16,
@@ -1756,10 +1756,6 @@ impl EvaluationCacheLayout {
 
     fn is_valid_for<F: Field>(&self, plan: &EvaluationPlan<F>) -> bool {
         validate_cache_events(plan, self)
-    }
-
-    pub(crate) fn payload_bytes(&self) -> usize {
-        self.events.len() * size_of::<CacheEvent>()
     }
 }
 
@@ -2811,7 +2807,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
     }
 
     #[cfg(test)]
-    pub(crate) fn evaluate_with_cache_layout(
+    fn evaluate_with_cache_layout(
         &self,
         ast: &Ast<E, F, B>,
         domain: &EvaluationDomain<F>,
@@ -2843,14 +2839,9 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         &self,
         expressions: I,
         domain: &EvaluationDomain<F>,
-        cache_layout: Option<&EvaluationCacheLayout>,
         compiled_plan: Option<&CompiledEvaluationPlan<F, B>>,
         challenges: EvaluationChallenges<F>,
-    ) -> (
-        Polynomial<F, B>,
-        Option<EvaluationCacheLayout>,
-        Option<CompiledEvaluationPlan<F, B>>,
-    )
+    ) -> (Polynomial<F, B>, Option<CompiledEvaluationPlan<F, B>>)
     where
         E: Copy + Send + Sync,
         F: WithSmallOrderMulGroup<3>,
@@ -2859,34 +2850,32 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
     {
         let compiled_plan = compiled_plan.filter(|plan| self.matches_shape(&plan.evaluator_shape));
         if let Some(compiled_plan) = compiled_plan {
-            return self.evaluate_inner(
+            return (
+                self.evaluate_inner(
+                    None,
+                    domain,
+                    None,
+                    false,
+                    Some(compiled_plan),
+                    false,
+                    challenges,
+                )
+                .0,
                 None,
-                domain,
-                cache_layout,
-                true,
-                Some(compiled_plan),
-                false,
-                challenges,
             );
         }
 
         let ast = Ast::distribute_challenge_powers(expressions, EvaluationChallenge::Y);
-        self.evaluate_inner(
-            Some(&ast),
-            domain,
-            cache_layout,
-            true,
-            None,
-            true,
-            challenges,
-        )
+        let (polynomial, _, plan) =
+            self.evaluate_inner(Some(&ast), domain, None, false, None, true, challenges);
+        (polynomial, plan)
     }
 
     /// Plans a cache layout without evaluating any polynomial rows.
     ///
     /// This requires an evaluator constructed by [`new_virtual_evaluator`].
     #[cfg(test)]
-    pub(crate) fn prepare_cache_layout(
+    fn prepare_cache_layout(
         &self,
         ast: &Ast<E, F, B>,
         poly_len: usize,
@@ -4874,10 +4863,9 @@ mod tests {
             gamma: F::from(7),
             y: F::from(7),
         };
-        let (first, _, plan) = evaluator.evaluate_quotient_with_compiled_plan(
+        let (first, plan) = evaluator.evaluate_quotient_with_compiled_plan(
             expressions(leaf),
             &domain,
-            None,
             None,
             first_challenges,
         );
@@ -4893,10 +4881,9 @@ mod tests {
             gamma: F::from(17),
             y: F::from(19),
         };
-        let (second, layout, replacement) = evaluator.evaluate_quotient_with_compiled_plan(
+        let (second, replacement) = evaluator.evaluate_quotient_with_compiled_plan(
             std::iter::empty(),
             &domain,
-            None,
             Some(&plan),
             second_challenges,
         );
@@ -4904,7 +4891,6 @@ mod tests {
             &second[..],
             &expected(&evaluator, &domain, leaf, second_challenges)[..]
         );
-        assert!(layout.is_none());
         assert!(replacement.is_none());
 
         for value in [F::ZERO, F::ONE, F::from(2), -F::ONE] {
@@ -4914,10 +4900,9 @@ mod tests {
                 gamma: value,
                 y: value,
             };
-            let (actual, _, replacement) = evaluator.evaluate_quotient_with_compiled_plan(
+            let (actual, replacement) = evaluator.evaluate_quotient_with_compiled_plan(
                 std::iter::empty(),
                 &domain,
-                None,
                 Some(&plan),
                 colliding_challenges,
             );
@@ -4940,7 +4925,6 @@ mod tests {
                     .evaluate_quotient_with_compiled_plan(
                         std::iter::empty(),
                         &domain,
-                        None,
                         Some(&plan),
                         second_challenges,
                     )
@@ -4951,7 +4935,6 @@ mod tests {
                     .evaluate_quotient_with_compiled_plan(
                         std::iter::empty(),
                         &domain,
-                        None,
                         Some(&plan),
                         third_challenges,
                     )
@@ -4968,10 +4951,9 @@ mod tests {
         let mut mismatched = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
         let mismatched_leaf = mismatched.register_poly(values.clone());
         mismatched.register_poly(values);
-        let (actual, _, replacement) = mismatched.evaluate_quotient_with_compiled_plan(
+        let (actual, replacement) = mismatched.evaluate_quotient_with_compiled_plan(
             expressions(mismatched_leaf),
             &domain,
-            None,
             Some(&plan),
             second_challenges,
         );
@@ -5017,14 +4999,13 @@ mod tests {
             1,
             original_selector,
         );
-        let (_, _, plan) = original.evaluate_quotient_with_compiled_plan(
+        let (_, plan) = original.evaluate_quotient_with_compiled_plan(
             [compressed_selector_expression(
                 original_query,
                 ORIGINAL_COMBINATION_LEN,
                 1,
             )],
             &domain,
-            None,
             None,
             challenges,
         );
@@ -5041,14 +5022,13 @@ mod tests {
             1,
             mismatched_selector,
         );
-        let (actual, _, replacement) = mismatched.evaluate_quotient_with_compiled_plan(
+        let (actual, replacement) = mismatched.evaluate_quotient_with_compiled_plan(
             [compressed_selector_expression(
                 mismatched_query,
                 MISMATCHED_COMBINATION_LEN,
                 1,
             )],
             &domain,
-            None,
             Some(&plan),
             challenges,
         );

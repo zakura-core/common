@@ -767,8 +767,8 @@ where
     // challenge-bound constraint AST allocation. A mismatch takes the full
     // construction path and can replace the retained program safely.
     let compiled_plan = pk
-        .quotient_cache_layouts
-        .get_compiled_plan(circuit_count)
+        .quotient_plans
+        .get(circuit_count)
         .filter(|plan| coset_evaluator.accepts_compiled_plan(plan));
     let (permutations, lookups, expressions) = if compiled_plan.is_some() {
         let permutations = permutations
@@ -870,8 +870,7 @@ where
     };
 
     // Construct and commit to the quotient polynomial h(X).
-    let cache_layout = pk.quotient_cache_layouts.get(circuit_count);
-    let (vanishing, prepared_layout, prepared_plan) = vanishing.construct_quotient(
+    let (vanishing, prepared_plan) = vanishing.construct_quotient(
         params,
         domain,
         &pk.fft_twiddles,
@@ -881,17 +880,12 @@ where
         beta,
         gamma,
         y,
-        cache_layout.as_deref(),
         compiled_plan.as_deref(),
         &mut rng,
         transcript,
     )?;
-    if let Some(layout) = prepared_layout {
-        pk.quotient_cache_layouts.retain(circuit_count, layout);
-    }
     if let Some(plan) = prepared_plan {
-        pk.quotient_cache_layouts
-            .retain_compiled_plan(circuit_count, plan);
+        pk.quotient_plans.retain(circuit_count, plan);
     }
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
@@ -1649,7 +1643,7 @@ fn compressed_selector_cache_preserves_proof() {
         crate::MIN_SELECTOR_FAMILY_LEN
     );
     assert_eq!(pk.vk.cs.lookups[0].input_expressions.len(), 2);
-    assert!(pk.quotient_cache_layouts.get_compiled_plan(3).is_none());
+    assert!(pk.quotient_plans.get(3).is_none());
 
     // Key generation compiles every retained shape before any proof. The
     // first proof must keep that exact Arc. An empty-plan key provides the
@@ -1657,18 +1651,18 @@ fn compressed_selector_cache_preserves_proof() {
     let mut eager_proofs = vec![];
     for circuit_count in [1, 2, 4] {
         let eager_plan = pk
-            .quotient_cache_layouts
-            .get_compiled_plan(circuit_count)
+            .quotient_plans
+            .get(circuit_count)
             .expect("keygen compiles each retained quotient plan");
         let eager_proof = create(&pk, &params, circuit_count, PROOF_SEED);
         let retained_plan = pk
-            .quotient_cache_layouts
-            .get_compiled_plan(circuit_count)
+            .quotient_plans
+            .get(circuit_count)
             .expect("the first proof retains its keygen plan");
         assert!(std::sync::Arc::ptr_eq(&eager_plan, &retained_plan));
 
         let mut lazy_pk = pk.clone();
-        lazy_pk.quotient_cache_layouts = std::sync::Arc::new(Default::default());
+        lazy_pk.quotient_plans = std::sync::Arc::new(Default::default());
         let lazy_proof = create(&lazy_pk, &params, circuit_count, PROOF_SEED);
         assert_eq!(eager_proof, lazy_proof);
         verify(&pk, &params, circuit_count, &eager_proof);
@@ -1679,15 +1673,15 @@ fn compressed_selector_cache_preserves_proof() {
     // symbolic program binds the resulting challenges, while proof bytes still
     // match a freshly planned control.
     let alternate_seed = PROOF_SEED ^ 0xa11c_e55e_7e57_0001;
-    let eager_plan = pk.quotient_cache_layouts.get_compiled_plan(1).unwrap();
+    let eager_plan = pk.quotient_plans.get(1).unwrap();
     let alternate_proof = create(&pk, &params, 1, alternate_seed);
     assert_ne!(alternate_proof, eager_proofs[0]);
     assert!(std::sync::Arc::ptr_eq(
         &eager_plan,
-        &pk.quotient_cache_layouts.get_compiled_plan(1).unwrap()
+        &pk.quotient_plans.get(1).unwrap()
     ));
     let mut alternate_lazy_pk = pk.clone();
-    alternate_lazy_pk.quotient_cache_layouts = std::sync::Arc::new(Default::default());
+    alternate_lazy_pk.quotient_plans = std::sync::Arc::new(Default::default());
     assert_eq!(
         alternate_proof,
         create(&alternate_lazy_pk, &params, 1, alternate_seed)
@@ -1709,7 +1703,7 @@ fn compressed_selector_cache_preserves_proof() {
             .coeff_to_extended(uncached_pk.fixed_polys[column_index].clone());
     }
     uncached_pk.cached_selector_families = Default::default();
-    uncached_pk.quotient_cache_layouts = std::sync::Arc::new(Default::default());
+    uncached_pk.quotient_plans = std::sync::Arc::new(Default::default());
 
     assert_eq!(
         create(&pk, &params, 2, PROOF_SEED),
@@ -1719,10 +1713,7 @@ fn compressed_selector_cache_preserves_proof() {
     // Concurrent first proofs share the keygen-compiled program without
     // replacement and preserve deterministic proof bytes.
     let concurrent_pk = create_pk();
-    let eager_plan = concurrent_pk
-        .quotient_cache_layouts
-        .get_compiled_plan(4)
-        .unwrap();
+    let eager_plan = concurrent_pk.quotient_plans.get(4).unwrap();
     let (first, second) = std::thread::scope(|scope| {
         let first = scope.spawn(|| create(&concurrent_pk, &params, 4, PROOF_SEED));
         let second = scope.spawn(|| create(&concurrent_pk, &params, 4, PROOF_SEED));
@@ -1731,10 +1722,7 @@ fn compressed_selector_cache_preserves_proof() {
     assert_eq!(first, second);
     assert!(std::sync::Arc::ptr_eq(
         &eager_plan,
-        &concurrent_pk
-            .quotient_cache_layouts
-            .get_compiled_plan(4)
-            .unwrap()
+        &concurrent_pk.quotient_plans.get(4).unwrap()
     ));
 
     #[cfg(feature = "multicore")]
