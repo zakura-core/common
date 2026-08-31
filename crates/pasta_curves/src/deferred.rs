@@ -10,6 +10,9 @@ use core::fmt::Debug;
 
 use crate::arithmetic::{adc, mac};
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) const INNER_PRODUCT_BLOCK_SIZE: usize = 32;
+
 /// A trait for fields that support deferred reduction of products.
 ///
 /// Instead of reducing each multiplication result immediately, callers
@@ -137,62 +140,96 @@ impl<F> Product<F> {
         self.carry = carry;
     }
 
-    /// Multiplies two pairs of raw 256-bit values and adds both 512-bit
+    /// Multiplies corresponding raw 256-bit values and adds their 512-bit
     /// products into this accumulator.
     #[cfg(target_arch = "aarch64")]
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
-    pub(crate) fn mul_accumulate_pair(
-        &mut self,
-        lhs0: &[u64; 4],
-        rhs0: &[u64; 4],
-        lhs1: &[u64; 4],
-        rhs1: &[u64; 4],
-    ) {
-        macro_rules! add_pair {
-            ($column:ident, $lhs_limb:literal, $rhs_limb:literal) => {{
-                add_product(&mut $column, lhs0[$lhs_limb], rhs0[$rhs_limb]);
-                add_product(&mut $column, lhs1[$lhs_limb], rhs1[$rhs_limb]);
+    pub(crate) fn mul_accumulate_block<T, L>(&mut self, lhs: &[T], rhs: &[T], limbs: L)
+    where
+        L: Copy + for<'a> Fn(&'a T) -> &'a [u64; 4],
+    {
+        assert_eq!(lhs.len(), rhs.len());
+
+        macro_rules! add_block {
+            ($columns:ident, $lhs_limb:literal, $rhs_limb:literal) => {{
+                let (lhs_quads, lhs_remainder) = lhs.as_chunks::<4>();
+                let (rhs_quads, rhs_remainder) = rhs.as_chunks::<4>();
+                for (lhs, rhs) in lhs_quads.iter().zip(rhs_quads) {
+                    add_product(
+                        &mut $columns[0],
+                        limbs(&lhs[0])[$lhs_limb],
+                        limbs(&rhs[0])[$rhs_limb],
+                    );
+                    add_product(
+                        &mut $columns[1],
+                        limbs(&lhs[1])[$lhs_limb],
+                        limbs(&rhs[1])[$rhs_limb],
+                    );
+                    add_product(
+                        &mut $columns[2],
+                        limbs(&lhs[2])[$lhs_limb],
+                        limbs(&rhs[2])[$rhs_limb],
+                    );
+                    add_product(
+                        &mut $columns[3],
+                        limbs(&lhs[3])[$lhs_limb],
+                        limbs(&rhs[3])[$rhs_limb],
+                    );
+                }
+                for (lhs, rhs) in lhs_remainder.iter().zip(rhs_remainder) {
+                    let lhs = limbs(lhs);
+                    let rhs = limbs(rhs);
+                    add_product(&mut $columns[0], lhs[$lhs_limb], rhs[$rhs_limb]);
+                }
             }};
         }
 
-        // Comba columns let the two products share each carry handoff. The
-        // third limb is sufficient because a column contains at most eight
-        // 128-bit products.
-        let mut column = [self.limbs[0], 0, 0];
-        add_pair!(column, 0, 0);
+        // Comba columns let every product in the block share each carry
+        // handoff. Three limbs suffice for every realizable input slice: a
+        // 64-bit target can hold fewer than 2^59 four-limb values, so the
+        // widest column sums fewer than 2^61 128-bit products.
+        let mut columns = [[self.limbs[0], 0, 0], [0; 3], [0; 3], [0; 3]];
+        add_block!(columns, 0, 0);
+        let mut column = merge_columns(columns);
         self.limbs[0] = column[0];
 
-        column = start_column(self.limbs[1], column[1], column[2]);
-        add_pair!(column, 0, 1);
-        add_pair!(column, 1, 0);
+        columns = start_columns(self.limbs[1], column[1], column[2]);
+        add_block!(columns, 0, 1);
+        add_block!(columns, 1, 0);
+        column = merge_columns(columns);
         self.limbs[1] = column[0];
 
-        column = start_column(self.limbs[2], column[1], column[2]);
-        add_pair!(column, 0, 2);
-        add_pair!(column, 1, 1);
-        add_pair!(column, 2, 0);
+        columns = start_columns(self.limbs[2], column[1], column[2]);
+        add_block!(columns, 0, 2);
+        add_block!(columns, 1, 1);
+        add_block!(columns, 2, 0);
+        column = merge_columns(columns);
         self.limbs[2] = column[0];
 
-        column = start_column(self.limbs[3], column[1], column[2]);
-        add_pair!(column, 0, 3);
-        add_pair!(column, 1, 2);
-        add_pair!(column, 2, 1);
-        add_pair!(column, 3, 0);
+        columns = start_columns(self.limbs[3], column[1], column[2]);
+        add_block!(columns, 0, 3);
+        add_block!(columns, 1, 2);
+        add_block!(columns, 2, 1);
+        add_block!(columns, 3, 0);
+        column = merge_columns(columns);
         self.limbs[3] = column[0];
 
-        column = start_column(self.limbs[4], column[1], column[2]);
-        add_pair!(column, 1, 3);
-        add_pair!(column, 2, 2);
-        add_pair!(column, 3, 1);
+        columns = start_columns(self.limbs[4], column[1], column[2]);
+        add_block!(columns, 1, 3);
+        add_block!(columns, 2, 2);
+        add_block!(columns, 3, 1);
+        column = merge_columns(columns);
         self.limbs[4] = column[0];
 
-        column = start_column(self.limbs[5], column[1], column[2]);
-        add_pair!(column, 2, 3);
-        add_pair!(column, 3, 2);
+        columns = start_columns(self.limbs[5], column[1], column[2]);
+        add_block!(columns, 2, 3);
+        add_block!(columns, 3, 2);
+        column = merge_columns(columns);
         self.limbs[5] = column[0];
 
-        column = start_column(self.limbs[6], column[1], column[2]);
-        add_pair!(column, 3, 3);
+        columns = start_columns(self.limbs[6], column[1], column[2]);
+        add_block!(columns, 3, 3);
+        column = merge_columns(columns);
         self.limbs[6] = column[0];
 
         column = start_column(self.limbs[7], column[1], column[2]);
@@ -292,6 +329,31 @@ fn start_column(accumulator: u64, carry_low: u64, carry_high: u64) -> [u64; 3] {
     [low, middle, high as u64]
 }
 
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn start_columns(accumulator: u64, carry_low: u64, carry_high: u64) -> [[u64; 3]; 4] {
+    [
+        start_column(accumulator, carry_low, carry_high),
+        [0; 3],
+        [0; 3],
+        [0; 3],
+    ]
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn merge_columns(columns: [[u64; 3]; 4]) -> [u64; 3] {
+    let [mut result, column1, column2, column3] = columns;
+    for column in [column1, column2, column3] {
+        let (low, carry) = adc(result[0], column[0], 0);
+        let (middle, carry) = adc(result[1], column[1], carry);
+        let (high, overflow) = adc(result[2], column[2], carry);
+        debug_assert_eq!(overflow, 0);
+        result = [low, middle, high];
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DeferredField, Product};
@@ -330,6 +392,11 @@ mod tests {
         [r0, r1, r2, r3, r4, r5, r6, r7]
     }
 
+    #[cfg(target_arch = "aarch64")]
+    fn raw_limbs(value: &[u64; 4]) -> &[u64; 4] {
+        value
+    }
+
     #[test]
     fn fused_mul_accumulate_matches_two_pass() {
         let mut rng = XorShiftRng::from_seed(SEED);
@@ -362,7 +429,7 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn paired_mul_accumulate_matches_scalar_calls() {
+    fn block_mul_accumulate_matches_scalar_calls() {
         let mut rng = XorShiftRng::from_seed(SEED);
         let max = [u64::MAX; 4];
         for case in 0..=10_000 {
@@ -387,7 +454,7 @@ mod tests {
 
             scalar.mul_accumulate(&lhs0, &rhs0);
             scalar.mul_accumulate(&lhs1, &rhs1);
-            paired.mul_accumulate_pair(&lhs0, &rhs0, &lhs1, &rhs1);
+            paired.mul_accumulate_block(&[lhs0, lhs1], &[rhs0, rhs1], raw_limbs);
 
             assert_eq!(paired.limbs, scalar.limbs);
             assert_eq!(paired.carry, scalar.carry);

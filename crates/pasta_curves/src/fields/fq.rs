@@ -13,6 +13,8 @@ use ff::{FieldBits, PrimeFieldBits};
 
 use super::portable;
 use crate::arithmetic::{SqrtTableHelpers, adc, mac, sbb};
+#[cfg(all(feature = "deferred", target_arch = "aarch64"))]
+use crate::deferred::INNER_PRODUCT_BLOCK_SIZE;
 #[cfg(feature = "deferred")]
 use crate::deferred::{DeferredField, Product};
 
@@ -579,6 +581,12 @@ impl Fq {
     }
 }
 
+#[cfg(all(feature = "deferred", target_arch = "aarch64"))]
+#[inline(always)]
+fn inner_product_limbs(value: &Fq) -> &[u64; 4] {
+    &value.0
+}
+
 #[cfg(feature = "deferred")]
 impl DeferredField for Fq {
     type Accumulator = Product<Fq>;
@@ -593,13 +601,11 @@ impl DeferredField for Fq {
     fn inner_product(lhs: &[Fq], rhs: &[Fq]) -> Fq {
         assert_eq!(lhs.len(), rhs.len());
         let mut accumulator = Self::Accumulator::default();
-        let (lhs_pairs, lhs_remainder) = lhs.as_chunks::<2>();
-        let (rhs_pairs, rhs_remainder) = rhs.as_chunks::<2>();
-        for (lhs, rhs) in lhs_pairs.iter().zip(rhs_pairs) {
-            accumulator.mul_accumulate_pair(&lhs[0].0, &rhs[0].0, &lhs[1].0, &rhs[1].0);
-        }
-        for (lhs, rhs) in lhs_remainder.iter().zip(rhs_remainder) {
-            accumulator.mul_accumulate(&lhs.0, &rhs.0);
+        for (lhs, rhs) in lhs
+            .chunks(INNER_PRODUCT_BLOCK_SIZE)
+            .zip(rhs.chunks(INNER_PRODUCT_BLOCK_SIZE))
+        {
+            accumulator.mul_accumulate_block(lhs, rhs, inner_product_limbs);
         }
         Self::reduce(accumulator)
     }
