@@ -252,11 +252,18 @@ fn kate_division_in_place<F: Field>(polynomial: &mut Vec<F>, point: F) {
     let mut quotient = polynomial
         .pop()
         .expect("a polynomial divided by a linear factor is nonempty");
-    for coefficient in polynomial.iter_mut().rev() {
-        let remainder = *coefficient + quotient * point;
+
+    let Some((constant_coefficient, coefficients)) = polynomial.split_first_mut() else {
+        return;
+    };
+    for coefficient in coefficients.iter_mut().rev() {
+        let next_quotient = *coefficient + quotient * point;
         *coefficient = quotient;
-        quotient = remainder;
+        quotient = next_quotient;
     }
+
+    // The constant coefficient affects only the discarded remainder.
+    *constant_coefficient = quotient;
 }
 
 /// Create a multi-opening proof.
@@ -483,6 +490,7 @@ mod tests {
     {
         for (coefficients, points) in [
             (vec![F::from(9)], vec![F::ZERO]),
+            (vec![F::from(3), F::from(5)], vec![F::from(7)]),
             (
                 (0..8).map(|value| F::from(value + 1)).collect(),
                 vec![F::ZERO, F::ONE, -F::ONE, F::from(7)],
