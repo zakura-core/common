@@ -91,21 +91,16 @@ fn fold_quotient_pieces_deferred<F: DeferredField>(
     parallelize(&mut output, |output, start| {
         let output_len = output.len();
         let mut products = vec![F::Accumulator::default(); output_len];
-        F::weighted_sum(
-            &mut products,
-            output,
-            core::slice::from_ref(
-                powers
-                    .last()
-                    .expect("a multi-piece quotient has a nonconstant power"),
-            ),
-        );
+        let highest_power = powers
+            .last()
+            .expect("a multi-piece quotient has a nonconstant power");
+        for (product, coefficient) in products.iter_mut().zip(output.iter()) {
+            F::mul_accumulate(product, coefficient, highest_power);
+        }
         for (piece, power) in intermediate.iter().zip(&powers) {
-            F::weighted_sum(
-                &mut products,
-                &piece[start..][..output_len],
-                core::slice::from_ref(power),
-            );
+            for (product, coefficient) in products.iter_mut().zip(&piece[start..][..output_len]) {
+                F::mul_accumulate(product, coefficient, power);
+            }
         }
         for ((output, product), constant) in output
             .iter_mut()
