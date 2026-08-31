@@ -642,6 +642,115 @@ impl<C: CurveAffine> Params<C> {
         best_multiexp::<C>(&tmp_scalars, &tmp_bases)
     }
 
+    /// Commits to a polynomial whose coefficients are expected to be
+    /// random-like and full-width. The profile is only a performance hint;
+    /// every backend remains exact for arbitrary scalar values.
+    pub(crate) fn commit_full_width(
+        &self,
+        poly: &Polynomial<C::Scalar, Coeff>,
+        r: Blind<C::Scalar>,
+    ) -> C::Curve {
+        #[cfg(feature = "orbits")]
+        if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
+            && let Some(prepared) = self.zero_check()
+        {
+            let n = self.n as usize;
+            if prepared.terms() == n + PREPARED_COMMITMENT_EXTRA_BASES && poly.len() == n {
+                let suffix = [r.0, C::Scalar::ZERO];
+                if let Some(commitment) =
+                    prepared.try_multiexp_full_width_with_prefix_and_suffix_vartime(poly, &suffix)
+                {
+                    return commitment;
+                }
+            }
+        }
+
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
+            && let (Some(prepared), Some(blind_table)) =
+                (self.commitment_table(), self.blind_table())
+        {
+            let n = self.n as usize;
+            if prepared.terms() == n && poly.len() == n {
+                let (commitment, blind) = crate::multicore::join(
+                    || prepared.try_multiexp_full_width_with_prefix_and_suffix_vartime(poly, &[]),
+                    || blind_table.multiply(r.0),
+                );
+                if let Some(commitment) = commitment {
+                    return commitment + blind;
+                }
+            }
+        }
+
+        self.commit(poly, r)
+    }
+
+    /// Attempts prepared commitments for a batch of random-like, full-width
+    /// coefficient polynomials. Returned points are canonical commitments.
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    pub(crate) fn try_commit_full_width_batch(
+        &self,
+        polys: &[Polynomial<C::Scalar, Coeff>],
+        blinds: &[Blind<C::Scalar>],
+    ) -> Option<Vec<C::Curve>> {
+        assert_eq!(polys.len(), blinds.len());
+
+        #[cfg(feature = "orbits")]
+        if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
+            && let Some(prepared) = self.zero_check()
+        {
+            let n = self.n as usize;
+            if prepared.terms() == n + PREPARED_COMMITMENT_EXTRA_BASES
+                && polys.iter().all(|poly| poly.len() == n)
+            {
+                let suffixes: Vec<_> = blinds
+                    .iter()
+                    .map(|blind| [blind.0, C::Scalar::ZERO])
+                    .collect();
+                let batches: Vec<_> = polys
+                    .iter()
+                    .zip(&suffixes)
+                    .map(|(poly, suffix)| (poly.as_ref(), suffix.as_slice()))
+                    .collect();
+                if let Some(commitments) =
+                    prepared.try_multiexp_full_width_batch_with_prefix_and_suffix_vartime(&batches)
+                {
+                    return Some(commitments);
+                }
+            }
+        }
+
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
+            && let (Some(prepared), Some(blind_table)) =
+                (self.commitment_table(), self.blind_table())
+        {
+            let n = self.n as usize;
+            if prepared.terms() == n && polys.iter().all(|poly| poly.len() == n) {
+                let batches: Vec<_> = polys.iter().map(|poly| (poly.as_ref(), &[][..])).collect();
+                let (commitments, blind_commitments) = crate::multicore::join(
+                    || {
+                        prepared
+                            .try_multiexp_full_width_batch_with_prefix_and_suffix_vartime(&batches)
+                    },
+                    || {
+                        blinds
+                            .iter()
+                            .map(|blind| blind_table.multiply(blind.0))
+                            .collect::<Vec<_>>()
+                    },
+                );
+                let mut commitments = commitments?;
+                for (commitment, blind) in commitments.iter_mut().zip(blind_commitments) {
+                    *commitment += blind;
+                }
+                return Some(commitments);
+            }
+        }
+
+        None
+    }
+
     /// This commits to a polynomial using its evaluations over the $2^k$ size
     /// evaluation domain. The commitment will be blinded by the blinding factor
     /// `r`.
@@ -1523,6 +1632,11 @@ fn prepared_commitments_match_unprepared() {
         let alpha = Blind(Fp::random(&mut rand::rng()));
         assert_eq!(armed.commit(&b, alpha), unarmed.commit(&b, alpha));
         assert_eq!(
+            armed.commit_full_width(&b, alpha),
+            unarmed.commit(&b, alpha),
+            "the full-width hint must not change the commitment"
+        );
+        assert_eq!(
             armed.commit_lagrange(&a, alpha),
             unarmed.commit_lagrange(&a, alpha)
         );
@@ -1565,6 +1679,134 @@ fn prepared_commitment_thread_policy_is_scoped() {
             msm::PREPARED_MSM_MAX_THREADS
         );
     }
+}
+
+/// Manual interleaved comparison of ordinary prepared commitments with the
+/// full-width Montgomery-residue hint, including an eight-row batch.
+///
+/// ```text
+/// RAYON_NUM_THREADS=8 cargo test --release -p zakura-halo2-proofs \
+///     --features orbits --lib -- --ignored full_width_commitment_timings \
+///     --nocapture
+/// ```
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+#[test]
+#[ignore = "manual timing harness; see the doc comment"]
+fn full_width_commitment_timings() {
+    use std::{hint::black_box, time::Instant};
+
+    #[cfg(feature = "multicore")]
+    use maybe_rayon::prelude::*;
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::pasta::{EpAffine, Fq};
+
+    const K: u32 = 11;
+    const CORPORA: usize = 128;
+    const BATCH: usize = 8;
+
+    fn trimmed_mean_millis(mut samples: Vec<f64>) -> f64 {
+        samples.sort_by(f64::total_cmp);
+        let trim = samples.len() / 10;
+        let samples = &samples[trim..samples.len() - trim];
+        samples.iter().sum::<f64>() / samples.len() as f64
+    }
+
+    let params = Params::<EpAffine>::new(K);
+    assert!(params.prepare_commitments());
+    let domain = super::EvaluationDomain::new(1, K);
+    let mut rng = StdRng::seed_from_u64(0x4d6f_6e74_676f_6d65);
+    let polynomials: Vec<_> = (0..CORPORA)
+        .map(|_| {
+            let mut polynomial = domain.empty_coeff();
+            polynomial
+                .iter_mut()
+                .for_each(|scalar| *scalar = Fq::random(&mut rng));
+            polynomial
+        })
+        .collect();
+    let blinds: Vec<_> = (0..CORPORA).map(|_| Blind(Fq::random(&mut rng))).collect();
+
+    let mut canonical_samples = Vec::with_capacity(CORPORA);
+    let mut full_width_samples = Vec::with_capacity(CORPORA);
+    for (round, (polynomial, blind)) in polynomials.iter().zip(&blinds).enumerate() {
+        let canonical = || {
+            let start = Instant::now();
+            let result = black_box(params.commit(black_box(polynomial), *blind));
+            (result, start.elapsed().as_secs_f64() * 1e3)
+        };
+        let full_width = || {
+            let start = Instant::now();
+            let result = black_box(params.commit_full_width(black_box(polynomial), *blind));
+            (result, start.elapsed().as_secs_f64() * 1e3)
+        };
+        let (canonical, full_width) = if round % 2 == 0 {
+            (canonical(), full_width())
+        } else {
+            let full_width = full_width();
+            (canonical(), full_width)
+        };
+        assert_eq!(canonical.0, full_width.0);
+        canonical_samples.push(canonical.1);
+        full_width_samples.push(full_width.1);
+    }
+    let canonical_ms = trimmed_mean_millis(canonical_samples);
+    let full_width_ms = trimmed_mean_millis(full_width_samples);
+    println!(
+        "singleton threads={} canonical={canonical_ms:.3}ms \
+         full-width={full_width_ms:.3}ms delta={:+.2}%",
+        crate::multicore::current_num_threads(),
+        100.0 * (full_width_ms / canonical_ms - 1.0),
+    );
+
+    let mut canonical_samples = Vec::with_capacity(CORPORA / BATCH);
+    let mut full_width_samples = Vec::with_capacity(CORPORA / BATCH);
+    for (round, (polynomials, blinds)) in polynomials
+        .chunks_exact(BATCH)
+        .zip(blinds.chunks_exact(BATCH))
+        .enumerate()
+    {
+        let canonical = || {
+            let start = Instant::now();
+            #[cfg(feature = "multicore")]
+            let result: Vec<_> = polynomials
+                .par_iter()
+                .zip(blinds.par_iter())
+                .map(|(polynomial, blind)| params.commit(polynomial, *blind))
+                .collect();
+            #[cfg(not(feature = "multicore"))]
+            let result: Vec<_> = polynomials
+                .iter()
+                .zip(blinds)
+                .map(|(polynomial, blind)| params.commit(polynomial, *blind))
+                .collect();
+            (black_box(result), start.elapsed().as_secs_f64() * 1e3)
+        };
+        let full_width = || {
+            let start = Instant::now();
+            let result = params
+                .try_commit_full_width_batch(black_box(polynomials), blinds)
+                .expect("the prepared backend handles this batch");
+            (black_box(result), start.elapsed().as_secs_f64() * 1e3)
+        };
+        let (canonical, full_width) = if round % 2 == 0 {
+            (canonical(), full_width())
+        } else {
+            let full_width = full_width();
+            (canonical(), full_width)
+        };
+        assert_eq!(canonical.0, full_width.0);
+        canonical_samples.push(canonical.1);
+        full_width_samples.push(full_width.1);
+    }
+    let canonical_ms = trimmed_mean_millis(canonical_samples);
+    let full_width_ms = trimmed_mean_millis(full_width_samples);
+    println!(
+        "batch={BATCH} threads={} canonical={canonical_ms:.3}ms \
+         full-width={full_width_ms:.3}ms delta={:+.2}%",
+        crate::multicore::current_num_threads(),
+        100.0 * (full_width_ms / canonical_ms - 1.0),
+    );
 }
 
 #[test]

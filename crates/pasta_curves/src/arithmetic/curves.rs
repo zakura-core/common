@@ -287,6 +287,58 @@ pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
         scalars.extend_from_slice(suffix);
         self.multiexp_with_terms_vartime(&scalars, extra)
     }
+
+    /// Attempts an exact multiscalar multiplication whose fixed-base scalars
+    /// are expected to be random-like and full-width. `prefix` is paired with
+    /// the first fixed bases and `suffix` with the remaining fixed bases.
+    ///
+    /// The profile is only a performance hint. A returned point must be the
+    /// canonical result for every scalar value. Implementations without a
+    /// specialized backend return [`None`].
+    ///
+    /// # Security
+    ///
+    /// Variable-time in everything; callers committing to secret data must
+    /// explicitly accept the timing side channel.
+    ///
+    /// # Panics
+    ///
+    /// Implementations may panic unless the combined slice length equals
+    /// [`Self::terms`].
+    fn try_multiexp_full_width_with_prefix_and_suffix_vartime(
+        &self,
+        _prefix: &[C::ScalarExt],
+        _suffix: &[C::ScalarExt],
+    ) -> Option<C> {
+        None
+    }
+
+    /// Attempts a batch of exact multiscalar multiplications whose fixed-base
+    /// scalars are expected to be random-like and full-width. Each `prefix`
+    /// is paired with the first fixed bases and its `suffix` with the
+    /// remaining fixed bases, as in
+    /// [`Self::multiexp_with_prefix_and_suffix`].
+    ///
+    /// The full-width profile is a performance hint only. Every returned
+    /// point must be the canonical multiscalar result for every scalar value,
+    /// including zero and sparse or small nonzero scalars. Implementations
+    /// without a specialized backend return [`None`].
+    ///
+    /// # Security
+    ///
+    /// Variable-time in everything; callers committing to secret data must
+    /// explicitly accept the timing side channel.
+    ///
+    /// # Panics
+    ///
+    /// Implementations may panic unless every combined slice length equals
+    /// [`Self::terms`].
+    fn try_multiexp_full_width_batch_with_prefix_and_suffix_vartime(
+        &self,
+        _batches: &[(&[C::ScalarExt], &[C::ScalarExt])],
+    ) -> Option<alloc::vec::Vec<C>> {
+        None
+    }
 }
 
 /// Internal construction for coordinates produced by trusted curve formulas.

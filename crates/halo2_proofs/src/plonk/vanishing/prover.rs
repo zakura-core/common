@@ -83,7 +83,9 @@ impl<C: CurveAffine> Argument<C> {
         let random_blind = Blind(C::Scalar::random(&mut rng));
 
         // Commit
-        let random_poly_commitment = params.commit(&random_poly, random_blind).to_affine();
+        let random_poly_commitment = params
+            .commit_full_width(&random_poly, random_blind)
+            .to_affine();
         transcript.write_point(random_poly_commitment)?;
 
         Ok(CommittedRandomPolynomial {

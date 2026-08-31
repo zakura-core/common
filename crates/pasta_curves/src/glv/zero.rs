@@ -106,7 +106,8 @@ use maybe_rayon::prelude::*;
 use super::orbit;
 use super::{
     AffinePoint, GlvParams, SignedMagnitude, checked_signed_magnitudes, current_num_threads,
-    decompose, private, reduce_affine_buckets, reduce_affine_buckets_in_place,
+    decompose, decompose_montgomery, private, reduce_affine_buckets,
+    reduce_affine_buckets_in_place,
 };
 
 mod codebook;
@@ -382,6 +383,43 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         }
     }
 
+    /// Attempts an MSM by interpreting each scalar's internal Montgomery
+    /// residue as its integer value. The returned point is scaled by $R$.
+    fn try_multiexp_montgomery_with_scalar_slices(
+        &self,
+        prefix: &[C::ScalarExt],
+        suffix: &[C::ScalarExt],
+    ) -> Option<C> {
+        let terms = prefix
+            .len()
+            .checked_add(suffix.len())
+            .expect("fixed scalar count overflow");
+        assert_eq!(terms, self.live.len(), "one scalar per prepared base");
+
+        if let Some(folded) = self.fold_scalar_slices(prefix, suffix) {
+            let scalar_at = |index| &folded[index];
+            return self.try_multiexp_with_scalar_at(
+                terms,
+                &scalar_at,
+                &[],
+                decompose_montgomery::<C>,
+            );
+        }
+        if suffix.is_empty() {
+            let scalar_at = |index| &prefix[index];
+            self.try_multiexp_with_scalar_at(terms, &scalar_at, &[], decompose_montgomery::<C>)
+        } else {
+            let scalar_at = |index| {
+                if index < prefix.len() {
+                    &prefix[index]
+                } else {
+                    &suffix[index - prefix.len()]
+                }
+            };
+            self.try_multiexp_with_scalar_at(terms, &scalar_at, &[], decompose_montgomery::<C>)
+        }
+    }
+
     /// Copies and folds scalars only when preparation found related bases.
     fn fold_scalar_slices(
         &self,
@@ -406,20 +444,38 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     }
 
     /// Evaluates fixed-base scalars fetched by prepared-base index.
-    fn multiexp_with_scalar_at<'a>(
+    fn multiexp_with_scalar_at<'a, F>(
         &self,
         terms: usize,
-        scalar_at: impl Fn(usize) -> &'a C::ScalarExt + Sync,
+        scalar_at: F,
         extra: &[(C::ScalarExt, C::AffineExt)],
-    ) -> C {
+    ) -> C
+    where
+        F: Fn(usize) -> &'a C::ScalarExt + Sync,
+    {
+        self.try_multiexp_with_scalar_at(terms, &scalar_at, extra, decompose::<C>)
+            .unwrap_or_else(|| self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra))
+    }
+
+    /// Attempts to evaluate fixed-base scalars fetched by prepared-base
+    /// index, without changing scalar encodings on an arithmetic failure.
+    fn try_multiexp_with_scalar_at<'a, F, D>(
+        &self,
+        terms: usize,
+        scalar_at: &F,
+        extra: &[(C::ScalarExt, C::AffineExt)],
+        decompose_scalar: D,
+    ) -> Option<C>
+    where
+        F: Fn(usize) -> &'a C::ScalarExt + Sync,
+        D: Fn(&C::ScalarExt) -> ((bool, u128), (bool, u128)) + Sync,
+    {
         let num_threads = current_num_threads();
 
         // Dead rows (identity bases, merge sources) contribute nothing;
         // force their recoding rows and residuals to zero. A decomposition
-        // half out of bound is unreachable (`decompose` guarantees the
-        // strict 2^127 bound), but rather than trust that with a panic the
-        // whole check degrades to the exact naive evaluation, matching
-        // `try_multiexp`'s posture toward the same guard.
+        // half out of bound is unreachable for either supported decomposition,
+        // but decline rather than mixing scalar encodings on a fallback.
         let decompose_checked = |index: usize| {
             if !self.live[index] {
                 let zero = SignedMagnitude {
@@ -428,13 +484,10 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 };
                 return Some((zero, zero));
             }
-            checked_signed_magnitudes(decompose::<C>(scalar_at(index)))
+            checked_signed_magnitudes(decompose_scalar(scalar_at(index)))
         };
-        let Some(recoded) =
-            codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
-        else {
-            return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
-        };
+        let recoded =
+            codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)?;
         // Extras with zero scalars or identity points contribute nothing.
         let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
             .iter()
@@ -443,14 +496,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             })
             .copied()
             .collect();
-        match self.evaluate(&recoded, &extras, num_threads) {
-            Some(sum) => sum,
-            // Unreachable for valid curve points (the batched-affine
-            // reduction's inversions cannot actually hit zero), but never
-            // trust that with the result's correctness: fall back to a
-            // naive exact evaluation.
-            None => self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra),
-        }
+        self.evaluate(&recoded, &extras, num_threads)
     }
 
     /// Checks several equations over the prepared bases at once through a
@@ -757,6 +803,44 @@ impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for PreparedZeroMsm<C
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> C {
         self.multiexp_with_scalar_slices(prefix, suffix, extra)
+    }
+
+    fn try_multiexp_full_width_with_prefix_and_suffix_vartime(
+        &self,
+        prefix: &[C::ScalarExt],
+        suffix: &[C::ScalarExt],
+    ) -> Option<C> {
+        let raw = self.try_multiexp_montgomery_with_scalar_slices(prefix, suffix)?;
+        let inverse = <C as private::Sealed>::scalar_montgomery_inverse(private::CrateToken(()));
+        Some(raw.mul_glv(&inverse))
+    }
+
+    fn try_multiexp_full_width_batch_with_prefix_and_suffix_vartime(
+        &self,
+        batches: &[(&[C::ScalarExt], &[C::ScalarExt])],
+    ) -> Option<Vec<C>> {
+        if batches.is_empty() {
+            return Some(Vec::new());
+        }
+
+        #[cfg(feature = "multicore")]
+        let raw: Vec<Option<C>> = batches
+            .par_iter()
+            .map(|(prefix, suffix)| self.try_multiexp_montgomery_with_scalar_slices(prefix, suffix))
+            .collect();
+        #[cfg(not(feature = "multicore"))]
+        let raw: Vec<Option<C>> = batches
+            .iter()
+            .map(|(prefix, suffix)| self.try_multiexp_montgomery_with_scalar_slices(prefix, suffix))
+            .collect();
+
+        // Correct every [R]C lane with one shared-scalar batch. Keeping the
+        // raw points inside this crate prevents callers from mixing scalar
+        // encodings or observing representation-scaled commitments.
+        let mut corrected = raw.into_iter().collect::<Option<Vec<_>>>()?;
+        let inverse = <C as private::Sealed>::scalar_montgomery_inverse(private::CrateToken(()));
+        super::batch_mul_same_scalar_in_place(&mut corrected, &inverse);
+        Some(corrected)
     }
 }
 
@@ -1399,6 +1483,64 @@ mod tests {
         );
     }
 
+    /// Montgomery-residue evaluation plus the shared correction returns the
+    /// same canonical points as independent prepared MSMs. This also covers
+    /// preparation-time relation folding and non-full-width scalar values.
+    fn full_width_batch_matches_canonical<C: GlvParams>() {
+        let (mut rows, bases) = testutil::zero_relations::<C>(700, 91, 4);
+        rows[0][10] += C::ScalarExt::ONE;
+        rows[1][37] += C::ScalarExt::from(19);
+        rows[2].fill(C::ScalarExt::ZERO);
+        rows[2][1] = C::ScalarExt::from(7);
+
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(6));
+        let splits = [0, 1, 699, 700];
+        let batches: Vec<_> = rows
+            .iter()
+            .zip(splits)
+            .map(|(row, split)| (&row[..split], &row[split..]))
+            .collect();
+        let expected: Vec<_> = batches
+            .iter()
+            .map(|(prefix, suffix)| prepared.multiexp_with_scalar_slices(prefix, suffix, &[]))
+            .collect();
+        for ((prefix, suffix), expected) in batches.iter().zip(&expected) {
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::
+                    try_multiexp_full_width_with_prefix_and_suffix_vartime(
+                        &prepared, prefix, suffix,
+                    )
+                    .expect("the prepared Pasta backend handles full-width scalars"),
+                *expected
+            );
+        }
+        let actual = crate::arithmetic::PreparedZeroCheck::
+            try_multiexp_full_width_batch_with_prefix_and_suffix_vartime(
+                &prepared,
+                &batches,
+            )
+            .expect("the prepared Pasta backend handles full-width batches");
+        assert_eq!(actual, expected);
+
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::
+                try_multiexp_full_width_batch_with_prefix_and_suffix_vartime(
+                    &prepared,
+                    &[],
+                ),
+            Some(Vec::new())
+        );
+        let default_prefix_and_suffix = DefaultPrefixAndSuffix(&prepared);
+        assert!(
+            crate::arithmetic::PreparedZeroCheck::
+                try_multiexp_full_width_batch_with_prefix_and_suffix_vartime(
+                    &default_prefix_and_suffix,
+                    &batches,
+                )
+                .is_none()
+        );
+    }
+
     /// Splitting terms between the prepared set and the extras never
     /// changes the verdict.
     fn extras_match_inline_terms<C: GlvParams>() {
@@ -1701,6 +1843,10 @@ mod tests {
                 #[test]
                 fn generic_agreement() {
                     matches_generic_msm::<$curve>();
+                }
+                #[test]
+                fn full_width_batch_agreement() {
+                    full_width_batch_matches_canonical::<$curve>();
                 }
                 #[test]
                 fn extras() {

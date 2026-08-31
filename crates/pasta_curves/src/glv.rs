@@ -144,6 +144,9 @@ mod private {
         /// $Rk \bmod q$, where `k` is `scalar` and $R$ is this scalar field's
         /// Montgomery factor.
         fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, token: CrateToken) -> [u64; 4];
+
+        /// Returns the scalar whose canonical value is $R^{-1}$.
+        fn scalar_montgomery_inverse(token: CrateToken) -> Self::ScalarExt;
     }
 
     impl Sealed for crate::pallas::Point {
@@ -168,6 +171,10 @@ mod private {
         fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> [u64; 4] {
             scalar.0
         }
+
+        fn scalar_montgomery_inverse(_: CrateToken) -> Self::ScalarExt {
+            crate::Fq([1, 0, 0, 0])
+        }
     }
 
     impl Sealed for crate::vesta::Point {
@@ -191,6 +198,10 @@ mod private {
 
         fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> [u64; 4] {
             scalar.0
+        }
+
+        fn scalar_montgomery_inverse(_: CrateToken) -> Self::ScalarExt {
+            crate::Fp([1, 0, 0, 0])
         }
     }
 }
