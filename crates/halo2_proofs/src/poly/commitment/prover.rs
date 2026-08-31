@@ -56,10 +56,14 @@ fn ipa_masking_commitment<C: CurveAffine>(
         scalars.push(*coefficient);
         bases.push(params.g[*index]);
     }
-    scalars.push(blind.0);
-    bases.push(params.w);
-
-    best_multiexp(&scalars, &bases)
+    if let Some(commitment) = params.try_commit_sparse_with_prepared_blind(&scalars, &bases, blind)
+    {
+        commitment
+    } else {
+        scalars.push(blind.0);
+        bases.push(params.w);
+        best_multiexp(&scalars, &bases)
+    }
 }
 
 fn ipa_round_multiexp<C: CurveAffine>(
@@ -148,7 +152,10 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
 ) -> io::Result<()> {
     assert_eq!(p_poly.len(), params.n as usize);
     let powers = power_vector(x_3, params.n as usize);
-    create_proof_with_powers(params, rng, transcript, p_poly, p_blind, x_3, powers)
+    let evaluation = evaluate_polynomial_with_powers(p_poly, &powers);
+    create_proof_with_powers(
+        params, rng, transcript, p_poly, p_blind, x_3, powers, evaluation,
+    )
 }
 
 /// Creates an opening proof while reusing the successive powers of `x_3`.
@@ -168,6 +175,7 @@ pub(in crate::poly) fn create_proof_with_powers<
     p_blind: Blind<C::Scalar>,
     x_3: C::Scalar,
     powers: Vec<C::Scalar>,
+    evaluation: C::Scalar,
 ) -> io::Result<()> {
     // We're limited to polynomials of degree n - 1.
     assert_eq!(p_poly.len(), params.n as usize);
@@ -198,8 +206,7 @@ pub(in crate::poly) fn create_proof_with_powers<
     for (index, mask) in &s_poly {
         p_prime_poly[*index] += *mask * xi;
     }
-    let v = evaluate_polynomial_with_powers(&p_prime_poly, &powers);
-    p_prime_poly[0] -= &v;
+    p_prime_poly[0] -= &evaluation;
     let p_prime_blind = s_poly_blind * Blind(xi) + p_blind;
 
     // This accumulates the synthetic blinding factor `f` starting
@@ -336,15 +343,19 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 #[cfg(test)]
 mod tests {
     use super::{
-        Params, compute_ipa_hi_evaluation_pasta, ipa_masking_commitment, ipa_round_multiexp,
-        parallel_generator_collapse, sample_ipa_masking_polynomial,
+        Params, compute_ipa_hi_evaluation_pasta, create_proof, create_proof_with_powers,
+        ipa_masking_commitment, ipa_round_multiexp, parallel_generator_collapse,
+        sample_ipa_masking_polynomial,
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
-    use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
+    use crate::{
+        poly::{EvaluationDomain, commitment::Blind, power_vector},
+        transcript::{Blake2bWrite, Challenge255},
+    };
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
-    use rand::rng;
+    use rand::{SeedableRng, rng, rngs::StdRng};
     use std::fmt::Debug;
 
     fn full_width_scalar<C: CurveAffine>() -> C::Scalar {
@@ -614,6 +625,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn precomputed_evaluation_preserves_proof_bytes() {
+        const K: u32 = 4;
+        const PROOF_SEED: u64 = 0x7072_6563_6f6d_7065;
+
+        let params = Params::<vesta::Affine>::new(K);
+        let domain = EvaluationDomain::new(1, K);
+        let polynomial = domain.coeff_from_vec(
+            (0..1 << K)
+                .map(|index| pallas::Base::from(index as u64 + 3))
+                .collect(),
+        );
+        let blind = Blind(pallas::Base::from(19));
+        let point = pallas::Base::from(23);
+        let evaluation = eval_polynomial(&polynomial, point);
+
+        type ProofTranscript = Blake2bWrite<Vec<u8>, vesta::Affine, Challenge255<vesta::Affine>>;
+        let mut ordinary = ProofTranscript::init(Vec::new());
+        create_proof(
+            &params,
+            StdRng::seed_from_u64(PROOF_SEED),
+            &mut ordinary,
+            &polynomial,
+            blind,
+            point,
+        )
+        .unwrap();
+
+        let mut precomputed = ProofTranscript::init(Vec::new());
+        create_proof_with_powers(
+            &params,
+            StdRng::seed_from_u64(PROOF_SEED),
+            &mut precomputed,
+            &polynomial,
+            blind,
+            point,
+            power_vector(point, params.n as usize),
+            evaluation,
+        )
+        .unwrap();
+
+        assert_eq!(ordinary.finalize(), precomputed.finalize());
     }
 
     #[test]

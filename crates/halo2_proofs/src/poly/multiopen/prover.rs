@@ -503,12 +503,22 @@ where
     let x_3: ChallengeX3<_> = transcript.squeeze_challenge_scalar();
     let powers = power_vector(*x_3, params.n as usize);
 
-    // The evaluations are independent, but their transcript order is fixed.
-    for evaluation in evaluate_polynomials(&q_polys, &powers) {
-        transcript.write_scalar(evaluation)?;
+    // Evaluate q' alongside the independent Q polynomials. Its evaluation is
+    // not written to the transcript, but lets the IPA opening reuse the final
+    // evaluation instead of recomputing a domain-sized inner product.
+    let (q_prime_eval, q_evals) = crate::multicore::join(
+        || evaluate_polynomial_with_powers(&q_prime_poly, &powers),
+        || evaluate_polynomials(&q_polys, &powers),
+    );
+    for evaluation in &q_evals {
+        transcript.write_scalar(*evaluation)?;
     }
 
     let x_4: ChallengeX4<_> = transcript.squeeze_challenge_scalar();
+
+    let p_eval = q_evals.iter().fold(q_prime_eval, |evaluation, q_eval| {
+        evaluation * *x_4 + q_eval
+    });
 
     let (p_poly, p_poly_blind) = q_polys.into_iter().zip(q_blinds).fold(
         (q_prime_poly, q_prime_blind),
@@ -528,6 +538,7 @@ where
         p_poly_blind,
         *x_3,
         powers,
+        p_eval,
     )
 }
 
