@@ -1,11 +1,9 @@
 use ff::Field;
 use rand_core::Rng;
 
-use super::super::{Coeff, Polynomial};
+use super::super::{Coeff, Polynomial, evaluate_polynomial_with_powers, power_vector};
 use super::{Blind, Params};
-use crate::arithmetic::{
-    CurveAffine, CurveExt, best_multiexp, compute_inner_product, eval_polynomial,
-};
+use crate::arithmetic::{CurveAffine, CurveExt, best_multiexp, compute_inner_product};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
 use group::{Curve, Group};
@@ -148,14 +146,38 @@ fn compute_ipa_inner_products_pasta<F: Field + 'static>(
 /// be rigorous.
 pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: TranscriptWrite<C, E>>(
     params: &Params<C>,
-    mut rng: R,
+    rng: R,
     transcript: &mut T,
     p_poly: &Polynomial<C::Scalar, Coeff>,
     p_blind: Blind<C::Scalar>,
     x_3: C::Scalar,
 ) -> io::Result<()> {
+    assert_eq!(p_poly.len(), params.n as usize);
+    let powers = power_vector(x_3, params.n as usize);
+    create_proof_with_powers(params, rng, transcript, p_poly, p_blind, x_3, powers)
+}
+
+/// Creates an opening proof while reusing the successive powers of `x_3`.
+///
+/// `powers` must be the length-`params.n` vector produced by [`power_vector`]
+/// for `x_3`.
+pub(in crate::poly) fn create_proof_with_powers<
+    C: CurveAffine,
+    E: EncodedChallenge<C>,
+    R: Rng,
+    T: TranscriptWrite<C, E>,
+>(
+    params: &Params<C>,
+    mut rng: R,
+    transcript: &mut T,
+    p_poly: &Polynomial<C::Scalar, Coeff>,
+    p_blind: Blind<C::Scalar>,
+    x_3: C::Scalar,
+    powers: Vec<C::Scalar>,
+) -> io::Result<()> {
     // We're limited to polynomials of degree n - 1.
     assert_eq!(p_poly.len(), params.n as usize);
+    assert_eq!(powers.len(), params.n as usize);
 
     // Sample a sparse random polynomial with a root at x_3, supported on the
     // constant and power-of-two coefficients. See the parent module's
@@ -182,7 +204,7 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
     for (index, mask) in &s_poly {
         p_prime_poly[*index] += *mask * xi;
     }
-    let v = eval_polynomial(&p_prime_poly, x_3);
+    let v = evaluate_polynomial_with_powers(&p_prime_poly, &powers);
     p_prime_poly[0] -= &v;
     let p_prime_blind = s_poly_blind * Blind(xi) + p_blind;
 
@@ -194,16 +216,9 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
     let mut p_prime = p_prime_poly.values;
     assert_eq!(p_prime.len(), params.n as usize);
 
-    // Initialize the vector `b` as the powers of `x_3`. The inner product of
-    // `p_prime` and `b` is the evaluation of the polynomial at `x_3`.
-    let mut b = Vec::with_capacity(1 << params.k);
-    {
-        let mut cur = C::Scalar::ONE;
-        for _ in 0..(1 << params.k) {
-            b.push(cur);
-            cur *= &x_3;
-        }
-    }
+    // The inner product of `p_prime` and `b` is the evaluation of the
+    // polynomial at `x_3`.
+    let mut b = powers;
 
     // Initialize the vector `G'` from the URS. We'll be progressively collapsing
     // this vector into smaller and smaller vectors until it is of length 1.

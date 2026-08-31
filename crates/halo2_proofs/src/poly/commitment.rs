@@ -155,6 +155,7 @@ mod verifier;
 
 pub use msm::MSM;
 pub use prover::create_proof;
+pub(super) use prover::create_proof_with_powers;
 pub use verifier::{Accumulator, Guard, verify_proof};
 
 use std::io;

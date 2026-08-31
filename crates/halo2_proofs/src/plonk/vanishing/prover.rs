@@ -120,7 +120,7 @@ fn fold_quotient_pieces_deferred<F: DeferredField>(
 
 fn fold_quotient_pieces_pasta<
     F: WithSmallOrderMulGroup<3> + 'static,
-    T: DeferredField + WithSmallOrderMulGroup<3> + 'static,
+    T: DeferredField + 'static,
 >(
     pieces: Vec<Polynomial<F, Coeff>>,
     xn: F,

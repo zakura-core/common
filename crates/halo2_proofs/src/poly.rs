@@ -2,11 +2,13 @@
 //! various forms, including computing commitments to them and provably opening
 //! the committed polynomials at arbitrary points.
 
-use crate::arithmetic::parallelize;
+use crate::arithmetic::{compute_inner_product, parallelize};
 use crate::plonk::Assigned;
 
 use group::ff::{BatchInvert, Field};
+use pasta_curves::{deferred::DeferredField, pallas, vesta};
 
+use std::any::{Any, TypeId};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::{Add, Deref, DerefMut, Index, IndexMut, Mul, RangeFrom, RangeFull};
@@ -18,6 +20,66 @@ pub mod multiopen;
 
 pub use domain::*;
 pub(crate) use evaluator::*;
+
+fn power_vector<F: Field>(point: F, len: usize) -> Vec<F> {
+    let mut powers = Vec::with_capacity(len);
+    if len == 0 {
+        return powers;
+    }
+
+    powers.push(F::ONE);
+    if len == 1 {
+        return powers;
+    }
+
+    let mut power = point;
+    powers.push(power);
+    for _ in 2..len {
+        power *= point;
+        powers.push(power);
+    }
+    powers
+}
+
+fn evaluate_polynomial_deferred<F: Field + 'static, T: DeferredField + 'static>(
+    polynomial: &dyn Any,
+    powers: &dyn Any,
+) -> F {
+    let polynomial = polynomial
+        .downcast_ref::<Polynomial<T, Coeff>>()
+        .expect("the polynomial field was checked before conversion");
+    let powers = powers
+        .downcast_ref::<Vec<T>>()
+        .expect("the power-vector field was checked before conversion");
+    let (constant, coefficients) = polynomial
+        .split_first()
+        .expect("a polynomial evaluation has at least one coefficient");
+    let value = T::inner_product(coefficients, &powers[1..]) + constant;
+    let value: Box<dyn Any> = Box::new(value);
+    *value
+        .downcast::<F>()
+        .expect("the evaluation field matches the polynomial field")
+}
+
+// A `Vec` is required for safe runtime downcasting to the Pasta field.
+#[allow(clippy::ptr_arg)]
+fn evaluate_polynomial_with_powers<F: Field + 'static>(
+    polynomial: &Polynomial<F, Coeff>,
+    powers: &Vec<F>,
+) -> F {
+    assert_eq!(polynomial.len(), powers.len());
+    if polynomial.is_empty() {
+        return F::ZERO;
+    }
+
+    if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
+        evaluate_polynomial_deferred::<F, pallas::Base>(polynomial, powers)
+    } else if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
+        evaluate_polynomial_deferred::<F, vesta::Base>(polynomial, powers)
+    } else {
+        compute_inner_product(&polynomial[1..], &powers[1..]) + polynomial[0]
+    }
+}
 
 /// This is an error that could occur during proving or circuit synthesis.
 // TODO: these errors need to be cleaned up
@@ -309,11 +371,39 @@ impl Rotation {
 
 #[cfg(test)]
 mod tests {
+    use crate::arithmetic::eval_polynomial;
     use ff::Field;
-    use pasta_curves::pallas;
+    use pasta_curves::{pallas, vesta};
     use rand::rng;
+    use std::marker::PhantomData;
 
-    use super::{EvaluationDomain, Rotation};
+    use super::{
+        Coeff, EvaluationDomain, Polynomial, Rotation, evaluate_polynomial_with_powers,
+        power_vector,
+    };
+
+    fn check_evaluate_polynomial_with_powers<F: Field + From<u64>>() {
+        let point = F::from(7);
+        for len in [0, 1, 2, 3, 31, 32, 2_048] {
+            let polynomial = Polynomial::<_, Coeff> {
+                values: (0..len)
+                    .map(|coefficient| F::from((coefficient + 3) as u64))
+                    .collect(),
+                _marker: PhantomData,
+            };
+            let powers = power_vector(point, len);
+            assert_eq!(
+                evaluate_polynomial_with_powers(&polynomial, &powers),
+                eval_polynomial(&polynomial, point),
+            );
+        }
+    }
+
+    #[test]
+    fn polynomial_evaluation_with_powers_matches_horner() {
+        check_evaluate_polynomial_with_powers::<pallas::Base>();
+        check_evaluate_polynomial_with_powers::<vesta::Base>();
+    }
 
     #[test]
     fn test_copy_rotated_chunk() {
