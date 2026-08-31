@@ -131,6 +131,33 @@ pub trait CurveExt:
         None
     }
 
+    /// Attempts an optimized variable-time identity test for a multiscalar
+    /// multiplication whose nonzero scalars are expected to be random-like
+    /// and full-width.
+    ///
+    /// The full-width profile is a performance hint only. The result must be
+    /// exact for every scalar value, including zero and sparse or small
+    /// nonzero scalars. [`Some(true)`](Some) means the multiscalar
+    /// multiplication is the identity, [`Some(false)`](Some) means it is not,
+    /// and [`None`] means that this implementation declined the optimization.
+    /// Implementations without a specialized backend return [`None`].
+    ///
+    /// # Security
+    ///
+    /// This method may run in variable time with respect to `scalars` and
+    /// `bases`. **Both slices must contain public data.**
+    ///
+    /// # Panics
+    ///
+    /// Implementations may panic if `scalars` and `bases` have different
+    /// lengths.
+    fn try_multiexp_full_width_is_identity_vartime(
+        _scalars: &[Self::ScalarExt],
+        _bases: &[Self::AffineExt],
+    ) -> Option<bool> {
+        None
+    }
+
     /// Attempts an affine, variable-time FFT specialized for this curve.
     ///
     /// `input` and `output` must have the same power-of-two length, equal to
