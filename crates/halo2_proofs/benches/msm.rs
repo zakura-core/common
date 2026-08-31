@@ -4,12 +4,37 @@ extern crate criterion;
 use crate::arithmetic::best_multiexp;
 use crate::pasta::{EqAffine, Fp};
 use crate::poly::commitment::Params;
+#[cfg(feature = "orbits")]
+use crate::poly::{EvaluationDomain, commitment::Blind};
+#[cfg(feature = "orbits")]
+use criterion::black_box;
 use criterion::{BenchmarkId, Criterion};
 use group::ff::Field;
 use halo2_proofs::*;
 use rand::rng;
 
 fn criterion_benchmark(c: &mut Criterion) {
+    #[cfg(feature = "orbits")]
+    {
+        const ORCHARD_K: u32 = 11;
+
+        let params = Params::<EqAffine>::new(ORCHARD_K);
+        assert!(params.prepare_commitments());
+        let domain = EvaluationDomain::<Fp>::new(1, ORCHARD_K);
+        let polynomial = domain.coeff_from_vec(
+            (0..(1 << ORCHARD_K))
+                .map(|_| Fp::random(&mut rng()))
+                .collect(),
+        );
+        let blind = Blind(Fp::random(&mut rng()));
+        let mut prepared = c.benchmark_group("prepared Orchard commitment MSM");
+        prepared.sample_size(30);
+        prepared.bench_function("coefficient-k11", |b| {
+            b.iter(|| params.commit(black_box(&polynomial), black_box(blind)))
+        });
+        prepared.finish();
+    }
+
     let params = Params::<EqAffine>::new(8);
     let bases = params.get_g();
     let mut late_ipa = c.benchmark_group("late IPA MSM");
