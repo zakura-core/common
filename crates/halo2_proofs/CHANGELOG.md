@@ -10,17 +10,6 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-### Changed
-
-- Reduced repeated `create_proof` work for one-, two-, and four-circuit
-  batches by retaining each batch shape's quotient-evaluator cache schedule in
-  the proving key. Isolated 10-worker Apple M4 Max benchmarks saved 0.25 ms
-  for one circuit and 1.00 ms for four circuits; isolated six-worker AMD EPYC
-  benchmarks saved 0.50 ms and 1.93 ms respectively. The three retained
-  schedules use 19 KiB in total, are shared by proving-key clones, and do not
-  alter proof bytes or verification
-  ([#291](https://github.com/zakura-core/common/pull/291)).
-
 ## [1.0.1] - 2026-08-29
 
 ### Changed
