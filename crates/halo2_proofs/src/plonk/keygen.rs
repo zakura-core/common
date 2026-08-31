@@ -1,6 +1,6 @@
 #![allow(clippy::int_plus_one)]
 
-use std::{cmp::Reverse, mem::size_of, ops::Range};
+use std::{cmp::Reverse, mem::size_of, ops::Range, sync::Arc};
 
 use ff::{Field, FromUniformBytes};
 use group::Curve;
@@ -592,6 +592,7 @@ where
         permutation: permutation_pk,
         fft_twiddles,
         floor_plan,
+        quotient_cache_layouts: Arc::new(Default::default()),
     })
 }
 #[cfg(test)]

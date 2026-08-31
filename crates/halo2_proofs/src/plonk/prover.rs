@@ -835,16 +835,21 @@ where
         );
 
     // Construct and commit to the quotient polynomial h(X).
-    let vanishing = vanishing.construct_quotient(
+    let cache_layout = pk.quotient_cache_layouts.get(circuit_count);
+    let (vanishing, prepared_layout) = vanishing.construct_quotient(
         params,
         domain,
         &pk.fft_twiddles,
         coset_evaluator,
         expressions,
         y,
+        cache_layout.as_deref(),
         &mut rng,
         transcript,
     )?;
+    if let Some(layout) = prepared_layout {
+        pk.quotient_cache_layouts.retain(circuit_count, layout);
+    }
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = x.pow([params.n, 0, 0, 0]);
@@ -1557,6 +1562,17 @@ fn compressed_selector_cache_preserves_proof() {
     uncached_pk.cached_selector_families = Default::default();
 
     assert_eq!(create(&pk, &params), create(&uncached_pk, &params));
+
+    // Concurrent cold proofs may race to prepare the same retained layout.
+    // Both results remain identical, and a later proof reuses the winner.
+    let concurrent_pk = create_pk();
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| create(&concurrent_pk, &params));
+        let second = scope.spawn(|| create(&concurrent_pk, &params));
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_eq!(first, second);
+    assert_eq!(first, create(&concurrent_pk, &params));
 
     #[cfg(feature = "multicore")]
     {

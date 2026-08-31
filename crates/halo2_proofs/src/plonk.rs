@@ -19,6 +19,7 @@ mod assigned;
 mod circuit;
 mod error;
 mod evaluation;
+mod evaluator_schedule;
 mod keygen;
 mod lookup;
 pub(crate) mod permutation;
@@ -155,6 +156,8 @@ pub struct ProvingKey<C: CurveAffine> {
     fft_twiddles: ProvingKeyTwiddles<C::Scalar>,
     /// Circuit-type-erased floor-planning data produced during key generation.
     floor_plan: Option<FloorPlan>,
+    /// Bounded, prover-only quotient evaluator schedules learned lazily.
+    quotient_cache_layouts: Arc<evaluator_schedule::QuotientCacheLayouts>,
 }
 
 #[derive(Debug)]
