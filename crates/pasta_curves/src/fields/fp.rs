@@ -604,58 +604,6 @@ impl DeferredField for Fp {
         Self::reduce(accumulator)
     }
 
-    #[cfg(target_arch = "aarch64")]
-    #[cfg_attr(not(feature = "uninline-portable"), inline)]
-    fn weighted_sum(accumulators: &mut [Self::Accumulator], terms: &[Fp], weights: &[Fp]) {
-        assert_eq!(accumulators.len(), terms.len());
-        match weights {
-            [weight] => {
-                let (accumulator_pairs, accumulator_remainder) = accumulators.as_chunks_mut::<2>();
-                let (term_pairs, term_remainder) = terms.as_chunks::<2>();
-                for (accumulators, terms) in accumulator_pairs.iter_mut().zip(term_pairs) {
-                    let [accumulator0, accumulator1] = accumulators;
-                    accumulator0.mul_accumulate_lanes(
-                        &terms[0].0,
-                        &weight.0,
-                        accumulator1,
-                        &terms[1].0,
-                        &weight.0,
-                    );
-                }
-                for (accumulator, term) in accumulator_remainder.iter_mut().zip(term_remainder) {
-                    accumulator.mul_accumulate(&term.0, &weight.0);
-                }
-            }
-            weights => {
-                assert_eq!(terms.len(), weights.len());
-                let (accumulator_pairs, accumulator_remainder) = accumulators.as_chunks_mut::<2>();
-                let (term_pairs, term_remainder) = terms.as_chunks::<2>();
-                let (weight_pairs, weight_remainder) = weights.as_chunks::<2>();
-                for ((accumulators, terms), weights) in accumulator_pairs
-                    .iter_mut()
-                    .zip(term_pairs)
-                    .zip(weight_pairs)
-                {
-                    let [accumulator0, accumulator1] = accumulators;
-                    accumulator0.mul_accumulate_lanes(
-                        &terms[0].0,
-                        &weights[0].0,
-                        accumulator1,
-                        &terms[1].0,
-                        &weights[1].0,
-                    );
-                }
-                for ((accumulator, term), weight) in accumulator_remainder
-                    .iter_mut()
-                    .zip(term_remainder)
-                    .zip(weight_remainder)
-                {
-                    accumulator.mul_accumulate(&term.0, &weight.0);
-                }
-            }
-        }
-    }
-
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     fn square_accumulate(acc: &mut Self::Accumulator, a: &Fp) {
         acc.accumulate(a.square_unreduced());

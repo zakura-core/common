@@ -104,9 +104,8 @@ fn compute_ipa_inner_products_deferred<F: Field + 'static, T: DeferredField + 's
         || T::inner_product(&a[half..], &b[..half]),
         || T::inner_product(&a[..half], &b[half..]),
     );
-    let result: Box<dyn Any> = Box::new(result);
-    *result
-        .downcast::<(F, F)>()
+    *(&result as &dyn Any)
+        .downcast_ref::<(F, F)>()
         .expect("the inner-product output matches its input field")
 }
 
