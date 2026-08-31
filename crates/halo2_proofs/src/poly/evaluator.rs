@@ -135,6 +135,7 @@ impl<E, B: Basis> AstLeaf<E, B> {
 /// borrowed and must outlive it.
 pub(crate) struct Evaluator<'poly, E, F: Field, B: Basis> {
     polys: Vec<Cow<'poly, Polynomial<F, B>>>,
+    virtual_poly_count: Option<usize>,
     compressed_selectors: Vec<CompressedSelectorLeaf<E, B>>,
     reused_compressed_selector_sources: Vec<usize>,
     _context: E,
@@ -158,6 +159,22 @@ pub(crate) fn new_evaluator<'poly, E: Fn() + Clone, F: Field, B: Basis>(
 ) -> Evaluator<'poly, E, F, B> {
     Evaluator {
         polys: vec![],
+        virtual_poly_count: None,
+        compressed_selectors: vec![],
+        reused_compressed_selector_sources: vec![],
+        _context: context,
+    }
+}
+
+/// Constructs an [`Evaluator`] that registers polynomial topology without
+/// retaining polynomial values. The returned evaluator accepts only virtual
+/// leaves and cannot evaluate rows.
+pub(crate) fn new_virtual_evaluator<E: Fn() + Clone, F: Field, B: Basis>(
+    context: E,
+) -> Evaluator<'static, E, F, B> {
+    Evaluator {
+        polys: vec![],
+        virtual_poly_count: Some(0),
         compressed_selectors: vec![],
         reused_compressed_selector_sources: vec![],
         _context: context,
@@ -1931,6 +1948,10 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
     /// This API treats each registered polynomial as unique, even if the same polynomial
     /// is added multiple times.
     pub(crate) fn register_poly(&mut self, poly: Polynomial<F, B>) -> AstLeaf<E, B> {
+        assert!(
+            self.virtual_poly_count.is_none(),
+            "a virtual evaluator cannot retain polynomial values"
+        );
         let index = self.polys.len();
         self.polys.push(Cow::Owned(poly));
 
@@ -1946,6 +1967,10 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
     /// This API treats each registered polynomial as unique, even if the same
     /// polynomial is added multiple times.
     pub(crate) fn register_poly_ref(&mut self, poly: &'poly Polynomial<F, B>) -> AstLeaf<E, B> {
+        assert!(
+            self.virtual_poly_count.is_none(),
+            "a virtual evaluator cannot retain polynomial values"
+        );
         let index = self.polys.len();
         self.polys.push(Cow::Borrowed(poly));
 
@@ -1954,6 +1979,23 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             rotation: Rotation::cur(),
             _evaluator: PhantomData,
         }
+    }
+
+    /// Registers a distinct polynomial leaf without retaining its row values.
+    ///
+    /// This requires an evaluator constructed by [`new_virtual_evaluator`].
+    pub(crate) fn register_virtual_poly(&mut self) -> AstLeaf<E, B> {
+        let index = self
+            .virtual_poly_count
+            .as_mut()
+            .expect("virtual leaves require a virtual evaluator");
+        let leaf = AstLeaf {
+            index: *index,
+            rotation: Rotation::cur(),
+            _evaluator: PhantomData,
+        };
+        *index += 1;
+        leaf
     }
 
     pub(crate) fn register_compressed_selector(
@@ -2095,6 +2137,31 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         self.evaluate_inner(ast, domain, cache_layout, true)
     }
 
+    /// Plans a cache layout without evaluating any polynomial rows.
+    ///
+    /// This requires an evaluator constructed by [`new_virtual_evaluator`].
+    pub(crate) fn prepare_cache_layout(
+        &self,
+        ast: &Ast<E, F, B>,
+        poly_len: usize,
+    ) -> Option<EvaluationCacheLayout>
+    where
+        E: Copy,
+        B: BasisOps,
+    {
+        assert!(
+            self.virtual_poly_count.is_some(),
+            "topology-only planning requires a virtual evaluator"
+        );
+        let ast = self
+            .replace_compressed_selectors(ast)
+            .unwrap_or_else(|| ast.clone());
+        let plan = EvaluationPlan::compile(&ast);
+        let (actions, cache_slots) =
+            plan.cache_common_subexpression_actions(linear_term_cache_budget::<F, B>(poly_len));
+        EvaluationCacheLayout::from_actions(&actions, cache_slots)
+    }
+
     fn evaluate_inner(
         &self,
         ast: &Ast<E, F, B>,
@@ -2107,6 +2174,10 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         F: WithSmallOrderMulGroup<3>,
         B: BasisOps,
     {
+        assert!(
+            self.virtual_poly_count.is_none(),
+            "a virtual evaluator cannot evaluate polynomial rows"
+        );
         // We're working in a single basis, so all polynomials are the same length.
         let poly_len = self.polys.first().unwrap().len();
         let (chunk_size, _num_chunks) = get_chunk_params(poly_len);
@@ -3065,8 +3136,8 @@ mod tests {
         Ast, AstLeaf, AstMul, BasisOps, CacheAction, DistributionWork, EvaluationPlan, Evaluator,
         FactorBodyPlan, FactorSide, LinearTermCacheBudget, LinearTermCacheOccupancy,
         MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_LINEAR_TERM_CACHE_ENTRIES, compressed_selector,
-        get_chunk_params, linear_term_cache_budget, new_evaluator, reuse_cache_slots,
-        selector_family_matches,
+        get_chunk_params, linear_term_cache_budget, new_evaluator, new_virtual_evaluator,
+        reuse_cache_slots, selector_family_matches,
     };
     use crate::poly::{Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Rotation};
 
@@ -3789,6 +3860,23 @@ mod tests {
             value.clone() * value
         };
         let original = repeated(7) + repeated(7);
+
+        let mut planner = new_virtual_evaluator::<_, pallas::Base, ExtendedLagrangeCoeff>(|| {});
+        let virtual_leaf = planner.register_virtual_poly();
+        let virtual_repeated = |constant| {
+            let value = Ast::from(virtual_leaf) + Ast::ConstantTerm(pallas::Base::from(constant));
+            value.clone() * value
+        };
+        let virtual_original = virtual_repeated(7) + virtual_repeated(7);
+        let eager_layout = planner
+            .prepare_cache_layout(&virtual_original, domain.extended_len())
+            .expect("topology-only planning prepares a layout");
+        let expected = evaluator.evaluate(&original, &domain);
+        let (actual, replacement) =
+            evaluator.evaluate_with_cache_layout(&original, &domain, Some(&eager_layout));
+        assert_eq!(&actual[..], &expected[..]);
+        assert!(replacement.is_none());
+
         let (_, layout) = evaluator.evaluate_with_cache_layout(&original, &domain, None);
         let layout = layout.expect("the cold evaluation prepares a layout");
         assert!(!layout.events.is_empty());

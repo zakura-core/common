@@ -124,6 +124,47 @@ pub(in crate::plonk) fn sample_product_blinding<C: CurveAffine, R: Rng>(
     }
 }
 
+/// Builds the coset-basis AST for one theta-compressed lookup side.
+///
+/// Every [`Expression`] must have had its virtual selectors removed.
+pub(in crate::plonk) fn compress_expressions_coset<E: Copy, F: Field>(
+    expressions: &[Expression<F>],
+    theta: F,
+    fixed_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
+    advice_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
+    instance_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
+) -> poly::Ast<E, F, ExtendedLagrangeCoeff> {
+    expressions
+        .iter()
+        .map(|expression| {
+            expression.evaluate(
+                &poly::Ast::ConstantTerm,
+                &|_| panic!("virtual selectors are removed during optimization"),
+                &|query| {
+                    fixed_cosets[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|query| {
+                    advice_cosets[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|query| {
+                    instance_cosets[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|a| -a,
+                &|a, b| a + b,
+                &|a, b| a * b,
+                &|a, scalar| a * scalar,
+            )
+        })
+        .reduce(|acc, expression| acc * poly::Ast::ConstantTerm(theta) + expression)
+        .unwrap_or(poly::Ast::ConstantTerm(F::ZERO))
+}
+
 impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
     /// Prepares the compressed, permuted input and table polynomials.
     ///
@@ -182,35 +223,6 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
                 })
                 .collect();
 
-            let unpermuted_cosets: Vec<_> = expressions
-                .iter()
-                .map(|expression| {
-                    expression.evaluate(
-                        &|scalar| poly::Ast::ConstantTerm(scalar),
-                        &|_| panic!("virtual selectors are removed during optimization"),
-                        &|query| {
-                            fixed_cosets[query.column_index]
-                                .with_rotation(query.rotation)
-                                .into()
-                        },
-                        &|query| {
-                            advice_cosets[query.column_index]
-                                .with_rotation(query.rotation)
-                                .into()
-                        },
-                        &|query| {
-                            instance_cosets[query.column_index]
-                                .with_rotation(query.rotation)
-                                .into()
-                        },
-                        &|a| -a,
-                        &|a, b| a + b,
-                        &|a, b| a * b,
-                        &|a, scalar| a * scalar,
-                    )
-                })
-                .collect();
-
             // Compressed version of expressions
             let compressed_expression = unpermuted_expressions
                 .into_iter()
@@ -218,10 +230,13 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
                 .unwrap_or(poly::Ast::ConstantTerm(C::Scalar::ZERO));
 
             // Compressed version of cosets
-            let compressed_coset = unpermuted_cosets
-                .into_iter()
-                .reduce(|acc, eval| acc * poly::Ast::ConstantTerm(*theta) + eval)
-                .unwrap_or(poly::Ast::ConstantTerm(C::Scalar::ZERO));
+            let compressed_coset = compress_expressions_coset(
+                expressions,
+                *theta,
+                fixed_cosets,
+                advice_cosets,
+                instance_cosets,
+            );
 
             (
                 compressed_coset,
@@ -491,6 +506,60 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedProduct<C, Ev> {
     }
 }
 
+/// Builds the lookup constraint ASTs without evaluating polynomial rows.
+pub(in crate::plonk) fn construct_constraints<E: Copy, F: Field>(
+    compressed_input: poly::Ast<E, F, ExtendedLagrangeCoeff>,
+    permuted_input: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+    compressed_table: poly::Ast<E, F, ExtendedLagrangeCoeff>,
+    permuted_table: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+    product: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+    beta: F,
+    gamma: F,
+    l0: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+    l_blind: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+    l_last: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+) -> impl Iterator<Item = poly::Ast<E, F, ExtendedLagrangeCoeff>> {
+    let active_rows = poly::Ast::one() - (poly::Ast::from(l_last) + l_blind);
+    let beta = poly::Ast::ConstantTerm(beta);
+    let gamma = poly::Ast::ConstantTerm(gamma);
+
+    iter::empty()
+        // l_0(X) * (1 - z(X)) = 0
+        .chain(Some((poly::Ast::one() - product) * l0))
+        // l_last(X) * (z(X)^2 - z(X)) = 0
+        .chain(Some(
+            (poly::Ast::from(product) * product - product) * l_last,
+        ))
+        // (1 - (l_last(X) + l_blind(X))) * (
+        //   z(omega X) (a'(X) + beta) (s'(X) + gamma)
+        //   - z(X) (compressed_input(X) + beta)
+        //     (compressed_table(X) + gamma)
+        // ) = 0
+        .chain({
+            let left: poly::Ast<_, _, _> =
+                poly::Ast::<_, F, _>::from(product.with_rotation(Rotation::next()))
+                    * (poly::Ast::from(permuted_input) + beta.clone())
+                    * (poly::Ast::from(permuted_table) + gamma.clone());
+
+            let right: poly::Ast<_, _, _> =
+                poly::Ast::from(product) * (compressed_input + beta) * (compressed_table + gamma);
+
+            Some((left - right) * active_rows.clone())
+        })
+        // l_0(X) * (a'(X) - s'(X)) = 0
+        .chain(Some(
+            (poly::Ast::from(permuted_input) - permuted_table) * l0,
+        ))
+        // (1 - (l_last + l_blind)) *
+        // (a'(X) - s'(X)) * (a'(X) - a'(omega^-1 X)) = 0
+        .chain(Some(
+            (poly::Ast::<_, F, _>::from(permuted_input) - permuted_table)
+                * (poly::Ast::from(permuted_input)
+                    - permuted_input.with_rotation(Rotation::prev()))
+                * active_rows,
+        ))
+}
+
 impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
     /// Given a Lookup with input expressions, table expressions, permuted input
     /// expression, permuted table expression, and grand product polynomial, this
@@ -509,58 +578,18 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
         impl Iterator<Item = poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>> + 'a,
     ) {
         let permuted = self.permuted;
-
-        let active_rows = poly::Ast::one() - (poly::Ast::from(l_last) + l_blind);
-        let beta = poly::Ast::ConstantTerm(*beta);
-        let gamma = poly::Ast::ConstantTerm(*gamma);
-
-        let expressions = iter::empty()
-            // l_0(X) * (1 - z(X)) = 0
-            .chain(Some((poly::Ast::one() - self.product_coset) * l0))
-            // l_last(X) * (z(X)^2 - z(X)) = 0
-            .chain(Some(
-                (poly::Ast::from(self.product_coset) * self.product_coset - self.product_coset)
-                    * l_last,
-            ))
-            // (1 - (l_last(X) + l_blind(X))) * (
-            //   z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-            //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
-            // ) = 0
-            .chain({
-                // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-                let left: poly::Ast<_, _, _> = poly::Ast::<_, C::Scalar, _>::from(
-                    self.product_coset.with_rotation(Rotation::next()),
-                ) * (poly::Ast::from(permuted.permuted_input_coset)
-                    + beta.clone())
-                    * (poly::Ast::from(permuted.permuted_table_coset) + gamma.clone());
-
-                //  z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
-                let right: poly::Ast<_, _, _> = poly::Ast::from(self.product_coset)
-                    * (permuted.compressed_input_coset + beta)
-                    * (permuted.compressed_table_coset + gamma);
-
-                Some((left - right) * active_rows.clone())
-            })
-            // Check that the first values in the permuted input expression and permuted
-            // fixed expression are the same.
-            // l_0(X) * (a'(X) - s'(X)) = 0
-            .chain(Some(
-                (poly::Ast::from(permuted.permuted_input_coset) - permuted.permuted_table_coset)
-                    * l0,
-            ))
-            // Check that each value in the permuted lookup input expression is either
-            // equal to the value above it, or the value at the same index in the
-            // permuted table expression.
-            // (1 - (l_last + l_blind)) * (a′(X) − s′(X))⋅(a′(X) − a′(\omega^{-1} X)) = 0
-            .chain(Some(
-                (poly::Ast::<_, C::Scalar, _>::from(permuted.permuted_input_coset)
-                    - permuted.permuted_table_coset)
-                    * (poly::Ast::from(permuted.permuted_input_coset)
-                        - permuted
-                            .permuted_input_coset
-                            .with_rotation(Rotation::prev()))
-                    * active_rows,
-            ));
+        let expressions = construct_constraints(
+            permuted.compressed_input_coset,
+            permuted.permuted_input_coset,
+            permuted.compressed_table_coset,
+            permuted.permuted_table_coset,
+            self.product_coset,
+            *beta,
+            *gamma,
+            l0,
+            l_blind,
+            l_last,
+        );
 
         (
             Constructed {

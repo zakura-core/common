@@ -1,6 +1,6 @@
 use group::{
     Curve,
-    ff::{Field, PrimeField},
+    ff::{Field, PrimeField, WithSmallOrderMulGroup},
 };
 use maybe_rayon::prelude::*;
 use rand_core::Rng;
@@ -349,6 +349,99 @@ impl Argument {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Builds the permutation constraint ASTs without evaluating polynomial rows.
+///
+/// The product leaves and permutation cosets must correspond, in order, to
+/// [`Argument::columns`] split according to `cs_degree`. The column-leaf slices
+/// must contain every column referenced by the argument.
+pub(in crate::plonk) fn construct_constraints<E: Copy, F: WithSmallOrderMulGroup<3>>(
+    argument: &Argument,
+    cs_degree: usize,
+    blinding_factors: usize,
+    products: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
+    advice_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
+    fixed_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
+    instance_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
+    permutation_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
+    l0: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+    l_blind: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+    l_last: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
+    beta: F,
+    gamma: F,
+) -> Vec<poly::Ast<E, F, ExtendedLagrangeCoeff>> {
+    let chunk_len = permutation_chunk_len(cs_degree);
+    let last_rotation = Rotation(-((blinding_factors + 1) as i32));
+    let mut expressions = vec![];
+
+    // Enforce only for the first set.
+    // l_0(X) * (1 - z_0(X)) = 0
+    if let Some(first) = products.first() {
+        expressions.push((poly::Ast::one() - *first) * l0);
+    }
+
+    // Enforce only for the last set.
+    // l_last(X) * (z_l(X)^2 - z_l(X)) = 0
+    if let Some(last) = products.last() {
+        expressions.push(((poly::Ast::from(*last) * *last) - *last) * l_last);
+    }
+
+    // Except for the first set, enforce.
+    // l_0(X) * (z_i(X) - z_{i-1}(omega^(last) X)) = 0
+    expressions.extend(
+        products
+            .iter()
+            .skip(1)
+            .zip(products.iter())
+            .map(|(product, previous)| {
+                (poly::Ast::from(*product) - previous.with_rotation(last_rotation)) * l0
+            }),
+    );
+
+    // For every set, enforce the permutation grand-product relation.
+    expressions.extend(
+        products
+            .iter()
+            .zip(argument.columns.chunks(chunk_len))
+            .zip(permutation_cosets.chunks(chunk_len))
+            .enumerate()
+            .map(|(chunk_index, ((product, columns), cosets))| {
+                let mut left = poly::Ast::<_, F, _>::from(product.with_rotation(Rotation::next()));
+                for (values, permutation) in columns
+                    .iter()
+                    .map(|&column| match column.column_type() {
+                        Any::Advice => &advice_cosets[column.index()],
+                        Any::Fixed => &fixed_cosets[column.index()],
+                        Any::Instance => &instance_cosets[column.index()],
+                    })
+                    .zip(cosets.iter())
+                {
+                    left *= poly::Ast::<_, F, _>::from(*values)
+                        + (poly::Ast::ConstantTerm(beta) * poly::Ast::from(*permutation))
+                        + poly::Ast::ConstantTerm(gamma);
+                }
+
+                let mut right = poly::Ast::from(*product);
+                let mut current_delta =
+                    beta * F::DELTA.pow_vartime([(chunk_index * chunk_len) as u64]);
+                for values in columns.iter().map(|&column| match column.column_type() {
+                    Any::Advice => &advice_cosets[column.index()],
+                    Any::Fixed => &fixed_cosets[column.index()],
+                    Any::Instance => &instance_cosets[column.index()],
+                }) {
+                    right *= poly::Ast::from(*values)
+                        + poly::Ast::LinearTerm(current_delta)
+                        + poly::Ast::ConstantTerm(gamma);
+                    current_delta *= &F::DELTA;
+                }
+
+                (left - right) * (poly::Ast::one() - (poly::Ast::from(l_last) + l_blind))
+            }),
+    );
+
+    expressions
+}
+
+#[allow(clippy::too_many_arguments)]
 fn prepare_ratios<C: CurveAffine>(
     params: &Params<C>,
     domain: &poly::EvaluationDomain<C::Scalar>,
@@ -513,10 +606,6 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Committed<C, Ev> {
         Constructed<C>,
         impl Iterator<Item = poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>> + 'a,
     ) {
-        let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
-        let blinding_factors = pk.vk.cs.blinding_factors();
-        let last_rotation = Rotation(-((blinding_factors + 1) as i32));
-
         let constructed = Constructed {
             sets: self
                 .sets
@@ -527,88 +616,28 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Committed<C, Ev> {
                 })
                 .collect(),
         };
+        let products = self
+            .sets
+            .iter()
+            .map(|set| set.permutation_product_coset)
+            .collect::<Vec<_>>();
+        let expressions = construct_constraints(
+            p,
+            pk.vk.cs_degree,
+            pk.vk.cs.blinding_factors(),
+            &products,
+            advice_cosets,
+            fixed_cosets,
+            instance_cosets,
+            permutation_cosets,
+            l0,
+            l_blind,
+            l_last,
+            *beta,
+            *gamma,
+        );
 
-        let expressions = iter::empty()
-            // Enforce only for the first set.
-            // l_0(X) * (1 - z_0(X)) = 0
-            .chain(
-                self.sets
-                    .first()
-                    .map(|first_set| (poly::Ast::one() - first_set.permutation_product_coset) * l0),
-            )
-            // Enforce only for the last set.
-            // l_last(X) * (z_l(X)^2 - z_l(X)) = 0
-            .chain(self.sets.last().map(|last_set| {
-                ((poly::Ast::from(last_set.permutation_product_coset)
-                    * last_set.permutation_product_coset)
-                    - last_set.permutation_product_coset)
-                    * l_last
-            }))
-            // Except for the first set, enforce.
-            // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
-            .chain(
-                self.sets
-                    .iter()
-                    .skip(1)
-                    .zip(self.sets.iter())
-                    .map(|(set, last_set)| {
-                        (poly::Ast::from(set.permutation_product_coset)
-                            - last_set
-                                .permutation_product_coset
-                                .with_rotation(last_rotation))
-                            * l0
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            // And for all the sets we enforce:
-            // (1 - (l_last(X) + l_blind(X))) * (
-            //   z_i(\omega X) \prod_j (p(X) + \beta s_j(X) + \gamma)
-            // - z_i(X) \prod_j (p(X) + \delta^j \beta X + \gamma)
-            // )
-            .chain(
-                self.sets
-                    .into_iter()
-                    .zip(p.columns.chunks(chunk_len))
-                    .zip(permutation_cosets.chunks(chunk_len))
-                    .enumerate()
-                    .map(move |(chunk_index, ((set, columns), cosets))| {
-                        let mut left = poly::Ast::<_, C::Scalar, _>::from(
-                            set.permutation_product_coset
-                                .with_rotation(Rotation::next()),
-                        );
-                        for (values, permutation) in columns
-                            .iter()
-                            .map(|&column| match column.column_type() {
-                                Any::Advice => &advice_cosets[column.index()],
-                                Any::Fixed => &fixed_cosets[column.index()],
-                                Any::Instance => &instance_cosets[column.index()],
-                            })
-                            .zip(cosets.iter())
-                        {
-                            left *= poly::Ast::<_, C::Scalar, _>::from(*values)
-                                + (poly::Ast::ConstantTerm(*beta) * poly::Ast::from(*permutation))
-                                + poly::Ast::ConstantTerm(*gamma);
-                        }
-
-                        let mut right = poly::Ast::from(set.permutation_product_coset);
-                        let mut current_delta = *beta
-                            * &(C::Scalar::DELTA.pow_vartime([(chunk_index * chunk_len) as u64]));
-                        for values in columns.iter().map(|&column| match column.column_type() {
-                            Any::Advice => &advice_cosets[column.index()],
-                            Any::Fixed => &fixed_cosets[column.index()],
-                            Any::Instance => &instance_cosets[column.index()],
-                        }) {
-                            right *= poly::Ast::from(*values)
-                                + poly::Ast::LinearTerm(current_delta)
-                                + poly::Ast::ConstantTerm(*gamma);
-                            current_delta *= &C::Scalar::DELTA;
-                        }
-
-                        (left - right) * (poly::Ast::one() - (poly::Ast::from(l_last) + l_blind))
-                    }),
-            );
-
-        (constructed, expressions)
+        (constructed, expressions.into_iter())
     }
 }
 
