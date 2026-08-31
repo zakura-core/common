@@ -1511,9 +1511,9 @@ fn compressed_selector_cache_preserves_proof() {
 
     #[derive(Clone, Copy, Debug)]
     struct Config {
-        advice: Column<Advice>,
+        advice: [Column<Advice>; 2],
         selectors: [Selector; crate::MIN_SELECTOR_FAMILY_LEN],
-        table: TableColumn,
+        table: [TableColumn; 2],
     }
 
     #[derive(Clone, Copy)]
@@ -1528,20 +1528,22 @@ fn compressed_selector_cache_preserves_proof() {
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-            let advice = meta.advice_column();
+            let advice = [meta.advice_column(), meta.advice_column()];
             let selectors = core::array::from_fn(|_| meta.selector());
-            let table = meta.lookup_table_column();
+            let table = [meta.lookup_table_column(), meta.lookup_table_column()];
 
-            meta.enable_equality(advice);
             meta.lookup(|meta| {
-                let advice = meta.query_advice(advice, Rotation::cur());
-                vec![(advice, table)]
+                advice
+                    .iter()
+                    .zip(table)
+                    .map(|(advice, table)| (meta.query_advice(*advice, Rotation::cur()), table))
+                    .collect()
             });
 
             for selector in selectors {
                 meta.create_gate("selector family", |meta| {
                     let selector = meta.query_selector(selector);
-                    let advice = meta.query_advice(advice, Rotation::cur());
+                    let advice = meta.query_advice(advice[0], Rotation::cur());
                     vec![selector * (advice - Expression::Constant(F::ONE))]
                 });
             }
@@ -1564,10 +1566,13 @@ fn compressed_selector_cache_preserves_proof() {
             mut layouter: impl Layouter<F>,
         ) -> Result<(), Error> {
             layouter.assign_table(
-                || "lookup table",
+                || "two-column lookup table",
                 |mut table| {
-                    table.assign_cell(|| "zero", config.table, 0, || Value::known(F::ZERO))?;
-                    table.assign_cell(|| "one", config.table, 1, || Value::known(F::ONE))?;
+                    for (row, value) in [F::ZERO, F::ONE].into_iter().enumerate() {
+                        for column in config.table {
+                            table.assign_cell(|| "value", column, row, || Value::known(value))?;
+                        }
+                    }
                     Ok(())
                 },
             )?;
@@ -1576,12 +1581,14 @@ fn compressed_selector_cache_preserves_proof() {
                 |mut region| {
                     for (row, selector) in config.selectors.iter().enumerate() {
                         selector.enable(&mut region, row)?;
-                        region.assign_advice(
-                            || "value",
-                            config.advice,
-                            row,
-                            || Value::known(F::ONE),
-                        )?;
+                        for advice in config.advice {
+                            region.assign_advice(
+                                || "value",
+                                advice,
+                                row,
+                                || Value::known(F::ONE),
+                            )?;
+                        }
                     }
                     Ok(())
                 },
@@ -1630,7 +1637,6 @@ fn compressed_selector_cache_preserves_proof() {
         )
         .expect("proof verification should not fail");
     }
-
     let params = Params::new(4);
     let create_pk = || {
         let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
@@ -1642,24 +1648,24 @@ fn compressed_selector_cache_preserves_proof() {
         pk.cached_selector_families[0].selectors.len() + 1,
         crate::MIN_SELECTOR_FAMILY_LEN
     );
-    assert!(pk.quotient_cache_layouts.get(3).is_none());
+    assert_eq!(pk.vk.cs.lookups[0].input_expressions.len(), 2);
+    assert!(pk.quotient_cache_layouts.get_compiled_plan(3).is_none());
 
-    // Key generation prepares every retained shape before any proof. The
-    // first proof must keep that exact Arc, rather than falling back and
-    // replacing a mismatched schedule. An empty-layout key provides the
+    // Key generation compiles every retained shape before any proof. The
+    // first proof must keep that exact Arc. An empty-plan key provides the
     // byte-for-byte control for 1, 2, and 4 circuits.
     let mut eager_proofs = vec![];
     for circuit_count in [1, 2, 4] {
-        let eager_layout = pk
+        let eager_plan = pk
             .quotient_cache_layouts
-            .get(circuit_count)
-            .expect("keygen prepares each retained quotient layout");
+            .get_compiled_plan(circuit_count)
+            .expect("keygen compiles each retained quotient plan");
         let eager_proof = create(&pk, &params, circuit_count, PROOF_SEED);
-        let retained_layout = pk
+        let retained_plan = pk
             .quotient_cache_layouts
-            .get(circuit_count)
-            .expect("the first proof retains its eager layout");
-        assert!(std::sync::Arc::ptr_eq(&eager_layout, &retained_layout));
+            .get_compiled_plan(circuit_count)
+            .expect("the first proof retains its keygen plan");
+        assert!(std::sync::Arc::ptr_eq(&eager_plan, &retained_plan));
 
         let mut lazy_pk = pk.clone();
         lazy_pk.quotient_cache_layouts = std::sync::Arc::new(Default::default());
@@ -1670,15 +1676,15 @@ fn compressed_selector_cache_preserves_proof() {
     }
 
     // A different seed changes commitments before theta is sampled. The
-    // eager sparse schedule remains valid for the resulting challenge-bound
-    // plan, while proof bytes still match a freshly planned control.
+    // symbolic program binds the resulting challenges, while proof bytes still
+    // match a freshly planned control.
     let alternate_seed = PROOF_SEED ^ 0xa11c_e55e_7e57_0001;
-    let eager_layout = pk.quotient_cache_layouts.get(1).unwrap();
+    let eager_plan = pk.quotient_cache_layouts.get_compiled_plan(1).unwrap();
     let alternate_proof = create(&pk, &params, 1, alternate_seed);
     assert_ne!(alternate_proof, eager_proofs[0]);
     assert!(std::sync::Arc::ptr_eq(
-        &eager_layout,
-        &pk.quotient_cache_layouts.get(1).unwrap()
+        &eager_plan,
+        &pk.quotient_cache_layouts.get_compiled_plan(1).unwrap()
     ));
     let mut alternate_lazy_pk = pk.clone();
     alternate_lazy_pk.quotient_cache_layouts = std::sync::Arc::new(Default::default());
@@ -1710,10 +1716,13 @@ fn compressed_selector_cache_preserves_proof() {
         create(&uncached_pk, &params, 2, PROOF_SEED)
     );
 
-    // Concurrent first proofs share the keygen-prepared schedule without
+    // Concurrent first proofs share the keygen-compiled program without
     // replacement and preserve deterministic proof bytes.
     let concurrent_pk = create_pk();
-    let eager_layout = concurrent_pk.quotient_cache_layouts.get(4).unwrap();
+    let eager_plan = concurrent_pk
+        .quotient_cache_layouts
+        .get_compiled_plan(4)
+        .unwrap();
     let (first, second) = std::thread::scope(|scope| {
         let first = scope.spawn(|| create(&concurrent_pk, &params, 4, PROOF_SEED));
         let second = scope.spawn(|| create(&concurrent_pk, &params, 4, PROOF_SEED));
@@ -1721,8 +1730,11 @@ fn compressed_selector_cache_preserves_proof() {
     });
     assert_eq!(first, second);
     assert!(std::sync::Arc::ptr_eq(
-        &eager_layout,
-        &concurrent_pk.quotient_cache_layouts.get(4).unwrap()
+        &eager_plan,
+        &concurrent_pk
+            .quotient_cache_layouts
+            .get_compiled_plan(4)
+            .unwrap()
     ));
 
     #[cfg(feature = "multicore")]
