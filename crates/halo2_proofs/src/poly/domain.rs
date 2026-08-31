@@ -976,23 +976,75 @@ fn recursive_butterfly_after_prefix<F: Field>(
                 },
             );
         } else {
-            recursive_butterfly_after_prefix(
+            recursive_butterfly_pair_after_prefix(
                 left,
-                completed_chunk_len,
-                twiddle_chunk * 2,
-                twiddles,
-                0,
-            );
-            recursive_butterfly_after_prefix(
                 right,
                 completed_chunk_len,
                 twiddle_chunk * 2,
                 twiddles,
-                0,
             );
         }
     }
 
+    butterfly_chunk(left, right, twiddle_chunk, twiddles);
+}
+
+/// Recursively processes two equal-sized field FFT chunks together. The FFT
+/// sizes are powers of two, so every recursive level contains an exact pair.
+/// Keeping the two independent twiddle multiplications adjacent gives the CPU
+/// two dependency chains to schedule.
+fn recursive_butterfly_pair_after_prefix<F: Field>(
+    first: &mut [F],
+    second: &mut [F],
+    completed_chunk_len: usize,
+    twiddle_chunk: usize,
+    twiddles: &[F],
+) {
+    debug_assert_eq!(first.len(), second.len());
+    let len = first.len();
+    debug_assert!(len.is_power_of_two());
+    debug_assert!(completed_chunk_len.is_power_of_two());
+    debug_assert!(completed_chunk_len <= len);
+    if len == completed_chunk_len {
+        return;
+    }
+
+    let (first_left, first_right) = first.split_at_mut(len / 2);
+    let (second_left, second_right) = second.split_at_mut(len / 2);
+    if len / 2 > completed_chunk_len {
+        recursive_butterfly_pair_after_prefix(
+            first_left,
+            first_right,
+            completed_chunk_len,
+            twiddle_chunk * 2,
+            twiddles,
+        );
+        recursive_butterfly_pair_after_prefix(
+            second_left,
+            second_right,
+            completed_chunk_len,
+            twiddle_chunk * 2,
+            twiddles,
+        );
+    }
+
+    butterfly_chunk_pair(
+        first_left,
+        first_right,
+        second_left,
+        second_right,
+        twiddle_chunk,
+        twiddles,
+    );
+}
+
+#[inline(always)]
+fn butterfly_chunk<F: Field>(
+    left: &mut [F],
+    right: &mut [F],
+    twiddle_chunk: usize,
+    twiddles: &[F],
+) {
     // Handle the unity twiddle without a field multiplication.
     let (first_left, left) = left.split_at_mut(1);
     let (first_right, right) = right.split_at_mut(1);
@@ -1007,6 +1059,54 @@ fn recursive_butterfly_after_prefix<F: Field>(
         *right = *left;
         *left += &t;
         *right -= &t;
+    }
+}
+
+#[inline(always)]
+fn butterfly_chunk_pair<F: Field>(
+    first_left: &mut [F],
+    first_right: &mut [F],
+    second_left: &mut [F],
+    second_right: &mut [F],
+    twiddle_chunk: usize,
+    twiddles: &[F],
+) {
+    debug_assert_eq!(first_left.len(), first_right.len());
+    debug_assert_eq!(first_left.len(), second_left.len());
+    debug_assert_eq!(first_left.len(), second_right.len());
+
+    // Handle both unity twiddles without field multiplications.
+    let (first_a, first_left) = first_left.split_at_mut(1);
+    let (first_b, first_right) = first_right.split_at_mut(1);
+    let (second_a, second_left) = second_left.split_at_mut(1);
+    let (second_b, second_right) = second_right.split_at_mut(1);
+    let first_t = first_b[0];
+    let second_t = second_b[0];
+    first_b[0] = first_a[0];
+    second_b[0] = second_a[0];
+    first_a[0] += &first_t;
+    second_a[0] += &second_t;
+    first_b[0] -= &first_t;
+    second_b[0] -= &second_t;
+
+    for (index, ((first_left, first_right), (second_left, second_right))) in first_left
+        .iter_mut()
+        .zip(first_right.iter_mut())
+        .zip(second_left.iter_mut().zip(second_right.iter_mut()))
+        .enumerate()
+    {
+        let twiddle = &twiddles[(index + 1) * twiddle_chunk];
+        let mut first_t = *first_right;
+        let mut second_t = *second_right;
+        first_t *= twiddle;
+        second_t *= twiddle;
+
+        *first_right = *first_left;
+        *second_right = *second_left;
+        *first_left += &first_t;
+        *second_left += &second_t;
+        *first_right -= &first_t;
+        *second_right -= &second_t;
     }
 }
 
