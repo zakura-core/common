@@ -1162,23 +1162,10 @@ struct CacheEvent {
 }
 
 /// A sparse, circuit-count-specific evaluator cache schedule.
-#[derive(Clone)]
 pub(crate) struct EvaluationCacheLayout {
     events: Box<[CacheEvent]>,
     occurrence_count: u32,
     cache_slots: u16,
-}
-
-impl fmt::Debug for EvaluationCacheLayout {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EvaluationCacheLayout")
-            .field("events", &self.events.len())
-            .field("occurrences", &self.occurrence_count)
-            .field("cache_slots", &self.cache_slots)
-            .field("payload_bytes", &self.payload_bytes())
-            .finish()
-    }
 }
 
 impl EvaluationCacheLayout {
