@@ -563,9 +563,9 @@ const TWIDDLE_MAJOR_MIN_CHUNK: usize = 16;
 #[cfg(feature = "multicore")]
 const TWIDDLE_MAJOR_MAX_CHUNK: usize = 2048;
 
-/// Montgomery-batched inversion for a nonempty slice of provably nonzero
-/// values: prefix products into `scratch`, one shared field inversion,
-/// back-substitution. The ladder's denominators are guaranteed nonzero by
+/// Montgomery-batched inversion for provably nonzero values: prefix products
+/// after each lane's head go into `scratch`, followed by one shared field
+/// inversion and back-substitution. The ladder's denominators are nonzero by
 /// [`affine_ladder_safe`], so unlike `ff::BatchInverter` this skips the
 /// per-element zero handling (one extra multiplication and two conditional
 /// selects per element), which is a measurable share of each ladder column.
@@ -577,18 +577,34 @@ const TWIDDLE_MAJOR_MAX_CHUNK: usize = 2048;
 /// any of them.
 fn batch_invert_nonzero<F: Field>(values: &mut [F], scratch: &mut [F]) {
     assert_eq!(values.len(), scratch.len());
+    let Some((first, values)) = values.split_first_mut() else {
+        return;
+    };
+
+    debug_assert!(!first.is_zero_vartime());
+    if values.is_empty() {
+        *first = first.invert().unwrap();
+        return;
+    }
+
+    let (second, values) = values.split_first_mut().unwrap();
+    debug_assert!(!second.is_zero_vartime());
+    let scratch = &mut scratch[2..];
+
     // Two accumulator chains, stepped in (even, odd) pairs: the classic
     // single-chain walk runs both passes at the field multiplication's
     // dependency latency, while independent even/odd chains run at its
     // throughput, for a fixed overhead of three extra multiplications per
     // call (one join before the shared inversion, two lane-seed recoveries
-    // after). The ladder only calls this with `BATCH_AFFINE_MIN_POINTS` or
-    // more live lanes — at the measured two-lane crossover on both x86-64
-    // (portable) and Apple aarch64 (assembly backend) — so no small-batch
-    // fallback is needed. A trailing element (odd length) has an even index
-    // and belongs to the first chain.
-    let mut acc0 = F::ONE;
-    let mut acc1 = F::ONE;
+    // after). The hot ladder calls this with `BATCH_AFFINE_MIN_POINTS` or
+    // more live lanes; auxiliary prepared-point paths can pass smaller
+    // batches, including the singleton handled above. A trailing element
+    // (odd length) has an even index and belongs to the first chain.
+    // Seed each lane from its first value. Besides removing the initial
+    // multiplication by one, this lets the backward pass assign the first
+    // two inverses directly and omit its final multiplication in each lane.
+    let mut acc0 = *first;
+    let mut acc1 = *second;
     for (pair, slots) in values.chunks_exact(2).zip(scratch.chunks_exact_mut(2)) {
         debug_assert!(!pair[0].is_zero_vartime());
         debug_assert!(!pair[1].is_zero_vartime());
@@ -633,6 +649,8 @@ fn batch_invert_nonzero<F: Field>(values: &mut [F], scratch: &mut [F]) {
         pair[0] = inverted0;
         pair[1] = inverted1;
     }
+    *first = acc0;
+    *second = acc1;
 }
 
 /// Small MSMs do not amortize GLV decomposition, affine endomorphism mapping,
@@ -1389,13 +1407,28 @@ fn batch_invert_and_add<F: Field>(
     additions: &mut [PendingAffineAddition<F>],
     points: &mut [AffinePoint<F>],
 ) -> Option<()> {
+    let Some((first, additions)) = additions.split_first_mut() else {
+        return Some(());
+    };
+
     if additions.is_empty() {
+        let denominator_inverse = Option::<F>::from(first.denominator.invert())?;
+        let left = points[first.output];
+        let slope = first.numerator * denominator_inverse;
+        let x = slope.square() - first.x_sum;
+        let y = slope * (left.x - x) - left.y;
+        points[first.output] = AffinePoint { x, y };
         return Some(());
     }
 
+    let (second, additions) = additions.split_first_mut().unwrap();
+
     // Compute two prefix lanes in lockstep. This retains one field inversion
     // for the entire batch while exposing independent multiplication chains.
-    let mut lane_products = [F::ONE; BATCH_INVERSION_LANES];
+    // Seeding from the first denominator in each lane removes the initial
+    // multiplication by one and lets the backward pass assign those two
+    // inverses directly, without a scratch multiplication or dead update.
+    let mut lane_products = [first.denominator, second.denominator];
     for pair in additions.chunks_mut(BATCH_INVERSION_LANES) {
         for (addition, product) in pair.iter_mut().zip(&mut lane_products) {
             addition.inversion_scratch = *product;
@@ -1462,6 +1495,23 @@ fn batch_invert_and_add<F: Field>(
             y: second_y,
         };
     }
+
+    let first_left = points[first.output];
+    let second_left = points[second.output];
+    let first_slope = first.numerator * lane_inverses[0];
+    let second_slope = second.numerator * lane_inverses[1];
+    let first_x = first_slope.square() - first.x_sum;
+    let second_x = second_slope.square() - second.x_sum;
+    let first_y = first_slope * (first_left.x - first_x) - first_left.y;
+    let second_y = second_slope * (second_left.x - second_x) - second_left.y;
+    points[first.output] = AffinePoint {
+        x: first_x,
+        y: first_y,
+    };
+    points[second.output] = AffinePoint {
+        x: second_x,
+        y: second_y,
+    };
     Some(())
 }
 
@@ -3895,6 +3945,32 @@ mod tests {
     use ff::Field;
 
     const VERIFIER_MULTIEXP_SIZES: [usize; 3] = [2_150, 2_990, 5_678];
+
+    fn batch_invert_nonzero_matches_individual<F>()
+    where
+        F: Field + From<u64>,
+    {
+        for length in [0usize, 1, 2, 3, 31, 32, 33, 64, 257] {
+            let mut values = (1..=length)
+                .map(|value| F::from(u64::try_from(value).unwrap()))
+                .collect::<Vec<_>>();
+            let expected = values
+                .iter()
+                .map(|value| value.invert().unwrap())
+                .collect::<Vec<_>>();
+            let mut scratch = vec![F::ZERO; length];
+
+            batch_invert_nonzero(&mut values, &mut scratch);
+
+            assert_eq!(values, expected, "length {length}");
+        }
+    }
+
+    #[test]
+    fn batch_invert_nonzero_handles_boundaries() {
+        batch_invert_nonzero_matches_individual::<crate::Fp>();
+        batch_invert_nonzero_matches_individual::<crate::Fq>();
+    }
 
     fn batch_invert_and_add_two_lanes_matches_individual<F>()
     where
