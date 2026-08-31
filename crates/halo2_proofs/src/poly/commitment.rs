@@ -1681,7 +1681,7 @@ fn prepared_sparse_commitment_matches_combined_msm() {
     assert!(params.prepare_commitments());
     let mut rng = StdRng::seed_from_u64(0x7370_6172_7365_6d73);
 
-    for indices in [&[0, 1][..], &[0, 1, 2, 4, 8, 16, 32][..]] {
+    for indices in [&[0, 1][..], &[0, 1, 2][..], &[0, 1, 2, 4, 8, 16, 32][..]] {
         let scalars = indices
             .iter()
             .map(|_| Fp::random(&mut rng))
@@ -1733,7 +1733,7 @@ fn benchmark_prepared_sparse_commitment() {
     let mut rng = StdRng::seed_from_u64(0x7370_6172_7365_626d);
 
     for (name, indices) in [
-        ("quotient", &[0, 1][..]),
+        ("quotient", &[0, 1, 2][..]),
         ("ipa", &[0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024][..]),
     ] {
         let scalars = indices
