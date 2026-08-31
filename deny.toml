@@ -54,6 +54,15 @@ skip = [
     { name = "syn", version = "=1.0.109" },
     { name = "syn", version = "=2.0.119" },
     { name = "windows-sys", version = "=0.52.0" },
+    # The cfg-gated Tachyon/Ragu stack consumes the published Zakura 1.0.1
+    # crates and its own maybe-rayon fork, while this workspace builds the
+    # corresponding packages from local paths or crates.io. Keep these source
+    # duplicates exact until the external stack can share workspace sources.
+    { name = "maybe-rayon", version = "=0.1.1" },
+    { name = "zakura-bls12-381", version = "=1.0.1" },
+    { name = "zakura-jubjub", version = "=1.0.1" },
+    { name = "zakura-pasta-curves", version = "=1.0.1" },
+    { name = "zakura-reddsa", version = "=1.0.1" },
 ]
 
 [sources]

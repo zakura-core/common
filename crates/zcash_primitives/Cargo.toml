@@ -51,7 +51,7 @@ zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "164
 zcash_script = { version = "0.4.3", default-features = false }
 
 [target.'cfg(zcash_unstable = "nutachyon")'.dependencies]
-zcash_tachyon = { git = "https://github.com/tachyon-zcash/tachyon", rev = "fd02241612a09284a0f37ee58970ef8dcb042e43", default-features = false }
+zcash_tachyon = { git = "https://github.com/tachyon-zcash/tachyon", rev = "fd02241612a09284a0f37ee58970ef8dcb042e43", version = "0.0.0", default-features = false }
 
 [dev-dependencies]
 assert_matches = "1.5"
