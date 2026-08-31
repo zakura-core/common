@@ -142,20 +142,22 @@ fn fold_quotient_pieces_pasta<
 //
 //     Q_x(x_3) = (... + x_1 h(x_3)) + r(x_3).
 //
-// For r(X) = a + bX, the map from (a, b) to (r(x), r(x_3)) has determinant
-// x_3 - x. Conditioned on the revealed r(x), r(x_3) is therefore uniform when
-// the points are distinct. The verifier rejects x_3 equal to any queried
-// point. The independently Pedersen-blinded group messages hide the
-// coefficients before each challenge, while the commitment scheme's separate
-// IPA mask hides its final folded scalar. This commitment participates in one
-// multi-opening, and the verifier sees only r(x) and its single affine
-// contribution r(x_3). Exposing r at another independent point would require
-// revisiting the two-coefficient argument. Thus two random coefficients give
-// the same HVZK masking role as the previous dense polynomial, up to the
-// scheme's existing negligible challenge-collision and transcript-abort
-// events. Soundness does not depend on an honest prover sampling r from either
+// For r(X) = a + bX + cX^2, the first two columns of the map from (a, b, c) to
+// (r(x), r(x_3)) have determinant x_3 - x. The map therefore has rank two
+// when the points are distinct, and a one-dimensional kernel. Conditioned on
+// the revealed r(x), r(x_3) is uniform, with one random coefficient of excess
+// entropy after both evaluations are fixed. The verifier rejects x_3 equal to
+// any queried point. The independently Pedersen-blinded group messages hide
+// the coefficients before each challenge, while the commitment scheme's
+// separate IPA mask hides its final folded scalar. This commitment
+// participates in one multi-opening, and the verifier sees only r(x) and its
+// single affine contribution r(x_3). Thus three random coefficients give the
+// same HVZK masking role as the previous dense polynomial, with one excess
+// coefficient beyond the two needed for these evaluations, up to the scheme's
+// existing negligible challenge-collision and transcript-abort events.
+// Soundness does not depend on an honest prover sampling r from either
 // distribution.
-const QUOTIENT_EVALUATION_MASK_COEFFICIENTS: usize = 2;
+const QUOTIENT_EVALUATION_MASK_COEFFICIENTS: usize = 3;
 
 fn sample_quotient_evaluation_mask<F: WithSmallOrderMulGroup<3>, R: Rng>(
     domain: &EvaluationDomain<F>,
@@ -184,14 +186,14 @@ fn commit_quotient_evaluation_mask<C: CurveAffine>(
             .all(|coefficient| *coefficient == C::Scalar::ZERO)
     );
 
-    let scalars = [polynomial[0], polynomial[1]];
-    let bases = [params.g[0], params.g[1]];
+    let scalars = [polynomial[0], polynomial[1], polynomial[2]];
+    let bases = [params.g[0], params.g[1], params.g[2]];
 
     params
         .try_commit_sparse_with_prepared_blind(&scalars, &bases, blind)
         .unwrap_or_else(|| {
-            let scalars = [polynomial[0], polynomial[1], blind.0];
-            let bases = [params.g[0], params.g[1], params.w];
+            let scalars = [polynomial[0], polynomial[1], polynomial[2], blind.0];
+            let bases = [params.g[0], params.g[1], params.g[2], params.w];
             best_multiexp(&scalars, &bases)
         })
 }
@@ -204,7 +206,7 @@ fn evaluate_quotient_evaluation_mask<F: Field>(polynomial: &Polynomial<F, Coeff>
             .all(|coefficient| *coefficient == F::ZERO)
     );
 
-    polynomial[0] + polynomial[1] * point
+    polynomial[0] + point * (polynomial[1] + polynomial[2] * point)
 }
 
 pub(in crate::plonk) struct CommittedRandomPolynomial<C: CurveAffine> {
@@ -237,12 +239,12 @@ impl<C: CurveAffine> Argument<C> {
         mut rng: R,
         transcript: &mut T,
     ) -> Result<CommittedRandomPolynomial<C>, Error> {
-        // Sample a random linear polynomial. If the PLONK and multi-opening
+        // Sample a random quadratic polynomial. If the PLONK and multi-opening
         // evaluation points are distinct, its values at those two points are
-        // independent and uniform: the evaluation matrix has determinant
-        // equal to the difference of the points. The multi-opening verifier
-        // rejects the exceptional point collision, which is the same
-        // negligible honest-abort event under the previous dense mask.
+        // independent and uniform, with one coefficient of excess entropy.
+        // The multi-opening verifier rejects the exceptional point collision,
+        // which is the same negligible honest-abort event under the previous
+        // dense mask.
         let random_poly = sample_quotient_evaluation_mask(domain, &mut rng);
         // Sample a random blinding factor
         let random_blind = Blind(C::Scalar::random(&mut rng));
@@ -484,23 +486,31 @@ mod tests {
         );
     }
 
-    fn two_evaluations_have_full_masking_rank<F>()
+    fn quadratic_mask_has_excess_entropy_after_two_evaluations<F>()
     where
         F: WithSmallOrderMulGroup<3> + From<u64> + core::fmt::Debug,
     {
         let first_point = F::from(5);
         let later_point = F::from(9);
         let first_evaluation = F::from(17);
-        let point_difference_inverse = (later_point - first_point).invert().unwrap();
+        let point_difference = later_point - first_point;
+        let point_difference_inverse = point_difference.invert().unwrap();
+        let squared_difference = later_point.square() - first_point.square();
 
-        // For every desired later evaluation there is exactly one linear
-        // polynomial with the fixed first evaluation. Thus a uniform random
-        // linear polynomial leaves the later evaluation uniform.
+        // For every desired later evaluation and every quadratic coefficient,
+        // there is exactly one choice of the remaining two coefficients. Thus
+        // the later evaluation is uniform, and fixing both evaluations leaves
+        // one coefficient of entropy.
         for later_evaluation in [F::ZERO, F::ONE, F::from(29)] {
-            let linear = (later_evaluation - first_evaluation) * point_difference_inverse;
-            let constant = first_evaluation - linear * first_point;
-            assert_eq!(constant + linear * first_point, first_evaluation);
-            assert_eq!(constant + linear * later_point, later_evaluation);
+            for quadratic in [F::ZERO, F::ONE, F::from(31)] {
+                let linear = (later_evaluation - first_evaluation - quadratic * squared_difference)
+                    * point_difference_inverse;
+                let constant =
+                    first_evaluation - linear * first_point - quadratic * first_point.square();
+                let evaluate = |point: F| constant + point * (linear + quadratic * point);
+                assert_eq!(evaluate(first_point), first_evaluation);
+                assert_eq!(evaluate(later_point), later_evaluation);
+            }
         }
     }
 
@@ -541,12 +551,12 @@ mod tests {
     }
 
     #[test]
-    fn two_evaluations_have_full_masking_rank_fp() {
-        two_evaluations_have_full_masking_rank::<pallas::Base>();
+    fn quadratic_mask_has_excess_entropy_after_two_evaluations_fp() {
+        quadratic_mask_has_excess_entropy_after_two_evaluations::<pallas::Base>();
     }
 
     #[test]
-    fn two_evaluations_have_full_masking_rank_fq() {
-        two_evaluations_have_full_masking_rank::<vesta::Base>();
+    fn quadratic_mask_has_excess_entropy_after_two_evaluations_fq() {
+        quadratic_mask_has_excess_entropy_after_two_evaluations::<vesta::Base>();
     }
 }
