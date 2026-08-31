@@ -26,11 +26,19 @@ fn criterion_benchmark(c: &mut Criterion) {
                 .map(|_| Fp::random(&mut rng()))
                 .collect(),
         );
+        let evaluations = domain.lagrange_from_vec(
+            (0..(1 << ORCHARD_K))
+                .map(|_| Fp::random(&mut rng()))
+                .collect(),
+        );
         let blind = Blind(Fp::random(&mut rng()));
         let mut prepared = c.benchmark_group("prepared Orchard commitment MSM");
         prepared.sample_size(30);
         prepared.bench_function("coefficient-k11", |b| {
             b.iter(|| params.commit(black_box(&polynomial), black_box(blind)))
+        });
+        prepared.bench_function("lagrange-k11", |b| {
+            b.iter(|| params.commit_lagrange(black_box(&evaluations), black_box(blind)))
         });
         prepared.finish();
     }

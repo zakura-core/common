@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Added
+
+- Added `PreparedZeroCheck::multiexp_with_prefix_and_suffix`, a
+  variable-time multiscalar multiplication that accepts the fixed-base scalars
+  as two consecutive slices; its default implementation preserves compatibility
+  with existing prepared backends by joining the slices.
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

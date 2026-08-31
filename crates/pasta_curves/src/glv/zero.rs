@@ -343,27 +343,76 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         scalars: &[C::ScalarExt],
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> C {
-        assert_eq!(
-            scalars.len(),
-            self.live.len(),
-            "one scalar per prepared base"
-        );
-        let num_threads = current_num_threads();
+        self.multiexp_with_scalar_slices(scalars, &[], extra)
+    }
 
-        // Fold merged bases' scalars into their targets (rare; scan-found).
-        let folded: Vec<C::ScalarExt>;
-        let scalars = if self.merges.is_empty() {
-            scalars
+    /// Evaluates fixed-base scalars supplied as two consecutive slices.
+    fn multiexp_with_scalar_slices(
+        &self,
+        prefix: &[C::ScalarExt],
+        suffix: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        let terms = prefix
+            .len()
+            .checked_add(suffix.len())
+            .expect("fixed scalar count overflow");
+        assert_eq!(terms, self.live.len(), "one scalar per prepared base");
+
+        if let Some(folded) = self.fold_scalar_slices(prefix, suffix) {
+            return self.multiexp_with_scalar_at(terms, |index| &folded[index], extra);
+        }
+        if suffix.is_empty() {
+            self.multiexp_with_scalar_at(terms, |index| &prefix[index], extra)
         } else {
-            let mut owned = scalars.to_vec();
-            for &(source, target, mu) in &self.merges {
-                let contribution = owned[source] * mu;
-                owned[target] += contribution;
-                owned[source] = C::ScalarExt::ZERO;
-            }
-            folded = owned;
-            &folded
-        };
+            // `try_recode_with` requests only indices in `0..terms`. The
+            // combined-length assertion above therefore makes every index
+            // land in exactly one slice and preserves its prepared-base pair.
+            self.multiexp_with_scalar_at(
+                terms,
+                |index| {
+                    if index < prefix.len() {
+                        &prefix[index]
+                    } else {
+                        &suffix[index - prefix.len()]
+                    }
+                },
+                extra,
+            )
+        }
+    }
+
+    /// Copies and folds scalars only when preparation found related bases.
+    fn fold_scalar_slices(
+        &self,
+        prefix: &[C::ScalarExt],
+        suffix: &[C::ScalarExt],
+    ) -> Option<Vec<C::ScalarExt>> {
+        if self.merges.is_empty() {
+            return None;
+        }
+
+        let mut scalars = Vec::with_capacity(prefix.len() + suffix.len());
+        scalars.extend_from_slice(prefix);
+        scalars.extend_from_slice(suffix);
+        for &(source, target, mu) in &self.merges {
+            // Preparation found P_source = [mu] P_target. Transfer the source
+            // scalar into the live target before zeroing the dead source row.
+            let contribution = scalars[source] * mu;
+            scalars[target] += contribution;
+            scalars[source] = C::ScalarExt::ZERO;
+        }
+        Some(scalars)
+    }
+
+    /// Evaluates fixed-base scalars fetched by prepared-base index.
+    fn multiexp_with_scalar_at<'a>(
+        &self,
+        terms: usize,
+        scalar_at: impl Fn(usize) -> &'a C::ScalarExt + Sync,
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        let num_threads = current_num_threads();
 
         // Dead rows (identity bases, merge sources) contribute nothing;
         // force their recoding rows and residuals to zero. A decomposition
@@ -379,17 +428,13 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 };
                 return Some((zero, zero));
             }
-            checked_signed_magnitudes(decompose::<C>(&scalars[index]))
+            checked_signed_magnitudes(decompose::<C>(scalar_at(index)))
         };
-        let Some(recoded) = codebook::try_recode_with(
-            &self.codebook,
-            scalars.len(),
-            num_threads,
-            decompose_checked,
-        ) else {
-            return self.naive_multiexp(scalars, extra);
+        let Some(recoded) =
+            codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
+        else {
+            return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
         };
-
         // Extras with zero scalars or identity points contribute nothing.
         let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
             .iter()
@@ -404,7 +449,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             // reduction's inversions cannot actually hit zero), but never
             // trust that with the result's correctness: fall back to a
             // naive exact evaluation.
-            None => self.naive_multiexp(scalars, extra),
+            None => self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra),
         }
     }
 
@@ -653,13 +698,15 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     }
 
     /// Exact fallback evaluation (never taken in practice; see the caller).
-    fn naive_multiexp(
+    fn naive_multiexp_with_scalar_at<'a>(
         &self,
-        scalars: &[C::ScalarExt],
+        terms: usize,
+        scalar_at: &(impl Fn(usize) -> &'a C::ScalarExt + Sync),
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> C {
         let mut acc = C::identity();
-        for (index, scalar) in scalars.iter().enumerate() {
+        for index in 0..terms {
+            let scalar = scalar_at(index);
             if !self.live[index] || bool::from(scalar.is_zero()) {
                 continue;
             }
@@ -701,6 +748,15 @@ impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for PreparedZeroMsm<C
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> C {
         PreparedZeroMsm::multiexp_with_terms_vartime(self, scalars, extra)
+    }
+
+    fn multiexp_with_prefix_and_suffix(
+        &self,
+        prefix: &[C::ScalarExt],
+        suffix: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        self.multiexp_with_scalar_slices(prefix, suffix, extra)
     }
 }
 
@@ -1243,6 +1299,31 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct DefaultPrefixAndSuffix<'a, C: GlvParams>(&'a PreparedZeroMsm<C>);
+
+    impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for DefaultPrefixAndSuffix<'_, C> {
+        fn terms(&self) -> usize {
+            self.0.terms()
+        }
+
+        fn is_zero_with_terms_vartime(
+            &self,
+            scalars: &[C::ScalarExt],
+            extra: &[(C::ScalarExt, C::AffineExt)],
+        ) -> bool {
+            self.0.is_zero_with_terms_vartime(scalars, extra)
+        }
+
+        fn multiexp_with_terms_vartime(
+            &self,
+            scalars: &[C::ScalarExt],
+            extra: &[(C::ScalarExt, C::AffineExt)],
+        ) -> C {
+            self.0.multiexp_with_terms_vartime(scalars, extra)
+        }
+    }
+
     /// The prepared check agrees with the generic MSM on random (nonzero)
     /// inputs and on the same inputs with extra terms carved out.
     fn matches_generic_msm<C: GlvParams>() {
@@ -1270,15 +1351,51 @@ mod tests {
             prepared.multiexp_with_terms_vartime(&scalars, &[]),
             expected
         );
+        let generator = C::generator().to_affine();
+        let extra_term = (C::ScalarExt::from(41), generator);
+        let expected_with_extra = expected + C::generator() * extra_term.0;
+        for split in [0, 1, scalars.len() - 2, scalars.len() - 1, scalars.len()] {
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
+                    &prepared,
+                    &scalars[..split],
+                    &scalars[split..],
+                    &[],
+                ),
+                expected,
+                "prefix/suffix evaluation differs at split {split}"
+            );
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
+                    &prepared,
+                    &scalars[..split],
+                    &scalars[split..],
+                    &[extra_term],
+                ),
+                expected_with_extra,
+                "prefix/suffix evaluation with extras differs at split {split}"
+            );
+        }
+        let default_prefix_and_suffix = DefaultPrefixAndSuffix(&prepared);
+        let split = scalars.len() - 2;
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
+                &default_prefix_and_suffix,
+                &scalars[..split],
+                &scalars[split..],
+                &[],
+            ),
+            expected,
+            "the trait's default prefix/suffix evaluation must preserve order"
+        );
         assert!(bool::from(
             prepared
                 .multiexp_with_terms_vartime(&scalars, &extra)
                 .is_identity()
         ));
-        let generator = C::generator().to_affine();
         assert_eq!(
-            prepared.multiexp_with_terms_vartime(&scalars, &[(C::ScalarExt::from(41), generator)]),
-            expected + C::generator() * C::ScalarExt::from(41)
+            prepared.multiexp_with_terms_vartime(&scalars, &[extra_term]),
+            expected_with_extra
         );
     }
 
@@ -1396,9 +1513,33 @@ mod tests {
             "planted relations must be found"
         );
         assert!(prepared.is_zero_vartime(&scalars));
+        let &(source, target, _) = prepared
+            .merges
+            .first()
+            .expect("the relation scan found at least one merge");
+        let split = source;
+        assert!(target < split, "merge target must precede its source");
+        assert!(bool::from(
+            crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
+                &prepared,
+                &scalars[..split],
+                &scalars[split..],
+                &[],
+            )
+            .is_identity()
+        ));
         let mut perturbed = scalars;
         perturbed[2] += C::ScalarExt::ONE;
         assert!(!prepared.is_zero_vartime(&perturbed));
+        assert!(!bool::from(
+            crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
+                &prepared,
+                &perturbed[..split],
+                &perturbed[split..],
+                &[],
+            )
+            .is_identity()
+        ));
     }
 
     /// The default planner produces a working preparation.

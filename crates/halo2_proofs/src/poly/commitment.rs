@@ -120,6 +120,8 @@ const BLIND_WINDOW_BITS: usize = u8::BITS as usize;
 const BLIND_WINDOW_ENTRIES: usize = (1 << BLIND_WINDOW_BITS) - 1;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const BLIND_BYTE_ORDER_PROBE: u64 = 0x0102_0304_0506_0708;
+#[cfg(feature = "orbits")]
+const PREPARED_COMMITMENT_EXTRA_BASES: usize = 2;
 
 /// The `k = 11` SRS shape, whose current Pasta α7 tables remain ahead
 /// through all ten cores on the benchmarked Apple M4 systems.
@@ -603,12 +605,11 @@ impl<C: CurveAffine> Params<C> {
             && let Some(prepared) = self.zero_check()
         {
             let n = self.n as usize;
-            if prepared.terms() == n + 2 && poly.len() == n {
-                let mut fixed = Vec::with_capacity(n + 2);
-                fixed.extend(poly.iter());
-                fixed.push(r.0);
-                fixed.push(C::Scalar::ZERO);
-                return prepared.multiexp_with_terms_vartime(&fixed, &[]);
+            if prepared.terms() == n + PREPARED_COMMITMENT_EXTRA_BASES && poly.len() == n {
+                // Logical concatenation keeps coefficients paired with `g`,
+                // the blind paired with `w`, and zero paired with unused `u`.
+                let suffix = [r.0, C::Scalar::ZERO];
+                return prepared.multiexp_with_prefix_and_suffix(poly, &suffix, &[]);
             }
         }
 
@@ -657,12 +658,11 @@ impl<C: CurveAffine> Params<C> {
             && let Some(prepared) = self.lagrange_table()
         {
             let n = self.n as usize;
-            if prepared.terms() == n + 2 && poly.len() == n {
-                let mut fixed = Vec::with_capacity(n + 2);
-                fixed.extend(poly.iter());
-                fixed.push(r.0);
-                fixed.push(C::Scalar::ZERO);
-                return prepared.multiexp_with_terms_vartime(&fixed, &[]);
+            if prepared.terms() == n + PREPARED_COMMITMENT_EXTRA_BASES && poly.len() == n {
+                // Preserve the same base-scalar pairing as the coefficient
+                // path, with the prefix paired with `g_lagrange`.
+                let suffix = [r.0, C::Scalar::ZERO];
+                return prepared.multiexp_with_prefix_and_suffix(poly, &suffix, &[]);
             }
         }
 
@@ -794,7 +794,7 @@ impl<C: CurveAffine> Params<C> {
         #[cfg(feature = "orbits")]
         {
             self.zero_check_cache.initialize(|| {
-                let mut bases = Vec::with_capacity(self.g.len() + 2);
+                let mut bases = Vec::with_capacity(self.g.len() + PREPARED_COMMITMENT_EXTRA_BASES);
                 bases.extend_from_slice(&self.g);
                 bases.push(self.w);
                 bases.push(self.u);
@@ -862,7 +862,8 @@ impl<C: CurveAffine> Params<C> {
                 return false;
             }
             self.lagrange_table_cache.initialize(|| {
-                let mut bases = Vec::with_capacity(self.g_lagrange.len() + 2);
+                let mut bases =
+                    Vec::with_capacity(self.g_lagrange.len() + PREPARED_COMMITMENT_EXTRA_BASES);
                 bases.extend_from_slice(&self.g_lagrange);
                 bases.push(self.w);
                 bases.push(self.u);
@@ -1066,7 +1067,7 @@ fn prepared_caches_initialize_once_across_clones() {
     use crate::pasta::{Eq, EqAffine};
 
     let params = Arc::new(Params::<EqAffine>::new(K));
-    let mut bases = Vec::with_capacity(params.g.len() + 2);
+    let mut bases = Vec::with_capacity(params.g.len() + PREPARED_COMMITMENT_EXTRA_BASES);
     bases.extend_from_slice(&params.g);
     bases.push(params.w);
     bases.push(params.u);

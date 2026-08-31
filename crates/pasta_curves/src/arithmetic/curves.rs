@@ -226,6 +226,40 @@ pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
         scalars: &[C::ScalarExt],
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> C;
+
+    /// The same exact multiscalar multiplication as
+    /// [`Self::multiexp_with_terms_vartime`], with the fixed-base scalars
+    /// supplied as two consecutive slices. `prefix` is paired with the first
+    /// fixed bases and `suffix` with the remaining fixed bases.
+    ///
+    /// The default implementation joins the slices in an owned buffer.
+    /// Backends can override this method to consume both slices directly.
+    ///
+    /// # Security
+    ///
+    /// Variable-time in everything; callers committing to secret data must
+    /// already accept a variable-time multiexp.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the combined slice length equals [`Self::terms`].
+    fn multiexp_with_prefix_and_suffix(
+        &self,
+        prefix: &[C::ScalarExt],
+        suffix: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        let terms = prefix
+            .len()
+            .checked_add(suffix.len())
+            .expect("fixed scalar count overflow");
+        assert_eq!(terms, self.terms(), "one scalar per prepared base");
+
+        let mut scalars = alloc::vec::Vec::with_capacity(terms);
+        scalars.extend_from_slice(prefix);
+        scalars.extend_from_slice(suffix);
+        self.multiexp_with_terms_vartime(&scalars, extra)
+    }
 }
 
 /// Internal construction for coordinates produced by trusted curve formulas.

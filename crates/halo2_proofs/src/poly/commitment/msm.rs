@@ -315,7 +315,7 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             && let Some(prepared) = self.params.zero_check()
         {
             let n = self.params.n as usize;
-            if prepared.terms() == n + 2 {
+            if prepared.terms() == n + super::PREPARED_COMMITMENT_EXTRA_BASES {
                 if !self.batched_other.is_empty() {
                     // Canonicalize in place rather than on a clone: the
                     // merged view serves the prepared check's extras, and
@@ -339,7 +339,8 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
                         .collect()
                 };
                 if extra.len() <= n {
-                    let mut fixed = vec![C::Scalar::ZERO; n + 2];
+                    let mut fixed =
+                        vec![C::Scalar::ZERO; n + super::PREPARED_COMMITMENT_EXTRA_BASES];
                     if let Some(g_scalars) = &self.g_scalars {
                         fixed[..n].copy_from_slice(g_scalars);
                     }
@@ -471,7 +472,10 @@ mod tests {
             // capped pool at the end of this test).
             assert!(armed, "Pasta params must arm under the orbits feature");
             let prepared = params.zero_check().expect("armed above");
-            assert_eq!(prepared.terms(), n + 2);
+            assert_eq!(
+                prepared.terms(),
+                n + super::super::PREPARED_COMMITMENT_EXTRA_BASES
+            );
         }
         #[cfg(not(feature = "orbits"))]
         assert!(!armed);
