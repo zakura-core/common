@@ -4458,7 +4458,7 @@ dependencies = [
 [[package]]
 name = "zcash_tachyon"
 version = "0.0.0"
-source = "git+https://github.com/tachyon-zcash/tachyon?rev=fd02241612a09284a0f37ee58970ef8dcb042e43#fd02241612a09284a0f37ee58970ef8dcb042e43"
+source = "git+https://github.com/tachyon-zcash/tachyon?rev=2dc7010c3e7771c539fd1c03a06bc6be1a7316c7#2dc7010c3e7771c539fd1c03a06bc6be1a7316c7"
 dependencies = [
  "blake2b_simd",
  "corez",
