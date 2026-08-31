@@ -9,11 +9,8 @@ use crate::arithmetic::{
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
 use group::{Curve, Group};
-#[cfg(target_arch = "aarch64")]
 use pasta_curves::{deferred::DeferredField, pallas, vesta};
-use std::any::Any;
-#[cfg(target_arch = "aarch64")]
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::io;
 
 /// Samples the sparse polynomial that masks the final folded IPA scalar,
@@ -86,7 +83,6 @@ fn ipa_round_multiexp<C: CurveAffine>(
     best_multiexp(&round_coeffs, &round_bases)
 }
 
-#[cfg(target_arch = "aarch64")]
 fn compute_ipa_inner_products_deferred<F: Field + 'static, T: DeferredField + 'static>(
     a: &dyn Any,
     b: &dyn Any,
@@ -114,14 +110,11 @@ fn compute_ipa_inner_products_pasta<F: Field + 'static>(
     b: &dyn Any,
     half: usize,
 ) -> (F, F) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
-            return compute_ipa_inner_products_deferred::<F, pallas::Base>(a, b, half);
-        }
-        if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
-            return compute_ipa_inner_products_deferred::<F, vesta::Base>(a, b, half);
-        }
+    if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
+        return compute_ipa_inner_products_deferred::<F, pallas::Base>(a, b, half);
+    }
+    if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
+        return compute_ipa_inner_products_deferred::<F, vesta::Base>(a, b, half);
     }
 
     // Downcasting the complete owned buffers is safe and avoids per-element
