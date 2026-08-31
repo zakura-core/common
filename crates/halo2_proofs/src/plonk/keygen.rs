@@ -580,7 +580,7 @@ where
         .domain
         .coeff_to_extended_with_twiddles(l_last, &fft_twiddles);
 
-    Ok(ProvingKey {
+    let pk = ProvingKey {
         vk,
         l0,
         l_blind,
@@ -593,7 +593,9 @@ where
         fft_twiddles,
         floor_plan,
         quotient_cache_layouts: Arc::new(Default::default()),
-    })
+    };
+    super::evaluator_schedule::prepare_quotient_cache_layouts(&pk);
+    Ok(pk)
 }
 #[cfg(test)]
 mod tests {

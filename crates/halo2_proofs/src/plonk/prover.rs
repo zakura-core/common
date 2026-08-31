@@ -1450,11 +1450,11 @@ fn v1_proving_key_reuses_floor_plan() {
 fn compressed_selector_cache_preserves_proof() {
     use crate::{
         circuit::{Layouter, SimpleFloorPlanner},
-        plonk::{Expression, keygen_pk, keygen_vk},
+        plonk::{Expression, SingleVerifier, TableColumn, keygen_pk, keygen_vk, verify_proof},
         poly::Rotation,
-        transcript::{Blake2bWrite, Challenge255},
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
-    use pasta_curves::EqAffine;
+    use pasta_curves::{EqAffine, Fp};
     use rand::{SeedableRng, rngs::StdRng};
 
     const PROOF_SEED: u64 = 0x5345_4c45_4354_4f52;
@@ -1463,6 +1463,7 @@ fn compressed_selector_cache_preserves_proof() {
     struct Config {
         advice: Column<Advice>,
         selectors: [Selector; crate::MIN_SELECTOR_FAMILY_LEN],
+        table: TableColumn,
     }
 
     #[derive(Clone, Copy)]
@@ -1479,6 +1480,13 @@ fn compressed_selector_cache_preserves_proof() {
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
             let advice = meta.advice_column();
             let selectors = core::array::from_fn(|_| meta.selector());
+            let table = meta.lookup_table_column();
+
+            meta.enable_equality(advice);
+            meta.lookup(|meta| {
+                let advice = meta.query_advice(advice, Rotation::cur());
+                vec![(advice, table)]
+            });
 
             for selector in selectors {
                 meta.create_gate("selector family", |meta| {
@@ -1493,7 +1501,11 @@ fn compressed_selector_cache_preserves_proof() {
             // column.
             meta.set_minimum_degree(crate::MIN_SELECTOR_FAMILY_LEN + 1);
 
-            Config { advice, selectors }
+            Config {
+                advice,
+                selectors,
+                table,
+            }
         }
 
         fn synthesize(
@@ -1501,6 +1513,14 @@ fn compressed_selector_cache_preserves_proof() {
             config: Self::Config,
             mut layouter: impl Layouter<F>,
         ) -> Result<(), Error> {
+            layouter.assign_table(
+                || "lookup table",
+                |mut table| {
+                    table.assign_cell(|| "zero", config.table, 0, || Value::known(F::ZERO))?;
+                    table.assign_cell(|| "one", config.table, 1, || Value::known(F::ONE))?;
+                    Ok(())
+                },
+            )?;
             layouter.assign_region(
                 || "selector family",
                 |mut region| {
@@ -1519,18 +1539,46 @@ fn compressed_selector_cache_preserves_proof() {
         }
     }
 
-    fn create(pk: &ProvingKey<EqAffine>, params: &Params<EqAffine>) -> Vec<u8> {
+    fn create(
+        pk: &ProvingKey<EqAffine>,
+        params: &Params<EqAffine>,
+        circuit_count: usize,
+        seed: u64,
+    ) -> Vec<u8> {
+        let circuits = [MyCircuit; 4];
+        let no_instance_columns: &[&[Fp]] = &[];
+        let instances = [no_instance_columns; 4];
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         create_proof(
             params,
             pk,
-            &[MyCircuit, MyCircuit],
-            &[&[], &[]],
-            StdRng::seed_from_u64(PROOF_SEED),
+            &circuits[..circuit_count],
+            &instances[..circuit_count],
+            StdRng::seed_from_u64(seed),
             &mut transcript,
         )
         .expect("proof generation should not fail");
         transcript.finalize()
+    }
+
+    fn verify(
+        pk: &ProvingKey<EqAffine>,
+        params: &Params<EqAffine>,
+        circuit_count: usize,
+        proof: &[u8],
+    ) {
+        let no_instance_columns: &[&[Fp]] = &[];
+        let instances = [no_instance_columns; 4];
+        let strategy = SingleVerifier::new(params);
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(proof);
+        verify_proof(
+            params,
+            pk.get_vk(),
+            strategy,
+            &instances[..circuit_count],
+            &mut transcript,
+        )
+        .expect("proof verification should not fail");
     }
 
     let params = Params::new(4);
@@ -1544,6 +1592,51 @@ fn compressed_selector_cache_preserves_proof() {
         pk.cached_selector_families[0].selectors.len() + 1,
         crate::MIN_SELECTOR_FAMILY_LEN
     );
+    assert!(pk.quotient_cache_layouts.get(3).is_none());
+
+    // Key generation prepares every retained shape before any proof. The
+    // first proof must keep that exact Arc, rather than falling back and
+    // replacing a mismatched schedule. An empty-layout key provides the
+    // byte-for-byte control for 1, 2, and 4 circuits.
+    let mut eager_proofs = vec![];
+    for circuit_count in [1, 2, 4] {
+        let eager_layout = pk
+            .quotient_cache_layouts
+            .get(circuit_count)
+            .expect("keygen prepares each retained quotient layout");
+        let eager_proof = create(&pk, &params, circuit_count, PROOF_SEED);
+        let retained_layout = pk
+            .quotient_cache_layouts
+            .get(circuit_count)
+            .expect("the first proof retains its eager layout");
+        assert!(std::sync::Arc::ptr_eq(&eager_layout, &retained_layout));
+
+        let mut lazy_pk = pk.clone();
+        lazy_pk.quotient_cache_layouts = std::sync::Arc::new(Default::default());
+        let lazy_proof = create(&lazy_pk, &params, circuit_count, PROOF_SEED);
+        assert_eq!(eager_proof, lazy_proof);
+        verify(&pk, &params, circuit_count, &eager_proof);
+        eager_proofs.push(eager_proof);
+    }
+
+    // A different seed changes commitments before theta is sampled. The
+    // eager sparse schedule remains valid for the resulting challenge-bound
+    // plan, while proof bytes still match a freshly planned control.
+    let alternate_seed = PROOF_SEED ^ 0xa11c_e55e_7e57_0001;
+    let eager_layout = pk.quotient_cache_layouts.get(1).unwrap();
+    let alternate_proof = create(&pk, &params, 1, alternate_seed);
+    assert_ne!(alternate_proof, eager_proofs[0]);
+    assert!(std::sync::Arc::ptr_eq(
+        &eager_layout,
+        &pk.quotient_cache_layouts.get(1).unwrap()
+    ));
+    let mut alternate_lazy_pk = pk.clone();
+    alternate_lazy_pk.quotient_cache_layouts = std::sync::Arc::new(Default::default());
+    assert_eq!(
+        alternate_proof,
+        create(&alternate_lazy_pk, &params, 1, alternate_seed)
+    );
+    verify(&pk, &params, 1, &alternate_proof);
 
     // A family omitted by the cache budget retains its source coset and takes
     // the generic evaluator path. Restore that state for every cached family.
@@ -1560,19 +1653,27 @@ fn compressed_selector_cache_preserves_proof() {
             .coeff_to_extended(uncached_pk.fixed_polys[column_index].clone());
     }
     uncached_pk.cached_selector_families = Default::default();
+    uncached_pk.quotient_cache_layouts = std::sync::Arc::new(Default::default());
 
-    assert_eq!(create(&pk, &params), create(&uncached_pk, &params));
+    assert_eq!(
+        create(&pk, &params, 2, PROOF_SEED),
+        create(&uncached_pk, &params, 2, PROOF_SEED)
+    );
 
-    // Concurrent cold proofs may race to prepare the same retained layout.
-    // Both results remain identical, and a later proof reuses the winner.
+    // Concurrent first proofs share the keygen-prepared schedule without
+    // replacement and preserve deterministic proof bytes.
     let concurrent_pk = create_pk();
+    let eager_layout = concurrent_pk.quotient_cache_layouts.get(4).unwrap();
     let (first, second) = std::thread::scope(|scope| {
-        let first = scope.spawn(|| create(&concurrent_pk, &params));
-        let second = scope.spawn(|| create(&concurrent_pk, &params));
+        let first = scope.spawn(|| create(&concurrent_pk, &params, 4, PROOF_SEED));
+        let second = scope.spawn(|| create(&concurrent_pk, &params, 4, PROOF_SEED));
         (first.join().unwrap(), second.join().unwrap())
     });
     assert_eq!(first, second);
-    assert_eq!(first, create(&concurrent_pk, &params));
+    assert!(std::sync::Arc::ptr_eq(
+        &eager_layout,
+        &concurrent_pk.quotient_cache_layouts.get(4).unwrap()
+    ));
 
     #[cfg(feature = "multicore")]
     {
@@ -1607,8 +1708,8 @@ fn compressed_selector_cache_preserves_proof() {
             }
         }
 
-        let single_proof = single_pool.install(|| create(&single_pk, &params));
-        let parallel_proof = parallel_pool.install(|| create(&parallel_pk, &params));
+        let single_proof = single_pool.install(|| create(&single_pk, &params, 4, PROOF_SEED));
+        let parallel_proof = parallel_pool.install(|| create(&parallel_pk, &params, 4, PROOF_SEED));
         assert_eq!(single_proof, parallel_proof);
     }
 }
