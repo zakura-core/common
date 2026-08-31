@@ -14,7 +14,7 @@ use super::Argument;
 use crate::{
     arithmetic::{CurveAffine, parallelize},
     plonk::{
-        ChallengeX, ChallengeY, Error,
+        ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
         evaluation::{EvaluationPoint, EvaluationQuery},
     },
     poly::{
@@ -197,16 +197,33 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         fft_twiddles: &ProvingKeyTwiddles<C::Scalar>,
         evaluator: poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
         expressions: impl Iterator<Item = poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
+        theta: ChallengeTheta<C>,
+        beta: ChallengeBeta<C>,
+        gamma: ChallengeGamma<C>,
         y: ChallengeY<C>,
         cache_layout: Option<&poly::EvaluationCacheLayout>,
+        compiled_plan: Option<&poly::CompiledEvaluationPlan<C::Scalar, ExtendedLagrangeCoeff>>,
         mut rng: R,
         transcript: &mut T,
-    ) -> Result<(ConstructedQuotient<C>, Option<poly::EvaluationCacheLayout>), Error> {
+    ) -> Result<
+        (
+            ConstructedQuotient<C>,
+            Option<poly::EvaluationCacheLayout>,
+            Option<poly::CompiledEvaluationPlan<C::Scalar, ExtendedLagrangeCoeff>>,
+        ),
+        Error,
+    > {
         // Fold the constraint expressions into the quotient numerator using
         // the y challenge, then evaluate the numerator.
-        let quotient_numerator = poly::Ast::distribute_powers(expressions, *y);
-        let (quotient_numerator, prepared_layout) =
-            evaluator.evaluate_with_cache_layout(&quotient_numerator, domain, cache_layout);
+        let challenges = poly::EvaluationChallenges::new(*theta, *beta, *gamma, *y);
+        let (quotient_numerator, prepared_layout, prepared_plan) = evaluator
+            .evaluate_quotient_with_compiled_plan(
+                expressions,
+                domain,
+                cache_layout,
+                compiled_plan,
+                challenges,
+            );
 
         // Move the numerator to coefficient form, divide by
         // t(X) = X^{params.n} - 1 using its sparse block inverse, and construct
@@ -252,6 +269,7 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
                 random_poly: self,
             },
             prepared_layout,
+            prepared_plan,
         ))
     }
 }

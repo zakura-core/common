@@ -763,98 +763,135 @@ where
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
 
-    // Evaluate the h(X) polynomial's constraint system expressions for the permutation constraints.
-    let (permutations, permutation_expressions): (Vec<_>, Vec<_>) = permutations
-        .into_iter()
-        .zip(advice_cosets.iter())
-        .zip(instance_cosets.iter())
-        .map(|((permutation, advice), instance)| {
-            permutation.construct(
-                pk,
-                &pk.vk.cs.permutation,
-                advice,
-                &fixed_cosets,
-                instance,
-                &permutation_cosets,
-                l0,
-                l_blind,
-                l_last,
-                beta,
-                gamma,
+    // Validate a keygen-prepared program before using it to bypass every
+    // challenge-bound constraint AST allocation. A mismatch takes the full
+    // construction path and can replace the retained program safely.
+    let compiled_plan = pk
+        .quotient_cache_layouts
+        .get_compiled_plan(circuit_count)
+        .filter(|plan| coset_evaluator.accepts_compiled_plan(plan));
+    let (permutations, lookups, expressions) = if compiled_plan.is_some() {
+        let permutations = permutations
+            .into_iter()
+            .map(permutation::prover::Committed::into_constructed)
+            .collect();
+        let lookups = lookups
+            .into_iter()
+            .map(|lookups| {
+                lookups
+                    .into_iter()
+                    .map(lookup::prover::Committed::into_constructed)
+                    .collect()
+            })
+            .collect();
+        (permutations, lookups, vec![])
+    } else {
+        // Build quotient ASTs only for an unprepared or mismatched shape.
+        let (permutations, permutation_expressions): (Vec<_>, Vec<Vec<_>>) = permutations
+            .into_iter()
+            .zip(advice_cosets.iter())
+            .zip(instance_cosets.iter())
+            .map(|((permutation, advice), instance)| {
+                let (constructed, expressions) = permutation.construct(
+                    pk,
+                    &pk.vk.cs.permutation,
+                    advice,
+                    &fixed_cosets,
+                    instance,
+                    &permutation_cosets,
+                    l0,
+                    l_blind,
+                    l_last,
+                );
+                (constructed, expressions.collect())
+            })
+            .unzip();
+
+        let (lookups, lookup_expressions): (Vec<Vec<_>>, Vec<Vec<Vec<_>>>) = lookups
+            .into_iter()
+            .map(|lookups| {
+                lookups
+                    .into_iter()
+                    .map(|lookup| {
+                        let (constructed, expressions) = lookup.construct(l0, l_blind, l_last);
+                        (constructed, expressions.collect())
+                    })
+                    .unzip()
+            })
+            .unzip();
+
+        let expressions = advice_cosets
+            .iter()
+            .zip(instance_cosets.iter())
+            .zip(permutation_expressions)
+            .zip(lookup_expressions)
+            .flat_map(
+                |(
+                    ((advice_cosets, instance_cosets), permutation_expressions),
+                    lookup_expressions,
+                )| {
+                    let fixed_cosets = &fixed_cosets;
+                    iter::empty()
+                        .chain(meta.gates.iter().flat_map(move |gate| {
+                            gate.polynomials().iter().map(move |expr| {
+                                expr.evaluate(
+                                    &poly::Ast::ConstantTerm,
+                                    &|_| {
+                                        panic!("virtual selectors are removed during optimization")
+                                    },
+                                    &|query| {
+                                        fixed_cosets[query.column_index]
+                                            .with_rotation(query.rotation)
+                                            .into()
+                                    },
+                                    &|query| {
+                                        advice_cosets[query.column_index]
+                                            .with_rotation(query.rotation)
+                                            .into()
+                                    },
+                                    &|query| {
+                                        instance_cosets[query.column_index]
+                                            .with_rotation(query.rotation)
+                                            .into()
+                                    },
+                                    &|a| -a,
+                                    &|a, b| a + b,
+                                    &|a, b| a * b,
+                                    &|a, scalar| a * scalar,
+                                )
+                            })
+                        }))
+                        .chain(permutation_expressions)
+                        .chain(lookup_expressions.into_iter().flatten())
+                },
             )
-        })
-        .unzip();
-
-    let (lookups, lookup_expressions): (Vec<Vec<_>>, Vec<Vec<_>>) = lookups
-        .into_iter()
-        .map(|lookups| {
-            // Evaluate the h(X) polynomial's constraint system expressions for the lookup constraints, if any.
-            lookups
-                .into_iter()
-                .map(|p| p.construct(beta, gamma, l0, l_blind, l_last))
-                .unzip()
-        })
-        .unzip();
-
-    let expressions = advice_cosets
-        .iter()
-        .zip(instance_cosets.iter())
-        .zip(permutation_expressions)
-        .zip(lookup_expressions)
-        .flat_map(
-            |(((advice_cosets, instance_cosets), permutation_expressions), lookup_expressions)| {
-                let fixed_cosets = &fixed_cosets;
-                iter::empty()
-                    // Custom constraints
-                    .chain(meta.gates.iter().flat_map(move |gate| {
-                        gate.polynomials().iter().map(move |expr| {
-                            expr.evaluate(
-                                &poly::Ast::ConstantTerm,
-                                &|_| panic!("virtual selectors are removed during optimization"),
-                                &|query| {
-                                    fixed_cosets[query.column_index]
-                                        .with_rotation(query.rotation)
-                                        .into()
-                                },
-                                &|query| {
-                                    advice_cosets[query.column_index]
-                                        .with_rotation(query.rotation)
-                                        .into()
-                                },
-                                &|query| {
-                                    instance_cosets[query.column_index]
-                                        .with_rotation(query.rotation)
-                                        .into()
-                                },
-                                &|a| -a,
-                                &|a, b| a + b,
-                                &|a, b| a * b,
-                                &|a, scalar| a * scalar,
-                            )
-                        })
-                    }))
-                    // Permutation constraints, if any.
-                    .chain(permutation_expressions)
-                    // Lookup constraints, if any.
-                    .chain(lookup_expressions.into_iter().flatten())
-            },
-        );
+            .collect();
+        (permutations, lookups, expressions)
+    };
 
     // Construct and commit to the quotient polynomial h(X).
     let cache_layout = pk.quotient_cache_layouts.get(circuit_count);
-    let (vanishing, prepared_layout) = vanishing.construct_quotient(
+    let (vanishing, prepared_layout, prepared_plan) = vanishing.construct_quotient(
         params,
         domain,
         &pk.fft_twiddles,
         coset_evaluator,
-        expressions,
+        expressions.into_iter(),
+        theta,
+        beta,
+        gamma,
         y,
         cache_layout.as_deref(),
+        compiled_plan.as_deref(),
         &mut rng,
         transcript,
     )?;
     if let Some(layout) = prepared_layout {
         pk.quotient_cache_layouts.retain(circuit_count, layout);
+    }
+    if let Some(plan) = prepared_plan {
+        pk.quotient_cache_layouts
+            .retain_compiled_plan(circuit_count, plan);
     }
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();

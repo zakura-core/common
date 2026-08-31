@@ -3,31 +3,20 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use ff::WithSmallOrderMulGroup;
+use ff::{Field, WithSmallOrderMulGroup};
 use maybe_rayon::prelude::*;
 
 use super::{ProvingKey, circuit::Expression, lookup, permutation};
 use crate::{
     arithmetic::CurveAffine,
-    poly::{self, Ast, AstLeaf, EvaluationCacheLayout, ExtendedLagrangeCoeff},
+    poly::{
+        self, Ast, AstLeaf, CompiledEvaluationPlan, EvaluationCacheLayout, ExtendedLagrangeCoeff,
+    },
 };
 
 const RETAINED_QUOTIENT_CIRCUIT_COUNTS: [usize; 3] = [1, 2, 4];
 const MAX_RETAINED_QUOTIENT_CACHE_LAYOUT_BYTES: usize = 64 * 1024;
-
-// These values model a generic transcript challenge tuple. They are distinct
-// and avoid zero, one, minus one, and two because those values can alter AST
-// equality or scalar-specialized plan costs. A real proof still compiles its
-// challenge-bound AST and validates every sparse cache event exactly. Thus, an
-// unusual real challenge, a circuit literal that collides with a sample, or a
-// future topology change can only reject and replace this eager layout; it
-// cannot apply a stale schedule. A scalar field that reduces these samples
-// into a special or repeated value skips eager preparation and retains the
-// existing lazy path.
-const EAGER_LAYOUT_THETA: u64 = 0x9e37_79b9_7f4a_7c15;
-const EAGER_LAYOUT_BETA: u64 = 0xd1b5_4a32_d192_ed03;
-const EAGER_LAYOUT_GAMMA: u64 = 0x94d0_49bb_1331_11eb;
-const EAGER_LAYOUT_Y: u64 = 0x8538_eb43_2d3f_6a91;
+const MAX_RETAINED_COMPILED_PLAN_BYTES: usize = 2 * 1024 * 1024;
 
 struct LookupTopology<E, F: WithSmallOrderMulGroup<3>> {
     compressed_input: Ast<E, F, ExtendedLagrangeCoeff>,
@@ -67,41 +56,24 @@ fn expression_ast<E: Copy, F: WithSmallOrderMulGroup<3>>(
     )
 }
 
-fn eager_challenges<F: WithSmallOrderMulGroup<3>>() -> Option<[F; 4]> {
-    let challenges = [
-        F::from(EAGER_LAYOUT_THETA),
-        F::from(EAGER_LAYOUT_BETA),
-        F::from(EAGER_LAYOUT_GAMMA),
-        F::from(EAGER_LAYOUT_Y),
-    ];
-    validate_eager_challenges(challenges)
-}
-
-fn validate_eager_challenges<F: WithSmallOrderMulGroup<3>>(challenges: [F; 4]) -> Option<[F; 4]> {
-    let two = F::ONE.double();
-    let non_special = challenges.iter().all(|challenge| {
-        *challenge != F::ZERO && *challenge != F::ONE && *challenge != -F::ONE && *challenge != two
-    });
-    let distinct = challenges
-        .iter()
-        .enumerate()
-        .all(|(index, challenge)| !challenges[..index].contains(challenge));
-    (non_special && distinct).then_some(challenges)
-}
-
-pub(super) struct QuotientCacheLayouts {
+pub(super) struct QuotientCacheLayouts<F: Field> {
     layouts: Mutex<[Option<Arc<EvaluationCacheLayout>>; RETAINED_QUOTIENT_CIRCUIT_COUNTS.len()]>,
+    compiled_plans: Mutex<
+        [Option<Arc<CompiledEvaluationPlan<F, ExtendedLagrangeCoeff>>>;
+            RETAINED_QUOTIENT_CIRCUIT_COUNTS.len()],
+    >,
 }
 
-impl Default for QuotientCacheLayouts {
+impl<F: Field> Default for QuotientCacheLayouts<F> {
     fn default() -> Self {
         Self {
             layouts: Mutex::new(std::array::from_fn(|_| None)),
+            compiled_plans: Mutex::new(std::array::from_fn(|_| None)),
         }
     }
 }
 
-impl fmt::Debug for QuotientCacheLayouts {
+impl<F: Field> fmt::Debug for QuotientCacheLayouts<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("QuotientCacheLayouts")
@@ -109,7 +81,7 @@ impl fmt::Debug for QuotientCacheLayouts {
     }
 }
 
-impl QuotientCacheLayouts {
+impl<F: Field> QuotientCacheLayouts<F> {
     fn index(circuit_count: usize) -> Option<usize> {
         RETAINED_QUOTIENT_CIRCUIT_COUNTS
             .iter()
@@ -119,6 +91,17 @@ impl QuotientCacheLayouts {
     pub(super) fn get(&self, circuit_count: usize) -> Option<Arc<EvaluationCacheLayout>> {
         let index = Self::index(circuit_count)?;
         self.layouts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())[index]
+            .clone()
+    }
+
+    pub(super) fn get_compiled_plan(
+        &self,
+        circuit_count: usize,
+    ) -> Option<Arc<CompiledEvaluationPlan<F, ExtendedLagrangeCoeff>>> {
+        let index = Self::index(circuit_count)?;
+        self.compiled_plans
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())[index]
             .clone()
@@ -145,17 +128,38 @@ impl QuotientCacheLayouts {
             layouts[index] = Some(Arc::new(layout));
         }
     }
+
+    pub(super) fn retain_compiled_plan(
+        &self,
+        circuit_count: usize,
+        plan: CompiledEvaluationPlan<F, ExtendedLagrangeCoeff>,
+    ) {
+        let Some(index) = Self::index(circuit_count) else {
+            return;
+        };
+        let mut plans = self
+            .compiled_plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let existing_bytes = plans
+            .iter()
+            .enumerate()
+            .filter(|(candidate, _)| *candidate != index)
+            .filter_map(|(_, plan)| plan.as_ref())
+            .map(|plan| plan.payload_bytes())
+            .sum::<usize>();
+        if existing_bytes.saturating_add(plan.payload_bytes()) <= MAX_RETAINED_COMPILED_PLAN_BYTES {
+            plans[index] = Some(Arc::new(plan));
+        }
+    }
 }
 
 /// Prepares bounded quotient schedules from proving-key topology alone.
 pub(super) fn prepare_quotient_cache_layouts<C: CurveAffine>(pk: &ProvingKey<C>) {
     let cs = &pk.vk.cs;
-    let Some([theta, beta, gamma, y]) = eager_challenges::<C::Scalar>() else {
-        return;
-    };
     let permutation_set_count = cs.permutation.set_count(pk.vk.cs_degree);
 
-    let layouts = RETAINED_QUOTIENT_CIRCUIT_COUNTS
+    let plans = RETAINED_QUOTIENT_CIRCUIT_COUNTS
         .into_par_iter()
         .map(|circuit_count| {
             let mut evaluator = poly::new_virtual_evaluator(|| {});
@@ -213,14 +217,12 @@ pub(super) fn prepare_quotient_cache_layouts<C: CurveAffine>(pk: &ProvingKey<C>)
                         .map(|lookup| {
                             let compressed_input = lookup::prover::compress_expressions_coset(
                                 &lookup.input_expressions,
-                                theta,
                                 &fixed,
                                 &advice[circuit_index],
                                 &instance[circuit_index],
                             );
                             let compressed_table = lookup::prover::compress_expressions_coset(
                                 &lookup.table_expressions,
-                                theta,
                                 &fixed,
                                 &advice[circuit_index],
                                 &instance[circuit_index],
@@ -282,8 +284,6 @@ pub(super) fn prepare_quotient_cache_layouts<C: CurveAffine>(pk: &ProvingKey<C>)
                     l0,
                     l_blind,
                     l_last,
-                    beta,
-                    gamma,
                 ));
                 for (lookup, product) in lookups.into_iter().zip(lookup_products) {
                     expressions.extend(lookup::prover::construct_constraints(
@@ -292,8 +292,6 @@ pub(super) fn prepare_quotient_cache_layouts<C: CurveAffine>(pk: &ProvingKey<C>)
                         lookup.compressed_table,
                         lookup.permuted_table,
                         product,
-                        beta,
-                        gamma,
                         l0,
                         l_blind,
                         l_last,
@@ -301,16 +299,17 @@ pub(super) fn prepare_quotient_cache_layouts<C: CurveAffine>(pk: &ProvingKey<C>)
                 }
             }
 
-            let quotient_numerator = Ast::distribute_powers(expressions, y);
-            evaluator
-                .prepare_cache_layout(&quotient_numerator, pk.vk.domain.extended_len())
-                .map(|layout| (circuit_count, layout))
+            let quotient_numerator =
+                Ast::distribute_challenge_powers(expressions, poly::EvaluationChallenge::Y);
+            let plan = evaluator
+                .prepare_compiled_quotient_plan(&quotient_numerator, pk.vk.domain.extended_len());
+            (circuit_count, plan)
         })
         .collect::<Vec<_>>();
-    // Retain in circuit-count order even though construction is parallel, so
-    // a future capacity-limited set of layouts remains deterministic.
-    for (circuit_count, layout) in layouts.into_iter().flatten() {
-        pk.quotient_cache_layouts.retain(circuit_count, layout);
+    // Retain in circuit-count order even though construction is parallel.
+    for (circuit_count, plan) in plans {
+        pk.quotient_cache_layouts
+            .retain_compiled_plan(circuit_count, plan);
     }
 }
 
@@ -322,20 +321,6 @@ mod tests {
     fn retained_counts_are_bounded() {
         assert_eq!(RETAINED_QUOTIENT_CIRCUIT_COUNTS, [1, 2, 4]);
         assert_eq!(MAX_RETAINED_QUOTIENT_CACHE_LAYOUT_BYTES, 64 * 1024);
-    }
-
-    #[test]
-    fn eager_challenge_reductions_fail_open() {
-        use pasta_curves::Fp;
-
-        assert!(eager_challenges::<Fp>().is_some());
-        assert!(
-            validate_eager_challenges([Fp::from(0), Fp::from(3), Fp::from(5), Fp::from(7)])
-                .is_none()
-        );
-        assert!(
-            validate_eager_challenges([Fp::from(3), Fp::from(3), Fp::from(5), Fp::from(7)])
-                .is_none()
-        );
+        assert_eq!(MAX_RETAINED_COMPILED_PLAN_BYTES, 2 * 1024 * 1024);
     }
 }

@@ -249,7 +249,6 @@ pub(in crate::plonk) fn sample_product_blinding<C: CurveAffine, R: Rng>(
 /// Every [`Expression`] must have had its virtual selectors removed.
 pub(in crate::plonk) fn compress_expressions_coset<E: Copy, F: Field>(
     expressions: &[Expression<F>],
-    theta: F,
     fixed_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
     advice_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
     instance_cosets: &[poly::AstLeaf<E, ExtendedLagrangeCoeff>],
@@ -281,7 +280,9 @@ pub(in crate::plonk) fn compress_expressions_coset<E: Copy, F: Field>(
                 &|a, scalar| a * scalar,
             )
         })
-        .reduce(|acc, expression| acc * poly::Ast::ConstantTerm(theta) + expression)
+        .reduce(|acc, expression| {
+            acc * poly::Ast::ChallengeTerm(poly::EvaluationChallenge::Theta) + expression
+        })
         .unwrap_or(poly::Ast::ConstantTerm(F::ZERO))
 }
 
@@ -373,7 +374,9 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             .reduce(|acc, expression| acc * theta + expression)
             .unwrap_or(poly::Ast::ConstantTerm(F::ZERO));
         let compressed_coset = unpermuted_cosets
-            .reduce(|acc, expression| acc * poly::Ast::ConstantTerm(theta) + expression)
+            .reduce(|acc, expression| {
+                acc * poly::Ast::ChallengeTerm(poly::EvaluationChallenge::Theta) + expression
+            })
             .unwrap_or(poly::Ast::ConstantTerm(F::ZERO));
         let compressed_expression = value_evaluator.evaluate(&compressed_expression, domain);
         let mut sorted_values = compressed_expression
@@ -459,7 +462,9 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             .reduce(|acc, expression| acc * theta + expression)
             .unwrap_or(poly::Ast::ConstantTerm(F::ZERO));
         let compressed_coset = unpermuted_cosets
-            .reduce(|acc, expression| acc * poly::Ast::ConstantTerm(theta) + expression)
+            .reduce(|acc, expression| {
+                acc * poly::Ast::ChallengeTerm(poly::EvaluationChallenge::Theta) + expression
+            })
             .unwrap_or(poly::Ast::ConstantTerm(F::ZERO));
         let compressed_expression = value_evaluator.evaluate(&compressed_expression, domain);
         let mut sorted_values = compressed_expression
@@ -970,15 +975,13 @@ pub(in crate::plonk) fn construct_constraints<E: Copy, F: Field>(
     compressed_table: poly::Ast<E, F, ExtendedLagrangeCoeff>,
     permuted_table: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
     product: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
-    beta: F,
-    gamma: F,
     l0: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
     l_blind: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
     l_last: poly::AstLeaf<E, ExtendedLagrangeCoeff>,
 ) -> impl Iterator<Item = poly::Ast<E, F, ExtendedLagrangeCoeff>> {
     let active_rows = poly::Ast::one() - (poly::Ast::from(l_last) + l_blind);
-    let beta = poly::Ast::ConstantTerm(beta);
-    let gamma = poly::Ast::ConstantTerm(gamma);
+    let beta = poly::Ast::ChallengeTerm(poly::EvaluationChallenge::Beta);
+    let gamma = poly::Ast::ChallengeTerm(poly::EvaluationChallenge::Gamma);
 
     iter::empty()
         // l_0(X) * (1 - z(X)) = 0
@@ -1018,6 +1021,18 @@ pub(in crate::plonk) fn construct_constraints<E: Copy, F: Field>(
 }
 
 impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
+    /// Finishes the lookup argument without rebuilding its quotient ASTs.
+    pub(in crate::plonk) fn into_constructed(self) -> Constructed<C> {
+        Constructed {
+            permuted_input_poly: self.permuted.permuted_input_poly,
+            permuted_input_blind: self.permuted.permuted_input_blind,
+            permuted_table_poly: self.permuted.permuted_table_poly,
+            permuted_table_blind: self.permuted.permuted_table_blind,
+            product_poly: self.product_poly,
+            product_blind: self.product_blind,
+        }
+    }
+
     /// Given a Lookup with input expressions, table expressions, permuted input
     /// expression, permuted table expression, and grand product polynomial, this
     /// method constructs constraints that must hold between these values.
@@ -1025,8 +1040,6 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
     /// the extended evaluation domain.
     pub(in crate::plonk) fn construct(
         self,
-        beta: ChallengeBeta<C>,
-        gamma: ChallengeGamma<C>,
         l0: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
         l_blind: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
         l_last: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
@@ -1041,8 +1054,6 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
             permuted.compressed_table_coset,
             permuted.permuted_table_coset,
             self.product_coset,
-            *beta,
-            *gamma,
             l0,
             l_blind,
             l_last,
