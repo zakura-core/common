@@ -182,10 +182,16 @@ fn commit_quotient_evaluation_mask<C: CurveAffine>(
             .all(|coefficient| *coefficient == C::Scalar::ZERO)
     );
 
-    let scalars = [polynomial[0], polynomial[1], blind.0];
-    let bases = [params.g[0], params.g[1], params.w];
+    let scalars = [polynomial[0], polynomial[1]];
+    let bases = [params.g[0], params.g[1]];
 
-    best_multiexp(&scalars, &bases)
+    params
+        .try_commit_sparse_with_prepared_blind(&scalars, &bases, blind)
+        .unwrap_or_else(|| {
+            let scalars = [polynomial[0], polynomial[1], blind.0];
+            let bases = [params.g[0], params.g[1], params.w];
+            best_multiexp(&scalars, &bases)
+        })
 }
 
 fn evaluate_quotient_evaluation_mask<F: Field>(polynomial: &Polynomial<F, Coeff>, point: F) -> F {
