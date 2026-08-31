@@ -55,9 +55,8 @@ fn evaluate_polynomial_deferred<F: Field + 'static, T: DeferredField + 'static>(
         .split_first()
         .expect("a polynomial evaluation has at least one coefficient");
     let value = T::inner_product(coefficients, &powers[1..]) + constant;
-    let value: Box<dyn Any> = Box::new(value);
-    *value
-        .downcast::<F>()
+    *(&value as &dyn Any)
+        .downcast_ref::<F>()
         .expect("the evaluation field matches the polynomial field")
 }
 

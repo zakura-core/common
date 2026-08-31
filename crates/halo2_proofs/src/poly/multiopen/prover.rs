@@ -388,9 +388,12 @@ fn prepare_q_prime<F: Field>(
     accumulator
 }
 
+// A `Vec` is required by `evaluate_polynomial_with_powers` for safe runtime
+// downcasting to the Pasta field.
+#[allow(clippy::ptr_arg)]
 fn evaluate_polynomials<F: Field + 'static>(
     polynomials: &[Polynomial<F, Coeff>],
-    powers: &[F],
+    powers: &Vec<F>,
 ) -> Vec<F> {
     if polynomials.is_empty() {
         return Vec::new();
@@ -753,7 +756,8 @@ mod tests {
         F: Field + From<u64> + Debug,
     {
         let empty = Vec::<Polynomial<F, Coeff>>::new();
-        assert!(evaluate_polynomials(&empty, &[]).is_empty());
+        let empty_powers = Vec::<F>::new();
+        assert!(evaluate_polynomials(&empty, &empty_powers).is_empty());
 
         let polynomial_len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
         let polynomials = (0..5)
