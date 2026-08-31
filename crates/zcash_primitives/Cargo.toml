@@ -50,6 +50,9 @@ zcash_note_encryption = { version = "0.4.1", features = ["pre-zip-212"] }
 zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "1643fcfe846d50426452dda3fe4ef2182470fac1", version = "0.10.5", default-features = false }
 zcash_script = { version = "0.4.3", default-features = false }
 
+[target.'cfg(zcash_unstable = "nutachyon")'.dependencies]
+zcash_tachyon = { git = "https://github.com/tachyon-zcash/tachyon", rev = "fd02241612a09284a0f37ee58970ef8dcb042e43", default-features = false }
+
 [dev-dependencies]
 assert_matches = "1.5"
 bls12_381 = { workspace = true, features = ["default"] }
@@ -81,6 +84,7 @@ std = [
     "sapling/std",
     "orchard/std",
     "transparent/std",
+    "zcash_tachyon/std",
 ]
 temporary-zcashd = []
 test-dependencies = [

@@ -1582,6 +1582,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
+            #[cfg(zcash_unstable = "nutachyon")]
+            tachyon_bundle: None,
         };
 
         //
@@ -1691,6 +1693,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
+            #[cfg(zcash_unstable = "nutachyon")]
+            tachyon_bundle: None,
         };
 
         // The unwrap() here is safe because the txid hashing
