@@ -13,6 +13,7 @@ use crate::{
     plonk::{
         self, Error,
         evaluation::{EvaluationPoint, EvaluationQuery},
+        evaluator_schedule::QuotientPoly,
     },
     poly::{
         self, Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
@@ -115,6 +116,7 @@ impl Argument {
         instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
+        circuit_index: usize,
         evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
         mut rng: R,
         transcript: &mut T,
@@ -136,8 +138,15 @@ impl Argument {
                 Blind(C::Scalar::random(&mut rng))
             },
             |set| {
-                let permutation_product_coset =
-                    evaluator.register_poly(set.permutation_product_coset);
+                let set_index = sets.len();
+                let permutation_product_coset = evaluator.register_poly_with_tag(
+                    set.permutation_product_coset,
+                    QuotientPoly::PermutationProduct {
+                        circuit_index,
+                        set_index,
+                    }
+                    .into(),
+                );
 
                 // Hash the permutation product commitment
                 transcript.write_point(set.permutation_product_commitment)?;
@@ -569,10 +578,18 @@ impl<C: CurveAffine> Prepared<C> {
         self,
         evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
         transcript: &mut T,
+        circuit_index: usize,
     ) -> Result<Committed<C, Ev>, Error> {
         let mut sets = Vec::with_capacity(self.sets.len());
-        for set in self.sets {
-            let permutation_product_coset = evaluator.register_poly(set.permutation_product_coset);
+        for (set_index, set) in self.sets.into_iter().enumerate() {
+            let permutation_product_coset = evaluator.register_poly_with_tag(
+                set.permutation_product_coset,
+                QuotientPoly::PermutationProduct {
+                    circuit_index,
+                    set_index,
+                }
+                .into(),
+            );
 
             // Hash the permutation product commitment
             transcript.write_point(set.permutation_product_commitment)?;

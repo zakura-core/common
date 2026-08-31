@@ -158,6 +158,18 @@ pub(crate) enum EvaluationChallenge {
     Y,
 }
 
+/// Opaque, exact semantic identity for one registered polynomial.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EvaluationPolyTag([usize; 3]);
+
+impl EvaluationPolyTag {
+    /// Creates a collision-free tag from an exact role and two role-specific
+    /// indices.
+    pub(crate) const fn new(role: usize, first: usize, second: usize) -> Self {
+        Self([role, first, second])
+    }
+}
+
 const EVALUATION_CHALLENGE_COUNT: usize = 4;
 
 /// Current-proof values for [`EvaluationChallenge`] operands.
@@ -312,6 +324,7 @@ struct CompressedSelectorShape {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EvaluatorShape {
     polynomial_lengths: Box<[usize]>,
+    polynomial_tags: Option<Box<[EvaluationPolyTag]>>,
     compressed_selectors: Box<[CompressedSelectorShape]>,
     reused_compressed_selector_sources: Box<[usize]>,
 }
@@ -466,6 +479,7 @@ impl<F: Field> BoundPlanScalars<F> {
 pub(crate) struct Evaluator<'poly, E, F: Field, B: Basis> {
     polys: Vec<Cow<'poly, Polynomial<F, B>>>,
     virtual_poly_count: Option<usize>,
+    polynomial_tags: Option<Vec<EvaluationPolyTag>>,
     compressed_selectors: Vec<CompressedSelectorLeaf<E, B>>,
     reused_compressed_selector_sources: Vec<usize>,
     _context: E,
@@ -490,6 +504,7 @@ pub(crate) fn new_evaluator<'poly, E: Fn() + Clone, F: Field, B: Basis>(
     Evaluator {
         polys: vec![],
         virtual_poly_count: None,
+        polynomial_tags: None,
         compressed_selectors: vec![],
         reused_compressed_selector_sources: vec![],
         _context: context,
@@ -505,6 +520,7 @@ pub(crate) fn new_virtual_evaluator<E: Fn() + Clone, F: Field, B: Basis>(
     Evaluator {
         polys: vec![],
         virtual_poly_count: Some(0),
+        polynomial_tags: None,
         compressed_selectors: vec![],
         reused_compressed_selector_sources: vec![],
         _context: context,
@@ -780,7 +796,7 @@ fn selector_family_matches<E: Copy, F: Field, B: Basis>(
     families
 }
 
-// A private evaluator program compiled once before parallel chunk evaluation.
+// A private evaluation plan compiled once before parallel chunk evaluation.
 // Structural AST matching and challenge-power calculation happen only while
 // constructing this plan.
 enum EvaluationPlan<F: Field> {
@@ -846,8 +862,7 @@ struct WeightedTerm<F: Field> {
     power: ScalarId<F>,
 }
 
-/// A challenge-independent quotient evaluator program retained by a proving
-/// key.
+/// A challenge-independent compiled quotient plan retained by a proving key.
 pub(crate) struct CompiledEvaluationPlan<F: Field, B: Basis> {
     plan: EvaluationPlan<F>,
     scalar_descriptors: Box<[PlanScalar<F>]>,
@@ -864,12 +879,35 @@ impl<F: Field, B: Basis> CompiledEvaluationPlan<F, B> {
             + self.plan.heap_payload_bytes()
             + self.scalar_descriptors.len() * size_of::<PlanScalar<F>>()
             + self.evaluator_shape.polynomial_lengths.len() * size_of::<usize>()
+            + self
+                .evaluator_shape
+                .polynomial_tags
+                .as_ref()
+                .map_or(0, |tags| tags.len() * size_of::<EvaluationPolyTag>())
             + self.evaluator_shape.compressed_selectors.len() * size_of::<CompressedSelectorShape>()
             + self
                 .evaluator_shape
                 .reused_compressed_selector_sources
                 .len()
                 * size_of::<usize>()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn swap_polynomial_tags(&mut self, lhs: EvaluationPolyTag, rhs: EvaluationPolyTag) {
+        let tags = self
+            .evaluator_shape
+            .polynomial_tags
+            .as_mut()
+            .expect("the plan has exact polynomial tags");
+        let lhs_index = tags
+            .iter()
+            .position(|tag| *tag == lhs)
+            .expect("the left polynomial tag is present");
+        let rhs_index = tags
+            .iter()
+            .position(|tag| *tag == rhs)
+            .expect("the right polynomial tag is present");
+        tags.swap(lhs_index, rhs_index);
     }
 }
 
@@ -2503,6 +2541,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         };
         EvaluatorShape {
             polynomial_lengths,
+            polynomial_tags: self.polynomial_tags.clone().map(Vec::into_boxed_slice),
             compressed_selectors: self
                 .compressed_selectors
                 .iter()
@@ -2527,6 +2566,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 .iter()
                 .zip(shape.polynomial_lengths.iter())
                 .all(|(polynomial, expected)| polynomial.len() == *expected)
+            && self.polynomial_tags.as_deref() == shape.polynomial_tags.as_deref()
             && self.compressed_selectors.len() == shape.compressed_selectors.len()
             && self
                 .compressed_selectors
@@ -2592,19 +2632,34 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
     ///
     /// This API treats each registered polynomial as unique, even if the same polynomial
     /// is added multiple times.
+    #[cfg(test)]
     pub(crate) fn register_poly(&mut self, poly: Polynomial<F, B>) -> AstLeaf<E, B> {
         assert!(
             self.virtual_poly_count.is_none(),
             "a virtual evaluator cannot retain polynomial values"
         );
         let index = self.polys.len();
+        self.record_polynomial_tag(index, None);
         self.polys.push(Cow::Owned(poly));
 
-        AstLeaf {
-            index,
-            rotation: Rotation::cur(),
-            _evaluator: PhantomData,
-        }
+        Self::leaf(index)
+    }
+
+    /// Registers an owned polynomial with an exact semantic tag.
+    pub(crate) fn register_poly_with_tag(
+        &mut self,
+        poly: Polynomial<F, B>,
+        tag: EvaluationPolyTag,
+    ) -> AstLeaf<E, B> {
+        assert!(
+            self.virtual_poly_count.is_none(),
+            "a virtual evaluator cannot retain polynomial values"
+        );
+        let index = self.polys.len();
+        self.record_polynomial_tag(index, Some(tag));
+        self.polys.push(Cow::Owned(poly));
+
+        Self::leaf(index)
     }
 
     /// Registers a borrowed polynomial for use in this evaluation context.
@@ -2617,8 +2672,60 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             "a virtual evaluator cannot retain polynomial values"
         );
         let index = self.polys.len();
+        self.record_polynomial_tag(index, None);
         self.polys.push(Cow::Borrowed(poly));
 
+        Self::leaf(index)
+    }
+
+    /// Registers a borrowed polynomial with an exact semantic tag.
+    pub(crate) fn register_poly_ref_with_tag(
+        &mut self,
+        poly: &'poly Polynomial<F, B>,
+        tag: EvaluationPolyTag,
+    ) -> AstLeaf<E, B> {
+        assert!(
+            self.virtual_poly_count.is_none(),
+            "a virtual evaluator cannot retain polynomial values"
+        );
+        let index = self.polys.len();
+        self.record_polynomial_tag(index, Some(tag));
+        self.polys.push(Cow::Borrowed(poly));
+
+        Self::leaf(index)
+    }
+
+    /// Registers a distinct polynomial leaf without retaining its row values.
+    ///
+    /// This requires an evaluator constructed by [`new_virtual_evaluator`].
+    #[cfg(test)]
+    pub(crate) fn register_virtual_poly(&mut self) -> AstLeaf<E, B> {
+        let index = self
+            .virtual_poly_count
+            .as_mut()
+            .expect("virtual leaves require a virtual evaluator");
+        let leaf_index = *index;
+        *index += 1;
+        self.record_polynomial_tag(leaf_index, None);
+        Self::leaf(leaf_index)
+    }
+
+    /// Registers a virtual polynomial with an exact semantic tag.
+    pub(crate) fn register_virtual_poly_with_tag(
+        &mut self,
+        tag: EvaluationPolyTag,
+    ) -> AstLeaf<E, B> {
+        let index = self
+            .virtual_poly_count
+            .as_mut()
+            .expect("virtual leaves require a virtual evaluator");
+        let leaf_index = *index;
+        *index += 1;
+        self.record_polynomial_tag(leaf_index, Some(tag));
+        Self::leaf(leaf_index)
+    }
+
+    fn leaf(index: usize) -> AstLeaf<E, B> {
         AstLeaf {
             index,
             rotation: Rotation::cur(),
@@ -2626,21 +2733,19 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         }
     }
 
-    /// Registers a distinct polynomial leaf without retaining its row values.
-    ///
-    /// This requires an evaluator constructed by [`new_virtual_evaluator`].
-    pub(crate) fn register_virtual_poly(&mut self) -> AstLeaf<E, B> {
-        let index = self
-            .virtual_poly_count
-            .as_mut()
-            .expect("virtual leaves require a virtual evaluator");
-        let leaf = AstLeaf {
-            index: *index,
-            rotation: Rotation::cur(),
-            _evaluator: PhantomData,
-        };
-        *index += 1;
-        leaf
+    fn record_polynomial_tag(&mut self, index: usize, tag: Option<EvaluationPolyTag>) {
+        match (&mut self.polynomial_tags, tag) {
+            (None, None) => {}
+            (None, Some(tag)) => {
+                assert_eq!(index, 0, "tag every polynomial or tag none of them");
+                self.polynomial_tags = Some(vec![tag]);
+            }
+            (Some(tags), Some(tag)) => {
+                assert_eq!(tags.len(), index);
+                tags.push(tag);
+            }
+            (Some(_), None) => panic!("tag every polynomial or tag none of them"),
+        }
     }
 
     pub(crate) fn register_compressed_selector(
@@ -2891,7 +2996,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         self.compile_quotient_plan(ast, poly_len, None, true).1
     }
 
-    /// Compiles a challenge-independent quotient program without evaluating
+    /// Compiles a challenge-independent quotient plan without evaluating
     /// polynomial rows.
     ///
     /// This requires an evaluator constructed by [`new_virtual_evaluator`].
@@ -3966,8 +4071,8 @@ mod tests {
 
     use super::{
         Ast, AstLeaf, AstMul, BasisOps, BoundPlanScalars, CacheAction, DistributionWork,
-        EvaluationChallenge, EvaluationChallenges, EvaluationPlan, Evaluator, FactorBodyPlan,
-        FactorSide, LinearTermCacheBudget, LinearTermCacheOccupancy,
+        EvaluationChallenge, EvaluationChallenges, EvaluationPlan, EvaluationPolyTag, Evaluator,
+        FactorBodyPlan, FactorSide, LinearTermCacheBudget, LinearTermCacheOccupancy,
         MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_LINEAR_TERM_CACHE_ENTRIES, PlanScalar,
         PlanScalarInterner, ScalarId, compressed_selector, get_chunk_params,
         linear_term_cache_budget, new_evaluator, new_virtual_evaluator, reuse_cache_slots,
@@ -4891,6 +4996,7 @@ mod tests {
             &second[..],
             &expected(&evaluator, &domain, leaf, second_challenges)[..]
         );
+        assert_ne!(&second[..], &first[..]);
         assert!(replacement.is_none());
 
         for value in [F::ZERO, F::ONE, F::from(2), -F::ONE] {
@@ -4961,6 +5067,61 @@ mod tests {
             &actual[..],
             &expected(&mismatched, &domain, mismatched_leaf, second_challenges,)[..]
         );
+        assert!(replacement.is_some());
+    }
+
+    #[test]
+    fn compiled_plan_rejects_swapped_polynomial_tags() {
+        type F = pallas::Base;
+
+        fn context() {}
+
+        fn expressions(
+            lhs: AstLeaf<fn(), ExtendedLagrangeCoeff>,
+            rhs: AstLeaf<fn(), ExtendedLagrangeCoeff>,
+        ) -> [Ast<fn(), F, ExtendedLagrangeCoeff>; 1] {
+            [Ast::from(lhs) * rhs + lhs]
+        }
+
+        let domain = EvaluationDomain::new(3, 4);
+        let mut lhs_values = domain.empty_extended();
+        let mut rhs_values = domain.empty_extended();
+        for (index, (lhs, rhs)) in lhs_values.iter_mut().zip(rhs_values.iter_mut()).enumerate() {
+            *lhs = F::from(index as u64 + 3);
+            *rhs = F::from(index as u64 + 41);
+        }
+        let lhs_tag = EvaluationPolyTag::new(0, 0, 0);
+        let rhs_tag = EvaluationPolyTag::new(1, 0, 0);
+        let challenges =
+            EvaluationChallenges::new(F::from(5), F::from(7), F::from(11), F::from(13));
+
+        let mut original = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
+        let lhs = original.register_poly_with_tag(lhs_values.clone(), lhs_tag);
+        let rhs = original.register_poly_with_tag(rhs_values.clone(), rhs_tag);
+        let (_, plan) = original.evaluate_quotient_with_compiled_plan(
+            expressions(lhs, rhs),
+            &domain,
+            None,
+            challenges,
+        );
+        let plan = plan.expect("the cold evaluation returns a compiled plan");
+
+        let mut swapped = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
+        let lhs = swapped.register_poly_with_tag(lhs_values, rhs_tag);
+        let rhs = swapped.register_poly_with_tag(rhs_values, lhs_tag);
+        let (expected, _) = swapped.evaluate_quotient_with_compiled_plan(
+            expressions(lhs, rhs),
+            &domain,
+            None,
+            challenges,
+        );
+        let (actual, replacement) = swapped.evaluate_quotient_with_compiled_plan(
+            expressions(lhs, rhs),
+            &domain,
+            Some(&plan),
+            challenges,
+        );
+        assert_eq!(&actual[..], &expected[..]);
         assert!(replacement.is_some());
     }
 

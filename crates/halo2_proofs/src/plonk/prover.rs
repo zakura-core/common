@@ -13,6 +13,7 @@ use super::{
     },
     commit_instance,
     evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+    evaluator_schedule::{self, QuotientPoly},
     lookup, permutation, vanishing,
 };
 
@@ -534,10 +535,14 @@ where
     let fixed_cosets: Vec<_> = pk
         .fixed_cosets
         .iter()
-        .map(|poly| coset_evaluator.register_poly_ref(poly))
+        .enumerate()
+        .map(|(column_index, poly)| {
+            coset_evaluator
+                .register_poly_ref_with_tag(poly, QuotientPoly::Fixed { column_index }.into())
+        })
         .collect();
 
-    for family in pk.cached_selector_families.iter() {
+    for (family_index, family) in pk.cached_selector_families.iter().enumerate() {
         let query_and_first_selector = fixed_cosets[family.column_index];
         let combination_len = family.selectors.len() + 1;
         coset_evaluator.register_compressed_selector(
@@ -547,7 +552,14 @@ where
             query_and_first_selector,
         );
         for (assigned_root, selector) in (2..).zip(family.selectors.iter()) {
-            let precomputed = coset_evaluator.register_poly_ref(selector);
+            let precomputed = coset_evaluator.register_poly_ref_with_tag(
+                selector,
+                QuotientPoly::Selector {
+                    family_index,
+                    assigned_root,
+                }
+                .into(),
+            );
             coset_evaluator.register_compressed_selector(
                 query_and_first_selector,
                 combination_len,
@@ -560,11 +572,22 @@ where
     // Register advice cosets with the polynomial evaluator.
     let advice_cosets: Vec<_> = advice
         .iter()
-        .map(|advice| {
+        .enumerate()
+        .map(|(circuit_index, advice)| {
             advice
                 .advice_cosets
                 .iter()
-                .map(|poly| coset_evaluator.register_poly_ref(poly))
+                .enumerate()
+                .map(|(column_index, poly)| {
+                    coset_evaluator.register_poly_ref_with_tag(
+                        poly,
+                        QuotientPoly::Advice {
+                            circuit_index,
+                            column_index,
+                        }
+                        .into(),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -572,11 +595,22 @@ where
     // Register instance cosets with the polynomial evaluator.
     let instance_cosets: Vec<_> = instance
         .iter()
-        .map(|instance| {
+        .enumerate()
+        .map(|(circuit_index, instance)| {
             instance
                 .instance_cosets
                 .iter()
-                .map(|poly| coset_evaluator.register_poly_ref(poly))
+                .enumerate()
+                .map(|(column_index, poly)| {
+                    coset_evaluator.register_poly_ref_with_tag(
+                        poly,
+                        QuotientPoly::Instance {
+                            circuit_index,
+                            column_index,
+                        }
+                        .into(),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -586,19 +620,24 @@ where
         .permutation
         .cosets
         .iter()
-        .map(|poly| coset_evaluator.register_poly_ref(poly))
+        .enumerate()
+        .map(|(column_index, poly)| {
+            coset_evaluator
+                .register_poly_ref_with_tag(poly, QuotientPoly::Permutation { column_index }.into())
+        })
         .collect();
 
     // Register boundary polynomials used in the lookup and permutation arguments.
-    let l0 = coset_evaluator.register_poly_ref(&pk.l0);
-    let l_blind = coset_evaluator.register_poly_ref(&pk.l_blind);
-    let l_last = coset_evaluator.register_poly_ref(&pk.l_last);
+    let l0 = coset_evaluator.register_poly_ref_with_tag(&pk.l0, QuotientPoly::L0.into());
+    let l_blind =
+        coset_evaluator.register_poly_ref_with_tag(&pk.l_blind, QuotientPoly::LBlind.into());
+    let l_last = coset_evaluator.register_poly_ref_with_tag(&pk.l_last, QuotientPoly::LLast.into());
 
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
     // A plan candidate lets lookup preparation omit its symbolic quotient
-    // ASTs. Exact evaluator-shape validation remains deferred until every
+    // ASTs. Evaluator-shape validation remains deferred until every
     // polynomial has been registered; a rejected candidate reconstructs them
     // on the ordinary compilation path below.
     let circuit_count = instance_values.len();
@@ -635,14 +674,19 @@ where
     )?;
 
     let mut prepared_lookups = prepared_lookups.into_iter();
-    let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = (0..instance_values.len())
-        .map(|_| {
+    let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = (0..circuit_count)
+        .map(|circuit_index| {
             (0..lookup_count)
-                .map(|_| {
+                .map(|lookup_index| {
                     prepared_lookups
                         .next()
                         .expect("one prepared lookup per task")
-                        .finalize(&mut coset_evaluator, transcript)
+                        .finalize(
+                            &mut coset_evaluator,
+                            transcript,
+                            circuit_index,
+                            lookup_index,
+                        )
                 })
                 .collect()
         })
@@ -678,7 +722,7 @@ where
             gamma,
             blinding,
         );
-        vec![prepared.commit(&mut coset_evaluator, transcript)?]
+        vec![prepared.commit(&mut coset_evaluator, transcript, 0)?]
     } else if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
         // Draw every permutation's blinding values in circuit and set
         // order before preparing the independent arguments in parallel.
@@ -706,7 +750,10 @@ where
 
         prepared_permutations
             .into_iter()
-            .map(|permutation| permutation.commit(&mut coset_evaluator, transcript))
+            .enumerate()
+            .map(|(circuit_index, permutation)| {
+                permutation.commit(&mut coset_evaluator, transcript, circuit_index)
+            })
             .collect::<Result<Vec<_>, _>>()?
     } else {
         // Keep each circuit's preparation and commitment together on smaller
@@ -714,7 +761,8 @@ where
         instance
             .iter()
             .zip(advice.iter())
-            .map(|(instance, advice)| {
+            .enumerate()
+            .map(|(circuit_index, (instance, advice))| {
                 pk.vk.cs.permutation.commit(
                     params,
                     pk,
@@ -724,6 +772,7 @@ where
                     &instance.instance_values,
                     beta,
                     gamma,
+                    circuit_index,
                     &mut coset_evaluator,
                     &mut rng,
                     transcript,
@@ -751,13 +800,18 @@ where
 
     let mut prepared_lookup_products = prepared_lookup_products.into_iter();
     let lookups: Vec<Vec<lookup::prover::Committed<C, _>>> = (0..circuit_count)
-        .map(|_| {
+        .map(|circuit_index| {
             (0..lookup_count)
-                .map(|_| {
+                .map(|lookup_index| {
                     prepared_lookup_products
                         .next()
                         .expect("one prepared lookup product per task")
-                        .finalize(&mut coset_evaluator, transcript)
+                        .finalize(
+                            &mut coset_evaluator,
+                            transcript,
+                            circuit_index,
+                            lookup_index,
+                        )
                 })
                 .collect()
         })
@@ -772,9 +826,9 @@ where
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
 
-    // Validate a keygen-prepared program before using it to bypass every
+    // Validate a keygen-prepared plan before using it to bypass every
     // challenge-bound constraint AST allocation. A mismatch takes the full
-    // construction path and can replace the retained program safely.
+    // construction path and can replace the retained plan safely.
     let compiled_plan = compiled_plan.filter(|plan| coset_evaluator.accepts_compiled_plan(plan));
     let (permutations, lookups, expressions) = if compiled_plan.is_some() {
         let permutations = permutations
@@ -850,31 +904,12 @@ where
                     let fixed_cosets = &fixed_cosets;
                     iter::empty()
                         .chain(meta.gates.iter().flat_map(move |gate| {
-                            gate.polynomials().iter().map(move |expr| {
-                                expr.evaluate(
-                                    &poly::Ast::ConstantTerm,
-                                    &|_| {
-                                        panic!("virtual selectors are removed during optimization")
-                                    },
-                                    &|query| {
-                                        fixed_cosets[query.column_index]
-                                            .with_rotation(query.rotation)
-                                            .into()
-                                    },
-                                    &|query| {
-                                        advice_cosets[query.column_index]
-                                            .with_rotation(query.rotation)
-                                            .into()
-                                    },
-                                    &|query| {
-                                        instance_cosets[query.column_index]
-                                            .with_rotation(query.rotation)
-                                            .into()
-                                    },
-                                    &|a| -a,
-                                    &|a, b| a + b,
-                                    &|a, b| a * b,
-                                    &|a, scalar| a * scalar,
+                            gate.polynomials().iter().map(move |expression| {
+                                evaluator_schedule::expression_ast(
+                                    expression,
+                                    fixed_cosets,
+                                    advice_cosets,
+                                    instance_cosets,
                                 )
                             })
                         }))
@@ -1687,7 +1722,7 @@ fn compressed_selector_cache_preserves_proof() {
     }
 
     // A different seed changes commitments before theta is sampled. The
-    // symbolic program binds the resulting challenges, while proof bytes still
+    // symbolic plan binds the resulting challenges, while proof bytes still
     // match a freshly planned control.
     let alternate_seed = PROOF_SEED ^ 0xa11c_e55e_7e57_0001;
     let eager_plan = pk.quotient_plans.get(1).unwrap();
@@ -1727,6 +1762,27 @@ fn compressed_selector_cache_preserves_proof() {
     ));
     verify(&mismatched_pk, &params, 2, &fallback_proof);
 
+    // Equal polynomial counts and lengths are insufficient: swapping a fixed
+    // column's semantic tag with an advice column's tag must also reject the
+    // retained plan and take the byte-identical fallback.
+    let swapped_tag_pk = create_pk();
+    swapped_tag_pk.quotient_plans.swap_polynomial_tags(
+        2,
+        QuotientPoly::Fixed { column_index: 0 },
+        QuotientPoly::Advice {
+            circuit_index: 0,
+            column_index: 0,
+        },
+    );
+    let rejected_plan = swapped_tag_pk.quotient_plans.get(2).unwrap();
+    let fallback_proof = create(&swapped_tag_pk, &params, 2, PROOF_SEED);
+    assert_eq!(fallback_proof, eager_proofs[1]);
+    assert!(!std::sync::Arc::ptr_eq(
+        &rejected_plan,
+        &swapped_tag_pk.quotient_plans.get(2).unwrap()
+    ));
+    verify(&swapped_tag_pk, &params, 2, &fallback_proof);
+
     // A family omitted by the cache budget retains its source coset and takes
     // the generic evaluator path. Restore that state for every cached family.
     let mut uncached_pk = pk.clone();
@@ -1749,7 +1805,7 @@ fn compressed_selector_cache_preserves_proof() {
         create(&uncached_pk, &params, 2, PROOF_SEED)
     );
 
-    // Concurrent first proofs share the keygen-compiled program without
+    // Concurrent first proofs share the keygen-compiled plan without
     // replacement and preserve deterministic proof bytes.
     let concurrent_pk = create_pk();
     let eager_plan = concurrent_pk.quotient_plans.get(4).unwrap();
@@ -1763,6 +1819,27 @@ fn compressed_selector_cache_preserves_proof() {
         &eager_plan,
         &concurrent_pk.quotient_plans.get(4).unwrap()
     ));
+
+    // Concurrent cold proofs can both miss without racing plan replacement or
+    // changing proof bytes.
+    let mut cold_pk = create_pk();
+    cold_pk.quotient_plans = std::sync::Arc::new(Default::default());
+    let barrier = std::sync::Barrier::new(3);
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            barrier.wait();
+            create(&cold_pk, &params, 2, PROOF_SEED)
+        });
+        let second = scope.spawn(|| {
+            barrier.wait();
+            create(&cold_pk, &params, 2, PROOF_SEED)
+        });
+        barrier.wait();
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_eq!(first, second);
+    assert!(cold_pk.quotient_plans.get(2).is_some());
+    verify(&cold_pk, &params, 2, &first);
 
     #[cfg(feature = "multicore")]
     {

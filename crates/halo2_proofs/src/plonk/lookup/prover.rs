@@ -1,6 +1,6 @@
 use super::super::{
     ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, Error, ProvingKey,
-    circuit::Expression,
+    circuit::Expression, evaluator_schedule::QuotientPoly,
 };
 use super::Argument;
 use crate::{
@@ -786,12 +786,28 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedPermuted<C, Ev> {
         self,
         evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
         transcript: &mut T,
+        circuit_index: usize,
+        lookup_index: usize,
     ) -> Result<Permuted<C, Ev>, Error> {
         transcript.write_point(self.permuted_input_commitment)?;
         transcript.write_point(self.permuted_table_commitment)?;
 
-        let permuted_input_coset = evaluator.register_poly(self.permuted_input_coset);
-        let permuted_table_coset = evaluator.register_poly(self.permuted_table_coset);
+        let permuted_input_coset = evaluator.register_poly_with_tag(
+            self.permuted_input_coset,
+            QuotientPoly::LookupPermutedInput {
+                circuit_index,
+                lookup_index,
+            }
+            .into(),
+        );
+        let permuted_table_coset = evaluator.register_poly_with_tag(
+            self.permuted_table_coset,
+            QuotientPoly::LookupPermutedTable {
+                circuit_index,
+                lookup_index,
+            }
+            .into(),
+        );
 
         Ok(Permuted {
             compressed_input_expression: self.compressed_input_expression,
@@ -964,8 +980,17 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedProduct<C, Ev> {
         self,
         evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
         transcript: &mut T,
+        circuit_index: usize,
+        lookup_index: usize,
     ) -> Result<Committed<C, Ev>, Error> {
-        let product_coset = evaluator.register_poly(self.product_coset);
+        let product_coset = evaluator.register_poly_with_tag(
+            self.product_coset,
+            QuotientPoly::LookupProduct {
+                circuit_index,
+                lookup_index,
+            }
+            .into(),
+        );
 
         // Hash product commitment.
         transcript.write_point(self.product_commitment)?;
