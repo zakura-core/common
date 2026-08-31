@@ -198,13 +198,15 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         evaluator: poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
         expressions: impl Iterator<Item = poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
         y: ChallengeY<C>,
+        cache_layout: Option<&poly::EvaluationCacheLayout>,
         mut rng: R,
         transcript: &mut T,
-    ) -> Result<ConstructedQuotient<C>, Error> {
+    ) -> Result<(ConstructedQuotient<C>, Option<poly::EvaluationCacheLayout>), Error> {
         // Fold the constraint expressions into the quotient numerator using
         // the y challenge, then evaluate the numerator.
         let quotient_numerator = poly::Ast::distribute_powers(expressions, *y);
-        let quotient_numerator = evaluator.evaluate(&quotient_numerator, domain);
+        let (quotient_numerator, prepared_layout) =
+            evaluator.evaluate_with_cache_layout(&quotient_numerator, domain, cache_layout);
 
         // Move the numerator to coefficient form, divide by
         // t(X) = X^{params.n} - 1 using its sparse block inverse, and construct
@@ -243,11 +245,14 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
             transcript.write_point(*c)?;
         }
 
-        Ok(ConstructedQuotient {
-            h_pieces,
-            h_blinds,
-            random_poly: self,
-        })
+        Ok((
+            ConstructedQuotient {
+                h_pieces,
+                h_blinds,
+                random_poly: self,
+            },
+            prepared_layout,
+        ))
     }
 }
 

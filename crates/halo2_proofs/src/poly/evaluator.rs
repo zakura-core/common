@@ -1149,6 +1149,76 @@ struct CacheAction {
     end: usize,
 }
 
+const CACHE_EVENT_LOAD: u8 = 0;
+const CACHE_EVENT_STORE: u8 = 1;
+
+#[derive(Clone, Copy, Debug)]
+struct CacheEvent {
+    occurrence: u32,
+    end: u32,
+    slot: u16,
+    kind: u8,
+    reserved: u8,
+}
+
+/// A sparse, circuit-count-specific evaluator cache schedule.
+#[derive(Clone)]
+pub(crate) struct EvaluationCacheLayout {
+    events: Box<[CacheEvent]>,
+    occurrence_count: u32,
+    cache_slots: u16,
+}
+
+impl fmt::Debug for EvaluationCacheLayout {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvaluationCacheLayout")
+            .field("events", &self.events.len())
+            .field("occurrences", &self.occurrence_count)
+            .field("cache_slots", &self.cache_slots)
+            .field("payload_bytes", &self.payload_bytes())
+            .finish()
+    }
+}
+
+impl EvaluationCacheLayout {
+    fn from_actions(actions: &[Option<CacheAction>], cache_slots: usize) -> Option<Self> {
+        let occurrence_count = actions.len().try_into().ok()?;
+        let cache_slots = cache_slots.try_into().ok()?;
+        let events = actions
+            .iter()
+            .enumerate()
+            .filter_map(|(occurrence, action)| action.map(|action| (occurrence, action)))
+            .map(|(occurrence, action)| {
+                Some(CacheEvent {
+                    occurrence: occurrence.try_into().ok()?,
+                    end: action.end.try_into().ok()?,
+                    slot: action.slot.try_into().ok()?,
+                    kind: if action.store {
+                        CACHE_EVENT_STORE
+                    } else {
+                        CACHE_EVENT_LOAD
+                    },
+                    reserved: 0,
+                })
+            })
+            .collect::<Option<Box<[_]>>>()?;
+        Some(Self {
+            events,
+            occurrence_count,
+            cache_slots,
+        })
+    }
+
+    fn is_valid_for<E, F: Field, B: Basis>(&self, plan: &EvaluationPlan<E, F, B>) -> bool {
+        validate_cache_events(plan, self)
+    }
+
+    pub(crate) fn payload_bytes(&self) -> usize {
+        self.events.len() * size_of::<CacheEvent>()
+    }
+}
+
 fn cache_slot_intervals(
     actions: &[Option<CacheAction>],
     cache_slots: usize,
@@ -1266,7 +1336,10 @@ struct RepeatShape {
 }
 
 impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
-    fn cache_common_subexpressions(&mut self, linear_term_budget: LinearTermCacheBudget) -> usize {
+    fn cache_common_subexpression_actions(
+        &self,
+        linear_term_budget: LinearTermCacheBudget,
+    ) -> (Vec<Option<CacheAction>>, usize) {
         let (actions, cache_slots) = {
             let mut occurrences = vec![];
             let mut scalars = vec![];
@@ -1369,11 +1442,299 @@ impl<E: Copy, F: Field, B: Basis> EvaluationPlan<E, F, B> {
             (actions, cache_slots)
         };
 
+        (actions, cache_slots)
+    }
+
+    #[cfg(test)]
+    fn cache_common_subexpressions(&mut self, linear_term_budget: LinearTermCacheBudget) -> usize {
+        let (actions, cache_slots) = self.cache_common_subexpression_actions(linear_term_budget);
         let mut occurrence = 0;
         apply_cache_actions(self, &actions, &mut occurrence);
         debug_assert_eq!(occurrence, actions.len());
         cache_slots
     }
+
+    fn cache_with_layout(
+        &mut self,
+        linear_term_budget: LinearTermCacheBudget,
+        cached: Option<&EvaluationCacheLayout>,
+        retain_layout: bool,
+    ) -> (usize, Option<EvaluationCacheLayout>) {
+        if let Some(cached) = cached
+            && cached.is_valid_for(self)
+        {
+            apply_cache_events(self, cached);
+            return (cached.cache_slots.into(), None);
+        }
+
+        let (actions, cache_slots) = self.cache_common_subexpression_actions(linear_term_budget);
+        let layout = retain_layout
+            .then(|| EvaluationCacheLayout::from_actions(&actions, cache_slots))
+            .flatten();
+        let mut occurrence = 0;
+        apply_cache_actions(self, &actions, &mut occurrence);
+        debug_assert_eq!(occurrence, actions.len());
+        (cache_slots, layout)
+    }
+}
+
+fn validate_cache_events<E, F: Field, B: Basis>(
+    plan: &EvaluationPlan<E, F, B>,
+    layout: &EvaluationCacheLayout,
+) -> bool {
+    fn validate_factor_body<'a, E, F: Field, B: Basis>(
+        body: &'a FactorBodyPlan<E, F, B>,
+        layout: &EvaluationCacheLayout,
+        event_index: &mut usize,
+        occurrence: &mut u32,
+        stores: &mut [Option<&'a EvaluationPlan<E, F, B>>],
+    ) -> bool {
+        match body {
+            FactorBodyPlan::Sequential(terms) => terms.iter().fold(true, |valid, term| {
+                validate_plan(term, layout, event_index, occurrence, stores) & valid
+            }),
+            FactorBodyPlan::Factored(work) => work.iter().fold(true, |valid, work| {
+                let work_valid = match work {
+                    FactorBodyWork::Term(term) => {
+                        validate_plan(&term.term, layout, event_index, occurrence, stores)
+                    }
+                    FactorBodyWork::SharedFactor { factor, terms } => {
+                        let factor_valid =
+                            validate_plan(factor, layout, event_index, occurrence, stores);
+                        terms.iter().fold(factor_valid, |valid, term| {
+                            validate_plan(&term.term, layout, event_index, occurrence, stores)
+                                & valid
+                        })
+                    }
+                };
+                work_valid & valid
+            }),
+        }
+    }
+
+    fn validate_plan<'a, E, F: Field, B: Basis>(
+        plan: &'a EvaluationPlan<E, F, B>,
+        layout: &EvaluationCacheLayout,
+        event_index: &mut usize,
+        occurrence: &mut u32,
+        stores: &mut [Option<&'a EvaluationPlan<E, F, B>>],
+    ) -> bool {
+        let start = *occurrence;
+        let event = match layout.events.get(*event_index) {
+            Some(event) if event.occurrence < start => return false,
+            Some(event) if event.occurrence == start => {
+                *event_index += 1;
+                Some(event)
+            }
+            _ => None,
+        };
+        let Some(next_occurrence) = occurrence.checked_add(1) else {
+            return false;
+        };
+        *occurrence = next_occurrence;
+        if let Some(event) = event
+            && (event.reserved != 0
+                || event.kind > CACHE_EVENT_STORE
+                || event.slot >= layout.cache_slots
+                || event.end > layout.occurrence_count
+                || layout
+                    .events
+                    .get(*event_index)
+                    .is_some_and(|next| next.occurrence < event.end))
+        {
+            return false;
+        }
+
+        let children_valid = match plan {
+            EvaluationPlan::Add(lhs, rhs) | EvaluationPlan::Mul(lhs, rhs) => {
+                let lhs = validate_plan(lhs, layout, event_index, occurrence, stores);
+                let rhs = validate_plan(rhs, layout, event_index, occurrence, stores);
+                lhs & rhs
+            }
+            EvaluationPlan::Square(inner) | EvaluationPlan::Scale(inner, _) => {
+                validate_plan(inner, layout, event_index, occurrence, stores)
+            }
+            EvaluationPlan::Horner { base, .. } => {
+                validate_plan(base, layout, event_index, occurrence, stores)
+            }
+            EvaluationPlan::DistributePowers { work, .. } => {
+                work.iter().fold(true, |valid, work| {
+                    let work_valid = match work {
+                        DistributionWork::Term { term, .. } => {
+                            validate_plan(term, layout, event_index, occurrence, stores)
+                        }
+                        DistributionWork::WeightedSharedFactor { factor, terms } => {
+                            let factor =
+                                validate_plan(factor, layout, event_index, occurrence, stores);
+                            terms.iter().fold(factor, |valid, term| {
+                                validate_plan(&term.term, layout, event_index, occurrence, stores)
+                                    & valid
+                            })
+                        }
+                        DistributionWork::SelectorFamily { runs, .. } => {
+                            runs.iter().rev().fold(true, |valid, run| {
+                                validate_factor_body(
+                                    &run.bodies,
+                                    layout,
+                                    event_index,
+                                    occurrence,
+                                    stores,
+                                ) & valid
+                            })
+                        }
+                    };
+                    work_valid & valid
+                })
+            }
+            EvaluationPlan::Poly(_)
+            | EvaluationPlan::LinearTerm(_)
+            | EvaluationPlan::ConstantTerm(_) => true,
+            EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => false,
+        };
+
+        let event_valid = event.is_none_or(|event| {
+            if event.end != *occurrence {
+                return false;
+            }
+            let slot = usize::from(event.slot);
+            if event.kind == CACHE_EVENT_STORE {
+                stores[slot] = Some(plan);
+                true
+            } else {
+                // The retained layout contains no trusted fingerprint. A load
+                // is reusable only when it exactly matches the store in this
+                // proof's challenge-bound plan.
+                stores[slot].is_some_and(|stored| same_plan(stored, plan))
+            }
+        });
+        children_valid & event_valid
+    }
+
+    let mut event_index = 0;
+    let mut occurrence = 0;
+    let mut stores = vec![None; usize::from(layout.cache_slots)];
+    validate_plan(plan, layout, &mut event_index, &mut occurrence, &mut stores)
+        && event_index == layout.events.len()
+        && occurrence == layout.occurrence_count
+}
+
+fn apply_cache_events<E, F: Field, B: Basis>(
+    plan: &mut EvaluationPlan<E, F, B>,
+    layout: &EvaluationCacheLayout,
+) {
+    fn apply_factor_body<E, F: Field, B: Basis>(
+        body: &mut FactorBodyPlan<E, F, B>,
+        layout: &EvaluationCacheLayout,
+        event_index: &mut usize,
+        occurrence: &mut u32,
+    ) {
+        match body {
+            FactorBodyPlan::Sequential(terms) => {
+                for term in terms {
+                    apply_plan(term, layout, event_index, occurrence);
+                }
+            }
+            FactorBodyPlan::Factored(work) => {
+                for work in work {
+                    match work {
+                        FactorBodyWork::Term(term) => {
+                            apply_plan(&mut term.term, layout, event_index, occurrence)
+                        }
+                        FactorBodyWork::SharedFactor { factor, terms } => {
+                            apply_plan(factor, layout, event_index, occurrence);
+                            for term in terms {
+                                apply_plan(&mut term.term, layout, event_index, occurrence);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_plan<E, F: Field, B: Basis>(
+        plan: &mut EvaluationPlan<E, F, B>,
+        layout: &EvaluationCacheLayout,
+        event_index: &mut usize,
+        occurrence: &mut u32,
+    ) {
+        let event = layout
+            .events
+            .get(*event_index)
+            .filter(|event| event.occurrence == *occurrence)
+            .copied();
+        if event.is_some() {
+            *event_index += 1;
+        }
+        *occurrence += 1;
+        if let Some(event) = event
+            && event.kind == CACHE_EVENT_LOAD
+        {
+            *plan = EvaluationPlan::CacheLoad {
+                slot: event.slot.into(),
+            };
+            *occurrence = event.end;
+            return;
+        }
+
+        match plan {
+            EvaluationPlan::Add(lhs, rhs) | EvaluationPlan::Mul(lhs, rhs) => {
+                apply_plan(lhs, layout, event_index, occurrence);
+                apply_plan(rhs, layout, event_index, occurrence);
+            }
+            EvaluationPlan::Square(inner) | EvaluationPlan::Scale(inner, _) => {
+                apply_plan(inner, layout, event_index, occurrence)
+            }
+            EvaluationPlan::Horner { base, .. } => {
+                apply_plan(base, layout, event_index, occurrence)
+            }
+            EvaluationPlan::DistributePowers { work, .. } => {
+                for work in work {
+                    match work {
+                        DistributionWork::Term { term, .. } => {
+                            apply_plan(term, layout, event_index, occurrence)
+                        }
+                        DistributionWork::WeightedSharedFactor { factor, terms } => {
+                            apply_plan(factor, layout, event_index, occurrence);
+                            for term in terms {
+                                apply_plan(&mut term.term, layout, event_index, occurrence);
+                            }
+                        }
+                        DistributionWork::SelectorFamily { runs, .. } => {
+                            for run in runs.iter_mut().rev() {
+                                apply_factor_body(&mut run.bodies, layout, event_index, occurrence);
+                            }
+                        }
+                    }
+                }
+            }
+            EvaluationPlan::Poly(_)
+            | EvaluationPlan::LinearTerm(_)
+            | EvaluationPlan::ConstantTerm(_) => {}
+            EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
+                unreachable!("a retained layout is applied to an uncached plan")
+            }
+        }
+
+        if let Some(event) = event {
+            let inner = std::mem::replace(
+                plan,
+                EvaluationPlan::CacheLoad {
+                    slot: event.slot.into(),
+                },
+            );
+            *plan = EvaluationPlan::CacheStore {
+                slot: event.slot.into(),
+                inner: Box::new(inner),
+            };
+        }
+    }
+
+    let mut event_index = 0;
+    let mut occurrence = 0;
+    apply_plan(plan, layout, &mut event_index, &mut occurrence);
+    debug_assert_eq!(event_index, layout.events.len());
+    debug_assert_eq!(occurrence, layout.occurrence_count);
 }
 
 fn apply_cache_actions<E, F: Field, B: Basis>(
@@ -1725,6 +2086,35 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         ast: &Ast<E, F, B>,
         domain: &EvaluationDomain<F>,
     ) -> Polynomial<F, B>
+    where
+        E: Copy + Send + Sync,
+        F: WithSmallOrderMulGroup<3>,
+        B: BasisOps,
+    {
+        self.evaluate_inner(ast, domain, None, false).0
+    }
+
+    pub(crate) fn evaluate_with_cache_layout(
+        &self,
+        ast: &Ast<E, F, B>,
+        domain: &EvaluationDomain<F>,
+        cache_layout: Option<&EvaluationCacheLayout>,
+    ) -> (Polynomial<F, B>, Option<EvaluationCacheLayout>)
+    where
+        E: Copy + Send + Sync,
+        F: WithSmallOrderMulGroup<3>,
+        B: BasisOps,
+    {
+        self.evaluate_inner(ast, domain, cache_layout, true)
+    }
+
+    fn evaluate_inner(
+        &self,
+        ast: &Ast<E, F, B>,
+        domain: &EvaluationDomain<F>,
+        cache_layout: Option<&EvaluationCacheLayout>,
+        retain_layout: bool,
+    ) -> (Polynomial<F, B>, Option<EvaluationCacheLayout>)
     where
         E: Copy + Send + Sync,
         F: WithSmallOrderMulGroup<3>,
@@ -2188,8 +2578,11 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             .replace_compressed_selectors(ast)
             .unwrap_or_else(|| ast.clone());
         let mut plan = EvaluationPlan::compile(&ast);
-        let cache_slots =
-            plan.cache_common_subexpressions(linear_term_cache_budget::<F, B>(poly_len));
+        let (cache_slots, prepared_layout) = plan.cache_with_layout(
+            linear_term_cache_budget::<F, B>(poly_len),
+            cache_layout,
+            retain_layout,
+        );
         let mut result = B::empty_poly(domain);
         let scratch_slots = plan.required_scratch_slots();
         multicore::scope(|scope| {
@@ -2210,7 +2603,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 });
             }
         });
-        result
+        (result, prepared_layout)
     }
 }
 
@@ -3392,6 +3785,45 @@ mod tests {
     fn repeated_squares_are_cached() {
         check_repeated_squares_are_cached::<pallas::Base>();
         check_repeated_squares_are_cached::<vesta::Base>();
+    }
+
+    #[test]
+    fn retained_cache_layout_is_validated_against_the_current_plan() {
+        let domain = EvaluationDomain::new(3, 4);
+        let mut values = domain.empty_extended();
+        for (index, value) in values.iter_mut().enumerate() {
+            *value = pallas::Base::from(index as u64 + 3);
+        }
+
+        let mut evaluator = new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {});
+        let leaf = evaluator.register_poly(values);
+        let repeated = |constant| {
+            let value = Ast::from(leaf) + Ast::ConstantTerm(pallas::Base::from(constant));
+            value.clone() * value
+        };
+        let original = repeated(7) + repeated(7);
+        let (_, layout) = evaluator.evaluate_with_cache_layout(&original, &domain, None);
+        let layout = layout.expect("the cold evaluation prepares a layout");
+        assert!(!layout.events.is_empty());
+
+        // Challenge-bound scalar values may differ between proofs. The
+        // retained events remain valid because their current-plan store and
+        // load shapes still compare exactly.
+        let matching = repeated(11) + repeated(11);
+        let expected = evaluator.evaluate(&matching, &domain);
+        let (actual, replacement) =
+            evaluator.evaluate_with_cache_layout(&matching, &domain, Some(&layout));
+        assert_eq!(&actual[..], &expected[..]);
+        assert!(replacement.is_none());
+
+        // The same occurrence count is insufficient: a different load shape
+        // invalidates the retained layout and safely falls back to planning.
+        let mismatched = repeated(13) + repeated(17);
+        let expected = evaluator.evaluate(&mismatched, &domain);
+        let (actual, replacement) =
+            evaluator.evaluate_with_cache_layout(&mismatched, &domain, Some(&layout));
+        assert_eq!(&actual[..], &expected[..]);
+        assert!(replacement.is_some());
     }
 
     fn check_nested_arithmetic_and_linear_common_subexpressions_are_cached<F>()
