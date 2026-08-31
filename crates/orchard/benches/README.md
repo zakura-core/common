@@ -40,9 +40,11 @@ RAYON_NUM_THREADS=1 cargo +1.97.1 bench --locked \
 The historical `orchard-k11` group measures steady-state throughput for one-,
 two-, and four-Action proofs. Its name is preserved for existing Criterion
 baselines and result parsers. Key generation, proving-key preparation, and a
-genuine proof-verification preflight occur before its timed routines. The
-preflight and Criterion warmup mean that every proving-key cache is populated
-before these samples; do not interpret them as first-proof latency.
+two-proof verification preflight occur before its timed routines. The two
+preflight proofs per Action count use distinct deterministic seeds on the same
+prepared key, exercising retained state under different transcript challenges.
+The preflight and Criterion warmup mean that every proving-key cache is
+populated before these samples; do not interpret them as first-proof latency.
 
 The `orchard-k11-first-after-build-and-prepare` group measures one- and
 four-Action semantic-cold proofs. Every iteration builds a fresh proving key,
@@ -54,6 +56,10 @@ pool, code pages, and operating-system caches remain warm. The group is not a
 process-startup or cold-page-cache benchmark. It requires a build with either
 the `multicore` or `orbits` feature and fails instead of silently measuring an
 unprepared key when commitment-table preparation is unavailable.
+
+Both groups use deterministic but varying proof RNG seeds, so consecutive
+proofs have different transcript challenges and bytes. Seed construction and
+RNG initialization happen outside the timed routines.
 
 Both groups use ten flat samples, a two-second warmup, and a 15-second
 measurement interval. The semantic-cold group is much more expensive in wall

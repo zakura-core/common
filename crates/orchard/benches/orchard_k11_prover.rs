@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, SamplingMode, black_box, criterion_group, criterion_main};
 use orchard::{
-    Anchor, Bundle,
+    Anchor, Bundle, Proof,
     builder::{Builder, BundleType, UnauthorizedBundle},
     bundle::{BundleVersion, Flags},
     circuit::{Instance, OrchardCircuitVersion, ProvingKey, VerifyingKey},
@@ -21,7 +21,10 @@ const FIXTURE_MEMO: [u8; FIXTURE_MEMO_SIZE] = [0; FIXTURE_MEMO_SIZE];
 const FIXTURE_SPENDING_KEY: [u8; 32] = [7; 32];
 const FIXTURE_ANCHOR: [u8; 32] = [0; 32];
 const FIXTURE_SEED: [u8; 32] = [0x42; 32];
-const PROOF_SEED: [u8; 32] = [0x24; 32];
+const PREFLIGHT_PROOF_SEED_DOMAIN: u8 = 0x24;
+const STEADY_PROOF_SEED_DOMAIN: u8 = 0x25;
+const FIRST_AFTER_PREPARE_PROOF_SEED_DOMAIN: u8 = 0x26;
+const PREFLIGHT_PROOF_COUNT: u64 = 2;
 
 const BENCHMARK_SAMPLES: usize = 10;
 const WARMUP_SECONDS: u64 = 2;
@@ -81,6 +84,14 @@ fn benchmark_name(action_count: usize) -> &'static str {
     }
 }
 
+fn proof_rng(domain: u8, action_count: usize, proof_index: u64) -> StdRng {
+    let mut seed = [domain; 32];
+    let action_count = u64::try_from(action_count).expect("Action count fits into u64");
+    seed[..8].copy_from_slice(&action_count.to_le_bytes());
+    seed[8..16].copy_from_slice(&proof_index.to_le_bytes());
+    StdRng::from_seed(seed)
+}
+
 fn build_prepared_key(version: OrchardCircuitVersion) -> ProvingKey {
     let pk = ProvingKey::build(version);
     assert!(
@@ -113,16 +124,32 @@ fn orchard_k11_prover(c: &mut Criterion) {
 
     // These preflights intentionally make the historical throughput cases
     // steady-state with respect to all proving-key caches.
-    for (_, fixture) in &fixtures {
-        // Check each exact fixture and proving path outside the timed region.
-        let proof = fixture
-            .bundle
-            .authorization()
-            .create_proof(&pk, &fixture.instances, StdRng::from_seed(PROOF_SEED))
-            .unwrap();
-        proof
-            .verify(&vk, &fixture.instances)
-            .expect("the benchmark proof must verify");
+    for (action_count, fixture) in &fixtures {
+        let mut previous_proof: Option<Proof> = None;
+        // Check each exact fixture and retained-state path outside the timed
+        // region with two distinct sets of transcript challenges.
+        for proof_index in 0..PREFLIGHT_PROOF_COUNT {
+            let proof = fixture
+                .bundle
+                .authorization()
+                .create_proof(
+                    &pk,
+                    &fixture.instances,
+                    proof_rng(PREFLIGHT_PROOF_SEED_DOMAIN, *action_count, proof_index),
+                )
+                .unwrap();
+            proof
+                .verify(&vk, &fixture.instances)
+                .expect("each benchmark preflight proof must verify");
+            if let Some(previous_proof) = &previous_proof {
+                assert_ne!(
+                    proof.as_ref(),
+                    previous_proof.as_ref(),
+                    "distinct proof seeds must produce distinct proofs",
+                );
+            }
+            previous_proof = Some(proof);
+        }
     }
 
     // Preserve the historical group ID used by baseline directories and
@@ -134,8 +161,13 @@ fn orchard_k11_prover(c: &mut Criterion) {
     steady.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
     for (action_count, fixture) in &fixtures {
         steady.bench_function(benchmark_name(*action_count), |bencher| {
+            let mut proof_index = 0;
             bencher.iter_batched(
-                || StdRng::from_seed(PROOF_SEED),
+                || {
+                    let proof_rng = proof_rng(STEADY_PROOF_SEED_DOMAIN, *action_count, proof_index);
+                    proof_index += 1;
+                    proof_rng
+                },
                 |proof_rng| {
                     black_box(
                         fixture
@@ -160,8 +192,17 @@ fn orchard_k11_prover(c: &mut Criterion) {
         FIRST_AFTER_BUILD_AND_PREPARE_ACTION_COUNTS.contains(action_count)
     }) {
         first_after_prepare.bench_function(benchmark_name(*action_count), |bencher| {
+            let mut proof_index = 0;
             bencher.iter_batched_ref(
-                || (build_prepared_key(version), StdRng::from_seed(PROOF_SEED)),
+                || {
+                    let proof_rng = proof_rng(
+                        FIRST_AFTER_PREPARE_PROOF_SEED_DOMAIN,
+                        *action_count,
+                        proof_index,
+                    );
+                    proof_index += 1;
+                    (build_prepared_key(version), proof_rng)
+                },
                 |(pk, proof_rng)| {
                     black_box(
                         fixture
