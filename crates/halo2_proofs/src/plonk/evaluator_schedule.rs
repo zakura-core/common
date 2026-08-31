@@ -13,7 +13,7 @@ use crate::{
 };
 
 const RETAINED_QUOTIENT_CIRCUIT_COUNTS: [usize; 3] = [1, 2, 4];
-const MAX_RETAINED_QUOTIENT_PLAN_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RETAINED_QUOTIENT_PLAN_BYTES: usize = 1024 * 1024;
 
 struct LookupTopology<E, F: WithSmallOrderMulGroup<3>> {
     compressed_input: Ast<E, F, ExtendedLagrangeCoeff>,
@@ -284,6 +284,6 @@ mod tests {
     #[test]
     fn retained_counts_are_bounded() {
         assert_eq!(RETAINED_QUOTIENT_CIRCUIT_COUNTS, [1, 2, 4]);
-        assert_eq!(MAX_RETAINED_QUOTIENT_PLAN_BYTES, 2 * 1024 * 1024);
+        assert_eq!(MAX_RETAINED_QUOTIENT_PLAN_BYTES, 1024 * 1024);
     }
 }

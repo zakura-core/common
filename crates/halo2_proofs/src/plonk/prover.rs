@@ -597,6 +597,14 @@ where
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
+    // A plan candidate lets lookup preparation omit its symbolic quotient
+    // ASTs. Exact evaluator-shape validation remains deferred until every
+    // polynomial has been registered; a rejected candidate reconstructs them
+    // on the ordinary compilation path below.
+    let circuit_count = instance_values.len();
+    let compiled_plan = pk.quotient_plans.get(circuit_count);
+    let build_lookup_quotient_asts = compiled_plan.is_none();
+
     let lookup_count = pk.vk.cs.lookups.len();
     let mut lookup_tasks = Vec::new();
     // Draw all blinding values in circuit-major, lookup-major order before
@@ -623,6 +631,7 @@ where
         &advice_cosets,
         &fixed_cosets,
         &instance_cosets,
+        build_lookup_quotient_asts,
     )?;
 
     let mut prepared_lookups = prepared_lookups.into_iter();
@@ -723,7 +732,7 @@ where
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    let circuit_count = lookups.len();
+    debug_assert_eq!(lookups.len(), circuit_count);
     let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
     // Draw all blinding values in circuit-major, lookup-major order before
     // preparing the independent lookup products in parallel.
@@ -766,10 +775,7 @@ where
     // Validate a keygen-prepared program before using it to bypass every
     // challenge-bound constraint AST allocation. A mismatch takes the full
     // construction path and can replace the retained program safely.
-    let compiled_plan = pk
-        .quotient_plans
-        .get(circuit_count)
-        .filter(|plan| coset_evaluator.accepts_compiled_plan(plan));
+    let compiled_plan = compiled_plan.filter(|plan| coset_evaluator.accepts_compiled_plan(plan));
     let (permutations, lookups, expressions) = if compiled_plan.is_some() {
         let permutations = permutations
             .into_iter()
@@ -809,11 +815,22 @@ where
 
         let (lookups, lookup_expressions): (Vec<Vec<_>>, Vec<Vec<Vec<_>>>) = lookups
             .into_iter()
-            .map(|lookups| {
+            .zip(advice_cosets.iter())
+            .zip(instance_cosets.iter())
+            .map(|((lookups, advice_cosets), instance_cosets)| {
                 lookups
                     .into_iter()
-                    .map(|lookup| {
-                        let (constructed, expressions) = lookup.construct(l0, l_blind, l_last);
+                    .zip(meta.lookups.iter())
+                    .map(|(lookup, argument)| {
+                        let (constructed, expressions) = lookup.construct(
+                            argument,
+                            &fixed_cosets,
+                            advice_cosets,
+                            instance_cosets,
+                            l0,
+                            l_blind,
+                            l_last,
+                        );
                         (constructed, expressions.collect())
                     })
                     .unzip()
@@ -1687,6 +1704,28 @@ fn compressed_selector_cache_preserves_proof() {
         create(&alternate_lazy_pk, &params, 1, alternate_seed)
     );
     verify(&pk, &params, 1, &alternate_proof);
+
+    // A candidate is selected before lookup preparation, so an exact shape
+    // mismatch must reconstruct the omitted lookup ASTs before falling back.
+    // Removing compressed-selector registration changes the evaluator shape
+    // without changing the constraint system or proof bytes.
+    let mut mismatched_pk = create_pk();
+    let rejected_plan = mismatched_pk.quotient_plans.get(2).unwrap();
+    for family in mismatched_pk.cached_selector_families.iter() {
+        let column_index = family.column_index;
+        mismatched_pk.fixed_cosets[column_index] = mismatched_pk
+            .vk
+            .domain
+            .coeff_to_extended(mismatched_pk.fixed_polys[column_index].clone());
+    }
+    mismatched_pk.cached_selector_families = Default::default();
+    let fallback_proof = create(&mismatched_pk, &params, 2, PROOF_SEED);
+    assert_eq!(fallback_proof, eager_proofs[1]);
+    assert!(!std::sync::Arc::ptr_eq(
+        &rejected_plan,
+        &mismatched_pk.quotient_plans.get(2).unwrap()
+    ));
+    verify(&mismatched_pk, &params, 2, &fallback_proof);
 
     // A family omitted by the cache budget retains its source coset and takes
     // the generic evaluator path. Restore that state for every cached family.
