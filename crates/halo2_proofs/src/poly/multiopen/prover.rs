@@ -489,7 +489,9 @@ where
     let q_prime_poly = prepare_q_prime(&point_sets, &q_polys, *x_2, params.n as usize);
 
     let q_prime_blind = Blind(C::Scalar::random(&mut rng));
-    let q_prime_commitment = params.commit(&q_prime_poly, q_prime_blind).to_affine();
+    let q_prime_commitment = params
+        .commit_full_width(&q_prime_poly, q_prime_blind)
+        .to_affine();
 
     transcript.write_point(q_prime_commitment)?;
 
