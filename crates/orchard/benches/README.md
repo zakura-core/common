@@ -33,9 +33,28 @@ RAYON_NUM_THREADS=1 cargo +1.91 bench --locked \
     --bench orchard_k11_prover
 ```
 
-Key generation and genuine proof-verification preflights occur before the
-timed routines. The benchmark measures one-, two-, and four-Action proofs with
-ten flat samples, a two-second warmup, and a 15-second measurement interval.
+The `orchard-k11-steady` group measures warm throughput for one-, two-, and
+four-Action proofs. Key generation, proving-key preparation, and a genuine
+proof-verification preflight occur before its timed routines. The preflight and
+Criterion warmup mean that every proving-key cache is populated before these
+samples; do not interpret them as first-proof latency.
+
+The `orchard-k11-first-after-build-and-prepare` group measures one- and
+four-Action semantic-cold proofs. Every iteration builds a fresh proving key,
+successfully prepares its commitment tables, and then creates exactly one
+proof with that key. Key generation, preparation, and destruction of the key
+and its prepared tables are outside the reported duration. This makes lazy
+per-key prover work visible even though Criterion's process, allocator, Rayon
+pool, code pages, and operating-system caches remain warm. The group is not a
+process-startup or cold-page-cache benchmark. It requires a build with either
+the `multicore` or `orbits` feature and fails instead of silently measuring an
+unprepared key when commitment-table preparation is unavailable.
+
+Both groups use ten flat samples, a two-second warmup, and a 15-second
+measurement interval. The semantic-cold group is much more expensive in wall
+time because it repeats key generation and roughly 25 MiB of commitment-table
+preparation for every warmup and measured iteration, even though Criterion
+excludes that setup from each reported proof duration.
 
 For a multicore run, set both thread-count variables to the same value:
 

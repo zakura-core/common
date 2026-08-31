@@ -3,15 +3,16 @@ use std::time::Duration;
 use criterion::{BatchSize, Criterion, SamplingMode, black_box, criterion_group, criterion_main};
 use orchard::{
     Anchor, Bundle,
-    builder::{Builder, BundleType},
+    builder::{Builder, BundleType, UnauthorizedBundle},
     bundle::{BundleVersion, Flags},
-    circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey},
+    circuit::{Instance, OrchardCircuitVersion, ProvingKey, VerifyingKey},
     keys::{FullViewingKey, Scope, SpendingKey},
     value::NoteValue,
 };
 use rand::{SeedableRng, rngs::StdRng};
 
-const BENCHMARK_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
+const STEADY_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
+const FIRST_AFTER_BUILD_AND_PREPARE_ACTION_COUNTS: [usize; 2] = [1, 4];
 const FIXTURE_ADDRESS_INDEX: u32 = 0;
 const FIXTURE_NOTE_VALUE: u64 = 10;
 /// The Orchard builder API fixes memo fields at 512 bytes.
@@ -30,6 +31,65 @@ const MEASUREMENT_SECONDS: u64 = 15;
 const DEFAULT_BENCHMARK_THREADS: &str = "1";
 const BENCHMARK_THREADS_ENV: &str = "ORCHARD_K11_PROVER_THREADS";
 
+struct ProverFixture {
+    bundle: UnauthorizedBundle<i64>,
+    instances: Vec<Instance>,
+}
+
+fn prover_fixture(action_count: usize) -> ProverFixture {
+    let sk = SpendingKey::from_bytes(FIXTURE_SPENDING_KEY).unwrap();
+    let recipient = FullViewingKey::from(&sk).address_at(FIXTURE_ADDRESS_INDEX, Scope::External);
+    let mut fixture_rng = StdRng::from_seed(FIXTURE_SEED);
+    let mut builder = Builder::new(
+        BundleType::Coinbase,
+        BundleVersion::orchard_v2(),
+        Flags::SPENDS_DISABLED,
+        Anchor::from_bytes(FIXTURE_ANCHOR).unwrap(),
+    )
+    .unwrap();
+    for _ in 0..action_count {
+        builder
+            .add_output(
+                None,
+                recipient,
+                NoteValue::from_raw(FIXTURE_NOTE_VALUE),
+                FIXTURE_MEMO,
+            )
+            .unwrap();
+    }
+    let bundle: Bundle<_, i64> = builder
+        .build(&mut fixture_rng)
+        .unwrap()
+        .expect("at least one output produces an Orchard bundle")
+        .0;
+    assert_eq!(bundle.actions().len(), action_count);
+    let instances = bundle
+        .actions()
+        .iter()
+        .map(|action| action.to_instance(*bundle.flags(), *bundle.anchor()))
+        .collect();
+
+    ProverFixture { bundle, instances }
+}
+
+fn benchmark_name(action_count: usize) -> &'static str {
+    match action_count {
+        1 => "prove-1-action",
+        2 => "prove-2-actions",
+        4 => "prove-4-actions",
+        _ => unreachable!("the benchmark action counts are fixed"),
+    }
+}
+
+fn build_prepared_key(version: OrchardCircuitVersion) -> ProvingKey {
+    let pk = ProvingKey::build(version);
+    assert!(
+        pk.prepare_proving(),
+        "first-after-prepare benchmarks require prepared commitment tables",
+    );
+    pk
+}
+
 fn orchard_k11_prover(c: &mut Criterion) {
     let expected_threads = std::env::var(BENCHMARK_THREADS_ENV)
         .unwrap_or_else(|_| DEFAULT_BENCHMARK_THREADS.to_owned());
@@ -39,8 +99,8 @@ fn orchard_k11_prover(c: &mut Criterion) {
         "set RAYON_NUM_THREADS to {expected_threads}",
     );
 
-    // Orchard fixes its Action circuit size at k = 11. Key generation is
-    // deliberately performed before registering the timed proving routine.
+    // Orchard fixes its Action circuit size at k = 11. This shared key is
+    // deliberately prepared and warmed before the steady-state routines.
     let version = OrchardCircuitVersion::FixedPostNu6_2;
     let vk = VerifyingKey::build(version);
     let pk = ProvingKey::build(version);
@@ -48,68 +108,38 @@ fn orchard_k11_prover(c: &mut Criterion) {
     #[cfg(any(feature = "multicore", feature = "orbits"))]
     assert!(pk.prepare_proving(), "Pasta commitment tables must prepare",);
 
-    let mut group = c.benchmark_group("orchard-k11");
-    group.sample_size(BENCHMARK_SAMPLES);
-    group.sampling_mode(SamplingMode::Flat);
-    group.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
-    group.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
-    for action_count in BENCHMARK_ACTION_COUNTS {
-        let sk = SpendingKey::from_bytes(FIXTURE_SPENDING_KEY).unwrap();
-        let recipient =
-            FullViewingKey::from(&sk).address_at(FIXTURE_ADDRESS_INDEX, Scope::External);
-        let mut fixture_rng = StdRng::from_seed(FIXTURE_SEED);
-        let mut builder = Builder::new(
-            BundleType::Coinbase,
-            BundleVersion::orchard_v2(),
-            Flags::SPENDS_DISABLED,
-            Anchor::from_bytes(FIXTURE_ANCHOR).unwrap(),
-        )
-        .unwrap();
-        for _ in 0..action_count {
-            builder
-                .add_output(
-                    None,
-                    recipient,
-                    NoteValue::from_raw(FIXTURE_NOTE_VALUE),
-                    FIXTURE_MEMO,
-                )
-                .unwrap();
-        }
-        let bundle: Bundle<_, i64> = builder
-            .build(&mut fixture_rng)
-            .unwrap()
-            .expect("at least one output produces an Orchard bundle")
-            .0;
-        assert_eq!(bundle.actions().len(), action_count);
-        let instances = bundle
-            .actions()
-            .iter()
-            .map(|action| action.to_instance(*bundle.flags(), *bundle.anchor()))
-            .collect::<Vec<_>>();
+    let fixtures =
+        STEADY_ACTION_COUNTS.map(|action_count| (action_count, prover_fixture(action_count)));
 
+    // These preflights intentionally make the historical throughput cases
+    // steady-state with respect to all proving-key caches.
+    for (_, fixture) in &fixtures {
         // Check each exact fixture and proving path outside the timed region.
-        let proof = bundle
+        let proof = fixture
+            .bundle
             .authorization()
-            .create_proof(&pk, &instances, StdRng::from_seed(PROOF_SEED))
+            .create_proof(&pk, &fixture.instances, StdRng::from_seed(PROOF_SEED))
             .unwrap();
         proof
-            .verify(&vk, &instances)
+            .verify(&vk, &fixture.instances)
             .expect("the benchmark proof must verify");
+    }
 
-        let benchmark_name = match action_count {
-            1 => "prove-1-action",
-            2 => "prove-2-actions",
-            4 => "prove-4-actions",
-            _ => unreachable!("the benchmark action counts are fixed"),
-        };
-        group.bench_function(benchmark_name, |bencher| {
+    let mut steady = c.benchmark_group("orchard-k11-steady");
+    steady.sample_size(BENCHMARK_SAMPLES);
+    steady.sampling_mode(SamplingMode::Flat);
+    steady.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
+    steady.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
+    for (action_count, fixture) in &fixtures {
+        steady.bench_function(benchmark_name(*action_count), |bencher| {
             bencher.iter_batched(
                 || StdRng::from_seed(PROOF_SEED),
                 |proof_rng| {
                     black_box(
-                        bundle
+                        fixture
+                            .bundle
                             .authorization()
-                            .create_proof(&pk, &instances, proof_rng)
+                            .create_proof(&pk, &fixture.instances, proof_rng)
                             .unwrap(),
                     )
                 },
@@ -117,7 +147,33 @@ fn orchard_k11_prover(c: &mut Criterion) {
             )
         });
     }
-    group.finish();
+    steady.finish();
+
+    let mut first_after_prepare = c.benchmark_group("orchard-k11-first-after-build-and-prepare");
+    first_after_prepare.sample_size(BENCHMARK_SAMPLES);
+    first_after_prepare.sampling_mode(SamplingMode::Flat);
+    first_after_prepare.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
+    first_after_prepare.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
+    for (action_count, fixture) in fixtures.iter().filter(|(action_count, _)| {
+        FIRST_AFTER_BUILD_AND_PREPARE_ACTION_COUNTS.contains(action_count)
+    }) {
+        first_after_prepare.bench_function(benchmark_name(*action_count), |bencher| {
+            bencher.iter_batched_ref(
+                || (build_prepared_key(version), StdRng::from_seed(PROOF_SEED)),
+                |(pk, proof_rng)| {
+                    black_box(
+                        fixture
+                            .bundle
+                            .authorization()
+                            .create_proof(pk, &fixture.instances, proof_rng)
+                            .unwrap(),
+                    )
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+    first_after_prepare.finish();
 }
 
 criterion_group!(benches, orchard_k11_prover);
