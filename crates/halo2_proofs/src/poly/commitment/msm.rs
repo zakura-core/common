@@ -1,9 +1,11 @@
 use super::Params;
 use crate::arithmetic::{CurveAffine, best_multiexp};
-use ff::Field;
+use ff::{Field, PrimeField};
 use group::Group;
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// The widest thread pool on which the prepared verifier zero-check stays
 /// engaged. The prepared evaluation stops scaling past this width — its
@@ -20,10 +22,62 @@ use std::collections::BTreeMap;
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 pub(crate) const PREPARED_MSM_MAX_THREADS: usize = 8;
 
+#[derive(Clone, Copy)]
+struct CanonicalFieldKey<F: PrimeField> {
+    value: F,
+    repr: F::Repr,
+}
+
+impl<F: PrimeField> CanonicalFieldKey<F> {
+    fn new(value: F) -> Self {
+        Self {
+            value,
+            repr: value.to_repr(),
+        }
+    }
+}
+
+impl<F: PrimeField> fmt::Debug for CanonicalFieldKey<F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(formatter)
+    }
+}
+
+impl<F: PrimeField> PartialEq for CanonicalFieldKey<F> {
+    fn eq(&self, other: &Self) -> bool {
+        self.repr.as_ref() == other.repr.as_ref()
+    }
+}
+
+impl<F: PrimeField> Eq for CanonicalFieldKey<F> {}
+
+impl<F: PrimeField> PartialOrd for CanonicalFieldKey<F> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<F: PrimeField> Ord for CanonicalFieldKey<F> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Any byte ordering is sufficient for grouping equal coordinates.
+        // Comparing from the final byte also preserves the existing order for
+        // Pasta fields, whose canonical representations are little-endian.
+        self.repr
+            .as_ref()
+            .iter()
+            .rev()
+            .cmp(other.repr.as_ref().iter().rev())
+    }
+}
+
 type ArbitraryTerm<C> = (
-    <C as CurveAffine>::Base,
+    CanonicalFieldKey<<C as CurveAffine>::Base>,
     (<C as CurveAffine>::ScalarExt, <C as CurveAffine>::Base),
 );
+type OtherTerms<C> = BTreeMap<
+    CanonicalFieldKey<<C as CurveAffine>::Base>,
+    (<C as CurveAffine>::ScalarExt, <C as CurveAffine>::Base),
+>;
 
 /// A multiscalar multiplication in the polynomial commitment scheme
 #[derive(Debug, Clone)]
@@ -32,8 +86,8 @@ pub struct MSM<'a, C: CurveAffine> {
     g_scalars: Option<Vec<C::Scalar>>,
     w_scalar: Option<C::Scalar>,
     u_scalar: Option<C::Scalar>,
-    // x-coordinate -> (scalar, y-coordinate)
-    other: BTreeMap<C::Base, (C::Scalar, C::Base)>,
+    // Cached x-coordinate -> (scalar, y-coordinate)
+    other: OtherTerms<C>,
     // Batch reduction moves arbitrary terms here and canonicalizes them once
     // before the final multiscalar multiplication.
     batched_other: Vec<ArbitraryTerm<C>>,
@@ -87,6 +141,10 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
     }
 
     fn add_other(&mut self, x: C::Base, scalar: C::Scalar, y: C::Base) {
+        self.add_other_key(CanonicalFieldKey::new(x), scalar, y);
+    }
+
+    fn add_other_key(&mut self, x: CanonicalFieldKey<C::Base>, scalar: C::Scalar, y: C::Base) {
         self.other
             .entry(x)
             .and_modify(|(our_scalar, our_y)| {
@@ -103,10 +161,10 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
     /// Add another multiexp into this one
     pub fn add_msm(&mut self, other: &Self) {
         for (x, (scalar, y)) in other.other.iter() {
-            self.add_other(*x, *scalar, *y);
+            self.add_other_key(*x, *scalar, *y);
         }
         for (x, (scalar, y)) in other.batched_other.iter() {
-            self.add_other(*x, *scalar, *y);
+            self.add_other_key(*x, *scalar, *y);
         }
 
         if let Some(g_scalars) = &other.g_scalars {
@@ -251,13 +309,17 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
 
         if batched_other.is_empty() {
             scalars.extend(other.values().map(|(scalar, _)| *scalar));
-            bases.extend(other.iter().map(|(x, (_, y))| C::from_xy(*x, *y).unwrap()));
+            bases.extend(
+                other
+                    .iter()
+                    .map(|(x, (_, y))| C::from_xy(x.value, *y).unwrap()),
+            );
         } else {
             scalars.extend(batched_other.iter().map(|(_, (scalar, _))| *scalar));
             bases.extend(
                 batched_other
                     .iter()
-                    .map(|(x, (_, y))| C::from_xy(*x, *y).unwrap()),
+                    .map(|(x, (_, y))| C::from_xy(x.value, *y).unwrap()),
             );
         }
 
@@ -330,12 +392,12 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
                 let extra: Vec<(C::Scalar, C)> = if self.batched_other.is_empty() {
                     self.other
                         .iter()
-                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(*x, *y).unwrap()))
+                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(x.value, *y).unwrap()))
                         .collect()
                 } else {
                     self.batched_other
                         .iter()
-                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(*x, *y).unwrap()))
+                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(x.value, *y).unwrap()))
                         .collect()
                 };
                 if extra.len() <= n {
@@ -376,14 +438,14 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         let mut other = self
             .other
             .iter()
-            .map(|(x, (scalar, y))| (*scalar, *x, *y))
+            .map(|(x, (scalar, y))| (*scalar, x.value, *y))
             .collect::<Vec<_>>();
         if !self.batched_other.is_empty() {
             let mut combined = self.batched_other.clone();
             combined.extend(self.other.iter().map(|(x, values)| (*x, *values)));
             other = canonicalize_other::<C>(combined)
                 .into_iter()
-                .map(|(x, (scalar, y))| (scalar, x, y))
+                .map(|(x, (scalar, y))| (scalar, x.value, y))
                 .collect();
         }
         (self.g_scalars.clone(), self.w_scalar, self.u_scalar, other)
@@ -392,9 +454,42 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
 
 #[cfg(test)]
 mod tests {
+    use super::CanonicalFieldKey;
     use crate::poly::commitment::{MSM, Params};
     use group::Curve;
-    use pasta_curves::{EpAffine, Fp, Fq, arithmetic::CurveAffine};
+    use pasta_curves::{EpAffine, EqAffine, Fp, Fq, arithmetic::CurveAffine};
+
+    fn assert_cached_key_order<F: ff::PrimeField + Ord>(values: &[F]) {
+        for left in values {
+            for right in values {
+                assert_eq!(
+                    CanonicalFieldKey::new(*left).cmp(&CanonicalFieldKey::new(*right)),
+                    left.cmp(right),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_pasta_keys_preserve_field_order() {
+        let pallas_params = Params::<EpAffine>::new(4);
+        let pallas_xs = pallas_params
+            .g
+            .iter()
+            .map(|point| *point.coordinates().unwrap().x())
+            .chain([Fp::from(0), Fp::from(1)])
+            .collect::<Vec<_>>();
+        assert_cached_key_order(&pallas_xs);
+
+        let vesta_params = Params::<EqAffine>::new(4);
+        let vesta_xs = vesta_params
+            .g
+            .iter()
+            .map(|point| *point.coordinates().unwrap().x())
+            .chain([Fq::from(0), Fq::from(1)])
+            .collect::<Vec<_>>();
+        assert_cached_key_order(&vesta_xs);
+    }
 
     #[test]
     fn msm_arithmetic() {
