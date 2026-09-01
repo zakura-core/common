@@ -509,7 +509,7 @@ fn prepare_ratios<C: CurveAffine>(
     parallelize(&mut ratios, |ratios, start| {
         let omega_start = omega.pow_vartime([start as u64]);
         let mut column_beta_delta = beta_delta;
-        for &column in columns {
+        for (column_index, &column) in columns.iter().enumerate() {
             let values = match column.column_type() {
                 Any::Advice => advice,
                 Any::Fixed => fixed,
@@ -523,7 +523,9 @@ fn prepare_ratios<C: CurveAffine>(
                 *ratio *= &(row_beta_deltaomega + &*gamma + value);
                 row_beta_deltaomega *= &omega;
             }
-            column_beta_delta *= &C::Scalar::DELTA;
+            if column_index + 1 < columns.len() {
+                column_beta_delta *= &C::Scalar::DELTA;
+            }
         }
     });
     for _ in columns {
