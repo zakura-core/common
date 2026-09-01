@@ -3310,10 +3310,43 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     output,
                 ),
                 EvaluationPlan::Add(a, b) => {
+                    if let EvaluationPlan::ConstantTerm(scalar) = a.as_ref() {
+                        // A constant leaf has no cache event, so evaluating its
+                        // sibling directly preserves the plan's cache order.
+                        let scalar = ctx.scalars.get(*scalar);
+                        if let EvaluationPlan::Scale(negated_rhs, factor) = b.as_ref()
+                            && ctx.scalars.get(*factor) == ctx.minus_one
+                        {
+                            recurse_into(negated_rhs, ctx, output, cache, scratch);
+                            B::combine_constant(
+                                ctx.chunk_index,
+                                scalar,
+                                output,
+                                |value, constant| constant - value,
+                            );
+                            return;
+                        }
+
+                        recurse_into(b, ctx, output, cache, scratch);
+                        B::combine_constant(ctx.chunk_index, scalar, output, |value, constant| {
+                            value + constant
+                        });
+                        return;
+                    }
+
                     recurse_into(a, ctx, output, cache, scratch);
                     if let EvaluationPlan::Scale(negated_rhs, scalar) = b.as_ref()
                         && ctx.scalars.get(*scalar) == ctx.minus_one
                     {
+                        if let EvaluationPlan::ConstantTerm(scalar) = negated_rhs.as_ref() {
+                            B::combine_constant(
+                                ctx.chunk_index,
+                                ctx.scalars.get(*scalar),
+                                output,
+                                |value, constant| value - constant,
+                            );
+                            return;
+                        }
                         if let EvaluationPlan::Poly(leaf) = negated_rhs.as_ref() {
                             let chunk = leaf_chunk(leaf, ctx, output.len());
                             for (lhs, rhs) in output.iter_mut().zip(chunk.iter()) {
@@ -3327,6 +3360,16 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         for (lhs, rhs) in output.iter_mut().zip(rhs_values.iter()) {
                             *lhs -= *rhs;
                         }
+                        return;
+                    }
+
+                    if let EvaluationPlan::ConstantTerm(scalar) = b.as_ref() {
+                        B::combine_constant(
+                            ctx.chunk_index,
+                            ctx.scalars.get(*scalar),
+                            output,
+                            |value, constant| value + constant,
+                        );
                         return;
                     }
 
@@ -3346,29 +3389,27 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 }
                 EvaluationPlan::Mul(a, b) => {
                     // Preserve the multiplication shape while avoiding a
-                    // constant vector for scalars with cheap field operations.
-                    if let EvaluationPlan::ConstantTerm(scalar) = a.as_ref()
-                        && recurse_small_scale_into(
+                    // constant vector for every scalar value.
+                    if let EvaluationPlan::ConstantTerm(scalar) = a.as_ref() {
+                        recurse_scaled_into(
                             b,
                             ctx.scalars.get(*scalar),
                             ctx,
                             output,
                             cache,
                             scratch,
-                        )
-                    {
+                        );
                         return;
                     }
-                    if let EvaluationPlan::ConstantTerm(scalar) = b.as_ref()
-                        && recurse_small_scale_into(
+                    if let EvaluationPlan::ConstantTerm(scalar) = b.as_ref() {
+                        recurse_scaled_into(
                             a,
                             ctx.scalars.get(*scalar),
                             ctx,
                             output,
                             cache,
                             scratch,
-                        )
-                    {
+                        );
                         return;
                     }
 
@@ -3423,35 +3464,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 }
                 EvaluationPlan::Scale(a, scalar) => {
                     let scalar = ctx.scalars.get(*scalar);
-                    if let EvaluationPlan::Poly(leaf) = a.as_ref() {
-                        let chunk = leaf_chunk(leaf, ctx, output.len());
-                        // Retain the borrowed-leaf path while using the same
-                        // cheap operations as compound small scales.
-                        if scalar == ctx.two {
-                            for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                                *output = value.double();
-                            }
-                        } else if scalar == ctx.minus_one {
-                            for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                                *output = -*value;
-                            }
-                        } else if scalar == F::ONE {
-                            for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                                *output = *value;
-                            }
-                        } else {
-                            for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                                *output = *value * scalar;
-                            }
-                        }
-                        return;
-                    }
-                    if !recurse_small_scale_into(a, scalar, ctx, output, cache, scratch) {
-                        recurse_into(a, ctx, output, cache, scratch);
-                        for lhs in output.iter_mut() {
-                            *lhs *= scalar;
-                        }
-                    }
+                    recurse_scaled_into(a, scalar, ctx, output, cache, scratch);
                 }
                 EvaluationPlan::Horner { base, coefficients } => {
                     let (highest, remaining) = coefficients
@@ -3526,31 +3539,51 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
-        fn recurse_small_scale_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
+        fn recurse_scaled_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
             plan: &EvaluationPlan<F>,
             scalar: F,
             ctx: &AstContext<'_, F, B>,
             output: &mut [F],
             cache: &mut [F],
             scratch: &mut [F],
-        ) -> bool {
-            if scalar == ctx.minus_one {
-                recurse_into(plan, ctx, output, cache, scratch);
-                for value in output.iter_mut() {
-                    *value = -*value;
+        ) {
+            if let EvaluationPlan::Poly(leaf) = plan {
+                let chunk = leaf_chunk(leaf, ctx, output.len());
+                if scalar == ctx.two {
+                    for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                        *output = value.double();
+                    }
+                } else if scalar == ctx.minus_one {
+                    for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                        *output = -*value;
+                    }
+                } else if scalar == F::ONE {
+                    for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                        *output = *value;
+                    }
+                } else {
+                    for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                        *output = *value * scalar;
+                    }
                 }
-                true
-            } else if scalar == F::ONE {
-                recurse_into(plan, ctx, output, cache, scratch);
-                true
-            } else if scalar == ctx.two {
-                recurse_into(plan, ctx, output, cache, scratch);
-                for value in output.iter_mut() {
-                    *value = value.double();
+                return;
+            }
+
+            recurse_into(plan, ctx, output, cache, scratch);
+            if scalar != F::ONE {
+                if scalar == ctx.minus_one {
+                    for value in output.iter_mut() {
+                        *value = -*value;
+                    }
+                } else if scalar == ctx.two {
+                    for value in output.iter_mut() {
+                        *value = value.double();
+                    }
+                } else {
+                    for value in output.iter_mut() {
+                        *value *= scalar;
+                    }
                 }
-                true
-            } else {
-                false
             }
         }
 
@@ -3866,6 +3899,16 @@ pub(crate) trait BasisOps: Basis {
         domain: &EvaluationDomain<F>,
     ) -> Polynomial<F, Self>;
     fn fill_constant<F: Field>(chunk_index: usize, scalar: F, output: &mut [F]);
+    /// Combines `output` with the basis representation of `scalar` in place.
+    ///
+    /// `combine` receives the existing output value first and the corresponding
+    /// coefficient or evaluation of the constant polynomial second.
+    fn combine_constant<F: Field>(
+        chunk_index: usize,
+        scalar: F,
+        output: &mut [F],
+        combine: impl FnMut(F, F) -> F,
+    );
     fn fill_linear<F: WithSmallOrderMulGroup<3>>(
         domain: &EvaluationDomain<F>,
         chunk_size: usize,
@@ -3963,6 +4006,22 @@ impl BasisOps for Coeff {
         }
     }
 
+    fn combine_constant<F: Field>(
+        chunk_index: usize,
+        scalar: F,
+        output: &mut [F],
+        mut combine: impl FnMut(F, F) -> F,
+    ) {
+        for (index, value) in output.iter_mut().enumerate() {
+            let constant = if chunk_index == 0 && index == 0 {
+                scalar
+            } else {
+                F::ZERO
+            };
+            *value = combine(*value, constant);
+        }
+    }
+
     fn fill_linear<F: WithSmallOrderMulGroup<3>>(
         _: &EvaluationDomain<F>,
         chunk_size: usize,
@@ -4009,6 +4068,17 @@ impl BasisOps for LagrangeCoeff {
 
     fn fill_constant<F: Field>(_: usize, scalar: F, output: &mut [F]) {
         output.fill(scalar);
+    }
+
+    fn combine_constant<F: Field>(
+        _: usize,
+        scalar: F,
+        output: &mut [F],
+        mut combine: impl FnMut(F, F) -> F,
+    ) {
+        for value in output {
+            *value = combine(*value, scalar);
+        }
     }
 
     fn fill_linear<F: WithSmallOrderMulGroup<3>>(
@@ -4059,6 +4129,17 @@ impl BasisOps for ExtendedLagrangeCoeff {
 
     fn fill_constant<F: Field>(_: usize, scalar: F, output: &mut [F]) {
         output.fill(scalar);
+    }
+
+    fn combine_constant<F: Field>(
+        _: usize,
+        scalar: F,
+        output: &mut [F],
+        mut combine: impl FnMut(F, F) -> F,
+    ) {
+        for value in output {
+            *value = combine(*value, scalar);
+        }
     }
 
     fn fill_linear<F: WithSmallOrderMulGroup<3>>(
@@ -4369,6 +4450,234 @@ mod tests {
 
         check::<LagrangeCoeff>();
         check::<ExtendedLagrangeCoeff>();
+    }
+
+    fn assert_constant_add_sub_values<B: BasisOps>() {
+        type F = pallas::Base;
+
+        fn context() {}
+
+        fn assert_operation<B: BasisOps>(
+            operation: usize,
+            actual: &Polynomial<F, B>,
+            value: &Polynomial<F, B>,
+            constant: &Polynomial<F, B>,
+        ) {
+            assert!(actual.iter().zip(value.iter().zip(constant.iter())).all(
+                |(actual, (value, constant))| {
+                    *actual
+                        == match operation {
+                            0 | 1 => *value + constant,
+                            2 => *constant - value,
+                            3 => *value - constant,
+                            _ => unreachable!(),
+                        }
+                }
+            ));
+        }
+
+        let domain = EvaluationDomain::new(3, 4);
+        let mut evaluator = new_evaluator::<fn(), _, B>(context);
+        evaluator.register_poly_with_tag(B::empty_poly(&domain), EvaluationPolyTag::new(0, 0, 0));
+        let value = Ast::LinearTerm(F::from(11));
+        let expected_value = evaluator.evaluate(&value, &domain);
+        let scalars = [-F::ONE, F::ZERO, F::ONE, F::from(2), F::from(7)];
+
+        for scalar in scalars {
+            let constant = Ast::ConstantTerm(scalar);
+            let operations = [
+                constant.clone() + value.clone(),
+                value.clone() + constant.clone(),
+                constant.clone() - value.clone(),
+                value.clone() - constant,
+            ];
+            let expected_constant = evaluator.evaluate(&Ast::ConstantTerm(scalar), &domain);
+            for (operation, ast) in operations.iter().enumerate() {
+                let actual = evaluator.evaluate(ast, &domain);
+                assert_operation(operation, &actual, &expected_value, &expected_constant);
+            }
+
+            // In the coefficient basis, multiplication by a constant is
+            // represented by `Scale`, because pointwise `Mul` is only defined
+            // for evaluation bases.
+            let scaled = value.clone() * scalar;
+            let actual = evaluator.evaluate(&scaled, &domain);
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected_value.iter())
+                    .all(|(actual, value)| *actual == *value * scalar)
+            );
+        }
+
+        for operation in 0..4 {
+            let constant = Ast::ChallengeTerm(EvaluationChallenge::Theta);
+            let ast = match operation {
+                0 => constant.clone() + value.clone(),
+                1 => value.clone() + constant.clone(),
+                2 => constant.clone() - value.clone(),
+                3 => value.clone() - constant,
+                _ => unreachable!(),
+            };
+            let first_scalar = scalars[0];
+            let first_challenges =
+                EvaluationChallenges::new(first_scalar, F::from(13), F::from(17), F::from(19));
+            let (first, plan) = evaluator.evaluate_quotient_with_compiled_plan(
+                std::iter::once(ast),
+                &domain,
+                None,
+                first_challenges,
+            );
+            let plan = plan.expect("a tagged evaluation returns a retained plan");
+            let expected_constant = evaluator.evaluate(&Ast::ConstantTerm(first_scalar), &domain);
+            assert_operation(operation, &first, &expected_value, &expected_constant);
+
+            for scalar in &scalars[1..] {
+                let challenges =
+                    EvaluationChallenges::new(*scalar, F::from(23), F::from(29), F::from(31));
+                let (actual, replacement) = evaluator.evaluate_quotient_with_compiled_plan(
+                    std::iter::empty(),
+                    &domain,
+                    Some(&plan),
+                    challenges,
+                );
+                assert!(replacement.is_none());
+                let expected_constant = evaluator.evaluate(&Ast::ConstantTerm(*scalar), &domain);
+                assert_operation(operation, &actual, &expected_value, &expected_constant);
+            }
+        }
+    }
+
+    #[test]
+    fn constant_add_sub_consumers_match_all_bases() {
+        assert_constant_add_sub_values::<Coeff>();
+        assert_constant_add_sub_values::<LagrangeCoeff>();
+        assert_constant_add_sub_values::<ExtendedLagrangeCoeff>();
+    }
+
+    fn assert_cached_constant_consumers<B: BasisOps>()
+    where
+        Ast<fn(), pallas::Base, B>: std::ops::Mul<Output = Ast<fn(), pallas::Base, B>>,
+    {
+        type F = pallas::Base;
+
+        fn context() {}
+
+        fn expression<B>(
+            operation: usize,
+            constant: Ast<fn(), F, B>,
+            value: Ast<fn(), F, B>,
+        ) -> Ast<fn(), F, B>
+        where
+            B: BasisOps,
+            Ast<fn(), F, B>: std::ops::Mul<Output = Ast<fn(), F, B>>,
+        {
+            match operation {
+                0 => constant + value,
+                1 => value + constant,
+                2 => constant - value,
+                3 => value - constant,
+                4 => constant * value,
+                5 => value * constant,
+                _ => unreachable!(),
+            }
+        }
+
+        fn expected(operation: usize, value: F, constant: F) -> F {
+            match operation {
+                0 | 1 => value + constant,
+                2 => constant - value,
+                3 => value - constant,
+                4 | 5 => value * constant,
+                _ => unreachable!(),
+            }
+        }
+
+        fn assert_values<B: Basis>(
+            operation: usize,
+            actual: &Polynomial<F, B>,
+            value: &Polynomial<F, B>,
+            scalar: F,
+        ) {
+            assert!(
+                actual
+                    .iter()
+                    .zip(value.iter())
+                    .all(|(actual, value)| *actual == expected(operation, *value, scalar))
+            );
+        }
+
+        let domain = EvaluationDomain::new(3, 4);
+        let mut values = B::empty_poly(&domain);
+        for (index, value) in values.iter_mut().enumerate() {
+            *value = F::from(index as u64 + 3);
+        }
+        let mut evaluator = new_evaluator::<fn(), _, B>(context);
+        let leaf = evaluator.register_poly_with_tag(values, EvaluationPolyTag::new(0, 0, 0));
+        let value = Ast::from(leaf);
+        let square = value.clone() * value;
+        let cached_value = square.clone() + square;
+        let expected_value = evaluator.evaluate(&cached_value, &domain);
+        let scalars = [-F::ONE, F::ZERO, F::ONE, F::from(2), F::from(7)];
+
+        for scalar in scalars {
+            // Keep the AST operand non-trivial while compiling it to a
+            // `ConstantTerm`, so `Mul` retains its original plan shape.
+            let constant = Ast::ConstantTerm(scalar) + Ast::ConstantTerm(F::ZERO);
+            for operation in 0..6 {
+                let ast = expression(operation, constant.clone(), cached_value.clone());
+                let (actual, plan) = evaluator.evaluate_quotient_with_compiled_plan(
+                    std::iter::once(ast),
+                    &domain,
+                    None,
+                    EvaluationChallenges::new(F::from(11), F::from(13), F::from(17), F::from(19)),
+                );
+                let plan = plan.expect("a tagged evaluation returns a retained plan");
+                assert!(
+                    plan.cache_slots > 0,
+                    "the child is evaluated through the cache"
+                );
+                assert_values(operation, &actual, &expected_value, scalar);
+            }
+        }
+
+        for operation in 0..6 {
+            let ast = expression(
+                operation,
+                Ast::ChallengeTerm(EvaluationChallenge::Theta),
+                cached_value.clone(),
+            );
+            let first_scalar = scalars[0];
+            let (first, plan) = evaluator.evaluate_quotient_with_compiled_plan(
+                std::iter::once(ast),
+                &domain,
+                None,
+                EvaluationChallenges::new(first_scalar, F::from(13), F::from(17), F::from(19)),
+            );
+            let plan = plan.expect("a tagged evaluation returns a retained plan");
+            assert!(
+                plan.cache_slots > 0,
+                "the child is evaluated through the cache"
+            );
+            assert_values(operation, &first, &expected_value, first_scalar);
+
+            for scalar in &scalars[1..] {
+                let (actual, replacement) = evaluator.evaluate_quotient_with_compiled_plan(
+                    std::iter::empty(),
+                    &domain,
+                    Some(&plan),
+                    EvaluationChallenges::new(*scalar, F::from(23), F::from(29), F::from(31)),
+                );
+                assert!(replacement.is_none());
+                assert_values(operation, &actual, &expected_value, *scalar);
+            }
+        }
+    }
+
+    #[test]
+    fn cached_constant_consumers_match_pointwise_bases() {
+        assert_cached_constant_consumers::<LagrangeCoeff>();
+        assert_cached_constant_consumers::<ExtendedLagrangeCoeff>();
     }
 
     #[test]
