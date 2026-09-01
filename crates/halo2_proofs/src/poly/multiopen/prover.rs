@@ -1,13 +1,14 @@
 use super::super::{
     Coeff, Polynomial,
     commitment::{self, Blind, Params},
+    evaluate_polynomial_with_powers, power_vector,
 };
 use super::{
     ChallengeX1, ChallengeX2, ChallengeX3, ChallengeX4, ProverQuery, Query,
     construct_intermediate_sets,
 };
 
-use crate::arithmetic::{CurveAffine, eval_polynomial};
+use crate::arithmetic::CurveAffine;
 use crate::multicore;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
@@ -387,7 +388,13 @@ fn prepare_q_prime<F: Field>(
     accumulator
 }
 
-fn evaluate_polynomials<F: Field>(polynomials: &[Polynomial<F, Coeff>], point: F) -> Vec<F> {
+// A `Vec` is required by `evaluate_polynomial_with_powers` for safe runtime
+// downcasting to the Pasta field.
+#[allow(clippy::ptr_arg)]
+fn evaluate_polynomials<F: Field + 'static>(
+    polynomials: &[Polynomial<F, Coeff>],
+    powers: &Vec<F>,
+) -> Vec<F> {
     if polynomials.is_empty() {
         return Vec::new();
     }
@@ -401,7 +408,7 @@ fn evaluate_polynomials<F: Field>(polynomials: &[Polynomial<F, Coeff>], point: F
     {
         return polynomials
             .iter()
-            .map(|polynomial| eval_polynomial(polynomial, point))
+            .map(|polynomial| evaluate_polynomial_with_powers(polynomial, powers))
             .collect();
     }
 
@@ -414,7 +421,7 @@ fn evaluate_polynomials<F: Field>(polynomials: &[Polynomial<F, Coeff>], point: F
         {
             scope.spawn(move |_| {
                 for (polynomial, evaluation) in polynomials.iter().zip(evaluations) {
-                    *evaluation = eval_polynomial(polynomial, point);
+                    *evaluation = evaluate_polynomial_with_powers(polynomial, powers);
                 }
             });
         }
@@ -494,9 +501,10 @@ where
     transcript.write_point(q_prime_commitment)?;
 
     let x_3: ChallengeX3<_> = transcript.squeeze_challenge_scalar();
+    let powers = power_vector(*x_3, params.n as usize);
 
     // The evaluations are independent, but their transcript order is fixed.
-    for evaluation in evaluate_polynomials(&q_polys, *x_3) {
+    for evaluation in evaluate_polynomials(&q_polys, &powers) {
         transcript.write_scalar(evaluation)?;
     }
 
@@ -512,7 +520,15 @@ where
         },
     );
 
-    commitment::create_proof(params, rng, transcript, &p_poly, p_poly_blind, *x_3)
+    commitment::create_proof_with_powers(
+        params,
+        rng,
+        transcript,
+        &p_poly,
+        p_poly_blind,
+        *x_3,
+        powers,
+    )
 }
 
 #[doc(hidden)]
@@ -556,7 +572,8 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 mod tests {
     use super::{
         Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial, collapse_polynomials,
-        evaluate_polynomials, kate_division_in_place, prepare_q_prime, scale_and_add_polynomial,
+        evaluate_polynomials, kate_division_in_place, power_vector, prepare_q_prime,
+        scale_and_add_polynomial,
     };
     use crate::arithmetic::{eval_polynomial, kate_division};
     use ff::Field;
@@ -739,7 +756,8 @@ mod tests {
         F: Field + From<u64> + Debug,
     {
         let empty = Vec::<Polynomial<F, Coeff>>::new();
-        assert!(evaluate_polynomials(&empty, F::from(17)).is_empty());
+        let empty_powers = Vec::<F>::new();
+        assert!(evaluate_polynomials(&empty, &empty_powers).is_empty());
 
         let polynomial_len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
         let polynomials = (0..5)
@@ -757,11 +775,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         for point in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let powers = power_vector(point, polynomial_len);
             let expected = polynomials
                 .iter()
                 .map(|polynomial| eval_polynomial(polynomial, point))
                 .collect::<Vec<_>>();
-            let check = || assert_eq!(evaluate_polynomials(&polynomials, point), expected);
+            let check = || assert_eq!(evaluate_polynomials(&polynomials, &powers), expected);
 
             #[cfg(feature = "multicore")]
             for thread_count in [1, 4, 10] {

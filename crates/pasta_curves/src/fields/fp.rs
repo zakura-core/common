@@ -382,6 +382,14 @@ impl Fp {
         Fp::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
     }
 
+    /// Multiplies `self` by `2^-exponent`.
+    #[inline]
+    pub(crate) fn mul_by_inverse_power_of_two(&self, exponent: u32) -> Self {
+        Fp(super::mul_by_inverse_power_of_two(
+            self.0, MODULUS.0, INV, exponent,
+        ))
+    }
+
     #[inline]
     fn mul_runtime(&self, rhs: &Self) -> Self {
         #[cfg(all(
@@ -1439,6 +1447,22 @@ fn test_inv_root_of_unity() {
 #[test]
 fn test_inv_2() {
     assert_eq!(Fp::TWO_INV, Fp::from(2).invert().unwrap());
+}
+
+#[test]
+fn mul_by_inverse_power_of_two_matches_field_multiplication() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x2f; 16]);
+    for value in core::iter::once(Fp::ZERO)
+        .chain(core::iter::once(-Fp::ONE))
+        .chain((0..1024).map(|_| Fp::random(&mut rng)))
+    {
+        for exponent in super::INVERSE_POWER_OF_TWO_TEST_EXPONENTS {
+            let expected = value * Fp::TWO_INV.pow_vartime([u64::from(exponent)]);
+            assert_eq!(value.mul_by_inverse_power_of_two(exponent), expected);
+        }
+    }
 }
 
 #[test]

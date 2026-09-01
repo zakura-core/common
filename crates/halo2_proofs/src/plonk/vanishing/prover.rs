@@ -1,9 +1,13 @@
-use std::iter;
+use std::{
+    any::{Any, TypeId},
+    iter,
+};
 
 use ff::{Field, WithSmallOrderMulGroup};
 use group::Curve;
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
+use pasta_curves::{deferred::DeferredField, pallas, vesta};
 use rand_core::Rng;
 
 use super::Argument;
@@ -23,14 +27,31 @@ use crate::{
 
 fn fold_quotient_pieces<F: WithSmallOrderMulGroup<3>>(
     domain: &EvaluationDomain<F>,
+    pieces: Vec<Polynomial<F, Coeff>>,
+    xn: F,
+) -> Polynomial<F, Coeff> {
+    if pieces.is_empty() {
+        return domain.empty_coeff();
+    }
+
+    if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
+        fold_quotient_pieces_pasta::<F, pallas::Base>(pieces, xn)
+    } else if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
+        fold_quotient_pieces_pasta::<F, vesta::Base>(pieces, xn)
+    } else {
+        fold_quotient_pieces_horner(pieces, xn)
+    }
+}
+
+fn fold_quotient_pieces_horner<F: WithSmallOrderMulGroup<3>>(
     mut pieces: Vec<Polynomial<F, Coeff>>,
     xn: F,
 ) -> Polynomial<F, Coeff> {
     // Pieces are ordered from least to most significant. Move the highest
     // allocation into the accumulator, then consume the rest in Horner order.
-    let Some(mut accumulator) = pieces.pop() else {
-        return domain.empty_coeff();
-    };
+    let mut accumulator = pieces
+        .pop()
+        .expect("an empty quotient-piece list is handled before folding");
 
     while let Some(piece) = pieces.pop() {
         debug_assert_eq!(accumulator.len(), piece.len());
@@ -42,6 +63,74 @@ fn fold_quotient_pieces<F: WithSmallOrderMulGroup<3>>(
     }
 
     accumulator
+}
+
+fn fold_quotient_pieces_deferred<F: DeferredField>(
+    mut pieces: Vec<Polynomial<F, Coeff>>,
+    xn: F,
+) -> Polynomial<F, Coeff> {
+    let piece_count = pieces.len();
+    let mut output = pieces
+        .pop()
+        .expect("an empty quotient-piece list is handled before folding");
+    if pieces.is_empty() {
+        return output;
+    }
+
+    let mut powers = Vec::with_capacity(piece_count - 1);
+    let mut power = xn;
+    powers.push(power);
+    for _ in 2..piece_count {
+        power *= xn;
+        powers.push(power);
+    }
+
+    let (constant, intermediate) = pieces
+        .split_first()
+        .expect("a multi-piece quotient has a constant piece");
+    parallelize(&mut output, |output, start| {
+        let output_len = output.len();
+        let mut products = vec![F::Accumulator::default(); output_len];
+        let highest_power = powers
+            .last()
+            .expect("a multi-piece quotient has a nonconstant power");
+        for (product, coefficient) in products.iter_mut().zip(output.iter()) {
+            F::mul_accumulate(product, coefficient, highest_power);
+        }
+        for (piece, power) in intermediate.iter().zip(&powers) {
+            for (product, coefficient) in products.iter_mut().zip(&piece[start..][..output_len]) {
+                F::mul_accumulate(product, coefficient, power);
+            }
+        }
+        for ((output, product), constant) in output
+            .iter_mut()
+            .zip(products)
+            .zip(&constant[start..][..output_len])
+        {
+            *output = F::reduce(product) + constant;
+        }
+    });
+    output
+}
+
+fn fold_quotient_pieces_pasta<
+    F: WithSmallOrderMulGroup<3> + 'static,
+    T: DeferredField + 'static,
+>(
+    pieces: Vec<Polynomial<F, Coeff>>,
+    xn: F,
+) -> Polynomial<F, Coeff> {
+    let xn = *(&xn as &dyn Any)
+        .downcast_ref::<T>()
+        .expect("the quotient field was checked before conversion");
+    let pieces: Box<dyn Any> = Box::new(pieces);
+    let pieces = *pieces
+        .downcast::<Vec<Polynomial<T, Coeff>>>()
+        .expect("the quotient pieces match their checked field");
+    let result: Box<dyn Any> = Box::new(fold_quotient_pieces_deferred(pieces, xn));
+    *result
+        .downcast::<Polynomial<F, Coeff>>()
+        .expect("the folded quotient matches its input field")
 }
 
 pub(in crate::plonk) struct CommittedRandomPolynomial<C: CurveAffine> {
@@ -218,8 +307,8 @@ impl<C: CurveAffine> EvaluatedQuotient<C> {
 mod tests {
     use super::fold_quotient_pieces;
     use crate::poly::{Coeff, EvaluationDomain, Polynomial};
-    use ff::{Field, WithSmallOrderMulGroup};
-    use pasta_curves::Fp;
+    use ff::WithSmallOrderMulGroup;
+    use pasta_curves::{Fp, Fq};
 
     fn allocating_fold<F: WithSmallOrderMulGroup<3>>(
         domain: &EvaluationDomain<F>,
@@ -234,18 +323,17 @@ mod tests {
             })
     }
 
-    #[test]
-    fn quotient_piece_fold_matches_allocating_horner_fold() {
+    fn check_quotient_piece_fold<F: WithSmallOrderMulGroup<3> + From<u64>>() {
         let domain = EvaluationDomain::new(3, 3);
         let domain_size = domain.empty_coeff().len();
 
-        for piece_count in 0..=4 {
-            for xn in [Fp::ZERO, Fp::ONE, Fp::from(7)] {
+        for piece_count in 0..=8 {
+            for xn in [F::ZERO, F::ONE, F::from(7)] {
                 let pieces = (0..piece_count)
                     .map(|piece| {
                         domain.coeff_from_vec(
                             (0..domain_size)
-                                .map(|coefficient| Fp::from((piece * 17 + coefficient + 1) as u64))
+                                .map(|coefficient| F::from((piece * 17 + coefficient + 1) as u64))
                                 .collect(),
                         )
                     })
@@ -261,5 +349,11 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn quotient_piece_fold_matches_allocating_horner_fold() {
+        check_quotient_piece_fold::<Fp>();
+        check_quotient_piece_fold::<Fq>();
     }
 }

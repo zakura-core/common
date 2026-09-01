@@ -12,7 +12,7 @@ use super::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation};
 use ff::WithSmallOrderMulGroup;
 use group::ff::{BatchInvert, Field};
 
-use std::{fmt, marker::PhantomData, sync::Arc};
+use std::{any::Any, fmt, marker::PhantomData, sync::Arc};
 
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
@@ -338,11 +338,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             &twiddles.base_inverse,
             parallel_depth(),
         );
-        parallelize(&mut polynomial.values, |values, _| {
-            for value in values {
-                *value *= &self.ifft_divisor;
-            }
-        });
+        normalize_inverse_fft(&mut polynomial.values, self.k, self.ifft_divisor, true);
 
         Polynomial {
             values: polynomial.values,
@@ -421,9 +417,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 &twiddles.base_inverse,
                 INNER_PARALLEL_DEPTH,
             );
-            for value in &mut values {
-                *value *= &self.ifft_divisor;
-            }
+            normalize_inverse_fft(&mut values, self.k, self.ifft_divisor, false);
             let polynomial = Polynomial {
                 values,
                 _marker: PhantomData,
@@ -549,22 +543,20 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         let mut piece_values = (0..piece_count)
             .map(|_| vec![F::ZERO; block_len])
             .collect::<Vec<_>>();
-        let output_blocks = piece_values
-            .iter_mut()
-            .map(Vec::as_mut_slice)
-            .collect::<Vec<_>>();
-        let quotient_columns = QuotientColumnContext {
-            transform: &polynomial.values,
+        write_quotient_columns(
+            &polynomial.values,
+            &mut piece_values,
             block_len,
             block_count,
-            scales: [
+            [
                 self.extended_ifft_divisor,
                 self.extended_ifft_divisor * self.g_coset_inv,
                 self.extended_ifft_divisor * self.g_coset,
             ],
-            sparse_vanishing_divisor: self.sparse_vanishing_divisor,
-        };
-        quotient_columns.write(output_blocks, 0, parallel_depth());
+            self.sparse_vanishing_divisor,
+            self.extended_k,
+            parallel_depth(),
+        );
 
         piece_values
             .into_iter()
@@ -932,6 +924,57 @@ fn bitreverse_permute<F>(values: &mut [F], log_n: u32) {
     }
 }
 
+fn normalize_inverse_fft<F: Field>(values: &mut Vec<F>, exponent: u32, divisor: F, parallel: bool) {
+    // Pasta exposes a partial Montgomery reduction for this exact scaling.
+    // Downcast the allocation once so the element loop has no type checks.
+    if let Some(values) = (values as &mut dyn Any).downcast_mut::<Vec<crate::pasta::Fp>>() {
+        normalize_inverse_fft_pasta(
+            values,
+            exponent,
+            parallel,
+            crate::arithmetic::mul_fp_by_inverse_power_of_two,
+        );
+        return;
+    }
+    if let Some(values) = (values as &mut dyn Any).downcast_mut::<Vec<crate::pasta::Fq>>() {
+        normalize_inverse_fft_pasta(
+            values,
+            exponent,
+            parallel,
+            crate::arithmetic::mul_fq_by_inverse_power_of_two,
+        );
+        return;
+    }
+
+    let scale = |values: &mut [F], _| {
+        for value in values {
+            *value *= &divisor;
+        }
+    };
+    if parallel {
+        parallelize(values, scale);
+    } else {
+        scale(values, 0);
+    }
+}
+
+fn normalize_inverse_fft_pasta<F, M>(values: &mut [F], exponent: u32, parallel: bool, multiply: M)
+where
+    F: Field,
+    M: Fn(&F, u32) -> F + Copy + Send + Sync,
+{
+    let scale = |values: &mut [F], _| {
+        for value in values {
+            *value = multiply(value, exponent);
+        }
+    };
+    if parallel {
+        parallelize(values, scale);
+    } else {
+        scale(values, 0);
+    }
+}
+
 fn bitreverse(value: usize, bits: u32) -> usize {
     if bits == 0 {
         0
@@ -1110,11 +1153,101 @@ fn butterfly_chunk_pair<F: Field>(
     }
 }
 
+fn write_quotient_columns<F: Field>(
+    transform: &Vec<F>,
+    piece_values: &mut Vec<Vec<F>>,
+    block_len: usize,
+    block_count: usize,
+    scales: [F; 3],
+    sparse_vanishing_divisor: F,
+    exponent: u32,
+    parallel_depth: u32,
+) {
+    if let Some(transform) = (transform as &dyn Any).downcast_ref::<Vec<crate::pasta::Fp>>() {
+        let piece_values = (piece_values as &mut dyn Any)
+            .downcast_mut::<Vec<Vec<crate::pasta::Fp>>>()
+            .expect("the quotient pieces and transform have the same field");
+        let scales: [crate::pasta::Fp; 3] = scales.map(downcast_field);
+        write_quotient_columns_inner(
+            transform,
+            piece_values,
+            block_len,
+            block_count,
+            downcast_field(sparse_vanishing_divisor),
+            parallel_depth,
+            |value, index| match index % scales.len() {
+                0 => crate::arithmetic::mul_fp_by_inverse_power_of_two(&value, exponent),
+                power => value * scales[power],
+            },
+        );
+        return;
+    }
+    if let Some(transform) = (transform as &dyn Any).downcast_ref::<Vec<crate::pasta::Fq>>() {
+        let piece_values = (piece_values as &mut dyn Any)
+            .downcast_mut::<Vec<Vec<crate::pasta::Fq>>>()
+            .expect("the quotient pieces and transform have the same field");
+        let scales: [crate::pasta::Fq; 3] = scales.map(downcast_field);
+        write_quotient_columns_inner(
+            transform,
+            piece_values,
+            block_len,
+            block_count,
+            downcast_field(sparse_vanishing_divisor),
+            parallel_depth,
+            |value, index| match index % scales.len() {
+                0 => crate::arithmetic::mul_fq_by_inverse_power_of_two(&value, exponent),
+                power => value * scales[power],
+            },
+        );
+        return;
+    }
+
+    write_quotient_columns_inner(
+        transform,
+        piece_values,
+        block_len,
+        block_count,
+        sparse_vanishing_divisor,
+        parallel_depth,
+        |value, index| value * scales[index % scales.len()],
+    );
+}
+
+fn write_quotient_columns_inner<F, S>(
+    transform: &[F],
+    piece_values: &mut [Vec<F>],
+    block_len: usize,
+    block_count: usize,
+    sparse_vanishing_divisor: F,
+    parallel_depth: u32,
+    scale: S,
+) where
+    F: Field,
+    S: Fn(F, usize) -> F + Copy + Send + Sync,
+{
+    let output_blocks = piece_values
+        .iter_mut()
+        .map(Vec::as_mut_slice)
+        .collect::<Vec<_>>();
+    let quotient_columns = QuotientColumnContext {
+        transform,
+        block_len,
+        block_count,
+        sparse_vanishing_divisor,
+    };
+    quotient_columns.write(output_blocks, 0, parallel_depth, scale);
+}
+
+fn downcast_field<F: Field, T: Field>(value: F) -> T {
+    *(&value as &dyn Any)
+        .downcast_ref::<T>()
+        .expect("the polynomial and domain fields have the same type")
+}
+
 struct QuotientColumnContext<'a, F> {
     transform: &'a [F],
     block_len: usize,
     block_count: usize,
-    scales: [F; 3],
     sparse_vanishing_divisor: F,
 }
 
@@ -1123,7 +1256,15 @@ impl<F: Field> QuotientColumnContext<'_, F> {
     /// into quotient-piece columns. An inverse transform reads output zero
     /// unchanged and every other output in reverse order; indexing that
     /// permutation here avoids reversing the full transform buffer first.
-    fn write(&self, mut output_blocks: Vec<&mut [F]>, column_offset: usize, parallel_depth: u32) {
+    fn write<S>(
+        &self,
+        mut output_blocks: Vec<&mut [F]>,
+        column_offset: usize,
+        parallel_depth: u32,
+        scale: S,
+    ) where
+        S: Fn(F, usize) -> F + Copy + Send + Sync,
+    {
         debug_assert!(!output_blocks.is_empty());
         let column_len = output_blocks[0].len();
         debug_assert!(
@@ -1144,8 +1285,15 @@ impl<F: Field> QuotientColumnContext<'_, F> {
             }
 
             multicore::join(
-                || self.write(left_outputs, column_offset, parallel_depth - 1),
-                || self.write(right_outputs, column_offset + middle, parallel_depth - 1),
+                || self.write(left_outputs, column_offset, parallel_depth - 1, scale),
+                || {
+                    self.write(
+                        right_outputs,
+                        column_offset + middle,
+                        parallel_depth - 1,
+                        scale,
+                    )
+                },
             );
             return;
         }
@@ -1164,8 +1312,7 @@ impl<F: Field> QuotientColumnContext<'_, F> {
                 } else {
                     transform_len - coefficient_index
                 };
-                *numerator = self.transform[transform_index]
-                    * self.scales[coefficient_index % self.scales.len()];
+                *numerator = scale(self.transform[transform_index], coefficient_index);
                 numerator_sum += &*numerator;
             }
 
@@ -1321,6 +1468,26 @@ fn test_batched_lagrange_transforms_match_independent_transforms() {
     let (coefficients, extended) = domain.batch_lagrange_to_coeff_and_extended(&[], &twiddles);
     assert!(coefficients.is_empty());
     assert!(extended.is_empty());
+}
+
+#[test]
+fn test_cached_base_inverse_transform_for_both_pasta_fields() {
+    use crate::pasta::{Fp, Fq};
+
+    fn check<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::<F>::new(9, 4);
+        let twiddles = domain.proving_key_twiddles();
+        let lagrange = domain.lagrange_from_vec((1..=1 << 4).map(F::from).collect());
+        let expected = domain.lagrange_to_coeff(lagrange.clone());
+        let actual = domain.lagrange_to_coeff_with_twiddles(lagrange, &twiddles);
+        assert_eq!(&actual[..], &expected[..]);
+    }
+
+    check::<Fp>();
+    check::<Fq>();
 }
 
 #[test]
