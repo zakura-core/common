@@ -1716,13 +1716,19 @@ mod tests {
     }
 
     #[test]
-    fn halo2_instance_includes_cross_address_disabled_flag() {
-        let (_, mut instance) =
-            generate_circuit_instance(OsRng, OrchardCircuitVersion::FixedPostNu6_2);
+    fn halo2_instance_matches_prepared_commitment_shape() {
+        let (_, mut instance) = generate_circuit_instance(OsRng, OrchardCircuitVersion::PostNu6_3);
 
         let halo2_instance = instance.to_halo2_instance();
         // These are the exact shape and Boolean suffix required by the
-        // prepared public-instance commitment route in `halo2_proofs`.
+        // prepared public-instance commitment route in `halo2_proofs`. Keep
+        // the literal expectations here so protocol-layout drift fails this
+        // regression test instead of silently disabling the fast path.
+        assert_eq!(super::INSTANCE_COLUMNS, 1);
+        assert_eq!(super::INSTANCE_ROWS, 10);
+        assert_eq!(super::ENABLE_SPEND, 7);
+        assert_eq!(super::ENABLE_OUTPUT, 8);
+        assert_eq!(super::DISABLE_CROSS_ADDRESS, 9);
         assert_eq!(halo2_instance.len(), super::INSTANCE_COLUMNS);
         assert_eq!(halo2_instance[0].len(), super::INSTANCE_ROWS);
         assert_eq!(halo2_instance[0][super::ENABLE_SPEND], vesta::Scalar::one());
