@@ -13,9 +13,7 @@ use rand_core::Rng;
 use super::Argument;
 use crate::{
     arithmetic::{CurveAffine, best_multiexp, parallelize},
-    plonk::{
-        ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
-    },
+    plonk::{ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error},
     poly::{
         self, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial, ProvingKeyTwiddles,
         commitment::{Blind, Params},
