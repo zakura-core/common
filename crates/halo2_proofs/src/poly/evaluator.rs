@@ -324,6 +324,8 @@ struct CompressedSelectorShape {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EvaluatorShape {
     polynomial_lengths: Box<[usize]>,
+    // `None` exists only for ephemeral plans used by the generic evaluator.
+    // A retained compiled quotient plan never matches without complete tags.
     polynomial_tags: Option<Box<[EvaluationPolyTag]>>,
     compressed_selectors: Box<[CompressedSelectorShape]>,
     reused_compressed_selector_sources: Box<[usize]>,
@@ -479,6 +481,9 @@ impl<F: Field> BoundPlanScalars<F> {
 pub(crate) struct Evaluator<'poly, E, F: Field, B: Basis> {
     polys: Vec<Cow<'poly, Polynomial<F, B>>>,
     virtual_poly_count: Option<usize>,
+    // Registration is all-or-none: `Some` always contains one tag per
+    // registered polynomial. [`Evaluator::record_polynomial_tag`] enforces the
+    // invariant at every registration site.
     polynomial_tags: Option<Vec<EvaluationPolyTag>>,
     compressed_selectors: Vec<CompressedSelectorLeaf<E, B>>,
     reused_compressed_selector_sources: Vec<usize>,
@@ -890,6 +895,15 @@ impl<F: Field, B: Basis> CompiledEvaluationPlan<F, B> {
                 .reused_compressed_selector_sources
                 .len()
                 * size_of::<usize>()
+    }
+
+    /// Returns whether every polynomial in this plan has an exact semantic
+    /// tag. Only such plans are safe to retain across prover calls.
+    pub(crate) fn has_exact_polynomial_tags(&self) -> bool {
+        self.evaluator_shape
+            .polynomial_tags
+            .as_ref()
+            .is_some_and(|tags| tags.len() == self.evaluator_shape.polynomial_lengths.len())
     }
 
     #[cfg(test)]
@@ -2521,6 +2535,13 @@ impl<F: Field> DistributionWork<F> {
 }
 
 impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
+    fn has_complete_polynomial_tags(&self) -> bool {
+        let polynomial_count = self.virtual_poly_count.unwrap_or(self.polys.len());
+        self.polynomial_tags
+            .as_ref()
+            .is_some_and(|tags| tags.len() == polynomial_count)
+    }
+
     fn shape_with_virtual_poly_len(&self, virtual_poly_len: Option<usize>) -> EvaluatorShape {
         let polynomial_lengths = match self.virtual_poly_count {
             Some(count) => {
@@ -2560,13 +2581,21 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
     }
 
     fn matches_shape(&self, shape: &EvaluatorShape) -> bool {
+        let (Some(polynomial_tags), Some(expected_tags)) = (
+            self.polynomial_tags.as_deref(),
+            shape.polynomial_tags.as_deref(),
+        ) else {
+            // Untagged shapes are valid only for an evaluator's ephemeral
+            // within-call plan; they can never authorize a retained hit.
+            return false;
+        };
         self.polys.len() == shape.polynomial_lengths.len()
             && self
                 .polys
                 .iter()
                 .zip(shape.polynomial_lengths.iter())
                 .all(|(polynomial, expected)| polynomial.len() == *expected)
-            && self.polynomial_tags.as_deref() == shape.polynomial_tags.as_deref()
+            && polynomial_tags == expected_tags
             && self.compressed_selectors.len() == shape.compressed_selectors.len()
             && self
                 .compressed_selectors
@@ -2734,6 +2763,9 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
     }
 
     fn record_polynomial_tag(&mut self, index: usize, tag: Option<EvaluationPolyTag>) {
+        // Starting tagged registration requires the first polynomial, and
+        // every later registration must remain tagged. Untagged registration
+        // likewise cannot opt into tags after the first polynomial.
         match (&mut self.polynomial_tags, tag) {
             (None, None) => {}
             (None, Some(tag)) => {
@@ -2971,8 +3003,15 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         }
 
         let ast = Ast::distribute_challenge_powers(expressions, EvaluationChallenge::Y);
-        let (polynomial, _, plan) =
-            self.evaluate_inner(Some(&ast), domain, None, false, None, true, challenges);
+        let (polynomial, _, plan) = self.evaluate_inner(
+            Some(&ast),
+            domain,
+            None,
+            false,
+            None,
+            self.has_complete_polynomial_tags(),
+            challenges,
+        );
         (polynomial, plan)
     }
 
@@ -3012,6 +3051,10 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         assert!(
             self.virtual_poly_count.is_some(),
             "topology-only planning requires a virtual evaluator"
+        );
+        assert!(
+            self.has_complete_polynomial_tags(),
+            "a retained quotient plan requires one semantic tag per polynomial"
         );
         self.compile_quotient_plan(ast, poly_len, None, false).0
     }
@@ -4958,8 +5001,9 @@ mod tests {
             *value = F::from(index as u64 + 11);
         }
 
+        let value_tag = EvaluationPolyTag::new(0, 0, 0);
         let mut evaluator = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
-        let leaf = evaluator.register_poly(values.clone());
+        let leaf = evaluator.register_poly_with_tag(values.clone(), value_tag);
         // Deliberately collide the concrete challenge values. The compiled
         // plan must retain their distinct symbolic provenance.
         let first_challenges = EvaluationChallenges {
@@ -5055,8 +5099,8 @@ mod tests {
         );
 
         let mut mismatched = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
-        let mismatched_leaf = mismatched.register_poly(values.clone());
-        mismatched.register_poly(values);
+        let mismatched_leaf = mismatched.register_poly_with_tag(values.clone(), value_tag);
+        mismatched.register_poly_with_tag(values, EvaluationPolyTag::new(1, 0, 0));
         let (actual, replacement) = mismatched.evaluate_quotient_with_compiled_plan(
             expressions(mismatched_leaf),
             &domain,
@@ -5107,8 +5151,8 @@ mod tests {
         let plan = plan.expect("the cold evaluation returns a compiled plan");
 
         let mut swapped = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
-        let lhs = swapped.register_poly_with_tag(lhs_values, rhs_tag);
-        let rhs = swapped.register_poly_with_tag(rhs_values, lhs_tag);
+        let lhs = swapped.register_poly_with_tag(lhs_values.clone(), rhs_tag);
+        let rhs = swapped.register_poly_with_tag(rhs_values.clone(), lhs_tag);
         let (expected, _) = swapped.evaluate_quotient_with_compiled_plan(
             expressions(lhs, rhs),
             &domain,
@@ -5123,6 +5167,18 @@ mod tests {
         );
         assert_eq!(&actual[..], &expected[..]);
         assert!(replacement.is_some());
+
+        let mut untagged = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
+        let untagged_lhs = untagged.register_poly(lhs_values);
+        let untagged_rhs = untagged.register_poly(rhs_values);
+        assert!(!untagged.accepts_compiled_plan(&plan));
+        let (_, replacement) = untagged.evaluate_quotient_with_compiled_plan(
+            expressions(untagged_lhs, untagged_rhs),
+            &domain,
+            Some(&plan),
+            challenges,
+        );
+        assert!(replacement.is_none());
     }
 
     #[test]
@@ -5151,9 +5207,12 @@ mod tests {
             gamma: F::from(7),
             y: F::from(11),
         };
+        let query_tag = EvaluationPolyTag::new(0, 0, 0);
+        let selector_tag = EvaluationPolyTag::new(1, 0, 0);
         let mut original = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
-        let original_query = original.register_poly(query_values.clone());
-        let original_selector = original.register_poly(selector_values.clone());
+        let original_query = original.register_poly_with_tag(query_values.clone(), query_tag);
+        let original_selector =
+            original.register_poly_with_tag(selector_values.clone(), selector_tag);
         original.register_compressed_selector(
             original_query,
             ORIGINAL_COMBINATION_LEN,
@@ -5175,8 +5234,8 @@ mod tests {
         // Keep polynomial count and lengths identical while changing only the
         // compressed-selector mapping retained by the evaluator.
         let mut mismatched = new_evaluator::<fn(), _, ExtendedLagrangeCoeff>(context);
-        let mismatched_query = mismatched.register_poly(query_values);
-        let mismatched_selector = mismatched.register_poly(selector_values);
+        let mismatched_query = mismatched.register_poly_with_tag(query_values, query_tag);
+        let mismatched_selector = mismatched.register_poly_with_tag(selector_values, selector_tag);
         mismatched.register_compressed_selector(
             mismatched_query,
             MISMATCHED_COMBINATION_LEN,

@@ -12,6 +12,8 @@ use crate::{
     poly::{self, Ast, AstLeaf, CompiledEvaluationPlan, ExtendedLagrangeCoeff},
 };
 
+// Candidates are inserted in this order, which is also their priority if the
+// aggregate cap cannot retain every shape.
 const RETAINED_QUOTIENT_CIRCUIT_COUNTS: [usize; 3] = [1, 2, 4];
 // This bounds payload kept by the proving key after parallel keygen planning;
 // it is not a bound on transient keygen allocations.
@@ -151,6 +153,11 @@ struct LookupTopology<E, F: WithSmallOrderMulGroup<3>> {
     permuted_table: AstLeaf<E, ExtendedLagrangeCoeff>,
 }
 
+/// Builds the gate AST shared by keygen planning and prover fallback.
+///
+/// Virtual selectors must already be removed. The leaf slices must come from
+/// complete fixed, advice, and instance registration in protocol column order;
+/// retained-plan validation checks their semantic tags before a hit.
 pub(in crate::plonk) fn expression_ast<E: Copy, F: WithSmallOrderMulGroup<3>>(
     expression: &Expression<F>,
     fixed: &[AstLeaf<E, ExtendedLagrangeCoeff>],
@@ -228,6 +235,9 @@ impl<F: Field> QuotientPlans<F> {
         circuit_count: usize,
         plan: CompiledEvaluationPlan<F, ExtendedLagrangeCoeff>,
     ) {
+        if !plan.has_exact_polynomial_tags() {
+            return;
+        }
         let Some(index) = Self::index(circuit_count) else {
             return;
         };

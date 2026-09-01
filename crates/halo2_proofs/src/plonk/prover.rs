@@ -1557,7 +1557,7 @@ fn compressed_selector_cache_preserves_proof() {
 
     #[derive(Clone, Copy, Debug)]
     struct Config {
-        advice: [Column<Advice>; 2],
+        advice: [Column<Advice>; 4],
         selectors: [Selector; crate::MIN_SELECTOR_FAMILY_LEN],
         table: [TableColumn; 2],
     }
@@ -1574,12 +1574,25 @@ fn compressed_selector_cache_preserves_proof() {
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-            let advice = [meta.advice_column(), meta.advice_column()];
+            let advice = core::array::from_fn(|_| meta.advice_column());
+            let instance = meta.instance_column();
             let selectors = core::array::from_fn(|_| meta.selector());
             let table = [meta.lookup_table_column(), meta.lookup_table_column()];
 
+            for column in advice {
+                meta.enable_equality(column);
+            }
+            meta.enable_equality(instance);
+
             meta.lookup(|meta| {
-                advice
+                advice[..2]
+                    .iter()
+                    .zip(table)
+                    .map(|(advice, table)| (meta.query_advice(*advice, Rotation::cur()), table))
+                    .collect()
+            });
+            meta.lookup(|meta| {
+                advice[2..]
                     .iter()
                     .zip(table)
                     .map(|(advice, table)| (meta.query_advice(*advice, Rotation::cur()), table))
@@ -1590,7 +1603,11 @@ fn compressed_selector_cache_preserves_proof() {
                 meta.create_gate("selector family", |meta| {
                     let selector = meta.query_selector(selector);
                     let advice = meta.query_advice(advice[0], Rotation::cur());
-                    vec![selector * (advice - Expression::Constant(F::ONE))]
+                    let instance = meta.query_instance(instance, Rotation::cur());
+                    vec![
+                        selector.clone() * (advice - Expression::Constant(F::ONE)),
+                        selector * instance,
+                    ]
                 });
             }
 
@@ -1649,8 +1666,9 @@ fn compressed_selector_cache_preserves_proof() {
         seed: u64,
     ) -> Vec<u8> {
         let circuits = [MyCircuit; 4];
-        let no_instance_columns: &[&[Fp]] = &[];
-        let instances = [no_instance_columns; 4];
+        let empty_instance: &[Fp] = &[];
+        let instance_columns: &[&[Fp]] = &[empty_instance];
+        let instances = [instance_columns; 4];
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         create_proof(
             params,
@@ -1670,8 +1688,9 @@ fn compressed_selector_cache_preserves_proof() {
         circuit_count: usize,
         proof: &[u8],
     ) {
-        let no_instance_columns: &[&[Fp]] = &[];
-        let instances = [no_instance_columns; 4];
+        let empty_instance: &[Fp] = &[];
+        let instance_columns: &[&[Fp]] = &[empty_instance];
+        let instances = [instance_columns; 4];
         let strategy = SingleVerifier::new(params);
         let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(proof);
         verify_proof(
@@ -1694,7 +1713,16 @@ fn compressed_selector_cache_preserves_proof() {
         pk.cached_selector_families[0].selectors.len() + 1,
         crate::MIN_SELECTOR_FAMILY_LEN
     );
-    assert_eq!(pk.vk.cs.lookups[0].input_expressions.len(), 2);
+    assert_eq!(pk.vk.cs.num_instance_columns, 1);
+    assert_eq!(pk.vk.cs.lookups.len(), 2);
+    assert!(
+        pk.vk
+            .cs
+            .lookups
+            .iter()
+            .all(|lookup| lookup.input_expressions.len() == 2)
+    );
+    assert!(pk.vk.cs.permutation.set_count(pk.vk.cs_degree) >= 2);
     assert!(pk.quotient_plans.get(3).is_none());
 
     // Key generation compiles every retained shape before any proof. The
@@ -1762,16 +1790,30 @@ fn compressed_selector_cache_preserves_proof() {
     ));
     verify(&mismatched_pk, &params, 2, &fallback_proof);
 
-    // Equal polynomial counts and lengths are insufficient: swapping a fixed
-    // column's semantic tag with an advice column's tag must also reject the
-    // retained plan and take the byte-identical fallback.
+    // Equal polynomial counts and lengths are insufficient. Swap tags across
+    // instance/lookup and permutation/lookup-product roles that appear more
+    // than once, and require the byte-identical fallback.
     let swapped_tag_pk = create_pk();
     swapped_tag_pk.quotient_plans.swap_polynomial_tags(
         2,
-        QuotientPoly::Fixed { column_index: 0 },
-        QuotientPoly::Advice {
+        QuotientPoly::Instance {
             circuit_index: 0,
             column_index: 0,
+        },
+        QuotientPoly::LookupPermutedTable {
+            circuit_index: 1,
+            lookup_index: 1,
+        },
+    );
+    swapped_tag_pk.quotient_plans.swap_polynomial_tags(
+        2,
+        QuotientPoly::PermutationProduct {
+            circuit_index: 0,
+            set_index: 1,
+        },
+        QuotientPoly::LookupProduct {
+            circuit_index: 1,
+            lookup_index: 0,
         },
     );
     let rejected_plan = swapped_tag_pk.quotient_plans.get(2).unwrap();
