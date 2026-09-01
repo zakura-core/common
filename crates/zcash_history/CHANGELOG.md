@@ -33,3 +33,5 @@ than continuing the original `0.6.0` numbering.
 - Forked from: `zcash_history 0.6.0`, published from
   [zcash/librustzcash](https://github.com/zcash/librustzcash) at commit
   [`b74429f9`](https://github.com/zcash/librustzcash/commit/b74429f9e4e3600c27492f1d936fb3b9c818c224).
+- Imported into this repository in commit
+  [`7ea249e8`](https://github.com/zakura-core/common/commit/7ea249e84c58ff1b56c82c27cd3050a5dc2be764).
