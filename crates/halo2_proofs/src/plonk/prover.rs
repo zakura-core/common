@@ -40,6 +40,17 @@ use crate::{
 
 const NO_DENOMINATOR: u32 = u32::MAX;
 
+#[cfg(all(test, feature = "batch"))]
+std::thread_local! {
+    static PREPARED_INSTANCE_ROUTE_HITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, feature = "batch"))]
+fn prepared_instance_route_hits() -> usize {
+    PREPARED_INSTANCE_ROUTE_HITS.get()
+}
+
 #[cfg(feature = "batch")]
 fn instance_scalar_bit(bytes: &[u8], bit: usize, byte_order: InstanceScalarByteOrder) -> bool {
     let byte_from_edge = bit / u8::BITS as usize;
@@ -267,6 +278,8 @@ fn commit_prover_instances<C: CurveAffine>(
 ) -> Vec<Vec<C::Curve>> {
     #[cfg(feature = "batch")]
     if let Some(commitments) = commit_prepared_instances(params, instances) {
+        #[cfg(test)]
+        PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
         return commitments;
     }
 
@@ -1695,6 +1708,13 @@ fn instance_preparation_preserves_proof_and_error_order() {
 
     #[cfg(feature = "batch")]
     {
+        // Pin both sides of the private Halo2 route contract. These literals
+        // intentionally make production-constant drift fail this test.
+        assert_eq!(PREPARED_INSTANCE_COLUMNS, 1);
+        assert_eq!(PREPARED_INSTANCE_DENSE_ROWS, 7);
+        assert_eq!(PREPARED_INSTANCE_BOOLEAN_ROWS, 3);
+        assert_eq!(PREPARED_INSTANCE_ROWS, 10);
+
         let exact_shape_values = (0..circuits.len())
             .map(|proof| {
                 let mut values: [Fp; PREPARED_INSTANCE_ROWS] = std::array::from_fn(|row| {
@@ -1732,8 +1752,12 @@ fn instance_preparation_preserves_proof_and_error_order() {
 
         let unprepared_params = Params::new(5);
         assert!(unprepared_params.prepared_instance_table().is_none());
+        let route_hits = prepared_instance_route_hits();
         let unprepared_proof = create_exact_shape_proof(&unprepared_params);
-        assert_eq!(create_exact_shape_proof(&params), unprepared_proof);
+        assert_eq!(prepared_instance_route_hits(), route_hits);
+        let prepared_proof = create_exact_shape_proof(&params);
+        assert_eq!(prepared_instance_route_hits(), route_hits + 1);
+        assert_eq!(prepared_proof, unprepared_proof);
     }
 
     let valid = [Fp::from(5)];
