@@ -955,6 +955,74 @@ impl<C: CurveAffine> Params<C> {
         self.commitment_tables_cache.blind()
     }
 
+    /// Tries to evaluate an IPA round MSM over the original coefficient
+    /// bases using the table retained by [`Self::prepare_commitments`].
+    ///
+    /// `prefix` and `suffix` provide one scalar for every base in `g`. The
+    /// remaining scalars multiply the IPA's `u` and blinding `w` bases.
+    /// This follows [`Self::commit`]'s existing variable-time prover timing
+    /// model and reuses the same prepared backend.
+    fn try_prepared_ipa_round_multiexp(
+        &self,
+        prefix: &[C::Scalar],
+        suffix: &[C::Scalar],
+        u_scalar: C::Scalar,
+        w_scalar: C::Scalar,
+    ) -> Option<C::Curve> {
+        assert_eq!(
+            prefix.len() + suffix.len(),
+            self.n as usize,
+            "one scalar per coefficient base",
+        );
+
+        if self.prepared_ipa_round_multiexp_is_available() {
+            #[cfg(feature = "orbits")]
+            if let Some(prepared) = self.zero_check() {
+                // The prepared coefficient table is ordered as [g..., w, u].
+                let mut expanded_suffix =
+                    Vec::with_capacity(suffix.len() + PREPARED_COMMITMENT_EXTRA_BASES);
+                expanded_suffix.extend_from_slice(suffix);
+                expanded_suffix.extend_from_slice(&[w_scalar, u_scalar]);
+                return Some(prepared.multiexp_with_prefix_and_suffix(
+                    prefix,
+                    &expanded_suffix,
+                    &[],
+                ));
+            }
+
+            #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+            if let Some(prepared) = self.commitment_table() {
+                return Some(prepared.multiexp_with_prefix_and_suffix(
+                    prefix,
+                    suffix,
+                    &[(u_scalar, self.u), (w_scalar, self.w)],
+                ));
+            }
+        }
+
+        let _ = (u_scalar, w_scalar);
+        None
+    }
+
+    fn prepared_ipa_round_multiexp_is_available(&self) -> bool {
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k) {
+            let n = self.n as usize;
+
+            #[cfg(feature = "orbits")]
+            return self
+                .zero_check()
+                .is_some_and(|prepared| prepared.terms() == n + PREPARED_COMMITMENT_EXTRA_BASES);
+
+            #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+            return self
+                .commitment_table()
+                .is_some_and(|prepared| prepared.terms() == n);
+        }
+
+        false
+    }
+
     /// The cached prepared zero-check, if [`Self::prepare_zero_checks`]
     /// built one.
     #[cfg(feature = "orbits")]
