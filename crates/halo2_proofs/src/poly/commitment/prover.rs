@@ -1,15 +1,30 @@
 use ff::Field;
+#[cfg(feature = "batch")]
+use maybe_rayon::prelude::*;
 use rand_core::Rng;
 
 use super::super::{Coeff, Polynomial, evaluate_polynomial_with_powers, power_vector};
 use super::{Blind, Params};
 use crate::arithmetic::{CurveAffine, CurveExt, best_multiexp, compute_inner_product};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
+#[cfg(feature = "batch")]
+use crate::{PreparedCommitmentTables, PreparedFixedBaseTable, prepared_fixed_base_scalar_digit};
 
 use group::{Curve, Group};
 use pasta_curves::{deferred::DeferredField, pallas, vesta};
 use std::any::{Any, TypeId};
 use std::io;
+
+#[cfg(all(test, feature = "batch"))]
+std::thread_local! {
+    static PREPARED_IPA_MASK_ROUTE_HITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, feature = "batch"))]
+fn prepared_ipa_mask_route_hits() -> usize {
+    PREPARED_IPA_MASK_ROUTE_HITS.get()
+}
 
 /// Samples the sparse polynomial that masks the final folded IPA scalar,
 ///
@@ -36,6 +51,60 @@ fn sample_ipa_masking_polynomial<F: Field, R: Rng>(k: u32, x: F, rng: &mut R) ->
     coefficients
 }
 
+/// Evaluates one sum over a positioned fixed-base table. Work is divided by
+/// scalar window, so a small number of bases can use the entire worker pool.
+#[cfg(feature = "batch")]
+fn evaluate_prepared_fixed_base_sum<'a, C: CurveAffine>(
+    table: &PreparedFixedBaseTable<C>,
+    scalars: impl Iterator<Item = &'a C::Scalar>,
+) -> Option<C::Curve>
+where
+    C::Scalar: 'a,
+{
+    let representations = table.scalar_representations(scalars)?;
+    let scalar_count = representations.len();
+    if scalar_count != table.bases {
+        return None;
+    }
+    let work = scalar_count.checked_mul(table.windows)?;
+    if work == 0 {
+        return Some(C::Curve::identity());
+    }
+
+    // Keep at least one scalar's windows in each job. Wider splitting adds
+    // Rayon and projective-reduction overhead without exposing another base.
+    let worker_count = crate::multicore::current_num_threads().min(scalar_count);
+    let partials = (0..worker_count)
+        .into_par_iter()
+        .map(|worker| {
+            let start = work * worker / worker_count;
+            let end = work * (worker + 1) / worker_count;
+            let mut partial = C::Curve::identity();
+            for position in start..end {
+                let base = position / table.windows;
+                let window = position % table.windows;
+                let digit = prepared_fixed_base_scalar_digit(
+                    representations[base].as_ref(),
+                    window,
+                    table.scalar_bits,
+                    table.byte_order,
+                );
+                if let Some(point) = table.point(base, window, digit) {
+                    partial += point;
+                }
+            }
+            partial
+        })
+        .collect::<Vec<_>>();
+
+    Some(
+        partials
+            .into_iter()
+            .reduce(|left, right| left + right)
+            .unwrap_or_else(C::Curve::identity),
+    )
+}
+
 fn ipa_masking_commitment<C: CurveAffine>(
     coefficients: &[(usize, C::Scalar)],
     blind: Blind<C::Scalar>,
@@ -48,6 +117,19 @@ fn ipa_masking_commitment<C: CurveAffine>(
     assert_eq!(coefficients[0].0, 0);
     for (t, (index, _)) in coefficients[1..].iter().enumerate() {
         assert_eq!(*index, 1 << t);
+    }
+
+    #[cfg(feature = "batch")]
+    if let Some(table) = params.prepared_ipa_mask_table() {
+        let scalars = coefficients
+            .iter()
+            .map(|(_, coefficient)| coefficient)
+            .chain(core::iter::once(&blind.0));
+        if let Some(commitment) = evaluate_prepared_fixed_base_sum(&table, scalars) {
+            #[cfg(test)]
+            PREPARED_IPA_MASK_ROUTE_HITS.set(PREPARED_IPA_MASK_ROUTE_HITS.get() + 1);
+            return commitment;
+        }
     }
 
     let mut scalars = Vec::with_capacity(coefficients.len() + 1);
@@ -335,12 +417,19 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "batch")]
+    use super::prepared_ipa_mask_route_hits;
     use super::{
         Params, compute_ipa_hi_evaluation_pasta, ipa_masking_commitment, ipa_round_multiexp,
         parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
     use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
+    #[cfg(feature = "batch")]
+    use crate::{
+        PREPARED_IPA_MASK_BASES, PREPARED_IPA_MASK_K, PreparedCommitmentTables,
+        PreparedFixedBaseTable, ScalarByteOrder,
+    };
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
@@ -415,6 +504,200 @@ mod tests {
                 params.commit(&full, blind),
             );
         }
+    }
+
+    #[cfg(feature = "batch")]
+    fn prepared_ipa_masking_commitment_matches_generic<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+    {
+        let params = Params::<C>::new(PREPARED_IPA_MASK_K);
+        let support = core::iter::once(0)
+            .chain((0..PREPARED_IPA_MASK_K).map(|bit| 1 << bit))
+            .collect::<Vec<_>>();
+        let full_width = full_width_scalar::<C>();
+        let values = [
+            full_width,
+            C::Scalar::ZERO,
+            C::Scalar::ONE,
+            -C::Scalar::ONE,
+            C::Scalar::from(7),
+            C::Scalar::from(8),
+            C::Scalar::from(15),
+            C::Scalar::from(16),
+            C::Scalar::from(127),
+            C::Scalar::from(128),
+            -full_width,
+            full_width.square(),
+        ];
+        let coefficients = support
+            .into_iter()
+            .zip(values)
+            .collect::<Vec<(usize, C::Scalar)>>();
+        let blind = Blind(full_width + C::Scalar::ONE);
+
+        // Use the ordinary dense-polynomial commitment as an independent
+        // oracle for the prepared base order, including a nonzero `g[0]`.
+        let domain = EvaluationDomain::new(1, PREPARED_IPA_MASK_K);
+        let mut polynomial = domain.empty_coeff();
+        for (index, coefficient) in &coefficients {
+            polynomial[*index] = *coefficient;
+        }
+        let expected = params.commit(&polynomial, blind);
+
+        assert!(params.prepared_ipa_mask_table().is_none());
+        let route_hits = prepared_ipa_mask_route_hits();
+        assert_eq!(
+            ipa_masking_commitment(&coefficients, blind, &params),
+            expected
+        );
+        assert_eq!(prepared_ipa_mask_route_hits(), route_hits);
+        assert!(params.prepare_ipa_mask_table());
+        assert_eq!(
+            params.prepared_ipa_mask_table().unwrap().bases,
+            PREPARED_IPA_MASK_BASES,
+        );
+
+        let check = || {
+            let route_hits = prepared_ipa_mask_route_hits();
+            assert_eq!(
+                ipa_masking_commitment(&coefficients, blind, &params),
+                expected
+            );
+            assert_eq!(prepared_ipa_mask_route_hits(), route_hits + 1);
+        };
+        #[cfg(feature = "multicore")]
+        for workers in [1, 2, 4, PREPARED_IPA_MASK_BASES] {
+            maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .expect("test pool must build")
+                .install(check);
+        }
+        #[cfg(not(feature = "multicore"))]
+        check();
+
+        // A prepared table with an unsupported opaque representation must
+        // decline without touching its points, then use the generic MSM.
+        let unsupported = Params::<C>::new(PREPARED_IPA_MASK_K);
+        unsupported
+            .ipa_mask_cache
+            .initialize(|| PreparedFixedBaseTable {
+                points: vec![],
+                scalar_bits: 0,
+                windows: 0,
+                byte_order: ScalarByteOrder::Unsupported,
+                bases: PREPARED_IPA_MASK_BASES,
+            });
+        let route_hits = prepared_ipa_mask_route_hits();
+        assert_eq!(
+            ipa_masking_commitment(&coefficients, blind, &unsupported),
+            expected,
+        );
+        assert_eq!(prepared_ipa_mask_route_hits(), route_hits);
+    }
+
+    #[cfg(feature = "batch")]
+    fn prepared_ipa_masking_proof_matches_unprepared() {
+        use crate::transcript::{Blake2bWrite, Challenge255, Transcript, TranscriptWrite};
+        use crate::{
+            circuit::{Layouter, SimpleFloorPlanner},
+            pasta::{EpAffine, EqAffine, Fp, Fq},
+            plonk::{Circuit, ConstraintSystem, Error, keygen_pk, keygen_vk},
+        };
+        use rand::{SeedableRng, rngs::StdRng};
+
+        #[derive(Clone, Copy)]
+        struct EmptyCircuit;
+
+        impl<F: Field> Circuit<F> for EmptyCircuit {
+            type Config = ();
+            type FloorPlanner = SimpleFloorPlanner;
+
+            fn without_witnesses(&self) -> Self {
+                *self
+            }
+
+            fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {}
+
+            fn synthesize(
+                &self,
+                _config: Self::Config,
+                _layouter: impl Layouter<F>,
+            ) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        macro_rules! check_curve {
+            ($curve:ty, $scalar:ty, $arm_with_keygen:expr) => {{
+                let armed = Params::<$curve>::new(PREPARED_IPA_MASK_K);
+                let mut encoded = vec![];
+                armed.write(&mut encoded).unwrap();
+                let unprepared = Params::<$curve>::read(&mut encoded.as_slice()).unwrap();
+                if $arm_with_keygen {
+                    let vk = keygen_vk(&armed, &EmptyCircuit).expect("keygen_vk must succeed");
+                    let _pk = keygen_pk(&armed, vk, &EmptyCircuit).expect("keygen_pk must succeed");
+                } else {
+                    assert!(armed.prepare_ipa_mask_table());
+                }
+                assert!(armed.prepared_ipa_mask_table().is_some());
+                assert!(unprepared.prepared_ipa_mask_table().is_none());
+
+                let domain = EvaluationDomain::new(1, PREPARED_IPA_MASK_K);
+                let mut polynomial = domain.empty_coeff();
+                for (index, coefficient) in polynomial.iter_mut().enumerate() {
+                    *coefficient = <$scalar>::from(index as u64 + 1).square() + <$scalar>::from(17);
+                }
+                let blind = Blind(<$scalar>::from(0x626c_696e_642d_6d73));
+
+                let prove = |params: &Params<$curve>| {
+                    let mut transcript =
+                        Blake2bWrite::<Vec<u8>, $curve, Challenge255<$curve>>::init(vec![]);
+                    let commitment = params.commit(&polynomial, blind).to_affine();
+                    transcript.write_point(commitment).unwrap();
+                    let point = *transcript.squeeze_challenge_scalar::<()>();
+                    let evaluation = eval_polynomial(&polynomial, point);
+                    transcript.write_scalar(evaluation).unwrap();
+                    super::create_proof(
+                        params,
+                        StdRng::seed_from_u64(0x6970_612d_6d61_736b),
+                        &mut transcript,
+                        &polynomial,
+                        blind,
+                        point,
+                    )
+                    .unwrap();
+                    transcript.finalize()
+                };
+
+                let route_hits = prepared_ipa_mask_route_hits();
+                let expected = prove(&unprepared);
+                assert_eq!(prepared_ipa_mask_route_hits(), route_hits);
+
+                let check = || {
+                    let route_hits = prepared_ipa_mask_route_hits();
+                    let proof = prove(&armed);
+                    assert_eq!(prepared_ipa_mask_route_hits(), route_hits + 1);
+                    assert_eq!(proof, expected);
+                };
+                #[cfg(feature = "multicore")]
+                for workers in [1, 4, 6, 10] {
+                    maybe_rayon::ThreadPoolBuilder::new()
+                        .num_threads(workers)
+                        .build()
+                        .expect("test pool must build")
+                        .install(check);
+                }
+                #[cfg(not(feature = "multicore"))]
+                check();
+            }};
+        }
+
+        // Orchard proves on Vesta; Pallas covers the other Pasta scalar
+        // representation and the direct cache initializer.
+        check_curve!(EqAffine, Fp, true);
+        check_curve!(EpAffine, Fq, false);
     }
 
     /// Apply the prover's IPA collapse to the coefficient vector `s` and
@@ -643,6 +926,24 @@ mod tests {
     #[test]
     fn masking_polynomial_is_sparse_and_commits_correctly_vesta() {
         masking_polynomial_is_sparse_and_commits_correctly::<vesta::Affine>();
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn prepared_ipa_masking_commitment_matches_generic_pallas() {
+        prepared_ipa_masking_commitment_matches_generic::<pallas::Affine>();
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn prepared_ipa_masking_commitment_matches_generic_vesta() {
+        prepared_ipa_masking_commitment_matches_generic::<vesta::Affine>();
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn prepared_ipa_masking_proof_bytes_match_unprepared() {
+        prepared_ipa_masking_proof_matches_unprepared();
     }
 
     #[test]

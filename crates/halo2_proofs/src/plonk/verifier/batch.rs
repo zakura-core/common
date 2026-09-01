@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use super::{VerificationStrategy, validate_instances, verify_proof_with_instance_commitments};
 use crate::{
-    INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE, InstanceWindowTable,
-    MAX_CACHED_INSTANCE_ROWS,
+    INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE, MAX_CACHED_INSTANCE_ROWS,
+    PreparedCommitmentTables,
     multicore::{IntoParallelIterator, TryFoldAndReduce},
     plonk::{Error, VerifyingKey, commit_instance},
     poly::commitment::{Guard, MSM, Params},

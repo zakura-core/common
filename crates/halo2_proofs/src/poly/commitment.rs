@@ -95,10 +95,11 @@ use crate::arithmetic::{CurveAffine, CurveExt, best_fft, best_multiexp, parallel
 use crate::helpers::CurveRead;
 #[cfg(feature = "batch")]
 use crate::{
-    INSTANCE_WINDOW_ENTRIES_PER_BASE, InstanceScalarByteOrder, InstanceWindowTable,
-    MAX_CACHED_INSTANCE_ROWS, PREPARED_INSTANCE_BOOLEAN_ROWS, PREPARED_INSTANCE_DENSE_ROWS,
-    PREPARED_INSTANCE_OFFSETS, PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_MAGNITUDES,
-    PreparedInstanceTable,
+    INSTANCE_WINDOW_ENTRIES_PER_BASE, MAX_CACHED_INSTANCE_ROWS, PREPARED_FIXED_BASE_WINDOW_BITS,
+    PREPARED_FIXED_BASE_WINDOW_MAGNITUDES, PREPARED_INSTANCE_BOOLEAN_ROWS,
+    PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_OFFSETS, PREPARED_IPA_MASK_BASES,
+    PREPARED_IPA_MASK_K, PreparedCommitmentTables, PreparedFixedBaseTable, PreparedInstanceTable,
+    ScalarByteOrder,
 };
 
 #[cfg(any(feature = "multicore", feature = "orbits"))]
@@ -186,6 +187,8 @@ pub struct Params<C: CurveAffine> {
     instance_window_cache: InstanceWindowCache<C>,
     #[cfg(feature = "batch")]
     prepared_instance_cache: PreparedInstanceCache<C>,
+    #[cfg(feature = "batch")]
+    ipa_mask_cache: PreparedFixedBaseCache<C>,
     #[cfg(feature = "orbits")]
     zero_check_cache: ZeroCheckCache<C>,
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -458,7 +461,30 @@ impl<C: CurveAffine> PreparedInstanceCache<C> {
 }
 
 #[cfg(feature = "batch")]
-fn extend_prepared_instance_base_projective<C: CurveAffine>(
+#[derive(Clone)]
+struct PreparedFixedBaseCache<C: CurveAffine>(Arc<OnceLock<Arc<PreparedFixedBaseTable<C>>>>);
+
+#[cfg(feature = "batch")]
+impl<C: CurveAffine> Default for PreparedFixedBaseCache<C> {
+    fn default() -> Self {
+        Self(Arc::new(OnceLock::new()))
+    }
+}
+
+#[cfg(feature = "batch")]
+impl<C: CurveAffine> PreparedFixedBaseCache<C> {
+    fn initialize(&self, initialize: impl FnOnce() -> PreparedFixedBaseTable<C>) -> bool {
+        self.0.get_or_init(|| Arc::new(initialize()));
+        true
+    }
+
+    fn get(&self) -> Option<Arc<PreparedFixedBaseTable<C>>> {
+        self.0.get().map(Arc::clone)
+    }
+}
+
+#[cfg(feature = "batch")]
+fn extend_prepared_fixed_base_projective<C: CurveAffine>(
     projective: &mut Vec<C::Curve>,
     base: C,
     windows: usize,
@@ -466,29 +492,29 @@ fn extend_prepared_instance_base_projective<C: CurveAffine>(
     let mut window_base = C::Curve::from(base);
     for _ in 0..windows {
         let mut multiple = window_base;
-        for _ in 0..PREPARED_INSTANCE_WINDOW_MAGNITUDES {
+        for _ in 0..PREPARED_FIXED_BASE_WINDOW_MAGNITUDES {
             projective.push(multiple);
             multiple += window_base;
         }
-        for _ in 0..PREPARED_INSTANCE_WINDOW_BITS {
+        for _ in 0..PREPARED_FIXED_BASE_WINDOW_BITS {
             window_base = window_base.double();
         }
     }
 }
 
 #[cfg(feature = "batch")]
-fn prepared_instance_points<C: CurveAffine>(bases: &[C], windows: usize) -> Vec<C> {
+fn prepared_fixed_base_points<C: CurveAffine>(bases: &[C], windows: usize) -> Vec<C> {
     let points_per_base = windows
-        .checked_mul(PREPARED_INSTANCE_WINDOW_MAGNITUDES)
-        .expect("prepared instance base table length fits in usize");
+        .checked_mul(PREPARED_FIXED_BASE_WINDOW_MAGNITUDES)
+        .expect("prepared fixed-base table length fits in usize");
     let capacity = bases
         .len()
         .checked_mul(points_per_base)
-        .expect("prepared instance table length fits in usize");
+        .expect("prepared fixed-base table length fits in usize");
 
-    // Apple silicon benefits from running the seven independent inversions in
-    // parallel. Other architectures retain one global inversion; in
-    // particular, separate inversions regressed the measured x86-64 build.
+    // Apple silicon benefits from normalizing independent base tables in
+    // parallel. Other architectures retain one global inversion; separate
+    // inversions regressed the measured x86-64 build.
     #[cfg(all(feature = "multicore", target_arch = "aarch64", target_os = "macos"))]
     if crate::multicore::current_num_threads() > 1 {
         let mut points = vec![C::identity(); capacity];
@@ -497,7 +523,7 @@ fn prepared_instance_points<C: CurveAffine>(bases: &[C], windows: usize) -> Vec<
             .zip(bases.par_iter())
             .for_each(|(points, &base)| {
                 let mut projective = Vec::with_capacity(points_per_base);
-                extend_prepared_instance_base_projective(&mut projective, base, windows);
+                extend_prepared_fixed_base_projective(&mut projective, base, windows);
                 C::Curve::batch_normalize(&projective, points);
             });
         return points;
@@ -505,11 +531,37 @@ fn prepared_instance_points<C: CurveAffine>(bases: &[C], windows: usize) -> Vec<
 
     let mut projective = Vec::with_capacity(capacity);
     for &base in bases {
-        extend_prepared_instance_base_projective(&mut projective, base, windows);
+        extend_prepared_fixed_base_projective(&mut projective, base, windows);
     }
     let mut points = vec![C::identity(); capacity];
     C::Curve::batch_normalize(&projective, &mut points);
     points
+}
+
+#[cfg(feature = "batch")]
+fn prepared_fixed_base_table<C: CurveAffine>(bases: &[C]) -> PreparedFixedBaseTable<C> {
+    let scalar_bits = C::Scalar::NUM_BITS as usize;
+    let windows = crate::prepared_fixed_base_window_count(scalar_bits);
+    let points = prepared_fixed_base_points(bases, windows);
+
+    let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
+    let probe_repr = probe.to_repr();
+    let probe_bytes = probe_repr.as_ref();
+    let little = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().rev().copied()) == probe;
+    let big = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().copied()) == probe;
+    let byte_order = match (little, big) {
+        (true, false) => ScalarByteOrder::LittleEndian,
+        (false, true) => ScalarByteOrder::BigEndian,
+        _ => ScalarByteOrder::Unsupported,
+    };
+
+    PreparedFixedBaseTable {
+        points,
+        scalar_bits,
+        windows,
+        byte_order,
+        bases: bases.len(),
+    }
 }
 
 #[cfg(feature = "batch")]
@@ -560,7 +612,7 @@ impl<C: CurveAffine> fmt::Debug for Params<C> {
 }
 
 #[cfg(feature = "batch")]
-impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
+impl<C: CurveAffine> PreparedCommitmentTables<C> for Params<C> {
     fn instance_window_table(&self, base_count: usize) -> Arc<Vec<C>> {
         assert!(base_count <= MAX_CACHED_INSTANCE_ROWS);
         assert!(base_count <= self.g_lagrange.len());
@@ -590,22 +642,8 @@ impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
         }
 
         self.prepared_instance_cache.initialize(|| {
-            let scalar_bits = C::Scalar::NUM_BITS as usize;
-            let windows = crate::prepared_instance_window_count(scalar_bits);
-            let points =
-                prepared_instance_points(&self.g_lagrange[..PREPARED_INSTANCE_DENSE_ROWS], windows);
-
-            let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
-            let probe_repr = probe.to_repr();
-            let probe_bytes = probe_repr.as_ref();
-            let little =
-                crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().rev().copied()) == probe;
-            let big = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().copied()) == probe;
-            let byte_order = match (little, big) {
-                (true, false) => InstanceScalarByteOrder::LittleEndian,
-                (false, true) => InstanceScalarByteOrder::BigEndian,
-                _ => InstanceScalarByteOrder::Unsupported,
-            };
+            let fixed_base =
+                prepared_fixed_base_table(&self.g_lagrange[..PREPARED_INSTANCE_DENSE_ROWS]);
 
             let mut offsets = [C::Curve::identity(); PREPARED_INSTANCE_OFFSETS];
             for (mask, offset) in offsets.iter_mut().enumerate() {
@@ -618,10 +656,7 @@ impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
             }
 
             PreparedInstanceTable {
-                points,
-                scalar_bits,
-                windows,
-                byte_order,
+                fixed_base,
                 offsets,
             }
         })
@@ -629,6 +664,27 @@ impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
 
     fn prepared_instance_table(&self) -> Option<Arc<PreparedInstanceTable<C>>> {
         self.prepared_instance_cache.get()
+    }
+
+    fn prepare_ipa_mask_table(&self) -> bool {
+        if self.k != PREPARED_IPA_MASK_K {
+            return false;
+        }
+
+        self.ipa_mask_cache.initialize(|| {
+            let mut bases = Vec::with_capacity(PREPARED_IPA_MASK_BASES);
+            bases.push(self.g[0]);
+            for bit in 0..PREPARED_IPA_MASK_K {
+                bases.push(self.g[1 << bit]);
+            }
+            bases.push(self.w);
+            debug_assert_eq!(bases.len(), PREPARED_IPA_MASK_BASES);
+            prepared_fixed_base_table(&bases)
+        })
+    }
+
+    fn prepared_ipa_mask_table(&self) -> Option<Arc<PreparedFixedBaseTable<C>>> {
+        self.ipa_mask_cache.get()
     }
 }
 
@@ -717,6 +773,8 @@ impl<C: CurveAffine> Params<C> {
             instance_window_cache: InstanceWindowCache::default(),
             #[cfg(feature = "batch")]
             prepared_instance_cache: PreparedInstanceCache::default(),
+            #[cfg(feature = "batch")]
+            ipa_mask_cache: PreparedFixedBaseCache::default(),
             #[cfg(feature = "orbits")]
             zero_check_cache: ZeroCheckCache::default(),
             #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -885,6 +943,8 @@ impl<C: CurveAffine> Params<C> {
             instance_window_cache: InstanceWindowCache::default(),
             #[cfg(feature = "batch")]
             prepared_instance_cache: PreparedInstanceCache::default(),
+            #[cfg(feature = "batch")]
+            ipa_mask_cache: PreparedFixedBaseCache::default(),
             #[cfg(feature = "orbits")]
             zero_check_cache: ZeroCheckCache::default(),
             #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -968,9 +1028,9 @@ impl<C: CurveAffine> Params<C> {
     /// covers `[g_lagrange..., w, u]`. Without `orbits`, the two tables cover
     /// exactly `g` and `g_lagrange`, plus a fixed-window table over `w`. When
     /// the `batch` feature is enabled, this also ensures that the small
-    /// public-instance table normally built by proving-key generation is
-    /// present. This evaluates each blind without a one-term MSM while keeping
-    /// the polynomial slice borrowed.
+    /// public-instance and `k = 11` IPA masking tables normally built by
+    /// proving-key generation are present. This evaluates each blind without
+    /// a one-term MSM while keeping the polynomial slice borrowed.
     ///
     /// Both commit methods use the tables on pools of at most eight effective
     /// threads. Orchard-sized (`k = 11`) tables on AArch64 macOS extend that
@@ -981,8 +1041,8 @@ impl<C: CurveAffine> Params<C> {
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// fixed-window table adds approximately 0.5 MiB for a 32-byte scalar
-    /// representation. The signed-width-four public-instance table adds about
-    /// 224 KiB on Pasta.
+    /// representation. The signed-width-four public-instance and `k = 11` IPA
+    /// masking tables add about 640 KiB on Pasta.
     ///
     /// Concurrent and repeat calls share their initialization attempts,
     /// including a backend decline. Without `orbits`, one atomic initialization
@@ -1014,6 +1074,7 @@ impl<C: CurveAffine> Params<C> {
             #[cfg(feature = "batch")]
             if prepared {
                 self.prepare_instance_table();
+                self.prepare_ipa_mask_table();
             }
             prepared
         }
@@ -1028,6 +1089,7 @@ impl<C: CurveAffine> Params<C> {
             #[cfg(feature = "batch")]
             if prepared {
                 self.prepare_instance_table();
+                self.prepare_ipa_mask_table();
             }
             prepared
         }
@@ -1164,11 +1226,11 @@ fn instance_window_cache_is_shared_by_clones_only() {
     assert!(params.prepare_instance_table());
     let prepared = params.prepared_instance_table().unwrap();
     let expected_prepared_points = PREPARED_INSTANCE_DENSE_ROWS
-        * crate::prepared_instance_window_count(
+        * crate::prepared_fixed_base_window_count(
             <EqAffine as group::CurveAffine>::Scalar::NUM_BITS as usize,
         )
-        * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
-    assert_eq!(prepared.points.len(), expected_prepared_points);
+        * PREPARED_FIXED_BASE_WINDOW_MAGNITUDES;
+    assert_eq!(prepared.fixed_base.points.len(), expected_prepared_points);
 
     let tables = std::thread::scope(|scope| {
         (0..4)
@@ -1241,33 +1303,88 @@ fn prepared_instance_table_is_stable_across_worker_counts() {
 
     let (serial, params) = build(1);
     let (parallel, _) = build(PREPARED_INSTANCE_DENSE_ROWS);
-    assert_eq!(parallel.points, serial.points);
+    assert_eq!(parallel.fixed_base.points, serial.fixed_base.points);
     assert_eq!(parallel.offsets, serial.offsets);
 
-    let points_per_base = serial.windows * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
+    let points_per_base = serial.fixed_base.windows * PREPARED_FIXED_BASE_WINDOW_MAGNITUDES;
     for (base_index, &base) in params.g_lagrange[..PREPARED_INSTANCE_DENSE_ROWS]
         .iter()
         .enumerate()
     {
         let mut window_base = Eq::from(base);
-        for window in 0..serial.windows {
-            let start = base_index * points_per_base + window * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
-            assert_eq!(serial.points[start], window_base.to_affine());
+        for window in 0..serial.fixed_base.windows {
+            let start =
+                base_index * points_per_base + window * PREPARED_FIXED_BASE_WINDOW_MAGNITUDES;
+            assert_eq!(serial.fixed_base.points[start], window_base.to_affine());
 
             let mut last_multiple = window_base;
-            for _ in 1..PREPARED_INSTANCE_WINDOW_MAGNITUDES {
+            for _ in 1..PREPARED_FIXED_BASE_WINDOW_MAGNITUDES {
                 last_multiple += window_base;
             }
             assert_eq!(
-                serial.points[start + PREPARED_INSTANCE_WINDOW_MAGNITUDES - 1],
+                serial.fixed_base.points[start + PREPARED_FIXED_BASE_WINDOW_MAGNITUDES - 1],
                 last_multiple.to_affine(),
             );
 
-            for _ in 0..PREPARED_INSTANCE_WINDOW_BITS {
+            for _ in 0..PREPARED_FIXED_BASE_WINDOW_BITS {
                 window_base = window_base.double();
             }
         }
     }
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn ipa_mask_table_is_shared_by_clones_and_not_serialized() {
+    use std::sync::Arc;
+
+    use crate::pasta::EqAffine;
+
+    let params = Arc::new(Params::<EqAffine>::new(PREPARED_IPA_MASK_K));
+    let cloned = params.as_ref().clone();
+    let mut serialized = vec![];
+    params.write(&mut serialized).unwrap();
+
+    assert!(params.prepared_ipa_mask_table().is_none());
+    let tables = std::thread::scope(|scope| {
+        (0..4)
+            .map(|_| {
+                let params = Arc::clone(&params);
+                scope.spawn(move || {
+                    assert!(params.prepare_ipa_mask_table());
+                    params.prepared_ipa_mask_table().unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let table = &tables[0];
+    assert!(tables.iter().all(|other| Arc::ptr_eq(table, other)));
+    assert_eq!(table.bases, PREPARED_IPA_MASK_BASES);
+    assert_eq!(
+        table.points.len(),
+        PREPARED_IPA_MASK_BASES
+            * crate::prepared_fixed_base_window_count(
+                <EqAffine as group::CurveAffine>::Scalar::NUM_BITS as usize,
+            )
+            * PREPARED_FIXED_BASE_WINDOW_MAGNITUDES,
+    );
+    assert!(Arc::ptr_eq(
+        table,
+        &cloned.prepared_ipa_mask_table().unwrap(),
+    ));
+
+    let mut serialized_after = vec![];
+    params.write(&mut serialized_after).unwrap();
+    assert_eq!(serialized_after, serialized);
+    let deserialized = Params::<EqAffine>::read(&mut serialized.as_slice()).unwrap();
+    assert!(deserialized.prepared_ipa_mask_table().is_none());
+
+    let unsupported = Params::<EqAffine>::new(PREPARED_IPA_MASK_K - 1);
+    assert!(!unsupported.prepare_ipa_mask_table());
+    assert!(unsupported.prepared_ipa_mask_table().is_none());
 }
 
 #[cfg(feature = "orbits")]

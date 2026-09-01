@@ -7,7 +7,7 @@ use group::Curve;
 use maybe_rayon::prelude::*;
 
 #[cfg(feature = "batch")]
-use crate::{InstanceWindowTable, PREPARED_INSTANCE_COLUMNS};
+use crate::{PREPARED_INSTANCE_COLUMNS, PreparedCommitmentTables};
 
 use super::{
     Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
@@ -29,6 +29,17 @@ use crate::{
 // Compacting pays for its scan and allocation once at least a quarter of a
 // fixed polynomial's terms are zero.
 const SPARSE_FIXED_COMMITMENT_ZERO_FRACTION_DENOMINATOR: usize = 4;
+
+#[cfg(feature = "batch")]
+fn prepare_small_fixed_base_tables<C: CurveAffine>(
+    params: &Params<C>,
+    num_instance_columns: usize,
+) {
+    if num_instance_columns == PREPARED_INSTANCE_COLUMNS {
+        let _ = params.prepare_instance_table();
+    }
+    let _ = params.prepare_ipa_mask_table();
+}
 
 fn commit_fixed_lagrange<C: CurveAffine>(
     params: &Params<C>,
@@ -556,11 +567,9 @@ where
                     .build_pk(params, &vk.domain, &cs.permutation, &fft_twiddles)
             },
             || {
-                // Build the small public-instance table during independent
-                // key generation work, not on the first proof.
-                if cs.num_instance_columns == PREPARED_INSTANCE_COLUMNS {
-                    let _ = params.prepare_instance_table();
-                }
+                // Build the small fixed-base tables during independent key
+                // generation work, not on the first proof.
+                prepare_small_fixed_base_tables(params, cs.num_instance_columns);
             },
         );
         permutation_pk
@@ -621,6 +630,8 @@ where
 }
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "batch")]
+    use super::prepare_small_fixed_base_tables;
     use super::{
         CompressedSelectorFamily, MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES,
         commit_fixed_lagrange, evaluate_compressed_selector_family, plan_compressed_selector_cache,
@@ -634,6 +645,9 @@ mod tests {
     };
     use ff::Field;
     use pasta_curves::{pallas, vesta};
+
+    #[cfg(feature = "batch")]
+    use crate::{PREPARED_INSTANCE_COLUMNS, PREPARED_IPA_MASK_K, PreparedCommitmentTables};
 
     #[test]
     fn sparse_fixed_commitment_matches_generic_commitment() {
@@ -649,6 +663,21 @@ mod tests {
             commit_fixed_lagrange(&params, &polynomial),
             params.commit_lagrange(&polynomial, Blind::default())
         );
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn keygen_prepares_the_small_fixed_base_tables() {
+        let params = Params::<EqAffine>::new(PREPARED_IPA_MASK_K);
+        assert!(params.prepared_instance_table().is_none());
+        assert!(params.prepared_ipa_mask_table().is_none());
+
+        prepare_small_fixed_base_tables(&params, 0);
+        assert!(params.prepared_instance_table().is_none());
+        assert!(params.prepared_ipa_mask_table().is_some());
+
+        prepare_small_fixed_base_tables(&params, PREPARED_INSTANCE_COLUMNS);
+        assert!(params.prepared_instance_table().is_some());
     }
 
     fn family(column_index: usize, combination_len: usize) -> CompressedSelectorFamily {
