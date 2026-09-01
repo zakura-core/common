@@ -283,10 +283,6 @@ macro_rules! new_curve_impl {
                 // x86-64 (Zen 4, portable) and Apple aarch64 (assembly
                 // backend) is ~32 elements.
                 const TWO_LANE_MIN: usize = 32;
-                // Peeling the first element from each lane wins through 64
-                // elements. Above that, the saved fixed work is too small to
-                // offset the changed loop shape on x86-64.
-                const ENDPOINT_MAX: usize = 64;
 
                 if p.len() < TWO_LANE_MIN {
                     let Some((first_p, p)) = p.split_first() else {
@@ -352,66 +348,13 @@ macro_rules! new_curve_impl {
                 // chains (throughput-bound instead of latency-bound), joined
                 // around a single shared field inversion. Identity handling is
                 // unchanged from the single-chain path above.
-                if p.len() <= ENDPOINT_MAX {
-                    let (first_p, p) = p.split_at(2);
-                    let (first_q, q) = q.split_at_mut(2);
-                    let first_skip = [first_p[0].is_identity(), first_p[1].is_identity()];
-                    let mut acc = [
-                        $base::conditional_select(&first_p[0].z, &$base::one(), first_skip[0]),
-                        $base::conditional_select(&first_p[1].z, &$base::one(), first_skip[1]),
-                    ];
-                    for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate() {
-                        q.x = acc[i & 1];
-                        acc[i & 1] = $base::conditional_select(
-                            &(acc[i & 1] * p.z),
-                            &acc[i & 1],
-                            p.is_identity(),
-                        );
-                    }
-
-                    // Join the lane products, invert once, and recover each
-                    // lane's inverse seed.
-                    let inverse = (acc[0] * acc[1]).invert().unwrap();
-                    let mut acc = [inverse * acc[1], inverse * acc[0]];
-
-                    for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate().rev() {
-                        let lane = i & 1;
-                        let skip = p.is_identity();
-                        let tmp = q.x * acc[lane];
-                        acc[lane] = $base::conditional_select(
-                            &(acc[lane] * p.z),
-                            &acc[lane],
-                            skip,
-                        );
-                        let tmp2 = Field::square(&tmp);
-                        let tmp3 = tmp2 * tmp;
-                        q.x = p.x * tmp2;
-                        q.y = p.y * tmp3;
-                        *q = $name_affine::conditional_select(
-                            &q,
-                            &$name_affine::identity(),
-                            skip,
-                        );
-                    }
-
-                    for lane in 0..2 {
-                        // The first prefix in each lane is one, and its final
-                        // accumulator update is dead.
-                        let tmp = acc[lane];
-                        let tmp2 = Field::square(&tmp);
-                        let tmp3 = tmp2 * tmp;
-                        first_q[lane].x = first_p[lane].x * tmp2;
-                        first_q[lane].y = first_p[lane].y * tmp3;
-                        first_q[lane] = $name_affine::conditional_select(
-                            &first_q[lane],
-                            &$name_affine::identity(),
-                            first_skip[lane],
-                        );
-                    }
-                    return;
-                }
-
-                let mut acc = [$base::one(); 2];
+                let (first_p, p) = p.split_at(2);
+                let (first_q, q) = q.split_at_mut(2);
+                let first_skip = [first_p[0].is_identity(), first_p[1].is_identity()];
+                let mut acc = [
+                    $base::conditional_select(&first_p[0].z, &$base::one(), first_skip[0]),
+                    $base::conditional_select(&first_p[1].z, &$base::one(), first_skip[1]),
+                ];
                 for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate() {
                     q.x = acc[i & 1];
                     acc[i & 1] = $base::conditional_select(
@@ -429,18 +372,12 @@ macro_rules! new_curve_impl {
                 for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate().rev() {
                     let lane = i & 1;
                     let skip = p.is_identity();
-
-                    // Compute tmp = 1/z
                     let tmp = q.x * acc[lane];
-
-                    // Cancel out z-coordinate in denominator of the lane seed
                     acc[lane] = $base::conditional_select(
                         &(acc[lane] * p.z),
                         &acc[lane],
                         skip,
                     );
-
-                    // Set the coordinates to the correct value
                     let tmp2 = Field::square(&tmp);
                     let tmp3 = tmp2 * tmp;
                     q.x = p.x * tmp2;
@@ -449,6 +386,21 @@ macro_rules! new_curve_impl {
                         &q,
                         &$name_affine::identity(),
                         skip,
+                    );
+                }
+
+                for lane in 0..2 {
+                    // The first prefix in each lane is one, and its final
+                    // accumulator update is dead.
+                    let tmp = acc[lane];
+                    let tmp2 = Field::square(&tmp);
+                    let tmp3 = tmp2 * tmp;
+                    first_q[lane].x = first_p[lane].x * tmp2;
+                    first_q[lane].y = first_p[lane].y * tmp3;
+                    first_q[lane] = $name_affine::conditional_select(
+                        &first_q[lane],
+                        &$name_affine::identity(),
+                        first_skip[lane],
                     );
                 }
             }
