@@ -1454,7 +1454,8 @@ mod batch_normalize_two_lane_tests {
     #[test]
     fn matches_to_affine_with_identities() {
         // Cover the single-chain path (< 32), the crossover, and the
-        // two-lane path, with identities sprinkled at even and odd indices.
+        // two-lane path, with identities at every combination of peeled
+        // heads and sprinkled at even and odd interior indices.
         let mut rng_state = 0x9e3779b97f4a7c15u64;
         let mut next = move || {
             rng_state ^= rng_state << 13;
@@ -1463,20 +1464,35 @@ mod batch_normalize_two_lane_tests {
             rng_state
         };
         for n in [0usize, 1, 2, 31, 32, 33, 64, 65, 128, 257, 512] {
-            let points: Vec<Ep> = (0..n)
-                .map(|i| {
-                    if i % 7 == 3 || i % 7 == 4 {
-                        Ep::identity()
-                    } else {
-                        Ep::generator() * Fq::from(next() | 1)
-                    }
-                })
-                .collect();
+            for head_identity_mask in 0u8..4 {
+                let points: Vec<Ep> = (0..n)
+                    .map(|i| {
+                        let head_is_identity = i < 2 && head_identity_mask & (1 << i) != 0;
+                        if head_is_identity || i % 7 == 3 || i % 7 == 4 {
+                            Ep::identity()
+                        } else {
+                            Ep::generator() * Fq::from(next() | 1)
+                        }
+                    })
+                    .collect();
+                let mut affine = vec![EpAffine::identity(); n];
+                Ep::batch_normalize(&points, &mut affine);
+                for (i, (p, a)) in points.iter().zip(&affine).enumerate() {
+                    assert_eq!(
+                        p.to_affine(),
+                        *a,
+                        "n = {n}, head mask = {head_identity_mask:#04b}, index = {i}"
+                    );
+                }
+            }
+
+            let points = vec![Ep::identity(); n];
             let mut affine = vec![EpAffine::identity(); n];
             Ep::batch_normalize(&points, &mut affine);
-            for (i, (p, a)) in points.iter().zip(&affine).enumerate() {
-                assert_eq!(p.to_affine(), *a, "n = {}, index {}", n, i);
-            }
+            assert!(
+                affine.iter().all(|point| point == &EpAffine::identity()),
+                "all-identity batch of length {n}"
+            );
         }
     }
 }
