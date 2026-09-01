@@ -312,12 +312,6 @@ where
     // from the verification key.
     let meta = &pk.vk.cs;
 
-    struct InstanceSingle<C: CurveAffine> {
-        pub instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-        pub instance_polys: Vec<Polynomial<C::Scalar, Coeff>>,
-        pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-    }
-
     let prepared_instances = instances
         .into_par_iter()
         .map(|instance| -> Result<_, Error> {
@@ -345,47 +339,20 @@ where
             let instance_commitments = instance_commitments;
             drop(instance_commitments_projective);
 
-            let instance_polys: Vec<_> = instance_values
-                .iter()
-                .map(|poly| {
-                    let lagrange_vec = domain.lagrange_from_vec(poly.to_vec());
-                    domain.lagrange_to_coeff_with_twiddles(lagrange_vec, &pk.fft_twiddles)
-                })
-                .collect();
-
-            let instance_cosets: Vec<_> = instance_polys
-                .iter()
-                .map(|poly| domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles))
-                .collect();
-
-            Ok((
-                instance_commitments,
-                InstanceSingle::<C> {
-                    instance_values,
-                    instance_polys,
-                    instance_cosets,
-                },
-            ))
+            Ok((instance_commitments, instance_values))
         })
         .collect::<Vec<_>>();
 
-    // Prepare each circuit independently, then preserve circuit and column
-    // order while updating the transcript. Keeping each preparation result in
-    // order also preserves the transcript prefix before an instance error.
-    let mut instance = Vec::with_capacity(prepared_instances.len());
+    // Preserve circuit and column order while updating the transcript. Keeping
+    // each preparation result in order also preserves the transcript prefix
+    // before an instance error.
+    let mut prepared_instance_values = Vec::with_capacity(prepared_instances.len());
     for prepared in prepared_instances {
-        let (instance_commitments, instance_single) = prepared?;
+        let (instance_commitments, instance_values) = prepared?;
         for commitment in instance_commitments {
             transcript.common_point(commitment)?;
         }
-        instance.push(instance_single);
-    }
-
-    struct AdviceSingle<C: CurveAffine> {
-        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-        pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
-        pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-        pub advice_blinds: Vec<Blind<C::Scalar>>,
+        prepared_instance_values.push(instance_values);
     }
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
@@ -404,15 +371,68 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Synthesize every circuit while allowing its floor planner to share
-    // circuit-shape-dependent work across the batch.
-    ConcreteCircuit::FloorPlanner::synthesize_batch(
-        &mut witnesses,
-        circuits,
-        config,
-        &meta.constants,
-        pk.floor_plan.as_ref(),
-    )?;
+    struct InstanceSingle<C: CurveAffine> {
+        pub instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+        pub instance_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+        pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+    }
+
+    let prepare_instance_polynomials = || {
+        prepared_instance_values
+            .into_par_iter()
+            .map(|instance_values| {
+                let instance_polys: Vec<_> = instance_values
+                    .iter()
+                    .map(|poly| {
+                        let lagrange_vec = domain.lagrange_from_vec(poly.to_vec());
+                        domain.lagrange_to_coeff_with_twiddles(lagrange_vec, &pk.fft_twiddles)
+                    })
+                    .collect();
+
+                let instance_cosets: Vec<_> = instance_polys
+                    .iter()
+                    .map(|poly| {
+                        domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles)
+                    })
+                    .collect();
+
+                InstanceSingle::<C> {
+                    instance_values,
+                    instance_polys,
+                    instance_cosets,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let synthesize = || {
+        // Synthesize every circuit while allowing its floor planner to share
+        // circuit-shape-dependent work across the batch.
+        ConcreteCircuit::FloorPlanner::synthesize_batch(
+            &mut witnesses,
+            circuits,
+            config,
+            &meta.constants,
+            pk.floor_plan.as_ref(),
+        )
+    };
+
+    // A single circuit cannot use circuit-level synthesis parallelism, so its
+    // instance transforms can occupy otherwise-idle worker capacity. Larger
+    // batches already expose both phases across their circuits.
+    let (instance, synthesis_result) =
+        if circuits.len() == 1 && crate::multicore::current_num_threads() > 1 {
+            crate::multicore::join(prepare_instance_polynomials, synthesize)
+        } else {
+            (prepare_instance_polynomials(), synthesize())
+        };
+    synthesis_result?;
+
+    struct AdviceSingle<C: CurveAffine> {
+        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+        pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+        pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+        pub advice_blinds: Vec<Blind<C::Scalar>>,
+    }
 
     // Consume randomness in circuit order before preparing the independent
     // commitments and polynomial transforms in parallel.
