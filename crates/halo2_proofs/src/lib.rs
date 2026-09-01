@@ -69,14 +69,18 @@ const PREPARED_INSTANCE_BOOLEAN_ROWS: usize = 3;
 const PREPARED_INSTANCE_ROWS: usize = PREPARED_INSTANCE_DENSE_ROWS + PREPARED_INSTANCE_BOOLEAN_ROWS;
 #[cfg(feature = "batch")]
 const PREPARED_INSTANCE_OFFSETS: usize = 1 << PREPARED_INSTANCE_BOOLEAN_ROWS;
-// Keep this isolated so the positioned-table memory/latency tradeoff can be
-// swept without changing the evaluator. Width one is the binary-power table;
-// width three retains about 260 KiB for Pasta and needs at most 85 additions
-// per dense scalar.
+// Signed width four retains about 224 KiB for Pasta and needs at most 64
+// additions per dense scalar.
 #[cfg(feature = "batch")]
-const PREPARED_INSTANCE_WINDOW_BITS: usize = 3;
+const PREPARED_INSTANCE_WINDOW_BITS: usize = 4;
 #[cfg(feature = "batch")]
-const PREPARED_INSTANCE_WINDOW_ENTRIES: usize = (1 << PREPARED_INSTANCE_WINDOW_BITS) - 1;
+const PREPARED_INSTANCE_WINDOW_MAGNITUDES: usize = 1 << (PREPARED_INSTANCE_WINDOW_BITS - 1);
+#[cfg(feature = "batch")]
+const fn prepared_instance_window_count(scalar_bits: usize) -> usize {
+    // Reserve a carry-only window exactly when the scalar bit length ends on a
+    // window boundary. A partial high window cannot carry out.
+    scalar_bits / PREPARED_INSTANCE_WINDOW_BITS + 1
+}
 // Each cached row retains 255 affine points, so this bounds the Pasta cache at
 // just under one MiB while covering Orchard's ten-row instance columns.
 #[cfg(feature = "batch")]
@@ -92,10 +96,10 @@ enum InstanceScalarByteOrder {
 
 /// Positioned fixed-window powers for the dense public-instance rows.
 ///
-/// Each row stores every nonzero digit after its positional shift, so online
-/// evaluation consists only of table lookups and mixed additions. The eight
-/// possible Boolean-row contributions are pre-added to `w` and retained
-/// alongside the table.
+/// Each row stores every positive signed-digit magnitude after its positional
+/// shift, so online evaluation consists only of table lookups, affine
+/// negations, and mixed additions. The eight possible Boolean-row
+/// contributions are pre-added to `w` and retained alongside the table.
 #[cfg(feature = "batch")]
 struct PreparedInstanceTable<C: pasta_curves::arithmetic::CurveAffine> {
     points: Vec<C>,

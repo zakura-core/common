@@ -1183,7 +1183,7 @@ impl ProvingKey {
     /// tables account for about 25.3 MiB and took about 36 ms to build on the
     /// benchmarked M4, amortized across proofs. With `orbits`, the two large
     /// tables account for about 24.8 MiB and took about 34 ms. Key generation
-    /// separately caches about 260 KiB for public-instance commitments.
+    /// separately caches about 224 KiB for public-instance commitments.
     ///
     /// Call this once before entering concurrent Rayon proving work.
     /// Concurrent callers outside that pool safely wait for and share the same

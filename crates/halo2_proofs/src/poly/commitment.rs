@@ -97,7 +97,7 @@ use crate::helpers::CurveRead;
 use crate::{
     INSTANCE_WINDOW_ENTRIES_PER_BASE, InstanceScalarByteOrder, InstanceWindowTable,
     MAX_CACHED_INSTANCE_ROWS, PREPARED_INSTANCE_BOOLEAN_ROWS, PREPARED_INSTANCE_DENSE_ROWS,
-    PREPARED_INSTANCE_OFFSETS, PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_ENTRIES,
+    PREPARED_INSTANCE_OFFSETS, PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_MAGNITUDES,
     PreparedInstanceTable,
 };
 
@@ -466,7 +466,7 @@ fn extend_prepared_instance_base_projective<C: CurveAffine>(
     let mut window_base = C::Curve::from(base);
     for _ in 0..windows {
         let mut multiple = window_base;
-        for _ in 0..PREPARED_INSTANCE_WINDOW_ENTRIES {
+        for _ in 0..PREPARED_INSTANCE_WINDOW_MAGNITUDES {
             projective.push(multiple);
             multiple += window_base;
         }
@@ -479,7 +479,7 @@ fn extend_prepared_instance_base_projective<C: CurveAffine>(
 #[cfg(feature = "batch")]
 fn prepared_instance_points<C: CurveAffine>(bases: &[C], windows: usize) -> Vec<C> {
     let points_per_base = windows
-        .checked_mul(PREPARED_INSTANCE_WINDOW_ENTRIES)
+        .checked_mul(PREPARED_INSTANCE_WINDOW_MAGNITUDES)
         .expect("prepared instance base table length fits in usize");
     let capacity = bases
         .len()
@@ -591,7 +591,7 @@ impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
 
         self.prepared_instance_cache.initialize(|| {
             let scalar_bits = C::Scalar::NUM_BITS as usize;
-            let windows = scalar_bits.div_ceil(PREPARED_INSTANCE_WINDOW_BITS);
+            let windows = crate::prepared_instance_window_count(scalar_bits);
             let points =
                 prepared_instance_points(&self.g_lagrange[..PREPARED_INSTANCE_DENSE_ROWS], windows);
 
@@ -981,8 +981,8 @@ impl<C: CurveAffine> Params<C> {
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// fixed-window table adds approximately 0.5 MiB for a 32-byte scalar
-    /// representation. The width-three public-instance table adds about 260
-    /// KiB on Pasta.
+    /// representation. The signed-width-four public-instance table adds about
+    /// 224 KiB on Pasta.
     ///
     /// Concurrent and repeat calls share their initialization attempts,
     /// including a backend decline. Without `orbits`, one atomic initialization
@@ -1164,9 +1164,10 @@ fn instance_window_cache_is_shared_by_clones_only() {
     assert!(params.prepare_instance_table());
     let prepared = params.prepared_instance_table().unwrap();
     let expected_prepared_points = PREPARED_INSTANCE_DENSE_ROWS
-        * (<EqAffine as group::CurveAffine>::Scalar::NUM_BITS as usize)
-            .div_ceil(PREPARED_INSTANCE_WINDOW_BITS)
-        * PREPARED_INSTANCE_WINDOW_ENTRIES;
+        * crate::prepared_instance_window_count(
+            <EqAffine as group::CurveAffine>::Scalar::NUM_BITS as usize,
+        )
+        * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
     assert_eq!(prepared.points.len(), expected_prepared_points);
 
     let tables = std::thread::scope(|scope| {
@@ -1243,22 +1244,22 @@ fn prepared_instance_table_is_stable_across_worker_counts() {
     assert_eq!(parallel.points, serial.points);
     assert_eq!(parallel.offsets, serial.offsets);
 
-    let points_per_base = serial.windows * PREPARED_INSTANCE_WINDOW_ENTRIES;
+    let points_per_base = serial.windows * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
     for (base_index, &base) in params.g_lagrange[..PREPARED_INSTANCE_DENSE_ROWS]
         .iter()
         .enumerate()
     {
         let mut window_base = Eq::from(base);
         for window in 0..serial.windows {
-            let start = base_index * points_per_base + window * PREPARED_INSTANCE_WINDOW_ENTRIES;
+            let start = base_index * points_per_base + window * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
             assert_eq!(serial.points[start], window_base.to_affine());
 
             let mut last_multiple = window_base;
-            for _ in 1..PREPARED_INSTANCE_WINDOW_ENTRIES {
+            for _ in 1..PREPARED_INSTANCE_WINDOW_MAGNITUDES {
                 last_multiple += window_base;
             }
             assert_eq!(
-                serial.points[start + PREPARED_INSTANCE_WINDOW_ENTRIES - 1],
+                serial.points[start + PREPARED_INSTANCE_WINDOW_MAGNITUDES - 1],
                 last_multiple.to_affine(),
             );
 

@@ -26,7 +26,7 @@ use crate::transcript::{EncodedChallenge, TranscriptWrite};
 use crate::{
     InstanceScalarByteOrder, InstanceWindowTable, PREPARED_INSTANCE_BOOLEAN_ROWS,
     PREPARED_INSTANCE_COLUMNS, PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_ROWS,
-    PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_ENTRIES, PreparedInstanceTable,
+    PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_MAGNITUDES, PreparedInstanceTable,
 };
 use crate::{
     arithmetic::{CurveAffine, batch_invert_multi},
@@ -64,21 +64,57 @@ fn instance_scalar_bit(bytes: &[u8], bit: usize, byte_order: InstanceScalarByteO
 }
 
 #[cfg(feature = "batch")]
-fn instance_scalar_window(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreparedInstanceDigit {
+    magnitude: usize,
+    negative: bool,
+}
+
+#[cfg(feature = "batch")]
+fn instance_scalar_digit(
     bytes: &[u8],
     window: usize,
     scalar_bits: usize,
     byte_order: InstanceScalarByteOrder,
-) -> usize {
+) -> PreparedInstanceDigit {
     let bit_start = window * PREPARED_INSTANCE_WINDOW_BITS;
-    (0..PREPARED_INSTANCE_WINDOW_BITS).fold(0, |digit, offset| {
-        let bit = bit_start + offset;
-        if bit < scalar_bits && instance_scalar_bit(bytes, bit, byte_order) {
-            digit | (1 << offset)
-        } else {
-            digit
+    debug_assert_eq!(u8::BITS as usize % PREPARED_INSTANCE_WINDOW_BITS, 0);
+    let value = if bit_start < scalar_bits {
+        let byte_from_edge = bit_start / u8::BITS as usize;
+        let byte = match byte_order {
+            InstanceScalarByteOrder::LittleEndian => bytes[byte_from_edge],
+            InstanceScalarByteOrder::BigEndian => bytes[bytes.len() - byte_from_edge - 1],
+            InstanceScalarByteOrder::Unsupported => unreachable!("byte order checked by caller"),
+        };
+        let bit_offset = bit_start % u8::BITS as usize;
+        let live_bits = (scalar_bits - bit_start).min(PREPARED_INSTANCE_WINDOW_BITS);
+        let mask = (1 << live_bits) - 1;
+        (usize::from(byte) >> bit_offset) & mask
+    } else {
+        0
+    };
+    let overlap = if bit_start == 0 {
+        0
+    } else {
+        usize::from(instance_scalar_bit(bytes, bit_start - 1, byte_order))
+    };
+
+    // The bit below each window is its carry-in, while the window's high bit
+    // is its carry-out. These terms cancel between adjacent windows, leaving a
+    // signed digit whose magnitude is at most half the radix.
+    let radix = PREPARED_INSTANCE_WINDOW_MAGNITUDES * 2;
+    if value < radix / 2 {
+        PreparedInstanceDigit {
+            magnitude: value + overlap,
+            negative: false,
         }
-    })
+    } else {
+        let magnitude = radix - value - overlap;
+        PreparedInstanceDigit {
+            magnitude,
+            negative: magnitude != 0,
+        }
+    }
 }
 
 /// Evaluates independent fixed-base products while splitting their bit ranges
@@ -101,7 +137,13 @@ fn evaluate_prepared_instance_terms<C: CurveAffine>(
         .zip(terms)
         .any(|(repr, (_, scalar))| {
             let bytes = repr.as_ref();
-            if table.scalar_bits > bytes.len() * u8::BITS as usize {
+            let Some(repr_bits) = bytes.len().checked_mul(u8::BITS as usize) else {
+                return true;
+            };
+            if table.scalar_bits > repr_bits
+                || (table.scalar_bits..repr_bits)
+                    .any(|bit| instance_scalar_bit(bytes, bit, table.byte_order))
+            {
                 return true;
             }
 
@@ -151,18 +193,19 @@ fn evaluate_prepared_instance_terms<C: CurveAffine>(
                     let repr = representations[term_index].as_ref();
                     let mut partial = C::Curve::identity();
                     for window in window_start..window_end {
-                        let digit = instance_scalar_window(
+                        let digit = instance_scalar_digit(
                             repr,
                             window,
                             table.scalar_bits,
                             table.byte_order,
                         );
-                        if digit != 0 {
+                        if digit.magnitude != 0 {
                             let point = (base_index * table.windows + window)
-                                * PREPARED_INSTANCE_WINDOW_ENTRIES
-                                + digit
+                                * PREPARED_INSTANCE_WINDOW_MAGNITUDES
+                                + digit.magnitude
                                 - 1;
-                            partial += table.points[point];
+                            let point = table.points[point];
+                            partial += if digit.negative { -point } else { point };
                         }
                     }
                     (term_index, partial)
@@ -1515,6 +1558,119 @@ fn test_commit_instance() {
 
 #[cfg(feature = "batch")]
 #[test]
+fn prepared_instance_signed_digit_boundaries() {
+    let cases = [
+        (0x00, 0, 0, false),
+        (0x07, 0, 7, false),
+        (0x08, 0, 8, true),
+        (0x0f, 0, 1, true),
+        (0x08, 1, 1, false),
+        (0x78, 1, 8, false),
+        (0x88, 1, 7, true),
+        (0xf8, 1, 0, false),
+    ];
+
+    for (byte, window, magnitude, negative) in cases {
+        let little = [byte, 0];
+        let big = [0, byte];
+        let expected = PreparedInstanceDigit {
+            magnitude,
+            negative,
+        };
+        assert_eq!(
+            instance_scalar_digit(
+                &little,
+                window,
+                u8::BITS as usize * little.len(),
+                InstanceScalarByteOrder::LittleEndian,
+            ),
+            expected,
+        );
+        assert_eq!(
+            instance_scalar_digit(
+                &big,
+                window,
+                u8::BITS as usize * big.len(),
+                InstanceScalarByteOrder::BigEndian,
+            ),
+            expected,
+        );
+    }
+
+    // A scalar bit length ending on a window boundary needs one carry-only
+    // window. The high half of the last data window carries into it.
+    assert_eq!(crate::prepared_instance_window_count(8), 3);
+    assert_eq!(
+        instance_scalar_digit(&[0x80], 2, 8, InstanceScalarByteOrder::LittleEndian),
+        PreparedInstanceDigit {
+            magnitude: 1,
+            negative: false,
+        },
+    );
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn prepared_instance_signed_windows_match_native_products() {
+    use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
+
+    macro_rules! check_curve {
+        ($curve:ty, $scalar:ty) => {{
+            const K: u32 = 4;
+
+            let params = Params::<$curve>::new(K);
+            assert!(params.prepare_instance_table());
+            let table = params.prepared_instance_table().unwrap();
+            let mut terms = vec![];
+            let mut expected = vec![];
+            let mut push = |scalar: $scalar| {
+                let base_index = terms.len() % PREPARED_INSTANCE_DENSE_ROWS;
+                terms.push((base_index, scalar));
+                expected.push(params.g_lagrange[base_index] * scalar);
+            };
+
+            let mut power = <$scalar>::ONE;
+            for bit in 0..<$scalar as PrimeField>::NUM_BITS as usize {
+                if bit >= PREPARED_INSTANCE_WINDOW_BITS - 1
+                    && (bit - (PREPARED_INSTANCE_WINDOW_BITS - 1)) % PREPARED_INSTANCE_WINDOW_BITS
+                        == 0
+                {
+                    let below = power - <$scalar>::ONE;
+                    let above = power + <$scalar>::ONE;
+                    for scalar in [below, power, above, -below, -power, -above] {
+                        push(scalar);
+                    }
+                }
+                power = power.double();
+            }
+
+            let mut top_bit = <$scalar>::ONE;
+            for _ in 1..<$scalar as PrimeField>::NUM_BITS {
+                top_bit = top_bit.double();
+            }
+            for scalar in [
+                top_bit - <$scalar>::ONE,
+                top_bit,
+                top_bit + <$scalar>::ONE,
+                -top_bit,
+            ] {
+                push(scalar);
+            }
+
+            assert_eq!(
+                evaluate_prepared_instance_terms(&table, &terms)
+                    .expect("Pasta scalar representations are supported"),
+                expected,
+            );
+        }};
+    }
+
+    check_curve!(EqAffine, Fp);
+    check_curve!(EpAffine, Fq);
+}
+
+#[cfg(feature = "batch")]
+#[test]
 fn prepared_instance_commitments_match_generic_msm() {
     use ff::FromUniformBytes;
     use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
@@ -1522,7 +1678,6 @@ fn prepared_instance_commitments_match_generic_msm() {
     macro_rules! check_curve {
         ($curve:ty, $scalar:ty) => {{
             const K: u32 = 6;
-            const PROOFS: usize = 8;
 
             let params = Params::<$curve>::new(K);
             assert!(params.prepare_instance_table());
@@ -1539,45 +1694,52 @@ fn prepared_instance_commitments_match_generic_msm() {
                 <$scalar as FromUniformBytes<64>>::from_uniform_bytes(&bytes)
             };
 
-            let mut owned = (0..PROOFS)
-                .map(|proof| {
-                    let mut instance = (0..PREPARED_INSTANCE_ROWS)
-                        .map(|row| scalar(proof, row))
-                        .collect::<Vec<_>>();
-                    // Exercise runtime sharing of two dense rows. The five
-                    // other dense rows remain proof-specific.
-                    instance[0] = scalar(0, 0);
-                    instance[3] = scalar(0, 3);
-                    for flag in 0..PREPARED_INSTANCE_BOOLEAN_ROWS {
-                        instance[PREPARED_INSTANCE_DENSE_ROWS + flag] =
-                            <$scalar>::from(((proof >> flag) & 1) as u64);
-                    }
-                    vec![instance]
-                })
-                .collect::<Vec<_>>();
-            // Pin the scalar edge cases used by the bit-window evaluator.
-            owned[0][0][1] = <$scalar>::ZERO;
-            owned[1][0][2] = <$scalar>::ONE;
-            owned[2][0][4] = -<$scalar>::ONE;
+            for proofs in [1, 2, 3, 8] {
+                let mut owned = (0..proofs)
+                    .map(|proof| {
+                        let mut instance = (0..PREPARED_INSTANCE_ROWS)
+                            .map(|row| scalar(proof, row))
+                            .collect::<Vec<_>>();
+                        // Exercise runtime sharing of two dense rows. The five
+                        // other rows differ whenever the batch has two proofs.
+                        instance[0] = scalar(0, 0);
+                        instance[3] = scalar(0, 3);
+                        for flag in 0..PREPARED_INSTANCE_BOOLEAN_ROWS {
+                            instance[PREPARED_INSTANCE_DENSE_ROWS + flag] =
+                                <$scalar>::from(((proof >> flag) & 1) as u64);
+                        }
+                        vec![instance]
+                    })
+                    .collect::<Vec<_>>();
+                // Pin the scalar edge cases used by the signed-window
+                // evaluator for every batch size that can contain them.
+                owned[0][0][1] = <$scalar>::ZERO;
+                if let Some(proof) = owned.get_mut(1) {
+                    proof[0][2] = <$scalar>::ONE;
+                }
+                if let Some(proof) = owned.get_mut(2) {
+                    proof[0][4] = -<$scalar>::ONE;
+                }
 
-            let column_refs = owned
-                .iter()
-                .map(|columns| columns.iter().map(Vec::as_slice).collect::<Vec<_>>())
-                .collect::<Vec<_>>();
-            let instance_refs = column_refs.iter().map(Vec::as_slice).collect::<Vec<_>>();
-            let actual = commit_prepared_instances(&params, &instance_refs)
-                .expect("the prepared exact-shape path is armed");
+                let column_refs = owned
+                    .iter()
+                    .map(|columns| columns.iter().map(Vec::as_slice).collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                let instance_refs = column_refs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+                let actual = commit_prepared_instances(&params, &instance_refs)
+                    .expect("the prepared exact-shape path is armed");
 
-            for (proof, columns) in instance_refs.iter().enumerate() {
-                assert_eq!(actual[proof].len(), PREPARED_INSTANCE_COLUMNS);
-                assert_eq!(actual[proof][0], commit_instance(&params, columns[0]));
+                for (proof, columns) in instance_refs.iter().enumerate() {
+                    assert_eq!(actual[proof].len(), PREPARED_INSTANCE_COLUMNS);
+                    assert_eq!(actual[proof][0], commit_instance(&params, columns[0]));
+                }
+
+                let mut non_boolean = owned[0][0].clone();
+                non_boolean[PREPARED_INSTANCE_DENSE_ROWS] = <$scalar>::from(2);
+                let non_boolean_columns = [non_boolean.as_slice()];
+                let non_boolean_proofs = [&non_boolean_columns[..]];
+                assert!(commit_prepared_instances(&params, &non_boolean_proofs).is_none());
             }
-
-            let mut non_boolean = owned[0][0].clone();
-            non_boolean[PREPARED_INSTANCE_DENSE_ROWS] = <$scalar>::from(2);
-            let non_boolean_columns = [non_boolean.as_slice()];
-            let non_boolean_proofs = [&non_boolean_columns[..]];
-            assert!(commit_prepared_instances(&params, &non_boolean_proofs).is_none());
         }};
     }
 
