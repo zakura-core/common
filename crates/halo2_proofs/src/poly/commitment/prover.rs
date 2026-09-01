@@ -11,6 +11,8 @@ use pasta_curves::{deferred::DeferredField, pallas, vesta};
 use std::any::{Any, TypeId};
 use std::io;
 
+const MIN_PARALLEL_IPA_EVALUATION_TERMS: usize = 64;
+
 /// Samples the sparse polynomial that masks the final folded IPA scalar,
 ///
 /// $$s(X) = \sum_{t=0}^{k-1} \alpha_t (X^{2^t} - x^{2^t}),$$
@@ -94,7 +96,20 @@ fn compute_ipa_hi_evaluation_deferred<F: Field + 'static, T: DeferredField + 'st
         .expect("the power-vector field was checked before conversion");
     assert_eq!(polynomial.len(), half * 2);
     assert!(powers.len() >= half);
-    let result = T::inner_product(&polynomial[half..], &powers[..half]);
+    let polynomial = &polynomial[half..];
+    let powers = &powers[..half];
+    let result = if half >= MIN_PARALLEL_IPA_EVALUATION_TERMS
+        && crate::multicore::current_num_threads() > 1
+    {
+        let split = half / 2;
+        let (lo, hi) = crate::multicore::join(
+            || T::inner_product(&polynomial[..split], &powers[..split]),
+            || T::inner_product(&polynomial[split..], &powers[split..]),
+        );
+        lo + hi
+    } else {
+        T::inner_product(polynomial, powers)
+    };
     *(&result as &dyn Any)
         .downcast_ref::<F>()
         .expect("the evaluation field matches the polynomial field")
@@ -122,7 +137,18 @@ fn compute_ipa_hi_evaluation_pasta<F: Field + 'static>(
         .expect("the power vector has the expected field");
     assert_eq!(polynomial.len(), half * 2);
     assert!(powers.len() >= half);
-    compute_inner_product(&polynomial[half..], &powers[..half])
+    let polynomial = &polynomial[half..];
+    let powers = &powers[..half];
+    if half >= MIN_PARALLEL_IPA_EVALUATION_TERMS && crate::multicore::current_num_threads() > 1 {
+        let split = half / 2;
+        let (lo, hi) = crate::multicore::join(
+            || compute_inner_product(&polynomial[..split], &powers[..split]),
+            || compute_inner_product(&polynomial[split..], &powers[split..]),
+        );
+        lo + hi
+    } else {
+        compute_inner_product(polynomial, powers)
+    }
 }
 
 /// Create a polynomial commitment opening proof for the polynomial defined
