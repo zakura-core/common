@@ -44,10 +44,10 @@ redjubjub = { workspace = true }
 sapling = { workspace = true }
 secp256k1 = { version = "0.29", features = ["alloc"], optional = true, default-features = false }
 sha2 = { version = "0.10", default-features = false }
-transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "1643fcfe846d50426452dda3fe4ef2182470fac1", version = "0.10.0", default-features = false, package = "zcash_transparent" }
+transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "c7235b1fc4b4296b8af2e26bf2f6adb24f873f56", version = "0.10.0", default-features = false, package = "zcash_transparent" }
 zcash_encoding = { version = "0.4", default-features = false }
 zcash_note_encryption = { version = "0.4.1", features = ["pre-zip-212"] }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "1643fcfe846d50426452dda3fe4ef2182470fac1", version = "0.10.5", default-features = false }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "c7235b1fc4b4296b8af2e26bf2f6adb24f873f56", version = "0.10.5", default-features = false }
 zcash_script = { version = "0.4.3", default-features = false }
 
 [target.'cfg(zcash_unstable = "nutachyon")'.dependencies]
@@ -64,8 +64,8 @@ proptest = ">=1,<1.7"
 rand = "0.10"
 rand_xorshift = "0.5"
 sapling = { workspace = true, features = ["test-dependencies"] }
-transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "1643fcfe846d50426452dda3fe4ef2182470fac1", version = "0.10.0", features = ["test-dependencies"], default-features = false, package = "zcash_transparent" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "1643fcfe846d50426452dda3fe4ef2182470fac1", version = "0.10.5", features = ["local-consensus", "test-dependencies"], default-features = false }
+transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "c7235b1fc4b4296b8af2e26bf2f6adb24f873f56", version = "0.10.0", features = ["test-dependencies"], default-features = false, package = "zcash_transparent" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "c7235b1fc4b4296b8af2e26bf2f6adb24f873f56", version = "0.10.5", features = ["local-consensus", "test-dependencies"], default-features = false }
 zip32 = { version = "0.2", default-features = false }
 
 [target."cfg(unix)".dev-dependencies]
