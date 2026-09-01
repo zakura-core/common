@@ -3388,6 +3388,17 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     }
                 }
                 EvaluationPlan::Mul(a, b) => {
+                    if let (EvaluationPlan::ConstantTerm(lhs), EvaluationPlan::ConstantTerm(rhs)) =
+                        (a.as_ref(), b.as_ref())
+                    {
+                        B::fill_constant(
+                            ctx.chunk_index,
+                            ctx.scalars.get(*lhs) * ctx.scalars.get(*rhs),
+                            output,
+                        );
+                        return;
+                    }
+
                     // Preserve the multiplication shape while avoiding a
                     // constant vector for every scalar value.
                     if let EvaluationPlan::ConstantTerm(scalar) = a.as_ref() {
@@ -4445,6 +4456,79 @@ mod tests {
                             .all(|(result, value)| *result == *value * scalar)
                     );
                 }
+            }
+        }
+
+        check::<LagrangeCoeff>();
+        check::<ExtendedLagrangeCoeff>();
+    }
+
+    #[test]
+    fn multiply_two_constant_terms() {
+        fn check<B: BasisOps>()
+        where
+            Ast<fn(), pallas::Base, B>: std::ops::Mul<Output = Ast<fn(), pallas::Base, B>>,
+        {
+            type F = pallas::Base;
+
+            fn context() {}
+
+            let domain = EvaluationDomain::new(3, 4);
+            let mut evaluator = new_evaluator::<fn(), _, B>(context);
+            evaluator
+                .register_poly_with_tag(B::empty_poly(&domain), EvaluationPolyTag::new(0, 0, 0));
+
+            for (lhs, rhs) in [
+                (-F::ONE, F::from(7)),
+                (F::ZERO, F::from(11)),
+                (F::ONE, F::from(13)),
+                (F::from(2), F::from(17)),
+            ] {
+                let expected = lhs * rhs;
+                let ast = Ast::ConstantTerm(lhs) * Ast::ConstantTerm(rhs);
+                assert!(matches!(
+                    compile_plan_only(&ast),
+                    EvaluationPlan::Mul(lhs, rhs)
+                        if matches!(lhs.as_ref(), EvaluationPlan::ConstantTerm(_))
+                            && matches!(rhs.as_ref(), EvaluationPlan::ConstantTerm(_))
+                ));
+                let actual = evaluator.evaluate(&ast, &domain);
+                assert!(actual.iter().all(|value| *value == expected));
+            }
+
+            let ast = Ast::ChallengeTerm(EvaluationChallenge::Theta)
+                * Ast::ChallengeTerm(EvaluationChallenge::Beta);
+            let challenge_pairs = [
+                (-F::ONE, F::from(7)),
+                (F::ZERO, F::from(11)),
+                (F::ONE, F::from(13)),
+                (F::from(2), F::from(17)),
+            ];
+            let first = challenge_pairs[0];
+            let (actual, plan) = evaluator.evaluate_quotient_with_compiled_plan(
+                std::iter::once(ast),
+                &domain,
+                None,
+                EvaluationChallenges::new(first.0, first.1, F::from(19), F::from(23)),
+            );
+            assert!(actual.iter().all(|value| *value == first.0 * first.1));
+            let plan = plan.expect("a tagged evaluation returns a retained plan");
+            assert!(matches!(
+                &plan.plan,
+                EvaluationPlan::Mul(lhs, rhs)
+                    if matches!(lhs.as_ref(), EvaluationPlan::ConstantTerm(_))
+                        && matches!(rhs.as_ref(), EvaluationPlan::ConstantTerm(_))
+            ));
+
+            for (lhs, rhs) in &challenge_pairs[1..] {
+                let (actual, replacement) = evaluator.evaluate_quotient_with_compiled_plan(
+                    std::iter::empty(),
+                    &domain,
+                    Some(&plan),
+                    EvaluationChallenges::new(*lhs, *rhs, F::from(29), F::from(31)),
+                );
+                assert!(replacement.is_none());
+                assert!(actual.iter().all(|value| *value == *lhs * rhs));
             }
         }
 
