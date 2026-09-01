@@ -6,6 +6,9 @@ use ff::{Field, FromUniformBytes};
 use group::Curve;
 use maybe_rayon::prelude::*;
 
+#[cfg(feature = "batch")]
+use crate::{InstanceWindowTable, PREPARED_INSTANCE_COLUMNS};
+
 use super::{
     Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
     circuit::{
@@ -544,6 +547,25 @@ where
         })
         .collect::<Vec<_>>();
 
+    #[cfg(feature = "batch")]
+    let permutation_pk = {
+        let (permutation_pk, ()) = crate::multicore::join(
+            || {
+                assembly
+                    .permutation
+                    .build_pk(params, &vk.domain, &cs.permutation, &fft_twiddles)
+            },
+            || {
+                // Build the small public-instance table during independent
+                // key generation work, not on the first proof.
+                if cs.num_instance_columns == PREPARED_INSTANCE_COLUMNS {
+                    let _ = params.prepare_instance_table();
+                }
+            },
+        );
+        permutation_pk
+    };
+    #[cfg(not(feature = "batch"))]
     let permutation_pk =
         assembly
             .permutation

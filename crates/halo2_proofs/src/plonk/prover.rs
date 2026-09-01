@@ -1,5 +1,7 @@
 use ff::Field;
-use group::Curve;
+#[cfg(feature = "batch")]
+use ff::PrimeField;
+use group::{Curve, Group};
 use maybe_rayon::prelude::*;
 use rand_core::Rng;
 use std::iter;
@@ -19,6 +21,12 @@ use super::{
 #[cfg(test)]
 use super::circuit::FloorPlan;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
+#[cfg(feature = "batch")]
+use crate::{
+    InstanceScalarByteOrder, InstanceWindowTable, PREPARED_INSTANCE_BOOLEAN_ROWS,
+    PREPARED_INSTANCE_COLUMNS, PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_ROWS,
+    PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_ENTRIES, PreparedInstanceTable,
+};
 use crate::{
     arithmetic::{CurveAffine, batch_invert_multi},
     circuit::Value,
@@ -31,6 +39,277 @@ use crate::{
 };
 
 const NO_DENOMINATOR: u32 = u32::MAX;
+
+#[cfg(feature = "batch")]
+fn instance_scalar_bit(bytes: &[u8], bit: usize, byte_order: InstanceScalarByteOrder) -> bool {
+    let byte_from_edge = bit / u8::BITS as usize;
+    let byte = match byte_order {
+        InstanceScalarByteOrder::LittleEndian => bytes[byte_from_edge],
+        InstanceScalarByteOrder::BigEndian => bytes[bytes.len() - byte_from_edge - 1],
+        InstanceScalarByteOrder::Unsupported => unreachable!("byte order checked by caller"),
+    };
+    byte & (1 << (bit % u8::BITS as usize)) != 0
+}
+
+#[cfg(feature = "batch")]
+fn instance_scalar_window(
+    bytes: &[u8],
+    window: usize,
+    scalar_bits: usize,
+    byte_order: InstanceScalarByteOrder,
+) -> usize {
+    let bit_start = window * PREPARED_INSTANCE_WINDOW_BITS;
+    (0..PREPARED_INSTANCE_WINDOW_BITS).fold(0, |digit, offset| {
+        let bit = bit_start + offset;
+        if bit < scalar_bits && instance_scalar_bit(bytes, bit, byte_order) {
+            digit | (1 << offset)
+        } else {
+            digit
+        }
+    })
+}
+
+/// Evaluates independent fixed-base products while splitting their bit ranges
+/// across the entire worker pool. Each job accumulates affine table entries
+/// locally; only job boundaries require projective-to-projective additions.
+#[cfg(feature = "batch")]
+fn evaluate_prepared_instance_terms<C: CurveAffine>(
+    table: &PreparedInstanceTable<C>,
+    terms: &[(usize, C::Scalar)],
+) -> Option<Vec<C::Curve>> {
+    if matches!(table.byte_order, InstanceScalarByteOrder::Unsupported) {
+        return None;
+    }
+    let representations = terms
+        .iter()
+        .map(|(_, scalar)| scalar.to_repr())
+        .collect::<Vec<_>>();
+    if representations
+        .iter()
+        .zip(terms)
+        .any(|(repr, (_, scalar))| {
+            let bytes = repr.as_ref();
+            if table.scalar_bits > bytes.len() * u8::BITS as usize {
+                return true;
+            }
+
+            // [`PrimeField::Repr`] is opaque. The construction-time probe only
+            // selects a candidate order; validate every term before its digits
+            // index the positioned table.
+            let decoded = match table.byte_order {
+                InstanceScalarByteOrder::LittleEndian => {
+                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
+                }
+                InstanceScalarByteOrder::BigEndian => {
+                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
+                }
+                InstanceScalarByteOrder::Unsupported => unreachable!("checked above"),
+            };
+            decoded != *scalar
+        })
+    {
+        return None;
+    }
+
+    let work = terms.len().checked_mul(table.windows)?;
+    if work == 0 {
+        return Some(vec![]);
+    }
+    let worker_count = crate::multicore::current_num_threads().min(work);
+    let partials = (0..worker_count)
+        .into_par_iter()
+        .map(|worker| {
+            let start = work * worker / worker_count;
+            let end = work * (worker + 1) / worker_count;
+            let first_term = start / table.windows;
+            let last_term = (end - 1) / table.windows;
+            (first_term..=last_term)
+                .map(|term_index| {
+                    let window_start = if term_index == first_term {
+                        start % table.windows
+                    } else {
+                        0
+                    };
+                    let window_end = if term_index == last_term {
+                        (end - 1) % table.windows + 1
+                    } else {
+                        table.windows
+                    };
+                    let (base_index, _) = terms[term_index];
+                    let repr = representations[term_index].as_ref();
+                    let mut partial = C::Curve::identity();
+                    for window in window_start..window_end {
+                        let digit = instance_scalar_window(
+                            repr,
+                            window,
+                            table.scalar_bits,
+                            table.byte_order,
+                        );
+                        if digit != 0 {
+                            let point = (base_index * table.windows + window)
+                                * PREPARED_INSTANCE_WINDOW_ENTRIES
+                                + digit
+                                - 1;
+                            partial += table.points[point];
+                        }
+                    }
+                    (term_index, partial)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut products = vec![None; terms.len()];
+    for (term_index, partial) in partials.into_iter().flatten() {
+        products[term_index] = Some(match products[term_index].take() {
+            Some(product) => product + partial,
+            None => partial,
+        });
+    }
+    Some(
+        products
+            .into_iter()
+            .map(|product| product.unwrap_or_else(C::Curve::identity))
+            .collect(),
+    )
+}
+
+#[cfg(feature = "batch")]
+fn instance_flag_mask<F: Field>(instance: &[F]) -> Option<usize> {
+    let mut mask = 0;
+    let flags = &instance[PREPARED_INSTANCE_DENSE_ROWS
+        ..PREPARED_INSTANCE_DENSE_ROWS + PREPARED_INSTANCE_BOOLEAN_ROWS];
+    for (flag, scalar) in flags.iter().enumerate() {
+        if bool::from(scalar.is_zero()) {
+            continue;
+        }
+        if bool::from((*scalar - F::ONE).is_zero()) {
+            mask |= 1 << flag;
+        } else {
+            return None;
+        }
+    }
+    Some(mask)
+}
+
+/// Commits the exact one-column Orchard instance shape, sharing any dense row
+/// that is equal across every proof. Equality is checked at runtime: generic
+/// ten-row circuits are not assumed to share Orchard's anchor or flags.
+#[cfg(feature = "batch")]
+fn commit_prepared_instances<C: CurveAffine>(
+    params: &Params<C>,
+    instances: &[&[&[C::Scalar]]],
+) -> Option<Vec<Vec<C::Curve>>> {
+    if instances.is_empty()
+        || instances.iter().any(|columns| {
+            columns.len() != PREPARED_INSTANCE_COLUMNS || columns[0].len() != PREPARED_INSTANCE_ROWS
+        })
+    {
+        return None;
+    }
+    let table = params.prepared_instance_table()?;
+    let flag_masks = instances
+        .iter()
+        .map(|columns| instance_flag_mask(columns[0]))
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut terms = Vec::with_capacity(PREPARED_INSTANCE_DENSE_ROWS * instances.len());
+    let mut shared_terms = Vec::with_capacity(PREPARED_INSTANCE_DENSE_ROWS);
+    let mut proof_terms = (0..instances.len())
+        .map(|_| Vec::with_capacity(PREPARED_INSTANCE_DENSE_ROWS))
+        .collect::<Vec<_>>();
+    for row in 0..PREPARED_INSTANCE_DENSE_ROWS {
+        let first = instances[0][0][row];
+        if instances
+            .iter()
+            .skip(1)
+            .all(|columns| columns[0][row] == first)
+        {
+            shared_terms.push(terms.len());
+            terms.push((row, first));
+        } else {
+            for (proof, columns) in instances.iter().enumerate() {
+                proof_terms[proof].push(terms.len());
+                terms.push((row, columns[0][row]));
+            }
+        }
+    }
+
+    let products = evaluate_prepared_instance_terms(&table, &terms)?;
+    let shared = shared_terms
+        .into_iter()
+        .map(|term| products[term])
+        .reduce(|left, right| left + right)
+        .unwrap_or_else(C::Curve::identity);
+    let shared_offset = flag_masks
+        .iter()
+        .all(|flag_mask| *flag_mask == flag_masks[0])
+        .then(|| table.offsets[flag_masks[0]] + shared);
+    Some(
+        proof_terms
+            .into_par_iter()
+            .zip(flag_masks.into_par_iter())
+            .map(|(terms, flag_mask)| {
+                let mut commitment =
+                    shared_offset.unwrap_or_else(|| table.offsets[flag_mask] + shared);
+                for term in terms {
+                    commitment += products[term];
+                }
+                vec![commitment]
+            })
+            .collect(),
+    )
+}
+
+fn commit_prover_instances<C: CurveAffine>(
+    params: &Params<C>,
+    instances: &[&[&[C::Scalar]]],
+) -> Vec<Vec<C::Curve>> {
+    #[cfg(feature = "batch")]
+    if let Some(commitments) = commit_prepared_instances(params, instances) {
+        return commitments;
+    }
+
+    instances
+        .into_par_iter()
+        .map(|columns| {
+            columns
+                .iter()
+                .map(|values| {
+                    if values.len() <= params.g_lagrange.len() {
+                        commit_instance(params, values)
+                    } else {
+                        // This placeholder is never written to the transcript:
+                        // instance preparation returns `InstanceTooLarge` at
+                        // the same proof position as the previous path.
+                        C::Curve::identity()
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn normalize_prover_instance_commitments<C: CurveAffine>(
+    params: &Params<C>,
+    instances: &[&[&[C::Scalar]]],
+) -> Vec<Vec<C>> {
+    let projective = commit_prover_instances(params, instances);
+    let column_counts = projective.iter().map(Vec::len).collect::<Vec<_>>();
+    let projective = projective.into_iter().flatten().collect::<Vec<_>>();
+    let mut affine = vec![C::identity(); projective.len()];
+    if !projective.is_empty() {
+        C::Curve::batch_normalize(&projective, &mut affine);
+    }
+
+    let mut affine = affine.into_iter();
+    let commitments = column_counts
+        .into_iter()
+        .map(|count| affine.by_ref().take(count).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert!(affine.next().is_none());
+    commitments
+}
 
 struct AdviceWitness<F: Field> {
     values: Vec<Polynomial<F, LagrangeCoeff>>,
@@ -310,16 +589,18 @@ where
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
     let meta = &pk.vk.cs;
+    let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
 
-    let prepared_instances = instances
+    let instance_commitments = normalize_prover_instance_commitments(params, instances);
+    let instance_values = instances
         .into_par_iter()
         .map(|instance| -> Result<_, Error> {
-            let instance_values = instance
+            instance
                 .iter()
                 .map(|values| {
                     let mut poly = domain.empty_lagrange();
                     assert_eq!(poly.len(), params.n as usize);
-                    if values.len() > (poly.len() - (meta.blinding_factors() + 1)) {
+                    if values.len() > max_instance_len {
                         return Err(Error::InstanceTooLarge);
                     }
                     for (poly, value) in poly.iter_mut().zip(values.iter()) {
@@ -327,27 +608,18 @@ where
                     }
                     Ok(poly)
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            let instance_commitments_projective: Vec<_> = instance
-                .iter()
-                .map(|values| commit_instance(params, values))
-                .collect();
-            let mut instance_commitments =
-                vec![C::identity(); instance_commitments_projective.len()];
-            C::Curve::batch_normalize(&instance_commitments_projective, &mut instance_commitments);
-            let instance_commitments = instance_commitments;
-            drop(instance_commitments_projective);
-
-            Ok((instance_commitments, instance_values))
+                .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Vec<_>>();
 
     // Preserve circuit and column order while updating the transcript. Keeping
     // each preparation result in order also preserves the transcript prefix
     // before an instance error.
-    let mut prepared_instance_values = Vec::with_capacity(prepared_instances.len());
-    for prepared in prepared_instances {
-        let (instance_commitments, instance_values) = prepared?;
+    let mut prepared_instance_values = Vec::with_capacity(instance_values.len());
+    for (instance_commitments, instance_values) in
+        instance_commitments.into_iter().zip(instance_values)
+    {
+        let instance_values = instance_values?;
         for commitment in instance_commitments {
             transcript.common_point(commitment)?;
         }
@@ -1134,6 +1406,78 @@ fn test_commit_instance() {
     check_curve!(EpAffine, Fq);
 }
 
+#[cfg(feature = "batch")]
+#[test]
+fn prepared_instance_commitments_match_generic_msm() {
+    use ff::FromUniformBytes;
+    use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
+
+    macro_rules! check_curve {
+        ($curve:ty, $scalar:ty) => {{
+            const K: u32 = 6;
+            const PROOFS: usize = 8;
+
+            let params = Params::<$curve>::new(K);
+            assert!(params.prepare_instance_table());
+
+            let scalar = |proof: usize, row: usize| {
+                let mut bytes = [0; 64];
+                for (offset, byte) in bytes.iter_mut().enumerate() {
+                    *byte = (proof as u8)
+                        .wrapping_mul(97)
+                        .wrapping_add((row as u8).wrapping_mul(53))
+                        .wrapping_add((offset as u8).wrapping_mul(29))
+                        .wrapping_add(11);
+                }
+                <$scalar as FromUniformBytes<64>>::from_uniform_bytes(&bytes)
+            };
+
+            let mut owned = (0..PROOFS)
+                .map(|proof| {
+                    let mut instance = (0..PREPARED_INSTANCE_ROWS)
+                        .map(|row| scalar(proof, row))
+                        .collect::<Vec<_>>();
+                    // Exercise runtime sharing of two dense rows. The five
+                    // other dense rows remain proof-specific.
+                    instance[0] = scalar(0, 0);
+                    instance[3] = scalar(0, 3);
+                    for flag in 0..PREPARED_INSTANCE_BOOLEAN_ROWS {
+                        instance[PREPARED_INSTANCE_DENSE_ROWS + flag] =
+                            <$scalar>::from(((proof >> flag) & 1) as u64);
+                    }
+                    vec![instance]
+                })
+                .collect::<Vec<_>>();
+            // Pin the scalar edge cases used by the bit-window evaluator.
+            owned[0][0][1] = <$scalar>::ZERO;
+            owned[1][0][2] = <$scalar>::ONE;
+            owned[2][0][4] = -<$scalar>::ONE;
+
+            let column_refs = owned
+                .iter()
+                .map(|columns| columns.iter().map(Vec::as_slice).collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            let instance_refs = column_refs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let actual = commit_prepared_instances(&params, &instance_refs)
+                .expect("the prepared exact-shape path is armed");
+
+            for (proof, columns) in instance_refs.iter().enumerate() {
+                assert_eq!(actual[proof].len(), PREPARED_INSTANCE_COLUMNS);
+                assert_eq!(actual[proof][0], commit_instance(&params, columns[0]));
+            }
+
+            let mut non_boolean = owned[0][0].clone();
+            non_boolean[PREPARED_INSTANCE_DENSE_ROWS] = <$scalar>::from(2);
+            let non_boolean_columns = [non_boolean.as_slice()];
+            let non_boolean_proofs = [&non_boolean_columns[..]];
+            assert!(commit_prepared_instances(&params, &non_boolean_proofs).is_none());
+        }};
+    }
+
+    check_curve!(EqAffine, Fp);
+    check_curve!(EpAffine, Fq);
+}
+
 #[test]
 fn test_create_proof() {
     use crate::{
@@ -1280,9 +1624,11 @@ fn instance_preparation_preserves_proof_and_error_order() {
         }
     }
 
-    let params: Params<EqAffine> = Params::new(3);
+    let params: Params<EqAffine> = Params::new(5);
     let vk = keygen_vk(&params, &InstanceCircuit).expect("keygen_vk should not fail");
     let pk = keygen_pk(&params, vk, &InstanceCircuit).expect("keygen_pk should not fail");
+    #[cfg(feature = "batch")]
+    assert!(params.prepared_instance_table().is_some());
     let circuits = [InstanceCircuit; 4];
     let instance_values = [[Fp::from(1)], [Fp::from(2)], [Fp::from(3)], [Fp::from(4)]];
     let instance_columns = instance_values
@@ -1345,6 +1691,49 @@ fn instance_preparation_preserves_proof_and_error_order() {
             .unwrap()
             .install(create_single_proof);
         assert_eq!(single_proof, expected_single_proof);
+    }
+
+    #[cfg(feature = "batch")]
+    {
+        let exact_shape_values = (0..circuits.len())
+            .map(|proof| {
+                let mut values: [Fp; PREPARED_INSTANCE_ROWS] = std::array::from_fn(|row| {
+                    Fp::from((proof * PREPARED_INSTANCE_ROWS + row + 1) as u64)
+                });
+                values[0] = Fp::from(91);
+                for flag in 0..PREPARED_INSTANCE_BOOLEAN_ROWS {
+                    values[PREPARED_INSTANCE_DENSE_ROWS + flag] =
+                        Fp::from(((proof >> flag) & 1) as u64);
+                }
+                values
+            })
+            .collect::<Vec<_>>();
+        let exact_shape_columns = exact_shape_values
+            .iter()
+            .map(|values| vec![values.as_slice()])
+            .collect::<Vec<_>>();
+        let exact_shape_instances = exact_shape_columns
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let create_exact_shape_proof = |params: &Params<EqAffine>| {
+            let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+            create_proof(
+                params,
+                &pk,
+                &circuits,
+                &exact_shape_instances,
+                StdRng::seed_from_u64(PROOF_SEED),
+                &mut transcript,
+            )
+            .expect("exact-shape proof generation should not fail");
+            transcript.finalize()
+        };
+
+        let unprepared_params = Params::new(5);
+        assert!(unprepared_params.prepared_instance_table().is_none());
+        let unprepared_proof = create_exact_shape_proof(&unprepared_params);
+        assert_eq!(create_exact_shape_proof(&params), unprepared_proof);
     }
 
     let valid = [Fp::from(5)];

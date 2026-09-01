@@ -1179,10 +1179,11 @@ impl ProvingKey {
     /// most eight effective threads, extended to ten on AArch64 macOS for
     /// Orchard's `k = 11` SRS (measured end to end on Apple M4). Wider pools
     /// retain their usual multiexp. One-shot provers need not prepare. With
-    /// the default multicore, no-orbits build at `k = 11`, the three tables
-    /// account for about 25.3 MiB and took about 36 ms to build on the
-    /// benchmarked M4, amortized across proofs. With `orbits`, the two tables
-    /// account for about 24.8 MiB and took about 34 ms.
+    /// the default multicore, no-orbits build at `k = 11`, the three large
+    /// tables account for about 25.3 MiB and took about 36 ms to build on the
+    /// benchmarked M4, amortized across proofs. With `orbits`, the two large
+    /// tables account for about 24.8 MiB and took about 34 ms. Key generation
+    /// separately caches about 260 KiB for public-instance commitments.
     ///
     /// Call this once before entering concurrent Rayon proving work.
     /// Concurrent callers outside that pool safely wait for and share the same
@@ -1720,7 +1721,15 @@ mod tests {
             generate_circuit_instance(OsRng, OrchardCircuitVersion::FixedPostNu6_2);
 
         let halo2_instance = instance.to_halo2_instance();
-        assert_eq!(halo2_instance[0].len(), 10);
+        // These are the exact shape and Boolean suffix required by the
+        // prepared public-instance commitment route in `halo2_proofs`.
+        assert_eq!(halo2_instance.len(), super::INSTANCE_COLUMNS);
+        assert_eq!(halo2_instance[0].len(), super::INSTANCE_ROWS);
+        assert_eq!(halo2_instance[0][super::ENABLE_SPEND], vesta::Scalar::one());
+        assert_eq!(
+            halo2_instance[0][super::ENABLE_OUTPUT],
+            vesta::Scalar::one()
+        );
         assert_eq!(
             halo2_instance[0][super::DISABLE_CROSS_ADDRESS],
             vesta::Scalar::zero()
