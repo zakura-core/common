@@ -437,6 +437,7 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let circuit_count = advice_witnesses.len();
     let (prepared_advice, lookup_table_plan) = crate::multicore::join(
         || {
             advice_witnesses
@@ -483,7 +484,13 @@ where
                 })
                 .collect::<Vec<_>>()
         },
-        || lookup::prover::prepare_table_plan(&pk.vk.cs.lookups, unusable_rows_start),
+        || {
+            lookup::prover::prepare_table_plan(
+                &pk.vk.cs.lookups,
+                circuit_count,
+                unusable_rows_start,
+            )
+        },
     );
 
     let mut advice = Vec::with_capacity(prepared_advice.len());

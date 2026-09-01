@@ -95,12 +95,14 @@ struct PreparedTable<F: Field, Ev> {
     compressed_expression: Arc<Polynomial<F, LagrangeCoeff>>,
     compressed_coset: Option<poly::Ast<Ev, F, ExtendedLagrangeCoeff>>,
     sorted_values: Vec<F>,
+    sorted_keys: Vec<PastaSortKey>,
 }
 
 struct PreparedInput<F: Field, Ev> {
     compressed_expression: Polynomial<F, LagrangeCoeff>,
     compressed_coset: Option<poly::Ast<Ev, F, ExtendedLagrangeCoeff>>,
     sorted_values: Vec<F>,
+    sorted_keys: Vec<PastaSortKey>,
 }
 
 struct PendingLookup<C: CurveAffine, Ev> {
@@ -150,13 +152,19 @@ impl Ord for PastaSortKey {
     }
 }
 
+fn uses_pasta_sort_keys<F: Field>() -> bool {
+    TypeId::of::<F>() == TypeId::of::<crate::pasta::Fp>()
+        || TypeId::of::<F>() == TypeId::of::<crate::pasta::Fq>()
+}
+
 pub(in crate::plonk) struct TablePlan {
     representatives: Vec<usize>,
     groups: Vec<usize>,
-    sort_scratch: Vec<Vec<PastaSortKey>>,
+    table_sort_scratch: Vec<Vec<PastaSortKey>>,
+    input_sort_scratch: Vec<Vec<PastaSortKey>>,
 }
 
-fn sort_pasta_table<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
     values: &mut [F],
     scratch: &mut [PastaSortKey],
 ) {
@@ -193,14 +201,14 @@ fn sort_pasta_table<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
 
 // A `Vec` is required here for safe runtime specialization through `Any`.
 #[allow(clippy::ptr_arg)]
-fn sort_table_values<F: Field + Ord>(values: &mut Vec<F>, scratch: &mut [PastaSortKey]) {
+fn sort_lookup_values<F: Field + Ord>(values: &mut Vec<F>, scratch: &mut [PastaSortKey]) {
     let dynamic_values = values as &mut dyn Any;
     if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fp>>() {
-        sort_pasta_table(values, scratch);
+        sort_pasta_values(values, scratch);
         return;
     }
     if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fq>>() {
-        sort_pasta_table(values, scratch);
+        sort_pasta_values(values, scratch);
         return;
     }
 
@@ -304,9 +312,10 @@ impl<F: Field> Argument<F> {
     }
 }
 
-/// Groups identical fixed tables and allocates their sort workspace.
+/// Plans fixed-table sharing and allocates lookup sort workspace.
 pub(in crate::plonk) fn prepare_table_plan<F: Field>(
     lookup_arguments: &[Argument<F>],
+    circuit_count: usize,
     usable_rows: usize,
 ) -> TablePlan {
     let mut representatives = Vec::<usize>::new();
@@ -326,18 +335,28 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
         })
         .collect::<Vec<_>>();
 
-    let is_pasta = TypeId::of::<F>() == TypeId::of::<crate::pasta::Fp>()
-        || TypeId::of::<F>() == TypeId::of::<crate::pasta::Fq>();
-    let scratch_len = if is_pasta { usable_rows } else { 0 };
-    let sort_scratch = representatives
+    let scratch_len = if uses_pasta_sort_keys::<F>() {
+        usable_rows
+    } else {
+        0
+    };
+    let table_sort_scratch = representatives
         .iter()
         .map(|_| vec![PastaSortKey::EMPTY; scratch_len])
+        .collect();
+    let input_sort_scratch = (0..circuit_count)
+        .flat_map(|_| {
+            lookup_arguments
+                .iter()
+                .map(|_| vec![PastaSortKey::EMPTY; scratch_len])
+        })
         .collect();
 
     TablePlan {
         representatives,
         groups,
-        sort_scratch,
+        table_sort_scratch,
+        input_sort_scratch,
     }
 }
 
@@ -352,7 +371,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         fixed_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         usable_rows: usize,
         build_quotient_asts: bool,
-        sort_scratch: &mut [PastaSortKey],
+        mut sort_scratch: Vec<PastaSortKey>,
     ) -> PreparedTable<F, Ec> {
         let unpermuted_expressions = self.table_expressions.iter().map(|expression| {
             let Expression::Fixed(query) = expression else {
@@ -387,12 +406,13 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             .take(usable_rows)
             .copied()
             .collect::<Vec<_>>();
-        sort_table_values(&mut sorted_values, sort_scratch);
+        sort_lookup_values(&mut sorted_values, &mut sort_scratch);
 
         PreparedTable {
             compressed_expression: Arc::new(compressed_expression),
             compressed_coset,
             sorted_values,
+            sorted_keys: sort_scratch,
         }
     }
 
@@ -410,6 +430,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         instance_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         usable_rows: usize,
         build_quotient_asts: bool,
+        mut sort_scratch: Vec<PastaSortKey>,
     ) -> PreparedInput<F, Ec> {
         let unpermuted_expressions = self.input_expressions.iter().map(|expression| {
             expression.evaluate(
@@ -478,12 +499,13 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             .take(usable_rows)
             .copied()
             .collect::<Vec<_>>();
-        sorted_values.sort_unstable();
+        sort_lookup_values(&mut sorted_values, &mut sort_scratch);
 
         PreparedInput {
             compressed_expression,
             compressed_coset,
             sorted_values,
+            sorted_keys: sort_scratch,
         }
     }
 
@@ -504,9 +526,14 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             compressed_expression: compressed_input_expression,
             compressed_coset: compressed_input_coset,
             sorted_values: sorted_input_values,
+            sorted_keys: sorted_input_keys,
         } = input;
-        let (mut permuted_input_values, mut permuted_table_values) =
-            permute_sorted_values(sorted_input_values, &table.sorted_values)?;
+        let (mut permuted_input_values, mut permuted_table_values) = permute_sorted_values(
+            sorted_input_values,
+            &sorted_input_keys,
+            &table.sorted_values,
+            &table.sorted_keys,
+        )?;
 
         let blind_rows = pk.vk.cs.blinding_factors() + 1;
         assert_eq!(blinding.input_rows.len(), blind_rows);
@@ -609,8 +636,10 @@ where
     let TablePlan {
         representatives: table_representatives,
         groups: table_groups,
-        sort_scratch,
+        table_sort_scratch,
+        input_sort_scratch,
     } = table_plan;
+    assert_eq!(lookup_tasks.len(), input_sort_scratch.len());
 
     let usable_rows = params.n as usize - (pk.vk.cs.blinding_factors() + 1);
 
@@ -618,8 +647,8 @@ where
     if crate::multicore::current_num_threads() == 1 {
         let prepared_tables = table_representatives
             .into_par_iter()
-            .zip(sort_scratch.into_par_iter())
-            .map(|(lookup_index, mut sort_scratch)| {
+            .zip(table_sort_scratch.into_par_iter())
+            .map(|(lookup_index, sort_scratch)| {
                 lookup_arguments[lookup_index].prepare_table(
                     domain,
                     value_evaluator,
@@ -628,14 +657,15 @@ where
                     fixed_cosets,
                     usable_rows,
                     build_quotient_asts,
-                    &mut sort_scratch,
+                    sort_scratch,
                 )
             })
             .collect::<Vec<_>>();
 
         return lookup_tasks
             .into_par_iter()
-            .map(|(circuit_index, lookup_index, blinding)| {
+            .zip(input_sort_scratch.into_par_iter())
+            .map(|((circuit_index, lookup_index, blinding), sort_scratch)| {
                 let input = lookup_arguments[lookup_index].prepare_input(
                     domain,
                     value_evaluator,
@@ -648,6 +678,7 @@ where
                     &instance_cosets[circuit_index],
                     usable_rows,
                     build_quotient_asts,
+                    sort_scratch,
                 );
                 lookup_arguments[lookup_index].finish_permuted(
                     pk,
@@ -680,8 +711,8 @@ where
     // blocks waiting for the other side. Results use task-indexed slots so the
     // caller retains circuit-major transcript order.
     crate::multicore::scope(|scope| {
-        for (task_index, (circuit_index, lookup_index, blinding)) in
-            lookup_tasks.into_iter().enumerate()
+        for (task_index, ((circuit_index, lookup_index, blinding), sort_scratch)) in
+            lookup_tasks.into_iter().zip(input_sort_scratch).enumerate()
         {
             let state = &table_states[table_groups[lookup_index]];
             let prepared = &prepared;
@@ -698,6 +729,7 @@ where
                     &instance_cosets[circuit_index],
                     usable_rows,
                     build_quotient_asts,
+                    sort_scratch,
                 );
 
                 let mut pending = Some(PendingLookup {
@@ -733,9 +765,9 @@ where
             });
         }
 
-        for ((representative, mut sort_scratch), state) in table_representatives
+        for ((representative, sort_scratch), state) in table_representatives
             .into_iter()
-            .zip(sort_scratch)
+            .zip(table_sort_scratch)
             .zip(&table_states)
         {
             let prepared = &prepared;
@@ -748,7 +780,7 @@ where
                     fixed_cosets,
                     usable_rows,
                     build_quotient_asts,
-                    &mut sort_scratch,
+                    sort_scratch,
                 ));
                 let pending = {
                     let mut state = state.lock().expect("table state is not poisoned");
@@ -1223,21 +1255,68 @@ fn permute_usable_values<F: Field + Ord>(
 ) -> Result<(Vec<F>, Vec<F>), Error> {
     assert_eq!(input_values.len(), table_values.len());
 
+    let scratch_len = if uses_pasta_sort_keys::<F>() {
+        input_values.len()
+    } else {
+        0
+    };
+    let mut input_keys = vec![PastaSortKey::EMPTY; scratch_len];
+    let mut table_keys = vec![PastaSortKey::EMPTY; scratch_len];
     crate::multicore::join(
-        || input_values.sort_unstable(),
-        || table_values.sort_unstable(),
+        || sort_lookup_values(&mut input_values, &mut input_keys),
+        || sort_lookup_values(&mut table_values, &mut table_keys),
     );
 
-    permute_sorted_values(input_values, &table_values)
+    permute_sorted_values(input_values, &input_keys, &table_values, &table_keys)
 }
 
 fn permute_sorted_values<F: Field + Ord>(
     input_values: Vec<F>,
+    input_keys: &[PastaSortKey],
     table_values: &[F],
+    table_keys: &[PastaSortKey],
 ) -> Result<(Vec<F>, Vec<F>), Error> {
-    debug_assert!(input_values.windows(2).all(|pair| pair[0] <= pair[1]));
-    debug_assert!(table_values.windows(2).all(|pair| pair[0] <= pair[1]));
     assert_eq!(input_values.len(), table_values.len());
+    assert_eq!(input_keys.is_empty(), table_keys.is_empty());
+    if input_keys.is_empty() {
+        debug_assert!(input_values.windows(2).all(|pair| pair[0] <= pair[1]));
+        debug_assert!(table_values.windows(2).all(|pair| pair[0] <= pair[1]));
+        let permuted_table_values = permute_sorted_values_by(
+            &input_values,
+            table_values,
+            |row| input_values[row] == input_values[row - 1],
+            |table_row, input_row| table_values[table_row] < input_values[input_row],
+            |table_row, input_row| table_values[table_row] == input_values[input_row],
+        )?;
+        return Ok((input_values, permuted_table_values));
+    }
+
+    assert_eq!(input_values.len(), input_keys.len());
+    assert_eq!(table_values.len(), table_keys.len());
+    debug_assert!(input_keys.windows(2).all(|pair| pair[0] <= pair[1]));
+    debug_assert!(table_keys.windows(2).all(|pair| pair[0] <= pair[1]));
+    let permuted_table_values = permute_sorted_values_by(
+        &input_values,
+        table_values,
+        |row| input_keys[row] == input_keys[row - 1],
+        |table_row, input_row| table_keys[table_row] < input_keys[input_row],
+        |table_row, input_row| table_keys[table_row] == input_keys[input_row],
+    )?;
+    Ok((input_values, permuted_table_values))
+}
+
+fn permute_sorted_values_by<F: Field, SameInput, TableLess, TableSame>(
+    input_values: &[F],
+    table_values: &[F],
+    same_input: SameInput,
+    table_less: TableLess,
+    table_same: TableSame,
+) -> Result<Vec<F>, Error>
+where
+    SameInput: Fn(usize) -> bool,
+    TableLess: Fn(usize, usize) -> bool,
+    TableSame: Fn(usize, usize) -> bool,
+{
     let usable_rows = input_values.len();
     let mut permuted_table_values = vec![F::ZERO; usable_rows];
     let mut consumed_table_rows = Vec::new();
@@ -1248,12 +1327,12 @@ fn permute_sorted_values<F: Field + Ord>(
         .zip(permuted_table_values.iter_mut())
         .enumerate()
         .filter_map(|(row, (input_value, table_value))| {
-            if row == 0 || *input_value != input_values[row - 1] {
+            if row == 0 || !same_input(row) {
                 *table_value = *input_value;
-                while table_row < usable_rows && table_values[table_row] < *input_value {
+                while table_row < usable_rows && table_less(table_row, row) {
                     table_row += 1;
                 }
-                if table_values.get(table_row) == Some(input_value) {
+                if table_row < usable_rows && table_same(table_row, row) {
                     consumed_table_rows.push(table_row);
                     table_row += 1;
                     None
@@ -1277,7 +1356,7 @@ fn permute_sorted_values<F: Field + Ord>(
     assert!(consumed_table_rows.next().is_none());
     assert!(repeated_input_rows.is_empty());
 
-    Ok((input_values, permuted_table_values))
+    Ok(permuted_table_values)
 }
 
 #[cfg(test)]
@@ -1349,11 +1428,11 @@ mod tests {
         let mut actual = expected.clone();
         expected.sort_unstable();
         let mut scratch = vec![PastaSortKey::EMPTY; actual.len()];
-        sort_table_values(&mut actual, &mut scratch);
+        sort_lookup_values(&mut actual, &mut scratch);
         assert_eq!(actual, expected);
 
         actual.reverse();
-        sort_table_values(&mut actual, &mut scratch);
+        sort_lookup_values(&mut actual, &mut scratch);
         assert_eq!(actual, expected);
     }
 
@@ -1363,7 +1442,7 @@ mod tests {
         check_table_sort::<pallas::Scalar>();
     }
 
-    fn small_vectors(len: usize) -> Vec<Vec<pallas::Scalar>> {
+    fn small_vectors<F: PrimeField>(len: usize) -> Vec<Vec<F>> {
         (0..TEST_ALPHABET_SIZE.pow(u32::try_from(len).expect("test length fits in u32")))
             .map(|mut encoded| {
                 (0..len)
@@ -1371,7 +1450,7 @@ mod tests {
                         let value = u64::try_from(encoded % TEST_ALPHABET_SIZE)
                             .expect("test alphabet values fit in u64");
                         encoded /= TEST_ALPHABET_SIZE;
-                        pallas::Scalar::from(value)
+                        F::from(value)
                     })
                     .collect()
             })
@@ -1408,18 +1487,31 @@ mod tests {
                 lookup_with_table(&[(1, 0, 0), (3, 2, -1)]),
                 lookup_with_table(&[(1, 0, 0)]),
             ],
+            2,
             17,
         );
         assert_eq!(plan.representatives, [0, 2]);
         assert_eq!(plan.groups, [0, 0, 1]);
-        assert_eq!(plan.sort_scratch.len(), 2);
-        assert!(plan.sort_scratch.iter().all(|scratch| scratch.len() == 17));
+        assert_eq!(plan.table_sort_scratch.len(), 2);
+        assert!(
+            plan.table_sort_scratch
+                .iter()
+                .all(|scratch| scratch.len() == 17)
+        );
+        assert_eq!(plan.input_sort_scratch.len(), 6);
+        assert!(
+            plan.input_sort_scratch
+                .iter()
+                .all(|scratch| scratch.len() == 17)
+        );
     }
 
-    #[test]
-    fn sorted_lookup_permutation_matches_reference_exhaustively() {
+    fn check_lookup_permutation_exhaustively<F>()
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord,
+    {
         for len in 0..=4 {
-            let vectors = small_vectors(len);
+            let vectors = small_vectors::<F>(len);
             for input in &vectors {
                 for table in &vectors {
                     let actual = permute_usable_values(input.clone(), table.clone());
@@ -1433,6 +1525,12 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn sorted_lookup_permutation_matches_reference_exhaustively() {
+        check_lookup_permutation_exhaustively::<pallas::Base>();
+        check_lookup_permutation_exhaustively::<pallas::Scalar>();
     }
 
     #[test]
