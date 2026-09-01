@@ -1310,6 +1310,26 @@ fn instance_preparation_preserves_proof_and_error_order() {
     let expected_proof = create_seeded_proof();
     assert_eq!(create_seeded_proof(), expected_proof);
 
+    let single_circuit = [InstanceCircuit];
+    let single_values = [Fp::from(5)];
+    let single_columns = [single_values.as_slice()];
+    let single_instances = [single_columns.as_slice()];
+    let create_single_proof = || {
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof(
+            &params,
+            &pk,
+            &single_circuit,
+            &single_instances,
+            StdRng::seed_from_u64(PROOF_SEED),
+            &mut transcript,
+        )
+        .expect("proof generation should not fail");
+        transcript.finalize()
+    };
+    let expected_single_proof = create_single_proof();
+    assert_eq!(create_single_proof(), expected_single_proof);
+
     #[cfg(feature = "multicore")]
     for threads in [1, 4] {
         let proof = maybe_rayon::ThreadPoolBuilder::new()
@@ -1318,6 +1338,13 @@ fn instance_preparation_preserves_proof_and_error_order() {
             .unwrap()
             .install(create_seeded_proof);
         assert_eq!(proof, expected_proof);
+
+        let single_proof = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(create_single_proof);
+        assert_eq!(single_proof, expected_single_proof);
     }
 
     let valid = [Fp::from(5)];
