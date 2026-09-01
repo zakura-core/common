@@ -505,17 +505,17 @@ fn prepare_ratios<C: CurveAffine>(
 
     // Multiply by the product of numerators for this permutation set.
     let omega = domain.get_omega();
-    let beta_deltaomega = deltaomega * &*beta;
+    let beta_delta = deltaomega * &*beta;
     parallelize(&mut ratios, |ratios, start| {
         let omega_start = omega.pow_vartime([start as u64]);
-        let mut column_beta_deltaomega = beta_deltaomega;
+        let mut column_beta_delta = beta_delta;
         for &column in columns {
             let values = match column.column_type() {
                 Any::Advice => advice,
                 Any::Fixed => fixed,
                 Any::Instance => instance,
             };
-            let mut row_beta_deltaomega = column_beta_deltaomega * &omega_start;
+            let mut row_beta_deltaomega = column_beta_delta * &omega_start;
             for (ratio, value) in ratios
                 .iter_mut()
                 .zip(values[column.index()][start..].iter())
@@ -523,7 +523,7 @@ fn prepare_ratios<C: CurveAffine>(
                 *ratio *= &(row_beta_deltaomega + &*gamma + value);
                 row_beta_deltaomega *= &omega;
             }
-            column_beta_deltaomega *= &C::Scalar::DELTA;
+            column_beta_delta *= &C::Scalar::DELTA;
         }
     });
     for _ in columns {
