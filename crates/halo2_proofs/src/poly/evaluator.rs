@@ -388,11 +388,26 @@ struct BoundEvaluationChallenges<F> {
     powers: [Vec<F>; EVALUATION_CHALLENGE_COUNT],
 }
 
-struct BoundPlanScalars<F>(Box<[F]>);
+#[derive(Clone, Copy)]
+enum ScaleKind {
+    MinusOne,
+    One,
+    Two,
+    Other,
+}
+
+struct BoundPlanScalars<F> {
+    values: Box<[F]>,
+    scale_kinds: Box<[ScaleKind]>,
+}
 
 impl<F: Copy> BoundPlanScalars<F> {
     fn get(&self, id: ScalarId<F>) -> F {
-        self.0[id.index()]
+        self.values[id.index()]
+    }
+
+    fn scale(&self, id: ScalarId<F>) -> (F, ScaleKind) {
+        (self.values[id.index()], self.scale_kinds[id.index()])
     }
 }
 
@@ -454,12 +469,30 @@ impl<F: Field> BoundPlanScalars<F> {
         max_exponents: [u32; EVALUATION_CHALLENGE_COUNT],
     ) -> Self {
         let challenges = BoundEvaluationChallenges::new(challenges, max_exponents);
-        Self(
-            descriptors
-                .iter()
-                .map(|descriptor| descriptor.resolve(&challenges))
-                .collect(),
-        )
+        let values = descriptors
+            .iter()
+            .map(|descriptor| descriptor.resolve(&challenges))
+            .collect::<Box<[_]>>();
+        let minus_one = -F::ONE;
+        let two = F::ONE.double();
+        let scale_kinds = values
+            .iter()
+            .map(|value| {
+                if *value == minus_one {
+                    ScaleKind::MinusOne
+                } else if *value == F::ONE {
+                    ScaleKind::One
+                } else if *value == two {
+                    ScaleKind::Two
+                } else {
+                    ScaleKind::Other
+                }
+            })
+            .collect();
+        Self {
+            values,
+            scale_kinds,
+        }
     }
 }
 
@@ -3092,8 +3125,6 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             chunk_index: usize,
             polys: &'a [Cow<'a, Polynomial<F, B>>],
             scalars: &'a BoundPlanScalars<F>,
-            minus_one: F,
-            two: F,
         }
 
         fn recurse_weighted_terms<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
@@ -3293,6 +3324,59 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             RotatedChunk { first, second }
         }
 
+        fn add_scaled<F: Field>(sums: &mut [F], values: &[F], scalar: F, kind: ScaleKind) {
+            debug_assert_eq!(sums.len(), values.len());
+            match kind {
+                ScaleKind::MinusOne => {
+                    for (sum, value) in sums.iter_mut().zip(values) {
+                        *sum -= value;
+                    }
+                }
+                ScaleKind::One => {
+                    for (sum, value) in sums.iter_mut().zip(values) {
+                        *sum += value;
+                    }
+                }
+                ScaleKind::Two => {
+                    for (sum, value) in sums.iter_mut().zip(values) {
+                        *sum += value.double();
+                    }
+                }
+                ScaleKind::Other => {
+                    let mut sum_blocks = sums.chunks_exact_mut(4);
+                    let mut value_blocks = values.chunks_exact(4);
+                    for (sums, values) in (&mut sum_blocks).zip(&mut value_blocks) {
+                        // Expose four independent multiplications before their
+                        // dependent additions.
+                        let product_0 = values[0] * scalar;
+                        let product_1 = values[1] * scalar;
+                        let product_2 = values[2] * scalar;
+                        let product_3 = values[3] * scalar;
+                        sums[0] += product_0;
+                        sums[1] += product_1;
+                        sums[2] += product_2;
+                        sums[3] += product_3;
+                    }
+                    for (sum, value) in sum_blocks
+                        .into_remainder()
+                        .iter_mut()
+                        .zip(value_blocks.remainder())
+                    {
+                        *sum += *value * scalar;
+                    }
+                }
+            }
+        }
+
+        fn scale_value<F: Field>(value: F, scalar: F, kind: ScaleKind) -> F {
+            match kind {
+                ScaleKind::MinusOne => -value,
+                ScaleKind::One => value,
+                ScaleKind::Two => value.double(),
+                ScaleKind::Other => value * scalar,
+            }
+        }
+
         fn recurse_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
             plan: &EvaluationPlan<F>,
             ctx: &AstContext<'_, F, B>,
@@ -3314,16 +3398,40 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         // A constant leaf has no cache event, so evaluating its
                         // sibling directly preserves the plan's cache order.
                         let scalar = ctx.scalars.get(*scalar);
-                        if let EvaluationPlan::Scale(negated_rhs, factor) = b.as_ref()
-                            && ctx.scalars.get(*factor) == ctx.minus_one
-                        {
-                            recurse_into(negated_rhs, ctx, output, cache, scratch);
-                            B::combine_constant(
-                                ctx.chunk_index,
-                                scalar,
-                                output,
-                                |value, constant| constant - value,
-                            );
+                        if let EvaluationPlan::Scale(scaled_rhs, factor) = b.as_ref() {
+                            let (factor, kind) = ctx.scalars.scale(*factor);
+                            if let EvaluationPlan::ConstantTerm(rhs) = scaled_rhs.as_ref() {
+                                let rhs = scale_value(ctx.scalars.get(*rhs), factor, kind);
+                                B::fill_constant(ctx.chunk_index, scalar + rhs, output);
+                                return;
+                            }
+                            recurse_into(scaled_rhs, ctx, output, cache, scratch);
+                            match kind {
+                                ScaleKind::MinusOne => B::combine_constant(
+                                    ctx.chunk_index,
+                                    scalar,
+                                    output,
+                                    |value, constant| constant - value,
+                                ),
+                                ScaleKind::One => B::combine_constant(
+                                    ctx.chunk_index,
+                                    scalar,
+                                    output,
+                                    |value, constant| constant + value,
+                                ),
+                                ScaleKind::Two => B::combine_constant(
+                                    ctx.chunk_index,
+                                    scalar,
+                                    output,
+                                    |value, constant| constant + value.double(),
+                                ),
+                                ScaleKind::Other => B::combine_constant(
+                                    ctx.chunk_index,
+                                    scalar,
+                                    output,
+                                    |value, constant| constant + value * factor,
+                                ),
+                            }
                             return;
                         }
 
@@ -3335,30 +3443,28 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     }
 
                     recurse_into(a, ctx, output, cache, scratch);
-                    if let EvaluationPlan::Scale(negated_rhs, scalar) = b.as_ref()
-                        && ctx.scalars.get(*scalar) == ctx.minus_one
-                    {
-                        if let EvaluationPlan::ConstantTerm(scalar) = negated_rhs.as_ref() {
+                    if let EvaluationPlan::Scale(scaled_rhs, scalar) = b.as_ref() {
+                        let (scalar, kind) = ctx.scalars.scale(*scalar);
+                        if let EvaluationPlan::ConstantTerm(constant) = scaled_rhs.as_ref() {
+                            let constant = scale_value(ctx.scalars.get(*constant), scalar, kind);
                             B::combine_constant(
                                 ctx.chunk_index,
-                                ctx.scalars.get(*scalar),
+                                constant,
                                 output,
-                                |value, constant| value - constant,
+                                |value, constant| value + constant,
                             );
-                            return;
-                        }
-                        if let EvaluationPlan::Poly(leaf) = negated_rhs.as_ref() {
+                        } else if let EvaluationPlan::Poly(leaf) = scaled_rhs.as_ref() {
                             let chunk = leaf_chunk(leaf, ctx, output.len());
-                            for (lhs, rhs) in output.iter_mut().zip(chunk.iter()) {
-                                *lhs -= *rhs;
+                            let (first, second) = chunk.into_slices();
+                            let (first_output, second_output) = output.split_at_mut(first.len());
+                            add_scaled(first_output, first, scalar, kind);
+                            if !second.is_empty() {
+                                add_scaled(second_output, second, scalar, kind);
                             }
-                            return;
-                        }
-
-                        let (rhs_values, rhs_scratch) = scratch.split_at_mut(output.len());
-                        recurse_into(negated_rhs, ctx, rhs_values, cache, rhs_scratch);
-                        for (lhs, rhs) in output.iter_mut().zip(rhs_values.iter()) {
-                            *lhs -= *rhs;
+                        } else {
+                            let (rhs_values, rhs_scratch) = scratch.split_at_mut(output.len());
+                            recurse_into(scaled_rhs, ctx, rhs_values, cache, rhs_scratch);
+                            add_scaled(output, rhs_values, scalar, kind);
                         }
                         return;
                     }
@@ -3402,25 +3508,13 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     // Preserve the multiplication shape while avoiding a
                     // constant vector for every scalar value.
                     if let EvaluationPlan::ConstantTerm(scalar) = a.as_ref() {
-                        recurse_scaled_into(
-                            b,
-                            ctx.scalars.get(*scalar),
-                            ctx,
-                            output,
-                            cache,
-                            scratch,
-                        );
+                        let (scalar, kind) = ctx.scalars.scale(*scalar);
+                        recurse_scaled_into(b, scalar, kind, ctx, output, cache, scratch);
                         return;
                     }
                     if let EvaluationPlan::ConstantTerm(scalar) = b.as_ref() {
-                        recurse_scaled_into(
-                            a,
-                            ctx.scalars.get(*scalar),
-                            ctx,
-                            output,
-                            cache,
-                            scratch,
-                        );
+                        let (scalar, kind) = ctx.scalars.scale(*scalar);
+                        recurse_scaled_into(a, scalar, kind, ctx, output, cache, scratch);
                         return;
                     }
 
@@ -3474,8 +3568,8 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     }
                 }
                 EvaluationPlan::Scale(a, scalar) => {
-                    let scalar = ctx.scalars.get(*scalar);
-                    recurse_scaled_into(a, scalar, ctx, output, cache, scratch);
+                    let (scalar, kind) = ctx.scalars.scale(*scalar);
+                    recurse_scaled_into(a, scalar, kind, ctx, output, cache, scratch);
                 }
                 EvaluationPlan::Horner { base, coefficients } => {
                     let (highest, remaining) = coefficients
@@ -3553,6 +3647,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         fn recurse_scaled_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
             plan: &EvaluationPlan<F>,
             scalar: F,
+            kind: ScaleKind,
             ctx: &AstContext<'_, F, B>,
             output: &mut [F],
             cache: &mut [F],
@@ -3560,37 +3655,45 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         ) {
             if let EvaluationPlan::Poly(leaf) = plan {
                 let chunk = leaf_chunk(leaf, ctx, output.len());
-                if scalar == ctx.two {
-                    for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                        *output = value.double();
+                match kind {
+                    ScaleKind::MinusOne => {
+                        for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                            *output = -*value;
+                        }
                     }
-                } else if scalar == ctx.minus_one {
-                    for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                        *output = -*value;
+                    ScaleKind::One => {
+                        for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                            *output = *value;
+                        }
                     }
-                } else if scalar == F::ONE {
-                    for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                        *output = *value;
+                    ScaleKind::Two => {
+                        for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                            *output = value.double();
+                        }
                     }
-                } else {
-                    for (output, value) in output.iter_mut().zip(chunk.iter()) {
-                        *output = *value * scalar;
+                    ScaleKind::Other => {
+                        for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                            *output = *value * scalar;
+                        }
                     }
                 }
                 return;
             }
 
             recurse_into(plan, ctx, output, cache, scratch);
-            if scalar != F::ONE {
-                if scalar == ctx.minus_one {
+            match kind {
+                ScaleKind::MinusOne => {
                     for value in output.iter_mut() {
                         *value = -*value;
                     }
-                } else if scalar == ctx.two {
+                }
+                ScaleKind::One => {}
+                ScaleKind::Two => {
                     for value in output.iter_mut() {
                         *value = value.double();
                     }
-                } else {
+                }
+                ScaleKind::Other => {
                     for value in output.iter_mut() {
                         *value *= scalar;
                     }
@@ -3600,8 +3703,6 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
 
         // Apply `ast` to each chunk in parallel, writing the result into an output
         // polynomial.
-        let minus_one = -F::ONE;
-        let two = F::ONE.double();
         let mut owned_plan = None;
         let mut prepared_layout = None;
         let (plan, scalar_descriptors, cache_slots, scratch_slots, max_challenge_exponents) =
@@ -3643,8 +3744,6 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         chunk_index,
                         polys: &self.polys,
                         scalars: bound_scalars,
-                        minus_one,
-                        two,
                     };
                     let mut storage = vec![F::ZERO; (cache_slots + scratch_slots) * out.len()];
                     let (cache, scratch) = storage.split_at_mut(cache_slots * out.len());
@@ -4775,6 +4874,84 @@ mod tests {
         let result =
             evaluator.evaluate(&(Ast::ConstantTerm(lhs) - Ast::ConstantTerm(rhs)), &domain);
         assert!(result.iter().all(|result| *result == lhs - rhs));
+    }
+
+    fn check_scaled_addends<F, B>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+        B: BasisOps,
+    {
+        let domain = EvaluationDomain::<F>::new(3, 4);
+        let mut evaluator = new_evaluator::<_, F, B>(|| {});
+        let leaves = (0..3)
+            .map(|poly_index| {
+                let mut poly = B::empty_poly(&domain);
+                let poly_len = poly.len();
+                for (row, value) in poly.iter_mut().enumerate() {
+                    *value = F::from((poly_index * poly_len + row + 1) as u64);
+                }
+                evaluator.register_poly(poly)
+            })
+            .collect::<Vec<_>>();
+
+        let lhs = Ast::from(leaves[0]);
+        for rhs in [
+            Ast::from(leaves[1]),
+            Ast::from(leaves[1]) + Ast::from(leaves[2]),
+        ] {
+            for scalar in [-F::ONE, F::ONE, F::ONE.double(), F::from(7)] {
+                let ast = lhs.clone() + rhs.clone() * scalar;
+                assert!(matches!(
+                    compile_plan_only(&ast),
+                    EvaluationPlan::Add(_, addend)
+                        if matches!(addend.as_ref(), EvaluationPlan::Scale(_, _))
+                ));
+
+                let lhs_values = evaluator.evaluate(&lhs, &domain);
+                let rhs_values = evaluator.evaluate(&rhs, &domain);
+                let actual = evaluator.evaluate(&ast, &domain);
+                assert!(
+                    actual
+                        .iter()
+                        .zip(lhs_values.iter().zip(rhs_values.iter()))
+                        .all(|(actual, (lhs, rhs))| *actual == *lhs + *rhs * scalar)
+                );
+            }
+        }
+    }
+
+    fn check_coefficient_scaled_addends<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::<F>::new(3, 4);
+        let mut evaluator = new_evaluator::<fn(), F, Coeff>(|| {});
+        evaluator.register_poly(domain.empty_coeff());
+
+        let lhs = Ast::ConstantTerm(F::from(3));
+        let rhs = Ast::ConstantTerm(F::from(5)) + Ast::LinearTerm(F::from(7));
+        for scalar in [-F::ONE, F::ONE, F::ONE.double(), F::from(11)] {
+            let ast = lhs.clone() + rhs.clone() * scalar;
+            let lhs_values = evaluator.evaluate(&lhs, &domain);
+            let rhs_values = evaluator.evaluate(&rhs, &domain);
+            let actual = evaluator.evaluate(&ast, &domain);
+            assert!(
+                actual
+                    .iter()
+                    .zip(lhs_values.iter().zip(rhs_values.iter()))
+                    .all(|(actual, (lhs, rhs))| *actual == *lhs + *rhs * scalar)
+            );
+        }
+    }
+
+    #[test]
+    fn scaled_addends_are_accumulated_in_place() {
+        check_coefficient_scaled_addends::<pallas::Base>();
+        check_scaled_addends::<pallas::Base, LagrangeCoeff>();
+        check_scaled_addends::<pallas::Base, ExtendedLagrangeCoeff>();
+        check_coefficient_scaled_addends::<vesta::Base>();
+        check_scaled_addends::<vesta::Base, LagrangeCoeff>();
+        check_scaled_addends::<vesta::Base, ExtendedLagrangeCoeff>();
     }
 
     #[test]
