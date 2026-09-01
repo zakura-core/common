@@ -13,12 +13,16 @@ use crate::{
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
-use ff::WithSmallOrderMulGroup;
+use ff::{PrimeField, WithSmallOrderMulGroup};
 use group::{Curve, ff::Field};
+use maybe_rayon::prelude::*;
 use rand_core::Rng;
 use std::{
+    any::{Any, TypeId},
+    cmp::Ordering,
     iter,
     ops::{Mul, MulAssign},
+    sync::{Arc, Mutex},
 };
 
 #[derive(Debug)]
@@ -29,7 +33,7 @@ pub(in crate::plonk) struct Permuted<C: CurveAffine, Ev> {
     permuted_input_poly: Polynomial<C::Scalar, Coeff>,
     permuted_input_coset: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
     permuted_input_blind: Blind<C::Scalar>,
-    compressed_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    compressed_table_expression: Arc<Polynomial<C::Scalar, LagrangeCoeff>>,
     compressed_table_coset: poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>,
     permuted_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
     permuted_table_poly: Polynomial<C::Scalar, Coeff>,
@@ -73,7 +77,7 @@ pub(in crate::plonk) struct PreparedPermuted<C: CurveAffine, Ev> {
     permuted_input_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
     permuted_input_commitment: C,
     permuted_input_blind: Blind<C::Scalar>,
-    compressed_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    compressed_table_expression: Arc<Polynomial<C::Scalar, LagrangeCoeff>>,
     compressed_table_coset: poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>,
     permuted_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
     permuted_table_poly: Polynomial<C::Scalar, Coeff>,
@@ -85,6 +89,122 @@ pub(in crate::plonk) struct PreparedPermuted<C: CurveAffine, Ev> {
 pub(in crate::plonk) struct ProductBlinding<F: Field> {
     rows: Vec<F>,
     product_blind: Blind<F>,
+}
+
+struct PreparedTable<F: Field, Ev> {
+    compressed_expression: Arc<Polynomial<F, LagrangeCoeff>>,
+    compressed_coset: poly::Ast<Ev, F, ExtendedLagrangeCoeff>,
+    sorted_values: Vec<F>,
+}
+
+struct PreparedInput<F: Field, Ev> {
+    compressed_expression: Polynomial<F, LagrangeCoeff>,
+    compressed_coset: poly::Ast<Ev, F, ExtendedLagrangeCoeff>,
+    sorted_values: Vec<F>,
+}
+
+struct PendingLookup<C: CurveAffine, Ev> {
+    task_index: usize,
+    lookup_index: usize,
+    input: PreparedInput<C::Scalar, Ev>,
+    blinding: PermutedBlinding<C::Scalar>,
+}
+
+struct TableState<C: CurveAffine, Ev> {
+    table: Option<Arc<PreparedTable<C::Scalar, Ev>>>,
+    pending: Vec<PendingLookup<C, Ev>>,
+}
+
+const PASTA_REPR_BYTES: usize = 32;
+
+#[derive(Clone, Copy)]
+struct PastaSortKey {
+    repr: [u8; PASTA_REPR_BYTES],
+    source: usize,
+}
+
+impl PastaSortKey {
+    const EMPTY: Self = Self {
+        repr: [0; PASTA_REPR_BYTES],
+        source: 0,
+    };
+}
+
+impl PartialEq for PastaSortKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.repr == other.repr
+    }
+}
+
+impl Eq for PastaSortKey {}
+
+impl PartialOrd for PastaSortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PastaSortKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.repr.iter().rev().cmp(other.repr.iter().rev())
+    }
+}
+
+pub(in crate::plonk) struct TablePlan {
+    representatives: Vec<usize>,
+    groups: Vec<usize>,
+    sort_scratch: Vec<Vec<PastaSortKey>>,
+}
+
+fn sort_pasta_table<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut [F],
+    scratch: &mut [PastaSortKey],
+) {
+    assert_eq!(values.len(), scratch.len());
+    for (source, (value, entry)) in values.iter().zip(scratch.iter_mut()).enumerate() {
+        *entry = PastaSortKey {
+            repr: value.to_repr(),
+            source,
+        };
+    }
+    scratch.sort_unstable();
+
+    // Equal canonical encodings represent equal field elements, so their
+    // relative input positions do not affect the lookup output.
+    for destination in 0..values.len() {
+        if scratch[destination].source == destination {
+            continue;
+        }
+
+        let displaced = values[destination];
+        let mut position = destination;
+        loop {
+            let source = scratch[position].source;
+            scratch[position].source = position;
+            if source == destination {
+                values[position] = displaced;
+                break;
+            }
+            values[position] = values[source];
+            position = source;
+        }
+    }
+}
+
+// A `Vec` is required here for safe runtime specialization through `Any`.
+#[allow(clippy::ptr_arg)]
+fn sort_table_values<F: Field + Ord>(values: &mut Vec<F>, scratch: &mut [PastaSortKey]) {
+    let dynamic_values = values as &mut dyn Any;
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fp>>() {
+        sort_pasta_table(values, scratch);
+        return;
+    }
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fq>>() {
+        sort_pasta_table(values, scratch);
+        return;
+    }
+
+    values.sort_unstable();
 }
 
 pub(in crate::plonk) struct PreparedProduct<C: CurveAffine, Ev> {
@@ -165,103 +285,243 @@ pub(in crate::plonk) fn compress_expressions_coset<E: Copy, F: Field>(
         .unwrap_or(poly::Ast::ConstantTerm(F::ZERO))
 }
 
-impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
-    /// Prepares the compressed, permuted input and table polynomials.
-    ///
-    /// This phase does not mutate the shared evaluator or transcript, so
-    /// independent lookup arguments can run in parallel. The caller must pass
-    /// the result to [`PreparedPermuted::finalize`] in circuit order.
+impl<F: Field> Argument<F> {
+    fn has_same_table(&self, other: &Self) -> bool {
+        self.table_expressions.len() == other.table_expressions.len()
+            && self
+                .table_expressions
+                .iter()
+                .zip(other.table_expressions.iter())
+                .all(|(left, right)| match (left, right) {
+                    (Expression::Fixed(left), Expression::Fixed(right)) => {
+                        left.index == right.index
+                            && left.column_index == right.column_index
+                            && left.rotation == right.rotation
+                    }
+                    _ => false,
+                })
+    }
+}
+
+/// Groups identical fixed tables and allocates their sort workspace.
+pub(in crate::plonk) fn prepare_table_plan<F: Field>(
+    lookup_arguments: &[Argument<F>],
+    usable_rows: usize,
+) -> TablePlan {
+    let mut representatives = Vec::<usize>::new();
+    let groups = lookup_arguments
+        .iter()
+        .enumerate()
+        .map(|(lookup_index, argument)| {
+            representatives
+                .iter()
+                .position(|representative| {
+                    argument.has_same_table(&lookup_arguments[*representative])
+                })
+                .unwrap_or_else(|| {
+                    representatives.push(lookup_index);
+                    representatives.len() - 1
+                })
+        })
+        .collect::<Vec<_>>();
+
+    let is_pasta = TypeId::of::<F>() == TypeId::of::<crate::pasta::Fp>()
+        || TypeId::of::<F>() == TypeId::of::<crate::pasta::Fq>();
+    let scratch_len = if is_pasta { usable_rows } else { 0 };
+    let sort_scratch = representatives
+        .iter()
+        .map(|_| vec![PastaSortKey::EMPTY; scratch_len])
+        .collect();
+
+    TablePlan {
+        representatives,
+        groups,
+        sort_scratch,
+    }
+}
+
+impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::plonk) fn prepare_permuted<C, Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
+    fn prepare_table<Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
         &self,
-        pk: &ProvingKey<C>,
-        params: &Params<C>,
-        domain: &EvaluationDomain<C::Scalar>,
-        value_evaluator: &poly::Evaluator<Ev, C::Scalar, LagrangeCoeff>,
-        theta: ChallengeTheta<C>,
+        domain: &EvaluationDomain<F>,
+        value_evaluator: &poly::Evaluator<Ev, F, LagrangeCoeff>,
+        theta: F,
+        fixed_values: &[poly::AstLeaf<Ev, LagrangeCoeff>],
+        fixed_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
+        usable_rows: usize,
+        sort_scratch: &mut [PastaSortKey],
+    ) -> PreparedTable<F, Ec> {
+        let unpermuted_expressions = self.table_expressions.iter().map(|expression| {
+            let Expression::Fixed(query) = expression else {
+                unreachable!("lookup table expressions are fixed queries")
+            };
+            fixed_values[query.column_index]
+                .with_rotation(query.rotation)
+                .into()
+        });
+        let unpermuted_cosets = self.table_expressions.iter().map(|expression| {
+            let Expression::Fixed(query) = expression else {
+                unreachable!("lookup table expressions are fixed queries")
+            };
+            fixed_cosets[query.column_index]
+                .with_rotation(query.rotation)
+                .into()
+        });
+
+        let compressed_expression = unpermuted_expressions
+            .reduce(|acc, expression| acc * theta + expression)
+            .unwrap_or(poly::Ast::ConstantTerm(F::ZERO));
+        let compressed_coset = unpermuted_cosets
+            .reduce(|acc, expression| acc * poly::Ast::ConstantTerm(theta) + expression)
+            .unwrap_or(poly::Ast::ConstantTerm(F::ZERO));
+        let compressed_expression = value_evaluator.evaluate(&compressed_expression, domain);
+        let mut sorted_values = compressed_expression
+            .iter()
+            .take(usable_rows)
+            .copied()
+            .collect::<Vec<_>>();
+        sort_table_values(&mut sorted_values, sort_scratch);
+
+        PreparedTable {
+            compressed_expression: Arc::new(compressed_expression),
+            compressed_coset,
+            sorted_values,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_input<Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
+        &self,
+        domain: &EvaluationDomain<F>,
+        value_evaluator: &poly::Evaluator<Ev, F, LagrangeCoeff>,
+        theta: F,
         advice_values: &[poly::AstLeaf<Ev, LagrangeCoeff>],
         fixed_values: &[poly::AstLeaf<Ev, LagrangeCoeff>],
         instance_values: &[poly::AstLeaf<Ev, LagrangeCoeff>],
         advice_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         fixed_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         instance_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
+        usable_rows: usize,
+    ) -> PreparedInput<F, Ec> {
+        let unpermuted_expressions = self.input_expressions.iter().map(|expression| {
+            expression.evaluate(
+                &|scalar| poly::Ast::ConstantTerm(scalar),
+                &|_| panic!("virtual selectors are removed during optimization"),
+                &|query| {
+                    fixed_values[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|query| {
+                    advice_values[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|query| {
+                    instance_values[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|a| -a,
+                &|a, b| a + b,
+                &|a, b| a * b,
+                &|a, scalar| a * scalar,
+            )
+        });
+        let unpermuted_cosets = self.input_expressions.iter().map(|expression| {
+            expression.evaluate(
+                &|scalar| poly::Ast::ConstantTerm(scalar),
+                &|_| panic!("virtual selectors are removed during optimization"),
+                &|query| {
+                    fixed_cosets[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|query| {
+                    advice_cosets[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|query| {
+                    instance_cosets[query.column_index]
+                        .with_rotation(query.rotation)
+                        .into()
+                },
+                &|a| -a,
+                &|a, b| a + b,
+                &|a, b| a * b,
+                &|a, scalar| a * scalar,
+            )
+        });
+
+        let compressed_expression = unpermuted_expressions
+            .reduce(|acc, expression| acc * theta + expression)
+            .unwrap_or(poly::Ast::ConstantTerm(F::ZERO));
+        let compressed_coset = unpermuted_cosets
+            .reduce(|acc, expression| acc * poly::Ast::ConstantTerm(theta) + expression)
+            .unwrap_or(poly::Ast::ConstantTerm(F::ZERO));
+        let compressed_expression = value_evaluator.evaluate(&compressed_expression, domain);
+        let mut sorted_values = compressed_expression
+            .iter()
+            .take(usable_rows)
+            .copied()
+            .collect::<Vec<_>>();
+        sorted_values.sort_unstable();
+
+        PreparedInput {
+            compressed_expression,
+            compressed_coset,
+            sorted_values,
+        }
+    }
+
+    fn finish_permuted<C, Ec: Copy + Send + Sync>(
+        &self,
+        pk: &ProvingKey<C>,
+        params: &Params<C>,
+        domain: &EvaluationDomain<C::Scalar>,
+        input: PreparedInput<C::Scalar, Ec>,
+        table: &PreparedTable<C::Scalar, Ec>,
         blinding: PermutedBlinding<C::Scalar>,
     ) -> Result<PreparedPermuted<C, Ec>, Error>
     where
         C: CurveAffine<ScalarExt = F>,
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
     {
-        // Closure to get values of expressions and compress them
-        let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
-            // Values of input expressions involved in the lookup
-            let unpermuted_expressions: Vec<_> = expressions
+        let PreparedInput {
+            compressed_expression: compressed_input_expression,
+            compressed_coset: compressed_input_coset,
+            sorted_values: sorted_input_values,
+        } = input;
+        let (mut permuted_input_values, mut permuted_table_values) =
+            permute_sorted_values(sorted_input_values, &table.sorted_values)?;
+
+        let blind_rows = pk.vk.cs.blinding_factors() + 1;
+        assert_eq!(blinding.input_rows.len(), blind_rows);
+        assert_eq!(blinding.table_rows.len(), blind_rows);
+        permuted_input_values.extend_from_slice(&blinding.input_rows);
+        permuted_table_values.extend_from_slice(&blinding.table_rows);
+        assert_eq!(permuted_input_values.len(), params.n as usize);
+        assert_eq!(permuted_table_values.len(), params.n as usize);
+
+        #[cfg(feature = "sanity-checks")]
+        {
+            let mut last = None;
+            for (input, table) in permuted_input_values
                 .iter()
-                .map(|expression| {
-                    expression.evaluate(
-                        &|scalar| poly::Ast::ConstantTerm(scalar),
-                        &|_| panic!("virtual selectors are removed during optimization"),
-                        &|query| {
-                            fixed_values[query.column_index]
-                                .with_rotation(query.rotation)
-                                .into()
-                        },
-                        &|query| {
-                            advice_values[query.column_index]
-                                .with_rotation(query.rotation)
-                                .into()
-                        },
-                        &|query| {
-                            instance_values[query.column_index]
-                                .with_rotation(query.rotation)
-                                .into()
-                        },
-                        &|a| -a,
-                        &|a, b| a + b,
-                        &|a, b| a * b,
-                        &|a, scalar| a * scalar,
-                    )
-                })
-                .collect();
+                .zip(permuted_table_values.iter())
+                .take(table.sorted_values.len())
+            {
+                if input != table {
+                    assert_eq!(*input, last.unwrap());
+                }
+                last = Some(*input);
+            }
+        }
 
-            // Compressed version of expressions
-            let compressed_expression = unpermuted_expressions
-                .into_iter()
-                .reduce(|acc, expression| acc * *theta + expression)
-                .unwrap_or(poly::Ast::ConstantTerm(C::Scalar::ZERO));
-
-            // Compressed version of cosets
-            let compressed_coset = compress_expressions_coset(
-                expressions,
-                *theta,
-                fixed_cosets,
-                advice_cosets,
-                instance_cosets,
-            );
-
-            (
-                compressed_coset,
-                value_evaluator.evaluate(&compressed_expression, domain),
-            )
-        };
-
-        // Get values of input expressions involved in the lookup and compress them
-        let (compressed_input_coset, compressed_input_expression) =
-            compress_expressions(&self.input_expressions);
-
-        // Get values of table expressions involved in the lookup and compress them
-        let (compressed_table_coset, compressed_table_expression) =
-            compress_expressions(&self.table_expressions);
-
-        // Permute compressed (InputExpression, TableExpression) pair
-        let (permuted_input_expression, permuted_table_expression) = permute_expression_pair::<C>(
-            pk,
-            params,
-            domain,
-            &blinding.input_rows,
-            &blinding.table_rows,
-            &compressed_input_expression,
-            &compressed_table_expression,
-        )?;
+        let permuted_input_expression = domain.lagrange_from_vec(permuted_input_values);
+        let permuted_table_expression = domain.lagrange_from_vec(permuted_table_values);
 
         let permuted_input_blind = blinding.input_blind;
         let permuted_table_blind = blinding.table_blind;
@@ -296,8 +556,8 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             permuted_input_coset,
             permuted_input_commitment,
             permuted_input_blind,
-            compressed_table_expression,
-            compressed_table_coset,
+            compressed_table_expression: Arc::clone(&table.compressed_expression),
+            compressed_table_coset: table.compressed_coset.clone(),
             permuted_table_expression,
             permuted_table_poly,
             permuted_table_coset,
@@ -305,6 +565,203 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             permuted_table_blind,
         })
     }
+}
+
+/// Prepares lookup arguments while sharing fixed-table work across circuits.
+///
+/// Each tuple in `lookup_tasks` is `(circuit index, lookup index, blinding)`.
+/// The returned values retain that task order so transcript writes remain in
+/// circuit-major, lookup-major order.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::plonk) fn prepare_permuted<C, Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
+    lookup_arguments: &[Argument<C::Scalar>],
+    table_plan: TablePlan,
+    lookup_tasks: Vec<(usize, usize, PermutedBlinding<C::Scalar>)>,
+    pk: &ProvingKey<C>,
+    params: &Params<C>,
+    domain: &EvaluationDomain<C::Scalar>,
+    value_evaluator: &poly::Evaluator<Ev, C::Scalar, LagrangeCoeff>,
+    theta: ChallengeTheta<C>,
+    advice_values: &[Vec<poly::AstLeaf<Ev, LagrangeCoeff>>],
+    fixed_values: &[poly::AstLeaf<Ev, LagrangeCoeff>],
+    instance_values: &[Vec<poly::AstLeaf<Ev, LagrangeCoeff>>],
+    advice_cosets: &[Vec<poly::AstLeaf<Ec, ExtendedLagrangeCoeff>>],
+    fixed_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
+    instance_cosets: &[Vec<poly::AstLeaf<Ec, ExtendedLagrangeCoeff>>],
+) -> Result<Vec<PreparedPermuted<C, Ec>>, Error>
+where
+    C: CurveAffine,
+    C::Scalar: WithSmallOrderMulGroup<3> + Ord,
+    C::Curve: Mul<C::Scalar, Output = C::Curve> + MulAssign<C::Scalar>,
+{
+    let TablePlan {
+        representatives: table_representatives,
+        groups: table_groups,
+        sort_scratch,
+    } = table_plan;
+
+    let usable_rows = params.n as usize - (pk.vk.cs.blinding_factors() + 1);
+
+    // With one worker, direct table preparation avoids continuation overhead.
+    if crate::multicore::current_num_threads() == 1 {
+        let prepared_tables = table_representatives
+            .into_par_iter()
+            .zip(sort_scratch.into_par_iter())
+            .map(|(lookup_index, mut sort_scratch)| {
+                lookup_arguments[lookup_index].prepare_table(
+                    domain,
+                    value_evaluator,
+                    *theta,
+                    fixed_values,
+                    fixed_cosets,
+                    usable_rows,
+                    &mut sort_scratch,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        return lookup_tasks
+            .into_par_iter()
+            .map(|(circuit_index, lookup_index, blinding)| {
+                let input = lookup_arguments[lookup_index].prepare_input(
+                    domain,
+                    value_evaluator,
+                    *theta,
+                    &advice_values[circuit_index],
+                    fixed_values,
+                    &instance_values[circuit_index],
+                    &advice_cosets[circuit_index],
+                    fixed_cosets,
+                    &instance_cosets[circuit_index],
+                    usable_rows,
+                );
+                lookup_arguments[lookup_index].finish_permuted(
+                    pk,
+                    params,
+                    domain,
+                    input,
+                    &prepared_tables[table_groups[lookup_index]],
+                    blinding,
+                )
+            })
+            .collect();
+    }
+
+    let table_states = (0..table_representatives.len())
+        .map(|_| {
+            Mutex::new(TableState::<C, Ec> {
+                table: None,
+                pending: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let prepared = Mutex::new(
+        (0..lookup_tasks.len())
+            .map(|_| None)
+            .collect::<Vec<Option<Result<PreparedPermuted<C, Ec>, Error>>>>(),
+    );
+
+    // Inputs and tables become ready independently. A completed input either
+    // continues immediately or moves into its table's pending queue; no worker
+    // blocks waiting for the other side. Results use task-indexed slots so the
+    // caller retains circuit-major transcript order.
+    crate::multicore::scope(|scope| {
+        for (task_index, (circuit_index, lookup_index, blinding)) in
+            lookup_tasks.into_iter().enumerate()
+        {
+            let state = &table_states[table_groups[lookup_index]];
+            let prepared = &prepared;
+            scope.spawn(move |_| {
+                let input = lookup_arguments[lookup_index].prepare_input(
+                    domain,
+                    value_evaluator,
+                    *theta,
+                    &advice_values[circuit_index],
+                    fixed_values,
+                    &instance_values[circuit_index],
+                    &advice_cosets[circuit_index],
+                    fixed_cosets,
+                    &instance_cosets[circuit_index],
+                    usable_rows,
+                );
+
+                let mut pending = Some(PendingLookup {
+                    task_index,
+                    lookup_index,
+                    input,
+                    blinding,
+                });
+                let table = {
+                    let mut state = state.lock().expect("table state is not poisoned");
+                    if let Some(table) = &state.table {
+                        Some(Arc::clone(table))
+                    } else {
+                        state
+                            .pending
+                            .push(pending.take().expect("the lookup task is available"));
+                        None
+                    }
+                };
+
+                if let Some(table) = table {
+                    let pending = pending.expect("the lookup task is available");
+                    let result = lookup_arguments[lookup_index].finish_permuted(
+                        pk,
+                        params,
+                        domain,
+                        pending.input,
+                        &table,
+                        pending.blinding,
+                    );
+                    prepared.lock().expect("results are not poisoned")[task_index] = Some(result);
+                }
+            });
+        }
+
+        for ((representative, mut sort_scratch), state) in table_representatives
+            .into_iter()
+            .zip(sort_scratch)
+            .zip(&table_states)
+        {
+            let prepared = &prepared;
+            scope.spawn(move |_| {
+                let table = Arc::new(lookup_arguments[representative].prepare_table(
+                    domain,
+                    value_evaluator,
+                    *theta,
+                    fixed_values,
+                    fixed_cosets,
+                    usable_rows,
+                    &mut sort_scratch,
+                ));
+                let pending = {
+                    let mut state = state.lock().expect("table state is not poisoned");
+                    state.table = Some(Arc::clone(&table));
+                    std::mem::take(&mut state.pending)
+                };
+
+                pending.into_par_iter().for_each(|pending| {
+                    let result = lookup_arguments[pending.lookup_index].finish_permuted(
+                        pk,
+                        params,
+                        domain,
+                        pending.input,
+                        &table,
+                        pending.blinding,
+                    );
+                    prepared.lock().expect("results are not poisoned")[pending.task_index] =
+                        Some(result);
+                });
+            });
+        }
+    });
+
+    prepared
+        .into_inner()
+        .expect("results are not poisoned")
+        .into_iter()
+        .map(|result| result.expect("every lookup task produces one result"))
+        .collect()
 }
 
 impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedPermuted<C, Ev> {
@@ -691,8 +1148,7 @@ impl<C: CurveAffine> Evaluated<C> {
     }
 }
 
-type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCoeff>);
-
+#[cfg(test)]
 fn permute_usable_values<F: Field + Ord>(
     mut input_values: Vec<F>,
     mut table_values: Vec<F>,
@@ -704,6 +1160,16 @@ fn permute_usable_values<F: Field + Ord>(
         || table_values.sort_unstable(),
     );
 
+    permute_sorted_values(input_values, &table_values)
+}
+
+fn permute_sorted_values<F: Field + Ord>(
+    input_values: Vec<F>,
+    table_values: &[F],
+) -> Result<(Vec<F>, Vec<F>), Error> {
+    debug_assert!(input_values.windows(2).all(|pair| pair[0] <= pair[1]));
+    debug_assert!(table_values.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(input_values.len(), table_values.len());
     let usable_rows = input_values.len();
     let mut permuted_table_values = vec![F::ZERO; usable_rows];
     let mut consumed_table_rows = Vec::new();
@@ -733,7 +1199,7 @@ fn permute_usable_values<F: Field + Ord>(
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut consumed_table_rows = consumed_table_rows.into_iter().peekable();
-    for (row, value) in table_values.into_iter().enumerate() {
+    for (row, value) in table_values.iter().copied().enumerate() {
         if consumed_table_rows.peek() == Some(&row) {
             consumed_table_rows.next();
         } else {
@@ -746,60 +1212,6 @@ fn permute_usable_values<F: Field + Ord>(
     Ok((input_values, permuted_table_values))
 }
 
-/// Given a vector of input values A and a vector of table values S,
-/// this method permutes A and S to produce A' and S', such that:
-/// - like values in A' are vertically adjacent to each other; and
-/// - the first row in a sequence of like values in A' is the row
-///   that has the corresponding value in S'.
-///
-/// This method returns (A', S') if no errors are encountered.
-fn permute_expression_pair<C: CurveAffine>(
-    pk: &ProvingKey<C>,
-    params: &Params<C>,
-    domain: &EvaluationDomain<C::Scalar>,
-    input_blinds: &[C::Scalar],
-    table_blinds: &[C::Scalar],
-    input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
-    table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
-) -> Result<ExpressionPair<C::Scalar>, Error> {
-    let blinding_factors = pk.vk.cs.blinding_factors();
-    let blind_rows = blinding_factors + 1;
-    let usable_rows = params.n as usize - blind_rows;
-
-    let mut input_values = input_expression.to_vec();
-    input_values.truncate(usable_rows);
-    let table_values = table_expression.iter().take(usable_rows).copied().collect();
-    let (mut permuted_input_expression, mut permuted_table_coeffs) =
-        permute_usable_values(input_values, table_values)?;
-
-    assert_eq!(input_blinds.len(), blind_rows);
-    assert_eq!(table_blinds.len(), blind_rows);
-    permuted_input_expression.extend_from_slice(input_blinds);
-    permuted_table_coeffs.extend_from_slice(table_blinds);
-    assert_eq!(permuted_input_expression.len(), params.n as usize);
-    assert_eq!(permuted_table_coeffs.len(), params.n as usize);
-
-    #[cfg(feature = "sanity-checks")]
-    {
-        let mut last = None;
-        for (a, b) in permuted_input_expression
-            .iter()
-            .zip(permuted_table_coeffs.iter())
-            .take(usable_rows)
-        {
-            if *a != *b {
-                assert_eq!(*a, last.unwrap());
-            }
-            last = Some(*a);
-        }
-    }
-
-    Ok((
-        domain.lagrange_from_vec(permuted_input_expression),
-        domain.lagrange_from_vec(permuted_table_coeffs),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -807,6 +1219,7 @@ mod tests {
     use pasta_curves::pallas;
 
     use super::*;
+    use crate::plonk::circuit::FixedQuery;
 
     const TEST_ALPHABET_SIZE: usize = 3;
 
@@ -858,6 +1271,30 @@ mod tests {
         values.iter().copied().map(pallas::Scalar::from).collect()
     }
 
+    fn check_table_sort<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord>() {
+        let mut expected = (0..1024_u64)
+            .flat_map(|value| {
+                let value = F::from(value.wrapping_mul(0x9e37_79b9));
+                [value, -value, value]
+            })
+            .collect::<Vec<_>>();
+        let mut actual = expected.clone();
+        expected.sort_unstable();
+        let mut scratch = vec![PastaSortKey::EMPTY; actual.len()];
+        sort_table_values(&mut actual, &mut scratch);
+        assert_eq!(actual, expected);
+
+        actual.reverse();
+        sort_table_values(&mut actual, &mut scratch);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn table_sort_matches_field_order() {
+        check_table_sort::<pallas::Base>();
+        check_table_sort::<pallas::Scalar>();
+    }
+
     fn small_vectors(len: usize) -> Vec<Vec<pallas::Scalar>> {
         (0..TEST_ALPHABET_SIZE.pow(u32::try_from(len).expect("test length fits in u32")))
             .map(|mut encoded| {
@@ -871,6 +1308,44 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    fn lookup_with_table(queries: &[(usize, usize, i32)]) -> Argument<pallas::Scalar> {
+        Argument {
+            input_expressions: Vec::new(),
+            table_expressions: queries
+                .iter()
+                .map(|(index, column_index, rotation)| {
+                    Expression::Fixed(FixedQuery {
+                        index: *index,
+                        column_index: *column_index,
+                        rotation: Rotation(*rotation),
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn identical_fixed_table_queries_share_preparation() {
+        let table = lookup_with_table(&[(1, 0, 0), (3, 2, -1)]);
+        assert!(table.has_same_table(&lookup_with_table(&[(1, 0, 0), (3, 2, -1)])));
+        assert!(!table.has_same_table(&lookup_with_table(&[(1, 0, 0)])));
+        assert!(!table.has_same_table(&lookup_with_table(&[(1, 0, 0), (4, 2, -1)])));
+        assert!(!table.has_same_table(&lookup_with_table(&[(3, 2, -1), (1, 0, 0)])));
+
+        let plan = prepare_table_plan(
+            &[
+                table,
+                lookup_with_table(&[(1, 0, 0), (3, 2, -1)]),
+                lookup_with_table(&[(1, 0, 0)]),
+            ],
+            17,
+        );
+        assert_eq!(plan.representatives, [0, 2]);
+        assert_eq!(plan.groups, [0, 0, 1]);
+        assert_eq!(plan.sort_scratch.len(), 2);
+        assert!(plan.sort_scratch.iter().all(|scratch| scratch.len() == 17));
     }
 
     #[test]

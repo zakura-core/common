@@ -436,45 +436,54 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let prepared_advice = advice_witnesses
-        .into_par_iter()
-        .map(|(advice, advice_blinds)| {
-            let (advice_commitments, (advice_polys, advice_cosets)) = crate::multicore::join(
-                || {
-                    #[cfg(feature = "multicore")]
-                    let advice_commitments_projective: Vec<_> = advice
-                        .par_iter()
-                        .zip(advice_blinds.par_iter())
-                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                        .collect();
-                    #[cfg(not(feature = "multicore"))]
-                    let advice_commitments_projective: Vec<_> = advice
-                        .iter()
-                        .zip(advice_blinds.iter())
-                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                        .collect();
-                    let mut advice_commitments =
-                        vec![C::identity(); advice_commitments_projective.len()];
-                    C::Curve::batch_normalize(
-                        &advice_commitments_projective,
-                        &mut advice_commitments,
-                    );
-                    advice_commitments
-                },
-                || domain.batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles),
-            );
+    let (prepared_advice, lookup_table_plan) = crate::multicore::join(
+        || {
+            advice_witnesses
+                .into_par_iter()
+                .map(|(advice, advice_blinds)| {
+                    let (advice_commitments, (advice_polys, advice_cosets)) =
+                        crate::multicore::join(
+                            || {
+                                #[cfg(feature = "multicore")]
+                                let advice_commitments_projective: Vec<_> = advice
+                                    .par_iter()
+                                    .zip(advice_blinds.par_iter())
+                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                    .collect();
+                                #[cfg(not(feature = "multicore"))]
+                                let advice_commitments_projective: Vec<_> = advice
+                                    .iter()
+                                    .zip(advice_blinds.iter())
+                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                    .collect();
+                                let mut advice_commitments =
+                                    vec![C::identity(); advice_commitments_projective.len()];
+                                C::Curve::batch_normalize(
+                                    &advice_commitments_projective,
+                                    &mut advice_commitments,
+                                );
+                                advice_commitments
+                            },
+                            || {
+                                domain
+                                    .batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles)
+                            },
+                        );
 
-            (
-                advice_commitments,
-                AdviceSingle::<C> {
-                    advice_values: advice,
-                    advice_polys,
-                    advice_cosets,
-                    advice_blinds,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
+                    (
+                        advice_commitments,
+                        AdviceSingle::<C> {
+                            advice_values: advice,
+                            advice_polys,
+                            advice_cosets,
+                            advice_blinds,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+        || lookup::prover::prepare_table_plan(&pk.vk.cs.lookups, unusable_rows_start),
+    );
 
     let mut advice = Vec::with_capacity(prepared_advice.len());
     for (advice_commitments, advice_single) in prepared_advice {
@@ -599,25 +608,22 @@ where
         }
     }
 
-    let prepared_lookups = lookup_tasks
-        .into_par_iter()
-        .map(|(circuit_index, lookup_index, blinding)| {
-            pk.vk.cs.lookups[lookup_index].prepare_permuted(
-                pk,
-                params,
-                domain,
-                &value_evaluator,
-                theta,
-                &advice_values[circuit_index],
-                &fixed_values,
-                &instance_values[circuit_index],
-                &advice_cosets[circuit_index],
-                &fixed_cosets,
-                &instance_cosets[circuit_index],
-                blinding,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let prepared_lookups = lookup::prover::prepare_permuted(
+        &pk.vk.cs.lookups,
+        lookup_table_plan,
+        lookup_tasks,
+        pk,
+        params,
+        domain,
+        &value_evaluator,
+        theta,
+        &advice_values,
+        &fixed_values,
+        &instance_values,
+        &advice_cosets,
+        &fixed_cosets,
+        &instance_cosets,
+    )?;
 
     let mut prepared_lookups = prepared_lookups.into_iter();
     let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = (0..instance_values.len())
