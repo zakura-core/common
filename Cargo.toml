@@ -29,6 +29,7 @@
 #   pasta_curves dependency that drags in the Sapling-side crates).
 # - zcash_primitives, zcash_keys: the librustzcash members Zakura consumes
 #   that depend on the crates above.
+# - zcash_history: the independent librustzcash history-tree fork Zakura consumes.
 
 [workspace]
 resolver = "2"
@@ -47,6 +48,7 @@ members = [
     "crates/redjubjub",
     "crates/sapling-crypto",
     "crates/sinsemilla",
+    "crates/zcash_history",
     "crates/zcash_keys",
     "crates/zcash_primitives",
     "crates/zcash_proofs",
@@ -87,6 +89,7 @@ reddsa = { package = "zakura-reddsa", version = "1.0.1", path = "crates/reddsa",
 redjubjub = { package = "zakura-redjubjub", version = "1.0.1", path = "crates/redjubjub", default-features = false }
 sapling = { package = "zakura-sapling-crypto", version = "1.0.1", path = "crates/sapling-crypto", default-features = false }
 sinsemilla = { package = "zakura-sinsemilla", version = "1.0.1", path = "crates/sinsemilla", default-features = false }
+zcash_history = { package = "zakura-history", version = "1.0.0", path = "crates/zcash_history", default-features = false }
 zcash_keys = { package = "zakura-keys", version = "1.0.1", path = "crates/zcash_keys", default-features = false }
 zcash_primitives = { package = "zakura-primitives", version = "1.0.1", path = "crates/zcash_primitives", default-features = false }
 zcash_proofs = { package = "zakura-proofs", version = "1.0.1", path = "crates/zcash_proofs", default-features = false }

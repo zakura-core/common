@@ -118,6 +118,7 @@ jobs:
             crates/redjubjub
             crates/sapling-crypto
             crates/sinsemilla
+            crates/zcash_history
             crates/zcash_keys
             crates/zcash_primitives
             crates/zcash_proofs
@@ -167,7 +168,7 @@ jobs:
               crates/sinsemilla/*)
                 sinsemilla=true
                 ;;
-              crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_proofs/*)
+              crates/zcash_history/*|crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_proofs/*)
                 librustzcash=true
                 ;;
               Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|.github/scripts/check_rust_group.sh|.github/scripts/workspace_packages.py|.github/workflows/ci.yml|.github/workflows/maintenance.yml)
@@ -311,7 +312,7 @@ jobs:
         if: ${{ !cancelled() && needs.changes.outputs.librustzcash == 'true' }}
         run: >-
           bash .github/scripts/check_rust_group.sh
-          "zakura-keys zakura-primitives zakura-proofs" true false
+          "zakura-history zakura-keys zakura-primitives zakura-proofs" true false
 
   formatting:
     name: Formatting
@@ -1023,11 +1024,16 @@ jobs:
       - name: Run tests
         run: >-
           cargo +1.91.0 test
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-proofs
           --all-features
           -- --test-threads=2
+      - name: Test NuTachyon history nodes
+        env:
+          RUSTFLAGS: '--cfg zcash_unstable="nutachyon"'
+        run: cargo +1.91.0 test -p zakura-history --all-features
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -1047,6 +1053,7 @@ jobs:
       - name: Check no-default-features
         run: >-
           cargo +1.91.0 check
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-proofs
@@ -1056,6 +1063,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-proofs
@@ -1066,6 +1074,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-proofs
@@ -1076,6 +1085,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-proofs
@@ -1086,6 +1096,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-proofs
@@ -1096,6 +1107,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-proofs
@@ -1105,7 +1117,7 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          for package in zakura-keys zakura-primitives zakura-proofs; do
+          for package in zakura-history zakura-keys zakura-primitives zakura-proofs; do
             cargo +1.91.0 metadata --no-deps --format-version 1 |
               jq -r --arg package "$package" \
                 '.packages[] | select(.name == $package) | .features | keys[]' |
@@ -1127,6 +1139,7 @@ jobs:
         continue-on-error: true
         run: >-
           cargo +beta clippy
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-proofs
@@ -1149,7 +1162,7 @@ jobs:
             packages: -p zakura-proofs
             build-deps: gcc-multilib
           - target: thumbv7em-none-eabihf
-            packages: -p zakura-keys -p zakura-primitives
+            packages: -p zakura-history -p zakura-keys -p zakura-primitives
             build-deps: gcc-arm-none-eabi
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
