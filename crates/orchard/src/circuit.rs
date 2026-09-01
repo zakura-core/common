@@ -1175,15 +1175,17 @@ impl ProvingKey {
     /// [`halo2_proofs::poly::commitment::Params::prepare_commitments`]).
     /// Long-lived provers (wallet backends, proving services) should call
     /// this once after constructing the key: the prover's polynomial
-    /// commitments then evaluate through the preparations on pools of at
-    /// most eight effective threads, extended to ten on AArch64 macOS for
-    /// Orchard's `k = 11` SRS (measured end to end on Apple M4). Wider pools
-    /// retain their usual multiexp. One-shot provers need not prepare. With
-    /// the default multicore, no-orbits build at `k = 11`, the three large
-    /// tables account for about 25.3 MiB and took about 36 ms to build on the
-    /// benchmarked M4, amortized across proofs. With `orbits`, the two large
-    /// tables account for about 24.8 MiB and took about 34 ms. Key generation
-    /// separately caches about 224 KiB for public-instance commitments.
+    /// commitments and both multiexponentiations in the first IPA round then
+    /// evaluate through the preparations on pools of at most eight effective
+    /// threads, extended to ten on AArch64 macOS for Orchard's `k = 11` SRS
+    /// (measured end to end on Apple M4). Later IPA rounds use
+    /// transcript-dependent folded bases and retain their usual multiexp.
+    /// One-shot provers need not prepare. With the default multicore,
+    /// no-orbits build at `k = 11`, the three large tables account for about
+    /// 25.3 MiB and took about 36 ms to build on the benchmarked M4, amortized
+    /// across proofs. With `orbits`, the two large tables account for about
+    /// 24.8 MiB and took about 34 ms. Key generation separately caches about
+    /// 224 KiB for public-instance commitments.
     ///
     /// Call this once before entering concurrent Rayon proving work.
     /// Concurrent callers outside that pool safely wait for and share the same

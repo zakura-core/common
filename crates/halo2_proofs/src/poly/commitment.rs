@@ -900,6 +900,10 @@ impl<C: CurveAffine> Params<C> {
     /// commitment terms ride along as the check's extra terms. On the
     /// Pasta curves this measured the verifier's final check ~1.5–2.4x
     /// faster; other curves without a prepared backend make this a no-op.
+    /// With `orbits`, the same `[g..., w, u]` table also serves
+    /// coefficient-basis calls to [`Self::commit`] and both
+    /// multiexponentiations in the first IPA prover round. Call
+    /// [`Self::prepare_commitments`] to prepare the Lagrange basis as well.
     ///
     /// The routing is thread-aware: on pools wider than eight effective
     /// threads, the unprepared planner out-scales the prepared evaluation
@@ -909,25 +913,25 @@ impl<C: CurveAffine> Params<C> {
     /// verifications that run on narrower pools.
     ///
     /// Preparation costs hundreds of milliseconds and tens of mebibytes
-    /// at typical `k`, amortized across every subsequent verification
-    /// with these params (batch verification folds many proofs into a
-    /// single final check, so it also pays just one). The cache is shared
-    /// with all clones of these params. Concurrent and repeat calls share
-    /// the same initialization attempt, including a backend decline. The
-    /// cache is never serialized, so call this again after [`Params::read`].
-    /// Call this once before entering concurrent Rayon work that uses these
-    /// params. Concurrent callers outside that pool safely wait for and share
-    /// the same attempt; fanning a cold call out across the worker pool can
-    /// occupy its other workers and serialize the initializer's parallel work.
+    /// at typical `k`, amortized across every subsequent use with these
+    /// params (batch verification folds many proofs into a single final
+    /// check, so it also pays just one). The cache is shared with all clones
+    /// of these params. Concurrent and repeat calls share the same
+    /// initialization attempt, including a backend decline. The cache is
+    /// never serialized, so call this again after [`Params::read`]. Call this
+    /// once before entering concurrent Rayon work that uses these params.
+    /// Concurrent callers outside that pool safely wait for and share the same
+    /// attempt; fanning a cold call out across the worker pool can occupy its
+    /// other workers and serialize the initializer's parallel work.
     ///
     /// Returns whether a prepared check was actually built and cached.
     /// `false` means arming was a no-op — the curve has no prepared
     /// backend, the backend declined (its prepared table for this SRS would
     /// exceed its internal footprint budget; on Pasta this begins at
     /// `k = 13`), or the `orbits` feature (disabled by default) is off — and
-    /// verification simply keeps evaluating the plain multiexp. Callers may
-    /// ignore the result; long-lived validators that expect the speedup can
-    /// assert or log it.
+    /// verification and the affected prover operations simply keep evaluating
+    /// plain multiexps. Callers may ignore the result; long-lived validators
+    /// that expect the speedup can assert or log it.
     pub fn prepare_zero_checks(&self) -> bool {
         #[cfg(feature = "orbits")]
         {
@@ -1038,14 +1042,16 @@ impl<C: CurveAffine> Params<C> {
     /// the `batch` feature is enabled, this also ensures that the small
     /// public-instance table normally built by proving-key generation is
     /// present. This evaluates each blind without a one-term MSM while keeping
-    /// the polynomial slice borrowed.
+    /// the polynomial slice borrowed. The coefficient table also evaluates
+    /// both multiexponentiations in the first IPA prover round; later rounds
+    /// use transcript-dependent folded bases and retain the planned multiexp.
     ///
-    /// Both commit methods use the tables on pools of at most eight effective
-    /// threads. Orchard-sized (`k = 11`) tables on AArch64 macOS extend that
-    /// bound to ten, where end-to-end proving stays ahead on the benchmarked
-    /// M4 system. Wider pools and unmeasured SRS shapes keep the planned
-    /// multiexp. Measurements covered full-width and witness-like (boolean,
-    /// byte, zero-padded) coefficient distributions.
+    /// Both commit methods and the first IPA round use the tables on pools of
+    /// at most eight effective threads. Orchard-sized (`k = 11`) tables on
+    /// AArch64 macOS extend that bound to ten, where end-to-end proving stays
+    /// ahead on the benchmarked M4 system. Wider pools and unmeasured SRS
+    /// shapes keep the planned multiexp. Measurements covered full-width and
+    /// witness-like (boolean, byte, zero-padded) coefficient distributions.
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// fixed-window table adds approximately 0.5 MiB for a 32-byte scalar
