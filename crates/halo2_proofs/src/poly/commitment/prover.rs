@@ -81,54 +81,48 @@ fn ipa_round_multiexp<C: CurveAffine>(
     best_multiexp(&round_coeffs, &round_bases)
 }
 
-fn compute_ipa_inner_products_deferred<F: Field + 'static, T: DeferredField + 'static>(
-    a: &dyn Any,
-    b: &dyn Any,
+fn compute_ipa_hi_evaluation_deferred<F: Field + 'static, T: DeferredField + 'static>(
+    polynomial: &dyn Any,
+    powers: &dyn Any,
     half: usize,
-) -> (F, F) {
-    let a = a
+) -> F {
+    let polynomial = polynomial
         .downcast_ref::<Vec<T>>()
-        .expect("the inner-product field was checked before conversion");
-    let b = b
+        .expect("the polynomial field was checked before conversion");
+    let powers = powers
         .downcast_ref::<Vec<T>>()
-        .expect("the inner-product field was checked before conversion");
-    assert_eq!(a.len(), b.len());
-    assert_eq!(a.len(), half * 2);
-    let result = crate::multicore::join(
-        || T::inner_product(&a[half..], &b[..half]),
-        || T::inner_product(&a[..half], &b[half..]),
-    );
+        .expect("the power-vector field was checked before conversion");
+    assert_eq!(polynomial.len(), half * 2);
+    assert!(powers.len() >= half);
+    let result = T::inner_product(&polynomial[half..], &powers[..half]);
     *(&result as &dyn Any)
-        .downcast_ref::<(F, F)>()
-        .expect("the inner-product output matches its input field")
+        .downcast_ref::<F>()
+        .expect("the evaluation field matches the polynomial field")
 }
 
-fn compute_ipa_inner_products_pasta<F: Field + 'static>(
-    a: &dyn Any,
-    b: &dyn Any,
+fn compute_ipa_hi_evaluation_pasta<F: Field + 'static>(
+    polynomial: &dyn Any,
+    powers: &dyn Any,
     half: usize,
-) -> (F, F) {
+) -> F {
     if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
-        return compute_ipa_inner_products_deferred::<F, pallas::Base>(a, b, half);
+        return compute_ipa_hi_evaluation_deferred::<F, pallas::Base>(polynomial, powers, half);
     }
     if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
-        return compute_ipa_inner_products_deferred::<F, vesta::Base>(a, b, half);
+        return compute_ipa_hi_evaluation_deferred::<F, vesta::Base>(polynomial, powers, half);
     }
 
     // Downcasting the complete owned buffers is safe and avoids per-element
     // type checks in the specialized path.
-    let a = a
+    let polynomial = polynomial
         .downcast_ref::<Vec<F>>()
-        .expect("the inner-product input has the expected field");
-    let b = b
+        .expect("the polynomial has the expected field");
+    let powers = powers
         .downcast_ref::<Vec<F>>()
-        .expect("the inner-product input has the expected field");
-    assert_eq!(a.len(), b.len());
-    assert_eq!(a.len(), half * 2);
-    crate::multicore::join(
-        || compute_inner_product(&a[half..], &b[..half]),
-        || compute_inner_product(&a[..half], &b[half..]),
-    )
+        .expect("the power vector has the expected field");
+    assert_eq!(polynomial.len(), half * 2);
+    assert!(powers.len() >= half);
+    compute_inner_product(&polynomial[half..], &powers[..half])
 }
 
 /// Create a polynomial commitment opening proof for the polynomial defined
@@ -216,9 +210,14 @@ pub(in crate::poly) fn create_proof_with_powers<
     let mut p_prime = p_prime_poly.values;
     assert_eq!(p_prime.len(), params.n as usize);
 
-    // The inner product of `p_prime` and `b` is the evaluation of the
-    // polynomial at `x_3`.
-    let mut b = powers;
+    // At every round, b[i] = b_scale * x_3^i. Keeping that invariant in
+    // scalar form avoids materializing and folding the power vector.
+    let mut b_scale = C::Scalar::ONE;
+
+    // Subtracting `v` above made the evaluation of `p_prime` at `x_3` zero.
+    // Tracking the evaluation through each fold lets one half-evaluation
+    // determine both IPA inner products.
+    let mut p_prime_at_x_3 = C::Scalar::ZERO;
 
     // Initialize the vector `G'` from the URS. We'll be progressively collapsing
     // this vector into smaller and smaller vectors until it is of length 1.
@@ -226,11 +225,18 @@ pub(in crate::poly) fn create_proof_with_powers<
 
     // Perform the inner product argument, round by round.
     for j in 0..params.k {
-        let half = 1 << (params.k - j - 1); // half the length of `p_prime`, `b`, `G'`
+        // Half the length of `p_prime`, `b`, and `G'`.
+        let half = 1 << (params.k - j - 1);
 
-        // Compute the scalar terms needed by L and R before their MSMs.
-        let (value_l_j, value_r_j) =
-            compute_ipa_inner_products_pasta::<C::Scalar>(&p_prime, &b, half);
+        // If P(X) = P_lo(X) + X^half P_hi(X), its tracked evaluation and
+        // P_hi(x_3) determine P_lo(x_3). This computes both IPA inner products
+        // from one half-sized inner product against the original powers.
+        let x_3_to_half = powers[half];
+        let p_hi_at_x_3 = compute_ipa_hi_evaluation_pasta::<C::Scalar>(&p_prime, &powers, half);
+        let p_lo_at_x_3 = p_prime_at_x_3 - x_3_to_half * p_hi_at_x_3;
+        let b_hi_scale = b_scale * x_3_to_half;
+        let value_l_j = b_scale * p_hi_at_x_3;
+        let value_r_j = b_hi_scale * p_lo_at_x_3;
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
 
@@ -268,15 +274,17 @@ pub(in crate::poly) fn create_proof_with_powers<
         let u_j = *transcript.squeeze_challenge_scalar::<()>();
         let u_j_inv = u_j.invert().unwrap(); // TODO, bubble this up
 
-        // Collapse `p_prime` and `b`.
+        // Collapse `p_prime`.
         // TODO: parallelize
         #[allow(clippy::assign_op_pattern)]
         for i in 0..half {
             p_prime[i] = p_prime[i] + &(p_prime[i + half] * &u_j_inv);
-            b[i] = b[i] + &(b[i + half] * &u_j);
         }
         p_prime.truncate(half);
-        b.truncate(half);
+        if j + 1 < params.k {
+            p_prime_at_x_3 = p_lo_at_x_3 + u_j_inv * p_hi_at_x_3;
+            b_scale += b_hi_scale * u_j;
+        }
 
         // Collapse `G'`
         parallel_generator_collapse(&mut g_prime, u_j);
@@ -328,15 +336,16 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 #[cfg(test)]
 mod tests {
     use super::{
-        Params, compute_ipa_inner_products_pasta, ipa_masking_commitment, ipa_round_multiexp,
+        Params, compute_ipa_hi_evaluation_pasta, ipa_masking_commitment, ipa_round_multiexp,
         parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
-    use crate::poly::{EvaluationDomain, commitment::Blind};
+    use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
     use rand::rng;
+    use std::fmt::Debug;
 
     fn full_width_scalar<C: CurveAffine>() -> C::Scalar {
         (C::Scalar::from(0x9E37_79B9_7F4A_7C15u64).square()
@@ -526,24 +535,84 @@ mod tests {
         }
     }
 
-    fn deferred_inner_product_matches_eager<F: Field + From<u64> + 'static>() {
-        for half in [0, 1, 2, 3, 31, 32, 2_048] {
-            let a = (0..half * 2)
+    fn deferred_hi_evaluation_matches_eager<F: Field + From<u64> + 'static>() {
+        for half in [1, 2, 3, 31, 32, 2_048] {
+            let polynomial = (0..half * 2)
                 .scan(F::from(7), |value, index| {
                     *value = value.square() + F::from(index as u64 + 1);
                     Some(*value)
                 })
                 .collect::<Vec<_>>();
-            let b = (0..half * 2)
+            let powers = (0..half * 2)
                 .scan(F::from(11), |value, index| {
                     *value = value.square() + F::from(index as u64 + 3);
                     Some(*value)
                 })
                 .collect::<Vec<_>>();
 
-            let (left, right) = compute_ipa_inner_products_pasta::<F>(&a, &b, half);
-            assert_eq!(left, compute_inner_product(&a[half..], &b[..half]));
-            assert_eq!(right, compute_inner_product(&a[..half], &b[half..]));
+            assert_eq!(
+                compute_ipa_hi_evaluation_pasta::<F>(&polynomial, &powers, half),
+                compute_inner_product(&polynomial[half..], &powers[..half]),
+            );
+        }
+    }
+
+    fn compact_b_state_matches_explicit_folds<F>()
+    where
+        F: Field + From<u64> + Debug + 'static,
+    {
+        for k in [1, 2, 3, 6, 11] {
+            let length = 1 << k;
+            for point in [F::ZERO, F::ONE, -F::ONE, F::from(19)] {
+                let powers = power_vector(point, length);
+                let mut polynomial = (0..length)
+                    .map(|index| F::from((index * 17 + 3) as u64))
+                    .collect::<Vec<_>>();
+                let evaluation = eval_polynomial(&polynomial, point);
+                polynomial[0] -= evaluation;
+
+                let mut b = powers.clone();
+                let mut polynomial_at_point = F::ZERO;
+                let mut b_scale = F::ONE;
+
+                for round in 0..k {
+                    let half = 1 << (k - round - 1);
+                    let expected_l = compute_inner_product(&polynomial[half..], &b[..half]);
+                    let expected_r = compute_inner_product(&polynomial[..half], &b[half..]);
+
+                    let point_to_half = powers[half];
+                    let p_hi_at_point =
+                        compute_ipa_hi_evaluation_pasta::<F>(&polynomial, &powers, half);
+                    let p_lo_at_point = polynomial_at_point - point_to_half * p_hi_at_point;
+                    let b_hi_scale = b_scale * point_to_half;
+
+                    assert_eq!(b_scale * p_hi_at_point, expected_l);
+                    assert_eq!(b_hi_scale * p_lo_at_point, expected_r);
+
+                    let challenge = if round == 0 {
+                        -F::ONE
+                    } else {
+                        F::from((round + 2) as u64)
+                    };
+                    let challenge_inverse = challenge.invert().unwrap();
+                    for index in 0..half {
+                        let p_hi = polynomial[index + half];
+                        let b_hi = b[index + half];
+                        polynomial[index] += p_hi * challenge_inverse;
+                        b[index] += b_hi * challenge;
+                    }
+                    polynomial.truncate(half);
+                    b.truncate(half);
+
+                    polynomial_at_point = p_lo_at_point + challenge_inverse * p_hi_at_point;
+                    b_scale += b_hi_scale * challenge;
+                    assert_eq!(polynomial_at_point, eval_polynomial(&polynomial, point));
+
+                    for (index, value) in b.iter().enumerate() {
+                        assert_eq!(*value, b_scale * powers[index]);
+                    }
+                }
+            }
         }
     }
 
@@ -587,12 +656,22 @@ mod tests {
     }
 
     #[test]
-    fn deferred_inner_product_matches_eager_pallas_base() {
-        deferred_inner_product_matches_eager::<pallas::Base>();
+    fn deferred_hi_evaluation_matches_eager_pallas_base() {
+        deferred_hi_evaluation_matches_eager::<pallas::Base>();
     }
 
     #[test]
-    fn deferred_inner_product_matches_eager_vesta_base() {
-        deferred_inner_product_matches_eager::<vesta::Base>();
+    fn deferred_hi_evaluation_matches_eager_vesta_base() {
+        deferred_hi_evaluation_matches_eager::<vesta::Base>();
+    }
+
+    #[test]
+    fn compact_b_state_matches_explicit_folds_pallas_base() {
+        compact_b_state_matches_explicit_folds::<pallas::Base>();
+    }
+
+    #[test]
+    fn compact_b_state_matches_explicit_folds_vesta_base() {
+        compact_b_state_matches_explicit_folds::<vesta::Base>();
     }
 }
