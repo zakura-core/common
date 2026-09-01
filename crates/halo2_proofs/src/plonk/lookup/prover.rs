@@ -118,23 +118,25 @@ struct TableState<C: CurveAffine, Ev> {
 }
 
 const PASTA_REPR_BYTES: usize = 32;
+const PASTA_LIMB_BYTES: usize = std::mem::size_of::<u64>();
+const PASTA_REPR_LIMBS: usize = PASTA_REPR_BYTES / PASTA_LIMB_BYTES;
 
 #[derive(Clone, Copy)]
 struct PastaSortKey {
-    repr: [u8; PASTA_REPR_BYTES],
+    limbs: [u64; PASTA_REPR_LIMBS],
     source: usize,
 }
 
 impl PastaSortKey {
     const EMPTY: Self = Self {
-        repr: [0; PASTA_REPR_BYTES],
+        limbs: [0; PASTA_REPR_LIMBS],
         source: 0,
     };
 }
 
 impl PartialEq for PastaSortKey {
     fn eq(&self, other: &Self) -> bool {
-        self.repr == other.repr
+        self.limbs == other.limbs
     }
 }
 
@@ -148,8 +150,14 @@ impl PartialOrd for PastaSortKey {
 
 impl Ord for PastaSortKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.repr.iter().rev().cmp(other.repr.iter().rev())
+        self.limbs.iter().rev().cmp(other.limbs.iter().rev())
     }
+}
+
+fn pasta_sort_limbs(repr: [u8; PASTA_REPR_BYTES]) -> [u64; PASTA_REPR_LIMBS] {
+    let (limbs, remainder) = repr.as_chunks::<PASTA_LIMB_BYTES>();
+    assert!(remainder.is_empty());
+    std::array::from_fn(|index| u64::from_le_bytes(limbs[index]))
 }
 
 fn uses_pasta_sort_keys<F: Field>() -> bool {
@@ -171,7 +179,7 @@ fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
     assert_eq!(values.len(), scratch.len());
     for (source, (value, entry)) in values.iter().zip(scratch.iter_mut()).enumerate() {
         *entry = PastaSortKey {
-            repr: value.to_repr(),
+            limbs: pasta_sort_limbs(value.to_repr()),
             source,
         };
     }
