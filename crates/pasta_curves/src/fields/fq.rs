@@ -306,6 +306,14 @@ impl Fq {
         Fq::mul(&d0, &R2).add(&Fq::mul(&d1, &R3))
     }
 
+    /// Variable-time equality on the canonical Montgomery limbs. Only for
+    /// paths that are already variable-time (e.g. the vartime multiexp).
+    #[cfg(feature = "glv")]
+    #[inline(always)]
+    pub(crate) fn eq_vartime(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
     /// Converts from an integer represented in little endian
     /// into its (congruent) `Fq` representation.
     pub const fn from_raw(val: [u64; 4]) -> Self {
@@ -675,6 +683,11 @@ impl ff::Field for Fq {
     #[inline(always)]
     fn square(&self) -> Self {
         self.square_runtime()
+    }
+
+    #[inline(always)]
+    fn is_zero_vartime(&self) -> bool {
+        self.0 == [0, 0, 0, 0]
     }
 
     fn sqrt_ratio(num: &Self, div: &Self) -> (Choice, Self) {

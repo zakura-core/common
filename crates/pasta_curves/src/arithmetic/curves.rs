@@ -109,6 +109,42 @@ pub trait CurveExt:
         }
     }
 
+    /// Point addition that may run in variable time with respect to both
+    /// inputs, branching on the identity and exceptional cases instead of
+    /// using constant-time selects. **Both points must be public.** The
+    /// default implementation falls back to the constant-time addition.
+    fn add_vartime(&self, rhs: &Self) -> Self {
+        *self + *rhs
+    }
+
+    /// Mixed point addition that may run in variable time with respect to
+    /// both inputs. **Both points must be public.** The default
+    /// implementation falls back to the constant-time addition.
+    fn add_mixed_vartime(&self, rhs: &Self::AffineExt) -> Self {
+        *self + *rhs
+    }
+
+    /// Batch Jacobian-to-affine conversion that may run in variable time
+    /// with respect to the points (identities are branched on instead of
+    /// handled with constant-time selects). **All points must be public.**
+    /// The default implementation falls back to the constant-time
+    /// [`group::Curve::batch_normalize`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `p` and `q` have different lengths.
+    fn batch_normalize_vartime(p: &[Self], q: &mut [Self::AffineExt]) {
+        Self::batch_normalize(p, q);
+    }
+
+    /// Point doubling that may run in variable time with respect to the
+    /// input (the identity is not re-canonicalized with a constant-time
+    /// select). **The point must be public.** The default implementation
+    /// falls back to the constant-time doubling.
+    fn double_vartime(&self) -> Self {
+        self.double()
+    }
+
     /// Attempts an optimized variable-time multiscalar multiplication.
     ///
     /// Implementations own the backend and tuning decisions. Implementations

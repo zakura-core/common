@@ -1222,12 +1222,13 @@ fn strauss_multiexp<C: GlvParams>(scalars: &[C::ScalarExt], bases: &[C::AffineEx
     let mut acc = C::identity();
     for column in (0..columns).rev() {
         if column + 1 < columns {
-            acc = acc.double();
+            acc = crate::arithmetic::CurveExt::double_vartime(&acc);
         }
         for (scalar, table) in decomposed.iter().zip(&tables) {
             let code = scalar.digits[column];
             if code != 0 {
-                acc += table.digit_point(code);
+                acc =
+                    crate::arithmetic::CurveExt::add_mixed_vartime(&acc, &table.digit_point(code));
             }
         }
     }
@@ -1675,11 +1676,12 @@ fn reduce_affine_buckets_inner<F: Field, const COMPLETE: bool>(
                 let left = pair[0];
                 let right = pair[1];
 
-                let (numerator, denominator) = if COMPLETE && left.x == right.x {
+                let dx = right.x - left.x;
+                let (numerator, denominator) = if COMPLETE && dx.is_zero_vartime() {
                     // Valid curve points with the same x-coordinate have the
                     // same or opposite y-coordinate. Handle both branches
                     // before asking the batch inverter to divide.
-                    if left.y != right.y || bool::from(left.y.is_zero()) {
+                    if !(right.y - left.y).is_zero_vartime() || left.y.is_zero_vartime() {
                         // The points are inverses, or this is a point of order
                         // two. Their sum is the identity, which is omitted.
                         continue;
@@ -1687,7 +1689,7 @@ fn reduce_affine_buckets_inner<F: Field, const COMPLETE: bool>(
                     let x_squared = left.x.square();
                     (x_squared.double() + x_squared, left.y.double())
                 } else {
-                    (right.y - left.y, right.x - left.x)
+                    (right.y - left.y, dx)
                 };
 
                 let output = next_points.len();
@@ -1746,9 +1748,12 @@ fn sum_buckets<C: GlvParams>(buckets: &[Option<AffinePoint<C::Base>>]) -> C {
     let mut sum = C::identity();
     for bucket in buckets.iter().rev() {
         if let Some(point) = bucket {
-            running += C::affine_unchecked(point.x, point.y, private::CrateToken(()));
+            running = crate::arithmetic::CurveExt::add_mixed_vartime(
+                &running,
+                &C::affine_unchecked(point.x, point.y, private::CrateToken(())),
+            );
         }
-        sum += running;
+        sum = crate::arithmetic::CurveExt::add_vartime(&sum, &running);
     }
     sum
 }
@@ -1811,12 +1816,12 @@ fn multiexp_serial<C: GlvParams>(
     for window in (0..window_count).rev() {
         if window + 1 != window_count {
             for _ in 0..window_bits {
-                acc = acc.double();
+                acc = crate::arithmetic::CurveExt::double_vartime(&acc);
             }
         }
 
         let buckets = fill_window::<C>(components, bases, window_bits, window)?;
-        acc += sum_buckets::<C>(&buckets);
+        acc = crate::arithmetic::CurveExt::add_vartime(&acc, &sum_buckets::<C>(&buckets));
     }
     Some(acc)
 }
@@ -1851,13 +1856,13 @@ fn paired_windows_sum<C: GlvParams>(
                 let mut low = low?;
                 let mut high = high?;
                 for _ in 0..window_bits {
-                    high = high.double();
+                    high = crate::arithmetic::CurveExt::double_vartime(&high);
                 }
                 low += high;
                 low
             };
             for _ in 0..window_bits * start {
-                sum = sum.double();
+                sum = crate::arithmetic::CurveExt::double_vartime(&sum);
             }
             Some(sum)
         })
@@ -1882,10 +1887,10 @@ fn parallel_windows_sum<C: GlvParams>(
     for (window, sum) in window_sums.into_iter().enumerate().rev() {
         if window + 1 != windows {
             for _ in 0..window_bits {
-                acc = acc.double();
+                acc = crate::arithmetic::CurveExt::double_vartime(&acc);
             }
         }
-        acc += sum;
+        acc = crate::arithmetic::CurveExt::add_vartime(&acc, &sum);
     }
     Some(acc)
 }
@@ -2146,10 +2151,10 @@ impl<C: GlvParams> Table<C> {
             // `acc` is still the identity on the first iteration; skip the
             // wasted doubling.
             if i + 1 < k.len {
-                acc = acc.double();
+                acc = crate::arithmetic::CurveExt::double_vartime(&acc);
             }
             if code != 0 {
-                acc += self.digit_point(code);
+                acc = crate::arithmetic::CurveExt::add_mixed_vartime(&acc, &self.digit_point(code));
             }
         }
         acc
