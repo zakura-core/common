@@ -139,6 +139,12 @@ const EXTRAS_PLANNED_MIN: usize = super::MIN_GLV_MULTIEXP_TERMS;
 /// 24.8 MiB in total, plus small metadata and allocator overhead.
 const DEFAULT_TABLE_FOOTPRINT_BUDGET: usize = 13 << 20;
 
+#[derive(Clone, Copy)]
+enum MainWindowFold {
+    Paired,
+    Horner,
+}
+
 /// A prepared fixed-base zero-check: reusable tables for testing
 /// $\sum_i \[k_i\] P_i \stackrel{?}{=} \mathcal{O}$ against the bases given
 /// at preparation, with per-check extra terms for the non-fixed remainder
@@ -317,7 +323,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> bool {
         bool::from(
-            self.multiexp_with_terms_vartime(scalars, extra)
+            self.multiexp_with_scalar_slices_using(scalars, &[], extra, MainWindowFold::Paired)
                 .is_identity(),
         )
     }
@@ -353,6 +359,16 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         suffix: &[C::ScalarExt],
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> C {
+        self.multiexp_with_scalar_slices_using(prefix, suffix, extra, MainWindowFold::Horner)
+    }
+
+    fn multiexp_with_scalar_slices_using(
+        &self,
+        prefix: &[C::ScalarExt],
+        suffix: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+        main_window_fold: MainWindowFold,
+    ) -> C {
         let terms = prefix
             .len()
             .checked_add(suffix.len())
@@ -360,10 +376,15 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         assert_eq!(terms, self.live.len(), "one scalar per prepared base");
 
         if let Some(folded) = self.fold_scalar_slices(prefix, suffix) {
-            return self.multiexp_with_scalar_at(terms, |index| &folded[index], extra);
+            return self.multiexp_with_scalar_at(
+                terms,
+                |index| &folded[index],
+                extra,
+                main_window_fold,
+            );
         }
         if suffix.is_empty() {
-            self.multiexp_with_scalar_at(terms, |index| &prefix[index], extra)
+            self.multiexp_with_scalar_at(terms, |index| &prefix[index], extra, main_window_fold)
         } else {
             // `try_recode_with` requests only indices in `0..terms`. The
             // combined-length assertion above therefore makes every index
@@ -378,6 +399,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                     }
                 },
                 extra,
+                main_window_fold,
             )
         }
     }
@@ -411,6 +433,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         terms: usize,
         scalar_at: impl Fn(usize) -> &'a C::ScalarExt + Sync,
         extra: &[(C::ScalarExt, C::AffineExt)],
+        main_window_fold: MainWindowFold,
     ) -> C {
         let num_threads = current_num_threads();
 
@@ -443,7 +466,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             })
             .copied()
             .collect();
-        match self.evaluate(&recoded, &extras, num_threads) {
+        match self.evaluate(&recoded, &extras, num_threads, main_window_fold) {
             Some(sum) => sum,
             // Unreachable for valid curve points (the batched-affine
             // reduction's inversions cannot actually hit zero), but never
@@ -519,28 +542,33 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         recoded: &Recoded,
         extras: &[(C::ScalarExt, C::AffineExt)],
         num_threads: usize,
+        main_window_fold: MainWindowFold,
     ) -> Option<C> {
         let window_bits = self.codebook.window_bits();
         let main_windows = self.codebook.main_windows();
         let active = recoded.active_windows;
 
         #[cfg(not(feature = "multicore"))]
-        let _ = num_threads;
+        let _ = (num_threads, main_window_fold);
         #[cfg(feature = "multicore")]
         if num_threads > 1 {
-            // The main windows run through the shared paired-window
-            // schedule ([`super::paired_windows_sum`]). The residual tail
-            // and the extras MSM run concurrently with them: with many
-            // extra terms (batch verification accumulates thousands of
-            // per-proof commitments) the extras are a substantial MSM of
-            // their own, and running the phases back to back would add
-            // their latency instead of overlapping it.
+            // Point-returning MSMs reduce the main windows independently
+            // and combine them with one Horner fold. Zero checks retain the
+            // paired schedule tuned for an isolated MSM. The residual tail
+            // and extras MSM run concurrently with the main windows.
             let main = || {
                 maybe_rayon::join(
-                    || {
-                        super::paired_windows_sum::<C>(active, window_bits, |window| {
-                            self.window_sum(recoded, window)
-                        })
+                    || match main_window_fold {
+                        MainWindowFold::Paired => {
+                            super::paired_windows_sum::<C>(active, window_bits, |window| {
+                                self.window_sum(recoded, window)
+                            })
+                        }
+                        MainWindowFold::Horner => {
+                            super::parallel_windows_sum::<C>(active, window_bits, |window| {
+                                self.window_sum(recoded, window)
+                            })
+                        }
                     },
                     || self.tail_sum(&recoded.residuals, num_threads),
                 )
