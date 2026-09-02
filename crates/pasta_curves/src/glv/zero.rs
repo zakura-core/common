@@ -582,7 +582,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             let mut tail = tail?;
             if !bool::from(tail.is_identity()) {
                 for _ in 0..window_bits * main_windows {
-                    tail = crate::arithmetic::CurveExt::double_vartime(&tail);
+                    tail = tail.double();
                 }
             }
             return Some(windows_part + tail + extras_part?);
@@ -591,15 +591,14 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let mut acc = self.tail_sum(&recoded.residuals, num_threads)?;
         if !bool::from(acc.is_identity()) {
             for _ in 0..window_bits * (main_windows - active) {
-                acc = crate::arithmetic::CurveExt::double_vartime(&acc);
+                acc = acc.double();
             }
         }
         for window in (0..active).rev() {
             for _ in 0..window_bits {
-                acc = crate::arithmetic::CurveExt::double_vartime(&acc);
+                acc = acc.double();
             }
-            acc =
-                crate::arithmetic::CurveExt::add_vartime(&acc, &self.window_sum(recoded, window)?);
+            acc += self.window_sum(recoded, window)?;
         }
         Some(acc + self.extras_sum(extras)?)
     }
@@ -981,7 +980,7 @@ fn integrate_coefficients<C: GlvParams>(
     if additions < BATCH_INTEGRATE_MIN_ADDS {
         let mut acc = C::identity();
         for ops in program.iter().rev() {
-            acc = crate::arithmetic::CurveExt::double_vartime(&acc);
+            acc = acc.double();
             for op in ops {
                 if let Some(point) = &buckets[usize::from(op.bucket)] {
                     let x = match op.rotation {
@@ -990,10 +989,7 @@ fn integrate_coefficients<C: GlvParams>(
                         _ => -point.x - point.x * zeta,
                     };
                     let y = if op.negate { -point.y } else { point.y };
-                    acc = crate::arithmetic::CurveExt::add_mixed_vartime(
-                        &acc,
-                        &C::affine_unchecked(x, y, private::CrateToken(())),
-                    );
+                    acc += C::affine_unchecked(x, y, private::CrateToken(()));
                 }
             }
         }
@@ -1027,12 +1023,9 @@ fn integrate_coefficients<C: GlvParams>(
     let position_sums = reduce_affine_buckets(points, offsets)?;
     let mut acc = C::identity();
     for sum in position_sums.iter().rev() {
-        acc = crate::arithmetic::CurveExt::double_vartime(&acc);
+        acc = acc.double();
         if let Some(point) = sum {
-            acc = crate::arithmetic::CurveExt::add_mixed_vartime(
-                &acc,
-                &C::affine_unchecked(point.x, point.y, private::CrateToken(())),
-            );
+            acc += C::affine_unchecked(point.x, point.y, private::CrateToken(()));
         }
     }
     Some(acc)

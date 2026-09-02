@@ -306,9 +306,7 @@ impl Fq {
         Fq::mul(&d0, &R2).add(&Fq::mul(&d1, &R3))
     }
 
-    /// Variable-time equality on the canonical Montgomery limbs. Only for
-    /// paths that are already variable-time (e.g. the vartime multiexp).
-    #[cfg(feature = "glv")]
+    /// Variable-time equality on the canonical Montgomery limbs.
     #[inline(always)]
     pub(crate) fn eq_vartime(&self, other: &Self) -> bool {
         self.0 == other.0

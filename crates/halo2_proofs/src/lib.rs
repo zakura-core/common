@@ -1,4 +1,10 @@
 //! # halo2_proofs
+//!
+//! # Timing
+//!
+//! Proof creation and multiexponentiation are not constant-time with respect
+//! to witnesses, blinding factors, or other scalar inputs. Callers must not
+//! rely on this crate for secret-independent execution.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // The actual lints we want to disable.

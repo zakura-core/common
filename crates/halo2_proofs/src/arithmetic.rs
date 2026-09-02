@@ -98,16 +98,22 @@ impl<C: CurveAffine> Bucket<C> {
     fn add_assign(&mut self, other: C) {
         *self = match *self {
             Bucket::None => Bucket::Affine(other),
-            Bucket::Affine(a) => Bucket::Projective(a.to_curve().add_mixed_vartime(&other)),
-            Bucket::Projective(a) => Bucket::Projective(a.add_mixed_vartime(&other)),
+            Bucket::Affine(a) => Bucket::Projective(a + other),
+            Bucket::Projective(mut a) => {
+                a += other;
+                Bucket::Projective(a)
+            }
         }
     }
 
-    fn add(self, other: C::Curve) -> C::Curve {
+    fn add(self, mut other: C::Curve) -> C::Curve {
         match self {
             Bucket::None => other,
-            Bucket::Affine(a) => other.add_mixed_vartime(&a),
-            Bucket::Projective(a) => other.add_vartime(&a),
+            Bucket::Affine(a) => {
+                other += a;
+                other
+            }
+            Bucket::Projective(a) => other + &a,
         }
     }
 }
@@ -215,7 +221,7 @@ impl<C: CurveAffine> BoothBuckets<C> {
         let mut sum = C::Curve::identity();
         self.coeffs.iter().rev().for_each(|b| {
             sum = b.add(sum);
-            acc = acc.add_vartime(&sum);
+            acc += sum;
         });
         acc
     }
@@ -223,6 +229,12 @@ impl<C: CurveAffine> BoothBuckets<C> {
 
 /// Performs a small multi-exponentiation operation.
 /// Uses the double-and-add algorithm with doublings shared across points.
+///
+/// # Timing
+///
+/// This function is variable-time with respect to `coeffs` and intermediate
+/// curve points. Callers must explicitly accept timing leakage when the
+/// coefficients are secret.
 pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     let coeffs: Vec<_> = coeffs.iter().map(|a| a.to_repr()).collect();
     let mut acc = C::Curve::identity();
@@ -231,12 +243,12 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
     for byte_idx in (0..32).rev() {
         // for bit idx
         for bit_idx in (0..8).rev() {
-            acc = acc.double_vartime();
+            acc = acc.double();
             // for each coeff
             for coeff_idx in 0..coeffs.len() {
                 let byte = coeffs[coeff_idx].as_ref()[byte_idx];
                 if ((byte >> bit_idx) & 1) != 0 {
-                    acc = acc.add_mixed_vartime(&bases[coeff_idx]);
+                    acc += bases[coeff_idx];
                 }
             }
         }
@@ -250,6 +262,12 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 /// This function will panic if coeffs and bases have a different length.
 ///
 /// This will use multithreading if beneficial.
+///
+/// # Timing
+///
+/// This function is variable-time with respect to `coeffs` and intermediate
+/// curve points. Halo proof creation uses it with witness- and
+/// blinding-derived coefficients and explicitly accepts that timing leakage.
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     assert_eq!(coeffs.len(), bases.len());
 
@@ -278,7 +296,7 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
             .rev()
             .map(|(i, buckets)| {
                 let mut acc = buckets.sum(&coeffs, bases, i);
-                (0..c * i).for_each(|_| acc = acc.double_vartime());
+                (0..c * i).for_each(|_| acc = acc.double());
                 acc
             })
             .the_best_reduce(C::Curve::identity, |a, b| a + b)
@@ -291,7 +309,7 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
             .map(|(i, buckets)| buckets.sum(&coeffs, bases, i))
             .fold(C::Curve::identity(), |mut sum, bucket| {
                 // restore original evaluation point
-                (0..c).for_each(|_| sum = sum.double_vartime());
+                (0..c).for_each(|_| sum = sum.double());
                 sum + bucket
             })
     }
