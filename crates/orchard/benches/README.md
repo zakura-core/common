@@ -179,7 +179,7 @@ at several proof-batch and worker counts:
 
 ```console
 cargo +1.97.1 test --locked --release -p zakura-orchard \
-    --test ironwood_batch_timings -- --ignored --nocapture
+    --features circuit --test ironwood_batch_timings -- --ignored --nocapture
 ```
 
 Set `IRONWOOD_ARM=1` to prepare the verifying key before validation. Fixture

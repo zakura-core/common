@@ -190,7 +190,7 @@ fn funding_notes(
     assert_eq!(funding_bundle.actions().len(), action_count);
 
     let ivk = payer_fvk.to_ivk(Scope::External);
-    spend_values
+    let mut funded_notes = spend_values
         .iter()
         .enumerate()
         .map(|(output_index, expected_value)| {
@@ -204,9 +204,18 @@ fn funding_notes(
             assert_eq!(note.value(), *expected_value);
             assert_eq!(decrypted_to, recipient);
             assert_eq!(memo, MEMO);
-            note
+            (action_index, note)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        funded_notes
+            .iter()
+            .map(|(action_index, _)| *action_index)
+            .collect::<BTreeSet<_>>(),
+        (0..action_count).collect(),
+    );
+    funded_notes.sort_unstable_by_key(|(action_index, _)| *action_index);
+    funded_notes.into_iter().map(|(_, note)| note).collect()
 }
 
 fn extracted_commitment(note: &Note) -> ExtractedNoteCommitment {

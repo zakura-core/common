@@ -1,4 +1,4 @@
-//! Manual benchmarks for the complete Orchard proving and verification paths.
+//! Manual benchmarks for complete Ironwood proving and verification paths.
 
 use alloc::vec::Vec;
 use ff::{Field, PrimeField};
@@ -32,7 +32,7 @@ use crate::{
     builder::{Builder, BundleType, UnauthorizedBundle},
     bundle::BundleVersion,
     keys::{FullViewingKey, Scope, SpendingKey},
-    note::{Note, Nullifier, Rho},
+    note::{ExtractedNoteCommitment, Note, Nullifier, Rho},
     tree::{MerkleHashOrchard, MerklePath},
     value::NoteValue,
 };
@@ -204,6 +204,10 @@ struct IronwoodPaymentFixture {
     instances: Vec<Instance>,
 }
 
+fn extracted_commitment(note: &Note) -> ExtractedNoteCommitment {
+    ExtractedNoteCommitment::from(note.commitment())
+}
+
 /// Builds authentication paths for notes placed consecutively in one tree.
 fn ironwood_spend_witnesses(notes: Vec<Note>) -> (crate::Anchor, Vec<(Note, MerklePath)>) {
     assert!(
@@ -212,7 +216,7 @@ fn ironwood_spend_witnesses(notes: Vec<Note>) -> (crate::Anchor, Vec<(Note, Merk
     );
     let leaves = notes
         .iter()
-        .map(|note| MerkleHashOrchard::from_cmx(&note.commitment().into()))
+        .map(|note| MerkleHashOrchard::from_cmx(&extracted_commitment(note)))
         .collect::<Vec<_>>();
     let mut levels = Vec::with_capacity(NOTE_COMMITMENT_TREE_DEPTH + 1);
     levels.push(leaves);
@@ -252,10 +256,10 @@ fn ironwood_spend_witnesses(notes: Vec<Note>) -> (crate::Anchor, Vec<(Note, Merk
             (note, MerklePath::from_parts(position, auth_path))
         })
         .collect::<Vec<_>>();
-    let anchor = witnesses[0].1.root(witnesses[0].0.commitment().into());
+    let anchor = witnesses[0].1.root(extracted_commitment(&witnesses[0].0));
     for (note, path) in &witnesses {
         assert_eq!(
-            path.root(note.commitment().into()),
+            path.root(extracted_commitment(note)),
             anchor,
             "benchmark spend witnesses share one anchor",
         );
@@ -390,6 +394,7 @@ fn ironwood_payment_fixture(
         .build(&mut rng)
         .unwrap()
         .expect("real spends and outputs produce an Ironwood bundle");
+    assert_eq!(bundle.bundle_version(), bundle_version);
     assert_eq!(bundle.actions().len(), action_count);
     assert_eq!(bundle.circuit_version(), OrchardCircuitVersion::PostNu6_3,);
     assert!(bundle.flags().spends_enabled());

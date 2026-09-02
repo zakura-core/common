@@ -3,8 +3,8 @@
 //! node runs it — across proof batch sizes and worker counts.
 //!
 //! ```text
-//! cargo test --release -p zakura-orchard --test ironwood_batch_timings -- \
-//!     --ignored --nocapture
+//! cargo test --release -p zakura-orchard --features circuit \
+//!     --test ironwood_batch_timings -- --ignored --nocapture
 //! ```
 //!
 //! Set `IRONWOOD_ARM=1` to prepare the verifying key for batch validation
@@ -17,7 +17,7 @@ use rand::{SeedableRng, rngs::StdRng};
 
 use orchard::{
     Bundle,
-    bundle::BatchValidator,
+    bundle::{BatchValidator, BundleVersion},
     circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey},
 };
 
@@ -28,11 +28,40 @@ use payment_support::payment_fixture_with_index;
 
 const BATCH_SIZES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 const THREADS: [usize; 3] = [1, 8, 32];
+const FIXTURE_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
 const PAYMENT_ACTIONS: usize = 2;
+const PROOF_SEED_DOMAIN: u8 = 0x50;
+const SIGNATURE_SEED_DOMAIN: u8 = 0x51;
+const SIGHASH_DOMAIN: u8 = 0xa5;
 
 fn median(mut samples: Vec<f64>) -> f64 {
     samples.sort_by(f64::total_cmp);
     samples[samples.len() / 2]
+}
+
+fn indexed_rng(domain: u8, index: u64) -> StdRng {
+    let mut seed = [domain; 32];
+    seed[..8].copy_from_slice(&index.to_le_bytes());
+    StdRng::from_seed(seed)
+}
+
+#[test]
+fn ironwood_payment_fixtures_are_valid() {
+    for action_count in FIXTURE_ACTION_COUNTS {
+        let fixture = payment_fixture_with_index(
+            action_count,
+            u64::try_from(action_count).expect("Action count fits into u64"),
+        );
+        assert_eq!(
+            fixture.bundle().bundle_version(),
+            BundleVersion::ironwood_v3(),
+        );
+        assert_eq!(
+            fixture.bundle().circuit_version(),
+            OrchardCircuitVersion::PostNu6_3,
+        );
+        assert_eq!(fixture.bundle().actions().len(), action_count);
+    }
 }
 
 /// Builds one distinct two-Action Ironwood payment with real spends, outputs,
@@ -41,9 +70,7 @@ fn ironwood_bundle(
     pk: &ProvingKey,
     index: u64,
 ) -> (Bundle<orchard::bundle::Authorized, i64>, [u8; 32]) {
-    let mut seed = [0x42u8; 32];
-    seed[..8].copy_from_slice(&index.to_le_bytes());
-    let mut sighash = [0xA5u8; 32];
+    let mut sighash = [SIGHASH_DOMAIN; 32];
     sighash[..8].copy_from_slice(&index.to_le_bytes());
 
     let fixture = payment_fixture_with_index(PAYMENT_ACTIONS, index);
@@ -53,10 +80,14 @@ fn ironwood_bundle(
     );
     let (bundle, spend_authorizing_key) = fixture.into_bundle_and_signing_key();
     let proven = bundle
-        .create_proof(pk, StdRng::from_seed(seed))
+        .create_proof(pk, indexed_rng(PROOF_SEED_DOMAIN, index))
         .expect("proving succeeds");
     let authorized = proven
-        .apply_signatures(StdRng::from_seed(seed), sighash, &[spend_authorizing_key])
+        .apply_signatures(
+            indexed_rng(SIGNATURE_SEED_DOMAIN, index),
+            sighash,
+            &[spend_authorizing_key],
+        )
         .expect("the payment spend is authorized");
     (authorized, sighash)
 }

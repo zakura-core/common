@@ -53,6 +53,8 @@ pub mod zip32;
 #[cfg(test)]
 mod test_vectors;
 
+// This private trait bridges sibling-module privacy for manual circuit
+// benchmarks; it is not part of the crate's benchmark-facing API.
 #[cfg(all(test, feature = "circuit"))]
 trait BenchmarkCircuitWitnesses {
     fn benchmark_circuits(&self) -> &[circuit::Circuit];

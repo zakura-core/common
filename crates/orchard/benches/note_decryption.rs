@@ -86,9 +86,10 @@ fn bench_note_decryption(c: &mut Criterion) {
     }
 
     {
-        // Benchmark with 2 IVKs to emulate a wallet with two pools of funds.
+        // Benchmark a wallet-sized search with two distinct IVKs. The first
+        // owns every payment output; the second exercises the other-key path.
         let ivks = 2;
-        let valid_ivks = vec![valid_ivk; ivks];
+        let valid_ivks = vec![valid_ivk, invalid_ivks[0].clone()];
         let actions: Vec<_> = fixtures
             .iter()
             .flat_map(|fixture| fixture.bundle().actions())
