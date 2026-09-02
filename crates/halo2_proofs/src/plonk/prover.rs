@@ -1056,102 +1056,135 @@ where
 
     let permutation_workers = crate::multicore::current_num_threads();
     let permutation_set_count = pk.vk.cs.permutation.set_count(pk.vk.cs_degree);
-    let permutations: Vec<permutation::prover::Committed<C, _>> = if instance.len() == 1
+    let prepare_single_permutation_sets = instance.len() == 1
         && prepare_permutation_sets_in_parallel::<C>(
             permutation_set_count,
             permutation_workers,
             params.n as usize,
-        ) {
-        // A single circuit cannot use circuit-level permutation parallelism.
-        // Prepare its independent sets concurrently, then retain transcript
-        // writes in set order.
-        let blinding = pk.vk.cs.permutation.sample_blinding(pk, &mut rng);
-        let prepared = pk.vk.cs.permutation.prepare_sets_in_parallel(
-            params,
-            pk,
-            &pk.permutation,
-            &advice[0].advice_values,
-            &pk.fixed_values,
-            &instance[0].instance_values,
-            beta,
-            gamma,
-            blinding,
         );
-        vec![prepared.commit(&mut coset_evaluator, transcript, 0)?]
-    } else if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
-        // Draw every permutation's blinding values in circuit and set
-        // order before preparing the independent arguments in parallel.
-        let permutation_blindings = (0..instance.len())
-            .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
-            .collect::<Vec<_>>();
+    let prepare_circuit_permutations =
+        prepare_permutations_in_parallel(instance.len(), permutation_workers);
 
-        let prepared_permutations = (0..instance.len())
-            .into_par_iter()
-            .zip(permutation_blindings.into_par_iter())
-            .map(|(circuit_index, blinding)| {
-                pk.vk.cs.permutation.prepare(
-                    params,
-                    pk,
-                    &pk.permutation,
-                    &advice[circuit_index].advice_values,
-                    &pk.fixed_values,
-                    &instance[circuit_index].instance_values,
-                    beta,
-                    gamma,
-                    blinding,
-                )
-            })
-            .collect::<Vec<_>>();
+    let (permutations, prepared_lookup_products) =
+        if prepare_single_permutation_sets || prepare_circuit_permutations {
+            // Draw every permutation and lookup-product blinding value in the
+            // existing order before preparing these independent arguments
+            // concurrently. Their commitments are still written in protocol
+            // order below.
+            let permutation_blindings = (0..instance.len())
+                .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
+                .collect::<Vec<_>>();
 
-        prepared_permutations
-            .into_iter()
-            .enumerate()
-            .map(|(circuit_index, permutation)| {
-                permutation.commit(&mut coset_evaluator, transcript, circuit_index)
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        // Keep each circuit's preparation and commitment together on smaller
-        // pools to avoid competing for cache across circuits.
-        instance
-            .iter()
-            .zip(advice.iter())
-            .enumerate()
-            .map(|(circuit_index, (instance, advice))| {
-                pk.vk.cs.permutation.commit(
-                    params,
-                    pk,
-                    &pk.permutation,
-                    &advice.advice_values,
-                    &pk.fixed_values,
-                    &instance.instance_values,
-                    beta,
-                    gamma,
-                    circuit_index,
-                    &mut coset_evaluator,
-                    &mut rng,
-                    transcript,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
+            debug_assert_eq!(lookups.len(), circuit_count);
+            let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
+            for circuit_lookups in lookups {
+                debug_assert_eq!(circuit_lookups.len(), lookup_count);
+                for lookup in circuit_lookups {
+                    let blinding = lookup::prover::sample_product_blinding(pk, &mut rng);
+                    lookup_product_tasks.push((lookup, blinding));
+                }
+            }
 
-    debug_assert_eq!(lookups.len(), circuit_count);
-    let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
-    // Draw all blinding values in circuit-major, lookup-major order before
-    // preparing the independent lookup products in parallel.
-    for circuit_lookups in lookups {
-        debug_assert_eq!(circuit_lookups.len(), lookup_count);
-        for lookup in circuit_lookups {
-            let blinding = lookup::prover::sample_product_blinding(pk, &mut rng);
-            lookup_product_tasks.push((lookup, blinding));
-        }
-    }
+            let (prepared_permutations, prepared_lookup_products) = crate::multicore::join(
+                || {
+                    if prepare_single_permutation_sets {
+                        let mut permutation_blindings = permutation_blindings.into_iter();
+                        let blinding = permutation_blindings
+                            .next()
+                            .expect("one permutation blinding per circuit");
+                        debug_assert!(permutation_blindings.next().is_none());
+                        vec![pk.vk.cs.permutation.prepare_sets_in_parallel(
+                            params,
+                            pk,
+                            &pk.permutation,
+                            &advice[0].advice_values,
+                            &pk.fixed_values,
+                            &instance[0].instance_values,
+                            beta,
+                            gamma,
+                            blinding,
+                        )]
+                    } else {
+                        (0..instance.len())
+                            .into_par_iter()
+                            .zip(permutation_blindings.into_par_iter())
+                            .map(|(circuit_index, blinding)| {
+                                pk.vk.cs.permutation.prepare(
+                                    params,
+                                    pk,
+                                    &pk.permutation,
+                                    &advice[circuit_index].advice_values,
+                                    &pk.fixed_values,
+                                    &instance[circuit_index].instance_values,
+                                    beta,
+                                    gamma,
+                                    blinding,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                },
+                || {
+                    lookup_product_tasks
+                        .into_par_iter()
+                        .map(|(lookup, blinding)| {
+                            lookup.prepare_product(pk, params, beta, gamma, blinding)
+                        })
+                        .collect::<Vec<_>>()
+                },
+            );
 
-    let prepared_lookup_products = lookup_product_tasks
-        .into_par_iter()
-        .map(|(lookup, blinding)| lookup.prepare_product(pk, params, beta, gamma, blinding))
-        .collect::<Vec<_>>();
+            let permutations = prepared_permutations
+                .into_iter()
+                .enumerate()
+                .map(|(circuit_index, permutation)| {
+                    permutation.commit(&mut coset_evaluator, transcript, circuit_index)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (permutations, prepared_lookup_products)
+        } else {
+            // Keep each circuit's preparation and commitment together on smaller
+            // pools to avoid competing for cache across circuits.
+            let permutations = instance
+                .iter()
+                .zip(advice.iter())
+                .enumerate()
+                .map(|(circuit_index, (instance, advice))| {
+                    pk.vk.cs.permutation.commit(
+                        params,
+                        pk,
+                        &pk.permutation,
+                        &advice.advice_values,
+                        &pk.fixed_values,
+                        &instance.instance_values,
+                        beta,
+                        gamma,
+                        circuit_index,
+                        &mut coset_evaluator,
+                        &mut rng,
+                        transcript,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            debug_assert_eq!(lookups.len(), circuit_count);
+            let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
+            // Draw all blinding values in circuit-major, lookup-major order before
+            // preparing the independent lookup products in parallel.
+            for circuit_lookups in lookups {
+                debug_assert_eq!(circuit_lookups.len(), lookup_count);
+                for lookup in circuit_lookups {
+                    let blinding = lookup::prover::sample_product_blinding(pk, &mut rng);
+                    lookup_product_tasks.push((lookup, blinding));
+                }
+            }
+
+            let prepared_lookup_products = lookup_product_tasks
+                .into_par_iter()
+                .map(|(lookup, blinding)| lookup.prepare_product(pk, params, beta, gamma, blinding))
+                .collect::<Vec<_>>();
+            (permutations, prepared_lookup_products)
+        };
 
     let mut prepared_lookup_products = prepared_lookup_products.into_iter();
     let lookups: Vec<Vec<lookup::prover::Committed<C, _>>> = (0..circuit_count)
