@@ -1,26 +1,30 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use orchard::{
-    Anchor, Bundle,
-    builder::{Builder, BundleType},
-    bundle::BundleVersion,
-    circuit::{OrchardCircuitVersion, ProvingKey},
     keys::{FullViewingKey, PreparedIncomingViewingKey, Scope, SpendingKey},
-    note_encryption::{CompactAction, OrchardDomain},
-    value::NoteValue,
+    note_encryption::{CompactAction, IronwoodDomain},
 };
-use rand::rng;
 use zcash_note_encryption::{batch, try_compact_note_decryption, try_note_decryption};
 
 #[cfg(unix)]
 use pprof::criterion::{Output, PProfProfiler};
 
-fn bench_note_decryption(c: &mut Criterion) {
-    let pk = ProvingKey::build(OrchardCircuitVersion::FixedPostNu6_2);
+mod support;
 
-    let fvk = FullViewingKey::from(&SpendingKey::from_bytes([7; 32]).unwrap());
-    let valid_ivk = fvk.to_ivk(Scope::External);
-    let recipient = valid_ivk.address_at(0u32);
-    let valid_ivk = PreparedIncomingViewingKey::new(&valid_ivk);
+use support::payment_fixture_with_index;
+
+const PAYMENT_ACTIONS: usize = 2;
+const BATCH_ACTIONS: usize = 100;
+
+fn bench_note_decryption(c: &mut Criterion) {
+    let fixtures = (0..BATCH_ACTIONS / PAYMENT_ACTIONS)
+        .map(|fixture_index| {
+            payment_fixture_with_index(
+                PAYMENT_ACTIONS,
+                u64::try_from(fixture_index).expect("fixture index fits into u64"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let valid_ivk = PreparedIncomingViewingKey::new(fixtures[0].recipient_ivk());
 
     // Compact actions don't have the full AEAD ciphertext, so ZIP 307 trial-decryption
     // relies on an invalid ivk resulting in random noise for which the note commitment
@@ -43,35 +47,12 @@ fn bench_note_decryption(c: &mut Criterion) {
         })
         .collect();
 
-    let bundle = {
-        let mut builder = Builder::new(
-            BundleType::DEFAULT,
-            BundleVersion::orchard_v2(),
-            BundleVersion::orchard_v2().default_flags(),
-            Anchor::from_bytes([0; 32]).unwrap(),
-        )
-        .unwrap();
-        // The builder pads to two actions, and shuffles their order. Add two recipients
-        // so the first action is always decryptable.
-        builder
-            .add_output(None, recipient, NoteValue::from_raw(10), [0; 512])
-            .unwrap();
-        builder
-            .add_output(None, recipient, NoteValue::from_raw(10), [0; 512])
-            .unwrap();
-        let bundle: Bundle<_, i64> = builder.build(rng()).unwrap().unwrap().0;
-        bundle
-            .create_proof(&pk, rng())
-            .unwrap()
-            .apply_signatures(rng(), [0; 32], &[])
-            .unwrap()
-    };
-    let action = bundle.actions().first();
+    let action = fixtures[0].bundle().actions().first();
 
-    let domain = OrchardDomain::for_action(action);
+    let domain = IronwoodDomain::for_action(action);
 
     let compact = {
-        let mut group = c.benchmark_group("note-decryption");
+        let mut group = c.benchmark_group("ironwood-note-decryption");
         group.throughput(Throughput::Elements(1));
 
         group.bench_function("valid", |b| {
@@ -93,7 +74,7 @@ fn bench_note_decryption(c: &mut Criterion) {
     };
 
     {
-        let mut group = c.benchmark_group("compact-note-decryption");
+        let mut group = c.benchmark_group("ironwood-compact-note-decryption");
         group.throughput(Throughput::Elements(invalid_ivks.len() as u64));
         group.bench_function("invalid", |b| {
             b.iter(|| {
@@ -108,19 +89,23 @@ fn bench_note_decryption(c: &mut Criterion) {
         // Benchmark with 2 IVKs to emulate a wallet with two pools of funds.
         let ivks = 2;
         let valid_ivks = vec![valid_ivk; ivks];
-        let actions: Vec<_> = (0..100)
-            .map(|_| (OrchardDomain::for_action(action), action.clone()))
+        let actions: Vec<_> = fixtures
+            .iter()
+            .flat_map(|fixture| fixture.bundle().actions())
+            .map(|action| (IronwoodDomain::for_action(action), action.clone()))
             .collect();
-        let compact: Vec<_> = (0..100)
-            .map(|_| {
+        assert_eq!(actions.len(), BATCH_ACTIONS);
+        let compact: Vec<_> = actions
+            .iter()
+            .map(|(_, action)| {
                 (
-                    OrchardDomain::for_action(action),
+                    IronwoodDomain::for_action(action),
                     CompactAction::from(action),
                 )
             })
             .collect();
 
-        let mut group = c.benchmark_group("batch-note-decryption");
+        let mut group = c.benchmark_group("ironwood-batch-note-decryption");
 
         for size in [10, 50, 100] {
             group.throughput(Throughput::Elements((ivks * size) as u64));
