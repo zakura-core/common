@@ -656,6 +656,25 @@ mod tests {
         }
     }
 
+    fn zero_challenge_selects_last_polynomial<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        let h = Polynomial {
+            values: vec![F::from(2), F::from(3), F::from(5)],
+            _marker: PhantomData,
+        };
+        let r = Polynomial {
+            values: vec![F::from(7), F::from(11), F::from(13)],
+            _marker: PhantomData,
+        };
+
+        let collapsed = collapse_polynomials(&[vec![&h, &r]], F::ZERO);
+
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].values, r.values);
+    }
+
     fn in_place_kate_division_matches_allocating<F>()
     where
         F: Field + From<u64> + Debug,
@@ -840,6 +859,17 @@ mod tests {
     fn streaming_collapse_matches_operator_collapse_fq() {
         streaming_collapse_matches_operator_collapse::<Fq>();
     }
+
+    #[test]
+    fn zero_challenge_selects_last_polynomial_fp() {
+        zero_challenge_selects_last_polynomial::<Fp>();
+    }
+
+    #[test]
+    fn zero_challenge_selects_last_polynomial_fq() {
+        zero_challenge_selects_last_polynomial::<Fq>();
+    }
+
     #[test]
     fn in_place_kate_division_matches_allocating_fp() {
         in_place_kate_division_matches_allocating::<Fp>();

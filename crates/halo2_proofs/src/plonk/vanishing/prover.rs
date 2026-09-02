@@ -497,8 +497,10 @@ mod tests {
     }
 
     #[test]
-    fn quotient_evaluation_mask_is_the_last_vanishing_query() {
+    fn quotient_evaluation_mask_is_the_global_last_query() {
         let domain = EvaluationDomain::new(1, 3);
+        let mut earlier_poly = domain.empty_coeff();
+        earlier_poly[0] = pallas::Base::from(2);
         let mut h_poly = domain.empty_coeff();
         h_poly[0] = pallas::Base::from(3);
         let mut mask_poly = domain.empty_coeff();
@@ -515,11 +517,19 @@ mod tests {
         type MaskTranscript = Blake2bWrite<Vec<u8>, vesta::Affine, Challenge255<vesta::Affine>>;
         let mut transcript = MaskTranscript::init(Vec::new());
         let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
-        let queries = evaluated.open(x).collect::<Vec<_>>();
+        let earlier_query = crate::poly::multiopen::ProverQuery {
+            point: *x,
+            poly: &earlier_poly,
+            blind: Blind(pallas::Base::from(13)),
+        };
+        let queries = core::iter::once(earlier_query)
+            .chain(evaluated.open(x))
+            .collect::<Vec<_>>();
 
-        assert_eq!(queries.len(), 2);
-        assert!(core::ptr::eq(queries[0].poly, &evaluated.h_poly));
-        assert!(core::ptr::eq(queries[1].poly, &evaluated.random_poly.poly));
+        assert_eq!(queries.len(), 3);
+        assert!(core::ptr::eq(queries[0].poly, &earlier_poly));
+        assert!(core::ptr::eq(queries[1].poly, &evaluated.h_poly));
+        assert!(core::ptr::eq(queries[2].poly, &evaluated.random_poly.poly));
     }
 
     #[test]
