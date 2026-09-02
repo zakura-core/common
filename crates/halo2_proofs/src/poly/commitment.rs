@@ -134,6 +134,8 @@ const BLIND_WINDOW_ENTRIES: usize = (1 << BLIND_WINDOW_BITS) - 1;
 const SCALAR_BYTE_ORDER_PROBE: u64 = 0x0102_0304_0506_0708;
 #[cfg(feature = "orbits")]
 const PREPARED_COMMITMENT_EXTRA_BASES: usize = 2;
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const MIN_PARALLEL_SPARSE_COMMITMENT_TERMS: usize = 3;
 
 /// The `k = 11` SRS shape, whose current Pasta α7 tables remain ahead
 /// through all ten cores on the benchmarked Apple M4 systems.
@@ -776,6 +778,40 @@ impl<C: CurveAffine> Params<C> {
         tmp_bases.push(self.w);
 
         best_multiexp::<C>(&tmp_scalars, &tmp_bases)
+    }
+
+    /// Tries to commit to sparse coefficient terms using the prepared blind.
+    ///
+    /// When the no-orbits commitment preparation is armed, the independent
+    /// blinding term reuses its fixed-window table and runs alongside the
+    /// remaining MSM. Returns [`None`] when the caller should retain its
+    /// ordinary combined MSM.
+    pub(crate) fn try_commit_sparse_with_prepared_blind(
+        &self,
+        scalars: &[C::Scalar],
+        bases: &[C],
+        blind: Blind<C::Scalar>,
+    ) -> Option<C::Curve> {
+        assert_eq!(scalars.len(), bases.len());
+        assert!(!scalars.is_empty());
+
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        // A two-term body shares doublings with the blind more cheaply than a
+        // second Rayon task can recover. One worker avoids that scheduling
+        // cost, while larger sparse bodies have enough MSM work to overlap.
+        if (crate::multicore::current_num_threads() == 1
+            || scalars.len() >= MIN_PARALLEL_SPARSE_COMMITMENT_TERMS)
+            && let Some(blind_table) = self.blind_table()
+        {
+            let (commitment, blind) = crate::multicore::join(
+                || best_multiexp(scalars, bases),
+                || blind_table.multiply(blind.0),
+            );
+            return Some(commitment + blind);
+        }
+
+        let _ = blind;
+        None
     }
 
     /// This commits to a polynomial using its evaluations over the $2^k$ size
@@ -1632,6 +1668,126 @@ fn blind_table_cache_is_shared_by_clones_and_not_serialized() {
 
     let deserialized = Params::<EqAffine>::read(&mut serialized_before.as_slice()).unwrap();
     assert!(deserialized.blind_table().is_none());
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn prepared_sparse_commitment_matches_combined_msm() {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::pasta::{EqAffine, Fp};
+
+    let params = Params::<EqAffine>::new(6);
+    assert!(params.prepare_commitments());
+    let mut rng = StdRng::seed_from_u64(0x7370_6172_7365_6d73);
+
+    for indices in [&[0, 1][..], &[0, 1, 2][..], &[0, 1, 2, 4, 8, 16, 32][..]] {
+        let scalars = indices
+            .iter()
+            .map(|_| Fp::random(&mut rng))
+            .collect::<Vec<_>>();
+        let bases = indices
+            .iter()
+            .map(|index| params.g[*index])
+            .collect::<Vec<_>>();
+        let blind = Blind(Fp::random(&mut rng));
+        let mut combined_scalars = scalars.clone();
+        let mut combined_bases = bases.clone();
+        combined_scalars.push(blind.0);
+        combined_bases.push(params.w);
+        let expected = best_multiexp(&combined_scalars, &combined_bases);
+
+        for workers in [1, 2] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let actual = pool
+                .install(|| params.try_commit_sparse_with_prepared_blind(&scalars, &bases, blind));
+            if workers > 1 && scalars.len() < MIN_PARALLEL_SPARSE_COMMITMENT_TERMS {
+                assert!(actual.is_none());
+            } else {
+                assert_eq!(actual.unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+#[ignore]
+/// Compares the combined MSM with the prepared-blind split used by the two
+/// sparse masking commitments in one- and six-worker pools.
+fn benchmark_prepared_sparse_commitment() {
+    use std::{hint::black_box, time::Instant};
+
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::pasta::{EqAffine, Fp};
+
+    const ITERATIONS: u32 = 1_000;
+    const REPETITIONS: usize = 5;
+
+    let params = Params::<EqAffine>::new(11);
+    assert!(params.prepare_commitments());
+    let mut rng = StdRng::seed_from_u64(0x7370_6172_7365_626d);
+
+    for (name, indices) in [
+        ("quotient", &[0, 1, 2][..]),
+        ("ipa", &[0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024][..]),
+    ] {
+        let scalars = indices
+            .iter()
+            .map(|_| Fp::random(&mut rng))
+            .collect::<Vec<_>>();
+        let bases = indices
+            .iter()
+            .map(|index| params.g[*index])
+            .collect::<Vec<_>>();
+        let blind = Blind(Fp::random(&mut rng));
+        let mut combined_scalars = scalars.clone();
+        let mut combined_bases = bases.clone();
+        combined_scalars.push(blind.0);
+        combined_bases.push(params.w);
+
+        for workers in [1, 6] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let measure = |prepared: bool| {
+                let start = Instant::now();
+                pool.install(|| {
+                    for _ in 0..ITERATIONS {
+                        let commitment = if prepared {
+                            params
+                                .try_commit_sparse_with_prepared_blind(&scalars, &bases, blind)
+                                .unwrap_or_else(|| {
+                                    best_multiexp(&combined_scalars, &combined_bases)
+                                })
+                        } else {
+                            best_multiexp(&combined_scalars, &combined_bases)
+                        };
+                        black_box(commitment.to_affine());
+                    }
+                });
+                start.elapsed().as_nanos() as f64 / f64::from(ITERATIONS)
+            };
+
+            for repetition in 0..REPETITIONS {
+                let (baseline, prepared) = if repetition % 2 == 0 {
+                    (measure(false), measure(true))
+                } else {
+                    let prepared = measure(true);
+                    (measure(false), prepared)
+                };
+                eprintln!(
+                    "sparse-commitment name={name} workers={workers} repetition={} baseline_ns={baseline:.3} prepared_ns={prepared:.3}",
+                    repetition + 1,
+                );
+            }
+        }
+    }
 }
 
 #[test]
