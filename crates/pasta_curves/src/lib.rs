@@ -1,4 +1,13 @@
 //! Implementation of the Pallas / Vesta curve cycle.
+//!
+//! # Timing
+//!
+//! This crate does not guarantee constant-time field or curve arithmetic.
+//! In particular, curve addition and batch normalization branch on identity
+//! and exceptional cases, and field inversion is variable-time. Scalar
+//! multiplication uses these curve operations internally. Callers whose
+//! threat model requires secret-independent execution must use a separately
+//! audited constant-time implementation.
 
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]

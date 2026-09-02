@@ -729,6 +729,10 @@ impl<C: CurveAffine> Params<C> {
     /// This computes a commitment to a polynomial described by the provided
     /// slice of coefficients. The commitment will be blinded by the blinding
     /// factor `r`.
+    ///
+    /// # Timing
+    ///
+    /// This method is variable-time with respect to `poly` and `r`.
     pub fn commit(&self, poly: &Polynomial<C::Scalar, Coeff>, r: Blind<C::Scalar>) -> C::Curve {
         // A prepared table over [g..., w, u] (built by
         // `Params::prepare_commitments`, or shared from
@@ -781,6 +785,10 @@ impl<C: CurveAffine> Params<C> {
     /// This commits to a polynomial using its evaluations over the $2^k$ size
     /// evaluation domain. The commitment will be blinded by the blinding factor
     /// `r`.
+    ///
+    /// # Timing
+    ///
+    /// This method is variable-time with respect to `poly` and `r`.
     pub fn commit_lagrange(
         &self,
         poly: &Polynomial<C::Scalar, LagrangeCoeff>,

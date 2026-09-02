@@ -44,32 +44,6 @@ macro_rules! impl_raw_coordinates {
 }
 
 #[cfg(feature = "alloc")]
-macro_rules! impl_add_vartime {
-    (glv, $name:ident) => {
-        #[cfg(feature = "glv")]
-        fn add_vartime(&self, rhs: &Self) -> Self {
-            $name::add_vartime(self, rhs)
-        }
-
-        #[cfg(feature = "glv")]
-        fn add_mixed_vartime(&self, rhs: &Self::AffineExt) -> Self {
-            $name::add_mixed_vartime(self, rhs)
-        }
-
-        #[cfg(feature = "glv")]
-        fn batch_normalize_vartime(p: &[Self], q: &mut [Self::AffineExt]) {
-            $name::batch_normalize_vartime(p, q)
-        }
-
-        #[cfg(feature = "glv")]
-        fn double_vartime(&self) -> Self {
-            $name::double_vartime(self)
-        }
-    };
-    (native, $name:ident) => {};
-}
-
-#[cfg(feature = "alloc")]
 macro_rules! impl_batch_mul_same_scalar_vartime {
     (glv, $name:ident) => {
         #[cfg(feature = "glv")]
@@ -150,166 +124,6 @@ macro_rules! new_curve_impl {
                 $base::from_raw($b_raw)
             }
 
-            /// Batch Jacobian-to-affine conversion with identity points
-            /// branched on raw limb equality instead of constant-time
-            /// selects. Only for paths whose points are public and already
-            /// variable-time.
-            #[cfg(feature = "glv")]
-            #[allow(dead_code)] // used only for the curves with GLV parameters
-            pub(crate) fn batch_normalize_vartime(p: &[$name], q: &mut [$name_affine]) {
-                assert_eq!(p.len(), q.len());
-
-                let zero = $base::zero();
-                // Two-lane Montgomery batch inversion, as in the
-                // constant-time `batch_normalize`, but skipping identity
-                // points with branches.
-                let mut acc = [$base::one(); 2];
-                for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate() {
-                    q.x = acc[i & 1];
-                    if !p.z.eq_vartime(&zero) {
-                        acc[i & 1] *= p.z;
-                    }
-                }
-
-                let inverse = (acc[0] * acc[1]).invert().unwrap();
-                let mut acc = [inverse * acc[1], inverse * acc[0]];
-
-                for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate().rev() {
-                    let lane = i & 1;
-                    if p.z.eq_vartime(&zero) {
-                        *q = $name_affine::identity();
-                        continue;
-                    }
-
-                    let tmp = q.x * acc[lane];
-                    acc[lane] *= p.z;
-
-                    let tmp2 = Field::square(&tmp);
-                    let tmp3 = tmp2 * tmp;
-
-                    q.x = p.x * tmp2;
-                    q.y = p.y * tmp3;
-                }
-            }
-
-            /// Variable-time mixed addition: the same Jacobian formulas as
-            /// `Add<&$name_affine>`, but with the identity and exceptional
-            /// cases branched on raw limb equality instead of constant-time
-            /// comparisons. Only for paths that are already variable-time
-            /// (e.g. the vartime multiexp accumulators).
-            #[cfg(feature = "glv")]
-            #[allow(dead_code)] // used only for the curves with GLV parameters
-            pub(crate) fn add_mixed_vartime(&self, rhs: &$name_affine) -> $name {
-                let zero = $base::zero();
-                if self.z.eq_vartime(&zero) {
-                    return rhs.to_curve();
-                }
-                if rhs.x.eq_vartime(&zero) && rhs.y.eq_vartime(&zero) {
-                    return *self;
-                }
-                let z1z1 = Field::square(&self.z);
-                let u2 = rhs.x * z1z1;
-                let s2 = rhs.y * z1z1 * self.z;
-                if self.x.eq_vartime(&u2) {
-                    return if self.y.eq_vartime(&s2) {
-                        self.double_vartime()
-                    } else {
-                        $name::identity()
-                    };
-                }
-                let h = u2 - self.x;
-                let hh = Field::square(&h);
-                let i = hh + hh;
-                let i = i + i;
-                let j = h * i;
-                let r = s2 - self.y;
-                let r = r + r;
-                let v = self.x * i;
-                let x3 = Field::square(&r) - j - v - v;
-                let j = self.y * j;
-                let j = j + j;
-                let y3 = r * (v - x3) - j;
-                let z3 = Field::square(&(self.z + h)) - z1z1 - hh;
-
-                $name { x: x3, y: y3, z: z3 }
-            }
-
-            /// Variable-time projective addition: the same Jacobian formulas
-            /// as `Add<&$name>`, with the special cases branched on raw limb
-            /// equality. Only for paths that are already variable-time.
-            #[cfg(feature = "glv")]
-            #[allow(dead_code)] // used only for the curves with GLV parameters
-            pub(crate) fn add_vartime(&self, rhs: &$name) -> $name {
-                let zero = $base::zero();
-                if self.z.eq_vartime(&zero) {
-                    return *rhs;
-                }
-                if rhs.z.eq_vartime(&zero) {
-                    return *self;
-                }
-                let z1z1 = Field::square(&self.z);
-                let z2z2 = Field::square(&rhs.z);
-                let u1 = self.x * z2z2;
-                let u2 = rhs.x * z1z1;
-                let s1 = self.y * z2z2 * rhs.z;
-                let s2 = rhs.y * z1z1 * self.z;
-                if u1.eq_vartime(&u2) {
-                    return if s1.eq_vartime(&s2) {
-                        self.double_vartime()
-                    } else {
-                        $name::identity()
-                    };
-                }
-                let h = u2 - u1;
-                let i = Field::square(&(h + h));
-                let j = h * i;
-                let r = s2 - s1;
-                let r = r + r;
-                let v = u1 * i;
-                let x3 = Field::square(&r) - j - v - v;
-                let s1 = s1 * j;
-                let s1 = s1 + s1;
-                let y3 = r * (v - x3) - s1;
-                let z3 = Field::square(&(self.z + rhs.z)) - z1z1 - z2z2;
-                let z3 = z3 * h;
-
-                $name { x: x3, y: y3, z: z3 }
-            }
-
-            /// Variable-time doubling: the same Jacobian formulas as
-            /// `double`, without the constant-time identity selection. The
-            /// identity input yields `z3 = 0`, which every consumer already
-            /// treats as the identity. Only for paths that are already
-            /// variable-time.
-            #[cfg(feature = "glv")]
-            #[allow(dead_code)] // used only for the curves with GLV parameters
-            pub(crate) fn double_vartime(&self) -> $name {
-                // http://www.hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html#doubling-dbl-2009-l
-                //
-                // There are no points of order 2.
-                let a = Field::square(&self.x);
-                let b = Field::square(&self.y);
-                let c = Field::square(&b);
-                let d = self.x + b;
-                let d = Field::square(&d);
-                let d = d - a - c;
-                let d = d + d;
-                let e = a + a + a;
-                let f = Field::square(&e);
-                let z3 = self.z * self.y;
-                let z3 = z3 + z3;
-                let x3 = f - (d + d);
-                let c = c + c;
-                let c = c + c;
-                let c = c + c;
-                let y3 = e * (d - x3) - c;
-
-                $name {
-                    x: x3,
-                    y: y3,
-                    z: z3,
-                }
-            }
         }
 
         /// Represents a point in the affine coordinate space (or the point at
@@ -453,7 +267,6 @@ macro_rules! new_curve_impl {
                     | self.z.is_zero()
             }
 
-            impl_add_vartime!($glv_backend, $name);
             impl_batch_mul_same_scalar_vartime!($glv_backend, $name);
             impl_multiexp_vartime!($glv_backend, $name);
             impl_prepare_zero_check!($glv_backend, $name);
@@ -477,19 +290,21 @@ macro_rules! new_curve_impl {
                         return;
                     };
                     let (first_q, q) = q.split_first_mut().unwrap();
-                    let first_skip = first_p.is_identity();
-                    let mut acc = $base::conditional_select(
-                        &first_p.z,
-                        &$base::one(),
-                        first_skip,
-                    );
+                    let first_skip = first_p.z.is_zero_vartime();
+                    let mut acc = if first_skip {
+                        $base::one()
+                    } else {
+                        first_p.z
+                    };
                     for (p, q) in p.iter().zip(q.iter_mut()) {
                         // We use the `x` field of $name_affine to store the
                         // product of previous z-coordinates seen.
                         q.x = acc;
 
                         // We will end up skipping all identities in p
-                        acc = $base::conditional_select(&(acc * p.z), &acc, p.is_identity());
+                        if !p.z.is_zero_vartime() {
+                            acc *= p.z;
+                        }
                     }
 
                     // This is the inverse, as all z-coordinates are nonzero and
@@ -497,13 +312,16 @@ macro_rules! new_curve_impl {
                     acc = acc.invert().unwrap();
 
                     for (p, q) in p.iter().rev().zip(q.iter_mut().rev()) {
-                        let skip = p.is_identity();
+                        if p.z.is_zero_vartime() {
+                            *q = $name_affine::identity();
+                            continue;
+                        }
 
                         // Compute tmp = 1/z
                         let tmp = q.x * acc;
 
                         // Cancel out z-coordinate in denominator of `acc`
-                        acc = $base::conditional_select(&(acc * p.z), &acc, skip);
+                        acc *= p.z;
 
                         // Set the coordinates to the correct value
                         let tmp2 = Field::square(&tmp);
@@ -511,23 +329,20 @@ macro_rules! new_curve_impl {
 
                         q.x = p.x * tmp2;
                         q.y = p.y * tmp3;
-
-                        *q = $name_affine::conditional_select(&q, &$name_affine::identity(), skip);
                     }
 
                     // The first prefix is one, and the accumulator is dead
                     // after producing its inverse, so both multiplications
                     // at this endpoint can be omitted.
-                    let tmp = acc;
-                    let tmp2 = Field::square(&tmp);
-                    let tmp3 = tmp2 * tmp;
-                    first_q.x = first_p.x * tmp2;
-                    first_q.y = first_p.y * tmp3;
-                    *first_q = $name_affine::conditional_select(
-                        &first_q,
-                        &$name_affine::identity(),
-                        first_skip,
-                    );
+                    if first_skip {
+                        *first_q = $name_affine::identity();
+                    } else {
+                        let tmp = acc;
+                        let tmp2 = Field::square(&tmp);
+                        let tmp3 = tmp2 * tmp;
+                        first_q.x = first_p.x * tmp2;
+                        first_q.y = first_p.y * tmp3;
+                    }
                     return;
                 }
 
@@ -538,18 +353,27 @@ macro_rules! new_curve_impl {
                 // unchanged from the single-chain path above.
                 let (first_p, p) = p.split_at(2);
                 let (first_q, q) = q.split_at_mut(2);
-                let first_skip = [first_p[0].is_identity(), first_p[1].is_identity()];
+                let first_skip = [
+                    first_p[0].z.is_zero_vartime(),
+                    first_p[1].z.is_zero_vartime(),
+                ];
                 let mut acc = [
-                    $base::conditional_select(&first_p[0].z, &$base::one(), first_skip[0]),
-                    $base::conditional_select(&first_p[1].z, &$base::one(), first_skip[1]),
+                    if first_skip[0] {
+                        $base::one()
+                    } else {
+                        first_p[0].z
+                    },
+                    if first_skip[1] {
+                        $base::one()
+                    } else {
+                        first_p[1].z
+                    },
                 ];
                 for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate() {
                     q.x = acc[i & 1];
-                    acc[i & 1] = $base::conditional_select(
-                        &(acc[i & 1] * p.z),
-                        &acc[i & 1],
-                        p.is_identity(),
-                    );
+                    if !p.z.is_zero_vartime() {
+                        acc[i & 1] *= p.z;
+                    }
                 }
 
                 // Join the lane products, invert once, and recover each
@@ -559,37 +383,30 @@ macro_rules! new_curve_impl {
 
                 for (i, (p, q)) in p.iter().zip(q.iter_mut()).enumerate().rev() {
                     let lane = i & 1;
-                    let skip = p.is_identity();
+                    if p.z.is_zero_vartime() {
+                        *q = $name_affine::identity();
+                        continue;
+                    }
                     let tmp = q.x * acc[lane];
-                    acc[lane] = $base::conditional_select(
-                        &(acc[lane] * p.z),
-                        &acc[lane],
-                        skip,
-                    );
+                    acc[lane] *= p.z;
                     let tmp2 = Field::square(&tmp);
                     let tmp3 = tmp2 * tmp;
                     q.x = p.x * tmp2;
                     q.y = p.y * tmp3;
-                    *q = $name_affine::conditional_select(
-                        &q,
-                        &$name_affine::identity(),
-                        skip,
-                    );
                 }
 
                 for lane in 0..2 {
                     // The first prefix in each lane is one, and its final
                     // accumulator update is dead.
-                    let tmp = acc[lane];
-                    let tmp2 = Field::square(&tmp);
-                    let tmp3 = tmp2 * tmp;
-                    first_q[lane].x = first_p[lane].x * tmp2;
-                    first_q[lane].y = first_p[lane].y * tmp3;
-                    first_q[lane] = $name_affine::conditional_select(
-                        &first_q[lane],
-                        &$name_affine::identity(),
-                        first_skip[lane],
-                    );
+                    if first_skip[lane] {
+                        first_q[lane] = $name_affine::identity();
+                    } else {
+                        let tmp = acc[lane];
+                        let tmp2 = Field::square(&tmp);
+                        let tmp3 = tmp2 * tmp;
+                        first_q[lane].x = first_p[lane].x * tmp2;
+                        first_q[lane].y = first_p[lane].y * tmp3;
+                    }
                 }
             }
 
@@ -754,9 +571,9 @@ macro_rules! new_curve_impl {
             type Output = $name;
 
             fn add(self, rhs: &'a $name) -> $name {
-                if bool::from(self.is_identity()) {
+                if self.z.is_zero_vartime() {
                     *rhs
-                } else if bool::from(rhs.is_identity()) {
+                } else if rhs.z.is_zero_vartime() {
                     *self
                 } else {
                     let z1z1 = Field::square(&self.z);
@@ -766,8 +583,8 @@ macro_rules! new_curve_impl {
                     let s1 = self.y * z2z2 * rhs.z;
                     let s2 = rhs.y * z1z1 * self.z;
 
-                    if u1 == u2 {
-                        if s1 == s2 {
+                    if u1.eq_vartime(&u2) {
+                        if s1.eq_vartime(&s2) {
                             self.double()
                         } else {
                             $name::identity()
@@ -798,17 +615,17 @@ macro_rules! new_curve_impl {
             type Output = $name;
 
             fn add(self, rhs: &'a $name_affine) -> $name {
-                if bool::from(self.is_identity()) {
+                if self.z.is_zero_vartime() {
                     rhs.to_curve()
-                } else if bool::from(rhs.is_identity()) {
+                } else if rhs.x.is_zero_vartime() && rhs.y.is_zero_vartime() {
                     *self
                 } else {
                     let z1z1 = Field::square(&self.z);
                     let u2 = rhs.x * z1z1;
                     let s2 = rhs.y * z1z1 * self.z;
 
-                    if self.x == u2 {
-                        if self.y == s2 {
+                    if self.x.eq_vartime(&u2) {
+                        if self.y.eq_vartime(&s2) {
                             self.double()
                         } else {
                             $name::identity()
@@ -917,13 +734,13 @@ macro_rules! new_curve_impl {
             type Output = $name;
 
             fn add(self, rhs: &'a $name_affine) -> $name {
-                if bool::from(self.is_identity()) {
+                if self.x.is_zero_vartime() && self.y.is_zero_vartime() {
                     rhs.to_curve()
-                } else if bool::from(rhs.is_identity()) {
+                } else if rhs.x.is_zero_vartime() && rhs.y.is_zero_vartime() {
                     self.to_curve()
                 } else {
-                    if self.x == rhs.x {
-                        if self.y == rhs.y {
+                    if self.x.eq_vartime(&rhs.x) {
+                        if self.y.eq_vartime(&rhs.y) {
                             self.to_curve().double()
                         } else {
                             $name::identity()
@@ -1201,13 +1018,11 @@ macro_rules! impl_projective_curve_specific {
             let c = c + c;
             let y3 = e * (d - x3) - c;
 
-            let tmp = $name {
+            $name {
                 x: x3,
                 y: y3,
                 z: z3,
-            };
-
-            $name::conditional_select(&tmp, &$name::identity(), self.is_identity())
+            }
         }
     };
     ($name:ident, $base:ident, general) => {
@@ -1234,13 +1049,11 @@ macro_rules! impl_projective_curve_specific {
             let y3 = m * (s - x3) - a;
             let z3 = (self.y + self.z).square() - yy - zz;
 
-            let tmp = $name {
+            $name {
                 x: x3,
                 y: y3,
                 z: z3,
-            };
-
-            $name::conditional_select(&tmp, &$name::identity(), self.is_identity())
+            }
         }
     };
 }
@@ -1635,12 +1448,14 @@ mod batch_normalize_two_lane_tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use group::{Curve, Group};
+    use group::Curve;
 
     use super::*;
 
-    #[test]
-    fn matches_to_affine_with_identities() {
+    fn check_curve<C: Curve>()
+    where
+        C::Scalar: From<u64>,
+    {
         // Cover the single-chain path (< 32), the crossover, and the
         // two-lane path, with identities at every combination of peeled
         // heads and sprinkled at even and odd interior indices.
@@ -1653,18 +1468,18 @@ mod batch_normalize_two_lane_tests {
         };
         for n in [0usize, 1, 2, 31, 32, 33, 64, 65, 128, 257, 512] {
             for head_identity_mask in 0u8..4 {
-                let points: Vec<Ep> = (0..n)
+                let points: Vec<C> = (0..n)
                     .map(|i| {
                         let head_is_identity = i < 2 && head_identity_mask & (1 << i) != 0;
                         if head_is_identity || i % 7 == 3 || i % 7 == 4 {
-                            Ep::identity()
+                            C::identity()
                         } else {
-                            Ep::generator() * Fq::from(next() | 1)
+                            C::generator() * C::Scalar::from(next() | 1)
                         }
                     })
                     .collect();
-                let mut affine = vec![EpAffine::identity(); n];
-                Ep::batch_normalize(&points, &mut affine);
+                let mut affine = vec![C::Affine::identity(); n];
+                C::batch_normalize(&points, &mut affine);
                 for (i, (p, a)) in points.iter().zip(&affine).enumerate() {
                     assert_eq!(
                         p.to_affine(),
@@ -1674,98 +1489,63 @@ mod batch_normalize_two_lane_tests {
                 }
             }
 
-            let points = vec![Ep::identity(); n];
-            let mut affine = vec![EpAffine::identity(); n];
-            Ep::batch_normalize(&points, &mut affine);
+            let points = vec![C::identity(); n];
+            let mut affine = vec![C::Affine::identity(); n];
+            C::batch_normalize(&points, &mut affine);
             assert!(
-                affine.iter().all(|point| point == &EpAffine::identity()),
+                affine.iter().all(|point| point == &C::Affine::identity()),
                 "all-identity batch of length {n}"
             );
-
-            #[cfg(feature = "glv")]
-            {
-                let mut affine_vartime = vec![EpAffine::identity(); n];
-                Ep::batch_normalize_vartime(&points, &mut affine_vartime);
-                assert_eq!(affine, affine_vartime, "n = {}", n);
-            }
         }
+    }
+
+    #[test]
+    fn matches_to_affine_with_identities() {
+        check_curve::<Ep>();
+        check_curve::<Eq>();
     }
 }
 
-#[cfg(all(test, feature = "glv"))]
-mod vartime_curve_op_tests {
+#[cfg(test)]
+mod curve_op_tests {
     use group::{Curve, Group};
 
     use super::*;
-    use crate::arithmetic::CurveExt;
 
-    fn cases_ep() -> [Ep; 5] {
-        [
-            Ep::identity(),
-            Ep::generator(),
-            Ep::generator() * Fq::from(3),
-            -(Ep::generator() * Fq::from(3)),
-            Ep::generator() * Fq::from(0xdeadbeefu64),
-        ]
-    }
+    macro_rules! check_curve_ops {
+        ($curve:ty, $scalar:ty) => {{
+            let identity = <$curve>::identity();
+            let point = <$curve>::generator() * <$scalar>::from(3);
+            let inverse = -point;
+            let affine_identity = identity.to_affine();
+            let affine_point = point.to_affine();
+            let affine_inverse = inverse.to_affine();
 
-    fn cases_eq() -> [Eq; 5] {
-        [
-            Eq::identity(),
-            Eq::generator(),
-            Eq::generator() * Fp::from(3),
-            -(Eq::generator() * Fp::from(3)),
-            Eq::generator() * Fp::from(0xdeadbeefu64),
-        ]
-    }
+            // Projective-projective identity, equality, and inverse branches.
+            assert_eq!(identity + &point, point);
+            assert_eq!(point + &identity, point);
+            assert_eq!(point + &point, point.double());
+            assert!(bool::from((point + &inverse).is_identity()));
 
-    #[test]
-    fn double_vartime_matches_double() {
-        for p in cases_ep() {
-            let mut ct = p;
-            let mut vt = p;
-            for _ in 0..4 {
-                ct = ct.double();
-                vt = CurveExt::double_vartime(&vt);
-                assert_eq!(ct.to_affine(), vt.to_affine());
-            }
-        }
-        for p in cases_eq() {
-            let mut ct = p;
-            let mut vt = p;
-            for _ in 0..4 {
-                ct = ct.double();
-                vt = CurveExt::double_vartime(&vt);
-                assert_eq!(ct.to_affine(), vt.to_affine());
-            }
-        }
+            // Projective-affine identity, equality, and inverse branches.
+            assert_eq!(identity + &affine_point, point);
+            assert_eq!(point + &affine_identity, point);
+            assert_eq!(point + &affine_point, point.double());
+            assert!(bool::from((point + &affine_inverse).is_identity()));
+
+            // Affine-affine identity, equality, and inverse branches.
+            assert_eq!(affine_identity + &affine_point, point);
+            assert_eq!(affine_point + &affine_identity, point);
+            assert_eq!(affine_point + &affine_point, point.double());
+            assert!(bool::from((affine_point + &affine_inverse).is_identity()));
+
+            assert!(bool::from(identity.double().is_identity()));
+        }};
     }
 
     #[test]
-    fn add_vartime_matches_add() {
-        for a in cases_ep() {
-            for b in cases_ep() {
-                assert_eq!(
-                    (a + b).to_affine(),
-                    CurveExt::add_vartime(&a, &b).to_affine()
-                );
-                assert_eq!(
-                    (a + b).to_affine(),
-                    CurveExt::add_mixed_vartime(&a, &b.to_affine()).to_affine()
-                );
-            }
-        }
-        for a in cases_eq() {
-            for b in cases_eq() {
-                assert_eq!(
-                    (a + b).to_affine(),
-                    CurveExt::add_vartime(&a, &b).to_affine()
-                );
-                assert_eq!(
-                    (a + b).to_affine(),
-                    CurveExt::add_mixed_vartime(&a, &b.to_affine()).to_affine()
-                );
-            }
-        }
+    fn default_ops_handle_exceptional_cases() {
+        check_curve_ops!(Ep, Fq);
+        check_curve_ops!(Eq, Fp);
     }
 }
