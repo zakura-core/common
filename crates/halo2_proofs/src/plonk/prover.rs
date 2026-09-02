@@ -1174,7 +1174,7 @@ where
     debug_assert!(prepared_lookup_products.next().is_none());
 
     // Commit to the random polynomial that masks the folded quotient
-    // evaluation in the multiopening argument.
+    // evaluation in the multi-opening argument.
     let vanishing =
         vanishing::Argument::commit_random_polynomial(params, domain, &mut rng, transcript)?;
 
@@ -1358,7 +1358,6 @@ where
         .collect::<Vec<_>>();
     let initial_evaluation_count = queries.len();
     let mut queries = queries;
-    queries.push(vanishing.evaluation_query());
     queries.extend(pk.permutation.evaluation_queries());
     for permutation in &permutations {
         queries.extend(permutation.evaluation_queries());
@@ -1382,14 +1381,7 @@ where
         transcript.write_scalar(evaluation)?;
     }
 
-    let vanishing = vanishing.evaluate(
-        xn,
-        domain,
-        evaluations
-            .next()
-            .expect("one random-polynomial evaluation is queued"),
-        transcript,
-    )?;
+    let vanishing = vanishing.evaluate(*x, xn, domain, transcript)?;
 
     // Evaluate common permutation data
     pk.permutation.evaluate(&mut evaluations, transcript)?;
@@ -1459,7 +1451,8 @@ where
                 }),
         )
         .chain(pk.permutation.open(x))
-        // We query the h(X) polynomial at x
+        // Keep these last among queries at x: the linear quotient-evaluation
+        // mask must have unit coefficient in its point-set fold at x_3.
         .chain(vanishing.open(x));
 
     multiopen::create_proof(params, rng, transcript, instances).map_err(|_| Error::Opening)
