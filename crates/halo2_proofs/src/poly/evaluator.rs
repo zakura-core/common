@@ -1238,6 +1238,154 @@ impl<'a, F: Field> PowerFold<'a, F> {
     }
 }
 
+// Reuses the buffers for consecutive weighted folds within one distribution
+// and one Rayon chunk. A reset makes prior contents unreachable: terms are
+// overwritten before accumulation, and the flags guard addends and products
+// until their buffers have been initialized for the current fold.
+struct DeferredPowerFold<T: DeferredField, F: Field> {
+    accumulators: Vec<T::Accumulator>,
+    terms: Vec<F>,
+    addends: Vec<F>,
+    reduced: Vec<F>,
+    has_products: bool,
+    has_addends: bool,
+}
+
+impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
+    fn new(len: usize) -> Self {
+        Self {
+            accumulators: vec![Default::default(); len],
+            terms: vec![F::ZERO; len],
+            addends: vec![F::ZERO; len],
+            reduced: vec![F::ZERO; len],
+            has_products: false,
+            has_addends: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.has_products = false;
+        self.has_addends = false;
+    }
+
+    fn accumulate(&mut self, power: F) {
+        if power == F::ONE {
+            if self.has_addends {
+                for (addend, term) in self.addends.iter_mut().zip(&self.terms) {
+                    *addend += term;
+                }
+            } else {
+                self.addends.copy_from_slice(&self.terms);
+                self.has_addends = true;
+            }
+        } else if self.has_products {
+            accumulate_deferred::<T>(&mut self.accumulators, &self.terms, &power);
+        } else {
+            initialize_deferred::<T>(&mut self.accumulators, &self.terms, &power);
+            self.has_products = true;
+        }
+    }
+
+    fn finish_into(&mut self, output: &mut [F]) {
+        if self.has_products {
+            reduce_deferred_into::<T, F>(&self.accumulators, &mut self.reduced);
+        } else {
+            self.reduced.fill(F::ZERO);
+        }
+        if self.has_addends {
+            for (result, addend) in self.reduced.iter_mut().zip(&self.addends) {
+                *result += addend;
+            }
+        }
+        output.copy_from_slice(&self.reduced);
+    }
+}
+
+enum ReusablePowerFold<F: Field> {
+    Eager { accumulators: Vec<F>, terms: Vec<F> },
+    Pallas(DeferredPowerFold<pallas::Base, F>),
+    Vesta(DeferredPowerFold<vesta::Base, F>),
+}
+
+impl<F: Field> ReusablePowerFold<F> {
+    fn new(len: usize) -> Self {
+        if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
+            Self::Pallas(DeferredPowerFold::new(len))
+        } else if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
+            Self::Vesta(DeferredPowerFold::new(len))
+        } else {
+            Self::Eager {
+                accumulators: vec![F::ZERO; len],
+                terms: vec![F::ZERO; len],
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Eager { accumulators, .. } => accumulators.fill(F::ZERO),
+            Self::Pallas(fold) => fold.reset(),
+            Self::Vesta(fold) => fold.reset(),
+        }
+    }
+
+    fn terms(&mut self) -> &mut [F] {
+        match self {
+            Self::Eager { terms, .. } => terms,
+            Self::Pallas(fold) => &mut fold.terms,
+            Self::Vesta(fold) => &mut fold.terms,
+        }
+    }
+
+    fn accumulate(&mut self, power: F) {
+        match self {
+            Self::Eager {
+                accumulators,
+                terms,
+            } => {
+                if power == F::ONE {
+                    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+                        *accumulator += *term;
+                    }
+                } else {
+                    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+                        *accumulator += *term * power;
+                    }
+                }
+            }
+            Self::Pallas(fold) => fold.accumulate(power),
+            Self::Vesta(fold) => fold.accumulate(power),
+        }
+    }
+
+    fn finish_into(&mut self, output: &mut [F]) {
+        match self {
+            Self::Eager { accumulators, .. } => output.copy_from_slice(accumulators),
+            Self::Pallas(fold) => fold.finish_into(output),
+            Self::Vesta(fold) => fold.finish_into(output),
+        }
+    }
+}
+
+fn initialize_deferred<T: DeferredField + 'static>(
+    accumulators: &mut [T::Accumulator],
+    terms: &dyn Any,
+    power: &dyn Any,
+) {
+    let terms = terms
+        .downcast_ref::<Vec<T>>()
+        .expect("term buffer matches the deferred field")
+        .as_slice();
+    let power = power
+        .downcast_ref::<T>()
+        .expect("power matches the deferred field");
+    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+        let mut initialized = T::Accumulator::default();
+        T::mul_accumulate(&mut initialized, term, power);
+        *accumulator = initialized;
+    }
+}
+
 fn accumulate_deferred<T: DeferredField + 'static>(
     accumulators: &mut [T::Accumulator],
     terms: &dyn Any,
@@ -1279,6 +1427,18 @@ fn reduce_deferred<T: DeferredField + 'static, F: Field>(
     match values.downcast::<Vec<F>>() {
         Ok(values) => *values,
         Err(_) => unreachable!("field type was checked before accumulation"),
+    }
+}
+
+fn reduce_deferred_into<T: DeferredField + 'static, F: Field>(
+    accumulators: &[T::Accumulator],
+    values: &mut Vec<F>,
+) {
+    let values = (values as &mut dyn Any)
+        .downcast_mut::<Vec<T>>()
+        .expect("output buffer matches the deferred field");
+    for (value, accumulator) in values.iter_mut().zip(accumulators) {
+        *value = T::reduce(*accumulator);
     }
 }
 
@@ -3133,13 +3293,14 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             output: &mut [F],
             cache: &mut [F],
             scratch: &mut [F],
+            fold: &mut ReusablePowerFold<F>,
         ) {
-            let mut fold = PowerFold::new(output);
+            fold.reset();
             for term in terms {
                 recurse_into(&term.term, ctx, fold.terms(), cache, scratch);
                 fold.accumulate(ctx.scalars.get(term.power));
             }
-            fold.finish();
+            fold.finish_into(output);
         }
 
         // `scratch` is preallocated per-chunk workspace whose size is derived
@@ -3172,6 +3333,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 }
                 FactorBodyPlan::Factored(work) => {
                     let mut fold = PowerFold::new(output);
+                    let mut reusable_weighted_fold = None;
                     for work in work {
                         match work {
                             FactorBodyWork::Term(term) => {
@@ -3182,7 +3344,18 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                                 recurse_into(factor, ctx, fold.factors(), cache, scratch);
                                 {
                                     let body_values = fold.terms();
-                                    recurse_weighted_terms(terms, ctx, body_values, cache, scratch);
+                                    let reusable_weighted_fold = reusable_weighted_fold
+                                        .get_or_insert_with(|| {
+                                            ReusablePowerFold::new(body_values.len())
+                                        });
+                                    recurse_weighted_terms(
+                                        terms,
+                                        ctx,
+                                        body_values,
+                                        cache,
+                                        scratch,
+                                        reusable_weighted_fold,
+                                    );
                                 }
                                 fold.accumulate_products();
                             }
@@ -3598,6 +3771,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 }
                 EvaluationPlan::DistributePowers { work, base } => {
                     let mut fold = PowerFold::new(output);
+                    let mut reusable_weighted_fold = None;
                     for work in work {
                         match work {
                             DistributionWork::Term { term, power } => {
@@ -3608,7 +3782,18 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                                 recurse_into(factor, ctx, fold.factors(), cache, scratch);
                                 {
                                     let body_values = fold.terms();
-                                    recurse_weighted_terms(terms, ctx, body_values, cache, scratch);
+                                    let reusable_weighted_fold = reusable_weighted_fold
+                                        .get_or_insert_with(|| {
+                                            ReusablePowerFold::new(body_values.len())
+                                        });
+                                    recurse_weighted_terms(
+                                        terms,
+                                        ctx,
+                                        body_values,
+                                        cache,
+                                        scratch,
+                                        reusable_weighted_fold,
+                                    );
                                 }
                                 fold.accumulate_products();
                             }
@@ -4308,13 +4493,49 @@ mod tests {
         EvaluationChallenge, EvaluationChallenges, EvaluationPlan, EvaluationPolyTag, Evaluator,
         FactorBodyPlan, FactorSide, LinearTermCacheBudget, LinearTermCacheOccupancy,
         MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_LINEAR_TERM_CACHE_ENTRIES, PlanScalar,
-        PlanScalarInterner, ScalarId, compressed_selector, get_chunk_params,
+        PlanScalarInterner, ReusablePowerFold, ScalarId, compressed_selector, get_chunk_params,
         linear_term_cache_budget, new_evaluator, new_virtual_evaluator, reuse_cache_slots,
         selector_family_matches,
     };
     use crate::poly::{
         Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
     };
+
+    fn check_reusable_power_fold<F: Field + From<u64>>() {
+        let terms = |seed: u64| {
+            (0..7)
+                .map(|offset| F::from(seed + offset))
+                .collect::<Vec<_>>()
+        };
+        let cases = [
+            vec![(terms(2), F::from(3)), (terms(11), F::from(5))],
+            vec![(terms(17), F::ONE)],
+            vec![(terms(23), F::ONE), (terms(31), F::from(7))],
+            vec![(terms(41), F::from(11)), (terms(47), F::ONE)],
+            vec![(terms(53), F::ONE), (terms(61), F::ONE)],
+        ];
+        let mut fold = ReusablePowerFold::<F>::new(7);
+        for case in cases {
+            fold.reset();
+            let mut expected = vec![F::ZERO; 7];
+            for (terms, power) in case {
+                fold.terms().copy_from_slice(&terms);
+                fold.accumulate(power);
+                for (expected, term) in expected.iter_mut().zip(terms) {
+                    *expected += term * power;
+                }
+            }
+            let mut actual = vec![F::ZERO; 7];
+            fold.finish_into(&mut actual);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn reusable_power_fold_resets_every_buffer() {
+        check_reusable_power_fold::<pallas::Base>();
+        check_reusable_power_fold::<vesta::Base>();
+    }
 
     fn compile_plan<E: Copy, F: Field, B: Basis>(
         ast: &Ast<E, F, B>,
