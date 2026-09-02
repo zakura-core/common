@@ -30,20 +30,25 @@ pub(in crate::plonk) struct Permuted<C: CurveAffine, Ev> {
     compressed_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
     permuted_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
     compressed_input_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
-    permuted_input_poly: Polynomial<C::Scalar, Coeff>,
     permuted_input_coset: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
     permuted_input_blind: Blind<C::Scalar>,
     compressed_table_expression: Arc<Polynomial<C::Scalar, LagrangeCoeff>>,
     compressed_table_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
     permuted_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
-    permuted_table_poly: Polynomial<C::Scalar, Coeff>,
     permuted_table_coset: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
     permuted_table_blind: Blind<C::Scalar>,
 }
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Committed<C: CurveAffine, Ev> {
-    permuted: Permuted<C, Ev>,
+    compressed_input_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
+    permuted_input_poly: Polynomial<C::Scalar, Coeff>,
+    permuted_input_coset: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
+    permuted_input_blind: Blind<C::Scalar>,
+    compressed_table_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
+    permuted_table_poly: Polynomial<C::Scalar, Coeff>,
+    permuted_table_coset: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
+    permuted_table_blind: Blind<C::Scalar>,
     product_poly: Polynomial<C::Scalar, Coeff>,
     product_coset: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
     product_blind: Blind<C::Scalar>,
@@ -73,15 +78,11 @@ pub(in crate::plonk) struct PreparedPermuted<C: CurveAffine, Ev> {
     compressed_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
     permuted_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
     compressed_input_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
-    permuted_input_poly: Polynomial<C::Scalar, Coeff>,
-    permuted_input_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
     permuted_input_commitment: C,
     permuted_input_blind: Blind<C::Scalar>,
     compressed_table_expression: Arc<Polynomial<C::Scalar, LagrangeCoeff>>,
     compressed_table_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
     permuted_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
-    permuted_table_poly: Polynomial<C::Scalar, Coeff>,
-    permuted_table_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
     permuted_table_commitment: C,
     permuted_table_blind: Blind<C::Scalar>,
 }
@@ -224,7 +225,16 @@ fn sort_lookup_values<F: Field + Ord>(values: &mut Vec<F>, scratch: &mut [PastaS
 }
 
 pub(in crate::plonk) struct PreparedProduct<C: CurveAffine, Ev> {
-    permuted: Permuted<C, Ev>,
+    compressed_input_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
+    permuted_input_poly: Polynomial<C::Scalar, Coeff>,
+    permuted_input_coset: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
+    permuted_input_coset_values: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    permuted_input_blind: Blind<C::Scalar>,
+    compressed_table_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
+    permuted_table_poly: Polynomial<C::Scalar, Coeff>,
+    permuted_table_coset: poly::AstLeaf<Ev, ExtendedLagrangeCoeff>,
+    permuted_table_coset_values: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    permuted_table_blind: Blind<C::Scalar>,
     product_poly: Polynomial<C::Scalar, Coeff>,
     product_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
     product_commitment: C,
@@ -572,41 +582,31 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         let permuted_input_blind = blinding.input_blind;
         let permuted_table_blind = blinding.table_blind;
 
-        // Convert and commit to the input and table permutations concurrently.
-        let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>,
-                             blind: Blind<C::Scalar>| {
-            let poly = pk
-                .vk
-                .domain
-                .lagrange_to_coeff_with_twiddles(values.clone(), &pk.fft_twiddles);
-            let coset = pk
-                .vk
-                .domain
-                .coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles);
-            let commitment = params.commit_lagrange(values, blind).to_affine();
-            (poly, coset, commitment)
-        };
-        let (
-            (permuted_input_poly, permuted_input_coset, permuted_input_commitment),
-            (permuted_table_poly, permuted_table_coset, permuted_table_commitment),
-        ) = crate::multicore::join(
-            || commit_values(&permuted_input_expression, permuted_input_blind),
-            || commit_values(&permuted_table_expression, permuted_table_blind),
+        // These Lagrange values remain live until the lookup product is built.
+        // Commit now, then consume them in the basis transforms after that
+        // final use instead of cloning both base-domain buffers here.
+        let (permuted_input_commitment, permuted_table_commitment) = crate::multicore::join(
+            || {
+                params
+                    .commit_lagrange(&permuted_input_expression, permuted_input_blind)
+                    .to_affine()
+            },
+            || {
+                params
+                    .commit_lagrange(&permuted_table_expression, permuted_table_blind)
+                    .to_affine()
+            },
         );
 
         Ok(PreparedPermuted {
             compressed_input_expression,
             compressed_input_coset,
             permuted_input_expression,
-            permuted_input_poly,
-            permuted_input_coset,
             permuted_input_commitment,
             permuted_input_blind,
             compressed_table_expression: Arc::clone(&table.compressed_expression),
             compressed_table_coset: table.compressed_coset.clone(),
             permuted_table_expression,
-            permuted_table_poly,
-            permuted_table_coset,
             permuted_table_commitment,
             permuted_table_blind,
         })
@@ -821,7 +821,7 @@ where
 }
 
 impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedPermuted<C, Ev> {
-    /// Writes commitments and registers cosets in circuit order.
+    /// Writes commitments and reserves coset leaves in circuit order.
     pub(in crate::plonk) fn finalize<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
         evaluator: &mut poly::Evaluator<Ev, C::Scalar, ExtendedLagrangeCoeff>,
@@ -832,16 +832,14 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedPermuted<C, Ev> {
         transcript.write_point(self.permuted_input_commitment)?;
         transcript.write_point(self.permuted_table_commitment)?;
 
-        let permuted_input_coset = evaluator.register_poly_with_tag(
-            self.permuted_input_coset,
+        let permuted_input_coset = evaluator.register_deferred_poly_with_tag(
             QuotientPoly::LookupPermutedInput {
                 circuit_index,
                 lookup_index,
             }
             .into(),
         );
-        let permuted_table_coset = evaluator.register_poly_with_tag(
-            self.permuted_table_coset,
+        let permuted_table_coset = evaluator.register_deferred_poly_with_tag(
             QuotientPoly::LookupPermutedTable {
                 circuit_index,
                 lookup_index,
@@ -853,13 +851,11 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedPermuted<C, Ev> {
             compressed_input_expression: self.compressed_input_expression,
             permuted_input_expression: self.permuted_input_expression,
             compressed_input_coset: self.compressed_input_coset,
-            permuted_input_poly: self.permuted_input_poly,
             permuted_input_coset,
             permuted_input_blind: self.permuted_input_blind,
             compressed_table_expression: self.compressed_table_expression,
             compressed_table_coset: self.compressed_table_coset,
             permuted_table_expression: self.permuted_table_expression,
-            permuted_table_poly: self.permuted_table_poly,
             permuted_table_coset,
             permuted_table_blind: self.permuted_table_blind,
         })
@@ -988,24 +984,73 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
             assert_eq!(z[u], C::Scalar::ONE);
         }
 
+        let Permuted {
+            compressed_input_expression: _,
+            permuted_input_expression,
+            compressed_input_coset,
+            permuted_input_coset,
+            permuted_input_blind,
+            compressed_table_expression: _,
+            compressed_table_coset,
+            permuted_table_expression,
+            permuted_table_coset,
+            permuted_table_blind,
+        } = self;
+        let transform_permuted = |values| {
+            let polynomial = pk
+                .vk
+                .domain
+                .lagrange_to_coeff_with_twiddles(values, &pk.fft_twiddles);
+            let coset = pk
+                .vk
+                .domain
+                .coeff_to_extended_with_twiddles(polynomial.clone(), &pk.fft_twiddles);
+            (polynomial, coset)
+        };
+
         let product_blind = blinding.product_blind;
-        let (product_commitment, (z, product_coset)) = crate::multicore::join(
-            || params.commit_lagrange(&z, product_blind).to_affine(),
+        let (
+            (
+                (permuted_input_poly, permuted_input_coset_values),
+                (permuted_table_poly, permuted_table_coset_values),
+            ),
+            (product_commitment, (z, product_coset)),
+        ) = crate::multicore::join(
             || {
-                let z = pk
-                    .vk
-                    .domain
-                    .lagrange_to_coeff_with_twiddles(z.clone(), &pk.fft_twiddles);
-                let coset = pk
-                    .vk
-                    .domain
-                    .coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles);
-                (z, coset)
+                crate::multicore::join(
+                    || transform_permuted(permuted_input_expression),
+                    || transform_permuted(permuted_table_expression),
+                )
+            },
+            || {
+                crate::multicore::join(
+                    || params.commit_lagrange(&z, product_blind).to_affine(),
+                    || {
+                        let z = pk
+                            .vk
+                            .domain
+                            .lagrange_to_coeff_with_twiddles(z.clone(), &pk.fft_twiddles);
+                        let coset = pk
+                            .vk
+                            .domain
+                            .coeff_to_extended_with_twiddles(z.clone(), &pk.fft_twiddles);
+                        (z, coset)
+                    },
+                )
             },
         );
 
         PreparedProduct {
-            permuted: self,
+            compressed_input_coset,
+            permuted_input_poly,
+            permuted_input_coset,
+            permuted_input_coset_values,
+            permuted_input_blind,
+            compressed_table_coset,
+            permuted_table_poly,
+            permuted_table_coset,
+            permuted_table_coset_values,
+            permuted_table_blind,
             product_poly: z,
             product_coset,
             product_commitment,
@@ -1023,6 +1068,8 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedProduct<C, Ev> {
         circuit_index: usize,
         lookup_index: usize,
     ) -> Result<Committed<C, Ev>, Error> {
+        evaluator.fill_deferred_poly(self.permuted_input_coset, self.permuted_input_coset_values);
+        evaluator.fill_deferred_poly(self.permuted_table_coset, self.permuted_table_coset_values);
         let product_coset = evaluator.register_poly_with_tag(
             self.product_coset,
             QuotientPoly::LookupProduct {
@@ -1036,7 +1083,14 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> PreparedProduct<C, Ev> {
         transcript.write_point(self.product_commitment)?;
 
         Ok(Committed {
-            permuted: self.permuted,
+            compressed_input_coset: self.compressed_input_coset,
+            permuted_input_poly: self.permuted_input_poly,
+            permuted_input_coset: self.permuted_input_coset,
+            permuted_input_blind: self.permuted_input_blind,
+            compressed_table_coset: self.compressed_table_coset,
+            permuted_table_poly: self.permuted_table_poly,
+            permuted_table_coset: self.permuted_table_coset,
+            permuted_table_blind: self.permuted_table_blind,
             product_poly: self.product_poly,
             product_coset,
             product_blind: self.product_blind,
@@ -1100,10 +1154,10 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
     /// Finishes the lookup argument without rebuilding its quotient ASTs.
     pub(in crate::plonk) fn into_constructed(self) -> Constructed<C> {
         Constructed {
-            permuted_input_poly: self.permuted.permuted_input_poly,
-            permuted_input_blind: self.permuted.permuted_input_blind,
-            permuted_table_poly: self.permuted.permuted_table_poly,
-            permuted_table_blind: self.permuted.permuted_table_blind,
+            permuted_input_poly: self.permuted_input_poly,
+            permuted_input_blind: self.permuted_input_blind,
+            permuted_table_poly: self.permuted_table_poly,
+            permuted_table_blind: self.permuted_table_blind,
             product_poly: self.product_poly,
             product_blind: self.product_blind,
         }
@@ -1128,8 +1182,7 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
         Constructed<C>,
         impl Iterator<Item = poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>> + 'a,
     ) {
-        let permuted = self.permuted;
-        let compressed_input_coset = permuted.compressed_input_coset.unwrap_or_else(|| {
+        let compressed_input_coset = self.compressed_input_coset.unwrap_or_else(|| {
             compress_expressions_coset(
                 &argument.input_expressions,
                 fixed_cosets,
@@ -1137,7 +1190,7 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
                 instance_cosets,
             )
         });
-        let compressed_table_coset = permuted.compressed_table_coset.unwrap_or_else(|| {
+        let compressed_table_coset = self.compressed_table_coset.unwrap_or_else(|| {
             compress_expressions_coset(
                 &argument.table_expressions,
                 fixed_cosets,
@@ -1147,9 +1200,9 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
         });
         let expressions = construct_constraints(
             compressed_input_coset,
-            permuted.permuted_input_coset,
+            self.permuted_input_coset,
             compressed_table_coset,
-            permuted.permuted_table_coset,
+            self.permuted_table_coset,
             self.product_coset,
             l0,
             l_blind,
@@ -1158,10 +1211,10 @@ impl<'a, C: CurveAffine, Ev: Copy + Send + Sync + 'a> Committed<C, Ev> {
 
         (
             Constructed {
-                permuted_input_poly: permuted.permuted_input_poly,
-                permuted_input_blind: permuted.permuted_input_blind,
-                permuted_table_poly: permuted.permuted_table_poly,
-                permuted_table_blind: permuted.permuted_table_blind,
+                permuted_input_poly: self.permuted_input_poly,
+                permuted_input_blind: self.permuted_input_blind,
+                permuted_table_poly: self.permuted_table_poly,
+                permuted_table_blind: self.permuted_table_blind,
                 product_poly: self.product_poly,
                 product_blind: self.product_blind,
             },
