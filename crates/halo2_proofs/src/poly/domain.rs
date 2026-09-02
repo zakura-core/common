@@ -35,7 +35,7 @@ type PolynomialTransformBatch<F> = (
 /// The fields are private so caches can only be built by
 /// [`EvaluationDomain::proving_key_twiddles`] or cloned from one it built.
 ///
-/// Clones share both allocations. This matters because [`ProvingKey`] is
+/// Clones share all retained allocations. This matters because [`ProvingKey`] is
 /// cloneable and these tables are intended to be retained, not rebuilt.
 /// Exact equivalence with the uncached transforms across the supported domain
 /// shapes is covered by
@@ -46,6 +46,8 @@ type PolynomialTransformBatch<F> = (
 pub(crate) struct ProvingKeyTwiddles<F> {
     base_inverse: Arc<[F]>,
     extended_forward: Arc<[F]>,
+    base_inverse_tables: Arc<[Vec<F>]>,
+    extended_forward_tables: Arc<[Vec<F>]>,
 }
 
 impl<F> fmt::Debug for ProvingKeyTwiddles<F> {
@@ -314,9 +316,16 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
     /// Builds the FFT twiddles retained by a proving key.
     pub(crate) fn proving_key_twiddles(&self) -> ProvingKeyTwiddles<F> {
+        let base_inverse = twiddle_table(self.omega_inv, 1 << self.k);
+        let extended_forward = twiddle_table(self.extended_omega, self.extended_len());
+        let base_inverse_tables = butterfly_twiddle_tables(&base_inverse, 1 << self.k);
+        let extended_forward_tables =
+            butterfly_twiddle_tables(&extended_forward, self.extended_len());
         ProvingKeyTwiddles {
-            base_inverse: Arc::from(twiddle_table(self.omega_inv, 1 << self.k)),
-            extended_forward: Arc::from(twiddle_table(self.extended_omega, self.extended_len())),
+            base_inverse: Arc::from(base_inverse),
+            extended_forward: Arc::from(extended_forward),
+            base_inverse_tables: Arc::from(base_inverse_tables),
+            extended_forward_tables: Arc::from(extended_forward_tables),
         }
     }
 
@@ -336,6 +345,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             1,
             1,
             &twiddles.base_inverse,
+            &twiddles.base_inverse_tables,
+            0,
             parallel_depth(),
         );
         normalize_inverse_fft(&mut polynomial.values, self.k, self.ifft_divisor, true);
@@ -362,6 +373,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             self.k,
             self.extended_k,
             &twiddles.extended_forward,
+            &twiddles.extended_forward_tables,
             parallel_depth(),
         );
 
@@ -415,6 +427,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 1,
                 1,
                 &twiddles.base_inverse,
+                &twiddles.base_inverse_tables,
+                0,
                 INNER_PARALLEL_DEPTH,
             );
             normalize_inverse_fft(&mut values, self.k, self.ifft_divisor, false);
@@ -430,6 +444,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 self.k,
                 self.extended_k,
                 &twiddles.extended_forward,
+                &twiddles.extended_forward_tables,
                 INNER_PARALLEL_DEPTH,
             );
             let extended = Polynomial {
@@ -532,6 +547,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             1,
             1,
             &twiddles.extended_forward,
+            &twiddles.extended_forward_tables,
+            0,
             parallel_depth(),
         );
 
@@ -591,6 +608,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             1,
             1,
             &twiddles.extended_forward,
+            &twiddles.extended_forward_tables,
+            0,
             parallel_depth(),
         );
         polynomial.values[1..].reverse();
@@ -701,11 +720,13 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
 
         let twiddles = twiddle_table(omega, extended_n);
+        let tables = butterfly_twiddle_tables(&twiddles, extended_n);
         Self::fft_zero_padded_with_twiddles(
             coefficients,
             log_n,
             extended_log_n,
             &twiddles,
+            &tables,
             parallel_depth(),
         );
     }
@@ -715,6 +736,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         log_n: u32,
         extended_log_n: u32,
         twiddles: &[F],
+        tables: &[Vec<F>],
         parallel_depth: u32,
     ) {
         assert!(log_n <= extended_log_n);
@@ -773,7 +795,15 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         // Each 2 * extension chunk contains the first retained stage. Continue
         // with the other log_n - 1 butterfly stages. A zero parallel depth
         // still traverses recursively to retain cache locality.
-        recursive_butterfly_after_prefix(&mut values, 2 * extension, 1, twiddles, parallel_depth);
+        recursive_butterfly_after_prefix(
+            &mut values,
+            2 * extension,
+            1,
+            twiddles,
+            tables,
+            0,
+            parallel_depth,
+        );
         *coefficients = values;
     }
 
@@ -983,11 +1013,30 @@ fn bitreverse(value: usize, bits: u32) -> usize {
     }
 }
 
+/// Node half-lengths at or below this size use the strided scalar combine
+/// loop; larger nodes use a contiguous per-level twiddle table.
+const CACHED_TWIDDLE_MIN_HALF: usize = 32;
+
+/// Builds contiguous per-level twiddle tables for the butterfly combine step.
+fn butterfly_twiddle_tables<F: Field>(twiddles: &[F], len: usize) -> Vec<Vec<F>> {
+    let mut tables = Vec::new();
+    let mut half = len / 2;
+    let mut chunk = 1;
+    while half > CACHED_TWIDDLE_MIN_HALF {
+        tables.push((1..half).map(|index| twiddles[index * chunk]).collect());
+        half /= 2;
+        chunk *= 2;
+    }
+    tables
+}
+
 fn recursive_butterfly_after_prefix<F: Field>(
     values: &mut [F],
     completed_chunk_len: usize,
     twiddle_chunk: usize,
     twiddles: &[F],
+    tables: &[Vec<F>],
+    level: usize,
     parallel_depth: u32,
 ) {
     let len = values.len();
@@ -1005,6 +1054,8 @@ fn recursive_butterfly_after_prefix<F: Field>(
                         completed_chunk_len,
                         twiddle_chunk * 2,
                         twiddles,
+                        tables,
+                        level + 1,
                         parallel_depth - 1,
                     )
                 },
@@ -1014,6 +1065,8 @@ fn recursive_butterfly_after_prefix<F: Field>(
                         completed_chunk_len,
                         twiddle_chunk * 2,
                         twiddles,
+                        tables,
+                        level + 1,
                         parallel_depth - 1,
                     )
                 },
@@ -1025,11 +1078,13 @@ fn recursive_butterfly_after_prefix<F: Field>(
                 completed_chunk_len,
                 twiddle_chunk * 2,
                 twiddles,
+                tables,
+                level + 1,
             );
         }
     }
 
-    butterfly_chunk(left, right, twiddle_chunk, twiddles);
+    butterfly_chunk(left, right, twiddle_chunk, twiddles, tables, level);
 }
 
 /// Recursively processes two equal-sized field FFT chunks together. The FFT
@@ -1042,6 +1097,8 @@ fn recursive_butterfly_pair_after_prefix<F: Field>(
     completed_chunk_len: usize,
     twiddle_chunk: usize,
     twiddles: &[F],
+    tables: &[Vec<F>],
+    level: usize,
 ) {
     debug_assert_eq!(first.len(), second.len());
     let len = first.len();
@@ -1061,6 +1118,8 @@ fn recursive_butterfly_pair_after_prefix<F: Field>(
             completed_chunk_len,
             twiddle_chunk * 2,
             twiddles,
+            tables,
+            level + 1,
         );
         recursive_butterfly_pair_after_prefix(
             second_left,
@@ -1068,6 +1127,8 @@ fn recursive_butterfly_pair_after_prefix<F: Field>(
             completed_chunk_len,
             twiddle_chunk * 2,
             twiddles,
+            tables,
+            level + 1,
         );
     }
 
@@ -1078,6 +1139,8 @@ fn recursive_butterfly_pair_after_prefix<F: Field>(
         second_right,
         twiddle_chunk,
         twiddles,
+        tables,
+        level,
     );
 }
 
@@ -1087,6 +1150,8 @@ fn butterfly_chunk<F: Field>(
     right: &mut [F],
     twiddle_chunk: usize,
     twiddles: &[F],
+    tables: &[Vec<F>],
+    level: usize,
 ) {
     // Handle the unity twiddle without a field multiplication.
     let (first_left, left) = left.split_at_mut(1);
@@ -1096,16 +1161,30 @@ fn butterfly_chunk<F: Field>(
     first_left[0] += &t;
     first_right[0] -= &t;
 
-    for (index, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
-        let mut t = *right;
-        t *= &twiddles[(index + 1) * twiddle_chunk];
-        *right = *left;
-        *left += &t;
-        *right -= &t;
+    if let Some(table) = tables.get(level) {
+        debug_assert_eq!(table.len(), right.len());
+        for (right, twiddle) in right.iter_mut().zip(table) {
+            *right *= twiddle;
+        }
+        for (left, right) in left.iter_mut().zip(right.iter_mut()) {
+            let t = *right;
+            *right = *left;
+            *left += &t;
+            *right -= &t;
+        }
+    } else {
+        for (index, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+            let mut t = *right;
+            t *= &twiddles[(index + 1) * twiddle_chunk];
+            *right = *left;
+            *left += &t;
+            *right -= &t;
+        }
     }
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn butterfly_chunk_pair<F: Field>(
     first_left: &mut [F],
     first_right: &mut [F],
@@ -1113,6 +1192,8 @@ fn butterfly_chunk_pair<F: Field>(
     second_right: &mut [F],
     twiddle_chunk: usize,
     twiddles: &[F],
+    tables: &[Vec<F>],
+    level: usize,
 ) {
     debug_assert_eq!(first_left.len(), first_right.len());
     debug_assert_eq!(first_left.len(), second_left.len());
@@ -1131,6 +1212,31 @@ fn butterfly_chunk_pair<F: Field>(
     second_a[0] += &second_t;
     first_b[0] -= &first_t;
     second_b[0] -= &second_t;
+
+    if let Some(table) = tables.get(level) {
+        debug_assert_eq!(table.len(), first_right.len());
+        for (right, twiddle) in first_right.iter_mut().zip(table) {
+            *right *= twiddle;
+        }
+        for (right, twiddle) in second_right.iter_mut().zip(table) {
+            *right *= twiddle;
+        }
+        for ((first_left, first_right), (second_left, second_right)) in first_left
+            .iter_mut()
+            .zip(first_right.iter_mut())
+            .zip(second_left.iter_mut().zip(second_right.iter_mut()))
+        {
+            let first_t = *first_right;
+            let second_t = *second_right;
+            *first_right = *first_left;
+            *second_right = *second_left;
+            *first_left += &first_t;
+            *second_left += &second_t;
+            *first_right -= &first_t;
+            *second_right -= &second_t;
+        }
+        return;
+    }
 
     for (index, ((first_left, first_right), (second_left, second_right))) in first_left
         .iter_mut()
@@ -1581,15 +1687,49 @@ fn test_sparse_quotient_division_matches_pointwise_on_basis_vectors() {
 fn test_orchard_proving_key_twiddle_cache_size_and_sharing() {
     use crate::pasta::pallas::Scalar;
 
-    let domain = EvaluationDomain::<Scalar>::new(9, 11);
+    const ORCHARD_DEGREE: u32 = 9;
+    const ORCHARD_K: u32 = 11;
+    const EXPECTED_FLAT_PAYLOAD_BYTES: usize = 288 * 1024;
+    const EXPECTED_LEVEL_PAYLOAD_BYTES: usize = 585_312;
+    #[cfg(target_pointer_width = "64")]
+    const EXPECTED_LEVEL_RETAINED_BYTES: usize = 585_656;
+
+    let domain = EvaluationDomain::<Scalar>::new(ORCHARD_DEGREE, ORCHARD_K);
     let twiddles = domain.proving_key_twiddles();
     assert_eq!(std::mem::size_of::<Scalar>(), 32);
-    assert_eq!(twiddles.base_inverse.len(), 1 << 10);
-    assert_eq!(twiddles.extended_forward.len(), 1 << 13);
+    assert_eq!(twiddles.base_inverse.len(), 1 << (ORCHARD_K - 1));
+    assert_eq!(
+        twiddles.extended_forward.len(),
+        1 << (domain.extended_k - 1)
+    );
     assert_eq!(
         (twiddles.base_inverse.len() + twiddles.extended_forward.len())
             * std::mem::size_of::<Scalar>(),
-        288 * 1024
+        EXPECTED_FLAT_PAYLOAD_BYTES
+    );
+
+    let level_tables = twiddles
+        .base_inverse_tables
+        .iter()
+        .chain(twiddles.extended_forward_tables.iter())
+        .collect::<Vec<_>>();
+    assert!(
+        level_tables
+            .iter()
+            .all(|table| table.len() == table.capacity())
+    );
+    let level_payload_bytes =
+        level_tables.iter().map(|table| table.len()).sum::<usize>() * std::mem::size_of::<Scalar>();
+    assert_eq!(level_payload_bytes, EXPECTED_LEVEL_PAYLOAD_BYTES);
+
+    // This stable accounting excludes allocator metadata and the two `Arc`
+    // reference-count headers, whose sizes are implementation details.
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(
+        level_payload_bytes
+            + level_tables.len() * std::mem::size_of::<Vec<Scalar>>()
+            + 2 * std::mem::size_of::<Arc<[Vec<Scalar>]>>(),
+        EXPECTED_LEVEL_RETAINED_BYTES
     );
 
     let cloned = twiddles.clone();
@@ -1597,6 +1737,14 @@ fn test_orchard_proving_key_twiddle_cache_size_and_sharing() {
     assert!(Arc::ptr_eq(
         &twiddles.extended_forward,
         &cloned.extended_forward
+    ));
+    assert!(Arc::ptr_eq(
+        &twiddles.base_inverse_tables,
+        &cloned.base_inverse_tables
+    ));
+    assert!(Arc::ptr_eq(
+        &twiddles.extended_forward_tables,
+        &cloned.extended_forward_tables
     ));
 }
 
