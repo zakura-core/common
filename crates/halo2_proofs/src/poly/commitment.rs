@@ -112,6 +112,13 @@ use group::{Curve, Group};
     target_os = "macos"
 ))]
 use maybe_rayon::prelude::*;
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use pasta_curves::{
+    glv::{Decomposed, GlvParams, Table},
+    pallas, vesta,
+};
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use std::any::Any;
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 #[cfg(feature = "batch")]
 use std::sync::Mutex;
@@ -192,6 +199,143 @@ pub struct Params<C: CurveAffine> {
     commitment_tables_cache: CommitmentTablesCache<C>,
     #[cfg(feature = "orbits")]
     lagrange_table_cache: ZeroCheckCache<C>,
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    ipa_generator_fold_cache: IpaGeneratorFoldCache,
+}
+
+/// Normalized GLV windows for the original SRS's high half, retained only
+/// for the first IPA generator fold. This private type erasure keeps Pasta's
+/// concrete GLV table type out of halo2's generic parameter surface.
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+#[derive(Debug)]
+enum PreparedIpaGeneratorFold {
+    Pallas(Vec<Table<pallas::Point>>),
+    Vesta(Vec<Table<vesta::Point>>),
+}
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+impl PreparedIpaGeneratorFold {
+    fn new<C: CurveAffine + 'static>(generators: &[C]) -> Option<Self> {
+        if generators.len() < 2 || !generators.len().is_multiple_of(2) {
+            return None;
+        }
+        let high = generators[generators.len() / 2..].to_vec();
+        let high = &high as &dyn Any;
+
+        if let Some(high) = high.downcast_ref::<Vec<pallas::Affine>>() {
+            let points: Vec<pallas::Point> = high.iter().copied().map(Into::into).collect();
+            return Some(Self::Pallas(Table::batch(&points)));
+        }
+        if let Some(high) = high.downcast_ref::<Vec<vesta::Affine>>() {
+            let points: Vec<vesta::Point> = high.iter().copied().map(Into::into).collect();
+            return Some(Self::Vesta(Table::batch(&points)));
+        }
+        None
+    }
+
+    // The owned vector is required for safe `Any` downcasting to the two
+    // concrete Pasta affine-vector types.
+    #[allow(clippy::ptr_arg)]
+    fn fold<C: CurveAffine + 'static>(
+        &self,
+        generators: &mut Vec<C>,
+        challenge: C::Scalar,
+    ) -> bool {
+        let generators = generators as &mut dyn Any;
+        let challenge = &challenge as &dyn Any;
+        match self {
+            Self::Pallas(tables) => {
+                let Some(generators) = generators.downcast_mut::<Vec<pallas::Affine>>() else {
+                    return false;
+                };
+                let Some(challenge) = challenge.downcast_ref::<pallas::Scalar>() else {
+                    return false;
+                };
+                fold_generators_with_tables(tables, generators, challenge)
+            }
+            Self::Vesta(tables) => {
+                let Some(generators) = generators.downcast_mut::<Vec<vesta::Affine>>() else {
+                    return false;
+                };
+                let Some(challenge) = challenge.downcast_ref::<vesta::Scalar>() else {
+                    return false;
+                };
+                fold_generators_with_tables(tables, generators, challenge)
+            }
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Pallas(tables) => tables.len() * core::mem::size_of::<Table<pallas::Point>>(),
+            Self::Vesta(tables) => tables.len() * core::mem::size_of::<Table<vesta::Point>>(),
+        }
+    }
+}
+
+/// Applies `G_lo + [challenge] G_hi` with the high-half windows retained by
+/// preparation. A length mismatch returns before touching `generators`.
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+fn fold_generators_with_tables<C: GlvParams>(
+    tables: &[Table<C>],
+    generators: &mut [C::AffineExt],
+    challenge: &C::ScalarExt,
+) -> bool {
+    let Some(expected) = tables.len().checked_mul(2) else {
+        return false;
+    };
+    if tables.is_empty() || generators.len() != expected {
+        return false;
+    }
+
+    let decomposed = Decomposed::<C>::new(challenge);
+    let (low, _) = generators.split_at_mut(tables.len());
+    let chunk_size = tables
+        .len()
+        .div_ceil(crate::multicore::current_num_threads());
+    crate::multicore::scope(|scope| {
+        for (low, tables) in low.chunks_mut(chunk_size).zip(tables.chunks(chunk_size)) {
+            let decomposed = &decomposed;
+            scope.spawn(move |_| {
+                let table_refs: Vec<&Table<C>> = tables.iter().collect();
+                let mut scaled = Table::mul_decomposed_batch(&table_refs, decomposed);
+                for (scaled, low) in scaled.iter_mut().zip(low.iter()) {
+                    *scaled += *low;
+                }
+                C::batch_normalize(&scaled, low);
+            });
+        }
+    });
+    true
+}
+
+/// A shared, lazily armed cache for [`PreparedIpaGeneratorFold`]. It is
+/// initialized by [`Params::prepare_commitments`], never during proving.
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+#[derive(Clone, Default)]
+struct IpaGeneratorFoldCache(Arc<OnceLock<Option<PreparedIpaGeneratorFold>>>);
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+impl IpaGeneratorFoldCache {
+    fn initialize<C: CurveAffine + 'static>(&self, generators: &[C]) -> bool {
+        self.0
+            .get_or_init(|| PreparedIpaGeneratorFold::new(generators))
+            .is_some()
+    }
+
+    fn get(&self) -> Option<&PreparedIpaGeneratorFold> {
+        self.0.get().and_then(Option::as_ref)
+    }
+}
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+impl fmt::Debug for IpaGeneratorFoldCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("IpaGeneratorFoldCache")
+            .field(&self.get().map(PreparedIpaGeneratorFold::retained_bytes))
+            .finish()
+    }
 }
 
 /// A lazily built prepared fixed-base multiexp table — over `[g..., w, u]`
@@ -723,6 +867,8 @@ impl<C: CurveAffine> Params<C> {
             commitment_tables_cache: CommitmentTablesCache::default(),
             #[cfg(feature = "orbits")]
             lagrange_table_cache: ZeroCheckCache::default(),
+            #[cfg(any(feature = "multicore", feature = "orbits"))]
+            ipa_generator_fold_cache: IpaGeneratorFoldCache::default(),
         }
     }
 
@@ -891,6 +1037,8 @@ impl<C: CurveAffine> Params<C> {
             commitment_tables_cache: CommitmentTablesCache::default(),
             #[cfg(feature = "orbits")]
             lagrange_table_cache: ZeroCheckCache::default(),
+            #[cfg(any(feature = "multicore", feature = "orbits"))]
+            ipa_generator_fold_cache: IpaGeneratorFoldCache::default(),
         })
     }
 
@@ -1053,10 +1201,11 @@ impl<C: CurveAffine> Params<C> {
     /// shapes keep the planned multiexp. Measurements covered full-width and
     /// witness-like (boolean, byte, zero-padded) coefficient distributions.
     ///
-    /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
-    /// fixed-window table adds approximately 0.5 MiB for a 32-byte scalar
-    /// representation. The signed-width-four public-instance table adds about
-    /// 224 KiB on Pasta.
+    /// The two α7 tables account for about 24.8 MiB at `k = 11`; normalized
+    /// GLV windows for the coefficient SRS's high half add exactly 1 MiB of
+    /// retained table payload on Pasta. The no-orbits fixed-window table adds
+    /// approximately 0.5 MiB for a 32-byte scalar representation. The
+    /// signed-width-four public-instance table adds about 224 KiB on Pasta.
     ///
     /// Concurrent and repeat calls share their initialization attempts,
     /// including a backend decline. Without `orbits`, one atomic initialization
@@ -1085,9 +1234,10 @@ impl<C: CurveAffine> Params<C> {
                 bases.push(self.u);
                 C::CurveExt::try_prepare_zero_check(&bases)
             });
-            #[cfg(feature = "batch")]
             if prepared {
+                #[cfg(feature = "batch")]
                 self.prepare_instance_table();
+                self.ipa_generator_fold_cache.initialize(&self.g);
             }
             prepared
         }
@@ -1099,9 +1249,10 @@ impl<C: CurveAffine> Params<C> {
                 let blind = BlindTable::new(self.w);
                 Some((coefficient, lagrange, blind))
             });
-            #[cfg(feature = "batch")]
             if prepared {
+                #[cfg(feature = "batch")]
                 self.prepare_instance_table();
+                self.ipa_generator_fold_cache.initialize(&self.g);
             }
             prepared
         }
@@ -1123,6 +1274,23 @@ impl<C: CurveAffine> Params<C> {
         {
             self.commitment_tables_cache.lagrange()
         }
+    }
+
+    /// Tries the first IPA generator fold through the normalized high-half
+    /// windows retained by [`Self::prepare_commitments`]. A decline leaves
+    /// `generators` untouched.
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    fn try_prepared_ipa_generator_fold(
+        &self,
+        generators: &mut Vec<C>,
+        challenge: C::Scalar,
+    ) -> bool {
+        if !self.prepared_ipa_round_multiexp_is_available() {
+            return false;
+        }
+        self.ipa_generator_fold_cache
+            .get()
+            .is_some_and(|prepared| prepared.fold(generators, challenge))
     }
 }
 
@@ -1706,6 +1874,35 @@ fn blind_table_cache_is_shared_by_clones_and_not_serialized() {
 
     let deserialized = Params::<EqAffine>::read(&mut serialized_before.as_slice()).unwrap();
     assert!(deserialized.blind_table().is_none());
+}
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+#[test]
+fn ipa_generator_fold_cache_is_shared_by_clones_and_not_serialized() {
+    use crate::pasta::EqAffine;
+
+    let params = Params::<EqAffine>::new(3);
+    let mut serialized_before = vec![];
+    params.write(&mut serialized_before).unwrap();
+    assert!(params.ipa_generator_fold_cache.get().is_none());
+    assert!(params.prepare_commitments());
+    let prepared = params.ipa_generator_fold_cache.get().unwrap();
+    assert_eq!(core::mem::size_of::<Table<vesta::Point>>(), 1024);
+    assert_eq!(
+        prepared.retained_bytes(),
+        4 * core::mem::size_of::<Table<vesta::Point>>(),
+    );
+
+    let cloned = params.clone();
+    let cloned_prepared = cloned.ipa_generator_fold_cache.get().unwrap();
+    assert!(core::ptr::eq(prepared, cloned_prepared));
+
+    let mut serialized_after = vec![];
+    params.write(&mut serialized_after).unwrap();
+    assert_eq!(serialized_before, serialized_after);
+
+    let deserialized = Params::<EqAffine>::read(&mut serialized_before.as_slice()).unwrap();
+    assert!(deserialized.ipa_generator_fold_cache.get().is_none());
 }
 
 #[test]

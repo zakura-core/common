@@ -314,8 +314,16 @@ pub(in crate::poly) fn create_proof_with_powers<
             b_scale += b_hi_scale * u_j;
         }
 
-        // Collapse `G'`
-        parallel_generator_collapse(&mut g_prime, u_j);
+        // The first fold can reuse normalized high-half windows retained by
+        // `prepare_commitments`; later folds have transcript-dependent bases.
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        let prepared_generator_fold =
+            j == 0 && params.try_prepared_ipa_generator_fold(&mut g_prime, u_j);
+        #[cfg(not(any(feature = "multicore", feature = "orbits")))]
+        let prepared_generator_fold = false;
+        if !prepared_generator_fold {
+            parallel_generator_collapse(&mut g_prime, u_j);
+        }
         g_prime.truncate(half);
 
         // Update randomness (the synthetic blinding factor at the end)
@@ -370,6 +378,8 @@ mod tests {
         parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    use crate::poly::commitment::PreparedIpaGeneratorFold;
     #[cfg(feature = "multicore")]
     use crate::poly::commitment::prepared_commitment_max_threads;
     use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
@@ -491,21 +501,28 @@ mod tests {
     }
 
     #[cfg(any(feature = "multicore", feature = "orbits"))]
-    fn prepared_first_round_preserves_opening_proof() {
+    fn prepared_first_round_preserves_opening_proof<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+        C::Scalar: ff::FromUniformBytes<64>,
+    {
         const K: u32 = 6;
         const PROOF_SEED: u64 = 0x4950_412d_524f_554e;
 
-        let params = Params::<pallas::Affine>::new(K);
+        let params = Params::<C>::new(K);
+        let mut generators = params.g.clone();
+        let untouched = generators.clone();
+        assert!(!params.try_prepared_ipa_generator_fold(&mut generators, C::Scalar::from(3)));
+        assert_eq!(generators, untouched);
         let domain = EvaluationDomain::new(1, K);
         let mut polynomial = domain.empty_coeff();
         for (index, coefficient) in polynomial.iter_mut().enumerate() {
-            *coefficient = pallas::Scalar::from(index as u64 + 1);
+            *coefficient = C::Scalar::from(index as u64 + 1);
         }
-        let blind = Blind(pallas::Scalar::from(17));
+        let blind = Blind(C::Scalar::from(17));
         let create_seeded_proof = || {
             let commitment = params.commit(&polynomial, blind).to_affine();
-            let mut transcript =
-                Blake2bWrite::<Vec<u8>, pallas::Affine, Challenge255<_>>::init(vec![]);
+            let mut transcript = Blake2bWrite::<Vec<u8>, C, Challenge255<_>>::init(vec![]);
             transcript.write_point(commitment).unwrap();
             let x = *transcript.squeeze_challenge_scalar::<()>();
             transcript
@@ -546,6 +563,12 @@ mod tests {
                 .unwrap();
             let gated_fallback = wide_pool.install(|| {
                 assert!(!params.prepared_ipa_round_multiexp_is_available());
+                let mut generators = params.g.clone();
+                let untouched = generators.clone();
+                assert!(
+                    !params.try_prepared_ipa_generator_fold(&mut generators, C::Scalar::from(3),)
+                );
+                assert_eq!(generators, untouched);
                 create_seeded_proof()
             });
             assert_eq!(gated_fallback, unprepared);
@@ -705,6 +728,49 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    fn prepared_generator_collapse_matches_native<C>()
+    where
+        C: CurveAffine + core::fmt::Debug + 'static,
+    {
+        let points: Vec<C> = (0..16)
+            .map(|i| {
+                if i == 3 || i == 12 {
+                    C::identity()
+                } else {
+                    C::from(C::Curve::generator() * C::Scalar::from(i as u64 + 1))
+                }
+            })
+            .collect();
+        let prepared = PreparedIpaGeneratorFold::new(&points).unwrap();
+        for challenge in [
+            C::Scalar::ZERO,
+            C::Scalar::ONE,
+            -C::Scalar::ONE,
+            C::Scalar::from(2),
+            full_width_scalar::<C>(),
+        ] {
+            let half = points.len() / 2;
+            let expected_projective: Vec<C::Curve> = points[..half]
+                .iter()
+                .zip(points[half..].iter())
+                .map(|(low, high)| low.to_curve() + (*high * challenge))
+                .collect();
+            let mut expected = vec![C::identity(); half];
+            C::Curve::batch_normalize(&expected_projective, &mut expected);
+
+            let mut actual = points.clone();
+            assert!(prepared.fold(&mut actual, challenge));
+            assert_eq!(&actual[..half], &expected);
+            assert_eq!(&actual[half..], &points[half..]);
+        }
+
+        let mut wrong_length = points[..points.len() - 1].to_vec();
+        let untouched = wrong_length.clone();
+        assert!(!prepared.fold(&mut wrong_length, C::Scalar::from(3)));
+        assert_eq!(wrong_length, untouched);
+    }
+
     fn deferred_hi_evaluation_matches_eager<F: Field + From<u64> + 'static>() {
         for half in [1, 2, 3, 31, 32, 2_048] {
             let polynomial = (0..half * 2)
@@ -796,6 +862,18 @@ mod tests {
         generator_collapse_matches_native::<vesta::Affine>();
     }
 
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    #[test]
+    fn prepared_generator_collapse_matches_native_pallas() {
+        prepared_generator_collapse_matches_native::<pallas::Affine>();
+    }
+
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    #[test]
+    fn prepared_generator_collapse_matches_native_vesta() {
+        prepared_generator_collapse_matches_native::<vesta::Affine>();
+    }
+
     #[test]
     fn round_multiexp_matches_split_pallas() {
         round_multiexp_matches_split::<pallas::Affine>();
@@ -820,8 +898,14 @@ mod tests {
 
     #[cfg(any(feature = "multicore", feature = "orbits"))]
     #[test]
-    fn prepared_first_round_preserves_unprepared_opening_proof() {
-        prepared_first_round_preserves_opening_proof();
+    fn prepared_first_round_preserves_unprepared_opening_proof_pallas() {
+        prepared_first_round_preserves_opening_proof::<pallas::Affine>();
+    }
+
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    #[test]
+    fn prepared_first_round_preserves_unprepared_opening_proof_vesta() {
+        prepared_first_round_preserves_opening_proof::<vesta::Affine>();
     }
 
     #[test]
