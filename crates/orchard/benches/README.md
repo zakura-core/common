@@ -89,10 +89,12 @@ RAYON_NUM_THREADS=10 cargo +1.97.1 bench --locked \
 
 ## Witness assignment
 
-The ignored witness-assignment benchmark uses the production Orchard circuit,
-reuses its V1 floor plan, and writes every generated advice value to benchmark
-storage. Circuit configuration, fixture generation, floor planning, and
-per-sample configuration cloning are outside the timed regions. It measures
+The ignored witness-assignment benchmark uses the production post-NU6.3
+circuit with deterministic Ironwood payments. Every Action has a real V3 spend
+and a nonzero output, and all spend witnesses share one valid anchor. The
+benchmark reuses its V1 floor plan and writes every generated advice value to
+benchmark storage. Circuit configuration, fixture generation, floor planning,
+and per-sample configuration cloning are outside the timed regions. It measures
 one-, two-, and four-Action synthesis with 50 warmups and 1,000 samples:
 
 ```console
@@ -125,22 +127,23 @@ Generate one corpus from the control binary:
 
 ```console
 RAYON_NUM_THREADS=1 \
-ORCHARD_BATCH_FIXTURE_CORPUS=/absolute/path/orchard-batch-v1.bin \
-ORCHARD_BATCH_FIXTURE_GENERATE=1 \
+IRONWOOD_BATCH_FIXTURE_CORPUS=/absolute/path/ironwood-batch-v2.bin \
+IRONWOOD_BATCH_FIXTURE_GENERATE=1 \
 ./orchard-test-control --ignored --exact \
-    circuit::benchmark::benchmark_batch_verifier \
+    circuit::benchmark::benchmark_ironwood_batch_verifier \
     --test-threads=1 --nocapture
 ```
 
-The corpus contains 64 deterministic, distinct, valid one-Action proofs. The
+The corpus contains 64 deterministic, distinct, valid two-Action Ironwood
+payment proofs. Every Action has a real V3 spend and a nonzero output. The
 output path must not already exist. Record its SHA-256 hash and reuse the same
 bytes for every binary:
 
 ```console
 RAYON_NUM_THREADS=1 \
-ORCHARD_BATCH_FIXTURE_CORPUS=/absolute/path/orchard-batch-v1.bin \
+IRONWOOD_BATCH_FIXTURE_CORPUS=/absolute/path/ironwood-batch-v2.bin \
 ./orchard-test-candidate --ignored --exact \
-    circuit::benchmark::benchmark_batch_verifier \
+    circuit::benchmark::benchmark_ironwood_batch_verifier \
     --test-threads=1 --nocapture
 ```
 
@@ -149,7 +152,7 @@ proof uniqueness, and a complete 64-proof batch verification. Corpus loading
 and this validation are outside the timed region.
 
 The standard run measures batch sizes 1, 2, 16, and 64 with three warmups and
-15 samples per size. Set `ORCHARD_BATCH_SCREEN=1` only for diagnostic screens;
+15 samples per size. Set `IRONWOOD_BATCH_SCREEN=1` only for diagnostic screens;
 that mode measures batch sizes 1 and 64 with one warmup and seven samples.
 
 ## Comparison protocol

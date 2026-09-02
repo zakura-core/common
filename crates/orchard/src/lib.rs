@@ -53,6 +53,11 @@ pub mod zip32;
 #[cfg(test)]
 mod test_vectors;
 
+#[cfg(all(test, feature = "circuit"))]
+trait BenchmarkCircuitWitnesses {
+    fn benchmark_circuits(&self) -> &[circuit::Circuit];
+}
+
 // Proving and verifying keys are immutable and depend only on the circuit
 // version, so tests in this process can share one of each per version.
 #[cfg(all(test, feature = "circuit"))]
