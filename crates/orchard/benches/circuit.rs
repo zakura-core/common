@@ -6,59 +6,30 @@ use criterion::{BenchmarkId, Criterion};
 #[cfg(unix)]
 use pprof::criterion::{Output, PProfProfiler};
 
-use orchard::{
-    Anchor, Bundle,
-    builder::{Builder, BundleType},
-    bundle::BundleVersion,
-    circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey},
-    keys::{FullViewingKey, Scope, SpendingKey},
-    value::NoteValue,
-};
+use orchard::circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey};
 use rand::rng;
 
+mod support;
+
+use support::payment_fixture;
+
 fn criterion_benchmark(c: &mut Criterion) {
-    let sk = SpendingKey::from_bytes([7; 32]).unwrap();
-    let recipient = FullViewingKey::from(&sk).address_at(0u32, Scope::External);
-
-    let vk = VerifyingKey::build(OrchardCircuitVersion::FixedPostNu6_2);
-    let pk = ProvingKey::build(OrchardCircuitVersion::FixedPostNu6_2);
-
-    let create_bundle = |num_recipients| {
-        let mut builder = Builder::new(
-            BundleType::DEFAULT,
-            BundleVersion::orchard_v2(),
-            BundleVersion::orchard_v2().default_flags(),
-            Anchor::from_bytes([0; 32]).unwrap(),
-        )
-        .unwrap();
-        for _ in 0..num_recipients {
-            builder
-                .add_output(None, recipient, NoteValue::from_raw(10), [0; 512])
-                .unwrap();
-        }
-        let bundle: Bundle<_, i64> = builder.build(rng()).unwrap().unwrap().0;
-
-        let instances: Vec<_> = bundle
-            .actions()
-            .iter()
-            .map(|a| a.to_instance(*bundle.flags(), *bundle.anchor()))
-            .collect();
-
-        (bundle, instances)
-    };
-
-    let recipients_range = 1..=4;
+    let version = OrchardCircuitVersion::PostNu6_3;
+    let vk = VerifyingKey::build(version);
+    let pk = ProvingKey::build(version);
+    let action_counts = 1..=4;
 
     {
-        let mut group = c.benchmark_group("proving");
+        let mut group = c.benchmark_group("ironwood-payment-proving");
         group.sample_size(10);
-        for num_recipients in recipients_range.clone() {
-            let (bundle, instances) = create_bundle(num_recipients);
-            group.bench_function(BenchmarkId::new("bundle", num_recipients), |b| {
+        for action_count in action_counts.clone() {
+            let fixture = payment_fixture(action_count);
+            group.bench_function(BenchmarkId::from_parameter(action_count), |b| {
                 b.iter(|| {
-                    bundle
+                    fixture
+                        .bundle()
                         .authorization()
-                        .create_proof(&pk, &instances, rng())
+                        .create_proof(&pk, fixture.instances(), rng())
                         .unwrap()
                 });
             });
@@ -66,17 +37,17 @@ fn criterion_benchmark(c: &mut Criterion) {
     }
 
     {
-        let mut group = c.benchmark_group("verifying");
-        for num_recipients in recipients_range {
-            let (bundle, instances) = create_bundle(num_recipients);
-            let bundle = bundle
-                .create_proof(&pk, rng())
-                .unwrap()
-                .apply_signatures(rng(), [0; 32], &[])
+        let mut group = c.benchmark_group("ironwood-payment-verifying");
+        for action_count in action_counts {
+            let fixture = payment_fixture(action_count);
+            let proof = fixture
+                .bundle()
+                .authorization()
+                .create_proof(&pk, fixture.instances(), rng())
                 .unwrap();
-            assert!(bundle.verify_proof(&vk).is_ok());
-            group.bench_function(BenchmarkId::new("bundle", num_recipients), |b| {
-                b.iter(|| bundle.authorization().proof().verify(&vk, &instances));
+            assert!(proof.verify(&vk, fixture.instances()).is_ok());
+            group.bench_function(BenchmarkId::from_parameter(action_count), |b| {
+                b.iter(|| proof.verify(&vk, fixture.instances()));
             });
         }
     }

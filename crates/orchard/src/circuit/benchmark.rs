@@ -1,4 +1,4 @@
-//! Manual benchmarks for the complete Orchard proving and verification paths.
+//! Manual benchmarks for complete Ironwood proving and verification paths.
 
 use alloc::vec::Vec;
 use ff::{Field, PrimeField};
@@ -9,8 +9,9 @@ use halo2_proofs::{
         ConstraintSystem, Error, Fixed, FloorPlanner, Instance as InstanceColumn, Selector,
     },
 };
+use incrementalmerkletree::{Hashable, Level};
 use pasta_curves::{pallas, vesta};
-use rand::{SeedableRng, rngs::StdRng};
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -24,48 +25,62 @@ use std::{
 
 use super::{
     Circuit, INSTANCE_COLUMNS, INSTANCE_ROWS, Instance, K, OrchardCircuitVersion, ProvingKey,
-    VerifyingKey, tests::generate_circuit_instance,
+    VerifyingKey,
 };
 use crate::{
-    Anchor, Bundle,
-    builder::{Builder, BundleType},
-    bundle::{BundleVersion, Flags},
+    BenchmarkCircuitWitnesses as _, Bundle, NOTE_COMMITMENT_TREE_DEPTH,
+    builder::{Builder, BundleType, UnauthorizedBundle},
+    bundle::BundleVersion,
     keys::{FullViewingKey, Scope, SpendingKey},
+    note::{ExtractedNoteCommitment, Note, Nullifier, Rho},
+    tree::{MerkleHashOrchard, MerklePath},
     value::NoteValue,
 };
 
 type Halo2Instances = Vec<Vec<Vec<vesta::Scalar>>>;
-type EncodedFixture = (Halo2Instances, Vec<u8>);
+type EncodedIronwoodFixture = (Halo2Instances, Vec<u8>);
 
-const BATCH_BENCH_SIZES: [usize; 4] = [1, 2, 16, 64];
-const BATCH_SCREEN_SIZES: [usize; 2] = [1, 64];
-const BATCH_BENCH_WARMUPS: usize = 3;
-const BATCH_BENCH_SAMPLES: usize = 15;
-const BATCH_SCREEN_WARMUPS: usize = 1;
-const BATCH_SCREEN_SAMPLES: usize = 7;
-const WITNESS_BENCH_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
-const WITNESS_BENCH_WARMUPS: usize = 50;
-const WITNESS_BENCH_SAMPLES: usize = 1_000;
+const IRONWOOD_BATCH_BENCH_SIZES: [usize; 4] = [1, 2, 16, 64];
+const IRONWOOD_BATCH_SCREEN_SIZES: [usize; 2] = [1, 64];
+const IRONWOOD_BATCH_BENCH_WARMUPS: usize = 3;
+const IRONWOOD_BATCH_BENCH_SAMPLES: usize = 15;
+const IRONWOOD_BATCH_SCREEN_WARMUPS: usize = 1;
+const IRONWOOD_BATCH_SCREEN_SAMPLES: usize = 7;
+const IRONWOOD_WITNESS_BENCH_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
+const IRONWOOD_WITNESS_BENCH_WARMUPS: usize = 50;
+const IRONWOOD_WITNESS_BENCH_SAMPLES: usize = 1_000;
 
-const FIXTURE_ACTIONS: usize = 1;
-const FIXTURE_ADDRESS_INDEX: u32 = 0;
-const FIXTURE_NOTE_VALUE: u64 = 10;
+/// A two-Action fixture exercises a fully populated Ironwood payment.
+const IRONWOOD_FIXTURE_ACTIONS: usize = 2;
+const IRONWOOD_FIXTURE_SPEND_ADDRESS_INDEX: u32 = 0;
+const IRONWOOD_FIXTURE_OUTPUT_ADDRESS_INDEX: u32 = 0;
+const IRONWOOD_FIXTURE_MIN_VALUE_BITS: u32 = 24;
+const IRONWOOD_FIXTURE_VALUE_BIT_WIDTH_COUNT: usize = 25;
+/// Coprime to the bit-width count, so Actions traverse every width.
+const IRONWOOD_FIXTURE_ACTION_MAGNITUDE_STRIDE: usize = 11;
 /// The Orchard builder API fixes memo fields at 512 bytes.
-const FIXTURE_MEMO_SIZE: usize = 512;
-const FIXTURE_MEMO: [u8; FIXTURE_MEMO_SIZE] = [0; FIXTURE_MEMO_SIZE];
-const FIXTURE_SPENDING_KEY: [u8; 32] = [7; 32];
-const FIXTURE_ANCHOR: [u8; 32] = [0; 32];
-const FIXTURE_SEED_DOMAIN: u8 = 0x42;
-const PROOF_SEED_DOMAIN: u8 = 0x24;
+const IRONWOOD_FIXTURE_MEMO_SIZE: usize = 512;
+const IRONWOOD_FIXTURE_MEMO: [u8; IRONWOOD_FIXTURE_MEMO_SIZE] = [0; IRONWOOD_FIXTURE_MEMO_SIZE];
+const IRONWOOD_FIXTURE_SPENDING_KEY: [u8; 32] = [7; 32];
+const IRONWOOD_FIXTURE_RECEIVER_SPENDING_KEY: [u8; 32] = [8; 32];
+const IRONWOOD_FIXTURE_SEED_DOMAIN: u8 = 0x42;
+const IRONWOOD_VALUE_SEED_DOMAIN: u8 = 0x43;
+const IRONWOOD_PROOF_SEED_DOMAIN: u8 = 0x24;
+const ZIP317_MARGINAL_FEE: u64 = 5_000;
+const ZIP317_GRACE_ACTIONS: usize = 2;
 const INDEX_SEED_BYTES: usize = core::mem::size_of::<u64>();
+/// Orchard's note-commitment tree is binary.
+const MERKLE_ARITY: usize = 2;
+/// Flipping the low path-index bit selects the sibling node.
+const MERKLE_SIBLING_MASK: usize = 1;
 
-const BATCH_FIXTURE_MAGIC: &[u8] = b"ZAKURA_ORCHARD_BATCH_CORPUS_V1";
+const IRONWOOD_BATCH_FIXTURE_MAGIC: &[u8] = b"ZAKURA_IRONWOOD_BATCH_CORPUS_V2";
 
 // Benchmark analogue of halo2_proofs' private WitnessCollection. This follows
 // its advice, instance, and row-bound behavior while leaving fixed columns and
 // copy constraints to the already-cached floor plan. A BTreeMap identifies
 // advice columns because Column::index is intentionally not public API.
-struct BenchmarkWitness<F: Field> {
+struct IronwoodBenchmarkWitness<F: Field> {
     k: u32,
     advice: BTreeMap<Column<Advice>, Vec<Assigned<F>>>,
     primary: Column<InstanceColumn>,
@@ -73,7 +88,7 @@ struct BenchmarkWitness<F: Field> {
     usable_rows: RangeTo<usize>,
 }
 
-impl<F: Field> Assignment<F> for BenchmarkWitness<F> {
+impl<F: Field> Assignment<F> for IronwoodBenchmarkWitness<F> {
     fn enter_region<NR, N>(&mut self, _: N)
     where
         NR: Into<String>,
@@ -184,6 +199,308 @@ impl<F: Field> Assignment<F> for BenchmarkWitness<F> {
     fn pop_namespace(&mut self, _: Option<String>) {}
 }
 
+struct IronwoodPaymentFixture {
+    bundle: UnauthorizedBundle<i64>,
+    instances: Vec<Instance>,
+}
+
+fn extracted_commitment(note: &Note) -> ExtractedNoteCommitment {
+    ExtractedNoteCommitment::from(note.commitment())
+}
+
+/// Builds authentication paths for notes placed consecutively in one tree.
+fn ironwood_spend_witnesses(notes: Vec<Note>) -> (crate::Anchor, Vec<(Note, MerklePath)>) {
+    assert!(
+        !notes.is_empty(),
+        "a payment fixture has at least one spend"
+    );
+    let leaves = notes
+        .iter()
+        .map(|note| MerkleHashOrchard::from_cmx(&extracted_commitment(note)))
+        .collect::<Vec<_>>();
+    let mut levels = Vec::with_capacity(NOTE_COMMITMENT_TREE_DEPTH + 1);
+    levels.push(leaves);
+    for level_index in 0..NOTE_COMMITMENT_TREE_DEPTH {
+        let level =
+            Level::from(u8::try_from(level_index).expect("the Orchard Merkle level fits into u8"));
+        let current = &levels[level_index];
+        let parents = current
+            .chunks(MERKLE_ARITY)
+            .map(|children| {
+                let left = children[0];
+                let right = children
+                    .get(1)
+                    .copied()
+                    .unwrap_or_else(|| MerkleHashOrchard::empty_root(level));
+                MerkleHashOrchard::combine(level, &left, &right)
+            })
+            .collect::<Vec<_>>();
+        levels.push(parents);
+    }
+
+    let witnesses = notes
+        .into_iter()
+        .enumerate()
+        .map(|(note_index, note)| {
+            let auth_path = core::array::from_fn(|level_index| {
+                let level = Level::from(
+                    u8::try_from(level_index).expect("the Orchard Merkle level fits into u8"),
+                );
+                let sibling = (note_index >> level_index) ^ MERKLE_SIBLING_MASK;
+                levels[level_index]
+                    .get(sibling)
+                    .copied()
+                    .unwrap_or_else(|| MerkleHashOrchard::empty_root(level))
+            });
+            let position = u32::try_from(note_index).expect("the fixture position fits into u32");
+            (note, MerklePath::from_parts(position, auth_path))
+        })
+        .collect::<Vec<_>>();
+    let anchor = witnesses[0].1.root(extracted_commitment(&witnesses[0].0));
+    for (note, path) in &witnesses {
+        assert_eq!(
+            path.root(extracted_commitment(note)),
+            anchor,
+            "benchmark spend witnesses share one anchor",
+        );
+    }
+
+    (anchor, witnesses)
+}
+
+/// Creates varied payment values without consuming the cryptographic fixture RNG.
+fn ironwood_payment_values(
+    action_count: usize,
+    fixture_index: usize,
+) -> (Vec<NoteValue>, Vec<NoteValue>, u64) {
+    let action_count_u64 =
+        u64::try_from(action_count).expect("the benchmark Action count fits into u64");
+    let total_fee = ZIP317_MARGINAL_FEE
+        .checked_mul(
+            u64::try_from(action_count.max(ZIP317_GRACE_ACTIONS))
+                .expect("the ZIP 317 logical Action count fits into u64"),
+        )
+        .expect("the benchmark fee fits into u64");
+    let fee_per_action = total_fee / action_count_u64;
+    let fee_remainder = total_fee % action_count_u64;
+    let mut value_rng = ironwood_benchmark_rng(IRONWOOD_VALUE_SEED_DOMAIN, fixture_index);
+
+    let spend_values = (0..action_count)
+        .map(|action_index| {
+            let width_offset = (fixture_index % IRONWOOD_FIXTURE_VALUE_BIT_WIDTH_COUNT
+                + (IRONWOOD_FIXTURE_ACTION_MAGNITUDE_STRIDE
+                    * (action_index % IRONWOOD_FIXTURE_VALUE_BIT_WIDTH_COUNT))
+                    % IRONWOOD_FIXTURE_VALUE_BIT_WIDTH_COUNT)
+                % IRONWOOD_FIXTURE_VALUE_BIT_WIDTH_COUNT;
+            let width = IRONWOOD_FIXTURE_MIN_VALUE_BITS
+                + u32::try_from(width_offset).expect("the value bit width fits into u32");
+            let top_bit = 1_u64 << (width - 1);
+            NoteValue::from_raw(top_bit | (value_rng.random::<u64>() & (top_bit - 1)))
+        })
+        .collect::<Vec<_>>();
+    let output_values = spend_values
+        .iter()
+        .enumerate()
+        .map(|(action_index, spend_value)| {
+            let action_index = u64::try_from(action_index).expect("the Action index fits into u64");
+            let fee = fee_per_action + u64::from(action_index < fee_remainder);
+            NoteValue::from_raw(
+                spend_value
+                    .inner()
+                    .checked_sub(fee)
+                    .expect("the benchmark output value is nonzero"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let spend_sum = spend_values
+        .iter()
+        .map(|value| u128::from(value.inner()))
+        .sum::<u128>();
+    let output_sum = output_values
+        .iter()
+        .map(|value| u128::from(value.inner()))
+        .sum::<u128>();
+    assert_eq!(spend_sum - output_sum, u128::from(total_fee));
+
+    (spend_values, output_values, total_fee)
+}
+
+/// Builds a deterministic Ironwood payment with fully populated Actions.
+fn ironwood_payment_fixture(
+    action_count: usize,
+    fixture_index: usize,
+    mut rng: impl Rng,
+) -> IronwoodPaymentFixture {
+    assert_ne!(action_count, 0, "a payment has at least one Action");
+    let bundle_version = BundleVersion::ironwood_v3();
+    let spend_key = SpendingKey::from_bytes(IRONWOOD_FIXTURE_SPENDING_KEY).unwrap();
+    let spend_fvk = FullViewingKey::from(&spend_key);
+    let spend_recipient =
+        spend_fvk.address_at(IRONWOOD_FIXTURE_SPEND_ADDRESS_INDEX, Scope::External);
+    let receiver_key = SpendingKey::from_bytes(IRONWOOD_FIXTURE_RECEIVER_SPENDING_KEY).unwrap();
+    let receiver = FullViewingKey::from(&receiver_key)
+        .address_at(IRONWOOD_FIXTURE_OUTPUT_ADDRESS_INDEX, Scope::External);
+    assert!(
+        !spend_recipient.same_expanded_receiver(&receiver),
+        "the benchmark payment exercises an Ironwood cross-address Action",
+    );
+
+    let (spend_values, output_values, total_fee) =
+        ironwood_payment_values(action_count, fixture_index);
+
+    let spend_notes = spend_values
+        .iter()
+        .copied()
+        .map(|spend_value| {
+            let rho = Rho::from_nf_old(Nullifier::dummy(&mut rng));
+            Note::new(
+                spend_recipient,
+                spend_value,
+                rho,
+                bundle_version.note_version(),
+                &mut rng,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (anchor, spend_witnesses) = ironwood_spend_witnesses(spend_notes);
+
+    let bundle_type = if action_count < ZIP317_GRACE_ACTIONS {
+        // Keep the explicit one-Action witness case from being padded to two.
+        BundleType::UNPADDED
+    } else {
+        BundleType::DEFAULT
+    };
+    let mut builder = Builder::new(
+        bundle_type,
+        bundle_version,
+        bundle_version.default_flags(),
+        anchor,
+    )
+    .unwrap();
+    for (note, path) in spend_witnesses {
+        builder.add_spend(spend_fvk.clone(), note, path).unwrap();
+    }
+    for output_value in output_values.iter().copied() {
+        builder
+            .add_output(
+                Some(spend_fvk.to_ovk(Scope::External)),
+                receiver,
+                output_value,
+                IRONWOOD_FIXTURE_MEMO,
+            )
+            .unwrap();
+    }
+    let (bundle, metadata): (Bundle<_, i64>, _) = builder
+        .build(&mut rng)
+        .unwrap()
+        .expect("real spends and outputs produce an Ironwood bundle");
+    assert_eq!(bundle.bundle_version(), bundle_version);
+    assert_eq!(bundle.actions().len(), action_count);
+    assert_eq!(bundle.circuit_version(), OrchardCircuitVersion::PostNu6_3,);
+    assert!(bundle.flags().spends_enabled());
+    assert!(bundle.flags().outputs_enabled());
+    assert!(bundle.flags().cross_address_enabled());
+    let spend_actions = (0..action_count)
+        .map(|index| metadata.spend_action_index(index).unwrap())
+        .collect::<Vec<_>>();
+    let output_actions = (0..action_count)
+        .map(|index| metadata.output_action_index(index).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spend_actions.iter().copied().collect::<BTreeSet<_>>(),
+        (0..action_count).collect(),
+    );
+    assert_eq!(
+        output_actions.iter().copied().collect::<BTreeSet<_>>(),
+        (0..action_count).collect(),
+    );
+    let expected_balance = i64::try_from(total_fee).expect("the fixture balance fits into i64");
+    assert_eq!(*bundle.value_balance(), expected_balance);
+    let circuits = bundle.benchmark_circuits();
+    for (spend_value, action_index) in spend_values.iter().zip(spend_actions) {
+        circuits[action_index]
+            .v_old
+            .assert_if_known(|value| value == spend_value);
+    }
+    for (output_value, action_index) in output_values.iter().zip(output_actions) {
+        circuits[action_index]
+            .v_new
+            .assert_if_known(|value| value == output_value);
+    }
+    let instances = bundle
+        .actions()
+        .iter()
+        .map(|action| action.to_instance(*bundle.flags(), *bundle.anchor()))
+        .collect();
+
+    IronwoodPaymentFixture { bundle, instances }
+}
+
+#[test]
+fn ironwood_payment_values_cover_fixture_magnitudes() {
+    let widths = (0..IRONWOOD_FIXTURE_VALUE_BIT_WIDTH_COUNT)
+        .map(|fixture_index| {
+            let (spend_values, _, _) = ironwood_payment_values(1, fixture_index);
+            spend_values[0].inner().ilog2() + 1
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_widths = (0..IRONWOOD_FIXTURE_VALUE_BIT_WIDTH_COUNT)
+        .map(|offset| {
+            IRONWOOD_FIXTURE_MIN_VALUE_BITS
+                + u32::try_from(offset).expect("the value bit width fits into u32")
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(widths, expected_widths);
+
+    for action_count in IRONWOOD_WITNESS_BENCH_ACTION_COUNTS {
+        let (spend_values, output_values, total_fee) =
+            ironwood_payment_values(action_count, action_count);
+        assert!(spend_values.iter().all(|value| *value != NoteValue::ZERO));
+        assert!(output_values.iter().all(|value| *value != NoteValue::ZERO));
+        assert_eq!(
+            total_fee,
+            ZIP317_MARGINAL_FEE
+                * u64::try_from(action_count.max(ZIP317_GRACE_ACTIONS))
+                    .expect("the ZIP 317 logical Action count fits into u64"),
+        );
+    }
+}
+
+#[test]
+fn ironwood_payment_fixtures_have_fully_populated_actions() {
+    for action_count in IRONWOOD_WITNESS_BENCH_ACTION_COUNTS {
+        let fixture = ironwood_payment_fixture(
+            action_count,
+            action_count,
+            ironwood_benchmark_rng(IRONWOOD_FIXTURE_SEED_DOMAIN, action_count),
+        );
+        assert_eq!(fixture.instances.len(), action_count);
+        assert_eq!(fixture.bundle.benchmark_circuits().len(), action_count);
+    }
+}
+
+#[test]
+fn ironwood_payment_fixture_proves() {
+    let fixture = ironwood_payment_fixture(
+        IRONWOOD_FIXTURE_ACTIONS,
+        IRONWOOD_FIXTURE_ACTIONS,
+        ironwood_benchmark_rng(IRONWOOD_FIXTURE_SEED_DOMAIN, IRONWOOD_FIXTURE_ACTIONS),
+    );
+    let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
+    let proof = fixture
+        .bundle
+        .authorization()
+        .create_proof(
+            keys.proving_key(),
+            &fixture.instances,
+            ironwood_benchmark_rng(IRONWOOD_PROOF_SEED_DOMAIN, IRONWOOD_FIXTURE_ACTIONS),
+        )
+        .expect("the benchmark payment fixture proves");
+    proof
+        .verify(keys.verifying_key(), &fixture.instances)
+        .expect("the benchmark payment fixture verifies");
+}
+
 #[test]
 #[ignore = "manual witness-assignment performance benchmark"]
 fn benchmark_witness_assignment() {
@@ -200,18 +517,17 @@ fn benchmark_witness_assignment() {
     let row_count = 1_usize << K;
     let usable_rows = ..row_count - (meta.blinding_factors() + 1);
 
-    for action_count in WITNESS_BENCH_ACTION_COUNTS {
-        let (circuits, instances): (Vec<_>, Vec<_>) = (0..action_count)
-            .map(|index| {
-                generate_circuit_instance(
-                    benchmark_rng(FIXTURE_SEED_DOMAIN, index),
-                    OrchardCircuitVersion::FixedPostNu6_2,
-                )
-            })
-            .unzip();
-        let mut witnesses = instances
+    for action_count in IRONWOOD_WITNESS_BENCH_ACTION_COUNTS {
+        let fixture = ironwood_payment_fixture(
+            action_count,
+            action_count,
+            ironwood_benchmark_rng(IRONWOOD_FIXTURE_SEED_DOMAIN, action_count),
+        );
+        let circuits = fixture.bundle.benchmark_circuits();
+        let mut witnesses = fixture
+            .instances
             .iter()
-            .map(|instance| BenchmarkWitness {
+            .map(|instance| IronwoodBenchmarkWitness {
                 k: K,
                 advice: config
                     .advices
@@ -232,7 +548,7 @@ fn benchmark_witness_assignment() {
 
         let floor_plan = floor_planner::V1::synthesize_batch(
             &mut witnesses,
-            &circuits,
+            circuits,
             config.clone(),
             &constants,
             None,
@@ -240,10 +556,10 @@ fn benchmark_witness_assignment() {
         .unwrap()
         .expect("the first synthesis creates a floor plan");
 
-        for _ in 0..WITNESS_BENCH_WARMUPS {
+        for _ in 0..IRONWOOD_WITNESS_BENCH_WARMUPS {
             floor_planner::V1::synthesize_batch(
                 &mut witnesses,
-                &circuits,
+                circuits,
                 config.clone(),
                 &constants,
                 Some(&floor_plan),
@@ -252,12 +568,12 @@ fn benchmark_witness_assignment() {
         }
 
         let mut elapsed = Duration::ZERO;
-        for _ in 0..WITNESS_BENCH_SAMPLES {
+        for _ in 0..IRONWOOD_WITNESS_BENCH_SAMPLES {
             let sample_config = config.clone();
             let started = Instant::now();
             floor_planner::V1::synthesize_batch(
                 &mut witnesses,
-                &circuits,
+                circuits,
                 sample_config,
                 &constants,
                 Some(&floor_plan),
@@ -268,14 +584,14 @@ fn benchmark_witness_assignment() {
         black_box(&witnesses);
 
         println!(
-            "ORCHARD_WITNESS_ASSIGNMENT workers={worker_count} actions={action_count} \
+            "IRONWOOD_WITNESS_ASSIGNMENT workers={worker_count} actions={action_count} \
              ns_per_synthesis={}",
-            elapsed.as_nanos() / WITNESS_BENCH_SAMPLES as u128,
+            elapsed.as_nanos() / IRONWOOD_WITNESS_BENCH_SAMPLES as u128,
         );
     }
 }
 
-fn benchmark_rng(domain: u8, index: usize) -> StdRng {
+fn ironwood_benchmark_rng(domain: u8, index: usize) -> StdRng {
     let mut seed = [domain; 32];
     let index = u64::try_from(index).expect("fixture index fits into u64");
     seed[..INDEX_SEED_BYTES].copy_from_slice(&index.to_le_bytes());
@@ -297,9 +613,9 @@ fn take_fixture_u64(input: &mut &[u8]) -> u64 {
     )
 }
 
-fn encode_batch_fixtures(encoded: &[EncodedFixture]) -> Vec<u8> {
+fn encode_ironwood_batch_fixtures(encoded: &[EncodedIronwoodFixture]) -> Vec<u8> {
     let mut corpus = Vec::new();
-    corpus.extend_from_slice(BATCH_FIXTURE_MAGIC);
+    corpus.extend_from_slice(IRONWOOD_BATCH_FIXTURE_MAGIC);
     corpus.extend_from_slice(
         &u64::try_from(encoded.len())
             .expect("fixture count fits into u64")
@@ -307,11 +623,13 @@ fn encode_batch_fixtures(encoded: &[EncodedFixture]) -> Vec<u8> {
     );
 
     for (instances, proof) in encoded {
-        assert_eq!(instances.len(), FIXTURE_ACTIONS);
-        assert_eq!(instances[0].len(), INSTANCE_COLUMNS);
-        assert_eq!(instances[0][0].len(), INSTANCE_ROWS);
-        for scalar in &instances[0][0] {
-            corpus.extend_from_slice(scalar.to_repr().as_ref());
+        assert_eq!(instances.len(), IRONWOOD_FIXTURE_ACTIONS);
+        for instance in instances {
+            assert_eq!(instance.len(), INSTANCE_COLUMNS);
+            assert_eq!(instance[0].len(), INSTANCE_ROWS);
+            for scalar in &instance[0] {
+                corpus.extend_from_slice(scalar.to_repr().as_ref());
+            }
         }
         corpus.extend_from_slice(
             &u64::try_from(proof.len())
@@ -324,8 +642,8 @@ fn encode_batch_fixtures(encoded: &[EncodedFixture]) -> Vec<u8> {
     corpus
 }
 
-fn write_batch_fixtures(path: &std::path::Path, encoded: &[EncodedFixture]) {
-    let corpus = encode_batch_fixtures(encoded);
+fn write_ironwood_batch_fixtures(path: &std::path::Path, encoded: &[EncodedIronwoodFixture]) {
+    let corpus = encode_ironwood_batch_fixtures(encoded);
 
     let mut output = OpenOptions::new()
         .write(true)
@@ -337,90 +655,76 @@ fn write_batch_fixtures(path: &std::path::Path, encoded: &[EncodedFixture]) {
         .expect("write batch fixture corpus");
 }
 
-fn decode_batch_fixtures(corpus: &[u8]) -> Vec<EncodedFixture> {
+fn decode_ironwood_batch_fixtures(corpus: &[u8]) -> Vec<EncodedIronwoodFixture> {
     let mut input = corpus;
     assert_eq!(
-        take_fixture_bytes(&mut input, BATCH_FIXTURE_MAGIC.len()),
-        BATCH_FIXTURE_MAGIC,
+        take_fixture_bytes(&mut input, IRONWOOD_BATCH_FIXTURE_MAGIC.len()),
+        IRONWOOD_BATCH_FIXTURE_MAGIC,
     );
     let proof_count =
         usize::try_from(take_fixture_u64(&mut input)).expect("fixture count fits usize");
 
     let fixtures = (0..proof_count)
         .map(|_| {
-            let column = (0..INSTANCE_ROWS)
+            let instances = (0..IRONWOOD_FIXTURE_ACTIONS)
                 .map(|_| {
-                    let mut repr = <vesta::Scalar as PrimeField>::Repr::default();
-                    let repr_bytes = repr.as_mut();
-                    let encoded = take_fixture_bytes(&mut input, repr_bytes.len());
-                    repr_bytes.copy_from_slice(encoded);
-                    Option::<vesta::Scalar>::from(vesta::Scalar::from_repr(repr))
-                        .expect("canonical fixture scalar")
+                    let column = (0..INSTANCE_ROWS)
+                        .map(|_| {
+                            let mut repr = <vesta::Scalar as PrimeField>::Repr::default();
+                            let repr_bytes = repr.as_mut();
+                            let encoded = take_fixture_bytes(&mut input, repr_bytes.len());
+                            repr_bytes.copy_from_slice(encoded);
+                            Option::<vesta::Scalar>::from(vesta::Scalar::from_repr(repr))
+                                .expect("canonical fixture scalar")
+                        })
+                        .collect::<Vec<_>>();
+                    vec![column]
                 })
                 .collect::<Vec<_>>();
             let proof_len =
                 usize::try_from(take_fixture_u64(&mut input)).expect("proof length fits usize");
             let proof = take_fixture_bytes(&mut input, proof_len).to_vec();
-            (vec![vec![column]], proof)
+            (instances, proof)
         })
         .collect::<Vec<_>>();
     assert!(input.is_empty(), "trailing batch fixture bytes");
     fixtures
 }
 
-fn read_batch_fixtures(path: &std::path::Path) -> Vec<EncodedFixture> {
+fn read_ironwood_batch_fixtures(path: &std::path::Path) -> Vec<EncodedIronwoodFixture> {
     let corpus = fs::read(path).expect("read batch fixture corpus");
-    decode_batch_fixtures(&corpus)
+    decode_ironwood_batch_fixtures(&corpus)
 }
 
-fn create_batch_fixtures(
+fn create_ironwood_batch_fixtures(
     version: OrchardCircuitVersion,
     vk: &VerifyingKey,
     proof_count: usize,
-) -> Vec<EncodedFixture> {
+) -> Vec<EncodedIronwoodFixture> {
     let pk = ProvingKey::build(version);
-    let sk = SpendingKey::from_bytes(FIXTURE_SPENDING_KEY).unwrap();
-    let recipient = FullViewingKey::from(&sk).address_at(FIXTURE_ADDRESS_INDEX, Scope::External);
 
     (0..proof_count)
         .map(|index| {
-            let mut fixture_rng = benchmark_rng(FIXTURE_SEED_DOMAIN, index);
-            let mut builder = Builder::new(
-                BundleType::Coinbase,
-                BundleVersion::orchard_v2(),
-                Flags::SPENDS_DISABLED,
-                Anchor::from_bytes(FIXTURE_ANCHOR).unwrap(),
-            )
-            .unwrap();
-            builder
-                .add_output(
-                    None,
-                    recipient,
-                    NoteValue::from_raw(FIXTURE_NOTE_VALUE),
-                    FIXTURE_MEMO,
-                )
-                .unwrap();
-            let bundle: Bundle<_, i64> = builder
-                .build(&mut fixture_rng)
-                .unwrap()
-                .expect("one output produces an Orchard bundle")
-                .0;
-            assert_eq!(bundle.actions().len(), FIXTURE_ACTIONS);
-
-            let instances = bundle
-                .actions()
-                .iter()
-                .map(|action| action.to_instance(*bundle.flags(), *bundle.anchor()))
-                .collect::<Vec<_>>();
-            let proof = bundle
+            let fixture = ironwood_payment_fixture(
+                IRONWOOD_FIXTURE_ACTIONS,
+                index,
+                ironwood_benchmark_rng(IRONWOOD_FIXTURE_SEED_DOMAIN, index),
+            );
+            let proof = fixture
+                .bundle
                 .authorization()
-                .create_proof(&pk, &instances, benchmark_rng(PROOF_SEED_DOMAIN, index))
+                .create_proof(
+                    &pk,
+                    &fixture.instances,
+                    ironwood_benchmark_rng(IRONWOOD_PROOF_SEED_DOMAIN, index),
+                )
                 .expect("proof creation should succeed");
             proof
-                .verify(vk, &instances)
+                .verify(vk, &fixture.instances)
                 .expect("benchmark proof should verify");
 
-            let instances = instances
+            let instances = fixture
+                .instances
                 .iter()
                 .map(Instance::to_halo2_instance)
                 .map(|columns| {
@@ -435,7 +739,11 @@ fn create_batch_fixtures(
         .collect()
 }
 
-fn validate_batch_fixtures(encoded: &[EncodedFixture], vk: &VerifyingKey, expected_count: usize) {
+fn validate_ironwood_batch_fixtures(
+    encoded: &[EncodedIronwoodFixture],
+    vk: &VerifyingKey,
+    expected_count: usize,
+) {
     assert_eq!(encoded.len(), expected_count);
     let unique_proofs = encoded
         .iter()
@@ -451,25 +759,36 @@ fn validate_batch_fixtures(encoded: &[EncodedFixture], vk: &VerifyingKey, expect
 }
 
 #[test]
-fn batch_fixture_encoding_roundtrips() {
+fn ironwood_batch_fixture_encoding_roundtrips() {
     const TEST_PROOF: &[u8] = b"fixture-codec-test";
 
-    let column = (0..INSTANCE_ROWS)
-        .map(|index| {
-            vesta::Scalar::from(u64::try_from(index).expect("instance row index fits into u64"))
-        })
-        .collect::<Vec<_>>();
-    let encoded = vec![(vec![vec![column]], TEST_PROOF.to_vec())];
+    let encoded = vec![(
+        (0..IRONWOOD_FIXTURE_ACTIONS)
+            .map(|action_index| {
+                let column = (0..INSTANCE_ROWS)
+                    .map(|row_index| {
+                        let index = action_index * INSTANCE_ROWS + row_index;
+                        vesta::Scalar::from(
+                            u64::try_from(index).expect("instance index fits into u64"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                vec![column]
+            })
+            .collect::<Vec<_>>(),
+        TEST_PROOF.to_vec(),
+    )];
+    assert_ne!(encoded[0].0[0], encoded[0].0[1]);
 
     assert_eq!(
-        decode_batch_fixtures(&encode_batch_fixtures(&encoded)),
+        decode_ironwood_batch_fixtures(&encode_ironwood_batch_fixtures(&encoded)),
         encoded
     );
 }
 
 #[test]
 #[ignore = "manual single-thread performance benchmark"]
-fn benchmark_batch_verifier() {
+fn benchmark_ironwood_batch_verifier() {
     assert_eq!(K, 11, "Orchard's protocol-fixed circuit size changed");
     assert_eq!(
         std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
@@ -477,34 +796,36 @@ fn benchmark_batch_verifier() {
         "run this benchmark with RAYON_NUM_THREADS=1",
     );
 
-    let version = OrchardCircuitVersion::FixedPostNu6_2;
+    let version = OrchardCircuitVersion::PostNu6_3;
     let vk = VerifyingKey::build(version);
-    let proof_count = *BATCH_BENCH_SIZES.last().expect("batch sizes are nonempty");
-    let fixture_path = std::env::var_os("ORCHARD_BATCH_FIXTURE_CORPUS")
+    let proof_count = *IRONWOOD_BATCH_BENCH_SIZES
+        .last()
+        .expect("batch sizes are nonempty");
+    let fixture_path = std::env::var_os("IRONWOOD_BATCH_FIXTURE_CORPUS")
         .map(std::path::PathBuf::from)
-        .expect("set ORCHARD_BATCH_FIXTURE_CORPUS");
-    let encoded = if std::env::var_os("ORCHARD_BATCH_FIXTURE_GENERATE").is_some() {
-        let fixtures = create_batch_fixtures(version, &vk, proof_count);
-        write_batch_fixtures(&fixture_path, &fixtures);
+        .expect("set IRONWOOD_BATCH_FIXTURE_CORPUS");
+    let encoded = if std::env::var_os("IRONWOOD_BATCH_FIXTURE_GENERATE").is_some() {
+        let fixtures = create_ironwood_batch_fixtures(version, &vk, proof_count);
+        write_ironwood_batch_fixtures(&fixture_path, &fixtures);
         fixtures
     } else {
-        read_batch_fixtures(&fixture_path)
+        read_ironwood_batch_fixtures(&fixture_path)
     };
 
     // Corpus loading and full proof validation are deliberately outside every
     // timed sample. Each benchmark binary independently performs this check.
-    validate_batch_fixtures(&encoded, &vk, proof_count);
+    validate_ironwood_batch_fixtures(&encoded, &vk, proof_count);
 
-    let screen = std::env::var_os("ORCHARD_BATCH_SCREEN").is_some();
+    let screen = std::env::var_os("IRONWOOD_BATCH_SCREEN").is_some();
     let batch_sizes: &[usize] = if screen {
-        &BATCH_SCREEN_SIZES
+        &IRONWOOD_BATCH_SCREEN_SIZES
     } else {
-        &BATCH_BENCH_SIZES
+        &IRONWOOD_BATCH_BENCH_SIZES
     };
     let (warmups, sample_count) = if screen {
-        (BATCH_SCREEN_WARMUPS, BATCH_SCREEN_SAMPLES)
+        (IRONWOOD_BATCH_SCREEN_WARMUPS, IRONWOOD_BATCH_SCREEN_SAMPLES)
     } else {
-        (BATCH_BENCH_WARMUPS, BATCH_BENCH_SAMPLES)
+        (IRONWOOD_BATCH_BENCH_WARMUPS, IRONWOOD_BATCH_BENCH_SAMPLES)
     };
 
     for &batch_size in batch_sizes {
@@ -524,6 +845,6 @@ fn benchmark_batch_verifier() {
                 samples.push(elapsed.as_nanos());
             }
         }
-        println!("BATCH_BENCH size={batch_size} samples_ns={samples:?}");
+        println!("IRONWOOD_BATCH_BENCH size={batch_size} samples_ns={samples:?}");
     }
 }

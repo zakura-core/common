@@ -764,6 +764,13 @@ impl ActionInfo {
 #[cfg(feature = "circuit")]
 pub type UnauthorizedBundle<V> = Bundle<InProgress<Unproven, Unauthorized>, V>;
 
+#[cfg(all(test, feature = "circuit"))]
+impl crate::BenchmarkCircuitWitnesses for UnauthorizedBundle<i64> {
+    fn benchmark_circuits(&self) -> &[Circuit] {
+        &self.authorization().proof.circuits
+    }
+}
+
 /// Metadata about a bundle created by [`bundle`] or [`Builder::build`] that is not necessarily
 /// recoverable from the bundle itself.
 ///
