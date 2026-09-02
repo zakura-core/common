@@ -370,7 +370,7 @@ pub(super) fn payment_fixture_with_index(
 
     let payer_ivk = payer_fvk.to_ivk(Scope::External);
     let recipient_ivk = recipient_fvk.to_ivk(Scope::External);
-    for output_index in 0..action_count {
+    for (output_index, expected_output_value) in output_values.iter().enumerate() {
         let action_index = metadata
             .output_action_index(output_index)
             .expect("each requested output has an Action");
@@ -378,7 +378,7 @@ pub(super) fn payment_fixture_with_index(
             .decrypt_output_with_key(action_index, &recipient_ivk)
             .expect("the recipient decrypts each payment output");
         assert_eq!(note.version(), bundle_version.note_version());
-        assert_eq!(note.value(), output_values[output_index]);
+        assert_eq!(note.value(), *expected_output_value);
         assert_eq!(decrypted_to, recipient);
         assert_eq!(memo, MEMO);
         assert!(
