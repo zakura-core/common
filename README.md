@@ -33,6 +33,23 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 
 `zakura-redjubjub` is a thin wrapper over `zakura-reddsa`, so the two are maintained together.
 
+## Rust toolchain
+
+[`rust-toolchain.toml`](rust-toolchain.toml) pins the development toolchain to
+Rust 1.97.1, so `cargo` in a checkout (builds, Clippy, rustfmt, and the
+benchmarks in [`crates/orchard/benches`](crates/orchard/benches/README.md))
+uses the same compiler for everyone. The crates themselves keep a minimum
+supported Rust version of 1.91 (`rust-version` in [`Cargo.toml`](Cargo.toml)),
+which CI builds separately; raising the MSRV is a consumer-visible change,
+while bumping the development pin is not. The workspace uses Cargo's
+MSRV-aware resolver, so `cargo update` prefers dependency releases that the
+1.91 toolchain can build. To reproduce the MSRV check locally:
+
+```console
+rustup toolchain install 1.91.0 --profile minimal
+cargo +1.91.0 check --locked --workspace
+```
+
 ## License
 
 All code in this repository is licensed under either of
