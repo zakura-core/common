@@ -60,6 +60,25 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
         to: &'v mut (dyn FnMut() -> Value<Assigned<F>> + 'v),
     ) -> Result<Cell, Error>;
 
+    /// Assigns a contiguous range of advice cells in one column.
+    ///
+    /// The default implementation delegates to [`Self::assign_advice`]. A
+    /// zero-length batch is a no-op.
+    fn assign_advice_batch<'v>(
+        &'v mut self,
+        annotation: &'v (dyn Fn(usize) -> String + 'v),
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        to: &'v mut (dyn FnMut(usize) -> Value<Assigned<F>> + 'v),
+    ) -> Result<(), Error> {
+        let end = offset.checked_add(len).ok_or(Error::BoundsFailure)?;
+        for (index, offset) in (offset..end).enumerate() {
+            self.assign_advice(&|| annotation(index), column, offset, &mut || to(index))?;
+        }
+        Ok(())
+    }
+
     /// Assigns a constant value to the column `advice` at `offset` within this region.
     ///
     /// The constant value will be assigned to a cell within one of the fixed columns
@@ -223,6 +242,22 @@ impl<F: Field> RegionLayouter<F> for RegionShape {
             row_offset: offset,
             column: column.into(),
         })
+    }
+
+    fn assign_advice_batch<'v>(
+        &'v mut self,
+        _: &'v (dyn Fn(usize) -> String + 'v),
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        _to: &'v mut (dyn FnMut(usize) -> Value<Assigned<F>> + 'v),
+    ) -> Result<(), Error> {
+        if len != 0 {
+            self.use_column(Column::<Any>::from(column).into());
+            let end = offset.checked_add(len).ok_or(Error::BoundsFailure)?;
+            self.row_count = cmp::max(self.row_count, end);
+        }
+        Ok(())
     }
 
     fn assign_advice_from_constant<'v>(

@@ -103,7 +103,9 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
         &self,
         mut layouter: impl Layouter<pallas::Base>,
         alpha: &AssignedCell<pallas::Base, pallas::Base>,
-        zs: &[Z<pallas::Base>], // [z_0, z_1, ..., z_{254}, z_{255}]
+        z_0: &Z<pallas::Base>,
+        z_130: &Z<pallas::Base>,
+        z_254: &Z<pallas::Base>,
     ) -> Result<(), Error> {
         // s = alpha + k_254 ⋅ 2^130 is witnessed here, and then copied into
         // the decomposition as well as the overflow check gate.
@@ -112,7 +114,7 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
         let s = {
             let s_val = alpha
                 .value()
-                .zip(zs[254].value())
+                .zip(z_254.value())
                 .map(|(alpha, k_254)| alpha + k_254 * pallas::Base::from_u128(1 << 65).square());
 
             layouter.assign_region(
@@ -143,14 +145,14 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                 self.q_mul_overflow.enable(&mut region, offset + 1)?;
 
                 // Copy `z_0`
-                zs[0].copy_advice(|| "copy z_0", &mut region, self.advices[0], offset)?;
+                z_0.copy_advice(|| "copy z_0", &mut region, self.advices[0], offset)?;
 
                 // Copy `z_130`
-                zs[130].copy_advice(|| "copy z_130", &mut region, self.advices[0], offset + 1)?;
+                z_130.copy_advice(|| "copy z_130", &mut region, self.advices[0], offset + 1)?;
 
                 // Witness η = inv0(z_130), where inv0(x) = 0 if x = 0, 1/x otherwise
                 {
-                    let eta = zs[130].value().map(|z_130| Assigned::from(z_130).invert());
+                    let eta = z_130.value().map(|z_130| Assigned::from(z_130).invert());
                     region.assign_advice(
                         || "η = inv0(z_130)",
                         self.advices[0],
@@ -160,7 +162,7 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                 }
 
                 // Copy `k_254` = z_254
-                zs[254].copy_advice(|| "copy k_254", &mut region, self.advices[1], offset)?;
+                z_254.copy_advice(|| "copy k_254", &mut region, self.advices[1], offset)?;
 
                 // Copy original alpha
                 alpha.copy_advice(

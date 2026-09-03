@@ -349,7 +349,7 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
         base: &NonIdentityEccPoint,
         circuit_version: CircuitVersion,
     ) -> Result<(EccPoint, ScalarVar), Error> {
-        let (result, zs): (EccPoint, Vec<Z<pallas::Base>>) = layouter.assign_region(
+        let (result, z_0, z_130, z_254) = layouter.assign_region(
             || "variable-base scalar mul",
             |mut region| {
                 let offset = 0;
@@ -392,25 +392,25 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                 )?);
 
                 // Double-and-add (incomplete addition) for the `hi` half of the scalar decomposition
-                let (x_a, y_a, zs_incomplete_hi) = self.hi_config.double_and_add(
+                let (x_a, y_a, hi_sums) = self.hi_config.double_and_add(
                     &mut region,
                     offset,
                     base,
                     bits_incomplete_hi,
-                    (X(acc.x), Y(acc.y), z_init.clone()),
+                    (X(acc.x), Y(acc.y), z_init),
                     circuit_version,
                     incomplete_witness,
                     INCOMPLETE_HI_RANGE,
                 )?;
 
                 // Double-and-add (incomplete addition) for the `lo` half of the scalar decomposition
-                let z = zs_incomplete_hi.last().expect("should not be empty");
-                let (x_a, y_a, zs_incomplete_lo) = self.lo_config.double_and_add(
+                let z = hi_sums.last.clone();
+                let (x_a, y_a, lo_sums) = self.lo_config.double_and_add(
                     &mut region,
                     offset,
                     base,
                     bits_incomplete_lo,
-                    (x_a, y_a, z.clone()),
+                    (x_a, y_a, z),
                     circuit_version,
                     incomplete_witness,
                     INCOMPLETE_LO_RANGE,
@@ -426,8 +426,8 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                 let offset = offset + INCOMPLETE_LO_RANGE.len() + 2;
 
                 // Complete addition
-                let (acc, zs_complete) = {
-                    let z = zs_incomplete_lo.last().expect("should not be empty");
+                let (acc, z_1) = {
+                    let z = lo_sums.last;
                     // Bits used in complete addition. k_{3} to k_{1} inclusive
                     // The LSB k_{0} is handled separately.
                     let bits_complete = &bits[COMPLETE_RANGE];
@@ -438,7 +438,7 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                         &base_point,
                         x_a,
                         y_a,
-                        z.clone(),
+                        z,
                     )?
                 };
 
@@ -446,7 +446,6 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                 let offset = offset + COMPLETE_RANGE.len() * 2;
 
                 // Process the least significant bit
-                let z_1 = zs_complete.last().unwrap().clone();
                 let (result, z_0) = self.process_lsb(&mut region, offset, base, acc, z_1, lsb)?;
 
                 #[cfg(test)]
@@ -466,29 +465,16 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                         .assert_if_known(|(real_mul, result)| &real_mul.to_affine() == result);
                 }
 
-                let zs = {
-                    let mut zs = std::iter::empty()
-                        .chain(Some(z_init))
-                        .chain(zs_incomplete_hi)
-                        .chain(zs_incomplete_lo)
-                        .chain(zs_complete)
-                        .chain(Some(z_0))
-                        .collect::<Vec<_>>();
-                    assert_eq!(zs.len(), pallas::Scalar::NUM_BITS as usize + 1);
-
-                    // This reverses zs to give us [z_0, z_1, ..., z_{254}, z_{255}].
-                    zs.reverse();
-                    zs
-                };
-
-                Ok((result, zs))
+                Ok((result, z_0, hi_sums.last, hi_sums.first))
             },
         )?;
 
         self.overflow_config.overflow_check(
             layouter.namespace(|| "overflow check"),
             &alpha,
-            &zs,
+            &z_0,
+            &z_130,
+            &z_254,
         )?;
 
         Ok((result, ScalarVar::BaseFieldElem(alpha)))

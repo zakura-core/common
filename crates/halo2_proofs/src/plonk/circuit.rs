@@ -390,6 +390,30 @@ pub trait Assignment<F: Field> {
         A: FnOnce() -> AR,
         AR: Into<String>;
 
+    /// Assigns a contiguous range of advice cells in one column.
+    ///
+    /// The default implementation delegates to [`Self::assign_advice`]. A
+    /// zero-length batch is a no-op.
+    fn assign_advice_batch<V, A, AR>(
+        &mut self,
+        annotation: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        for (index, row) in (row..end).enumerate() {
+            self.assign_advice(|| annotation(index), column, row, || to(index))?;
+        }
+        Ok(())
+    }
+
     /// Assign a fixed value
     fn assign_fixed<V, VR, A, AR>(
         &mut self,
