@@ -2884,6 +2884,42 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         Self::leaf(index)
     }
 
+    /// Reserves a tagged owned-polynomial slot whose values will be supplied
+    /// before evaluation. This preserves semantic leaf ordering across work
+    /// that is deliberately deferred past transcript-adjacent phases.
+    pub(crate) fn register_deferred_poly_with_tag(
+        &mut self,
+        tag: EvaluationPolyTag,
+    ) -> AstLeaf<E, B> {
+        assert!(
+            self.virtual_poly_count.is_none(),
+            "a virtual evaluator cannot retain polynomial values"
+        );
+        let index = self.polys.len();
+        self.record_polynomial_tag(index, Some(tag));
+        self.polys.push(Cow::Owned(Polynomial {
+            values: Vec::new(),
+            _marker: PhantomData,
+        }));
+
+        Self::leaf(index)
+    }
+
+    /// Supplies the values for a slot from
+    /// [`Self::register_deferred_poly_with_tag`].
+    pub(crate) fn fill_deferred_poly(&mut self, leaf: AstLeaf<E, B>, poly: Polynomial<F, B>) {
+        assert!(
+            self.virtual_poly_count.is_none(),
+            "a virtual evaluator cannot retain polynomial values"
+        );
+        let slot = self
+            .polys
+            .get_mut(leaf.index)
+            .expect("a deferred polynomial leaf belongs to this evaluator");
+        assert!(slot.is_empty(), "a deferred polynomial is filled once");
+        *slot = Cow::Owned(poly);
+    }
+
     /// Registers a borrowed polynomial for use in this evaluation context.
     ///
     /// This API treats each registered polynomial as unique, even if the same
