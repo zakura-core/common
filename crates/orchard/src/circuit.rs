@@ -243,15 +243,13 @@ impl MerklePreparation {
         match self {
             Self::None => None,
             #[cfg(feature = "multicore")]
-            Self::Receiver(receiver) => receiver
-                .lock()
-                .expect("Merkle preparation receiver should not be poisoned")
-                .take()
-                .and_then(|receiver| {
-                    receiver
-                        .recv()
-                        .expect("Merkle preparation task should complete")
-                }),
+            Self::Receiver(receiver) => {
+                let receiver = receiver
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()?;
+                receiver.recv().ok().flatten()
+            }
         }
     }
 }
@@ -1567,9 +1565,10 @@ impl Proof {
             // Prefer Action-level synthesis parallelism for batches that fill
             // the worker pool. A single Action has no higher-level work to use
             // instead, while smaller batches leave workers for Merkle
-            // preparation.
-            let prepare_merkle =
-                circuits.len() == 1 || circuits.len() < maybe_rayon::current_num_threads();
+            // preparation. Do not block on preparation from within the same
+            // Rayon pool, where callers may already occupy its workers.
+            let prepare_merkle = maybe_rayon::current_thread_index().is_none()
+                && (circuits.len() == 1 || circuits.len() < maybe_rayon::current_num_threads());
             if prepare_merkle {
                 let circuits: Vec<_> = circuits
                     .iter()
