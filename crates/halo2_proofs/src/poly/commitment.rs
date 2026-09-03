@@ -368,6 +368,37 @@ enum ScalarByteOrder {
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 impl<C: CurveAffine> FixedBasePairTable<C> {
+    fn extend_projective_points(base: C, windows: usize, points: &mut Vec<C::Curve>) {
+        let mut window_base = C::Curve::from(base);
+        for window in 0..windows {
+            let mut multiple = window_base;
+            for magnitude in 0..FIXED_BASE_WINDOW_MAGNITUDES {
+                points.push(multiple);
+                if magnitude + 1 != FIXED_BASE_WINDOW_MAGNITUDES {
+                    multiple += window_base;
+                }
+            }
+            if window + 1 != windows {
+                // `multiple` is the maximum signed magnitude, so doubling
+                // it advances the base by one full radix window.
+                window_base = multiple.double();
+            }
+        }
+    }
+
+    fn normalized_base(base: C, windows: usize, result_capacity: usize) -> Vec<C> {
+        let points_per_base = windows
+            .checked_mul(FIXED_BASE_WINDOW_MAGNITUDES)
+            .expect("fixed-base table length fits in usize");
+        let mut projective = Vec::with_capacity(points_per_base);
+        Self::extend_projective_points(base, windows, &mut projective);
+
+        let mut points = Vec::with_capacity(result_capacity);
+        points.resize(points_per_base, C::identity());
+        C::Curve::batch_normalize(&projective, &mut points);
+        points
+    }
+
     fn new(w: C, u: C) -> Self {
         let bases = [w, u];
         let scalar_bits = C::Scalar::NUM_BITS as usize;
@@ -379,26 +410,26 @@ impl<C: CurveAffine> FixedBasePairTable<C> {
             .len()
             .checked_mul(points_per_base)
             .expect("fixed-base pair table length fits in usize");
-        let mut projective = Vec::with_capacity(capacity);
-        for &base in &bases {
-            let mut window_base = C::Curve::from(base);
-            for window in 0..windows {
-                let mut multiple = window_base;
-                for magnitude in 0..FIXED_BASE_WINDOW_MAGNITUDES {
-                    projective.push(multiple);
-                    if magnitude + 1 != FIXED_BASE_WINDOW_MAGNITUDES {
-                        multiple += window_base;
-                    }
-                }
-                if window + 1 != windows {
-                    for _ in 0..FIXED_BASE_WINDOW_BITS {
-                        window_base = window_base.double();
-                    }
-                }
+        // Keep one batch inversion on a single worker. With multiple workers,
+        // the two bases can be constructed and normalized independently.
+        let points = if crate::multicore::current_num_threads() == 1 {
+            let mut projective = Vec::with_capacity(capacity);
+            for &base in &bases {
+                Self::extend_projective_points(base, windows, &mut projective);
             }
-        }
-        let mut points = vec![C::identity(); projective.len()];
-        C::Curve::batch_normalize(&projective, &mut points);
+            let mut points = vec![C::identity(); projective.len()];
+            C::Curve::batch_normalize(&projective, &mut points);
+            points
+        } else {
+            // Reserve the final pair capacity in the `w` half so appending the
+            // independently normalized `u` half needs no reallocation or copy.
+            let (mut points, mut u_points) = crate::multicore::join(
+                || Self::normalized_base(w, windows, capacity),
+                || Self::normalized_base(u, windows, points_per_base),
+            );
+            points.append(&mut u_points);
+            points
+        };
 
         let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
         let probe_repr = probe.to_repr();
@@ -2070,6 +2101,33 @@ impl<F: Field> AddAssign<F> for Blind<F> {
 impl<F: Field> MulAssign<F> for Blind<F> {
     fn mul_assign(&mut self, rhs: F) {
         self.0 *= rhs;
+    }
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn fixed_base_pair_table_is_stable_across_worker_counts() {
+    use crate::pasta::EqAffine;
+
+    let params = Params::<EqAffine>::new(3);
+    let build = |workers| {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .expect("test pool must build")
+            .install(|| FixedBasePairTable::new(params.w, params.u))
+    };
+    let single = build(1);
+    for workers in [2, 6, 10] {
+        let parallel = build(workers);
+        assert_eq!(parallel.bases, single.bases);
+        assert_eq!(parallel.points, single.points);
+        assert_eq!(parallel.scalar_bits, single.scalar_bits);
+        assert_eq!(parallel.windows, single.windows);
+        assert_eq!(
+            std::mem::discriminant(&parallel.byte_order),
+            std::mem::discriminant(&single.byte_order),
+        );
     }
 }
 
