@@ -1,6 +1,8 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ff::Field;
+use group::{Curve, Group};
 use halo2_gadgets::{
+    ecc::chip::{NUM_WINDOWS, compute_lagrange_coeffs},
     poseidon::primitives::{self as poseidon, ConstantLength, P128Pow5T3},
     sinsemilla::primitives as sinsemilla,
 };
@@ -57,6 +59,15 @@ fn bench_primitives(c: &mut Criterion) {
                 b.iter(|| committer.commit(bits[..size].iter().cloned(), &r))
             });
         }
+    }
+
+    {
+        let mut group = c.benchmark_group("ECC fixed-base preprocessing");
+        group.sample_size(10);
+        let base = pallas::Point::generator().to_affine();
+        group.bench_function("full-width Lagrange coefficients", |b| {
+            b.iter(|| compute_lagrange_coeffs(base, NUM_WINDOWS))
+        });
     }
 }
 

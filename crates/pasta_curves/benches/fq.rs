@@ -1,11 +1,14 @@
 ///! Benchmarks for the Fq field.
-use criterion::{Bencher, Criterion, criterion_group, criterion_main};
+use criterion::{Bencher, Criterion, black_box, criterion_group, criterion_main};
 
 use rand::SeedableRng;
 use rand_xorshift::XorShiftRng;
 
 use ff::{Field, PrimeField};
 use pasta_curves::Fq;
+use pasta_curves::arithmetic::square_fq_n;
+
+const PROVER_DOMAIN_EXPONENT: u32 = 11;
 
 fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Fq");
@@ -22,6 +25,18 @@ fn criterion_benchmark(c: &mut Criterion) {
     group.bench_function("from_repr", bench_fq_from_repr);
     group.bench_function("eq/equal", |b| bench_fq_eq(b, true));
     group.bench_function("eq/unequal", |b| bench_fq_eq(b, false));
+    group.bench_function("pow 2^11/constant-time", bench_fq_pow_power_of_two);
+    group.bench_function("pow 2^11/repeated-squaring", bench_fq_square_n);
+}
+
+fn bench_fq_pow_power_of_two(b: &mut Bencher) {
+    let value = Fq::from(0x9e37_79b9_7f4a_7c15);
+    b.iter(|| black_box(value).pow([1 << PROVER_DOMAIN_EXPONENT, 0, 0, 0]));
+}
+
+fn bench_fq_square_n(b: &mut Bencher) {
+    let value = Fq::from(0x9e37_79b9_7f4a_7c15);
+    b.iter(|| square_fq_n(black_box(&value), PROVER_DOMAIN_EXPONENT));
 }
 
 fn bench_fq_eq(b: &mut Bencher, equal: bool) {

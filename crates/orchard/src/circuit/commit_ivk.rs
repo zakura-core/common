@@ -7,7 +7,7 @@
 
 use core::iter;
 
-use group::ff::{Field, PrimeField};
+use group::ff::PrimeField;
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
     plonk::{Advice, Column, ConstraintSystem, Constraints, Error, Expression, Selector},
@@ -130,7 +130,9 @@ impl CommitIvkChip {
 
             // Check that nk = b_2 (5 bits) || c (240 bits) || d_0 (9 bits) || d_1 (1 bit)
             let nk_decomposition_check = {
-                let two_pow_245 = pallas::Base::from(1 << 49).pow([5, 0, 0, 0]);
+                let two_pow_49 = pallas::Base::from(1 << 49);
+                let two_pow_245 =
+                    pasta_curves::arithmetic::square_fp_n(&two_pow_49, 2) * two_pow_49;
 
                 b_2.clone()
                     + c.clone() * two_pow_5
