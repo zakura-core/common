@@ -133,7 +133,7 @@ const BLIND_WINDOW_ENTRIES: usize = (1 << BLIND_WINDOW_BITS) - 1;
 const SCALAR_BYTE_ORDER_PROBE: u64 = 0x0102_0304_0506_0708;
 /// The measured memory/latency knee for the two sparse prover commitments.
 #[cfg(feature = "multicore")]
-const SPARSE_COMMITMENT_WINDOW_BITS: usize = 3;
+const SPARSE_COMMITMENT_WINDOW_BITS: usize = 4;
 #[cfg(feature = "multicore")]
 const SPARSE_COMMITMENT_WINDOW_MAGNITUDES: usize = 1 << (SPARSE_COMMITMENT_WINDOW_BITS - 1);
 /// Below the full Orchard IPA mask, projective mixed additions are faster than
@@ -477,7 +477,7 @@ impl<C: CurveAffine> fmt::Debug for SparseCommitmentCache<C> {
     }
 }
 
-/// A signed-width-three positioned-window table over the generators needed
+/// A signed-width-four positioned-window table over the generators needed
 /// by the two sparse prover commitments.
 #[cfg(feature = "multicore")]
 struct SparseCommitmentTable<C: CurveAffine> {
@@ -502,14 +502,18 @@ impl<C: CurveAffine> SparseCommitmentTable<C> {
             Vec::with_capacity(bases.len() * windows * SPARSE_COMMITMENT_WINDOW_MAGNITUDES);
         for &base in bases {
             let mut window_base = C::Curve::from(base);
-            for _ in 0..windows {
+            for window in 0..windows {
                 let mut multiple = window_base;
-                for _ in 0..SPARSE_COMMITMENT_WINDOW_MAGNITUDES {
+                for magnitude in 0..SPARSE_COMMITMENT_WINDOW_MAGNITUDES {
                     projective.push(multiple);
-                    multiple += window_base;
+                    if magnitude + 1 != SPARSE_COMMITMENT_WINDOW_MAGNITUDES {
+                        multiple += window_base;
+                    }
                 }
-                for _ in 0..SPARSE_COMMITMENT_WINDOW_BITS {
-                    window_base = window_base.double();
+                if window + 1 != windows {
+                    // `multiple` is the maximum signed magnitude, so doubling
+                    // it advances the base by one full radix window.
+                    window_base = multiple.double();
                 }
             }
         }
@@ -559,15 +563,36 @@ impl<C: CurveAffine> SparseCommitmentTable<C> {
         usize::from(bytes[byte] & (1 << (bit % u8::BITS as usize)) != 0)
     }
 
+    fn byte_from_low_end(bytes: &[u8], index: usize, little: bool) -> Option<u8> {
+        if little {
+            bytes.get(index).copied()
+        } else {
+            bytes.get(bytes.len().checked_sub(index + 1)?).copied()
+        }
+    }
+
+    fn window_value(bytes: &[u8], bit_start: usize, live_bits: usize, little: bool) -> usize {
+        if live_bits == 0 {
+            return 0;
+        }
+        let byte_start = bit_start / u8::BITS as usize;
+        let shift = bit_start % u8::BITS as usize;
+        let byte_count = (shift + live_bits).div_ceil(u8::BITS as usize);
+        let mut packed = 0u32;
+        for offset in 0..byte_count {
+            let byte = Self::byte_from_low_end(bytes, byte_start + offset, little)
+                .expect("the scalar representation has enough bytes");
+            packed |= u32::from(byte) << (offset * u8::BITS as usize);
+        }
+        ((packed >> shift) as usize) & ((1 << live_bits) - 1)
+    }
+
     fn digit(bytes: &[u8], window: usize, little: bool) -> isize {
         let bit_start = window * SPARSE_COMMITMENT_WINDOW_BITS;
-        let mut value = 0;
-        for offset in 0..SPARSE_COMMITMENT_WINDOW_BITS {
-            let bit = bit_start + offset;
-            if bit < C::Scalar::NUM_BITS as usize {
-                value |= Self::bit(bytes, bit, little) << offset;
-            }
-        }
+        let live_bits = (C::Scalar::NUM_BITS as usize)
+            .saturating_sub(bit_start)
+            .min(SPARSE_COMMITMENT_WINDOW_BITS);
+        let value = Self::window_value(bytes, bit_start, live_bits, little);
         let carry = if bit_start == 0 {
             0
         } else {
@@ -1266,7 +1291,7 @@ impl<C: CurveAffine> Params<C> {
     /// covers `[g_lagrange..., w, u]`. Without `orbits`, the two tables cover
     /// exactly `g` and `g_lagrange`, plus a fixed-window table over `w`. When
     /// the `multicore` feature is enabled at Orchard's `k = 11`, this also
-    /// ensures that the signed-width-three table for sparse masking commitments
+    /// ensures that the signed-width-four table for sparse masking commitments
     /// is present. With `batch`, it also ensures that the small public-instance
     /// table normally built by proving-key generation is present. This
     /// evaluates each blind without a one-term MSM while keeping the polynomial
@@ -1281,9 +1306,9 @@ impl<C: CurveAffine> Params<C> {
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// fixed-window table adds approximately 0.5 MiB for a 32-byte scalar
-    /// representation. The signed-width-three sparse commitment table adds
-    /// about 280 KiB, and the signed-width-four public-instance table adds
-    /// about 224 KiB on Pasta.
+    /// representation. The signed-width-four sparse commitment table adds
+    /// 416 KiB, and the signed-width-four public-instance table adds about
+    /// 224 KiB on Pasta.
     ///
     /// Concurrent and repeat calls share their initialization attempts,
     /// including a backend decline. Without `orbits`, one atomic initialization
@@ -2001,20 +2026,25 @@ fn blind_table_cache_is_shared_by_clones_and_not_serialized() {
 fn sparse_commitment_signed_digit_boundaries() {
     use crate::pasta::EqAffine;
 
-    for (byte, expected) in [
-        (0b0000_0000, 0),
-        (0b0000_0100, 1),
-        (0b0001_1000, 3),
-        (0b0001_1100, 4),
-        (0b0010_0000, -4),
-        (0b0010_0100, -3),
-        (0b0011_1000, -1),
-        (0b0011_1100, 0),
+    const ENCODED_BYTES: usize = std::mem::size_of::<u64>();
+    let half_radix = 1 << (SPARSE_COMMITMENT_WINDOW_BITS - 1);
+    let radix = 1 << SPARSE_COMMITMENT_WINDOW_BITS;
+    for (value, carry, expected) in [
+        (0, 0, 0),
+        (0, 1, 1),
+        (half_radix - 1, 0, half_radix as isize - 1),
+        (half_radix - 1, 1, half_radix as isize),
+        (half_radix, 0, -(half_radix as isize)),
+        (half_radix, 1, -(half_radix as isize) + 1),
+        (radix - 1, 0, -1),
+        (radix - 1, 1, 0),
     ] {
+        let encoded = ((value << SPARSE_COMMITMENT_WINDOW_BITS)
+            | (carry << (SPARSE_COMMITMENT_WINDOW_BITS - 1))) as u64;
         let mut little = [0; 32];
-        little[0] = byte;
+        little[..ENCODED_BYTES].copy_from_slice(&encoded.to_le_bytes());
         let mut big = [0; 32];
-        big[31] = byte;
+        big[32 - ENCODED_BYTES..].copy_from_slice(&encoded.to_be_bytes());
         assert_eq!(
             SparseCommitmentTable::<EqAffine>::digit(&little, 1, true),
             expected,
