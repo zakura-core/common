@@ -654,6 +654,31 @@ impl Circuit {
             (psi_old, rho_old, cm_old, g_d_old, ak_P, nk, v_old, v_new)
         };
 
+        // Merkle path validity check
+        // (https://p.z.cash/ZKS:action-merkle-path-validity?partial).
+        let root = {
+            let path = self
+                .path
+                .map(|typed_path| typed_path.map(|node| node.inner()));
+            let merkle_inputs = MerklePath::construct(
+                [config.merkle_chip_1(), config.merkle_chip_2()],
+                OrchardHashDomains::MerkleCrh,
+                self.pos,
+                path,
+            );
+            let leaf = cm_old.extract_p().inner().clone();
+
+            if let Some(prepared) = prepared_merkle.take() {
+                merkle_inputs.calculate_root_prepared(
+                    layouter.namespace(|| "Merkle path"),
+                    leaf,
+                    Value::known(&prepared),
+                )?
+            } else {
+                merkle_inputs.calculate_root(layouter.namespace(|| "Merkle path"), leaf)?
+            }
+        };
+
         // Value commitment integrity (https://p.z.cash/ZKS:action-cv-net-integrity?partial).
         let v_net_magnitude_sign = {
             // Witness the magnitude and sign of v_net = v_old - v_new
@@ -886,31 +911,6 @@ impl Circuit {
             // Constrain cmx to equal public input
             layouter.constrain_instance(cmx.inner().cell(), config.primary, CMX)?;
         }
-
-        // Merkle path validity check
-        // (https://p.z.cash/ZKS:action-merkle-path-validity?partial).
-        let root = {
-            let path = self
-                .path
-                .map(|typed_path| typed_path.map(|node| node.inner()));
-            let merkle_inputs = MerklePath::construct(
-                [config.merkle_chip_1(), config.merkle_chip_2()],
-                OrchardHashDomains::MerkleCrh,
-                self.pos,
-                path,
-            );
-            let leaf = cm_old.extract_p().inner().clone();
-
-            if let Some(prepared) = prepared_merkle.take() {
-                merkle_inputs.calculate_root_prepared(
-                    layouter.namespace(|| "Merkle path"),
-                    leaf,
-                    Value::known(&prepared),
-                )?
-            } else {
-                merkle_inputs.calculate_root(layouter.namespace(|| "Merkle path"), leaf)?
-            }
-        };
 
         // Constrain the remaining Orchard circuit checks.
         layouter.assign_region(
