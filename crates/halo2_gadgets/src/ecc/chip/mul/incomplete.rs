@@ -1,12 +1,13 @@
 use super::super::{CircuitVersion, NonIdentityEccPoint};
-use super::{X, Y, Z};
+use super::{IncompleteMulWitness, IncompleteRowWitness, X, Y, Z};
 use crate::utilities::bool_check;
 
 use group::ff::PrimeField;
 use halo2_proofs::{
     circuit::{Region, Value},
     plonk::{
-        Advice, Column, ConstraintSystem, Constraints, Error, Expression, Selector, VirtualCells,
+        Advice, Assigned, Column, ConstraintSystem, Constraints, Error, Expression, Selector,
+        VirtualCells,
     },
     poly::Rotation,
 };
@@ -233,24 +234,14 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
         bits: &[Value<bool>],
         acc: (X<pallas::Base>, Y<pallas::Base>, Z<pallas::Base>),
         circuit_version: CircuitVersion,
+        witness: Value<&IncompleteMulWitness>,
+        witness_range: std::ops::Range<usize>,
     ) -> Result<(X<pallas::Base>, Y<pallas::Base>, Vec<Z<pallas::Base>>), Error> {
         // Check that we have the correct number of bits for this double-and-add.
         assert_eq!(bits.len(), NUM_BITS);
+        assert_eq!(witness_range.len(), bits.len());
 
-        // Handle exceptional cases
         let (x_p, y_p) = (base.x.value().cloned(), base.y.value().cloned());
-        let (x_a, y_a) = (acc.0.value().cloned(), acc.1.value().cloned());
-
-        x_a.zip(y_a)
-            .zip(x_p.zip(y_p))
-            .error_if_known_and(|((x_a, y_a), (x_p, y_p))| {
-                // A is point at infinity
-                (x_p.is_zero_vartime() && y_p.is_zero_vartime())
-                // Q is point at infinity
-                || (x_a.is_zero_vartime() && y_a.is_zero_vartime())
-                // x_p = x_a
-                || (x_p == x_a)
-            })?;
 
         // Set q_mul values
         {
@@ -268,9 +259,9 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
         }
 
         // Initialise double-and-add
-        let (mut x_a, mut y_a, mut z) = {
+        let mut x_a = {
             // Initialise the running `z` sum for the scalar bits.
-            let z = acc.2.copy_advice(|| "starting z", region, self.z, offset)?;
+            acc.2.copy_advice(|| "starting z", region, self.z, offset)?;
 
             // Initialise acc
             let x_a = acc.0.copy_advice(
@@ -279,14 +270,14 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
                 self.double_and_add.x_a,
                 offset + 1,
             )?;
-            let y_a = acc.1.copy_advice(
+            acc.1.copy_advice(
                 || "starting y_a",
                 region,
                 self.double_and_add.lambda_1,
                 offset,
             )?;
 
-            (x_a, y_a.value().cloned(), z)
+            x_a
         };
 
         // Increase offset by 1; we used row 0 for initializing `z`.
@@ -296,14 +287,16 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
         let mut zs: Vec<Z<pallas::Base>> = Vec::with_capacity(bits.len());
 
         // Incomplete addition
-        for (row, k) in bits.iter().enumerate() {
+        for row in 0..bits.len() {
+            let witness_index = witness_range.start + row;
+            let row_witness = |f: fn(&IncompleteRowWitness) -> pallas::Base| {
+                witness.map(|witness| f(&witness.rows[witness_index]))
+            };
+
             // z_{i} = 2 * z_{i+1} + k_i
             // https://p.z.cash/halo2-0.1:ecc-var-mul-witness-scalar?partial
-            let z_val = z
-                .value()
-                .zip(k.as_ref())
-                .map(|(z_val, k)| z_val.double() + pallas::Base::from(*k as u64));
-            z = region.assign_advice(|| "z", self.z, row + offset, || z_val)?;
+            let z_val = row_witness(|row| row.z);
+            let z = region.assign_advice(|| "z", self.z, row + offset, || z_val)?;
             zs.push(Z(z.clone()));
 
             // Assign `x_p`, `y_p`.
@@ -336,17 +329,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
                 }
             }
 
-            // If the bit is set, use `y`; if the bit is not set, use `-y`
-            let y_p = y_p
-                .zip(k.as_ref())
-                .map(|(y_p, k)| if !k { -y_p } else { y_p });
-
-            // Compute and assign λ1⋅(x_A − x_P) = y_A − y_P
-            let lambda1 = y_a
-                .zip(y_p)
-                .zip(x_a.value())
-                .zip(x_p)
-                .map(|(((y_a, y_p), x_a), x_p)| (y_a - y_p) * (x_a - x_p).invert());
+            let lambda1 = row_witness(|row| row.lambda_1).map(Assigned::Trivial);
             region.assign_advice(
                 || "lambda1",
                 self.double_and_add.lambda_1,
@@ -354,18 +337,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
                 || lambda1,
             )?;
 
-            // x_R = λ1^2 - x_A - x_P
-            let x_r = lambda1
-                .zip(x_a.value())
-                .zip(x_p)
-                .map(|((lambda1, x_a), x_p)| lambda1.square() - x_a - x_p);
-
-            // λ2 = (2(y_A) / (x_A - x_R)) - λ1
-            let lambda2 = lambda1
-                .zip(y_a)
-                .zip(x_a.value())
-                .zip(x_r)
-                .map(|(((lambda1, y_a), x_a), x_r)| y_a.double() * (x_a - x_r).invert() - lambda1);
+            let lambda2 = row_witness(|row| row.lambda_2).map(Assigned::Trivial);
             region.assign_advice(
                 || "lambda2",
                 self.double_and_add.lambda_2,
@@ -373,10 +345,9 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
                 || lambda2,
             )?;
 
-            // Compute and assign `x_a` for the next row
-            let x_a_new = lambda2.square() - x_a.value() - x_r;
-            y_a = lambda2 * (x_a.value() - x_a_new) - y_a;
-            let x_a_val = x_a_new;
+            let x_a_val = witness
+                .map(|witness| witness.point(witness_index + 1).x)
+                .map(Assigned::Trivial);
             x_a = region.assign_advice(
                 || "x_a",
                 self.double_and_add.x_a,
@@ -390,7 +361,11 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             || "y_a",
             self.double_and_add.lambda_1,
             offset + NUM_BITS,
-            || y_a,
+            || {
+                witness
+                    .map(|witness| witness.point(witness_range.end).y)
+                    .map(Assigned::Trivial)
+            },
         )?;
 
         Ok((X(x_a), Y(y_a), zs))
