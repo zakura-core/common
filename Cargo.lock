@@ -3892,6 +3892,7 @@ dependencies = [
  "image",
  "incrementalmerkletree",
  "inferno",
+ "maybe-rayon",
  "memuse",
  "nonempty",
  "once_cell",

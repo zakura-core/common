@@ -23,6 +23,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "multicore")]
+use super::CircuitWithPreparedMerklePath;
 use super::{
     Circuit, INSTANCE_COLUMNS, INSTANCE_ROWS, Instance, K, OrchardCircuitVersion, ProvingKey,
     VerifyingKey,
@@ -46,7 +48,7 @@ const IRONWOOD_BATCH_BENCH_WARMUPS: usize = 3;
 const IRONWOOD_BATCH_BENCH_SAMPLES: usize = 15;
 const IRONWOOD_BATCH_SCREEN_WARMUPS: usize = 1;
 const IRONWOOD_BATCH_SCREEN_SAMPLES: usize = 7;
-const IRONWOOD_WITNESS_BENCH_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
+const IRONWOOD_WITNESS_BENCH_ACTION_COUNTS: [usize; 5] = [1, 2, 4, 5, 6];
 const IRONWOOD_WITNESS_BENCH_WARMUPS: usize = 50;
 const IRONWOOD_WITNESS_BENCH_SAMPLES: usize = 1_000;
 
@@ -633,8 +635,17 @@ fn benchmark_witness_assignment() {
     let constants = [config.constant];
     let row_count = 1_usize << K;
     let usable_rows = ..row_count - (meta.blinding_factors() + 1);
+    let action_counts = std::env::var("IRONWOOD_WITNESS_ACTION_COUNT")
+        .map(|action_count| {
+            vec![
+                action_count
+                    .parse::<usize>()
+                    .expect("IRONWOOD_WITNESS_ACTION_COUNT must be a positive integer"),
+            ]
+        })
+        .unwrap_or_else(|_| IRONWOOD_WITNESS_BENCH_ACTION_COUNTS.to_vec());
 
-    for action_count in IRONWOOD_WITNESS_BENCH_ACTION_COUNTS {
+    for action_count in action_counts {
         let fixture = ironwood_payment_fixture(
             action_count,
             action_count,
@@ -663,17 +674,69 @@ fn benchmark_witness_assignment() {
             })
             .collect::<Vec<_>>();
 
+        #[cfg(feature = "multicore")]
+        let prepare_merkle = action_count == 1 || action_count < worker_count;
+
+        #[cfg(feature = "multicore")]
+        let floor_plan = if prepare_merkle {
+            let prepared_circuits: Vec<_> = circuits
+                .iter()
+                .map(CircuitWithPreparedMerklePath::new)
+                .collect();
+            floor_planner::V1::synthesize_batch(
+                &mut witnesses,
+                &prepared_circuits,
+                config.clone(),
+                &constants,
+                None,
+            )
+        } else {
+            floor_planner::V1::synthesize_batch(
+                &mut witnesses,
+                circuits,
+                config.clone(),
+                &constants,
+                None,
+            )
+        };
+        #[cfg(not(feature = "multicore"))]
         let floor_plan = floor_planner::V1::synthesize_batch(
             &mut witnesses,
             circuits,
             config.clone(),
             &constants,
             None,
-        )
-        .unwrap()
-        .expect("the first synthesis creates a floor plan");
+        );
+        let floor_plan = floor_plan
+            .unwrap()
+            .expect("the first synthesis creates a floor plan");
 
         for _ in 0..IRONWOOD_WITNESS_BENCH_WARMUPS {
+            #[cfg(feature = "multicore")]
+            if prepare_merkle {
+                let prepared_circuits: Vec<_> = circuits
+                    .iter()
+                    .map(CircuitWithPreparedMerklePath::new)
+                    .collect();
+                floor_planner::V1::synthesize_batch(
+                    &mut witnesses,
+                    &prepared_circuits,
+                    config.clone(),
+                    &constants,
+                    Some(&floor_plan),
+                )
+                .unwrap();
+            } else {
+                floor_planner::V1::synthesize_batch(
+                    &mut witnesses,
+                    circuits,
+                    config.clone(),
+                    &constants,
+                    Some(&floor_plan),
+                )
+                .unwrap();
+            }
+            #[cfg(not(feature = "multicore"))]
             floor_planner::V1::synthesize_batch(
                 &mut witnesses,
                 circuits,
@@ -685,9 +748,35 @@ fn benchmark_witness_assignment() {
         }
 
         let mut elapsed = Duration::ZERO;
+        let mut samples = Vec::with_capacity(IRONWOOD_WITNESS_BENCH_SAMPLES);
         for _ in 0..IRONWOOD_WITNESS_BENCH_SAMPLES {
             let sample_config = config.clone();
             let started = Instant::now();
+            #[cfg(feature = "multicore")]
+            if prepare_merkle {
+                let prepared_circuits: Vec<_> = circuits
+                    .iter()
+                    .map(CircuitWithPreparedMerklePath::new)
+                    .collect();
+                floor_planner::V1::synthesize_batch(
+                    &mut witnesses,
+                    &prepared_circuits,
+                    sample_config,
+                    &constants,
+                    Some(&floor_plan),
+                )
+                .unwrap();
+            } else {
+                floor_planner::V1::synthesize_batch(
+                    &mut witnesses,
+                    circuits,
+                    sample_config,
+                    &constants,
+                    Some(&floor_plan),
+                )
+                .unwrap();
+            }
+            #[cfg(not(feature = "multicore"))]
             floor_planner::V1::synthesize_batch(
                 &mut witnesses,
                 circuits,
@@ -696,14 +785,19 @@ fn benchmark_witness_assignment() {
                 Some(&floor_plan),
             )
             .unwrap();
-            elapsed += started.elapsed();
+            let sample = started.elapsed();
+            elapsed += sample;
+            samples.push(sample.as_nanos());
         }
         black_box(&witnesses);
+        samples.sort_unstable();
 
         println!(
             "IRONWOOD_WITNESS_ASSIGNMENT workers={worker_count} actions={action_count} \
-             ns_per_synthesis={}",
+             ns_per_synthesis={} p50_ns={} p95_ns={}",
             elapsed.as_nanos() / IRONWOOD_WITNESS_BENCH_SAMPLES as u128,
+            samples[IRONWOOD_WITNESS_BENCH_SAMPLES / 2],
+            samples[IRONWOOD_WITNESS_BENCH_SAMPLES * 95 / 100],
         );
     }
 }

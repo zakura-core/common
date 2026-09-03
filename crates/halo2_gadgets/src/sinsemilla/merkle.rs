@@ -1,16 +1,95 @@
 //! Gadgets for implementing a Merkle tree with Sinsemilla.
 
+use group::ff::PrimeField;
 use halo2_proofs::{
-    circuit::{Chip, Layouter, Value},
+    circuit::{AssignedCell, Chip, Layouter, Value},
     plonk::Error,
 };
-use pasta_curves::arithmetic::CurveAffine;
+use pasta_curves::{arithmetic::CurveAffine, pallas};
 
-use super::{HashDomains, SinsemillaInstructions};
+use super::chip::{PreparedHashWitness, prepare_hash_witness};
+use super::{CommitDomains, HashDomains, SinsemillaInstructions};
 
-use crate::utilities::{UtilitiesInstructions, cond_swap::CondSwapInstructions, i2lebsp};
+use crate::{
+    ecc::FixedPoints,
+    utilities::{
+        UtilitiesInstructions, cond_swap::CondSwapInstructions, i2lebsp,
+        lookup_range_check::PallasLookupRangeCheck,
+    },
+};
 
 pub mod chip;
+
+const MERKLE_LAYER_BITS: usize = 10;
+const MERKLE_NODE_BITS: usize = pallas::Base::NUM_BITS as usize;
+const MERKLE_MESSAGE_WORDS: usize =
+    (MERKLE_LAYER_BITS + 2 * MERKLE_NODE_BITS) / crate::sinsemilla::primitives::K;
+
+/// Opaque arithmetic witnesses for every hash in a Sinsemilla Merkle path.
+pub struct PreparedMerklePathWitness<const PATH_LENGTH: usize> {
+    layers: [PreparedHashWitness; PATH_LENGTH],
+}
+
+impl<const PATH_LENGTH: usize> core::fmt::Debug for PreparedMerklePathWitness<PATH_LENGTH> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PreparedMerklePathWitness(..)")
+    }
+}
+
+fn merkle_message_words(
+    layer: usize,
+    left: pallas::Base,
+    right: pallas::Base,
+) -> [u32; MERKLE_MESSAGE_WORDS] {
+    let left = left.to_repr();
+    let right = right.to_repr();
+    core::array::from_fn(|word_index| {
+        let message_offset = word_index * crate::sinsemilla::primitives::K;
+        (0..crate::sinsemilla::primitives::K).fold(0, |word, bit_index| {
+            let message_bit = message_offset + bit_index;
+            let bit = if message_bit < MERKLE_LAYER_BITS {
+                ((layer >> message_bit) & 1) as u32
+            } else {
+                let node_bit = message_bit - MERKLE_LAYER_BITS;
+                let (repr, bit) = if node_bit < MERKLE_NODE_BITS {
+                    (&left, node_bit)
+                } else {
+                    (&right, node_bit - MERKLE_NODE_BITS)
+                };
+                u32::from((repr.as_ref()[bit / u8::BITS as usize] >> (bit % 8)) & 1)
+            };
+            word | (bit << bit_index)
+        })
+    })
+}
+
+/// Prepares a [`PreparedMerklePathWitness`] for a complete Sinsemilla Merkle
+/// path.
+///
+/// Returns `None` if any incomplete addition in the path has an exceptional
+/// result.
+pub fn prepare_merkle_path_witness<const PATH_LENGTH: usize>(
+    q: pallas::Affine,
+    leaf_pos: u32,
+    path: [pallas::Base; PATH_LENGTH],
+    mut node: pallas::Base,
+) -> Option<PreparedMerklePathWitness<PATH_LENGTH>> {
+    let mut layers = Vec::with_capacity(PATH_LENGTH);
+    for (layer, sibling) in path.into_iter().enumerate() {
+        let position_bit = leaf_pos.checked_shr(layer as u32).unwrap_or(0) & 1;
+        let (left, right) = if position_bit == 0 {
+            (node, sibling)
+        } else {
+            (sibling, node)
+        };
+        let prepared = prepare_hash_witness(q, &merkle_message_words(layer, left, right))?;
+        node = prepared.output_x();
+        layers.push(prepared);
+    }
+    Some(PreparedMerklePathWitness {
+        layers: layers.try_into().ok()?,
+    })
+}
 
 /// SWU hash-to-curve personalization for the Merkle CRH generator
 pub const MERKLE_CRH_PERSONALIZATION: &str = "z.cash:Orchard-MerkleCRH";
@@ -97,6 +176,58 @@ where
     }
 }
 
+impl<Hash, Commit, Fixed, Lookup, const PATH_LENGTH: usize, const PAR: usize>
+    MerklePath<
+        pallas::Affine,
+        chip::MerkleChip<Hash, Commit, Fixed, Lookup>,
+        PATH_LENGTH,
+        { crate::sinsemilla::primitives::K },
+        { crate::sinsemilla::primitives::C },
+        PAR,
+    >
+where
+    Hash: HashDomains<pallas::Affine> + Eq,
+    Fixed: FixedPoints<pallas::Affine>,
+    Commit: CommitDomains<pallas::Affine, Fixed, Hash> + Eq,
+    Lookup: PallasLookupRangeCheck,
+{
+    /// Calculates a Merkle root using a [`PreparedMerklePathWitness`].
+    pub fn calculate_root_prepared(
+        &self,
+        mut layouter: impl Layouter<pallas::Base>,
+        leaf: AssignedCell<pallas::Base, pallas::Base>,
+        prepared: Value<&PreparedMerklePathWitness<PATH_LENGTH>>,
+    ) -> Result<AssignedCell<pallas::Base, pallas::Base>, Error> {
+        let layers_per_chip = (PATH_LENGTH + PAR - 1) / PAR;
+        let chips = (0..PATH_LENGTH).map(|i| self.chips[i / layers_per_chip].clone());
+        let path = self.path.transpose_array();
+        let pos: [Value<bool>; PATH_LENGTH] = self
+            .leaf_pos
+            .map(|pos| i2lebsp(pos as u64))
+            .transpose_array();
+        let q = self.domain.Q();
+
+        let mut node = leaf;
+        for (l, ((sibling, pos), chip)) in path.iter().zip(pos.iter()).zip(chips).enumerate() {
+            let pair = chip.swap(
+                layouter.namespace(|| "node position"),
+                (node, *sibling),
+                *pos,
+            )?;
+            node = chip.hash_layer_prepared::<PATH_LENGTH>(
+                layouter.namespace(|| format!("MerkleCRH({}, left, right)", l)),
+                q,
+                l,
+                pair.0,
+                pair.1,
+                prepared.map(|prepared| &prepared.layers[l]),
+            )?;
+        }
+
+        Ok(node)
+    }
+}
+
 #[allow(non_snake_case)]
 impl<
     C: CurveAffine,
@@ -176,6 +307,7 @@ pub mod tests {
     use super::{
         MerklePath,
         chip::{MerkleChip, MerkleConfig},
+        prepare_merkle_path_witness,
     };
 
     use crate::{
@@ -213,6 +345,7 @@ pub mod tests {
         leaf: Value<pallas::Base>,
         leaf_pos: Value<u32>,
         merkle_path: Value<[pallas::Base; MERKLE_DEPTH]>,
+        prepared: bool,
         _lookup_marker: PhantomData<Lookup>,
     }
 
@@ -221,11 +354,13 @@ pub mod tests {
             leaf: Value<pallas::Base>,
             leaf_pos: Value<u32>,
             merkle_path: Value<[pallas::Base; MERKLE_DEPTH]>,
+            prepared: bool,
         ) -> Self {
             Self {
                 leaf,
                 leaf_pos,
                 merkle_path,
+                prepared,
                 _lookup_marker: PhantomData,
             }
         }
@@ -303,7 +438,12 @@ pub mod tests {
         type FloorPlanner = SimpleFloorPlanner;
 
         fn without_witnesses(&self) -> Self {
-            MyMerkleCircuit::new(Value::default(), Value::default(), Value::default())
+            MyMerkleCircuit::new(
+                Value::default(),
+                Value::default(),
+                Value::default(),
+                self.prepared,
+            )
         }
 
         fn configure(meta: &mut ConstraintSystem<pallas::Base>) -> Self::Config {
@@ -338,8 +478,22 @@ pub mod tests {
                 path: self.merkle_path,
             };
 
-            let computed_final_root =
-                path.calculate_root(layouter.namespace(|| "calculate root"), leaf)?;
+            let computed_final_root = if self.prepared {
+                let prepared = self.leaf.zip(self.leaf_pos).zip(self.merkle_path).and_then(
+                    |((leaf, leaf_pos), merkle_path)| {
+                        prepare_merkle_path_witness(TestHashDomain.Q(), leaf_pos, merkle_path, leaf)
+                            .map(Value::known)
+                            .unwrap_or_else(Value::unknown)
+                    },
+                );
+                path.calculate_root_prepared(
+                    layouter.namespace(|| "calculate root"),
+                    leaf,
+                    prepared.as_ref(),
+                )?
+            } else {
+                path.calculate_root(layouter.namespace(|| "calculate root"), leaf)?
+            };
 
             self.leaf
                 .zip(self.leaf_pos)
@@ -408,12 +562,22 @@ pub mod tests {
             Value::known(leaf),
             Value::known(pos),
             Value::known(path.try_into().unwrap()),
+            false,
         )
     }
 
     #[test]
     fn merkle_chip() {
         let circuit: MyMerkleCircuit<PallasLookupRangeCheckConfig> = generate_circuit();
+
+        let prover = MockProver::run(11, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()))
+    }
+
+    #[test]
+    fn merkle_chip_with_prepared_arithmetic() {
+        let mut circuit: MyMerkleCircuit<PallasLookupRangeCheckConfig> = generate_circuit();
+        circuit.prepared = true;
 
         let prover = MockProver::run(11, &circuit, vec![]).unwrap();
         assert_eq!(prover.verify(), Ok(()))
@@ -438,6 +602,7 @@ pub mod tests {
             leaf: Value::default(),
             leaf_pos: Value::default(),
             merkle_path: Value::default(),
+            prepared: false,
             _lookup_marker: PhantomData,
         };
         halo2_proofs::dev::CircuitLayout::default()
