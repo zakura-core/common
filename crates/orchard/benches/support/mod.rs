@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use ff::{Field, PrimeField};
 use incrementalmerkletree::{Hashable, Level};
 use orchard::{
     Anchor, Bundle, NOTE_COMMITMENT_TREE_DEPTH,
@@ -11,7 +12,8 @@ use orchard::{
     tree::{MerkleHashOrchard, MerklePath},
     value::NoteValue,
 };
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use pasta_curves::pallas;
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 
 const MEMO_SIZE: usize = 512;
 const MEMO: [u8; MEMO_SIZE] = [0; MEMO_SIZE];
@@ -20,6 +22,7 @@ const RECIPIENT_SPENDING_KEY: [u8; 32] = [8; 32];
 const FUNDING_SEED_DOMAIN: u8 = 0x40;
 const PAYMENT_SEED_DOMAIN: u8 = 0x41;
 const VALUE_SEED_DOMAIN: u8 = 0x43;
+const MERKLE_SEED_DOMAIN: u8 = 0x44;
 const MIN_VALUE_BITS: u32 = 24;
 const VALUE_BIT_WIDTH_COUNT: usize = 25;
 /// Coprime to the bit-width count, so Actions traverse every width.
@@ -30,6 +33,17 @@ const ZIP317_GRACE_ACTIONS: usize = 2;
 const MERKLE_ARITY: usize = 2;
 /// Flipping the low path-index bit selects the sibling node.
 const MERKLE_SIBLING_MASK: usize = 1;
+
+#[allow(
+    dead_code,
+    reason = "each benchmark target selects only the payment shapes it needs"
+)]
+#[derive(Clone, Copy)]
+enum PaymentShape {
+    AllRealSingleRecipient,
+    AllRealRecipientAndChange,
+    PaddedRecipientAndChange,
+}
 
 #[allow(
     dead_code,
@@ -222,59 +236,96 @@ fn extracted_commitment(note: &Note) -> ExtractedNoteCommitment {
     ExtractedNoteCommitment::from(note.commitment())
 }
 
-fn shared_anchor_witnesses(notes: Vec<Note>) -> (Anchor, Vec<(Note, MerklePath)>) {
+// Keep this aligned with `ironwood_spend_witnesses` in
+// `src/circuit/benchmark.rs`; benchmark targets cannot share private helpers.
+fn shared_anchor_witnesses(
+    notes: Vec<Note>,
+    rng: &mut impl Rng,
+) -> (Anchor, Vec<(Note, MerklePath)>) {
     assert!(
         !notes.is_empty(),
         "a payment fixture has at least one spend"
     );
 
-    let leaves = notes
+    let arity = u64::try_from(MERKLE_ARITY).expect("Merkle arity fits into u64");
+    let sibling_mask =
+        u64::try_from(MERKLE_SIBLING_MASK).expect("Merkle sibling mask fits into u64");
+    let mut positions = BTreeSet::new();
+    while positions.len() < notes.len() {
+        positions.insert(rng.random::<u32>());
+    }
+    let positions = positions.into_iter().collect::<Vec<_>>();
+    let leaves = positions
         .iter()
-        .map(|note| MerkleHashOrchard::from_cmx(&extracted_commitment(note)))
-        .collect::<Vec<_>>();
+        .copied()
+        .zip(notes.iter())
+        .map(|(position, note)| {
+            (
+                u64::from(position),
+                MerkleHashOrchard::from_cmx(&extracted_commitment(note)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut levels = Vec::with_capacity(NOTE_COMMITMENT_TREE_DEPTH + 1);
     levels.push(leaves);
 
     for level_index in 0..NOTE_COMMITMENT_TREE_DEPTH {
         let level =
             Level::from(u8::try_from(level_index).expect("Orchard Merkle level fits into u8"));
-        let current = &levels[level_index];
+        let mut current = levels[level_index].clone();
         let parents = current
-            .chunks(MERKLE_ARITY)
-            .map(|children| {
-                let right = children
-                    .get(1)
-                    .copied()
-                    .unwrap_or_else(|| MerkleHashOrchard::empty_root(level));
-                MerkleHashOrchard::combine(level, &children[0], &right)
+            .keys()
+            .map(|index| index / arity)
+            .collect::<BTreeSet<_>>();
+        for parent in &parents {
+            let left = parent * arity;
+            for child in [left, left + sibling_mask] {
+                // A spend reveals sibling subtree roots but not their
+                // preimages, so independent canonical nodes accurately model
+                // a populated tree.
+                current.entry(child).or_insert_with(|| {
+                    let value = pallas::Base::random(&mut *rng).to_repr();
+                    MerkleHashOrchard::from_bytes(&value).unwrap()
+                });
+            }
+        }
+        levels[level_index] = current;
+        let parents = parents
+            .into_iter()
+            .map(|parent| {
+                let left = parent * arity;
+                let current = &levels[level_index];
+                (
+                    parent,
+                    MerkleHashOrchard::combine(
+                        level,
+                        &current[&left],
+                        &current[&(left + sibling_mask)],
+                    ),
+                )
             })
             .collect();
         levels.push(parents);
     }
 
-    let anchor = Anchor::from(levels[NOTE_COMMITMENT_TREE_DEPTH][0]);
     let witnesses = notes
         .into_iter()
-        .enumerate()
-        .map(|(position, note)| {
+        .zip(positions)
+        .map(|(note, position)| {
             let auth_path = core::array::from_fn(|level_index| {
-                let level = Level::from(
-                    u8::try_from(level_index).expect("Orchard Merkle level fits into u8"),
-                );
-                let sibling = (position >> level_index) ^ MERKLE_SIBLING_MASK;
+                let sibling = (u64::from(position) >> level_index) ^ sibling_mask;
                 levels[level_index]
-                    .get(sibling)
+                    .get(&sibling)
                     .copied()
-                    .unwrap_or_else(|| MerkleHashOrchard::empty_root(level))
+                    .expect("every authentication-path sibling is populated")
             });
-            let path = MerklePath::from_parts(
-                u32::try_from(position).expect("fixture position fits into u32"),
-                auth_path,
-            );
-            assert_eq!(path.root(extracted_commitment(&note)), anchor);
-            (note, path)
+            (note, MerklePath::from_parts(position, auth_path))
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let anchor = witnesses[0].1.root(extracted_commitment(&witnesses[0].0));
+    for (note, path) in &witnesses {
+        assert_eq!(path.root(extracted_commitment(note)), anchor);
+    }
 
     (anchor, witnesses)
 }
@@ -284,14 +335,43 @@ fn shared_anchor_witnesses(notes: Vec<Note>) -> (Anchor, Vec<(Note, MerklePath)>
     reason = "indexed fixtures are used directly by some benchmark targets"
 )]
 pub(super) fn payment_fixture(action_count: usize) -> PaymentFixture {
-    payment_fixture_with_index(action_count, 0)
+    payment_fixture_with_shape(action_count, 0, PaymentShape::AllRealRecipientAndChange)
 }
 
+#[allow(dead_code, reason = "used by the full-prover benchmark target")]
+pub(super) fn padded_two_action_payment_fixture() -> PaymentFixture {
+    payment_fixture_with_shape(2, 0, PaymentShape::PaddedRecipientAndChange)
+}
+
+#[allow(dead_code, reason = "used by the full-prover benchmark target")]
+pub(super) fn two_real_spends_payment_fixture() -> PaymentFixture {
+    payment_fixture_with_shape(2, 0, PaymentShape::AllRealRecipientAndChange)
+}
+
+#[allow(
+    dead_code,
+    reason = "indexed fixtures are used directly by some benchmark targets"
+)]
 pub(super) fn payment_fixture_with_index(
     action_count: usize,
     fixture_index: u64,
 ) -> PaymentFixture {
+    payment_fixture_with_shape(
+        action_count,
+        fixture_index,
+        PaymentShape::AllRealSingleRecipient,
+    )
+}
+
+fn payment_fixture_with_shape(
+    action_count: usize,
+    fixture_index: u64,
+    shape: PaymentShape,
+) -> PaymentFixture {
     assert_ne!(action_count, 0, "a payment has at least one Action");
+    if matches!(shape, PaymentShape::PaddedRecipientAndChange) {
+        assert_eq!(action_count, 2, "the named prover fixtures are two-Action");
+    }
 
     let bundle_version = BundleVersion::ironwood_v3();
     let payer_sk = SpendingKey::from_bytes(PAYER_SPENDING_KEY).unwrap();
@@ -306,9 +386,39 @@ pub(super) fn payment_fixture_with_index(
         "the fixture uses distinct payer and recipient addresses",
     );
 
-    let (spend_values, output_values, total_fee) = payment_values(action_count, fixture_index);
-    let (anchor, spend_notes) =
-        shared_anchor_witnesses(funding_notes(&spend_values, fixture_index, &payer_fvk));
+    let (mut spend_values, output_values, total_fee) = payment_values(action_count, fixture_index);
+    if matches!(shape, PaymentShape::PaddedRecipientAndChange) {
+        let second = spend_values.pop().unwrap();
+        let first = spend_values.pop().unwrap();
+        spend_values.push(NoteValue::from_raw(
+            first
+                .inner()
+                .checked_add(second.inner())
+                .expect("the combined fixture spend fits into u64"),
+        ));
+    }
+    let output_recipients = match shape {
+        PaymentShape::AllRealSingleRecipient => vec![recipient; action_count],
+        PaymentShape::AllRealRecipientAndChange | PaymentShape::PaddedRecipientAndChange => (0
+            ..action_count)
+            .map(|action_index| {
+                if action_count > 1 && action_index + 1 == action_count {
+                    payer_fvk.address_at(
+                        u32::try_from(action_index).expect("Action index fits into u32"),
+                        Scope::Internal,
+                    )
+                } else {
+                    recipient_fvk.address_at(
+                        u32::try_from(action_index).expect("Action index fits into u32"),
+                        Scope::External,
+                    )
+                }
+            })
+            .collect(),
+    };
+    let notes = funding_notes(&spend_values, fixture_index, &payer_fvk);
+    let mut merkle_rng = fixture_rng(MERKLE_SEED_DOMAIN, action_count, fixture_index);
+    let (anchor, spend_notes) = shared_anchor_witnesses(notes, &mut merkle_rng);
     let mut builder = Builder::new(
         fixture_bundle_type(action_count),
         bundle_version,
@@ -322,15 +432,27 @@ pub(super) fn payment_fixture_with_index(
             .add_spend(payer_fvk.clone(), note, path)
             .expect("each real spend is owned and anchored");
     }
-    for output_value in &output_values {
-        builder
-            .add_output(
-                Some(payer_fvk.to_ovk(Scope::External)),
-                recipient,
-                *output_value,
-                MEMO,
-            )
-            .expect("each cross-address Ironwood payment output is valid");
+    for (output_value, recipient) in output_values.iter().zip(&output_recipients) {
+        if payer_fvk.scope_for_address(recipient).is_some() {
+            builder
+                .add_change_output(
+                    payer_fvk.clone(),
+                    Some(payer_fvk.to_ovk(Scope::Internal)),
+                    *recipient,
+                    *output_value,
+                    MEMO,
+                )
+                .expect("the payer owns its Ironwood change output");
+        } else {
+            builder
+                .add_output(
+                    Some(payer_fvk.to_ovk(Scope::External)),
+                    *recipient,
+                    *output_value,
+                    MEMO,
+                )
+                .expect("each cross-address Ironwood payment output is valid");
+        }
     }
 
     let mut rng = fixture_rng(PAYMENT_SEED_DOMAIN, action_count, fixture_index);
@@ -350,7 +472,7 @@ pub(super) fn payment_fixture_with_index(
         i64::try_from(total_fee).expect("fixture fee fits into i64"),
     );
 
-    let spend_action_indices = (0..action_count)
+    let spend_action_indices = (0..spend_values.len())
         .map(|index| {
             metadata
                 .spend_action_index(index)
@@ -365,27 +487,38 @@ pub(super) fn payment_fixture_with_index(
         })
         .collect::<BTreeSet<_>>();
     let all_action_indices = (0..action_count).collect::<BTreeSet<_>>();
-    assert_eq!(spend_action_indices, all_action_indices);
+    assert_eq!(spend_action_indices.len(), spend_values.len());
+    assert!(spend_action_indices.is_subset(&all_action_indices));
     assert_eq!(output_action_indices, all_action_indices);
 
-    let payer_ivk = payer_fvk.to_ivk(Scope::External);
+    let payer_internal_ivk = payer_fvk.to_ivk(Scope::Internal);
     let recipient_ivk = recipient_fvk.to_ivk(Scope::External);
-    for (output_index, expected_output_value) in output_values.iter().enumerate() {
+    for (output_index, (expected_output_value, expected_recipient)) in
+        output_values.iter().zip(&output_recipients).enumerate()
+    {
         let action_index = metadata
             .output_action_index(output_index)
             .expect("each requested output has an Action");
+        let (decrypting_ivk, other_ivk) = if recipient_fvk
+            .scope_for_address(expected_recipient)
+            .is_some()
+        {
+            (&recipient_ivk, &payer_internal_ivk)
+        } else {
+            (&payer_internal_ivk, &recipient_ivk)
+        };
         let (note, decrypted_to, memo) = bundle
-            .decrypt_output_with_key(action_index, &recipient_ivk)
-            .expect("the recipient decrypts each payment output");
+            .decrypt_output_with_key(action_index, decrypting_ivk)
+            .expect("the intended recipient decrypts each payment output");
         assert_eq!(note.version(), bundle_version.note_version());
         assert_eq!(note.value(), *expected_output_value);
-        assert_eq!(decrypted_to, recipient);
+        assert_eq!(decrypted_to, *expected_recipient);
         assert_eq!(memo, MEMO);
         assert!(
             bundle
-                .decrypt_output_with_key(action_index, &payer_ivk)
+                .decrypt_output_with_key(action_index, other_ivk)
                 .is_none(),
-            "the payer must not decrypt the cross-address output",
+            "the other fixture wallet must not decrypt the output",
         );
     }
 

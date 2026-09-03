@@ -208,51 +208,89 @@ fn extracted_commitment(note: &Note) -> ExtractedNoteCommitment {
     ExtractedNoteCommitment::from(note.commitment())
 }
 
-/// Builds authentication paths for notes placed consecutively in one tree.
-fn ironwood_spend_witnesses(notes: Vec<Note>) -> (crate::Anchor, Vec<(Note, MerklePath)>) {
+/// Builds authentication paths for notes scattered through one populated tree.
+///
+/// Keep this aligned with `shared_anchor_witnesses` in
+/// `benches/support/mod.rs`; benchmark targets cannot share private helpers.
+fn ironwood_spend_witnesses(
+    notes: Vec<Note>,
+    rng: &mut impl Rng,
+) -> (crate::Anchor, Vec<(Note, MerklePath)>) {
     assert!(
         !notes.is_empty(),
         "a payment fixture has at least one spend"
     );
-    let leaves = notes
+    let arity = u64::try_from(MERKLE_ARITY).expect("the Merkle arity fits into u64");
+    let sibling_mask =
+        u64::try_from(MERKLE_SIBLING_MASK).expect("the Merkle sibling mask fits into u64");
+    let mut positions = BTreeSet::new();
+    while positions.len() < notes.len() {
+        positions.insert(rng.random::<u32>());
+    }
+    let positions = positions.into_iter().collect::<Vec<_>>();
+    let leaves = positions
         .iter()
-        .map(|note| MerkleHashOrchard::from_cmx(&extracted_commitment(note)))
-        .collect::<Vec<_>>();
+        .copied()
+        .zip(notes.iter())
+        .map(|(position, note)| {
+            (
+                u64::from(position),
+                MerkleHashOrchard::from_cmx(&extracted_commitment(note)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut levels = Vec::with_capacity(NOTE_COMMITMENT_TREE_DEPTH + 1);
     levels.push(leaves);
     for level_index in 0..NOTE_COMMITMENT_TREE_DEPTH {
         let level =
             Level::from(u8::try_from(level_index).expect("the Orchard Merkle level fits into u8"));
-        let current = &levels[level_index];
+        let mut current = levels[level_index].clone();
         let parents = current
-            .chunks(MERKLE_ARITY)
-            .map(|children| {
-                let left = children[0];
-                let right = children
-                    .get(1)
-                    .copied()
-                    .unwrap_or_else(|| MerkleHashOrchard::empty_root(level));
-                MerkleHashOrchard::combine(level, &left, &right)
+            .keys()
+            .map(|index| index / arity)
+            .collect::<BTreeSet<_>>();
+        for parent in &parents {
+            let left = parent * arity;
+            for child in [left, left + sibling_mask] {
+                // Authentication paths expose sibling subtree roots, but not
+                // their preimages. Model a populated tree with independent
+                // canonical nodes instead of repeated empty roots.
+                current.entry(child).or_insert_with(|| {
+                    let value = pallas::Base::random(&mut *rng).to_repr();
+                    MerkleHashOrchard::from_bytes(&value).unwrap()
+                });
+            }
+        }
+        levels[level_index] = current;
+        let parents = parents
+            .into_iter()
+            .map(|parent| {
+                let left = parent * arity;
+                let current = &levels[level_index];
+                (
+                    parent,
+                    MerkleHashOrchard::combine(
+                        level,
+                        &current[&left],
+                        &current[&(left + sibling_mask)],
+                    ),
+                )
             })
-            .collect::<Vec<_>>();
+            .collect::<BTreeMap<_, _>>();
         levels.push(parents);
     }
 
     let witnesses = notes
         .into_iter()
-        .enumerate()
-        .map(|(note_index, note)| {
+        .zip(positions)
+        .map(|(note, position)| {
             let auth_path = core::array::from_fn(|level_index| {
-                let level = Level::from(
-                    u8::try_from(level_index).expect("the Orchard Merkle level fits into u8"),
-                );
-                let sibling = (note_index >> level_index) ^ MERKLE_SIBLING_MASK;
+                let sibling = (u64::from(position) >> level_index) ^ sibling_mask;
                 levels[level_index]
-                    .get(sibling)
+                    .get(&sibling)
                     .copied()
-                    .unwrap_or_else(|| MerkleHashOrchard::empty_root(level))
+                    .expect("every authentication-path sibling is populated")
             });
-            let position = u32::try_from(note_index).expect("the fixture position fits into u32");
             (note, MerklePath::from_parts(position, auth_path))
         })
         .collect::<Vec<_>>();
@@ -338,11 +376,34 @@ fn ironwood_payment_fixture(
     let spend_recipient =
         spend_fvk.address_at(IRONWOOD_FIXTURE_SPEND_ADDRESS_INDEX, Scope::External);
     let receiver_key = SpendingKey::from_bytes(IRONWOOD_FIXTURE_RECEIVER_SPENDING_KEY).unwrap();
-    let receiver = FullViewingKey::from(&receiver_key)
-        .address_at(IRONWOOD_FIXTURE_OUTPUT_ADDRESS_INDEX, Scope::External);
+    let receiver_fvk = FullViewingKey::from(&receiver_key);
+    let receivers = (0..action_count)
+        .map(|action_index| {
+            let address_index = IRONWOOD_FIXTURE_OUTPUT_ADDRESS_INDEX
+                .checked_add(u32::try_from(action_index).unwrap())
+                .unwrap();
+            if action_count > 1 && action_index + 1 == action_count {
+                // Model the final output as change back to the payer.
+                spend_fvk.address_at(address_index, Scope::Internal)
+            } else {
+                receiver_fvk.address_at(address_index, Scope::External)
+            }
+        })
+        .collect::<Vec<_>>();
     assert!(
-        !spend_recipient.same_expanded_receiver(&receiver),
-        "the benchmark payment exercises an Ironwood cross-address Action",
+        receivers
+            .iter()
+            .all(|receiver| !spend_recipient.same_expanded_receiver(receiver)),
+        "the benchmark payment exercises Ironwood cross-address Actions",
+    );
+    assert_eq!(
+        receivers
+            .iter()
+            .map(|receiver| receiver.to_raw_address_bytes())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        action_count,
+        "the benchmark payment uses a distinct receiver for each Action",
     );
 
     let (spend_values, output_values, total_fee) =
@@ -362,7 +423,7 @@ fn ironwood_payment_fixture(
             )
         })
         .collect::<Vec<_>>();
-    let (anchor, spend_witnesses) = ironwood_spend_witnesses(spend_notes);
+    let (anchor, spend_witnesses) = ironwood_spend_witnesses(spend_notes, &mut rng);
 
     let bundle_type = if action_count < ZIP317_GRACE_ACTIONS {
         // Keep the explicit one-Action witness case from being padded to two.
@@ -380,15 +441,27 @@ fn ironwood_payment_fixture(
     for (note, path) in spend_witnesses {
         builder.add_spend(spend_fvk.clone(), note, path).unwrap();
     }
-    for output_value in output_values.iter().copied() {
-        builder
-            .add_output(
-                Some(spend_fvk.to_ovk(Scope::External)),
-                receiver,
-                output_value,
-                IRONWOOD_FIXTURE_MEMO,
-            )
-            .unwrap();
+    for (output_value, receiver) in output_values.iter().copied().zip(receivers) {
+        if spend_fvk.scope_for_address(&receiver).is_some() {
+            builder
+                .add_change_output(
+                    spend_fvk.clone(),
+                    Some(spend_fvk.to_ovk(Scope::Internal)),
+                    receiver,
+                    output_value,
+                    IRONWOOD_FIXTURE_MEMO,
+                )
+                .unwrap();
+        } else {
+            builder
+                .add_output(
+                    Some(spend_fvk.to_ovk(Scope::External)),
+                    receiver,
+                    output_value,
+                    IRONWOOD_FIXTURE_MEMO,
+                )
+                .unwrap();
+        }
     }
     let (bundle, metadata): (Bundle<_, i64>, _) = builder
         .build(&mut rng)
