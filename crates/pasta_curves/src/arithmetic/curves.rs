@@ -187,9 +187,25 @@ pub trait CurveExt:
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "multicore", feature = "orbits"))))]
 pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
-    /// The number of fixed bases this preparation covers; `scalars` below
-    /// must have exactly this length.
+    /// The number of fixed bases this preparation covers; scalar slices
+    /// passed to the evaluation methods must have exactly this length.
     fn terms(&self) -> usize;
+
+    /// Estimates the variable-time scalar work of this prepared backend.
+    ///
+    /// The returned units are implementation-defined, additive across scalar
+    /// slices, and exclude fixed per-call costs. They are only suitable for
+    /// comparing scalar slices through the same prepared handle. Unlike the
+    /// evaluation methods, this accepts a scalar sample of any length. A
+    /// backend returns `None` when it does not provide an estimate.
+    ///
+    /// # Security
+    ///
+    /// Variable-time in `scalars`; callers must not use this with secret
+    /// scalars unless they already accept scalar-dependent timing.
+    fn estimate_scalar_work_vartime(&self, _scalars: &[C::ScalarExt]) -> Option<usize> {
+        None
+    }
 
     /// Whether $\sum_i \[k_i\] P_i + \sum_j \[s_j\] Q_j$ is the identity.
     ///

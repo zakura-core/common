@@ -105,8 +105,8 @@ use maybe_rayon::prelude::*;
 
 use super::orbit;
 use super::{
-    AffinePoint, GlvParams, SignedMagnitude, checked_signed_magnitudes, current_num_threads,
-    decompose, private, reduce_affine_buckets, reduce_affine_buckets_in_place,
+    AffinePoint, GLV_COMPONENT_BITS, GlvParams, SignedMagnitude, checked_signed_magnitudes,
+    current_num_threads, decompose, private, reduce_affine_buckets, reduce_affine_buckets_in_place,
 };
 
 mod codebook;
@@ -282,6 +282,58 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// The number of fixed bases this preparation covers.
     pub fn terms(&self) -> usize {
         self.live.len()
+    }
+
+    /// Estimates the prepared evaluator's scalar-dependent bucket visits.
+    fn estimate_scalar_work_vartime(&self, scalars: &[C::ScalarExt]) -> Option<usize> {
+        // Arbitrary samples have no fixed-base indices, so they cannot model
+        // the evaluator's identity suppression or relation folding.
+        if !self.merges.is_empty() || self.live.iter().any(|&live| !live) {
+            return None;
+        }
+
+        const MAX_MAIN_WINDOWS: usize = GLV_COMPONENT_BITS.div_ceil(codebook::MIN_WINDOW_BITS);
+        const MAX_TAIL_WINDOWS: usize = orbit::window_count(orbit::MIN_WINDOW_BITS);
+
+        let main_windows = self.codebook.main_windows();
+        let mut main = [0_u32; MAX_MAIN_WINDOWS];
+        let tail_params = &self.tail_params[self.tail_width];
+        let tail_windows = tail_params.window_stride();
+        let mut tail = [0_u16; MAX_TAIL_WINDOWS];
+        let signed = |component: SignedMagnitude| {
+            if component.negative {
+                -(component.magnitude as i128)
+            } else {
+                component.magnitude as i128
+            }
+        };
+
+        scalars.iter().try_fold(0_usize, |work, scalar| {
+            if scalar.is_zero_vartime() {
+                return Some(work);
+            }
+
+            let (first, second) = checked_signed_magnitudes(decompose::<C>(scalar))?;
+            main[..main_windows].fill(0);
+            let (top, (tail_a, tail_b)) =
+                self.codebook
+                    .recode_pair(signed(first), signed(second), &mut main[..main_windows]);
+            let main_work = main[..top].iter().filter(|&&code| code != 0).count();
+
+            tail[..tail_windows].fill(0);
+            let residual = (
+                SignedMagnitude::from((tail_a < 0, u128::from(tail_a.unsigned_abs()))),
+                SignedMagnitude::from((tail_b < 0, u128::from(tail_b.unsigned_abs()))),
+            );
+            let tail_top = orbit::recode_row(
+                tail_params,
+                residual.0,
+                residual.1,
+                &mut tail[..tail_windows],
+            );
+            let tail_work = tail[..tail_top].iter().filter(|&&code| code != 0).count();
+            Some(work.saturating_add(main_work).saturating_add(tail_work))
+        })
     }
 
     /// Accounted table footprint in bytes: the variant table, tail bases,
@@ -760,6 +812,10 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
 impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for PreparedZeroMsm<C> {
     fn terms(&self) -> usize {
         PreparedZeroMsm::terms(self)
+    }
+
+    fn estimate_scalar_work_vartime(&self, scalars: &[C::ScalarExt]) -> Option<usize> {
+        PreparedZeroMsm::estimate_scalar_work_vartime(self, scalars)
     }
 
     fn is_zero_with_terms_vartime(
@@ -1297,6 +1353,72 @@ mod tests {
                 beta_extent: 16,
             },
         ]
+    }
+
+    /// The estimator follows the actual prepared recoder and still recognizes
+    /// low-work scalars across signs and the free unit directions.
+    fn scalar_work_estimate_profiles<C: GlvParams>() {
+        const TERMS: usize = 64;
+
+        let (random, _, _) = super::super::testutil::verifier_multiexp_inputs::<C>(TERMS);
+        let generator = C::generator();
+        let bases = (1..=TERMS)
+            .map(|value| {
+                (generator * C::ScalarExt::from(u64::try_from(value).unwrap())).to_affine()
+            })
+            .collect::<Vec<_>>();
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(7));
+        let small = (1..=TERMS)
+            .map(|value| C::ScalarExt::from(u64::try_from(value).unwrap()))
+            .collect::<Vec<_>>();
+        let negative = small.iter().map(|scalar| -*scalar).collect::<Vec<_>>();
+        let zeta = small
+            .iter()
+            .map(|scalar| *scalar * C::ScalarExt::ZETA)
+            .collect::<Vec<_>>();
+        let two_component = (1..=TERMS)
+            .map(|value| {
+                C::ScalarExt::from(u64::try_from(value).unwrap())
+                    + C::ScalarExt::from(u64::try_from(value + 1).unwrap()) * C::ScalarExt::ZETA
+            })
+            .collect::<Vec<_>>();
+        let estimate = |scalars: &[C::ScalarExt]| {
+            crate::arithmetic::PreparedZeroCheck::estimate_scalar_work_vartime(&prepared, scalars)
+                .unwrap()
+        };
+
+        assert_eq!(estimate(&[C::ScalarExt::ZERO; TERMS]), 0);
+        let random_work = estimate(&random);
+        for low_work in [
+            estimate(&small),
+            estimate(&negative),
+            estimate(&zeta),
+            estimate(&two_component),
+        ] {
+            assert!(low_work < random_work);
+        }
+
+        let mut identity_bases = bases;
+        identity_bases[0] = C::AffineExt::identity();
+        let identity_prepared =
+            PreparedZeroMsm::<C>::prepare_with_mode(&identity_bases, CodebookMode::alpha_only(7));
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::estimate_scalar_work_vartime(
+                &identity_prepared,
+                &random,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn pallas_scalar_work_estimate_profiles() {
+        scalar_work_estimate_profiles::<pallas::Point>();
+    }
+
+    #[test]
+    fn vesta_scalar_work_estimate_profiles() {
+        scalar_work_estimate_profiles::<vesta::Point>();
     }
 
     /// Exact zero relations verify; one-bit perturbations, all-zero
