@@ -400,6 +400,41 @@ impl<F: Field> AdviceWitness<F> {
             return Err(Error::BoundsFailure);
         }
 
+        self.assign_valid(column, row, assigned);
+        Ok(())
+    }
+
+    fn assign_batch<V>(
+        &mut self,
+        column: usize,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Result<Assigned<F>, Error>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if self
+            .values
+            .get(column)
+            .and_then(|values| values.get(row..end))
+            .is_none()
+        {
+            return Err(Error::BoundsFailure);
+        }
+
+        for index in 0..len {
+            self.assign_valid(column, row + index, to(index)?);
+        }
+        Ok(())
+    }
+
+    fn assign_valid(&mut self, column: usize, row: usize, assigned: Assigned<F>) {
         match assigned {
             Assigned::Zero => {
                 self.remove_denominator(column, row);
@@ -423,8 +458,6 @@ impl<F: Field> AdviceWitness<F> {
                 self.values[column][row] = numerator;
             }
         }
-
-        Ok(())
     }
 
     fn remove_denominator(&mut self, column: usize, row: usize) {
@@ -552,6 +585,32 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
 
         self.advice
             .assign(column.index(), row, to().into_field().assign()?)
+    }
+
+    fn assign_advice_batch<V, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if !self.usable_rows.contains(&row) || end > self.usable_rows.end {
+            return Err(Error::not_enough_rows_available(self.k));
+        }
+
+        self.advice
+            .assign_batch(column.index(), row, len, |index| to(index).assign())
     }
 
     fn assign_fixed<V, VR, A, AR>(
@@ -1837,6 +1896,24 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
     advice
         .assign(0, 5, Assigned::Rational(Fp::ZERO, Fp::from(7)))
         .unwrap();
+    advice
+        .assign_batch(0, 6, 2, |index| {
+            Ok(match index {
+                0 => Assigned::Rational(Fp::from(12), Fp::from(3)),
+                1 => Assigned::Trivial(Fp::from(13)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    advice
+        .assign_batch(0, 6, 2, |index| {
+            Ok(match index {
+                0 => Assigned::Trivial(Fp::from(6)),
+                1 => Assigned::Rational(Fp::from(14), Fp::from(2)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
 
     assert!(matches!(
         advice.assign(2, 0, Assigned::Zero),
@@ -1846,12 +1923,27 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
         advice.assign(0, 8, Assigned::Zero),
         Err(Error::BoundsFailure)
     ));
+    assert!(
+        advice
+            .assign_batch(usize::MAX, usize::MAX, 0, |_| unreachable!())
+            .is_ok()
+    );
+    assert!(matches!(
+        advice.assign_batch(0, 7, 2, |_| Ok(Assigned::Zero)),
+        Err(Error::BoundsFailure)
+    ));
+    assert!(matches!(
+        advice.assign_batch(0, usize::MAX, 2, |_| Ok(Assigned::Zero)),
+        Err(Error::BoundsFailure)
+    ));
 
     let advice = advice.evaluate();
     assert_eq!(advice[0][0], Fp::from(5));
     assert_eq!(advice[0][2], Fp::ZERO);
     assert_eq!(advice[0][3], Fp::ZERO);
     assert_eq!(advice[0][5], Fp::ZERO);
+    assert_eq!(advice[0][6], Fp::from(6));
+    assert_eq!(advice[0][7], Fp::from(7));
     assert_eq!(advice[1][1], Fp::from(3));
     assert_eq!(advice[1][4], Fp::from(11));
 }

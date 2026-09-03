@@ -93,7 +93,7 @@ impl Config {
         x_a: X<pallas::Base>,
         y_a: Y<pallas::Base>,
         z: Z<pallas::Base>,
-    ) -> Result<(EccPoint, Vec<Z<pallas::Base>>), Error> {
+    ) -> Result<(EccPoint, Z<pallas::Base>), Error> {
         // Make sure we have the correct number of bits for the complete addition
         // part of variable-base scalar mul.
         assert_eq!(bits.len(), COMPLETE_RANGE.len());
@@ -122,9 +122,6 @@ impl Config {
             Z(z)
         };
 
-        // Store interstitial running sum `z`s in vector
-        let mut zs: Vec<Z<pallas::Base>> = Vec::with_capacity(bits.len());
-
         // Complete addition
         for (iter, k) in bits.iter().enumerate() {
             // Each iteration uses 2 rows (two complete additions)
@@ -145,8 +142,6 @@ impl Config {
                     region.assign_advice(|| "z", self.z_complete, row + offset + 2, || z_val)?;
                 Z(z_cell)
             };
-            zs.push(z.clone());
-
             // Assign `y_p` for complete addition.
             let y_p = {
                 let base_y = base.y.copy_advice(
@@ -187,6 +182,6 @@ impl Config {
                 .add_config
                 .assign_region(&acc, &tmp_acc, row + offset + 1, region)?;
         }
-        Ok((acc, zs))
+        Ok((acc, z))
     }
 }

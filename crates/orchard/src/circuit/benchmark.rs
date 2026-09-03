@@ -160,6 +160,46 @@ impl<F: Field> Assignment<F> for IronwoodBenchmarkWitness<F> {
         }
     }
 
+    fn assign_advice_batch<V, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if !self.usable_rows.contains(&row) || end > self.usable_rows.end {
+            return Err(Error::NotEnoughRowsAvailable { current_k: self.k });
+        }
+
+        let targets = self
+            .advice
+            .get_mut(&column)
+            .and_then(|column| column.get_mut(row..end))
+            .ok_or(Error::BoundsFailure)?;
+        for (index, target) in targets.iter_mut().enumerate() {
+            let mut assigned = false;
+            let _ = to(index).map(|value| {
+                *target = value;
+                assigned = true;
+            });
+            if !assigned {
+                return Err(Error::Synthesis);
+            }
+        }
+        Ok(())
+    }
+
     fn assign_fixed<V, VR, A, AR>(
         &mut self,
         _: A,

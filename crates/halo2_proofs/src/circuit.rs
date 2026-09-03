@@ -247,6 +247,34 @@ impl<'r, F: Field> Region<'r, F> {
         })
     }
 
+    /// Assigns a contiguous range of advice cells in one column.
+    ///
+    /// This avoids constructing cell handles when the caller only needs to
+    /// populate witness values. Use [`Self::assign_advice`] for cells that will
+    /// be copied or otherwise referenced later. A zero-length batch is a no-op.
+    pub fn assign_advice_batch<'v, V, VR, A, AR>(
+        &'v mut self,
+        annotation: A,
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<VR> + 'v,
+        for<'vr> Assigned<F>: From<&'vr VR>,
+        A: Fn(usize) -> AR + 'v,
+        AR: Into<String>,
+    {
+        self.region.assign_advice_batch(
+            &|index| annotation(index).into(),
+            column,
+            offset,
+            len,
+            &mut |index| to(index).to_field(),
+        )
+    }
+
     /// Assigns a constant value to the column `advice` at `offset` within this region.
     ///
     /// The constant value will be assigned to a cell within one of the fixed columns
