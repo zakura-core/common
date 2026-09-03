@@ -80,11 +80,55 @@ impl RegionNameTracker {
     }
 }
 
+#[derive(Debug)]
+struct RegionLookup {
+    namespace_children: Vec<HashMap<String, usize>>,
+    region_indices: Vec<HashMap<String, Vec<RegionIndex>>>,
+    region_count: usize,
+}
+
+impl RegionLookup {
+    fn new(region_ids: Vec<RegionId>) -> Self {
+        let mut lookup = Self {
+            namespace_children: vec![HashMap::new()],
+            region_indices: vec![HashMap::new()],
+            region_count: region_ids.len(),
+        };
+
+        for (index, id) in region_ids.into_iter().enumerate() {
+            let mut namespace = 0;
+            for name in id.path.namespace {
+                namespace = if let Some(child) = lookup.namespace_children[namespace].get(&name) {
+                    *child
+                } else {
+                    let child = lookup.namespace_children.len();
+                    lookup.namespace_children.push(HashMap::new());
+                    lookup.region_indices.push(HashMap::new());
+                    lookup.namespace_children[namespace].insert(name, child);
+                    child
+                };
+            }
+
+            let occurrences = lookup.region_indices[namespace]
+                .entry(id.path.name)
+                .or_default();
+            debug_assert_eq!(occurrences.len(), id.occurrence);
+            occurrences.push(index.into());
+        }
+
+        lookup
+    }
+
+    fn len(&self) -> usize {
+        self.region_count
+    }
+}
+
 struct V1Layout {
     /// Stores the starting row for each region.
     regions: Vec<RegionStart>,
-    /// Identifies each region independently of synthesis order.
-    region_ids: Vec<RegionId>,
+    /// Maps each region's identity to its index in `regions`.
+    region_lookup: RegionLookup,
     /// Stores the occupied rows in each global-constant column.
     fixed_allocations: Vec<(Column<Fixed>, strategy::Allocations)>,
     /// Stores the first row after all planned regions.
@@ -288,9 +332,11 @@ impl V1 {
             })
             .collect();
 
+        let region_lookup = RegionLookup::new(measure.region_ids);
+
         Ok(V1Layout {
             regions,
-            region_ids: measure.region_ids,
+            region_lookup,
             fixed_allocations,
             first_unassigned_row,
         })
@@ -325,14 +371,14 @@ impl V1 {
     ) -> Result<(), Error> {
         let mut plan = V1Plan::new(cs, layout.regions.clone())?;
 
-        let remaining = Counter::new(layout.region_ids.len());
+        let assigned = Counter::new(0);
         let mut assign =
-            NamedAssignmentPass::new(&mut plan, &layout.region_ids, &remaining, assign_tables);
+            NamedAssignmentPass::new(&mut plan, &layout.region_lookup, &assigned, assign_tables);
         {
             let pass = &mut assign;
             circuit.synthesize(config, V1Pass::assign_named(pass))?;
         }
-        if remaining.get() != 0 {
+        if assigned.get() != layout.region_lookup.len() {
             return Err(Error::Synthesis);
         }
 
@@ -460,8 +506,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
             Pass::Assignment(pass) => pass.plan.cs.push_namespace(name_fn),
             Pass::NamedAssignment(pass) => {
                 let name = name_fn().into();
-                pass.names.push_namespace(name.clone());
-                pass.plan.cs.push_namespace(|| name);
+                pass.push_namespace(name);
             }
         }
     }
@@ -470,10 +515,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
         match &mut self.0 {
             Pass::Measurement(pass) => pass.names.pop_namespace(),
             Pass::Assignment(pass) => pass.plan.cs.pop_namespace(gadget_name),
-            Pass::NamedAssignment(pass) => {
-                pass.names.pop_namespace();
-                pass.plan.cs.pop_namespace(gadget_name);
-            }
+            Pass::NamedAssignment(pass) => pass.pop_namespace(gadget_name),
         }
     }
 }
@@ -618,32 +660,51 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
 #[derive(Debug)]
 struct NamedAssignmentPass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
     plan: &'p mut V1Plan<'a, F, CS>,
-    region_indices: HashMap<RegionId, RegionIndex>,
-    remaining: &'p Counter<usize>,
-    names: RegionNameTracker,
+    region_lookup: &'p RegionLookup,
+    namespace_stack: Vec<Option<usize>>,
+    occurrences: Vec<HashMap<&'p str, usize>>,
+    assigned: &'p Counter<usize>,
     assign_tables: bool,
 }
 
 impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS> {
     fn new(
         plan: &'p mut V1Plan<'a, F, CS>,
-        region_ids: &[RegionId],
-        remaining: &'p Counter<usize>,
+        region_lookup: &'p RegionLookup,
+        assigned: &'p Counter<usize>,
         assign_tables: bool,
     ) -> Self {
-        let region_indices = region_ids
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, id)| (id, index.into()))
+        let occurrences = (0..region_lookup.region_indices.len())
+            .map(|_| HashMap::new())
             .collect();
         Self {
             plan,
-            region_indices,
-            remaining,
-            names: RegionNameTracker::default(),
+            region_lookup,
+            namespace_stack: vec![Some(0)],
+            occurrences,
+            assigned,
             assign_tables,
         }
+    }
+
+    fn push_namespace(&mut self, name: String) {
+        let namespace = self
+            .namespace_stack
+            .last()
+            .copied()
+            .flatten()
+            .and_then(|namespace| {
+                self.region_lookup.namespace_children[namespace]
+                    .get(name.as_str())
+                    .copied()
+            });
+        self.namespace_stack.push(namespace);
+        self.plan.cs.push_namespace(|| name);
+    }
+
+    fn pop_namespace(&mut self, gadget_name: Option<String>) {
+        self.namespace_stack.pop();
+        self.plan.cs.pop_namespace(gadget_name);
     }
 
     fn assign_region<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
@@ -653,13 +714,23 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
         NR: Into<String>,
     {
         let name = name().into();
-        let region_index = self
-            .region_indices
-            .remove(&self.names.next(name.clone()))
+        let namespace = self
+            .namespace_stack
+            .last()
+            .copied()
+            .flatten()
             .ok_or(Error::Synthesis)?;
-        self.remaining.set(self.remaining.get() - 1);
+        let (planned_name, region_indices) = self.region_lookup.region_indices[namespace]
+            .get_key_value(name.as_str())
+            .ok_or(Error::Synthesis)?;
+        let occurrence = self.occurrences[namespace]
+            .entry(planned_name.as_str())
+            .or_default();
+        let region_index = *region_indices.get(*occurrence).ok_or(Error::Synthesis)?;
+        *occurrence += 1;
+        self.assigned.set(self.assigned.get() + 1);
 
-        self.plan.cs.enter_region(|| name.clone());
+        self.plan.cs.enter_region(|| name);
         let mut region = V1Region::new(self.plan, region_index);
         let result = {
             let region: &mut dyn RegionLayouter<F> = &mut region;
@@ -886,17 +957,17 @@ mod tests {
             config: Self::Config,
             mut layouter: impl Layouter<vesta::Scalar>,
         ) -> Result<(), Error> {
-            let names = if self.reverse {
-                ["second", "first"]
+            let namespaces = if self.reverse {
+                ["second namespace", "first namespace"]
             } else if self.rename {
-                ["renamed", "second"]
+                ["renamed namespace", "second namespace"]
             } else {
-                ["first", "second"]
+                ["first namespace", "second namespace"]
             };
 
-            for (offset, name) in names.into_iter().enumerate() {
-                layouter.assign_region(
-                    || name,
+            for (offset, namespace) in namespaces.into_iter().enumerate() {
+                layouter.namespace(|| namespace).assign_region(
+                    || "value region",
                     |mut region| {
                         region.assign_advice(
                             || "value",
