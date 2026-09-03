@@ -500,7 +500,9 @@ pub trait FloorPlanner {
     /// `floor_plan` contains immutable planning data retained by the proving
     /// key. Implementations must ignore plans they do not recognize. Built-in
     /// floor planners can return a newly constructed plan for the proving key
-    /// to retain.
+    /// to retain. When reusing a recognized plan, implementations may skip
+    /// fixed-table assignment closures because those values were incorporated
+    /// into the proving key when the plan was created.
     fn synthesize_batch<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
         assignments: &mut [CS],
         circuits: &[C],

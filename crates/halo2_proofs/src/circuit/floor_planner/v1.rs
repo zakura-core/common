@@ -74,7 +74,7 @@ impl FloorPlanner for V1 {
         constants: Vec<Column<Fixed>>,
     ) -> Result<(), Error> {
         let layout = Self::plan::<F, CS, C>(circuit, config.clone(), &constants)?;
-        Self::assign(cs, circuit, config, &layout)
+        Self::assign(cs, circuit, config, &layout, true)
     }
 
     fn synthesize_batch<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
@@ -95,8 +95,17 @@ impl FloorPlanner for V1 {
         let (layout, is_new) =
             Self::cached_or_plan::<F, CS, C>(floor_plan, first_circuit, config.clone(), constants)?;
         let new_plan = is_new.then(|| FloorPlan::from_arc(layout.clone()));
+        // A recognized plan was retained while its proving key's fixed columns
+        // were assigned, so only a newly-created plan needs table assignments.
+        let assign_tables = is_new;
         if circuits.len() == 1 {
-            Self::assign(&mut assignments[0], first_circuit, config, &layout)?;
+            Self::assign(
+                &mut assignments[0],
+                first_circuit,
+                config,
+                &layout,
+                assign_tables,
+            )?;
             return Ok(new_plan);
         }
 
@@ -110,7 +119,7 @@ impl FloorPlanner for V1 {
             .zip(circuits.into_par_iter())
             .zip(configs.into_par_iter())
             .try_for_each(|((assignment, circuit), config)| {
-                Self::assign(assignment, circuit, config, &layout)
+                Self::assign(assignment, circuit, config, &layout, assign_tables)
             })?;
 
         Ok(new_plan)
@@ -181,12 +190,13 @@ impl V1 {
         circuit: &C,
         config: C::Config,
         layout: &V1Layout,
+        assign_tables: bool,
     ) -> Result<(), Error> {
         let mut plan = V1Plan::new(cs, layout.regions.clone())?;
 
         // Second pass:
         // - Assign the regions.
-        let mut assign = AssignmentPass::new(&mut plan);
+        let mut assign = AssignmentPass::new(&mut plan, assign_tables);
         {
             let pass = &mut assign;
             circuit.synthesize(config, V1Pass::assign(pass))?;
@@ -270,6 +280,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
     {
         match &mut self.0 {
             Pass::Measurement(_) => Ok(()),
+            Pass::Assignment(pass) if !pass.assign_tables => Ok(()),
             Pass::Assignment(pass) => pass.assign_table(name, assignment),
         }
     }
@@ -342,13 +353,16 @@ pub struct AssignmentPass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
     plan: &'p mut V1Plan<'a, F, CS>,
     /// Counter tracking which region we need to assign next.
     region_index: usize,
+    /// Whether to assign fixed lookup tables during this pass.
+    assign_tables: bool,
 }
 
 impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
-    fn new(plan: &'p mut V1Plan<'a, F, CS>) -> Self {
+    fn new(plan: &'p mut V1Plan<'a, F, CS>, assign_tables: bool) -> Self {
         AssignmentPass {
             plan,
             region_index: 0,
+            assign_tables,
         }
     }
 
