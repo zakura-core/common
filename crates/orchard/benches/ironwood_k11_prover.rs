@@ -9,9 +9,10 @@ use rand::{SeedableRng, rngs::StdRng};
 
 mod support;
 
-use support::payment_fixture;
+use support::{
+    padded_two_action_payment_fixture, payment_fixture, two_real_spends_payment_fixture,
+};
 
-const STEADY_ACTION_COUNTS: [usize; 3] = [1, 2, 4];
 const FIRST_AFTER_BUILD_AND_PREPARE_ACTION_COUNTS: [usize; 2] = [1, 4];
 const PREFLIGHT_PROOF_SEED_DOMAIN: u8 = 0x24;
 const STEADY_PROOF_SEED_DOMAIN: u8 = 0x25;
@@ -25,15 +26,6 @@ const MEASUREMENT_SECONDS: u64 = 15;
 // and `RAYON_NUM_THREADS` to the same value to measure multicore proving.
 const DEFAULT_BENCHMARK_THREADS: &str = "1";
 const BENCHMARK_THREADS_ENV: &str = "IRONWOOD_K11_PROVER_THREADS";
-
-fn benchmark_name(action_count: usize) -> &'static str {
-    match action_count {
-        1 => "prove-1-action",
-        2 => "prove-2-actions",
-        4 => "prove-4-actions",
-        _ => unreachable!("the benchmark action counts are fixed"),
-    }
-}
 
 fn proof_rng(domain: u8, action_count: usize, proof_index: u64) -> StdRng {
     let mut seed = [domain; 32];
@@ -70,12 +62,24 @@ fn ironwood_k11_prover(c: &mut Criterion) {
     #[cfg(any(feature = "multicore", feature = "orbits"))]
     assert!(pk.prepare_proving(), "Pasta commitment tables must prepare",);
 
-    let fixtures =
-        STEADY_ACTION_COUNTS.map(|action_count| (action_count, payment_fixture(action_count)));
+    let fixtures = [
+        ("prove-1-action", 1, payment_fixture(1)),
+        (
+            "prove-2-actions-padded-payment",
+            2,
+            padded_two_action_payment_fixture(),
+        ),
+        (
+            "prove-2-actions-two-real-spends",
+            2,
+            two_real_spends_payment_fixture(),
+        ),
+        ("prove-4-actions", 4, payment_fixture(4)),
+    ];
 
     // These preflights intentionally make the historical throughput cases
     // steady-state with respect to all proving-key caches.
-    for (action_count, fixture) in &fixtures {
+    for (_, action_count, fixture) in &fixtures {
         let mut previous_proof: Option<Proof> = None;
         // Check each exact fixture and retained-state path outside the timed
         // region with two distinct sets of transcript challenges.
@@ -108,8 +112,8 @@ fn ironwood_k11_prover(c: &mut Criterion) {
     steady.sampling_mode(SamplingMode::Flat);
     steady.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
     steady.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
-    for (action_count, fixture) in &fixtures {
-        steady.bench_function(benchmark_name(*action_count), |bencher| {
+    for (name, action_count, fixture) in &fixtures {
+        steady.bench_function(*name, |bencher| {
             let mut proof_index = 0;
             bencher.iter_batched(
                 || {
@@ -137,10 +141,10 @@ fn ironwood_k11_prover(c: &mut Criterion) {
     first_after_prepare.sampling_mode(SamplingMode::Flat);
     first_after_prepare.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
     first_after_prepare.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
-    for (action_count, fixture) in fixtures.iter().filter(|(action_count, _)| {
+    for (name, action_count, fixture) in fixtures.iter().filter(|(_, action_count, _)| {
         FIRST_AFTER_BUILD_AND_PREPARE_ACTION_COUNTS.contains(action_count)
     }) {
-        first_after_prepare.bench_function(benchmark_name(*action_count), |bencher| {
+        first_after_prepare.bench_function(*name, |bencher| {
             let mut proof_index = 0;
             bencher.iter_batched_ref(
                 || {
