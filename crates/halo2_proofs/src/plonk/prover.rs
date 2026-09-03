@@ -1295,7 +1295,7 @@ where
     }
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
-    let xn = x.pow([params.n, 0, 0, 0]);
+    let xn = super::pow_by_power_of_two(*x, params.k);
     let polynomial_evaluator = PolynomialEvaluator::new(
         [
             *x,
