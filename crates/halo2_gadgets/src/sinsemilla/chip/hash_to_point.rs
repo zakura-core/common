@@ -1,7 +1,7 @@
 use super::super::{CommitDomains, HashDomains, SinsemillaInstructions};
 use super::{NonIdentityEccPoint, SinsemillaChip};
 use crate::{
-    ecc::FixedPoints,
+    ecc::{FixedPoints, chip::DoubleAndAdd},
     sinsemilla::primitives::{self as sinsemilla, INV_TWO_POW_K, SINSEMILLA_S},
     utilities::lookup_range_check::PallasLookupRangeCheck,
 };
@@ -93,6 +93,46 @@ impl PreparedHashWitness {
     pub(crate) fn output_x(&self) -> pallas::Base {
         self.output_x
     }
+}
+
+fn assign_hash_rounds(
+    region: &mut Region<'_, pallas::Base>,
+    double_and_add: &DoubleAndAdd,
+    offset: usize,
+    len: usize,
+    round: impl Fn(usize) -> Value<PreparedHashRound>,
+) -> Result<X<pallas::Base>, Error> {
+    region.assign_advice_batch(
+        |_| "lambda_1",
+        double_and_add.lambda_1,
+        offset,
+        len,
+        |row| round(row).map(|round| round.lambda_1),
+    )?;
+    region.assign_advice_batch(
+        |_| "lambda_2",
+        double_and_add.lambda_2,
+        offset,
+        len,
+        |row| round(row).map(|round| round.lambda_2),
+    )?;
+
+    // Only the final accumulator cell is referenced after assignment.
+    region.assign_advice_batch(
+        |_| "x_a",
+        double_and_add.x_a,
+        offset + 1,
+        len - 1,
+        |row| round(row).map(|round| round.x_a),
+    )?;
+    region
+        .assign_advice(
+            || "x_a",
+            double_and_add.x_a,
+            offset + len,
+            || round(len - 1).map(|round| round.x_a),
+        )
+        .map(X)
 }
 
 impl DoubleAndAddWitness {
@@ -679,39 +719,27 @@ where
         // The accumulator x-coordinate provided by the caller MUST have been assigned
         // within this region.
 
-        for (row, word) in words.iter().enumerate() {
-            let r#gen = word.map(|word| SINSEMILLA_S[word as usize]);
-            let x_p = r#gen.map(|r#gen| r#gen.0);
-            let y_p = r#gen.map(|r#gen| r#gen.1);
+        region.assign_advice_batch(
+            |_| "x_p",
+            config.double_and_add.x_p,
+            offset,
+            words.len(),
+            |row| words[row].map(|word| SINSEMILLA_S[word as usize].0),
+        )?;
 
-            // Assign `x_p`
-            region.assign_advice(|| "x_p", config.double_and_add.x_p, offset + row, || x_p)?;
+        if let Some(prepared) = prepared {
+            let x_a =
+                assign_hash_rounds(region, &config.double_and_add, offset, words.len(), |row| {
+                    prepared.map(|prepared| prepared[row])
+                })?;
 
-            if let Some(prepared) = prepared {
-                let round = prepared.map(|prepared| prepared[row]);
-                region.assign_advice(
-                    || "lambda_1",
-                    config.double_and_add.lambda_1,
-                    offset + row,
-                    || round.map(|round| round.lambda_1),
-                )?;
-                region.assign_advice(
-                    || "lambda_2",
-                    config.double_and_add.lambda_2,
-                    offset + row,
-                    || round.map(|round| round.lambda_2),
-                )?;
-                let x_a_cell = region.assign_advice(
-                    || "x_a",
-                    config.double_and_add.x_a,
-                    offset + row + 1,
-                    || round.map(|round| round.x_a),
-                )?;
-                x_a = x_a_cell.into();
-                continue;
-            }
+            return Ok((x_a, y_a, zs, projective));
+        }
 
-            if let Some(point) = projective.as_mut() {
+        if let Some(point) = projective.as_mut() {
+            let mut rounds = Vec::with_capacity(words.len());
+            for (row, word) in words.iter().enumerate() {
+                let r#gen = word.map(|word| SINSEMILLA_S[word as usize]);
                 let witness = if row == 0 && cache_first_word {
                     let (next_point, witness) = point
                         .as_ref()
@@ -740,41 +768,33 @@ where
                         .map(|(point, r#gen)| point.double_and_add(r#gen))
                 };
 
-                let lambda_1 = witness
-                    .as_ref()
-                    .zip(point.as_ref())
-                    .map(|(witness, point)| witness.lambda_1(point));
-                region.assign_advice(
-                    || "lambda_1",
-                    config.double_and_add.lambda_1,
-                    offset + row,
-                    || lambda_1,
-                )?;
-
-                let lambda_2 = witness
-                    .as_ref()
-                    .zip(point.as_ref())
-                    .map(|(witness, point)| witness.lambda_2(point));
-                region.assign_advice(
-                    || "lambda_2",
-                    config.double_and_add.lambda_2,
-                    offset + row,
-                    || lambda_2,
-                )?;
-
-                let x_a_new = point
-                    .as_ref()
-                    .map(|point| Assigned::Rational(point.x, point.z_sq));
-                let x_a_cell = region.assign_advice(
-                    || "x_a",
-                    config.double_and_add.x_a,
-                    offset + row + 1,
-                    || x_a_new,
-                )?;
-
-                x_a = x_a_cell.into();
-                continue;
+                rounds.push(
+                    witness
+                        .as_ref()
+                        .zip(point.as_ref())
+                        .map(|(witness, point)| PreparedHashRound {
+                            lambda_1: witness.lambda_1(point),
+                            lambda_2: witness.lambda_2(point),
+                            x_a: Assigned::Rational(point.x, point.z_sq),
+                        }),
+                );
             }
+
+            let x_a = assign_hash_rounds(
+                region,
+                &config.double_and_add,
+                offset,
+                rounds.len(),
+                |row| rounds[row],
+            )?;
+
+            return Ok((x_a, y_a, zs, projective));
+        }
+
+        for (row, word) in words.iter().enumerate() {
+            let r#gen = word.map(|word| SINSEMILLA_S[word as usize]);
+            let x_p = r#gen.map(|r#gen| r#gen.0);
+            let y_p = r#gen.map(|r#gen| r#gen.1);
 
             // Compute and assign `lambda_1`
             let lambda_1 = {

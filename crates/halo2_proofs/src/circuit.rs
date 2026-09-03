@@ -251,7 +251,9 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// This avoids constructing cell handles when the caller only needs to
     /// populate witness values. Use [`Self::assign_advice`] for cells that will
-    /// be copied or otherwise referenced later. A zero-length batch is a no-op.
+    /// be copied or otherwise referenced later. The annotation and value
+    /// closures receive a zero-based index in `0..len`; index `i` assigns row
+    /// `offset + i`. A zero-length batch is a no-op.
     pub fn assign_advice_batch<'v, V, VR, A, AR>(
         &'v mut self,
         annotation: A,

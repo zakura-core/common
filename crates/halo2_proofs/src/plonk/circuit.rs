@@ -392,8 +392,9 @@ pub trait Assignment<F: Field> {
 
     /// Assigns a contiguous range of advice cells in one column.
     ///
-    /// The default implementation delegates to [`Self::assign_advice`]. A
-    /// zero-length batch is a no-op.
+    /// The annotation and value closures receive a zero-based index in
+    /// `0..len`; index `i` assigns `row + i`. The default implementation
+    /// delegates to [`Self::assign_advice`]. A zero-length batch is a no-op.
     fn assign_advice_batch<V, A, AR>(
         &mut self,
         annotation: A,
