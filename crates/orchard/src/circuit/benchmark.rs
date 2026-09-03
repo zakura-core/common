@@ -364,6 +364,8 @@ fn ironwood_payment_values(
 }
 
 /// Builds a deterministic Ironwood payment with fully populated Actions.
+///
+/// Spent notes share one external payer IVK but use distinct receivers.
 fn ironwood_payment_fixture(
     action_count: usize,
     fixture_index: usize,
@@ -373,8 +375,23 @@ fn ironwood_payment_fixture(
     let bundle_version = BundleVersion::ironwood_v3();
     let spend_key = SpendingKey::from_bytes(IRONWOOD_FIXTURE_SPENDING_KEY).unwrap();
     let spend_fvk = FullViewingKey::from(&spend_key);
-    let spend_recipient =
-        spend_fvk.address_at(IRONWOOD_FIXTURE_SPEND_ADDRESS_INDEX, Scope::External);
+    let spend_recipients = (0..action_count)
+        .map(|action_index| {
+            let address_index = IRONWOOD_FIXTURE_SPEND_ADDRESS_INDEX
+                .checked_add(u32::try_from(action_index).unwrap())
+                .unwrap();
+            spend_fvk.address_at(address_index, Scope::External)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        spend_recipients
+            .iter()
+            .enumerate()
+            .all(|(index, recipient)| spend_recipients[..index]
+                .iter()
+                .all(|previous| !recipient.same_expanded_receiver(previous))),
+        "the benchmark payment uses a distinct spent-note receiver for each Action",
+    );
     let receiver_key = SpendingKey::from_bytes(IRONWOOD_FIXTURE_RECEIVER_SPENDING_KEY).unwrap();
     let receiver_fvk = FullViewingKey::from(&receiver_key);
     let receivers = (0..action_count)
@@ -391,9 +408,9 @@ fn ironwood_payment_fixture(
         })
         .collect::<Vec<_>>();
     assert!(
-        receivers
+        spend_recipients.iter().all(|spend_recipient| receivers
             .iter()
-            .all(|receiver| !spend_recipient.same_expanded_receiver(receiver)),
+            .all(|receiver| !spend_recipient.same_expanded_receiver(receiver))),
         "the benchmark payment exercises Ironwood cross-address Actions",
     );
     assert_eq!(
@@ -412,7 +429,8 @@ fn ironwood_payment_fixture(
     let spend_notes = spend_values
         .iter()
         .copied()
-        .map(|spend_value| {
+        .zip(spend_recipients.iter().copied())
+        .map(|(spend_value, spend_recipient)| {
             let rho = Rho::from_nf_old(Nullifier::dummy(&mut rng));
             Note::new(
                 spend_recipient,
@@ -490,7 +508,18 @@ fn ironwood_payment_fixture(
     let expected_balance = i64::try_from(total_fee).expect("the fixture balance fits into i64");
     assert_eq!(*bundle.value_balance(), expected_balance);
     let circuits = bundle.benchmark_circuits();
-    for (spend_value, action_index) in spend_values.iter().zip(spend_actions) {
+    for ((spend_value, spend_recipient), action_index) in spend_values
+        .iter()
+        .zip(&spend_recipients)
+        .zip(spend_actions)
+    {
+        let expected_g_d = spend_recipient.g_d();
+        circuits[action_index]
+            .g_d_old
+            .assert_if_known(|value| value == &expected_g_d);
+        circuits[action_index]
+            .pk_d_old
+            .assert_if_known(|value| value == spend_recipient.pk_d());
         circuits[action_index]
             .v_old
             .assert_if_known(|value| value == spend_value);
@@ -540,7 +569,7 @@ fn ironwood_payment_values_cover_fixture_magnitudes() {
 }
 
 #[test]
-fn ironwood_payment_fixtures_have_fully_populated_actions() {
+fn ironwood_payment_fixtures_have_distinct_fully_populated_actions() {
     for action_count in IRONWOOD_WITNESS_BENCH_ACTION_COUNTS {
         let fixture = ironwood_payment_fixture(
             action_count,
@@ -548,7 +577,22 @@ fn ironwood_payment_fixtures_have_fully_populated_actions() {
             ironwood_benchmark_rng(IRONWOOD_FIXTURE_SEED_DOMAIN, action_count),
         );
         assert_eq!(fixture.instances.len(), action_count);
-        assert_eq!(fixture.bundle.benchmark_circuits().len(), action_count);
+        let circuits = fixture.bundle.benchmark_circuits();
+        assert_eq!(circuits.len(), action_count);
+        for (index, circuit) in circuits.iter().enumerate() {
+            for previous in &circuits[..index] {
+                circuit
+                    .g_d_old
+                    .as_ref()
+                    .zip(previous.g_d_old.as_ref())
+                    .assert_if_known(|(current, previous)| current != previous);
+                circuit
+                    .pk_d_old
+                    .as_ref()
+                    .zip(previous.pk_d_old.as_ref())
+                    .assert_if_known(|(current, previous)| current != previous);
+            }
+        }
     }
 }
 

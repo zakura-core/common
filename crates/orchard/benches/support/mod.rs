@@ -168,6 +168,7 @@ fn payment_values(
     (spend_values, output_values, total_fee)
 }
 
+/// Creates funding notes with one external payer IVK and distinct receivers.
 fn funding_notes(
     spend_values: &[NoteValue],
     fixture_index: u64,
@@ -175,7 +176,14 @@ fn funding_notes(
 ) -> Vec<Note> {
     let action_count = spend_values.len();
     let bundle_version = BundleVersion::ironwood_v3();
-    let recipient = payer_fvk.address_at(0u32, Scope::External);
+    let recipients = (0..action_count)
+        .map(|action_index| {
+            payer_fvk.address_at(
+                u32::try_from(action_index).expect("Action index fits into u32"),
+                Scope::External,
+            )
+        })
+        .collect::<Vec<_>>();
     let mut builder = Builder::new(
         fixture_bundle_type(action_count),
         bundle_version,
@@ -184,11 +192,11 @@ fn funding_notes(
     )
     .expect("Ironwood permits output-only funding bundles");
 
-    for value in spend_values {
+    for (value, recipient) in spend_values.iter().zip(&recipients) {
         builder
             .add_output(
                 Some(payer_fvk.to_ovk(Scope::External)),
-                recipient,
+                *recipient,
                 *value,
                 MEMO,
             )
@@ -206,8 +214,9 @@ fn funding_notes(
     let ivk = payer_fvk.to_ivk(Scope::External);
     let mut funded_notes = spend_values
         .iter()
+        .zip(&recipients)
         .enumerate()
-        .map(|(output_index, expected_value)| {
+        .map(|(output_index, (expected_value, expected_recipient))| {
             let action_index = metadata
                 .output_action_index(output_index)
                 .expect("each funding output has an Action");
@@ -216,7 +225,11 @@ fn funding_notes(
                 .expect("the payer decrypts each funding note");
             assert_eq!(note.version(), bundle_version.note_version());
             assert_eq!(note.value(), *expected_value);
-            assert_eq!(decrypted_to, recipient);
+            assert_eq!(decrypted_to, *expected_recipient);
+            assert_eq!(
+                payer_fvk.scope_for_address(&decrypted_to),
+                Some(Scope::External),
+            );
             assert_eq!(memo, MEMO);
             (action_index, note)
         })
@@ -227,6 +240,15 @@ fn funding_notes(
             .map(|(action_index, _)| *action_index)
             .collect::<BTreeSet<_>>(),
         (0..action_count).collect(),
+    );
+    assert_eq!(
+        funded_notes
+            .iter()
+            .map(|(_, note)| *note.recipient().diversifier().as_array())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        action_count,
+        "multi-spend fixtures use distinct old-note diversifiers",
     );
     funded_notes.sort_unstable_by_key(|(action_index, _)| *action_index);
     funded_notes.into_iter().map(|(_, note)| note).collect()
