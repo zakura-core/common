@@ -76,7 +76,12 @@ pprof = { version = "0.11", features = ["criterion", "flamegraph"] }
 circuit = ["dep:halo2_gadgets", "dep:halo2_proofs", "std"]
 default = ["circuit", "multicore", "std"]
 dev-graph = ["halo2_proofs?/dev-graph", "image", "plotters"]
-multicore = ["halo2_proofs?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
+multicore = [
+    "halo2_gadgets?/multicore",
+    "halo2_proofs?/multicore",
+    "dep:maybe-rayon",
+    "maybe-rayon/threads",
+]
 orbits = ["halo2_proofs?/orbits"]
 std = ["corez/std", "group/wnaf-memuse", "reddsa/std"]
 test-dependencies = ["proptest", "rand/std", "rand/std_rng"]

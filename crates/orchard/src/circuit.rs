@@ -2,9 +2,6 @@
 
 use alloc::vec::Vec;
 
-#[cfg(feature = "multicore")]
-use std::sync::{Arc, Mutex, mpsc};
-
 use group::{Curve, GroupEncoding};
 use halo2_proofs::{
     circuit::{Layouter, Value, floor_planner},
@@ -54,12 +51,10 @@ use halo2_gadgets::{
     },
     poseidon::{Pow5Chip as PoseidonChip, Pow5Config as PoseidonConfig, primitives as poseidon},
     sinsemilla::{
-        HashDomains,
         chip::{SinsemillaChip, SinsemillaConfig},
         merkle::{
-            MerklePath, PreparedMerklePathWitness,
+            MerklePath,
             chip::{MerkleChip, MerkleConfig},
-            prepare_merkle_path_witness,
         },
     },
     utilities::lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
@@ -97,8 +92,6 @@ fn orchard_k11_params() -> Params<vesta::Affine> {
 /// Shape of the public instance consumed by one Orchard Action proof.
 const INSTANCE_COLUMNS: usize = 1;
 const INSTANCE_ROWS: usize = 10;
-type OrchardPreparedMerklePath = PreparedMerklePathWitness<MERKLE_DEPTH_ORCHARD>;
-
 // Absolute offsets for public inputs.
 const ANCHOR: usize = 0;
 const CV_NET_X: usize = 1;
@@ -224,47 +217,7 @@ pub struct Circuit {
     pub(crate) circuit_version: OrchardCircuitVersion,
 }
 
-enum MerklePreparation {
-    None,
-    #[cfg(feature = "multicore")]
-    Receiver(Arc<Mutex<Option<mpsc::Receiver<Option<OrchardPreparedMerklePath>>>>>),
-}
-
-impl MerklePreparation {
-    fn take(self) -> Option<OrchardPreparedMerklePath> {
-        match self {
-            Self::None => None,
-            #[cfg(feature = "multicore")]
-            Self::Receiver(receiver) => receiver
-                .lock()
-                .expect("Merkle preparation receiver should not be poisoned")
-                .take()
-                .and_then(|receiver| {
-                    receiver
-                        .recv()
-                        .expect("Merkle preparation task should complete")
-                }),
-        }
-    }
-}
-
 impl Circuit {
-    fn prepare_merkle_path(&self) -> Option<OrchardPreparedMerklePath> {
-        let mut prepared = None;
-        self.path
-            .zip(self.pos)
-            .zip(self.cm_old.as_ref())
-            .map(|((path, pos), cm)| {
-                prepared = prepare_merkle_path_witness(
-                    OrchardHashDomains::MerkleCrh.Q(),
-                    pos,
-                    path.map(|node| node.inner()),
-                    ExtractedNoteCommitment::from(cm.clone()).inner(),
-                );
-            });
-        prepared
-    }
-
     /// Returns an empty circuit with all private witnesses unknown.
     ///
     /// This is used for circuit shape-dependent operations, such as generating keys
@@ -584,7 +537,7 @@ impl Circuit {
         &self,
         config: &Config,
         layouter: &mut impl Layouter<pallas::Base>,
-        prepared_merkle: MerklePreparation,
+        #[cfg_attr(not(feature = "multicore"), allow(unused_variables))] parallel_merkle: bool,
     ) -> Result<AddressPoints, plonk::Error> {
         // Load the Sinsemilla generator lookup table used by the whole circuit.
         SinsemillaChip::load(config.sinsemilla_config_1.clone(), layouter)?;
@@ -668,15 +621,14 @@ impl Circuit {
             );
             let leaf = cm_old.extract_p().inner().clone();
 
-            if let Some(prepared) = prepared_merkle.take() {
-                merkle_inputs.calculate_root_prepared(
-                    layouter.namespace(|| "Merkle path"),
-                    leaf,
-                    Value::known(&prepared),
-                )?
+            #[cfg(feature = "multicore")]
+            if parallel_merkle {
+                merkle_inputs.calculate_root_parallel(layouter.namespace(|| "Merkle path"), leaf)?
             } else {
                 merkle_inputs.calculate_root(layouter.namespace(|| "Merkle path"), leaf)?
             }
+            #[cfg(not(feature = "multicore"))]
+            merkle_inputs.calculate_root(layouter.namespace(|| "Merkle path"), leaf)?
         };
 
         // Value commitment integrity (https://p.z.cash/ZKS:action-cv-net-integrity?partial).
@@ -1123,13 +1075,13 @@ impl Circuit {
 }
 
 impl Circuit {
-    fn synthesize_with_merkle_preparation(
+    fn synthesize_with_parallel_merkle(
         &self,
         config: Config,
         mut layouter: impl Layouter<pallas::Base>,
-        prepared_merkle: MerklePreparation,
+        parallel_merkle: bool,
     ) -> Result<(), plonk::Error> {
-        let addrs = self.synthesize_base(&config, &mut layouter, prepared_merkle)?;
+        let addrs = self.synthesize_base(&config, &mut layouter, parallel_merkle)?;
 
         if self.circuit_version.supports_cross_address_restriction() {
             Self::synthesize_cross_address_checks(&config, &mut layouter, &addrs)?;
@@ -1141,37 +1093,27 @@ impl Circuit {
 
 #[cfg(feature = "multicore")]
 #[derive(Debug)]
-struct CircuitWithPreparedMerklePath {
+struct CircuitWithParallelMerklePath {
     circuit: Circuit,
-    prepared_merkle: Arc<Mutex<Option<mpsc::Receiver<Option<OrchardPreparedMerklePath>>>>>,
 }
 
 #[cfg(feature = "multicore")]
-impl CircuitWithPreparedMerklePath {
+impl CircuitWithParallelMerklePath {
     fn new(circuit: &Circuit) -> Self {
-        let circuit = circuit.clone();
-        let preparation_circuit = circuit.clone();
-        let (sender, receiver) = mpsc::channel();
-        maybe_rayon::spawn(move || {
-            let _ = sender.send(preparation_circuit.prepare_merkle_path());
-        });
-
         Self {
-            circuit,
-            prepared_merkle: Arc::new(Mutex::new(Some(receiver))),
+            circuit: circuit.clone(),
         }
     }
 }
 
 #[cfg(feature = "multicore")]
-impl plonk::Circuit<pallas::Base> for CircuitWithPreparedMerklePath {
+impl plonk::Circuit<pallas::Base> for CircuitWithParallelMerklePath {
     type Config = Config;
     type FloorPlanner = floor_planner::V1;
 
     fn without_witnesses(&self) -> Self {
         Self {
             circuit: Circuit::empty(self.circuit.circuit_version),
-            prepared_merkle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1184,11 +1126,8 @@ impl plonk::Circuit<pallas::Base> for CircuitWithPreparedMerklePath {
         config: Self::Config,
         layouter: impl Layouter<pallas::Base>,
     ) -> Result<(), plonk::Error> {
-        self.circuit.synthesize_with_merkle_preparation(
-            config,
-            layouter,
-            MerklePreparation::Receiver(Arc::clone(&self.prepared_merkle)),
-        )
+        self.circuit
+            .synthesize_with_parallel_merkle(config, layouter, true)
     }
 }
 
@@ -1209,7 +1148,7 @@ impl plonk::Circuit<pallas::Base> for Circuit {
         config: Self::Config,
         layouter: impl Layouter<pallas::Base>,
     ) -> Result<(), plonk::Error> {
-        self.synthesize_with_merkle_preparation(config, layouter, MerklePreparation::None)
+        self.synthesize_with_parallel_merkle(config, layouter, false)
     }
 }
 
@@ -1540,12 +1479,12 @@ impl Proof {
             // the worker pool. A single Action has no higher-level work to use
             // instead, while smaller batches leave workers for Merkle
             // preparation.
-            let prepare_merkle =
+            let parallel_merkle =
                 circuits.len() == 1 || circuits.len() < maybe_rayon::current_num_threads();
-            if prepare_merkle {
+            if parallel_merkle {
                 let circuits: Vec<_> = circuits
                     .iter()
-                    .map(CircuitWithPreparedMerklePath::new)
+                    .map(CircuitWithParallelMerklePath::new)
                     .collect();
                 plonk::create_proof(
                     &pk.params,

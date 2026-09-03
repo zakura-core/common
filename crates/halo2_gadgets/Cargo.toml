@@ -25,6 +25,7 @@ ff = "0.14"
 group = "0.14"
 halo2_poseidon = { workspace = true }
 halo2_proofs = { workspace = true }
+maybe-rayon = { version = "0.1.0", default-features = false, optional = true }
 pasta_curves = { workspace = true, features = ["default"] }
 plotters = { version = "0.3.0", optional = true, default-features = false }
 proptest = { version = "1.0.0", optional = true }
@@ -44,6 +45,7 @@ pprof = { version = "0.8", features = ["criterion", "flamegraph"] }
 
 [features]
 beta = ["halo2_proofs/beta"]
+multicore = ["dep:maybe-rayon", "halo2_proofs/multicore", "maybe-rayon/threads"]
 nightly = ["beta", "halo2_proofs/nightly", "unstable-sha256-gadget"]
 test-dependencies = ["proptest", "sinsemilla/test-dependencies"]
 test-dev-graph = [

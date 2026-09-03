@@ -27,6 +27,7 @@ use crate::{
         },
     },
 };
+
 use group::ff::PrimeField;
 
 /// Configuration for the `MerkleChip` implementation.
@@ -448,6 +449,7 @@ where
         Ok(hash)
     }
 
+    #[cfg_attr(not(feature = "multicore"), allow(dead_code))]
     pub(crate) fn hash_layer_prepared<const MERKLE_DEPTH: usize>(
         &self,
         layouter: impl Layouter<pallas::Base>,

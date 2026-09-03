@@ -76,6 +76,7 @@ struct CachedFirstWordWitness {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "multicore"), allow(dead_code))]
 pub(crate) struct PreparedHashRound {
     lambda_1: Assigned<pallas::Base>,
     lambda_2: Assigned<pallas::Base>,
@@ -83,6 +84,7 @@ pub(crate) struct PreparedHashRound {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "multicore"), allow(dead_code))]
 pub(crate) struct PreparedHashWitness {
     rounds: Vec<PreparedHashRound>,
     final_y: Assigned<pallas::Base>,
@@ -90,6 +92,7 @@ pub(crate) struct PreparedHashWitness {
 }
 
 impl PreparedHashWitness {
+    #[cfg_attr(not(feature = "multicore"), allow(dead_code))]
     pub(crate) fn output_x(&self) -> pallas::Base {
         self.output_x
     }
@@ -168,6 +171,7 @@ fn has_merkle_initial_q(initial_q: pallas::Affine) -> bool {
     initial_q.raw_coordinates() == MERKLE_INITIAL_Q
 }
 
+#[cfg_attr(not(feature = "multicore"), allow(dead_code))]
 pub(crate) fn prepare_hash_witness(
     initial_q: pallas::Affine,
     words: &[u32],
