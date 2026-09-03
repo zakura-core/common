@@ -487,7 +487,7 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
 
         self.overflow_config.overflow_check(
             layouter.namespace(|| "overflow check"),
-            alpha.clone(),
+            &alpha,
             &zs,
         )?;
 
