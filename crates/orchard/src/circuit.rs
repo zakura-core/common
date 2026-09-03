@@ -2153,6 +2153,30 @@ mod tests {
         round_trip_for_version(OrchardCircuitVersion::PostNu6_3, vk, 1);
     }
 
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn proof_creation_inside_single_worker_pool() {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut rng = OsRng;
+                let (circuit, instance) =
+                    generate_circuit_instance(&mut rng, OrchardCircuitVersion::FixedPostNu6_2);
+                let keys = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2);
+                let proof = Proof::create(
+                    keys.proving_key(),
+                    &[circuit],
+                    core::slice::from_ref(&instance),
+                    &mut rng,
+                )
+                .unwrap();
+
+                assert!(proof.verify(keys.verifying_key(), &[instance]).is_ok());
+            });
+    }
+
     const CIRCUIT_VERSIONS: [OrchardCircuitVersion; 3] = [
         OrchardCircuitVersion::InsecurePreNu6_2,
         OrchardCircuitVersion::FixedPostNu6_2,
