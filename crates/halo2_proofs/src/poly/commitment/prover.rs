@@ -307,8 +307,12 @@ pub(in crate::poly) fn create_proof_with_powers<
             params,
             z,
         );
-        let l_j = l_j.to_affine();
-        let r_j = r_j.to_affine();
+        // Normalize the two round points together so they share one field
+        // inversion.
+        let points = [l_j, r_j];
+        let mut affine = [C::identity(); 2];
+        C::Curve::batch_normalize(&points, &mut affine);
+        let [l_j, r_j] = affine;
 
         // Feed L and R into the real transcript
         transcript.write_point(l_j)?;
