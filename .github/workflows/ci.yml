@@ -770,6 +770,14 @@ jobs:
           --release
           --all-features
           test_inv
+      - name: Test private multicore evaluator
+        if: runner.os == 'macOS' && runner.arch == 'ARM64'
+        run: >-
+          cargo +stable test -p zakura-pasta-curves
+          --verbose
+          --release
+          --features=multicore,aarch64-asm
+          glv::zero::tests
       - name: Test Apple AArch64 assembly
         if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: >-

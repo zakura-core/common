@@ -135,7 +135,7 @@ const SCALAR_BYTE_ORDER_PROBE: u64 = 0x0102_0304_0506_0708;
 #[cfg(feature = "orbits")]
 const PREPARED_COMMITMENT_EXTRA_BASES: usize = 2;
 
-/// The `k = 11` SRS shape, whose current Pasta α7 tables remain ahead
+/// The `k = 11` SRS shape, whose current Pasta prepared tables remain ahead
 /// through all ten cores on the benchmarked Apple M4 systems.
 #[cfg(all(
     any(feature = "multicore", feature = "orbits"),
@@ -987,17 +987,20 @@ impl<C: CurveAffine> Params<C> {
     /// multiexp. Measurements covered full-width and witness-like (boolean,
     /// byte, zero-padded) coefficient distributions.
     ///
-    /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
-    /// fixed-window table adds approximately 0.5 MiB for a 32-byte scalar
-    /// representation. The signed-width-four public-instance table adds about
-    /// 224 KiB on Pasta.
+    /// On AArch64 macOS without `orbits`, the two α8 tables account for about
+    /// 49.6 MiB at `k = 11`; other targets and the public `orbits` planner keep
+    /// two α7 tables accounting for about 24.8 MiB. The no-orbits fixed-window
+    /// table adds approximately 0.5 MiB for a 32-byte scalar representation.
+    /// The signed-width-four public-instance table adds about 224 KiB on
+    /// Pasta.
     ///
     /// Concurrent and repeat calls share their initialization attempts,
-    /// including a backend decline. Without `orbits`, one atomic initialization
-    /// prevents any large table from being exposed until all three have built.
-    /// The caches are shared with all clones and never serialized, so call
-    /// again after [`Params::read`]. Returns whether preparation is armed.
-    /// Without `orbits`, this also requires the default `multicore` feature.
+    /// including a backend decline. Without `orbits`, one atomic
+    /// initialization prevents any large table from being exposed until all
+    /// three have built. The caches are shared with all clones and never
+    /// serialized, so call again after [`Params::read`]. Returns whether
+    /// preparation is armed. Without `orbits`, this also requires the default
+    /// `multicore` feature.
     ///
     /// Call this once before entering concurrent Rayon work that uses these
     /// params. Concurrent callers outside that pool safely wait for and share
