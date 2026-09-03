@@ -149,7 +149,7 @@ const SPARSE_COMMITMENT_AFFINE_REDUCTION_TERMS: usize = PREPARED_SPARSE_COMMITME
 #[cfg(feature = "orbits")]
 const PREPARED_COMMITMENT_EXTRA_BASES: usize = 2;
 
-/// The `k = 11` SRS shape, whose current Pasta α7 tables remain ahead
+/// The `k = 11` SRS shape, whose current Pasta prepared tables remain ahead
 /// through all ten cores on the benchmarked Apple M4 systems.
 #[cfg(all(
     any(feature = "multicore", feature = "orbits"),
@@ -1483,7 +1483,9 @@ impl<C: CurveAffine> Params<C> {
     /// MSMs keep their normal planner. Measurements covered full-width and
     /// witness-like (boolean, byte, zero-padded) coefficient distributions.
     ///
-    /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
+    /// On AArch64 macOS without `orbits`, the two α8 tables account for about
+    /// 49.5 MiB at `k = 11`; other targets and the public `orbits` planner keep
+    /// two α7 tables accounting for about 24.8 MiB. The no-orbits
     /// signed-width-eight pair adds exactly 512 KiB of affine-point payload for
     /// 255-bit Pasta scalars. The signed-width-four sparse commitment table
     /// adds 416 KiB, and the signed-width-four public-instance table adds about

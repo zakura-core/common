@@ -1179,12 +1179,13 @@ impl ProvingKey {
     /// most eight effective threads, extended to ten on AArch64 macOS for
     /// Orchard's `k = 11` SRS (measured end to end on Apple M4). Wider pools
     /// retain their usual multiexp. One-shot provers need not prepare. With
-    /// the default multicore, no-orbits build at `k = 11`, the three large
-    /// tables account for about 25.3 MiB and took about 36 ms to build on the
-    /// benchmarked M4, amortized across proofs. With `orbits`, the two large
-    /// tables account for about 24.8 MiB and took about 34 ms. Key generation
-    /// separately caches about 640 KiB for public-instance and sparse masking
-    /// commitments.
+    /// the default multicore, no-orbits build at `k = 11` on AArch64 macOS,
+    /// the three tables account for about 50.0 MiB and took about 31.5 ms to
+    /// build on the benchmarked M4, amortized across proofs. Other targets
+    /// retain α7 and account for about 25.3 MiB; the M4 α7 control took about
+    /// 16.0 ms. With `orbits`, the two tables account for about 24.8 MiB. Key
+    /// generation separately caches about 640 KiB for public-instance and
+    /// sparse masking commitments.
     ///
     /// Call this once before entering concurrent Rayon proving work.
     /// Concurrent callers outside that pool safely wait for and share the same

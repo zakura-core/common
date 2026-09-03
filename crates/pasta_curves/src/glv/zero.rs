@@ -86,11 +86,22 @@
 //! traffic, is ~3/4 of the runtime, and the small-table α6 mode inflates
 //! under contention exactly as the 48 MiB modes do).
 //!
-//! Every ranking here (mode preferences, tail widths, the planner list)
-//! was measured on one 32-core x86-64 host with the portable field
-//! backend. Re-fit on other targets — in particular aarch64 with the
-//! assembly backend, whose inversion/multiplication ratio differs — by
-//! rerunning the two ignored harnesses in this module's tests
+//! The private AArch64 macOS multicore, no-orbits evaluator uses a separate
+//! 25 MiB per-table ceiling at power-of-two sizes where the public planner
+//! selects α7. At the Orchard 2,048-base scale this admits α8. In 100 balanced
+//! end-to-end pairs on a 10-core Apple M4, it reduced one-Action proofs by
+//! 0.644 ms (95% CI 0.497--0.792 ms) and four-Action proofs by 1.007 ms
+//! (95% CI 0.638--1.377 ms). Explicit preparation added about 15.5 ms. Its
+//! two prepared tables account for about 49.5 MiB instead of 24.8 MiB. Other
+//! targets, sizes, and the public orbit-enabled planner retain the 13 MiB
+//! policy.
+//!
+//! Except for the private no-orbits choice above, every ranking here (mode
+//! preferences, tail widths, the planner list) was measured on one 32-core
+//! x86-64 host with the portable field backend. Re-fit on other targets — in
+//! particular AArch64 with the assembly backend, whose inversion/multiplication
+//! ratio differs — by rerunning the two ignored harnesses in this module's
+//! tests
 //! (`zero_check_timings`, `zero_check_phase_timings`) and the parent
 //! module's `msm_backend_timings`.
 
@@ -144,6 +155,21 @@ enum MainWindowFold {
     Paired,
     Horner,
 }
+
+/// Per-table ceiling for the private AArch64 macOS no-orbits evaluator. The
+/// wider budget admits α8 for an Orchard-sized SRS; its two prover tables
+/// account for about 49.5 MiB in total, plus small metadata and allocator
+/// overhead.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const NO_ORBITS_TABLE_FOOTPRINT_BUDGET: usize = 25 << 20;
+
+/// The fixed-base count whose AArch64 macOS α8 route was measured.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const NO_ORBITS_ALPHA_EIGHT_TERMS: usize = 1 << 11;
+
+/// Whether this target has measurements supporting the private α8 tier.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const NO_ORBITS_ALPHA_EIGHT_TARGET: bool = cfg!(all(target_arch = "aarch64", target_os = "macos"));
 
 /// A prepared fixed-base zero-check: reusable tables for testing
 /// $\sum_i \[k_i\] P_i \stackrel{?}{=} \mathcal{O}$ against the bases given
@@ -201,6 +227,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// Pasta bases), declining rather than silently allocating past it. Use
     /// [`Self::prepare_with_mode`] to pin a mode explicitly and accept its
     /// memory regardless of the budget.
+    #[cfg(any(test, feature = "orbits"))]
     pub fn prepare(bases: &[C::AffineExt]) -> Option<Self> {
         plan_mode::<C>(
             bases.len(),
@@ -208,6 +235,16 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             DEFAULT_TABLE_FOOTPRINT_BUDGET,
         )
         .map(|mode| Self::prepare_with_mode(bases, mode))
+    }
+
+    /// Prepares the private no-orbits evaluator, replacing the α7 tier with
+    /// α8 for the measured 2,048-term input on AArch64 macOS when it fits the
+    /// wider budget. Other targets, sizes, modes, and declines retain the
+    /// existing 13 MiB policy.
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    pub(super) fn prepare_no_orbits(bases: &[C::AffineExt]) -> Option<Self> {
+        plan_no_orbits_mode::<C>(bases.len(), current_num_threads())
+            .map(|mode| Self::prepare_with_mode(bases, mode))
     }
 
     /// Prepares zero-checks against `bases` with an explicit codebook mode.
@@ -1097,6 +1134,12 @@ const BETA_SIX_POWER_FOUR: ModeCandidate = ModeCandidate {
     variants: 128,
     buckets: 16,
 };
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const ALPHA_EIGHT: ModeCandidate = ModeCandidate {
+    mode: CodebookMode::alpha_only(8),
+    variants: 128,
+    buckets: 128,
+};
 const ALPHA_SEVEN: ModeCandidate = ModeCandidate {
     mode: CodebookMode::alpha_only(7),
     variants: 64,
@@ -1154,6 +1197,30 @@ fn plan_mode<C: GlvParams>(
             .is_some_and(|bytes| bytes <= table_footprint_budget)
         })
         .map(|candidate| candidate.mode)
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+fn plan_no_orbits_mode<C: GlvParams>(terms: usize, num_threads: usize) -> Option<CodebookMode> {
+    let default_mode = plan_mode::<C>(terms, num_threads, DEFAULT_TABLE_FOOTPRINT_BUDGET)?;
+    if default_mode != ALPHA_SEVEN.mode
+        || !NO_ORBITS_ALPHA_EIGHT_TARGET
+        || terms != NO_ORBITS_ALPHA_EIGHT_TERMS
+    {
+        return Some(default_mode);
+    }
+
+    let alpha_eight_fits = estimated_table_footprint::<C>(
+        terms,
+        ALPHA_EIGHT.mode.window_bits(),
+        ALPHA_EIGHT.variants,
+        ALPHA_EIGHT.buckets,
+    )
+    .is_some_and(|bytes| bytes <= NO_ORBITS_TABLE_FOOTPRINT_BUDGET);
+    Some(if alpha_eight_fits {
+        ALPHA_EIGHT.mode
+    } else {
+        default_mode
+    })
 }
 
 /// Computes the allocation classes included by
@@ -1622,6 +1689,75 @@ mod tests {
                 plan_mode::<pallas::Point>(largest + 1, threads, DEFAULT_TABLE_FOOTPRINT_BUDGET);
             assert!(fits.is_some());
             assert_eq!(too_large, None);
+        }
+    }
+
+    /// The private no-orbits planner admits α8 only for measured inputs
+    /// without changing the public planner's retained-memory ceiling.
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn no_orbits_plan_scopes_alpha_eight_to_measured_inputs() {
+        for threads in [1usize, 32] {
+            let expected = if NO_ORBITS_ALPHA_EIGHT_TARGET {
+                CodebookMode::alpha_only(8)
+            } else {
+                CodebookMode::alpha_only(7)
+            };
+            assert_eq!(
+                plan_no_orbits_mode::<pallas::Point>(NO_ORBITS_ALPHA_EIGHT_TERMS, threads),
+                Some(expected),
+            );
+            let default =
+                plan_mode::<pallas::Point>(2_050, threads, DEFAULT_TABLE_FOOTPRINT_BUDGET);
+            assert_eq!(
+                plan_no_orbits_mode::<pallas::Point>(2_050, threads),
+                default
+            );
+            assert_eq!(plan_no_orbits_mode::<pallas::Point>(8_192, threads), None);
+        }
+
+        let bytes = estimated_table_footprint::<pallas::Point>(
+            NO_ORBITS_ALPHA_EIGHT_TERMS,
+            ALPHA_EIGHT.mode.window_bits(),
+            ALPHA_EIGHT.variants,
+            ALPHA_EIGHT.buckets,
+        )
+        .expect("the Orchard-sized estimate fits usize");
+        assert!(bytes > DEFAULT_TABLE_FOOTPRINT_BUDGET);
+        assert!(bytes <= NO_ORBITS_TABLE_FOOTPRINT_BUDGET);
+        let codebook = Codebook::new(ALPHA_EIGHT.mode);
+        assert_eq!(codebook.variants().len(), ALPHA_EIGHT.variants);
+        assert_eq!(codebook.bucket_count(), ALPHA_EIGHT.buckets);
+
+        for terms in [512, 600, 1_024, 4_096, 8_192] {
+            for threads in [1usize, 32] {
+                assert_eq!(
+                    plan_no_orbits_mode::<pallas::Point>(terms, threads),
+                    plan_mode::<pallas::Point>(terms, threads, DEFAULT_TABLE_FOOTPRINT_BUDGET,),
+                );
+            }
+        }
+
+        let fixed = estimated_table_footprint::<pallas::Point>(
+            0,
+            ALPHA_EIGHT.mode.window_bits(),
+            ALPHA_EIGHT.variants,
+            ALPHA_EIGHT.buckets,
+        )
+        .unwrap();
+        let one = estimated_table_footprint::<pallas::Point>(
+            1,
+            ALPHA_EIGHT.mode.window_bits(),
+            ALPHA_EIGHT.variants,
+            ALPHA_EIGHT.buckets,
+        )
+        .unwrap();
+        let largest = (NO_ORBITS_TABLE_FOOTPRINT_BUDGET - fixed) / (one - fixed);
+        for threads in [1usize, 32] {
+            assert_eq!(
+                plan_no_orbits_mode::<pallas::Point>(largest + 1, threads),
+                plan_mode::<pallas::Point>(largest + 1, threads, DEFAULT_TABLE_FOOTPRINT_BUDGET,),
+            );
         }
     }
 
