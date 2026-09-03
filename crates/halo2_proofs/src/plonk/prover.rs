@@ -2066,21 +2066,29 @@ fn instance_preparation_preserves_proof_and_error_order() {
 fn v1_proving_key_reuses_floor_plan() {
     use crate::{
         circuit::floor_planner::V1,
-        plonk::{keygen_pk, keygen_vk},
-        transcript::{Blake2bWrite, Challenge255},
+        plonk::{SingleVerifier, TableColumn, keygen_pk, keygen_vk, verify_proof},
+        poly::Rotation,
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
     use pasta_curves::EqAffine;
     use rand::{SeedableRng, rngs::StdRng};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static MEASUREMENTS: AtomicUsize = AtomicUsize::new(0);
+    static TABLE_ASSIGNMENTS: AtomicUsize = AtomicUsize::new(0);
     const PROOF_SEED: u64 = 0x5631_4241_5443_4802;
+
+    #[derive(Clone, Copy)]
+    struct MyConfig {
+        advice: Column<Advice>,
+        table: TableColumn,
+    }
 
     #[derive(Clone, Copy)]
     struct MyCircuit;
 
     impl<F: Field> Circuit<F> for MyCircuit {
-        type Config = ();
+        type Config = MyConfig;
         type FloorPlanner = V1;
 
         fn without_witnesses(&self) -> Self {
@@ -2088,23 +2096,45 @@ fn v1_proving_key_reuses_floor_plan() {
             *self
         }
 
-        fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {}
+        fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
+            let advice = meta.advice_column();
+            let table = meta.lookup_table_column();
+            meta.lookup(|meta| vec![(meta.query_advice(advice, Rotation::cur()), table)]);
+            MyConfig { advice, table }
+        }
 
         fn synthesize(
             &self,
-            _config: Self::Config,
-            _layouter: impl crate::circuit::Layouter<F>,
+            config: Self::Config,
+            mut layouter: impl crate::circuit::Layouter<F>,
         ) -> Result<(), Error> {
-            Ok(())
+            layouter.assign_table(
+                || "fixed table",
+                |mut region| {
+                    TABLE_ASSIGNMENTS.fetch_add(1, Ordering::Relaxed);
+                    region.assign_cell(|| "zero", config.table, 0, || Value::known(F::ZERO))
+                },
+            )?;
+            layouter.assign_region(
+                || "witness",
+                |mut region| {
+                    region.assign_advice(|| "zero", config.advice, 0, || Value::known(F::ZERO))?;
+                    Ok(())
+                },
+            )
         }
     }
 
     let params: Params<EqAffine> = Params::new(3);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
     let mut pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 2);
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
 
     MEASUREMENTS.store(0, Ordering::Relaxed);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     create_proof(
         &params,
         &pk,
@@ -2115,9 +2145,35 @@ fn v1_proving_key_reuses_floor_plan() {
     )
     .expect("proof generation should not fail");
     // The plan cached in the proving key is reused, so proving re-measures
-    // nothing.
+    // nothing. The fixed table is already part of the proving key, so the
+    // witness-only assignment also skips replaying it.
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 0);
     let first_proof = transcript.finalize();
+    let strategy = SingleVerifier::new(&params);
+    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&first_proof[..]);
+    verify_proof(
+        &params,
+        pk.get_vk(),
+        strategy,
+        &[&[], &[], &[]],
+        &mut transcript,
+    )
+    .expect("proof verification should not fail");
+
+    // A single circuit takes a separate synthesis branch from a batch.
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
+    create_proof(
+        &params,
+        &pk,
+        &[MyCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("single proof generation should not fail");
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 0);
 
     // The proof bytes must not depend on the parallel schedule: re-create the
     // proof under single- and multi-worker Rayon pools and require identical
@@ -2126,6 +2182,7 @@ fn v1_proving_key_reuses_floor_plan() {
     for threads in [1, 4] {
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         MEASUREMENTS.store(0, Ordering::Relaxed);
+        TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
         maybe_rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
@@ -2142,6 +2199,7 @@ fn v1_proving_key_reuses_floor_plan() {
             })
             .expect("proof generation should not fail");
         assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
+        assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 0);
         assert_eq!(transcript.finalize(), first_proof);
     }
 
@@ -2150,6 +2208,7 @@ fn v1_proving_key_reuses_floor_plan() {
     pk.floor_plan = Some(FloorPlan::from_arc(std::sync::Arc::new(())));
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
     MEASUREMENTS.store(0, Ordering::Relaxed);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     create_proof(
         &params,
         &pk,
@@ -2160,6 +2219,7 @@ fn v1_proving_key_reuses_floor_plan() {
     )
     .expect("proof generation with an incompatible plan should not fail");
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
     assert_eq!(transcript.finalize(), first_proof);
 }
 
