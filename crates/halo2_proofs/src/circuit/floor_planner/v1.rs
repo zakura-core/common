@@ -1,4 +1,11 @@
-use std::{cell::Cell as Counter, collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use ff::Field;
 use maybe_rayon::prelude::*;
@@ -371,14 +378,14 @@ impl V1 {
     ) -> Result<(), Error> {
         let mut plan = V1Plan::new(cs, layout.regions.clone())?;
 
-        let assigned = Counter::new(0);
+        let assigned = AtomicUsize::new(0);
         let mut assign =
             NamedAssignmentPass::new(&mut plan, &layout.region_lookup, &assigned, assign_tables);
         {
             let pass = &mut assign;
             circuit.synthesize(config, V1Pass::assign_named(pass))?;
         }
-        if assigned.get() != layout.region_lookup.len() {
+        if assigned.load(Ordering::Relaxed) != layout.region_lookup.len() {
             return Err(Error::Synthesis);
         }
 
@@ -663,7 +670,7 @@ struct NamedAssignmentPass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
     region_lookup: &'p RegionLookup,
     namespace_stack: Vec<Option<usize>>,
     occurrences: Vec<HashMap<&'p str, usize>>,
-    assigned: &'p Counter<usize>,
+    assigned: &'p AtomicUsize,
     assign_tables: bool,
 }
 
@@ -671,7 +678,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
     fn new(
         plan: &'p mut V1Plan<'a, F, CS>,
         region_lookup: &'p RegionLookup,
-        assigned: &'p Counter<usize>,
+        assigned: &'p AtomicUsize,
         assign_tables: bool,
     ) -> Self {
         let occurrences = (0..region_lookup.region_indices.len())
@@ -728,7 +735,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
             .or_default();
         let region_index = *region_indices.get(*occurrence).ok_or(Error::Synthesis)?;
         *occurrence += 1;
-        self.assigned.set(self.assigned.get() + 1);
+        self.assigned.fetch_add(1, Ordering::Relaxed);
 
         self.plan.cs.enter_region(|| name);
         let mut region = V1Region::new(self.plan, region_index);
