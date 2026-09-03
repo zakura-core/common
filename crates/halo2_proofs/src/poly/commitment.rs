@@ -1450,6 +1450,51 @@ impl<C: CurveAffine> Params<C> {
         self.commitment_tables_cache.fixed_bases()
     }
 
+    /// Tries to evaluate both MSMs in the first IPA round using the coefficient
+    /// table retained by [`Self::prepare_commitments`].
+    fn try_prepared_first_ipa_round(
+        &self,
+        p_hi: &[C::Scalar],
+        p_lo: &[C::Scalar],
+        l_u: C::Scalar,
+        l_w: C::Scalar,
+        r_u: C::Scalar,
+        r_w: C::Scalar,
+    ) -> Option<(C::Curve, C::Curve)> {
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        {
+            let half = self.n as usize / 2;
+            assert_eq!(p_hi.len(), half, "one scalar per lower-half base");
+            assert_eq!(p_lo.len(), half, "one scalar per upper-half base");
+            if crate::multicore::current_num_threads() > prepared_commitment_max_threads(self.k) {
+                return None;
+            }
+
+            let prepared = self.commitment_table()?;
+            if prepared.terms() != self.n as usize {
+                return None;
+            }
+            let fixed_bases = self.fixed_base_table()?;
+            let zeroes = vec![C::Scalar::ZERO; half];
+            let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
+                || {
+                    crate::multicore::join(
+                        || prepared.multiexp_with_prefix_and_suffix(p_hi, &zeroes, &[]),
+                        || prepared.multiexp_with_prefix_and_suffix(&zeroes, p_lo, &[]),
+                    )
+                },
+                || fixed_bases.multiply_ipa_rounds(l_u, l_w, r_u, r_w),
+            );
+            return Some((l_body + l_auxiliary, r_body + r_auxiliary));
+        }
+
+        #[cfg(any(not(feature = "multicore"), feature = "orbits"))]
+        {
+            let _ = (p_hi, p_lo, l_u, l_w, r_u, r_w);
+            None
+        }
+    }
+
     /// The cached prepared zero-check, if [`Self::prepare_zero_checks`]
     /// built one.
     #[cfg(feature = "orbits")]
@@ -1478,10 +1523,14 @@ impl<C: CurveAffine> Params<C> {
     /// effective threads. Orchard-sized (`k = 11`) tables on `AArch64` macOS
     /// extend that bound to ten, where end-to-end proving stays ahead on the
     /// benchmarked M4 system. Wider pools and unmeasured SRS shapes keep the
-    /// planned commitment multiexp. Without `orbits`, the armed IPA round path
-    /// still uses the small fixed pair while its transcript-dependent generator
-    /// MSMs keep their normal planner. Measurements covered full-width and
-    /// witness-like (boolean, byte, zero-padded) coefficient distributions.
+    /// planned commitment multiexp. Without `orbits`, the first IPA round also
+    /// reuses the coefficient table. Its two generator MSMs each have one
+    /// active half and one zero half: the backend still recodes and scans all
+    /// scalar slots, but zero scalars do not fetch prepared points or populate
+    /// buckets. Later IPA rounds keep their normal planner, while the small
+    /// fixed pair handles `u` and `w` in every round. Measurements covered
+    /// full-width and witness-like (boolean, byte, zero-padded) coefficient
+    /// distributions.
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// signed-width-eight pair adds exactly 512 KiB of affine-point payload for

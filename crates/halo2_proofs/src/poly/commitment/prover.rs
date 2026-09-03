@@ -288,25 +288,35 @@ pub(in crate::poly) fn create_proof_with_powers<
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
 
-        // Run the transcript-dependent generator MSMs together, while a
-        // prepared table handles the fixed `u` and `w` terms separately when
-        // it is available.
-        let (l_j, r_j) = ipa_round_multiexps(
-            IpaRoundTerms {
-                coeffs: &p_prime[half..],
-                bases: &g_prime[0..half],
-                value: value_l_j,
-                randomness: l_j_randomness,
-            },
-            IpaRoundTerms {
-                coeffs: &p_prime[0..half],
-                bases: &g_prime[half..],
-                value: value_r_j,
-                randomness: r_j_randomness,
-            },
-            params,
-            z,
-        );
+        let l_terms = IpaRoundTerms {
+            coeffs: &p_prime[half..],
+            bases: &g_prime[0..half],
+            value: value_l_j,
+            randomness: l_j_randomness,
+        };
+        let r_terms = IpaRoundTerms {
+            coeffs: &p_prime[0..half],
+            bases: &g_prime[half..],
+            value: value_r_j,
+            randomness: r_j_randomness,
+        };
+
+        // The first round uses the original SRS bases, so it can reuse the
+        // coefficient table retained by `prepare_commitments`. Later rounds
+        // use transcript-dependent folded bases and keep the ordinary MSM.
+        let prepared_round = (j == 0).then(|| {
+            params.try_prepared_first_ipa_round(
+                l_terms.coeffs,
+                r_terms.coeffs,
+                l_terms.value * z,
+                l_terms.randomness,
+                r_terms.value * z,
+                r_terms.randomness,
+            )
+        });
+        let (l_j, r_j) = prepared_round
+            .flatten()
+            .unwrap_or_else(|| ipa_round_multiexps(l_terms, r_terms, params, z));
         // Normalize the two round points together so they share one field
         // inversion.
         let points = [l_j, r_j];
@@ -382,18 +392,26 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use super::create_proof;
     use super::{
         Params, compute_ipa_hi_evaluation_pasta, ipa_masking_commitment, ipa_round_multiexp,
         parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use crate::poly::commitment::prepared_commitment_max_threads;
     use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use crate::transcript::{Blake2bWrite, Challenge255, Transcript, TranscriptWrite};
     #[cfg(feature = "multicore")]
     use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
     use rand::rng;
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use rand::{SeedableRng, rngs::StdRng};
     use std::fmt::Debug;
 
     fn full_width_scalar<C: CurveAffine>() -> C::Scalar {
@@ -428,6 +446,148 @@ mod tests {
                 ipa_round_multiexp(&coeffs, bases, value, randomness, &params, z),
                 expected,
             );
+        }
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn prepared_first_round_matches_ordinary<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+    {
+        const K: u32 = 6;
+
+        let params = Params::<C>::new(K);
+        let half = 1 << (K - 1);
+        let mut scalar = full_width_scalar::<C>();
+        let coefficients = (0..2 * half)
+            .map(|index| {
+                scalar = scalar.square() + C::Scalar::from(index as u64 + 1);
+                scalar
+            })
+            .collect::<Vec<_>>();
+        let (p_lo, p_hi) = coefficients.split_at(half);
+        let l_value = scalar.square() + C::Scalar::from(71);
+        let l_randomness = l_value.square() + C::Scalar::from(73);
+        let r_value = l_randomness.square() + C::Scalar::from(79);
+        let r_randomness = r_value.square() + C::Scalar::from(83);
+        let z = r_randomness.square() + C::Scalar::from(89);
+
+        let unprepared_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        unprepared_pool.install(|| {
+            assert!(
+                params
+                    .try_prepared_first_ipa_round(
+                        p_hi,
+                        p_lo,
+                        l_value * z,
+                        l_randomness,
+                        r_value * z,
+                        r_randomness,
+                    )
+                    .is_none()
+            );
+        });
+
+        assert!(params.prepare_commitments());
+        for workers in [1, 4] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let expected_l =
+                    ipa_round_multiexp(p_hi, &params.g[..half], l_value, l_randomness, &params, z);
+                let expected_r =
+                    ipa_round_multiexp(p_lo, &params.g[half..], r_value, r_randomness, &params, z);
+                let (actual_l, actual_r) = params
+                    .try_prepared_first_ipa_round(
+                        p_hi,
+                        p_lo,
+                        l_value * z,
+                        l_randomness,
+                        r_value * z,
+                        r_randomness,
+                    )
+                    .unwrap();
+                assert_eq!(actual_l, expected_l);
+                assert_eq!(actual_r, expected_r);
+            });
+        }
+
+        #[cfg(feature = "multicore")]
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(prepared_commitment_max_threads(K) + 1)
+            .build()
+            .unwrap()
+            .install(|| {
+                assert!(
+                    params
+                        .try_prepared_first_ipa_round(
+                            p_hi,
+                            p_lo,
+                            l_value * z,
+                            l_randomness,
+                            r_value * z,
+                            r_randomness,
+                        )
+                        .is_none()
+                );
+            });
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn prepared_first_round_preserves_opening_proof() {
+        const K: u32 = 6;
+        const PROOF_SEED: u64 = 0x4950_412d_524f_554e;
+
+        let params = Params::<pallas::Affine>::new(K);
+        let domain = EvaluationDomain::new(1, K);
+        let mut polynomial = domain.empty_coeff();
+        for (index, coefficient) in polynomial.iter_mut().enumerate() {
+            *coefficient = pallas::Scalar::from(index as u64 + 1);
+        }
+        let blind = Blind(pallas::Scalar::from(17));
+        let create_seeded_proof = || {
+            let commitment = params.commit(&polynomial, blind).to_affine();
+            let mut transcript =
+                Blake2bWrite::<Vec<u8>, pallas::Affine, Challenge255<_>>::init(vec![]);
+            transcript.write_point(commitment).unwrap();
+            let x = *transcript.squeeze_challenge_scalar::<()>();
+            transcript
+                .write_scalar(eval_polynomial(&polynomial, x))
+                .unwrap();
+            create_proof(
+                &params,
+                StdRng::seed_from_u64(PROOF_SEED),
+                &mut transcript,
+                &polynomial,
+                blind,
+                x,
+            )
+            .unwrap();
+            transcript.finalize()
+        };
+        let narrow_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+
+        let unprepared = narrow_pool.install(create_seeded_proof);
+        assert!(params.prepare_commitments());
+        let prepared = narrow_pool.install(create_seeded_proof);
+        assert_eq!(prepared, unprepared);
+
+        #[cfg(feature = "multicore")]
+        {
+            let wide_pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(prepared_commitment_max_threads(K) + 1)
+                .build()
+                .unwrap();
+            let gated_fallback = wide_pool.install(create_seeded_proof);
+            assert_eq!(gated_fallback, unprepared);
         }
     }
 
@@ -692,6 +852,25 @@ mod tests {
     fn round_multiexp_matches_split_vesta() {
         round_multiexp_matches_split::<vesta::Affine>();
     }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_first_round_matches_ordinary_pallas() {
+        prepared_first_round_matches_ordinary::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_first_round_matches_ordinary_vesta() {
+        prepared_first_round_matches_ordinary::<vesta::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_first_round_preserves_unprepared_opening_proof() {
+        prepared_first_round_preserves_opening_proof();
+    }
+
     #[test]
     fn masking_polynomial_is_sparse_and_commits_correctly_pallas() {
         masking_polynomial_is_sparse_and_commits_correctly::<pallas::Affine>();
