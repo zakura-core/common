@@ -1,7 +1,7 @@
 use super::super::{CommitDomains, HashDomains, SinsemillaInstructions};
 use super::{NonIdentityEccPoint, SinsemillaChip};
 use crate::{
-    ecc::FixedPoints,
+    ecc::{FixedPoints, chip::DoubleAndAdd},
     sinsemilla::primitives::{self as sinsemilla, INV_TWO_POW_K, SINSEMILLA_S},
     utilities::lookup_range_check::PallasLookupRangeCheck,
 };
@@ -93,6 +93,46 @@ impl PreparedHashWitness {
     pub(crate) fn output_x(&self) -> pallas::Base {
         self.output_x
     }
+}
+
+fn assign_hash_rounds(
+    region: &mut Region<'_, pallas::Base>,
+    double_and_add: &DoubleAndAdd,
+    offset: usize,
+    len: usize,
+    round: impl Fn(usize) -> Value<PreparedHashRound>,
+) -> Result<X<pallas::Base>, Error> {
+    region.assign_advice_batch(
+        |_| "lambda_1",
+        double_and_add.lambda_1,
+        offset,
+        len,
+        |row| round(row).map(|round| round.lambda_1),
+    )?;
+    region.assign_advice_batch(
+        |_| "lambda_2",
+        double_and_add.lambda_2,
+        offset,
+        len,
+        |row| round(row).map(|round| round.lambda_2),
+    )?;
+
+    // Only the final accumulator cell is referenced after assignment.
+    region.assign_advice_batch(
+        |_| "x_a",
+        double_and_add.x_a,
+        offset + 1,
+        len - 1,
+        |row| round(row).map(|round| round.x_a),
+    )?;
+    region
+        .assign_advice(
+            || "x_a",
+            double_and_add.x_a,
+            offset + len,
+            || round(len - 1).map(|round| round.x_a),
+        )
+        .map(X)
 }
 
 impl DoubleAndAddWitness {
@@ -688,37 +728,12 @@ where
         )?;
 
         if let Some(prepared) = prepared {
-            region.assign_advice_batch(
-                |_| "lambda_1",
-                config.double_and_add.lambda_1,
-                offset,
-                words.len(),
-                |row| prepared.map(|prepared| prepared[row].lambda_1),
-            )?;
-            region.assign_advice_batch(
-                |_| "lambda_2",
-                config.double_and_add.lambda_2,
-                offset,
-                words.len(),
-                |row| prepared.map(|prepared| prepared[row].lambda_2),
-            )?;
+            let x_a =
+                assign_hash_rounds(region, &config.double_and_add, offset, words.len(), |row| {
+                    prepared.map(|prepared| prepared[row])
+                })?;
 
-            // Only the final accumulator cell is referenced after assignment.
-            region.assign_advice_batch(
-                |_| "x_a",
-                config.double_and_add.x_a,
-                offset + 1,
-                words.len() - 1,
-                |row| prepared.map(|prepared| prepared[row].x_a),
-            )?;
-            let x_a = region.assign_advice(
-                || "x_a",
-                config.double_and_add.x_a,
-                offset + words.len(),
-                || prepared.map(|prepared| prepared[words.len() - 1].x_a),
-            )?;
-
-            return Ok((x_a.into(), y_a, zs, projective));
+            return Ok((x_a, y_a, zs, projective));
         }
 
         if let Some(point) = projective.as_mut() {
@@ -765,35 +780,15 @@ where
                 );
             }
 
-            region.assign_advice_batch(
-                |_| "lambda_1",
-                config.double_and_add.lambda_1,
+            let x_a = assign_hash_rounds(
+                region,
+                &config.double_and_add,
                 offset,
                 rounds.len(),
-                |row| rounds[row].map(|round| round.lambda_1),
-            )?;
-            region.assign_advice_batch(
-                |_| "lambda_2",
-                config.double_and_add.lambda_2,
-                offset,
-                rounds.len(),
-                |row| rounds[row].map(|round| round.lambda_2),
-            )?;
-            region.assign_advice_batch(
-                |_| "x_a",
-                config.double_and_add.x_a,
-                offset + 1,
-                rounds.len() - 1,
-                |row| rounds[row].map(|round| round.x_a),
-            )?;
-            let x_a = region.assign_advice(
-                || "x_a",
-                config.double_and_add.x_a,
-                offset + rounds.len(),
-                || rounds[rounds.len() - 1].map(|round| round.x_a),
+                |row| rounds[row],
             )?;
 
-            return Ok((x_a.into(), y_a, zs, projective));
+            return Ok((x_a, y_a, zs, projective));
         }
 
         for (row, word) in words.iter().enumerate() {
