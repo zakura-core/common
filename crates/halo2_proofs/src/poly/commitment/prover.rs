@@ -88,6 +88,47 @@ fn ipa_round_multiexp<C: CurveAffine>(
     best_multiexp(&round_coeffs, &round_bases)
 }
 
+#[derive(Clone, Copy)]
+struct IpaRoundTerms<'a, C: CurveAffine> {
+    coeffs: &'a [C::Scalar],
+    bases: &'a [C],
+    value: C::Scalar,
+    randomness: C::Scalar,
+}
+
+fn ipa_round_multiexps<C: CurveAffine>(
+    l: IpaRoundTerms<'_, C>,
+    r: IpaRoundTerms<'_, C>,
+    params: &Params<C>,
+    z: C::Scalar,
+) -> (C::Curve, C::Curve) {
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    if let Some(fixed_bases) = params.fixed_base_table() {
+        let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
+            || {
+                crate::multicore::join(
+                    || best_multiexp(l.coeffs, l.bases),
+                    || best_multiexp(r.coeffs, r.bases),
+                )
+            },
+            || {
+                fixed_bases.multiply_ipa_rounds(
+                    l.value * z,
+                    l.randomness,
+                    r.value * z,
+                    r.randomness,
+                )
+            },
+        );
+        return (l_body + l_auxiliary, r_body + r_auxiliary);
+    }
+
+    crate::multicore::join(
+        || ipa_round_multiexp(l.coeffs, l.bases, l.value, l.randomness, params, z),
+        || ipa_round_multiexp(r.coeffs, r.bases, r.value, r.randomness, params, z),
+    )
+}
+
 fn compute_ipa_hi_evaluation_deferred<F: Field + 'static, T: DeferredField + 'static>(
     polynomial: &dyn Any,
     powers: &dyn Any,
@@ -247,29 +288,24 @@ pub(in crate::poly) fn create_proof_with_powers<
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
 
-        // Include the U and W terms in each main MSM so their doublings are
-        // shared with the round commitment.
-        let (l_j, r_j) = crate::multicore::join(
-            || {
-                ipa_round_multiexp(
-                    &p_prime[half..],
-                    &g_prime[0..half],
-                    value_l_j,
-                    l_j_randomness,
-                    params,
-                    z,
-                )
+        // Run the transcript-dependent generator MSMs together, while a
+        // prepared table handles the fixed `u` and `w` terms separately when
+        // it is available.
+        let (l_j, r_j) = ipa_round_multiexps(
+            IpaRoundTerms {
+                coeffs: &p_prime[half..],
+                bases: &g_prime[0..half],
+                value: value_l_j,
+                randomness: l_j_randomness,
             },
-            || {
-                ipa_round_multiexp(
-                    &p_prime[0..half],
-                    &g_prime[half..],
-                    value_r_j,
-                    r_j_randomness,
-                    params,
-                    z,
-                )
+            IpaRoundTerms {
+                coeffs: &p_prime[0..half],
+                bases: &g_prime[half..],
+                value: value_r_j,
+                randomness: r_j_randomness,
             },
+            params,
+            z,
         );
         let l_j = l_j.to_affine();
         let r_j = r_j.to_affine();
