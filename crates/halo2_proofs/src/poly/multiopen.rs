@@ -491,6 +491,97 @@ fn point_set_quotients_preserve_proof_across_workers() {
 }
 
 #[test]
+fn short_trailing_polynomial_preserves_proof() {
+    use group::Curve;
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use super::commitment::{Blind, Params};
+    use crate::arithmetic::eval_polynomial;
+    use crate::pasta::{EqAffine, Fp};
+    use crate::transcript::Challenge255;
+
+    const K: u32 = 6;
+    const PROOF_SEED: u64 = 0x5350_4152_5345_4d41;
+
+    let params: Params<EqAffine> = Params::new(K);
+    let domain = EvaluationDomain::new(1, K);
+    let mut first = domain.empty_coeff();
+    let mut second = domain.empty_coeff();
+    for (index, coefficient) in first.iter_mut().enumerate() {
+        *coefficient = Fp::from(10 + index as u64);
+    }
+    for (index, coefficient) in second.iter_mut().enumerate() {
+        *coefficient = Fp::from(100 + index as u64);
+    }
+
+    let trailing = Polynomial::from_coefficients(vec![Fp::from(7), Fp::from(11)]);
+    let mut padded = domain.empty_coeff();
+    padded[..][..trailing.len()].copy_from_slice(&trailing);
+
+    let first_blind = Blind(Fp::from(3));
+    let second_blind = Blind(Fp::from(5));
+    let trailing_blind = Blind(Fp::from(13));
+    let point = Fp::from(17);
+    let create_seeded_proof = |trailing: &Polynomial<Fp, Coeff>| {
+        let mut transcript = crate::transcript::Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof(
+            &params,
+            StdRng::seed_from_u64(PROOF_SEED),
+            &mut transcript,
+            [
+                ProverQuery {
+                    point,
+                    poly: &first,
+                    blind: first_blind,
+                },
+                ProverQuery {
+                    point,
+                    poly: &second,
+                    blind: second_blind,
+                },
+                ProverQuery {
+                    point,
+                    poly: trailing,
+                    blind: trailing_blind,
+                },
+            ],
+        )
+        .expect("proof generation should not fail");
+        transcript.finalize()
+    };
+
+    let expected = create_seeded_proof(&padded);
+    let proof = create_seeded_proof(&trailing);
+    assert_eq!(proof, expected);
+
+    let first_commitment = params.commit(&first, first_blind).to_affine();
+    let second_commitment = params.commit(&second, second_blind).to_affine();
+    let trailing_commitment = params.commit(&padded, trailing_blind).to_affine();
+    let mut proof = proof.as_slice();
+    let mut transcript = crate::transcript::Blake2bRead::<_, _, Challenge255<_>>::init(&mut proof);
+    let guard = verify_proof(
+        &params,
+        &mut transcript,
+        [
+            VerifierQuery::new_commitment(&first_commitment, point, eval_polynomial(&first, point)),
+            VerifierQuery::new_commitment(
+                &second_commitment,
+                point,
+                eval_polynomial(&second, point),
+            ),
+            VerifierQuery::new_commitment(
+                &trailing_commitment,
+                point,
+                eval_polynomial(&trailing, point),
+            ),
+        ],
+        params.empty_msm(),
+    )
+    .expect("proof verification should not fail");
+    assert!(guard.use_challenges().eval());
+}
+
+#[test]
 fn test_identical_queries() {
     use assert_matches::assert_matches;
     use group::Curve;

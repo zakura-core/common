@@ -156,18 +156,13 @@ fn fold_quotient_pieces_pasta<
 const QUOTIENT_EVALUATION_MASK_COEFFICIENTS: usize = 2;
 
 fn sample_quotient_evaluation_mask<F: WithSmallOrderMulGroup<3>, R: Rng>(
-    domain: &EvaluationDomain<F>,
     mut rng: R,
 ) -> Polynomial<F, Coeff> {
-    let mut polynomial = domain.empty_coeff();
-    assert!(polynomial.len() >= QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
-    for coefficient in polynomial
-        .iter_mut()
-        .take(QUOTIENT_EVALUATION_MASK_COEFFICIENTS)
-    {
-        *coefficient = F::random(&mut rng);
-    }
-    polynomial
+    Polynomial::from_coefficients(
+        (0..QUOTIENT_EVALUATION_MASK_COEFFICIENTS)
+            .map(|_| F::random(&mut rng))
+            .collect(),
+    )
 }
 
 fn commit_quotient_evaluation_mask<C: CurveAffine>(
@@ -175,12 +170,8 @@ fn commit_quotient_evaluation_mask<C: CurveAffine>(
     polynomial: &Polynomial<C::Scalar, Coeff>,
     blind: Blind<C::Scalar>,
 ) -> C::Curve {
-    assert_eq!(polynomial.len(), params.n as usize);
-    debug_assert!(
-        polynomial[QUOTIENT_EVALUATION_MASK_COEFFICIENTS..]
-            .iter()
-            .all(|coefficient| *coefficient == C::Scalar::ZERO)
-    );
+    assert_eq!(polynomial.len(), QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
+    assert!(params.g.len() >= polynomial.len());
 
     let scalars = [polynomial[0], polynomial[1], blind.0];
     let bases = [params.g[0], params.g[1], params.w];
@@ -189,12 +180,7 @@ fn commit_quotient_evaluation_mask<C: CurveAffine>(
 }
 
 fn evaluate_quotient_evaluation_mask<F: Field>(polynomial: &Polynomial<F, Coeff>, point: F) -> F {
-    assert!(polynomial.len() >= QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
-    debug_assert!(
-        polynomial[QUOTIENT_EVALUATION_MASK_COEFFICIENTS..]
-            .iter()
-            .all(|coefficient| *coefficient == F::ZERO)
-    );
+    assert_eq!(polynomial.len(), QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
 
     polynomial[0] + polynomial[1] * point
 }
@@ -225,7 +211,6 @@ impl<C: CurveAffine> Argument<C> {
         T: TranscriptWrite<C, E>,
     >(
         params: &Params<C>,
-        domain: &EvaluationDomain<C::Scalar>,
         mut rng: R,
         transcript: &mut T,
     ) -> Result<CommittedRandomPolynomial<C>, Error> {
@@ -235,7 +220,7 @@ impl<C: CurveAffine> Argument<C> {
         // equal to the difference of the points. The multi-opening verifier
         // rejects the exceptional point collision, which is the same
         // negligible honest-abort event under the previous dense mask.
-        let random_poly = sample_quotient_evaluation_mask(domain, &mut rng);
+        let random_poly = sample_quotient_evaluation_mask(&mut rng);
         // Sample a random blinding factor
         let random_blind = Blind(C::Scalar::random(&mut rng));
 
@@ -456,17 +441,16 @@ mod tests {
         let domain = EvaluationDomain::new(1, 3);
         let params = crate::poly::commitment::Params::<C>::new(3);
         let mut rng = StdRng::seed_from_u64(0x7175_6f74_6965_6e74);
-        let polynomial = sample_quotient_evaluation_mask(&domain, &mut rng);
-        assert!(
-            polynomial[QUOTIENT_EVALUATION_MASK_COEFFICIENTS..]
-                .iter()
-                .all(|coefficient| *coefficient == C::Scalar::ZERO)
-        );
+        let polynomial = sample_quotient_evaluation_mask(&mut rng);
+        assert_eq!(polynomial.len(), QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
+
+        let mut padded = domain.empty_coeff();
+        padded[..][..polynomial.len()].copy_from_slice(&polynomial);
 
         let blind = Blind(C::Scalar::random(&mut rng));
         assert_eq!(
             commit_quotient_evaluation_mask(&params, &polynomial, blind),
-            params.commit(&polynomial, blind),
+            params.commit(&padded, blind),
         );
 
         let point = C::Scalar::random(&mut rng);
@@ -503,8 +487,8 @@ mod tests {
         earlier_poly[0] = pallas::Base::from(2);
         let mut h_poly = domain.empty_coeff();
         h_poly[0] = pallas::Base::from(3);
-        let mut mask_poly = domain.empty_coeff();
-        mask_poly[0] = pallas::Base::from(5);
+        let mask_poly =
+            Polynomial::from_coefficients(vec![pallas::Base::from(5), pallas::Base::from(17)]);
 
         let evaluated = super::EvaluatedQuotient::<vesta::Affine> {
             h_poly,
@@ -530,6 +514,7 @@ mod tests {
         assert!(core::ptr::eq(queries[0].poly, &earlier_poly));
         assert!(core::ptr::eq(queries[1].poly, &evaluated.h_poly));
         assert!(core::ptr::eq(queries[2].poly, &evaluated.random_poly.poly));
+        assert_eq!(queries[2].poly.len(), QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
     }
 
     #[test]

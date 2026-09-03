@@ -1175,8 +1175,7 @@ where
 
     // Commit to the random polynomial that masks the folded quotient
     // evaluation in the multi-opening argument.
-    let vanishing =
-        vanishing::Argument::commit_random_polynomial(params, domain, &mut rng, transcript)?;
+    let vanishing = vanishing::Argument::commit_random_polynomial(params, &mut rng, transcript)?;
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();

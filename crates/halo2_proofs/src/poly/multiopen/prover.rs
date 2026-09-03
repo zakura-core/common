@@ -675,6 +675,38 @@ mod tests {
         assert_eq!(collapsed[0].values, r.values);
     }
 
+    fn short_trailing_polynomial_matches_zero_padding<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        let len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
+        let first = Polynomial::from_coefficients(
+            (0..len).map(|index| F::from(index as u64 + 1)).collect(),
+        );
+        let trailing = Polynomial::from_coefficients(vec![F::from(7), F::from(11)]);
+        let mut padded = Polynomial::from_coefficients(vec![F::ZERO; len]);
+        padded[..][..trailing.len()].copy_from_slice(&trailing);
+
+        for challenge in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let expected = collapse_polynomials(&[vec![&first, &padded]], challenge);
+            let check = || {
+                let actual = collapse_polynomials(&[vec![&first, &trailing]], challenge);
+                assert_eq!(&actual[0][..], &expected[0][..]);
+            };
+
+            #[cfg(feature = "multicore")]
+            for thread_count in [1, 4] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(thread_count)
+                    .build()
+                    .unwrap()
+                    .install(check);
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
     fn in_place_kate_division_matches_allocating<F>()
     where
         F: Field + From<u64> + Debug,
@@ -858,6 +890,16 @@ mod tests {
     #[test]
     fn streaming_collapse_matches_operator_collapse_fq() {
         streaming_collapse_matches_operator_collapse::<Fq>();
+    }
+
+    #[test]
+    fn short_trailing_polynomial_matches_zero_padding_fp() {
+        short_trailing_polynomial_matches_zero_padding::<Fp>();
+    }
+
+    #[test]
+    fn short_trailing_polynomial_matches_zero_padding_fq() {
+        short_trailing_polynomial_matches_zero_padding::<Fq>();
     }
 
     #[test]
