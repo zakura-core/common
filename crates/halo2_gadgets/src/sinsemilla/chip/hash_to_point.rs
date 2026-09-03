@@ -679,37 +679,52 @@ where
         // The accumulator x-coordinate provided by the caller MUST have been assigned
         // within this region.
 
+        region.assign_advice_batch(
+            |_| "x_p",
+            config.double_and_add.x_p,
+            offset,
+            words.len(),
+            |row| words[row].map(|word| SINSEMILLA_S[word as usize].0),
+        )?;
+
+        if let Some(prepared) = prepared {
+            region.assign_advice_batch(
+                |_| "lambda_1",
+                config.double_and_add.lambda_1,
+                offset,
+                words.len(),
+                |row| prepared.map(|prepared| prepared[row].lambda_1),
+            )?;
+            region.assign_advice_batch(
+                |_| "lambda_2",
+                config.double_and_add.lambda_2,
+                offset,
+                words.len(),
+                |row| prepared.map(|prepared| prepared[row].lambda_2),
+            )?;
+
+            // Only the final accumulator cell is referenced after assignment.
+            region.assign_advice_batch(
+                |_| "x_a",
+                config.double_and_add.x_a,
+                offset + 1,
+                words.len() - 1,
+                |row| prepared.map(|prepared| prepared[row].x_a),
+            )?;
+            let x_a = region.assign_advice(
+                || "x_a",
+                config.double_and_add.x_a,
+                offset + words.len(),
+                || prepared.map(|prepared| prepared[words.len() - 1].x_a),
+            )?;
+
+            return Ok((x_a.into(), y_a, zs, projective));
+        }
+
         for (row, word) in words.iter().enumerate() {
             let r#gen = word.map(|word| SINSEMILLA_S[word as usize]);
             let x_p = r#gen.map(|r#gen| r#gen.0);
             let y_p = r#gen.map(|r#gen| r#gen.1);
-
-            // Assign `x_p`
-            region.assign_advice(|| "x_p", config.double_and_add.x_p, offset + row, || x_p)?;
-
-            if let Some(prepared) = prepared {
-                let round = prepared.map(|prepared| prepared[row]);
-                region.assign_advice(
-                    || "lambda_1",
-                    config.double_and_add.lambda_1,
-                    offset + row,
-                    || round.map(|round| round.lambda_1),
-                )?;
-                region.assign_advice(
-                    || "lambda_2",
-                    config.double_and_add.lambda_2,
-                    offset + row,
-                    || round.map(|round| round.lambda_2),
-                )?;
-                let x_a_cell = region.assign_advice(
-                    || "x_a",
-                    config.double_and_add.x_a,
-                    offset + row + 1,
-                    || round.map(|round| round.x_a),
-                )?;
-                x_a = x_a_cell.into();
-                continue;
-            }
 
             if let Some(point) = projective.as_mut() {
                 let witness = if row == 0 && cache_first_word {
