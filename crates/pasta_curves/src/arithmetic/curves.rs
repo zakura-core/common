@@ -191,19 +191,25 @@ pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
     /// passed to the evaluation methods must have exactly this length.
     fn terms(&self) -> usize;
 
-    /// Estimates the variable-time scalar work of this prepared backend.
+    /// Compares the variable-time scalar work of this prepared backend.
     ///
-    /// The returned units are implementation-defined, additive across scalar
-    /// slices, and exclude fixed per-call costs. They are only suitable for
-    /// comparing scalar slices through the same prepared handle. Unlike the
-    /// evaluation methods, this accepts a scalar sample of any length. A
-    /// backend returns `None` when it does not provide an estimate.
+    /// Returns `Some(true)` only when the backend can establish that
+    /// `candidate` is no more expensive than `baseline`, and `Some(false)`
+    /// when it cannot establish that relation. Returns `None` when the backend
+    /// cannot compare the inputs at all. The slices must have equal length and
+    /// represent one evaluation each. Unlike the evaluation methods, they may
+    /// be samples of any length. This is a routing hint, not an elapsed-time
+    /// guarantee, and it does not establish algebraic equivalence.
     ///
     /// # Security
     ///
-    /// Variable-time in `scalars`; callers must not use this with secret
-    /// scalars unless they already accept scalar-dependent timing.
-    fn estimate_scalar_work_vartime(&self, _scalars: &[C::ScalarExt]) -> Option<usize> {
+    /// Variable-time in both scalar slices; callers must not use this with
+    /// secret scalars unless they already accept scalar-dependent timing.
+    fn scalar_work_is_at_most_vartime(
+        &self,
+        _candidate: &[C::ScalarExt],
+        _baseline: &[C::ScalarExt],
+    ) -> Option<bool> {
         None
     }
 
