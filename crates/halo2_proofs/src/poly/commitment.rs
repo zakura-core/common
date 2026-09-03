@@ -1469,6 +1469,11 @@ impl<C: CurveAffine> Params<C> {
     /// and handles the fixed `u` and `w` terms in every IPA round while keeping
     /// the polynomial slices borrowed.
     ///
+    /// Without `orbits`, a multi-worker call constructs the independent
+    /// coefficient-basis, Lagrange-basis, and fixed-base pair tables
+    /// concurrently. A one-worker call keeps the sequential construction and
+    /// its early-decline behavior.
+    ///
     /// Both commit methods use the large tables on pools of at most eight
     /// effective threads. Orchard-sized (`k = 11`) tables on `AArch64` macOS
     /// extend that bound to ten, where end-to-end proving stays ahead on the
@@ -1526,9 +1531,26 @@ impl<C: CurveAffine> Params<C> {
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         {
             let prepared = self.commitment_tables_cache.initialize(|| {
-                let coefficient = C::CurveExt::try_prepare_zero_check(&self.g)?;
-                let lagrange = C::CurveExt::try_prepare_zero_check(&self.g_lagrange)?;
-                let fixed_bases = FixedBasePairTable::new(self.w, self.u);
+                let (coefficient, lagrange, fixed_bases) =
+                    if crate::multicore::current_num_threads() == 1 {
+                        let coefficient = C::CurveExt::try_prepare_zero_check(&self.g)?;
+                        let lagrange = C::CurveExt::try_prepare_zero_check(&self.g_lagrange)?;
+                        let fixed_bases = FixedBasePairTable::new(self.w, self.u);
+                        (coefficient, lagrange, fixed_bases)
+                    } else {
+                        let ((coefficient, lagrange), fixed_bases) = crate::multicore::join(
+                            || {
+                                crate::multicore::join(
+                                    || C::CurveExt::try_prepare_zero_check(&self.g),
+                                    || C::CurveExt::try_prepare_zero_check(&self.g_lagrange),
+                                )
+                            },
+                            || FixedBasePairTable::new(self.w, self.u),
+                        );
+                        let coefficient = coefficient?;
+                        let lagrange = lagrange?;
+                        (coefficient, lagrange, fixed_bases)
+                    };
                 Some((coefficient, lagrange, fixed_bases))
             });
             #[cfg(feature = "batch")]
