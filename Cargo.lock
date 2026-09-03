@@ -3770,7 +3770,6 @@ dependencies = [
  "ff",
  "group",
  "inferno",
- "maybe-rayon",
  "plotters",
  "pprof 0.8.0",
  "proptest",

@@ -28,9 +28,7 @@ pub(crate) mod generator_table;
 use generator_table::GeneratorTableConfig;
 
 mod hash_to_point;
-pub(crate) use hash_to_point::PreparedHashWitness;
-#[cfg(feature = "multicore")]
-pub(crate) use hash_to_point::prepare_hash_witness;
+pub(crate) use hash_to_point::{PreparedHashWitness, prepare_hash_witness};
 
 /// Configuration for the Sinsemilla hash chip
 ///

@@ -1,16 +1,12 @@
 //! Gadgets for implementing a Merkle tree with Sinsemilla.
 
-#[cfg(feature = "multicore")]
 use group::ff::PrimeField;
-#[cfg(feature = "multicore")]
-use halo2_proofs::circuit::AssignedCell;
 use halo2_proofs::{
-    circuit::{Chip, Layouter, Value},
+    circuit::{AssignedCell, Chip, Layouter, Value},
     plonk::Error,
 };
 use pasta_curves::{arithmetic::CurveAffine, pallas};
 
-#[cfg(feature = "multicore")]
 use super::chip::{PreparedHashWitness, prepare_hash_witness};
 use super::{CommitDomains, HashDomains, SinsemillaInstructions};
 
@@ -24,15 +20,22 @@ use crate::{
 
 pub mod chip;
 
-#[cfg(feature = "multicore")]
 const MERKLE_LAYER_BITS: usize = 10;
-#[cfg(feature = "multicore")]
 const MERKLE_NODE_BITS: usize = pallas::Base::NUM_BITS as usize;
-#[cfg(feature = "multicore")]
 const MERKLE_MESSAGE_WORDS: usize =
     (MERKLE_LAYER_BITS + 2 * MERKLE_NODE_BITS) / crate::sinsemilla::primitives::K;
 
-#[cfg(feature = "multicore")]
+/// Opaque arithmetic witnesses for every hash in a Sinsemilla Merkle path.
+pub struct PreparedMerklePathWitness<const PATH_LENGTH: usize> {
+    layers: [PreparedHashWitness; PATH_LENGTH],
+}
+
+impl<const PATH_LENGTH: usize> core::fmt::Debug for PreparedMerklePathWitness<PATH_LENGTH> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PreparedMerklePathWitness(..)")
+    }
+}
+
 fn merkle_message_words(
     layer: usize,
     left: pallas::Base,
@@ -57,6 +60,34 @@ fn merkle_message_words(
             };
             word | (bit << bit_index)
         })
+    })
+}
+
+/// Prepares a [`PreparedMerklePathWitness`] for a complete Sinsemilla Merkle
+/// path.
+///
+/// Returns `None` if any incomplete addition in the path has an exceptional
+/// result.
+pub fn prepare_merkle_path_witness<const PATH_LENGTH: usize>(
+    q: pallas::Affine,
+    leaf_pos: u32,
+    path: [pallas::Base; PATH_LENGTH],
+    mut node: pallas::Base,
+) -> Option<PreparedMerklePathWitness<PATH_LENGTH>> {
+    let mut layers = Vec::with_capacity(PATH_LENGTH);
+    for (layer, sibling) in path.into_iter().enumerate() {
+        let position_bit = leaf_pos.checked_shr(layer as u32).unwrap_or(0) & 1;
+        let (left, right) = if position_bit == 0 {
+            (node, sibling)
+        } else {
+            (sibling, node)
+        };
+        let prepared = prepare_hash_witness(q, &merkle_message_words(layer, left, right))?;
+        node = prepared.output_x();
+        layers.push(prepared);
+    }
+    Some(PreparedMerklePathWitness {
+        layers: layers.try_into().ok()?,
     })
 }
 
@@ -160,16 +191,13 @@ where
     Commit: CommitDomains<pallas::Affine, Fixed, Hash> + Eq,
     Lookup: PallasLookupRangeCheck,
 {
-    /// Calculates a Merkle root while preparing each layer's arithmetic in
-    /// parallel with assignment of the previous layer.
-    #[cfg(feature = "multicore")]
-    pub fn calculate_root_parallel(
+    /// Calculates a Merkle root using a [`PreparedMerklePathWitness`].
+    pub fn calculate_root_prepared(
         &self,
         mut layouter: impl Layouter<pallas::Base>,
         leaf: AssignedCell<pallas::Base, pallas::Base>,
+        prepared: Value<&PreparedMerklePathWitness<PATH_LENGTH>>,
     ) -> Result<AssignedCell<pallas::Base, pallas::Base>, Error> {
-        use std::{cell::Cell, sync::mpsc};
-
         let layers_per_chip = (PATH_LENGTH + PAR - 1) / PAR;
         let chips = (0..PATH_LENGTH).map(|i| self.chips[i / layers_per_chip].clone());
         let path = self.path.transpose_array();
@@ -179,37 +207,6 @@ where
             .transpose_array();
         let q = self.domain.Q();
 
-        // Bound the channel so preparation stays at most one layer ahead of
-        // assignment. This retains only two layers' witnesses at a time.
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let scheduled = Cell::new(false);
-        self.path.zip(self.leaf_pos).zip(leaf.value().copied()).map(
-            |((path, leaf_pos), mut node)| {
-                scheduled.set(true);
-                maybe_rayon::spawn(move || {
-                    for (layer, sibling) in path.into_iter().enumerate() {
-                        let position_bit = leaf_pos.checked_shr(layer as u32).unwrap_or(0) & 1;
-                        let (left, right) = if position_bit == 0 {
-                            (node, sibling)
-                        } else {
-                            (sibling, node)
-                        };
-                        let prepared =
-                            prepare_hash_witness(q, &merkle_message_words(layer, left, right));
-                        let next_node = prepared.as_ref().map(PreparedHashWitness::output_x);
-                        if sender.send(prepared).is_err() {
-                            return;
-                        }
-                        if let Some(next_node) = next_node {
-                            node = next_node;
-                        } else {
-                            return;
-                        }
-                    }
-                });
-            },
-        );
-
         let mut node = leaf;
         for (l, ((sibling, pos), chip)) in path.iter().zip(pos.iter()).zip(chips).enumerate() {
             let pair = chip.swap(
@@ -217,23 +214,13 @@ where
                 (node, *sibling),
                 *pos,
             )?;
-            let prepared = if scheduled.get() {
-                Value::known(
-                    receiver
-                        .recv()
-                        .map_err(|_| Error::Synthesis)?
-                        .ok_or(Error::Synthesis)?,
-                )
-            } else {
-                Value::unknown()
-            };
             node = chip.hash_layer_prepared::<PATH_LENGTH>(
                 layouter.namespace(|| format!("MerkleCRH({}, left, right)", l)),
                 q,
                 l,
                 pair.0,
                 pair.1,
-                prepared.as_ref(),
+                prepared.map(|prepared| &prepared.layers[l]),
             )?;
         }
 
@@ -320,6 +307,7 @@ pub mod tests {
     use super::{
         MerklePath,
         chip::{MerkleChip, MerkleConfig},
+        prepare_merkle_path_witness,
     };
 
     use crate::{
@@ -357,7 +345,7 @@ pub mod tests {
         leaf: Value<pallas::Base>,
         leaf_pos: Value<u32>,
         merkle_path: Value<[pallas::Base; MERKLE_DEPTH]>,
-        parallel: bool,
+        prepared: bool,
         _lookup_marker: PhantomData<Lookup>,
     }
 
@@ -366,13 +354,13 @@ pub mod tests {
             leaf: Value<pallas::Base>,
             leaf_pos: Value<u32>,
             merkle_path: Value<[pallas::Base; MERKLE_DEPTH]>,
-            parallel: bool,
+            prepared: bool,
         ) -> Self {
             Self {
                 leaf,
                 leaf_pos,
                 merkle_path,
-                parallel,
+                prepared,
                 _lookup_marker: PhantomData,
             }
         }
@@ -454,7 +442,7 @@ pub mod tests {
                 Value::default(),
                 Value::default(),
                 Value::default(),
-                self.parallel,
+                self.prepared,
             )
         }
 
@@ -490,15 +478,22 @@ pub mod tests {
                 path: self.merkle_path,
             };
 
-            #[cfg(feature = "multicore")]
-            let computed_final_root = if self.parallel {
-                path.calculate_root_parallel(layouter.namespace(|| "calculate root"), leaf)?
+            let computed_final_root = if self.prepared {
+                let prepared = self.leaf.zip(self.leaf_pos).zip(self.merkle_path).and_then(
+                    |((leaf, leaf_pos), merkle_path)| {
+                        prepare_merkle_path_witness(TestHashDomain.Q(), leaf_pos, merkle_path, leaf)
+                            .map(Value::known)
+                            .unwrap_or_else(Value::unknown)
+                    },
+                );
+                path.calculate_root_prepared(
+                    layouter.namespace(|| "calculate root"),
+                    leaf,
+                    prepared.as_ref(),
+                )?
             } else {
                 path.calculate_root(layouter.namespace(|| "calculate root"), leaf)?
             };
-            #[cfg(not(feature = "multicore"))]
-            let computed_final_root =
-                path.calculate_root(layouter.namespace(|| "calculate root"), leaf)?;
 
             self.leaf
                 .zip(self.leaf_pos)
@@ -580,10 +575,9 @@ pub mod tests {
     }
 
     #[test]
-    #[cfg(feature = "multicore")]
-    fn merkle_chip_with_parallel_arithmetic() {
+    fn merkle_chip_with_prepared_arithmetic() {
         let mut circuit: MyMerkleCircuit<PallasLookupRangeCheckConfig> = generate_circuit();
-        circuit.parallel = true;
+        circuit.prepared = true;
 
         let prover = MockProver::run(11, &circuit, vec![]).unwrap();
         assert_eq!(prover.verify(), Ok(()))
@@ -608,7 +602,7 @@ pub mod tests {
             leaf: Value::default(),
             leaf_pos: Value::default(),
             merkle_path: Value::default(),
-            parallel: false,
+            prepared: false,
             _lookup_marker: PhantomData,
         };
         halo2_proofs::dev::CircuitLayout::default()
