@@ -2,12 +2,9 @@
 
 use alloc::vec::Vec;
 
-#[cfg(feature = "multicore")]
-use std::sync::{Arc, Mutex, mpsc};
-
 use group::{Curve, GroupEncoding};
 use halo2_proofs::{
-    circuit::{AssignedCell, Layouter, Value, floor_planner},
+    circuit::{Layouter, Value, floor_planner},
     plonk::{
         self, Advice, BatchVerifier, Column, Constraints, Expression, Fixed,
         Instance as InstanceColumn, Selector, SingleVerifier,
@@ -54,12 +51,10 @@ use halo2_gadgets::{
     },
     poseidon::{Pow5Chip as PoseidonChip, Pow5Config as PoseidonConfig, primitives as poseidon},
     sinsemilla::{
-        HashDomains,
         chip::{SinsemillaChip, SinsemillaConfig},
         merkle::{
-            MerklePath, PreparedMerklePathWitness,
+            MerklePath,
             chip::{MerkleChip, MerkleConfig},
-            prepare_merkle_path_witness,
         },
     },
     utilities::lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
@@ -97,8 +92,6 @@ fn orchard_k11_params() -> Params<vesta::Affine> {
 /// Shape of the public instance consumed by one Orchard Action proof.
 const INSTANCE_COLUMNS: usize = 1;
 const INSTANCE_ROWS: usize = 10;
-type OrchardPreparedMerklePath = PreparedMerklePathWitness<MERKLE_DEPTH_ORCHARD>;
-
 // Absolute offsets for public inputs.
 const ANCHOR: usize = 0;
 const CV_NET_X: usize = 1;
@@ -224,81 +217,7 @@ pub struct Circuit {
     pub(crate) circuit_version: OrchardCircuitVersion,
 }
 
-enum MerklePreparation {
-    None,
-    #[cfg(feature = "multicore")]
-    Receiver(Arc<Mutex<Option<mpsc::Receiver<Option<OrchardPreparedMerklePath>>>>>),
-}
-
-impl MerklePreparation {
-    fn is_deferred(&self) -> bool {
-        match self {
-            Self::None => false,
-            #[cfg(feature = "multicore")]
-            Self::Receiver(_) => true,
-        }
-    }
-
-    fn take(self) -> Option<OrchardPreparedMerklePath> {
-        match self {
-            Self::None => None,
-            #[cfg(feature = "multicore")]
-            Self::Receiver(receiver) => {
-                let receiver = receiver
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()?;
-                receiver.recv().ok().flatten()
-            }
-        }
-    }
-}
-
 impl Circuit {
-    fn prepare_merkle_path(&self) -> Option<OrchardPreparedMerklePath> {
-        let mut prepared = None;
-        self.path
-            .zip(self.pos)
-            .zip(self.cm_old.as_ref())
-            .map(|((path, pos), cm)| {
-                prepared = prepare_merkle_path_witness(
-                    OrchardHashDomains::MerkleCrh.Q(),
-                    pos,
-                    path.map(|node| node.inner()),
-                    ExtractedNoteCommitment::from(cm.clone()).inner(),
-                );
-            });
-        prepared
-    }
-
-    fn synthesize_merkle_path(
-        &self,
-        config: &Config,
-        layouter: &mut impl Layouter<pallas::Base>,
-        leaf: AssignedCell<pallas::Base, pallas::Base>,
-        prepared: Option<&OrchardPreparedMerklePath>,
-    ) -> Result<AssignedCell<pallas::Base, pallas::Base>, plonk::Error> {
-        let path = self
-            .path
-            .map(|typed_path| typed_path.map(|node| node.inner()));
-        let merkle_inputs = MerklePath::construct(
-            [config.merkle_chip_1(), config.merkle_chip_2()],
-            OrchardHashDomains::MerkleCrh,
-            self.pos,
-            path,
-        );
-
-        if let Some(prepared) = prepared {
-            merkle_inputs.calculate_root_prepared(
-                layouter.namespace(|| "Merkle path"),
-                leaf,
-                Value::known(prepared),
-            )
-        } else {
-            merkle_inputs.calculate_root(layouter.namespace(|| "Merkle path"), leaf)
-        }
-    }
-
     /// Returns an empty circuit with all private witnesses unknown.
     ///
     /// This is used for circuit shape-dependent operations, such as generating keys
@@ -618,7 +537,6 @@ impl Circuit {
         &self,
         config: &Config,
         layouter: &mut impl Layouter<pallas::Base>,
-        prepared_merkle: MerklePreparation,
     ) -> Result<AddressPoints, plonk::Error> {
         // Load the Sinsemilla generator lookup table used by the whole circuit.
         SinsemillaChip::load(config.sinsemilla_config_1.clone(), layouter)?;
@@ -688,14 +606,20 @@ impl Circuit {
             (psi_old, rho_old, cm_old, g_d_old, ak_P, nk, v_old, v_new)
         };
 
-        let merkle_leaf = cm_old.extract_p().inner().clone();
-        // Keep the canonical circuit and the wrapper's witness-free planning
-        // pass in the historical order. Only a real prepared witness defers
-        // these assignments so its arithmetic can overlap the intervening work.
-        let root = if prepared_merkle.is_deferred() {
-            None
-        } else {
-            Some(self.synthesize_merkle_path(config, layouter, merkle_leaf.clone(), None)?)
+        // Merkle path validity check
+        // (https://p.z.cash/ZKS:action-merkle-path-validity?partial).
+        let root = {
+            let path = self
+                .path
+                .map(|typed_path| typed_path.map(|node| node.inner()));
+            let merkle_inputs = MerklePath::construct(
+                [config.merkle_chip_1(), config.merkle_chip_2()],
+                OrchardHashDomains::MerkleCrh,
+                self.pos,
+                path,
+            );
+            let leaf = cm_old.extract_p().inner().clone();
+            merkle_inputs.calculate_root(layouter.namespace(|| "Merkle path"), leaf)?
         };
 
         // Value commitment integrity (https://p.z.cash/ZKS:action-cv-net-integrity?partial).
@@ -931,13 +855,6 @@ impl Circuit {
             layouter.constrain_instance(cmx.inner().cell(), config.primary, CMX)?;
         }
 
-        let root = if let Some(root) = root {
-            root
-        } else {
-            let prepared = prepared_merkle.take();
-            self.synthesize_merkle_path(config, layouter, merkle_leaf, prepared.as_ref())?
-        };
-
         // Constrain the remaining Orchard circuit checks.
         layouter.assign_region(
             || "Orchard circuit checks",
@@ -1148,76 +1065,6 @@ impl Circuit {
     }
 }
 
-impl Circuit {
-    fn synthesize_with_merkle_preparation(
-        &self,
-        config: Config,
-        mut layouter: impl Layouter<pallas::Base>,
-        prepared_merkle: MerklePreparation,
-    ) -> Result<(), plonk::Error> {
-        let addrs = self.synthesize_base(&config, &mut layouter, prepared_merkle)?;
-
-        if self.circuit_version.supports_cross_address_restriction() {
-            Self::synthesize_cross_address_checks(&config, &mut layouter, &addrs)?;
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(feature = "multicore")]
-#[derive(Debug)]
-struct CircuitWithPreparedMerklePath {
-    circuit: Circuit,
-    prepared_merkle: Arc<Mutex<Option<mpsc::Receiver<Option<OrchardPreparedMerklePath>>>>>,
-}
-
-#[cfg(feature = "multicore")]
-impl CircuitWithPreparedMerklePath {
-    fn new(circuit: &Circuit) -> Self {
-        let circuit = circuit.clone();
-        let preparation_circuit = circuit.clone();
-        let (sender, receiver) = mpsc::channel();
-        maybe_rayon::spawn(move || {
-            let _ = sender.send(preparation_circuit.prepare_merkle_path());
-        });
-
-        Self {
-            circuit,
-            prepared_merkle: Arc::new(Mutex::new(Some(receiver))),
-        }
-    }
-}
-
-#[cfg(feature = "multicore")]
-impl plonk::Circuit<pallas::Base> for CircuitWithPreparedMerklePath {
-    type Config = Config;
-    type FloorPlanner = floor_planner::V1Named;
-
-    fn without_witnesses(&self) -> Self {
-        Self {
-            circuit: Circuit::empty(self.circuit.circuit_version),
-            prepared_merkle: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn configure(meta: &mut plonk::ConstraintSystem<pallas::Base>) -> Self::Config {
-        Config::configure(meta)
-    }
-
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        layouter: impl Layouter<pallas::Base>,
-    ) -> Result<(), plonk::Error> {
-        self.circuit.synthesize_with_merkle_preparation(
-            config,
-            layouter,
-            MerklePreparation::Receiver(Arc::clone(&self.prepared_merkle)),
-        )
-    }
-}
-
 impl plonk::Circuit<pallas::Base> for Circuit {
     type Config = Config;
     type FloorPlanner = floor_planner::V1;
@@ -1233,9 +1080,15 @@ impl plonk::Circuit<pallas::Base> for Circuit {
     fn synthesize(
         &self,
         config: Self::Config,
-        layouter: impl Layouter<pallas::Base>,
+        mut layouter: impl Layouter<pallas::Base>,
     ) -> Result<(), plonk::Error> {
-        self.synthesize_with_merkle_preparation(config, layouter, MerklePreparation::None)
+        let addrs = self.synthesize_base(&config, &mut layouter)?;
+
+        if self.circuit_version.supports_cross_address_restriction() {
+            Self::synthesize_cross_address_checks(&config, &mut layouter, &addrs)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -1563,40 +1416,6 @@ impl Proof {
 
         let mut transcript = Blake2bWrite::<_, vesta::Affine, _>::init(vec![]);
 
-        #[cfg(feature = "multicore")]
-        {
-            // Prefer Action-level synthesis parallelism for batches that fill
-            // the worker pool. A single Action has no higher-level work to use
-            // instead, while smaller batches leave workers for Merkle
-            // preparation. Do not block on preparation from within the same
-            // Rayon pool, where callers may already occupy its workers.
-            let prepare_merkle = maybe_rayon::current_thread_index().is_none()
-                && (circuits.len() == 1 || circuits.len() < maybe_rayon::current_num_threads());
-            if prepare_merkle {
-                let circuits: Vec<_> = circuits
-                    .iter()
-                    .map(CircuitWithPreparedMerklePath::new)
-                    .collect();
-                plonk::create_proof(
-                    &pk.params,
-                    &pk.pk,
-                    &circuits,
-                    &instances,
-                    &mut rng,
-                    &mut transcript,
-                )?;
-            } else {
-                plonk::create_proof(
-                    &pk.params,
-                    &pk.pk,
-                    circuits,
-                    &instances,
-                    &mut rng,
-                    &mut transcript,
-                )?;
-            }
-        }
-        #[cfg(not(feature = "multicore"))]
         plonk::create_proof(
             &pk.params,
             &pk.pk,

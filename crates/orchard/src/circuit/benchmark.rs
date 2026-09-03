@@ -23,8 +23,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(feature = "multicore")]
-use super::CircuitWithPreparedMerklePath;
 use super::{
     Circuit, INSTANCE_COLUMNS, INSTANCE_ROWS, Instance, K, OrchardCircuitVersion, ProvingKey,
     VerifyingKey,
@@ -714,11 +712,7 @@ fn benchmark_witness_assignment() {
             })
             .collect::<Vec<_>>();
 
-        #[cfg(feature = "multicore")]
-        let prepare_merkle = action_count == 1 || action_count < worker_count;
-
-        // Generate the canonical plan from the ordinary circuit, as key
-        // generation does. The prepared circuit must reuse this exact plan.
+        // Generate the canonical plan, as key generation does.
         let floor_plan = floor_planner::V1::synthesize_batch(
             &mut witnesses,
             circuits,
@@ -731,31 +725,6 @@ fn benchmark_witness_assignment() {
             .expect("the first synthesis creates a floor plan");
 
         for _ in 0..IRONWOOD_WITNESS_BENCH_WARMUPS {
-            #[cfg(feature = "multicore")]
-            if prepare_merkle {
-                let prepared_circuits: Vec<_> = circuits
-                    .iter()
-                    .map(CircuitWithPreparedMerklePath::new)
-                    .collect();
-                floor_planner::V1Named::synthesize_batch(
-                    &mut witnesses,
-                    &prepared_circuits,
-                    config.clone(),
-                    &constants,
-                    Some(&floor_plan),
-                )
-                .unwrap();
-            } else {
-                floor_planner::V1::synthesize_batch(
-                    &mut witnesses,
-                    circuits,
-                    config.clone(),
-                    &constants,
-                    Some(&floor_plan),
-                )
-                .unwrap();
-            }
-            #[cfg(not(feature = "multicore"))]
             floor_planner::V1::synthesize_batch(
                 &mut witnesses,
                 circuits,
@@ -771,31 +740,6 @@ fn benchmark_witness_assignment() {
         for _ in 0..IRONWOOD_WITNESS_BENCH_SAMPLES {
             let sample_config = config.clone();
             let started = Instant::now();
-            #[cfg(feature = "multicore")]
-            if prepare_merkle {
-                let prepared_circuits: Vec<_> = circuits
-                    .iter()
-                    .map(CircuitWithPreparedMerklePath::new)
-                    .collect();
-                floor_planner::V1Named::synthesize_batch(
-                    &mut witnesses,
-                    &prepared_circuits,
-                    sample_config,
-                    &constants,
-                    Some(&floor_plan),
-                )
-                .unwrap();
-            } else {
-                floor_planner::V1::synthesize_batch(
-                    &mut witnesses,
-                    circuits,
-                    sample_config,
-                    &constants,
-                    Some(&floor_plan),
-                )
-                .unwrap();
-            }
-            #[cfg(not(feature = "multicore"))]
             floor_planner::V1::synthesize_batch(
                 &mut witnesses,
                 circuits,
