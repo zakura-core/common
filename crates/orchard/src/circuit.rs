@@ -1527,9 +1527,9 @@ impl Proof {
     /// Returns [`plonk::Error::Synthesis`] if any circuit's version does not match `pk`'s
     /// version, since `pk` could not produce a valid proof for it.
     ///
-    /// Returns [`plonk::Error::InvalidInstances`] if any instance has
-    /// `disableCrossAddress = 1` and `pk` is not an
-    /// [`OrchardCircuitVersion::PostNu6_3`] proving key.
+    /// Returns [`plonk::Error::InvalidInstances`] if the circuit and instance
+    /// counts differ, or if any instance has `disableCrossAddress = 1` and `pk`
+    /// is not an [`OrchardCircuitVersion::PostNu6_3`] proving key.
     ///
     /// All instances of a bundle carry the same `disableCrossAddress` value; that uniformity
     /// is the bundle layer's invariant, and is not checked here.
@@ -1548,6 +1548,9 @@ impl Proof {
         if instances.iter().any(Instance::cross_address_disabled)
             && !pk.supports_cross_address_restriction()
         {
+            return Err(plonk::Error::InvalidInstances);
+        }
+        if circuits.len() != instances.len() {
             return Err(plonk::Error::InvalidInstances);
         }
 
@@ -2247,6 +2250,19 @@ mod tests {
                 Err(super::plonk::Error::Synthesis),
             ));
         }
+    }
+
+    #[test]
+    fn create_rejects_mismatched_circuit_and_instance_counts() {
+        let mut rng = OsRng;
+        let (circuit, _) =
+            generate_circuit_instance(&mut rng, OrchardCircuitVersion::FixedPostNu6_2);
+        let pk = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key();
+
+        assert!(matches!(
+            Proof::create(pk, &[circuit], &[], &mut rng),
+            Err(super::plonk::Error::InvalidInstances),
+        ));
     }
 
     fn serialized_proof_test_case_for_version(

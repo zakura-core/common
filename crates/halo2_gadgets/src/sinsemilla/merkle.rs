@@ -66,14 +66,18 @@ fn merkle_message_words(
 /// Prepares a [`PreparedMerklePathWitness`] for a complete Sinsemilla Merkle
 /// path.
 ///
-/// Returns `None` if any incomplete addition in the path has an exceptional
-/// result.
+/// Returns `None` if `q` is the identity or any incomplete addition in the
+/// path has an exceptional result.
 pub fn prepare_merkle_path_witness<const PATH_LENGTH: usize>(
     q: pallas::Affine,
     leaf_pos: u32,
     path: [pallas::Base; PATH_LENGTH],
     mut node: pallas::Base,
 ) -> Option<PreparedMerklePathWitness<PATH_LENGTH>> {
+    if bool::from(group::CurveAffine::is_identity(&q)) {
+        return None;
+    }
+
     let mut layers = Vec::with_capacity(PATH_LENGTH);
     for (layer, sibling) in path.into_iter().enumerate() {
         let position_bit = leaf_pos.checked_shr(layer as u32).unwrap_or(0) & 1;
@@ -327,7 +331,10 @@ pub mod tests {
         },
     };
 
-    use group::ff::{Field, PrimeField, PrimeFieldBits};
+    use group::{
+        Curve, Group,
+        ff::{Field, PrimeField, PrimeFieldBits},
+    };
     use halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
         dev::MockProver,
@@ -339,6 +346,19 @@ pub mod tests {
     use std::{convert::TryInto, iter, marker::PhantomData};
 
     const MERKLE_DEPTH: usize = 32;
+
+    #[test]
+    fn prepared_witness_rejects_identity_generator() {
+        assert!(
+            prepare_merkle_path_witness::<1>(
+                pallas::Point::identity().to_affine(),
+                0,
+                [pallas::Base::ZERO],
+                pallas::Base::ZERO,
+            )
+            .is_none()
+        );
+    }
 
     #[derive(Default)]
     struct MyMerkleCircuit<Lookup: PallasLookupRangeCheck> {
