@@ -68,7 +68,7 @@ impl ConstantTimeEq for Fq {
 impl PartialEq for Fq {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.ct_eq(other).unwrap_u8() == 1
+        self.eq_vartime(other)
     }
 }
 

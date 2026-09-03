@@ -20,6 +20,32 @@ fn criterion_benchmark(c: &mut Criterion) {
     group.bench_function("sqrt", bench_fp_sqrt);
     group.bench_function("to_repr", bench_fp_to_repr);
     group.bench_function("from_repr", bench_fp_from_repr);
+    group.bench_function("eq/equal", |b| bench_fp_eq(b, true));
+    group.bench_function("eq/unequal", |b| bench_fp_eq(b, false));
+}
+
+fn bench_fp_eq(b: &mut Bencher, equal: bool) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+    let values: Vec<_> = (0..SAMPLES)
+        .map(|_| {
+            let lhs = Fp::random(&mut rng);
+            let rhs = if equal { lhs } else { Fp::random(&mut rng) };
+            (lhs, rhs)
+        })
+        .collect();
+    assert!(values.iter().all(|(lhs, rhs)| (*lhs == *rhs) == equal));
+
+    let mut count = 0;
+    b.iter(|| {
+        let result = values[count].0 == values[count].1;
+        count = (count + 1) % SAMPLES;
+        result
+    });
 }
 
 fn bench_fp_double(b: &mut Bencher) {
