@@ -11,6 +11,8 @@ use pasta_curves::{deferred::DeferredField, pallas, vesta};
 use rand_core::Rng;
 
 use super::Argument;
+#[cfg(feature = "multicore")]
+use crate::PreparedSparseCommitments;
 use crate::{
     arithmetic::{CurveAffine, best_multiexp, parallelize},
     plonk::{ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error},
@@ -172,6 +174,14 @@ fn commit_quotient_evaluation_mask<C: CurveAffine>(
 ) -> C::Curve {
     assert_eq!(polynomial.len(), QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
     assert!(params.g.len() >= polynomial.len());
+
+    #[cfg(feature = "multicore")]
+    {
+        let coefficients = [(0, polynomial[0]), (1, polynomial[1])];
+        if let Some(commitment) = params.commit_sparse(&coefficients, blind) {
+            return commitment;
+        }
+    }
 
     let scalars = [polynomial[0], polynomial[1], blind.0];
     let bases = [params.g[0], params.g[1], params.w];
@@ -378,6 +388,8 @@ mod tests {
         QUOTIENT_EVALUATION_MASK_COEFFICIENTS, commit_quotient_evaluation_mask,
         evaluate_quotient_evaluation_mask, fold_quotient_pieces, sample_quotient_evaluation_mask,
     };
+    #[cfg(feature = "multicore")]
+    use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use crate::{
         arithmetic::{CurveAffine, eval_polynomial},
         plonk::ChallengeX,
@@ -438,8 +450,12 @@ mod tests {
     where
         C: CurveAffine + core::fmt::Debug,
     {
-        let domain = EvaluationDomain::new(1, 3);
-        let params = crate::poly::commitment::Params::<C>::new(3);
+        #[cfg(feature = "multicore")]
+        let k = PREPARED_SPARSE_COMMITMENT_K;
+        #[cfg(not(feature = "multicore"))]
+        let k = 3;
+        let domain = EvaluationDomain::new(1, k);
+        let params = crate::poly::commitment::Params::<C>::new(k);
         let mut rng = StdRng::seed_from_u64(0x7175_6f74_6965_6e74);
         let polynomial = sample_quotient_evaluation_mask(&mut rng);
         assert_eq!(polynomial.len(), QUOTIENT_EVALUATION_MASK_COEFFICIENTS);
@@ -452,6 +468,14 @@ mod tests {
             commit_quotient_evaluation_mask(&params, &polynomial, blind),
             params.commit(&padded, blind),
         );
+        #[cfg(feature = "multicore")]
+        {
+            assert!(params.prepare_sparse_commitment());
+            assert_eq!(
+                commit_quotient_evaluation_mask(&params, &polynomial, blind),
+                params.commit(&padded, blind),
+            );
+        }
 
         let point = C::Scalar::random(&mut rng);
         assert_eq!(

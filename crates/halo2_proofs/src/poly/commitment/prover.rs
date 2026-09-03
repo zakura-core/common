@@ -3,6 +3,8 @@ use rand_core::Rng;
 
 use super::super::{Coeff, Polynomial, evaluate_polynomial_with_powers, power_vector};
 use super::{Blind, Params};
+#[cfg(feature = "multicore")]
+use crate::PreparedSparseCommitments;
 use crate::arithmetic::{CurveAffine, CurveExt, best_multiexp, compute_inner_product};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
@@ -48,6 +50,11 @@ fn ipa_masking_commitment<C: CurveAffine>(
     assert_eq!(coefficients[0].0, 0);
     for (t, (index, _)) in coefficients[1..].iter().enumerate() {
         assert_eq!(*index, 1 << t);
+    }
+
+    #[cfg(feature = "multicore")]
+    if let Some(commitment) = params.commit_sparse(coefficients, blind) {
+        return commitment;
     }
 
     let mut scalars = Vec::with_capacity(coefficients.len() + 1);
@@ -341,6 +348,8 @@ mod tests {
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
     use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
+    #[cfg(feature = "multicore")]
+    use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
@@ -414,6 +423,14 @@ mod tests {
                 ipa_masking_commitment(&coefficients, blind, &params),
                 params.commit(&full, blind),
             );
+            #[cfg(feature = "multicore")]
+            if k == PREPARED_SPARSE_COMMITMENT_K {
+                assert!(params.prepare_sparse_commitment());
+                assert_eq!(
+                    ipa_masking_commitment(&coefficients, blind, &params),
+                    params.commit(&full, blind),
+                );
+            }
         }
     }
 

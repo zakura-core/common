@@ -25,7 +25,7 @@ pub mod transcript;
 pub mod dev;
 mod helpers;
 
-#[cfg(any(feature = "batch", all(feature = "multicore", not(feature = "orbits"))))]
+#[cfg(any(feature = "batch", feature = "multicore"))]
 fn decode_scalar_repr<F: ff::PrimeField>(mut bytes: impl ExactSizeIterator<Item = u8>) -> F {
     const LIMB_BYTES: usize = core::mem::size_of::<u64>();
 
@@ -53,6 +53,20 @@ fn decode_scalar_repr<F: ff::PrimeField>(mut bytes: impl ExactSizeIterator<Item 
         }
     }
     decoded.unwrap_or(F::ZERO)
+}
+
+#[cfg(feature = "multicore")]
+const PREPARED_SPARSE_COMMITMENT_K: u32 = 11;
+
+#[cfg(feature = "multicore")]
+trait PreparedSparseCommitments<C: pasta_curves::arithmetic::CurveAffine> {
+    fn prepare_sparse_commitment(&self) -> bool;
+
+    fn commit_sparse(
+        &self,
+        coefficients: &[(usize, C::Scalar)],
+        blind: poly::commitment::Blind<C::Scalar>,
+    ) -> Option<C::Curve>;
 }
 
 // Selector families smaller than this are cheaper to evaluate directly.
