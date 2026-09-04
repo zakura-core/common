@@ -10,6 +10,25 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.1.0-rc.1] - 2026-09-03
+
+### Changed
+
+- Prepared proving remains enabled through ten effective threads on AArch64
+  macOS for Orchard's `k = 11` SRS, retaining the faster prepared route in
+  end-to-end Apple M4 measurements while wider pools continue to use the
+  planned multiexp
+  ([#234](https://github.com/zakura-core/common/pull/234)).
+- `ProvingKey::prepare_proving` now prepares prover commitments under the
+  default multicore feature set, without requiring orbit MSMs
+  ([#270](https://github.com/zakura-core/common/pull/270)).
+- Default no-orbits prepared proving now retains an additional approximately
+  0.5 MiB fixed-base blind table to reduce repeated proof time
+  ([#271](https://github.com/zakura-core/common/pull/271)).
+- Improved Orchard proof-creation latency by preparing Merkle-path arithmetic
+  concurrently with independent circuit witness assignment
+  ([#340](https://github.com/zakura-core/common/pull/340)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

@@ -10,6 +10,45 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.1.0-rc.1] - 2026-09-03
+
+### Added
+
+- Added the `utilities::MulByInversePowerOfTwo` trait, which multiplies a
+  field element by `2^-exponent` with a provided generic implementation and
+  optimized Pasta `Fp`/`Fq` implementations
+  ([#295](https://github.com/zakura-core/common/pull/295)).
+- Added opaque APIs for preparing Sinsemilla Merkle-path arithmetic before
+  assigning the corresponding circuit witnesses
+  ([#340](https://github.com/zakura-core/common/pull/340)).
+
+### Changed
+
+- The lookup range check and running-sum decomposition gadgets now scale each
+  running-sum step with a partial Montgomery reduction on Pasta fields. Their
+  decomposition methods require `F: MulByInversePowerOfTwo`; fields other
+  than Pasta `Fp`/`Fq` need a one-line empty implementation of that trait to
+  keep using them ([#295](https://github.com/zakura-core/common/pull/295)).
+- Changed generic fixed-base window preprocessing to advance public window
+  scales iteratively instead of recomputing each power with constant-time
+  exponentiation, reducing full-width Lagrange-coefficient generation by
+  14.7% on Apple M4 and 16.3% on x86_64 Linux. Orchard uses precomputed
+  coefficient tables, so these measurements do not represent an Orchard
+  key-generation speedup
+  ([#333](https://github.com/zakura-core/common/pull/333)).
+- Reduced variable-base multiplication witness-generation time by precomputing
+  the incomplete double-and-add chain before assigning circuit cells
+  ([#337](https://github.com/zakura-core/common/pull/337)).
+- Avoided redundant cell-handle clones in the variable-base multiplication
+  overflow check ([#341](https://github.com/zakura-core/common/pull/341)).
+- Reduced Ironwood witness-assignment time by batching unused-cell assignments
+  in variable-base multiplication and retaining handles only for running sums
+  consumed by later constraints
+  ([#342](https://github.com/zakura-core/common/pull/342)).
+- Reduced Sinsemilla witness-assignment time by batching cells whose handles
+  are not consumed by later constraints
+  ([#344](https://github.com/zakura-core/common/pull/344)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed
