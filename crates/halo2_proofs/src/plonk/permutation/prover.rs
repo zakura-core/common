@@ -9,7 +9,7 @@ use std::{convert::Infallible, iter};
 use super::super::{ChallengeBeta, ChallengeGamma, ChallengeX, circuit::Any};
 use super::{Argument, ProvingKey, permutation_chunk_len};
 use crate::{
-    arithmetic::{CurveAffine, parallelize},
+    arithmetic::CurveAffine,
     plonk::{
         self, Error,
         evaluation::{EvaluationPoint, EvaluationQuery},
@@ -38,8 +38,9 @@ struct SetBlinding<F: Field> {
     product_blind: Blind<F>,
 }
 
-struct PreparedRatios<F: Field> {
-    values: Vec<F>,
+struct PreparedFractions<F: Field> {
+    numerators: Vec<F>,
+    denominators: Vec<F>,
     blinding: SetBlinding<F>,
 }
 
@@ -248,33 +249,35 @@ impl Argument {
 
         // Indexed collection preserves set order for the dependent prefix
         // chain and eventual transcript writes.
-        let prepared_ratios = set_inputs
+        let prepared_fractions = set_inputs
             .into_par_iter()
             .zip(blinding.sets.into_par_iter())
-            .map(
-                |((columns, permutations, initial_deltaomega), blinding)| PreparedRatios {
-                    values: prepare_ratios(
-                        params,
-                        domain,
-                        columns,
-                        permutations,
-                        advice,
-                        fixed,
-                        instance,
-                        beta,
-                        gamma,
-                        initial_deltaomega,
-                    )
-                    .0,
+            .map(|((columns, permutations, initial_deltaomega), blinding)| {
+                let (numerators, denominators, _) = prepare_fractions(
+                    params,
+                    domain,
+                    columns,
+                    permutations,
+                    advice,
+                    fixed,
+                    instance,
+                    beta,
+                    gamma,
+                    initial_deltaomega,
+                    blinding_factors,
+                );
+                PreparedFractions {
+                    numerators,
+                    denominators,
                     blinding,
-                },
-            )
+                }
+            })
             .collect::<Vec<_>>();
 
         // Each set starts with the preceding set's final product, so this
         // short prefix chain remains serial.
         let mut last_z = C::Scalar::ONE;
-        let products = prepared_ratios
+        let products = prepared_fractions
             .into_iter()
             .map(|prepared| {
                 let blinding = prepared.blinding;
@@ -282,7 +285,8 @@ impl Argument {
                     domain,
                     blinding_factors,
                     &mut last_z,
-                    prepared.values,
+                    prepared.numerators,
+                    prepared.denominators,
                     |rows| {
                         rows.copy_from_slice(&blinding.rows);
                         blinding.product_blind
@@ -333,7 +337,7 @@ impl Argument {
             .chunks(chunk_len)
             .zip(pkey.permutations.chunks(chunk_len))
         {
-            let (ratios, next_deltaomega) = prepare_ratios(
+            let (numerators, denominators, next_deltaomega) = prepare_fractions(
                 params,
                 domain,
                 columns,
@@ -344,12 +348,17 @@ impl Argument {
                 beta,
                 gamma,
                 deltaomega,
+                blinding_factors,
             );
             deltaomega = next_deltaomega;
-            let product =
-                build_product::<C>(domain, blinding_factors, &mut last_z, ratios, |rows| {
-                    set_blinding(rows)
-                });
+            let product = build_product::<C>(
+                domain,
+                blinding_factors,
+                &mut last_z,
+                numerators,
+                denominators,
+                |rows| set_blinding(rows),
+            );
             finish_set(prepare_product(params, pk, product))?;
         }
 
@@ -452,7 +461,7 @@ pub(in crate::plonk) fn construct_constraints<E: Copy, F: WithSmallOrderMulGroup
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_ratios<C: CurveAffine>(
+fn prepare_fractions<C: CurveAffine>(
     params: &Params<C>,
     domain: &poly::EvaluationDomain<C::Scalar>,
     columns: &[plonk::Column<Any>],
@@ -463,98 +472,75 @@ fn prepare_ratios<C: CurveAffine>(
     beta: ChallengeBeta<C>,
     gamma: ChallengeGamma<C>,
     mut deltaomega: C::Scalar,
-) -> (Vec<C::Scalar>, C::Scalar) {
-    let mut ratios = vec![C::Scalar::ZERO; params.n as usize];
-
-    // Compute the product of denominators for this permutation set.
-    parallelize(&mut ratios, |ratios, start| {
-        let mut columns = columns.iter().zip(permutations);
-        let (&first_column, first_permutation) = columns
-            .next()
-            .expect("a permutation set contains at least one column");
-        let first_values = match first_column.column_type() {
-            Any::Advice => advice,
-            Any::Fixed => fixed,
-            Any::Instance => instance,
-        };
-        for ((ratio, value), permuted_value) in ratios
-            .iter_mut()
-            .zip(first_values[first_column.index()][start..].iter())
-            .zip(first_permutation[start..].iter())
-        {
-            *ratio = *beta * permuted_value + &*gamma + value;
-        }
-
-        for (&column, permuted_values) in columns {
-            let values = match column.column_type() {
-                Any::Advice => advice,
-                Any::Fixed => fixed,
-                Any::Instance => instance,
-            };
-            for ((ratio, value), permuted_value) in ratios
-                .iter_mut()
-                .zip(values[column.index()][start..].iter())
-                .zip(permuted_values[start..].iter())
-            {
-                *ratio *= &(*beta * permuted_value + &*gamma + value);
-            }
-        }
-    });
-
-    crate::arithmetic::batch_invert_multi(&mut ratios);
-
-    // Multiply by the product of numerators for this permutation set.
+    blinding_factors: usize,
+) -> (Vec<C::Scalar>, Vec<C::Scalar>, C::Scalar) {
+    let fraction_rows = params.n as usize - (blinding_factors + 1);
+    let mut numerators = vec![C::Scalar::ZERO; params.n as usize];
+    let mut denominators = vec![C::Scalar::ZERO; params.n as usize];
     let omega = domain.get_omega();
     let beta_delta = deltaomega * &*beta;
-    parallelize(&mut ratios, |ratios, start| {
-        let omega_start = omega.pow_vartime([start as u64]);
-        let mut column_beta_delta = beta_delta;
-        for (column_index, &column) in columns.iter().enumerate() {
-            let values = match column.column_type() {
-                Any::Advice => advice,
-                Any::Fixed => fixed,
-                Any::Instance => instance,
-            };
-            let mut row_beta_deltaomega = column_beta_delta * &omega_start;
-            for (ratio, value) in ratios
-                .iter_mut()
-                .zip(values[column.index()][start..].iter())
+    super::super::parallelize_two(
+        &mut numerators[..fraction_rows],
+        &mut denominators[..fraction_rows],
+        |numerators, denominators, start| {
+            let omega_start = omega.pow_vartime([start as u64]);
+            let mut column_beta_delta = beta_delta;
+            for (column_index, (&column, permuted_values)) in
+                columns.iter().zip(permutations).enumerate()
             {
-                *ratio *= &(row_beta_deltaomega + &*gamma + value);
-                row_beta_deltaomega *= &omega;
+                let values = match column.column_type() {
+                    Any::Advice => advice,
+                    Any::Fixed => fixed,
+                    Any::Instance => instance,
+                };
+                let mut row_beta_deltaomega = column_beta_delta * &omega_start;
+                for (((numerator, denominator), value), permuted_value) in numerators
+                    .iter_mut()
+                    .zip(denominators.iter_mut())
+                    .zip(values[column.index()][start..].iter())
+                    .zip(permuted_values[start..].iter())
+                {
+                    let numerator_factor = row_beta_deltaomega + &*gamma + value;
+                    let denominator_factor = *beta * permuted_value + &*gamma + value;
+                    if column_index == 0 {
+                        *numerator = numerator_factor;
+                        *denominator = denominator_factor;
+                    } else {
+                        *numerator *= &numerator_factor;
+                        *denominator *= &denominator_factor;
+                    }
+                    row_beta_deltaomega *= &omega;
+                }
+                if column_index + 1 < columns.len() {
+                    column_beta_delta *= &C::Scalar::DELTA;
+                }
             }
-            if column_index + 1 < columns.len() {
-                column_beta_delta *= &C::Scalar::DELTA;
-            }
-        }
-    });
+        },
+    );
     for _ in columns {
         deltaomega *= &C::Scalar::DELTA;
     }
 
-    (ratios, deltaomega)
+    (numerators, denominators, deltaomega)
 }
 
 fn build_product<C: CurveAffine>(
     domain: &poly::EvaluationDomain<C::Scalar>,
     blinding_factors: usize,
     last_z: &mut C::Scalar,
-    mut ratios: Vec<C::Scalar>,
+    numerators: Vec<C::Scalar>,
+    denominators: Vec<C::Scalar>,
     set_blinding: impl FnOnce(&mut [C::Scalar]) -> Blind<C::Scalar>,
 ) -> UntransformedSet<C::Scalar> {
-    let usable_rows = ratios.len() - blinding_factors;
-    let mut state = *last_z;
-    let (last, prefix) = ratios[..usable_rows]
-        .split_last_mut()
-        .expect("the usable evaluation domain is non-empty");
-    for value in prefix {
-        let current = *value;
-        *value = state;
-        state *= &current;
-    }
-    *last = state;
+    let usable_rows = numerators.len() - blinding_factors;
+    let product = super::super::prefix_products_of_fractions(
+        numerators,
+        denominators,
+        usable_rows - 1,
+        *last_z,
+    );
 
-    let mut product = domain.lagrange_from_vec(ratios);
+    let mut product = domain.lagrange_from_vec(product);
     let product_blind = set_blinding(&mut product[usable_rows..]);
     *last_z = product[usable_rows - 1];
 

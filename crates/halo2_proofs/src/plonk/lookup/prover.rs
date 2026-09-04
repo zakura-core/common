@@ -885,33 +885,30 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         // s_j(X) is the jth table expression in this lookup,
         // s'(X) is the compression of the permuted table expressions,
         // and i is the ith row of the expression.
-        let mut lookup_product = vec![C::Scalar::ZERO; params.n as usize];
+        let fraction_rows = params.n as usize - (blinding_factors + 1);
+        let mut denominators = vec![C::Scalar::ZERO; params.n as usize];
         // Denominator uses the permuted input expression and permuted table expression
-        parallelize(&mut lookup_product, |lookup_product, start| {
-            for ((lookup_product, permuted_input_value), permuted_table_value) in lookup_product
+        parallelize(&mut denominators[..fraction_rows], |denominators, start| {
+            for ((denominator, permuted_input_value), permuted_table_value) in denominators
                 .iter_mut()
                 .zip(self.permuted_input_expression[start..].iter())
                 .zip(self.permuted_table_expression[start..].iter())
             {
-                *lookup_product = (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
+                *denominator = (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
             }
         });
 
-        // Batch invert to obtain the denominators for the lookup product
-        // polynomials
-        crate::arithmetic::batch_invert_multi(&mut lookup_product);
-
-        // Finish the computation of the entire fraction by computing the numerators
+        // Compute the numerators for the lookup product polynomial.
         // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
         // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
-        parallelize(&mut lookup_product, |product, start| {
-            for ((product, &input_term), &table_term) in product
+        let mut numerators = vec![C::Scalar::ZERO; params.n as usize];
+        parallelize(&mut numerators[..fraction_rows], |numerators, start| {
+            for ((numerator, &input_term), &table_term) in numerators
                 .iter_mut()
                 .zip(self.compressed_input_expression[start..].iter())
                 .zip(self.compressed_table_expression[start..].iter())
             {
-                *product *= &(input_term + &*beta);
-                *product *= &(table_term + &*gamma);
+                *numerator = (input_term + &*beta) * &(table_term + &*gamma);
             }
         });
 
@@ -928,18 +925,16 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         // s'(\omega^i) is the permuted table expression,
         // and i is the ith row of the expression.
 
-        // Compute the evaluations of the lookup product polynomial
-        // over our domain, starting with z[0] = 1
-        // Reuse the fraction vector for z instead of allocating a second
-        // domain-sized vector. This includes the "last" row, which should be
-        // a boolean (and ideally 1, else soundness is broken).
+        // Compute the evaluations of the lookup product polynomial over our
+        // domain, starting with z[0] = 1. Reuse the numerator vector for z
+        // instead of allocating a third domain-sized vector.
         let usable_rows = params.n as usize - blinding_factors;
-        let mut state = C::Scalar::ONE;
-        for product in lookup_product.iter_mut().take(usable_rows) {
-            let current = *product;
-            *product = state;
-            state *= &current;
-        }
+        let mut lookup_product = super::super::prefix_products_of_fractions(
+            numerators,
+            denominators,
+            fraction_rows,
+            C::Scalar::ONE,
+        );
         lookup_product.truncate(usable_rows);
         lookup_product.extend(blinding.rows);
         assert_eq!(lookup_product.len(), params.n as usize);
