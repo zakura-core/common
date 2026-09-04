@@ -2797,15 +2797,29 @@ fn compressed_selector_cache_preserves_proof() {
             meta.lookup(|meta| {
                 advice[..2]
                     .iter()
+                    .zip([F::ZERO, F::ONE])
                     .zip(table)
-                    .map(|(advice, table)| (meta.query_advice(*advice, Rotation::cur()), table))
+                    .map(|((advice, offset), table)| {
+                        (
+                            meta.query_advice(*advice, Rotation::cur())
+                                + Expression::Constant(offset),
+                            table,
+                        )
+                    })
                     .collect()
             });
             meta.lookup(|meta| {
                 advice[2..]
                     .iter()
+                    .zip([F::ZERO, F::ONE])
                     .zip(table)
-                    .map(|(advice, table)| (meta.query_advice(*advice, Rotation::cur()), table))
+                    .map(|((advice, offset), table)| {
+                        (
+                            meta.query_advice(*advice, Rotation::cur())
+                                + Expression::Constant(offset),
+                            table,
+                        )
+                    })
                     .collect()
             });
 
@@ -2841,8 +2855,11 @@ fn compressed_selector_cache_preserves_proof() {
             layouter.assign_table(
                 || "two-column lookup table",
                 |mut table| {
-                    for (row, value) in [F::ZERO, F::ONE].into_iter().enumerate() {
-                        for column in config.table {
+                    for (row, values) in [[F::ZERO, F::ONE], [F::ONE, F::ONE + F::ONE]]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        for (column, value) in config.table.into_iter().zip(values) {
                             table.assign_cell(|| "value", column, row, || Value::known(value))?;
                         }
                     }

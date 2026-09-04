@@ -3,6 +3,8 @@ use super::super::{
     circuit::Expression, evaluator_schedule::QuotientPoly,
 };
 use super::Argument;
+#[cfg(feature = "multicore")]
+use crate::PreparedSparseCommitments;
 use crate::{
     arithmetic::{CurveAffine, parallelize},
     plonk::evaluation::{EvaluationPoint, EvaluationQuery},
@@ -92,11 +94,17 @@ pub(in crate::plonk) struct ProductBlinding<F: Field> {
     product_blind: Blind<F>,
 }
 
-struct PreparedTable<F: Field, Ev> {
-    compressed_expression: Arc<Polynomial<F, LagrangeCoeff>>,
-    compressed_coset: Option<poly::Ast<Ev, F, ExtendedLagrangeCoeff>>,
-    sorted_values: Vec<F>,
+struct PreparedTable<C: CurveAffine, Ev> {
+    compressed_expression: Arc<Polynomial<C::Scalar, LagrangeCoeff>>,
+    compressed_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
+    sorted_values: Vec<C::Scalar>,
     sorted_keys: Vec<PastaSortKey>,
+    commitment_center: Option<TableCommitmentCenter<C>>,
+}
+
+struct TableCommitmentCenter<C: CurveAffine> {
+    scalar: C::Scalar,
+    correction: C::Curve,
 }
 
 struct PreparedInput<F: Field, Ev> {
@@ -114,9 +122,14 @@ struct PendingLookup<C: CurveAffine, Ev> {
 }
 
 struct TableState<C: CurveAffine, Ev> {
-    table: Option<Arc<PreparedTable<C::Scalar, Ev>>>,
+    table: Option<Arc<PreparedTable<C, Ev>>>,
     pending: Vec<PendingLookup<C, Ev>>,
 }
+
+/// Require centering to remove at least one quarter of the usable terms that
+/// would otherwise be nonzero. This keeps the extra scalar pass and fixed-base
+/// multiplication away from tables with only a weak mode.
+const TABLE_CENTERING_MIN_SAVED_FRACTION_DENOMINATOR: usize = 4;
 
 const PASTA_REPR_BYTES: usize = 32;
 const PASTA_LIMB_BYTES: usize = std::mem::size_of::<u64>();
@@ -222,6 +235,57 @@ fn sort_lookup_values<F: Field + Ord>(values: &mut Vec<F>, scratch: &mut [PastaS
     }
 
     values.sort_unstable();
+}
+
+fn table_commitment_center<F: Field + Ord>(sorted_values: &[F]) -> Option<F> {
+    debug_assert!(sorted_values.windows(2).all(|pair| pair[0] <= pair[1]));
+    let mut zero_count = 0;
+    let mut best = None;
+    let mut best_count = 0;
+
+    for run in sorted_values.chunk_by(|left, right| left == right) {
+        let value = run[0];
+        if bool::from(value.is_zero()) {
+            zero_count = run.len();
+        } else if run.len() > best_count {
+            best = Some(value);
+            best_count = run.len();
+        }
+    }
+
+    let best = best?;
+    if best_count == 1 {
+        return None;
+    }
+    let saved_terms = best_count.checked_sub(zero_count)?;
+    (saved_terms
+        >= sorted_values
+            .len()
+            .div_ceil(TABLE_CENTERING_MIN_SAVED_FRACTION_DENOMINATOR))
+    .then_some(best)
+}
+
+fn fixed_table_center<C: CurveAffine>(
+    params: &Params<C>,
+    sorted_values: &[C::Scalar],
+) -> Option<TableCommitmentCenter<C>>
+where
+    C::Scalar: Ord,
+    C::Curve: Mul<C::Scalar, Output = C::Curve>,
+{
+    if std::env::var_os("ZAKURA_LOOKUP_MODE_CENTER_CONTROL").is_some() {
+        return None;
+    }
+    let scalar = table_commitment_center(sorted_values)?;
+    #[cfg(feature = "multicore")]
+    if let Some(correction) = params.commit_sparse(&[(0, scalar)], Blind(C::Scalar::ZERO)) {
+        return Some(TableCommitmentCenter { scalar, correction });
+    }
+
+    Some(TableCommitmentCenter {
+        scalar,
+        correction: C::Curve::from(params.g[0]) * scalar,
+    })
 }
 
 pub(in crate::plonk) struct PreparedProduct<C: CurveAffine, Ev> {
@@ -380,8 +444,9 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
 
 impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
     #[allow(clippy::too_many_arguments)]
-    fn prepare_table<Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
+    fn prepare_table<C, Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
         &self,
+        params: &Params<C>,
         domain: &EvaluationDomain<F>,
         value_evaluator: &poly::Evaluator<Ev, F, LagrangeCoeff>,
         theta: F,
@@ -390,7 +455,11 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         usable_rows: usize,
         build_quotient_asts: bool,
         mut sort_scratch: Vec<PastaSortKey>,
-    ) -> PreparedTable<F, Ec> {
+    ) -> PreparedTable<C, Ec>
+    where
+        C: CurveAffine<ScalarExt = F>,
+        C::Curve: Mul<F, Output = C::Curve>,
+    {
         let unpermuted_expressions = self.table_expressions.iter().map(|expression| {
             let Expression::Fixed(query) = expression else {
                 unreachable!("lookup table expressions are fixed queries")
@@ -425,12 +494,14 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             .copied()
             .collect::<Vec<_>>();
         sort_lookup_values(&mut sorted_values, &mut sort_scratch);
+        let commitment_center = fixed_table_center(params, &sorted_values);
 
         PreparedTable {
             compressed_expression: Arc::new(compressed_expression),
             compressed_coset,
             sorted_values,
             sorted_keys: sort_scratch,
+            commitment_center,
         }
     }
 
@@ -533,7 +604,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
         input: PreparedInput<C::Scalar, Ec>,
-        table: &PreparedTable<C::Scalar, Ec>,
+        table: &PreparedTable<C, Ec>,
         blinding: PermutedBlinding<C::Scalar>,
     ) -> Result<PreparedPermuted<C, Ec>, Error>
     where
@@ -592,6 +663,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             permuted_input_blind,
             &permuted_table_expression,
             permuted_table_blind,
+            table.commitment_center.as_ref(),
         );
 
         Ok(PreparedPermuted {
@@ -616,12 +688,13 @@ fn commit_permuted_pair<C: CurveAffine>(
     input_blind: Blind<C::Scalar>,
     table: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_blind: Blind<C::Scalar>,
+    table_center: Option<&TableCommitmentCenter<C>>,
 ) -> (C, C) {
     // By linearity, C(input, r_i) = C(table, r_t) +
     // C(input - table, r_i - r_t). The sorted lookup construction makes the
     // delta sparse, which the retained commitment table handles efficiently.
     let (table_commitment, difference_commitment) = crate::multicore::join(
-        || params.commit_lagrange(table, table_blind),
+        || commit_lagrange_centered(params, domain, table, table_blind, table_center),
         || {
             commit_lagrange_difference(
                 params,
@@ -636,6 +709,28 @@ fn commit_permuted_pair<C: CurveAffine>(
     let mut affine = [C::identity(); 2];
     C::Curve::batch_normalize(&projective, &mut affine);
     (affine[0], affine[1])
+}
+
+fn commit_lagrange_centered<C: CurveAffine>(
+    params: &Params<C>,
+    domain: &EvaluationDomain<C::Scalar>,
+    polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
+    blind: Blind<C::Scalar>,
+    center: Option<&TableCommitmentCenter<C>>,
+) -> C::Curve {
+    let Some(center) = center else {
+        return params.commit_lagrange(polynomial, blind);
+    };
+
+    // The sum of every Lagrange-basis generator is the constant coefficient
+    // generator g[0]. Centering every row therefore preserves the commitment
+    // after adding [center] g[0]. This scratch polynomial is used only by the
+    // commitment; the lookup product retains the original values.
+    let centered = polynomial
+        .iter()
+        .map(|value| *value - center.scalar)
+        .collect();
+    params.commit_lagrange(&domain.lagrange_from_vec(centered), blind) + center.correction
 }
 
 fn commit_lagrange_difference<C: CurveAffine>(
@@ -701,6 +796,7 @@ where
             .zip(table_sort_scratch.into_par_iter())
             .map(|(lookup_index, sort_scratch)| {
                 lookup_arguments[lookup_index].prepare_table(
+                    params,
                     domain,
                     value_evaluator,
                     *theta,
@@ -824,6 +920,7 @@ where
             let prepared = &prepared;
             scope.spawn(move |_| {
                 let table = Arc::new(lookup_arguments[representative].prepare_table(
+                    params,
                     domain,
                     value_evaluator,
                     *theta,
@@ -1535,6 +1632,7 @@ mod tests {
                 Blind(C::Scalar::ZERO),
                 &zero,
                 Blind(C::Scalar::ZERO),
+                None,
             ),
             (C::identity(), C::identity()),
         );
@@ -1542,6 +1640,11 @@ mod tests {
         let table_values = (0..1_usize << K)
             .map(|index| C::Scalar::from(index as u64 + 1))
             .collect::<Vec<_>>();
+        let center_scalar = C::Scalar::from(29);
+        let center = TableCommitmentCenter {
+            scalar: center_scalar,
+            correction: C::Curve::from(params.g[0]) * center_scalar,
+        };
 
         let identical = table_values.clone();
         let full_difference = table_values
@@ -1589,11 +1692,35 @@ mod tests {
                 params.commit_lagrange(&table, table_blind).to_affine(),
             );
 
-            assert_eq!(
-                commit_permuted_pair(&params, &domain, &input, input_blind, &table, table_blind,),
-                expected,
-            );
+            for table_center in [None, Some(&center)] {
+                assert_eq!(
+                    commit_permuted_pair(
+                        &params,
+                        &domain,
+                        &input,
+                        input_blind,
+                        &table,
+                        table_blind,
+                        table_center,
+                    ),
+                    expected,
+                );
+            }
         }
+
+        let constant = domain.lagrange_from_vec(vec![center_scalar; 1usize << K]);
+        let expected_constant = params.commit_lagrange(&constant, Blind(C::Scalar::ZERO));
+        assert_eq!(expected_constant, center.correction);
+        assert_eq!(
+            commit_lagrange_centered(
+                &params,
+                &domain,
+                &constant,
+                Blind(C::Scalar::ZERO),
+                Some(&center),
+            ),
+            center.correction,
+        );
     }
 
     #[test]
@@ -1628,6 +1755,101 @@ mod tests {
     fn table_sort_matches_field_order() {
         check_table_sort::<pallas::Base>();
         check_table_sort::<pallas::Scalar>();
+    }
+
+    fn sorted_values_with_counts(counts: &[(u64, usize)]) -> Vec<pallas::Scalar> {
+        let mut values = counts
+            .iter()
+            .flat_map(|&(value, count)| iter::repeat(pallas::Scalar::from(value)).take(count))
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        values
+    }
+
+    fn sorted_values_with_mode(mode_count: usize, len: usize) -> Vec<pallas::Scalar> {
+        let mut values = iter::repeat(pallas::Scalar::ONE)
+            .take(mode_count)
+            .chain((0..len - mode_count).map(|index| {
+                pallas::Scalar::from(u64::try_from(index).expect("test index fits in u64") + 2)
+            }))
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        values
+    }
+
+    #[test]
+    fn table_commitment_center_requires_a_strong_nonzero_mode() {
+        let len = 16usize;
+        let threshold = len.div_ceil(TABLE_CENTERING_MIN_SAVED_FRACTION_DENOMINATOR);
+        let exact = sorted_values_with_mode(threshold, len);
+        assert_eq!(table_commitment_center(&exact), Some(pallas::Scalar::ONE));
+
+        let below = sorted_values_with_mode(threshold - 1, len);
+        assert_eq!(table_commitment_center(&below), None);
+        assert_eq!(table_commitment_center::<pallas::Scalar>(&[]), None);
+        assert_eq!(
+            table_commitment_center(&sorted_values_with_counts(&[(1, 1), (2, 1), (3, 1)])),
+            None,
+        );
+    }
+
+    #[test]
+    fn table_commitment_center_accounts_for_existing_zeroes() {
+        let zero_dominant = sorted_values_with_counts(&[(0, 8), (1, 6), (2, 2)]);
+        assert_eq!(table_commitment_center(&zero_dominant), None);
+
+        let threshold = sorted_values_with_counts(&[
+            (0, 2),
+            (1, 6),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (8, 1),
+            (9, 1),
+        ]);
+        assert_eq!(
+            table_commitment_center(&threshold),
+            Some(pallas::Scalar::ONE),
+        );
+
+        let below_threshold = sorted_values_with_counts(&[
+            (0, 2),
+            (1, 5),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (8, 1),
+            (9, 1),
+            (10, 1),
+        ]);
+        assert_eq!(table_commitment_center(&below_threshold), None);
+
+        let nonzero_dominant = sorted_values_with_counts(&[(0, 1), (1, 5), (2, 5), (3, 5)]);
+        assert_eq!(
+            table_commitment_center(&nonzero_dominant),
+            Some(pallas::Scalar::ONE),
+        );
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn fixed_table_center_matches_native_multiplication() {
+        let params = Params::<pallas::Affine>::new(crate::PREPARED_SPARSE_COMMITMENT_K);
+        assert!(params.prepare_sparse_commitment());
+        let values = sorted_values_with_counts(&[(0, 1), (1, 8), (2, 1)]);
+
+        let center = fixed_table_center(&params, &values).expect("the strong mode is centered");
+        assert_eq!(center.scalar, pallas::Scalar::ONE);
+        assert_eq!(
+            center.correction,
+            pallas::Point::from(params.g[0]) * center.scalar,
+        );
     }
 
     fn small_vectors<F: PrimeField>(len: usize) -> Vec<Vec<F>> {
