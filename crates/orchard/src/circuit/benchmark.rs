@@ -646,6 +646,7 @@ fn ironwood_payment_fixture_proves() {
         ironwood_benchmark_rng(IRONWOOD_FIXTURE_SEED_DOMAIN, IRONWOOD_FIXTURE_ACTIONS),
     );
     let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     assert!(keys.proving_key().prepare_proving());
     let create_proof = || {
         fixture.bundle.authorization().create_proof(
