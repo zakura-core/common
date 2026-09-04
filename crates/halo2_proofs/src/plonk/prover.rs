@@ -820,13 +820,25 @@ where
         pub advice_blinds: Vec<Blind<C::Scalar>>,
     }
 
+    // Rational advice evaluation is independent across circuits. Keep every
+    // RNG draw below in circuit order and after successful synthesis.
+    let evaluate_in_parallel = witnesses.len() > 1 && crate::multicore::current_num_threads() > 1;
+    let advice_values = if evaluate_in_parallel {
+        witnesses
+            .into_par_iter()
+            .map(|witness| witness.advice.evaluate())
+            .collect::<Vec<_>>()
+    } else {
+        witnesses
+            .into_iter()
+            .map(|witness| witness.advice.evaluate())
+            .collect::<Vec<_>>()
+    };
     // Consume randomness in circuit order before preparing the independent
     // commitments and polynomial transforms in parallel.
-    let advice_witnesses = witnesses
+    let advice_witnesses = advice_values
         .into_iter()
-        .map(|witness| -> Result<_, Error> {
-            let mut advice = witness.advice.evaluate();
-
+        .map(|mut advice| {
             // Add blinding factors to advice columns
             for advice in &mut advice {
                 for cell in &mut advice[unusable_rows_start..] {
@@ -839,9 +851,9 @@ where
                 .iter()
                 .map(|_| Blind(C::Scalar::random(&mut rng)))
                 .collect();
-            Ok((advice, advice_blinds))
+            (advice, advice_blinds)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
 
     let circuit_count = advice_witnesses.len();
     let (prepared_advice, lookup_table_plan) = crate::multicore::join(
@@ -1945,6 +1957,148 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
     assert_eq!(advice[0][7], Fp::from(7));
     assert_eq!(advice[1][1], Fp::from(3));
     assert_eq!(advice[1][4], Fp::from(11));
+}
+
+#[cfg(feature = "multicore")]
+#[test]
+fn parallel_advice_evaluation_preserves_proof_bytes() {
+    use crate::{
+        circuit::SimpleFloorPlanner,
+        plonk::{keygen_pk, keygen_vk},
+        transcript::{Blake2bWrite, Challenge255},
+    };
+    use pasta_curves::{EqAffine, Fp};
+    use rand::{SeedableRng, rngs::StdRng};
+
+    const PROOF_SEED: u64 = 0x5041_5241_4456_4943;
+    const WORKER_COUNTS: [usize; 4] = [1, 2, 6, 10];
+
+    #[derive(Clone, Copy)]
+    struct RationalCircuit {
+        initial: [Assigned<Fp>; 2],
+        replacement: [Assigned<Fp>; 2],
+    }
+
+    impl Circuit<Fp> for RationalCircuit {
+        type Config = Column<Advice>;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self {
+                initial: [
+                    Assigned::Rational(Fp::ZERO, Fp::ONE),
+                    Assigned::Rational(Fp::ZERO, Fp::ONE),
+                ],
+                replacement: [Assigned::Zero, Assigned::Zero],
+            }
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            meta.advice_column()
+        }
+
+        fn synthesize(
+            &self,
+            advice: Self::Config,
+            mut layouter: impl crate::circuit::Layouter<Fp>,
+        ) -> Result<(), Error> {
+            layouter.assign_region(
+                || "rational advice",
+                |mut region| {
+                    for (row, value) in self.initial.into_iter().enumerate() {
+                        region.assign_advice(
+                            || "initial value",
+                            advice,
+                            row,
+                            || Value::known(value),
+                        )?;
+                    }
+                    for (row, value) in self.replacement.into_iter().enumerate() {
+                        region.assign_advice(
+                            || "replacement value",
+                            advice,
+                            row,
+                            || Value::known(value),
+                        )?;
+                    }
+                    Ok(())
+                },
+            )
+        }
+    }
+
+    let circuits = [
+        RationalCircuit {
+            initial: [
+                Assigned::Rational(Fp::from(2), Fp::from(3)),
+                Assigned::Rational(Fp::from(5), Fp::from(7)),
+            ],
+            replacement: [
+                Assigned::Trivial(Fp::from(11)),
+                Assigned::Rational(Fp::from(13), Fp::ZERO),
+            ],
+        },
+        RationalCircuit {
+            initial: [
+                Assigned::Rational(Fp::from(17), Fp::from(19)),
+                Assigned::Rational(Fp::from(23), Fp::from(29)),
+            ],
+            replacement: [
+                Assigned::Rational(Fp::ZERO, Fp::from(31)),
+                Assigned::Rational(Fp::from(37), Fp::from(41)),
+            ],
+        },
+        RationalCircuit {
+            initial: [
+                Assigned::Rational(Fp::from(43), Fp::ZERO),
+                Assigned::Rational(Fp::from(47), Fp::from(53)),
+            ],
+            replacement: [
+                Assigned::Rational(Fp::from(59), Fp::from(61)),
+                Assigned::Zero,
+            ],
+        },
+        RationalCircuit {
+            initial: [
+                Assigned::Rational(Fp::from(67), Fp::from(71)),
+                Assigned::Rational(Fp::from(73), Fp::ZERO),
+            ],
+            replacement: [
+                Assigned::Rational(Fp::from(79), Fp::ZERO),
+                Assigned::Trivial(Fp::from(83)),
+            ],
+        },
+    ];
+    let params: Params<EqAffine> = Params::new(3);
+    let vk = keygen_vk(&params, &circuits[0]).expect("keygen_vk should not fail");
+    let pk = keygen_pk(&params, vk, &circuits[0]).expect("keygen_pk should not fail");
+    let instances = [&[][..], &[][..], &[][..], &[][..]];
+    let create = |circuit_count, threads| {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+                create_proof(
+                    &params,
+                    &pk,
+                    &circuits[..circuit_count],
+                    &instances[..circuit_count],
+                    StdRng::seed_from_u64(PROOF_SEED),
+                    &mut transcript,
+                )
+                .expect("proof generation should not fail");
+                transcript.finalize()
+            })
+    };
+
+    let expected_single = create(1, 1);
+    let expected_batch = create(4, 1);
+    for threads in WORKER_COUNTS {
+        assert_eq!(create(1, threads), expected_single);
+        assert_eq!(create(4, threads), expected_batch);
+    }
 }
 
 #[test]
