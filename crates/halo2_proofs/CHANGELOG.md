@@ -10,7 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [1.1.0-rc.1] - 2026-09-03
+## [1.1.0] - 2026-09-04
 
 ### Added
 
@@ -256,9 +256,6 @@ internal implementation details are not tracked here.
   At `k = 11`, the isolated calculation was 63.6x faster on Apple M4 and
   64.9x faster on x86_64 Linux; proof bytes and transcripts are unchanged
   ([#333](https://github.com/zakura-core/common/pull/333)).
-- Improved witness-synthesis performance for `V1` circuits that reuse a
-  proving-key floor plan by avoiding redundant fixed-table assignments
-  ([#334](https://github.com/zakura-core/common/pull/334)).
 - Prepared both fixed IPA generators for prover commitments. A signed table
   with eight-bit windows now handles the `w` blinding term and the `u` and `w`
   terms in each IPA round. In 100 paired ten-worker Apple M4 measurements, the
@@ -284,9 +281,11 @@ internal implementation details are not tracked here.
   assignment APIs receive zero-based indices relative to the start of the
   batch
   ([#344](https://github.com/zakura-core/common/pull/344)).
-- Reduced proof-creation latency by overlapping public-instance commitments
-  and polynomial transforms with the continuous witness-to-advice preparation
-  path ([#345](https://github.com/zakura-core/common/pull/345)).
+- Reduced multi-circuit proof-creation latency on multi-worker pools by
+  overlapping public-instance polynomial transforms with witness synthesis;
+  single-circuit proving already overlapped these phases and is unchanged
+  ([#345](https://github.com/zakura-core/common/pull/345),
+  [#348](https://github.com/zakura-core/common/pull/348)).
 
 ## [1.0.1] - 2026-08-29
 
