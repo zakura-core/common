@@ -282,6 +282,80 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
     assert_eq!(reencoded, encoded);
 }
 
+#[test]
+#[cfg(all(zcash_unstable = "nutachyon", not(zcash_unstable = "nu7")))]
+fn v7_zakura_serialization_vectors_deserialize_and_reserialize_exactly() {
+    use zcash_tachyon::TachyonBundle;
+
+    #[derive(Clone, Copy)]
+    enum ExpectedBundle {
+        None,
+        Adjunct,
+        Proven,
+    }
+
+    let vectors = [
+        (
+            "empty",
+            include_str!("tests/data/v7_empty.hex"),
+            ExpectedBundle::None,
+            0,
+        ),
+        (
+            "adjunct",
+            include_str!("tests/data/v7_tachyon_adjunct.hex"),
+            ExpectedBundle::Adjunct,
+            1,
+        ),
+        (
+            "proven",
+            include_str!("tests/data/v7_tachyon_proven.hex"),
+            ExpectedBundle::Proven,
+            1,
+        ),
+        (
+            "multi-action proven",
+            include_str!("tests/data/v7_tachyon_multi_action_proven.hex"),
+            ExpectedBundle::Proven,
+            2,
+        ),
+    ];
+
+    for (name, encoded_hex, expected_bundle, expected_action_count) in vectors {
+        let encoded = hex::decode(encoded_hex.trim()).unwrap();
+        let transaction = Transaction::read(&encoded[..], BranchId::Sprout)
+            .unwrap_or_else(|error| panic!("{name} vector did not deserialize: {error}"));
+
+        assert_eq!(transaction.version(), TxVersion::V7, "{name}");
+        assert_eq!(
+            transaction.consensus_branch_id(),
+            BranchId::NuTachyon,
+            "{name}"
+        );
+        assert_eq!(
+            transaction
+                .tachyon_bundle()
+                .as_dyn()
+                .map_or(0, |bundle| bundle.actions.len()),
+            expected_action_count,
+            "{name}"
+        );
+        assert!(
+            matches!(
+                (transaction.tachyon_bundle(), expected_bundle),
+                (TachyonBundle::NoBundle, ExpectedBundle::None)
+                    | (TachyonBundle::Adjunct(_), ExpectedBundle::Adjunct)
+                    | (TachyonBundle::Proven(_), ExpectedBundle::Proven)
+            ),
+            "{name} bundle state differs"
+        );
+
+        let mut reencoded = Vec::new();
+        transaction.write(&mut reencoded).unwrap();
+        assert_eq!(reencoded, encoded, "{name} reserialization differs");
+    }
+}
+
 #[cfg(all(test, not(zcash_unstable = "nu7")))]
 #[test]
 fn v4_transactions_remain_valid_in_nu6_3() {
