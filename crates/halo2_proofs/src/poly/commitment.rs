@@ -141,12 +141,12 @@ const PREPARED_DEFERRED_IPA_K: u32 = 11;
 /// Leading IPA rounds represented over the original coefficient SRS.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const PREPARED_DEFERRED_IPA_ROUNDS: u32 = 4;
-/// Signed-window width for the deferred-fold materialization table.
+/// Width of the wNAF used by the deferred-fold materialization table.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const DEFERRED_IPA_MATERIALIZATION_WINDOW_BITS: usize = 6;
+const DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH: usize = 7;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES: usize =
-    1 << (DEFERRED_IPA_MATERIALIZATION_WINDOW_BITS - 1);
+const DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES: usize =
+    1 << (DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH - 2);
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 fn prepared_deferred_ipa_rounds(k: u32) -> Option<u32> {
@@ -408,9 +408,9 @@ fn scalar_byte_order<F: PrimeField>() -> ScalarByteOrder {
     }
 }
 
-/// Unpositioned signed-window multiples for every coefficient-SRS generator.
-/// The table materializes several IPA folds whose scalar vector is shared by
-/// every output lane.
+/// Unpositioned odd multiples for every coefficient-SRS generator. The table
+/// materializes several IPA folds whose scalar vector is shared by every
+/// output lane.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 struct DeferredIpaGeneratorTable<C: CurveAffine> {
     points: Vec<C>,
@@ -443,13 +443,13 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
         let cached_generators = &generators[first_cached_generator..];
         let table_len = cached_generators
             .len()
-            .checked_mul(DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES)?;
+            .checked_mul(DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES)?;
         let mut points = vec![C::identity(); table_len];
         let generator_chunk = cached_generators
             .len()
             .div_ceil(crate::multicore::current_num_threads());
         let point_chunk =
-            generator_chunk.checked_mul(DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES)?;
+            generator_chunk.checked_mul(DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES)?;
         crate::multicore::scope(|scope| {
             for (generators, points) in cached_generators
                 .chunks(generator_chunk)
@@ -459,11 +459,12 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                     let mut projective = Vec::with_capacity(points.len());
                     for &generator in generators {
                         let generator = C::Curve::from(generator);
-                        let mut multiple = generator;
-                        for magnitude in 0..DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES {
-                            projective.push(multiple);
-                            if magnitude + 1 != DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES {
-                                multiple += generator;
+                        let step = generator.double();
+                        let mut odd_multiple = generator;
+                        for index in 0..DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES {
+                            projective.push(odd_multiple);
+                            if index + 1 != DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES {
+                                odd_multiple += step;
                             }
                         }
                     }
@@ -523,23 +524,48 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
         Some(((packed >> shift) as usize) & ((1 << live_bits) - 1))
     }
 
-    fn digit(bytes: &[u8], window: usize, little: bool) -> Option<isize> {
-        let bit_start = window.checked_mul(DEFERRED_IPA_MATERIALIZATION_WINDOW_BITS)?;
-        let live_bits = (C::Scalar::NUM_BITS as usize)
-            .saturating_sub(bit_start)
-            .min(DEFERRED_IPA_MATERIALIZATION_WINDOW_BITS);
-        let value = Self::window_value(bytes, bit_start, live_bits, little)?;
-        let carry = if bit_start == 0 {
-            0
-        } else {
-            Self::bit(bytes, bit_start - 1, little)?
-        };
-        let radix = 1 << DEFERRED_IPA_MATERIALIZATION_WINDOW_BITS;
-        Some(if value < radix / 2 {
-            (value + carry) as isize
-        } else {
-            -((radix - value - carry) as isize)
-        })
+    fn wnaf_digits(bytes: &[u8], little: bool) -> Option<Vec<i8>> {
+        let scalar_bits = C::Scalar::NUM_BITS as usize;
+        let mut digits = vec![0; scalar_bits.checked_add(1)?];
+        let radix = 1 << DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH;
+        let midpoint = radix / 2;
+        let mut bit = 0;
+        let mut carry = 0;
+
+        while bit <= scalar_bits {
+            let scalar_bit = if bit == scalar_bits {
+                0
+            } else {
+                Self::bit(bytes, bit, little)?
+            };
+            if scalar_bit == carry {
+                bit += 1;
+                continue;
+            }
+
+            let live_bits = scalar_bits
+                .saturating_sub(bit)
+                .min(DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH);
+            let value = Self::window_value(bytes, bit, live_bits, little)? + carry;
+            let digit = if value < midpoint {
+                carry = 0;
+                value as isize
+            } else {
+                carry = 1;
+                value as isize - radix as isize
+            };
+            let digit = i8::try_from(digit).ok()?;
+            if digit == 0
+                || digit.unsigned_abs() as usize >= 2 * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
+                || digit % 2 == 0
+            {
+                return None;
+            }
+            digits[bit] = digit;
+            bit = bit.checked_add(DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH)?;
+        }
+
+        (carry == 0).then_some(digits)
     }
 
     fn validate_repr(&self, scalar: C::Scalar, bytes: &[u8], little: bool) -> bool {
@@ -586,15 +612,22 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                     .then_some(repr)
             })
             .collect::<Option<Vec<_>>>()?;
-        let windows = C::Scalar::NUM_BITS as usize / DEFERRED_IPA_MATERIALIZATION_WINDOW_BITS + 1;
-        let digits = (0..windows)
-            .flat_map(|window| {
-                reprs.iter().map(move |repr| {
-                    Self::digit(repr.as_ref(), window, little)
-                        .expect("the scalar representation was validated")
-                })
-            })
-            .collect::<Vec<_>>();
+        let scalar_bits = C::Scalar::NUM_BITS as usize;
+        let scalar_count = reprs.len();
+        let mut digits = vec![0i8; (scalar_bits + 1).checked_mul(scalar_count)?];
+        for (scalar_index, repr) in reprs.iter().enumerate() {
+            for (bit, digit) in Self::wnaf_digits(repr.as_ref(), little)?
+                .into_iter()
+                .enumerate()
+            {
+                digits[bit * scalar_count + scalar_index] = digit;
+            }
+        }
+        let top_bit = (0..=scalar_bits).rfind(|&bit| {
+            digits[bit * scalar_count..(bit + 1) * scalar_count]
+                .iter()
+                .any(|&digit| digit != 0)
+        });
         let mut projective = vec![C::Curve::identity(); count];
         let chunk_size = count.div_ceil(crate::multicore::current_num_threads());
         crate::multicore::scope(|scope| {
@@ -602,27 +635,27 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                 let start = chunk_index * chunk_size;
                 let digits = &digits;
                 scope.spawn(move |_| {
-                    for window in (0..windows).rev() {
-                        if window + 1 != windows {
-                            for output in output.iter_mut() {
-                                for _ in 0..DEFERRED_IPA_MATERIALIZATION_WINDOW_BITS {
+                    if let Some(top_bit) = top_bit {
+                        for bit in (0..=top_bit).rev() {
+                            if bit != top_bit {
+                                for output in output.iter_mut() {
                                     *output = output.double();
                                 }
                             }
-                        }
-                        let window_digits = &digits
-                            [window * (scalars.len() - 1)..(window + 1) * (scalars.len() - 1)];
-                        for (cached_block, &digit) in window_digits.iter().enumerate() {
-                            if digit == 0 {
-                                continue;
-                            }
-                            for (lane, output) in output.iter_mut().enumerate() {
-                                let generator = (cached_block + 1) * count + start + lane;
-                                let point = self.points[(generator - self.first_cached_generator)
-                                    * DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES
-                                    + digit.unsigned_abs()
-                                    - 1];
-                                *output += if digit < 0 { -point } else { point };
+                            let bit_digits = &digits[bit * scalar_count..(bit + 1) * scalar_count];
+                            for (cached_block, &digit) in bit_digits.iter().enumerate() {
+                                if digit == 0 {
+                                    continue;
+                                }
+                                let point_offset = (usize::from(digit.unsigned_abs()) - 1) / 2;
+                                for (lane, output) in output.iter_mut().enumerate() {
+                                    let generator = (cached_block + 1) * count + start + lane;
+                                    let point = self.points[(generator
+                                        - self.first_cached_generator)
+                                        * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
+                                        + point_offset];
+                                    *output += if digit < 0 { -point } else { point };
+                                }
                             }
                         }
                     }
@@ -2058,7 +2091,7 @@ impl<C: CurveAffine> Params<C> {
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// signed-width-eight pair adds exactly 512 KiB of affine-point payload for
-    /// 255-bit Pasta scalars. At `k = 11`, the signed-width-six deferred-fold
+    /// 255-bit Pasta scalars. At `k = 11`, the width-seven wNAF deferred-fold
     /// table omits the scalar-one block and adds exactly 3.75 MiB. The
     /// signed-width-four sparse commitment table adds 416 KiB, and the
     /// signed-width-four public-instance table adds about 224 KiB on Pasta.

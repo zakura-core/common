@@ -488,8 +488,9 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 mod tests {
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
     use super::super::{
-        DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES, DeferredIpaGeneratorTable,
-        PREPARED_DEFERRED_IPA_ROUNDS, deferred_ipa_round_scalars, prepared_deferred_ipa_rounds,
+        DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES, DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH,
+        DeferredIpaGeneratorTable, PREPARED_DEFERRED_IPA_ROUNDS, ScalarByteOrder,
+        deferred_ipa_round_scalars, prepared_deferred_ipa_rounds, scalar_byte_order,
     };
     use super::{
         Params, compute_ipa_hi_evaluation_pasta, ipa_masking_commitment, ipa_round_multiexp,
@@ -521,6 +522,202 @@ mod tests {
         (C::Scalar::from(0x9E37_79B9_7F4A_7C15u64).square()
             + C::Scalar::from(0x0123_4567_89AB_CDEFu64))
         .square()
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn prior_signed_radix_digit<C: CurveAffine>(
+        bytes: &[u8],
+        window: usize,
+        little: bool,
+    ) -> isize {
+        const WIDTH: usize = 6;
+
+        let bit_start = window * WIDTH;
+        let live_bits = (C::Scalar::NUM_BITS as usize)
+            .saturating_sub(bit_start)
+            .min(WIDTH);
+        let value =
+            DeferredIpaGeneratorTable::<C>::window_value(bytes, bit_start, live_bits, little)
+                .unwrap();
+        let carry = if bit_start == 0 {
+            0
+        } else {
+            DeferredIpaGeneratorTable::<C>::bit(bytes, bit_start - 1, little).unwrap()
+        };
+        let radix = 1 << WIDTH;
+        if value < radix / 2 {
+            (value + carry) as isize
+        } else {
+            -((radix - value - carry) as isize)
+        }
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn assert_wnaf_recode<C>()
+    where
+        C: CurveAffine,
+        C::Scalar: FromUniformBytes<64> + Debug,
+    {
+        let little = match scalar_byte_order::<C::Scalar>() {
+            ScalarByteOrder::LittleEndian => true,
+            ScalarByteOrder::BigEndian => false,
+            ScalarByteOrder::Unsupported => panic!("Pasta scalar byte order is supported"),
+        };
+        let recode = |scalar: C::Scalar| {
+            DeferredIpaGeneratorTable::<C>::wnaf_digits(scalar.to_repr().as_ref(), little)
+                .expect("canonical Pasta scalars have a width-seven wNAF")
+        };
+        assert!(recode(C::Scalar::ZERO).into_iter().all(|digit| digit == 0));
+        let positive_max = recode(C::Scalar::from(63));
+        assert_eq!(positive_max[0], 63);
+        let negative_max = recode(C::Scalar::from(65));
+        assert_eq!(negative_max[0], -63);
+        assert_eq!(negative_max[7], 1);
+        let boundary_carry = recode(C::Scalar::from(127));
+        assert_eq!(boundary_carry[0], -1);
+        assert_eq!(boundary_carry[7], 1);
+        let top_exponent = u64::from(C::Scalar::NUM_BITS - 1);
+        let top_carry_scalar = C::Scalar::from(2).pow_vartime([top_exponent]) - C::Scalar::ONE;
+        let top_carry = recode(top_carry_scalar);
+        assert_eq!(top_carry[0], -1);
+        assert_eq!(top_carry[top_exponent as usize], 1);
+        assert_eq!(top_carry.iter().filter(|&&digit| digit != 0).count(), 2);
+        let full_width = -C::Scalar::ONE;
+        let full_width_repr = full_width.to_repr();
+        assert_eq!(
+            (0..C::Scalar::NUM_BITS as usize).rfind(|&bit| {
+                DeferredIpaGeneratorTable::<C>::bit(full_width_repr.as_ref(), bit, little)
+                    == Some(1)
+            }),
+            Some(C::Scalar::NUM_BITS as usize - 1),
+        );
+        let mut scalars = vec![
+            C::Scalar::ZERO,
+            C::Scalar::ONE,
+            full_width,
+            C::Scalar::from(31),
+            C::Scalar::from(32),
+            C::Scalar::from(33),
+            C::Scalar::from(63),
+            C::Scalar::from(64),
+            C::Scalar::from(65),
+            C::Scalar::from(127),
+            C::Scalar::from(128),
+            C::Scalar::from(129),
+            full_width_scalar::<C>(),
+        ];
+        for exponent in [
+            1,
+            6,
+            7,
+            8,
+            62,
+            63,
+            64,
+            126,
+            127,
+            128,
+            252,
+            253,
+            top_exponent,
+        ] {
+            let power = C::Scalar::from(2).pow_vartime([exponent]);
+            scalars.extend([power - C::Scalar::ONE, power, power + C::Scalar::ONE]);
+        }
+        let mut rng = StdRng::seed_from_u64(0x574e_4146_2d52_4543);
+        scalars.extend((0..512).map(|_| C::Scalar::random(&mut rng)));
+
+        for scalar in scalars {
+            let repr = scalar.to_repr();
+            let digits = recode(scalar);
+            let mut reversed = repr.as_ref().to_vec();
+            reversed.reverse();
+            assert_eq!(
+                DeferredIpaGeneratorTable::<C>::wnaf_digits(&reversed, !little)
+                    .expect("the reversed representation also recodes"),
+                digits,
+            );
+
+            let mut reconstructed = C::Scalar::ZERO;
+            for &digit in digits.iter().rev() {
+                reconstructed = reconstructed.double();
+                let magnitude = C::Scalar::from(u64::from(digit.unsigned_abs()));
+                if digit > 0 {
+                    reconstructed += magnitude;
+                } else if digit < 0 {
+                    reconstructed -= magnitude;
+                }
+            }
+            assert_eq!(reconstructed, scalar);
+
+            for (bit, &digit) in digits.iter().enumerate() {
+                if digit == 0 {
+                    continue;
+                }
+                assert_eq!(digit % 2, if digit > 0 { 1 } else { -1 });
+                assert!(
+                    usize::from(digit.unsigned_abs())
+                        < 2 * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
+                );
+                let following = digits
+                    .iter()
+                    .skip(bit + 1)
+                    .take(DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH - 1);
+                assert!(following.into_iter().all(|&digit| digit == 0));
+            }
+        }
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn wnaf_operation_counts<C>()
+    where
+        C: CurveAffine,
+        C::Scalar: FromUniformBytes<64>,
+    {
+        const BATCHES: usize = 256;
+        const PRIOR_WIDTH: usize = 6;
+
+        let little = match scalar_byte_order::<C::Scalar>() {
+            ScalarByteOrder::LittleEndian => true,
+            ScalarByteOrder::BigEndian => false,
+            ScalarByteOrder::Unsupported => panic!("Pasta scalar byte order is supported"),
+        };
+        let prior_windows = C::Scalar::NUM_BITS as usize / PRIOR_WIDTH + 1;
+        let mut prior_additions = 0;
+        let mut wnaf_additions = 0;
+        let mut wnaf_doublings = 0;
+        let mut rng = StdRng::seed_from_u64(0x574e_4146_2d43_4e54);
+
+        for _ in 0..BATCHES {
+            let mut scalars = vec![C::Scalar::ONE];
+            for _ in 0..PREPARED_DEFERRED_IPA_ROUNDS {
+                extend_deferred_generator_weights(&mut scalars, C::Scalar::random(&mut rng));
+            }
+            let mut top_bit = None;
+            for scalar in scalars.into_iter().skip(1) {
+                let repr = scalar.to_repr();
+                prior_additions += (0..prior_windows)
+                    .filter(|&window| {
+                        prior_signed_radix_digit::<C>(repr.as_ref(), window, little) != 0
+                    })
+                    .count();
+                let digits =
+                    DeferredIpaGeneratorTable::<C>::wnaf_digits(repr.as_ref(), little).unwrap();
+                wnaf_additions += digits.iter().filter(|&&digit| digit != 0).count();
+                top_bit = top_bit.max(digits.iter().rposition(|&digit| digit != 0));
+            }
+            wnaf_doublings += top_bit.unwrap_or(0);
+        }
+
+        let prior_doublings = BATCHES * (prior_windows - 1) * PRIOR_WIDTH;
+        eprintln!(
+            "{}: prior additions {prior_additions}, wNAF additions \
+             {wnaf_additions}, prior doublings {prior_doublings}, wNAF \
+             doublings {wnaf_doublings}",
+            core::any::type_name::<C>(),
+        );
+        assert!(wnaf_additions * 5 < prior_additions * 4);
+        assert!(wnaf_doublings <= prior_doublings + 3 * BATCHES);
     }
 
     fn round_multiexp_matches_split<C>()
@@ -764,12 +961,12 @@ mod tests {
             C::Scalar::ONE,
             C::Scalar::ZERO,
             -C::Scalar::ONE,
-            C::Scalar::from(31),
-            C::Scalar::from(32),
-            C::Scalar::from(33),
             C::Scalar::from(63),
             C::Scalar::from(64),
             C::Scalar::from(65),
+            C::Scalar::from(127),
+            C::Scalar::from(128),
+            C::Scalar::from(129),
             power - C::Scalar::ONE,
             power,
             power + C::Scalar::ONE,
@@ -778,19 +975,39 @@ mod tests {
             top + C::Scalar::ONE,
             full_width_scalar::<C>(),
         ];
-        let actual = table
-            .materialize(&scalars, &params.g[..count])
-            .expect("canonical Pasta scalars must materialize");
-        for (lane, actual) in actual.iter().enumerate() {
-            let bases = (0..scalars.len())
-                .map(|block| params.g[block * count + lane])
-                .collect::<Vec<_>>();
-            assert_eq!(actual.to_curve(), best_multiexp(&scalars, &bases));
+        let assert_materialization = |scalars: &[C::Scalar]| {
+            let actual = table
+                .materialize(scalars, &params.g[..count])
+                .expect("canonical Pasta scalars must materialize");
+            for (lane, actual) in actual.iter().enumerate() {
+                let bases = (0..scalars.len())
+                    .map(|block| params.g[block * count + lane])
+                    .collect::<Vec<_>>();
+                assert_eq!(actual.to_curve(), best_multiexp(scalars, &bases));
+            }
+        };
+        assert_materialization(&scalars);
+
+        let mut scalar_one_only = [C::Scalar::ZERO; 1 << PREPARED_DEFERRED_IPA_ROUNDS];
+        scalar_one_only[0] = C::Scalar::ONE;
+        assert_eq!(
+            table
+                .materialize(&scalar_one_only, &params.g[..count])
+                .expect("all-zero cached blocks must materialize"),
+            params.g[..count],
+        );
+
+        let mut dense = [C::Scalar::ZERO; 1 << PREPARED_DEFERRED_IPA_ROUNDS];
+        dense[0] = C::Scalar::ONE;
+        let mut rng = StdRng::seed_from_u64(0x574e_4146_2d44_454e);
+        for scalar in &mut dense[1..] {
+            *scalar = C::Scalar::random(&mut rng);
         }
+        assert_materialization(&dense);
         assert_eq!(
             table.retained_bytes(),
             (params.g.len() - count)
-                * DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES
+                * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
                 * core::mem::size_of::<C>(),
         );
 
@@ -814,7 +1031,7 @@ mod tests {
             eager,
         );
 
-        table.byte_order = super::super::ScalarByteOrder::Unsupported;
+        table.byte_order = ScalarByteOrder::Unsupported;
         assert!(table.materialize(&weights, &params.g[..count]).is_none());
     }
 
@@ -1228,6 +1445,30 @@ mod tests {
     #[test]
     fn deferred_round_scalars_match_eager_vesta() {
         deferred_round_scalars_match_eager::<vesta::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_materialization_wnaf_recode_pallas() {
+        assert_wnaf_recode::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_materialization_wnaf_recode_vesta() {
+        assert_wnaf_recode::<vesta::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_materialization_wnaf_operation_counts_pallas() {
+        wnaf_operation_counts::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_materialization_wnaf_operation_counts_vesta() {
+        wnaf_operation_counts::<vesta::Affine>();
     }
 
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
