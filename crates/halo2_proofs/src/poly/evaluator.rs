@@ -3577,6 +3577,28 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
+        fn copy_scaled<F: Field>(output: &mut [F], values: &[F], scalar: F, kind: ScaleKind) {
+            debug_assert_eq!(output.len(), values.len());
+            match kind {
+                ScaleKind::MinusOne => {
+                    for (output, value) in output.iter_mut().zip(values) {
+                        *output = -*value;
+                    }
+                }
+                ScaleKind::One => output.copy_from_slice(values),
+                ScaleKind::Two => {
+                    for (output, value) in output.iter_mut().zip(values) {
+                        *output = value.double();
+                    }
+                }
+                ScaleKind::Other => {
+                    for (output, value) in output.iter_mut().zip(values) {
+                        *output = *value * scalar;
+                    }
+                }
+            }
+        }
+
         fn scale_value<F: Field>(value: F, scalar: F, kind: ScaleKind) -> F {
             match kind {
                 ScaleKind::MinusOne => -value,
@@ -3752,6 +3774,9 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                             if !second.is_empty() {
                                 add_scaled(second_output, second, scalar, kind);
                             }
+                        } else if let EvaluationPlan::CacheLoad { slot } = scaled_rhs.as_ref() {
+                            let start = slot * output.len();
+                            add_scaled(output, &cache[start..start + output.len()], scalar, kind);
                         } else {
                             let (rhs_values, rhs_scratch) = scratch.split_at_mut(output.len());
                             recurse_into(scaled_rhs, ctx, rhs_values, cache, rhs_scratch);
@@ -3774,6 +3799,15 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         let chunk = leaf_chunk(leaf, ctx, output.len());
                         for (lhs, rhs) in output.iter_mut().zip(chunk.iter()) {
                             *lhs += *rhs;
+                        }
+                        return;
+                    }
+
+                    if let EvaluationPlan::CacheLoad { slot } = b.as_ref() {
+                        let chunk_len = output.len();
+                        let start = slot * chunk_len;
+                        for (lhs, rhs) in output.iter_mut().zip(&cache[start..start + chunk_len]) {
+                            *lhs += rhs;
                         }
                         return;
                     }
@@ -3829,6 +3863,16 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         }
                         return;
                     }
+                    if let EvaluationPlan::CacheLoad { slot } = b.as_ref() {
+                        recurse_into(a, ctx, output, cache, scratch);
+                        let chunk_len = output.len();
+                        let start = slot * chunk_len;
+                        for (lhs, rhs) in output.iter_mut().zip(&cache[start..start + chunk_len]) {
+                            *lhs *= rhs;
+                        }
+                        return;
+                    }
+
                     if let EvaluationPlan::Poly(lhs) = a.as_ref() {
                         recurse_into(b, ctx, output, cache, scratch);
                         let lhs = leaf_chunk(lhs, ctx, output.len());
@@ -3980,6 +4024,12 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         }
                     }
                 }
+                return;
+            }
+
+            if let EvaluationPlan::CacheLoad { slot } = plan {
+                let start = slot * output.len();
+                copy_scaled(output, &cache[start..start + output.len()], scalar, kind);
                 return;
             }
 
@@ -5864,6 +5914,68 @@ mod tests {
     fn repeated_squares_are_cached() {
         check_repeated_squares_are_cached::<pallas::Base>();
         check_repeated_squares_are_cached::<vesta::Base>();
+    }
+
+    fn check_cached_rhs_consumers<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(5, 4);
+        let mut values = domain.empty_extended();
+        let mut factors = domain.empty_extended();
+        for (row, (value, factor)) in values.iter_mut().zip(factors.iter_mut()).enumerate() {
+            *value = F::from(row as u64 + 3);
+            *factor = F::from(row as u64 + 41);
+        }
+        let rotated = domain.rotate_extended(&values, Rotation::next());
+
+        let mut evaluator = new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {});
+        let value = evaluator.register_poly(values);
+        let factor = evaluator.register_poly(factors.clone());
+        let base = Ast::from(value.with_rotation(Rotation::next())) + Ast::ConstantTerm(F::from(7));
+        let shared = base.clone() * base;
+        let shared_values = rotated
+            .iter()
+            .map(|value| (*value + F::from(7)).square())
+            .collect::<Vec<_>>();
+
+        let direct = evaluator.evaluate(&(shared.clone() + shared.clone()), &domain);
+        for (actual, shared) in direct.iter().zip(&shared_values) {
+            assert_eq!(*actual, shared.double());
+        }
+
+        for scalar in [-F::ONE, F::ONE, F::ONE.double(), F::from(11)] {
+            let scaled = evaluator.evaluate(&(shared.clone() + shared.clone() * scalar), &domain);
+            let constant_product = evaluator.evaluate(
+                &(shared.clone() + Ast::ConstantTerm(scalar) * shared.clone()),
+                &domain,
+            );
+            for ((scaled, constant_product), shared) in scaled
+                .iter()
+                .zip(constant_product.iter())
+                .zip(&shared_values)
+            {
+                let expected = *shared + *shared * scalar;
+                assert_eq!(*scaled, expected);
+                assert_eq!(*constant_product, expected);
+            }
+        }
+
+        let product = evaluator.evaluate(&(shared.clone() + Ast::from(factor) * shared), &domain);
+        for (((actual, shared), factor), row) in product
+            .iter()
+            .zip(&shared_values)
+            .zip(factors.iter())
+            .zip(0..)
+        {
+            assert_eq!(*actual, *shared + *factor * shared, "row {row}");
+        }
+    }
+
+    #[test]
+    fn cached_rhs_consumers_read_cache_storage_directly() {
+        check_cached_rhs_consumers::<pallas::Base>();
+        check_cached_rhs_consumers::<vesta::Base>();
     }
 
     #[test]
