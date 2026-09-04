@@ -585,17 +585,13 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         // These Lagrange values remain live until the lookup product is built.
         // Commit now, then consume them in the basis transforms after that
         // final use instead of cloning both base-domain buffers here.
-        let (permuted_input_commitment, permuted_table_commitment) = crate::multicore::join(
-            || {
-                params
-                    .commit_lagrange(&permuted_input_expression, permuted_input_blind)
-                    .to_affine()
-            },
-            || {
-                params
-                    .commit_lagrange(&permuted_table_expression, permuted_table_blind)
-                    .to_affine()
-            },
+        let (permuted_input_commitment, permuted_table_commitment) = commit_permuted_pair(
+            params,
+            domain,
+            &permuted_input_expression,
+            permuted_input_blind,
+            &permuted_table_expression,
+            permuted_table_blind,
         );
 
         Ok(PreparedPermuted {
@@ -611,6 +607,53 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             permuted_table_blind,
         })
     }
+}
+
+fn commit_permuted_pair<C: CurveAffine>(
+    params: &Params<C>,
+    domain: &EvaluationDomain<C::Scalar>,
+    input: &Polynomial<C::Scalar, LagrangeCoeff>,
+    input_blind: Blind<C::Scalar>,
+    table: &Polynomial<C::Scalar, LagrangeCoeff>,
+    table_blind: Blind<C::Scalar>,
+) -> (C, C) {
+    // By linearity, C(input, r_i) = C(table, r_t) +
+    // C(input - table, r_i - r_t). The sorted lookup construction makes the
+    // delta sparse, which the retained commitment table handles efficiently.
+    let (table_commitment, difference_commitment) = crate::multicore::join(
+        || params.commit_lagrange(table, table_blind),
+        || {
+            commit_lagrange_difference(
+                params,
+                domain,
+                input,
+                table,
+                Blind(input_blind.0 - table_blind.0),
+            )
+        },
+    );
+    let projective = [table_commitment + difference_commitment, table_commitment];
+    let mut affine = [C::identity(); 2];
+    C::Curve::batch_normalize(&projective, &mut affine);
+    (affine[0], affine[1])
+}
+
+fn commit_lagrange_difference<C: CurveAffine>(
+    params: &Params<C>,
+    domain: &EvaluationDomain<C::Scalar>,
+    lhs: &Polynomial<C::Scalar, LagrangeCoeff>,
+    rhs: &Polynomial<C::Scalar, LagrangeCoeff>,
+    blind: Blind<C::Scalar>,
+) -> C::Curve {
+    assert_eq!(lhs.len(), rhs.len());
+    assert_eq!(lhs.len(), params.g_lagrange.len());
+
+    let difference = lhs
+        .iter()
+        .zip(rhs.iter())
+        .map(|(&lhs, &rhs)| lhs - rhs)
+        .collect();
+    params.commit_lagrange(&domain.lagrange_from_vec(difference), blind)
 }
 
 /// Prepares lookup arguments while sharing fixed-table work across circuits.
@@ -1419,7 +1462,7 @@ where
 mod tests {
     use std::collections::BTreeMap;
 
-    use pasta_curves::pallas;
+    use pasta_curves::{pallas, vesta};
 
     use super::*;
     use crate::plonk::circuit::FixedQuery;
@@ -1472,6 +1515,95 @@ mod tests {
 
     fn values(values: &[u64]) -> Vec<pallas::Scalar> {
         values.iter().copied().map(pallas::Scalar::from).collect()
+    }
+
+    fn check_permuted_pair_commitments<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+        C::Curve: core::fmt::Debug,
+    {
+        const K: u32 = 4;
+
+        let params = Params::<C>::new(K);
+        let domain = EvaluationDomain::<C::Scalar>::new(1, K);
+        let zero = domain.lagrange_from_vec(vec![C::Scalar::ZERO; 1 << K]);
+        assert_eq!(
+            commit_permuted_pair(
+                &params,
+                &domain,
+                &zero,
+                Blind(C::Scalar::ZERO),
+                &zero,
+                Blind(C::Scalar::ZERO),
+            ),
+            (C::identity(), C::identity()),
+        );
+
+        let table_values = (0..1_usize << K)
+            .map(|index| C::Scalar::from(index as u64 + 1))
+            .collect::<Vec<_>>();
+
+        let identical = table_values.clone();
+        let full_difference = table_values
+            .iter()
+            .map(|value| *value + C::Scalar::ONE)
+            .collect::<Vec<_>>();
+        let sparse_difference = table_values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if index % 3 == 0 {
+                    *value + C::Scalar::from(index as u64 + 2)
+                } else {
+                    *value
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (input_values, input_blind, table_blind) in [
+            (
+                identical.clone(),
+                Blind(C::Scalar::from(7)),
+                Blind(C::Scalar::from(7)),
+            ),
+            (
+                identical,
+                Blind(C::Scalar::from(11)),
+                Blind(C::Scalar::from(13)),
+            ),
+            (
+                full_difference,
+                Blind(C::Scalar::from(17)),
+                Blind(C::Scalar::from(17)),
+            ),
+            (
+                sparse_difference,
+                Blind(C::Scalar::from(19)),
+                Blind(C::Scalar::from(23)),
+            ),
+        ] {
+            let input = domain.lagrange_from_vec(input_values);
+            let table = domain.lagrange_from_vec(table_values.clone());
+            let expected = (
+                params.commit_lagrange(&input, input_blind).to_affine(),
+                params.commit_lagrange(&table, table_blind).to_affine(),
+            );
+
+            assert_eq!(
+                commit_permuted_pair(&params, &domain, &input, input_blind, &table, table_blind,),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn permuted_pair_commitments_reuse_table_pallas() {
+        check_permuted_pair_commitments::<pallas::Affine>();
+    }
+
+    #[test]
+    fn permuted_pair_commitments_reuse_table_vesta() {
+        check_permuted_pair_commitments::<vesta::Affine>();
     }
 
     fn check_table_sort<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord>() {
