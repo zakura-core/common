@@ -3,8 +3,6 @@ use super::super::{
     circuit::Expression, evaluator_schedule::QuotientPoly,
 };
 use super::Argument;
-#[cfg(feature = "multicore")]
-use crate::PreparedSparseCommitments;
 use crate::{
     arithmetic::{CurveAffine, parallelize},
     plonk::evaluation::{EvaluationPoint, EvaluationQuery},
@@ -94,17 +92,12 @@ pub(in crate::plonk) struct ProductBlinding<F: Field> {
     product_blind: Blind<F>,
 }
 
-struct PreparedTable<C: CurveAffine, Ev> {
-    compressed_expression: Arc<Polynomial<C::Scalar, LagrangeCoeff>>,
-    compressed_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
-    sorted_values: Vec<C::Scalar>,
+struct PreparedTable<F: Field, Ev> {
+    compressed_expression: Arc<Polynomial<F, LagrangeCoeff>>,
+    compressed_coset: Option<poly::Ast<Ev, F, ExtendedLagrangeCoeff>>,
+    sorted_values: Vec<F>,
     sorted_keys: Vec<PastaSortKey>,
-    commitment_center: Option<TableCommitmentCenter<C>>,
-}
-
-struct TableCommitmentCenter<C: CurveAffine> {
-    scalar: C::Scalar,
-    correction: C::Curve,
+    sinsemilla_q_0: Option<(F, usize)>,
 }
 
 struct PreparedInput<F: Field, Ev> {
@@ -122,14 +115,14 @@ struct PendingLookup<C: CurveAffine, Ev> {
 }
 
 struct TableState<C: CurveAffine, Ev> {
-    table: Option<Arc<PreparedTable<C, Ev>>>,
+    table: Option<Arc<PreparedTable<C::Scalar, Ev>>>,
     pending: Vec<PendingLookup<C, Ev>>,
 }
 
-/// Require centering to remove at least one quarter of the usable terms that
-/// would otherwise be nonzero. This keeps the extra scalar pass and fixed-base
-/// multiplication away from tables with only a weak mode.
-const TABLE_CENTERING_MIN_SAVED_FRACTION_DENOMINATOR: usize = 4;
+/// Require factoring to remove at least one quarter of the usable terms.
+/// This also guards the structural Sinsemilla marker against unrelated tables
+/// that happen to have the same lookup shape.
+const SINSEMILLA_Q_0_MIN_REPETITION_FRACTION_DENOMINATOR: usize = 4;
 
 const PASTA_REPR_BYTES: usize = 32;
 const PASTA_LIMB_BYTES: usize = std::mem::size_of::<u64>();
@@ -182,6 +175,7 @@ fn uses_pasta_sort_keys<F: Field>() -> bool {
 pub(in crate::plonk) struct TablePlan {
     representatives: Vec<usize>,
     groups: Vec<usize>,
+    sinsemilla_tables: Vec<bool>,
     table_sort_scratch: Vec<Vec<PastaSortKey>>,
     input_sort_scratch: Vec<Vec<PastaSortKey>>,
 }
@@ -237,52 +231,18 @@ fn sort_lookup_values<F: Field + Ord>(values: &mut Vec<F>, scratch: &mut [PastaS
     values.sort_unstable();
 }
 
-fn table_commitment_center<F: Field + Ord>(sorted_values: &[F]) -> Option<F> {
+fn factorable_sinsemilla_q_0<F: Field + Ord>(sorted_values: &[F], q_0: F) -> Option<(F, usize)> {
     debug_assert!(sorted_values.windows(2).all(|pair| pair[0] <= pair[1]));
-    let mut zero_count = 0;
-    let mut best = None;
-    let mut best_count = 0;
-
-    for run in sorted_values.chunk_by(|left, right| left == right) {
-        let value = run[0];
-        if bool::from(value.is_zero()) {
-            zero_count = run.len();
-        } else if run.len() > best_count {
-            best = Some(value);
-            best_count = run.len();
-        }
-    }
-
-    let best = best?;
-    if best_count == 1 {
+    if sorted_values.is_empty() || bool::from(q_0.is_zero()) {
         return None;
     }
-    let saved_terms = best_count.checked_sub(zero_count)?;
-    (saved_terms
+
+    let q_0_terms = sorted_values.iter().filter(|&&value| value == q_0).count();
+    (q_0_terms
         >= sorted_values
             .len()
-            .div_ceil(TABLE_CENTERING_MIN_SAVED_FRACTION_DENOMINATOR))
-    .then_some(best)
-}
-
-fn fixed_table_center<C: CurveAffine>(
-    params: &Params<C>,
-    sorted_values: &[C::Scalar],
-) -> Option<TableCommitmentCenter<C>>
-where
-    C::Scalar: Ord,
-    C::Curve: Mul<C::Scalar, Output = C::Curve>,
-{
-    let scalar = table_commitment_center(sorted_values)?;
-    #[cfg(feature = "multicore")]
-    if let Some(correction) = params.commit_sparse(&[(0, scalar)], Blind(C::Scalar::ZERO)) {
-        return Some(TableCommitmentCenter { scalar, correction });
-    }
-
-    Some(TableCommitmentCenter {
-        scalar,
-        correction: C::Curve::from(params.g[0]) * scalar,
-    })
+            .div_ceil(SINSEMILLA_Q_0_MIN_REPETITION_FRACTION_DENOMINATOR))
+    .then_some((q_0, q_0_terms))
 }
 
 pub(in crate::plonk) struct PreparedProduct<C: CurveAffine, Ev> {
@@ -374,20 +334,50 @@ pub(in crate::plonk) fn compress_expressions_coset<E: Copy, F: Field>(
 }
 
 impl<F: Field> Argument<F> {
+    fn has_same_fixed_query(left: &Expression<F>, right: &Expression<F>) -> bool {
+        match (left, right) {
+            (Expression::Fixed(left), Expression::Fixed(right)) => {
+                left.index == right.index
+                    && left.column_index == right.column_index
+                    && left.rotation == right.rotation
+            }
+            _ => false,
+        }
+    }
+
     fn has_same_table(&self, other: &Self) -> bool {
         self.table_expressions.len() == other.table_expressions.len()
             && self
                 .table_expressions
                 .iter()
                 .zip(other.table_expressions.iter())
-                .all(|(left, right)| match (left, right) {
-                    (Expression::Fixed(left), Expression::Fixed(right)) => {
-                        left.index == right.index
-                            && left.column_index == right.column_index
-                            && left.rotation == right.rotation
-                    }
-                    _ => false,
-                })
+                .all(|(left, right)| Self::has_same_fixed_query(left, right))
+    }
+
+    fn has_sinsemilla_table_shape(&self, arguments: &[Self], uses: usize) -> bool {
+        let [
+            Expression::Fixed(index),
+            Expression::Fixed(x),
+            Expression::Fixed(y),
+        ] = self.table_expressions.as_slice()
+        else {
+            return false;
+        };
+        let current_rotation = Rotation::cur();
+        uses > 1
+            && [index, x, y]
+                .iter()
+                .all(|query| query.rotation == current_rotation)
+            && index.column_index != x.column_index
+            && index.column_index != y.column_index
+            && x.column_index != y.column_index
+            && arguments.iter().any(|argument| {
+                argument.table_expressions.len() == 1
+                    && Self::has_same_fixed_query(
+                        &self.table_expressions[0],
+                        &argument.table_expressions[0],
+                    )
+            })
     }
 }
 
@@ -413,6 +403,22 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
                 })
         })
         .collect::<Vec<_>>();
+    let mut group_uses = vec![0usize; representatives.len()];
+    for &group in &groups {
+        group_uses[group] += 1;
+    }
+    // Orchard's Sinsemilla table is the reused three-column generator lookup
+    // whose index column is also used by the unary range lookup. This private
+    // structural marker avoids adding a circuit-configuration hint to the
+    // public API. The q_0 repetition threshold below guards lookalike tables.
+    let sinsemilla_tables = representatives
+        .iter()
+        .enumerate()
+        .map(|(group, &representative)| {
+            lookup_arguments[representative]
+                .has_sinsemilla_table_shape(lookup_arguments, group_uses[group])
+        })
+        .collect();
 
     let scratch_len = if uses_pasta_sort_keys::<F>() {
         usable_rows
@@ -434,6 +440,7 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
     TablePlan {
         representatives,
         groups,
+        sinsemilla_tables,
         table_sort_scratch,
         input_sort_scratch,
     }
@@ -441,9 +448,8 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
 
 impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
     #[allow(clippy::too_many_arguments)]
-    fn prepare_table<C, Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
+    fn prepare_table<Ev: Copy + Send + Sync, Ec: Copy + Send + Sync>(
         &self,
-        params: &Params<C>,
         domain: &EvaluationDomain<F>,
         value_evaluator: &poly::Evaluator<Ev, F, LagrangeCoeff>,
         theta: F,
@@ -451,12 +457,9 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         fixed_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         usable_rows: usize,
         build_quotient_asts: bool,
+        sinsemilla_table: bool,
         mut sort_scratch: Vec<PastaSortKey>,
-    ) -> PreparedTable<C, Ec>
-    where
-        C: CurveAffine<ScalarExt = F>,
-        C::Curve: Mul<F, Output = C::Curve>,
-    {
+    ) -> PreparedTable<F, Ec> {
         let unpermuted_expressions = self.table_expressions.iter().map(|expression| {
             let Expression::Fixed(query) = expression else {
                 unreachable!("lookup table expressions are fixed queries")
@@ -485,20 +488,27 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
                 .unwrap_or(poly::Ast::ConstantTerm(F::ZERO))
         });
         let compressed_expression = value_evaluator.evaluate(&compressed_expression, domain);
+        let q_0 = compressed_expression[0];
         let mut sorted_values = compressed_expression
             .iter()
             .take(usable_rows)
             .copied()
             .collect::<Vec<_>>();
         sort_lookup_values(&mut sorted_values, &mut sort_scratch);
-        let commitment_center = fixed_table_center(params, &sorted_values);
+        // The Sinsemilla generator lookup is padded with its first tuple. Its
+        // theta-compressed value is therefore repeated over roughly half of
+        // the table commitment. Keep this specialization at the table-MSM
+        // boundary instead of changing generic MSM routing.
+        let sinsemilla_q_0 = sinsemilla_table
+            .then(|| factorable_sinsemilla_q_0(&sorted_values, q_0))
+            .flatten();
 
         PreparedTable {
             compressed_expression: Arc::new(compressed_expression),
             compressed_coset,
             sorted_values,
             sorted_keys: sort_scratch,
-            commitment_center,
+            sinsemilla_q_0,
         }
     }
 
@@ -601,7 +611,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
         input: PreparedInput<C::Scalar, Ec>,
-        table: &PreparedTable<C, Ec>,
+        table: &PreparedTable<F, Ec>,
         blinding: PermutedBlinding<C::Scalar>,
     ) -> Result<PreparedPermuted<C, Ec>, Error>
     where
@@ -620,6 +630,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             &table.sorted_values,
             &table.sorted_keys,
         )?;
+        debug_assert_eq!(permuted_table_values.len(), table.sorted_values.len());
 
         let blind_rows = pk.vk.cs.blinding_factors() + 1;
         assert_eq!(blinding.input_rows.len(), blind_rows);
@@ -660,7 +671,8 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             permuted_input_blind,
             &permuted_table_expression,
             permuted_table_blind,
-            table.commitment_center.as_ref(),
+            table.sinsemilla_q_0,
+            table.sorted_values.len(),
         );
 
         Ok(PreparedPermuted {
@@ -678,6 +690,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_permuted_pair<C: CurveAffine>(
     params: &Params<C>,
     domain: &EvaluationDomain<C::Scalar>,
@@ -685,13 +698,14 @@ fn commit_permuted_pair<C: CurveAffine>(
     input_blind: Blind<C::Scalar>,
     table: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_blind: Blind<C::Scalar>,
-    table_center: Option<&TableCommitmentCenter<C>>,
+    sinsemilla_q_0: Option<(C::Scalar, usize)>,
+    usable_rows: usize,
 ) -> (C, C) {
     // By linearity, C(input, r_i) = C(table, r_t) +
     // C(input - table, r_i - r_t). The sorted lookup construction makes the
     // delta sparse, which the retained commitment table handles efficiently.
     let (table_commitment, difference_commitment) = crate::multicore::join(
-        || commit_lagrange_centered(params, domain, table, table_blind, table_center),
+        || commit_sinsemilla_table(params, table, table_blind, sinsemilla_q_0, usable_rows),
         || {
             commit_lagrange_difference(
                 params,
@@ -708,28 +722,24 @@ fn commit_permuted_pair<C: CurveAffine>(
     (affine[0], affine[1])
 }
 
-fn commit_lagrange_centered<C: CurveAffine>(
+fn commit_sinsemilla_table<C: CurveAffine>(
     params: &Params<C>,
-    domain: &EvaluationDomain<C::Scalar>,
     polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
     blind: Blind<C::Scalar>,
-    center: Option<&TableCommitmentCenter<C>>,
+    sinsemilla_q_0: Option<(C::Scalar, usize)>,
+    usable_rows: usize,
 ) -> C::Curve {
-    let Some(center) = center else {
+    let Some((q_0, q_0_count)) = sinsemilla_q_0 else {
         return params.commit_lagrange(polynomial, blind);
     };
 
-    // The sum of every Lagrange-basis generator is the constant coefficient
-    // generator g[0]. Centering every row therefore preserves the commitment
-    // after adding [center] g[0]. Including the random tail avoids caching a
-    // separate usable-row generator sum, and translating those uniform values
-    // by a public scalar leaves them uniform. This scratch polynomial is used
-    // only by the commitment; the lookup product retains the original values.
-    let centered = polynomial
-        .iter()
-        .map(|value| *value - center.scalar)
-        .collect();
-    params.commit_lagrange(&domain.lagrange_from_vec(centered), blind) + center.correction
+    // Factor the Sinsemilla table's repeated q_0 without changing any other
+    // scalar. The dedicated prepared-table path sums the selected Lagrange
+    // bases into S_U, then adds [q_0] S_U. Existing zero and low-magnitude
+    // behavior is therefore preserved for every remaining coefficient.
+    params
+        .try_commit_sinsemilla_table(polynomial, blind, q_0, q_0_count, usable_rows)
+        .unwrap_or_else(|| params.commit_lagrange(polynomial, blind))
 }
 
 fn commit_lagrange_difference<C: CurveAffine>(
@@ -781,6 +791,7 @@ where
     let TablePlan {
         representatives: table_representatives,
         groups: table_groups,
+        sinsemilla_tables,
         table_sort_scratch,
         input_sort_scratch,
     } = table_plan;
@@ -793,9 +804,9 @@ where
         let prepared_tables = table_representatives
             .into_par_iter()
             .zip(table_sort_scratch.into_par_iter())
-            .map(|(lookup_index, sort_scratch)| {
+            .zip(sinsemilla_tables.into_par_iter())
+            .map(|((lookup_index, sort_scratch), sinsemilla_table)| {
                 lookup_arguments[lookup_index].prepare_table(
-                    params,
                     domain,
                     value_evaluator,
                     *theta,
@@ -803,6 +814,7 @@ where
                     fixed_cosets,
                     usable_rows,
                     build_quotient_asts,
+                    sinsemilla_table,
                     sort_scratch,
                 )
             })
@@ -911,15 +923,15 @@ where
             });
         }
 
-        for ((representative, sort_scratch), state) in table_representatives
+        for (((representative, sort_scratch), sinsemilla_table), state) in table_representatives
             .into_iter()
             .zip(table_sort_scratch)
+            .zip(sinsemilla_tables)
             .zip(&table_states)
         {
             let prepared = &prepared;
             scope.spawn(move |_| {
                 let table = Arc::new(lookup_arguments[representative].prepare_table(
-                    params,
                     domain,
                     value_evaluator,
                     *theta,
@@ -927,6 +939,7 @@ where
                     fixed_cosets,
                     usable_rows,
                     build_quotient_asts,
+                    sinsemilla_table,
                     sort_scratch,
                 ));
                 let pending = {
@@ -1621,6 +1634,13 @@ mod tests {
         const K: u32 = 4;
 
         let params = Params::<C>::new(K);
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        assert!(params.prepare_commitments());
+        #[cfg(feature = "multicore")]
+        let prepared_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
         let domain = EvaluationDomain::<C::Scalar>::new(1, K);
         let zero = domain.lagrange_from_vec(vec![C::Scalar::ZERO; 1 << K]);
         assert_eq!(
@@ -1632,18 +1652,21 @@ mod tests {
                 &zero,
                 Blind(C::Scalar::ZERO),
                 None,
+                0,
             ),
             (C::identity(), C::identity()),
         );
 
+        let q_0 = C::Scalar::from(29);
         let table_values = (0..1_usize << K)
-            .map(|index| C::Scalar::from(index as u64 + 1))
+            .map(|index| {
+                if (index < 15 && index % 2 == 0) || index == (1 << K) - 1 {
+                    q_0
+                } else {
+                    C::Scalar::from(index as u64 + 1)
+                }
+            })
             .collect::<Vec<_>>();
-        let center_scalar = C::Scalar::from(29);
-        let center = TableCommitmentCenter {
-            scalar: center_scalar,
-            correction: C::Curve::from(params.g[0]) * center_scalar,
-        };
 
         let identical = table_values.clone();
         let full_difference = table_values
@@ -1690,8 +1713,20 @@ mod tests {
                 params.commit_lagrange(&input, input_blind).to_affine(),
                 params.commit_lagrange(&table, table_blind).to_affine(),
             );
+            // Model noncontiguous witness-dependent positions and a random
+            // blind-tail row that happens to equal q_0.
+            #[cfg(feature = "multicore")]
+            let routed_table = prepared_pool
+                .install(|| params.try_commit_sinsemilla_table(&table, table_blind, q_0, 8, 15));
+            #[cfg(all(not(feature = "multicore"), feature = "orbits"))]
+            let routed_table = params.try_commit_sinsemilla_table(&table, table_blind, q_0, 8, 15);
+            #[cfg(any(feature = "multicore", feature = "orbits"))]
+            assert_eq!(
+                routed_table.map(|point| point.to_affine()),
+                Some(expected.1)
+            );
 
-            for table_center in [None, Some(&center)] {
+            for sinsemilla_q_0 in [None, Some((q_0, 8))] {
                 assert_eq!(
                     commit_permuted_pair(
                         &params,
@@ -1700,26 +1735,107 @@ mod tests {
                         input_blind,
                         &table,
                         table_blind,
-                        table_center,
+                        sinsemilla_q_0,
+                        15,
                     ),
                     expected,
                 );
             }
         }
 
-        let constant = domain.lagrange_from_vec(vec![center_scalar; 1usize << K]);
+        let constant = domain.lagrange_from_vec(vec![q_0; 1usize << K]);
         let expected_constant = params.commit_lagrange(&constant, Blind(C::Scalar::ZERO));
-        assert_eq!(expected_constant, center.correction);
         assert_eq!(
-            commit_lagrange_centered(
+            commit_sinsemilla_table(
                 &params,
-                &domain,
                 &constant,
                 Blind(C::Scalar::ZERO),
-                Some(&center),
+                Some((q_0, 1 << K)),
+                1 << K,
             ),
-            center.correction,
+            expected_constant,
         );
+
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        {
+            #[cfg(feature = "multicore")]
+            let routed = prepared_pool.install(|| {
+                params.try_commit_sinsemilla_table(
+                    &constant,
+                    Blind(C::Scalar::ZERO),
+                    q_0,
+                    1 << K,
+                    1 << K,
+                )
+            });
+            #[cfg(not(feature = "multicore"))]
+            let routed = params.try_commit_sinsemilla_table(
+                &constant,
+                Blind(C::Scalar::ZERO),
+                q_0,
+                1 << K,
+                1 << K,
+            );
+            assert_eq!(routed, Some(expected_constant));
+
+            assert!(
+                params
+                    .try_commit_sinsemilla_table(
+                        &constant,
+                        Blind(C::Scalar::ZERO),
+                        C::Scalar::ZERO,
+                        1 << K,
+                        1 << K,
+                    )
+                    .is_none()
+            );
+            assert!(
+                params
+                    .try_commit_sinsemilla_table(
+                        &constant,
+                        Blind(C::Scalar::ZERO),
+                        q_0,
+                        (1 << K) - 1,
+                        1 << K,
+                    )
+                    .is_none()
+            );
+            assert!(
+                params
+                    .try_commit_sinsemilla_table(
+                        &constant,
+                        Blind(C::Scalar::ZERO),
+                        q_0,
+                        (1 << K) + 1,
+                        1 << K,
+                    )
+                    .is_none()
+            );
+            assert!(
+                params
+                    .try_commit_sinsemilla_table(
+                        &constant,
+                        Blind(C::Scalar::ZERO),
+                        q_0,
+                        1 << K,
+                        (1 << K) + 1,
+                    )
+                    .is_none()
+            );
+
+            let unprepared = Params::<C>::new(K);
+            assert!(
+                unprepared
+                    .try_commit_sinsemilla_table(
+                        &constant,
+                        Blind(C::Scalar::ZERO),
+                        q_0,
+                        1 << K,
+                        1 << K,
+                    )
+                    .is_none()
+            );
+        }
     }
 
     #[test]
@@ -1790,59 +1906,50 @@ mod tests {
     }
 
     #[test]
-    fn table_commitment_center_requires_a_strong_nonzero_mode() {
+    fn sinsemilla_q_0_requires_a_strong_nonzero_repetition() {
         let len = 16usize;
-        let threshold = len.div_ceil(TABLE_CENTERING_MIN_SAVED_FRACTION_DENOMINATOR);
+        let threshold = len.div_ceil(SINSEMILLA_Q_0_MIN_REPETITION_FRACTION_DENOMINATOR);
         let exact = sorted_values_with_mode(threshold, len);
-        assert_eq!(table_commitment_center(&exact), Some(pallas::Scalar::ONE));
+        assert_eq!(
+            factorable_sinsemilla_q_0(&exact, pallas::Scalar::ONE),
+            Some((pallas::Scalar::ONE, threshold)),
+        );
 
         let below = sorted_values_with_mode(threshold - 1, len);
-        assert_eq!(table_commitment_center(&below), None);
-        assert_eq!(table_commitment_center::<pallas::Scalar>(&[]), None);
+        assert_eq!(factorable_sinsemilla_q_0(&below, pallas::Scalar::ONE), None,);
         assert_eq!(
-            table_commitment_center(&sorted_values_with_counts(&[(1, 1), (2, 1), (3, 1)])),
+            factorable_sinsemilla_q_0::<pallas::Scalar>(&[], pallas::Scalar::ONE),
+            None,
+        );
+        assert_eq!(
+            factorable_sinsemilla_q_0(
+                &sorted_values_with_counts(&[(0, 8), (1, 4), (2, 4)]),
+                pallas::Scalar::ZERO,
+            ),
             None,
         );
     }
 
     #[test]
-    fn table_commitment_center_accounts_for_existing_zeroes() {
-        let zero_dominant = sorted_values_with_counts(&[(0, 8), (1, 6), (2, 2)]);
-        assert_eq!(table_commitment_center(&zero_dominant), None);
-
-        let threshold = sorted_values_with_zeroes_and_mode(2, 6, 16);
+    fn sinsemilla_factoring_uses_q_0_instead_of_the_mode() {
+        let longer_other_run = sorted_values_with_counts(&[(1, 4), (2, 8), (3, 4)]);
         assert_eq!(
-            table_commitment_center(&threshold),
-            Some(pallas::Scalar::ONE),
+            factorable_sinsemilla_q_0(&longer_other_run, pallas::Scalar::ONE),
+            Some((pallas::Scalar::ONE, 4)),
         );
 
-        let below_threshold = sorted_values_with_zeroes_and_mode(2, 5, 16);
-        assert_eq!(table_commitment_center(&below_threshold), None);
-
-        let nonzero_dominant = sorted_values_with_counts(&[(0, 1), (1, 5), (2, 5), (3, 5)]);
+        let weak_q_0 = sorted_values_with_counts(&[(1, 3), (2, 8), (3, 5)]);
         assert_eq!(
-            table_commitment_center(&nonzero_dominant),
-            Some(pallas::Scalar::ONE),
+            factorable_sinsemilla_q_0(&weak_q_0, pallas::Scalar::ONE),
+            None,
         );
-    }
 
-    #[cfg(feature = "multicore")]
-    #[test]
-    fn fixed_table_center_matches_native_multiplication() {
-        let params = Params::<pallas::Affine>::new(crate::PREPARED_SPARSE_COMMITMENT_K);
-        assert!(params.prepare_sparse_commitment());
-        let scalar = (pallas::Scalar::from(0x9e37_79b9_7f4a_7c15).square()
-            + pallas::Scalar::from(0x0123_4567_89ab_cdef))
-        .square();
-        let mut values = vec![pallas::Scalar::ZERO, pallas::Scalar::ONE];
-        values.extend(iter::repeat(scalar).take(8));
-        values.sort_unstable();
-
-        let center = fixed_table_center(&params, &values).expect("the strong mode is centered");
-        assert_eq!(center.scalar, scalar);
+        // Existing zeroes remain zero after factoring, so they do not reduce
+        // the number of q_0 terms saved by the dedicated MSM.
+        let zero_dominant = sorted_values_with_counts(&[(0, 8), (1, 4), (2, 4)]);
         assert_eq!(
-            center.correction,
-            pallas::Point::from(params.g[0]) * center.scalar,
+            factorable_sinsemilla_q_0(&zero_dominant, pallas::Scalar::ONE),
+            Some((pallas::Scalar::ONE, 4)),
         );
     }
 
@@ -1896,6 +2003,7 @@ mod tests {
         );
         assert_eq!(plan.representatives, [0, 2]);
         assert_eq!(plan.groups, [0, 0, 1]);
+        assert_eq!(plan.sinsemilla_tables, [false, false]);
         assert_eq!(plan.table_sort_scratch.len(), 2);
         assert!(
             plan.table_sort_scratch
@@ -1908,6 +2016,55 @@ mod tests {
                 .iter()
                 .all(|scratch| scratch.len() == 17)
         );
+    }
+
+    #[test]
+    fn reused_indexed_triple_matches_sinsemilla_shape() {
+        let index = lookup_with_table(&[(1, 0, 0)]);
+        let triple = lookup_with_table(&[(1, 0, 0), (11, 1, 0), (12, 2, 0)]);
+        let plan = prepare_table_plan(
+            &[
+                index,
+                triple,
+                lookup_with_table(&[(1, 0, 0), (11, 1, 0), (12, 2, 0)]),
+            ],
+            2,
+            17,
+        );
+        assert_eq!(plan.representatives, [0, 1]);
+        assert_eq!(plan.groups, [0, 1, 1]);
+        assert_eq!(plan.sinsemilla_tables, [false, true]);
+
+        let one_off = prepare_table_plan(
+            &[
+                lookup_with_table(&[(1, 0, 0)]),
+                lookup_with_table(&[(1, 0, 0), (11, 1, 0), (12, 2, 0)]),
+            ],
+            1,
+            17,
+        );
+        assert_eq!(one_off.sinsemilla_tables, [false, false]);
+
+        let no_index_lookup = prepare_table_plan(
+            &[
+                lookup_with_table(&[(1, 0, 0), (11, 1, 0), (12, 2, 0)]),
+                lookup_with_table(&[(1, 0, 0), (11, 1, 0), (12, 2, 0)]),
+            ],
+            1,
+            17,
+        );
+        assert_eq!(no_index_lookup.sinsemilla_tables, [false]);
+
+        let rotated = prepare_table_plan(
+            &[
+                lookup_with_table(&[(1, 0, 0)]),
+                lookup_with_table(&[(1, 0, 0), (11, 1, 1), (12, 2, 0)]),
+                lookup_with_table(&[(1, 0, 0), (11, 1, 1), (12, 2, 0)]),
+            ],
+            1,
+            17,
+        );
+        assert_eq!(rotated.sinsemilla_tables, [false, false]);
     }
 
     fn check_lookup_permutation_exhaustively<F>()

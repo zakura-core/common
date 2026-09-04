@@ -646,15 +646,23 @@ fn ironwood_payment_fixture_proves() {
         ironwood_benchmark_rng(IRONWOOD_FIXTURE_SEED_DOMAIN, IRONWOOD_FIXTURE_ACTIONS),
     );
     let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
-    let proof = fixture
-        .bundle
-        .authorization()
-        .create_proof(
+    assert!(keys.proving_key().prepare_proving());
+    let create_proof = || {
+        fixture.bundle.authorization().create_proof(
             keys.proving_key(),
             &fixture.instances,
             ironwood_benchmark_rng(IRONWOOD_PROOF_SEED_DOMAIN, IRONWOOD_FIXTURE_ACTIONS),
         )
-        .expect("the benchmark payment fixture proves");
+    };
+    #[cfg(feature = "multicore")]
+    let proof = maybe_rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("the Ironwood proof test thread pool builds")
+        .install(create_proof);
+    #[cfg(not(feature = "multicore"))]
+    let proof = create_proof();
+    let proof = proof.expect("the benchmark payment fixture proves");
     proof
         .verify(keys.verifying_key(), &fixture.instances)
         .expect("the benchmark payment fixture verifies");

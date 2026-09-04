@@ -1322,6 +1322,124 @@ impl<C: CurveAffine> Params<C> {
         best_multiexp::<C>(&tmp_scalars, &tmp_bases)
     }
 
+    /// Attempts the dedicated prepared-table commitment for a permuted
+    /// Sinsemilla lookup table. It factors the repeated `q_0` terms into one
+    /// multiplication by the sum of their Lagrange bases, so every other
+    /// scalar retains its existing zero and low-magnitude behavior.
+    pub(crate) fn try_commit_sinsemilla_table(
+        &self,
+        poly: &Polynomial<C::Scalar, LagrangeCoeff>,
+        r: Blind<C::Scalar>,
+        q_0: C::Scalar,
+        q_0_count: usize,
+        usable_rows: usize,
+    ) -> Option<C::Curve> {
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        {
+            if crate::multicore::current_num_threads() > prepared_commitment_max_threads(self.k) {
+                return None;
+            }
+
+            let prepared = self.lagrange_table()?;
+            let n = self.n as usize;
+            if poly.len() != n {
+                return None;
+            }
+            #[cfg(feature = "orbits")]
+            if prepared.terms() != n + PREPARED_COMMITMENT_EXTRA_BASES {
+                return None;
+            }
+            #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+            if prepared.terms() != n {
+                return None;
+            }
+
+            if q_0_count == 0
+                || q_0_count > usable_rows
+                || usable_rows > n
+                || bool::from(q_0.is_zero())
+            {
+                return None;
+            }
+            let mut remaining = poly.iter().copied().collect::<Vec<_>>();
+            let mut q_0_rows = Vec::with_capacity(q_0_count);
+            for (row, value) in remaining[..usable_rows].iter_mut().enumerate() {
+                if *value == q_0 {
+                    *value = C::Scalar::ZERO;
+                    q_0_rows.push(row);
+                }
+            }
+            if q_0_rows.len() != q_0_count {
+                return None;
+            }
+
+            let q_0_correction = || {
+                let sum_rows = |rows: &[usize]| {
+                    let mut rows = rows.iter();
+                    let Some(&first) = rows.next() else {
+                        return C::Curve::identity();
+                    };
+                    let mut sum = C::Curve::from(self.g_lagrange[first]);
+                    for &row in rows {
+                        sum += self.g_lagrange[row];
+                    }
+                    sum
+                };
+
+                #[cfg(feature = "multicore")]
+                let selected_sum = {
+                    // Bound each correction to two jobs. Several lookup tasks
+                    // already run concurrently, so full-pool fanout contends
+                    // with the larger prepared MSM beside this sum.
+                    let midpoint = q_0_rows.len().div_ceil(2);
+                    let (left, right) = crate::multicore::join(
+                        || sum_rows(&q_0_rows[..midpoint]),
+                        || sum_rows(&q_0_rows[midpoint..]),
+                    );
+                    left + right
+                };
+                #[cfg(not(feature = "multicore"))]
+                let selected_sum = sum_rows(&q_0_rows);
+
+                best_multiexp::<C>(&[q_0], &[selected_sum.to_affine()])
+            };
+
+            #[cfg(feature = "orbits")]
+            let commitment = {
+                let remaining_suffix = [r.0, C::Scalar::ZERO];
+                let (remaining, selected_sum) = crate::multicore::join(
+                    || prepared.multiexp_with_prefix_and_suffix(&remaining, &remaining_suffix, &[]),
+                    q_0_correction,
+                );
+                remaining + selected_sum
+            };
+
+            #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+            let commitment = {
+                let fixed_bases = self.fixed_base_table()?;
+                let (remaining, selected_sum) = crate::multicore::join(
+                    || {
+                        let (remaining, blind) = crate::multicore::join(
+                            || prepared.multiexp_with_terms_vartime(&remaining, &[]),
+                            || fixed_bases.multiply_blind(r.0),
+                        );
+                        remaining + blind
+                    },
+                    q_0_correction,
+                );
+                remaining + selected_sum
+            };
+
+            Some(commitment)
+        }
+
+        #[cfg(not(any(feature = "multicore", feature = "orbits")))]
+        {
+            let _ = (poly, r, q_0, q_0_count, usable_rows);
+            None
+        }
+    }
+
     /// Generates an empty multiscalar multiplication struct using the
     /// appropriate params.
     pub fn empty_msm(&self) -> MSM<'_, C> {
