@@ -386,6 +386,75 @@ fn test_roundtrip() {
 }
 
 #[test]
+fn test_short_polynomials_open_as_zero_extended() {
+    use group::Curve;
+    use rand::rng;
+
+    use super::commitment::{Blind, Params};
+    use crate::arithmetic::eval_polynomial;
+    use crate::pasta::{EqAffine, Fp};
+    use crate::transcript::Challenge255;
+
+    const K: u32 = 2;
+
+    // A polynomial constructed in a domain smaller than the parameters must
+    // open as its zero-extended equivalent.
+    let params: Params<EqAffine> = Params::new(K);
+    let short_domain = EvaluationDomain::new(1, K - 1);
+    let full_domain = EvaluationDomain::new(1, K);
+
+    let short = short_domain.coeff_from_vec(vec![Fp::from(3), Fp::from(4)]);
+    let padded = full_domain.coeff_from_vec(vec![Fp::from(3), Fp::from(4), Fp::ZERO, Fp::ZERO]);
+
+    let mut full = full_domain.empty_coeff();
+    for (i, a) in full.iter_mut().enumerate() {
+        *a = Fp::from(100 + i as u64);
+    }
+
+    let blind = Blind(Fp::from(7));
+    let short_commitment = params.commit(&padded, blind).to_affine();
+    let full_commitment = params.commit(&full, blind).to_affine();
+
+    let x = Fp::from(9);
+    let y = Fp::from(13);
+
+    let mut transcript = crate::transcript::Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        rng(),
+        &mut transcript,
+        [
+            ProverQuery {
+                point: x,
+                poly: &short,
+                blind,
+            },
+            ProverQuery {
+                point: y,
+                poly: &full,
+                blind,
+            },
+        ],
+    )
+    .unwrap();
+    let proof = transcript.finalize();
+
+    let mut proof = &proof[..];
+    let mut transcript = crate::transcript::Blake2bRead::<_, _, Challenge255<_>>::init(&mut proof);
+    let guard = verify_proof(
+        &params,
+        &mut transcript,
+        [
+            VerifierQuery::new_commitment(&short_commitment, x, eval_polynomial(&short, x)),
+            VerifierQuery::new_commitment(&full_commitment, y, eval_polynomial(&full, y)),
+        ],
+        params.empty_msm(),
+    )
+    .unwrap();
+    assert!(guard.use_challenges().eval());
+}
+
+#[test]
 fn point_set_quotients_preserve_proof_across_workers() {
     use group::Curve;
     use rand::{SeedableRng, rngs::StdRng};
