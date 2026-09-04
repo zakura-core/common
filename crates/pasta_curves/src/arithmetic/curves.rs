@@ -145,7 +145,8 @@ pub trait CurveExt:
     /// # Security
     ///
     /// This method may run in variable time with respect to `scalars` and
-    /// `bases`. **Both slices must contain public data.**
+    /// `bases`. Inputs should be public unless the caller explicitly accepts
+    /// timing leakage from secret material.
     ///
     /// # Panics
     ///
