@@ -222,7 +222,7 @@ impl TxVersion {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 | TxVersion::V5 => false,
             TxVersion::V6 => true,
             #[cfg(zcash_unstable = "nutachyon")]
-            TxVersion::V7 => false,
+            TxVersion::V7 => true,
         }
     }
 
@@ -1063,30 +1063,29 @@ impl Transaction {
     /// Reads a V7 transaction: the V6 body followed by a Tachyon bundle.
     #[cfg(zcash_unstable = "nutachyon")]
     fn read_v7<R: Read>(mut reader: R, version: TxVersion) -> io::Result<Self> {
-        let (consensus_branch_id, lock_time, expiry_height) =
-            Self::read_header_fragment(&mut reader)?;
+        let header_fragment = Self::read_v6_header_fragment(&mut reader)?;
 
         let transparent_bundle = Self::read_transparent(&mut reader)?;
         let sapling_bundle = sapling_serialization::read_v5_bundle(&mut reader)?;
         let orchard_bundle = orchard_serialization::read_v6_bundle(
             &mut reader,
-            consensus_branch_id,
+            header_fragment.consensus_branch_id,
             orchard::ValuePool::Orchard,
         )?;
         let ironwood_bundle = orchard_serialization::read_v6_bundle(
             &mut reader,
-            consensus_branch_id,
+            header_fragment.consensus_branch_id,
             orchard::ValuePool::Ironwood,
         )?;
         let tachyon_bundle = tachyon_serialization::read_v7_bundle(&mut reader)?;
 
         let data = TransactionData {
             version,
-            consensus_branch_id,
-            lock_time,
-            expiry_height,
+            consensus_branch_id: header_fragment.consensus_branch_id,
+            lock_time: header_fragment.lock_time,
+            expiry_height: header_fragment.expiry_height,
             #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-            zip233_amount: Zatoshis::ZERO,
+            zip233_amount: header_fragment.zip233_amount,
             transparent_bundle,
             sprout_bundle: None,
             sapling_bundle,
@@ -1098,7 +1097,7 @@ impl Transaction {
         Ok(Self::from_data_v6(data))
     }
 
-    /// Utility function for reading header data common to v5 and v6 transactions.
+    /// Utility function for reading header data common to V5 and later transactions.
     fn read_header_fragment<R: Read>(mut reader: R) -> io::Result<(BranchId, u32, BlockHeight)> {
         let consensus_branch_id = reader.read_u32_le().and_then(|value| {
             BranchId::try_from(value).map_err(|_e| {
@@ -1249,7 +1248,7 @@ impl Transaction {
                 "Sprout components cannot be present when serializing to the V7 transaction format.",
             ));
         }
-        self.write_v5_header(&mut writer)?;
+        self.write_v6_header(&mut writer)?;
 
         self.write_transparent(&mut writer)?;
         self.write_v5_sapling(&mut writer)?;

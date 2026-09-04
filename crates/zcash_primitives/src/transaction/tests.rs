@@ -82,13 +82,18 @@ fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
     );
     assert!(TxVersion::V7.valid_in_branch(BranchId::NuTachyon));
     assert!(!TxVersion::V7.valid_in_branch(BranchId::Nu6_3));
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    assert!(TxVersion::V7.has_zip233());
+
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    let zip233_amount = Zatoshis::const_from_u64(123_456);
 
     let tx = TransactionData::from_parts_v7(
         BranchId::NuTachyon,
         0,
         0u32.into(),
         #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-        Zatoshis::ZERO,
+        zip233_amount,
         None,
         None,
         None,
@@ -98,6 +103,24 @@ fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
     .freeze()
     .unwrap();
     assert!(tx.tachyon_bundle().is_no_bundle());
+
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    {
+        let tx_without_burn = TransactionData::from_parts_v7(
+            BranchId::NuTachyon,
+            0,
+            0u32.into(),
+            Zatoshis::ZERO,
+            None,
+            None,
+            None,
+            None,
+            zcash_tachyon::TachyonBundle::NoBundle,
+        )
+        .freeze()
+        .unwrap();
+        assert_ne!(tx.txid(), tx_without_burn.txid());
+    }
 
     let mut encoded = Vec::new();
     tx.write(&mut encoded).unwrap();
@@ -111,6 +134,8 @@ fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
     let decoded = Transaction::read(&encoded[..], BranchId::Sprout).unwrap();
     assert_eq!(decoded.version(), TxVersion::V7);
     assert_eq!(decoded.consensus_branch_id(), BranchId::NuTachyon);
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    assert_eq!(decoded.zip233_amount(), zip233_amount);
     assert!(decoded.tachyon_bundle().is_no_bundle());
     let mut reencoded = Vec::new();
     decoded.write(&mut reencoded).unwrap();
