@@ -127,10 +127,7 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
         element: AssignedCell<F, F>,
         num_words: usize,
         strict: bool,
-    ) -> Result<RunningSum<F>, Error>
-    where
-        F: MulByInversePowerOfTwo,
-    {
+    ) -> Result<RunningSum<F>, Error> {
         layouter.assign_region(
             || format!("{:?} words range check", num_words),
             |mut region| {
@@ -149,10 +146,7 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
         value: Value<F>,
         num_words: usize,
         strict: bool,
-    ) -> Result<RunningSum<F>, Error>
-    where
-        F: MulByInversePowerOfTwo,
-    {
+    ) -> Result<RunningSum<F>, Error> {
         layouter.assign_region(
             || "Witness element",
             |mut region| {
@@ -180,10 +174,7 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
         element: AssignedCell<F, F>,
         num_words: usize,
         strict: bool,
-    ) -> Result<RunningSum<F>, Error>
-    where
-        F: MulByInversePowerOfTwo,
-    {
+    ) -> Result<RunningSum<F>, Error> {
         // `num_words` must fit into a single field element.
         assert!(num_words * K <= F::CAPACITY as usize);
         let num_bits = num_words * K;
@@ -227,7 +218,7 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
                 let z_val = z
                     .value()
                     .zip(*word)
-                    .map(|(z, word)| (*z - word).mul_by_inverse_power_of_two(K));
+                    .map(|(z, word)| mul_by_inverse_power_of_two(*z - word, K));
 
                 // Assign z_next
                 region.assign_advice(
@@ -868,7 +859,7 @@ impl PallasLookupRangeCheck for PallasLookupRangeCheck4_5BConfig {}
 
 #[cfg(test)]
 mod tests {
-    use super::super::{MulByInversePowerOfTwo, inverse_power_of_two, lebs2ip};
+    use super::super::{inverse_power_of_two, lebs2ip};
 
     use ff::{Field, PrimeFieldBits};
     use halo2_proofs::{
@@ -903,10 +894,8 @@ mod tests {
         }
     }
 
-    impl<
-        F: PrimeFieldBits + MulByInversePowerOfTwo,
-        Lookup: LookupRangeCheck<F, K> + std::clone::Clone,
-    > Circuit<F> for MyLookupCircuit<F, Lookup>
+    impl<F: PrimeFieldBits, Lookup: LookupRangeCheck<F, K> + std::clone::Clone> Circuit<F>
+        for MyLookupCircuit<F, Lookup>
     {
         type Config = Lookup;
         type FloorPlanner = SimpleFloorPlanner;

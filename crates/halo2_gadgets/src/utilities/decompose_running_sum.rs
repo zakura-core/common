@@ -29,7 +29,7 @@ use halo2_proofs::{
     poly::Rotation,
 };
 
-use super::{MulByInversePowerOfTwo, range_check};
+use super::{mul_by_inverse_power_of_two, range_check};
 
 use std::marker::PhantomData;
 
@@ -109,10 +109,7 @@ impl<F: PrimeFieldBits, const WINDOW_NUM_BITS: usize> RunningSumConfig<F, WINDOW
         strict: bool,
         word_num_bits: usize,
         num_windows: usize,
-    ) -> Result<RunningSum<F>, Error>
-    where
-        F: MulByInversePowerOfTwo,
-    {
+    ) -> Result<RunningSum<F>, Error> {
         let z_0 = region.assign_advice(|| "z_0 = alpha", self.z, offset, || alpha)?;
         self.decompose(region, offset, z_0, strict, word_num_bits, num_windows)
     }
@@ -129,10 +126,7 @@ impl<F: PrimeFieldBits, const WINDOW_NUM_BITS: usize> RunningSumConfig<F, WINDOW
         strict: bool,
         word_num_bits: usize,
         num_windows: usize,
-    ) -> Result<RunningSum<F>, Error>
-    where
-        F: MulByInversePowerOfTwo,
-    {
+    ) -> Result<RunningSum<F>, Error> {
         let z_0 = alpha.copy_advice(|| "copy z_0 = alpha", region, self.z, offset)?;
         self.decompose(region, offset, z_0, strict, word_num_bits, num_windows)
     }
@@ -150,10 +144,7 @@ impl<F: PrimeFieldBits, const WINDOW_NUM_BITS: usize> RunningSumConfig<F, WINDOW
         strict: bool,
         word_num_bits: usize,
         num_windows: usize,
-    ) -> Result<RunningSum<F>, Error>
-    where
-        F: MulByInversePowerOfTwo,
-    {
+    ) -> Result<RunningSum<F>, Error> {
         // Make sure that we do not have more windows than required for the number
         // of bits in the word. In other words, every window must contain at least
         // one bit of the word (no empty windows).
@@ -190,7 +181,7 @@ impl<F: PrimeFieldBits, const WINDOW_NUM_BITS: usize> RunningSumConfig<F, WINDOW
                 let z_cur_val = z.value().copied();
                 let word = word.map(|word| F::from(word as u64));
                 let z_next_val =
-                    (z_cur_val - word).map(|z| z.mul_by_inverse_power_of_two(WINDOW_NUM_BITS));
+                    (z_cur_val - word).map(|z| mul_by_inverse_power_of_two(z, WINDOW_NUM_BITS));
                 region.assign_advice(
                     || format!("z_{:?}", i + 1),
                     self.z,
@@ -245,7 +236,7 @@ mod tests {
         }
 
         impl<
-            F: PrimeFieldBits + MulByInversePowerOfTwo,
+            F: PrimeFieldBits,
             const WORD_NUM_BITS: usize,
             const WINDOW_NUM_BITS: usize,
             const NUM_WINDOWS: usize,

@@ -14,10 +14,6 @@ internal implementation details are not tracked here.
 
 ### Added
 
-- Added the `utilities::MulByInversePowerOfTwo` trait, which multiplies a
-  field element by `2^-exponent` with a provided generic implementation and
-  optimized Pasta `Fp`/`Fq` implementations
-  ([#295](https://github.com/zakura-core/common/pull/295)).
 - Added opaque APIs for preparing Sinsemilla Merkle-path arithmetic before
   assigning the corresponding circuit witnesses
   ([#340](https://github.com/zakura-core/common/pull/340)).
@@ -25,10 +21,8 @@ internal implementation details are not tracked here.
 ### Changed
 
 - The lookup range check and running-sum decomposition gadgets now scale each
-  running-sum step with a partial Montgomery reduction on Pasta fields. Their
-  decomposition methods require `F: MulByInversePowerOfTwo`; fields other
-  than Pasta `Fp`/`Fq` need a one-line empty implementation of that trait to
-  keep using them ([#295](https://github.com/zakura-core/common/pull/295)).
+  running-sum step with a partial Montgomery reduction on Pasta fields
+  ([#295](https://github.com/zakura-core/common/pull/295)).
 - Changed generic fixed-base window preprocessing to advance public window
   scales iteratively instead of recomputing each power with constant-time
   exponentiation, reducing full-width Lagrange-coefficient generation by
