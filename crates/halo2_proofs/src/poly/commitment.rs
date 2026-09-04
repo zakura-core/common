@@ -122,13 +122,19 @@ use std::{fmt, sync::Arc};
 mod msm;
 mod prover;
 
-/// One byte per cached fixed-base window. This spends 255 affine points per
-/// scalar-representation byte and evaluates a blind with at most one mixed
-/// addition per byte, without doublings.
+/// Signed width-eight fixed-base windows. Each base spends 128 affine points
+/// per window and evaluates a scalar with at most one mixed addition per
+/// window, without doublings.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const BLIND_WINDOW_BITS: usize = u8::BITS as usize;
+const FIXED_BASE_WINDOW_BITS: usize = u8::BITS as usize;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const BLIND_WINDOW_ENTRIES: usize = (1 << BLIND_WINDOW_BITS) - 1;
+const FIXED_BASE_WINDOW_MAGNITUDES: usize = 1 << (FIXED_BASE_WINDOW_BITS - 1);
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const FIXED_BASE_W_INDEX: usize = 0;
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const FIXED_BASE_U_INDEX: usize = 1;
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const FIXED_BASE_COUNT: usize = 2;
 #[cfg(any(feature = "batch", feature = "multicore"))]
 const SCALAR_BYTE_ORDER_PROBE: u64 = 0x0102_0304_0506_0708;
 /// The measured memory/latency knee for the two sparse prover commitments.
@@ -256,11 +262,12 @@ impl<C: CurveAffine> fmt::Debug for ZeroCheckCache<C> {
     }
 }
 
-/// The no-orbits prover's exact-`n` coefficient and Lagrange preparations.
-/// One lock makes their initialization atomic and prevents concurrent calls
-/// from duplicating the two large table builds. The cached handles are marked
-/// unwind-safe because [`OnceLock`] does not publish a panicking initializer and
-/// the cache never mutates or replaces published handles.
+/// The no-orbits prover's exact-`n` coefficient and Lagrange preparations, plus
+/// the fixed-base `w` and `u` pair. One lock makes their initialization atomic
+/// and prevents concurrent calls from duplicating the three table builds. The
+/// cached handles are marked unwind-safe because [`OnceLock`] does not publish
+/// a panicking initializer and the cache never mutates or replaces published
+/// handles.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[derive(Clone)]
 struct CommitmentTablesCache<C: CurveAffine>(
@@ -270,7 +277,7 @@ struct CommitmentTablesCache<C: CurveAffine>(
             Option<(
                 AssertUnwindSafe<Arc<dyn PreparedZeroCheck<C::CurveExt>>>,
                 AssertUnwindSafe<Arc<dyn PreparedZeroCheck<C::CurveExt>>>,
-                Arc<BlindTable<C>>,
+                Arc<FixedBasePairTable<C>>,
             )>,
         >,
     >,
@@ -291,16 +298,16 @@ impl<C: CurveAffine> CommitmentTablesCache<C> {
         initialize: impl FnOnce() -> Option<(
             Box<dyn PreparedZeroCheck<C::CurveExt>>,
             Box<dyn PreparedZeroCheck<C::CurveExt>>,
-            BlindTable<C>,
+            FixedBasePairTable<C>,
         )>,
     ) -> bool {
         self.0
             .get_or_init(|| {
-                initialize().map(|(coefficient, lagrange, blind)| {
+                initialize().map(|(coefficient, lagrange, fixed_bases)| {
                     (
                         AssertUnwindSafe(Arc::from(coefficient)),
                         AssertUnwindSafe(Arc::from(lagrange)),
-                        Arc::new(blind),
+                        Arc::new(fixed_bases),
                     )
                 })
             })
@@ -321,11 +328,11 @@ impl<C: CurveAffine> CommitmentTablesCache<C> {
             .map(|(_, lagrange, _)| Arc::clone(&lagrange.0))
     }
 
-    fn blind(&self) -> Option<Arc<BlindTable<C>>> {
+    fn fixed_bases(&self) -> Option<Arc<FixedBasePairTable<C>>> {
         self.0
             .get()
             .and_then(Option::as_ref)
-            .map(|(_, _, blind)| Arc::clone(blind))
+            .map(|(_, _, fixed_bases)| Arc::clone(fixed_bases))
     }
 }
 
@@ -340,11 +347,13 @@ impl<C: CurveAffine> fmt::Debug for CommitmentTablesCache<C> {
     }
 }
 
-/// A fixed-window table for the commitment blinding generator.
+/// Positioned fixed-window tables for the commitment scheme's `w` and `u`
+/// generators.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-struct BlindTable<C: CurveAffine> {
-    base: C,
+struct FixedBasePairTable<C: CurveAffine> {
+    bases: [C; FIXED_BASE_COUNT],
     points: Vec<C>,
+    scalar_bits: usize,
     windows: usize,
     byte_order: ScalarByteOrder,
 }
@@ -358,23 +367,69 @@ enum ScalarByteOrder {
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-impl<C: CurveAffine> BlindTable<C> {
-    fn new(base: C) -> Self {
-        let windows = <C::Scalar as PrimeField>::Repr::default().as_ref().len();
-        let mut projective = Vec::with_capacity(windows * BLIND_WINDOW_ENTRIES);
+impl<C: CurveAffine> FixedBasePairTable<C> {
+    fn extend_projective_points(base: C, windows: usize, points: &mut Vec<C::Curve>) {
         let mut window_base = C::Curve::from(base);
-        for _ in 0..windows {
+        for window in 0..windows {
             let mut multiple = window_base;
-            for _ in 0..BLIND_WINDOW_ENTRIES {
-                projective.push(multiple);
-                multiple += window_base;
+            for magnitude in 0..FIXED_BASE_WINDOW_MAGNITUDES {
+                points.push(multiple);
+                if magnitude + 1 != FIXED_BASE_WINDOW_MAGNITUDES {
+                    multiple += window_base;
+                }
             }
-            for _ in 0..BLIND_WINDOW_BITS {
-                window_base = window_base.double();
+            if window + 1 != windows {
+                // `multiple` is the maximum signed magnitude, so doubling
+                // it advances the base by one full radix window.
+                window_base = multiple.double();
             }
         }
-        let mut points = vec![C::identity(); projective.len()];
+    }
+
+    fn normalized_base(base: C, windows: usize, result_capacity: usize) -> Vec<C> {
+        let points_per_base = windows
+            .checked_mul(FIXED_BASE_WINDOW_MAGNITUDES)
+            .expect("fixed-base table length fits in usize");
+        let mut projective = Vec::with_capacity(points_per_base);
+        Self::extend_projective_points(base, windows, &mut projective);
+
+        let mut points = Vec::with_capacity(result_capacity);
+        points.resize(points_per_base, C::identity());
         C::Curve::batch_normalize(&projective, &mut points);
+        points
+    }
+
+    fn new(w: C, u: C) -> Self {
+        let bases = [w, u];
+        let scalar_bits = C::Scalar::NUM_BITS as usize;
+        let windows = scalar_bits / FIXED_BASE_WINDOW_BITS + 1;
+        let points_per_base = windows
+            .checked_mul(FIXED_BASE_WINDOW_MAGNITUDES)
+            .expect("fixed-base table length fits in usize");
+        let capacity = bases
+            .len()
+            .checked_mul(points_per_base)
+            .expect("fixed-base pair table length fits in usize");
+        // Keep one batch inversion on a single worker. With multiple workers,
+        // the two bases can be constructed and normalized independently.
+        let points = if crate::multicore::current_num_threads() == 1 {
+            let mut projective = Vec::with_capacity(capacity);
+            for &base in &bases {
+                Self::extend_projective_points(base, windows, &mut projective);
+            }
+            let mut points = vec![C::identity(); projective.len()];
+            C::Curve::batch_normalize(&projective, &mut points);
+            points
+        } else {
+            // Reserve the final pair capacity in the `w` half so appending the
+            // independently normalized `u` half needs no reallocation or copy.
+            let (mut points, mut u_points) = crate::multicore::join(
+                || Self::normalized_base(w, windows, capacity),
+                || Self::normalized_base(u, windows, points_per_base),
+            );
+            points.append(&mut u_points);
+            points
+        };
 
         let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
         let probe_repr = probe.to_repr();
@@ -389,23 +444,42 @@ impl<C: CurveAffine> BlindTable<C> {
         };
 
         Self {
-            base,
+            bases,
             points,
+            scalar_bits,
             windows,
             byte_order,
         }
     }
 
-    /// Multiplies the cached base by `scalar`.
+    /// Multiplies one cached base by `scalar`.
     ///
     /// This is variable-time in `scalar`: it skips zero digits and indexes the
     /// table by each nonzero digit. The prover's commitment MSMs already accept
     /// variable-time evaluation of their secret inputs.
-    fn multiply(&self, scalar: C::Scalar) -> C::Curve {
+    fn multiply(&self, base: usize, scalar: C::Scalar) -> C::Curve {
+        assert!(base < self.bases.len());
         let repr = scalar.to_repr();
         let bytes = repr.as_ref();
-        if bytes.len() != self.windows {
-            return C::Curve::from(self.base) * scalar;
+        if !self.scalar_repr_is_supported(scalar, bytes) {
+            return C::Curve::from(self.bases[base]) * scalar;
+        }
+
+        let mut acc = C::Curve::identity();
+        for window in 0..self.windows {
+            self.accumulate_digit(&mut acc, base, bytes, window);
+        }
+        acc
+    }
+
+    fn scalar_repr_is_supported(&self, scalar: C::Scalar, bytes: &[u8]) -> bool {
+        let Some(repr_bits) = bytes.len().checked_mul(u8::BITS as usize) else {
+            return false;
+        };
+        if repr_bits < self.scalar_bits
+            || (self.scalar_bits..repr_bits).any(|bit| self.scalar_bit(bytes, bit).unwrap_or(true))
+        {
+            return false;
         }
 
         // [`PrimeField::Repr`] is opaque and has implementation-specific
@@ -415,32 +489,129 @@ impl<C: CurveAffine> BlindTable<C> {
         let little = match self.byte_order {
             ScalarByteOrder::LittleEndian => true,
             ScalarByteOrder::BigEndian => false,
-            ScalarByteOrder::Unsupported => {
-                return C::Curve::from(self.base) * scalar;
-            }
+            ScalarByteOrder::Unsupported => return false,
         };
         let decoded = if little {
             crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
         } else {
             crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
         };
-        if decoded != scalar {
-            return C::Curve::from(self.base) * scalar;
+        decoded == scalar
+    }
+
+    fn accumulate_digit(&self, acc: &mut C::Curve, base: usize, bytes: &[u8], window: usize) {
+        let points_per_base = self.windows * FIXED_BASE_WINDOW_MAGNITUDES;
+        let (magnitude, negative) = self.signed_digit(bytes, window);
+        if magnitude != 0 {
+            let point = self.points
+                [base * points_per_base + window * FIXED_BASE_WINDOW_MAGNITUDES + magnitude - 1];
+            *acc += if negative { -point } else { point };
+        }
+    }
+
+    fn multiply_blind(&self, scalar: C::Scalar) -> C::Curve {
+        self.multiply(FIXED_BASE_W_INDEX, scalar)
+    }
+
+    fn multiply_ipa(&self, u_scalar: C::Scalar, w_scalar: C::Scalar) -> C::Curve {
+        self.multiply(FIXED_BASE_U_INDEX, u_scalar) + self.multiply(FIXED_BASE_W_INDEX, w_scalar)
+    }
+
+    /// Computes the fixed-base terms for both IPA round points while
+    /// interleaving four independent projective accumulators.
+    fn multiply_ipa_rounds(
+        &self,
+        l_u_scalar: C::Scalar,
+        l_w_scalar: C::Scalar,
+        r_u_scalar: C::Scalar,
+        r_w_scalar: C::Scalar,
+    ) -> (C::Curve, C::Curve) {
+        let scalars = [l_u_scalar, l_w_scalar, r_u_scalar, r_w_scalar];
+        let reprs = scalars.map(|scalar| scalar.to_repr());
+        if scalars
+            .iter()
+            .zip(&reprs)
+            .any(|(&scalar, repr)| !self.scalar_repr_is_supported(scalar, repr.as_ref()))
+        {
+            return (
+                self.multiply_ipa(l_u_scalar, l_w_scalar),
+                self.multiply_ipa(r_u_scalar, r_w_scalar),
+            );
         }
 
-        let mut acc = C::Curve::identity();
-        for (position, &digit) in bytes.iter().enumerate() {
-            if digit == 0 {
-                continue;
+        // The order is U_L, W_L, U_R, W_R. Alternating the independent
+        // accumulators exposes mixed-addition latency to the CPU without
+        // creating four tiny Rayon tasks.
+        let base_indices = [
+            FIXED_BASE_U_INDEX,
+            FIXED_BASE_W_INDEX,
+            FIXED_BASE_U_INDEX,
+            FIXED_BASE_W_INDEX,
+        ];
+        let mut accumulators = [C::Curve::identity(); 4];
+        for window in 0..self.windows {
+            for ((acc, repr), &base) in accumulators.iter_mut().zip(&reprs).zip(&base_indices) {
+                self.accumulate_digit(acc, base, repr.as_ref(), window);
             }
-            let window = if little {
-                position
-            } else {
-                self.windows - position - 1
-            };
-            acc += self.points[window * BLIND_WINDOW_ENTRIES + usize::from(digit) - 1];
         }
-        acc
+
+        (
+            accumulators[0] + accumulators[1],
+            accumulators[2] + accumulators[3],
+        )
+    }
+
+    fn scalar_byte(&self, bytes: &[u8], byte_from_edge: usize) -> Option<u8> {
+        let byte = match self.byte_order {
+            ScalarByteOrder::LittleEndian => *bytes.get(byte_from_edge)?,
+            ScalarByteOrder::BigEndian => {
+                *bytes.get(bytes.len().checked_sub(byte_from_edge + 1)?)?
+            }
+            ScalarByteOrder::Unsupported => return None,
+        };
+        Some(byte)
+    }
+
+    fn scalar_bit(&self, bytes: &[u8], bit: usize) -> Option<bool> {
+        let byte = self.scalar_byte(bytes, bit / FIXED_BASE_WINDOW_BITS)?;
+        Some(byte & (1 << (bit % u8::BITS as usize)) != 0)
+    }
+
+    fn signed_digit(&self, bytes: &[u8], window: usize) -> (usize, bool) {
+        let bit_start = window
+            .checked_mul(FIXED_BASE_WINDOW_BITS)
+            .expect("fixed-base window offset fits in usize");
+        let live_bits = self
+            .scalar_bits
+            .saturating_sub(bit_start)
+            .min(FIXED_BASE_WINDOW_BITS);
+        let value = if live_bits == 0 {
+            0
+        } else {
+            // The window width is one byte, so the signed-window payload is a
+            // single aligned load rather than eight individual bit reads.
+            let mask = (1 << live_bits) - 1;
+            usize::from(
+                self.scalar_byte(bytes, window)
+                    .expect("the scalar representation was validated"),
+            ) & mask
+        };
+        let overlap = if bit_start == 0 {
+            0
+        } else {
+            usize::from(
+                self.scalar_byte(bytes, window - 1)
+                    .expect("the scalar representation was validated")
+                    >> (FIXED_BASE_WINDOW_BITS - 1),
+            )
+        };
+        let radix = FIXED_BASE_WINDOW_MAGNITUDES * 2;
+        if value < radix / 2 {
+            (value + overlap, false)
+        } else {
+            let magnitude = radix - value - overlap;
+            (magnitude, magnitude != 0)
+        }
     }
 }
 
@@ -1067,17 +1238,17 @@ impl<C: CurveAffine> Params<C> {
         }
 
         // Without `orbits`, the prepared table covers exactly `g`; a small
-        // fixed-window table handles the blind without a one-term MSM.
+        // fixed-window pair handles the blind without a one-term MSM.
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
-            && let (Some(prepared), Some(blind_table)) =
-                (self.commitment_table(), self.blind_table())
+            && let (Some(prepared), Some(fixed_bases)) =
+                (self.commitment_table(), self.fixed_base_table())
         {
             let n = self.n as usize;
             if prepared.terms() == n && poly.len() == n {
                 let (commitment, blind) = crate::multicore::join(
                     || prepared.multiexp_with_terms_vartime(poly, &[]),
-                    || blind_table.multiply(r.0),
+                    || fixed_bases.multiply_blind(r.0),
                 );
                 return commitment + blind;
             }
@@ -1126,13 +1297,14 @@ impl<C: CurveAffine> Params<C> {
         // The exact-`n` Lagrange table mirrors the coefficient route above.
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
-            && let (Some(prepared), Some(blind_table)) = (self.lagrange_table(), self.blind_table())
+            && let (Some(prepared), Some(fixed_bases)) =
+                (self.lagrange_table(), self.fixed_base_table())
         {
             let n = self.n as usize;
             if prepared.terms() == n && poly.len() == n {
                 let (commitment, blind) = crate::multicore::join(
                     || prepared.multiexp_with_terms_vartime(poly, &[]),
-                    || blind_table.multiply(r.0),
+                    || fixed_bases.multiply_blind(r.0),
                 );
                 return commitment + blind;
             }
@@ -1274,8 +1446,8 @@ impl<C: CurveAffine> Params<C> {
     }
 
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-    fn blind_table(&self) -> Option<Arc<BlindTable<C>>> {
-        self.commitment_tables_cache.blind()
+    fn fixed_base_table(&self) -> Option<Arc<FixedBasePairTable<C>>> {
+        self.commitment_tables_cache.fixed_bases()
     }
 
     /// The cached prepared zero-check, if [`Self::prepare_zero_checks`]
@@ -1289,25 +1461,32 @@ impl<C: CurveAffine> Params<C> {
     /// commitments. With `orbits`, the coefficient table over `[g..., w, u]`
     /// is shared with [`Self::prepare_zero_checks`], and the Lagrange table
     /// covers `[g_lagrange..., w, u]`. Without `orbits`, the two tables cover
-    /// exactly `g` and `g_lagrange`, plus a fixed-window table over `w`. When
-    /// the `multicore` feature is enabled at Orchard's `k = 11`, this also
-    /// ensures that the signed-width-four table for sparse masking commitments
-    /// is present. With `batch`, it also ensures that the small public-instance
-    /// table normally built by proving-key generation is present. This
-    /// evaluates each blind without a one-term MSM while keeping the polynomial
-    /// slice borrowed.
+    /// exactly `g` and `g_lagrange`, plus signed fixed-window tables over `w`
+    /// and `u`. At Orchard's `k = 11`, this also ensures that the sparse
+    /// masking-commitment table is present. With `batch`, it also ensures that
+    /// the small public-instance table normally built by proving-key generation
+    /// is present. The fixed pair evaluates each blind without a one-term MSM
+    /// and handles the fixed `u` and `w` terms in every IPA round while keeping
+    /// the polynomial slices borrowed.
     ///
-    /// Both commit methods use the tables on pools of at most eight effective
-    /// threads. Orchard-sized (`k = 11`) tables on AArch64 macOS extend that
-    /// bound to ten, where end-to-end proving stays ahead on the benchmarked
-    /// M4 system. Wider pools and unmeasured SRS shapes keep the planned
-    /// multiexp. Measurements covered full-width and witness-like (boolean,
-    /// byte, zero-padded) coefficient distributions.
+    /// Without `orbits`, a multi-worker call constructs the independent
+    /// coefficient-basis, Lagrange-basis, and fixed-base pair tables
+    /// concurrently. A one-worker call keeps the sequential construction and
+    /// its early-decline behavior.
+    ///
+    /// Both commit methods use the large tables on pools of at most eight
+    /// effective threads. Orchard-sized (`k = 11`) tables on `AArch64` macOS
+    /// extend that bound to ten, where end-to-end proving stays ahead on the
+    /// benchmarked M4 system. Wider pools and unmeasured SRS shapes keep the
+    /// planned commitment multiexp. Without `orbits`, the armed IPA round path
+    /// still uses the small fixed pair while its transcript-dependent generator
+    /// MSMs keep their normal planner. Measurements covered full-width and
+    /// witness-like (boolean, byte, zero-padded) coefficient distributions.
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
-    /// fixed-window table adds approximately 0.5 MiB for a 32-byte scalar
-    /// representation. The signed-width-four sparse commitment table adds
-    /// 416 KiB, and the signed-width-four public-instance table adds about
+    /// signed-width-eight pair adds exactly 512 KiB of affine-point payload for
+    /// 255-bit Pasta scalars. The signed-width-four sparse commitment table
+    /// adds 416 KiB, and the signed-width-four public-instance table adds about
     /// 224 KiB on Pasta.
     ///
     /// Concurrent and repeat calls share their initialization attempts,
@@ -1352,10 +1531,27 @@ impl<C: CurveAffine> Params<C> {
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         {
             let prepared = self.commitment_tables_cache.initialize(|| {
-                let coefficient = C::CurveExt::try_prepare_zero_check(&self.g)?;
-                let lagrange = C::CurveExt::try_prepare_zero_check(&self.g_lagrange)?;
-                let blind = BlindTable::new(self.w);
-                Some((coefficient, lagrange, blind))
+                let (coefficient, lagrange, fixed_bases) =
+                    if crate::multicore::current_num_threads() == 1 {
+                        let coefficient = C::CurveExt::try_prepare_zero_check(&self.g)?;
+                        let lagrange = C::CurveExt::try_prepare_zero_check(&self.g_lagrange)?;
+                        let fixed_bases = FixedBasePairTable::new(self.w, self.u);
+                        (coefficient, lagrange, fixed_bases)
+                    } else {
+                        let ((coefficient, lagrange), fixed_bases) = crate::multicore::join(
+                            || {
+                                crate::multicore::join(
+                                    || C::CurveExt::try_prepare_zero_check(&self.g),
+                                    || C::CurveExt::try_prepare_zero_check(&self.g_lagrange),
+                                )
+                            },
+                            || FixedBasePairTable::new(self.w, self.u),
+                        );
+                        let coefficient = coefficient?;
+                        let lagrange = lagrange?;
+                        (coefficient, lagrange, fixed_bases)
+                    };
+                Some((coefficient, lagrange, fixed_bases))
             });
             #[cfg(feature = "batch")]
             if prepared {
@@ -1790,6 +1986,7 @@ fn commitment_tables_cache_initializes_once_across_clones() {
     let coefficient_bases = Arc::new(params.g.clone());
     let lagrange_bases = Arc::new(params.g_lagrange.clone());
     let blind_base = params.w;
+    let ipa_u_base = params.u;
     let cache = params.commitment_tables_cache.clone();
     let attempts = AtomicUsize::new(0);
     let start = Barrier::new(CALLERS);
@@ -1808,13 +2005,13 @@ fn commitment_tables_cache_initializes_once_across_clones() {
                         attempts.fetch_add(1, Ordering::Relaxed);
                         let coefficient = Eq::try_prepare_zero_check(coefficient_bases.as_slice())?;
                         let lagrange = Eq::try_prepare_zero_check(lagrange_bases.as_slice())?;
-                        let blind = BlindTable::new(blind_base);
-                        Some((coefficient, lagrange, blind))
+                        let fixed_bases = FixedBasePairTable::new(blind_base, ipa_u_base);
+                        Some((coefficient, lagrange, fixed_bases))
                     }));
                     (
                         cache.coefficient().expect("coefficient table is armed"),
                         cache.lagrange().expect("Lagrange table is armed"),
-                        cache.blind().expect("blind table is armed"),
+                        cache.fixed_bases().expect("fixed-base table is armed"),
                     )
                 })
             })
@@ -1825,11 +2022,16 @@ fn commitment_tables_cache_initializes_once_across_clones() {
     });
 
     assert_eq!(attempts.load(Ordering::Relaxed), 1);
-    assert!(tables.iter().skip(1).all(|(coefficient, lagrange, blind)| {
-        Arc::ptr_eq(&tables[0].0, coefficient)
-            && Arc::ptr_eq(&tables[0].1, lagrange)
-            && Arc::ptr_eq(&tables[0].2, blind)
-    }));
+    assert!(
+        tables
+            .iter()
+            .skip(1)
+            .all(|(coefficient, lagrange, fixed_bases)| {
+                Arc::ptr_eq(&tables[0].0, coefficient)
+                    && Arc::ptr_eq(&tables[0].1, lagrange)
+                    && Arc::ptr_eq(&tables[0].2, fixed_bases)
+            })
+    );
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -1857,7 +2059,7 @@ fn commitment_tables_cache_memoizes_decline_and_retries_panic() {
     assert_eq!(attempts.load(Ordering::Relaxed), 1);
     assert!(declined.coefficient().is_none());
     assert!(declined.lagrange().is_none());
-    assert!(declined.blind().is_none());
+    assert!(declined.fixed_bases().is_none());
 
     let params = Params::<EqAffine>::new(4);
     let panicked = CommitmentTablesCache::<EqAffine>::default();
@@ -1866,12 +2068,12 @@ fn commitment_tables_cache_memoizes_decline_and_retries_panic() {
     assert!(panicked.initialize(|| {
         let coefficient = Eq::try_prepare_zero_check(&params.g)?;
         let lagrange = Eq::try_prepare_zero_check(&params.g_lagrange)?;
-        let blind = BlindTable::new(params.w);
-        Some((coefficient, lagrange, blind))
+        let fixed_bases = FixedBasePairTable::new(params.w, params.u);
+        Some((coefficient, lagrange, fixed_bases))
     }));
     assert!(panicked.coefficient().is_some());
     assert!(panicked.lagrange().is_some());
-    assert!(panicked.blind().is_some());
+    assert!(panicked.fixed_bases().is_some());
 }
 
 /// Wrapper type around a blinding factor.
@@ -1926,13 +2128,68 @@ impl<F: Field> MulAssign<F> for Blind<F> {
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
-fn blind_table_matches_native_multiplication() {
+fn fixed_base_pair_table_is_stable_across_worker_counts() {
+    use crate::pasta::EqAffine;
+
+    let params = Params::<EqAffine>::new(3);
+    let build = |workers| {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .expect("test pool must build")
+            .install(|| FixedBasePairTable::new(params.w, params.u))
+    };
+    let single = build(1);
+    for workers in [2, 6, 10] {
+        let parallel = build(workers);
+        assert_eq!(parallel.bases, single.bases);
+        assert_eq!(parallel.points, single.points);
+        assert_eq!(parallel.scalar_bits, single.scalar_bits);
+        assert_eq!(parallel.windows, single.windows);
+        assert_eq!(
+            std::mem::discriminant(&parallel.byte_order),
+            std::mem::discriminant(&single.byte_order),
+        );
+    }
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn fixed_base_pair_table_matches_native_multiplication() {
     use rand::{SeedableRng, rngs::StdRng};
 
     use crate::pasta::{EpAffine, EqAffine};
 
-    fn exercise<C: CurveAffine>(base: C) {
-        let mut table = BlindTable::new(base);
+    fn assert_ipa_rounds<C: CurveAffine>(
+        table: &FixedBasePairTable<C>,
+        bases: [C; FIXED_BASE_COUNT],
+        scalars: [C::Scalar; 4],
+        case: &str,
+    ) {
+        let [l_u, l_w, r_u, r_w] = scalars;
+        let (l, r) = table.multiply_ipa_rounds(l_u, l_w, r_u, r_w);
+        assert_eq!(
+            l,
+            C::Curve::from(bases[FIXED_BASE_U_INDEX]) * l_u
+                + C::Curve::from(bases[FIXED_BASE_W_INDEX]) * l_w,
+            "left IPA fixed-base result must preserve {case} scalar ordering",
+        );
+        assert_eq!(
+            r,
+            C::Curve::from(bases[FIXED_BASE_U_INDEX]) * r_u
+                + C::Curve::from(bases[FIXED_BASE_W_INDEX]) * r_w,
+            "right IPA fixed-base result must preserve {case} scalar ordering",
+        );
+    }
+
+    fn exercise<C: CurveAffine>(bases: [C; FIXED_BASE_COUNT]) {
+        let mut table =
+            FixedBasePairTable::new(bases[FIXED_BASE_W_INDEX], bases[FIXED_BASE_U_INDEX]);
+        assert_eq!(table.bases, bases);
+        assert_eq!(
+            table.points.len(),
+            FIXED_BASE_COUNT * table.windows * FIXED_BASE_WINDOW_MAGNITUDES,
+        );
         let little = match table.byte_order {
             ScalarByteOrder::LittleEndian => true,
             ScalarByteOrder::BigEndian => false,
@@ -1946,8 +2203,15 @@ fn blind_table_matches_native_multiplication() {
             C::Scalar::ONE,
             -C::Scalar::ONE,
             C::Scalar::from(SCALAR_BYTE_ORDER_PROBE),
+            C::Scalar::from(127),
+            C::Scalar::from(128),
+            C::Scalar::from(129),
+            C::Scalar::from(0x7f00),
+            C::Scalar::from(0x7f80),
+            C::Scalar::from(0x8000),
+            C::Scalar::from(0x8080),
         ];
-        for exponent in [8, 16, 24, 32, 64, 128, 248] {
+        for exponent in [8, 16, 24, 32, 64, 128, 248, 254] {
             let radix_power = C::Scalar::from(2).pow_vartime([exponent]);
             scalars.extend([
                 radix_power - C::Scalar::ONE,
@@ -1957,60 +2221,118 @@ fn blind_table_matches_native_multiplication() {
         }
         scalars.extend((0..16).map(|_| C::Scalar::random(&mut rng)));
 
-        for scalar in scalars {
-            let repr = scalar.to_repr();
-            let bytes = repr.as_ref();
-            let decoded = if little {
-                crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
-            } else {
-                crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
-            };
-            assert_eq!(decoded, scalar, "Pasta scalar digits must decode");
-            assert_eq!(
-                table.multiply(scalar),
-                C::Curve::from(base) * scalar,
-                "fixed blind multiplication must match native multiplication"
-            );
+        for (base_index, base) in bases.into_iter().enumerate() {
+            for &scalar in &scalars {
+                let repr = scalar.to_repr();
+                let bytes = repr.as_ref();
+                let decoded = if little {
+                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
+                } else {
+                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
+                };
+                assert_eq!(decoded, scalar, "Pasta scalar digits must decode");
+                assert_eq!(
+                    table.multiply(base_index, scalar),
+                    C::Curve::from(base) * scalar,
+                    "fixed-base multiplication must match native multiplication"
+                );
+            }
+        }
+
+        let top_bit = C::Scalar::from(2)
+            .pow_vartime([u64::from(C::Scalar::NUM_BITS.checked_sub(1).unwrap())]);
+        let round_cases = [
+            (
+                "four-way",
+                [
+                    C::Scalar::from(3),
+                    C::Scalar::from(5),
+                    C::Scalar::from(7),
+                    C::Scalar::from(11),
+                ],
+            ),
+            (
+                "signed carry",
+                [
+                    C::Scalar::from(0x7f),
+                    C::Scalar::from(0x80),
+                    C::Scalar::from(0xff),
+                    C::Scalar::from(0x100),
+                ],
+            ),
+            (
+                "top bit",
+                [
+                    top_bit - C::Scalar::ONE,
+                    top_bit,
+                    top_bit + C::Scalar::ONE,
+                    -C::Scalar::ONE,
+                ],
+            ),
+        ];
+        for (case, scalars) in round_cases {
+            assert_ipa_rounds(&table, bases, scalars, case);
         }
 
         let fallback_scalar = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
         table.byte_order = ScalarByteOrder::Unsupported;
-        assert_eq!(
-            table.multiply(fallback_scalar),
-            C::Curve::from(base) * fallback_scalar,
-            "an unsupported representation must use native multiplication"
-        );
+        for (base_index, base) in bases.into_iter().enumerate() {
+            assert_eq!(
+                table.multiply(base_index, fallback_scalar),
+                C::Curve::from(base) * fallback_scalar,
+                "an unsupported representation must use native multiplication"
+            );
+        }
+        assert_ipa_rounds(&table, bases, round_cases[0].1, "fallback");
 
         table.byte_order = if little {
             ScalarByteOrder::LittleEndian
         } else {
             ScalarByteOrder::BigEndian
         };
-        table.windows += 1;
-        assert_eq!(
-            table.multiply(fallback_scalar),
-            C::Curve::from(base) * fallback_scalar,
-            "a representation-length mismatch must use native multiplication"
+        let mut invalid_top_bit = C::Scalar::ZERO.to_repr();
+        let bytes = invalid_top_bit.as_mut();
+        let high_byte = if little { bytes.len() - 1 } else { 0 };
+        bytes[high_byte] |= 1 << (C::Scalar::NUM_BITS as usize % u8::BITS as usize);
+        let decoded_invalid = if little {
+            crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
+        } else {
+            crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
+        };
+        assert!(
+            !table.scalar_repr_is_supported(decoded_invalid, bytes),
+            "an occupied representation bit above NUM_BITS must be rejected"
         );
+
+        table.scalar_bits = fallback_scalar.to_repr().as_ref().len() * u8::BITS as usize + 1;
+        for (base_index, base) in bases.into_iter().enumerate() {
+            assert_eq!(
+                table.multiply(base_index, fallback_scalar),
+                C::Curve::from(base) * fallback_scalar,
+                "a representation-length mismatch must use native multiplication"
+            );
+        }
     }
 
-    exercise(Params::<EpAffine>::new(3).w);
-    exercise(Params::<EqAffine>::new(3).w);
+    let ep = Params::<EpAffine>::new(3);
+    exercise([ep.w, ep.u]);
+    let eq = Params::<EqAffine>::new(3);
+    exercise([eq.w, eq.u]);
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
-fn blind_table_cache_is_shared_by_clones_and_not_serialized() {
+fn fixed_base_table_cache_is_shared_by_clones_and_not_serialized() {
     use crate::pasta::EqAffine;
 
     let params = Params::<EqAffine>::new(3);
     let mut serialized_before = vec![];
     params.write(&mut serialized_before).unwrap();
-    assert!(params.blind_table().is_none());
+    assert!(params.fixed_base_table().is_none());
     assert!(params.prepare_commitments());
-    let table = params.blind_table().unwrap();
+    let table = params.fixed_base_table().unwrap();
 
-    let cloned_table = params.clone().blind_table().unwrap();
+    let cloned_table = params.clone().fixed_base_table().unwrap();
     assert!(Arc::ptr_eq(&table, &cloned_table));
 
     let mut serialized_after = vec![];
@@ -2018,7 +2340,64 @@ fn blind_table_cache_is_shared_by_clones_and_not_serialized() {
     assert_eq!(serialized_before, serialized_after);
 
     let deserialized = Params::<EqAffine>::read(&mut serialized_before.as_slice()).unwrap();
-    assert!(deserialized.blind_table().is_none());
+    assert!(deserialized.fixed_base_table().is_none());
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn prepared_fixed_base_ipa_rounds_match_unprepared_proof() {
+    const K: u32 = 6;
+    const THREADS: usize = 4;
+    const RNG_SEED: u64 = 0x6970_612d_752d_7721;
+
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::arithmetic::eval_polynomial;
+    use crate::pasta::{EpAffine, Fq};
+    use crate::transcript::{Blake2bWrite, Challenge255, Transcript, TranscriptWrite};
+
+    assert!(THREADS <= prepared_commitment_max_threads(K));
+    let params = Params::<EpAffine>::new(K);
+    let domain = super::EvaluationDomain::new(1, K);
+    let mut polynomial = domain.empty_coeff();
+    for (index, coefficient) in polynomial.iter_mut().enumerate() {
+        *coefficient = Fq::from((index as u64).wrapping_mul(17).wrapping_add(3));
+    }
+    let blind = Blind(Fq::from(0x7769_746e_6573_7321));
+
+    let prove = || {
+        assert_eq!(crate::multicore::current_num_threads(), THREADS);
+        let commitment = params.commit(&polynomial, blind).to_affine();
+        let mut transcript =
+            Blake2bWrite::<Vec<u8>, EpAffine, Challenge255<EpAffine>>::init(vec![]);
+        transcript.write_point(commitment).unwrap();
+        let point = *transcript.squeeze_challenge_scalar::<()>();
+        transcript
+            .write_scalar(eval_polynomial(&polynomial, point))
+            .unwrap();
+        create_proof(
+            &params,
+            StdRng::seed_from_u64(RNG_SEED),
+            &mut transcript,
+            &polynomial,
+            blind,
+            point,
+        )
+        .unwrap();
+        transcript.finalize()
+    };
+
+    let pool = maybe_rayon::ThreadPoolBuilder::new()
+        .num_threads(THREADS)
+        .build()
+        .expect("test pool must build");
+    assert!(params.fixed_base_table().is_none());
+    let unprepared = pool.install(prove);
+
+    assert!(params.prepare_commitments());
+    assert!(params.fixed_base_table().is_some());
+    let prepared = pool.install(prove);
+    assert_eq!(prepared, unprepared);
 }
 
 #[cfg(feature = "multicore")]
@@ -2251,7 +2630,7 @@ fn prepared_commitments_match_unprepared() {
         assert!(!armed.prepare_zero_checks());
         let coefficient = armed.commitment_table().unwrap();
         let lagrange = armed.lagrange_table().unwrap();
-        let blind = armed.blind_table().unwrap();
+        let fixed_bases = armed.fixed_base_table().unwrap();
         let cloned = armed.clone();
         assert!(cloned.prepare_commitments());
         assert!(Arc::ptr_eq(
@@ -2259,7 +2638,10 @@ fn prepared_commitments_match_unprepared() {
             &cloned.commitment_table().unwrap()
         ));
         assert!(Arc::ptr_eq(&lagrange, &cloned.lagrange_table().unwrap()));
-        assert!(Arc::ptr_eq(&blind, &cloned.blind_table().unwrap()));
+        assert!(Arc::ptr_eq(
+            &fixed_bases,
+            &cloned.fixed_base_table().unwrap()
+        ));
     }
     #[cfg(all(not(feature = "multicore"), not(feature = "orbits")))]
     assert!(!armed_ok, "preparation stays disabled without multicore");
