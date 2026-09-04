@@ -51,6 +51,11 @@ const NO_DENOMINATOR: u32 = u32::MAX;
 // because both routes evaluate one independent blind term.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const ADVICE_DELTA_PREPARED_K: u32 = 11;
+// End-to-end Ironwood measurements found a benefit at eight and ten workers,
+// while two- and four-worker screens did not support enabling overlap. Narrower
+// pools retain the per-circuit commitment/transform schedule.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const ADVICE_DELTA_OVERLAP_MIN_WORKERS: usize = 8;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const ADVICE_DELTA_ROUTE_DENOMINATOR: usize = 8;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -159,7 +164,7 @@ fn overlap_advice_delta_planning<C: CurveAffine>(
     advice_witnesses: &[AdvicePolynomialsAndBlinds<C>],
 ) -> bool {
     advice_witnesses.len() > 1
-        && crate::multicore::current_num_threads() > 1
+        && crate::multicore::current_num_threads() >= ADVICE_DELTA_OVERLAP_MIN_WORKERS
         && params.k() == ADVICE_DELTA_PREPARED_K
         && advice_witnesses
             .first()
@@ -2633,9 +2638,11 @@ fn advice_delta_commitments_preserve_proofs() {
             take_advice_delta_overlap_hits();
             let actual = proof(armed, pk, circuits, threads, true);
             assert_eq!(take_advice_delta_route_hits(), expected_route_hits);
+            let expected_overlap =
+                circuits.len() > 1 && threads >= ADVICE_DELTA_OVERLAP_MIN_WORKERS;
             assert_eq!(
                 take_advice_delta_overlap_hits(),
-                usize::from(circuits.len() > 1 && threads > 1),
+                usize::from(expected_overlap),
             );
             assert_eq!(actual, expected);
         }
@@ -2651,8 +2658,9 @@ fn advice_delta_commitments_preserve_proofs() {
     let vk = keygen_vk(&unarmed, &keygen_circuit).expect("keygen_vk should not fail");
     let pk = keygen_pk(&unarmed, vk, &keygen_circuit).expect("keygen_pk should not fail");
     assert!(armed.prepare_commitments());
+    let worker_counts = [1, 4, ADVICE_DELTA_OVERLAP_MIN_WORKERS];
 
-    for (circuit_count, worker_counts) in [(1, &[1, 4][..]), (2, &[1, 4][..]), (4, &[1, 4][..])] {
+    for circuit_count in [1, 2, 4] {
         let circuits = (0..circuit_count)
             .map(|circuit_index| AdviceDeltaCircuit {
                 circuit_index,
@@ -2666,7 +2674,7 @@ fn advice_delta_commitments_preserve_proofs() {
             &pk,
             &circuits,
             ADVICE_COLUMNS * circuit_count.saturating_sub(1),
-            worker_counts,
+            &worker_counts,
         );
     }
 
@@ -2680,7 +2688,7 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::Similar,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &direct_only, 0, &[1, 4]);
+    compare_profiles(&armed, &unarmed, &pk, &direct_only, 0, &worker_counts);
 
     // Routing is independent per later circuit: a useful second circuit can
     // reuse the reference while a dissimilar third circuit commits directly.
@@ -2697,7 +2705,14 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::Similar,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &mixed, ADVICE_COLUMNS, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &mixed,
+        ADVICE_COLUMNS,
+        &worker_counts,
+    );
 
     // One useful column cannot amortize the circuit-wide path, so the sampled
     // aggregate gate retains the fallback.
@@ -2709,7 +2724,14 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::Similar,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &globally_too_small, 0, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &globally_too_small,
+        0,
+        &worker_counts,
+    );
 
     // Counts alone strongly prefer these deltas, but their few nonzero
     // values are full-width while the direct scalars are small. The sampled
@@ -2726,7 +2748,14 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::MagnitudeInversion,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &magnitude_inversion, 0, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &magnitude_inversion,
+        0,
+        &worker_counts,
+    );
 
     // The count guard prefers a delta with one quarter zeroes over an all-one
     // direct polynomial. Its nonzero terms are 2^119, however, so they activate
@@ -2772,7 +2801,14 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::HighWindowSparse,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &high_window_sparse, 0, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &high_window_sparse,
+        0,
+        &worker_counts,
+    );
 
     // A fixed work sample could otherwise miss every high-window delta. The
     // direct sample only contains unit scalars and therefore does not span the
@@ -2818,7 +2854,14 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::MissedHighWindow,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &missed_high_window, 0, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &missed_high_window,
+        0,
+        &worker_counts,
+    );
 }
 
 #[test]
