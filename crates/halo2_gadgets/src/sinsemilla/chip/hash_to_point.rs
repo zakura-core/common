@@ -22,6 +22,7 @@ use first_word_witnesses::{MERKLE_FIRST_WORD_WITNESSES, MERKLE_INITIAL_Q};
 
 const FIELD_REPR_LIMBS: usize =
     core::mem::size_of::<<pallas::Base as PrimeField>::Repr>() / core::mem::size_of::<u64>();
+const MERKLE_RETAINED_RUNNING_SUM_CELLS: [usize; 3] = [2, 2, 0];
 
 #[inline(always)]
 fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
@@ -74,6 +75,11 @@ struct CachedFirstWordWitness {
     point: ProjectivePoint,
     witness: DoubleAndAddWitness,
 }
+
+type HashResult = (
+    NonIdentityEccPoint,
+    Vec<Vec<AssignedCell<pallas::Base, pallas::Base>>>,
+);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PreparedHashRound {
@@ -261,7 +267,6 @@ where
 {
     /// [Specification](https://p.z.cash/halo2-0.1:sinsemilla-constraints?partial).
     #[allow(non_snake_case)]
-    #[allow(clippy::type_complexity)]
     pub(super) fn hash_message(
         &self,
         region: &mut Region<'_, pallas::Base>,
@@ -271,20 +276,14 @@ where
             { sinsemilla::K },
             { sinsemilla::C },
         >>::Message,
-    ) -> Result<
-        (
-            NonIdentityEccPoint,
-            Vec<Vec<AssignedCell<pallas::Base, pallas::Base>>>,
-        ),
-        Error,
-    > {
+    ) -> Result<HashResult, Error> {
         let projective = Value::known(ProjectivePoint::from_affine(Q));
         // An Orchard MerkleCRH message starts with the 10-bit encoding of its
         // layer index, so its first Sinsemilla word is cached.
         let cache_first_word = has_merkle_initial_q(Q);
         let (offset, x_a, y_a) = self.public_q_initialization(region, Q)?;
 
-        let (x_a, y_a, zs_sum) = self.hash_all_pieces(
+        let (x_a, y_a, zs_sum) = self.hash_all_pieces::<false>(
             region,
             offset,
             message,
@@ -317,15 +316,12 @@ where
             { sinsemilla::C },
         >>::Message,
         prepared: Value<&PreparedHashWitness>,
-    ) -> Result<
-        (
-            NonIdentityEccPoint,
-            Vec<Vec<AssignedCell<pallas::Base, pallas::Base>>>,
-        ),
-        Error,
-    > {
+    ) -> Result<HashResult, Error> {
+        if message.len() != MERKLE_RETAINED_RUNNING_SUM_CELLS.len() {
+            return Err(Error::Synthesis);
+        }
         let (offset, x_a, y_a) = self.public_q_initialization(region, q)?;
-        let (x_a, y_a, zs_sum) = self.hash_all_pieces(
+        let (x_a, y_a, zs_sum) = self.hash_all_pieces::<true>(
             region,
             offset,
             message,
@@ -371,7 +367,7 @@ where
         let (offset, x_a, y_a) = self.private_q_initialization(region, Q)?;
 
         let (x_a, y_a, zs_sum) =
-            self.hash_all_pieces(region, offset, message, x_a, y_a, None, false, None)?;
+            self.hash_all_pieces::<false>(region, offset, message, x_a, y_a, None, false, None)?;
 
         #[cfg(test)]
         self.check_hash_result(EccPointQ::PrivatePoint(Q.clone()), message, &x_a, &y_a);
@@ -495,7 +491,7 @@ where
 
     #[allow(clippy::type_complexity)]
     /// Hash `message` from the initial point `Q`.
-    fn hash_all_pieces(
+    fn hash_all_pieces<const RETAIN_MERKLE_RUNNING_SUMS: bool>(
         &self,
         region: &mut Region<'_, pallas::Base>,
         mut offset: usize,
@@ -527,7 +523,7 @@ where
             let final_piece = idx == message.len() - 1;
 
             // The value of the accumulator after this piece is processed.
-            let (x, y, zs, next_projective) = self.hash_piece(
+            let (x, y, zs, next_projective) = self.hash_piece::<RETAIN_MERKLE_RUNNING_SUMS>(
                 region,
                 offset,
                 piece,
@@ -541,6 +537,7 @@ where
                         &prepared.rounds[prepared_offset..prepared_offset + piece.num_words()]
                     })
                 }),
+                idx,
             )?;
             cache_first_word = false;
 
@@ -604,7 +601,7 @@ where
     /// by the caller is not copied. This only works because `hash_piece()` is
     /// an internal API. Before this call to `hash_piece()`, x_a MUST have been
     /// already assigned within this region at the correct offset.
-    fn hash_piece(
+    fn hash_piece<const RETAIN_MERKLE_RUNNING_SUMS: bool>(
         &self,
         region: &mut Region<'_, pallas::Base>,
         offset: usize,
@@ -619,6 +616,7 @@ where
         mut projective: Option<Value<ProjectivePoint>>,
         cache_first_word: bool,
         prepared: Option<Value<&[PreparedHashRound]>>,
+        piece_index: usize,
     ) -> Result<
         (
             X<pallas::Base>,
@@ -677,10 +675,60 @@ where
         let words = words.transpose_vec(piece.num_words());
 
         // Decompose message piece into `K`-bit pieces with a running sum `z`.
-        let zs = {
+        let zs = if RETAIN_MERKLE_RUNNING_SUMS {
+            let retained_cells =
+                MERKLE_RETAINED_RUNNING_SUM_CELLS[piece_index].min(piece.num_words());
+            let mut zs = Vec::with_capacity(retained_cells);
+
+            let initial_z = piece.cell_value().copy_advice(
+                || "z_0 (copy of message piece)",
+                region,
+                config.bits,
+                offset,
+            )?;
+            if retained_cells != 0 {
+                zs.push(initial_z);
+            }
+
+            let mut z = piece.field_elem();
+            let inv_2_k = Value::known(pallas::Base::from_repr(INV_TWO_POW_K).unwrap());
+            let intermediate_count = words.len() - 1;
+            let retained_intermediate_count =
+                retained_cells.saturating_sub(1).min(intermediate_count);
+
+            for (idx, word) in words[..retained_intermediate_count].iter().enumerate() {
+                let word = word.map(|word| pallas::Base::from(word as u64));
+                z = (z - word) * inv_2_k;
+                let cell = region.assign_advice(
+                    || format!("z_{:?}", idx + 1),
+                    config.bits,
+                    offset + idx + 1,
+                    || z,
+                )?;
+                zs.push(cell)
+            }
+
+            if retained_intermediate_count != intermediate_count {
+                region.assign_advice_batch(
+                    |idx| format!("z_{:?}", retained_intermediate_count + idx + 1),
+                    config.bits,
+                    offset + retained_intermediate_count + 1,
+                    intermediate_count - retained_intermediate_count,
+                    |idx| {
+                        let word = words[retained_intermediate_count + idx]
+                            .map(|word| pallas::Base::from(word as u64));
+                        z = (z - word) * inv_2_k;
+                        z
+                    },
+                )?;
+            }
+
+            zs
+        } else {
             let mut zs = Vec::with_capacity(piece.num_words() + 1);
 
-            // Copy message and initialize running sum `z` to decompose message in-circuit
+            // Copy the message and initialize the in-circuit decomposition's
+            // running sum `z`.
             let initial_z = piece.cell_value().copy_advice(
                 || "z_0 (copy of message piece)",
                 region,
@@ -693,14 +741,15 @@ where
             //          z_i = 2^K * z_{i + 1} + m_{i + 1}
             // => z_{i + 1} = (z_i - m_{i + 1}) / 2^K
             //
-            // For a message piece m = m_1 + 2^K m_2 + ... + 2^{K(n-1)} m_n}, initialize z_0 = m.
-            // We end up with z_n = 0. (z_n is not directly encoded as a cell value;
-            // it is implicitly taken as 0 by adjusting the definition of m_{i+1}.)
+            // For a message piece m = m_1 + 2^K m_2 + ... +
+            // 2^{K(n-1)} m_n, initialize z_0 = m. We end up with z_n = 0.
+            // (z_n is not directly encoded as a cell value; it is implicitly
+            // taken as 0 by adjusting the definition of m_{i+1}.)
             let mut z = piece.field_elem();
             let inv_2_k = Value::known(pallas::Base::from_repr(INV_TWO_POW_K).unwrap());
 
             // We do not assign the final z_n as it is constrained to be zero.
-            for (idx, word) in words[0..(words.len() - 1)].iter().enumerate() {
+            for (idx, word) in words[..(words.len() - 1)].iter().enumerate() {
                 let word = word.map(|word| pallas::Base::from(word as u64));
                 // z_{i + 1} = (z_i - m_{i + 1}) / 2^K
                 z = (z - word) * inv_2_k;
