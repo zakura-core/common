@@ -86,22 +86,33 @@ fn prefix_products_of_fractions<F: Field>(
     assert_eq!(numerators.len(), denominators.len());
     assert!(fraction_rows < numerators.len());
 
+    if fraction_rows == 0 {
+        numerators[0] = initial;
+        return numerators;
+    }
+
     // Compute the inverse of the complete denominator product with two
     // independent multiplication chains. A zero denominator is negligible
     // for challenge-blinded products, but retain the current zero-skipping
     // behavior below for exactness on every input.
-    let mut denominator_even = F::ONE;
-    let mut denominator_odd = F::ONE;
-    let mut pairs = denominators[..fraction_rows].chunks_exact(2);
-    for pair in &mut pairs {
-        denominator_even *= pair[0];
-        denominator_odd *= pair[1];
-    }
-    if let Some(value) = pairs.remainder().first() {
-        denominator_even *= value;
-    }
+    let denominator_product = if fraction_rows == 1 {
+        denominators[0]
+    } else {
+        // Seed both lanes from their first values instead of multiplying
+        // those values by one.
+        let mut denominator_even = denominators[0];
+        let mut denominator_odd = denominators[1];
+        let mut pairs = denominators[2..fraction_rows].chunks_exact(2);
+        for pair in &mut pairs {
+            denominator_even *= pair[0];
+            denominator_odd *= pair[1];
+        }
+        if let Some(value) = pairs.remainder().first() {
+            denominator_even *= value;
+        }
 
-    let denominator_product = denominator_even * denominator_odd;
+        denominator_even * denominator_odd
+    };
     if let Some(mut denominator_inverse) = Option::<F>::from(denominator_product.invert()) {
         // First form every numerator prefix. The following reverse walk uses
         // D_i / (D_0 ... D_i) = 1 / (D_0 ... D_{i-1}) to recover the matching
@@ -114,7 +125,9 @@ fn prefix_products_of_fractions<F: Field>(
         }
         numerators[fraction_rows] = numerator_prefix * denominator_inverse;
 
-        for row in (0..fraction_rows).rev() {
+        // Row zero already contains `initial`. Stop at row one rather than
+        // multiplying the final denominator inverse and output by one.
+        for row in (1..fraction_rows).rev() {
             denominator_inverse *= denominators[row];
             numerators[row] *= denominator_inverse;
         }
