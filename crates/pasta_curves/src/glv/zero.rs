@@ -105,8 +105,8 @@ use maybe_rayon::prelude::*;
 
 use super::orbit;
 use super::{
-    AffinePoint, GlvParams, SignedMagnitude, checked_signed_magnitudes, current_num_threads,
-    decompose, private, reduce_affine_buckets, reduce_affine_buckets_in_place,
+    AffinePoint, GLV_COMPONENT_BITS, GlvParams, SignedMagnitude, checked_signed_magnitudes,
+    current_num_threads, decompose, private, reduce_affine_buckets, reduce_affine_buckets_in_place,
 };
 
 mod codebook;
@@ -143,6 +143,23 @@ const DEFAULT_TABLE_FOOTPRINT_BUDGET: usize = 13 << 20;
 enum MainWindowFold {
     Paired,
     Horner,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScalarWorkProfile {
+    main_active: usize,
+    main_visits: usize,
+    tail_active: usize,
+    tail_visits: usize,
+}
+
+impl ScalarWorkProfile {
+    fn is_at_most(self, baseline: Self) -> bool {
+        self.main_active <= baseline.main_active
+            && self.main_visits <= baseline.main_visits
+            && self.tail_active <= baseline.tail_active
+            && self.tail_visits <= baseline.tail_visits
+    }
 }
 
 /// A prepared fixed-base zero-check: reusable tables for testing
@@ -282,6 +299,96 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// The number of fixed bases this preparation covers.
     pub fn terms(&self) -> usize {
         self.live.len()
+    }
+
+    /// Profiles the prepared evaluator's scalar-dependent work.
+    fn scalar_work_profile_vartime(&self, scalars: &[C::ScalarExt]) -> Option<ScalarWorkProfile> {
+        // Arbitrary samples have no fixed-base indices, so they cannot model
+        // the evaluator's identity suppression or relation folding.
+        if !self.merges.is_empty() || self.live.iter().any(|&live| !live) {
+            return None;
+        }
+
+        const MAX_MAIN_WINDOWS: usize = GLV_COMPONENT_BITS.div_ceil(codebook::MIN_WINDOW_BITS);
+        const MAX_TAIL_WINDOWS: usize = orbit::window_count(orbit::MIN_WINDOW_BITS);
+
+        let main_windows = self.codebook.main_windows();
+        let mut main_active = 0;
+        let mut main_visits = 0_usize;
+        let mut main = [0_u32; MAX_MAIN_WINDOWS];
+        let tail_params = &self.tail_params[self.tail_width];
+        let tail_windows = tail_params.window_stride();
+        let mut tail_active = 0;
+        let mut tail_visits = 0_usize;
+        let mut tail = [0_u16; MAX_TAIL_WINDOWS];
+        let signed = |component: SignedMagnitude| {
+            if component.negative {
+                -(component.magnitude as i128)
+            } else {
+                component.magnitude as i128
+            }
+        };
+
+        for scalar in scalars {
+            if scalar.is_zero_vartime() {
+                continue;
+            }
+
+            let (first, second) = checked_signed_magnitudes(decompose::<C>(scalar))?;
+            main[..main_windows].fill(0);
+            let (top, (tail_a, tail_b)) =
+                self.codebook
+                    .recode_pair(signed(first), signed(second), &mut main[..main_windows]);
+            main_active = main_active.max(top);
+            main_visits =
+                main_visits.checked_add(main[..top].iter().filter(|&&code| code != 0).count())?;
+
+            tail[..tail_windows].fill(0);
+            let residual = (
+                SignedMagnitude::from((tail_a < 0, u128::from(tail_a.unsigned_abs()))),
+                SignedMagnitude::from((tail_b < 0, u128::from(tail_b.unsigned_abs()))),
+            );
+            let tail_top = orbit::recode_row(
+                tail_params,
+                residual.0,
+                residual.1,
+                &mut tail[..tail_windows],
+            );
+            tail_active = tail_active.max(tail_top);
+            tail_visits = tail_visits
+                .checked_add(tail[..tail_top].iter().filter(|&&code| code != 0).count())?;
+        }
+
+        Some(ScalarWorkProfile {
+            main_active,
+            main_visits,
+            tail_active,
+            tail_visits,
+        })
+    }
+
+    /// Compares the prepared evaluator's scalar-dependent work.
+    fn scalar_work_is_at_most_vartime(
+        &self,
+        candidate: &[C::ScalarExt],
+        baseline: &[C::ScalarExt],
+    ) -> Option<bool> {
+        if candidate.len() != baseline.len() {
+            return None;
+        }
+
+        // Each active window scans a complete code column before its nonzero
+        // digits are staged. A caller may use these slices as samples of a
+        // larger evaluation, so also require the baseline to reach the main
+        // evaluator's maximum span. No unseen candidate value can then add a
+        // main window. Compare the remaining modeled dimensions without
+        // assigning backend-specific weights.
+        let baseline = self.scalar_work_profile_vartime(baseline)?;
+        if baseline.main_active != self.codebook.main_windows() {
+            return Some(false);
+        }
+        let candidate = self.scalar_work_profile_vartime(candidate)?;
+        Some(candidate.is_at_most(baseline))
     }
 
     /// Accounted table footprint in bytes: the variant table, tail bases,
@@ -760,6 +867,14 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
 impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for PreparedZeroMsm<C> {
     fn terms(&self) -> usize {
         PreparedZeroMsm::terms(self)
+    }
+
+    fn scalar_work_is_at_most_vartime(
+        &self,
+        candidate: &[C::ScalarExt],
+        baseline: &[C::ScalarExt],
+    ) -> Option<bool> {
+        PreparedZeroMsm::scalar_work_is_at_most_vartime(self, candidate, baseline)
     }
 
     fn is_zero_with_terms_vartime(
@@ -1297,6 +1412,121 @@ mod tests {
                 beta_extent: 16,
             },
         ]
+    }
+
+    /// The comparison follows the actual prepared recoder and recognizes
+    /// low-work scalars against a full-span baseline.
+    fn scalar_work_comparison_profiles<C: GlvParams>() {
+        const TERMS: usize = 64;
+
+        let (random, _, _) = super::super::testutil::verifier_multiexp_inputs::<C>(TERMS);
+        let generator = C::generator();
+        let bases = (1..=TERMS)
+            .map(|value| {
+                (generator * C::ScalarExt::from(u64::try_from(value).unwrap())).to_affine()
+            })
+            .collect::<Vec<_>>();
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(7));
+        let small = (1..=TERMS)
+            .map(|value| C::ScalarExt::from(u64::try_from(value).unwrap()))
+            .collect::<Vec<_>>();
+        let negative = small.iter().map(|scalar| -*scalar).collect::<Vec<_>>();
+        let zeta = small
+            .iter()
+            .map(|scalar| *scalar * C::ScalarExt::ZETA)
+            .collect::<Vec<_>>();
+        let is_at_most = |candidate: &[C::ScalarExt], baseline: &[C::ScalarExt]| {
+            crate::arithmetic::PreparedZeroCheck::scalar_work_is_at_most_vartime(
+                &prepared, candidate, baseline,
+            )
+        };
+
+        let zero = [C::ScalarExt::ZERO; TERMS];
+        let random_profile = prepared.scalar_work_profile_vartime(&random).unwrap();
+        assert_eq!(random_profile.main_active, prepared.codebook.main_windows());
+        assert_eq!(is_at_most(&zero, &random), Some(true));
+        assert_eq!(is_at_most(&random, &zero), Some(false));
+        for low_work in [&small, &negative, &zeta] {
+            assert_eq!(is_at_most(low_work, &random), Some(true));
+        }
+        assert_eq!(is_at_most(&small[..TERMS - 1], &small), None);
+
+        // A low-span baseline cannot protect a sampled caller against an
+        // unseen candidate value activating more main windows.
+        let ones = vec![C::ScalarExt::ONE; TERMS];
+        assert_eq!(is_at_most(&zero, &ones), Some(false));
+
+        // Counting only nonzero digits incorrectly prefers this sparse input:
+        // each live scalar has one digit, but reaching it activates almost
+        // every main window. The evaluator scans every term in those windows.
+        let mut high = C::ScalarExt::ONE;
+        for _ in 0..119 {
+            high = high.double();
+        }
+        let sparse_high = (0..TERMS)
+            .map(|index| {
+                if index % 4 == 0 {
+                    C::ScalarExt::ZERO
+                } else {
+                    high
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(is_at_most(&sparse_high, &ones), Some(false));
+
+        // Canonical magnitude is not a proxy for prepared work: zeta is a
+        // single free-unit digit even though its canonical representation is
+        // full-width. The comparison must still reject sparse high powers.
+        for _ in 119..200 {
+            high = high.double();
+        }
+        let zeta_units = vec![C::ScalarExt::ZETA; TERMS];
+        let sparse_higher = (0..TERMS)
+            .map(|index| {
+                if index % 4 == 0 {
+                    C::ScalarExt::ZERO
+                } else {
+                    high
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(is_at_most(&sparse_higher, &zeta_units), Some(false));
+
+        let mut identity_bases = bases.clone();
+        identity_bases[0] = C::AffineExt::identity();
+        let identity_prepared =
+            PreparedZeroMsm::<C>::prepare_with_mode(&identity_bases, CodebookMode::alpha_only(7));
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::scalar_work_is_at_most_vartime(
+                &identity_prepared,
+                &random,
+                &small,
+            ),
+            None,
+        );
+
+        let mut duplicate_bases = bases;
+        duplicate_bases[1] = duplicate_bases[0];
+        let relation_prepared =
+            PreparedZeroMsm::<C>::prepare_with_mode(&duplicate_bases, CodebookMode::alpha_only(7));
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::scalar_work_is_at_most_vartime(
+                &relation_prepared,
+                &random,
+                &small,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn pallas_scalar_work_comparison_profiles() {
+        scalar_work_comparison_profiles::<pallas::Point>();
+    }
+
+    #[test]
+    fn vesta_scalar_work_comparison_profiles() {
+        scalar_work_comparison_profiles::<vesta::Point>();
     }
 
     /// Exact zero relations verify; one-bit perturbations, all-zero

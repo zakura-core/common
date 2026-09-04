@@ -1322,6 +1322,24 @@ impl<C: CurveAffine> Params<C> {
         best_multiexp::<C>(&tmp_scalars, &tmp_bases)
     }
 
+    /// Returns whether [`Self::commit_lagrange`] would use the prepared
+    /// no-orbits backend for a polynomial of `polynomial_len` coefficients.
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    pub(crate) fn prepared_lagrange_commitments_active(&self, polynomial_len: usize) -> bool {
+        // Keep these checks aligned with the prepared no-orbits route above
+        // without factoring the commitment hot path through another helper.
+        if crate::multicore::current_num_threads() > prepared_commitment_max_threads(self.k) {
+            return false;
+        }
+
+        let (Some(prepared), Some(_fixed_bases)) = (self.lagrange_table(), self.fixed_base_table())
+        else {
+            return false;
+        };
+        let n = self.n as usize;
+        prepared.terms() == n && polynomial_len == n
+    }
+
     /// Generates an empty multiscalar multiplication struct using the
     /// appropriate params.
     pub fn empty_msm(&self) -> MSM<'_, C> {
@@ -1551,6 +1569,14 @@ impl<C: CurveAffine> Params<C> {
     /// params. Concurrent callers outside that pool safely wait for and share
     /// the same attempt; fanning a cold call out across the worker pool can
     /// occupy its other workers and serialize the initializer's parallel work.
+    ///
+    /// # Security
+    ///
+    /// Commitments evaluated from these prepared tables are variable-time in
+    /// their secret inputs. When proving several circuits together, their
+    /// relative sparsity and similarity can affect runtime. Callers must not
+    /// expose that timing across an untrusted boundary when those relationships
+    /// are sensitive.
     pub fn prepare_commitments(&self) -> bool {
         #[cfg(feature = "orbits")]
         {
@@ -2740,7 +2766,19 @@ fn prepared_commitments_match_unprepared() {
             .num_threads(num_threads)
             .build()
             .expect("test pool must build")
-            .install(|| exercise(&armed, &unarmed, 41 + num_threads as u64));
+            .install(|| {
+                #[cfg(not(feature = "orbits"))]
+                {
+                    let full_len = armed.n as usize;
+                    assert_eq!(
+                        armed.prepared_lagrange_commitments_active(full_len),
+                        num_threads <= prepared_commitment_max_threads(armed.k),
+                    );
+                    assert!(!armed.prepared_lagrange_commitments_active(full_len - 1));
+                    assert!(!unarmed.prepared_lagrange_commitments_active(full_len));
+                }
+                exercise(&armed, &unarmed, 41 + num_threads as u64)
+            });
     }
 }
 

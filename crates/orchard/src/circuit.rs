@@ -1349,6 +1349,14 @@ impl ProvingKey {
     /// means arming was a no-op (Orchard was built with neither `multicore`
     /// nor `orbits`, or its backend declined) and proving simply keeps its
     /// unprepared path. Callers may ignore the result.
+    ///
+    /// # Security
+    ///
+    /// Proofs created after preparation remain variable-time in private
+    /// witnesses. When proving several Actions together, their sparsity and
+    /// similarity may affect timing; see [`halo2_proofs::plonk::create_proof`].
+    /// Do not expose proving latency across an untrusted boundary when those
+    /// relationships are sensitive.
     pub fn prepare_proving(&self) -> bool {
         self.params.prepare_commitments()
     }
@@ -1541,6 +1549,14 @@ impl Proof {
     ///
     /// All instances of a bundle carry the same `disableCrossAddress` value; that uniformity
     /// is the bundle layer's invariant, and is not checked here.
+    ///
+    /// # Security
+    ///
+    /// Proof creation is variable-time in the private witnesses. With a
+    /// [`ProvingKey`] armed by [`ProvingKey::prepare_proving`], the relative
+    /// sparsity and similarity of several Actions can affect runtime. Do not
+    /// expose proving latency across an untrusted boundary when those
+    /// relationships are sensitive.
     pub fn create(
         pk: &ProvingKey,
         circuits: &[Circuit],
