@@ -51,6 +51,223 @@ fn commit_instance<C: CurveAffine>(params: &Params<C>, instance: &[C::Scalar]) -
     commitment
 }
 
+fn parallelize_two<A: Send, B: Send>(
+    left: &mut [A],
+    right: &mut [B],
+    f: impl Fn(&mut [A], &mut [B], usize) + Send + Sync + Clone,
+) {
+    assert_eq!(left.len(), right.len());
+    let num_threads = crate::multicore::current_num_threads();
+    let mut chunk = left.len() / num_threads;
+    if chunk < num_threads {
+        chunk = left.len();
+    }
+
+    crate::multicore::scope(|scope| {
+        for (chunk_num, (left, right)) in left
+            .chunks_mut(chunk)
+            .zip(right.chunks_mut(chunk))
+            .enumerate()
+        {
+            let f = f.clone();
+            scope.spawn(move |_| f(left, right, chunk_num * chunk));
+        }
+    });
+}
+
+/// Builds the prefix products of `numerators[i] / denominators[i]` with one
+/// field inversion.
+fn prefix_products_of_fractions<F: Field>(
+    mut numerators: Vec<F>,
+    mut denominators: Vec<F>,
+    fraction_rows: usize,
+    initial: F,
+) -> Vec<F> {
+    assert_eq!(numerators.len(), denominators.len());
+    assert!(fraction_rows < numerators.len());
+
+    // Compute the inverse of the complete denominator product with two
+    // independent multiplication chains. A zero denominator is negligible
+    // for challenge-blinded products, but retain the current zero-skipping
+    // behavior below for exactness on every input.
+    let mut denominator_even = F::ONE;
+    let mut denominator_odd = F::ONE;
+    let mut pairs = denominators[..fraction_rows].chunks_exact(2);
+    for pair in &mut pairs {
+        denominator_even *= pair[0];
+        denominator_odd *= pair[1];
+    }
+    if let Some(value) = pairs.remainder().first() {
+        denominator_even *= value;
+    }
+
+    let denominator_product = denominator_even * denominator_odd;
+    if let Some(mut denominator_inverse) = Option::<F>::from(denominator_product.invert()) {
+        // First form every numerator prefix. The following reverse walk uses
+        // D_i / (D_0 ... D_i) = 1 / (D_0 ... D_{i-1}) to recover the matching
+        // denominator prefix without inverting each row separately.
+        let mut numerator_prefix = initial;
+        for numerator in &mut numerators[..fraction_rows] {
+            let current = *numerator;
+            *numerator = numerator_prefix;
+            numerator_prefix *= current;
+        }
+        numerators[fraction_rows] = numerator_prefix * denominator_inverse;
+
+        for row in (0..fraction_rows).rev() {
+            denominator_inverse *= denominators[row];
+            numerators[row] *= denominator_inverse;
+        }
+    } else {
+        // Match `batch_invert_multi` for the vanishingly unlikely case in
+        // which a challenge-blinded denominator is zero.
+        crate::arithmetic::batch_invert_multi(&mut denominators[..fraction_rows]);
+        let mut state = initial;
+        for (numerator, denominator_inverse) in numerators[..fraction_rows]
+            .iter_mut()
+            .zip(&denominators[..fraction_rows])
+        {
+            let ratio = *numerator * denominator_inverse;
+            *numerator = state;
+            state *= ratio;
+        }
+        numerators[fraction_rows] = state;
+    }
+
+    numerators
+}
+
+#[cfg(test)]
+mod prefix_products_of_fractions_tests {
+    use super::prefix_products_of_fractions;
+    use group::ff::Field;
+    use pasta_curves::Fp;
+
+    fn pseudo_random_values(len: usize, mut state: u64) -> Vec<Fp> {
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                Fp::from(state)
+            })
+            .collect()
+    }
+
+    fn reference_prefix_products(
+        mut numerators: Vec<Fp>,
+        mut denominators: Vec<Fp>,
+        fraction_rows: usize,
+        initial: Fp,
+    ) -> Vec<Fp> {
+        crate::arithmetic::batch_invert_multi(&mut denominators[..fraction_rows]);
+
+        let mut state = initial;
+        for (numerator, denominator_inverse) in numerators[..fraction_rows]
+            .iter_mut()
+            .zip(&denominators[..fraction_rows])
+        {
+            let ratio = *numerator * denominator_inverse;
+            *numerator = state;
+            state *= ratio;
+        }
+        numerators[fraction_rows] = state;
+        numerators
+    }
+
+    #[test]
+    fn matches_batch_inversion_for_random_nonzero_products() {
+        for fraction_rows in [0, 1, 2, 31, 32, 33, 2_042] {
+            let len = fraction_rows + 6;
+            let numerators = pseudo_random_values(len, 0x1234_5678_9abc_def0);
+            let mut denominators = pseudo_random_values(len, 0xfedc_ba98_7654_3210);
+            for denominator in &mut denominators[..fraction_rows] {
+                if bool::from(denominator.is_zero()) {
+                    *denominator = Fp::ONE;
+                }
+            }
+            let initial = Fp::from(0x0123_4567_89ab_cdef);
+
+            let expected = reference_prefix_products(
+                numerators.clone(),
+                denominators.clone(),
+                fraction_rows,
+                initial,
+            );
+            let actual =
+                prefix_products_of_fractions(numerators, denominators, fraction_rows, initial);
+
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn zero_denominators_match_zero_skipping_batch_inversion() {
+        let fraction_rows = 65;
+        let numerators = pseudo_random_values(fraction_rows + 6, 0x3141_5926_5358_9793);
+        let base_denominators = pseudo_random_values(fraction_rows + 6, 0x2718_2818_2845_9045);
+        let initial = Fp::from(42);
+
+        for zero_rows in [vec![0], vec![32], vec![64], vec![0, 17, 64]] {
+            let mut denominators = base_denominators.clone();
+            for row in zero_rows {
+                denominators[row] = Fp::ZERO;
+            }
+            let expected = reference_prefix_products(
+                numerators.clone(),
+                denominators.clone(),
+                fraction_rows,
+                initial,
+            );
+            let actual = prefix_products_of_fractions(
+                numerators.clone(),
+                denominators,
+                fraction_rows,
+                initial,
+            );
+
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn zero_numerators_match_the_reference_prefix_chain() {
+        let fraction_rows = 65;
+        let mut numerators = pseudo_random_values(fraction_rows + 6, 0x0123_4567_89ab_cdef);
+        let denominators = pseudo_random_values(fraction_rows + 6, 0xfedc_ba98_7654_3210);
+        numerators[0] = Fp::ZERO;
+        numerators[32] = Fp::ZERO;
+        numerators[64] = Fp::ZERO;
+        let initial = Fp::from(42);
+
+        let expected = reference_prefix_products(
+            numerators.clone(),
+            denominators.clone(),
+            fraction_rows,
+            initial,
+        );
+        let actual = prefix_products_of_fractions(numerators, denominators, fraction_rows, initial);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn leaves_blinding_rows_untouched() {
+        const DOMAIN_ROWS: usize = 2_048;
+        const BLINDING_FACTORS: usize = 5;
+        const FRACTION_ROWS: usize = DOMAIN_ROWS - (BLINDING_FACTORS + 1);
+
+        let numerators = pseudo_random_values(DOMAIN_ROWS, 0xa5a5_a5a5_5a5a_5a5a);
+        let mut denominators = pseudo_random_values(DOMAIN_ROWS, 0x5a5a_5a5a_a5a5_a5a5);
+        denominators[DOMAIN_ROWS - 1] = Fp::ZERO;
+        let numerator_tail = numerators[FRACTION_ROWS + 1..].to_vec();
+        let products =
+            prefix_products_of_fractions(numerators, denominators, FRACTION_ROWS, Fp::ONE);
+
+        assert_eq!(&products[FRACTION_ROWS + 1..], &numerator_tail);
+    }
+}
+
 /// Computes `base^(2^exponent)` using the public exponent directly.
 fn pow_by_power_of_two<F: Field + 'static>(base: F, exponent: u32) -> F {
     if TypeId::of::<F>() == TypeId::of::<pasta_curves::Fp>() {
