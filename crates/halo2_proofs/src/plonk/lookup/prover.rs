@@ -273,9 +273,6 @@ where
     C::Scalar: Ord,
     C::Curve: Mul<C::Scalar, Output = C::Curve>,
 {
-    if std::env::var_os("ZAKURA_LOOKUP_MODE_CENTER_CONTROL").is_some() {
-        return None;
-    }
     let scalar = table_commitment_center(sorted_values)?;
     #[cfg(feature = "multicore")]
     if let Some(correction) = params.commit_sparse(&[(0, scalar)], Blind(C::Scalar::ZERO)) {
@@ -724,8 +721,10 @@ fn commit_lagrange_centered<C: CurveAffine>(
 
     // The sum of every Lagrange-basis generator is the constant coefficient
     // generator g[0]. Centering every row therefore preserves the commitment
-    // after adding [center] g[0]. This scratch polynomial is used only by the
-    // commitment; the lookup product retains the original values.
+    // after adding [center] g[0]. Including the random tail avoids caching a
+    // separate usable-row generator sum, and translating those uniform values
+    // by a public scalar leaves them uniform. This scratch polynomial is used
+    // only by the commitment; the lookup product retains the original values.
     let centered = polynomial
         .iter()
         .map(|value| *value - center.scalar)
@@ -1767,9 +1766,22 @@ mod tests {
     }
 
     fn sorted_values_with_mode(mode_count: usize, len: usize) -> Vec<pallas::Scalar> {
-        let mut values = iter::repeat(pallas::Scalar::ONE)
-            .take(mode_count)
-            .chain((0..len - mode_count).map(|index| {
+        sorted_values_with_zeroes_and_mode(0, mode_count, len)
+    }
+
+    fn sorted_values_with_zeroes_and_mode(
+        zero_count: usize,
+        mode_count: usize,
+        len: usize,
+    ) -> Vec<pallas::Scalar> {
+        let unique_count = len
+            .checked_sub(zero_count)
+            .and_then(|remaining| remaining.checked_sub(mode_count))
+            .expect("zeroes and mode fit within the test vector");
+        let mut values = iter::repeat(pallas::Scalar::ZERO)
+            .take(zero_count)
+            .chain(iter::repeat(pallas::Scalar::ONE).take(mode_count))
+            .chain((0..unique_count).map(|index| {
                 pallas::Scalar::from(u64::try_from(index).expect("test index fits in u64") + 2)
             }))
             .collect::<Vec<_>>();
@@ -1798,36 +1810,13 @@ mod tests {
         let zero_dominant = sorted_values_with_counts(&[(0, 8), (1, 6), (2, 2)]);
         assert_eq!(table_commitment_center(&zero_dominant), None);
 
-        let threshold = sorted_values_with_counts(&[
-            (0, 2),
-            (1, 6),
-            (2, 1),
-            (3, 1),
-            (4, 1),
-            (5, 1),
-            (6, 1),
-            (7, 1),
-            (8, 1),
-            (9, 1),
-        ]);
+        let threshold = sorted_values_with_zeroes_and_mode(2, 6, 16);
         assert_eq!(
             table_commitment_center(&threshold),
             Some(pallas::Scalar::ONE),
         );
 
-        let below_threshold = sorted_values_with_counts(&[
-            (0, 2),
-            (1, 5),
-            (2, 1),
-            (3, 1),
-            (4, 1),
-            (5, 1),
-            (6, 1),
-            (7, 1),
-            (8, 1),
-            (9, 1),
-            (10, 1),
-        ]);
+        let below_threshold = sorted_values_with_zeroes_and_mode(2, 5, 16);
         assert_eq!(table_commitment_center(&below_threshold), None);
 
         let nonzero_dominant = sorted_values_with_counts(&[(0, 1), (1, 5), (2, 5), (3, 5)]);
@@ -1842,10 +1831,15 @@ mod tests {
     fn fixed_table_center_matches_native_multiplication() {
         let params = Params::<pallas::Affine>::new(crate::PREPARED_SPARSE_COMMITMENT_K);
         assert!(params.prepare_sparse_commitment());
-        let values = sorted_values_with_counts(&[(0, 1), (1, 8), (2, 1)]);
+        let scalar = (pallas::Scalar::from(0x9e37_79b9_7f4a_7c15).square()
+            + pallas::Scalar::from(0x0123_4567_89ab_cdef))
+        .square();
+        let mut values = vec![pallas::Scalar::ZERO, pallas::Scalar::ONE];
+        values.extend(iter::repeat(scalar).take(8));
+        values.sort_unstable();
 
         let center = fixed_table_center(&params, &values).expect("the strong mode is centered");
-        assert_eq!(center.scalar, pallas::Scalar::ONE);
+        assert_eq!(center.scalar, scalar);
         assert_eq!(
             center.correction,
             pallas::Point::from(params.g[0]) * center.scalar,
