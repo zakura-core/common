@@ -93,10 +93,11 @@ fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
         None,
         None,
         None,
-        None,
+        zcash_tachyon::TachyonBundle::NoBundle,
     )
     .freeze()
     .unwrap();
+    assert!(tx.tachyon_bundle().is_no_bundle());
 
     let mut encoded = Vec::new();
     tx.write(&mut encoded).unwrap();
@@ -110,6 +111,7 @@ fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
     let decoded = Transaction::read(&encoded[..], BranchId::Sprout).unwrap();
     assert_eq!(decoded.version(), TxVersion::V7);
     assert_eq!(decoded.consensus_branch_id(), BranchId::NuTachyon);
+    assert!(decoded.tachyon_bundle().is_no_bundle());
     let mut reencoded = Vec::new();
     decoded.write(&mut reencoded).unwrap();
     assert_eq!(reencoded, encoded);
@@ -167,7 +169,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
         None,
         None,
         None,
-        Some(tachyon_bundle.clone()),
+        tachyon_bundle.clone(),
     )
     .freeze()
     .unwrap();
@@ -181,14 +183,14 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
         None,
         None,
         None,
-        None,
+        TachyonBundle::NoBundle,
     )
     .freeze()
     .unwrap();
 
     assert!(matches!(
         transaction.tachyon_bundle(),
-        Some(TachyonBundle::Adjunct(_))
+        TachyonBundle::Adjunct(_)
     ));
     assert_ne!(transaction.txid(), transaction_without_tachyon.txid());
     assert_ne!(
@@ -206,7 +208,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
         None,
         None,
         None,
-        Some(tachyon_bundle),
+        tachyon_bundle,
     );
     let sighash_transaction_without_tachyon = TransactionData::<TestUnauthorized>::from_parts_v7(
         BranchId::NuTachyon,
@@ -218,7 +220,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
         None,
         None,
         None,
-        None,
+        TachyonBundle::NoBundle,
     );
     let txid_parts = sighash_transaction.digest(TxIdDigester);
     let txid_parts_without_tachyon = sighash_transaction_without_tachyon.digest(TxIdDigester);
@@ -247,7 +249,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
     let decoded = Transaction::read(&encoded[..], BranchId::Sprout).unwrap();
     assert!(matches!(
         decoded.tachyon_bundle(),
-        Some(TachyonBundle::Adjunct(_))
+        TachyonBundle::Adjunct(_)
     ));
 
     let mut reencoded = Vec::new();

@@ -315,7 +315,7 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
     type OrchardDigest = Option<Blake2bHash>;
     type IronwoodDigest = Option<Blake2bHash>;
     #[cfg(zcash_unstable = "nutachyon")]
-    type TachyonDigest = Option<[u8; 32]>;
+    type TachyonDigest = [u8; 32];
 
     type Digest = TxDigests<Blake2bHash>;
 
@@ -378,11 +378,8 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
     }
 
     #[cfg(zcash_unstable = "nutachyon")]
-    fn digest_tachyon(
-        &self,
-        tachyon_bundle: Option<&zcash_tachyon::TachyonBundle>,
-    ) -> Self::TachyonDigest {
-        tachyon_bundle.map(zcash_tachyon::TachyonBundle::commitment)
+    fn digest_tachyon(&self, tachyon_bundle: &zcash_tachyon::TachyonBundle) -> Self::TachyonDigest {
+        tachyon_bundle.commitment()
     }
 
     fn combine(
@@ -499,7 +496,7 @@ pub(crate) fn to_hash_v7(
     sapling_digest: Option<Blake2bHash>,
     orchard_digest: Option<Blake2bHash>,
     ironwood_digest: Option<Blake2bHash>,
-    tachyon_digest: Option<[u8; 32]>,
+    tachyon_digest: [u8; 32],
 ) -> Blake2bHash {
     let mut personal = [0; 16];
     personal[..12].copy_from_slice(ZCASH_TX_PERSONALIZATION_PREFIX);
@@ -536,10 +533,7 @@ pub(crate) fn to_hash_v7(
             .as_bytes(),
     )
     .unwrap();
-    h.write_all(
-        &tachyon_digest.unwrap_or_else(|| zcash_tachyon::TachyonBundle::NoBundle.commitment()),
-    )
-    .unwrap();
+    h.write_all(&tachyon_digest).unwrap();
 
     h.finalize()
 }
@@ -704,14 +698,8 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
     }
 
     #[cfg(zcash_unstable = "nutachyon")]
-    fn digest_tachyon(
-        &self,
-        tachyon_bundle: Option<&zcash_tachyon::TachyonBundle>,
-    ) -> Self::TachyonDigest {
-        tachyon_bundle.map_or_else(
-            || zcash_tachyon::TachyonBundle::NoBundle.auth_digest(),
-            zcash_tachyon::TachyonBundle::auth_digest,
-        )
+    fn digest_tachyon(&self, tachyon_bundle: &zcash_tachyon::TachyonBundle) -> Self::TachyonDigest {
+        tachyon_bundle.auth_digest()
     }
 
     fn combine(
