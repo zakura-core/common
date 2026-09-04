@@ -6,8 +6,7 @@ use halo2_proofs::{
     plonk::{Advice, Column, Error, Expression},
 };
 
-use std::marker::PhantomData;
-use std::ops::Range;
+use std::{any::Any, marker::PhantomData, ops::Range};
 
 pub mod cond_swap;
 pub mod decompose_running_sum;
@@ -22,39 +21,33 @@ fn inverse_power_of_two<F: PrimeField>(exponent: usize) -> F {
 /// `Fq` twin) reduce by at most 63 bits per call.
 const MAX_PASTA_INVERSE_POWER_OF_TWO_EXPONENT: usize = 63;
 
-/// Multiplication by `2^-exponent`.
-///
-/// The provided method multiplies by [`PrimeField::TWO_INV`] raised to
-/// `exponent`; fields with a cheaper reduction override it. The running-sum
-/// decomposition gadgets require this trait, so a field only needs the
-/// (empty) provided implementation to use them.
-pub trait MulByInversePowerOfTwo: PrimeField {
-    /// Returns `self * 2^-exponent`.
-    fn mul_by_inverse_power_of_two(&self, exponent: usize) -> Self {
-        *self * inverse_power_of_two::<Self>(exponent)
-    }
-}
+// Inline these helpers so monomorphization removes their type checks from each
+// Pasta running-sum step.
+#[inline(always)]
+fn mul_by_inverse_power_of_two<F: PrimeField>(value: F, exponent: usize) -> F {
+    if exponent <= MAX_PASTA_INVERSE_POWER_OF_TWO_EXPONENT {
+        let exponent = u32::try_from(exponent).expect("the bounded exponent fits into u32");
 
-impl MulByInversePowerOfTwo for pasta_curves::Fp {
-    fn mul_by_inverse_power_of_two(&self, exponent: usize) -> Self {
-        if exponent <= MAX_PASTA_INVERSE_POWER_OF_TWO_EXPONENT {
-            // The bound above makes the u32 cast infallible.
-            pasta_curves::arithmetic::mul_fp_by_inverse_power_of_two(self, exponent as u32)
-        } else {
-            *self * inverse_power_of_two::<Self>(exponent)
+        if let Some(value) = (&value as &dyn Any).downcast_ref::<pasta_curves::Fp>() {
+            return downcast_field(pasta_curves::arithmetic::mul_fp_by_inverse_power_of_two(
+                value, exponent,
+            ));
+        }
+        if let Some(value) = (&value as &dyn Any).downcast_ref::<pasta_curves::Fq>() {
+            return downcast_field(pasta_curves::arithmetic::mul_fq_by_inverse_power_of_two(
+                value, exponent,
+            ));
         }
     }
+
+    value * inverse_power_of_two::<F>(exponent)
 }
 
-impl MulByInversePowerOfTwo for pasta_curves::Fq {
-    fn mul_by_inverse_power_of_two(&self, exponent: usize) -> Self {
-        if exponent <= MAX_PASTA_INVERSE_POWER_OF_TWO_EXPONENT {
-            // The bound above makes the u32 cast infallible.
-            pasta_curves::arithmetic::mul_fq_by_inverse_power_of_two(self, exponent as u32)
-        } else {
-            *self * inverse_power_of_two::<Self>(exponent)
-        }
-    }
+#[inline(always)]
+fn downcast_field<F: Field, T: Field>(value: F) -> T {
+    *(&value as &dyn Any)
+        .downcast_ref::<T>()
+        .expect("the input and output fields have the same type")
 }
 
 /// A type that has a value at either keygen or proving time.
@@ -326,10 +319,10 @@ mod tests {
 
     #[test]
     fn mul_by_inverse_power_of_two_matches_generic_path() {
-        fn check<F: MulByInversePowerOfTwo>() {
+        fn check<F: PrimeField>() {
             let mut rng = rng();
-            // Straddle the Pasta bridge's 63-bit cap to also exercise the
-            // large-exponent fallback in the overridden implementations.
+            // Straddle the Pasta bridges' 63-bit cap to also exercise their
+            // large-exponent fallback.
             for exponent in [
                 0,
                 1,
@@ -341,7 +334,7 @@ mod tests {
             ] {
                 for value in [F::ZERO, -F::ONE, F::random(&mut rng)] {
                     assert_eq!(
-                        value.mul_by_inverse_power_of_two(exponent),
+                        mul_by_inverse_power_of_two(value, exponent),
                         value * inverse_power_of_two::<F>(exponent)
                     );
                 }

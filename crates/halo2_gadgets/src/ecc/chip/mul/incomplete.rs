@@ -1,12 +1,13 @@
 use super::super::{CircuitVersion, NonIdentityEccPoint};
-use super::{X, Y, Z};
+use super::{IncompleteMulWitness, X, Y, Z};
 use crate::utilities::bool_check;
 
 use group::ff::PrimeField;
 use halo2_proofs::{
     circuit::{Region, Value},
     plonk::{
-        Advice, Column, ConstraintSystem, Constraints, Error, Expression, Selector, VirtualCells,
+        Advice, Assigned, Column, ConstraintSystem, Constraints, Error, Expression, Selector,
+        VirtualCells,
     },
     poly::Rotation,
 };
@@ -69,6 +70,11 @@ pub(crate) struct Config<const NUM_BITS: usize> {
     pub(super) double_and_add: DoubleAndAdd,
     // y-coordinate of the point being added in each double-and-add iteration.
     pub(super) y_p: Column<Advice>,
+}
+
+pub(super) struct RunningSums {
+    pub(super) first: Z<pallas::Base>,
+    pub(super) last: Z<pallas::Base>,
 }
 
 impl<const NUM_BITS: usize> Config<NUM_BITS> {
@@ -223,8 +229,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
     /// halves and process them side by side, using the same rows but with
     /// non-overlapping columns. The base is never the identity point even at
     /// the boundary between halves.
-    /// Returns (x, y, z).
-    #[allow(clippy::type_complexity)]
+    /// Returns the final point and the running-sum endpoints.
     pub(super) fn double_and_add(
         &self,
         region: &mut Region<'_, pallas::Base>,
@@ -233,24 +238,15 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
         bits: &[Value<bool>],
         acc: (X<pallas::Base>, Y<pallas::Base>, Z<pallas::Base>),
         circuit_version: CircuitVersion,
-    ) -> Result<(X<pallas::Base>, Y<pallas::Base>, Vec<Z<pallas::Base>>), Error> {
+        witness: Value<&IncompleteMulWitness>,
+        witness_range: std::ops::Range<usize>,
+    ) -> Result<(X<pallas::Base>, Y<pallas::Base>, RunningSums), Error> {
         // Check that we have the correct number of bits for this double-and-add.
         assert_eq!(bits.len(), NUM_BITS);
+        assert_eq!(witness_range.len(), bits.len());
+        assert!(bits.len() >= 2);
 
-        // Handle exceptional cases
         let (x_p, y_p) = (base.x.value().cloned(), base.y.value().cloned());
-        let (x_a, y_a) = (acc.0.value().cloned(), acc.1.value().cloned());
-
-        x_a.zip(y_a)
-            .zip(x_p.zip(y_p))
-            .error_if_known_and(|((x_a, y_a), (x_p, y_p))| {
-                // A is point at infinity
-                (x_p.is_zero_vartime() && y_p.is_zero_vartime())
-                // Q is point at infinity
-                || (x_a.is_zero_vartime() && y_a.is_zero_vartime())
-                // x_p = x_a
-                || (x_p == x_a)
-            })?;
 
         // Set q_mul values
         {
@@ -268,131 +264,143 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
         }
 
         // Initialise double-and-add
-        let (mut x_a, mut y_a, mut z) = {
+        {
             // Initialise the running `z` sum for the scalar bits.
-            let z = acc.2.copy_advice(|| "starting z", region, self.z, offset)?;
+            acc.2.copy_advice(|| "starting z", region, self.z, offset)?;
 
             // Initialise acc
-            let x_a = acc.0.copy_advice(
+            acc.0.copy_advice(
                 || "starting x_a",
                 region,
                 self.double_and_add.x_a,
                 offset + 1,
             )?;
-            let y_a = acc.1.copy_advice(
+            acc.1.copy_advice(
                 || "starting y_a",
                 region,
                 self.double_and_add.lambda_1,
                 offset,
             )?;
-
-            (x_a, y_a.value().cloned(), z)
-        };
+        }
 
         // Increase offset by 1; we used row 0 for initializing `z`.
         let offset = offset + 1;
 
-        // Initialise vector to store all interstitial `z` running sum values.
-        let mut zs: Vec<Z<pallas::Base>> = Vec::with_capacity(bits.len());
+        // The first and final running sums are used by the overflow check or
+        // the next multiplication stage. Only retain handles for those cells.
+        let first_z = region.assign_advice(
+            || "z",
+            self.z,
+            offset,
+            || witness.map(|witness| witness.rows[witness_range.start].z),
+        )?;
+        region.assign_advice_batch(
+            |_| "z",
+            self.z,
+            offset + 1,
+            bits.len() - 2,
+            |row| witness.map(|witness| witness.rows[witness_range.start + row + 1].z),
+        )?;
+        let last_z = region.assign_advice(
+            || "z",
+            self.z,
+            offset + bits.len() - 1,
+            || witness.map(|witness| witness.rows[witness_range.end - 1].z),
+        )?;
 
-        // Incomplete addition
-        for (row, k) in bits.iter().enumerate() {
-            // z_{i} = 2 * z_{i+1} + k_i
-            // https://p.z.cash/halo2-0.1:ecc-var-mul-witness-scalar?partial
-            let z_val = z
-                .value()
-                .zip(k.as_ref())
-                .map(|(z_val, k)| z_val.double() + pallas::Base::from(*k as u64));
-            z = region.assign_advice(|| "z", self.z, row + offset, || z_val)?;
-            zs.push(Z(z.clone()));
-
-            // Assign `x_p`, `y_p`.
-            //
-            // The `q_mul_2` gate only constrains `(x_p, y_p)` to be *constant* across the
-            // incomplete-addition rows; it does not by itself tie them to the real `base`.
-            // The fixed circuit therefore `copy_advice`s `base` into the first loop row, so
-            // the `q_mul_2` constancy propagates the equality to every loop row, forcing the
-            // per-iteration base to equal `base`. `InsecureUnanchoredBase` reproduces the prior
-            // behaviour (no anchor) and exists only to rebuild the historical verifying key.
-            match circuit_version {
-                CircuitVersion::AnchoredBase if row == 0 => {
-                    base.x.copy_advice(
-                        || "anchor x_p to base",
-                        region,
-                        self.double_and_add.x_p,
-                        row + offset,
-                    )?;
-                    base.y
-                        .copy_advice(|| "anchor y_p to base", region, self.y_p, row + offset)?;
-                }
-                _ => {
-                    region.assign_advice(
-                        || "x_p",
-                        self.double_and_add.x_p,
-                        row + offset,
-                        || x_p,
-                    )?;
-                    region.assign_advice(|| "y_p", self.y_p, row + offset, || y_p)?;
-                }
+        // The `q_mul_2` gate constrains `(x_p, y_p)` to be constant, but it
+        // does not tie them to the real `base`. Anchor the first row in the
+        // fixed circuit, then batch-assign the remaining repeated values.
+        match circuit_version {
+            CircuitVersion::AnchoredBase => {
+                base.x.copy_advice(
+                    || "anchor x_p to base",
+                    region,
+                    self.double_and_add.x_p,
+                    offset,
+                )?;
+                base.y
+                    .copy_advice(|| "anchor y_p to base", region, self.y_p, offset)?;
             }
-
-            // If the bit is set, use `y`; if the bit is not set, use `-y`
-            let y_p = y_p
-                .zip(k.as_ref())
-                .map(|(y_p, k)| if !k { -y_p } else { y_p });
-
-            // Compute and assign λ1⋅(x_A − x_P) = y_A − y_P
-            let lambda1 = y_a
-                .zip(y_p)
-                .zip(x_a.value())
-                .zip(x_p)
-                .map(|(((y_a, y_p), x_a), x_p)| (y_a - y_p) * (x_a - x_p).invert());
-            region.assign_advice(
-                || "lambda1",
-                self.double_and_add.lambda_1,
-                row + offset,
-                || lambda1,
-            )?;
-
-            // x_R = λ1^2 - x_A - x_P
-            let x_r = lambda1
-                .zip(x_a.value())
-                .zip(x_p)
-                .map(|((lambda1, x_a), x_p)| lambda1.square() - x_a - x_p);
-
-            // λ2 = (2(y_A) / (x_A - x_R)) - λ1
-            let lambda2 = lambda1
-                .zip(y_a)
-                .zip(x_a.value())
-                .zip(x_r)
-                .map(|(((lambda1, y_a), x_a), x_r)| y_a.double() * (x_a - x_r).invert() - lambda1);
-            region.assign_advice(
-                || "lambda2",
-                self.double_and_add.lambda_2,
-                row + offset,
-                || lambda2,
-            )?;
-
-            // Compute and assign `x_a` for the next row
-            let x_a_new = lambda2.square() - x_a.value() - x_r;
-            y_a = lambda2 * (x_a.value() - x_a_new) - y_a;
-            let x_a_val = x_a_new;
-            x_a = region.assign_advice(
-                || "x_a",
-                self.double_and_add.x_a,
-                row + offset + 1,
-                || x_a_val,
-            )?;
+            CircuitVersion::InsecureUnanchoredBase => {
+                region.assign_advice(|| "x_p", self.double_and_add.x_p, offset, || x_p)?;
+                region.assign_advice(|| "y_p", self.y_p, offset, || y_p)?;
+            }
         }
+        region.assign_advice_batch(
+            |_| "x_p",
+            self.double_and_add.x_p,
+            offset + 1,
+            bits.len() - 1,
+            |_| x_p,
+        )?;
+        region.assign_advice_batch(|_| "y_p", self.y_p, offset + 1, bits.len() - 1, |_| y_p)?;
+
+        region.assign_advice_batch(
+            |_| "lambda1",
+            self.double_and_add.lambda_1,
+            offset,
+            bits.len(),
+            |row| {
+                witness
+                    .map(|witness| witness.rows[witness_range.start + row].lambda_1)
+                    .map(Assigned::Trivial)
+            },
+        )?;
+        region.assign_advice_batch(
+            |_| "lambda2",
+            self.double_and_add.lambda_2,
+            offset,
+            bits.len(),
+            |row| {
+                witness
+                    .map(|witness| witness.rows[witness_range.start + row].lambda_2)
+                    .map(Assigned::Trivial)
+            },
+        )?;
+
+        // Only the final `x_a` cell is used after assignment.
+        region.assign_advice_batch(
+            |_| "x_a",
+            self.double_and_add.x_a,
+            offset + 1,
+            bits.len() - 1,
+            |row| {
+                witness
+                    .map(|witness| witness.point(witness_range.start + row + 1).x)
+                    .map(Assigned::Trivial)
+            },
+        )?;
+        let x_a = region.assign_advice(
+            || "x_a",
+            self.double_and_add.x_a,
+            offset + NUM_BITS,
+            || {
+                witness
+                    .map(|witness| witness.point(witness_range.end).x)
+                    .map(Assigned::Trivial)
+            },
+        )?;
 
         // Witness final y_a
         let y_a = region.assign_advice(
             || "y_a",
             self.double_and_add.lambda_1,
             offset + NUM_BITS,
-            || y_a,
+            || {
+                witness
+                    .map(|witness| witness.point(witness_range.end).y)
+                    .map(Assigned::Trivial)
+            },
         )?;
 
-        Ok((X(x_a), Y(y_a), zs))
+        Ok((
+            X(x_a),
+            Y(y_a),
+            RunningSums {
+                first: Z(first_z),
+                last: Z(last_z),
+            },
+        ))
     }
 }

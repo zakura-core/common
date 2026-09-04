@@ -19,7 +19,7 @@ use crate::{
         ecc::FixedPoints,
         sinsemilla::{
             CommitDomains, HashDomains, SinsemillaInstructions,
-            chip::{SinsemillaChip, SinsemillaConfig},
+            chip::{PreparedHashWitness, SinsemillaChip, SinsemillaConfig},
         },
         utilities::{
             UtilitiesInstructions,
@@ -217,9 +217,7 @@ where
     }
 }
 
-impl<Hash, Commit, Fixed, Lookup, const MERKLE_DEPTH: usize>
-    MerkleInstructions<pallas::Affine, MERKLE_DEPTH, { sinsemilla::K }, { sinsemilla::C }>
-    for MerkleChip<Hash, Commit, Fixed, Lookup>
+impl<Hash, Commit, Fixed, Lookup> MerkleChip<Hash, Commit, Fixed, Lookup>
 where
     Hash: HashDomains<pallas::Affine> + Eq,
     Fixed: FixedPoints<pallas::Affine>,
@@ -227,15 +225,16 @@ where
     Lookup: PallasLookupRangeCheck,
 {
     #[allow(non_snake_case)]
-    fn hash_layer(
+    fn hash_layer_inner<const MERKLE_DEPTH: usize>(
         &self,
         mut layouter: impl Layouter<pallas::Base>,
         Q: pallas::Affine,
         // l = MERKLE_DEPTH - layer - 1
         l: usize,
-        left: Self::Var,
-        right: Self::Var,
-    ) -> Result<Self::Var, Error> {
+        left: AssignedCell<pallas::Base, pallas::Base>,
+        right: AssignedCell<pallas::Base, pallas::Base>,
+        prepared: Option<Value<&PreparedHashWitness>>,
+    ) -> Result<AssignedCell<pallas::Base, pallas::Base>, Error> {
         let config = self.config().clone();
 
         // We need to hash `l || left || right`, where `l` is a 10-bit value.
@@ -319,11 +318,24 @@ where
         // these.
         //
         // https://p.z.cash/proto:merkle-crh-orchard
-        let (point, zs) = self.hash_to_point(
-            layouter.namespace(|| format!("hash at l = {}", l)),
-            Q,
-            vec![a.inner(), b.inner(), c.inner()].into(),
-        )?;
+        let message = vec![a.inner(), b.inner(), c.inner()].into();
+        let sinsemilla_chip = SinsemillaChip::<Hash, Commit, Fixed, Lookup>::construct(
+            config.sinsemilla_config.clone(),
+        );
+        let (point, zs) = if let Some(prepared) = prepared {
+            sinsemilla_chip.hash_to_point_prepared(
+                layouter.namespace(|| format!("hash at l = {}", l)),
+                Q,
+                message,
+                prepared,
+            )?
+        } else {
+            sinsemilla_chip.hash_to_point(
+                layouter.namespace(|| format!("hash at l = {}", l)),
+                Q,
+                message,
+            )?
+        };
         let hash = Self::extract(&point);
 
         // `SinsemillaChip::hash_to_point` returns the running sum for each `MessagePiece`.
@@ -434,6 +446,40 @@ where
         }
 
         Ok(hash)
+    }
+
+    pub(crate) fn hash_layer_prepared<const MERKLE_DEPTH: usize>(
+        &self,
+        layouter: impl Layouter<pallas::Base>,
+        q: pallas::Affine,
+        l: usize,
+        left: AssignedCell<pallas::Base, pallas::Base>,
+        right: AssignedCell<pallas::Base, pallas::Base>,
+        prepared: Value<&PreparedHashWitness>,
+    ) -> Result<AssignedCell<pallas::Base, pallas::Base>, Error> {
+        self.hash_layer_inner::<MERKLE_DEPTH>(layouter, q, l, left, right, Some(prepared))
+    }
+}
+
+impl<Hash, Commit, Fixed, Lookup, const MERKLE_DEPTH: usize>
+    MerkleInstructions<pallas::Affine, MERKLE_DEPTH, { sinsemilla::K }, { sinsemilla::C }>
+    for MerkleChip<Hash, Commit, Fixed, Lookup>
+where
+    Hash: HashDomains<pallas::Affine> + Eq,
+    Fixed: FixedPoints<pallas::Affine>,
+    Commit: CommitDomains<pallas::Affine, Fixed, Hash> + Eq,
+    Lookup: PallasLookupRangeCheck,
+{
+    #[allow(non_snake_case)]
+    fn hash_layer(
+        &self,
+        layouter: impl Layouter<pallas::Base>,
+        Q: pallas::Affine,
+        l: usize,
+        left: Self::Var,
+        right: Self::Var,
+    ) -> Result<Self::Var, Error> {
+        self.hash_layer_inner::<MERKLE_DEPTH>(layouter, Q, l, left, right, None)
     }
 }
 

@@ -109,8 +109,25 @@ fn batch_invert_nonzero(values: &mut [pallas::Base], scratch: &mut [pallas::Base
     use group::ff::Field;
 
     assert_eq!(values.len(), scratch.len());
-    let mut acc0 = pallas::Base::one();
-    let mut acc1 = pallas::Base::one();
+    let Some((first, values)) = values.split_first_mut() else {
+        return;
+    };
+
+    debug_assert!(!first.is_zero_vartime());
+    if values.is_empty() {
+        *first = first.invert().unwrap();
+        return;
+    }
+
+    let (second, values) = values.split_first_mut().unwrap();
+    debug_assert!(!second.is_zero_vartime());
+    let scratch = &mut scratch[2..];
+
+    // Seed each lane from its first value. Besides removing the initial
+    // multiplication by one, this lets the backward pass assign the first
+    // two inverses directly and omit its final multiplication in each lane.
+    let mut acc0 = *first;
+    let mut acc1 = *second;
     for (pair, slots) in values
         .as_chunks::<2>()
         .0
@@ -162,6 +179,8 @@ fn batch_invert_nonzero(values: &mut [pallas::Base], scratch: &mut [pallas::Base
         pair[0] = inverted0;
         pair[1] = inverted1;
     }
+    *first = acc0;
+    *second = acc1;
 }
 
 fn extract(point: pallas::Point) -> pallas::Base {
@@ -366,13 +385,24 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         // backward step needs each point's `z` and the prefix before it),
         // so no scratch allocation is needed. An identity result — only
         // reachable through the infeasible exceptional cases (see the
-        // module docs) — extracts to zero, matching [`extract`], and an
-        // empty batch runs zero iterations around an inversion of one.
+        // module docs) — extracts to zero, matching [`extract`]. An empty
+        // batch returns immediately, and the first nonempty endpoint is
+        // seeded directly instead of multiplying by one in both passes.
         workspace
             .xs
             .resize(workspace.points.len(), pallas::Base::zero());
-        let mut acc = pallas::Base::one();
-        for (point, slot) in workspace.points.iter().zip(workspace.xs.iter_mut()) {
+        let Some((first_point, points)) = workspace.points.split_first() else {
+            return &workspace.xs;
+        };
+        let (first_slot, slots) = workspace.xs.split_first_mut().unwrap();
+        let (_, _, first_z) = first_point.jacobian_coordinates();
+        let first_is_identity = first_z.is_zero_vartime();
+        let mut acc = if first_is_identity {
+            pallas::Base::one()
+        } else {
+            first_z
+        };
+        for (point, slot) in points.iter().zip(slots.iter_mut()) {
             let (_, _, z) = point.jacobian_coordinates();
             *slot = acc;
             if !z.is_zero_vartime() {
@@ -381,7 +411,7 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
         }
         // Skipped (identity) points never enter the product.
         let mut acc = acc.invert().unwrap();
-        for (point, slot) in workspace.points.iter().zip(workspace.xs.iter_mut()).rev() {
+        for (point, slot) in points.iter().zip(slots.iter_mut()).rev() {
             let (x, _, z) = point.jacobian_coordinates();
             if z.is_zero_vartime() {
                 *slot = pallas::Base::zero();
@@ -391,6 +421,12 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
                 *slot = x * square_with_runtime_backend(&z_inv);
             }
         }
+        let (first_x, _, _) = first_point.jacobian_coordinates();
+        *first_slot = if first_is_identity {
+            pallas::Base::zero()
+        } else {
+            first_x * square_with_runtime_backend(&acc)
+        };
         &workspace.xs
     }
 
@@ -663,7 +699,7 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
 mod tests {
     use alloc::vec::Vec;
 
-    use group::{Curve, CurveAffine as _, Group};
+    use group::{Curve, CurveAffine as _, Group, ff::Field};
     use pasta_curves::pallas;
     use subtle::CtOption;
 
@@ -672,6 +708,24 @@ mod tests {
 
     const MERKLE_WORDS: usize = 52;
     const MERKLE_DOMAIN: &str = "z.cash:Orchard-MerkleCRH";
+
+    #[test]
+    fn batch_invert_nonzero_handles_boundaries() {
+        for length in [0usize, 1, 2, 3, 31, 32, 33, 64, 257] {
+            let mut values = (1..=length)
+                .map(|value| pallas::Base::from(value as u64))
+                .collect::<Vec<_>>();
+            let expected = values
+                .iter()
+                .map(|value| value.invert().unwrap())
+                .collect::<Vec<_>>();
+            let mut scratch = vec![pallas::Base::ZERO; length];
+
+            super::batch_invert_nonzero(&mut values, &mut scratch);
+
+            assert_eq!(values, expected, "length {length}");
+        }
+    }
 
     fn assert_matches(expected: CtOption<pallas::Point>, actual: pallas::Point) {
         assert!(bool::from(expected.is_some()));

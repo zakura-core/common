@@ -1,5 +1,7 @@
 use ff::Field;
-use group::Curve;
+#[cfg(feature = "batch")]
+use ff::PrimeField;
+use group::{Curve, Group};
 use maybe_rayon::prelude::*;
 use rand_core::Rng;
 use std::iter;
@@ -13,12 +15,19 @@ use super::{
     },
     commit_instance,
     evaluation::{EvaluationPoint, EvaluationQuery, PolynomialEvaluator},
+    evaluator_schedule::{self, QuotientPoly},
     lookup, permutation, vanishing,
 };
 
 #[cfg(test)]
 use super::circuit::FloorPlan;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
+#[cfg(feature = "batch")]
+use crate::{
+    InstanceScalarByteOrder, InstanceWindowTable, PREPARED_INSTANCE_BOOLEAN_ROWS,
+    PREPARED_INSTANCE_COLUMNS, PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_ROWS,
+    PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_MAGNITUDES, PreparedInstanceTable,
+};
 use crate::{
     arithmetic::{CurveAffine, batch_invert_multi},
     circuit::Value,
@@ -31,6 +40,333 @@ use crate::{
 };
 
 const NO_DENOMINATOR: u32 = u32::MAX;
+
+#[cfg(all(test, feature = "batch"))]
+std::thread_local! {
+    static PREPARED_INSTANCE_ROUTE_HITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, feature = "batch"))]
+fn prepared_instance_route_hits() -> usize {
+    PREPARED_INSTANCE_ROUTE_HITS.get()
+}
+
+#[cfg(feature = "batch")]
+fn instance_scalar_bit(bytes: &[u8], bit: usize, byte_order: InstanceScalarByteOrder) -> bool {
+    let byte_from_edge = bit / u8::BITS as usize;
+    let byte = match byte_order {
+        InstanceScalarByteOrder::LittleEndian => bytes[byte_from_edge],
+        InstanceScalarByteOrder::BigEndian => bytes[bytes.len() - byte_from_edge - 1],
+        InstanceScalarByteOrder::Unsupported => unreachable!("byte order checked by caller"),
+    };
+    byte & (1 << (bit % u8::BITS as usize)) != 0
+}
+
+#[cfg(feature = "batch")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreparedInstanceDigit {
+    magnitude: usize,
+    negative: bool,
+}
+
+#[cfg(feature = "batch")]
+fn instance_scalar_digit(
+    bytes: &[u8],
+    window: usize,
+    scalar_bits: usize,
+    byte_order: InstanceScalarByteOrder,
+) -> PreparedInstanceDigit {
+    let bit_start = window * PREPARED_INSTANCE_WINDOW_BITS;
+    debug_assert_eq!(u8::BITS as usize % PREPARED_INSTANCE_WINDOW_BITS, 0);
+    let value = if bit_start < scalar_bits {
+        let byte_from_edge = bit_start / u8::BITS as usize;
+        let byte = match byte_order {
+            InstanceScalarByteOrder::LittleEndian => bytes[byte_from_edge],
+            InstanceScalarByteOrder::BigEndian => bytes[bytes.len() - byte_from_edge - 1],
+            InstanceScalarByteOrder::Unsupported => unreachable!("byte order checked by caller"),
+        };
+        let bit_offset = bit_start % u8::BITS as usize;
+        let live_bits = (scalar_bits - bit_start).min(PREPARED_INSTANCE_WINDOW_BITS);
+        let mask = (1 << live_bits) - 1;
+        (usize::from(byte) >> bit_offset) & mask
+    } else {
+        0
+    };
+    let overlap = if bit_start == 0 {
+        0
+    } else {
+        usize::from(instance_scalar_bit(bytes, bit_start - 1, byte_order))
+    };
+
+    // The bit below each window is its carry-in, while the window's high bit
+    // is its carry-out. These terms cancel between adjacent windows, leaving a
+    // signed digit whose magnitude is at most half the radix.
+    let radix = PREPARED_INSTANCE_WINDOW_MAGNITUDES * 2;
+    if value < radix / 2 {
+        PreparedInstanceDigit {
+            magnitude: value + overlap,
+            negative: false,
+        }
+    } else {
+        let magnitude = radix - value - overlap;
+        PreparedInstanceDigit {
+            magnitude,
+            negative: magnitude != 0,
+        }
+    }
+}
+
+/// Evaluates independent fixed-base products while splitting their bit ranges
+/// across the entire worker pool. Each job accumulates affine table entries
+/// locally; only job boundaries require projective-to-projective additions.
+#[cfg(feature = "batch")]
+fn evaluate_prepared_instance_terms<C: CurveAffine>(
+    table: &PreparedInstanceTable<C>,
+    terms: &[(usize, C::Scalar)],
+) -> Option<Vec<C::Curve>> {
+    if matches!(table.byte_order, InstanceScalarByteOrder::Unsupported) {
+        return None;
+    }
+    let representations = terms
+        .iter()
+        .map(|(_, scalar)| scalar.to_repr())
+        .collect::<Vec<_>>();
+    if representations
+        .iter()
+        .zip(terms)
+        .any(|(repr, (_, scalar))| {
+            let bytes = repr.as_ref();
+            let Some(repr_bits) = bytes.len().checked_mul(u8::BITS as usize) else {
+                return true;
+            };
+            if table.scalar_bits > repr_bits
+                || (table.scalar_bits..repr_bits)
+                    .any(|bit| instance_scalar_bit(bytes, bit, table.byte_order))
+            {
+                return true;
+            }
+
+            // [`PrimeField::Repr`] is opaque. The construction-time probe only
+            // selects a candidate order; validate every term before its digits
+            // index the positioned table.
+            let decoded = match table.byte_order {
+                InstanceScalarByteOrder::LittleEndian => {
+                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
+                }
+                InstanceScalarByteOrder::BigEndian => {
+                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
+                }
+                InstanceScalarByteOrder::Unsupported => unreachable!("checked above"),
+            };
+            decoded != *scalar
+        })
+    {
+        return None;
+    }
+
+    let work = terms.len().checked_mul(table.windows)?;
+    if work == 0 {
+        return Some(vec![]);
+    }
+    let worker_count = crate::multicore::current_num_threads().min(work);
+    let partials = (0..worker_count)
+        .into_par_iter()
+        .map(|worker| {
+            let start = work * worker / worker_count;
+            let end = work * (worker + 1) / worker_count;
+            let first_term = start / table.windows;
+            let last_term = (end - 1) / table.windows;
+            (first_term..=last_term)
+                .map(|term_index| {
+                    let window_start = if term_index == first_term {
+                        start % table.windows
+                    } else {
+                        0
+                    };
+                    let window_end = if term_index == last_term {
+                        (end - 1) % table.windows + 1
+                    } else {
+                        table.windows
+                    };
+                    let (base_index, _) = terms[term_index];
+                    let repr = representations[term_index].as_ref();
+                    let mut partial = C::Curve::identity();
+                    for window in window_start..window_end {
+                        let digit = instance_scalar_digit(
+                            repr,
+                            window,
+                            table.scalar_bits,
+                            table.byte_order,
+                        );
+                        if digit.magnitude != 0 {
+                            let point = (base_index * table.windows + window)
+                                * PREPARED_INSTANCE_WINDOW_MAGNITUDES
+                                + digit.magnitude
+                                - 1;
+                            let point = table.points[point];
+                            partial += if digit.negative { -point } else { point };
+                        }
+                    }
+                    (term_index, partial)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut products = vec![None; terms.len()];
+    for (term_index, partial) in partials.into_iter().flatten() {
+        products[term_index] = Some(match products[term_index].take() {
+            Some(product) => product + partial,
+            None => partial,
+        });
+    }
+    Some(
+        products
+            .into_iter()
+            .map(|product| product.unwrap_or_else(C::Curve::identity))
+            .collect(),
+    )
+}
+
+#[cfg(feature = "batch")]
+fn instance_flag_mask<F: Field>(instance: &[F]) -> Option<usize> {
+    let mut mask = 0;
+    let flags = &instance[PREPARED_INSTANCE_DENSE_ROWS
+        ..PREPARED_INSTANCE_DENSE_ROWS + PREPARED_INSTANCE_BOOLEAN_ROWS];
+    for (flag, scalar) in flags.iter().enumerate() {
+        if bool::from(scalar.is_zero()) {
+            continue;
+        }
+        if bool::from((*scalar - F::ONE).is_zero()) {
+            mask |= 1 << flag;
+        } else {
+            return None;
+        }
+    }
+    Some(mask)
+}
+
+/// Commits the exact one-column Orchard instance shape, sharing any dense row
+/// that is equal across every proof. Equality is checked at runtime: generic
+/// ten-row circuits are not assumed to share Orchard's anchor or flags.
+#[cfg(feature = "batch")]
+fn commit_prepared_instances<C: CurveAffine>(
+    params: &Params<C>,
+    instances: &[&[&[C::Scalar]]],
+) -> Option<Vec<Vec<C::Curve>>> {
+    if instances.is_empty()
+        || instances.iter().any(|columns| {
+            columns.len() != PREPARED_INSTANCE_COLUMNS || columns[0].len() != PREPARED_INSTANCE_ROWS
+        })
+    {
+        return None;
+    }
+    let table = params.prepared_instance_table()?;
+    let flag_masks = instances
+        .iter()
+        .map(|columns| instance_flag_mask(columns[0]))
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut terms = Vec::with_capacity(PREPARED_INSTANCE_DENSE_ROWS * instances.len());
+    let mut shared_terms = Vec::with_capacity(PREPARED_INSTANCE_DENSE_ROWS);
+    let mut proof_terms = (0..instances.len())
+        .map(|_| Vec::with_capacity(PREPARED_INSTANCE_DENSE_ROWS))
+        .collect::<Vec<_>>();
+    for row in 0..PREPARED_INSTANCE_DENSE_ROWS {
+        let first = instances[0][0][row];
+        if instances
+            .iter()
+            .skip(1)
+            .all(|columns| columns[0][row] == first)
+        {
+            shared_terms.push(terms.len());
+            terms.push((row, first));
+        } else {
+            for (proof, columns) in instances.iter().enumerate() {
+                proof_terms[proof].push(terms.len());
+                terms.push((row, columns[0][row]));
+            }
+        }
+    }
+
+    let products = evaluate_prepared_instance_terms(&table, &terms)?;
+    let shared = shared_terms
+        .into_iter()
+        .map(|term| products[term])
+        .reduce(|left, right| left + right)
+        .unwrap_or_else(C::Curve::identity);
+    let shared_offset = flag_masks
+        .iter()
+        .all(|flag_mask| *flag_mask == flag_masks[0])
+        .then(|| table.offsets[flag_masks[0]] + shared);
+    Some(
+        proof_terms
+            .into_par_iter()
+            .zip(flag_masks.into_par_iter())
+            .map(|(terms, flag_mask)| {
+                let mut commitment =
+                    shared_offset.unwrap_or_else(|| table.offsets[flag_mask] + shared);
+                for term in terms {
+                    commitment += products[term];
+                }
+                vec![commitment]
+            })
+            .collect(),
+    )
+}
+
+fn commit_prover_instances<C: CurveAffine>(
+    params: &Params<C>,
+    instances: &[&[&[C::Scalar]]],
+) -> Vec<Vec<C::Curve>> {
+    #[cfg(feature = "batch")]
+    if let Some(commitments) = commit_prepared_instances(params, instances) {
+        #[cfg(test)]
+        PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
+        return commitments;
+    }
+
+    instances
+        .into_par_iter()
+        .map(|columns| {
+            columns
+                .iter()
+                .map(|values| {
+                    if values.len() <= params.g_lagrange.len() {
+                        commit_instance(params, values)
+                    } else {
+                        // This placeholder is never written to the transcript:
+                        // instance preparation returns `InstanceTooLarge` at
+                        // the same proof position as the previous path.
+                        C::Curve::identity()
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn normalize_prover_instance_commitments<C: CurveAffine>(
+    params: &Params<C>,
+    instances: &[&[&[C::Scalar]]],
+) -> Vec<Vec<C>> {
+    let projective = commit_prover_instances(params, instances);
+    let column_counts = projective.iter().map(Vec::len).collect::<Vec<_>>();
+    let projective = projective.into_iter().flatten().collect::<Vec<_>>();
+    let mut affine = vec![C::identity(); projective.len()];
+    if !projective.is_empty() {
+        C::Curve::batch_normalize(&projective, &mut affine);
+    }
+
+    let mut affine = affine.into_iter();
+    let commitments = column_counts
+        .into_iter()
+        .map(|count| affine.by_ref().take(count).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert!(affine.next().is_none());
+    commitments
+}
 
 struct AdviceWitness<F: Field> {
     values: Vec<Polynomial<F, LagrangeCoeff>>,
@@ -64,6 +400,41 @@ impl<F: Field> AdviceWitness<F> {
             return Err(Error::BoundsFailure);
         }
 
+        self.assign_valid(column, row, assigned);
+        Ok(())
+    }
+
+    fn assign_batch<V>(
+        &mut self,
+        column: usize,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Result<Assigned<F>, Error>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if self
+            .values
+            .get(column)
+            .and_then(|values| values.get(row..end))
+            .is_none()
+        {
+            return Err(Error::BoundsFailure);
+        }
+
+        for index in 0..len {
+            self.assign_valid(column, row + index, to(index)?);
+        }
+        Ok(())
+    }
+
+    fn assign_valid(&mut self, column: usize, row: usize, assigned: Assigned<F>) {
         match assigned {
             Assigned::Zero => {
                 self.remove_denominator(column, row);
@@ -87,8 +458,6 @@ impl<F: Field> AdviceWitness<F> {
                 self.values[column][row] = numerator;
             }
         }
-
-        Ok(())
     }
 
     fn remove_denominator(&mut self, column: usize, row: usize) {
@@ -137,6 +506,18 @@ fn prepare_permutations_in_parallel(task_count: usize, worker_count: usize) -> b
     task_count > 1 && worker_count.saturating_sub(task_count) >= PERMUTATION_INNER_WORKER_HEADROOM
 }
 
+fn permutation_parallel_scratch_fits<C: CurveAffine>(
+    additional_task_count: usize,
+    domain_size: usize,
+) -> bool {
+    let scratch_bytes_per_row = std::mem::size_of::<C>()
+        + PERMUTATION_PARALLEL_SCRATCH_SCALAR_EQUIVALENTS * std::mem::size_of::<C::Scalar>();
+    additional_task_count
+        .checked_mul(domain_size)
+        .and_then(|rows| rows.checked_mul(scratch_bytes_per_row))
+        .is_some_and(|bytes| bytes <= PERMUTATION_PARALLEL_ESTIMATED_SCRATCH_BUDGET_BYTES)
+}
+
 fn prepare_permutation_sets_in_parallel<C: CurveAffine>(
     set_count: usize,
     worker_count: usize,
@@ -146,13 +527,22 @@ fn prepare_permutation_sets_in_parallel<C: CurveAffine>(
         return false;
     }
 
-    let scratch_bytes_per_row = std::mem::size_of::<C>()
-        + PERMUTATION_PARALLEL_SCRATCH_SCALAR_EQUIVALENTS * std::mem::size_of::<C::Scalar>();
-    set_count
-        .saturating_sub(1)
-        .checked_mul(domain_size)
-        .and_then(|rows| rows.checked_mul(scratch_bytes_per_row))
-        .is_some_and(|bytes| bytes <= PERMUTATION_PARALLEL_ESTIMATED_SCRATCH_BUDGET_BYTES)
+    permutation_parallel_scratch_fits::<C>(set_count.saturating_sub(1), domain_size)
+}
+
+fn prepare_nested_permutation_sets_in_parallel<C: CurveAffine>(
+    circuit_count: usize,
+    set_count: usize,
+    worker_count: usize,
+    domain_size: usize,
+) -> bool {
+    circuit_count > 1
+        && set_count > 1
+        && prepare_permutations_in_parallel(circuit_count, worker_count)
+        && permutation_parallel_scratch_fits::<C>(
+            circuit_count.saturating_mul(set_count.saturating_sub(1)),
+            domain_size,
+        )
 }
 
 struct WitnessCollection<'a, F: Field> {
@@ -216,6 +606,32 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
 
         self.advice
             .assign(column.index(), row, to().into_field().assign()?)
+    }
+
+    fn assign_advice_batch<V, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if !self.usable_rows.contains(&row) || end > self.usable_rows.end {
+            return Err(Error::not_enough_rows_available(self.k));
+        }
+
+        self.advice
+            .assign_batch(column.index(), row, len, |index| to(index).assign())
     }
 
     fn assign_fixed<V, VR, A, AR>(
@@ -310,22 +726,18 @@ where
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
     let meta = &pk.vk.cs;
+    let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
 
-    struct InstanceSingle<C: CurveAffine> {
-        pub instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-        pub instance_polys: Vec<Polynomial<C::Scalar, Coeff>>,
-        pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-    }
-
-    let prepared_instances = instances
+    let instance_commitments = normalize_prover_instance_commitments(params, instances);
+    let instance_values = instances
         .into_par_iter()
         .map(|instance| -> Result<_, Error> {
-            let instance_values = instance
+            instance
                 .iter()
                 .map(|values| {
                     let mut poly = domain.empty_lagrange();
                     assert_eq!(poly.len(), params.n as usize);
-                    if values.len() > (poly.len() - (meta.blinding_factors() + 1)) {
+                    if values.len() > max_instance_len {
                         return Err(Error::InstanceTooLarge);
                     }
                     for (poly, value) in poly.iter_mut().zip(values.iter()) {
@@ -333,58 +745,22 @@ where
                     }
                     Ok(poly)
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            let instance_commitments_projective: Vec<_> = instance
-                .iter()
-                .map(|values| commit_instance(params, values))
-                .collect();
-            let mut instance_commitments =
-                vec![C::identity(); instance_commitments_projective.len()];
-            C::Curve::batch_normalize(&instance_commitments_projective, &mut instance_commitments);
-            let instance_commitments = instance_commitments;
-            drop(instance_commitments_projective);
-
-            let instance_polys: Vec<_> = instance_values
-                .iter()
-                .map(|poly| {
-                    let lagrange_vec = domain.lagrange_from_vec(poly.to_vec());
-                    domain.lagrange_to_coeff_with_twiddles(lagrange_vec, &pk.fft_twiddles)
-                })
-                .collect();
-
-            let instance_cosets: Vec<_> = instance_polys
-                .iter()
-                .map(|poly| domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles))
-                .collect();
-
-            Ok((
-                instance_commitments,
-                InstanceSingle::<C> {
-                    instance_values,
-                    instance_polys,
-                    instance_cosets,
-                },
-            ))
+                .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Vec<_>>();
 
-    // Prepare each circuit independently, then preserve circuit and column
-    // order while updating the transcript. Keeping each preparation result in
-    // order also preserves the transcript prefix before an instance error.
-    let mut instance = Vec::with_capacity(prepared_instances.len());
-    for prepared in prepared_instances {
-        let (instance_commitments, instance_single) = prepared?;
+    // Preserve circuit and column order while updating the transcript. Keeping
+    // each preparation result in order also preserves the transcript prefix
+    // before an instance error.
+    let mut prepared_instance_values = Vec::with_capacity(instance_values.len());
+    for (instance_commitments, instance_values) in
+        instance_commitments.into_iter().zip(instance_values)
+    {
+        let instance_values = instance_values?;
         for commitment in instance_commitments {
             transcript.common_point(commitment)?;
         }
-        instance.push(instance_single);
-    }
-
-    struct AdviceSingle<C: CurveAffine> {
-        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-        pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
-        pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-        pub advice_blinds: Vec<Blind<C::Scalar>>,
+        prepared_instance_values.push(instance_values);
     }
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
@@ -403,23 +779,87 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Synthesize every circuit while allowing its floor planner to share
-    // circuit-shape-dependent work across the batch.
-    ConcreteCircuit::FloorPlanner::synthesize_batch(
-        &mut witnesses,
-        circuits,
-        config,
-        &meta.constants,
-        pk.floor_plan.as_ref(),
-    )?;
+    struct InstanceSingle<C: CurveAffine> {
+        pub instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+        pub instance_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+        pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+    }
 
+    let prepare_instance_polynomials = || {
+        prepared_instance_values
+            .into_par_iter()
+            .map(|instance_values| {
+                let instance_polys: Vec<_> = instance_values
+                    .iter()
+                    .map(|poly| {
+                        let lagrange_vec = domain.lagrange_from_vec(poly.to_vec());
+                        domain.lagrange_to_coeff_with_twiddles(lagrange_vec, &pk.fft_twiddles)
+                    })
+                    .collect();
+
+                let instance_cosets: Vec<_> = instance_polys
+                    .iter()
+                    .map(|poly| {
+                        domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles)
+                    })
+                    .collect();
+
+                InstanceSingle::<C> {
+                    instance_values,
+                    instance_polys,
+                    instance_cosets,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let synthesize = || {
+        // Synthesize every circuit while allowing its floor planner to share
+        // circuit-shape-dependent work across the batch.
+        ConcreteCircuit::FloorPlanner::synthesize_batch(
+            &mut witnesses,
+            circuits,
+            config,
+            &meta.constants,
+            pk.floor_plan.as_ref(),
+        )
+    };
+
+    // Instance polynomial preparation and witness synthesis are independent.
+    // Run them concurrently while preserving the ordered results consumed
+    // below.
+    let (instance, synthesis_result) = if crate::multicore::current_num_threads() > 1 {
+        crate::multicore::join(prepare_instance_polynomials, synthesize)
+    } else {
+        (prepare_instance_polynomials(), synthesize())
+    };
+    synthesis_result?;
+
+    struct AdviceSingle<C: CurveAffine> {
+        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+        pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+        pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+        pub advice_blinds: Vec<Blind<C::Scalar>>,
+    }
+
+    // Rational advice evaluation is independent across circuits. Keep every
+    // RNG draw below in circuit order and after successful synthesis.
+    let evaluate_in_parallel = witnesses.len() > 1 && crate::multicore::current_num_threads() > 1;
+    let advice_values = if evaluate_in_parallel {
+        witnesses
+            .into_par_iter()
+            .map(|witness| witness.advice.evaluate())
+            .collect::<Vec<_>>()
+    } else {
+        witnesses
+            .into_iter()
+            .map(|witness| witness.advice.evaluate())
+            .collect::<Vec<_>>()
+    };
     // Consume randomness in circuit order before preparing the independent
     // commitments and polynomial transforms in parallel.
-    let advice_witnesses = witnesses
+    let advice_witnesses = advice_values
         .into_iter()
-        .map(|witness| -> Result<_, Error> {
-            let mut advice = witness.advice.evaluate();
-
+        .map(|mut advice| {
             // Add blinding factors to advice columns
             for advice in &mut advice {
                 for cell in &mut advice[unusable_rows_start..] {
@@ -432,49 +872,65 @@ where
                 .iter()
                 .map(|_| Blind(C::Scalar::random(&mut rng)))
                 .collect();
-            Ok((advice, advice_blinds))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let prepared_advice = advice_witnesses
-        .into_par_iter()
-        .map(|(advice, advice_blinds)| {
-            let (advice_commitments, (advice_polys, advice_cosets)) = crate::multicore::join(
-                || {
-                    #[cfg(feature = "multicore")]
-                    let advice_commitments_projective: Vec<_> = advice
-                        .par_iter()
-                        .zip(advice_blinds.par_iter())
-                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                        .collect();
-                    #[cfg(not(feature = "multicore"))]
-                    let advice_commitments_projective: Vec<_> = advice
-                        .iter()
-                        .zip(advice_blinds.iter())
-                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                        .collect();
-                    let mut advice_commitments =
-                        vec![C::identity(); advice_commitments_projective.len()];
-                    C::Curve::batch_normalize(
-                        &advice_commitments_projective,
-                        &mut advice_commitments,
-                    );
-                    advice_commitments
-                },
-                || domain.batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles),
-            );
-
-            (
-                advice_commitments,
-                AdviceSingle::<C> {
-                    advice_values: advice,
-                    advice_polys,
-                    advice_cosets,
-                    advice_blinds,
-                },
-            )
+            (advice, advice_blinds)
         })
         .collect::<Vec<_>>();
+
+    let circuit_count = advice_witnesses.len();
+    let (prepared_advice, lookup_table_plan) = crate::multicore::join(
+        || {
+            advice_witnesses
+                .into_par_iter()
+                .map(|(advice, advice_blinds)| {
+                    let (advice_commitments, (advice_polys, advice_cosets)) =
+                        crate::multicore::join(
+                            || {
+                                #[cfg(feature = "multicore")]
+                                let advice_commitments_projective: Vec<_> = advice
+                                    .par_iter()
+                                    .zip(advice_blinds.par_iter())
+                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                    .collect();
+                                #[cfg(not(feature = "multicore"))]
+                                let advice_commitments_projective: Vec<_> = advice
+                                    .iter()
+                                    .zip(advice_blinds.iter())
+                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                    .collect();
+                                let mut advice_commitments =
+                                    vec![C::identity(); advice_commitments_projective.len()];
+                                C::Curve::batch_normalize(
+                                    &advice_commitments_projective,
+                                    &mut advice_commitments,
+                                );
+                                advice_commitments
+                            },
+                            || {
+                                domain
+                                    .batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles)
+                            },
+                        );
+
+                    (
+                        advice_commitments,
+                        AdviceSingle::<C> {
+                            advice_values: advice,
+                            advice_polys,
+                            advice_cosets,
+                            advice_blinds,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+        || {
+            lookup::prover::prepare_table_plan(
+                &pk.vk.cs.lookups,
+                circuit_count,
+                unusable_rows_start,
+            )
+        },
+    );
 
     let mut advice = Vec::with_capacity(prepared_advice.len());
     for (advice_commitments, advice_single) in prepared_advice {
@@ -525,10 +981,14 @@ where
     let fixed_cosets: Vec<_> = pk
         .fixed_cosets
         .iter()
-        .map(|poly| coset_evaluator.register_poly_ref(poly))
+        .enumerate()
+        .map(|(column_index, poly)| {
+            coset_evaluator
+                .register_poly_ref_with_tag(poly, QuotientPoly::Fixed { column_index }.into())
+        })
         .collect();
 
-    for family in pk.cached_selector_families.iter() {
+    for (family_index, family) in pk.cached_selector_families.iter().enumerate() {
         let query_and_first_selector = fixed_cosets[family.column_index];
         let combination_len = family.selectors.len() + 1;
         coset_evaluator.register_compressed_selector(
@@ -538,7 +998,14 @@ where
             query_and_first_selector,
         );
         for (assigned_root, selector) in (2..).zip(family.selectors.iter()) {
-            let precomputed = coset_evaluator.register_poly_ref(selector);
+            let precomputed = coset_evaluator.register_poly_ref_with_tag(
+                selector,
+                QuotientPoly::Selector {
+                    family_index,
+                    assigned_root,
+                }
+                .into(),
+            );
             coset_evaluator.register_compressed_selector(
                 query_and_first_selector,
                 combination_len,
@@ -551,11 +1018,22 @@ where
     // Register advice cosets with the polynomial evaluator.
     let advice_cosets: Vec<_> = advice
         .iter()
-        .map(|advice| {
+        .enumerate()
+        .map(|(circuit_index, advice)| {
             advice
                 .advice_cosets
                 .iter()
-                .map(|poly| coset_evaluator.register_poly_ref(poly))
+                .enumerate()
+                .map(|(column_index, poly)| {
+                    coset_evaluator.register_poly_ref_with_tag(
+                        poly,
+                        QuotientPoly::Advice {
+                            circuit_index,
+                            column_index,
+                        }
+                        .into(),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -563,11 +1041,22 @@ where
     // Register instance cosets with the polynomial evaluator.
     let instance_cosets: Vec<_> = instance
         .iter()
-        .map(|instance| {
+        .enumerate()
+        .map(|(circuit_index, instance)| {
             instance
                 .instance_cosets
                 .iter()
-                .map(|poly| coset_evaluator.register_poly_ref(poly))
+                .enumerate()
+                .map(|(column_index, poly)| {
+                    coset_evaluator.register_poly_ref_with_tag(
+                        poly,
+                        QuotientPoly::Instance {
+                            circuit_index,
+                            column_index,
+                        }
+                        .into(),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -577,16 +1066,29 @@ where
         .permutation
         .cosets
         .iter()
-        .map(|poly| coset_evaluator.register_poly_ref(poly))
+        .enumerate()
+        .map(|(column_index, poly)| {
+            coset_evaluator
+                .register_poly_ref_with_tag(poly, QuotientPoly::Permutation { column_index }.into())
+        })
         .collect();
 
     // Register boundary polynomials used in the lookup and permutation arguments.
-    let l0 = coset_evaluator.register_poly_ref(&pk.l0);
-    let l_blind = coset_evaluator.register_poly_ref(&pk.l_blind);
-    let l_last = coset_evaluator.register_poly_ref(&pk.l_last);
+    let l0 = coset_evaluator.register_poly_ref_with_tag(&pk.l0, QuotientPoly::L0.into());
+    let l_blind =
+        coset_evaluator.register_poly_ref_with_tag(&pk.l_blind, QuotientPoly::LBlind.into());
+    let l_last = coset_evaluator.register_poly_ref_with_tag(&pk.l_last, QuotientPoly::LLast.into());
 
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
+
+    // A plan candidate lets lookup preparation omit its symbolic quotient
+    // ASTs. Evaluator-shape validation remains deferred until every
+    // polynomial has been registered; a rejected candidate reconstructs them
+    // on the ordinary compilation path below.
+    let circuit_count = instance_values.len();
+    let compiled_plan = pk.quotient_plans.get(circuit_count);
+    let build_lookup_quotient_asts = compiled_plan.is_none();
 
     let lookup_count = pk.vk.cs.lookups.len();
     let mut lookup_tasks = Vec::new();
@@ -599,35 +1101,38 @@ where
         }
     }
 
-    let prepared_lookups = lookup_tasks
-        .into_par_iter()
-        .map(|(circuit_index, lookup_index, blinding)| {
-            pk.vk.cs.lookups[lookup_index].prepare_permuted(
-                pk,
-                params,
-                domain,
-                &value_evaluator,
-                theta,
-                &advice_values[circuit_index],
-                &fixed_values,
-                &instance_values[circuit_index],
-                &advice_cosets[circuit_index],
-                &fixed_cosets,
-                &instance_cosets[circuit_index],
-                blinding,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let prepared_lookups = lookup::prover::prepare_permuted(
+        &pk.vk.cs.lookups,
+        lookup_table_plan,
+        lookup_tasks,
+        pk,
+        params,
+        domain,
+        &value_evaluator,
+        theta,
+        &advice_values,
+        &fixed_values,
+        &instance_values,
+        &advice_cosets,
+        &fixed_cosets,
+        &instance_cosets,
+        build_lookup_quotient_asts,
+    )?;
 
     let mut prepared_lookups = prepared_lookups.into_iter();
-    let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = (0..instance_values.len())
-        .map(|_| {
+    let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = (0..circuit_count)
+        .map(|circuit_index| {
             (0..lookup_count)
-                .map(|_| {
+                .map(|lookup_index| {
                     prepared_lookups
                         .next()
                         .expect("one prepared lookup per task")
-                        .finalize(&mut coset_evaluator, transcript)
+                        .finalize(
+                            &mut coset_evaluator,
+                            transcript,
+                            circuit_index,
+                            lookup_index,
+                        )
                 })
                 .collect()
         })
@@ -642,6 +1147,12 @@ where
 
     let permutation_workers = crate::multicore::current_num_threads();
     let permutation_set_count = pk.vk.cs.permutation.set_count(pk.vk.cs_degree);
+    let prepare_nested_permutation_sets = prepare_nested_permutation_sets_in_parallel::<C>(
+        instance.len(),
+        permutation_set_count,
+        permutation_workers,
+        params.n as usize,
+    );
     let permutations: Vec<permutation::prover::Committed<C, _>> = if instance.len() == 1
         && prepare_permutation_sets_in_parallel::<C>(
             permutation_set_count,
@@ -663,7 +1174,7 @@ where
             gamma,
             blinding,
         );
-        vec![prepared.commit(&mut coset_evaluator, transcript)?]
+        vec![prepared.commit(&mut coset_evaluator, transcript, 0)?]
     } else if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
         // Draw every permutation's blinding values in circuit and set
         // order before preparing the independent arguments in parallel.
@@ -671,27 +1182,47 @@ where
             .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
             .collect::<Vec<_>>();
 
+        // When the aggregate scratch remains bounded, let each circuit expose
+        // its independent set work to the same pool. The per-circuit product
+        // prefix and the eventual transcript writes retain their order.
         let prepared_permutations = (0..instance.len())
             .into_par_iter()
             .zip(permutation_blindings.into_par_iter())
             .map(|(circuit_index, blinding)| {
-                pk.vk.cs.permutation.prepare(
-                    params,
-                    pk,
-                    &pk.permutation,
-                    &advice[circuit_index].advice_values,
-                    &pk.fixed_values,
-                    &instance[circuit_index].instance_values,
-                    beta,
-                    gamma,
-                    blinding,
-                )
+                if prepare_nested_permutation_sets {
+                    pk.vk.cs.permutation.prepare_sets_in_parallel(
+                        params,
+                        pk,
+                        &pk.permutation,
+                        &advice[circuit_index].advice_values,
+                        &pk.fixed_values,
+                        &instance[circuit_index].instance_values,
+                        beta,
+                        gamma,
+                        blinding,
+                    )
+                } else {
+                    pk.vk.cs.permutation.prepare(
+                        params,
+                        pk,
+                        &pk.permutation,
+                        &advice[circuit_index].advice_values,
+                        &pk.fixed_values,
+                        &instance[circuit_index].instance_values,
+                        beta,
+                        gamma,
+                        blinding,
+                    )
+                }
             })
             .collect::<Vec<_>>();
 
         prepared_permutations
             .into_iter()
-            .map(|permutation| permutation.commit(&mut coset_evaluator, transcript))
+            .enumerate()
+            .map(|(circuit_index, permutation)| {
+                permutation.commit(&mut coset_evaluator, transcript, circuit_index)
+            })
             .collect::<Result<Vec<_>, _>>()?
     } else {
         // Keep each circuit's preparation and commitment together on smaller
@@ -699,7 +1230,8 @@ where
         instance
             .iter()
             .zip(advice.iter())
-            .map(|(instance, advice)| {
+            .enumerate()
+            .map(|(circuit_index, (instance, advice))| {
                 pk.vk.cs.permutation.commit(
                     params,
                     pk,
@@ -709,6 +1241,7 @@ where
                     &instance.instance_values,
                     beta,
                     gamma,
+                    circuit_index,
                     &mut coset_evaluator,
                     &mut rng,
                     transcript,
@@ -717,7 +1250,7 @@ where
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    let circuit_count = lookups.len();
+    debug_assert_eq!(lookups.len(), circuit_count);
     let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
     // Draw all blinding values in circuit-major, lookup-major order before
     // preparing the independent lookup products in parallel.
@@ -736,13 +1269,18 @@ where
 
     let mut prepared_lookup_products = prepared_lookup_products.into_iter();
     let lookups: Vec<Vec<lookup::prover::Committed<C, _>>> = (0..circuit_count)
-        .map(|_| {
+        .map(|circuit_index| {
             (0..lookup_count)
-                .map(|_| {
+                .map(|lookup_index| {
                     prepared_lookup_products
                         .next()
                         .expect("one prepared lookup product per task")
-                        .finalize(&mut coset_evaluator, transcript)
+                        .finalize(
+                            &mut coset_evaluator,
+                            transcript,
+                            circuit_index,
+                            lookup_index,
+                        )
                 })
                 .collect()
         })
@@ -750,104 +1288,128 @@ where
     debug_assert!(prepared_lookup_products.next().is_none());
 
     // Commit to the random polynomial that masks the folded quotient
-    // evaluation in the multiopening argument.
-    let vanishing =
-        vanishing::Argument::commit_random_polynomial(params, domain, &mut rng, transcript)?;
+    // evaluation in the multi-opening argument.
+    let vanishing = vanishing::Argument::commit_random_polynomial(params, &mut rng, transcript)?;
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
 
-    // Evaluate the h(X) polynomial's constraint system expressions for the permutation constraints.
-    let (permutations, permutation_expressions): (Vec<_>, Vec<_>) = permutations
-        .into_iter()
-        .zip(advice_cosets.iter())
-        .zip(instance_cosets.iter())
-        .map(|((permutation, advice), instance)| {
-            permutation.construct(
-                pk,
-                &pk.vk.cs.permutation,
-                advice,
-                &fixed_cosets,
-                instance,
-                &permutation_cosets,
-                l0,
-                l_blind,
-                l_last,
-                beta,
-                gamma,
+    // Validate a keygen-prepared plan before using it to bypass every
+    // challenge-bound constraint AST allocation. A mismatch takes the full
+    // construction path and can replace the retained plan safely.
+    let compiled_plan = compiled_plan.filter(|plan| coset_evaluator.accepts_compiled_plan(plan));
+    let (permutations, lookups, expressions) = if compiled_plan.is_some() {
+        let permutations = permutations
+            .into_iter()
+            .map(permutation::prover::Committed::into_constructed)
+            .collect();
+        let lookups = lookups
+            .into_iter()
+            .map(|lookups| {
+                lookups
+                    .into_iter()
+                    .map(lookup::prover::Committed::into_constructed)
+                    .collect()
+            })
+            .collect();
+        (permutations, lookups, vec![])
+    } else {
+        // Build quotient ASTs only for an unprepared or mismatched shape.
+        let (permutations, permutation_expressions): (Vec<_>, Vec<Vec<_>>) = permutations
+            .into_iter()
+            .zip(advice_cosets.iter())
+            .zip(instance_cosets.iter())
+            .map(|((permutation, advice), instance)| {
+                let (constructed, expressions) = permutation.construct(
+                    pk,
+                    &pk.vk.cs.permutation,
+                    advice,
+                    &fixed_cosets,
+                    instance,
+                    &permutation_cosets,
+                    l0,
+                    l_blind,
+                    l_last,
+                );
+                (constructed, expressions.collect())
+            })
+            .unzip();
+
+        let (lookups, lookup_expressions): (Vec<Vec<_>>, Vec<Vec<Vec<_>>>) = lookups
+            .into_iter()
+            .zip(advice_cosets.iter())
+            .zip(instance_cosets.iter())
+            .map(|((lookups, advice_cosets), instance_cosets)| {
+                lookups
+                    .into_iter()
+                    .zip(meta.lookups.iter())
+                    .map(|(lookup, argument)| {
+                        let (constructed, expressions) = lookup.construct(
+                            argument,
+                            &fixed_cosets,
+                            advice_cosets,
+                            instance_cosets,
+                            l0,
+                            l_blind,
+                            l_last,
+                        );
+                        (constructed, expressions.collect())
+                    })
+                    .unzip()
+            })
+            .unzip();
+
+        let expressions = advice_cosets
+            .iter()
+            .zip(instance_cosets.iter())
+            .zip(permutation_expressions)
+            .zip(lookup_expressions)
+            .flat_map(
+                |(
+                    ((advice_cosets, instance_cosets), permutation_expressions),
+                    lookup_expressions,
+                )| {
+                    let fixed_cosets = &fixed_cosets;
+                    iter::empty()
+                        .chain(meta.gates.iter().flat_map(move |gate| {
+                            gate.polynomials().iter().map(move |expression| {
+                                evaluator_schedule::expression_ast(
+                                    expression,
+                                    fixed_cosets,
+                                    advice_cosets,
+                                    instance_cosets,
+                                )
+                            })
+                        }))
+                        .chain(permutation_expressions)
+                        .chain(lookup_expressions.into_iter().flatten())
+                },
             )
-        })
-        .unzip();
-
-    let (lookups, lookup_expressions): (Vec<Vec<_>>, Vec<Vec<_>>) = lookups
-        .into_iter()
-        .map(|lookups| {
-            // Evaluate the h(X) polynomial's constraint system expressions for the lookup constraints, if any.
-            lookups
-                .into_iter()
-                .map(|p| p.construct(beta, gamma, l0, l_blind, l_last))
-                .unzip()
-        })
-        .unzip();
-
-    let expressions = advice_cosets
-        .iter()
-        .zip(instance_cosets.iter())
-        .zip(permutation_expressions)
-        .zip(lookup_expressions)
-        .flat_map(
-            |(((advice_cosets, instance_cosets), permutation_expressions), lookup_expressions)| {
-                let fixed_cosets = &fixed_cosets;
-                iter::empty()
-                    // Custom constraints
-                    .chain(meta.gates.iter().flat_map(move |gate| {
-                        gate.polynomials().iter().map(move |expr| {
-                            expr.evaluate(
-                                &poly::Ast::ConstantTerm,
-                                &|_| panic!("virtual selectors are removed during optimization"),
-                                &|query| {
-                                    fixed_cosets[query.column_index]
-                                        .with_rotation(query.rotation)
-                                        .into()
-                                },
-                                &|query| {
-                                    advice_cosets[query.column_index]
-                                        .with_rotation(query.rotation)
-                                        .into()
-                                },
-                                &|query| {
-                                    instance_cosets[query.column_index]
-                                        .with_rotation(query.rotation)
-                                        .into()
-                                },
-                                &|a| -a,
-                                &|a, b| a + b,
-                                &|a, b| a * b,
-                                &|a, scalar| a * scalar,
-                            )
-                        })
-                    }))
-                    // Permutation constraints, if any.
-                    .chain(permutation_expressions)
-                    // Lookup constraints, if any.
-                    .chain(lookup_expressions.into_iter().flatten())
-            },
-        );
+            .collect();
+        (permutations, lookups, expressions)
+    };
 
     // Construct and commit to the quotient polynomial h(X).
-    let vanishing = vanishing.construct_quotient(
+    let (vanishing, prepared_plan) = vanishing.construct_quotient(
         params,
         domain,
         &pk.fft_twiddles,
         coset_evaluator,
-        expressions,
+        expressions.into_iter(),
+        theta,
+        beta,
+        gamma,
         y,
+        compiled_plan.as_deref(),
         &mut rng,
         transcript,
     )?;
+    if let Some(plan) = prepared_plan {
+        pk.quotient_plans.retain(circuit_count, plan);
+    }
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
-    let xn = x.pow([params.n, 0, 0, 0]);
+    let xn = super::pow_by_power_of_two(*x, params.k);
     let polynomial_evaluator = PolynomialEvaluator::new(
         [
             *x,
@@ -909,7 +1471,6 @@ where
         .collect::<Vec<_>>();
     let initial_evaluation_count = queries.len();
     let mut queries = queries;
-    queries.push(vanishing.evaluation_query());
     queries.extend(pk.permutation.evaluation_queries());
     for permutation in &permutations {
         queries.extend(permutation.evaluation_queries());
@@ -933,14 +1494,7 @@ where
         transcript.write_scalar(evaluation)?;
     }
 
-    let vanishing = vanishing.evaluate(
-        xn,
-        domain,
-        evaluations
-            .next()
-            .expect("one random-polynomial evaluation is queued"),
-        transcript,
-    )?;
+    let vanishing = vanishing.evaluate(*x, xn, domain, transcript)?;
 
     // Evaluate common permutation data
     pk.permutation.evaluate(&mut evaluations, transcript)?;
@@ -1010,7 +1564,8 @@ where
                 }),
         )
         .chain(pk.permutation.open(x))
-        // We query the h(X) polynomial at x
+        // Keep these last among queries at x: the linear quotient-evaluation
+        // mask must have unit coefficient in its point-set fold at x_3.
         .chain(vanishing.open(x));
 
     multiopen::create_proof(params, rng, transcript, instances).map_err(|_| Error::Opening)
@@ -1060,6 +1615,37 @@ fn permutation_set_parallelism_limits_scratch() {
         6,
         LARGE_DOMAIN_SIZE,
     ));
+
+    assert!(prepare_nested_permutation_sets_in_parallel::<EqAffine>(
+        4,
+        3,
+        10,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_nested_permutation_sets_in_parallel::<EqAffine>(
+        1,
+        3,
+        10,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_nested_permutation_sets_in_parallel::<EqAffine>(
+        4,
+        3,
+        5,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_nested_permutation_sets_in_parallel::<EqAffine>(
+        8,
+        3,
+        10,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_nested_permutation_sets_in_parallel::<EqAffine>(
+        4,
+        3,
+        10,
+        LARGE_DOMAIN_SIZE,
+    ));
 }
 
 #[test]
@@ -1106,6 +1692,197 @@ fn test_commit_instance() {
                     commit_instance(&params, &instance),
                     params.commit_lagrange(&poly, Blind::default())
                 );
+            }
+        }};
+    }
+
+    check_curve!(EqAffine, Fp);
+    check_curve!(EpAffine, Fq);
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn prepared_instance_signed_digit_boundaries() {
+    let cases = [
+        (0x00, 0, 0, false),
+        (0x07, 0, 7, false),
+        (0x08, 0, 8, true),
+        (0x0f, 0, 1, true),
+        (0x08, 1, 1, false),
+        (0x78, 1, 8, false),
+        (0x88, 1, 7, true),
+        (0xf8, 1, 0, false),
+    ];
+
+    for (byte, window, magnitude, negative) in cases {
+        let little = [byte, 0];
+        let big = [0, byte];
+        let expected = PreparedInstanceDigit {
+            magnitude,
+            negative,
+        };
+        assert_eq!(
+            instance_scalar_digit(
+                &little,
+                window,
+                u8::BITS as usize * little.len(),
+                InstanceScalarByteOrder::LittleEndian,
+            ),
+            expected,
+        );
+        assert_eq!(
+            instance_scalar_digit(
+                &big,
+                window,
+                u8::BITS as usize * big.len(),
+                InstanceScalarByteOrder::BigEndian,
+            ),
+            expected,
+        );
+    }
+
+    // A scalar bit length ending on a window boundary needs one carry-only
+    // window. The high half of the last data window carries into it.
+    assert_eq!(crate::prepared_instance_window_count(8), 3);
+    assert_eq!(
+        instance_scalar_digit(&[0x80], 2, 8, InstanceScalarByteOrder::LittleEndian),
+        PreparedInstanceDigit {
+            magnitude: 1,
+            negative: false,
+        },
+    );
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn prepared_instance_signed_windows_match_native_products() {
+    use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
+
+    macro_rules! check_curve {
+        ($curve:ty, $scalar:ty) => {{
+            const K: u32 = 4;
+
+            let params = Params::<$curve>::new(K);
+            assert!(params.prepare_instance_table());
+            let table = params.prepared_instance_table().unwrap();
+            let mut terms = vec![];
+            let mut expected = vec![];
+            let mut push = |scalar: $scalar| {
+                let base_index = terms.len() % PREPARED_INSTANCE_DENSE_ROWS;
+                terms.push((base_index, scalar));
+                expected.push(params.g_lagrange[base_index] * scalar);
+            };
+
+            let mut power = <$scalar>::ONE;
+            for bit in 0..<$scalar as PrimeField>::NUM_BITS as usize {
+                if bit >= PREPARED_INSTANCE_WINDOW_BITS - 1
+                    && (bit - (PREPARED_INSTANCE_WINDOW_BITS - 1)) % PREPARED_INSTANCE_WINDOW_BITS
+                        == 0
+                {
+                    let below = power - <$scalar>::ONE;
+                    let above = power + <$scalar>::ONE;
+                    for scalar in [below, power, above, -below, -power, -above] {
+                        push(scalar);
+                    }
+                }
+                power = power.double();
+            }
+
+            let mut top_bit = <$scalar>::ONE;
+            for _ in 1..<$scalar as PrimeField>::NUM_BITS {
+                top_bit = top_bit.double();
+            }
+            for scalar in [
+                top_bit - <$scalar>::ONE,
+                top_bit,
+                top_bit + <$scalar>::ONE,
+                -top_bit,
+            ] {
+                push(scalar);
+            }
+
+            assert_eq!(
+                evaluate_prepared_instance_terms(&table, &terms)
+                    .expect("Pasta scalar representations are supported"),
+                expected,
+            );
+        }};
+    }
+
+    check_curve!(EqAffine, Fp);
+    check_curve!(EpAffine, Fq);
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn prepared_instance_commitments_match_generic_msm() {
+    use ff::FromUniformBytes;
+    use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
+
+    macro_rules! check_curve {
+        ($curve:ty, $scalar:ty) => {{
+            const K: u32 = 6;
+
+            let params = Params::<$curve>::new(K);
+            assert!(params.prepare_instance_table());
+
+            let scalar = |proof: usize, row: usize| {
+                let mut bytes = [0; 64];
+                for (offset, byte) in bytes.iter_mut().enumerate() {
+                    *byte = (proof as u8)
+                        .wrapping_mul(97)
+                        .wrapping_add((row as u8).wrapping_mul(53))
+                        .wrapping_add((offset as u8).wrapping_mul(29))
+                        .wrapping_add(11);
+                }
+                <$scalar as FromUniformBytes<64>>::from_uniform_bytes(&bytes)
+            };
+
+            for proofs in [1, 2, 3, 8] {
+                let mut owned = (0..proofs)
+                    .map(|proof| {
+                        let mut instance = (0..PREPARED_INSTANCE_ROWS)
+                            .map(|row| scalar(proof, row))
+                            .collect::<Vec<_>>();
+                        // Exercise runtime sharing of two dense rows. The five
+                        // other rows differ whenever the batch has two proofs.
+                        instance[0] = scalar(0, 0);
+                        instance[3] = scalar(0, 3);
+                        for flag in 0..PREPARED_INSTANCE_BOOLEAN_ROWS {
+                            instance[PREPARED_INSTANCE_DENSE_ROWS + flag] =
+                                <$scalar>::from(((proof >> flag) & 1) as u64);
+                        }
+                        vec![instance]
+                    })
+                    .collect::<Vec<_>>();
+                // Pin the scalar edge cases used by the signed-window
+                // evaluator for every batch size that can contain them.
+                owned[0][0][1] = <$scalar>::ZERO;
+                if let Some(proof) = owned.get_mut(1) {
+                    proof[0][2] = <$scalar>::ONE;
+                }
+                if let Some(proof) = owned.get_mut(2) {
+                    proof[0][4] = -<$scalar>::ONE;
+                }
+
+                let column_refs = owned
+                    .iter()
+                    .map(|columns| columns.iter().map(Vec::as_slice).collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                let instance_refs = column_refs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+                let actual = commit_prepared_instances(&params, &instance_refs)
+                    .expect("the prepared exact-shape path is armed");
+
+                for (proof, columns) in instance_refs.iter().enumerate() {
+                    assert_eq!(actual[proof].len(), PREPARED_INSTANCE_COLUMNS);
+                    assert_eq!(actual[proof][0], commit_instance(&params, columns[0]));
+                }
+
+                let mut non_boolean = owned[0][0].clone();
+                non_boolean[PREPARED_INSTANCE_DENSE_ROWS] = <$scalar>::from(2);
+                let non_boolean_columns = [non_boolean.as_slice()];
+                let non_boolean_proofs = [&non_boolean_columns[..]];
+                assert!(commit_prepared_instances(&params, &non_boolean_proofs).is_none());
             }
         }};
     }
@@ -1205,6 +1982,24 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
     advice
         .assign(0, 5, Assigned::Rational(Fp::ZERO, Fp::from(7)))
         .unwrap();
+    advice
+        .assign_batch(0, 6, 2, |index| {
+            Ok(match index {
+                0 => Assigned::Rational(Fp::from(12), Fp::from(3)),
+                1 => Assigned::Trivial(Fp::from(13)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    advice
+        .assign_batch(0, 6, 2, |index| {
+            Ok(match index {
+                0 => Assigned::Trivial(Fp::from(6)),
+                1 => Assigned::Rational(Fp::from(14), Fp::from(2)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
 
     assert!(matches!(
         advice.assign(2, 0, Assigned::Zero),
@@ -1214,14 +2009,171 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
         advice.assign(0, 8, Assigned::Zero),
         Err(Error::BoundsFailure)
     ));
+    assert!(
+        advice
+            .assign_batch(usize::MAX, usize::MAX, 0, |_| unreachable!())
+            .is_ok()
+    );
+    assert!(matches!(
+        advice.assign_batch(0, 7, 2, |_| Ok(Assigned::Zero)),
+        Err(Error::BoundsFailure)
+    ));
+    assert!(matches!(
+        advice.assign_batch(0, usize::MAX, 2, |_| Ok(Assigned::Zero)),
+        Err(Error::BoundsFailure)
+    ));
 
     let advice = advice.evaluate();
     assert_eq!(advice[0][0], Fp::from(5));
     assert_eq!(advice[0][2], Fp::ZERO);
     assert_eq!(advice[0][3], Fp::ZERO);
     assert_eq!(advice[0][5], Fp::ZERO);
+    assert_eq!(advice[0][6], Fp::from(6));
+    assert_eq!(advice[0][7], Fp::from(7));
     assert_eq!(advice[1][1], Fp::from(3));
     assert_eq!(advice[1][4], Fp::from(11));
+}
+
+#[cfg(feature = "multicore")]
+#[test]
+fn parallel_advice_evaluation_preserves_proof_bytes() {
+    use crate::{
+        circuit::SimpleFloorPlanner,
+        plonk::{keygen_pk, keygen_vk},
+        transcript::{Blake2bWrite, Challenge255},
+    };
+    use pasta_curves::{EqAffine, Fp};
+    use rand::{SeedableRng, rngs::StdRng};
+
+    const PROOF_SEED: u64 = 0x5041_5241_4456_4943;
+    const WORKER_COUNTS: [usize; 4] = [1, 2, 6, 10];
+
+    #[derive(Clone, Copy)]
+    struct RationalCircuit {
+        initial: [Assigned<Fp>; 2],
+        replacement: [Assigned<Fp>; 2],
+    }
+
+    impl Circuit<Fp> for RationalCircuit {
+        type Config = Column<Advice>;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self {
+                initial: [
+                    Assigned::Rational(Fp::ZERO, Fp::ONE),
+                    Assigned::Rational(Fp::ZERO, Fp::ONE),
+                ],
+                replacement: [Assigned::Zero, Assigned::Zero],
+            }
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            meta.advice_column()
+        }
+
+        fn synthesize(
+            &self,
+            advice: Self::Config,
+            mut layouter: impl crate::circuit::Layouter<Fp>,
+        ) -> Result<(), Error> {
+            layouter.assign_region(
+                || "rational advice",
+                |mut region| {
+                    for (row, value) in self.initial.into_iter().enumerate() {
+                        region.assign_advice(
+                            || "initial value",
+                            advice,
+                            row,
+                            || Value::known(value),
+                        )?;
+                    }
+                    for (row, value) in self.replacement.into_iter().enumerate() {
+                        region.assign_advice(
+                            || "replacement value",
+                            advice,
+                            row,
+                            || Value::known(value),
+                        )?;
+                    }
+                    Ok(())
+                },
+            )
+        }
+    }
+
+    let circuits = [
+        RationalCircuit {
+            initial: [
+                Assigned::Rational(Fp::from(2), Fp::from(3)),
+                Assigned::Rational(Fp::from(5), Fp::from(7)),
+            ],
+            replacement: [
+                Assigned::Trivial(Fp::from(11)),
+                Assigned::Rational(Fp::from(13), Fp::ZERO),
+            ],
+        },
+        RationalCircuit {
+            initial: [
+                Assigned::Rational(Fp::from(17), Fp::from(19)),
+                Assigned::Rational(Fp::from(23), Fp::from(29)),
+            ],
+            replacement: [
+                Assigned::Rational(Fp::ZERO, Fp::from(31)),
+                Assigned::Rational(Fp::from(37), Fp::from(41)),
+            ],
+        },
+        RationalCircuit {
+            initial: [
+                Assigned::Rational(Fp::from(43), Fp::ZERO),
+                Assigned::Rational(Fp::from(47), Fp::from(53)),
+            ],
+            replacement: [
+                Assigned::Rational(Fp::from(59), Fp::from(61)),
+                Assigned::Zero,
+            ],
+        },
+        RationalCircuit {
+            initial: [
+                Assigned::Rational(Fp::from(67), Fp::from(71)),
+                Assigned::Rational(Fp::from(73), Fp::ZERO),
+            ],
+            replacement: [
+                Assigned::Rational(Fp::from(79), Fp::ZERO),
+                Assigned::Trivial(Fp::from(83)),
+            ],
+        },
+    ];
+    let params: Params<EqAffine> = Params::new(3);
+    let vk = keygen_vk(&params, &circuits[0]).expect("keygen_vk should not fail");
+    let pk = keygen_pk(&params, vk, &circuits[0]).expect("keygen_pk should not fail");
+    let instances = [&[][..], &[][..], &[][..], &[][..]];
+    let create = |circuit_count, threads| {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+                create_proof(
+                    &params,
+                    &pk,
+                    &circuits[..circuit_count],
+                    &instances[..circuit_count],
+                    StdRng::seed_from_u64(PROOF_SEED),
+                    &mut transcript,
+                )
+                .expect("proof generation should not fail");
+                transcript.finalize()
+            })
+    };
+
+    let expected_single = create(1, 1);
+    let expected_batch = create(4, 1);
+    for threads in WORKER_COUNTS {
+        assert_eq!(create(1, threads), expected_single);
+        assert_eq!(create(4, threads), expected_batch);
+    }
 }
 
 #[test]
@@ -1260,9 +2212,11 @@ fn instance_preparation_preserves_proof_and_error_order() {
         }
     }
 
-    let params: Params<EqAffine> = Params::new(3);
+    let params: Params<EqAffine> = Params::new(5);
     let vk = keygen_vk(&params, &InstanceCircuit).expect("keygen_vk should not fail");
     let pk = keygen_pk(&params, vk, &InstanceCircuit).expect("keygen_pk should not fail");
+    #[cfg(feature = "batch")]
+    assert!(params.prepared_instance_table().is_some());
     let circuits = [InstanceCircuit; 4];
     let instance_values = [[Fp::from(1)], [Fp::from(2)], [Fp::from(3)], [Fp::from(4)]];
     let instance_columns = instance_values
@@ -1290,6 +2244,26 @@ fn instance_preparation_preserves_proof_and_error_order() {
     let expected_proof = create_seeded_proof();
     assert_eq!(create_seeded_proof(), expected_proof);
 
+    let single_circuit = [InstanceCircuit];
+    let single_values = [Fp::from(5)];
+    let single_columns = [single_values.as_slice()];
+    let single_instances = [single_columns.as_slice()];
+    let create_single_proof = || {
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof(
+            &params,
+            &pk,
+            &single_circuit,
+            &single_instances,
+            StdRng::seed_from_u64(PROOF_SEED),
+            &mut transcript,
+        )
+        .expect("proof generation should not fail");
+        transcript.finalize()
+    };
+    let expected_single_proof = create_single_proof();
+    assert_eq!(create_single_proof(), expected_single_proof);
+
     #[cfg(feature = "multicore")]
     for threads in [1, 4] {
         let proof = maybe_rayon::ThreadPoolBuilder::new()
@@ -1298,6 +2272,67 @@ fn instance_preparation_preserves_proof_and_error_order() {
             .unwrap()
             .install(create_seeded_proof);
         assert_eq!(proof, expected_proof);
+
+        let single_proof = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(create_single_proof);
+        assert_eq!(single_proof, expected_single_proof);
+    }
+
+    #[cfg(feature = "batch")]
+    {
+        // Pin both sides of the private Halo2 route contract. These literals
+        // intentionally make production-constant drift fail this test.
+        assert_eq!(PREPARED_INSTANCE_COLUMNS, 1);
+        assert_eq!(PREPARED_INSTANCE_DENSE_ROWS, 7);
+        assert_eq!(PREPARED_INSTANCE_BOOLEAN_ROWS, 3);
+        assert_eq!(PREPARED_INSTANCE_ROWS, 10);
+
+        let exact_shape_values = (0..circuits.len())
+            .map(|proof| {
+                let mut values: [Fp; PREPARED_INSTANCE_ROWS] = std::array::from_fn(|row| {
+                    Fp::from((proof * PREPARED_INSTANCE_ROWS + row + 1) as u64)
+                });
+                values[0] = Fp::from(91);
+                for flag in 0..PREPARED_INSTANCE_BOOLEAN_ROWS {
+                    values[PREPARED_INSTANCE_DENSE_ROWS + flag] =
+                        Fp::from(((proof >> flag) & 1) as u64);
+                }
+                values
+            })
+            .collect::<Vec<_>>();
+        let exact_shape_columns = exact_shape_values
+            .iter()
+            .map(|values| vec![values.as_slice()])
+            .collect::<Vec<_>>();
+        let exact_shape_instances = exact_shape_columns
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let create_exact_shape_proof = |params: &Params<EqAffine>| {
+            let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+            create_proof(
+                params,
+                &pk,
+                &circuits,
+                &exact_shape_instances,
+                StdRng::seed_from_u64(PROOF_SEED),
+                &mut transcript,
+            )
+            .expect("exact-shape proof generation should not fail");
+            transcript.finalize()
+        };
+
+        let unprepared_params = Params::new(5);
+        assert!(unprepared_params.prepared_instance_table().is_none());
+        let route_hits = prepared_instance_route_hits();
+        let unprepared_proof = create_exact_shape_proof(&unprepared_params);
+        assert_eq!(prepared_instance_route_hits(), route_hits);
+        let prepared_proof = create_exact_shape_proof(&params);
+        assert_eq!(prepared_instance_route_hits(), route_hits + 1);
+        assert_eq!(prepared_proof, unprepared_proof);
     }
 
     let valid = [Fp::from(5)];
@@ -1348,24 +2383,220 @@ fn instance_preparation_preserves_proof_and_error_order() {
 }
 
 #[test]
+fn instance_failures_do_not_run_synthesis_or_consume_rng() {
+    use crate::{
+        circuit::SimpleFloorPlanner,
+        plonk::{keygen_pk, keygen_vk},
+        transcript::{Blake2bWrite, Challenge255, Transcript},
+    };
+    use pasta_curves::{EqAffine, Fp};
+    use rand_core::{Infallible, TryRng};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone)]
+    struct SideEffectCircuit {
+        syntheses: Arc<AtomicUsize>,
+        fail: bool,
+    }
+
+    impl Circuit<Fp> for SideEffectCircuit {
+        type Config = (Column<Instance>, Column<Advice>);
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self {
+                syntheses: Arc::clone(&self.syntheses),
+                fail: false,
+            }
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            (meta.instance_column(), meta.advice_column())
+        }
+
+        fn synthesize(
+            &self,
+            _config: Self::Config,
+            _layouter: impl crate::circuit::Layouter<Fp>,
+        ) -> Result<(), Error> {
+            self.syntheses.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err(Error::Synthesis)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct CountingRng {
+        bytes: Arc<AtomicUsize>,
+    }
+
+    impl TryRng for CountingRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.bytes.fetch_add(4, Ordering::SeqCst);
+            Ok(0x5a5a_5a5a)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.bytes.fetch_add(8, Ordering::SeqCst);
+            Ok(0x5a5a_5a5a_5a5a_5a5a)
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            self.bytes.fetch_add(dst.len(), Ordering::SeqCst);
+            dst.fill(0x5a);
+            Ok(())
+        }
+    }
+
+    struct FailOnCommonPoint {
+        inner: Blake2bWrite<Vec<u8>, EqAffine, Challenge255<EqAffine>>,
+    }
+
+    impl Transcript<EqAffine, Challenge255<EqAffine>> for FailOnCommonPoint {
+        fn squeeze_challenge(&mut self) -> Challenge255<EqAffine> {
+            self.inner.squeeze_challenge()
+        }
+
+        fn common_point(&mut self, _point: EqAffine) -> std::io::Result<()> {
+            Err(std::io::Error::other("deliberate common-point failure"))
+        }
+
+        fn common_scalar(&mut self, scalar: Fp) -> std::io::Result<()> {
+            self.inner.common_scalar(scalar)
+        }
+    }
+
+    impl TranscriptWrite<EqAffine, Challenge255<EqAffine>> for FailOnCommonPoint {
+        fn write_point(&mut self, point: EqAffine) -> std::io::Result<()> {
+            self.inner.write_point(point)
+        }
+
+        fn write_scalar(&mut self, scalar: Fp) -> std::io::Result<()> {
+            self.inner.write_scalar(scalar)
+        }
+    }
+
+    let syntheses = Arc::new(AtomicUsize::new(0));
+    let circuit = SideEffectCircuit {
+        syntheses: Arc::clone(&syntheses),
+        fail: false,
+    };
+    let params: Params<EqAffine> = Params::new(5);
+    let vk = keygen_vk(&params, &circuit).expect("keygen_vk should not fail");
+    let pk = keygen_pk(&params, vk, &circuit).expect("keygen_pk should not fail");
+    syntheses.store(0, Ordering::SeqCst);
+
+    let oversized = vec![Fp::ZERO; params.n as usize];
+    let oversized_columns = [oversized.as_slice()];
+    let rng_bytes = Arc::new(AtomicUsize::new(0));
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    let result = create_proof(
+        &params,
+        &pk,
+        &[SideEffectCircuit {
+            syntheses: Arc::clone(&syntheses),
+            fail: true,
+        }],
+        &[&oversized_columns],
+        CountingRng {
+            bytes: Arc::clone(&rng_bytes),
+        },
+        &mut transcript,
+    );
+    assert!(matches!(result, Err(Error::InstanceTooLarge)));
+    let oversized_effects = (
+        syntheses.load(Ordering::SeqCst),
+        rng_bytes.load(Ordering::SeqCst),
+    );
+
+    // A transcript failure for an earlier instance must still precede a later
+    // oversized instance.
+    let valid = [Fp::ONE];
+    let valid_columns = [valid.as_slice()];
+    syntheses.store(0, Ordering::SeqCst);
+    rng_bytes.store(0, Ordering::SeqCst);
+    let mut transcript = FailOnCommonPoint {
+        inner: Blake2bWrite::init(vec![]),
+    };
+    let result = create_proof(
+        &params,
+        &pk,
+        &[circuit.clone(), circuit.clone()],
+        &[&valid_columns, &oversized_columns],
+        CountingRng {
+            bytes: Arc::clone(&rng_bytes),
+        },
+        &mut transcript,
+    );
+    assert!(matches!(result, Err(Error::Transcript(_))));
+    let transcript_effects = (
+        syntheses.load(Ordering::SeqCst),
+        rng_bytes.load(Ordering::SeqCst),
+    );
+
+    // Synthesis historically precedes the first prover-randomness draw.
+    syntheses.store(0, Ordering::SeqCst);
+    rng_bytes.store(0, Ordering::SeqCst);
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    let result = create_proof(
+        &params,
+        &pk,
+        &[SideEffectCircuit {
+            syntheses: Arc::clone(&syntheses),
+            fail: true,
+        }],
+        &[&valid_columns],
+        CountingRng {
+            bytes: Arc::clone(&rng_bytes),
+        },
+        &mut transcript,
+    );
+    assert!(matches!(result, Err(Error::Synthesis)));
+    let synthesis_effects = (
+        syntheses.load(Ordering::SeqCst),
+        rng_bytes.load(Ordering::SeqCst),
+    );
+    assert_eq!(
+        [oversized_effects, transcript_effects, synthesis_effects],
+        [(0, 0), (0, 0), (1, 0)],
+    );
+}
+
+#[test]
 fn v1_proving_key_reuses_floor_plan() {
     use crate::{
         circuit::floor_planner::V1,
-        plonk::{keygen_pk, keygen_vk},
-        transcript::{Blake2bWrite, Challenge255},
+        plonk::{SingleVerifier, TableColumn, keygen_pk, keygen_vk, verify_proof},
+        poly::Rotation,
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
     use pasta_curves::EqAffine;
     use rand::{SeedableRng, rngs::StdRng};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     static MEASUREMENTS: AtomicUsize = AtomicUsize::new(0);
+    static TABLE_ASSIGNMENTS: AtomicUsize = AtomicUsize::new(0);
+    static FAIL_TABLE: AtomicBool = AtomicBool::new(false);
     const PROOF_SEED: u64 = 0x5631_4241_5443_4802;
+
+    #[derive(Clone, Copy)]
+    struct MyConfig {
+        advice: Column<Advice>,
+        table: TableColumn,
+    }
 
     #[derive(Clone, Copy)]
     struct MyCircuit;
 
     impl<F: Field> Circuit<F> for MyCircuit {
-        type Config = ();
+        type Config = MyConfig;
         type FloorPlanner = V1;
 
         fn without_witnesses(&self) -> Self {
@@ -1373,23 +2604,48 @@ fn v1_proving_key_reuses_floor_plan() {
             *self
         }
 
-        fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {}
+        fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
+            let advice = meta.advice_column();
+            let table = meta.lookup_table_column();
+            meta.lookup(|meta| vec![(meta.query_advice(advice, Rotation::cur()), table)]);
+            MyConfig { advice, table }
+        }
 
         fn synthesize(
             &self,
-            _config: Self::Config,
-            _layouter: impl crate::circuit::Layouter<F>,
+            config: Self::Config,
+            mut layouter: impl crate::circuit::Layouter<F>,
         ) -> Result<(), Error> {
-            Ok(())
+            layouter.assign_table(
+                || "fixed table",
+                |mut region| {
+                    TABLE_ASSIGNMENTS.fetch_add(1, Ordering::Relaxed);
+                    if FAIL_TABLE.load(Ordering::Relaxed) {
+                        return Err(Error::Synthesis);
+                    }
+                    region.assign_cell(|| "zero", config.table, 0, || Value::known(F::ZERO))
+                },
+            )?;
+            layouter.assign_region(
+                || "witness",
+                |mut region| {
+                    region.assign_advice(|| "zero", config.advice, 0, || Value::known(F::ZERO))?;
+                    Ok(())
+                },
+            )
         }
     }
 
     let params: Params<EqAffine> = Params::new(3);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
     let mut pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 2);
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
 
     MEASUREMENTS.store(0, Ordering::Relaxed);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     create_proof(
         &params,
         &pk,
@@ -1400,9 +2656,53 @@ fn v1_proving_key_reuses_floor_plan() {
     )
     .expect("proof generation should not fail");
     // The plan cached in the proving key is reused, so proving re-measures
-    // nothing.
+    // nothing. The fixed table values are already part of the proving key,
+    // but each circuit's table closure still runs: its side effects and
+    // errors are observable behavior.
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
     let first_proof = transcript.finalize();
+    let strategy = SingleVerifier::new(&params);
+    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&first_proof[..]);
+    verify_proof(
+        &params,
+        pk.get_vk(),
+        strategy,
+        &[&[], &[], &[]],
+        &mut transcript,
+    )
+    .expect("proof verification should not fail");
+
+    // A single circuit takes a separate synthesis branch from a batch.
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
+    create_proof(
+        &params,
+        &pk,
+        &[MyCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("single proof generation should not fail");
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
+
+    // An error returned by the table closure while the cached plan is reused
+    // must propagate out of proving, exactly as when the plan is new.
+    FAIL_TABLE.store(true, Ordering::Relaxed);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    let result = create_proof(
+        &params,
+        &pk,
+        &[MyCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(PROOF_SEED),
+        &mut transcript,
+    );
+    assert!(matches!(result, Err(Error::Synthesis)));
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
+    FAIL_TABLE.store(false, Ordering::Relaxed);
 
     // The proof bytes must not depend on the parallel schedule: re-create the
     // proof under single- and multi-worker Rayon pools and require identical
@@ -1411,6 +2711,7 @@ fn v1_proving_key_reuses_floor_plan() {
     for threads in [1, 4] {
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         MEASUREMENTS.store(0, Ordering::Relaxed);
+        TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
         maybe_rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
@@ -1427,6 +2728,7 @@ fn v1_proving_key_reuses_floor_plan() {
             })
             .expect("proof generation should not fail");
         assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
+        assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
         assert_eq!(transcript.finalize(), first_proof);
     }
 
@@ -1435,6 +2737,7 @@ fn v1_proving_key_reuses_floor_plan() {
     pk.floor_plan = Some(FloorPlan::from_arc(std::sync::Arc::new(())));
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
     MEASUREMENTS.store(0, Ordering::Relaxed);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     create_proof(
         &params,
         &pk,
@@ -1445,6 +2748,7 @@ fn v1_proving_key_reuses_floor_plan() {
     )
     .expect("proof generation with an incompatible plan should not fail");
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 1);
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
     assert_eq!(transcript.finalize(), first_proof);
 }
 
@@ -1452,19 +2756,20 @@ fn v1_proving_key_reuses_floor_plan() {
 fn compressed_selector_cache_preserves_proof() {
     use crate::{
         circuit::{Layouter, SimpleFloorPlanner},
-        plonk::{Expression, keygen_pk, keygen_vk},
+        plonk::{Expression, SingleVerifier, TableColumn, keygen_pk, keygen_vk, verify_proof},
         poly::Rotation,
-        transcript::{Blake2bWrite, Challenge255},
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
-    use pasta_curves::EqAffine;
+    use pasta_curves::{EqAffine, Fp};
     use rand::{SeedableRng, rngs::StdRng};
 
     const PROOF_SEED: u64 = 0x5345_4c45_4354_4f52;
 
     #[derive(Clone, Copy, Debug)]
     struct Config {
-        advice: Column<Advice>,
+        advice: [Column<Advice>; 4],
         selectors: [Selector; crate::MIN_SELECTOR_FAMILY_LEN],
+        table: [TableColumn; 2],
     }
 
     #[derive(Clone, Copy)]
@@ -1479,14 +2784,40 @@ fn compressed_selector_cache_preserves_proof() {
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-            let advice = meta.advice_column();
+            let advice = core::array::from_fn(|_| meta.advice_column());
+            let instance = meta.instance_column();
             let selectors = core::array::from_fn(|_| meta.selector());
+            let table = [meta.lookup_table_column(), meta.lookup_table_column()];
+
+            for column in advice {
+                meta.enable_equality(column);
+            }
+            meta.enable_equality(instance);
+
+            meta.lookup(|meta| {
+                advice[..2]
+                    .iter()
+                    .zip(table)
+                    .map(|(advice, table)| (meta.query_advice(*advice, Rotation::cur()), table))
+                    .collect()
+            });
+            meta.lookup(|meta| {
+                advice[2..]
+                    .iter()
+                    .zip(table)
+                    .map(|(advice, table)| (meta.query_advice(*advice, Rotation::cur()), table))
+                    .collect()
+            });
 
             for selector in selectors {
                 meta.create_gate("selector family", |meta| {
                     let selector = meta.query_selector(selector);
-                    let advice = meta.query_advice(advice, Rotation::cur());
-                    vec![selector * (advice - Expression::Constant(F::ONE))]
+                    let advice = meta.query_advice(advice[0], Rotation::cur());
+                    let instance = meta.query_instance(instance, Rotation::cur());
+                    vec![
+                        selector.clone() * (advice - Expression::Constant(F::ONE)),
+                        selector * instance,
+                    ]
                 });
             }
 
@@ -1495,7 +2826,11 @@ fn compressed_selector_cache_preserves_proof() {
             // column.
             meta.set_minimum_degree(crate::MIN_SELECTOR_FAMILY_LEN + 1);
 
-            Config { advice, selectors }
+            Config {
+                advice,
+                selectors,
+                table,
+            }
         }
 
         fn synthesize(
@@ -1503,17 +2838,30 @@ fn compressed_selector_cache_preserves_proof() {
             config: Self::Config,
             mut layouter: impl Layouter<F>,
         ) -> Result<(), Error> {
+            layouter.assign_table(
+                || "two-column lookup table",
+                |mut table| {
+                    for (row, value) in [F::ZERO, F::ONE].into_iter().enumerate() {
+                        for column in config.table {
+                            table.assign_cell(|| "value", column, row, || Value::known(value))?;
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
             layouter.assign_region(
                 || "selector family",
                 |mut region| {
                     for (row, selector) in config.selectors.iter().enumerate() {
                         selector.enable(&mut region, row)?;
-                        region.assign_advice(
-                            || "value",
-                            config.advice,
-                            row,
-                            || Value::known(F::ONE),
-                        )?;
+                        for advice in config.advice {
+                            region.assign_advice(
+                                || "value",
+                                advice,
+                                row,
+                                || Value::known(F::ONE),
+                            )?;
+                        }
                     }
                     Ok(())
                 },
@@ -1521,20 +2869,49 @@ fn compressed_selector_cache_preserves_proof() {
         }
     }
 
-    fn create(pk: &ProvingKey<EqAffine>, params: &Params<EqAffine>) -> Vec<u8> {
+    fn create(
+        pk: &ProvingKey<EqAffine>,
+        params: &Params<EqAffine>,
+        circuit_count: usize,
+        seed: u64,
+    ) -> Vec<u8> {
+        let circuits = [MyCircuit; 4];
+        let empty_instance: &[Fp] = &[];
+        let instance_columns: &[&[Fp]] = &[empty_instance];
+        let instances = [instance_columns; 4];
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         create_proof(
             params,
             pk,
-            &[MyCircuit, MyCircuit],
-            &[&[], &[]],
-            StdRng::seed_from_u64(PROOF_SEED),
+            &circuits[..circuit_count],
+            &instances[..circuit_count],
+            StdRng::seed_from_u64(seed),
             &mut transcript,
         )
         .expect("proof generation should not fail");
         transcript.finalize()
     }
 
+    fn verify(
+        pk: &ProvingKey<EqAffine>,
+        params: &Params<EqAffine>,
+        circuit_count: usize,
+        proof: &[u8],
+    ) {
+        let empty_instance: &[Fp] = &[];
+        let instance_columns: &[&[Fp]] = &[empty_instance];
+        let instances = [instance_columns; 4];
+        let strategy = SingleVerifier::new(params);
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(proof);
+        verify_proof(
+            params,
+            pk.get_vk(),
+            strategy,
+            &instances[..circuit_count],
+            &mut transcript,
+        )
+        .expect("proof verification should not fail");
+    }
     let params = Params::new(4);
     let create_pk = || {
         let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
@@ -1546,6 +2923,117 @@ fn compressed_selector_cache_preserves_proof() {
         pk.cached_selector_families[0].selectors.len() + 1,
         crate::MIN_SELECTOR_FAMILY_LEN
     );
+    assert_eq!(pk.vk.cs.num_instance_columns, 1);
+    assert_eq!(pk.vk.cs.lookups.len(), 2);
+    assert!(
+        pk.vk
+            .cs
+            .lookups
+            .iter()
+            .all(|lookup| lookup.input_expressions.len() == 2)
+    );
+    assert!(pk.vk.cs.permutation.set_count(pk.vk.cs_degree) >= 2);
+    assert!(pk.quotient_plans.get(3).is_none());
+
+    // Key generation compiles every retained shape before any proof. The
+    // first proof must keep that exact Arc. An empty-plan key provides the
+    // byte-for-byte control for 1, 2, and 4 circuits.
+    let mut eager_proofs = vec![];
+    for circuit_count in [1, 2, 4] {
+        let eager_plan = pk
+            .quotient_plans
+            .get(circuit_count)
+            .expect("keygen compiles each retained quotient plan");
+        let eager_proof = create(&pk, &params, circuit_count, PROOF_SEED);
+        let retained_plan = pk
+            .quotient_plans
+            .get(circuit_count)
+            .expect("the first proof retains its keygen plan");
+        assert!(std::sync::Arc::ptr_eq(&eager_plan, &retained_plan));
+
+        let mut lazy_pk = pk.clone();
+        lazy_pk.quotient_plans = std::sync::Arc::new(Default::default());
+        let lazy_proof = create(&lazy_pk, &params, circuit_count, PROOF_SEED);
+        assert_eq!(eager_proof, lazy_proof);
+        verify(&pk, &params, circuit_count, &eager_proof);
+        eager_proofs.push(eager_proof);
+    }
+
+    // A different seed changes commitments before theta is sampled. The
+    // symbolic plan binds the resulting challenges, while proof bytes still
+    // match a freshly planned control.
+    let alternate_seed = PROOF_SEED ^ 0xa11c_e55e_7e57_0001;
+    let eager_plan = pk.quotient_plans.get(1).unwrap();
+    let alternate_proof = create(&pk, &params, 1, alternate_seed);
+    assert_ne!(alternate_proof, eager_proofs[0]);
+    assert!(std::sync::Arc::ptr_eq(
+        &eager_plan,
+        &pk.quotient_plans.get(1).unwrap()
+    ));
+    let mut alternate_lazy_pk = pk.clone();
+    alternate_lazy_pk.quotient_plans = std::sync::Arc::new(Default::default());
+    assert_eq!(
+        alternate_proof,
+        create(&alternate_lazy_pk, &params, 1, alternate_seed)
+    );
+    verify(&pk, &params, 1, &alternate_proof);
+
+    // A candidate is selected before lookup preparation, so an exact shape
+    // mismatch must reconstruct the omitted lookup ASTs before falling back.
+    // Removing compressed-selector registration changes the evaluator shape
+    // without changing the constraint system or proof bytes.
+    let mut mismatched_pk = create_pk();
+    let rejected_plan = mismatched_pk.quotient_plans.get(2).unwrap();
+    for family in mismatched_pk.cached_selector_families.iter() {
+        let column_index = family.column_index;
+        mismatched_pk.fixed_cosets[column_index] = mismatched_pk
+            .vk
+            .domain
+            .coeff_to_extended(mismatched_pk.fixed_polys[column_index].clone());
+    }
+    mismatched_pk.cached_selector_families = Default::default();
+    let fallback_proof = create(&mismatched_pk, &params, 2, PROOF_SEED);
+    assert_eq!(fallback_proof, eager_proofs[1]);
+    assert!(!std::sync::Arc::ptr_eq(
+        &rejected_plan,
+        &mismatched_pk.quotient_plans.get(2).unwrap()
+    ));
+    verify(&mismatched_pk, &params, 2, &fallback_proof);
+
+    // Equal polynomial counts and lengths are insufficient. Swap tags across
+    // instance/lookup and permutation/lookup-product roles that appear more
+    // than once, and require the byte-identical fallback.
+    let swapped_tag_pk = create_pk();
+    swapped_tag_pk.quotient_plans.swap_polynomial_tags(
+        2,
+        QuotientPoly::Instance {
+            circuit_index: 0,
+            column_index: 0,
+        },
+        QuotientPoly::LookupPermutedTable {
+            circuit_index: 1,
+            lookup_index: 1,
+        },
+    );
+    swapped_tag_pk.quotient_plans.swap_polynomial_tags(
+        2,
+        QuotientPoly::PermutationProduct {
+            circuit_index: 0,
+            set_index: 1,
+        },
+        QuotientPoly::LookupProduct {
+            circuit_index: 1,
+            lookup_index: 0,
+        },
+    );
+    let rejected_plan = swapped_tag_pk.quotient_plans.get(2).unwrap();
+    let fallback_proof = create(&swapped_tag_pk, &params, 2, PROOF_SEED);
+    assert_eq!(fallback_proof, eager_proofs[1]);
+    assert!(!std::sync::Arc::ptr_eq(
+        &rejected_plan,
+        &swapped_tag_pk.quotient_plans.get(2).unwrap()
+    ));
+    verify(&swapped_tag_pk, &params, 2, &fallback_proof);
 
     // A family omitted by the cache budget retains its source coset and takes
     // the generic evaluator path. Restore that state for every cached family.
@@ -1562,8 +3050,48 @@ fn compressed_selector_cache_preserves_proof() {
             .coeff_to_extended(uncached_pk.fixed_polys[column_index].clone());
     }
     uncached_pk.cached_selector_families = Default::default();
+    uncached_pk.quotient_plans = std::sync::Arc::new(Default::default());
 
-    assert_eq!(create(&pk, &params), create(&uncached_pk, &params));
+    assert_eq!(
+        create(&pk, &params, 2, PROOF_SEED),
+        create(&uncached_pk, &params, 2, PROOF_SEED)
+    );
+
+    // Concurrent first proofs share the keygen-compiled plan without
+    // replacement and preserve deterministic proof bytes.
+    let concurrent_pk = create_pk();
+    let eager_plan = concurrent_pk.quotient_plans.get(4).unwrap();
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| create(&concurrent_pk, &params, 4, PROOF_SEED));
+        let second = scope.spawn(|| create(&concurrent_pk, &params, 4, PROOF_SEED));
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_eq!(first, second);
+    assert!(std::sync::Arc::ptr_eq(
+        &eager_plan,
+        &concurrent_pk.quotient_plans.get(4).unwrap()
+    ));
+
+    // Concurrent cold proofs can both miss without racing plan replacement or
+    // changing proof bytes.
+    let mut cold_pk = create_pk();
+    cold_pk.quotient_plans = std::sync::Arc::new(Default::default());
+    let barrier = std::sync::Barrier::new(3);
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            barrier.wait();
+            create(&cold_pk, &params, 2, PROOF_SEED)
+        });
+        let second = scope.spawn(|| {
+            barrier.wait();
+            create(&cold_pk, &params, 2, PROOF_SEED)
+        });
+        barrier.wait();
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_eq!(first, second);
+    assert!(cold_pk.quotient_plans.get(2).is_some());
+    verify(&cold_pk, &params, 2, &first);
 
     #[cfg(feature = "multicore")]
     {
@@ -1598,8 +3126,8 @@ fn compressed_selector_cache_preserves_proof() {
             }
         }
 
-        let single_proof = single_pool.install(|| create(&single_pk, &params));
-        let parallel_proof = parallel_pool.install(|| create(&parallel_pk, &params));
+        let single_proof = single_pool.install(|| create(&single_pk, &params, 4, PROOF_SEED));
+        let parallel_proof = parallel_pool.install(|| create(&parallel_pk, &params, 4, PROOF_SEED));
         assert_eq!(single_proof, parallel_proof);
     }
 }

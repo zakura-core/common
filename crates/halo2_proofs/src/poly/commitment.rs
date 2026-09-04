@@ -94,16 +94,27 @@ use crate::arithmetic::PreparedZeroCheck;
 use crate::arithmetic::{CurveAffine, CurveExt, best_fft, best_multiexp, parallelize};
 use crate::helpers::CurveRead;
 #[cfg(feature = "batch")]
-use crate::{INSTANCE_WINDOW_ENTRIES_PER_BASE, InstanceWindowTable, MAX_CACHED_INSTANCE_ROWS};
+use crate::{
+    INSTANCE_WINDOW_ENTRIES_PER_BASE, InstanceScalarByteOrder, InstanceWindowTable,
+    MAX_CACHED_INSTANCE_ROWS, PREPARED_INSTANCE_BOOLEAN_ROWS, PREPARED_INSTANCE_DENSE_ROWS,
+    PREPARED_INSTANCE_OFFSETS, PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_MAGNITUDES,
+    PreparedInstanceTable,
+};
+#[cfg(feature = "multicore")]
+use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
 
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 use core::panic::AssertUnwindSafe;
+#[cfg(feature = "multicore")]
+use ff::BatchInvert;
 use ff::{Field, PrimeField};
 use group::{Curve, Group};
+#[cfg(feature = "multicore")]
+use maybe_rayon::prelude::*;
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 #[cfg(feature = "batch")]
 use std::sync::Mutex;
-#[cfg(any(feature = "multicore", feature = "orbits"))]
+#[cfg(any(feature = "batch", feature = "multicore", feature = "orbits"))]
 use std::sync::OnceLock;
 #[cfg(any(feature = "batch", feature = "multicore", feature = "orbits"))]
 use std::{fmt, sync::Arc};
@@ -111,15 +122,30 @@ use std::{fmt, sync::Arc};
 mod msm;
 mod prover;
 
-/// One byte per cached fixed-base window. This spends 255 affine points per
-/// scalar-representation byte and evaluates a blind with at most one mixed
-/// addition per byte, without doublings.
+/// Signed width-eight fixed-base windows. Each base spends 128 affine points
+/// per window and evaluates a scalar with at most one mixed addition per
+/// window, without doublings.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const BLIND_WINDOW_BITS: usize = u8::BITS as usize;
+const FIXED_BASE_WINDOW_BITS: usize = u8::BITS as usize;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const BLIND_WINDOW_ENTRIES: usize = (1 << BLIND_WINDOW_BITS) - 1;
+const FIXED_BASE_WINDOW_MAGNITUDES: usize = 1 << (FIXED_BASE_WINDOW_BITS - 1);
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const BLIND_BYTE_ORDER_PROBE: u64 = 0x0102_0304_0506_0708;
+const FIXED_BASE_W_INDEX: usize = 0;
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const FIXED_BASE_U_INDEX: usize = 1;
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const FIXED_BASE_COUNT: usize = 2;
+#[cfg(any(feature = "batch", feature = "multicore"))]
+const SCALAR_BYTE_ORDER_PROBE: u64 = 0x0102_0304_0506_0708;
+/// The measured memory/latency knee for the two sparse prover commitments.
+#[cfg(feature = "multicore")]
+const SPARSE_COMMITMENT_WINDOW_BITS: usize = 4;
+#[cfg(feature = "multicore")]
+const SPARSE_COMMITMENT_WINDOW_MAGNITUDES: usize = 1 << (SPARSE_COMMITMENT_WINDOW_BITS - 1);
+/// Below the full Orchard IPA mask, projective mixed additions are faster than
+/// batched affine reduction.
+#[cfg(feature = "multicore")]
+const SPARSE_COMMITMENT_AFFINE_REDUCTION_TERMS: usize = PREPARED_SPARSE_COMMITMENT_K as usize + 2;
 #[cfg(feature = "orbits")]
 const PREPARED_COMMITMENT_EXTRA_BASES: usize = 2;
 
@@ -172,12 +198,16 @@ pub struct Params<C: CurveAffine> {
     pub(crate) u: C,
     #[cfg(feature = "batch")]
     instance_window_cache: InstanceWindowCache<C>,
+    #[cfg(feature = "batch")]
+    prepared_instance_cache: PreparedInstanceCache<C>,
     #[cfg(feature = "orbits")]
     zero_check_cache: ZeroCheckCache<C>,
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
     commitment_tables_cache: CommitmentTablesCache<C>,
     #[cfg(feature = "orbits")]
     lagrange_table_cache: ZeroCheckCache<C>,
+    #[cfg(feature = "multicore")]
+    sparse_commitment_cache: SparseCommitmentCache<C>,
 }
 
 /// A lazily built prepared fixed-base multiexp table — over `[g..., w, u]`
@@ -232,11 +262,12 @@ impl<C: CurveAffine> fmt::Debug for ZeroCheckCache<C> {
     }
 }
 
-/// The no-orbits prover's exact-`n` coefficient and Lagrange preparations.
-/// One lock makes their initialization atomic and prevents concurrent calls
-/// from duplicating the two large table builds. The cached handles are marked
-/// unwind-safe because [`OnceLock`] does not publish a panicking initializer and
-/// the cache never mutates or replaces published handles.
+/// The no-orbits prover's exact-`n` coefficient and Lagrange preparations, plus
+/// the fixed-base `w` and `u` pair. One lock makes their initialization atomic
+/// and prevents concurrent calls from duplicating the three table builds. The
+/// cached handles are marked unwind-safe because [`OnceLock`] does not publish
+/// a panicking initializer and the cache never mutates or replaces published
+/// handles.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[derive(Clone)]
 struct CommitmentTablesCache<C: CurveAffine>(
@@ -246,7 +277,7 @@ struct CommitmentTablesCache<C: CurveAffine>(
             Option<(
                 AssertUnwindSafe<Arc<dyn PreparedZeroCheck<C::CurveExt>>>,
                 AssertUnwindSafe<Arc<dyn PreparedZeroCheck<C::CurveExt>>>,
-                Arc<BlindTable<C>>,
+                Arc<FixedBasePairTable<C>>,
             )>,
         >,
     >,
@@ -267,16 +298,16 @@ impl<C: CurveAffine> CommitmentTablesCache<C> {
         initialize: impl FnOnce() -> Option<(
             Box<dyn PreparedZeroCheck<C::CurveExt>>,
             Box<dyn PreparedZeroCheck<C::CurveExt>>,
-            BlindTable<C>,
+            FixedBasePairTable<C>,
         )>,
     ) -> bool {
         self.0
             .get_or_init(|| {
-                initialize().map(|(coefficient, lagrange, blind)| {
+                initialize().map(|(coefficient, lagrange, fixed_bases)| {
                     (
                         AssertUnwindSafe(Arc::from(coefficient)),
                         AssertUnwindSafe(Arc::from(lagrange)),
-                        Arc::new(blind),
+                        Arc::new(fixed_bases),
                     )
                 })
             })
@@ -297,11 +328,11 @@ impl<C: CurveAffine> CommitmentTablesCache<C> {
             .map(|(_, lagrange, _)| Arc::clone(&lagrange.0))
     }
 
-    fn blind(&self) -> Option<Arc<BlindTable<C>>> {
+    fn fixed_bases(&self) -> Option<Arc<FixedBasePairTable<C>>> {
         self.0
             .get()
             .and_then(Option::as_ref)
-            .map(|(_, _, blind)| Arc::clone(blind))
+            .map(|(_, _, fixed_bases)| Arc::clone(fixed_bases))
     }
 }
 
@@ -316,78 +347,139 @@ impl<C: CurveAffine> fmt::Debug for CommitmentTablesCache<C> {
     }
 }
 
-/// A fixed-window table for the commitment blinding generator.
+/// Positioned fixed-window tables for the commitment scheme's `w` and `u`
+/// generators.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-struct BlindTable<C: CurveAffine> {
-    base: C,
+struct FixedBasePairTable<C: CurveAffine> {
+    bases: [C; FIXED_BASE_COUNT],
     points: Vec<C>,
+    scalar_bits: usize,
     windows: usize,
-    byte_order: BlindScalarByteOrder,
+    byte_order: ScalarByteOrder,
 }
 
-#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[cfg(feature = "multicore")]
 #[derive(Clone, Copy)]
-enum BlindScalarByteOrder {
+enum ScalarByteOrder {
     LittleEndian,
     BigEndian,
     Unsupported,
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-impl<C: CurveAffine> BlindTable<C> {
-    fn new(base: C) -> Self {
-        let windows = <C::Scalar as PrimeField>::Repr::default().as_ref().len();
-        let mut projective = Vec::with_capacity(windows * BLIND_WINDOW_ENTRIES);
+impl<C: CurveAffine> FixedBasePairTable<C> {
+    fn extend_projective_points(base: C, windows: usize, points: &mut Vec<C::Curve>) {
         let mut window_base = C::Curve::from(base);
-        for _ in 0..windows {
+        for window in 0..windows {
             let mut multiple = window_base;
-            for _ in 0..BLIND_WINDOW_ENTRIES {
-                projective.push(multiple);
-                multiple += window_base;
+            for magnitude in 0..FIXED_BASE_WINDOW_MAGNITUDES {
+                points.push(multiple);
+                if magnitude + 1 != FIXED_BASE_WINDOW_MAGNITUDES {
+                    multiple += window_base;
+                }
             }
-            for _ in 0..BLIND_WINDOW_BITS {
-                window_base = window_base.double();
+            if window + 1 != windows {
+                // `multiple` is the maximum signed magnitude, so doubling
+                // it advances the base by one full radix window.
+                window_base = multiple.double();
             }
         }
-        let mut points = vec![C::identity(); projective.len()];
-        C::Curve::batch_normalize(&projective, &mut points);
+    }
 
-        let probe = C::Scalar::from(BLIND_BYTE_ORDER_PROBE);
+    fn normalized_base(base: C, windows: usize, result_capacity: usize) -> Vec<C> {
+        let points_per_base = windows
+            .checked_mul(FIXED_BASE_WINDOW_MAGNITUDES)
+            .expect("fixed-base table length fits in usize");
+        let mut projective = Vec::with_capacity(points_per_base);
+        Self::extend_projective_points(base, windows, &mut projective);
+
+        let mut points = Vec::with_capacity(result_capacity);
+        points.resize(points_per_base, C::identity());
+        C::Curve::batch_normalize(&projective, &mut points);
+        points
+    }
+
+    fn new(w: C, u: C) -> Self {
+        let bases = [w, u];
+        let scalar_bits = C::Scalar::NUM_BITS as usize;
+        let windows = scalar_bits / FIXED_BASE_WINDOW_BITS + 1;
+        let points_per_base = windows
+            .checked_mul(FIXED_BASE_WINDOW_MAGNITUDES)
+            .expect("fixed-base table length fits in usize");
+        let capacity = bases
+            .len()
+            .checked_mul(points_per_base)
+            .expect("fixed-base pair table length fits in usize");
+        // Keep one batch inversion on a single worker. With multiple workers,
+        // the two bases can be constructed and normalized independently.
+        let points = if crate::multicore::current_num_threads() == 1 {
+            let mut projective = Vec::with_capacity(capacity);
+            for &base in &bases {
+                Self::extend_projective_points(base, windows, &mut projective);
+            }
+            let mut points = vec![C::identity(); projective.len()];
+            C::Curve::batch_normalize(&projective, &mut points);
+            points
+        } else {
+            // Reserve the final pair capacity in the `w` half so appending the
+            // independently normalized `u` half needs no reallocation or copy.
+            let (mut points, mut u_points) = crate::multicore::join(
+                || Self::normalized_base(w, windows, capacity),
+                || Self::normalized_base(u, windows, points_per_base),
+            );
+            points.append(&mut u_points);
+            points
+        };
+
+        let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
         let probe_repr = probe.to_repr();
         let probe_bytes = probe_repr.as_ref();
-        let little = Self::decode(probe_bytes.iter().rev().copied()) == probe;
-        let big = Self::decode(probe_bytes.iter().copied()) == probe;
+        let little =
+            crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().rev().copied()) == probe;
+        let big = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().copied()) == probe;
         let byte_order = match (little, big) {
-            (true, false) => BlindScalarByteOrder::LittleEndian,
-            (false, true) => BlindScalarByteOrder::BigEndian,
-            _ => BlindScalarByteOrder::Unsupported,
+            (true, false) => ScalarByteOrder::LittleEndian,
+            (false, true) => ScalarByteOrder::BigEndian,
+            _ => ScalarByteOrder::Unsupported,
         };
 
         Self {
-            base,
+            bases,
             points,
+            scalar_bits,
             windows,
             byte_order,
         }
     }
 
-    fn decode(bytes: impl Iterator<Item = u8>) -> C::Scalar {
-        let radix = C::Scalar::from(1u64 << BLIND_WINDOW_BITS);
-        bytes.fold(C::Scalar::ZERO, |acc, byte| {
-            acc * radix + C::Scalar::from(u64::from(byte))
-        })
-    }
-
-    /// Multiplies the cached base by `scalar`.
+    /// Multiplies one cached base by `scalar`.
     ///
     /// This is variable-time in `scalar`: it skips zero digits and indexes the
     /// table by each nonzero digit. The prover's commitment MSMs already accept
     /// variable-time evaluation of their secret inputs.
-    fn multiply(&self, scalar: C::Scalar) -> C::Curve {
+    fn multiply(&self, base: usize, scalar: C::Scalar) -> C::Curve {
+        assert!(base < self.bases.len());
         let repr = scalar.to_repr();
         let bytes = repr.as_ref();
-        if bytes.len() != self.windows {
-            return C::Curve::from(self.base) * scalar;
+        if !self.scalar_repr_is_supported(scalar, bytes) {
+            return C::Curve::from(self.bases[base]) * scalar;
+        }
+
+        let mut acc = C::Curve::identity();
+        for window in 0..self.windows {
+            self.accumulate_digit(&mut acc, base, bytes, window);
+        }
+        acc
+    }
+
+    fn scalar_repr_is_supported(&self, scalar: C::Scalar, bytes: &[u8]) -> bool {
+        let Some(repr_bits) = bytes.len().checked_mul(u8::BITS as usize) else {
+            return false;
+        };
+        if repr_bits < self.scalar_bits
+            || (self.scalar_bits..repr_bits).any(|bit| self.scalar_bit(bytes, bit).unwrap_or(true))
+        {
+            return false;
         }
 
         // [`PrimeField::Repr`] is opaque and has implementation-specific
@@ -395,35 +487,511 @@ impl<C: CurveAffine> BlindTable<C> {
         // multiplication verifies its digits before using the table. An
         // exotic representation safely falls back to native multiplication.
         let little = match self.byte_order {
-            BlindScalarByteOrder::LittleEndian => true,
-            BlindScalarByteOrder::BigEndian => false,
-            BlindScalarByteOrder::Unsupported => {
-                return C::Curve::from(self.base) * scalar;
-            }
+            ScalarByteOrder::LittleEndian => true,
+            ScalarByteOrder::BigEndian => false,
+            ScalarByteOrder::Unsupported => return false,
         };
         let decoded = if little {
-            Self::decode(bytes.iter().rev().copied())
+            crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
         } else {
-            Self::decode(bytes.iter().copied())
+            crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
         };
-        if decoded != scalar {
-            return C::Curve::from(self.base) * scalar;
+        decoded == scalar
+    }
+
+    fn accumulate_digit(&self, acc: &mut C::Curve, base: usize, bytes: &[u8], window: usize) {
+        let points_per_base = self.windows * FIXED_BASE_WINDOW_MAGNITUDES;
+        let (magnitude, negative) = self.signed_digit(bytes, window);
+        if magnitude != 0 {
+            let point = self.points
+                [base * points_per_base + window * FIXED_BASE_WINDOW_MAGNITUDES + magnitude - 1];
+            *acc += if negative { -point } else { point };
+        }
+    }
+
+    fn multiply_blind(&self, scalar: C::Scalar) -> C::Curve {
+        self.multiply(FIXED_BASE_W_INDEX, scalar)
+    }
+
+    fn multiply_ipa(&self, u_scalar: C::Scalar, w_scalar: C::Scalar) -> C::Curve {
+        self.multiply(FIXED_BASE_U_INDEX, u_scalar) + self.multiply(FIXED_BASE_W_INDEX, w_scalar)
+    }
+
+    /// Computes the fixed-base terms for both IPA round points while
+    /// interleaving four independent projective accumulators.
+    fn multiply_ipa_rounds(
+        &self,
+        l_u_scalar: C::Scalar,
+        l_w_scalar: C::Scalar,
+        r_u_scalar: C::Scalar,
+        r_w_scalar: C::Scalar,
+    ) -> (C::Curve, C::Curve) {
+        let scalars = [l_u_scalar, l_w_scalar, r_u_scalar, r_w_scalar];
+        let reprs = scalars.map(|scalar| scalar.to_repr());
+        if scalars
+            .iter()
+            .zip(&reprs)
+            .any(|(&scalar, repr)| !self.scalar_repr_is_supported(scalar, repr.as_ref()))
+        {
+            return (
+                self.multiply_ipa(l_u_scalar, l_w_scalar),
+                self.multiply_ipa(r_u_scalar, r_w_scalar),
+            );
         }
 
-        let mut acc = C::Curve::identity();
-        for (position, &digit) in bytes.iter().enumerate() {
-            if digit == 0 {
-                continue;
+        // The order is U_L, W_L, U_R, W_R. Alternating the independent
+        // accumulators exposes mixed-addition latency to the CPU without
+        // creating four tiny Rayon tasks.
+        let base_indices = [
+            FIXED_BASE_U_INDEX,
+            FIXED_BASE_W_INDEX,
+            FIXED_BASE_U_INDEX,
+            FIXED_BASE_W_INDEX,
+        ];
+        let mut accumulators = [C::Curve::identity(); 4];
+        for window in 0..self.windows {
+            for ((acc, repr), &base) in accumulators.iter_mut().zip(&reprs).zip(&base_indices) {
+                self.accumulate_digit(acc, base, repr.as_ref(), window);
             }
-            let window = if little {
-                position
-            } else {
-                self.windows - position - 1
-            };
-            acc += self.points[window * BLIND_WINDOW_ENTRIES + usize::from(digit) - 1];
         }
-        acc
+
+        (
+            accumulators[0] + accumulators[1],
+            accumulators[2] + accumulators[3],
+        )
     }
+
+    fn scalar_byte(&self, bytes: &[u8], byte_from_edge: usize) -> Option<u8> {
+        let byte = match self.byte_order {
+            ScalarByteOrder::LittleEndian => *bytes.get(byte_from_edge)?,
+            ScalarByteOrder::BigEndian => {
+                *bytes.get(bytes.len().checked_sub(byte_from_edge + 1)?)?
+            }
+            ScalarByteOrder::Unsupported => return None,
+        };
+        Some(byte)
+    }
+
+    fn scalar_bit(&self, bytes: &[u8], bit: usize) -> Option<bool> {
+        let byte = self.scalar_byte(bytes, bit / FIXED_BASE_WINDOW_BITS)?;
+        Some(byte & (1 << (bit % u8::BITS as usize)) != 0)
+    }
+
+    fn signed_digit(&self, bytes: &[u8], window: usize) -> (usize, bool) {
+        let bit_start = window
+            .checked_mul(FIXED_BASE_WINDOW_BITS)
+            .expect("fixed-base window offset fits in usize");
+        let live_bits = self
+            .scalar_bits
+            .saturating_sub(bit_start)
+            .min(FIXED_BASE_WINDOW_BITS);
+        let value = if live_bits == 0 {
+            0
+        } else {
+            // The window width is one byte, so the signed-window payload is a
+            // single aligned load rather than eight individual bit reads.
+            let mask = (1 << live_bits) - 1;
+            usize::from(
+                self.scalar_byte(bytes, window)
+                    .expect("the scalar representation was validated"),
+            ) & mask
+        };
+        let overlap = if bit_start == 0 {
+            0
+        } else {
+            usize::from(
+                self.scalar_byte(bytes, window - 1)
+                    .expect("the scalar representation was validated")
+                    >> (FIXED_BASE_WINDOW_BITS - 1),
+            )
+        };
+        let radix = FIXED_BASE_WINDOW_MAGNITUDES * 2;
+        if value < radix / 2 {
+            (value + overlap, false)
+        } else {
+            let magnitude = radix - value - overlap;
+            (magnitude, magnitude != 0)
+        }
+    }
+}
+
+/// A clone-shared cache for the sparse fixed-base prover commitments.
+#[cfg(feature = "multicore")]
+#[derive(Clone)]
+struct SparseCommitmentCache<C: CurveAffine>(Arc<OnceLock<Arc<SparseCommitmentTable<C>>>>);
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> Default for SparseCommitmentCache<C> {
+    fn default() -> Self {
+        Self(Arc::new(OnceLock::new()))
+    }
+}
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> SparseCommitmentCache<C> {
+    fn initialize(&self, initialize: impl FnOnce() -> SparseCommitmentTable<C>) {
+        self.0.get_or_init(|| Arc::new(initialize()));
+    }
+
+    fn get(&self) -> Option<Arc<SparseCommitmentTable<C>>> {
+        self.0.get().map(Arc::clone)
+    }
+}
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> fmt::Debug for SparseCommitmentCache<C> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("SparseCommitmentCache")
+            .field(&self.0.get().is_some())
+            .finish()
+    }
+}
+
+/// A signed-width-four positioned-window table over the generators needed
+/// by the two sparse prover commitments.
+#[cfg(feature = "multicore")]
+struct SparseCommitmentTable<C: CurveAffine> {
+    points: Vec<C>,
+    windows: usize,
+    bases: usize,
+    byte_order: ScalarByteOrder,
+}
+
+#[cfg(feature = "multicore")]
+#[derive(Clone, Copy)]
+struct SparseAffinePoint<F: Field> {
+    x: F,
+    y: F,
+}
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> SparseCommitmentTable<C> {
+    fn new(bases: &[C]) -> Self {
+        let windows = C::Scalar::NUM_BITS as usize / SPARSE_COMMITMENT_WINDOW_BITS + 1;
+        let mut projective =
+            Vec::with_capacity(bases.len() * windows * SPARSE_COMMITMENT_WINDOW_MAGNITUDES);
+        for &base in bases {
+            let mut window_base = C::Curve::from(base);
+            for window in 0..windows {
+                let mut multiple = window_base;
+                for magnitude in 0..SPARSE_COMMITMENT_WINDOW_MAGNITUDES {
+                    projective.push(multiple);
+                    if magnitude + 1 != SPARSE_COMMITMENT_WINDOW_MAGNITUDES {
+                        multiple += window_base;
+                    }
+                }
+                if window + 1 != windows {
+                    // `multiple` is the maximum signed magnitude, so doubling
+                    // it advances the base by one full radix window.
+                    window_base = multiple.double();
+                }
+            }
+        }
+        let mut points = vec![C::identity(); projective.len()];
+        C::Curve::batch_normalize(&projective, &mut points);
+
+        let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
+        let probe_repr = probe.to_repr();
+        let probe_bytes = probe_repr.as_ref();
+        let little =
+            crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().rev().copied()) == probe;
+        let big = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().copied()) == probe;
+        let byte_order = match (little, big) {
+            (true, false) => ScalarByteOrder::LittleEndian,
+            (false, true) => ScalarByteOrder::BigEndian,
+            _ => ScalarByteOrder::Unsupported,
+        };
+
+        Self {
+            points,
+            windows,
+            bases: bases.len(),
+            byte_order,
+        }
+    }
+
+    fn little_endian(&self) -> Option<bool> {
+        match self.byte_order {
+            ScalarByteOrder::LittleEndian => Some(true),
+            ScalarByteOrder::BigEndian => Some(false),
+            ScalarByteOrder::Unsupported => None,
+        }
+    }
+
+    fn validate_repr(&self, scalar: C::Scalar, bytes: &[u8], little: bool) -> bool {
+        let decoded = if little {
+            crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
+        } else {
+            crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
+        };
+        decoded == scalar
+    }
+
+    fn bit(bytes: &[u8], bit: usize, little: bool) -> usize {
+        let byte = bit / u8::BITS as usize;
+        let byte = if little { byte } else { bytes.len() - byte - 1 };
+        usize::from(bytes[byte] & (1 << (bit % u8::BITS as usize)) != 0)
+    }
+
+    fn byte_from_low_end(bytes: &[u8], index: usize, little: bool) -> Option<u8> {
+        if little {
+            bytes.get(index).copied()
+        } else {
+            bytes.get(bytes.len().checked_sub(index + 1)?).copied()
+        }
+    }
+
+    fn window_value(bytes: &[u8], bit_start: usize, live_bits: usize, little: bool) -> usize {
+        if live_bits == 0 {
+            return 0;
+        }
+        let byte_start = bit_start / u8::BITS as usize;
+        let shift = bit_start % u8::BITS as usize;
+        let byte_count = (shift + live_bits).div_ceil(u8::BITS as usize);
+        let mut packed = 0u32;
+        for offset in 0..byte_count {
+            let byte = Self::byte_from_low_end(bytes, byte_start + offset, little)
+                .expect("the scalar representation has enough bytes");
+            packed |= u32::from(byte) << (offset * u8::BITS as usize);
+        }
+        ((packed >> shift) as usize) & ((1 << live_bits) - 1)
+    }
+
+    fn digit(bytes: &[u8], window: usize, little: bool) -> isize {
+        let bit_start = window * SPARSE_COMMITMENT_WINDOW_BITS;
+        let live_bits = (C::Scalar::NUM_BITS as usize)
+            .saturating_sub(bit_start)
+            .min(SPARSE_COMMITMENT_WINDOW_BITS);
+        let value = Self::window_value(bytes, bit_start, live_bits, little);
+        let carry = if bit_start == 0 {
+            0
+        } else {
+            Self::bit(bytes, bit_start - 1, little)
+        };
+        // The bit below each window is its carry-in, while the window's high
+        // bit is its carry-out. These cancel between adjacent windows and
+        // leave a signed digit no larger than half the radix.
+        let radix = 1 << SPARSE_COMMITMENT_WINDOW_BITS;
+        if value < radix / 2 {
+            (value + carry) as isize
+        } else {
+            -((radix - value - carry) as isize)
+        }
+    }
+
+    fn selected_points(&self, terms: &[(usize, C::Scalar)], little: bool) -> Option<Vec<C>> {
+        let mut selected = Vec::with_capacity(terms.len() * self.windows);
+        for &(base, scalar) in terms {
+            if base >= self.bases {
+                return None;
+            }
+            let repr = scalar.to_repr();
+            let bytes = repr.as_ref();
+            if !self.validate_repr(scalar, bytes, little) {
+                return None;
+            }
+            for window in 0..self.windows {
+                let digit = Self::digit(bytes, window, little);
+                if digit == 0 {
+                    continue;
+                }
+                let point_index = (base * self.windows + window)
+                    * SPARSE_COMMITMENT_WINDOW_MAGNITUDES
+                    + digit.unsigned_abs()
+                    - 1;
+                let point = self.points[point_index];
+                selected.push(if digit < 0 { -point } else { point });
+            }
+        }
+        Some(selected)
+    }
+
+    fn reduce_affine(points: &[C]) -> Option<C::Curve> {
+        if points.is_empty() {
+            return Some(C::Curve::identity());
+        }
+        let mut points = points
+            .iter()
+            .map(|point| {
+                let coordinates: Option<crate::arithmetic::Coordinates<C>> =
+                    Option::from(point.coordinates());
+                coordinates.map(|coordinates| SparseAffinePoint {
+                    x: *coordinates.x(),
+                    y: *coordinates.y(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        while points.len() > 1 {
+            let (pairs, remainder) = points.as_chunks::<2>();
+            let mut denominators = pairs
+                .iter()
+                .map(|[left, right]| right.x - left.x)
+                .collect::<Vec<_>>();
+            if denominators
+                .iter()
+                .any(|denominator| bool::from(denominator.is_zero()))
+            {
+                return None;
+            }
+            denominators.iter_mut().batch_invert();
+
+            let mut next = pairs
+                .iter()
+                .zip(denominators)
+                .map(|([left, right], denominator_inverse)| {
+                    let slope = (right.y - left.y) * denominator_inverse;
+                    let x = slope.square() - left.x - right.x;
+                    let y = slope * (left.x - x) - left.y;
+                    SparseAffinePoint { x, y }
+                })
+                .collect::<Vec<_>>();
+            if let [last] = remainder {
+                next.push(*last);
+            }
+            points = next;
+        }
+
+        Option::from(C::from_xy(points[0].x, points[0].y)).map(C::Curve::from)
+    }
+
+    fn evaluate_projective(&self, terms: &[(usize, C::Scalar)], little: bool) -> Option<C::Curve> {
+        let evaluate_term = |&(base, scalar): &(usize, C::Scalar)| {
+            if base >= self.bases {
+                return None;
+            }
+            let repr = scalar.to_repr();
+            let bytes = repr.as_ref();
+            if !self.validate_repr(scalar, bytes, little) {
+                return None;
+            }
+            let mut accumulators = [C::Curve::identity(); 2];
+            for window in 0..self.windows {
+                let digit = Self::digit(bytes, window, little);
+                if digit == 0 {
+                    continue;
+                }
+                let point_index = (base * self.windows + window)
+                    * SPARSE_COMMITMENT_WINDOW_MAGNITUDES
+                    + digit.unsigned_abs()
+                    - 1;
+                let point = self.points[point_index];
+                accumulators[window % accumulators.len()] += if digit < 0 { -point } else { point };
+            }
+            Some(accumulators[0] + accumulators[1])
+        };
+
+        if crate::multicore::current_num_threads() == 1 {
+            terms
+                .iter()
+                .try_fold(C::Curve::identity(), |mut sum, term| {
+                    sum += evaluate_term(term)?;
+                    Some(sum)
+                })
+        } else {
+            terms
+                .par_iter()
+                .map(evaluate_term)
+                .try_reduce(C::Curve::identity, |mut left, right| {
+                    left += right;
+                    Some(left)
+                })
+        }
+    }
+
+    /// Evaluates the table in variable time. Unsupported scalar
+    /// representations and incomplete affine additions return `None`, so the
+    /// caller can use the generic multiexp.
+    fn evaluate(&self, terms: &[(usize, C::Scalar)]) -> Option<C::Curve> {
+        let little = self.little_endian()?;
+        if terms.len() >= SPARSE_COMMITMENT_AFFINE_REDUCTION_TERMS
+            && crate::multicore::current_num_threads() == 1
+            && let Some(selected) = self.selected_points(terms, little)
+            && let Some(sum) = Self::reduce_affine(&selected)
+        {
+            return Some(sum);
+        }
+        self.evaluate_projective(terms, little)
+    }
+}
+
+#[cfg(feature = "batch")]
+#[derive(Clone)]
+struct PreparedInstanceCache<C: CurveAffine>(Arc<OnceLock<Arc<PreparedInstanceTable<C>>>>);
+
+#[cfg(feature = "batch")]
+impl<C: CurveAffine> Default for PreparedInstanceCache<C> {
+    fn default() -> Self {
+        Self(Arc::new(OnceLock::new()))
+    }
+}
+
+#[cfg(feature = "batch")]
+impl<C: CurveAffine> PreparedInstanceCache<C> {
+    fn initialize(&self, initialize: impl FnOnce() -> PreparedInstanceTable<C>) -> bool {
+        self.0.get_or_init(|| Arc::new(initialize()));
+        true
+    }
+
+    fn get(&self) -> Option<Arc<PreparedInstanceTable<C>>> {
+        self.0.get().map(Arc::clone)
+    }
+}
+
+#[cfg(feature = "batch")]
+fn extend_prepared_instance_base_projective<C: CurveAffine>(
+    projective: &mut Vec<C::Curve>,
+    base: C,
+    windows: usize,
+) {
+    let mut window_base = C::Curve::from(base);
+    for _ in 0..windows {
+        let mut multiple = window_base;
+        for _ in 0..PREPARED_INSTANCE_WINDOW_MAGNITUDES {
+            projective.push(multiple);
+            multiple += window_base;
+        }
+        for _ in 0..PREPARED_INSTANCE_WINDOW_BITS {
+            window_base = window_base.double();
+        }
+    }
+}
+
+#[cfg(feature = "batch")]
+fn prepared_instance_points<C: CurveAffine>(bases: &[C], windows: usize) -> Vec<C> {
+    let points_per_base = windows
+        .checked_mul(PREPARED_INSTANCE_WINDOW_MAGNITUDES)
+        .expect("prepared instance base table length fits in usize");
+    let capacity = bases
+        .len()
+        .checked_mul(points_per_base)
+        .expect("prepared instance table length fits in usize");
+
+    // Apple silicon benefits from running the seven independent inversions in
+    // parallel. Other architectures retain one global inversion; in
+    // particular, separate inversions regressed the measured x86-64 build.
+    #[cfg(all(feature = "multicore", target_arch = "aarch64", target_os = "macos"))]
+    if crate::multicore::current_num_threads() > 1 {
+        let mut points = vec![C::identity(); capacity];
+        points
+            .par_chunks_mut(points_per_base)
+            .zip(bases.par_iter())
+            .for_each(|(points, &base)| {
+                let mut projective = Vec::with_capacity(points_per_base);
+                extend_prepared_instance_base_projective(&mut projective, base, windows);
+                C::Curve::batch_normalize(&projective, points);
+            });
+        return points;
+    }
+
+    let mut projective = Vec::with_capacity(capacity);
+    for &base in bases {
+        extend_prepared_instance_base_projective(&mut projective, base, windows);
+    }
+    let mut points = vec![C::identity(); capacity];
+    C::Curve::batch_normalize(&projective, &mut points);
+    points
 }
 
 #[cfg(feature = "batch")]
@@ -496,6 +1064,53 @@ impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
             C::Curve::batch_normalize(&projective, &mut affine);
             affine
         })
+    }
+
+    fn prepare_instance_table(&self) -> bool {
+        if self.g_lagrange.len() < crate::PREPARED_INSTANCE_ROWS {
+            return false;
+        }
+
+        self.prepared_instance_cache.initialize(|| {
+            let scalar_bits = C::Scalar::NUM_BITS as usize;
+            let windows = crate::prepared_instance_window_count(scalar_bits);
+            let points =
+                prepared_instance_points(&self.g_lagrange[..PREPARED_INSTANCE_DENSE_ROWS], windows);
+
+            let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
+            let probe_repr = probe.to_repr();
+            let probe_bytes = probe_repr.as_ref();
+            let little =
+                crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().rev().copied()) == probe;
+            let big = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().copied()) == probe;
+            let byte_order = match (little, big) {
+                (true, false) => InstanceScalarByteOrder::LittleEndian,
+                (false, true) => InstanceScalarByteOrder::BigEndian,
+                _ => InstanceScalarByteOrder::Unsupported,
+            };
+
+            let mut offsets = [C::Curve::identity(); PREPARED_INSTANCE_OFFSETS];
+            for (mask, offset) in offsets.iter_mut().enumerate() {
+                *offset = C::Curve::from(self.w);
+                for flag in 0..PREPARED_INSTANCE_BOOLEAN_ROWS {
+                    if mask & (1 << flag) != 0 {
+                        *offset += self.g_lagrange[PREPARED_INSTANCE_DENSE_ROWS + flag];
+                    }
+                }
+            }
+
+            PreparedInstanceTable {
+                points,
+                scalar_bits,
+                windows,
+                byte_order,
+                offsets,
+            }
+        })
+    }
+
+    fn prepared_instance_table(&self) -> Option<Arc<PreparedInstanceTable<C>>> {
+        self.prepared_instance_cache.get()
     }
 }
 
@@ -582,18 +1197,26 @@ impl<C: CurveAffine> Params<C> {
             u,
             #[cfg(feature = "batch")]
             instance_window_cache: InstanceWindowCache::default(),
+            #[cfg(feature = "batch")]
+            prepared_instance_cache: PreparedInstanceCache::default(),
             #[cfg(feature = "orbits")]
             zero_check_cache: ZeroCheckCache::default(),
             #[cfg(all(feature = "multicore", not(feature = "orbits")))]
             commitment_tables_cache: CommitmentTablesCache::default(),
             #[cfg(feature = "orbits")]
             lagrange_table_cache: ZeroCheckCache::default(),
+            #[cfg(feature = "multicore")]
+            sparse_commitment_cache: SparseCommitmentCache::default(),
         }
     }
 
     /// This computes a commitment to a polynomial described by the provided
     /// slice of coefficients. The commitment will be blinded by the blinding
     /// factor `r`.
+    ///
+    /// # Timing
+    ///
+    /// This method is variable-time with respect to `poly` and `r`.
     pub fn commit(&self, poly: &Polynomial<C::Scalar, Coeff>, r: Blind<C::Scalar>) -> C::Curve {
         // A prepared table over [g..., w, u] (built by
         // `Params::prepare_commitments`, or shared from
@@ -615,17 +1238,17 @@ impl<C: CurveAffine> Params<C> {
         }
 
         // Without `orbits`, the prepared table covers exactly `g`; a small
-        // fixed-window table handles the blind without a one-term MSM.
+        // fixed-window pair handles the blind without a one-term MSM.
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
-            && let (Some(prepared), Some(blind_table)) =
-                (self.commitment_table(), self.blind_table())
+            && let (Some(prepared), Some(fixed_bases)) =
+                (self.commitment_table(), self.fixed_base_table())
         {
             let n = self.n as usize;
             if prepared.terms() == n && poly.len() == n {
                 let (commitment, blind) = crate::multicore::join(
                     || prepared.multiexp_with_terms_vartime(poly, &[]),
-                    || blind_table.multiply(r.0),
+                    || fixed_bases.multiply_blind(r.0),
                 );
                 return commitment + blind;
             }
@@ -646,6 +1269,10 @@ impl<C: CurveAffine> Params<C> {
     /// This commits to a polynomial using its evaluations over the $2^k$ size
     /// evaluation domain. The commitment will be blinded by the blinding factor
     /// `r`.
+    ///
+    /// # Timing
+    ///
+    /// This method is variable-time with respect to `poly` and `r`.
     pub fn commit_lagrange(
         &self,
         poly: &Polynomial<C::Scalar, LagrangeCoeff>,
@@ -670,13 +1297,14 @@ impl<C: CurveAffine> Params<C> {
         // The exact-`n` Lagrange table mirrors the coefficient route above.
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         if crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k)
-            && let (Some(prepared), Some(blind_table)) = (self.lagrange_table(), self.blind_table())
+            && let (Some(prepared), Some(fixed_bases)) =
+                (self.lagrange_table(), self.fixed_base_table())
         {
             let n = self.n as usize;
             if prepared.terms() == n && poly.len() == n {
                 let (commitment, blind) = crate::multicore::join(
                     || prepared.multiexp_with_terms_vartime(poly, &[]),
-                    || blind_table.multiply(r.0),
+                    || fixed_bases.multiply_blind(r.0),
                 );
                 return commitment + blind;
             }
@@ -748,12 +1376,16 @@ impl<C: CurveAffine> Params<C> {
             u,
             #[cfg(feature = "batch")]
             instance_window_cache: InstanceWindowCache::default(),
+            #[cfg(feature = "batch")]
+            prepared_instance_cache: PreparedInstanceCache::default(),
             #[cfg(feature = "orbits")]
             zero_check_cache: ZeroCheckCache::default(),
             #[cfg(all(feature = "multicore", not(feature = "orbits")))]
             commitment_tables_cache: CommitmentTablesCache::default(),
             #[cfg(feature = "orbits")]
             lagrange_table_cache: ZeroCheckCache::default(),
+            #[cfg(feature = "multicore")]
+            sparse_commitment_cache: SparseCommitmentCache::default(),
         })
     }
 
@@ -814,8 +1446,53 @@ impl<C: CurveAffine> Params<C> {
     }
 
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-    fn blind_table(&self) -> Option<Arc<BlindTable<C>>> {
-        self.commitment_tables_cache.blind()
+    fn fixed_base_table(&self) -> Option<Arc<FixedBasePairTable<C>>> {
+        self.commitment_tables_cache.fixed_bases()
+    }
+
+    /// Tries to evaluate both MSMs in the first IPA round using the coefficient
+    /// table retained by [`Self::prepare_commitments`].
+    fn try_prepared_first_ipa_round(
+        &self,
+        p_hi: &[C::Scalar],
+        p_lo: &[C::Scalar],
+        l_u: C::Scalar,
+        l_w: C::Scalar,
+        r_u: C::Scalar,
+        r_w: C::Scalar,
+    ) -> Option<(C::Curve, C::Curve)> {
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        {
+            let half = self.n as usize / 2;
+            assert_eq!(p_hi.len(), half, "one scalar per lower-half base");
+            assert_eq!(p_lo.len(), half, "one scalar per upper-half base");
+            if crate::multicore::current_num_threads() > prepared_commitment_max_threads(self.k) {
+                return None;
+            }
+
+            let prepared = self.commitment_table()?;
+            if prepared.terms() != self.n as usize {
+                return None;
+            }
+            let fixed_bases = self.fixed_base_table()?;
+            let zeroes = vec![C::Scalar::ZERO; half];
+            let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
+                || {
+                    crate::multicore::join(
+                        || prepared.multiexp_with_prefix_and_suffix(p_hi, &zeroes, &[]),
+                        || prepared.multiexp_with_prefix_and_suffix(&zeroes, p_lo, &[]),
+                    )
+                },
+                || fixed_bases.multiply_ipa_rounds(l_u, l_w, r_u, r_w),
+            );
+            return Some((l_body + l_auxiliary, r_body + r_auxiliary));
+        }
+
+        #[cfg(any(not(feature = "multicore"), feature = "orbits"))]
+        {
+            let _ = (p_hi, p_lo, l_u, l_w, r_u, r_w);
+            None
+        }
     }
 
     /// The cached prepared zero-check, if [`Self::prepare_zero_checks`]
@@ -829,26 +1506,46 @@ impl<C: CurveAffine> Params<C> {
     /// commitments. With `orbits`, the coefficient table over `[g..., w, u]`
     /// is shared with [`Self::prepare_zero_checks`], and the Lagrange table
     /// covers `[g_lagrange..., w, u]`. Without `orbits`, the two tables cover
-    /// exactly `g` and `g_lagrange`, plus a fixed-window table over `w`. This
-    /// evaluates each blind without a one-term MSM while keeping the polynomial
-    /// slice borrowed.
+    /// exactly `g` and `g_lagrange`, plus signed fixed-window tables over `w`
+    /// and `u`. At Orchard's `k = 11`, this also ensures that the sparse
+    /// masking-commitment table is present. With `batch`, it also ensures that
+    /// the small public-instance table normally built by proving-key generation
+    /// is present. The fixed pair evaluates each blind without a one-term MSM
+    /// and handles the fixed `u` and `w` terms in every IPA round while keeping
+    /// the polynomial slices borrowed.
     ///
-    /// Both commit methods use the tables on pools of at most eight effective
-    /// threads. Orchard-sized (`k = 11`) tables on AArch64 macOS extend that
-    /// bound to ten, where end-to-end proving stays ahead on the benchmarked
-    /// M4 system. Wider pools and unmeasured SRS shapes keep the planned
-    /// multiexp. Measurements covered full-width and witness-like (boolean,
-    /// byte, zero-padded) coefficient distributions.
+    /// Without `orbits`, a multi-worker call constructs the independent
+    /// coefficient-basis, Lagrange-basis, and fixed-base pair tables
+    /// concurrently. A one-worker call keeps the sequential construction and
+    /// its early-decline behavior.
+    ///
+    /// Both commit methods use the large tables on pools of at most eight
+    /// effective threads. Orchard-sized (`k = 11`) tables on `AArch64` macOS
+    /// extend that bound to ten, where end-to-end proving stays ahead on the
+    /// benchmarked M4 system. Wider pools and unmeasured SRS shapes keep the
+    /// planned commitment multiexp. Without `orbits`, the first IPA round also
+    /// reuses the coefficient table. Its two generator MSMs each have one
+    /// active half and one zero half: the backend still recodes and scans all
+    /// scalar slots, but zero scalars do not fetch prepared points or populate
+    /// buckets. Later IPA rounds keep their normal planner, while the small
+    /// fixed pair handles `u` and `w` in every round. Measurements covered
+    /// full-width and witness-like (boolean, byte, zero-padded) coefficient
+    /// distributions.
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
-    /// fixed-window table adds approximately 0.5 MiB for a 32-byte scalar
-    /// representation. Concurrent and repeat calls share their initialization
-    /// attempts, including a backend decline. Without `orbits`, one atomic
-    /// initialization prevents any table from being exposed until all three
-    /// have built. The caches are shared with all clones and never serialized,
-    /// so call again after [`Params::read`]. Returns whether preparation is
-    /// armed. Without `orbits`, this also requires the default `multicore`
-    /// feature.
+    /// signed-width-eight pair adds exactly 512 KiB of affine-point payload for
+    /// 255-bit Pasta scalars. The signed-width-four sparse commitment table
+    /// adds 416 KiB, and the signed-width-four public-instance table adds about
+    /// 224 KiB on Pasta.
+    ///
+    /// Concurrent and repeat calls share their initialization attempts,
+    /// including a backend decline. Without `orbits`, one atomic initialization
+    /// prevents any large table from being exposed until all three have built.
+    /// The small sparse table has a separate once-only cache because key
+    /// generation can build it concurrently with unrelated permutation work.
+    /// The caches are shared with all clones and never serialized, so call
+    /// again after [`Params::read`]. Returns whether preparation is armed.
+    /// Without `orbits`, this also requires the default `multicore` feature.
     ///
     /// Call this once before entering concurrent Rayon work that uses these
     /// params. Concurrent callers outside that pool safely wait for and share
@@ -862,23 +1559,57 @@ impl<C: CurveAffine> Params<C> {
                 // decline means the Lagrange build would decline too.
                 return false;
             }
-            self.lagrange_table_cache.initialize(|| {
+            let prepared = self.lagrange_table_cache.initialize(|| {
                 let mut bases =
                     Vec::with_capacity(self.g_lagrange.len() + PREPARED_COMMITMENT_EXTRA_BASES);
                 bases.extend_from_slice(&self.g_lagrange);
                 bases.push(self.w);
                 bases.push(self.u);
                 C::CurveExt::try_prepare_zero_check(&bases)
-            })
+            });
+            #[cfg(feature = "batch")]
+            if prepared {
+                self.prepare_instance_table();
+            }
+            #[cfg(feature = "multicore")]
+            if prepared {
+                let _ = self.prepare_sparse_commitment();
+            }
+            prepared
         }
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         {
-            self.commitment_tables_cache.initialize(|| {
-                let coefficient = C::CurveExt::try_prepare_zero_check(&self.g)?;
-                let lagrange = C::CurveExt::try_prepare_zero_check(&self.g_lagrange)?;
-                let blind = BlindTable::new(self.w);
-                Some((coefficient, lagrange, blind))
-            })
+            let prepared = self.commitment_tables_cache.initialize(|| {
+                let (coefficient, lagrange, fixed_bases) =
+                    if crate::multicore::current_num_threads() == 1 {
+                        let coefficient = C::CurveExt::try_prepare_zero_check(&self.g)?;
+                        let lagrange = C::CurveExt::try_prepare_zero_check(&self.g_lagrange)?;
+                        let fixed_bases = FixedBasePairTable::new(self.w, self.u);
+                        (coefficient, lagrange, fixed_bases)
+                    } else {
+                        let ((coefficient, lagrange), fixed_bases) = crate::multicore::join(
+                            || {
+                                crate::multicore::join(
+                                    || C::CurveExt::try_prepare_zero_check(&self.g),
+                                    || C::CurveExt::try_prepare_zero_check(&self.g_lagrange),
+                                )
+                            },
+                            || FixedBasePairTable::new(self.w, self.u),
+                        );
+                        let coefficient = coefficient?;
+                        let lagrange = lagrange?;
+                        (coefficient, lagrange, fixed_bases)
+                    };
+                Some((coefficient, lagrange, fixed_bases))
+            });
+            #[cfg(feature = "batch")]
+            if prepared {
+                self.prepare_instance_table();
+            }
+            if prepared {
+                let _ = self.prepare_sparse_commitment();
+            }
+            prepared
         }
         #[cfg(all(not(feature = "multicore"), not(feature = "orbits")))]
         {
@@ -898,6 +1629,58 @@ impl<C: CurveAffine> Params<C> {
         {
             self.commitment_tables_cache.lagrange()
         }
+    }
+}
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> PreparedSparseCommitments<C> for Params<C> {
+    fn prepare_sparse_commitment(&self) -> bool {
+        if self.k != PREPARED_SPARSE_COMMITMENT_K {
+            return false;
+        }
+        let mut bases = Vec::with_capacity(self.k as usize + 2);
+        let Some(&constant) = self.g.first() else {
+            return false;
+        };
+        bases.push(constant);
+        for exponent in 0..self.k {
+            let Some(index) = 1usize.checked_shl(exponent) else {
+                return false;
+            };
+            let Some(&base) = self.g.get(index) else {
+                return false;
+            };
+            bases.push(base);
+        }
+        bases.push(self.w);
+        self.sparse_commitment_cache
+            .initialize(|| SparseCommitmentTable::new(&bases));
+        true
+    }
+
+    fn commit_sparse(
+        &self,
+        coefficients: &[(usize, C::Scalar)],
+        blind: Blind<C::Scalar>,
+    ) -> Option<C::Curve> {
+        let table = self.sparse_commitment_cache.get()?;
+        let mut terms = Vec::with_capacity(coefficients.len() + 1);
+        for &(index, coefficient) in coefficients {
+            let table_index = if index == 0 {
+                0
+            } else if index.is_power_of_two() {
+                let exponent = index.trailing_zeros();
+                if exponent >= self.k {
+                    return None;
+                }
+                exponent as usize + 1
+            } else {
+                return None;
+            };
+            terms.push((table_index, coefficient));
+        }
+        terms.push((self.k as usize + 1, blind.0));
+        table.evaluate(&terms)
     }
 }
 
@@ -1009,6 +1792,15 @@ fn instance_window_cache_is_shared_by_clones_only() {
     let debug_before = format!("{params:?}");
     let mut serialized_before = vec![];
     params.write(&mut serialized_before).unwrap();
+    assert!(params.prepared_instance_table().is_none());
+    assert!(params.prepare_instance_table());
+    let prepared = params.prepared_instance_table().unwrap();
+    let expected_prepared_points = PREPARED_INSTANCE_DENSE_ROWS
+        * crate::prepared_instance_window_count(
+            <EqAffine as group::CurveAffine>::Scalar::NUM_BITS as usize,
+        )
+        * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
+    assert_eq!(prepared.points.len(), expected_prepared_points);
 
     let tables = std::thread::scope(|scope| {
         (0..4)
@@ -1035,6 +1827,10 @@ fn instance_window_cache_is_shared_by_clones_only() {
     let cloned = params.as_ref().clone();
     let cloned_table = cloned.instance_window_table(BASE_COUNT);
     assert!(Arc::ptr_eq(&tables[0], &cloned_table));
+    assert!(Arc::ptr_eq(
+        &prepared,
+        &cloned.prepared_instance_table().unwrap()
+    ));
     assert_eq!(format!("{params:?}"), debug_before);
 
     let mut serialized_after = vec![];
@@ -1042,6 +1838,7 @@ fn instance_window_cache_is_shared_by_clones_only() {
     assert_eq!(serialized_after, serialized_before);
 
     let deserialized = Params::<EqAffine>::read(&mut serialized_before.as_slice()).unwrap();
+    assert!(deserialized.prepared_instance_table().is_none());
     let smaller_table = params.instance_window_table(BASE_COUNT - 1);
     assert!(Arc::ptr_eq(&tables[0], &smaller_table));
 
@@ -1052,6 +1849,57 @@ fn instance_window_cache_is_shared_by_clones_only() {
 
     let deserialized_table = deserialized.instance_window_table(BASE_COUNT);
     assert!(!Arc::ptr_eq(&larger_table, &deserialized_table));
+}
+
+#[cfg(all(feature = "batch", feature = "multicore"))]
+#[test]
+fn prepared_instance_table_is_stable_across_worker_counts() {
+    const K: u32 = 4;
+
+    use crate::pasta::{Eq, EqAffine};
+
+    let build = |num_threads| {
+        let params = Params::<EqAffine>::new(K);
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("test pool must build")
+            .install(|| {
+                assert_eq!(crate::multicore::current_num_threads(), num_threads);
+                assert!(params.prepare_instance_table());
+            });
+        (params.prepared_instance_table().unwrap(), params)
+    };
+
+    let (serial, params) = build(1);
+    let (parallel, _) = build(PREPARED_INSTANCE_DENSE_ROWS);
+    assert_eq!(parallel.points, serial.points);
+    assert_eq!(parallel.offsets, serial.offsets);
+
+    let points_per_base = serial.windows * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
+    for (base_index, &base) in params.g_lagrange[..PREPARED_INSTANCE_DENSE_ROWS]
+        .iter()
+        .enumerate()
+    {
+        let mut window_base = Eq::from(base);
+        for window in 0..serial.windows {
+            let start = base_index * points_per_base + window * PREPARED_INSTANCE_WINDOW_MAGNITUDES;
+            assert_eq!(serial.points[start], window_base.to_affine());
+
+            let mut last_multiple = window_base;
+            for _ in 1..PREPARED_INSTANCE_WINDOW_MAGNITUDES {
+                last_multiple += window_base;
+            }
+            assert_eq!(
+                serial.points[start + PREPARED_INSTANCE_WINDOW_MAGNITUDES - 1],
+                last_multiple.to_affine(),
+            );
+
+            for _ in 0..PREPARED_INSTANCE_WINDOW_BITS {
+                window_base = window_base.double();
+            }
+        }
+    }
 }
 
 #[cfg(feature = "orbits")]
@@ -1187,6 +2035,7 @@ fn commitment_tables_cache_initializes_once_across_clones() {
     let coefficient_bases = Arc::new(params.g.clone());
     let lagrange_bases = Arc::new(params.g_lagrange.clone());
     let blind_base = params.w;
+    let ipa_u_base = params.u;
     let cache = params.commitment_tables_cache.clone();
     let attempts = AtomicUsize::new(0);
     let start = Barrier::new(CALLERS);
@@ -1205,13 +2054,13 @@ fn commitment_tables_cache_initializes_once_across_clones() {
                         attempts.fetch_add(1, Ordering::Relaxed);
                         let coefficient = Eq::try_prepare_zero_check(coefficient_bases.as_slice())?;
                         let lagrange = Eq::try_prepare_zero_check(lagrange_bases.as_slice())?;
-                        let blind = BlindTable::new(blind_base);
-                        Some((coefficient, lagrange, blind))
+                        let fixed_bases = FixedBasePairTable::new(blind_base, ipa_u_base);
+                        Some((coefficient, lagrange, fixed_bases))
                     }));
                     (
                         cache.coefficient().expect("coefficient table is armed"),
                         cache.lagrange().expect("Lagrange table is armed"),
-                        cache.blind().expect("blind table is armed"),
+                        cache.fixed_bases().expect("fixed-base table is armed"),
                     )
                 })
             })
@@ -1222,11 +2071,16 @@ fn commitment_tables_cache_initializes_once_across_clones() {
     });
 
     assert_eq!(attempts.load(Ordering::Relaxed), 1);
-    assert!(tables.iter().skip(1).all(|(coefficient, lagrange, blind)| {
-        Arc::ptr_eq(&tables[0].0, coefficient)
-            && Arc::ptr_eq(&tables[0].1, lagrange)
-            && Arc::ptr_eq(&tables[0].2, blind)
-    }));
+    assert!(
+        tables
+            .iter()
+            .skip(1)
+            .all(|(coefficient, lagrange, fixed_bases)| {
+                Arc::ptr_eq(&tables[0].0, coefficient)
+                    && Arc::ptr_eq(&tables[0].1, lagrange)
+                    && Arc::ptr_eq(&tables[0].2, fixed_bases)
+            })
+    );
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -1254,7 +2108,7 @@ fn commitment_tables_cache_memoizes_decline_and_retries_panic() {
     assert_eq!(attempts.load(Ordering::Relaxed), 1);
     assert!(declined.coefficient().is_none());
     assert!(declined.lagrange().is_none());
-    assert!(declined.blind().is_none());
+    assert!(declined.fixed_bases().is_none());
 
     let params = Params::<EqAffine>::new(4);
     let panicked = CommitmentTablesCache::<EqAffine>::default();
@@ -1263,12 +2117,12 @@ fn commitment_tables_cache_memoizes_decline_and_retries_panic() {
     assert!(panicked.initialize(|| {
         let coefficient = Eq::try_prepare_zero_check(&params.g)?;
         let lagrange = Eq::try_prepare_zero_check(&params.g_lagrange)?;
-        let blind = BlindTable::new(params.w);
-        Some((coefficient, lagrange, blind))
+        let fixed_bases = FixedBasePairTable::new(params.w, params.u);
+        Some((coefficient, lagrange, fixed_bases))
     }));
     assert!(panicked.coefficient().is_some());
     assert!(panicked.lagrange().is_some());
-    assert!(panicked.blind().is_some());
+    assert!(panicked.fixed_bases().is_some());
 }
 
 /// Wrapper type around a blinding factor.
@@ -1323,17 +2177,72 @@ impl<F: Field> MulAssign<F> for Blind<F> {
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
-fn blind_table_matches_native_multiplication() {
+fn fixed_base_pair_table_is_stable_across_worker_counts() {
+    use crate::pasta::EqAffine;
+
+    let params = Params::<EqAffine>::new(3);
+    let build = |workers| {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .expect("test pool must build")
+            .install(|| FixedBasePairTable::new(params.w, params.u))
+    };
+    let single = build(1);
+    for workers in [2, 6, 10] {
+        let parallel = build(workers);
+        assert_eq!(parallel.bases, single.bases);
+        assert_eq!(parallel.points, single.points);
+        assert_eq!(parallel.scalar_bits, single.scalar_bits);
+        assert_eq!(parallel.windows, single.windows);
+        assert_eq!(
+            std::mem::discriminant(&parallel.byte_order),
+            std::mem::discriminant(&single.byte_order),
+        );
+    }
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn fixed_base_pair_table_matches_native_multiplication() {
     use rand::{SeedableRng, rngs::StdRng};
 
     use crate::pasta::{EpAffine, EqAffine};
 
-    fn exercise<C: CurveAffine>(base: C) {
-        let mut table = BlindTable::new(base);
+    fn assert_ipa_rounds<C: CurveAffine>(
+        table: &FixedBasePairTable<C>,
+        bases: [C; FIXED_BASE_COUNT],
+        scalars: [C::Scalar; 4],
+        case: &str,
+    ) {
+        let [l_u, l_w, r_u, r_w] = scalars;
+        let (l, r) = table.multiply_ipa_rounds(l_u, l_w, r_u, r_w);
+        assert_eq!(
+            l,
+            C::Curve::from(bases[FIXED_BASE_U_INDEX]) * l_u
+                + C::Curve::from(bases[FIXED_BASE_W_INDEX]) * l_w,
+            "left IPA fixed-base result must preserve {case} scalar ordering",
+        );
+        assert_eq!(
+            r,
+            C::Curve::from(bases[FIXED_BASE_U_INDEX]) * r_u
+                + C::Curve::from(bases[FIXED_BASE_W_INDEX]) * r_w,
+            "right IPA fixed-base result must preserve {case} scalar ordering",
+        );
+    }
+
+    fn exercise<C: CurveAffine>(bases: [C; FIXED_BASE_COUNT]) {
+        let mut table =
+            FixedBasePairTable::new(bases[FIXED_BASE_W_INDEX], bases[FIXED_BASE_U_INDEX]);
+        assert_eq!(table.bases, bases);
+        assert_eq!(
+            table.points.len(),
+            FIXED_BASE_COUNT * table.windows * FIXED_BASE_WINDOW_MAGNITUDES,
+        );
         let little = match table.byte_order {
-            BlindScalarByteOrder::LittleEndian => true,
-            BlindScalarByteOrder::BigEndian => false,
-            BlindScalarByteOrder::Unsupported => {
+            ScalarByteOrder::LittleEndian => true,
+            ScalarByteOrder::BigEndian => false,
+            ScalarByteOrder::Unsupported => {
                 panic!("Pasta scalar representations must have a supported byte order")
             }
         };
@@ -1342,9 +2251,16 @@ fn blind_table_matches_native_multiplication() {
             C::Scalar::ZERO,
             C::Scalar::ONE,
             -C::Scalar::ONE,
-            C::Scalar::from(BLIND_BYTE_ORDER_PROBE),
+            C::Scalar::from(SCALAR_BYTE_ORDER_PROBE),
+            C::Scalar::from(127),
+            C::Scalar::from(128),
+            C::Scalar::from(129),
+            C::Scalar::from(0x7f00),
+            C::Scalar::from(0x7f80),
+            C::Scalar::from(0x8000),
+            C::Scalar::from(0x8080),
         ];
-        for exponent in [8, 16, 24, 32, 64, 128, 248] {
+        for exponent in [8, 16, 24, 32, 64, 128, 248, 254] {
             let radix_power = C::Scalar::from(2).pow_vartime([exponent]);
             scalars.extend([
                 radix_power - C::Scalar::ONE,
@@ -1354,60 +2270,118 @@ fn blind_table_matches_native_multiplication() {
         }
         scalars.extend((0..16).map(|_| C::Scalar::random(&mut rng)));
 
-        for scalar in scalars {
-            let repr = scalar.to_repr();
-            let bytes = repr.as_ref();
-            let decoded = if little {
-                BlindTable::<C>::decode(bytes.iter().rev().copied())
-            } else {
-                BlindTable::<C>::decode(bytes.iter().copied())
-            };
-            assert_eq!(decoded, scalar, "Pasta scalar digits must decode");
-            assert_eq!(
-                table.multiply(scalar),
-                C::Curve::from(base) * scalar,
-                "fixed blind multiplication must match native multiplication"
-            );
+        for (base_index, base) in bases.into_iter().enumerate() {
+            for &scalar in &scalars {
+                let repr = scalar.to_repr();
+                let bytes = repr.as_ref();
+                let decoded = if little {
+                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
+                } else {
+                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
+                };
+                assert_eq!(decoded, scalar, "Pasta scalar digits must decode");
+                assert_eq!(
+                    table.multiply(base_index, scalar),
+                    C::Curve::from(base) * scalar,
+                    "fixed-base multiplication must match native multiplication"
+                );
+            }
         }
 
-        let fallback_scalar = C::Scalar::from(BLIND_BYTE_ORDER_PROBE);
-        table.byte_order = BlindScalarByteOrder::Unsupported;
-        assert_eq!(
-            table.multiply(fallback_scalar),
-            C::Curve::from(base) * fallback_scalar,
-            "an unsupported representation must use native multiplication"
-        );
+        let top_bit = C::Scalar::from(2)
+            .pow_vartime([u64::from(C::Scalar::NUM_BITS.checked_sub(1).unwrap())]);
+        let round_cases = [
+            (
+                "four-way",
+                [
+                    C::Scalar::from(3),
+                    C::Scalar::from(5),
+                    C::Scalar::from(7),
+                    C::Scalar::from(11),
+                ],
+            ),
+            (
+                "signed carry",
+                [
+                    C::Scalar::from(0x7f),
+                    C::Scalar::from(0x80),
+                    C::Scalar::from(0xff),
+                    C::Scalar::from(0x100),
+                ],
+            ),
+            (
+                "top bit",
+                [
+                    top_bit - C::Scalar::ONE,
+                    top_bit,
+                    top_bit + C::Scalar::ONE,
+                    -C::Scalar::ONE,
+                ],
+            ),
+        ];
+        for (case, scalars) in round_cases {
+            assert_ipa_rounds(&table, bases, scalars, case);
+        }
+
+        let fallback_scalar = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
+        table.byte_order = ScalarByteOrder::Unsupported;
+        for (base_index, base) in bases.into_iter().enumerate() {
+            assert_eq!(
+                table.multiply(base_index, fallback_scalar),
+                C::Curve::from(base) * fallback_scalar,
+                "an unsupported representation must use native multiplication"
+            );
+        }
+        assert_ipa_rounds(&table, bases, round_cases[0].1, "fallback");
 
         table.byte_order = if little {
-            BlindScalarByteOrder::LittleEndian
+            ScalarByteOrder::LittleEndian
         } else {
-            BlindScalarByteOrder::BigEndian
+            ScalarByteOrder::BigEndian
         };
-        table.windows += 1;
-        assert_eq!(
-            table.multiply(fallback_scalar),
-            C::Curve::from(base) * fallback_scalar,
-            "a representation-length mismatch must use native multiplication"
+        let mut invalid_top_bit = C::Scalar::ZERO.to_repr();
+        let bytes = invalid_top_bit.as_mut();
+        let high_byte = if little { bytes.len() - 1 } else { 0 };
+        bytes[high_byte] |= 1 << (C::Scalar::NUM_BITS as usize % u8::BITS as usize);
+        let decoded_invalid = if little {
+            crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
+        } else {
+            crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
+        };
+        assert!(
+            !table.scalar_repr_is_supported(decoded_invalid, bytes),
+            "an occupied representation bit above NUM_BITS must be rejected"
         );
+
+        table.scalar_bits = fallback_scalar.to_repr().as_ref().len() * u8::BITS as usize + 1;
+        for (base_index, base) in bases.into_iter().enumerate() {
+            assert_eq!(
+                table.multiply(base_index, fallback_scalar),
+                C::Curve::from(base) * fallback_scalar,
+                "a representation-length mismatch must use native multiplication"
+            );
+        }
     }
 
-    exercise(Params::<EpAffine>::new(3).w);
-    exercise(Params::<EqAffine>::new(3).w);
+    let ep = Params::<EpAffine>::new(3);
+    exercise([ep.w, ep.u]);
+    let eq = Params::<EqAffine>::new(3);
+    exercise([eq.w, eq.u]);
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
-fn blind_table_cache_is_shared_by_clones_and_not_serialized() {
+fn fixed_base_table_cache_is_shared_by_clones_and_not_serialized() {
     use crate::pasta::EqAffine;
 
     let params = Params::<EqAffine>::new(3);
     let mut serialized_before = vec![];
     params.write(&mut serialized_before).unwrap();
-    assert!(params.blind_table().is_none());
+    assert!(params.fixed_base_table().is_none());
     assert!(params.prepare_commitments());
-    let table = params.blind_table().unwrap();
+    let table = params.fixed_base_table().unwrap();
 
-    let cloned_table = params.clone().blind_table().unwrap();
+    let cloned_table = params.clone().fixed_base_table().unwrap();
     assert!(Arc::ptr_eq(&table, &cloned_table));
 
     let mut serialized_after = vec![];
@@ -1415,7 +2389,218 @@ fn blind_table_cache_is_shared_by_clones_and_not_serialized() {
     assert_eq!(serialized_before, serialized_after);
 
     let deserialized = Params::<EqAffine>::read(&mut serialized_before.as_slice()).unwrap();
-    assert!(deserialized.blind_table().is_none());
+    assert!(deserialized.fixed_base_table().is_none());
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn prepared_fixed_base_ipa_rounds_match_unprepared_proof() {
+    const K: u32 = 6;
+    const THREADS: usize = 4;
+    const RNG_SEED: u64 = 0x6970_612d_752d_7721;
+
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::arithmetic::eval_polynomial;
+    use crate::pasta::{EpAffine, Fq};
+    use crate::transcript::{Blake2bWrite, Challenge255, Transcript, TranscriptWrite};
+
+    assert!(THREADS <= prepared_commitment_max_threads(K));
+    let params = Params::<EpAffine>::new(K);
+    let domain = super::EvaluationDomain::new(1, K);
+    let mut polynomial = domain.empty_coeff();
+    for (index, coefficient) in polynomial.iter_mut().enumerate() {
+        *coefficient = Fq::from((index as u64).wrapping_mul(17).wrapping_add(3));
+    }
+    let blind = Blind(Fq::from(0x7769_746e_6573_7321));
+
+    let prove = || {
+        assert_eq!(crate::multicore::current_num_threads(), THREADS);
+        let commitment = params.commit(&polynomial, blind).to_affine();
+        let mut transcript =
+            Blake2bWrite::<Vec<u8>, EpAffine, Challenge255<EpAffine>>::init(vec![]);
+        transcript.write_point(commitment).unwrap();
+        let point = *transcript.squeeze_challenge_scalar::<()>();
+        transcript
+            .write_scalar(eval_polynomial(&polynomial, point))
+            .unwrap();
+        create_proof(
+            &params,
+            StdRng::seed_from_u64(RNG_SEED),
+            &mut transcript,
+            &polynomial,
+            blind,
+            point,
+        )
+        .unwrap();
+        transcript.finalize()
+    };
+
+    let pool = maybe_rayon::ThreadPoolBuilder::new()
+        .num_threads(THREADS)
+        .build()
+        .expect("test pool must build");
+    assert!(params.fixed_base_table().is_none());
+    let unprepared = pool.install(prove);
+
+    assert!(params.prepare_commitments());
+    assert!(params.fixed_base_table().is_some());
+    let prepared = pool.install(prove);
+    assert_eq!(prepared, unprepared);
+}
+
+#[cfg(feature = "multicore")]
+#[test]
+fn sparse_commitment_signed_digit_boundaries() {
+    use crate::pasta::EqAffine;
+
+    const ENCODED_BYTES: usize = std::mem::size_of::<u64>();
+    let half_radix = 1 << (SPARSE_COMMITMENT_WINDOW_BITS - 1);
+    let radix = 1 << SPARSE_COMMITMENT_WINDOW_BITS;
+    for (value, carry, expected) in [
+        (0, 0, 0),
+        (0, 1, 1),
+        (half_radix - 1, 0, half_radix as isize - 1),
+        (half_radix - 1, 1, half_radix as isize),
+        (half_radix, 0, -(half_radix as isize)),
+        (half_radix, 1, -(half_radix as isize) + 1),
+        (radix - 1, 0, -1),
+        (radix - 1, 1, 0),
+    ] {
+        let encoded = ((value << SPARSE_COMMITMENT_WINDOW_BITS)
+            | (carry << (SPARSE_COMMITMENT_WINDOW_BITS - 1))) as u64;
+        let mut little = [0; 32];
+        little[..ENCODED_BYTES].copy_from_slice(&encoded.to_le_bytes());
+        let mut big = [0; 32];
+        big[32 - ENCODED_BYTES..].copy_from_slice(&encoded.to_be_bytes());
+        assert_eq!(
+            SparseCommitmentTable::<EqAffine>::digit(&little, 1, true),
+            expected,
+        );
+        assert_eq!(
+            SparseCommitmentTable::<EqAffine>::digit(&big, 1, false),
+            expected,
+        );
+    }
+
+    let unsupported = SparseCommitmentTable::<EqAffine> {
+        points: Vec::new(),
+        windows: 0,
+        bases: 0,
+        byte_order: ScalarByteOrder::Unsupported,
+    };
+    assert!(unsupported.evaluate(&[]).is_none());
+}
+
+#[cfg(feature = "multicore")]
+#[test]
+fn sparse_commitment_table_matches_multiexp() {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::pasta::{EqAffine, Fp};
+
+    let params = Params::<EqAffine>::new(PREPARED_SPARSE_COMMITMENT_K);
+    let mut rng = StdRng::seed_from_u64(0x7370_6172_7365_2d33);
+    let coefficients = std::iter::once((0, Fp::random(&mut rng)))
+        .chain(
+            (0..PREPARED_SPARSE_COMMITMENT_K).map(|exponent| (1 << exponent, Fp::random(&mut rng))),
+        )
+        .collect::<Vec<_>>();
+    let blind = Blind(Fp::random(&mut rng));
+
+    assert!(params.commit_sparse(&coefficients, blind).is_none());
+    let other_k = Params::<EqAffine>::new(PREPARED_SPARSE_COMMITMENT_K - 1);
+    assert!(!other_k.prepare_sparse_commitment());
+    assert!(other_k.commit_sparse(&coefficients, blind).is_none());
+    assert!(params.prepare_sparse_commitment());
+    let table = params.sparse_commitment_cache.get().unwrap();
+    assert!(Arc::ptr_eq(
+        &table,
+        &params.clone().sparse_commitment_cache.get().unwrap()
+    ));
+    let mut encoded = Vec::new();
+    params.write(&mut encoded).unwrap();
+    let decoded = Params::<EqAffine>::read(&mut encoded.as_slice()).unwrap();
+    assert!(decoded.sparse_commitment_cache.get().is_none());
+
+    let concurrent = Arc::new(Params::<EqAffine>::new(PREPARED_SPARSE_COMMITMENT_K));
+    let tables = std::thread::scope(|scope| {
+        (0..4)
+            .map(|_| {
+                let concurrent = Arc::clone(&concurrent);
+                scope.spawn(move || {
+                    assert!(concurrent.prepare_sparse_commitment());
+                    concurrent.sparse_commitment_cache.get().unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        tables
+            .iter()
+            .skip(1)
+            .all(|other| Arc::ptr_eq(&tables[0], other))
+    );
+
+    let mut scalars = coefficients
+        .iter()
+        .map(|(_, coefficient)| *coefficient)
+        .collect::<Vec<_>>();
+    scalars.push(blind.0);
+    let mut bases = coefficients
+        .iter()
+        .map(|(index, _)| params.g[*index])
+        .collect::<Vec<_>>();
+    bases.push(params.w);
+    let expected = best_multiexp(&scalars, &bases);
+
+    for workers in [1, 6] {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .expect("test pool must build")
+            .install(|| {
+                assert_eq!(params.commit_sparse(&coefficients, blind), Some(expected));
+            });
+    }
+
+    let quotient_coefficients = coefficients[..2].to_vec();
+    let quotient_scalars = [
+        quotient_coefficients[0].1,
+        quotient_coefficients[1].1,
+        blind.0,
+    ];
+    let quotient_bases = [params.g[0], params.g[1], params.w];
+    assert_eq!(
+        params.commit_sparse(&quotient_coefficients, blind),
+        Some(best_multiexp(&quotient_scalars, &quotient_bases))
+    );
+    assert!(
+        params
+            .commit_sparse(&[(3, Fp::random(&mut rng))], blind)
+            .is_none()
+    );
+
+    let little = table
+        .little_endian()
+        .expect("Pasta scalar representations must have a supported byte order");
+    let terms = coefficients
+        .iter()
+        .enumerate()
+        .map(|(base, (_, scalar))| (base, *scalar))
+        .chain(std::iter::once((
+            PREPARED_SPARSE_COMMITMENT_K as usize + 1,
+            blind.0,
+        )))
+        .collect::<Vec<_>>();
+    let selected = table.selected_points(&terms, little).unwrap();
+    assert_eq!(
+        SparseCommitmentTable::reduce_affine(&selected),
+        Some(expected)
+    );
 }
 
 #[test]
@@ -1494,7 +2679,7 @@ fn prepared_commitments_match_unprepared() {
         assert!(!armed.prepare_zero_checks());
         let coefficient = armed.commitment_table().unwrap();
         let lagrange = armed.lagrange_table().unwrap();
-        let blind = armed.blind_table().unwrap();
+        let fixed_bases = armed.fixed_base_table().unwrap();
         let cloned = armed.clone();
         assert!(cloned.prepare_commitments());
         assert!(Arc::ptr_eq(
@@ -1502,10 +2687,21 @@ fn prepared_commitments_match_unprepared() {
             &cloned.commitment_table().unwrap()
         ));
         assert!(Arc::ptr_eq(&lagrange, &cloned.lagrange_table().unwrap()));
-        assert!(Arc::ptr_eq(&blind, &cloned.blind_table().unwrap()));
+        assert!(Arc::ptr_eq(
+            &fixed_bases,
+            &cloned.fixed_base_table().unwrap()
+        ));
     }
     #[cfg(all(not(feature = "multicore"), not(feature = "orbits")))]
     assert!(!armed_ok, "preparation stays disabled without multicore");
+    #[cfg(feature = "batch")]
+    if armed_ok {
+        assert!(armed.prepared_instance_table().is_some());
+    }
+    #[cfg(feature = "multicore")]
+    if armed_ok {
+        assert!(armed.sparse_commitment_cache.get().is_none());
+    }
 
     let mut rng = rng();
     let exercise = |armed: &Params<EqAffine>, unarmed: &Params<EqAffine>, seed: u64| {

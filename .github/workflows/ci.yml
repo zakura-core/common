@@ -628,13 +628,13 @@ jobs:
           --no-default-features
           --features batch,dev-graph,gadget-traces,multicore
           -- arithmetic::test_multiexp
-      - name: Run the prepared commitment test with multicore
+      - name: Run the prepared commitment tests with multicore
         run: >-
           cargo +stable test --verbose --release
           -p zakura-halo2-proofs
           --no-default-features
           --features batch,dev-graph,gadget-traces,multicore
-          -- prepared_commitments_match_unprepared
+          -- prepared_
 
   sinsemilla-weighted-test:
     name: sinsemilla / Test weighted Merkle evaluator on Linux

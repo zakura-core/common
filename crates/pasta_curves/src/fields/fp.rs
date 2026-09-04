@@ -68,7 +68,7 @@ impl ConstantTimeEq for Fp {
 impl PartialEq for Fp {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.ct_eq(other).unwrap_u8() == 1
+        self.eq_vartime(other)
     }
 }
 
@@ -304,6 +304,12 @@ impl Fp {
         // (see `aarch64_asm.rs`); this cold path is not worth carrying that
         // coupling, and hashing dominates its callers anyway.
         Fp::mul(&d0, &R2).add(&Fp::mul(&d1, &R3))
+    }
+
+    /// Variable-time equality on the canonical Montgomery limbs.
+    #[inline(always)]
+    pub(crate) fn eq_vartime(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 
     /// Converts from an integer represented in little endian
@@ -675,6 +681,11 @@ impl ff::Field for Fp {
     #[inline(always)]
     fn square(&self) -> Self {
         self.square_runtime()
+    }
+
+    #[inline(always)]
+    fn is_zero_vartime(&self) -> bool {
+        self.0 == [0, 0, 0, 0]
     }
 
     fn sqrt_ratio(num: &Self, div: &Self) -> (Choice, Self) {

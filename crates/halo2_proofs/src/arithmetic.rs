@@ -50,8 +50,13 @@ where
     I: IntoIterator<Item = &'a mut F>,
 {
     fn batch_inverse_and_scale(self, scale: F) -> F {
-        let mut acc = F::ONE;
-        let iter = self.into_iter();
+        let mut iter = self.into_iter();
+        let Some(first) = iter.next() else {
+            return F::ONE;
+        };
+        let first_value = *first;
+        let first_is_zero = first_value.is_zero();
+        let mut acc = F::conditional_select(&first_value, &F::ONE, first_is_zero);
         let mut products = Vec::with_capacity(iter.size_hint().0);
         for value in iter {
             let current = *value;
@@ -71,6 +76,12 @@ where
             acc = F::conditional_select(&(acc * *value), &acc, skip);
             *value = F::conditional_select(&inverse, value, skip);
         }
+
+        // The first prefix is one, and the accumulator is dead after
+        // producing its inverse, so both endpoint multiplications are
+        // unnecessary.
+        let inverse = F::conditional_select(&acc, &*first, first_is_zero);
+        *first = inverse;
 
         product_inverse
     }
@@ -218,6 +229,12 @@ impl<C: CurveAffine> BoothBuckets<C> {
 
 /// Performs a small multi-exponentiation operation.
 /// Uses the double-and-add algorithm with doublings shared across points.
+///
+/// # Timing
+///
+/// This function is variable-time with respect to `coeffs` and intermediate
+/// curve points. Callers must explicitly accept timing leakage when the
+/// coefficients are secret.
 pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     let coeffs: Vec<_> = coeffs.iter().map(|a| a.to_repr()).collect();
     let mut acc = C::Curve::identity();
@@ -245,6 +262,12 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 /// This function will panic if coeffs and bases have a different length.
 ///
 /// This will use multithreading if beneficial.
+///
+/// # Timing
+///
+/// This function is variable-time with respect to `coeffs` and intermediate
+/// curve points. Halo proof creation uses it with witness- and
+/// blinding-derived coefficients and explicitly accepts that timing leakage.
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     assert_eq!(coeffs.len(), bases.len());
 
@@ -501,8 +524,12 @@ pub(crate) fn batch_invert_multi<F: Field>(values: &mut [F]) {
     let mut scratch = vec![F::ZERO; values.len()];
 
     if values.len() < BATCH_INVERT_TWO_LANE_MIN {
-        let mut acc = F::ONE;
-        for (value, slot) in values.iter().zip(scratch.iter_mut()) {
+        let Some((first, values)) = values.split_first_mut() else {
+            return;
+        };
+        let first_is_zero = first.is_zero_vartime();
+        let mut acc = if first_is_zero { F::ONE } else { *first };
+        for (value, slot) in values.iter().zip(scratch[1..].iter_mut()) {
             *slot = acc;
             if !value.is_zero_vartime() {
                 acc *= value;
@@ -510,12 +537,15 @@ pub(crate) fn batch_invert_multi<F: Field>(values: &mut [F]) {
         }
         // Skipped elements never enter the product, so this cannot fail.
         let mut acc = acc.invert().unwrap();
-        for (value, slot) in values.iter_mut().zip(scratch.iter()).rev() {
+        for (value, slot) in values.iter_mut().zip(scratch[1..].iter()).rev() {
             if !value.is_zero_vartime() {
                 let inverted = acc * slot;
                 acc *= *value;
                 *value = inverted;
             }
+        }
+        if !first_is_zero {
+            *first = acc;
         }
         return;
     }
@@ -711,6 +741,14 @@ fn test_batch_inverse_and_scale_boundaries() {
         empty.iter_mut().batch_inverse_and_scale(Fq::from(9)),
         Fq::ONE
     );
+
+    let mut singleton = [Fq::from(4)];
+    let singleton_inverse = Fq::from(4).invert().unwrap();
+    assert_eq!(
+        singleton.iter_mut().batch_inverse_and_scale(Fq::from(9)),
+        singleton_inverse
+    );
+    assert_eq!(singleton, [singleton_inverse * Fq::from(9)]);
 
     let original = [Fq::ZERO, Fq::from(2), Fq::from(3)];
     let mut scaled = original;
@@ -1026,7 +1064,8 @@ mod batch_invert_multi_tests {
     fn matches_ff_batch_invert_with_zeros() {
         // Lengths cover the empty slice, the single-chain branch, the
         // threshold crossing, odd and even two-lane lengths, and a large
-        // batch; zeros are planted at both even and odd indices.
+        // batch; zeros are planted at both even and odd indices, with both
+        // nonzero and zero leading elements.
         let mut state = 0x4c4c_4c4c_u64;
         let mut next = move || {
             state = state
@@ -1034,21 +1073,23 @@ mod batch_invert_multi_tests {
                 .wrapping_add(1442695040888963407);
             state
         };
-        for n in [0usize, 1, 2, 3, 7, 31, 32, 33, 64, 257, 1000] {
-            let values: Vec<Fp> = (0..n)
-                .map(|i| {
-                    if i % 5 == 3 {
-                        Fp::zero()
-                    } else {
-                        Fp::from(next() | 1)
-                    }
-                })
-                .collect();
-            let mut expected = values.clone();
-            expected.iter_mut().batch_invert();
-            let mut ours = values.clone();
-            batch_invert_multi(&mut ours);
-            assert_eq!(ours, expected, "n = {}", n);
+        for leading_zero in [false, true] {
+            for n in [0usize, 1, 2, 3, 7, 31, 32, 33, 64, 257, 1000] {
+                let values: Vec<Fp> = (0..n)
+                    .map(|i| {
+                        if (leading_zero && i == 0) || i % 5 == 3 {
+                            Fp::zero()
+                        } else {
+                            Fp::from(next() | 1)
+                        }
+                    })
+                    .collect();
+                let mut expected = values.clone();
+                expected.iter_mut().batch_invert();
+                let mut ours = values.clone();
+                batch_invert_multi(&mut ours);
+                assert_eq!(ours, expected, "n = {n}, leading zero = {leading_zero}");
+            }
         }
     }
 }

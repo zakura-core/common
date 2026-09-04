@@ -1,7 +1,7 @@
 use super::super::{CommitDomains, HashDomains, SinsemillaInstructions};
 use super::{NonIdentityEccPoint, SinsemillaChip};
 use crate::{
-    ecc::FixedPoints,
+    ecc::{FixedPoints, chip::DoubleAndAdd},
     sinsemilla::primitives::{self as sinsemilla, INV_TWO_POW_K, SINSEMILLA_S},
     utilities::lookup_range_check::PallasLookupRangeCheck,
 };
@@ -22,6 +22,7 @@ use first_word_witnesses::{MERKLE_FIRST_WORD_WITNESSES, MERKLE_INITIAL_Q};
 
 const FIELD_REPR_LIMBS: usize =
     core::mem::size_of::<<pallas::Base as PrimeField>::Repr>() / core::mem::size_of::<u64>();
+const MERKLE_RETAINED_RUNNING_SUM_CELLS: [usize; 3] = [2, 2, 0];
 
 #[inline(always)]
 fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
@@ -73,6 +74,71 @@ struct DoubleAndAddWitness {
 struct CachedFirstWordWitness {
     point: ProjectivePoint,
     witness: DoubleAndAddWitness,
+}
+
+type HashResult = (
+    NonIdentityEccPoint,
+    Vec<Vec<AssignedCell<pallas::Base, pallas::Base>>>,
+);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreparedHashRound {
+    lambda_1: Assigned<pallas::Base>,
+    lambda_2: Assigned<pallas::Base>,
+    x_a: Assigned<pallas::Base>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedHashWitness {
+    rounds: Vec<PreparedHashRound>,
+    final_y: Assigned<pallas::Base>,
+    output_x: pallas::Base,
+}
+
+impl PreparedHashWitness {
+    pub(crate) fn output_x(&self) -> pallas::Base {
+        self.output_x
+    }
+}
+
+fn assign_hash_rounds(
+    region: &mut Region<'_, pallas::Base>,
+    double_and_add: &DoubleAndAdd,
+    offset: usize,
+    len: usize,
+    round: impl Fn(usize) -> Value<PreparedHashRound>,
+) -> Result<X<pallas::Base>, Error> {
+    region.assign_advice_batch(
+        |_| "lambda_1",
+        double_and_add.lambda_1,
+        offset,
+        len,
+        |row| round(row).map(|round| round.lambda_1),
+    )?;
+    region.assign_advice_batch(
+        |_| "lambda_2",
+        double_and_add.lambda_2,
+        offset,
+        len,
+        |row| round(row).map(|round| round.lambda_2),
+    )?;
+
+    // Only the final accumulator cell is referenced after assignment.
+    region.assign_advice_batch(
+        |_| "x_a",
+        double_and_add.x_a,
+        offset + 1,
+        len - 1,
+        |row| round(row).map(|round| round.x_a),
+    )?;
+    region
+        .assign_advice(
+            || "x_a",
+            double_and_add.x_a,
+            offset + len,
+            || round(len - 1).map(|round| round.x_a),
+        )
+        .map(X)
 }
 
 impl DoubleAndAddWitness {
@@ -148,6 +214,43 @@ fn has_merkle_initial_q(initial_q: pallas::Affine) -> bool {
     initial_q.raw_coordinates() == MERKLE_INITIAL_Q
 }
 
+pub(crate) fn prepare_hash_witness(
+    initial_q: pallas::Affine,
+    words: &[u32],
+) -> Option<PreparedHashWitness> {
+    let mut point = ProjectivePoint::from_affine(initial_q);
+    let cache_first_word = has_merkle_initial_q(initial_q);
+    let mut rounds = Vec::with_capacity(words.len());
+
+    for (row, &word) in words.iter().enumerate() {
+        let generator = *SINSEMILLA_S.get(word as usize)?;
+        let witness = if row == 0 && cache_first_word {
+            let cached = *MERKLE_FIRST_WORD_WITNESSES.get(word as usize)?;
+            point = cached.point;
+            cached.witness
+        } else {
+            point.double_and_add(generator)
+        };
+        rounds.push(PreparedHashRound {
+            lambda_1: witness.lambda_1(&point),
+            lambda_2: witness.lambda_2(&point),
+            x_a: Assigned::Rational(point.x, point.z_sq),
+        });
+    }
+
+    if point.z.is_zero_vartime() {
+        return None;
+    }
+
+    let output_x = Assigned::Rational(point.x, point.z_sq).evaluate();
+    rounds.last_mut()?.x_a = Assigned::Trivial(output_x);
+    Some(PreparedHashWitness {
+        rounds,
+        final_y: Assigned::Rational(point.y, point.z_sq * point.z),
+        output_x,
+    })
+}
+
 /// `EccPointQ` can hold either a public or a private ECC Point
 #[cfg(test)]
 enum EccPointQ {
@@ -164,7 +267,6 @@ where
 {
     /// [Specification](https://p.z.cash/halo2-0.1:sinsemilla-constraints?partial).
     #[allow(non_snake_case)]
-    #[allow(clippy::type_complexity)]
     pub(super) fn hash_message(
         &self,
         region: &mut Region<'_, pallas::Base>,
@@ -174,20 +276,14 @@ where
             { sinsemilla::K },
             { sinsemilla::C },
         >>::Message,
-    ) -> Result<
-        (
-            NonIdentityEccPoint,
-            Vec<Vec<AssignedCell<pallas::Base, pallas::Base>>>,
-        ),
-        Error,
-    > {
+    ) -> Result<HashResult, Error> {
         let projective = Value::known(ProjectivePoint::from_affine(Q));
         // An Orchard MerkleCRH message starts with the 10-bit encoding of its
         // layer index, so its first Sinsemilla word is cached.
         let cache_first_word = has_merkle_initial_q(Q);
         let (offset, x_a, y_a) = self.public_q_initialization(region, Q)?;
 
-        let (x_a, y_a, zs_sum) = self.hash_all_pieces(
+        let (x_a, y_a, zs_sum) = self.hash_all_pieces::<false>(
             region,
             offset,
             message,
@@ -195,10 +291,46 @@ where
             y_a,
             Some(projective),
             cache_first_word,
+            None,
         )?;
 
         #[cfg(test)]
         self.check_hash_result(EccPointQ::PublicPoint(Q), message, &x_a, &y_a);
+
+        x_a.value()
+            .zip(y_a.value())
+            .error_if_known_and(|(x_a, y_a)| x_a.is_zero_vartime() || y_a.is_zero_vartime())?;
+        Ok((
+            NonIdentityEccPoint::from_coordinates_unchecked(x_a.0, y_a),
+            zs_sum,
+        ))
+    }
+
+    pub(super) fn hash_message_prepared(
+        &self,
+        region: &mut Region<'_, pallas::Base>,
+        q: pallas::Affine,
+        message: &<Self as SinsemillaInstructions<
+            pallas::Affine,
+            { sinsemilla::K },
+            { sinsemilla::C },
+        >>::Message,
+        prepared: Value<&PreparedHashWitness>,
+    ) -> Result<HashResult, Error> {
+        if message.len() != MERKLE_RETAINED_RUNNING_SUM_CELLS.len() {
+            return Err(Error::Synthesis);
+        }
+        let (offset, x_a, y_a) = self.public_q_initialization(region, q)?;
+        let (x_a, y_a, zs_sum) = self.hash_all_pieces::<true>(
+            region,
+            offset,
+            message,
+            x_a,
+            y_a,
+            None,
+            false,
+            Some(prepared),
+        )?;
 
         x_a.value()
             .zip(y_a.value())
@@ -235,7 +367,7 @@ where
         let (offset, x_a, y_a) = self.private_q_initialization(region, Q)?;
 
         let (x_a, y_a, zs_sum) =
-            self.hash_all_pieces(region, offset, message, x_a, y_a, None, false)?;
+            self.hash_all_pieces::<false>(region, offset, message, x_a, y_a, None, false, None)?;
 
         #[cfg(test)]
         self.check_hash_result(EccPointQ::PrivatePoint(Q.clone()), message, &x_a, &y_a);
@@ -359,7 +491,7 @@ where
 
     #[allow(clippy::type_complexity)]
     /// Hash `message` from the initial point `Q`.
-    fn hash_all_pieces(
+    fn hash_all_pieces<const RETAIN_MERKLE_RUNNING_SUMS: bool>(
         &self,
         region: &mut Region<'_, pallas::Base>,
         mut offset: usize,
@@ -372,6 +504,7 @@ where
         mut y_a: Y<pallas::Base>,
         mut projective: Option<Value<ProjectivePoint>>,
         mut cache_first_word: bool,
+        prepared: Option<Value<&PreparedHashWitness>>,
     ) -> Result<
         (
             X<pallas::Base>,
@@ -385,11 +518,12 @@ where
         let mut zs_sum: Vec<Vec<AssignedCell<pallas::Base, pallas::Base>>> = Vec::new();
 
         // Hash each piece in the message.
+        let mut prepared_offset = 0;
         for (idx, piece) in message.iter().enumerate() {
             let final_piece = idx == message.len() - 1;
 
             // The value of the accumulator after this piece is processed.
-            let (x, y, zs, next_projective) = self.hash_piece(
+            let (x, y, zs, next_projective) = self.hash_piece::<RETAIN_MERKLE_RUNNING_SUMS>(
                 region,
                 offset,
                 piece,
@@ -398,6 +532,12 @@ where
                 final_piece,
                 projective,
                 cache_first_word,
+                prepared.map(|prepared| {
+                    prepared.map(|prepared| {
+                        &prepared.rounds[prepared_offset..prepared_offset + piece.num_words()]
+                    })
+                }),
+                idx,
             )?;
             cache_first_word = false;
 
@@ -410,11 +550,14 @@ where
             y_a = y;
             projective = next_projective;
             zs_sum.push(zs);
+            prepared_offset += piece.num_words();
         }
 
         // The projective path does not need an affine y-coordinate between
         // rounds. Derive it once, when the circuit finally assigns it.
-        if let Some(point) = projective {
+        if let Some(prepared) = prepared {
+            y_a = prepared.map(|prepared| prepared.final_y).into();
+        } else if let Some(point) = projective {
             point.error_if_known_and(|point| point.z.is_zero_vartime())?;
             y_a = point
                 .map(|point| Assigned::Rational(point.y, point.z_sq * point.z))
@@ -458,7 +601,7 @@ where
     /// by the caller is not copied. This only works because `hash_piece()` is
     /// an internal API. Before this call to `hash_piece()`, x_a MUST have been
     /// already assigned within this region at the correct offset.
-    fn hash_piece(
+    fn hash_piece<const RETAIN_MERKLE_RUNNING_SUMS: bool>(
         &self,
         region: &mut Region<'_, pallas::Base>,
         offset: usize,
@@ -472,6 +615,8 @@ where
         final_piece: bool,
         mut projective: Option<Value<ProjectivePoint>>,
         cache_first_word: bool,
+        prepared: Option<Value<&[PreparedHashRound]>>,
+        piece_index: usize,
     ) -> Result<
         (
             X<pallas::Base>,
@@ -530,10 +675,60 @@ where
         let words = words.transpose_vec(piece.num_words());
 
         // Decompose message piece into `K`-bit pieces with a running sum `z`.
-        let zs = {
+        let zs = if RETAIN_MERKLE_RUNNING_SUMS {
+            let retained_cells =
+                MERKLE_RETAINED_RUNNING_SUM_CELLS[piece_index].min(piece.num_words());
+            let mut zs = Vec::with_capacity(retained_cells);
+
+            let initial_z = piece.cell_value().copy_advice(
+                || "z_0 (copy of message piece)",
+                region,
+                config.bits,
+                offset,
+            )?;
+            if retained_cells != 0 {
+                zs.push(initial_z);
+            }
+
+            let mut z = piece.field_elem();
+            let inv_2_k = Value::known(pallas::Base::from_repr(INV_TWO_POW_K).unwrap());
+            let intermediate_count = words.len() - 1;
+            let retained_intermediate_count =
+                retained_cells.saturating_sub(1).min(intermediate_count);
+
+            for (idx, word) in words[..retained_intermediate_count].iter().enumerate() {
+                let word = word.map(|word| pallas::Base::from(word as u64));
+                z = (z - word) * inv_2_k;
+                let cell = region.assign_advice(
+                    || format!("z_{:?}", idx + 1),
+                    config.bits,
+                    offset + idx + 1,
+                    || z,
+                )?;
+                zs.push(cell)
+            }
+
+            if retained_intermediate_count != intermediate_count {
+                region.assign_advice_batch(
+                    |idx| format!("z_{:?}", retained_intermediate_count + idx + 1),
+                    config.bits,
+                    offset + retained_intermediate_count + 1,
+                    intermediate_count - retained_intermediate_count,
+                    |idx| {
+                        let word = words[retained_intermediate_count + idx]
+                            .map(|word| pallas::Base::from(word as u64));
+                        z = (z - word) * inv_2_k;
+                        z
+                    },
+                )?;
+            }
+
+            zs
+        } else {
             let mut zs = Vec::with_capacity(piece.num_words() + 1);
 
-            // Copy message and initialize running sum `z` to decompose message in-circuit
+            // Copy the message and initialize the in-circuit decomposition's
+            // running sum `z`.
             let initial_z = piece.cell_value().copy_advice(
                 || "z_0 (copy of message piece)",
                 region,
@@ -546,14 +741,15 @@ where
             //          z_i = 2^K * z_{i + 1} + m_{i + 1}
             // => z_{i + 1} = (z_i - m_{i + 1}) / 2^K
             //
-            // For a message piece m = m_1 + 2^K m_2 + ... + 2^{K(n-1)} m_n}, initialize z_0 = m.
-            // We end up with z_n = 0. (z_n is not directly encoded as a cell value;
-            // it is implicitly taken as 0 by adjusting the definition of m_{i+1}.)
+            // For a message piece m = m_1 + 2^K m_2 + ... +
+            // 2^{K(n-1)} m_n, initialize z_0 = m. We end up with z_n = 0.
+            // (z_n is not directly encoded as a cell value; it is implicitly
+            // taken as 0 by adjusting the definition of m_{i+1}.)
             let mut z = piece.field_elem();
             let inv_2_k = Value::known(pallas::Base::from_repr(INV_TWO_POW_K).unwrap());
 
             // We do not assign the final z_n as it is constrained to be zero.
-            for (idx, word) in words[0..(words.len() - 1)].iter().enumerate() {
+            for (idx, word) in words[..(words.len() - 1)].iter().enumerate() {
                 let word = word.map(|word| pallas::Base::from(word as u64));
                 // z_{i + 1} = (z_i - m_{i + 1}) / 2^K
                 z = (z - word) * inv_2_k;
@@ -572,15 +768,27 @@ where
         // The accumulator x-coordinate provided by the caller MUST have been assigned
         // within this region.
 
-        for (row, word) in words.iter().enumerate() {
-            let r#gen = word.map(|word| SINSEMILLA_S[word as usize]);
-            let x_p = r#gen.map(|r#gen| r#gen.0);
-            let y_p = r#gen.map(|r#gen| r#gen.1);
+        region.assign_advice_batch(
+            |_| "x_p",
+            config.double_and_add.x_p,
+            offset,
+            words.len(),
+            |row| words[row].map(|word| SINSEMILLA_S[word as usize].0),
+        )?;
 
-            // Assign `x_p`
-            region.assign_advice(|| "x_p", config.double_and_add.x_p, offset + row, || x_p)?;
+        if let Some(prepared) = prepared {
+            let x_a =
+                assign_hash_rounds(region, &config.double_and_add, offset, words.len(), |row| {
+                    prepared.map(|prepared| prepared[row])
+                })?;
 
-            if let Some(point) = projective.as_mut() {
+            return Ok((x_a, y_a, zs, projective));
+        }
+
+        if let Some(point) = projective.as_mut() {
+            let mut rounds = Vec::with_capacity(words.len());
+            for (row, word) in words.iter().enumerate() {
+                let r#gen = word.map(|word| SINSEMILLA_S[word as usize]);
                 let witness = if row == 0 && cache_first_word {
                     let (next_point, witness) = point
                         .as_ref()
@@ -609,41 +817,33 @@ where
                         .map(|(point, r#gen)| point.double_and_add(r#gen))
                 };
 
-                let lambda_1 = witness
-                    .as_ref()
-                    .zip(point.as_ref())
-                    .map(|(witness, point)| witness.lambda_1(point));
-                region.assign_advice(
-                    || "lambda_1",
-                    config.double_and_add.lambda_1,
-                    offset + row,
-                    || lambda_1,
-                )?;
-
-                let lambda_2 = witness
-                    .as_ref()
-                    .zip(point.as_ref())
-                    .map(|(witness, point)| witness.lambda_2(point));
-                region.assign_advice(
-                    || "lambda_2",
-                    config.double_and_add.lambda_2,
-                    offset + row,
-                    || lambda_2,
-                )?;
-
-                let x_a_new = point
-                    .as_ref()
-                    .map(|point| Assigned::Rational(point.x, point.z_sq));
-                let x_a_cell = region.assign_advice(
-                    || "x_a",
-                    config.double_and_add.x_a,
-                    offset + row + 1,
-                    || x_a_new,
-                )?;
-
-                x_a = x_a_cell.into();
-                continue;
+                rounds.push(
+                    witness
+                        .as_ref()
+                        .zip(point.as_ref())
+                        .map(|(witness, point)| PreparedHashRound {
+                            lambda_1: witness.lambda_1(point),
+                            lambda_2: witness.lambda_2(point),
+                            x_a: Assigned::Rational(point.x, point.z_sq),
+                        }),
+                );
             }
+
+            let x_a = assign_hash_rounds(
+                region,
+                &config.double_and_add,
+                offset,
+                rounds.len(),
+                |row| rounds[row],
+            )?;
+
+            return Ok((x_a, y_a, zs, projective));
+        }
+
+        for (row, word) in words.iter().enumerate() {
+            let r#gen = word.map(|word| SINSEMILLA_S[word as usize]);
+            let x_p = r#gen.map(|r#gen| r#gen.0);
+            let y_p = r#gen.map(|r#gen| r#gen.1);
 
             // Compute and assign `lambda_1`
             let lambda_1 = {

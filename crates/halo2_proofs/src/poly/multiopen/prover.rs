@@ -491,7 +491,14 @@ where
         q_blinds[set_index] *= *x_1;
         q_blinds[set_index] += commitment_data.commitment.blind;
     }
-    let q_polys = collapse_polynomials(&polynomial_groups, *x_1);
+    let mut q_polys = collapse_polynomials(&polynomial_groups, *x_1);
+    // Queried polynomials may be constructed in a domain smaller than the
+    // parameters; their missing high coefficients are zero.
+    for q_poly in &mut q_polys {
+        if q_poly.values.len() < params.n as usize {
+            q_poly.values.resize(params.n as usize, C::Scalar::ZERO);
+        }
+    }
 
     let q_prime_poly = prepare_q_prime(&point_sets, &q_polys, *x_2, params.n as usize);
 
@@ -650,6 +657,57 @@ mod tests {
                     .build()
                     .unwrap()
                     .install(&check);
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
+    fn zero_challenge_selects_last_polynomial<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        let h = Polynomial {
+            values: vec![F::from(2), F::from(3), F::from(5)],
+            _marker: PhantomData,
+        };
+        let r = Polynomial {
+            values: vec![F::from(7), F::from(11), F::from(13)],
+            _marker: PhantomData,
+        };
+
+        let collapsed = collapse_polynomials(&[vec![&h, &r]], F::ZERO);
+
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].values, r.values);
+    }
+
+    fn short_trailing_polynomial_matches_zero_padding<F>()
+    where
+        F: Field + From<u64> + Debug,
+    {
+        let len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
+        let first = Polynomial::from_coefficients(
+            (0..len).map(|index| F::from(index as u64 + 1)).collect(),
+        );
+        let trailing = Polynomial::from_coefficients(vec![F::from(7), F::from(11)]);
+        let mut padded = Polynomial::from_coefficients(vec![F::ZERO; len]);
+        padded[..][..trailing.len()].copy_from_slice(&trailing);
+
+        for challenge in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let expected = collapse_polynomials(&[vec![&first, &padded]], challenge);
+            let check = || {
+                let actual = collapse_polynomials(&[vec![&first, &trailing]], challenge);
+                assert_eq!(&actual[0][..], &expected[0][..]);
+            };
+
+            #[cfg(feature = "multicore")]
+            for thread_count in [1, 4] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(thread_count)
+                    .build()
+                    .unwrap()
+                    .install(check);
             }
             #[cfg(not(feature = "multicore"))]
             check();
@@ -840,6 +898,27 @@ mod tests {
     fn streaming_collapse_matches_operator_collapse_fq() {
         streaming_collapse_matches_operator_collapse::<Fq>();
     }
+
+    #[test]
+    fn short_trailing_polynomial_matches_zero_padding_fp() {
+        short_trailing_polynomial_matches_zero_padding::<Fp>();
+    }
+
+    #[test]
+    fn short_trailing_polynomial_matches_zero_padding_fq() {
+        short_trailing_polynomial_matches_zero_padding::<Fq>();
+    }
+
+    #[test]
+    fn zero_challenge_selects_last_polynomial_fp() {
+        zero_challenge_selects_last_polynomial::<Fp>();
+    }
+
+    #[test]
+    fn zero_challenge_selects_last_polynomial_fq() {
+        zero_challenge_selects_last_polynomial::<Fq>();
+    }
+
     #[test]
     fn in_place_kate_division_matches_allocating_fp() {
         in_place_kate_division_matches_allocating::<Fp>();

@@ -1,10 +1,15 @@
 #![allow(clippy::int_plus_one)]
 
-use std::{cmp::Reverse, mem::size_of, ops::Range};
+use std::{cmp::Reverse, mem::size_of, ops::Range, sync::Arc};
 
 use ff::{Field, FromUniformBytes};
 use group::Curve;
 use maybe_rayon::prelude::*;
+
+#[cfg(feature = "multicore")]
+use crate::PreparedSparseCommitments;
+#[cfg(feature = "batch")]
+use crate::{InstanceWindowTable, PREPARED_INSTANCE_COLUMNS};
 
 use super::{
     Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
@@ -26,6 +31,21 @@ use crate::{
 // Compacting pays for its scan and allocation once at least a quarter of a
 // fixed polynomial's terms are zero.
 const SPARSE_FIXED_COMMITMENT_ZERO_FRACTION_DENOMINATOR: usize = 4;
+
+#[cfg(any(feature = "batch", feature = "multicore"))]
+fn prepare_small_fixed_base_tables<C: CurveAffine>(
+    params: &Params<C>,
+    num_instance_columns: usize,
+) {
+    #[cfg(feature = "batch")]
+    if num_instance_columns == PREPARED_INSTANCE_COLUMNS {
+        let _ = params.prepare_instance_table();
+    }
+    #[cfg(not(feature = "batch"))]
+    let _ = num_instance_columns;
+    #[cfg(feature = "multicore")]
+    let _ = params.prepare_sparse_commitment();
+}
 
 fn commit_fixed_lagrange<C: CurveAffine>(
     params: &Params<C>,
@@ -544,6 +564,23 @@ where
         })
         .collect::<Vec<_>>();
 
+    #[cfg(any(feature = "batch", feature = "multicore"))]
+    let permutation_pk = {
+        let (permutation_pk, ()) = crate::multicore::join(
+            || {
+                assembly
+                    .permutation
+                    .build_pk(params, &vk.domain, &cs.permutation, &fft_twiddles)
+            },
+            || {
+                // Build small fixed-base tables during independent key
+                // generation work, not on the first proof.
+                prepare_small_fixed_base_tables(params, cs.num_instance_columns);
+            },
+        );
+        permutation_pk
+    };
+    #[cfg(not(any(feature = "batch", feature = "multicore")))]
     let permutation_pk =
         assembly
             .permutation
@@ -580,7 +617,7 @@ where
         .domain
         .coeff_to_extended_with_twiddles(l_last, &fft_twiddles);
 
-    Ok(ProvingKey {
+    let pk = ProvingKey {
         vk,
         l0,
         l_blind,
@@ -592,14 +629,21 @@ where
         permutation: permutation_pk,
         fft_twiddles,
         floor_plan,
-    })
+        quotient_plans: Arc::new(Default::default()),
+    };
+    super::evaluator_schedule::prepare_quotient_plans(&pk);
+    Ok(pk)
 }
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "multicore")]
+    use super::prepare_small_fixed_base_tables;
     use super::{
         CompressedSelectorFamily, MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES,
         commit_fixed_lagrange, evaluate_compressed_selector_family, plan_compressed_selector_cache,
     };
+    #[cfg(feature = "multicore")]
+    use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use crate::{
         pasta::{EqAffine, Fp},
         poly::{
@@ -624,6 +668,18 @@ mod tests {
             commit_fixed_lagrange(&params, &polynomial),
             params.commit_lagrange(&polynomial, Blind::default())
         );
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn keygen_prepares_sparse_commitment_table() {
+        let params = Params::<EqAffine>::new(PREPARED_SPARSE_COMMITMENT_K);
+        let coefficients = [(0, Fp::from(3)), (1, Fp::from(7))];
+        let blind = Blind(Fp::from(11));
+        assert!(params.commit_sparse(&coefficients, blind).is_none());
+
+        prepare_small_fixed_base_tables(&params, 0);
+        assert!(params.commit_sparse(&coefficients, blind).is_some());
     }
 
     fn family(column_index: usize, combination_len: usize) -> CompressedSelectorFamily {

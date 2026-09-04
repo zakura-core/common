@@ -3,6 +3,8 @@ use rand_core::Rng;
 
 use super::super::{Coeff, Polynomial, evaluate_polynomial_with_powers, power_vector};
 use super::{Blind, Params};
+#[cfg(feature = "multicore")]
+use crate::PreparedSparseCommitments;
 use crate::arithmetic::{CurveAffine, CurveExt, best_multiexp, compute_inner_product};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
@@ -50,6 +52,11 @@ fn ipa_masking_commitment<C: CurveAffine>(
         assert_eq!(*index, 1 << t);
     }
 
+    #[cfg(feature = "multicore")]
+    if let Some(commitment) = params.commit_sparse(coefficients, blind) {
+        return commitment;
+    }
+
     let mut scalars = Vec::with_capacity(coefficients.len() + 1);
     let mut bases = Vec::with_capacity(coefficients.len() + 1);
     for (index, coefficient) in coefficients {
@@ -81,54 +88,89 @@ fn ipa_round_multiexp<C: CurveAffine>(
     best_multiexp(&round_coeffs, &round_bases)
 }
 
-fn compute_ipa_inner_products_deferred<F: Field + 'static, T: DeferredField + 'static>(
-    a: &dyn Any,
-    b: &dyn Any,
-    half: usize,
-) -> (F, F) {
-    let a = a
-        .downcast_ref::<Vec<T>>()
-        .expect("the inner-product field was checked before conversion");
-    let b = b
-        .downcast_ref::<Vec<T>>()
-        .expect("the inner-product field was checked before conversion");
-    assert_eq!(a.len(), b.len());
-    assert_eq!(a.len(), half * 2);
-    let result = crate::multicore::join(
-        || T::inner_product(&a[half..], &b[..half]),
-        || T::inner_product(&a[..half], &b[half..]),
-    );
-    *(&result as &dyn Any)
-        .downcast_ref::<(F, F)>()
-        .expect("the inner-product output matches its input field")
+#[derive(Clone, Copy)]
+struct IpaRoundTerms<'a, C: CurveAffine> {
+    coeffs: &'a [C::Scalar],
+    bases: &'a [C],
+    value: C::Scalar,
+    randomness: C::Scalar,
 }
 
-fn compute_ipa_inner_products_pasta<F: Field + 'static>(
-    a: &dyn Any,
-    b: &dyn Any,
+fn ipa_round_multiexps<C: CurveAffine>(
+    l: IpaRoundTerms<'_, C>,
+    r: IpaRoundTerms<'_, C>,
+    params: &Params<C>,
+    z: C::Scalar,
+) -> (C::Curve, C::Curve) {
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    if let Some(fixed_bases) = params.fixed_base_table() {
+        let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
+            || {
+                crate::multicore::join(
+                    || best_multiexp(l.coeffs, l.bases),
+                    || best_multiexp(r.coeffs, r.bases),
+                )
+            },
+            || {
+                fixed_bases.multiply_ipa_rounds(
+                    l.value * z,
+                    l.randomness,
+                    r.value * z,
+                    r.randomness,
+                )
+            },
+        );
+        return (l_body + l_auxiliary, r_body + r_auxiliary);
+    }
+
+    crate::multicore::join(
+        || ipa_round_multiexp(l.coeffs, l.bases, l.value, l.randomness, params, z),
+        || ipa_round_multiexp(r.coeffs, r.bases, r.value, r.randomness, params, z),
+    )
+}
+
+fn compute_ipa_hi_evaluation_deferred<F: Field + 'static, T: DeferredField + 'static>(
+    polynomial: &dyn Any,
+    powers: &dyn Any,
     half: usize,
-) -> (F, F) {
+) -> F {
+    let polynomial = polynomial
+        .downcast_ref::<Vec<T>>()
+        .expect("the polynomial field was checked before conversion");
+    let powers = powers
+        .downcast_ref::<Vec<T>>()
+        .expect("the power-vector field was checked before conversion");
+    assert_eq!(polynomial.len(), half * 2);
+    assert!(powers.len() >= half);
+    let result = T::inner_product(&polynomial[half..], &powers[..half]);
+    *(&result as &dyn Any)
+        .downcast_ref::<F>()
+        .expect("the evaluation field matches the polynomial field")
+}
+
+fn compute_ipa_hi_evaluation_pasta<F: Field + 'static>(
+    polynomial: &dyn Any,
+    powers: &dyn Any,
+    half: usize,
+) -> F {
     if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
-        return compute_ipa_inner_products_deferred::<F, pallas::Base>(a, b, half);
+        return compute_ipa_hi_evaluation_deferred::<F, pallas::Base>(polynomial, powers, half);
     }
     if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
-        return compute_ipa_inner_products_deferred::<F, vesta::Base>(a, b, half);
+        return compute_ipa_hi_evaluation_deferred::<F, vesta::Base>(polynomial, powers, half);
     }
 
     // Downcasting the complete owned buffers is safe and avoids per-element
     // type checks in the specialized path.
-    let a = a
+    let polynomial = polynomial
         .downcast_ref::<Vec<F>>()
-        .expect("the inner-product input has the expected field");
-    let b = b
+        .expect("the polynomial has the expected field");
+    let powers = powers
         .downcast_ref::<Vec<F>>()
-        .expect("the inner-product input has the expected field");
-    assert_eq!(a.len(), b.len());
-    assert_eq!(a.len(), half * 2);
-    crate::multicore::join(
-        || compute_inner_product(&a[half..], &b[..half]),
-        || compute_inner_product(&a[..half], &b[half..]),
-    )
+        .expect("the power vector has the expected field");
+    assert_eq!(polynomial.len(), half * 2);
+    assert!(powers.len() >= half);
+    compute_inner_product(&polynomial[half..], &powers[..half])
 }
 
 /// Create a polynomial commitment opening proof for the polynomial defined
@@ -216,9 +258,14 @@ pub(in crate::poly) fn create_proof_with_powers<
     let mut p_prime = p_prime_poly.values;
     assert_eq!(p_prime.len(), params.n as usize);
 
-    // The inner product of `p_prime` and `b` is the evaluation of the
-    // polynomial at `x_3`.
-    let mut b = powers;
+    // At every round, b[i] = b_scale * x_3^i. Keeping that invariant in
+    // scalar form avoids materializing and folding the power vector.
+    let mut b_scale = C::Scalar::ONE;
+
+    // Subtracting `v` above made the evaluation of `p_prime` at `x_3` zero.
+    // Tracking the evaluation through each fold lets one half-evaluation
+    // determine both IPA inner products.
+    let mut p_prime_at_x_3 = C::Scalar::ZERO;
 
     // Initialize the vector `G'` from the URS. We'll be progressively collapsing
     // this vector into smaller and smaller vectors until it is of length 1.
@@ -226,40 +273,56 @@ pub(in crate::poly) fn create_proof_with_powers<
 
     // Perform the inner product argument, round by round.
     for j in 0..params.k {
-        let half = 1 << (params.k - j - 1); // half the length of `p_prime`, `b`, `G'`
+        // Half the length of `p_prime`, `b`, and `G'`.
+        let half = 1 << (params.k - j - 1);
 
-        // Compute the scalar terms needed by L and R before their MSMs.
-        let (value_l_j, value_r_j) =
-            compute_ipa_inner_products_pasta::<C::Scalar>(&p_prime, &b, half);
+        // If P(X) = P_lo(X) + X^half P_hi(X), its tracked evaluation and
+        // P_hi(x_3) determine P_lo(x_3). This computes both IPA inner products
+        // from one half-sized inner product against the original powers.
+        let x_3_to_half = powers[half];
+        let p_hi_at_x_3 = compute_ipa_hi_evaluation_pasta::<C::Scalar>(&p_prime, &powers, half);
+        let p_lo_at_x_3 = p_prime_at_x_3 - x_3_to_half * p_hi_at_x_3;
+        let b_hi_scale = b_scale * x_3_to_half;
+        let value_l_j = b_scale * p_hi_at_x_3;
+        let value_r_j = b_hi_scale * p_lo_at_x_3;
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
 
-        // Include the U and W terms in each main MSM so their doublings are
-        // shared with the round commitment.
-        let (l_j, r_j) = crate::multicore::join(
-            || {
-                ipa_round_multiexp(
-                    &p_prime[half..],
-                    &g_prime[0..half],
-                    value_l_j,
-                    l_j_randomness,
-                    params,
-                    z,
-                )
-            },
-            || {
-                ipa_round_multiexp(
-                    &p_prime[0..half],
-                    &g_prime[half..],
-                    value_r_j,
-                    r_j_randomness,
-                    params,
-                    z,
-                )
-            },
-        );
-        let l_j = l_j.to_affine();
-        let r_j = r_j.to_affine();
+        let l_terms = IpaRoundTerms {
+            coeffs: &p_prime[half..],
+            bases: &g_prime[0..half],
+            value: value_l_j,
+            randomness: l_j_randomness,
+        };
+        let r_terms = IpaRoundTerms {
+            coeffs: &p_prime[0..half],
+            bases: &g_prime[half..],
+            value: value_r_j,
+            randomness: r_j_randomness,
+        };
+
+        // The first round uses the original SRS bases, so it can reuse the
+        // coefficient table retained by `prepare_commitments`. Later rounds
+        // use transcript-dependent folded bases and keep the ordinary MSM.
+        let prepared_round = (j == 0).then(|| {
+            params.try_prepared_first_ipa_round(
+                l_terms.coeffs,
+                r_terms.coeffs,
+                l_terms.value * z,
+                l_terms.randomness,
+                r_terms.value * z,
+                r_terms.randomness,
+            )
+        });
+        let (l_j, r_j) = prepared_round
+            .flatten()
+            .unwrap_or_else(|| ipa_round_multiexps(l_terms, r_terms, params, z));
+        // Normalize the two round points together so they share one field
+        // inversion.
+        let points = [l_j, r_j];
+        let mut affine = [C::identity(); 2];
+        C::Curve::batch_normalize(&points, &mut affine);
+        let [l_j, r_j] = affine;
 
         // Feed L and R into the real transcript
         transcript.write_point(l_j)?;
@@ -268,15 +331,17 @@ pub(in crate::poly) fn create_proof_with_powers<
         let u_j = *transcript.squeeze_challenge_scalar::<()>();
         let u_j_inv = u_j.invert().unwrap(); // TODO, bubble this up
 
-        // Collapse `p_prime` and `b`.
+        // Collapse `p_prime`.
         // TODO: parallelize
         #[allow(clippy::assign_op_pattern)]
         for i in 0..half {
             p_prime[i] = p_prime[i] + &(p_prime[i + half] * &u_j_inv);
-            b[i] = b[i] + &(b[i + half] * &u_j);
         }
         p_prime.truncate(half);
-        b.truncate(half);
+        if j + 1 < params.k {
+            p_prime_at_x_3 = p_lo_at_x_3 + u_j_inv * p_hi_at_x_3;
+            b_scale += b_hi_scale * u_j;
+        }
 
         // Collapse `G'`
         parallel_generator_collapse(&mut g_prime, u_j);
@@ -327,16 +392,27 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use super::create_proof;
     use super::{
-        Params, compute_ipa_inner_products_pasta, ipa_masking_commitment, ipa_round_multiexp,
+        Params, compute_ipa_hi_evaluation_pasta, ipa_masking_commitment, ipa_round_multiexp,
         parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
-    use crate::poly::{EvaluationDomain, commitment::Blind};
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use crate::poly::commitment::prepared_commitment_max_threads;
+    use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use crate::transcript::{Blake2bWrite, Challenge255, Transcript, TranscriptWrite};
+    #[cfg(feature = "multicore")]
+    use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
     use rand::rng;
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use rand::{SeedableRng, rngs::StdRng};
+    use std::fmt::Debug;
 
     fn full_width_scalar<C: CurveAffine>() -> C::Scalar {
         (C::Scalar::from(0x9E37_79B9_7F4A_7C15u64).square()
@@ -373,6 +449,148 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn prepared_first_round_matches_ordinary<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+    {
+        const K: u32 = 6;
+
+        let params = Params::<C>::new(K);
+        let half = 1 << (K - 1);
+        let mut scalar = full_width_scalar::<C>();
+        let coefficients = (0..2 * half)
+            .map(|index| {
+                scalar = scalar.square() + C::Scalar::from(index as u64 + 1);
+                scalar
+            })
+            .collect::<Vec<_>>();
+        let (p_lo, p_hi) = coefficients.split_at(half);
+        let l_value = scalar.square() + C::Scalar::from(71);
+        let l_randomness = l_value.square() + C::Scalar::from(73);
+        let r_value = l_randomness.square() + C::Scalar::from(79);
+        let r_randomness = r_value.square() + C::Scalar::from(83);
+        let z = r_randomness.square() + C::Scalar::from(89);
+
+        let unprepared_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        unprepared_pool.install(|| {
+            assert!(
+                params
+                    .try_prepared_first_ipa_round(
+                        p_hi,
+                        p_lo,
+                        l_value * z,
+                        l_randomness,
+                        r_value * z,
+                        r_randomness,
+                    )
+                    .is_none()
+            );
+        });
+
+        assert!(params.prepare_commitments());
+        for workers in [1, 4] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let expected_l =
+                    ipa_round_multiexp(p_hi, &params.g[..half], l_value, l_randomness, &params, z);
+                let expected_r =
+                    ipa_round_multiexp(p_lo, &params.g[half..], r_value, r_randomness, &params, z);
+                let (actual_l, actual_r) = params
+                    .try_prepared_first_ipa_round(
+                        p_hi,
+                        p_lo,
+                        l_value * z,
+                        l_randomness,
+                        r_value * z,
+                        r_randomness,
+                    )
+                    .unwrap();
+                assert_eq!(actual_l, expected_l);
+                assert_eq!(actual_r, expected_r);
+            });
+        }
+
+        #[cfg(feature = "multicore")]
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(prepared_commitment_max_threads(K) + 1)
+            .build()
+            .unwrap()
+            .install(|| {
+                assert!(
+                    params
+                        .try_prepared_first_ipa_round(
+                            p_hi,
+                            p_lo,
+                            l_value * z,
+                            l_randomness,
+                            r_value * z,
+                            r_randomness,
+                        )
+                        .is_none()
+                );
+            });
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn prepared_first_round_preserves_opening_proof() {
+        const K: u32 = 6;
+        const PROOF_SEED: u64 = 0x4950_412d_524f_554e;
+
+        let params = Params::<pallas::Affine>::new(K);
+        let domain = EvaluationDomain::new(1, K);
+        let mut polynomial = domain.empty_coeff();
+        for (index, coefficient) in polynomial.iter_mut().enumerate() {
+            *coefficient = pallas::Scalar::from(index as u64 + 1);
+        }
+        let blind = Blind(pallas::Scalar::from(17));
+        let create_seeded_proof = || {
+            let commitment = params.commit(&polynomial, blind).to_affine();
+            let mut transcript =
+                Blake2bWrite::<Vec<u8>, pallas::Affine, Challenge255<_>>::init(vec![]);
+            transcript.write_point(commitment).unwrap();
+            let x = *transcript.squeeze_challenge_scalar::<()>();
+            transcript
+                .write_scalar(eval_polynomial(&polynomial, x))
+                .unwrap();
+            create_proof(
+                &params,
+                StdRng::seed_from_u64(PROOF_SEED),
+                &mut transcript,
+                &polynomial,
+                blind,
+                x,
+            )
+            .unwrap();
+            transcript.finalize()
+        };
+        let narrow_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+
+        let unprepared = narrow_pool.install(create_seeded_proof);
+        assert!(params.prepare_commitments());
+        let prepared = narrow_pool.install(create_seeded_proof);
+        assert_eq!(prepared, unprepared);
+
+        #[cfg(feature = "multicore")]
+        {
+            let wide_pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(prepared_commitment_max_threads(K) + 1)
+                .build()
+                .unwrap();
+            let gated_fallback = wide_pool.install(create_seeded_proof);
+            assert_eq!(gated_fallback, unprepared);
+        }
+    }
+
     fn masking_polynomial_is_sparse_and_commits_correctly<C>()
     where
         C: CurveAffine + core::fmt::Debug,
@@ -405,6 +623,14 @@ mod tests {
                 ipa_masking_commitment(&coefficients, blind, &params),
                 params.commit(&full, blind),
             );
+            #[cfg(feature = "multicore")]
+            if k == PREPARED_SPARSE_COMMITMENT_K {
+                assert!(params.prepare_sparse_commitment());
+                assert_eq!(
+                    ipa_masking_commitment(&coefficients, blind, &params),
+                    params.commit(&full, blind),
+                );
+            }
         }
     }
 
@@ -526,24 +752,84 @@ mod tests {
         }
     }
 
-    fn deferred_inner_product_matches_eager<F: Field + From<u64> + 'static>() {
-        for half in [0, 1, 2, 3, 31, 32, 2_048] {
-            let a = (0..half * 2)
+    fn deferred_hi_evaluation_matches_eager<F: Field + From<u64> + 'static>() {
+        for half in [1, 2, 3, 31, 32, 2_048] {
+            let polynomial = (0..half * 2)
                 .scan(F::from(7), |value, index| {
                     *value = value.square() + F::from(index as u64 + 1);
                     Some(*value)
                 })
                 .collect::<Vec<_>>();
-            let b = (0..half * 2)
+            let powers = (0..half * 2)
                 .scan(F::from(11), |value, index| {
                     *value = value.square() + F::from(index as u64 + 3);
                     Some(*value)
                 })
                 .collect::<Vec<_>>();
 
-            let (left, right) = compute_ipa_inner_products_pasta::<F>(&a, &b, half);
-            assert_eq!(left, compute_inner_product(&a[half..], &b[..half]));
-            assert_eq!(right, compute_inner_product(&a[..half], &b[half..]));
+            assert_eq!(
+                compute_ipa_hi_evaluation_pasta::<F>(&polynomial, &powers, half),
+                compute_inner_product(&polynomial[half..], &powers[..half]),
+            );
+        }
+    }
+
+    fn compact_b_state_matches_explicit_folds<F>()
+    where
+        F: Field + From<u64> + Debug + 'static,
+    {
+        for k in [1, 2, 3, 6, 11] {
+            let length = 1 << k;
+            for point in [F::ZERO, F::ONE, -F::ONE, F::from(19)] {
+                let powers = power_vector(point, length);
+                let mut polynomial = (0..length)
+                    .map(|index| F::from((index * 17 + 3) as u64))
+                    .collect::<Vec<_>>();
+                let evaluation = eval_polynomial(&polynomial, point);
+                polynomial[0] -= evaluation;
+
+                let mut b = powers.clone();
+                let mut polynomial_at_point = F::ZERO;
+                let mut b_scale = F::ONE;
+
+                for round in 0..k {
+                    let half = 1 << (k - round - 1);
+                    let expected_l = compute_inner_product(&polynomial[half..], &b[..half]);
+                    let expected_r = compute_inner_product(&polynomial[..half], &b[half..]);
+
+                    let point_to_half = powers[half];
+                    let p_hi_at_point =
+                        compute_ipa_hi_evaluation_pasta::<F>(&polynomial, &powers, half);
+                    let p_lo_at_point = polynomial_at_point - point_to_half * p_hi_at_point;
+                    let b_hi_scale = b_scale * point_to_half;
+
+                    assert_eq!(b_scale * p_hi_at_point, expected_l);
+                    assert_eq!(b_hi_scale * p_lo_at_point, expected_r);
+
+                    let challenge = if round == 0 {
+                        -F::ONE
+                    } else {
+                        F::from((round + 2) as u64)
+                    };
+                    let challenge_inverse = challenge.invert().unwrap();
+                    for index in 0..half {
+                        let p_hi = polynomial[index + half];
+                        let b_hi = b[index + half];
+                        polynomial[index] += p_hi * challenge_inverse;
+                        b[index] += b_hi * challenge;
+                    }
+                    polynomial.truncate(half);
+                    b.truncate(half);
+
+                    polynomial_at_point = p_lo_at_point + challenge_inverse * p_hi_at_point;
+                    b_scale += b_hi_scale * challenge;
+                    assert_eq!(polynomial_at_point, eval_polynomial(&polynomial, point));
+
+                    for (index, value) in b.iter().enumerate() {
+                        assert_eq!(*value, b_scale * powers[index]);
+                    }
+                }
+            }
         }
     }
 
@@ -566,6 +852,25 @@ mod tests {
     fn round_multiexp_matches_split_vesta() {
         round_multiexp_matches_split::<vesta::Affine>();
     }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_first_round_matches_ordinary_pallas() {
+        prepared_first_round_matches_ordinary::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_first_round_matches_ordinary_vesta() {
+        prepared_first_round_matches_ordinary::<vesta::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_first_round_preserves_unprepared_opening_proof() {
+        prepared_first_round_preserves_opening_proof();
+    }
+
     #[test]
     fn masking_polynomial_is_sparse_and_commits_correctly_pallas() {
         masking_polynomial_is_sparse_and_commits_correctly::<pallas::Affine>();
@@ -587,12 +892,22 @@ mod tests {
     }
 
     #[test]
-    fn deferred_inner_product_matches_eager_pallas_base() {
-        deferred_inner_product_matches_eager::<pallas::Base>();
+    fn deferred_hi_evaluation_matches_eager_pallas_base() {
+        deferred_hi_evaluation_matches_eager::<pallas::Base>();
     }
 
     #[test]
-    fn deferred_inner_product_matches_eager_vesta_base() {
-        deferred_inner_product_matches_eager::<vesta::Base>();
+    fn deferred_hi_evaluation_matches_eager_vesta_base() {
+        deferred_hi_evaluation_matches_eager::<vesta::Base>();
+    }
+
+    #[test]
+    fn compact_b_state_matches_explicit_folds_pallas_base() {
+        compact_b_state_matches_explicit_folds::<pallas::Base>();
+    }
+
+    #[test]
+    fn compact_b_state_matches_explicit_folds_vesta_base() {
+        compact_b_state_matches_explicit_folds::<vesta::Base>();
     }
 }

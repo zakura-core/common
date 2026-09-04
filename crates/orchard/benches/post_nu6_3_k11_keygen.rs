@@ -7,9 +7,9 @@ const BENCHMARK_SAMPLES: usize = 10;
 const WARMUP_SECONDS: u64 = 2;
 const MEASUREMENT_SECONDS: u64 = 15;
 
-fn orchard_k11_keygen(criterion: &mut Criterion) {
-    let version = OrchardCircuitVersion::FixedPostNu6_2;
-    let mut group = criterion.benchmark_group("orchard-k11-keygen");
+fn post_nu6_3_k11_keygen(criterion: &mut Criterion) {
+    let version = OrchardCircuitVersion::PostNu6_3;
+    let mut group = criterion.benchmark_group("post-nu6-3-k11-keygen");
     group.sample_size(BENCHMARK_SAMPLES);
     group.sampling_mode(SamplingMode::Flat);
     group.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
@@ -30,5 +30,5 @@ fn orchard_k11_keygen(criterion: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, orchard_k11_keygen);
+criterion_group!(benches, post_nu6_3_k11_keygen);
 criterion_main!(benches);
