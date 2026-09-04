@@ -898,11 +898,11 @@ where
     let ((prepared_instances, used_prepared_route), prepared_advice) =
         crate::multicore::join(prepare_instances, prepare_advice);
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "batch"))]
     if used_prepared_route {
         PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
     }
-    #[cfg(not(test))]
+    #[cfg(not(all(test, feature = "batch")))]
     let _ = used_prepared_route;
 
     // Preserve circuit and column order while updating the transcript. Keeping
