@@ -319,39 +319,40 @@ fn commit_prepared_instances<C: CurveAffine>(
 fn commit_prover_instances<C: CurveAffine>(
     params: &Params<C>,
     instances: &[&[&[C::Scalar]]],
-) -> Vec<Vec<C::Curve>> {
+) -> (Vec<Vec<C::Curve>>, bool) {
     #[cfg(feature = "batch")]
     if let Some(commitments) = commit_prepared_instances(params, instances) {
-        #[cfg(test)]
-        PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
-        return commitments;
+        return (commitments, true);
     }
 
-    instances
-        .into_par_iter()
-        .map(|columns| {
-            columns
-                .iter()
-                .map(|values| {
-                    if values.len() <= params.g_lagrange.len() {
-                        commit_instance(params, values)
-                    } else {
-                        // This placeholder is never written to the transcript:
-                        // instance preparation returns `InstanceTooLarge` at
-                        // the same proof position as the previous path.
-                        C::Curve::identity()
-                    }
-                })
-                .collect()
-        })
-        .collect()
+    (
+        instances
+            .into_par_iter()
+            .map(|columns| {
+                columns
+                    .iter()
+                    .map(|values| {
+                        if values.len() <= params.g_lagrange.len() {
+                            commit_instance(params, values)
+                        } else {
+                            // This placeholder is never written to the transcript:
+                            // instance preparation returns `InstanceTooLarge` at
+                            // the same proof position as the previous path.
+                            C::Curve::identity()
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+        false,
+    )
 }
 
 fn normalize_prover_instance_commitments<C: CurveAffine>(
     params: &Params<C>,
     instances: &[&[&[C::Scalar]]],
-) -> Vec<Vec<C>> {
-    let projective = commit_prover_instances(params, instances);
+) -> (Vec<Vec<C>>, bool) {
+    let (projective, used_prepared_route) = commit_prover_instances(params, instances);
     let column_counts = projective.iter().map(Vec::len).collect::<Vec<_>>();
     let projective = projective.into_iter().flatten().collect::<Vec<_>>();
     let mut affine = vec![C::identity(); projective.len()];
@@ -365,7 +366,7 @@ fn normalize_prover_instance_commitments<C: CurveAffine>(
         .map(|count| affine.by_ref().take(count).collect::<Vec<_>>())
         .collect::<Vec<_>>();
     assert!(affine.next().is_none());
-    commitments
+    (commitments, used_prepared_route)
 }
 
 struct AdviceWitness<F: Field> {
@@ -705,44 +706,8 @@ where
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
     let meta = &pk.vk.cs;
-    let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
-
-    let instance_commitments = normalize_prover_instance_commitments(params, instances);
-    let instance_values = instances
-        .into_par_iter()
-        .map(|instance| -> Result<_, Error> {
-            instance
-                .iter()
-                .map(|values| {
-                    let mut poly = domain.empty_lagrange();
-                    assert_eq!(poly.len(), params.n as usize);
-                    if values.len() > max_instance_len {
-                        return Err(Error::InstanceTooLarge);
-                    }
-                    for (poly, value) in poly.iter_mut().zip(values.iter()) {
-                        *poly = *value;
-                    }
-                    Ok(poly)
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .collect::<Vec<_>>();
-
-    // Preserve circuit and column order while updating the transcript. Keeping
-    // each preparation result in order also preserves the transcript prefix
-    // before an instance error.
-    let mut prepared_instance_values = Vec::with_capacity(instance_values.len());
-    for (instance_commitments, instance_values) in
-        instance_commitments.into_iter().zip(instance_values)
-    {
-        let instance_values = instance_values?;
-        for commitment in instance_commitments {
-            transcript.common_point(commitment)?;
-        }
-        prepared_instance_values.push(instance_values);
-    }
-
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
+    let max_instance_len = unusable_rows_start;
     let mut witnesses = instances
         .iter()
         .map(|instances| WitnessCollection {
@@ -764,10 +729,56 @@ where
         pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
-    let prepare_instance_polynomials = || {
-        prepared_instance_values
+    struct AdviceSingle<C: CurveAffine> {
+        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+        pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+        pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+        pub advice_blinds: Vec<Blind<C::Scalar>>,
+    }
+
+    struct AdviceRandomness<F: Field> {
+        pub row_blinds: Vec<Vec<F>>,
+        pub polynomial_blinds: Vec<Blind<F>>,
+    }
+
+    // Draw randomness in the historical circuit, column, and row order before
+    // entering parallel work. This keeps `R` free of a new `Send` bound.
+    let advice_randomness = (0..circuits.len())
+        .map(|_| AdviceRandomness {
+            row_blinds: (0..meta.num_advice_columns)
+                .map(|_| {
+                    (unusable_rows_start..params.n as usize)
+                        .map(|_| C::Scalar::random(&mut rng))
+                        .collect()
+                })
+                .collect(),
+            polynomial_blinds: (0..meta.num_advice_columns)
+                .map(|_| Blind(C::Scalar::random(&mut rng)))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    let prepare_instances = || {
+        let (instance_commitments, used_prepared_route) =
+            normalize_prover_instance_commitments(params, instances);
+        let prepared = instances
             .into_par_iter()
-            .map(|instance_values| {
+            .zip(instance_commitments.into_par_iter())
+            .map(|(instance, instance_commitments)| -> Result<_, Error> {
+                let instance_values = instance
+                    .iter()
+                    .map(|values| {
+                        let mut poly = domain.empty_lagrange();
+                        assert_eq!(poly.len(), params.n as usize);
+                        if values.len() > max_instance_len {
+                            return Err(Error::InstanceTooLarge);
+                        }
+                        for (poly, value) in poly.iter_mut().zip(values.iter()) {
+                            *poly = *value;
+                        }
+                        Ok(poly)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let instance_polys: Vec<_> = instance_values
                     .iter()
                     .map(|poly| {
@@ -783,15 +794,20 @@ where
                     })
                     .collect();
 
-                InstanceSingle::<C> {
-                    instance_values,
-                    instance_polys,
-                    instance_cosets,
-                }
+                Ok((
+                    instance_commitments,
+                    InstanceSingle::<C> {
+                        instance_values,
+                        instance_polys,
+                        instance_cosets,
+                    },
+                ))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (prepared, used_prepared_route)
     };
-    let synthesize = || {
+
+    let prepare_advice = || -> Result<_, Error> {
         // Synthesize every circuit while allowing its floor planner to share
         // circuit-shape-dependent work across the batch.
         ConcreteCircuit::FloorPlanner::synthesize_batch(
@@ -800,105 +816,108 @@ where
             config,
             &meta.constants,
             pk.floor_plan.as_ref(),
-        )
+        )?;
+
+        let advice_witnesses = witnesses
+            .into_iter()
+            .zip(advice_randomness)
+            .map(|(witness, randomness)| {
+                let mut advice = witness.advice.evaluate();
+
+                // Add blinding factors to advice columns.
+                for (advice, row_blinds) in advice.iter_mut().zip(randomness.row_blinds) {
+                    advice[unusable_rows_start..].copy_from_slice(&row_blinds);
+                }
+
+                (advice, randomness.polynomial_blinds)
+            })
+            .collect::<Vec<_>>();
+
+        let circuit_count = advice_witnesses.len();
+        Ok(crate::multicore::join(
+            || {
+                advice_witnesses
+                    .into_par_iter()
+                    .map(|(advice, advice_blinds)| {
+                        let (advice_commitments, (advice_polys, advice_cosets)) =
+                            crate::multicore::join(
+                                || {
+                                    #[cfg(feature = "multicore")]
+                                    let advice_commitments_projective: Vec<_> = advice
+                                        .par_iter()
+                                        .zip(advice_blinds.par_iter())
+                                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                        .collect();
+                                    #[cfg(not(feature = "multicore"))]
+                                    let advice_commitments_projective: Vec<_> = advice
+                                        .iter()
+                                        .zip(advice_blinds.iter())
+                                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                        .collect();
+                                    let mut advice_commitments =
+                                        vec![C::identity(); advice_commitments_projective.len()];
+                                    C::Curve::batch_normalize(
+                                        &advice_commitments_projective,
+                                        &mut advice_commitments,
+                                    );
+                                    advice_commitments
+                                },
+                                || {
+                                    domain.batch_lagrange_to_coeff_and_extended(
+                                        &advice,
+                                        &pk.fft_twiddles,
+                                    )
+                                },
+                            );
+
+                        (
+                            advice_commitments,
+                            AdviceSingle::<C> {
+                                advice_values: advice,
+                                advice_polys,
+                                advice_cosets,
+                                advice_blinds,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+            || {
+                lookup::prover::prepare_table_plan(
+                    &pk.vk.cs.lookups,
+                    circuit_count,
+                    unusable_rows_start,
+                )
+            },
+        ))
     };
 
-    // A single circuit cannot use circuit-level synthesis parallelism, so its
-    // instance transforms can occupy otherwise-idle worker capacity. Larger
-    // batches already expose both phases across their circuits.
-    let (instance, synthesis_result) =
-        if circuits.len() == 1 && crate::multicore::current_num_threads() > 1 {
-            crate::multicore::join(prepare_instance_polynomials, synthesize)
-        } else {
-            (prepare_instance_polynomials(), synthesize())
-        };
-    synthesis_result?;
+    // Continue directly from witness synthesis into advice preparation. The
+    // public-instance branch runs independently, and Rayon workers from the
+    // branch that finishes first can steal remaining parallel work.
+    let ((prepared_instances, used_prepared_route), prepared_advice) =
+        crate::multicore::join(prepare_instances, prepare_advice);
 
-    struct AdviceSingle<C: CurveAffine> {
-        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-        pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
-        pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-        pub advice_blinds: Vec<Blind<C::Scalar>>,
+    #[cfg(all(test, feature = "batch"))]
+    if used_prepared_route {
+        PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
+    }
+    #[cfg(not(all(test, feature = "batch")))]
+    let _ = used_prepared_route;
+
+    // Preserve circuit and column order while updating the transcript. Keeping
+    // each preparation result in order also preserves the transcript prefix
+    // before an instance error or synthesis error.
+    let mut instance = Vec::with_capacity(prepared_instances.len());
+    for prepared_instance in prepared_instances {
+        let (instance_commitments, instance_single) = prepared_instance?;
+        for commitment in instance_commitments {
+            transcript.common_point(commitment)?;
+        }
+        instance.push(instance_single);
     }
 
-    // Consume randomness in circuit order before preparing the independent
-    // commitments and polynomial transforms in parallel.
-    let advice_witnesses = witnesses
-        .into_iter()
-        .map(|witness| -> Result<_, Error> {
-            let mut advice = witness.advice.evaluate();
-
-            // Add blinding factors to advice columns
-            for advice in &mut advice {
-                for cell in &mut advice[unusable_rows_start..] {
-                    *cell = C::Scalar::random(&mut rng);
-                }
-            }
-
-            // Compute commitments to advice column polynomials
-            let advice_blinds: Vec<_> = advice
-                .iter()
-                .map(|_| Blind(C::Scalar::random(&mut rng)))
-                .collect();
-            Ok((advice, advice_blinds))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let circuit_count = advice_witnesses.len();
-    let (prepared_advice, lookup_table_plan) = crate::multicore::join(
-        || {
-            advice_witnesses
-                .into_par_iter()
-                .map(|(advice, advice_blinds)| {
-                    let (advice_commitments, (advice_polys, advice_cosets)) =
-                        crate::multicore::join(
-                            || {
-                                #[cfg(feature = "multicore")]
-                                let advice_commitments_projective: Vec<_> = advice
-                                    .par_iter()
-                                    .zip(advice_blinds.par_iter())
-                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                                    .collect();
-                                #[cfg(not(feature = "multicore"))]
-                                let advice_commitments_projective: Vec<_> = advice
-                                    .iter()
-                                    .zip(advice_blinds.iter())
-                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                                    .collect();
-                                let mut advice_commitments =
-                                    vec![C::identity(); advice_commitments_projective.len()];
-                                C::Curve::batch_normalize(
-                                    &advice_commitments_projective,
-                                    &mut advice_commitments,
-                                );
-                                advice_commitments
-                            },
-                            || {
-                                domain
-                                    .batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles)
-                            },
-                        );
-
-                    (
-                        advice_commitments,
-                        AdviceSingle::<C> {
-                            advice_values: advice,
-                            advice_polys,
-                            advice_cosets,
-                            advice_blinds,
-                        },
-                    )
-                })
-                .collect::<Vec<_>>()
-        },
-        || {
-            lookup::prover::prepare_table_plan(
-                &pk.vk.cs.lookups,
-                circuit_count,
-                unusable_rows_start,
-            )
-        },
-    );
+    let (prepared_advice, lookup_table_plan) = prepared_advice?;
 
     let mut advice = Vec::with_capacity(prepared_advice.len());
     for (advice_commitments, advice_single) in prepared_advice {
