@@ -2350,10 +2350,11 @@ fn v1_proving_key_reuses_floor_plan() {
     };
     use pasta_curves::EqAffine;
     use rand::{SeedableRng, rngs::StdRng};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     static MEASUREMENTS: AtomicUsize = AtomicUsize::new(0);
     static TABLE_ASSIGNMENTS: AtomicUsize = AtomicUsize::new(0);
+    static FAIL_TABLE: AtomicBool = AtomicBool::new(false);
     const PROOF_SEED: u64 = 0x5631_4241_5443_4802;
 
     #[derive(Clone, Copy)]
@@ -2390,6 +2391,9 @@ fn v1_proving_key_reuses_floor_plan() {
                 || "fixed table",
                 |mut region| {
                     TABLE_ASSIGNMENTS.fetch_add(1, Ordering::Relaxed);
+                    if FAIL_TABLE.load(Ordering::Relaxed) {
+                        return Err(Error::Synthesis);
+                    }
                     region.assign_cell(|| "zero", config.table, 0, || Value::known(F::ZERO))
                 },
             )?;
@@ -2423,10 +2427,11 @@ fn v1_proving_key_reuses_floor_plan() {
     )
     .expect("proof generation should not fail");
     // The plan cached in the proving key is reused, so proving re-measures
-    // nothing. The fixed table is already part of the proving key, so the
-    // witness-only assignment also skips replaying it.
+    // nothing. The fixed table values are already part of the proving key,
+    // but each circuit's table closure still runs: its side effects and
+    // errors are observable behavior.
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
-    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 0);
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
     let first_proof = transcript.finalize();
     let strategy = SingleVerifier::new(&params);
     let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&first_proof[..]);
@@ -2451,7 +2456,24 @@ fn v1_proving_key_reuses_floor_plan() {
         &mut transcript,
     )
     .expect("single proof generation should not fail");
-    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 0);
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
+
+    // An error returned by the table closure while the cached plan is reused
+    // must propagate out of proving, exactly as when the plan is new.
+    FAIL_TABLE.store(true, Ordering::Relaxed);
+    TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    let result = create_proof(
+        &params,
+        &pk,
+        &[MyCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(PROOF_SEED),
+        &mut transcript,
+    );
+    assert!(matches!(result, Err(Error::Synthesis)));
+    assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
+    FAIL_TABLE.store(false, Ordering::Relaxed);
 
     // The proof bytes must not depend on the parallel schedule: re-create the
     // proof under single- and multi-worker Rayon pools and require identical
@@ -2477,7 +2499,7 @@ fn v1_proving_key_reuses_floor_plan() {
             })
             .expect("proof generation should not fail");
         assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
-        assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 0);
+        assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
         assert_eq!(transcript.finalize(), first_proof);
     }
 

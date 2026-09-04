@@ -491,7 +491,14 @@ where
         q_blinds[set_index] *= *x_1;
         q_blinds[set_index] += commitment_data.commitment.blind;
     }
-    let q_polys = collapse_polynomials(&polynomial_groups, *x_1);
+    let mut q_polys = collapse_polynomials(&polynomial_groups, *x_1);
+    // Queried polynomials may be constructed in a domain smaller than the
+    // parameters; their missing high coefficients are zero.
+    for q_poly in &mut q_polys {
+        if q_poly.values.len() < params.n as usize {
+            q_poly.values.resize(params.n as usize, C::Scalar::ZERO);
+        }
+    }
 
     let q_prime_poly = prepare_q_prime(&point_sets, &q_polys, *x_2, params.n as usize);
 
