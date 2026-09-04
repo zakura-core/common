@@ -3599,6 +3599,39 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
+        fn copy_add_scaled<F: Field>(
+            output: &mut [F],
+            lhs: &[F],
+            rhs: &[F],
+            scalar: F,
+            kind: ScaleKind,
+        ) {
+            debug_assert_eq!(output.len(), lhs.len());
+            debug_assert_eq!(output.len(), rhs.len());
+            match kind {
+                ScaleKind::MinusOne => {
+                    for ((output, lhs), rhs) in output.iter_mut().zip(lhs).zip(rhs) {
+                        *output = *lhs - rhs;
+                    }
+                }
+                ScaleKind::One => {
+                    for ((output, lhs), rhs) in output.iter_mut().zip(lhs).zip(rhs) {
+                        *output = *lhs + rhs;
+                    }
+                }
+                ScaleKind::Two => {
+                    for ((output, lhs), rhs) in output.iter_mut().zip(lhs).zip(rhs) {
+                        *output = *lhs + rhs.double();
+                    }
+                }
+                ScaleKind::Other => {
+                    for ((output, lhs), rhs) in output.iter_mut().zip(lhs).zip(rhs) {
+                        *output = *lhs + *rhs * scalar;
+                    }
+                }
+            }
+        }
+
         fn scale_value<F: Field>(value: F, scalar: F, kind: ScaleKind) -> F {
             match kind {
                 ScaleKind::MinusOne => -value,
@@ -3715,6 +3748,61 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                             value + constant
                         });
                         return;
+                    }
+
+                    if let EvaluationPlan::CacheLoad { slot } = a.as_ref() {
+                        let start = slot * output.len();
+                        let lhs = &cache[start..start + output.len()];
+                        if let EvaluationPlan::Poly(rhs) = b.as_ref() {
+                            let rhs = leaf_chunk(rhs, ctx, output.len());
+                            let (first, second) = rhs.into_slices();
+                            let (first_output, second_output) = output.split_at_mut(first.len());
+                            let (first_lhs, second_lhs) = lhs.split_at(first.len());
+                            copy_add_scaled(first_output, first_lhs, first, F::ONE, ScaleKind::One);
+                            if !second.is_empty() {
+                                copy_add_scaled(
+                                    second_output,
+                                    second_lhs,
+                                    second,
+                                    F::ONE,
+                                    ScaleKind::One,
+                                );
+                            }
+                            return;
+                        }
+                        if let EvaluationPlan::CacheLoad { slot } = b.as_ref() {
+                            let start = slot * output.len();
+                            let rhs = &cache[start..start + output.len()];
+                            copy_add_scaled(output, lhs, rhs, F::ONE, ScaleKind::One);
+                            return;
+                        }
+                        if let EvaluationPlan::Scale(inner, scalar) = b.as_ref() {
+                            let (scalar, kind) = ctx.scalars.scale(*scalar);
+                            if let EvaluationPlan::Poly(rhs) = inner.as_ref() {
+                                let rhs = leaf_chunk(rhs, ctx, output.len());
+                                let (first, second) = rhs.into_slices();
+                                let (first_output, second_output) =
+                                    output.split_at_mut(first.len());
+                                let (first_lhs, second_lhs) = lhs.split_at(first.len());
+                                copy_add_scaled(first_output, first_lhs, first, scalar, kind);
+                                if !second.is_empty() {
+                                    copy_add_scaled(
+                                        second_output,
+                                        second_lhs,
+                                        second,
+                                        scalar,
+                                        kind,
+                                    );
+                                }
+                                return;
+                            }
+                            if let EvaluationPlan::CacheLoad { slot } = inner.as_ref() {
+                                let start = slot * output.len();
+                                let rhs = &cache[start..start + output.len()];
+                                copy_add_scaled(output, lhs, rhs, scalar, kind);
+                                return;
+                            }
+                        }
                     }
 
                     if let EvaluationPlan::Poly(lhs) = a.as_ref()
@@ -5976,6 +6064,83 @@ mod tests {
     fn cached_rhs_consumers_read_cache_storage_directly() {
         check_cached_rhs_consumers::<pallas::Base>();
         check_cached_rhs_consumers::<vesta::Base>();
+    }
+
+    fn check_cached_lhs_addends<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(5, 4);
+        let mut values = (0..3)
+            .map(|column| {
+                let mut values = domain.empty_extended();
+                for (row, value) in values.iter_mut().enumerate() {
+                    *value = F::from((column * domain.extended_len() + row + 3) as u64);
+                }
+                values
+            })
+            .collect::<Vec<_>>();
+        let rhs_values = values[2].clone();
+
+        let mut evaluator = new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {});
+        let lhs = evaluator.register_poly(values.remove(0));
+        let other = evaluator.register_poly(values.remove(0));
+        let rhs = evaluator.register_poly(values.remove(0));
+        let lhs = Ast::from(lhs) + Ast::ConstantTerm(F::from(7));
+        let lhs = lhs.clone() * lhs;
+        let other = Ast::from(other) + Ast::ConstantTerm(F::from(11));
+        let other = other.clone() * other;
+        let lhs_values = evaluator.evaluate(&lhs, &domain);
+        let other_values = evaluator.evaluate(&other, &domain);
+
+        let direct = evaluator.evaluate(&(lhs.clone() + (lhs.clone() + Ast::from(rhs))), &domain);
+        for ((actual, lhs), rhs) in direct.iter().zip(lhs_values.iter()).zip(rhs_values.iter()) {
+            assert_eq!(*actual, lhs.double() + rhs);
+        }
+
+        for scalar in [-F::ONE, F::ONE, F::ONE.double(), F::from(13)] {
+            let scaled = evaluator.evaluate(
+                &(lhs.clone() + (lhs.clone() + Ast::from(rhs) * scalar)),
+                &domain,
+            );
+            for ((actual, lhs), rhs) in scaled.iter().zip(lhs_values.iter()).zip(rhs_values.iter())
+            {
+                assert_eq!(*actual, lhs.double() + *rhs * scalar);
+            }
+        }
+
+        let cached = evaluator.evaluate(
+            &((lhs.clone() + other.clone() * F::from(3)) + (lhs.clone() + other.clone())),
+            &domain,
+        );
+        for ((actual, lhs), other) in cached
+            .iter()
+            .zip(lhs_values.iter())
+            .zip(other_values.iter())
+        {
+            assert_eq!(*actual, lhs.double() + other.double().double());
+        }
+
+        for scalar in [-F::ONE, F::ONE, F::ONE.double(), F::from(13)] {
+            let scaled_cached = evaluator.evaluate(
+                &((lhs.clone() + other.clone() * F::from(3))
+                    + (lhs.clone() + other.clone() * scalar)),
+                &domain,
+            );
+            for ((actual, lhs), other) in scaled_cached
+                .iter()
+                .zip(lhs_values.iter())
+                .zip(other_values.iter())
+            {
+                assert_eq!(*actual, lhs.double() + *other * (F::from(3) + scalar));
+            }
+        }
+    }
+
+    #[test]
+    fn cached_lhs_addends_read_cache_storage_directly() {
+        check_cached_lhs_addends::<pallas::Base>();
+        check_cached_lhs_addends::<vesta::Base>();
     }
 
     #[test]
