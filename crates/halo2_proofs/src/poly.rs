@@ -193,6 +193,16 @@ impl<F, B> Polynomial<F, B> {
     }
 }
 
+impl<F> Polynomial<F, Coeff> {
+    /// Constructs a coefficient-basis polynomial without domain padding.
+    pub(crate) fn from_coefficients(values: Vec<F>) -> Self {
+        Self {
+            values,
+            _marker: PhantomData,
+        }
+    }
+}
+
 pub(crate) fn batch_invert_assigned<F: Field>(
     assigned: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>> {

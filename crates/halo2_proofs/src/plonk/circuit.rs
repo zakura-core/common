@@ -390,6 +390,31 @@ pub trait Assignment<F: Field> {
         A: FnOnce() -> AR,
         AR: Into<String>;
 
+    /// Assigns a contiguous range of advice cells in one column.
+    ///
+    /// The annotation and value closures receive a zero-based index in
+    /// `0..len`; index `i` assigns `row + i`. The default implementation
+    /// delegates to [`Self::assign_advice`]. A zero-length batch is a no-op.
+    fn assign_advice_batch<V, A, AR>(
+        &mut self,
+        annotation: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        for (index, row) in (row..end).enumerate() {
+            self.assign_advice(|| annotation(index), column, row, || to(index))?;
+        }
+        Ok(())
+    }
+
     /// Assign a fixed value
     fn assign_fixed<V, VR, A, AR>(
         &mut self,
@@ -500,7 +525,9 @@ pub trait FloorPlanner {
     /// `floor_plan` contains immutable planning data retained by the proving
     /// key. Implementations must ignore plans they do not recognize. Built-in
     /// floor planners can return a newly constructed plan for the proving key
-    /// to retain.
+    /// to retain. When reusing a recognized plan, implementations may skip
+    /// fixed-table assignment closures because those values were incorporated
+    /// into the proving key when the plan was created.
     fn synthesize_batch<F: Field, CS: Assignment<F> + Send, C: Circuit<F> + Sync>(
         assignments: &mut [CS],
         circuits: &[C],

@@ -288,7 +288,7 @@ fn verify_proof_with_instance_commitments<
     // commitments open to the correct values.
     let vanishing = {
         // x^n
-        let xn = x.pow([params.n, 0, 0, 0]);
+        let xn = super::pow_by_power_of_two(*x, params.k);
 
         let blinding_factors = vk.cs.blinding_factors();
         let l_evals = vk

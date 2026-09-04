@@ -39,38 +39,41 @@ pub(crate) const T_P: u128 = 45560315531419706090280762371685220353;
 /// [the Halo 2 book](https://zcash.github.io/halo2/design/gadgets/ecc/fixed-base-scalar-mul.html#load-fixed-base).
 fn compute_window_table<C: CurveAffine>(base: C, num_windows: usize) -> Vec<[C; H]> {
     let mut window_table: Vec<[C; H]> = Vec::with_capacity(num_windows);
+    let h = C::Scalar::from(H as u64);
+    let mut window_scale = C::Scalar::ONE;
 
     // Generate window table entries for all windows but the last.
     // For these first `num_windows - 1` windows, we compute the multiple [(k+2)*(2^3)^w]B.
     // Here, w ranges from [0..`num_windows - 1`)
-    for w in 0..(num_windows - 1) {
+    for _ in 0..(num_windows - 1) {
         window_table.push(
             (0..H)
                 .map(|k| {
                     // scalar = (k+2)*(8^w)
-                    let scalar = C::Scalar::from(k as u64 + 2)
-                        * C::Scalar::from(H as u64).pow([w as u64, 0, 0, 0]);
+                    let scalar = C::Scalar::from(k as u64 + 2) * window_scale;
                     (base * scalar).to_affine()
                 })
                 .collect::<ArrayVec<C, H>>()
                 .into_inner()
                 .unwrap(),
         );
+        window_scale *= h;
     }
 
     // Generate window table entries for the last window, w = `num_windows - 1`.
     // For the last window, we compute [k * (2^3)^w - sum]B, where sum is defined
     // as sum = \sum_{j = 0}^{`num_windows - 2`} 2^{3j+1}
-    let sum = (0..(num_windows - 1)).fold(C::Scalar::ZERO, |acc, j| {
-        acc + C::Scalar::from(2).pow([FIXED_BASE_WINDOW_SIZE as u64 * j as u64 + 1, 0, 0, 0])
-    });
+    let mut offset = C::Scalar::from(2);
+    let mut sum = C::Scalar::ZERO;
+    for _ in 0..(num_windows - 1) {
+        sum += offset;
+        offset *= h;
+    }
     window_table.push(
         (0..H)
             .map(|k| {
                 // scalar = k * (2^3)^w - sum, where w = `num_windows - 1`
-                let scalar = C::Scalar::from(k as u64)
-                    * C::Scalar::from(H as u64).pow([(num_windows - 1) as u64, 0, 0, 0])
-                    - sum;
+                let scalar = C::Scalar::from(k as u64) * window_scale - sum;
                 (base * scalar).to_affine()
             })
             .collect::<ArrayVec<C, H>>()

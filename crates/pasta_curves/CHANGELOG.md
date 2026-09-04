@@ -10,6 +10,82 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.1.0-rc.1] - 2026-09-03
+
+### Added
+
+- Added a serial deferred-field inner-product operation, with a private
+  AArch64 block kernel for the Pasta fields
+  ([#277](https://github.com/zakura-core/common/pull/277)).
+- Added `PreparedZeroCheck::multiexp_with_prefix_and_suffix`, a variable-time
+  multiscalar multiplication that accepts fixed-base scalars as two consecutive
+  slices and provides a compatibility-preserving default implementation
+  ([#281](https://github.com/zakura-core/common/pull/281)).
+- Added doc-hidden arithmetic bridges for multiplying `Fp` and `Fq` by an
+  inverse power of two without a full field multiplication
+  ([#282](https://github.com/zakura-core/common/pull/282)).
+- Added the doc-hidden `arithmetic::{square_fp_n, square_fq_n}` cross-crate
+  bridges for invoking the dedicated repeated-squaring implementation
+  ([#333](https://github.com/zakura-core/common/pull/333)).
+
+### Changed
+
+- The default prepared zero-check planner now caps the dominant retained
+  per-table payload at 13 MiB. For an Orchard-sized SRS, alpha-seven accounts
+  for about 12.4 MiB per table, or 24.8 MiB for halo2's coefficient and
+  Lagrange pair, instead of the previous beta pair's 96.9 MiB. These figures
+  exclude small metadata and allocator overhead; they are not total heap or
+  RSS. The selected mode, `prepared_bytes` accounting, and decline threshold
+  can therefore change
+  ([#233](https://github.com/zakura-core/common/pull/233)).
+- Improved multicore Signed-Booth MSM performance by evaluating each window
+  independently and combining the ordered sums with one Horner fold
+  ([#245](https://github.com/zakura-core/common/pull/245)).
+- GLV MSMs now skip two exceptional-case coordinate comparisons per ordinary
+  affine bucket pair and reuse reduction buffers, reducing common-path
+  arithmetic and allocation work. Exceptional pairs retry the unchanged level
+  with complete affine formulas
+  ([#246](https://github.com/zakura-core/common/pull/246)).
+- AArch64 Pasta field inversion now defers the three-multiply negative-eta
+  divstep formula until its branch is taken, avoiding speculative work and
+  reducing measured direct-inversion latency. The algorithm and outputs are
+  unchanged, and non-AArch64 machine code is unaffected
+  ([#268](https://github.com/zakura-core/common/pull/268)).
+- `PreparedZeroCheck` and `CurveExt::try_prepare_zero_check` are now
+  available when either `multicore` or `orbits` is enabled; their signatures
+  are unchanged, and single-core `glv` builds remain unaffected
+  ([#270](https://github.com/zakura-core/common/pull/270)).
+- Prepared affine MSM bucket reductions now compact successful incomplete
+  additions into their existing point buffer and reuse level storage, while
+  exceptional pairs retain the complete affine fallback
+  ([#272](https://github.com/zakura-core/common/pull/272)).
+- Reduced measured Apple M4 latency for 2,048-term, four-output prepared
+  fixed-base evaluations by about 0.14–0.21 ms and removed a 128 KiB transient
+  allocation
+  ([#274](https://github.com/zakura-core/common/pull/274)).
+- Processes AArch64 deferred-field inner products in 32-product blocks with
+  four interleaved accumulator lanes
+  ([#280](https://github.com/zakura-core/common/pull/280)).
+- Changed Pallas and Vesta addition, doubling, and batch normalization to use
+  variable-time identity and exceptional-case handling. This also affects
+  scalar multiplication built from these group operations; callers must not
+  assume secret-independent timing
+  ([#319](https://github.com/zakura-core/common/pull/319)).
+- Reduced cold four-Action Orchard proof generation by 0.475 ms (0.34%) in a
+  100-pair, 10-worker Apple M4 benchmark by combining the 19 independently
+  evaluated windows of each prepared point-returning α7 MSM with one ordered
+  Horner fold. This removes 567 redundant projective doublings per full-window
+  evaluation. A one-Action benchmark showed no regression. On the same commit,
+  a 400-pair, six-worker AMD Linux benchmark improved four-Action proofs by
+  0.970 ms (0.285%). Verifier zero checks retain their paired-window schedule;
+  proof bytes and public APIs are unchanged
+  ([#320](https://github.com/zakura-core/common/pull/320)).
+- Changed `Fp` and `Fq` `PartialEq` comparisons to variable-time operation,
+  reducing isolated equality latency by approximately 36% on Apple M4 while
+  retaining `ConstantTimeEq` for callers that explicitly require
+  constant-time equality
+  ([#330](https://github.com/zakura-core/common/pull/330)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

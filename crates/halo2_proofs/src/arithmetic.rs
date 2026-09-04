@@ -229,6 +229,12 @@ impl<C: CurveAffine> BoothBuckets<C> {
 
 /// Performs a small multi-exponentiation operation.
 /// Uses the double-and-add algorithm with doublings shared across points.
+///
+/// # Timing
+///
+/// This function is variable-time with respect to `coeffs` and intermediate
+/// curve points. Callers must explicitly accept timing leakage when the
+/// coefficients are secret.
 pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     let coeffs: Vec<_> = coeffs.iter().map(|a| a.to_repr()).collect();
     let mut acc = C::Curve::identity();
@@ -256,6 +262,12 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 /// This function will panic if coeffs and bases have a different length.
 ///
 /// This will use multithreading if beneficial.
+///
+/// # Timing
+///
+/// This function is variable-time with respect to `coeffs` and intermediate
+/// curve points. Halo proof creation uses it with witness- and
+/// blinding-derived coefficients and explicitly accepts that timing leakage.
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     assert_eq!(coeffs.len(), bases.len());
 

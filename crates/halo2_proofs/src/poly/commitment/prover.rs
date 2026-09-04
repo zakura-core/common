@@ -3,6 +3,8 @@ use rand_core::Rng;
 
 use super::super::{Coeff, Polynomial, evaluate_polynomial_with_powers, power_vector};
 use super::{Blind, Params};
+#[cfg(feature = "multicore")]
+use crate::PreparedSparseCommitments;
 use crate::arithmetic::{CurveAffine, CurveExt, best_multiexp, compute_inner_product};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
@@ -50,6 +52,11 @@ fn ipa_masking_commitment<C: CurveAffine>(
         assert_eq!(*index, 1 << t);
     }
 
+    #[cfg(feature = "multicore")]
+    if let Some(commitment) = params.commit_sparse(coefficients, blind) {
+        return commitment;
+    }
+
     let mut scalars = Vec::with_capacity(coefficients.len() + 1);
     let mut bases = Vec::with_capacity(coefficients.len() + 1);
     for (index, coefficient) in coefficients {
@@ -79,6 +86,47 @@ fn ipa_round_multiexp<C: CurveAffine>(
     round_bases.extend_from_slice(&[params.u, params.w]);
 
     best_multiexp(&round_coeffs, &round_bases)
+}
+
+#[derive(Clone, Copy)]
+struct IpaRoundTerms<'a, C: CurveAffine> {
+    coeffs: &'a [C::Scalar],
+    bases: &'a [C],
+    value: C::Scalar,
+    randomness: C::Scalar,
+}
+
+fn ipa_round_multiexps<C: CurveAffine>(
+    l: IpaRoundTerms<'_, C>,
+    r: IpaRoundTerms<'_, C>,
+    params: &Params<C>,
+    z: C::Scalar,
+) -> (C::Curve, C::Curve) {
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    if let Some(fixed_bases) = params.fixed_base_table() {
+        let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
+            || {
+                crate::multicore::join(
+                    || best_multiexp(l.coeffs, l.bases),
+                    || best_multiexp(r.coeffs, r.bases),
+                )
+            },
+            || {
+                fixed_bases.multiply_ipa_rounds(
+                    l.value * z,
+                    l.randomness,
+                    r.value * z,
+                    r.randomness,
+                )
+            },
+        );
+        return (l_body + l_auxiliary, r_body + r_auxiliary);
+    }
+
+    crate::multicore::join(
+        || ipa_round_multiexp(l.coeffs, l.bases, l.value, l.randomness, params, z),
+        || ipa_round_multiexp(r.coeffs, r.bases, r.value, r.randomness, params, z),
+    )
 }
 
 fn compute_ipa_hi_evaluation_deferred<F: Field + 'static, T: DeferredField + 'static>(
@@ -240,29 +288,24 @@ pub(in crate::poly) fn create_proof_with_powers<
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
 
-        // Include the U and W terms in each main MSM so their doublings are
-        // shared with the round commitment.
-        let (l_j, r_j) = crate::multicore::join(
-            || {
-                ipa_round_multiexp(
-                    &p_prime[half..],
-                    &g_prime[0..half],
-                    value_l_j,
-                    l_j_randomness,
-                    params,
-                    z,
-                )
+        // Run the transcript-dependent generator MSMs together, while a
+        // prepared table handles the fixed `u` and `w` terms separately when
+        // it is available.
+        let (l_j, r_j) = ipa_round_multiexps(
+            IpaRoundTerms {
+                coeffs: &p_prime[half..],
+                bases: &g_prime[0..half],
+                value: value_l_j,
+                randomness: l_j_randomness,
             },
-            || {
-                ipa_round_multiexp(
-                    &p_prime[0..half],
-                    &g_prime[half..],
-                    value_r_j,
-                    r_j_randomness,
-                    params,
-                    z,
-                )
+            IpaRoundTerms {
+                coeffs: &p_prime[0..half],
+                bases: &g_prime[half..],
+                value: value_r_j,
+                randomness: r_j_randomness,
             },
+            params,
+            z,
         );
         let l_j = l_j.to_affine();
         let r_j = r_j.to_affine();
@@ -341,6 +384,8 @@ mod tests {
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
     use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
+    #[cfg(feature = "multicore")]
+    use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use ff::Field;
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
@@ -414,6 +459,14 @@ mod tests {
                 ipa_masking_commitment(&coefficients, blind, &params),
                 params.commit(&full, blind),
             );
+            #[cfg(feature = "multicore")]
+            if k == PREPARED_SPARSE_COMMITMENT_K {
+                assert!(params.prepare_sparse_commitment());
+                assert_eq!(
+                    ipa_masking_commitment(&coefficients, blind, &params),
+                    params.commit(&full, blind),
+                );
+            }
         }
     }
 

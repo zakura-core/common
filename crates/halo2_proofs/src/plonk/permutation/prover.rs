@@ -464,46 +464,71 @@ fn prepare_ratios<C: CurveAffine>(
     gamma: ChallengeGamma<C>,
     mut deltaomega: C::Scalar,
 ) -> (Vec<C::Scalar>, C::Scalar) {
-    let mut ratios = vec![C::Scalar::ONE; params.n as usize];
+    let mut ratios = vec![C::Scalar::ZERO; params.n as usize];
 
     // Compute the product of denominators for this permutation set.
-    for (&column, permuted_column_values) in columns.iter().zip(permutations.iter()) {
-        let values = match column.column_type() {
+    parallelize(&mut ratios, |ratios, start| {
+        let mut columns = columns.iter().zip(permutations);
+        let (&first_column, first_permutation) = columns
+            .next()
+            .expect("a permutation set contains at least one column");
+        let first_values = match first_column.column_type() {
             Any::Advice => advice,
             Any::Fixed => fixed,
             Any::Instance => instance,
         };
-        parallelize(&mut ratios, |ratios, start| {
+        for ((ratio, value), permuted_value) in ratios
+            .iter_mut()
+            .zip(first_values[first_column.index()][start..].iter())
+            .zip(first_permutation[start..].iter())
+        {
+            *ratio = *beta * permuted_value + &*gamma + value;
+        }
+
+        for (&column, permuted_values) in columns {
+            let values = match column.column_type() {
+                Any::Advice => advice,
+                Any::Fixed => fixed,
+                Any::Instance => instance,
+            };
             for ((ratio, value), permuted_value) in ratios
                 .iter_mut()
                 .zip(values[column.index()][start..].iter())
-                .zip(permuted_column_values[start..].iter())
+                .zip(permuted_values[start..].iter())
             {
                 *ratio *= &(*beta * permuted_value + &*gamma + value);
             }
-        });
-    }
+        }
+    });
 
     crate::arithmetic::batch_invert_multi(&mut ratios);
 
     // Multiply by the product of numerators for this permutation set.
-    for &column in columns {
-        let omega = domain.get_omega();
-        let values = match column.column_type() {
-            Any::Advice => advice,
-            Any::Fixed => fixed,
-            Any::Instance => instance,
-        };
-        parallelize(&mut ratios, |ratios, start| {
-            let mut row_deltaomega = deltaomega * &omega.pow_vartime([start as u64]);
+    let omega = domain.get_omega();
+    let beta_delta = deltaomega * &*beta;
+    parallelize(&mut ratios, |ratios, start| {
+        let omega_start = omega.pow_vartime([start as u64]);
+        let mut column_beta_delta = beta_delta;
+        for (column_index, &column) in columns.iter().enumerate() {
+            let values = match column.column_type() {
+                Any::Advice => advice,
+                Any::Fixed => fixed,
+                Any::Instance => instance,
+            };
+            let mut row_beta_deltaomega = column_beta_delta * &omega_start;
             for (ratio, value) in ratios
                 .iter_mut()
                 .zip(values[column.index()][start..].iter())
             {
-                *ratio *= &(row_deltaomega * &*beta + &*gamma + value);
-                row_deltaomega *= &omega;
+                *ratio *= &(row_beta_deltaomega + &*gamma + value);
+                row_beta_deltaomega *= &omega;
             }
-        });
+            if column_index + 1 < columns.len() {
+                column_beta_delta *= &C::Scalar::DELTA;
+            }
+        }
+    });
+    for _ in columns {
         deltaomega *= &C::Scalar::DELTA;
     }
 
@@ -813,6 +838,7 @@ mod tests {
 
     const EQUALITY_COLUMNS: usize = 3;
     const MINIMUM_DEGREE: usize = 4;
+    const PROOF_K: u32 = 7;
     const MAX_PROOF_CIRCUITS: usize = 4;
     const PROOF_CIRCUIT_COUNTS: [usize; 3] = [1, 2, MAX_PROOF_CIRCUITS];
     const PROOF_THREAD_COUNTS: [usize; 2] = [6, 10];
@@ -877,7 +903,9 @@ mod tests {
 
     #[test]
     fn proof_bytes_match_across_permutation_preparation_schedules() {
-        let params: Params<EqAffine> = Params::new(4);
+        // This domain is large enough for `parallelize` to assign more than
+        // one chunk at the tested worker counts, covering nonzero offsets.
+        let params: Params<EqAffine> = Params::new(PROOF_K);
         let circuit = PermutationCircuit { value: Fp::from(0) };
         let vk = keygen_vk(&params, &circuit).expect("keygen_vk should not fail");
         let pk = keygen_pk(&params, vk, &circuit).expect("keygen_pk should not fail");

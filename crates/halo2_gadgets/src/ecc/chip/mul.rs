@@ -15,7 +15,7 @@ use halo2_proofs::{
     poly::Rotation,
 };
 
-use pasta_curves::pallas;
+use pasta_curves::{arithmetic::CurveAffine, pallas};
 
 mod complete;
 pub(super) mod incomplete;
@@ -43,6 +43,188 @@ const INCOMPLETE_LO_LEN: usize = INCOMPLETE_LEN - INCOMPLETE_HI_LEN;
 // Bits k_{3} to k_{1} inclusive are used in complete addition.
 // Bit k_{0} is handled separately.
 const COMPLETE_RANGE: Range<usize> = INCOMPLETE_LEN..(INCOMPLETE_LEN + NUM_COMPLETE_BITS);
+
+#[derive(Clone, Copy, Debug)]
+struct JacobianPoint {
+    x: pallas::Base,
+    y: pallas::Base,
+    z: pallas::Base,
+}
+
+impl JacobianPoint {
+    fn from_affine(point: pallas::Affine) -> Self {
+        let coordinates = point
+            .coordinates()
+            .expect("the variable-base multiplication base is nonidentity");
+        Self {
+            x: *coordinates.x(),
+            y: *coordinates.y(),
+            z: pallas::Base::ONE,
+        }
+    }
+
+    /// Doubles a nonidentity Pallas point without exceptional-case handling.
+    fn double_unchecked(self) -> Self {
+        // dbl-2009-l for a short-Weierstrass curve with a = 0.
+        let a = self.x.square();
+        let b = self.y.square();
+        let c = b.square();
+        let d = ((self.x + b).square() - a - c).double();
+        let e = a.double() + a;
+        let f = e.square();
+        let z = (self.z * self.y).double();
+        let x = f - d.double();
+        let y = e * (d - x) - c.double().double().double();
+
+        Self { x, y, z }
+    }
+
+    /// Adds a nonidentity affine point that is neither equal to nor the
+    /// negation of `self`.
+    fn add_mixed_unchecked(self, x: pallas::Base, y: pallas::Base) -> Self {
+        let z_squared = self.z.square();
+        let u = x * z_squared;
+        let s = y * z_squared * self.z;
+        let h = u - self.x;
+        let hh = h.square();
+        let i = hh.double().double();
+        let j = h * i;
+        let r = (s - self.y).double();
+        let v = self.x * i;
+        let result_x = r.square() - j - v.double();
+        let result_y = r * (v - result_x) - (self.y * j).double();
+        let result_z = (self.z + h).square() - z_squared - hh;
+
+        Self {
+            x: result_x,
+            y: result_y,
+            z: result_z,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AffinePoint {
+    x: pallas::Base,
+    y: pallas::Base,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IncompleteRowWitness {
+    z: pallas::Base,
+    point: AffinePoint,
+    lambda_1: pallas::Base,
+    lambda_2: pallas::Base,
+}
+
+#[derive(Clone, Debug)]
+struct IncompleteMulWitness {
+    rows: Vec<IncompleteRowWitness>,
+    output: AffinePoint,
+}
+
+impl IncompleteMulWitness {
+    fn new(base: pallas::Affine, scalar: &pallas::Base) -> Self {
+        let coordinates = base
+            .coordinates()
+            .expect("the variable-base multiplication base is nonidentity");
+        let base_x = *coordinates.x();
+        let base_y = *coordinates.y();
+        let mut bits = scalar_mul_bits(scalar);
+        bits.reverse();
+
+        // For the incomplete prefix, the accumulator coefficient starts at 2
+        // and follows c' = 2c +/- 1. At row i in 0..251 it is between 2^i + 1
+        // and 3 * 2^i - 1. Thus c < 2^252 and 3c < 9 * 2^250 < q, so neither c
+        // nor 3c can be 0 or +/-1 modulo the Pallas group order q. The final
+        // output coefficient is also nonzero because it is less than 2^253.
+        let mut accumulator = JacobianPoint::from_affine(base).double_unchecked();
+        let mut accumulators = Vec::with_capacity(INCOMPLETE_LEN + 1);
+        accumulators.push(accumulator);
+        for bit in &bits[..INCOMPLETE_LEN] {
+            accumulator = accumulator.double_unchecked();
+            let addend_y = if *bit { base_y } else { -base_y };
+            accumulator = accumulator.add_mixed_unchecked(base_x, addend_y);
+            accumulators.push(accumulator);
+        }
+
+        let affine = batch_normalize_nonidentity(&accumulators);
+        let mut denominators = Vec::with_capacity(INCOMPLETE_LEN * 2);
+        for points in affine.windows(2) {
+            let current = points[0];
+            let next = points[1];
+            denominators.push(current.x - base_x);
+            denominators.push(current.x - next.x);
+        }
+        batch_invert_nonzero(&mut denominators);
+
+        let mut z = pallas::Base::ZERO;
+        let mut rows = Vec::with_capacity(INCOMPLETE_LEN);
+        for ((bit, points), inverses) in bits[..INCOMPLETE_LEN]
+            .iter()
+            .zip(affine.windows(2))
+            .zip(denominators.chunks_exact(2))
+        {
+            let current = points[0];
+            let next = points[1];
+            let addend_y = if *bit { base_y } else { -base_y };
+            z = z.double() + pallas::Base::from(*bit as u64);
+            rows.push(IncompleteRowWitness {
+                z,
+                point: current,
+                lambda_1: (current.y - addend_y) * inverses[0],
+                lambda_2: (current.y + next.y) * inverses[1],
+            });
+        }
+
+        Self {
+            rows,
+            output: *affine.last().expect("the accumulator list is nonempty"),
+        }
+    }
+
+    fn point(&self, index: usize) -> AffinePoint {
+        if index == self.rows.len() {
+            self.output
+        } else {
+            self.rows[index].point
+        }
+    }
+}
+
+fn batch_normalize_nonidentity(points: &[JacobianPoint]) -> Vec<AffinePoint> {
+    let mut z_inverses = points.iter().map(|point| point.z).collect::<Vec<_>>();
+    batch_invert_nonzero(&mut z_inverses);
+    points
+        .iter()
+        .zip(z_inverses)
+        .map(|(point, z_inverse)| {
+            let z_squared = z_inverse.square();
+            AffinePoint {
+                x: point.x * z_squared,
+                y: point.y * z_squared * z_inverse,
+            }
+        })
+        .collect()
+}
+
+fn batch_invert_nonzero(values: &mut [pallas::Base]) {
+    let mut scratch = Vec::with_capacity(values.len());
+    let mut accumulator = pallas::Base::ONE;
+    for value in values.iter() {
+        scratch.push(accumulator);
+        accumulator *= value;
+    }
+
+    accumulator = accumulator
+        .invert()
+        .expect("incomplete multiplication denominators are nonzero");
+    for (value, prefix) in values.iter_mut().zip(scratch).rev() {
+        let original = *value;
+        *value = accumulator * prefix;
+        accumulator *= original;
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Config<Lookup: PallasLookupRangeCheck = PallasLookupRangeCheckConfig> {
@@ -167,7 +349,7 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
         base: &NonIdentityEccPoint,
         circuit_version: CircuitVersion,
     ) -> Result<(EccPoint, ScalarVar), Error> {
-        let (result, zs): (EccPoint, Vec<Z<pallas::Base>>) = layouter.assign_region(
+        let (result, z_0, z_130, z_254) = layouter.assign_region(
             || "variable-base scalar mul",
             |mut region| {
                 let offset = 0;
@@ -177,6 +359,11 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
 
                 // Decompose `k = alpha + t_q` bitwise (big-endian bit order).
                 let bits = decompose_for_scalar_mul(alpha.value());
+                let incomplete_witness = base
+                    .point()
+                    .zip(alpha.value().copied())
+                    .map(|(base, scalar)| IncompleteMulWitness::new(base, &scalar));
+                let incomplete_witness = incomplete_witness.as_ref();
 
                 // Define ranges for each part of the algorithm.
                 let bits_incomplete_hi = &bits[INCOMPLETE_HI_RANGE];
@@ -205,24 +392,28 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                 )?);
 
                 // Double-and-add (incomplete addition) for the `hi` half of the scalar decomposition
-                let (x_a, y_a, zs_incomplete_hi) = self.hi_config.double_and_add(
+                let (x_a, y_a, hi_sums) = self.hi_config.double_and_add(
                     &mut region,
                     offset,
                     base,
                     bits_incomplete_hi,
-                    (X(acc.x), Y(acc.y), z_init.clone()),
+                    (X(acc.x), Y(acc.y), z_init),
                     circuit_version,
+                    incomplete_witness,
+                    INCOMPLETE_HI_RANGE,
                 )?;
 
                 // Double-and-add (incomplete addition) for the `lo` half of the scalar decomposition
-                let z = zs_incomplete_hi.last().expect("should not be empty");
-                let (x_a, y_a, zs_incomplete_lo) = self.lo_config.double_and_add(
+                let z = hi_sums.last.clone();
+                let (x_a, y_a, lo_sums) = self.lo_config.double_and_add(
                     &mut region,
                     offset,
                     base,
                     bits_incomplete_lo,
-                    (x_a, y_a, z.clone()),
+                    (x_a, y_a, z),
                     circuit_version,
+                    incomplete_witness,
+                    INCOMPLETE_LO_RANGE,
                 )?;
 
                 // Move from incomplete addition to complete addition.
@@ -235,8 +426,8 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                 let offset = offset + INCOMPLETE_LO_RANGE.len() + 2;
 
                 // Complete addition
-                let (acc, zs_complete) = {
-                    let z = zs_incomplete_lo.last().expect("should not be empty");
+                let (acc, z_1) = {
+                    let z = lo_sums.last;
                     // Bits used in complete addition. k_{3} to k_{1} inclusive
                     // The LSB k_{0} is handled separately.
                     let bits_complete = &bits[COMPLETE_RANGE];
@@ -247,7 +438,7 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                         &base_point,
                         x_a,
                         y_a,
-                        z.clone(),
+                        z,
                     )?
                 };
 
@@ -255,7 +446,6 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                 let offset = offset + COMPLETE_RANGE.len() * 2;
 
                 // Process the least significant bit
-                let z_1 = zs_complete.last().unwrap().clone();
                 let (result, z_0) = self.process_lsb(&mut region, offset, base, acc, z_1, lsb)?;
 
                 #[cfg(test)]
@@ -275,29 +465,16 @@ impl<Lookup: PallasLookupRangeCheck> Config<Lookup> {
                         .assert_if_known(|(real_mul, result)| &real_mul.to_affine() == result);
                 }
 
-                let zs = {
-                    let mut zs = std::iter::empty()
-                        .chain(Some(z_init))
-                        .chain(zs_incomplete_hi)
-                        .chain(zs_incomplete_lo)
-                        .chain(zs_complete)
-                        .chain(Some(z_0))
-                        .collect::<Vec<_>>();
-                    assert_eq!(zs.len(), pallas::Scalar::NUM_BITS as usize + 1);
-
-                    // This reverses zs to give us [z_0, z_1, ..., z_{254}, z_{255}].
-                    zs.reverse();
-                    zs
-                };
-
-                Ok((result, zs))
+                Ok((result, z_0, hi_sums.last, hi_sums.first))
             },
         )?;
 
         self.overflow_config.overflow_check(
             layouter.namespace(|| "overflow check"),
-            alpha.clone(),
-            &zs,
+            &alpha,
+            &z_0,
+            &z_130,
+            &z_254,
         )?;
 
         Ok((result, ScalarVar::BaseFieldElem(alpha)))
@@ -417,39 +594,41 @@ impl<F: Field> Deref for Z<F> {
     }
 }
 
+fn scalar_mul_bits(scalar: &pallas::Base) -> Vec<bool> {
+    // We use `k = scalar + t_q` in the double-and-add algorithm, where
+    // the scalar field `F_q = 2^254 + t_q`.
+    // Note that the addition `scalar + t_q` is not reduced, so it must be
+    // computed over 256-bit integers rather than in the field. The sum
+    // cannot overflow 256 bits: `scalar` is at most 255 bits and `t_q` is
+    // at most 127 bits.
+    let mut k = [0u64; 4];
+    let repr = scalar.to_repr();
+    for (limb, chunk) in k.iter_mut().zip(repr.chunks(8)) {
+        *limb = u64::from_le_bytes(chunk.try_into().unwrap());
+    }
+    let t_q = [T_Q as u64, (T_Q >> 64) as u64, 0, 0];
+    let mut carry = 0u128;
+    for (k_limb, t_q_limb) in k.iter_mut().zip(t_q) {
+        let sum = *k_limb as u128 + t_q_limb as u128 + carry;
+        *k_limb = sum as u64;
+        carry = sum >> 64;
+    }
+
+    // Little-endian bit representation of `k`.
+    let bitstring = k
+        .into_iter()
+        .flat_map(|limb| limb.to_le_bytes())
+        .flat_map(|byte| (0..8).map(move |shift| (byte >> shift) % 2 == 1));
+
+    // Take the first 255 bits.
+    bitstring
+        .take(pallas::Scalar::NUM_BITS as usize)
+        .collect::<Vec<_>>()
+}
+
 // https://p.z.cash/halo2-0.1:ecc-var-mul-witness-scalar?partial
 fn decompose_for_scalar_mul(scalar: Value<&pallas::Base>) -> Vec<Value<bool>> {
-    let bitstring = scalar.map(|scalar| {
-        // We use `k = scalar + t_q` in the double-and-add algorithm, where
-        // the scalar field `F_q = 2^254 + t_q`.
-        // Note that the addition `scalar + t_q` is not reduced, so it must be
-        // computed over 256-bit integers rather than in the field. The sum
-        // cannot overflow 256 bits: `scalar` is at most 255 bits and `t_q` is
-        // at most 127 bits.
-        let mut k = [0u64; 4];
-        let repr = scalar.to_repr();
-        for (limb, chunk) in k.iter_mut().zip(repr.chunks(8)) {
-            *limb = u64::from_le_bytes(chunk.try_into().unwrap());
-        }
-        let t_q = [T_Q as u64, (T_Q >> 64) as u64, 0, 0];
-        let mut carry = 0u128;
-        for (k_limb, t_q_limb) in k.iter_mut().zip(t_q) {
-            let sum = *k_limb as u128 + t_q_limb as u128 + carry;
-            *k_limb = sum as u64;
-            carry = sum >> 64;
-        }
-
-        // Little-endian bit representation of `k`.
-        let bitstring = k
-            .into_iter()
-            .flat_map(|limb| limb.to_le_bytes())
-            .flat_map(|byte| (0..8).map(move |shift| (byte >> shift) % 2 == 1));
-
-        // Take the first 255 bits.
-        bitstring
-            .take(pallas::Scalar::NUM_BITS as usize)
-            .collect::<Vec<_>>()
-    });
+    let bitstring = scalar.map(scalar_mul_bits);
 
     // Transpose.
     let mut bitstring = bitstring.transpose_vec(pallas::Scalar::NUM_BITS as usize);
@@ -461,14 +640,17 @@ fn decompose_for_scalar_mul(scalar: Value<&pallas::Base>) -> Vec<Value<bool>> {
 #[cfg(test)]
 pub mod tests {
     use group::{
-        Curve,
+        Curve, CurveAffine as _, Group,
         ff::{Field, PrimeField},
     };
     use halo2_proofs::{
         circuit::{Chip, Layouter, Value},
         plonk::Error,
     };
-    use pasta_curves::pallas;
+    use pasta_curves::{
+        arithmetic::{CurveAffine, mul_fp_by_inverse_power_of_two},
+        pallas,
+    };
     use rand::rng;
 
     use crate::{
@@ -479,6 +661,63 @@ pub mod tests {
         },
         utilities::{UtilitiesInstructions, lookup_range_check::PallasLookupRangeCheck},
     };
+
+    #[test]
+    fn incomplete_witness_matches_group_arithmetic_and_gate_equations() {
+        let mut rng = rng();
+        let base = pallas::Point::random(&mut rng).to_affine();
+        let coordinates = base.coordinates().unwrap();
+        let base_x = *coordinates.x();
+        let base_y = *coordinates.y();
+        let scalars = [
+            pallas::Base::ZERO,
+            pallas::Base::ONE,
+            -pallas::Base::ONE,
+            pallas::Base::random(&mut rng),
+        ];
+
+        for scalar in scalars {
+            let witness = super::IncompleteMulWitness::new(base, &scalar);
+            let mut bits = super::scalar_mul_bits(&scalar);
+            bits.reverse();
+            let mut accumulator = base.to_curve().double();
+
+            for (index, bit) in bits[..super::INCOMPLETE_LEN].iter().enumerate() {
+                let row = witness.rows[index];
+                let current = accumulator.to_affine();
+                let current_coordinates = current.coordinates().unwrap();
+                assert_eq!(row.point.x, *current_coordinates.x());
+                assert_eq!(row.point.y, *current_coordinates.y());
+
+                let addend_y = if *bit { base_y } else { -base_y };
+                let next = witness.point(index + 1);
+                let x_r = row.lambda_1.square() - row.point.x - base_x;
+                let reconstructed_y = mul_fp_by_inverse_power_of_two(
+                    &((row.lambda_1 + row.lambda_2) * (row.point.x - x_r)),
+                    1,
+                );
+                assert_eq!(reconstructed_y, row.point.y);
+                assert_eq!(
+                    row.lambda_1 * (row.point.x - base_x),
+                    row.point.y - addend_y,
+                );
+                assert_eq!(row.lambda_2.square() - x_r - row.point.x, next.x,);
+                assert_eq!(row.lambda_2 * (row.point.x - next.x), row.point.y + next.y,);
+
+                accumulator = accumulator.double()
+                    + if *bit {
+                        base.to_curve()
+                    } else {
+                        -base.to_curve()
+                    };
+            }
+
+            let output = accumulator.to_affine();
+            let output_coordinates = output.coordinates().unwrap();
+            assert_eq!(witness.output.x, *output_coordinates.x());
+            assert_eq!(witness.output.y, *output_coordinates.y());
+        }
+    }
 
     pub(crate) fn test_mul<Lookup: PallasLookupRangeCheck>(
         chip: EccChip<TestFixedBases, Lookup>,

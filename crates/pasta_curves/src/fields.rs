@@ -61,6 +61,22 @@ mod aarch64_asm;
 pub use fp::*;
 pub use fq::*;
 
+#[cfg(test)]
+fn check_equality<F: core::fmt::Debug + PartialEq + subtle::ConstantTimeEq>(values: &[F]) {
+    for lhs in values {
+        for rhs in values {
+            assert_eq!(*lhs == *rhs, bool::from(lhs.ct_eq(rhs)));
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn variable_time_equality_matches_constant_time_equality() {
+    check_equality(&[Fp::zero(), Fp::one(), Fp::from(2), -Fp::one()]);
+    check_equality(&[Fq::zero(), Fq::one(), Fq::from(2), -Fq::one()]);
+}
+
 /// Converts 64-bit little-endian limbs to 32-bit little endian limbs.
 #[cfg(feature = "gpu")]
 fn u64_to_u32(limbs: &[u64]) -> alloc::vec::Vec<u32> {

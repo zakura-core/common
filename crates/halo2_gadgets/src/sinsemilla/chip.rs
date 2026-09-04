@@ -28,6 +28,7 @@ pub(crate) mod generator_table;
 use generator_table::GeneratorTableConfig;
 
 mod hash_to_point;
+pub(crate) use hash_to_point::{PreparedHashWitness, prepare_hash_witness};
 
 /// Configuration for the Sinsemilla hash chip
 ///
@@ -146,6 +147,39 @@ where
     /// Reconstructs this chip from the given config.
     pub fn construct(config: <Self as Chip<pallas::Base>>::Config) -> Self {
         Self { config }
+    }
+
+    pub(crate) fn hash_to_point_prepared(
+        &self,
+        mut layouter: impl Layouter<pallas::Base>,
+        q: pallas::Affine,
+        message: <Self as SinsemillaInstructions<
+            pallas::Affine,
+            { sinsemilla::K },
+            { sinsemilla::C },
+        >>::Message,
+        prepared: Value<&PreparedHashWitness>,
+    ) -> Result<
+        (
+            <Self as SinsemillaInstructions<
+                pallas::Affine,
+                { sinsemilla::K },
+                { sinsemilla::C },
+            >>::NonIdentityPoint,
+            Vec<
+                <Self as SinsemillaInstructions<
+                    pallas::Affine,
+                    { sinsemilla::K },
+                    { sinsemilla::C },
+                >>::RunningSum,
+            >,
+        ),
+        Error,
+    > {
+        layouter.assign_region(
+            || "hash_to_point",
+            |mut region| self.hash_message_prepared(&mut region, q, &message, prepared),
+        )
     }
 
     /// Loads the lookup table required by this chip into the circuit.

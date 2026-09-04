@@ -35,6 +35,7 @@ hex = { version = "0.4", features = ["alloc"], default-features = false }
 image = { version = "0.24", optional = true }
 incrementalmerkletree = "0.8.1"
 memuse = { version = "0.2.2", default-features = false }
+maybe-rayon = { version = "0.1.0", default-features = false, optional = true }
 nonempty = { version = "0.11", default-features = false }
 once_cell = { version = "1", features = ["race", "alloc"], default-features = false }
 pasta_curves = { workspace = true, features = ["default", "glv"] }
@@ -75,7 +76,7 @@ pprof = { version = "0.11", features = ["criterion", "flamegraph"] }
 circuit = ["dep:halo2_gadgets", "dep:halo2_proofs", "std"]
 default = ["circuit", "multicore", "std"]
 dev-graph = ["halo2_proofs?/dev-graph", "image", "plotters"]
-multicore = ["halo2_proofs?/multicore"]
+multicore = ["halo2_proofs?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
 orbits = ["halo2_proofs?/orbits"]
 std = ["corez/std", "group/wnaf-memuse", "reddsa/std"]
 test-dependencies = ["proptest", "rand/std", "rand/std_rng"]
@@ -111,11 +112,11 @@ name = "merkle"
 harness = false
 
 [[bench]]
-name = "orchard_k11_prover"
+name = "ironwood_k11_prover"
 harness = false
 required-features = ["circuit"]
 
 [[bench]]
-name = "orchard_k11_keygen"
+name = "post_nu6_3_k11_keygen"
 harness = false
 required-features = ["circuit"]

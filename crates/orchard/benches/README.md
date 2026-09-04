@@ -1,8 +1,10 @@
-# Orchard proving and verification benchmarks
+# Ironwood proving and verification benchmarks
 
-These harnesses exercise complete Orchard proving and verification paths. They
-are intended for controlled comparisons between two already-built revisions,
-not for microbenchmarking isolated arithmetic.
+The workload-bearing harnesses use deterministic Ironwood V3 payments under
+the post-NU6.3 circuit. Every payment Action has a real nonzero spend and
+output to a different wallet. They are intended for controlled comparisons
+between two already-built revisions, not for microbenchmarking isolated
+arithmetic.
 
 The commands below pin Rust 1.97.1 for comparable performance measurements.
 This does not change the workspace's minimum supported Rust version of 1.91,
@@ -34,19 +36,20 @@ Build or run the Criterion target with one Rayon worker:
 ```console
 RAYON_NUM_THREADS=1 cargo +1.97.1 bench --locked \
     -p zakura-orchard --features circuit \
-    --bench orchard_k11_prover
+    --bench ironwood_k11_prover
 ```
 
-The historical `orchard-k11` group measures steady-state throughput for one-,
-two-, and four-Action proofs. Its name is preserved for existing Criterion
-baselines and result parsers. Key generation, proving-key preparation, and a
-two-proof verification preflight occur before its timed routines. The two
-preflight proofs per Action count use distinct deterministic seeds on the same
-prepared key, exercising retained state under different transcript challenges.
-The preflight and Criterion warmup mean that every proving-key cache is
-populated before these samples; do not interpret them as first-proof latency.
+The `ironwood-k11` group measures steady-state throughput for one-, two-, and
+four-Action proofs. The new ID is deliberate: these real Ironwood-payment
+results are not comparable with the old Orchard V2 output-only workload. Key
+generation, proving-key preparation, and a two-proof verification preflight
+occur before its timed routines. The two preflight proofs per Action count use
+distinct deterministic seeds on the same prepared key, exercising retained
+state under different transcript challenges. The preflight and Criterion
+warmup mean that every proving-key cache is populated before these samples; do
+not interpret them as first-proof latency.
 
-The `orchard-k11-first-after-build-and-prepare` group measures one- and
+The `ironwood-k11-first-after-build-and-prepare` group measures one- and
 four-Action semantic-cold proofs. Every iteration builds a fresh proving key,
 successfully prepares its commitment tables, and then creates exactly one
 proof with that key. Key generation, preparation, and destruction of the key
@@ -70,29 +73,44 @@ excludes that setup from each reported proof duration.
 For a multicore run, set both thread-count variables to the same value:
 
 ```console
-RAYON_NUM_THREADS=10 ORCHARD_K11_PROVER_THREADS=10 \
+RAYON_NUM_THREADS=10 IRONWOOD_K11_PROVER_THREADS=10 \
     cargo +1.97.1 bench --locked \
     -p zakura-orchard --features circuit \
-    --bench orchard_k11_prover
+    --bench ironwood_k11_prover
 ```
 
 ## Proving-key generation
 
-The proving-key benchmark uses the same Orchard circuit and Criterion timing
-configuration:
+The proving-key benchmark uses the post-NU6.3 circuit shared by the Orchard
+and Ironwood V3 pools, and the same Criterion timing configuration:
 
 ```console
 RAYON_NUM_THREADS=10 cargo +1.97.1 bench --locked \
     -p zakura-orchard --features circuit \
-    --bench orchard_k11_keygen
+    --bench post_nu6_3_k11_keygen
 ```
+
+## Note decryption
+
+The decryption harness uses [`IronwoodDomain`] and genuine V3 ciphertexts. Its
+batch rows contain 100 distinct Actions from 50 two-Action payments, rather
+than cloning one ciphertext:
+
+```console
+cargo +1.97.1 bench --locked -p zakura-orchard --features circuit \
+    --bench note_decryption
+```
+
+[`IronwoodDomain`]: ../src/note_encryption.rs
 
 ## Witness assignment
 
-The ignored witness-assignment benchmark uses the production Orchard circuit,
-reuses its V1 floor plan, and writes every generated advice value to benchmark
-storage. Circuit configuration, fixture generation, floor planning, and
-per-sample configuration cloning are outside the timed regions. It measures
+The ignored witness-assignment benchmark uses the production post-NU6.3
+circuit with deterministic Ironwood payments. Every Action has a real V3 spend
+and a nonzero output, and all spend witnesses share one valid anchor. The
+benchmark reuses its V1 floor plan and writes every generated advice value to
+benchmark storage. Circuit configuration, fixture generation, floor planning,
+and per-sample configuration cloning are outside the timed regions. It measures
 one-, two-, and four-Action synthesis with 50 warmups and 1,000 samples:
 
 ```console
@@ -125,22 +143,23 @@ Generate one corpus from the control binary:
 
 ```console
 RAYON_NUM_THREADS=1 \
-ORCHARD_BATCH_FIXTURE_CORPUS=/absolute/path/orchard-batch-v1.bin \
-ORCHARD_BATCH_FIXTURE_GENERATE=1 \
+IRONWOOD_BATCH_FIXTURE_CORPUS=/absolute/path/ironwood-batch-v2.bin \
+IRONWOOD_BATCH_FIXTURE_GENERATE=1 \
 ./orchard-test-control --ignored --exact \
-    circuit::benchmark::benchmark_batch_verifier \
+    circuit::benchmark::benchmark_ironwood_batch_verifier \
     --test-threads=1 --nocapture
 ```
 
-The corpus contains 64 deterministic, distinct, valid one-Action proofs. The
+The corpus contains 64 deterministic, distinct, valid two-Action Ironwood
+payment proofs. Every Action has a real V3 spend and a nonzero output. The
 output path must not already exist. Record its SHA-256 hash and reuse the same
 bytes for every binary:
 
 ```console
 RAYON_NUM_THREADS=1 \
-ORCHARD_BATCH_FIXTURE_CORPUS=/absolute/path/orchard-batch-v1.bin \
+IRONWOOD_BATCH_FIXTURE_CORPUS=/absolute/path/ironwood-batch-v2.bin \
 ./orchard-test-candidate --ignored --exact \
-    circuit::benchmark::benchmark_batch_verifier \
+    circuit::benchmark::benchmark_ironwood_batch_verifier \
     --test-threads=1 --nocapture
 ```
 
@@ -149,8 +168,24 @@ proof uniqueness, and a complete 64-proof batch verification. Corpus loading
 and this validation are outside the timed region.
 
 The standard run measures batch sizes 1, 2, 16, and 64 with three warmups and
-15 samples per size. Set `ORCHARD_BATCH_SCREEN=1` only for diagnostic screens;
+15 samples per size. Set `IRONWOOD_BATCH_SCREEN=1` only for diagnostic screens;
 that mode measures batch sizes 1 and 64 with one warmup and seven samples.
+
+## End-to-end batch validation
+
+The ignored integration harness creates 64 distinct two-Action payments with
+real proofs and RedPallas spend signatures, then measures [`BatchValidator`]
+at several proof-batch and worker counts:
+
+```console
+cargo +1.97.1 test --locked --release -p zakura-orchard \
+    --features circuit --test ironwood_batch_timings -- --ignored --nocapture
+```
+
+Set `IRONWOOD_ARM=1` to prepare the verifying key before validation. Fixture
+construction, proving, and signing are outside every timed sample.
+
+[`BatchValidator`]: ../src/bundle/batch.rs
 
 ## Comparison protocol
 
@@ -161,7 +196,7 @@ For final comparisons:
 3. Keep the machine on external power and free of competing build or benchmark
    processes.
 4. Set `RAYON_NUM_THREADS` explicitly for every preflight and timed leg. For
-   multicore prover runs, set `ORCHARD_K11_PROVER_THREADS` to the same value.
+   multicore prover runs, set `IRONWOOD_K11_PROVER_THREADS` to the same value.
 5. Qualify the host with two control runs before comparing revisions.
 6. Run one balanced control/candidate/candidate/control bracket.
 7. Retain raw samples, binary and corpus hashes, source commits, feature sets,

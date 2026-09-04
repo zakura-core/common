@@ -280,6 +280,26 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
         })
     }
 
+    fn assign_advice_batch<'v>(
+        &'v mut self,
+        annotation: &'v (dyn Fn(usize) -> String + 'v),
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        to: &'v mut (dyn FnMut(usize) -> Value<Assigned<F>> + 'v),
+    ) -> Result<(), Error> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let offset = self.layouter.regions[*self.region_index]
+            .checked_add(offset)
+            .ok_or(Error::BoundsFailure)?;
+        self.layouter
+            .cs
+            .assign_advice_batch(annotation, column, offset, len, to)
+    }
+
     fn assign_advice_from_constant<'v>(
         &'v mut self,
         annotation: &'v (dyn Fn() -> String + 'v),
