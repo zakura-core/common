@@ -89,41 +89,97 @@ impl RegionNameTracker {
 
 #[derive(Debug)]
 struct RegionLookup {
-    namespace_children: Vec<HashMap<String, usize>>,
-    region_indices: Vec<HashMap<String, Vec<RegionIndex>>>,
+    namespace_children: Vec<NameLookup<usize>>,
+    region_indices: Vec<NameLookup<RegionOccurrences>>,
+    region_name_count: usize,
     region_count: usize,
+}
+
+const COMPACT_NAME_LOOKUP_LIMIT: usize = 8;
+
+#[derive(Debug)]
+enum NameLookup<V> {
+    Compact(Vec<(String, V)>),
+    Hashed(HashMap<String, V>),
+}
+
+impl<V> NameLookup<V> {
+    fn from_map(entries: HashMap<String, V>) -> Self {
+        if entries.len() <= COMPACT_NAME_LOOKUP_LIMIT {
+            Self::Compact(entries.into_iter().collect())
+        } else {
+            Self::Hashed(entries)
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&V> {
+        match self {
+            Self::Compact(entries) => entries
+                .iter()
+                .find(|(entry_name, _)| entry_name == name)
+                .map(|(_, value)| value),
+            Self::Hashed(entries) => entries.get(name),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RegionOccurrences {
+    id: usize,
+    indices: Vec<RegionIndex>,
 }
 
 impl RegionLookup {
     fn new(region_ids: Vec<RegionId>) -> Self {
-        let mut lookup = Self {
-            namespace_children: vec![HashMap::new()],
-            region_indices: vec![HashMap::new()],
-            region_count: region_ids.len(),
-        };
+        let region_count = region_ids.len();
+        let mut namespace_children = vec![HashMap::new()];
+        let mut region_indices = vec![HashMap::<String, Vec<RegionIndex>>::new()];
 
         for (index, id) in region_ids.into_iter().enumerate() {
             let mut namespace = 0;
             for name in id.path.namespace {
-                namespace = if let Some(child) = lookup.namespace_children[namespace].get(&name) {
+                namespace = if let Some(child) = namespace_children[namespace].get(&name) {
                     *child
                 } else {
-                    let child = lookup.namespace_children.len();
-                    lookup.namespace_children.push(HashMap::new());
-                    lookup.region_indices.push(HashMap::new());
-                    lookup.namespace_children[namespace].insert(name, child);
+                    let child = namespace_children.len();
+                    namespace_children.push(HashMap::new());
+                    region_indices.push(HashMap::new());
+                    namespace_children[namespace].insert(name, child);
                     child
                 };
             }
 
-            let occurrences = lookup.region_indices[namespace]
-                .entry(id.path.name)
-                .or_default();
+            let occurrences = region_indices[namespace].entry(id.path.name).or_default();
             debug_assert_eq!(occurrences.len(), id.occurrence);
             occurrences.push(index.into());
         }
 
-        lookup
+        let namespace_children = namespace_children
+            .into_iter()
+            .map(NameLookup::from_map)
+            .collect();
+        let mut region_name_count = 0;
+        let region_indices = region_indices
+            .into_iter()
+            .map(|regions| {
+                let regions = regions
+                    .into_iter()
+                    .map(|(name, indices)| {
+                        let id = region_name_count;
+                        region_name_count += 1;
+                        (name, RegionOccurrences { id, indices })
+                    })
+                    .collect::<HashMap<_, _>>();
+                NameLookup::from_map(regions)
+            })
+            .collect();
+
+        Self {
+            namespace_children,
+            region_indices,
+            region_name_count,
+            region_count,
+        }
     }
 
     fn len(&self) -> usize {
@@ -645,7 +701,7 @@ struct NamedAssignmentPass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
     plan: &'p mut V1Plan<'a, F, CS>,
     region_lookup: &'p RegionLookup,
     namespace_stack: Vec<Option<usize>>,
-    occurrences: Vec<HashMap<&'p str, usize>>,
+    occurrences: Vec<usize>,
     assigned: &'p AtomicUsize,
 }
 
@@ -655,14 +711,11 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
         region_lookup: &'p RegionLookup,
         assigned: &'p AtomicUsize,
     ) -> Self {
-        let occurrences = (0..region_lookup.region_indices.len())
-            .map(|_| HashMap::new())
-            .collect();
         Self {
             plan,
             region_lookup,
             namespace_stack: vec![Some(0)],
-            occurrences,
+            occurrences: vec![0; region_lookup.region_name_count],
             assigned,
         }
     }
@@ -675,7 +728,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
             .flatten()
             .and_then(|namespace| {
                 self.region_lookup.namespace_children[namespace]
-                    .get(name.as_str())
+                    .get(&name)
                     .copied()
             });
         self.namespace_stack.push(namespace);
@@ -700,15 +753,19 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
             .copied()
             .flatten()
             .ok_or(Error::Synthesis)?;
-        let (planned_name, region_indices) = self.region_lookup.region_indices[namespace]
-            .get_key_value(name.as_str())
+        let region_occurrences = self.region_lookup.region_indices[namespace]
+            .get(&name)
             .ok_or(Error::Synthesis)?;
-        let occurrence = self.occurrences[namespace]
-            .entry(planned_name.as_str())
-            .or_default();
-        let region_index = *region_indices.get(*occurrence).ok_or(Error::Synthesis)?;
+        let occurrence = &mut self.occurrences[region_occurrences.id];
+        let region_index = *region_occurrences
+            .indices
+            .get(*occurrence)
+            .ok_or(Error::Synthesis)?;
         *occurrence += 1;
-        self.assigned.fetch_add(1, Ordering::Relaxed);
+        // Each pass is single-threaded. Separate operations preserve the
+        // planner's auto traits without requiring a locked read-modify-write.
+        let assigned = self.assigned.load(Ordering::Relaxed);
+        self.assigned.store(assigned + 1, Ordering::Relaxed);
 
         self.plan.cs.enter_region(|| name);
         let mut region = V1Region::new(self.plan, region_index);
@@ -923,6 +980,8 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use pasta_curves::vesta;
 
     use crate::{
@@ -930,6 +989,25 @@ mod tests {
         dev::MockProver,
         plonk::{Advice, Circuit, Column, Error},
     };
+
+    use super::{COMPACT_NAME_LOOKUP_LIMIT, NameLookup};
+
+    #[test]
+    fn name_lookup_uses_bounded_compact_storage() {
+        let entries = (0..COMPACT_NAME_LOOKUP_LIMIT)
+            .map(|index| (index.to_string(), index))
+            .collect::<HashMap<_, _>>();
+        let compact = NameLookup::from_map(entries);
+        assert!(matches!(compact, NameLookup::Compact(_)));
+        assert_eq!(compact.get("3"), Some(&3));
+
+        let entries = (0..=COMPACT_NAME_LOOKUP_LIMIT)
+            .map(|index| (index.to_string(), index))
+            .collect::<HashMap<_, _>>();
+        let hashed = NameLookup::from_map(entries);
+        assert!(matches!(hashed, NameLookup::Hashed(_)));
+        assert_eq!(hashed.get("3"), Some(&3));
+    }
 
     #[derive(Clone)]
     struct NamedCircuit {
