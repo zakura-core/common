@@ -193,13 +193,14 @@ pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
 
     /// Compares the variable-time scalar work of this prepared backend.
     ///
-    /// Returns `Some(true)` only when the backend can establish that
-    /// `candidate` is no more expensive than `baseline`, and `Some(false)`
-    /// when it cannot establish that relation. Returns `None` when the backend
-    /// cannot compare the inputs at all. The slices must have equal length and
-    /// represent one evaluation each. Unlike the evaluation methods, they may
-    /// be samples of any length. This is a routing hint, not an elapsed-time
-    /// guarantee, and it does not establish algebraic equivalence.
+    /// Returns `Some(true)` when the backend's conservative scalar-work model
+    /// accepts `candidate` over `baseline`, and `Some(false)` when it does not.
+    /// Returns `None` when the backend cannot compare the inputs at all. The
+    /// slices must have equal length and represent one evaluation each. Unlike
+    /// the evaluation methods, they may be samples of any length. The result
+    /// describes only the backend's modeled dimensions for these slices; it is
+    /// not an elapsed-time guarantee, a prediction for unsampled values, or a
+    /// statement of algebraic equivalence.
     ///
     /// # Security
     ///
