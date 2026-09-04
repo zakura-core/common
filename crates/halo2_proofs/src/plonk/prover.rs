@@ -1153,8 +1153,7 @@ where
                                                 params.commit_lagrange(poly, *blind)
                                             })
                                             .collect();
-                                        let mut advice_commitments =
-                                            vec![
+                                        let mut advice_commitments = vec![
                                                 C::identity();
                                                 advice_commitments_projective.len()
                                             ];
@@ -2501,11 +2500,19 @@ fn test_create_proof() {
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
 fn sampled_advice_delta_counts_require_global_savings() {
-    assert_eq!(use_sampled_advice_delta_counts(&[(255, 0)]), Some(false));
-    assert_eq!(use_sampled_advice_delta_counts(&[(256, 0)]), Some(true));
+    assert_eq!(
+        use_sampled_advice_delta_counts(&[(ADVICE_DELTA_MIN_SAMPLED_SAVINGS - 1, 0)]),
+        Some(false),
+    );
+    assert_eq!(
+        use_sampled_advice_delta_counts(&[(ADVICE_DELTA_MIN_SAMPLED_SAVINGS, 0)]),
+        Some(true),
+    );
 
     // The fractional threshold is strict.
-    let exactly_one_eighth = [(256, 224); 8];
+    let direct = ADVICE_DELTA_COUNT_SAMPLES;
+    let delta = direct - direct / ADVICE_DELTA_ROUTE_DENOMINATOR;
+    let exactly_one_eighth = [(direct, delta); ADVICE_DELTA_ROUTE_DENOMINATOR];
     assert_eq!(
         use_sampled_advice_delta_counts(&exactly_one_eighth),
         Some(false),
@@ -2520,7 +2527,11 @@ fn sampled_advice_delta_counts_require_global_savings() {
     // No individual column may gain sampled nonzero coefficients, even when
     // the aggregate would otherwise pass.
     assert_eq!(
-        use_sampled_advice_delta_counts(&[(256, 0), (256, 0), (0, 1)]),
+        use_sampled_advice_delta_counts(&[
+            (ADVICE_DELTA_COUNT_SAMPLES, 0),
+            (ADVICE_DELTA_COUNT_SAMPLES, 0),
+            (0, 1),
+        ]),
         Some(false),
     );
 
@@ -2534,7 +2545,7 @@ fn sampled_advice_delta_counts_require_global_savings() {
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
 fn advice_delta_samples_one_row_per_stratum() {
-    const POLYNOMIAL_LEN: usize = 2048;
+    const POLYNOMIAL_LEN: usize = 1 << ADVICE_DELTA_PREPARED_K;
 
     for sample in 0..ADVICE_DELTA_COUNT_SAMPLES {
         let row = advice_delta_stratified_row(POLYNOMIAL_LEN, ADVICE_DELTA_COUNT_SAMPLES, sample)
