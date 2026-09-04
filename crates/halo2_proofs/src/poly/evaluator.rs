@@ -3586,6 +3586,50 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
+        fn scale_and_add<F: Field>(values: &mut [F], addends: &[F], scalar: F, kind: ScaleKind) {
+            debug_assert_eq!(values.len(), addends.len());
+            match kind {
+                ScaleKind::MinusOne => {
+                    for (value, addend) in values.iter_mut().zip(addends) {
+                        *value = *addend - *value;
+                    }
+                }
+                ScaleKind::One => {
+                    for (value, addend) in values.iter_mut().zip(addends) {
+                        *value += addend;
+                    }
+                }
+                ScaleKind::Two => {
+                    for (value, addend) in values.iter_mut().zip(addends) {
+                        *value = value.double() + addend;
+                    }
+                }
+                ScaleKind::Other => {
+                    let mut value_blocks = values.chunks_exact_mut(4);
+                    let mut addend_blocks = addends.chunks_exact(4);
+                    for (values, addends) in (&mut value_blocks).zip(&mut addend_blocks) {
+                        // Expose four independent multiplications before their
+                        // dependent additions.
+                        let product_0 = values[0] * scalar;
+                        let product_1 = values[1] * scalar;
+                        let product_2 = values[2] * scalar;
+                        let product_3 = values[3] * scalar;
+                        values[0] = product_0 + addends[0];
+                        values[1] = product_1 + addends[1];
+                        values[2] = product_2 + addends[2];
+                        values[3] = product_3 + addends[3];
+                    }
+                    for (value, addend) in value_blocks
+                        .into_remainder()
+                        .iter_mut()
+                        .zip(addend_blocks.remainder())
+                    {
+                        *value = *value * scalar + addend;
+                    }
+                }
+            }
+        }
+
         fn recurse_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
             plan: &EvaluationPlan<F>,
             ctx: &AstContext<'_, F, B>,
@@ -3648,6 +3692,44 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         B::combine_constant(ctx.chunk_index, scalar, output, |value, constant| {
                             value + constant
                         });
+                        return;
+                    }
+
+                    if let EvaluationPlan::Poly(lhs) = a.as_ref()
+                        && !matches!(
+                            b.as_ref(),
+                            EvaluationPlan::Poly(_) | EvaluationPlan::ConstantTerm(_)
+                        )
+                        && !matches!(
+                            b.as_ref(),
+                            EvaluationPlan::Scale(inner, _)
+                                if matches!(
+                                    inner.as_ref(),
+                                    EvaluationPlan::Poly(_)
+                                        | EvaluationPlan::ConstantTerm(_)
+                                )
+                        )
+                    {
+                        // A polynomial leaf has no cache event, so evaluating
+                        // its sibling first preserves the plan's cache order
+                        // and avoids materializing the leaf before combining.
+                        if let EvaluationPlan::Scale(inner, scalar) = b.as_ref() {
+                            let (scalar, kind) = ctx.scalars.scale(*scalar);
+                            recurse_into(inner, ctx, output, cache, scratch);
+                            let lhs = leaf_chunk(lhs, ctx, output.len());
+                            let (first, second) = lhs.into_slices();
+                            let (first_output, second_output) = output.split_at_mut(first.len());
+                            scale_and_add(first_output, first, scalar, kind);
+                            if !second.is_empty() {
+                                scale_and_add(second_output, second, scalar, kind);
+                            }
+                        } else {
+                            recurse_into(b, ctx, output, cache, scratch);
+                            let lhs = leaf_chunk(lhs, ctx, output.len());
+                            for (output, lhs) in output.iter_mut().zip(lhs.iter()) {
+                                *output += lhs;
+                            }
+                        }
                         return;
                     }
 
@@ -5209,6 +5291,63 @@ mod tests {
         check_coefficient_scaled_addends::<vesta::Base>();
         check_scaled_addends::<vesta::Base, LagrangeCoeff>();
         check_scaled_addends::<vesta::Base, ExtendedLagrangeCoeff>();
+    }
+
+    fn check_left_polynomial_addends<F, B>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+        B: BasisOps,
+        Ast<fn(), F, B>: std::ops::Mul<Output = Ast<fn(), F, B>>,
+    {
+        fn context() {}
+
+        let domain = EvaluationDomain::<F>::new(3, 4);
+        let mut evaluator = new_evaluator::<fn(), F, B>(context);
+        let leaves = (0..4)
+            .map(|poly_index| {
+                let mut poly = B::empty_poly(&domain);
+                let poly_len = poly.len();
+                for (row, value) in poly.iter_mut().enumerate() {
+                    *value = F::from((poly_index * poly_len + row + 1) as u64);
+                }
+                evaluator.register_poly(poly)
+            })
+            .collect::<Vec<_>>();
+
+        let lhs = Ast::from(leaves[0].with_rotation(Rotation::next()));
+        let repeated_sum = Ast::from(leaves[1].with_rotation(Rotation::prev()))
+            + Ast::from(leaves[2].with_rotation(Rotation::next()));
+        let repeated = repeated_sum.clone() * repeated_sum;
+        let rhs = repeated.clone() * Ast::from(leaves[3]) + repeated;
+        for rhs in [rhs.clone(), Ast::Scale(Arc::new(rhs), F::from(7))] {
+            let ast = lhs.clone() + rhs.clone();
+            let (mut plan, scalars) = compile_plan(&ast);
+            assert!(
+                matches!(plan, EvaluationPlan::Add(ref lhs, _) if matches!(lhs.as_ref(), EvaluationPlan::Poly(_)))
+            );
+            assert_ne!(
+                plan.cache_common_subexpressions(LinearTermCacheBudget::default(), &scalars),
+                0,
+            );
+
+            let lhs_values = evaluator.evaluate(&lhs, &domain);
+            let rhs_values = evaluator.evaluate(&rhs, &domain);
+            let actual = evaluator.evaluate(&ast, &domain);
+            assert!(
+                actual
+                    .iter()
+                    .zip(lhs_values.iter().zip(rhs_values.iter()))
+                    .all(|(actual, (lhs, rhs))| *actual == *lhs + rhs)
+            );
+        }
+    }
+
+    #[test]
+    fn left_polynomial_addends_preserve_cache_order() {
+        check_left_polynomial_addends::<pallas::Base, LagrangeCoeff>();
+        check_left_polynomial_addends::<pallas::Base, ExtendedLagrangeCoeff>();
+        check_left_polynomial_addends::<vesta::Base, LagrangeCoeff>();
+        check_left_polynomial_addends::<vesta::Base, ExtendedLagrangeCoeff>();
     }
 
     #[test]
