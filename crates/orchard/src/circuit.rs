@@ -255,19 +255,20 @@ impl MerklePreparation {
 }
 
 impl Circuit {
-    fn prepare_merkle_path(&self) -> Option<OrchardPreparedMerklePath> {
+    fn prepare_merkle_path(
+        path: Value<[MerkleHashOrchard; MERKLE_DEPTH_ORCHARD]>,
+        pos: Value<u32>,
+        cm_old: Value<NoteCommitment>,
+    ) -> Option<OrchardPreparedMerklePath> {
         let mut prepared = None;
-        self.path
-            .zip(self.pos)
-            .zip(self.cm_old.as_ref())
-            .map(|((path, pos), cm)| {
-                prepared = prepare_merkle_path_witness(
-                    OrchardHashDomains::MerkleCrh.Q(),
-                    pos,
-                    path.map(|node| node.inner()),
-                    ExtractedNoteCommitment::from(cm.clone()).inner(),
-                );
-            });
+        path.zip(pos).zip(cm_old).map(|((path, pos), cm)| {
+            prepared = prepare_merkle_path_witness(
+                OrchardHashDomains::MerkleCrh.Q(),
+                pos,
+                path.map(|node| node.inner()),
+                ExtractedNoteCommitment::from(cm).inner(),
+            );
+        });
         prepared
     }
 
@@ -1175,11 +1176,17 @@ struct CircuitWithPreparedMerklePath {
 #[cfg(feature = "multicore")]
 impl CircuitWithPreparedMerklePath {
     fn new(circuit: &Circuit) -> Self {
+        let preparation_path = circuit.path;
+        let preparation_pos = circuit.pos;
+        let preparation_cm_old = circuit.cm_old.clone();
         let circuit = circuit.clone();
-        let preparation_circuit = circuit.clone();
         let (sender, receiver) = mpsc::channel();
         maybe_rayon::spawn(move || {
-            let _ = sender.send(preparation_circuit.prepare_merkle_path());
+            let _ = sender.send(Circuit::prepare_merkle_path(
+                preparation_path,
+                preparation_pos,
+                preparation_cm_old,
+            ));
         });
 
         Self {
