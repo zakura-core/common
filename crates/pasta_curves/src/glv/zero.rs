@@ -378,10 +378,16 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         }
 
         // Each active window scans a complete code column before its nonzero
-        // digits are staged. Require every main and residual-tail dimension
-        // to be nonincreasing instead of assigning backend-specific weights.
-        let candidate = self.scalar_work_profile_vartime(candidate)?;
+        // digits are staged. A caller may use these slices as samples of a
+        // larger evaluation, so also require the baseline to reach the main
+        // evaluator's maximum span. No unseen candidate value can then add a
+        // main window. Compare the remaining modeled dimensions without
+        // assigning backend-specific weights.
         let baseline = self.scalar_work_profile_vartime(baseline)?;
+        if baseline.main_active != self.codebook.main_windows() {
+            return Some(false);
+        }
+        let candidate = self.scalar_work_profile_vartime(candidate)?;
         Some(candidate.is_at_most(baseline))
     }
 
@@ -1408,8 +1414,8 @@ mod tests {
         ]
     }
 
-    /// The comparison follows the actual prepared recoder and still recognizes
-    /// low-work scalars across signs and the free unit directions.
+    /// The comparison follows the actual prepared recoder and recognizes
+    /// low-work scalars against a full-span baseline.
     fn scalar_work_comparison_profiles<C: GlvParams>() {
         const TERMS: usize = 64;
 
@@ -1436,14 +1442,19 @@ mod tests {
         };
 
         let zero = [C::ScalarExt::ZERO; TERMS];
+        let random_profile = prepared.scalar_work_profile_vartime(&random).unwrap();
+        assert_eq!(random_profile.main_active, prepared.codebook.main_windows());
         assert_eq!(is_at_most(&zero, &random), Some(true));
         assert_eq!(is_at_most(&random, &zero), Some(false));
         for low_work in [&small, &negative, &zeta] {
             assert_eq!(is_at_most(low_work, &random), Some(true));
         }
-        assert_eq!(is_at_most(&small, &negative), Some(true));
-        assert_eq!(is_at_most(&negative, &small), Some(false));
         assert_eq!(is_at_most(&small[..TERMS - 1], &small), None);
+
+        // A low-span baseline cannot protect a sampled caller against an
+        // unseen candidate value activating more main windows.
+        let ones = vec![C::ScalarExt::ONE; TERMS];
+        assert_eq!(is_at_most(&zero, &ones), Some(false));
 
         // Counting only nonzero digits incorrectly prefers this sparse input:
         // each live scalar has one digit, but reaching it activates almost
@@ -1452,7 +1463,6 @@ mod tests {
         for _ in 0..119 {
             high = high.double();
         }
-        let ones = vec![C::ScalarExt::ONE; TERMS];
         let sparse_high = (0..TERMS)
             .map(|index| {
                 if index % 4 == 0 {
@@ -1482,13 +1492,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(is_at_most(&sparse_higher, &zeta_units), Some(false));
 
-        let mut identity_bases = bases;
+        let mut identity_bases = bases.clone();
         identity_bases[0] = C::AffineExt::identity();
         let identity_prepared =
             PreparedZeroMsm::<C>::prepare_with_mode(&identity_bases, CodebookMode::alpha_only(7));
         assert_eq!(
             crate::arithmetic::PreparedZeroCheck::scalar_work_is_at_most_vartime(
                 &identity_prepared,
+                &random,
+                &small,
+            ),
+            None,
+        );
+
+        let mut duplicate_bases = bases;
+        duplicate_bases[1] = duplicate_bases[0];
+        let relation_prepared =
+            PreparedZeroMsm::<C>::prepare_with_mode(&duplicate_bases, CodebookMode::alpha_only(7));
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::scalar_work_is_at_most_vartime(
+                &relation_prepared,
                 &random,
                 &small,
             ),

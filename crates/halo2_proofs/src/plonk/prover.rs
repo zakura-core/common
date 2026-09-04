@@ -45,9 +45,10 @@ const NO_DENOMINATOR: u32 = u32::MAX;
 // at the Ironwood Action circuit's k. For each later circuit, a 256-row
 // stratified sample must show that no advice column gains nonzero coefficients,
 // while the aggregate removes more than one eighth of its nonzero coefficients
-// and at least 256 sampled coefficients. An eight-row aggregate prepared-work
-// sample then rejects adverse recoding and active-window costs. Blinds are
-// excluded because both routes evaluate one independent blind term.
+// and at least 256 sampled coefficients. Eight-row per-column prepared-work
+// samples then reject adverse recoding and active-window costs, and each
+// direct sample must span every prepared main window. Blinds are excluded
+// because both routes evaluate one independent blind term.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const ADVICE_DELTA_PREPARED_K: u32 = 11;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -71,22 +72,30 @@ fn take_advice_delta_route_hits() -> usize {
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-fn advice_delta_stratified_row(polynomial_len: usize, sample_rows: usize, sample: usize) -> usize {
-    debug_assert_ne!(polynomial_len, 0);
-    debug_assert_ne!(sample_rows, 0);
-    debug_assert!(sample < sample_rows);
+fn advice_delta_stratified_row(
+    polynomial_len: usize,
+    sample_rows: usize,
+    sample: usize,
+) -> Option<usize> {
+    if polynomial_len == 0 || sample_rows == 0 || sample >= sample_rows {
+        return None;
+    }
 
-    let start = (sample as u128).saturating_mul(polynomial_len as u128) / sample_rows as u128;
-    let end = ((sample + 1) as u128).saturating_mul(polynomial_len as u128) / sample_rows as u128;
-    let width = end.saturating_sub(start).max(1);
+    let polynomial_len = polynomial_len as u128;
+    let sample_rows = sample_rows as u128;
+    let sample = sample as u128;
+    let start = sample.checked_mul(polynomial_len)? / sample_rows;
+    let end = sample.checked_add(1)?.checked_mul(polynomial_len)? / sample_rows;
+    let width = end.checked_sub(start)?.max(1);
     // A fractional Weyl sequence chooses a different deterministic offset in
     // each stratum instead of repeatedly sampling the same relative row.
-    let sample = u32::try_from(sample).unwrap_or(u32::MAX);
+    let sample = u32::try_from(sample).ok()?;
     let fraction = sample
         .wrapping_add(1)
         .wrapping_mul(ADVICE_DELTA_STRATIFIED_FRACTION);
-    let row = start + ((fraction as u128).saturating_mul(width) >> u32::BITS);
-    usize::try_from(row).unwrap_or(polynomial_len - 1)
+    let offset = (fraction as u128).checked_mul(width)? >> u32::BITS;
+    let row = usize::try_from(start.checked_add(offset)?).ok()?;
+    (row < usize::try_from(polynomial_len).ok()?).then_some(row)
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -99,7 +108,7 @@ fn sampled_advice_delta_nonzero_counts<F: Field>(
     debug_assert!(!direct.is_empty());
     let sample_rows = sample_rows.min(direct.len());
     (0..sample_rows).try_fold((0_usize, 0_usize), |(direct_count, delta_count), sample| {
-        let row = advice_delta_stratified_row(direct.len(), sample_rows, sample);
+        let row = advice_delta_stratified_row(direct.len(), sample_rows, sample)?;
         Some((
             direct_count.checked_add(usize::from(!direct[row].is_zero_vartime()))?,
             delta_count.checked_add(usize::from(direct[row] != reference[row]))?,
@@ -210,7 +219,7 @@ fn plan_advice_deltas<C: CurveAffine>(
                 direct_sample.clear();
                 delta_sample.clear();
                 for sample in 0..work_rows {
-                    let row = advice_delta_stratified_row(polynomial_len, work_rows, sample);
+                    let row = advice_delta_stratified_row(polynomial_len, work_rows, sample)?;
                     direct_sample.push(direct[row]);
                     delta_sample.push(direct[row] - reference[row]);
                 }
@@ -2256,11 +2265,16 @@ fn advice_delta_samples_one_row_per_stratum() {
     const POLYNOMIAL_LEN: usize = 2048;
 
     for sample in 0..ADVICE_DELTA_COUNT_SAMPLES {
-        let row = advice_delta_stratified_row(POLYNOMIAL_LEN, ADVICE_DELTA_COUNT_SAMPLES, sample);
+        let row = advice_delta_stratified_row(POLYNOMIAL_LEN, ADVICE_DELTA_COUNT_SAMPLES, sample)
+            .unwrap();
         let start = sample * POLYNOMIAL_LEN / ADVICE_DELTA_COUNT_SAMPLES;
         let end = (sample + 1) * POLYNOMIAL_LEN / ADVICE_DELTA_COUNT_SAMPLES;
         assert!((start..end).contains(&row));
     }
+
+    assert_eq!(advice_delta_stratified_row(0, 1, 0), None);
+    assert_eq!(advice_delta_stratified_row(1, 0, 0), None);
+    assert_eq!(advice_delta_stratified_row(1, 1, 1), None);
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -2335,6 +2349,7 @@ fn advice_delta_commitments_preserve_proofs() {
         Similar,
         MagnitudeInversion,
         HighWindowSparse,
+        MissedHighWindow,
     }
 
     #[derive(Clone, Copy)]
@@ -2345,6 +2360,23 @@ fn advice_delta_commitments_preserve_proofs() {
     }
 
     impl AdviceDeltaCircuit {
+        fn is_router_sample(row: usize) -> bool {
+            static SAMPLE_ROWS: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
+
+            SAMPLE_ROWS.get_or_init(|| {
+                let polynomial_len = 1_usize << ADVICE_DELTA_PREPARED_K;
+                let mut rows = vec![false; polynomial_len];
+                for sample_rows in [ADVICE_DELTA_COUNT_SAMPLES, ADVICE_DELTA_WORK_SAMPLES] {
+                    for sample in 0..sample_rows {
+                        let row = advice_delta_stratified_row(polynomial_len, sample_rows, sample)
+                            .unwrap();
+                        rows[row] = true;
+                    }
+                }
+                rows
+            })[row]
+        }
+
         fn random_value(column: usize, row: usize) -> Fp {
             let mut state = u64::try_from(column * ASSIGNED_ROWS + row)
                 .unwrap()
@@ -2362,15 +2394,17 @@ fn advice_delta_commitments_preserve_proofs() {
         fn value(&self, column: usize, row: usize) -> Fp {
             match self.profile {
                 AdviceDeltaProfile::Similar => {
-                    let value = if column < self.shared_columns {
+                    let reference = Self::random_value(column, row);
+                    if self.circuit_index == 0 || column < self.shared_columns {
                         // This profile models same-wallet witness reuse.
-                        row + 1
+                        reference
                     } else {
                         // Every value at the same position differs from the
-                        // reference.
-                        self.circuit_index * ASSIGNED_ROWS + row + 1
-                    };
-                    Fp::from(u64::try_from(value).expect("test value fits into u64"))
+                        // reference by a low-work scalar.
+                        let delta = self.circuit_index * ASSIGNED_ROWS + row + 1;
+                        reference
+                            + Fp::from(u64::try_from(delta).expect("test value fits into u64"))
+                    }
                 }
                 AdviceDeltaProfile::MagnitudeInversion => {
                     let direct = Fp::from(u64::try_from(row + 1).unwrap());
@@ -2383,6 +2417,14 @@ fn advice_delta_commitments_preserve_proofs() {
                 AdviceDeltaProfile::HighWindowSparse => {
                     let direct = Fp::ONE;
                     if self.circuit_index == 0 && row % 4 != 0 {
+                        direct - Fp::from_u128(1_u128 << 119)
+                    } else {
+                        direct
+                    }
+                }
+                AdviceDeltaProfile::MissedHighWindow => {
+                    let direct = Fp::ONE;
+                    if self.circuit_index == 0 && !Self::is_router_sample(row) {
                         direct - Fp::from_u128(1_u128 << 119)
                     } else {
                         direct
@@ -2631,6 +2673,52 @@ fn advice_delta_commitments_preserve_proofs() {
         },
     ];
     compare_profiles(&armed, &unarmed, &pk, &high_window_sparse, 0, &[1, 4]);
+
+    // A fixed work sample could otherwise miss every high-window delta. The
+    // direct sample only contains unit scalars and therefore does not span the
+    // prepared evaluator's main windows, so the conservative comparison must
+    // retain the direct route.
+    let direct = (0..(1_usize << ADVICE_DELTA_PREPARED_K))
+        .map(|row| {
+            if row < ASSIGNED_ROWS {
+                Fp::ONE
+            } else {
+                Fp::ZERO
+            }
+        })
+        .collect::<Vec<_>>();
+    let reference = direct
+        .iter()
+        .enumerate()
+        .map(|(row, &direct)| {
+            if row < ASSIGNED_ROWS && !AdviceDeltaCircuit::is_router_sample(row) {
+                direct - Fp::from_u128(1_u128 << 119)
+            } else {
+                direct
+            }
+        })
+        .collect::<Vec<_>>();
+    let counts = (0..ADVICE_COLUMNS)
+        .map(|_| {
+            sampled_advice_delta_nonzero_counts(&direct, &reference, ADVICE_DELTA_COUNT_SAMPLES)
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap();
+    assert_eq!(use_sampled_advice_delta_counts(&counts), Some(true));
+
+    let missed_high_window = [
+        AdviceDeltaCircuit {
+            circuit_index: 0,
+            shared_columns: 0,
+            profile: AdviceDeltaProfile::MissedHighWindow,
+        },
+        AdviceDeltaCircuit {
+            circuit_index: 1,
+            shared_columns: 0,
+            profile: AdviceDeltaProfile::MissedHighWindow,
+        },
+    ];
+    compare_profiles(&armed, &unarmed, &pk, &missed_high_window, 0, &[1, 4]);
 }
 
 #[test]
