@@ -1,5 +1,5 @@
 use group::{
-    Curve,
+    Curve, Group,
     ff::{Field, PrimeField, WithSmallOrderMulGroup},
 };
 use maybe_rayon::prelude::*;
@@ -9,7 +9,7 @@ use std::{convert::Infallible, iter};
 use super::super::{ChallengeBeta, ChallengeGamma, ChallengeX, circuit::Any};
 use super::{Argument, ProvingKey, permutation_chunk_len};
 use crate::{
-    arithmetic::CurveAffine,
+    arithmetic::{CurveAffine, best_multiexp},
     plonk::{
         self, Error,
         evaluation::{EvaluationPoint, EvaluationQuery},
@@ -558,7 +558,10 @@ fn prepare_product<C: CurveAffine>(
     let blind = set.product_blind;
     let z = set.product;
     let (commitment, (polynomial, coset)) = crate::multicore::join(
-        || params.commit_lagrange(&z, blind),
+        || {
+            try_commit_constant_prefix(params, &z, blind, pk.vk.cs.blinding_factors())
+                .unwrap_or_else(|| params.commit_lagrange(&z, blind))
+        },
         || {
             let polynomial = pk
                 .vk
@@ -578,6 +581,50 @@ fn prepare_product<C: CurveAffine>(
         permutation_product_commitment: commitment.to_affine(),
         permutation_product_blind: blind,
     }
+}
+
+/// Commits to a Lagrange polynomial whose non-blinding rows are constant.
+///
+/// A constant Lagrange vector represents a constant coefficient polynomial,
+/// so its commitment is the constant times `g[0]`. The remaining terms are
+/// the differences between the blinded tail and that constant, plus the
+/// commitment blind. Returns `None` when the prefix is not constant.
+fn try_commit_constant_prefix<C: CurveAffine>(
+    params: &Params<C>,
+    polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
+    blind: Blind<C::Scalar>,
+    blinding_factors: usize,
+) -> Option<C::Curve> {
+    let prefix_len = polynomial.len().checked_sub(blinding_factors)?;
+    let values = &polynomial[..];
+    let (&constant, prefix) = values.get(..prefix_len)?.split_first()?;
+    if prefix.iter().any(|value| *value != constant) {
+        return None;
+    }
+
+    let mut scalars = Vec::with_capacity(blinding_factors + 2);
+    let mut bases = Vec::with_capacity(blinding_factors + 2);
+    if !bool::from(constant.is_zero()) {
+        scalars.push(constant);
+        bases.push(params.g[0]);
+    }
+    for (offset, &value) in values[prefix_len..].iter().enumerate() {
+        let delta = value - constant;
+        if !bool::from(delta.is_zero()) {
+            scalars.push(delta);
+            bases.push(params.g_lagrange[prefix_len + offset]);
+        }
+    }
+    if !bool::from(blind.0.is_zero()) {
+        scalars.push(blind.0);
+        bases.push(params.w);
+    }
+
+    Some(if scalars.is_empty() {
+        C::Curve::identity()
+    } else {
+        best_multiexp::<C>(&scalars, &bases)
+    })
 }
 
 impl<C: CurveAffine> Prepared<C> {
@@ -804,6 +851,122 @@ impl<C: CurveAffine> Evaluated<C> {
                         })
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod constant_prefix_commitment_tests {
+    use super::try_commit_constant_prefix;
+    use crate::{
+        arithmetic::CurveAffine,
+        poly::{
+            EvaluationDomain, LagrangeCoeff, Polynomial,
+            commitment::{Blind, Params},
+        },
+    };
+    use group::ff::Field;
+    use pasta_curves::{EpAffine, EqAffine, Fp};
+    use proptest::prelude::*;
+
+    const K: u32 = 4;
+    const BLINDING_FACTORS: usize = 5;
+
+    fn polynomial_with_constant_prefix<C: CurveAffine>(
+        constant: C::Scalar,
+        tail: &[C::Scalar],
+    ) -> Polynomial<C::Scalar, LagrangeCoeff> {
+        let domain = EvaluationDomain::new(1, K);
+        let mut values = vec![constant; 1 << K];
+        let tail_start = values.len() - tail.len();
+        values[tail_start..].copy_from_slice(tail);
+        domain.lagrange_from_vec(values)
+    }
+
+    fn assert_edge_constants_match<C: CurveAffine>()
+    where
+        C::Scalar: From<u64>,
+    {
+        let params = Params::<C>::new(K);
+        let zero_tail = [C::Scalar::ZERO; BLINDING_FACTORS];
+        let zero_polynomial = polynomial_with_constant_prefix::<C>(C::Scalar::ZERO, &zero_tail);
+        let zero_blind = Blind(C::Scalar::ZERO);
+        let sparse_zero =
+            try_commit_constant_prefix(&params, &zero_polynomial, zero_blind, BLINDING_FACTORS)
+                .expect("the zero polynomial has a constant prefix");
+        assert_eq!(
+            sparse_zero,
+            params.commit_lagrange(&zero_polynomial, zero_blind)
+        );
+
+        for constant in [C::Scalar::ZERO, C::Scalar::ONE, C::Scalar::from(17)] {
+            for blind in [C::Scalar::ZERO, C::Scalar::from(29)] {
+                let tail = [
+                    constant,
+                    C::Scalar::ZERO,
+                    C::Scalar::ONE,
+                    C::Scalar::from(41),
+                    constant,
+                ];
+                let polynomial = polynomial_with_constant_prefix::<C>(constant, &tail);
+                let blind = Blind(blind);
+
+                let sparse =
+                    try_commit_constant_prefix(&params, &polynomial, blind, BLINDING_FACTORS)
+                        .expect("the polynomial has a constant prefix");
+                assert_eq!(sparse, params.commit_lagrange(&polynomial, blind));
+            }
+        }
+    }
+
+    #[test]
+    fn constant_prefix_matches_dense_commitment_for_edge_constants() {
+        assert_edge_constants_match::<EqAffine>();
+        assert_edge_constants_match::<EpAffine>();
+    }
+
+    #[test]
+    fn nonconstant_or_empty_prefix_uses_the_dense_fallback() {
+        let params = Params::<EqAffine>::new(K);
+        let tail = [Fp::from(2); BLINDING_FACTORS];
+        let mut polynomial = polynomial_with_constant_prefix::<EqAffine>(Fp::from(7), &tail);
+        polynomial[3] = Fp::from(8);
+        let blind = Blind(Fp::from(11));
+
+        assert!(
+            try_commit_constant_prefix(&params, &polynomial, blind, BLINDING_FACTORS).is_none()
+        );
+        assert!(try_commit_constant_prefix(&params, &polynomial, blind, 1 << K).is_none());
+        assert!(try_commit_constant_prefix(&params, &polynomial, blind, (1 << K) + 1).is_none());
+
+        let fallback = try_commit_constant_prefix(&params, &polynomial, blind, BLINDING_FACTORS)
+            .unwrap_or_else(|| params.commit_lagrange(&polynomial, blind));
+        assert_eq!(fallback, params.commit_lagrange(&polynomial, blind));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn arbitrary_constant_prefixes_match_dense_commitments(
+            constant in any::<u64>(),
+            tail in prop::collection::vec(any::<u64>(), BLINDING_FACTORS),
+            blind in any::<u64>(),
+        ) {
+            let params = Params::<EqAffine>::new(K);
+            let constant = Fp::from(constant);
+            let tail = tail.into_iter().map(Fp::from).collect::<Vec<_>>();
+            let polynomial = polynomial_with_constant_prefix::<EqAffine>(constant, &tail);
+            let blind = Blind(Fp::from(blind));
+
+            let sparse = try_commit_constant_prefix(
+                &params,
+                &polynomial,
+                blind,
+                BLINDING_FACTORS,
+            )
+            .expect("the polynomial has a constant prefix");
+            prop_assert_eq!(sparse, params.commit_lagrange(&polynomial, blind));
+        }
     }
 }
 
