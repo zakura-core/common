@@ -1286,6 +1286,25 @@ impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
         }
     }
 
+    fn accumulate_values(&mut self, terms: &[F], power: F) {
+        debug_assert_eq!(self.terms.len(), terms.len());
+        if power == F::ONE {
+            if self.has_addends {
+                for (addend, term) in self.addends.iter_mut().zip(terms) {
+                    *addend += term;
+                }
+            } else {
+                self.addends.copy_from_slice(terms);
+                self.has_addends = true;
+            }
+        } else if self.has_products {
+            accumulate_deferred_values::<T, F>(&mut self.accumulators, terms, &power);
+        } else {
+            initialize_deferred_values::<T, F>(&mut self.accumulators, terms, &power);
+            self.has_products = true;
+        }
+    }
+
     fn finish_into(&mut self, output: &mut [F]) {
         if self.has_products {
             reduce_deferred_into::<T, F>(&self.accumulators, &mut self.reduced);
@@ -1358,6 +1377,24 @@ impl<F: Field> ReusablePowerFold<F> {
         }
     }
 
+    fn accumulate_values(&mut self, terms: &[F], power: F) {
+        match self {
+            Self::Eager { accumulators, .. } => {
+                if power == F::ONE {
+                    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+                        *accumulator += *term;
+                    }
+                } else {
+                    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+                        *accumulator += *term * power;
+                    }
+                }
+            }
+            Self::Pallas(fold) => fold.accumulate_values(terms, power),
+            Self::Vesta(fold) => fold.accumulate_values(terms, power),
+        }
+    }
+
     fn finish_into(&mut self, output: &mut [F]) {
         match self {
             Self::Eager { accumulators, .. } => output.copy_from_slice(accumulators),
@@ -1386,6 +1423,26 @@ fn initialize_deferred<T: DeferredField + 'static>(
     }
 }
 
+fn initialize_deferred_values<T: DeferredField + 'static, F: Field>(
+    accumulators: &mut [T::Accumulator],
+    terms: &[F],
+    power: &F,
+) {
+    // `ReusablePowerFold` selects `T` by `TypeId`, so these checked casts
+    // cannot fail. Per-element casts let us keep the cache slice borrowed.
+    let power = (power as &dyn Any)
+        .downcast_ref::<T>()
+        .expect("power matches the deferred field");
+    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+        let term = (term as &dyn Any)
+            .downcast_ref::<T>()
+            .expect("term matches the deferred field");
+        let mut initialized = T::Accumulator::default();
+        T::mul_accumulate(&mut initialized, term, power);
+        *accumulator = initialized;
+    }
+}
+
 fn accumulate_deferred<T: DeferredField + 'static>(
     accumulators: &mut [T::Accumulator],
     terms: &dyn Any,
@@ -1399,6 +1456,23 @@ fn accumulate_deferred<T: DeferredField + 'static>(
         .downcast_ref::<T>()
         .expect("power matches the deferred field");
     for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+        T::mul_accumulate(accumulator, term, power);
+    }
+}
+
+fn accumulate_deferred_values<T: DeferredField + 'static, F: Field>(
+    accumulators: &mut [T::Accumulator],
+    terms: &[F],
+    power: &F,
+) {
+    // See `initialize_deferred_values` for the runtime type invariant.
+    let power = (power as &dyn Any)
+        .downcast_ref::<T>()
+        .expect("power matches the deferred field");
+    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
+        let term = (term as &dyn Any)
+            .downcast_ref::<T>()
+            .expect("term matches the deferred field");
         T::mul_accumulate(accumulator, term, power);
     }
 }
@@ -3333,8 +3407,15 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         ) {
             fold.reset();
             for term in terms {
-                recurse_into(&term.term, ctx, fold.terms(), cache, scratch);
-                fold.accumulate(ctx.scalars.get(term.power));
+                let power = ctx.scalars.get(term.power);
+                if let EvaluationPlan::CacheLoad { slot } = &term.term {
+                    let chunk_len = output.len();
+                    let start = slot * chunk_len;
+                    fold.accumulate_values(&cache[start..start + chunk_len], power);
+                } else {
+                    recurse_into(&term.term, ctx, fold.terms(), cache, scratch);
+                    fold.accumulate(power);
+                }
             }
             fold.finish_into(output);
         }
@@ -4774,14 +4855,21 @@ mod tests {
         for case in cases {
             fold.reset();
             let mut expected = vec![F::ZERO; 7];
-            for (terms, power) in case {
+            for (terms, power) in &case {
                 fold.terms().copy_from_slice(&terms);
-                fold.accumulate(power);
+                fold.accumulate(*power);
                 for (expected, term) in expected.iter_mut().zip(terms) {
-                    *expected += term * power;
+                    *expected += *term * *power;
                 }
             }
             let mut actual = vec![F::ZERO; 7];
+            fold.finish_into(&mut actual);
+            assert_eq!(actual, expected);
+
+            fold.reset();
+            for (terms, power) in &case {
+                fold.accumulate_values(terms, *power);
+            }
             fold.finish_into(&mut actual);
             assert_eq!(actual, expected);
         }
