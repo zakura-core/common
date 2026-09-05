@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- Extended the `aarch64-asm` field-arithmetic backend from Apple AArch64 to
+  Unix AArch64 targets, with platform-specific Mach-O and ELF symbols. On
+  physical Pixel 7 through Pixel 10 devices, prepared two-Action Orchard proof
+  median latency fell by 9.3% to 18.7%.
+
 ## [1.1.0] - 2026-09-04
 
 ### Added
