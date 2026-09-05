@@ -512,9 +512,7 @@ mod tests {
     use crate::poly::{
         EvaluationDomain, commitment::Blind, evaluate_polynomial_with_powers, power_vector,
     };
-    use crate::transcript::{Blake2bWrite, Challenge255};
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-    use crate::transcript::{Transcript, TranscriptWrite};
+    use crate::transcript::{Blake2bWrite, Challenge255, Transcript, TranscriptWrite};
     #[cfg(feature = "multicore")]
     use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use ff::Field;
@@ -532,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn precomputed_evaluation_and_powers_preserve_proof_bytes() {
+    fn precomputed_evaluation_matches_former_path_and_preserves_proof_bytes() {
         const K: u32 = 4;
         const PROOF_SEED: u64 = 0x7072_6563_6f6d_7065;
 
@@ -547,8 +545,25 @@ mod tests {
         let point = pallas::Base::from(23);
         let powers = power_vector(point, 1 << K);
         let evaluation = evaluate_polynomial_with_powers(&polynomial, &powers);
-
         type ProofTranscript = Blake2bWrite<Vec<u8>, vesta::Affine, Challenge255<vesta::Affine>>;
+
+        // The former path evaluated P + xi S after constructing the sparse
+        // masking polynomial. Reproduce that prefix independently: S(point) =
+        // 0 makes the former evaluation exactly P(point).
+        let mut mask_rng = StdRng::seed_from_u64(PROOF_SEED);
+        let mask = sample_ipa_masking_polynomial(K, point, &mut mask_rng);
+        let mask_blind = Blind(pallas::Base::random(&mut mask_rng));
+        let mask_commitment = ipa_masking_commitment(&mask, mask_blind, &params).to_affine();
+        let mut former_prefix = ProofTranscript::init(Vec::new());
+        former_prefix.write_point(mask_commitment).unwrap();
+        let xi = *former_prefix.squeeze_challenge_scalar::<()>();
+        let mut masked_polynomial = polynomial.clone();
+        for (index, coefficient) in mask {
+            masked_polynomial[index] += coefficient * xi;
+        }
+        let former_evaluation = evaluate_polynomial_with_powers(&masked_polynomial, &powers);
+        assert_eq!(former_evaluation, evaluation);
+
         let mut ordinary = ProofTranscript::init(Vec::new());
         create_proof(
             &params,
