@@ -604,6 +604,21 @@ pub fn create_proof<
 where
     I: IntoIterator<Item = ProverQuery<'a, C>> + Clone,
 {
+    let profile = std::env::var_os("ZAKURA_PHASE_PROFILE").is_some();
+    let mut profile_phase_start = profile.then(std::time::Instant::now);
+    macro_rules! profile_mark {
+        ($phase:literal) => {
+            if let Some(start) = profile_phase_start {
+                eprintln!(
+                    "MULTIOPEN phase={} ns={}",
+                    $phase,
+                    start.elapsed().as_nanos(),
+                );
+                profile_phase_start = Some(std::time::Instant::now());
+            }
+        };
+    }
+
     let x_1: ChallengeX1<_> = transcript.squeeze_challenge_scalar();
     let x_2: ChallengeX2<_> = transcript.squeeze_challenge_scalar();
 
@@ -613,6 +628,7 @@ where
             "queries iterator is empty or contains duplicate queries",
         )
     })?;
+    profile_mark!("intermediate_sets");
 
     // Collapse openings at same point sets together into single openings using
     // x_1 challenge.
@@ -632,19 +648,23 @@ where
             q_poly.values.resize(params.n as usize, C::Scalar::ZERO);
         }
     }
+    profile_mark!("collapse");
 
     let PreparedQPrime {
         polynomial: q_prime_poly,
         division_remainders,
     } = prepare_q_prime(&point_sets, &q_polys, *x_2, params.n as usize);
+    profile_mark!("q_prime_polynomial");
 
     let q_prime_blind = Blind(C::Scalar::random(&mut rng));
     let q_prime_commitment = params.commit(&q_prime_poly, q_prime_blind).to_affine();
+    profile_mark!("q_prime_commitment");
 
     transcript.write_point(q_prime_commitment)?;
 
     let x_3: ChallengeX3<_> = transcript.squeeze_challenge_scalar();
     let powers = power_vector(*x_3, params.n as usize);
+    profile_mark!("power_vector");
 
     // The evaluations are independent, but their transcript order is fixed.
     // Prepare the small q' evaluation terms in the same scope so their batch
@@ -656,6 +676,7 @@ where
     for evaluation in &q_evaluations {
         transcript.write_scalar(*evaluation)?;
     }
+    profile_mark!("q_evaluations");
 
     // The synthetic divisions used to build q' left one scalar remainder per
     // queried point. Unwind those divisions at x_3 to derive q'(x_3) from the
@@ -683,8 +704,9 @@ where
             )
         },
     );
+    profile_mark!("p_polynomial");
 
-    commitment::create_proof_with_powers(
+    let result = commitment::create_proof_with_powers(
         params,
         rng,
         transcript,
@@ -693,7 +715,10 @@ where
         *x_3,
         powers,
         p_evaluation,
-    )
+    );
+    profile_mark!("ipa");
+    let _ = profile_phase_start;
+    result
 }
 
 #[doc(hidden)]

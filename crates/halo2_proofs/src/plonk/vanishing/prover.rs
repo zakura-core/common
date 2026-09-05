@@ -275,21 +275,39 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         ),
         Error,
     > {
+        let profile = std::env::var_os("ZAKURA_PHASE_PROFILE").is_some();
+        let mut profile_phase_start = profile.then(std::time::Instant::now);
+        macro_rules! profile_mark {
+            ($phase:literal) => {
+                if let Some(start) = profile_phase_start {
+                    eprintln!(
+                        "QUOTIENT phase={} ns={}",
+                        $phase,
+                        start.elapsed().as_nanos(),
+                    );
+                    profile_phase_start = Some(std::time::Instant::now());
+                }
+            };
+        }
+
         // Fold the constraint expressions into the quotient numerator using
         // the y challenge, then evaluate the numerator.
         let challenges = poly::EvaluationChallenges::new(*theta, *beta, *gamma, *y);
+        profile_mark!("challenge_setup");
         let (quotient_numerator, prepared_plan) = evaluator.evaluate_quotient_with_compiled_plan(
             expressions,
             domain,
             compiled_plan,
             challenges,
         );
+        profile_mark!("evaluate");
 
         // Move the numerator to coefficient form, divide by
         // t(X) = X^{params.n} - 1 using its sparse block inverse, and construct
         // the coefficient-form quotient pieces in the same pass.
         let h_pieces =
             domain.quotient_numerator_to_pieces_with_twiddles(quotient_numerator, fft_twiddles);
+        profile_mark!("ifft_divide_split");
         debug_assert!(
             h_pieces
                 .iter()
@@ -299,6 +317,7 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
             .iter()
             .map(|_| Blind(C::Scalar::random(&mut rng)))
             .collect();
+        profile_mark!("blind");
 
         // Compute commitments to each h(X) piece
         #[cfg(feature = "multicore")]
@@ -316,11 +335,14 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
         let mut h_commitments = vec![C::identity(); h_commitments_projective.len()];
         C::Curve::batch_normalize(&h_commitments_projective, &mut h_commitments);
         let h_commitments = h_commitments;
+        profile_mark!("commitments");
 
         // Hash each h(X) piece
         for c in h_commitments.iter() {
             transcript.write_point(*c)?;
         }
+        profile_mark!("transcript");
+        let _ = profile_phase_start;
 
         Ok((
             ConstructedQuotient {
