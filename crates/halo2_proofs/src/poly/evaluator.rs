@@ -1246,7 +1246,6 @@ struct DeferredPowerFold<T: DeferredField, F: Field> {
     accumulators: Vec<T::Accumulator>,
     terms: Vec<F>,
     addends: Vec<F>,
-    reduced: Vec<F>,
     has_products: bool,
     has_addends: bool,
 }
@@ -1257,7 +1256,6 @@ impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
             accumulators: vec![Default::default(); len],
             terms: vec![F::ZERO; len],
             addends: vec![F::ZERO; len],
-            reduced: vec![F::ZERO; len],
             has_products: false,
             has_addends: false,
         }
@@ -1306,17 +1304,17 @@ impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
     }
 
     fn finish_into(&mut self, output: &mut [F]) {
+        assert_eq!(self.accumulators.len(), output.len());
         if self.has_products {
-            reduce_deferred_into::<T, F>(&self.accumulators, &mut self.reduced);
+            reduce_deferred_into::<T, F>(&self.accumulators, output);
         } else {
-            self.reduced.fill(F::ZERO);
+            output.fill(F::ZERO);
         }
         if self.has_addends {
-            for (result, addend) in self.reduced.iter_mut().zip(&self.addends) {
+            for (result, addend) in output.iter_mut().zip(&self.addends) {
                 *result += addend;
             }
         }
-        output.copy_from_slice(&self.reduced);
     }
 }
 
@@ -1506,12 +1504,14 @@ fn reduce_deferred<T: DeferredField + 'static, F: Field>(
 
 fn reduce_deferred_into<T: DeferredField + 'static, F: Field>(
     accumulators: &[T::Accumulator],
-    values: &mut Vec<F>,
+    values: &mut [F],
 ) {
-    let values = (values as &mut dyn Any)
-        .downcast_mut::<Vec<T>>()
-        .expect("output buffer matches the deferred field");
     for (value, accumulator) in values.iter_mut().zip(accumulators) {
+        // The caller selected `T` by `TypeId`, so this checked cast cannot
+        // fail. Casting each element lets reduction target a borrowed slice.
+        let value = (value as &mut dyn Any)
+            .downcast_mut::<T>()
+            .expect("output element matches the deferred field");
         *value = T::reduce(*accumulator);
     }
 }
