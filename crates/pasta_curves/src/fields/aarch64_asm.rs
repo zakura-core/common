@@ -108,21 +108,6 @@ fn is_canonical(value: &Limbs, modulus: &Limbs) -> bool {
 /// this.
 #[inline(always)]
 pub(super) fn mul(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
-    mul_inner::<true>(lhs, rhs, modulus, inv)
-}
-
-/// FFT-only multiplication with `lhs < 2p` and canonical `rhs`. The result
-/// is below `2p`. The lhs high limb is at most 2^63, excluding the carry
-/// overflow described in the module documentation for unrestricted inputs.
-#[cfg(feature = "alloc")]
-#[inline(always)]
-pub(super) fn mul_lazy(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
-    debug_assert!(lhs[3] <= (1 << 63));
-    mul_inner::<false>(lhs, rhs, modulus, inv)
-}
-
-#[inline(always)]
-fn mul_inner<const CANONICAL: bool>(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
     debug_assert!(
         is_canonical(rhs, modulus),
         "aarch64_asm::mul requires a canonical rhs"
@@ -295,7 +280,6 @@ fn mul_inner<const CANONICAL: bool>(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, i
             "adcs {r3}, {r4}, {t3}",            // Final candidate limb 3.
 
             // Subtract p = [p0,p1,0,p3].
-            ".if {canonical}",
             "mov {q}, #0x4000000000000000",     // Materialize p3 = 2^62.
             "subs {t0}, {r0}, {p0}",            // Tentative result limb 0 = candidate - p[0].
             "sbcs {t1}, {r1}, {p1}",            // Tentative result limb 1 minus p[1].
@@ -307,8 +291,6 @@ fn mul_inner<const CANONICAL: bool>(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs, i
             "csel {r1}, {r1}, {t1}, lo",        // Select canonical output limb 1.
             "csel {r2}, {r2}, {t2}, lo",        // Select canonical output limb 2.
             "csel {r3}, {r3}, {t3}, lo",        // Select canonical output limb 3.
-            ".endif",
-            canonical = const CANONICAL as usize,
             a0 = in(reg) lhs[0],
             a1 = in(reg) lhs[1],
             a2 = in(reg) lhs[2],

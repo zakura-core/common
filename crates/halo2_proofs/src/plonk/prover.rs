@@ -368,10 +368,6 @@ fn normalize_prover_instance_commitments<C: CurveAffine>(
     commitments
 }
 
-// Amortize one field inversion and Rayon scheduling over each chunk.
-#[cfg(feature = "multicore")]
-const ADVICE_INVERSION_MIN_CHUNK: usize = 1024;
-
 struct AdviceWitness<F: Field> {
     values: Vec<Polynomial<F, LagrangeCoeff>>,
     denominator_cells: Vec<usize>,
@@ -483,18 +479,6 @@ impl<F: Field> AdviceWitness<F> {
     }
 
     fn evaluate(mut self) -> Vec<Polynomial<F, LagrangeCoeff>> {
-        #[cfg(feature = "multicore")]
-        {
-            let chunk_len = self
-                .denominators
-                .len()
-                .div_ceil(crate::multicore::current_num_threads())
-                .max(ADVICE_INVERSION_MIN_CHUNK);
-            self.denominators
-                .par_chunks_mut(chunk_len)
-                .for_each(batch_invert_multi);
-        }
-        #[cfg(not(feature = "multicore"))]
         batch_invert_multi(&mut self.denominators);
         for (cell, denominator_inverse) in self.denominator_cells.into_iter().zip(self.denominators)
         {
@@ -2109,7 +2093,7 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
 
 #[cfg(feature = "multicore")]
 #[test]
-fn chunked_advice_evaluation_matches_serial() {
+fn advice_evaluation_matches_individual_inverses() {
     use pasta_curves::Fp;
 
     let domain = poly::EvaluationDomain::new(3, 12);
@@ -2130,8 +2114,7 @@ fn chunked_advice_evaluation_matches_serial() {
                         *value = assigned.evaluate();
                     }
                 }
-                // Exercise sparse-index repair as well as zero denominators
-                // and chunks that cross column boundaries.
+                // Exercise sparse-index repair as well as zero denominators.
                 advice.assign(0, 0, Assigned::Zero).unwrap();
                 expected[0][0] = Fp::ZERO;
                 for (actual, expected) in advice.evaluate().iter().zip(&expected) {

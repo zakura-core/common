@@ -112,18 +112,7 @@ macro_rules! montgomery_rounds {
 ///
 /// `(t_lo + Q * modulus) / R <= modulus` and `t_hi < modulus`, so the sum is
 /// below `2 * modulus` and fits in four limbs.
-#[cfg(any(
-    target_arch = "x86_64",
-    test,
-    all(
-        feature = "alloc",
-        not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_family = "unix"
-        ))
-    )
-))]
+#[cfg(any(target_arch = "x86_64", test))]
 #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
 pub(super) const fn montgomery_reduce_low_lazy(
     t: &[u64; 8],

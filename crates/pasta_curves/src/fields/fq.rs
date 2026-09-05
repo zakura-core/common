@@ -12,12 +12,6 @@ use crate::once::OnceTable;
 use ff::{FieldBits, PrimeFieldBits};
 
 use super::portable;
-
-#[cfg(all(test, feature = "alloc"))]
-#[test]
-fn lazy_fft_arithmetic_boundaries() {
-    super::fft::check_boundaries(MODULUS.0, |value: Fq| value.0, Fq);
-}
 use crate::arithmetic::{SqrtTableHelpers, adc, mac, sbb};
 #[cfg(all(feature = "deferred", target_arch = "aarch64"))]
 use crate::deferred::INNER_PRODUCT_BLOCK_SIZE;
@@ -400,45 +394,6 @@ impl Fq {
         Fq(super::mul_by_inverse_power_of_two(
             self.0, MODULUS.0, INV, exponent,
         ))
-    }
-
-    /// Executes serial FFT stages using private residues below twice the
-    /// modulus, normalizing before returning to field callers.
-    #[cfg(feature = "alloc")]
-    pub(crate) fn fft_after_prefix(
-        values: &mut [Self],
-        completed: usize,
-        stride: usize,
-        twiddle: impl Fn(usize) -> Self,
-    ) {
-        super::fft::transform(
-            values,
-            completed,
-            stride,
-            twiddle,
-            |value| value.0,
-            Self,
-            |lhs, rhs| {
-                #[cfg(all(
-                    feature = "aarch64-asm",
-                    target_arch = "aarch64",
-                    target_family = "unix"
-                ))]
-                {
-                    super::aarch64_asm::mul_lazy(&lhs, &rhs, &MODULUS.0, INV)
-                }
-                #[cfg(not(all(
-                    feature = "aarch64-asm",
-                    target_arch = "aarch64",
-                    target_family = "unix"
-                )))]
-                {
-                    let product = Self(lhs).mul_unreduced(&Self(rhs));
-                    portable::montgomery_reduce_low_lazy(&product, &MODULUS.0, INV)
-                }
-            },
-            MODULUS.0,
-        );
     }
 
     #[inline]
