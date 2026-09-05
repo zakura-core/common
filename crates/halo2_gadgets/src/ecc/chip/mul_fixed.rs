@@ -4,7 +4,10 @@ use super::{
 };
 use crate::utilities::decompose_running_sum::RunningSumConfig;
 
-use std::marker::PhantomData;
+use std::{
+    marker::PhantomData,
+    sync::{Arc, LazyLock, Mutex},
+};
 
 use group::ff::{Field, PrimeField, PrimeFieldBits};
 #[cfg(test)]
@@ -18,7 +21,6 @@ use halo2_proofs::{
     poly::Rotation,
 };
 use pasta_curves::{arithmetic::CurveAffine, pallas};
-use std::sync::LazyLock;
 #[cfg(test)]
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 
@@ -88,6 +90,37 @@ struct WindowWitness {
     y: pallas::Base,
     u: pallas::Base,
 }
+
+struct CachedWindowWitnesses {
+    generator: pallas::Affine,
+    num_windows: usize,
+    lagrange_coeffs: Vec<[pallas::Base; H]>,
+    us: Vec<[<pallas::Base as PrimeField>::Repr; H]>,
+    zs: Vec<u64>,
+    windows: Vec<[WindowWitness; H]>,
+}
+
+impl CachedWindowWitnesses {
+    fn matches(
+        &self,
+        generator: pallas::Affine,
+        num_windows: usize,
+        lagrange_coeffs: &[[pallas::Base; H]],
+        us: &[[<pallas::Base as PrimeField>::Repr; H]],
+        zs: &[u64],
+    ) -> bool {
+        self.generator == generator
+            && self.num_windows == num_windows
+            && self.lagrange_coeffs == lagrange_coeffs
+            && self.us == us
+            && self.zs == zs
+    }
+}
+
+static WINDOW_WITNESS_CACHE: LazyLock<Mutex<Vec<Arc<CachedWindowWitnesses>>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+// Bound memory use for callers whose fixed-point tables vary at runtime.
+const MAX_CACHED_WINDOW_TABLES: usize = 16;
 
 #[derive(Clone, Copy)]
 struct WindowAccumulator {
@@ -177,6 +210,7 @@ fn evaluate_lagrange_polynomial(coefficients: &[pallas::Base; H], window: usize)
     }
 }
 
+#[cfg(test)]
 fn reconstruct_window_witnesses(
     lagrange_coeffs: &[[pallas::Base; H]],
     us: &[[<pallas::Base as PrimeField>::Repr; H]],
@@ -199,6 +233,67 @@ fn reconstruct_window_witnesses(
             WindowWitness { x, y, u }
         })
         .collect()
+}
+
+fn cached_window_witnesses<F: FixedPoint<pallas::Affine>, const NUM_WINDOWS: usize>(
+    base: &F,
+) -> Arc<CachedWindowWitnesses> {
+    let generator = base.generator();
+    let lagrange_coeffs = base.lagrange_coeffs();
+    let us = base.u();
+    let zs = base.z();
+    assert_eq!(lagrange_coeffs.len(), NUM_WINDOWS);
+    assert_eq!(us.len(), NUM_WINDOWS);
+    assert_eq!(zs.len(), NUM_WINDOWS);
+    {
+        let cache = WINDOW_WITNESS_CACHE.lock().unwrap();
+        // A generator does not uniquely determine the auxiliary u and z values
+        // allowed by `FixedPoint`, so the complete table identifies an entry.
+        if let Some(entry) = cache
+            .iter()
+            .find(|entry| entry.matches(generator, NUM_WINDOWS, &lagrange_coeffs, &us, &zs))
+        {
+            return Arc::clone(entry);
+        }
+    }
+
+    let windows = (0..lagrange_coeffs.len())
+        .map(|index| {
+            std::array::from_fn(|window| {
+                let x = evaluate_lagrange_polynomial(&lagrange_coeffs[index], window);
+                let u = pallas::Base::from_repr(us[index][window])
+                    .expect("stored fixed-base u-coordinate is canonical");
+                let y = u.square() - pallas::Base::from(zs[index]);
+                WindowWitness { x, y, u }
+            })
+        })
+        .collect::<Vec<_>>();
+    let entry = Arc::new(CachedWindowWitnesses {
+        generator,
+        num_windows: NUM_WINDOWS,
+        lagrange_coeffs,
+        us,
+        zs,
+        windows,
+    });
+
+    let mut cache = WINDOW_WITNESS_CACHE.lock().unwrap();
+    if let Some(existing) = cache.iter().find(|existing| {
+        existing.matches(
+            entry.generator,
+            entry.num_windows,
+            &entry.lagrange_coeffs,
+            &entry.us,
+            &entry.zs,
+        )
+    }) {
+        return Arc::clone(existing);
+    }
+    if cache.len() >= MAX_CACHED_WINDOW_TABLES {
+        cache.remove(0);
+    }
+    cache.push(Arc::clone(&entry));
+    entry
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -346,19 +441,17 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
         base: &F,
         coords_check_toggle: Selector,
     ) -> Result<(NonIdentityEccPoint, NonIdentityEccPoint), Error> {
-        let lagrange_coeffs = base.lagrange_coeffs();
-        let us = base.u();
-        let zs = base.z();
-        assert_eq!(lagrange_coeffs.len(), NUM_WINDOWS);
-        assert_eq!(us.len(), NUM_WINDOWS);
-        assert_eq!(zs.len(), NUM_WINDOWS);
+        let cached = cached_window_witnesses::<_, NUM_WINDOWS>(base);
+        assert_eq!(cached.lagrange_coeffs.len(), NUM_WINDOWS);
+        assert_eq!(cached.zs.len(), NUM_WINDOWS);
+        assert_eq!(cached.windows.len(), NUM_WINDOWS);
 
         // Assign fixed columns for given fixed base
         self.assign_fixed_constants::<NUM_WINDOWS>(
             region,
             offset,
-            &lagrange_coeffs,
-            &zs,
+            &cached.lagrange_coeffs,
+            &cached.zs,
             coords_check_toggle,
         )?;
 
@@ -366,7 +459,13 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
         assert_eq!(scalar_windows_usize.len(), NUM_WINDOWS);
         let window_witnesses: Value<Vec<_>> = scalar_windows_usize.iter().copied().collect();
         let window_witnesses = window_witnesses
-            .map(|windows| reconstruct_window_witnesses(&lagrange_coeffs, &us, &zs, &windows))
+            .map(|windows| {
+                windows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, window)| cached.windows[index][*window])
+                    .collect::<Vec<_>>()
+            })
             .transpose_vec(NUM_WINDOWS);
 
         // Initialize accumulator
@@ -614,7 +713,7 @@ impl ScalarFixed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecc::chip::{NUM_WINDOWS, NUM_WINDOWS_SHORT};
+    use crate::ecc::chip::{FullScalar, NUM_WINDOWS, NUM_WINDOWS_SHORT};
     use crate::ecc::tests::{FullWidth, Short};
     /// Offset applied to non-MSB windows to avoid identity points.
     const WINDOW_OFFSET: usize = 2;
@@ -696,6 +795,59 @@ mod tests {
     fn reconstructed_window_witnesses_match_curve_points() {
         assert_reconstructed_window_witnesses(FullWidth::from_pallas_generator(), NUM_WINDOWS);
         assert_reconstructed_window_witnesses(Short, NUM_WINDOWS_SHORT);
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct AlteredFullWidth {
+        inner: FullWidth,
+        alter_u: bool,
+    }
+
+    impl FixedPoint<pallas::Affine> for AlteredFullWidth {
+        type FixedScalarKind = FullScalar;
+
+        fn generator(&self) -> pallas::Affine {
+            self.inner.generator()
+        }
+
+        fn u(&self) -> Vec<[[u8; 32]; H]> {
+            let mut us = self.inner.u();
+            if self.alter_u {
+                us[0][0] = [0; 32];
+            }
+            us
+        }
+
+        fn z(&self) -> Vec<u64> {
+            self.inner.z()
+        }
+
+        fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+            self.inner.lagrange_coeffs()
+        }
+    }
+
+    #[test]
+    fn window_witness_cache_keys_on_complete_tables() {
+        let base = FullWidth::from_pallas_generator();
+        let original = AlteredFullWidth {
+            inner: base.clone(),
+            alter_u: false,
+        };
+        let altered = AlteredFullWidth {
+            inner: base,
+            alter_u: true,
+        };
+
+        let original = cached_window_witnesses::<_, NUM_WINDOWS>(&original);
+        let altered = cached_window_witnesses::<_, NUM_WINDOWS>(&altered);
+        let altered_again = cached_window_witnesses::<_, NUM_WINDOWS>(&AlteredFullWidth {
+            inner: FullWidth::from_pallas_generator(),
+            alter_u: true,
+        });
+
+        assert!(!Arc::ptr_eq(&original, &altered));
+        assert!(Arc::ptr_eq(&altered, &altered_again));
     }
 
     #[test]
