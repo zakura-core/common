@@ -1283,6 +1283,29 @@ impl VerifyingKey {
         self.circuit_version.supports_cross_address_restriction()
     }
 
+    /// The pinned circuit description of this verifying key: the exact text the
+    /// `round_trip_*` tests compare against `src/circuit_data/circuit_description_*`.
+    /// Stable across platforms and releases for a given circuit version.
+    pub fn pinned_description(&self) -> alloc::string::String {
+        format!("{:#?}\n", self.vk.pinned())
+    }
+
+    /// A 32-byte fingerprint of this verifying key: BLAKE2b-256 over
+    /// [`Self::pinned_description`], personalized with `Orchard-VkFprint`.
+    ///
+    /// Downstream consensus code can pin this constant and refuse to start (or to
+    /// verify) if the key it built does not match, so that a circuit change is a
+    /// deliberate hard fork rather than a silent dependency bump.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        let hash = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"Orchard-VkFprint")
+            .hash(self.pinned_description().as_bytes());
+        let mut out = [0u8; 32];
+        out.copy_from_slice(hash.as_bytes());
+        out
+    }
+
     /// Prepares this key for repeated proof verification: builds and caches
     /// a prepared fixed-base zero-check over the key's SRS, which the halo2
     /// verifier's final identity test then routes through (see
@@ -2152,6 +2175,37 @@ mod tests {
             include_str!("circuit_data/circuit_description_fixed"),
         );
         round_trip_for_version(OrchardCircuitVersion::FixedPostNu6_2, vk, 2);
+    }
+
+    /// Fingerprints of the three pinned circuit descriptions. Computed as
+    /// BLAKE2b-256(person="Orchard-VkFprint") over the fixture files; a change here
+    /// means the verifying key changed.
+    #[test]
+    fn verifying_key_fingerprints_are_pinned() {
+        let expect = |hex: &str| -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for (i, b) in out.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+            }
+            out
+        };
+        for (version, hex) in [
+            (
+                OrchardCircuitVersion::InsecurePreNu6_2,
+                "6e6df0842e34ccdf251813ce52e1db353e03b0330ccb64ce8fa1cf9b3cfef6ce",
+            ),
+            (
+                OrchardCircuitVersion::FixedPostNu6_2,
+                "1bee049ad3ff027c8d448e64b4413b3c4a483a743b5f39bcfbb6102f626591fb",
+            ),
+            (
+                OrchardCircuitVersion::PostNu6_3,
+                "3409b1d4c3e45906d283bdf402fdc61a3eb22b2ff72b25943a738d0e4558ab72",
+            ),
+        ] {
+            let vk = VerifyingKey::build(version);
+            assert_eq!(vk.fingerprint(), expect(hex), "{version:?}");
+        }
     }
 
     #[test]
