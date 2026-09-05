@@ -122,6 +122,9 @@ use std::{fmt, sync::Arc};
 mod msm;
 mod prover;
 
+// This is also the largest exponent that is portable to 32-bit targets.
+const MAX_PARAMETER_K: u32 = 31;
+
 /// Signed width-eight fixed-base windows. Each base spends 128 affine points
 /// per window and evaluates a scalar with at most one mixed addition per
 /// window, without doublings.
@@ -1530,7 +1533,7 @@ impl<C: CurveAffine> Params<C> {
     pub fn new(k: u32) -> Self {
         // This is usually a limitation on the curve, but we also want 32-bit
         // architectures to be supported.
-        assert!(k < 32);
+        assert!(k <= MAX_PARAMETER_K);
 
         // In src/arithmetic/fields.rs we ensure that usize is at least 32 bits.
 
@@ -1886,6 +1889,12 @@ impl<C: CurveAffine> Params<C> {
         let mut k = [0u8; 4];
         reader.read_exact(&mut k[..])?;
         let k = u32::from_le_bytes(k);
+        if k > MAX_PARAMETER_K {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "parameter size exponent exceeds the supported maximum",
+            ));
+        }
 
         let n: u64 = 1 << k;
 
@@ -2347,6 +2356,17 @@ fn incorrect_lagrange_basis_does_not_match_hash_pin() {
     incorrect_basis[0] = incorrect_basis[1];
 
     assert_ne!(lagrange_basis_hash(&incorrect_basis), expected_hash);
+}
+
+#[test]
+fn params_read_rejects_unsupported_size_exponents() {
+    use crate::pasta::EqAffine;
+
+    for k in [MAX_PARAMETER_K + 1, u32::MAX] {
+        let error = Params::<EqAffine>::read(&mut k.to_le_bytes().as_slice())
+            .expect_err("an unsupported parameter exponent must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
 }
 
 #[cfg(feature = "batch")]
