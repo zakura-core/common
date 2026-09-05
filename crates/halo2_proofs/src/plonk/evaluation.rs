@@ -223,6 +223,9 @@ fn convert_point<F: Field, T: Field>(point: EvaluationPoint<F>) -> EvaluationPoi
 }
 
 fn deferred_inner_product<F: DeferredField>(polynomial: &[F], powers: &[F]) -> F {
+    if let Some(value) = crate::arithmetic::batch::inner_product(polynomial, powers) {
+        return value;
+    }
     F::inner_product(polynomial, powers)
 }
 

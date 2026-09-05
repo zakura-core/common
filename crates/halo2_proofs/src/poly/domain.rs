@@ -2,7 +2,7 @@
 //! domain that is of a suitable size for the application.
 
 use crate::{
-    arithmetic::{best_fft, parallelize},
+    arithmetic::{batch, best_fft, parallelize},
     multicore,
     plonk::Assigned,
 };
@@ -695,10 +695,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     fn ifft(a: &mut [F], omega_inv: F, log_n: u32, divisor: F) {
         best_fft(a, omega_inv, log_n);
         parallelize(a, |a, _| {
-            for a in a {
-                // Finish iFFT
-                *a *= &divisor;
-            }
+            // Finish iFFT
+            batch::scale_slice(a, &divisor);
         });
     }
 

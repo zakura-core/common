@@ -83,6 +83,17 @@ impl<F> Product<F> {
         _marker: core::marker::PhantomData,
     };
 
+    /// Constructs an accumulator directly from a 512-bit limb array and a
+    /// carry of bits 512 and above.
+    #[cfg(all(target_arch = "x86_64", feature = "ifma"))]
+    pub(crate) fn from_raw(limbs: [u64; 8], carry: u64) -> Self {
+        Product {
+            limbs,
+            carry,
+            _marker: core::marker::PhantomData,
+        }
+    }
+
     /// Multiplies two raw 256-bit values and adds their 512-bit product into
     /// this accumulator.
     ///

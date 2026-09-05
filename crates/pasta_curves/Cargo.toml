@@ -50,6 +50,9 @@ bits = ["ff/bits"]
 default = ["bits", "sqrt-table"]
 deferred = []
 glv = ["alloc"]
+# Batched AVX-512 IFMA slice arithmetic (x86_64 only; requires std for
+# runtime CPU feature detection).
+ifma = []
 gpu = ["alloc", "ec-gpu"]
 # Parallel evaluation of the GLV multiscalar windows and affine batches in
 # `glv.rs` through the Rayon pool; implies `glv` (and therefore `alloc`).
