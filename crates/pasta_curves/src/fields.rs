@@ -55,7 +55,8 @@ fn mul_by_inverse_power_of_two(
     feature = "aarch64-asm",
     target_arch = "aarch64",
     target_family = "unix",
-    target_pointer_width = "64"
+    target_pointer_width = "64",
+    target_endian = "little"
 ))]
 mod aarch64_asm;
 
