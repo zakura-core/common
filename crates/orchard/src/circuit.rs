@@ -510,6 +510,9 @@ impl Config {
 
         // We have a lot of free space in the right-most advice columns; use one of them
         // for all of our range checks.
+        // Keep this lookup on the Sinsemilla index column: the prepared prover
+        // recognizes that shared fixed column when routing sorted 10-bit
+        // range-check inputs.
         let range_check = LookupRangeCheckConfig::configure(meta, advices[9], table_idx);
 
         // Configuration for curve point operations.
@@ -1332,16 +1335,15 @@ impl ProvingKey {
     /// no-orbits build, the first four IPA rounds do as well. The preparations
     /// apply on pools of at most eight effective threads, extended to ten on
     /// AArch64 macOS for Orchard's `k = 11` SRS. Wider pools retain their usual
-    /// multiexp. One-shot provers need not prepare. At `k = 11`, the four
+    /// multiexp. One-shot provers need not prepare. At `k = 11`, the five
     /// retained tables in the default multicore, no-orbits build account for
-    /// about 29.1 MiB. In x86_64 Linux lifecycle measurements, preparation
-    /// took about 130 ms on one worker, about 38 ms more than the previous
-    /// cache set. On four through eight workers, the added construction ran
-    /// under the existing preparations' critical path and total preparation
-    /// remained about 43 ms. With `orbits`, the two large tables account for
-    /// about 24.8 MiB and took about 34 ms on the benchmarked Apple M4. Key
-    /// generation separately caches about 640 KiB for public-instance and
-    /// sparse masking commitments.
+    /// about 29.5 MiB. With `orbits`, the two large tables account for about
+    /// 24.8 MiB. With `multicore`, both backends additionally retain three
+    /// affine multiples per Lagrange suffix sum for sorted 10-bit range-check
+    /// commitments. These occupy 384 KiB; construction adds 576 KiB of
+    /// projective scratch and reaches a 960 KiB combined peak. Key generation
+    /// separately caches about 640 KiB for public-instance and sparse masking
+    /// commitments.
     ///
     /// Call this once before entering concurrent Rayon proving work.
     /// Concurrent callers outside that pool safely wait for and share the same

@@ -58,6 +58,14 @@ fn decode_scalar_repr<F: ff::PrimeField>(mut bytes: impl ExactSizeIterator<Item 
 #[cfg(feature = "multicore")]
 const PREPARED_SPARSE_COMMITMENT_K: u32 = 11;
 
+/// The Orchard-sized domain used by the sorted 10-bit range-check commitment.
+#[cfg(feature = "multicore")]
+const PREPARED_SORTED_U10_COMMITMENT_K: u32 = PREPARED_SPARSE_COMMITMENT_K;
+
+/// Cached multiples `H`, `2H`, and `4H` for each Lagrange suffix sum.
+#[cfg(feature = "multicore")]
+const SORTED_U10_SUFFIX_MULTIPLES: usize = 3;
+
 #[cfg(feature = "multicore")]
 trait PreparedSparseCommitments<C: pasta_curves::arithmetic::CurveAffine> {
     fn prepare_sparse_commitment(&self) -> bool;
@@ -67,6 +75,11 @@ trait PreparedSparseCommitments<C: pasta_curves::arithmetic::CurveAffine> {
         coefficients: &[(usize, C::Scalar)],
         blind: poly::commitment::Blind<C::Scalar>,
     ) -> Option<C::Curve>;
+}
+
+#[cfg(feature = "multicore")]
+trait PreparedLookupCommitments<C: pasta_curves::arithmetic::CurveAffine> {
+    fn prepared_lagrange_suffix_multiples(&self) -> Option<&[C]>;
 }
 
 // Selector families smaller than this are cheaper to evaluate directly.
