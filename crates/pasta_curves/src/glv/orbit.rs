@@ -551,8 +551,8 @@ pub(super) fn windows_sum<C: GlvParams>(
 /// The orbit-backend MSM over decomposed components. Callers guarantee the
 /// components respect the [`GLV_COMPONENT_BITS`] bound (as
 /// [`super::checked_signed_magnitudes`] enforces). Parallel runs schedule
-/// the windows through the shared paired-window driver
-/// ([`super::paired_windows_sum`]).
+/// the windows through the shared balanced reduction tree
+/// ([`super::balanced_windows_sum`]).
 #[cfg(feature = "orbits")]
 pub(super) fn multiexp<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
@@ -571,7 +571,7 @@ pub(super) fn multiexp<C: GlvParams>(
     let _ = num_threads;
     #[cfg(feature = "multicore")]
     if num_threads > 1 {
-        return super::paired_windows_sum::<C>(active_windows, window_bits, |window| {
+        return super::balanced_windows_sum::<C>(active_windows, window_bits, |window| {
             windows_sum::<C>(&params, &digits, &rotated, window..window + 1)
         });
     }

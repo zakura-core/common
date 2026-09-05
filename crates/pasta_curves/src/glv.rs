@@ -1826,49 +1826,45 @@ fn multiexp_serial<C: GlvParams>(
 }
 
 /// $\sum_{w < \text{windows}} B^w C_w$ for $C_w$ = `window_sum(w)`, with
-/// adjacent windows paired per rayon task. The pair members are still
-/// computed as independent (joined) subtasks — so wide pools stay as
-/// occupied as with one task per window, which measured best against
-/// contiguous window chunks on a 32-core x86-64 host — while the pair
-/// shares one Horner shift chain, halving the doublings a
-/// one-task-per-window schedule duplicates. The pair roots remain
-/// independent, so their remaining shifts overlap. `None` from
+/// windows combined through a balanced tree. Every window remains an
+/// independent Rayon task. Each merge shifts only its upper subtree,
+/// sharing the shift across all of that subtree's windows. This needs
+/// O(windows log windows) doublings instead of independently shifting
+/// every pair to its absolute position. `None` from
 /// `window_sum` (an arithmetic guard) propagates out. Shared by the
-/// Eisenstein-orbit backend and the prepared zero-check's main-window and
-/// tail drivers.
+/// Eisenstein-orbit backend and the prepared
+/// zero-check's main-window and tail drivers.
 #[cfg(feature = "multicore")]
-fn paired_windows_sum<C: GlvParams>(
+fn balanced_windows_sum<C: GlvParams>(
     windows: usize,
     window_bits: usize,
     window_sum: impl Fn(usize) -> Option<C> + Sync,
 ) -> Option<C> {
-    const WINDOWS_PER_PAIR: usize = 2;
-    let pair_count = windows.div_ceil(WINDOWS_PER_PAIR);
-    (0..pair_count)
-        .into_par_iter()
-        .map(|pair| {
-            let start = pair * WINDOWS_PER_PAIR;
-            let mut sum = if start + 1 == windows {
-                window_sum(start)?
-            } else {
-                let (low, high) = maybe_rayon::join(|| window_sum(start), || window_sum(start + 1));
-                let mut low = low?;
+    fn sum_range<C: GlvParams>(
+        start: usize,
+        windows: usize,
+        window_bits: usize,
+        window_sum: &(impl Fn(usize) -> Option<C> + Sync),
+    ) -> Option<C> {
+        match windows {
+            0 => Some(C::identity()),
+            1 => window_sum(start),
+            _ => {
+                let half = windows / 2;
+                let (low, high) = maybe_rayon::join(
+                    || sum_range(start, half, window_bits, window_sum),
+                    || sum_range(start + half, windows - half, window_bits, window_sum),
+                );
                 let mut high = high?;
-                for _ in 0..window_bits {
+                for _ in 0..window_bits * half {
                     high = high.double();
                 }
-                low += high;
-                low
-            };
-            for _ in 0..window_bits * start {
-                sum = sum.double();
+                Some(low? + high)
             }
-            Some(sum)
-        })
-        .try_reduce(C::identity, |mut left, right| {
-            left += right;
-            Some(left)
-        })
+        }
+    }
+
+    sum_range(0, windows, window_bits, &window_sum)
 }
 
 /// Evaluates each Signed-Booth window independently through Rayon, then
@@ -4039,6 +4035,49 @@ mod tests {
     use ff::Field;
 
     const VERIFIER_MULTIEXP_SIZES: [usize; 3] = [2_150, 2_990, 5_678];
+
+    #[cfg(feature = "multicore")]
+    fn parallel_windows_match_weighted_sum<C: GlvParams>() {
+        for windows in [0, 1, 2, 3, 5, 20, 21, 33] {
+            let points: Vec<_> = (0..windows)
+                .map(|index| match index % 5 {
+                    0 => C::identity(),
+                    1 => C::generator(),
+                    2 => -C::generator(),
+                    _ => C::generator() * C::ScalarExt::from(index as u64),
+                })
+                .collect();
+            for bits in [1, 4, 7] {
+                let radix = C::ScalarExt::from(1 << bits);
+                let mut power = C::ScalarExt::ONE;
+                let mut expected = C::identity();
+                for point in &points {
+                    expected += *point * power;
+                    power *= radix;
+                }
+                assert_eq!(
+                    balanced_windows_sum::<C>(windows, bits, |index| Some(points[index])),
+                    Some(expected),
+                    "windows={windows}, bits={bits}",
+                );
+                for failure in 0..windows {
+                    assert!(
+                        balanced_windows_sum::<C>(windows, bits, |index| {
+                            (index != failure).then_some(points[index])
+                        })
+                        .is_none()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "multicore")]
+    fn parallel_windows_match_weighted_sum_on_both_curves() {
+        parallel_windows_match_weighted_sum::<crate::pallas::Point>();
+        parallel_windows_match_weighted_sum::<crate::vesta::Point>();
+    }
 
     fn batch_invert_nonzero_matches_individual<F>()
     where

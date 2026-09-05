@@ -141,7 +141,7 @@ const DEFAULT_TABLE_FOOTPRINT_BUDGET: usize = 13 << 20;
 
 #[derive(Clone, Copy)]
 enum MainWindowFold {
-    Paired,
+    Balanced,
     Horner,
 }
 
@@ -323,7 +323,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> bool {
         bool::from(
-            self.multiexp_with_scalar_slices_using(scalars, &[], extra, MainWindowFold::Paired)
+            self.multiexp_with_scalar_slices_using(scalars, &[], extra, MainWindowFold::Balanced)
                 .is_identity(),
         )
     }
@@ -554,13 +554,13 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         if num_threads > 1 {
             // Point-returning MSMs reduce the main windows independently
             // and combine them with one Horner fold. Zero checks retain the
-            // paired schedule tuned for an isolated MSM. The residual tail
+            // balanced reduction tree. The residual tail
             // and extras MSM run concurrently with the main windows.
             let main = || {
                 maybe_rayon::join(
                     || match main_window_fold {
-                        MainWindowFold::Paired => {
-                            super::paired_windows_sum::<C>(active, window_bits, |window| {
+                        MainWindowFold::Balanced => {
+                            super::balanced_windows_sum::<C>(active, window_bits, |window| {
                                 self.window_sum(recoded, window)
                             })
                         }
@@ -829,7 +829,7 @@ fn tail_multiexp<C: GlvParams>(
             .map(|(row, &(first, second))| orbit::recode_row(params, first, second, row))
             .max()
             .unwrap_or(0);
-        return super::paired_windows_sum::<C>(active, params.width(), |window| {
+        return super::balanced_windows_sum::<C>(active, params.width(), |window| {
             orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1)
         });
     }
