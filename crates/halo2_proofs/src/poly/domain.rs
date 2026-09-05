@@ -340,7 +340,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         assert_eq!(twiddles.base_inverse.len(), (1 << self.k) / 2);
 
         bitreverse_permute(&mut polynomial.values, self.k);
-        recursive_butterfly_after_prefix(
+        field_butterfly_after_prefix(
             &mut polynomial.values,
             1,
             1,
@@ -422,7 +422,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
             let mut values = polynomial.values.clone();
             bitreverse_permute(&mut values, self.k);
-            recursive_butterfly_after_prefix(
+            field_butterfly_after_prefix(
                 &mut values,
                 1,
                 1,
@@ -542,7 +542,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
 
         bitreverse_permute(&mut polynomial.values, self.extended_k);
-        recursive_butterfly_after_prefix(
+        field_butterfly_after_prefix(
             &mut polynomial.values,
             1,
             1,
@@ -603,7 +603,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         assert_eq!(twiddles.extended_forward.len(), self.extended_len() / 2);
 
         bitreverse_permute(&mut polynomial.values, self.extended_k);
-        recursive_butterfly_after_prefix(
+        field_butterfly_after_prefix(
             &mut polynomial.values,
             1,
             1,
@@ -795,7 +795,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         // Each 2 * extension chunk contains the first retained stage. Continue
         // with the other log_n - 1 butterfly stages. A zero parallel depth
         // still traverses recursively to retain cache locality.
-        recursive_butterfly_after_prefix(
+        field_butterfly_after_prefix(
             &mut values,
             2 * extension,
             1,
@@ -1028,6 +1028,48 @@ fn butterfly_twiddle_tables<F: Field>(twiddles: &[F], len: usize) -> Vec<Vec<F>>
         chunk *= 2;
     }
     tables
+}
+
+fn field_butterfly_after_prefix<F: Field>(
+    values: &mut Vec<F>,
+    completed_chunk_len: usize,
+    twiddle_chunk: usize,
+    twiddles: &[F],
+    tables: &[Vec<F>],
+    level: usize,
+    parallel_depth: u32,
+) {
+    // Polynomial batches already supply outer parallelism. Preserve the
+    // ordinary parallel transform for standalone FFTs.
+    if parallel_depth == 0 {
+        if let Some(values) = (values as &mut dyn Any).downcast_mut::<Vec<crate::pasta::Fp>>() {
+            crate::pasta::arithmetic::fft_fp_after_prefix(
+                values,
+                completed_chunk_len,
+                twiddle_chunk,
+                |index| downcast_field(twiddles[index]),
+            );
+            return;
+        }
+        if let Some(values) = (values as &mut dyn Any).downcast_mut::<Vec<crate::pasta::Fq>>() {
+            crate::pasta::arithmetic::fft_fq_after_prefix(
+                values,
+                completed_chunk_len,
+                twiddle_chunk,
+                |index| downcast_field(twiddles[index]),
+            );
+            return;
+        }
+    }
+    recursive_butterfly_after_prefix(
+        values,
+        completed_chunk_len,
+        twiddle_chunk,
+        twiddles,
+        tables,
+        level,
+        parallel_depth,
+    );
 }
 
 fn recursive_butterfly_after_prefix<F: Field>(

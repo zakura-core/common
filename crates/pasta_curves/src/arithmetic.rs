@@ -10,6 +10,40 @@ mod fields;
 pub use curves::*;
 pub(crate) use fields::*;
 
+/// Completes serial FFT stages on bit-reversed [`crate::Fp`] values.
+///
+/// This cross-crate bridge keeps lazy residues private. `completed` is the
+/// power-of-two prefix chunk length already transformed; `stride` scales
+/// twiddle indices. Inputs and outputs are canonical field elements.
+///
+/// Panics unless the nonempty input and prefix lengths are powers of two,
+/// the prefix fits the input, and the stride times input length fits usize.
+#[cfg(feature = "alloc")]
+#[doc(hidden)]
+pub fn fft_fp_after_prefix(
+    values: &mut [crate::Fp],
+    completed: usize,
+    stride: usize,
+    twiddle: impl Fn(usize) -> crate::Fp,
+) {
+    crate::Fp::fft_after_prefix(values, completed, stride, twiddle);
+}
+
+/// Completes serial FFT stages on bit-reversed [`crate::Fq`] values.
+///
+/// Has the same prefix, stride, and panic contract as
+/// [`fft_fp_after_prefix`]. Inputs and outputs remain canonical.
+#[cfg(feature = "alloc")]
+#[doc(hidden)]
+pub fn fft_fq_after_prefix(
+    values: &mut [crate::Fq],
+    completed: usize,
+    stride: usize,
+    twiddle: impl Fn(usize) -> crate::Fq,
+) {
+    crate::Fq::fft_after_prefix(values, completed, stride, twiddle);
+}
+
 /// Multiplies an [`Fp`](crate::Fp) element by `2^-exponent`.
 ///
 /// This is an internal cross-crate bridge for `halo2_proofs`.
