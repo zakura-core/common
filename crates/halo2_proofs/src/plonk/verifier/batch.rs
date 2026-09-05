@@ -280,7 +280,13 @@ where
             );
 
         match final_msm {
-            Ok(msm) => msm.eval(),
+            // Each contribution passed through the IPA challenge expansion,
+            // which normally produces random-like, full-width coefficients,
+            // before being scaled into the batch. The batch coefficients are
+            // fresh, sampled after every proof equation is fixed, and discarded
+            // after this check, so batch verification explicitly accepts the
+            // variable-time MSM's timing leakage.
+            Ok(msm) => msm.eval_full_width(),
             Err(_) => false,
         }
     }
