@@ -401,7 +401,7 @@ mod tests {
         parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
-    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    #[cfg(feature = "multicore")]
     use crate::poly::commitment::prepared_commitment_max_threads;
     use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
     #[cfg(any(feature = "multicore", feature = "orbits"))]
