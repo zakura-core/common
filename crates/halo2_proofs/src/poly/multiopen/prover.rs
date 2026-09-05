@@ -27,6 +27,9 @@ const MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD: usize = 1 << 10;
 // Bound the field payload retained for simultaneous point-set quotient terms.
 // This excludes `Vec` metadata and allocator rounding.
 const MAX_PARALLEL_Q_PRIME_FIELD_BYTES: usize = 8 * 1024 * 1024;
+// Only use remainder evaluation when it stays cheaper after charging one
+// inversion as this many direct-evaluation multiplications.
+const Q_PRIME_INVERSION_MULTIPLICATION_ALLOWANCE: usize = 1 << 10;
 const DEFERRED_FOLD_LANES: usize = 2;
 
 fn fold_polynomial_range<F: Field>(
@@ -270,12 +273,20 @@ fn prepare_q_prime_term<F: Field>(
     polynomial: &Polynomial<F, Coeff>,
     points: &[F],
     domain_len: usize,
+    retain_remainders: bool,
 ) -> (Polynomial<F, Coeff>, Vec<F>) {
     let mut values = polynomial.values.clone();
-    let remainders = points
-        .iter()
-        .map(|point| kate_division_in_place(&mut values, *point))
-        .collect();
+    let mut remainders = if retain_remainders {
+        Vec::with_capacity(points.len())
+    } else {
+        Vec::new()
+    };
+    for point in points {
+        let remainder = kate_division_in_place(&mut values, *point);
+        if retain_remainders {
+            remainders.push(remainder);
+        }
+    }
     values.resize(domain_len, F::ZERO);
     (
         Polynomial {
@@ -288,7 +299,38 @@ fn prepare_q_prime_term<F: Field>(
 
 struct PreparedQPrime<F> {
     polynomial: Polynomial<F, Coeff>,
-    division_remainders: Vec<Vec<F>>,
+    division_remainders: Option<Vec<Vec<F>>>,
+}
+
+fn q_prime_remainder_evaluation_multiplications(
+    point_set_count: usize,
+    queried_point_count: usize,
+) -> Option<usize> {
+    if point_set_count == 0 || queried_point_count < point_set_count {
+        return None;
+    }
+
+    // For S point sets and M queried points: M products for the vanishing
+    // polynomials, 3S for batch inversion, M-S for the Newton evaluations, S
+    // for the quotients, and S-1 for the challenge fold: 2M + 4S - 1.
+    queried_point_count
+        .checked_mul(2)?
+        .checked_add(point_set_count.checked_mul(4)?)?
+        .checked_sub(1)
+}
+
+fn should_retain_q_prime_remainders(
+    point_set_count: usize,
+    queried_point_count: usize,
+    domain_len: usize,
+) -> bool {
+    let direct_multiplications = domain_len.saturating_sub(1);
+
+    q_prime_remainder_evaluation_multiplications(point_set_count, queried_point_count)
+        .and_then(|multiplications| {
+            multiplications.checked_add(Q_PRIME_INVERSION_MULTIPLICATION_ALLOWANCE)
+        })
+        .is_some_and(|multiplications| multiplications < direct_multiplications)
 }
 
 fn evaluate_q_prime_from_remainders<F: Field>(
@@ -390,6 +432,12 @@ fn prepare_q_prime<F: Field>(
     domain_len: usize,
 ) -> PreparedQPrime<F> {
     debug_assert_eq!(point_sets.len(), polynomials.len());
+    let retain_remainders = point_sets
+        .iter()
+        .try_fold(0usize, |count, points| count.checked_add(points.len()))
+        .is_some_and(|queried_point_count| {
+            should_retain_q_prime_remainders(point_sets.len(), queried_point_count, domain_len)
+        });
 
     let division_work =
         point_sets
@@ -405,10 +453,14 @@ fn prepare_q_prime<F: Field>(
 
     if !prepare_in_parallel {
         let mut accumulator: Option<Polynomial<F, Coeff>> = None;
-        let mut division_remainders = Vec::with_capacity(point_sets.len());
+        let mut division_remainders =
+            retain_remainders.then(|| Vec::with_capacity(point_sets.len()));
         for (points, polynomial) in point_sets.iter().zip(polynomials) {
-            let (term, remainders) = prepare_q_prime_term(polynomial, points, domain_len);
-            division_remainders.push(remainders);
+            let (term, remainders) =
+                prepare_q_prime_term(polynomial, points, domain_len, retain_remainders);
+            if let Some(division_remainders) = &mut division_remainders {
+                division_remainders.push(remainders);
+            }
             if let Some(accumulator) = accumulator.as_mut() {
                 fold_q_prime_range(
                     &mut accumulator.values,
@@ -430,14 +482,26 @@ fn prepare_q_prime<F: Field>(
     multicore::scope(|scope| {
         for ((points, polynomial), output) in point_sets.iter().zip(polynomials).zip(&mut terms) {
             scope.spawn(move |_| {
-                *output = Some(prepare_q_prime_term(polynomial, points, domain_len));
+                *output = Some(prepare_q_prime_term(
+                    polynomial,
+                    points,
+                    domain_len,
+                    retain_remainders,
+                ));
             });
         }
     });
-    let (terms, division_remainders): (Vec<_>, Vec<_>) = terms
+    let mut division_remainders = retain_remainders.then(|| Vec::with_capacity(point_sets.len()));
+    let terms = terms
         .into_iter()
-        .map(|term| term.expect("each point-set quotient task completed"))
-        .unzip();
+        .map(|term| {
+            let (term, remainders) = term.expect("each point-set quotient task completed");
+            if let Some(division_remainders) = &mut division_remainders {
+                division_remainders.push(remainders);
+            }
+            term
+        })
+        .collect::<Vec<_>>();
 
     let mut terms = terms.into_iter();
     let mut accumulator = terms
@@ -582,13 +646,12 @@ where
         }
     }
 
-    let PreparedQPrime {
-        polynomial: q_prime_poly,
-        division_remainders,
-    } = prepare_q_prime(&point_sets, &q_polys, *x_2, params.n as usize);
+    let prepared_q_prime = prepare_q_prime(&point_sets, &q_polys, *x_2, params.n as usize);
 
     let q_prime_blind = Blind(C::Scalar::random(&mut rng));
-    let q_prime_commitment = params.commit(&q_prime_poly, q_prime_blind).to_affine();
+    let q_prime_commitment = params
+        .commit(&prepared_q_prime.polynomial, q_prime_blind)
+        .to_affine();
 
     transcript.write_point(q_prime_commitment)?;
 
@@ -606,14 +669,19 @@ where
     // Q_i(x_3) values already required by the transcript. The verifier rejects
     // a collision between x_3 and a queried point; retain the old evaluation
     // path for that negligible event so proof creation remains infallible.
-    let q_prime_evaluation = evaluate_q_prime_from_remainders(
-        &point_sets,
-        &q_evaluations,
-        &division_remainders,
-        *x_2,
-        *x_3,
-    )
-    .unwrap_or_else(|| evaluate_polynomial_with_powers(&q_prime_poly, &powers));
+    let q_prime_evaluation = prepared_q_prime
+        .division_remainders
+        .as_deref()
+        .and_then(|division_remainders| {
+            evaluate_q_prime_from_remainders(
+                &point_sets,
+                &q_evaluations,
+                division_remainders,
+                *x_2,
+                *x_3,
+            )
+        })
+        .unwrap_or_else(|| evaluate_polynomial_with_powers(&prepared_q_prime.polynomial, &powers));
 
     let x_4: ChallengeX4<_> = transcript.squeeze_challenge_scalar();
 
@@ -624,7 +692,7 @@ where
         });
 
     let (p_poly, p_poly_blind) = q_polys.into_iter().zip(q_blinds).fold(
-        (q_prime_poly, q_prime_blind),
+        (prepared_q_prime.polynomial, q_prime_blind),
         |(q_prime_poly, q_prime_blind), (poly, blind)| {
             (
                 scale_and_add_polynomial(q_prime_poly, *x_4, &poly),
@@ -685,9 +753,12 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial, collapse_polynomials,
-        evaluate_polynomials, evaluate_q_prime_from_remainders, kate_division_in_place,
-        power_vector, prepare_q_prime, scale_and_add_polynomial,
+        Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial,
+        Q_PRIME_INVERSION_MULTIPLICATION_ALLOWANCE, collapse_polynomials,
+        evaluate_polynomial_with_powers, evaluate_polynomials, evaluate_q_prime_from_remainders,
+        kate_division_in_place, power_vector, prepare_q_prime,
+        q_prime_remainder_evaluation_multiplications, scale_and_add_polynomial,
+        should_retain_q_prime_remainders,
     };
     use crate::arithmetic::{eval_polynomial, kate_division};
     use ff::Field;
@@ -877,6 +948,26 @@ mod tests {
             .expect("the test has point sets")
     }
 
+    #[test]
+    fn q_prime_remainder_gate_accounts_for_inversion_and_shape() {
+        assert_eq!(
+            q_prime_remainder_evaluation_multiplications(5, 11),
+            Some(41)
+        );
+        let replacement_with_inversion = 41 + Q_PRIME_INVERSION_MULTIPLICATION_ALLOWANCE;
+        let uses_remainders = |domain_len| should_retain_q_prime_remainders(5, 11, domain_len);
+        assert_eq!(
+            [
+                uses_remainders(replacement_with_inversion + 1),
+                uses_remainders(replacement_with_inversion + 2),
+                uses_remainders(1 << 10),
+                uses_remainders(1 << 11),
+            ],
+            [false, true, false, true]
+        );
+        assert!(!should_retain_q_prime_remainders(1, 512, 1 << 11));
+    }
+
     fn parallel_q_prime_matches_ordered_operator_fold<F>()
     where
         F: Field + From<u64> + Debug,
@@ -905,8 +996,15 @@ mod tests {
         for challenge in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
             let expected = reference_q_prime(&point_sets, &polynomials, challenge, domain_len);
             let check = || {
+                let direct = prepare_q_prime(&point_sets[..1], &polynomials[..1], challenge, 16);
+                assert!(direct.division_remainders.is_none());
+
                 let actual = prepare_q_prime(&point_sets, &polynomials, challenge, domain_len);
                 assert_eq!(&actual.polynomial[..], &expected[..]);
+                let division_remainders = actual
+                    .division_remainders
+                    .as_deref()
+                    .expect("this shape passes the remainder-evaluation gate");
 
                 for point in [F::from(13), F::from(19)] {
                     let q_evaluations = polynomials
@@ -916,7 +1014,7 @@ mod tests {
                     let derived = evaluate_q_prime_from_remainders(
                         &point_sets,
                         &q_evaluations,
-                        &actual.division_remainders,
+                        division_remainders,
                         challenge,
                         point,
                     )
@@ -929,15 +1027,20 @@ mod tests {
                     .iter()
                     .map(|polynomial| eval_polynomial(polynomial, collision))
                     .collect::<Vec<_>>();
-                assert!(
-                    evaluate_q_prime_from_remainders(
-                        &point_sets,
-                        &q_evaluations,
-                        &actual.division_remainders,
-                        challenge,
-                        collision,
-                    )
-                    .is_none()
+                let derived = evaluate_q_prime_from_remainders(
+                    &point_sets,
+                    &q_evaluations,
+                    division_remainders,
+                    challenge,
+                    collision,
+                );
+                assert!(derived.is_none());
+                let powers = power_vector(collision, domain_len);
+                assert_eq!(
+                    derived.unwrap_or_else(|| {
+                        evaluate_polynomial_with_powers(&actual.polynomial, &powers)
+                    }),
+                    eval_polynomial(&actual.polynomial, collision)
                 );
             };
 
