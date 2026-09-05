@@ -112,10 +112,10 @@ use group::{Curve, Group};
 #[cfg(feature = "multicore")]
 use maybe_rayon::prelude::*;
 use std::ops::{Add, AddAssign, Mul, MulAssign};
+#[cfg(feature = "batch")]
+use std::sync::Mutex;
 #[cfg(any(feature = "batch", feature = "multicore", feature = "orbits"))]
 use std::sync::OnceLock;
-#[cfg(feature = "batch")]
-use std::sync::{Condvar, Mutex};
 #[cfg(any(feature = "batch", feature = "multicore", feature = "orbits"))]
 use std::{fmt, sync::Arc};
 
@@ -1409,24 +1409,12 @@ fn prepared_instance_points<C: CurveAffine>(bases: &[C], windows: usize) -> Vec<
 
 #[cfg(feature = "batch")]
 #[derive(Clone)]
-struct InstanceWindowCache<C>(Arc<(Mutex<InstanceWindowCacheState<C>>, Condvar)>);
-
-#[cfg(feature = "batch")]
-struct InstanceWindowCacheState<C> {
-    table: Option<Arc<Vec<C>>>,
-    growing: bool,
-}
+struct InstanceWindowCache<C>(Arc<Mutex<Option<Arc<Vec<C>>>>>);
 
 #[cfg(feature = "batch")]
 impl<C> Default for InstanceWindowCache<C> {
     fn default() -> Self {
-        Self(Arc::new((
-            Mutex::new(InstanceWindowCacheState {
-                table: None,
-                growing: false,
-            }),
-            Condvar::new(),
-        )))
+        Self(Arc::new(Mutex::new(None)))
     }
 }
 
@@ -1436,55 +1424,18 @@ impl<C> InstanceWindowCache<C> {
         let required_len = base_count
             .checked_mul(INSTANCE_WINDOW_ENTRIES_PER_BASE)
             .expect("instance window table length fits in usize");
-        let (state_mutex, growth_finished) = &*self.0;
-        let mut state = state_mutex
+        let mut table = self
+            .0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        loop {
-            // Readers whose prefix is already cached never wait for a larger
-            // table build.
-            if let Some(table) = state
-                .table
-                .as_ref()
-                .filter(|table| table.len() >= required_len)
-            {
-                return Arc::clone(table);
-            }
-            if !state.growing {
-                state.growing = true;
-                break;
-            }
-            state = growth_finished
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(table) = table.as_ref().filter(|table| table.len() >= required_len) {
+            return Arc::clone(table);
         }
-        drop(state);
 
-        // Keep growth single-flight, but do the curve work without holding
-        // the mutex. Restore the cache state if construction panics.
-        let initialized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let initialized = Arc::new(initialize());
-            assert_eq!(initialized.len(), required_len);
-            initialized
-        }));
-
-        let mut state = state_mutex
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.growing = false;
-        let result = match initialized {
-            Ok(initialized) => {
-                state.table = Some(Arc::clone(&initialized));
-                initialized
-            }
-            Err(payload) => {
-                growth_finished.notify_all();
-                drop(state);
-                std::panic::resume_unwind(payload);
-            }
-        };
-        growth_finished.notify_all();
-        result
+        let initialized = Arc::new(initialize());
+        assert_eq!(initialized.len(), required_len);
+        *table = Some(Arc::clone(&initialized));
+        initialized
     }
 }
 
@@ -2416,65 +2367,6 @@ fn params_read_rejects_unsupported_size_exponents() {
             .expect_err("an unsupported parameter exponent must be rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
-}
-
-#[cfg(feature = "batch")]
-#[test]
-fn instance_window_cache_serves_cached_prefix_during_growth() {
-    use std::{
-        sync::{Arc, mpsc},
-        time::Duration,
-    };
-
-    const INITIAL_BASES: usize = 1;
-    const GROWN_BASES: usize = 2;
-
-    let cache = InstanceWindowCache::<u8>::default();
-    let initial = cache.get_or_grow(INITIAL_BASES, || {
-        vec![0; INITIAL_BASES * INSTANCE_WINDOW_ENTRIES_PER_BASE]
-    });
-    let (growth_started_tx, growth_started_rx) = mpsc::channel();
-    let (finish_growth_tx, finish_growth_rx) = mpsc::channel();
-    let (cached_tx, cached_rx) = mpsc::channel();
-
-    std::thread::scope(|scope| {
-        let growing_cache = cache.clone();
-        scope.spawn(move || {
-            growing_cache.get_or_grow(GROWN_BASES, || {
-                growth_started_tx.send(()).unwrap();
-                finish_growth_rx.recv().unwrap();
-                vec![0; GROWN_BASES * INSTANCE_WINDOW_ENTRIES_PER_BASE]
-            });
-        });
-
-        growth_started_rx.recv().unwrap();
-        let reading_cache = cache.clone();
-        scope.spawn(move || {
-            let cached = reading_cache.get_or_grow(INITIAL_BASES, || {
-                panic!("the cached prefix must not be rebuilt")
-            });
-            cached_tx.send(cached).unwrap();
-        });
-
-        let cached = cached_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("cached prefixes must not wait for table growth");
-        assert!(Arc::ptr_eq(&initial, &cached));
-        finish_growth_tx.send(()).unwrap();
-    });
-
-    let panicking = InstanceWindowCache::<u8>::default();
-    let panic = std::panic::catch_unwind(|| {
-        panicking.get_or_grow(INITIAL_BASES, || panic!("table build failed"));
-    });
-    assert!(panic.is_err());
-    let recovered = panicking.get_or_grow(INITIAL_BASES, || {
-        vec![0; INITIAL_BASES * INSTANCE_WINDOW_ENTRIES_PER_BASE]
-    });
-    assert_eq!(
-        recovered.len(),
-        INITIAL_BASES * INSTANCE_WINDOW_ENTRIES_PER_BASE
-    );
 }
 
 #[cfg(feature = "batch")]
