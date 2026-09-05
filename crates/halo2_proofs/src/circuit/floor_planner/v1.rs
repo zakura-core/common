@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fmt,
+    ops::Range,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -189,19 +190,19 @@ impl RegionLookup {
 
 struct V1Layout {
     /// Stores the starting row for each region.
-    regions: Vec<RegionStart>,
+    regions: Arc<[RegionStart]>,
     /// Maps each region's identity to its index in `regions`.
     region_lookup: RegionLookup,
-    /// Stores the occupied rows in each global-constant column.
-    fixed_allocations: Vec<(Column<Fixed>, strategy::Allocations)>,
-    /// Stores the first row after all planned regions.
-    first_unassigned_row: usize,
+    /// Compiled free ranges for assigning global constants, in column order.
+    constant_ranges: Vec<(Column<Fixed>, Range<usize>)>,
+    /// Number of available constant cells across the compiled ranges.
+    constant_capacity: usize,
 }
 
 struct V1Plan<'a, F: Field, CS: Assignment<F> + 'a> {
     cs: &'a mut CS,
     /// Stores the starting row for each region.
-    regions: Vec<RegionStart>,
+    regions: Arc<[RegionStart]>,
     /// Stores the constants to be assigned, and the cells to which they are copied.
     constants: Vec<(Assigned<F>, Cell)>,
     /// Stores the table fixed columns.
@@ -216,7 +217,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for V1Plan<'a, F, CS> {
 
 impl<'a, F: Field, CS: Assignment<F>> V1Plan<'a, F, CS> {
     /// Creates a new v1 layouter.
-    fn new(cs: &'a mut CS, regions: Vec<RegionStart>) -> Result<Self, Error> {
+    fn new(cs: &'a mut CS, regions: Arc<[RegionStart]>) -> Result<Self, Error> {
         let ret = V1Plan {
             cs,
             regions,
@@ -368,24 +369,30 @@ impl V1 {
             .unwrap_or(0);
 
         // - Position the constants within those rows.
-        let fixed_allocations = constants
+        let constant_ranges: Vec<_> = constants
             .iter()
-            .map(|&column| {
+            .flat_map(|&column| {
                 let allocation = column_allocations
                     .get(&Column::<Any>::from(column).into())
                     .cloned()
                     .unwrap_or_default();
-                (column, allocation)
+                allocation
+                    .free_intervals(0, Some(first_unassigned_row))
+                    .map(|empty| (column, empty.range().unwrap()))
+                    .collect::<Vec<_>>()
             })
             .collect();
+        let constant_capacity = constant_ranges.iter().fold(0usize, |capacity, (_, range)| {
+            capacity.saturating_add(range.len())
+        });
 
         let region_lookup = RegionLookup::new(measure.region_ids);
 
         Ok(V1Layout {
-            regions,
+            regions: regions.into(),
             region_lookup,
-            fixed_allocations,
-            first_unassigned_row,
+            constant_ranges,
+            constant_capacity,
         })
     }
 
@@ -395,7 +402,7 @@ impl V1 {
         config: C::Config,
         layout: &V1Layout,
     ) -> Result<(), Error> {
-        let mut plan = V1Plan::new(cs, layout.regions.clone())?;
+        let mut plan = V1Plan::new(cs, Arc::clone(&layout.regions))?;
 
         // Second pass:
         // - Assign the regions.
@@ -414,7 +421,7 @@ impl V1 {
         config: C::Config,
         layout: &V1Layout,
     ) -> Result<(), Error> {
-        let mut plan = V1Plan::new(cs, layout.regions.clone())?;
+        let mut plan = V1Plan::new(cs, Arc::clone(&layout.regions))?;
 
         let assigned = AtomicUsize::new(0);
         let mut assign = NamedAssignmentPass::new(&mut plan, &layout.region_lookup, &assigned);
@@ -433,22 +440,14 @@ impl V1 {
         plan: V1Plan<'_, F, CS>,
         layout: &V1Layout,
     ) -> Result<(), Error> {
-        let constant_positions = || {
-            layout
-                .fixed_allocations
-                .iter()
-                .flat_map(|(column, allocation)| {
-                    let column = *column;
-                    allocation
-                        .free_intervals(0, Some(layout.first_unassigned_row))
-                        .flat_map(move |empty| empty.range().unwrap().map(move |row| (column, row)))
-                })
-        };
-        if constant_positions().count() < plan.constants.len() {
+        if layout.constant_capacity < plan.constants.len() {
             return Err(Error::NotEnoughColumnsForConstants);
         }
-        for ((fixed_column, fixed_row), (value, advice)) in constant_positions().zip(plan.constants)
-        {
+        let constant_positions = layout
+            .constant_ranges
+            .iter()
+            .flat_map(|(column, range)| range.clone().map(move |row| (*column, row)));
+        for ((fixed_column, fixed_row), (value, advice)) in constant_positions.zip(plan.constants) {
             plan.cs.assign_fixed(
                 || format!("Constant({:?})", value.evaluate()),
                 fixed_column,
