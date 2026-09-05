@@ -65,6 +65,12 @@ const PREPARED_SORTED_U10_COMMITMENT_K: u32 = PREPARED_SPARSE_COMMITMENT_K;
 /// Cached multiples `H`, `2H`, and `4H` for each Lagrange suffix sum.
 #[cfg(feature = "multicore")]
 const SORTED_U10_SUFFIX_MULTIPLES: usize = 3;
+/// Blinded suffix terms in the permuted 10-bit range-check table.
+///
+/// The Pasta backend privately mirrors this value so it can reject accidental
+/// callers without requiring a public cross-crate protocol constant.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const PERMUTED_U10_TABLE_SUFFIX_TERMS: usize = 6;
 
 #[cfg(feature = "multicore")]
 trait PreparedSparseCommitments<C: pasta_curves::arithmetic::CurveAffine> {
@@ -80,6 +86,14 @@ trait PreparedSparseCommitments<C: pasta_curves::arithmetic::CurveAffine> {
 #[cfg(feature = "multicore")]
 trait PreparedLookupCommitments<C: pasta_curves::arithmetic::CurveAffine> {
     fn prepared_lagrange_suffix_multiples(&self) -> Option<&[C]>;
+
+    #[cfg(not(feature = "orbits"))]
+    fn commit_permuted_u10_table(
+        &self,
+        prefix: &[C::Scalar],
+        suffix: &[C::Scalar],
+        blind: poly::commitment::Blind<C::Scalar>,
+    ) -> Option<C::Curve>;
 }
 
 // Selector families smaller than this are cheaper to evaluate directly.

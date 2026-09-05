@@ -89,6 +89,8 @@
 //! [BCMS20]: https://eprint.iacr.org/2020/499
 
 use super::{Coeff, LagrangeCoeff, Polynomial};
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+use crate::PERMUTED_U10_TABLE_SUFFIX_TERMS;
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 use crate::arithmetic::PreparedZeroCheck;
 use crate::arithmetic::{CurveAffine, CurveExt, best_fft, best_multiexp, parallelize};
@@ -2286,6 +2288,32 @@ impl<C: CurveAffine> PreparedLookupCommitments<C> for Params<C> {
             && crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k))
         .then(|| self.lagrange_suffix_multiples_cache.get())
         .flatten()
+    }
+
+    #[cfg(not(feature = "orbits"))]
+    fn commit_permuted_u10_table(
+        &self,
+        prefix: &[C::Scalar],
+        suffix: &[C::Scalar],
+        blind: Blind<C::Scalar>,
+    ) -> Option<C::Curve> {
+        if self.k != PREPARED_SORTED_U10_COMMITMENT_K
+            || crate::multicore::current_num_threads() > prepared_commitment_max_threads(self.k)
+            || suffix.len() != PERMUTED_U10_TABLE_SUFFIX_TERMS
+            || prefix.len().checked_add(suffix.len())? != self.n as usize
+        {
+            return None;
+        }
+        let prepared = self.lagrange_table()?;
+        let fixed_bases = self.fixed_base_table()?;
+        if prepared.terms() != self.n as usize {
+            return None;
+        }
+        let (commitment, blind) = crate::multicore::join(
+            || prepared.multiexp_with_prefix_and_suffix(prefix, suffix, &[]),
+            || fixed_bases.multiply_blind(blind.0),
+        );
+        Some(commitment + blind)
     }
 }
 
