@@ -401,7 +401,7 @@ impl Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         ))]
         {
             Fq(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
@@ -410,7 +410,7 @@ impl Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         )))]
         {
             self.mul(rhs)
@@ -422,7 +422,7 @@ impl Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         ))]
         {
             Fq(super::aarch64_asm::square(&self.0, &MODULUS.0, INV))
@@ -431,7 +431,7 @@ impl Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         )))]
         {
             self.square()
@@ -448,7 +448,7 @@ impl Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         ))]
         {
             Fq(super::aarch64_asm::sqr_n_mul(
@@ -459,7 +459,7 @@ impl Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         )))]
         {
             // Leave the accumulator unreduced between squarings. The closing
@@ -478,7 +478,7 @@ impl Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         ))]
         {
             // Calling the dedicated single-square routine is faster than
@@ -495,7 +495,7 @@ impl Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         )))]
         {
             Fq(portable::canonicalize(
@@ -830,14 +830,14 @@ impl ff::PrimeField for Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         ))]
         let tmp = Fq(super::aarch64_asm::from_mont(&self.0, &MODULUS.0, INV));
 
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_vendor = "apple"
+            target_family = "unix"
         )))]
         let tmp = Fq::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
 
@@ -1008,7 +1008,7 @@ impl ec_gpu::GpuField for Fq {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    target_family = "unix"
 ))]
 fn aarch64_asm_portable_repr(value: Fq) -> [u8; 32] {
     let value = Fq::montgomery_reduce(value.0[0], value.0[1], value.0[2], value.0[3], 0, 0, 0, 0);
@@ -1023,7 +1023,7 @@ fn aarch64_asm_portable_repr(value: Fq) -> [u8; 32] {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    target_family = "unix"
 ))]
 fn aarch64_asm_check_repr(value: Fq) {
     let portable = aarch64_asm_portable_repr(value);
@@ -1036,7 +1036,7 @@ fn aarch64_asm_check_repr(value: Fq) {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    target_family = "unix"
 ))]
 fn aarch64_asm_portable_cmp(lhs: Fq, rhs: Fq) -> core::cmp::Ordering {
     aarch64_asm_portable_repr(lhs)
@@ -1054,7 +1054,7 @@ fn aarch64_asm_portable_cmp(lhs: Fq, rhs: Fq) -> core::cmp::Ordering {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    target_family = "unix"
 ))]
 #[test]
 fn aarch64_asm_matches_portable_arithmetic() {
@@ -1526,7 +1526,7 @@ fn test_from_u512() {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    target_family = "unix"
 ))]
 #[test]
 fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
@@ -1660,7 +1660,7 @@ fn constants_are_canonical() {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    target_family = "unix"
 ))]
 #[test]
 fn aarch64_asm_mul_canonical_sweep_matches_portable() {
@@ -1689,7 +1689,7 @@ fn aarch64_asm_mul_canonical_sweep_matches_portable() {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    target_family = "unix"
 ))]
 #[test]
 fn aarch64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
@@ -1736,7 +1736,7 @@ fn aarch64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
     debug_assertions,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    target_family = "unix"
 ))]
 #[test]
 #[should_panic(expected = "requires a canonical rhs")]
