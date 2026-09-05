@@ -6,6 +6,10 @@ use alloc::vec::Vec;
 
 type Limbs = [u64; 4];
 
+// Separate multiplication from combination once a chunk is large enough to
+// expose independent products without keeping both butterfly inputs live.
+const STREAMED_PRODUCTS_MIN_HALF: usize = 32;
+
 #[inline(always)]
 fn subtract_if_possible(value: Limbs, high: u64, modulus: Limbs) -> Limbs {
     let (d0, borrow) = sbb(value[0], modulus[0], 0);
@@ -91,6 +95,17 @@ pub(super) fn transform<F: Copy>(
             multiply,
             twice_modulus,
         );
+        if half > STREAMED_PRODUCTS_MIN_HALF {
+            for (index, right) in right.iter_mut().enumerate().skip(1) {
+                *right = multiply(*right, twiddle(index * stride));
+            }
+            for (left, right) in left.iter_mut().zip(right) {
+                let original = *left;
+                *left = add(original, *right, twice_modulus);
+                *right = sub(original, *right, twice_modulus);
+            }
+            return;
+        }
         for (index, (left, right)) in left.iter_mut().zip(right).enumerate() {
             let product = if index == 0 {
                 *right
