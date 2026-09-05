@@ -105,6 +105,9 @@ impl Assembly {
         domain: &EvaluationDomain<C::Scalar>,
         p: &Argument,
     ) -> VerifyingKey<C> {
+        #[cfg(feature = "multicore")]
+        use maybe_rayon::prelude::*;
+
         // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
         let mut omega_powers = Vec::with_capacity(params.n as usize);
         {
@@ -145,6 +148,12 @@ impl Assembly {
             permutation_polys.push(permutation_poly);
         }
 
+        #[cfg(feature = "multicore")]
+        let commitments_projective = permutation_polys
+            .par_iter()
+            .map(|polynomial| params.commit_lagrange(polynomial, Blind::default()))
+            .collect::<Vec<_>>();
+        #[cfg(not(feature = "multicore"))]
         let commitments_projective = permutation_polys
             .iter()
             .map(|polynomial| params.commit_lagrange(polynomial, Blind::default()))
