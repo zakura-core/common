@@ -1579,6 +1579,39 @@ impl<C: CurveAffine> Params<C> {
         r_u: C::Scalar,
         r_w: C::Scalar,
     ) -> Option<(C::Curve, C::Curve)> {
+        #[cfg(feature = "orbits")]
+        {
+            let n = self.n as usize;
+            let half = n / 2;
+            assert_eq!(p_hi.len(), half, "one scalar per lower-half base");
+            assert_eq!(p_lo.len(), half, "one scalar per upper-half base");
+            if crate::multicore::current_num_threads() > prepared_commitment_max_threads(self.k) {
+                return None;
+            }
+            let prepared = self.zero_check()?;
+            if prepared.terms() != n + PREPARED_COMMITMENT_EXTRA_BASES {
+                return None;
+            }
+            // Reuse [g..., w, u], leaving the inactive generator half zero.
+            // Both round commitments retain their original scalar pairing.
+            return Some(crate::multicore::join(
+                || {
+                    let mut scalars = vec![C::Scalar::ZERO; n + PREPARED_COMMITMENT_EXTRA_BASES];
+                    scalars[..half].copy_from_slice(p_hi);
+                    scalars[n] = l_w;
+                    scalars[n + 1] = l_u;
+                    prepared.multiexp_with_terms_vartime(&scalars, &[])
+                },
+                || {
+                    let mut scalars = vec![C::Scalar::ZERO; n + PREPARED_COMMITMENT_EXTRA_BASES];
+                    scalars[half..n].copy_from_slice(p_lo);
+                    scalars[n] = r_w;
+                    scalars[n + 1] = r_u;
+                    prepared.multiexp_with_terms_vartime(&scalars, &[])
+                },
+            ));
+        }
+
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         {
             let half = self.n as usize / 2;
@@ -1606,7 +1639,7 @@ impl<C: CurveAffine> Params<C> {
             return Some((l_body + l_auxiliary, r_body + r_auxiliary));
         }
 
-        #[cfg(any(not(feature = "multicore"), feature = "orbits"))]
+        #[cfg(not(any(feature = "multicore", feature = "orbits")))]
         {
             let _ = (p_hi, p_lo, l_u, l_w, r_u, r_w);
             None
@@ -1641,7 +1674,7 @@ impl<C: CurveAffine> Params<C> {
     /// effective threads. Orchard-sized (`k = 11`) tables on `AArch64` macOS
     /// extend that bound to ten, where end-to-end proving stays ahead on the
     /// benchmarked M4 system. Wider pools and unmeasured SRS shapes keep the
-    /// planned commitment multiexp. Without `orbits`, the first IPA round also
+    /// planned commitment multiexp. The first IPA round also
     /// reuses the coefficient table. Its two generator MSMs each have one
     /// active half and one zero half: the backend still recodes and scans all
     /// scalar slots, but zero scalars do not fetch prepared points or populate

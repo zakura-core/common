@@ -343,16 +343,18 @@ pub(in crate::poly) fn create_proof_with_powers<
             b_scale += b_hi_scale * u_j;
         }
 
-        // Collapse `G'`
-        parallel_generator_collapse(&mut g_prime, u_j);
-        g_prime.truncate(half);
+        // The final folded generator is not used by the prover.
+        if half > 1 {
+            parallel_generator_collapse(&mut g_prime, u_j);
+            g_prime.truncate(half);
+        }
 
         // Update randomness (the synthetic blinding factor at the end)
         f += &(l_j_randomness * &u_j_inv);
         f += &(r_j_randomness * &u_j);
     }
 
-    // We have fully collapsed `p_prime`, `b`, `G'`
+    // The polynomial coefficients have fully collapsed.
     assert_eq!(p_prime.len(), 1);
     let c = p_prime[0];
 
@@ -392,17 +394,17 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     use super::create_proof;
     use super::{
         Params, compute_ipa_hi_evaluation_pasta, ipa_masking_commitment, ipa_round_multiexp,
         parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     use crate::poly::commitment::prepared_commitment_max_threads;
     use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     use crate::transcript::{Blake2bWrite, Challenge255, Transcript, TranscriptWrite};
     #[cfg(feature = "multicore")]
     use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
@@ -410,7 +412,7 @@ mod tests {
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
     use rand::rng;
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     use rand::{SeedableRng, rngs::StdRng};
     use std::fmt::Debug;
 
@@ -449,7 +451,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     fn prepared_first_round_matches_ordinary<C>()
     where
         C: CurveAffine + core::fmt::Debug,
@@ -538,7 +540,7 @@ mod tests {
             });
     }
 
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     fn prepared_first_round_preserves_opening_proof() {
         const K: u32 = 6;
         const PROOF_SEED: u64 = 0x4950_412d_524f_554e;
@@ -853,19 +855,19 @@ mod tests {
         round_multiexp_matches_split::<vesta::Affine>();
     }
 
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     #[test]
     fn prepared_first_round_matches_ordinary_pallas() {
         prepared_first_round_matches_ordinary::<pallas::Affine>();
     }
 
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     #[test]
     fn prepared_first_round_matches_ordinary_vesta() {
         prepared_first_round_matches_ordinary::<vesta::Affine>();
     }
 
-    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
     #[test]
     fn prepared_first_round_preserves_unprepared_opening_proof() {
         prepared_first_round_preserves_opening_proof();
