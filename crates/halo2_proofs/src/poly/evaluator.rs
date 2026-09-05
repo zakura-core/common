@@ -4299,7 +4299,25 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             .polys
             .first()
             .map_or_else(|| B::empty_poly(domain).len(), |poly| poly.len());
-        let (chunk_size, _num_chunks) = get_chunk_params(poly_len);
+        // Lookup expressions use the base domain. Restrict this diagnostic to
+        // the extended-domain quotient evaluator so its records are unique.
+        let profile =
+            std::env::var_os("ZAKURA_PHASE_PROFILE").is_some() && poly_len == domain.extended_len();
+        let profile_total_start = profile.then(std::time::Instant::now);
+        let mut profile_phase_start = profile_total_start;
+        let (chunk_size, num_chunks) = get_chunk_params(poly_len);
+        macro_rules! profile_mark {
+            ($phase:literal) => {
+                if let Some(start) = profile_phase_start {
+                    eprintln!(
+                        "EVALUATOR phase={} ns={}",
+                        $phase,
+                        start.elapsed().as_nanos(),
+                    );
+                    profile_phase_start = Some(std::time::Instant::now());
+                }
+            };
+        }
 
         struct AstContext<'a, F: Field, B: Basis> {
             domain: &'a EvaluationDomain<F>,
@@ -5346,13 +5364,28 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     )
                 }
             };
+        if profile {
+            eprintln!(
+                "EVALUATOR_PLAN retained={} scalar_descriptors={}",
+                compiled_plan.is_some(),
+                scalar_descriptors.len(),
+            );
+        }
+        profile_mark!("plan_prepare");
         let mut result = B::empty_poly(domain);
+        profile_mark!("result_allocation_zeroing");
         let bound_scalars =
             BoundPlanScalars::new(scalar_descriptors, challenges, max_challenge_exponents);
+        profile_mark!("scalar_binding");
+        let workspace_allocation_ns = std::sync::atomic::AtomicU64::new(0);
+        let row_evaluation_ns = std::sync::atomic::AtomicU64::new(0);
+        let execution_start = profile.then(std::time::Instant::now);
         multicore::scope(|scope| {
             let bound_scalars = &bound_scalars;
             for (chunk_index, out) in result.chunks_mut(chunk_size).enumerate() {
                 let plan = &plan;
+                let workspace_allocation_ns = &workspace_allocation_ns;
+                let row_evaluation_ns = &row_evaluation_ns;
                 scope.spawn(move |_| {
                     let ctx = AstContext {
                         domain,
@@ -5361,12 +5394,54 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         polys: &self.polys,
                         scalars: bound_scalars,
                     };
+                    let allocation_start = profile.then(std::time::Instant::now);
                     let mut storage = vec![F::ZERO; (cache_slots + scratch_slots) * out.len()];
+                    if let Some(start) = allocation_start {
+                        workspace_allocation_ns.fetch_add(
+                            start.elapsed().as_nanos() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                     let (cache, scratch) = storage.split_at_mut(cache_slots * out.len());
+                    let evaluation_start = profile.then(std::time::Instant::now);
                     recurse_into(plan, &ctx, out, cache, scratch);
+                    if let Some(start) = evaluation_start {
+                        row_evaluation_ns.fetch_add(
+                            start.elapsed().as_nanos() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                 });
             }
         });
+        if let Some(start) = execution_start {
+            eprintln!(
+                "EVALUATOR_SHAPE poly_len={} chunks={} chunk_size={} cache_slots={} scratch_slots={} result_bytes={} workspace_bytes={}",
+                poly_len,
+                num_chunks,
+                chunk_size,
+                cache_slots,
+                scratch_slots,
+                poly_len * std::mem::size_of::<F>(),
+                (cache_slots + scratch_slots) * poly_len * std::mem::size_of::<F>(),
+            );
+            eprintln!(
+                "EVALUATOR phase=workspace_allocation_zeroing_worker_sum ns={}",
+                workspace_allocation_ns.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            eprintln!(
+                "EVALUATOR phase=row_evaluation_worker_sum ns={}",
+                row_evaluation_ns.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            eprintln!(
+                "EVALUATOR phase=parallel_execution_wall ns={}",
+                start.elapsed().as_nanos(),
+            );
+        }
+        if let Some(start) = profile_total_start {
+            eprintln!("EVALUATOR_END total_ns={}", start.elapsed().as_nanos());
+        }
+        let _ = profile_phase_start;
         let prepared_plan = retain_compiled_plan.then(|| owned_plan.take()).flatten();
         (result, prepared_layout, prepared_plan)
     }

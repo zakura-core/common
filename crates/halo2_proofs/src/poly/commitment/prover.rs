@@ -245,6 +245,9 @@ pub(in crate::poly) fn create_proof_with_powers<
     powers: Vec<C::Scalar>,
     evaluation: C::Scalar,
 ) -> io::Result<()> {
+    let profile = std::env::var_os("ZAKURA_PHASE_PROFILE").is_some();
+    let ipa_total_start = profile.then(std::time::Instant::now);
+
     // We're limited to polynomials of degree n - 1.
     assert_eq!(p_poly.len(), params.n as usize);
     assert_eq!(powers.len(), params.n as usize);
@@ -267,9 +270,12 @@ pub(in crate::poly) fn create_proof_with_powers<
     // Challenge that ensures that the prover did not interfere with the U term
     // in their commitments.
     let z = *transcript.squeeze_challenge_scalar::<()>();
+    let mask_setup_elapsed =
+        ipa_total_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
 
     // We'll be opening `P' = P - [v] G_0 + [ξ] S` to ensure it has a root at
     // zero.
+    let phase_start = profile.then(std::time::Instant::now);
     let mut p_prime_poly = p_poly;
     for (index, mask) in &s_poly {
         p_prime_poly[*index] += *mask * xi;
@@ -284,6 +290,8 @@ pub(in crate::poly) fn create_proof_with_powers<
     // Initialize the vector `p_prime` as the coefficients of the polynomial.
     let mut p_prime = p_prime_poly.values;
     assert_eq!(p_prime.len(), params.n as usize);
+    let polynomial_setup_elapsed =
+        phase_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
 
     // At every round, b[i] = b_scale * x_3^i. Keeping that invariant in
     // scalar form avoids materializing and folding the power vector.
@@ -293,6 +301,8 @@ pub(in crate::poly) fn create_proof_with_powers<
     // Tracking the evaluation through each fold lets one half-evaluation
     // determine both IPA inner products.
     let mut p_prime_at_x_3 = C::Scalar::ZERO;
+
+    let phase_start = profile.then(std::time::Instant::now);
 
     // Snapshot the complete prepared context before choosing the symbolic
     // generator representation. A missing table or an unmeasured pool width
@@ -314,6 +324,16 @@ pub(in crate::poly) fn create_proof_with_powers<
     };
     #[cfg(any(not(feature = "multicore"), feature = "orbits"))]
     let mut g_prime = params.g.clone();
+    let generator_setup_elapsed =
+        phase_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
+
+    let mut inner_product_elapsed = std::time::Duration::ZERO;
+    let mut round_msm_elapsed = std::time::Duration::ZERO;
+    let mut transcript_elapsed = std::time::Duration::ZERO;
+    let mut scalar_fold_elapsed = std::time::Duration::ZERO;
+    let mut generator_fold_elapsed = std::time::Duration::ZERO;
+    let mut blind_fold_elapsed = std::time::Duration::ZERO;
+    let mut round_timings = Vec::with_capacity(params.k as usize);
 
     // Perform the inner product argument, round by round.
     for j in 0..params.k {
@@ -323,6 +343,7 @@ pub(in crate::poly) fn create_proof_with_powers<
         // If P(X) = P_lo(X) + X^half P_hi(X), its tracked evaluation and
         // P_hi(x_3) determine P_lo(x_3). This computes both IPA inner products
         // from one half-sized inner product against the original powers.
+        let phase_start = profile.then(std::time::Instant::now);
         let x_3_to_half = powers[half];
         let p_hi_at_x_3 = compute_ipa_hi_evaluation_pasta::<C::Scalar>(&p_prime, &powers, half);
         let p_lo_at_x_3 = p_prime_at_x_3 - x_3_to_half * p_hi_at_x_3;
@@ -331,6 +352,9 @@ pub(in crate::poly) fn create_proof_with_powers<
         let value_r_j = b_hi_scale * p_lo_at_x_3;
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
+        let inner_product_round =
+            phase_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
+        inner_product_elapsed += inner_product_round;
 
         let ordinary_round = || {
             let l_terms = IpaRoundTerms {
@@ -362,6 +386,8 @@ pub(in crate::poly) fn create_proof_with_powers<
                 .flatten()
                 .unwrap_or_else(|| ipa_round_multiexps(l_terms, r_terms, params, z))
         };
+
+        let phase_start = profile.then(std::time::Instant::now);
 
         #[cfg(all(feature = "multicore", not(feature = "orbits")))]
         let (l_j, r_j) = if let Some(prepared) = deferred_ipa
@@ -399,16 +425,24 @@ pub(in crate::poly) fn create_proof_with_powers<
         let mut affine = [C::identity(); 2];
         C::Curve::batch_normalize(&points, &mut affine);
         let [l_j, r_j] = affine;
+        let round_msm_round =
+            phase_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
+        round_msm_elapsed += round_msm_round;
 
         // Feed L and R into the real transcript
+        let phase_start = profile.then(std::time::Instant::now);
         transcript.write_point(l_j)?;
         transcript.write_point(r_j)?;
 
         let u_j = *transcript.squeeze_challenge_scalar::<()>();
         let u_j_inv = u_j.invert().unwrap(); // TODO, bubble this up
+        let transcript_round =
+            phase_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
+        transcript_elapsed += transcript_round;
 
         // Collapse `p_prime`.
         // TODO: parallelize
+        let phase_start = profile.then(std::time::Instant::now);
         #[allow(clippy::assign_op_pattern)]
         for i in 0..half {
             p_prime[i] = p_prime[i] + &(p_prime[i + half] * &u_j_inv);
@@ -418,6 +452,11 @@ pub(in crate::poly) fn create_proof_with_powers<
             p_prime_at_x_3 = p_lo_at_x_3 + u_j_inv * p_hi_at_x_3;
             b_scale += b_hi_scale * u_j;
         }
+        let scalar_fold_round =
+            phase_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
+        scalar_fold_elapsed += scalar_fold_round;
+
+        let phase_start = profile.then(std::time::Instant::now);
 
         // Collapse `G'`, or extend the symbolic block weights and materialize
         // all leading folds once the ordinary rounds take over.
@@ -452,18 +491,69 @@ pub(in crate::poly) fn create_proof_with_powers<
             parallel_generator_collapse(&mut g_prime, u_j);
             g_prime.truncate(half);
         }
+        let generator_fold_round =
+            phase_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
+        generator_fold_elapsed += generator_fold_round;
 
         // Update randomness (the synthetic blinding factor at the end)
+        let phase_start = profile.then(std::time::Instant::now);
         f += &(l_j_randomness * &u_j_inv);
         f += &(r_j_randomness * &u_j);
+        let blind_fold_round =
+            phase_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
+        blind_fold_elapsed += blind_fold_round;
+        round_timings.push((
+            j,
+            half,
+            inner_product_round,
+            round_msm_round,
+            transcript_round,
+            scalar_fold_round,
+            generator_fold_round,
+            blind_fold_round,
+        ));
     }
 
     // We have fully collapsed `p_prime`, `b`, `G'`
     assert_eq!(p_prime.len(), 1);
     let c = p_prime[0];
 
+    let finalize_start = profile.then(std::time::Instant::now);
     transcript.write_scalar(c)?;
     transcript.write_scalar(f)?;
+    let finalize_elapsed =
+        finalize_start.map_or(std::time::Duration::ZERO, |start| start.elapsed());
+
+    if let Some(start) = ipa_total_start {
+        for (phase, elapsed) in [
+            ("mask_setup", mask_setup_elapsed),
+            ("polynomial_setup", polynomial_setup_elapsed),
+            ("generator_setup", generator_setup_elapsed),
+            ("inner_product", inner_product_elapsed),
+            ("round_msm", round_msm_elapsed),
+            ("transcript", transcript_elapsed),
+            ("scalar_fold", scalar_fold_elapsed),
+            ("generator_fold", generator_fold_elapsed),
+            ("blind_fold", blind_fold_elapsed),
+            ("finalize", finalize_elapsed),
+        ] {
+            eprintln!("IPA phase={} ns={}", phase, elapsed.as_nanos());
+        }
+        for (round, half, inner, msm, transcript, scalar, generator, blind) in round_timings {
+            eprintln!(
+                "IPA_ROUND round={} half={} inner_ns={} msm_ns={} transcript_ns={} scalar_fold_ns={} generator_fold_ns={} blind_fold_ns={}",
+                round,
+                half,
+                inner.as_nanos(),
+                msm.as_nanos(),
+                transcript.as_nanos(),
+                scalar.as_nanos(),
+                generator.as_nanos(),
+                blind.as_nanos(),
+            );
+        }
+        eprintln!("IPA_END total_ns={}", start.elapsed().as_nanos());
+    }
 
     Ok(())
 }

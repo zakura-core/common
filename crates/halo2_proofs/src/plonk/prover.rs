@@ -1008,6 +1008,25 @@ pub fn create_proof<
 where
     <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
 {
+    let profile = std::env::var_os("ZAKURA_PHASE_PROFILE").is_some();
+    let profile_total_start = profile.then(std::time::Instant::now);
+    let mut profile_phase_start = profile_total_start;
+    if profile {
+        eprintln!(
+            "PROFILE_BEGIN circuits={} rayon_threads={}",
+            circuits.len(),
+            crate::multicore::current_num_threads(),
+        );
+    }
+    macro_rules! profile_mark {
+        ($phase:literal) => {
+            if let Some(start) = profile_phase_start {
+                eprintln!("PROFILE phase={} ns={}", $phase, start.elapsed().as_nanos());
+                profile_phase_start = Some(std::time::Instant::now());
+            }
+        };
+    }
+
     if circuits.len() != instances.len() {
         return Err(Error::InvalidInstances);
     }
@@ -1036,6 +1055,19 @@ where
     // from the verification key.
     let meta = &pk.vk.cs;
     let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
+    if profile {
+        eprintln!(
+            "PROFILE_SHAPE advice={} fixed={} instance={} permutation_columns={} lookup_arguments={} cs_degree={} quotient_pieces={}",
+            meta.num_advice_columns,
+            meta.num_fixed_columns,
+            meta.num_instance_columns,
+            meta.permutation.get_columns().len(),
+            meta.lookups.len(),
+            meta.degree(),
+            domain.get_quotient_poly_degree(),
+        );
+    }
+    profile_mark!("setup");
 
     let instance_values = instances
         .into_par_iter()
@@ -1063,6 +1095,7 @@ where
     for instance_values in instance_values {
         prepared_instance_values.push(instance_values?);
     }
+    profile_mark!("instances");
 
     #[cfg(feature = "unstable-prover-fingerprint")]
     super::prover_fingerprint::record_setup(params, pk, instances);
@@ -1307,6 +1340,7 @@ where
         synthesize(&mut witnesses)?;
         (instance, prepare_advice(witnesses, &mut rng))
     };
+    profile_mark!("instance_synthesis_and_advice_prepare");
 
     let mut advice = Vec::with_capacity(prepared_advice.len());
     for (advice_commitments, advice_single) in prepared_advice {
@@ -1315,6 +1349,7 @@ where
         }
         advice.push(advice_single);
     }
+    profile_mark!("advice_transcript");
 
     // Create polynomial evaluator context for values.
     let mut value_evaluator = poly::new_evaluator(|| {});
@@ -1454,6 +1489,7 @@ where
     let l_blind =
         coset_evaluator.register_poly_ref_with_tag(&pk.l_blind, QuotientPoly::LBlind.into());
     let l_last = coset_evaluator.register_poly_ref_with_tag(&pk.l_last, QuotientPoly::LLast.into());
+    profile_mark!("evaluator_registration");
 
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
@@ -1494,6 +1530,7 @@ where
         &instance_cosets,
         build_lookup_quotient_asts,
     )?;
+    profile_mark!("lookup_permuted_prepare");
 
     let mut prepared_lookups = prepared_lookups.into_iter();
     let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = (0..circuit_count)
@@ -1514,6 +1551,7 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
     debug_assert!(prepared_lookups.next().is_none());
+    profile_mark!("lookup_permuted_finalize");
 
     // Sample beta challenge
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
@@ -1625,6 +1663,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?
     };
+    profile_mark!("permutation_commitments");
 
     debug_assert_eq!(lookups.len(), circuit_count);
     let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
@@ -1642,6 +1681,7 @@ where
         .into_par_iter()
         .map(|(lookup, blinding)| lookup.prepare_product(pk, params, beta, gamma, blinding))
         .collect::<Vec<_>>();
+    profile_mark!("lookup_product_prepare");
 
     let mut prepared_lookup_products = prepared_lookup_products.into_iter();
     let lookups: Vec<Vec<lookup::prover::Committed<C, _>>> = (0..circuit_count)
@@ -1662,10 +1702,12 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
     debug_assert!(prepared_lookup_products.next().is_none());
+    profile_mark!("lookup_product_finalize");
 
     // Commit to the random polynomial that masks the folded quotient
     // evaluation in the multi-opening argument.
     let vanishing = vanishing::Argument::commit_random_polynomial(params, &mut rng, transcript)?;
+    profile_mark!("random_commitment");
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
@@ -1764,6 +1806,7 @@ where
             .collect();
         (permutations, lookups, expressions)
     };
+    profile_mark!("constraint_setup");
 
     // Construct and commit to the quotient polynomial h(X).
     let (vanishing, prepared_plan) = vanishing.construct_quotient(
@@ -1783,6 +1826,7 @@ where
     if let Some(plan) = prepared_plan {
         pk.quotient_plans.retain(circuit_count, plan);
     }
+    profile_mark!("quotient");
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = super::pow_by_power_of_two(*x, params.k);
@@ -1856,12 +1900,14 @@ where
             queries.extend(lookup.evaluation_queries());
         }
     }
+    profile_mark!("evaluation_setup");
 
     // All evaluations below depend only on x. Evaluate them as one batch so
     // that small argument-local query sets share the same worker wave, then
     // preserve the protocol's transcript order while consuming the results.
     let evaluations = polynomial_evaluator.evaluate(&queries);
     drop(queries);
+    profile_mark!("polynomial_evaluations");
     let mut evaluations = evaluations.into_iter();
     for _ in 0..initial_evaluation_count {
         let evaluation = evaluations
@@ -1895,6 +1941,7 @@ where
         evaluations.next().is_none(),
         "one result is consumed for every batched polynomial evaluation query",
     );
+    profile_mark!("evaluation_transcript");
 
     let instances = instance
         .iter()
@@ -1944,7 +1991,19 @@ where
         // mask must have unit coefficient in its point-set fold at x_3.
         .chain(vanishing.open(x));
 
-    multiopen::create_proof(params, rng, transcript, instances).map_err(|_| Error::Opening)
+    profile_mark!("opening_queries");
+    let result =
+        multiopen::create_proof(params, rng, transcript, instances).map_err(|_| Error::Opening);
+    profile_mark!("multiopen");
+    let _ = profile_phase_start;
+    if let Some(start) = profile_total_start {
+        eprintln!(
+            "PROFILE_END circuits={} total_ns={}",
+            circuits.len(),
+            start.elapsed().as_nanos(),
+        );
+    }
+    result
 }
 
 #[test]
