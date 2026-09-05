@@ -13,7 +13,7 @@ use support::{
     padded_two_action_payment_fixture, payment_fixture, two_real_spends_payment_fixture,
 };
 
-const FIRST_AFTER_BUILD_AND_PREPARE_ACTION_COUNTS: [usize; 2] = [1, 4];
+const FIRST_AFTER_BUILD_AND_PREPARE_ACTION_COUNTS: [usize; 5] = [1, 2, 3, 4, 5];
 const PREFLIGHT_PROOF_SEED_DOMAIN: u8 = 0x24;
 const STEADY_PROOF_SEED_DOMAIN: u8 = 0x25;
 const FIRST_AFTER_PREPARE_PROOF_SEED_DOMAIN: u8 = 0x26;
@@ -74,7 +74,9 @@ fn ironwood_k11_prover(c: &mut Criterion) {
             2,
             two_real_spends_payment_fixture(),
         ),
+        ("prove-3-actions", 3, payment_fixture(3)),
         ("prove-4-actions", 4, payment_fixture(4)),
+        ("prove-5-actions", 5, payment_fixture(5)),
     ];
 
     // These preflights intentionally make the historical throughput cases
