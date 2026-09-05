@@ -1,0 +1,13 @@
+diff --git a/crates/halo2_proofs/src/plonk/prover.rs b/crates/halo2_proofs/src/plonk/prover.rs
+index 40cd26f5..57f6b0c4 100644
+--- a/crates/halo2_proofs/src/plonk/prover.rs
++++ b/crates/halo2_proofs/src/plonk/prover.rs
+@@ -765,0 +766 @@ where
++    let phase_start = std::time::Instant::now();
+@@ -835,0 +837,3 @@ where
++    let phase_synthesis = phase_start.elapsed();
++    let phase_denominators: Vec<_> = witnesses.iter().map(|w| w.advice.denominators.len()).collect();
++    let phase_evaluate_start = std::time::Instant::now();
+@@ -857,0 +862,2 @@ where
++    eprintln!("IRONWOOD_PHASES actions={} synthesis_us={} evaluate_us={} denominators={:?}",
++        circuits.len(), phase_synthesis.as_micros(), phase_evaluate_start.elapsed().as_micros(), phase_denominators);
