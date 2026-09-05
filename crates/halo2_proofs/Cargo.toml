@@ -36,6 +36,9 @@ tracing = "0.1"
 [target.'cfg(all(target_arch = "aarch64", target_vendor = "apple"))'.dependencies]
 pasta_curves = { workspace = true, features = ["default", "aarch64-asm"] }
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+pasta_curves = { workspace = true, features = ["default", "x86_64-asm"] }
+
 [dev-dependencies]
 assert_matches = "1.5"
 criterion = "0.3"

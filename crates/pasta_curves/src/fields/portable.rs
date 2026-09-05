@@ -8,8 +8,10 @@
 use crate::arithmetic::{adc, mac, sbb};
 
 #[cfg(target_arch = "x86_64")]
+#[cfg_attr(feature = "x86_64-asm", allow(dead_code))]
 const PASTA_MODULUS_TOP_SHIFT: u32 = 62;
 #[cfg(target_arch = "x86_64")]
+#[cfg_attr(feature = "x86_64-asm", allow(dead_code))]
 const PASTA_MODULUS_TOP_OVERFLOW_SHIFT: u32 = u64::BITS - PASTA_MODULUS_TOP_SHIFT;
 
 /// Squares a canonical element, returning the canonical square.
@@ -162,6 +164,7 @@ pub(super) const fn montgomery_reduce_low_lazy(
 
 /// Adds `k * 2^62` to `value` and `carry`, returning the low and high limbs.
 #[cfg(target_arch = "x86_64")]
+#[cfg_attr(feature = "x86_64-asm", allow(dead_code))]
 #[inline(always)]
 const fn mac_pasta_modulus_top(value: u64, k: u64, carry: u64) -> (u64, u64) {
     let (low, carry) = adc(value, k << PASTA_MODULUS_TOP_SHIFT, carry);
@@ -170,6 +173,7 @@ const fn mac_pasta_modulus_top(value: u64, k: u64, carry: u64) -> (u64, u64) {
 
 /// Squares and lazily reduces while interleaving independent upper-half work.
 #[cfg(target_arch = "x86_64")]
+#[cfg_attr(feature = "x86_64-asm", allow(dead_code))]
 #[inline(always)]
 const fn square_reduce_lazy_pasta(value: &[u64; 4], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
     debug_assert!(modulus[2] == 0);
@@ -296,6 +300,7 @@ pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 
     ),
     allow(dead_code)
 )]
+#[cfg_attr(all(feature = "x86_64-asm", target_arch = "x86_64"), allow(dead_code))]
 pub(super) fn sqr_n_lazy(value: &[u64; 4], n: u32, modulus: &[u64; 4], inv: u64) -> [u64; 4] {
     let mut acc = *value;
     for _ in 0..n {

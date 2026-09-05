@@ -64,6 +64,9 @@ repr-c = []
 serde = ["hex", "serde_crate"]
 sqrt-table = ["alloc", "dep:once_cell"]
 uninline-portable = []
+# Inline-assembly Montgomery multiplication using BMI2/ADX (x86_64 only;
+# requires an ADX-capable CPU: Intel Broadwell+ or AMD Zen+).
+x86_64-asm = []
 
 [[bench]]
 name = "fp"
