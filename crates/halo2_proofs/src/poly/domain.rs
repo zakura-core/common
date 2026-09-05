@@ -1490,6 +1490,39 @@ pub struct PinnedEvaluationDomain<'a, F: Field> {
 }
 
 #[test]
+fn lazy_fft_matches_canonical_stages_on_both_fields() {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    fn check<F: WithSmallOrderMulGroup<3>>() {
+        let mut rng = StdRng::seed_from_u64(0x4646_542d_4c41_5a59);
+        for k in 0..=11 {
+            let domain = EvaluationDomain::<F>::new(3, k);
+            let twiddles = twiddle_table(domain.omega, 1 << k);
+            let input: Vec<_> = (0..1 << k)
+                .map(|i| match i % 5 {
+                    0 => F::ZERO,
+                    1 => F::ONE,
+                    2 => -F::ONE,
+                    _ => F::random(&mut rng),
+                })
+                .collect();
+            for completed in [1, 2, 4, 16] {
+                if completed > input.len() {
+                    continue;
+                }
+                let mut expected = input.clone();
+                recursive_butterfly_after_prefix(&mut expected, completed, 1, &twiddles, &[], 0, 0);
+                let mut actual = input.clone();
+                field_butterfly_after_prefix(&mut actual, completed, 1, &twiddles, &[], 0, 0);
+                assert_eq!(actual, expected, "k={k}, completed={completed}");
+            }
+        }
+    }
+    check::<crate::pasta::Fp>();
+    check::<crate::pasta::Fq>();
+}
+
+#[test]
 fn test_zero_padded_fft_matches_best_fft() {
     use crate::{arithmetic::best_fft, pasta::pallas::Scalar};
 

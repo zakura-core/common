@@ -1321,6 +1321,7 @@ pub struct ProvingKey {
     params: halo2_proofs::poly::commitment::Params<vesta::Affine>,
     pk: plonk::ProvingKey<vesta::Affine>,
     circuit_version: OrchardCircuitVersion,
+    config: Config,
 }
 
 impl ProvingKey {
@@ -1365,11 +1366,13 @@ impl ProvingKey {
 
         let vk = plonk::keygen_vk(&params, &circuit).unwrap();
         let pk = plonk::keygen_pk(&params, vk, &circuit).unwrap();
+        let config = Config::configure(&mut plonk::ConstraintSystem::default());
 
         ProvingKey {
             params,
             pk,
             circuit_version,
+            config,
         }
     }
 
@@ -1588,31 +1591,34 @@ impl Proof {
                     .iter()
                     .map(CircuitWithPreparedMerklePath::new)
                     .collect();
-                plonk::create_proof(
+                plonk::create_proof_with_config(
                     &pk.params,
                     &pk.pk,
                     &circuits,
                     &instances,
+                    pk.config.clone(),
                     &mut rng,
                     &mut transcript,
                 )?;
             } else {
-                plonk::create_proof(
+                plonk::create_proof_with_config(
                     &pk.params,
                     &pk.pk,
                     circuits,
                     &instances,
+                    pk.config.clone(),
                     &mut rng,
                     &mut transcript,
                 )?;
             }
         }
         #[cfg(not(feature = "multicore"))]
-        plonk::create_proof(
+        plonk::create_proof_with_config(
             &pk.params,
             &pk.pk,
             circuits,
             &instances,
+            pk.config.clone(),
             &mut rng,
             &mut transcript,
         )?;

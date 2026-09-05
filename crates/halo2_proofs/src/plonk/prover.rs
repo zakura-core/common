@@ -716,11 +716,68 @@ pub fn create_proof<
     pk: &ProvingKey<C>,
     circuits: &[ConcreteCircuit],
     instances: &[&[&[C::Scalar]]],
-    mut rng: R,
+    rng: R,
     transcript: &mut T,
 ) -> Result<(), Error>
 where
     <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
+{
+    create_proof_internal(params, pk, circuits, instances, None, rng, transcript)
+}
+
+/// Creates a proof using a previously constructed circuit configuration.
+///
+/// `config` must be the result of [`Circuit::configure`] on a fresh
+/// [`ConstraintSystem`] for the circuit shape used to generate `pk`.
+/// It is consumed; callers retaining a configuration must clone explicitly.
+/// This avoids rebuilding and discarding the constraint system for each
+/// proof. All other requirements and errors are those of [`create_proof`].
+pub fn create_proof_with_config<
+    C: CurveAffine,
+    E: EncodedChallenge<C>,
+    R: Rng,
+    T: TranscriptWrite<C, E>,
+    ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
+>(
+    params: &Params<C>,
+    pk: &ProvingKey<C>,
+    circuits: &[ConcreteCircuit],
+    instances: &[&[&[C::Scalar]]],
+    config: ConcreteCircuit::Config,
+    rng: R,
+    transcript: &mut T,
+) -> Result<(), Error>
+where
+    ConcreteCircuit::Config: Send,
+{
+    create_proof_internal(
+        params,
+        pk,
+        circuits,
+        instances,
+        Some(config),
+        rng,
+        transcript,
+    )
+}
+
+fn create_proof_internal<
+    C: CurveAffine,
+    E: EncodedChallenge<C>,
+    R: Rng,
+    T: TranscriptWrite<C, E>,
+    ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
+>(
+    params: &Params<C>,
+    pk: &ProvingKey<C>,
+    circuits: &[ConcreteCircuit],
+    instances: &[&[&[C::Scalar]]],
+    config: Option<ConcreteCircuit::Config>,
+    mut rng: R,
+    transcript: &mut T,
+) -> Result<(), Error>
+where
+    ConcreteCircuit::Config: Send,
 {
     if circuits.len() != instances.len() {
         return Err(Error::InvalidInstances);
@@ -736,8 +793,8 @@ where
     pk.vk.hash_into(transcript)?;
 
     let domain = &pk.vk.domain;
-    let mut meta = ConstraintSystem::default();
-    let config = ConcreteCircuit::configure(&mut meta);
+    let config =
+        config.unwrap_or_else(|| ConcreteCircuit::configure(&mut ConstraintSystem::default()));
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
@@ -2198,31 +2255,46 @@ fn parallel_advice_evaluation_preserves_proof_bytes() {
     let vk = keygen_vk(&params, &circuits[0]).expect("keygen_vk should not fail");
     let pk = keygen_pk(&params, vk, &circuits[0]).expect("keygen_pk should not fail");
     let instances = [&[][..], &[][..], &[][..], &[][..]];
-    let create = |circuit_count, threads| {
+    let create = |circuit_count, threads, cached| {
         maybe_rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap()
             .install(|| {
                 let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
-                create_proof(
-                    &params,
-                    &pk,
-                    &circuits[..circuit_count],
-                    &instances[..circuit_count],
-                    StdRng::seed_from_u64(PROOF_SEED),
-                    &mut transcript,
-                )
+                if cached {
+                    let config = RationalCircuit::configure(&mut ConstraintSystem::default());
+                    create_proof_with_config(
+                        &params,
+                        &pk,
+                        &circuits[..circuit_count],
+                        &instances[..circuit_count],
+                        config,
+                        StdRng::seed_from_u64(PROOF_SEED),
+                        &mut transcript,
+                    )
+                } else {
+                    create_proof(
+                        &params,
+                        &pk,
+                        &circuits[..circuit_count],
+                        &instances[..circuit_count],
+                        StdRng::seed_from_u64(PROOF_SEED),
+                        &mut transcript,
+                    )
+                }
                 .expect("proof generation should not fail");
                 transcript.finalize()
             })
     };
 
-    let expected_single = create(1, 1);
-    let expected_batch = create(4, 1);
+    let expected_single = create(1, 1, false);
+    let expected_batch = create(4, 1, false);
     for threads in WORKER_COUNTS {
-        assert_eq!(create(1, threads), expected_single);
-        assert_eq!(create(4, threads), expected_batch);
+        for cached in [false, true] {
+            assert_eq!(create(1, threads, cached), expected_single);
+            assert_eq!(create(4, threads, cached), expected_batch);
+        }
     }
 }
 
