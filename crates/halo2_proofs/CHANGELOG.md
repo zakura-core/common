@@ -10,14 +10,6 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-### Changed
-
-- Enabled the assembly-accelerated Pasta field backend on Unix AArch64 targets,
-  extending the existing automatic Apple AArch64 configuration to Android and
-  other Unix targets. On physical Pixel 7 through Pixel 10 devices, prepared
-  two-Action Orchard proof median latency fell by 9.3% to 18.7%
-  ([#370](https://github.com/zakura-core/common/pull/370)).
-
 ## [1.1.0] - 2026-09-04
 
 ### Added
