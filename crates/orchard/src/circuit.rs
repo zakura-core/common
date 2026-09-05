@@ -1321,6 +1321,7 @@ pub struct ProvingKey {
     params: halo2_proofs::poly::commitment::Params<vesta::Affine>,
     pk: plonk::ProvingKey<vesta::Affine>,
     circuit_version: OrchardCircuitVersion,
+    // Retained circuit-shape data, not rebuilt for every transaction.
     config: Config,
 }
 
@@ -1397,6 +1398,13 @@ impl ProvingKey {
     pub fn supports_cross_address_restriction(&self) -> bool {
         self.circuit_version.supports_cross_address_restriction()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn proving_key_configuration_preserves_thread_safety() {
+    fn assert_traits<T: Send + Sync>() {}
+    assert_traits::<ProvingKey>();
 }
 
 /// Public inputs to the Orchard Action circuit.

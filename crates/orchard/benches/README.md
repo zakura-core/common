@@ -39,8 +39,10 @@ RAYON_NUM_THREADS=1 cargo +1.97.1 bench --locked \
     --bench ironwood_k11_prover
 ```
 
-The `ironwood-k11` group measures steady-state throughput for one-, two-, and
-four-Action proofs. The new ID is deliberate: these real Ironwood-payment
+The `ironwood-k11` group measures steady-state latency for one- through
+five-Action proofs. Each iteration creates one proof for one transaction,
+not multiple concurrent transaction proofs. The new ID is deliberate: these
+real Ironwood-payment
 results are not comparable with the old Orchard V2 output-only workload. Key
 generation, proving-key preparation, and a two-proof verification preflight
 occur before its timed routines. The two preflight proofs per Action count use
@@ -49,8 +51,8 @@ state under different transcript challenges. The preflight and Criterion
 warmup mean that every proving-key cache is populated before these samples; do
 not interpret them as first-proof latency.
 
-The `ironwood-k11-first-after-build-and-prepare` group measures one- and
-four-Action semantic-cold proofs. Every iteration builds a fresh proving key,
+The `ironwood-k11-first-after-build-and-prepare` group measures one- through
+five-Action semantic-cold proofs. Every iteration builds a fresh proving key,
 successfully prepares its commitment tables, and then creates exactly one
 proof with that key. Key generation, preparation, and destruction of the key
 and its prepared tables are outside the reported duration. This makes lazy
@@ -74,7 +76,7 @@ setup from each reported proof duration.
 For a multicore run, set both thread-count variables to the same value:
 
 ```console
-RAYON_NUM_THREADS=10 IRONWOOD_K11_PROVER_THREADS=10 \
+RAYON_NUM_THREADS=6 IRONWOOD_K11_PROVER_THREADS=6 \
     cargo +1.97.1 bench --locked \
     -p zakura-orchard --features circuit \
     --bench ironwood_k11_prover
