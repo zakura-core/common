@@ -590,11 +590,11 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
                 .unwrap_or(poly::Ast::ConstantTerm(F::ZERO))
         });
         let compressed_expression = value_evaluator.evaluate(&compressed_expression, domain);
-        let mut sorted_values = compressed_expression
-            .iter()
-            .take(usable_rows)
-            .copied()
-            .collect::<Vec<_>>();
+        // These values gain blind rows in `finish_permuted`, as does the
+        // table permutation derived from them. Retain full-domain capacity
+        // for both vectors.
+        let mut sorted_values = Vec::with_capacity(compressed_expression.len());
+        sorted_values.extend(compressed_expression.iter().take(usable_rows).copied());
         sort_lookup_values(&mut sorted_values, &mut sort_scratch);
 
         PreparedInput {
@@ -1486,12 +1486,14 @@ fn permute_sorted_values<F: Field + Ord>(
 ) -> Result<(Vec<F>, Vec<F>), Error> {
     assert_eq!(input_values.len(), table_values.len());
     assert_eq!(input_keys.is_empty(), table_keys.is_empty());
+    let output_capacity = input_values.capacity();
     if input_keys.is_empty() {
         debug_assert!(input_values.windows(2).all(|pair| pair[0] <= pair[1]));
         debug_assert!(table_values.windows(2).all(|pair| pair[0] <= pair[1]));
         let permuted_table_values = permute_sorted_values_by(
             &input_values,
             table_values,
+            output_capacity,
             |row| input_values[row] == input_values[row - 1],
             |table_row, input_row| table_values[table_row] < input_values[input_row],
             |table_row, input_row| table_values[table_row] == input_values[input_row],
@@ -1506,6 +1508,7 @@ fn permute_sorted_values<F: Field + Ord>(
     let permuted_table_values = permute_sorted_values_by(
         &input_values,
         table_values,
+        output_capacity,
         |row| input_keys[row] == input_keys[row - 1],
         |table_row, input_row| table_keys[table_row] < input_keys[input_row],
         |table_row, input_row| table_keys[table_row] == input_keys[input_row],
@@ -1516,6 +1519,7 @@ fn permute_sorted_values<F: Field + Ord>(
 fn permute_sorted_values_by<F: Field, SameInput, TableLess, TableSame>(
     input_values: &[F],
     table_values: &[F],
+    output_capacity: usize,
     same_input: SameInput,
     table_less: TableLess,
     table_same: TableSame,
@@ -1526,7 +1530,8 @@ where
     TableSame: Fn(usize, usize) -> bool,
 {
     let usable_rows = input_values.len();
-    let mut permuted_table_values = vec![F::ZERO; usable_rows];
+    let mut permuted_table_values = Vec::with_capacity(output_capacity);
+    permuted_table_values.resize(usable_rows, F::ZERO);
     let mut consumed_table_rows = Vec::new();
     let mut table_row = 0;
 
