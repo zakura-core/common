@@ -291,14 +291,20 @@ struct PreparedQPrime<F> {
     division_remainders: Vec<Vec<F>>,
 }
 
-fn evaluate_q_prime_from_remainders<F: Field>(
+struct QPrimeEvaluationTerm<F> {
+    remainder: F,
+    vanishing_inverse: F,
+}
+
+struct PreparedQPrimeEvaluation<F> {
+    terms: Vec<QPrimeEvaluationTerm<F>>,
+}
+
+fn prepare_q_prime_evaluation<F: Field>(
     point_sets: &[Vec<F>],
-    q_evaluations: &[F],
     division_remainders: &[Vec<F>],
-    challenge: F,
     point: F,
-) -> Option<F> {
-    assert_eq!(point_sets.len(), q_evaluations.len());
+) -> Option<PreparedQPrimeEvaluation<F>> {
     assert_eq!(point_sets.len(), division_remainders.len());
 
     // Successive divisions give
@@ -307,49 +313,60 @@ fn evaluate_q_prime_from_remainders<F: Field>(
     //
     // with the scalar remainders forming R_i in Newton basis. Evaluate each
     // small R_i and Z_i, then batch the inversions of the Z_i evaluations.
-    let mut vanishing_inverses = point_sets
+    let mut terms = point_sets
         .iter()
-        .map(|points| {
-            points.iter().fold(F::ONE, |denominator, query_point| {
+        .zip(division_remainders)
+        .map(|(points, remainders)| {
+            assert_eq!(points.len(), remainders.len());
+            let (last_remainder, earlier_remainders) = remainders
+                .split_last()
+                .expect("a point set contains at least one point");
+            let remainder = earlier_remainders.iter().zip(points).rev().fold(
+                *last_remainder,
+                |evaluation, (remainder, query_point)| {
+                    *remainder + (point - query_point) * evaluation
+                },
+            );
+            let vanishing_inverse = points.iter().fold(F::ONE, |denominator, query_point| {
                 denominator * (point - query_point)
-            })
+            });
+            QPrimeEvaluationTerm {
+                remainder,
+                vanishing_inverse,
+            }
         })
         .collect::<Vec<_>>();
-    if vanishing_inverses
+    if terms
         .iter()
-        .any(|denominator| bool::from(denominator.is_zero()))
+        .any(|term| bool::from(term.vanishing_inverse.is_zero()))
     {
         return None;
     }
-    vanishing_inverses.iter_mut().batch_invert();
+    terms
+        .iter_mut()
+        .map(|term| &mut term.vanishing_inverse)
+        .batch_invert();
+
+    Some(PreparedQPrimeEvaluation { terms })
+}
+
+fn finish_q_prime_evaluation<F: Field>(
+    prepared: PreparedQPrimeEvaluation<F>,
+    q_evaluations: &[F],
+    challenge: F,
+) -> F {
+    assert_eq!(prepared.terms.len(), q_evaluations.len());
 
     let mut term_evaluations = q_evaluations
         .iter()
-        .zip(point_sets)
-        .zip(division_remainders)
-        .zip(vanishing_inverses)
-        .map(
-            |(((q_evaluation, points), remainders), vanishing_inverse)| {
-                assert_eq!(points.len(), remainders.len());
-                let (last_remainder, earlier_remainders) = remainders
-                    .split_last()
-                    .expect("a point set contains at least one point");
-                let remainder_evaluation = earlier_remainders.iter().zip(points).rev().fold(
-                    *last_remainder,
-                    |evaluation, (remainder, query_point)| {
-                        *remainder + (point - query_point) * evaluation
-                    },
-                );
-                (*q_evaluation - remainder_evaluation) * vanishing_inverse
-            },
-        );
+        .zip(prepared.terms)
+        .map(|(q_evaluation, term)| (*q_evaluation - term.remainder) * term.vanishing_inverse);
     let first = term_evaluations
         .next()
         .expect("there is at least one multi-opening point set");
-    let evaluation = term_evaluations.fold(first, |evaluation, term_evaluation| {
+    term_evaluations.fold(first, |evaluation, term_evaluation| {
         evaluation * challenge + term_evaluation
-    });
-    Some(evaluation)
+    })
 }
 
 fn fold_q_prime_range<F: Field>(
@@ -473,33 +490,50 @@ fn prepare_q_prime<F: Field>(
 // A `Vec` is required by `evaluate_polynomial_with_powers` for safe runtime
 // downcasting to the Pasta field.
 #[allow(clippy::ptr_arg)]
-fn evaluate_polynomials<F: Field + 'static>(
+fn evaluate_polynomials_with_side_work<F, R, W>(
     polynomials: &[Polynomial<F, Coeff>],
     powers: &Vec<F>,
-) -> Vec<F> {
+    side_work: W,
+) -> (Vec<F>, R)
+where
+    F: Field + 'static,
+    R: Send,
+    W: FnOnce() -> R + Send,
+{
     if polynomials.is_empty() {
-        return Vec::new();
+        return (Vec::new(), side_work());
     }
 
-    let worker_count = multicore::current_num_threads().min(polynomials.len());
+    let thread_count = multicore::current_num_threads();
+    let worker_count = thread_count.min(polynomials.len());
     let total_work = polynomials.iter().fold(0usize, |total, polynomial| {
         total.saturating_add(polynomial.len())
     });
     if worker_count <= 1
         || total_work.div_ceil(worker_count) < MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD
     {
-        return polynomials
+        let evaluations = polynomials
             .iter()
             .map(|polynomial| evaluate_polynomial_with_powers(polynomial, powers))
             .collect();
+        return (evaluations, side_work());
     }
 
     let mut evaluations = vec![F::ZERO; polynomials.len()];
+    let mut side_output = None;
     let polynomials_per_task = polynomials.len().div_ceil(worker_count);
+    let evaluation_task_count = polynomials.len().div_ceil(polynomials_per_task);
+    let last_task_start = (evaluation_task_count - 1) * polynomials_per_task;
+    let (polynomials, last_polynomials) = polynomials.split_at(last_task_start);
+    let (regular_evaluations, last_evaluations) = evaluations.split_at_mut(last_task_start);
+    // Use an otherwise-idle worker when one is available. If every worker has
+    // an evaluation chunk, append the small side job to the shortest chunk to
+    // avoid adding another task and its scheduling overhead.
+    let separate_side_task = thread_count > evaluation_task_count;
     multicore::scope(|scope| {
         for (polynomials, evaluations) in polynomials
             .chunks(polynomials_per_task)
-            .zip(evaluations.chunks_mut(polynomials_per_task))
+            .zip(regular_evaluations.chunks_mut(polynomials_per_task))
         {
             scope.spawn(move |_| {
                 for (polynomial, evaluation) in polynomials.iter().zip(evaluations) {
@@ -507,8 +541,25 @@ fn evaluate_polynomials<F: Field + 'static>(
                 }
             });
         }
+        let evaluate_last = || {
+            for (polynomial, evaluation) in last_polynomials.iter().zip(last_evaluations) {
+                *evaluation = evaluate_polynomial_with_powers(polynomial, powers);
+            }
+        };
+        if separate_side_task {
+            scope.spawn(|_| evaluate_last());
+            scope.spawn(|_| side_output = Some(side_work()));
+        } else {
+            scope.spawn(|_| {
+                evaluate_last();
+                side_output = Some(side_work());
+            });
+        }
     });
-    evaluations
+    (
+        evaluations,
+        side_output.expect("the independent side task completed"),
+    )
 }
 
 fn scale_and_add_polynomial<F: Field>(
@@ -596,7 +647,12 @@ where
     let powers = power_vector(*x_3, params.n as usize);
 
     // The evaluations are independent, but their transcript order is fixed.
-    let q_evaluations = evaluate_polynomials(&q_polys, &powers);
+    // Prepare the small q' evaluation terms in the same scope so their batch
+    // inversion is hidden beneath the domain-sized evaluations.
+    let (q_evaluations, prepared_q_prime_evaluation) =
+        evaluate_polynomials_with_side_work(&q_polys, &powers, || {
+            prepare_q_prime_evaluation(&point_sets, &division_remainders, *x_3)
+        });
     for evaluation in &q_evaluations {
         transcript.write_scalar(*evaluation)?;
     }
@@ -606,14 +662,9 @@ where
     // Q_i(x_3) values already required by the transcript. The verifier rejects
     // a collision between x_3 and a queried point; retain the old evaluation
     // path for that negligible event so proof creation remains infallible.
-    let q_prime_evaluation = evaluate_q_prime_from_remainders(
-        &point_sets,
-        &q_evaluations,
-        &division_remainders,
-        *x_2,
-        *x_3,
-    )
-    .unwrap_or_else(|| evaluate_polynomial_with_powers(&q_prime_poly, &powers));
+    let q_prime_evaluation = prepared_q_prime_evaluation
+        .map(|prepared| finish_q_prime_evaluation(prepared, &q_evaluations, *x_2))
+        .unwrap_or_else(|| evaluate_polynomial_with_powers(&q_prime_poly, &powers));
 
     let x_4: ChallengeX4<_> = transcript.squeeze_challenge_scalar();
 
@@ -686,8 +737,8 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 mod tests {
     use super::{
         Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial, collapse_polynomials,
-        evaluate_polynomials, evaluate_q_prime_from_remainders, kate_division_in_place,
-        power_vector, prepare_q_prime, scale_and_add_polynomial,
+        evaluate_polynomials_with_side_work, finish_q_prime_evaluation, kate_division_in_place,
+        power_vector, prepare_q_prime, prepare_q_prime_evaluation, scale_and_add_polynomial,
     };
     use crate::arithmetic::{eval_polynomial, kate_division};
     use ff::Field;
@@ -913,28 +964,18 @@ mod tests {
                         .iter()
                         .map(|polynomial| eval_polynomial(polynomial, point))
                         .collect::<Vec<_>>();
-                    let derived = evaluate_q_prime_from_remainders(
-                        &point_sets,
-                        &q_evaluations,
-                        &actual.division_remainders,
-                        challenge,
-                        point,
-                    )
-                    .unwrap();
+                    let prepared =
+                        prepare_q_prime_evaluation(&point_sets, &actual.division_remainders, point)
+                            .unwrap();
+                    let derived = finish_q_prime_evaluation(prepared, &q_evaluations, challenge);
                     assert_eq!(derived, eval_polynomial(&actual.polynomial, point));
                 }
 
                 let collision = point_sets[0][0];
-                let q_evaluations = polynomials
-                    .iter()
-                    .map(|polynomial| eval_polynomial(polynomial, collision))
-                    .collect::<Vec<_>>();
                 assert!(
-                    evaluate_q_prime_from_remainders(
+                    prepare_q_prime_evaluation(
                         &point_sets,
-                        &q_evaluations,
                         &actual.division_remainders,
-                        challenge,
                         collision,
                     )
                     .is_none()
@@ -960,7 +1001,10 @@ mod tests {
     {
         let empty = Vec::<Polynomial<F, Coeff>>::new();
         let empty_powers = Vec::<F>::new();
-        assert!(evaluate_polynomials(&empty, &empty_powers).is_empty());
+        let (empty_evaluations, side_output) =
+            evaluate_polynomials_with_side_work(&empty, &empty_powers, || 17);
+        assert!(empty_evaluations.is_empty());
+        assert_eq!(side_output, 17);
 
         let polynomial_len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
         let polynomials = (0..5)
@@ -983,10 +1027,15 @@ mod tests {
                 .iter()
                 .map(|polynomial| eval_polynomial(polynomial, point))
                 .collect::<Vec<_>>();
-            let check = || assert_eq!(evaluate_polynomials(&polynomials, &powers), expected);
+            let check = || {
+                let (actual, side_output) =
+                    evaluate_polynomials_with_side_work(&polynomials, &powers, || 19);
+                assert_eq!(actual, expected);
+                assert_eq!(side_output, 19);
+            };
 
             #[cfg(feature = "multicore")]
-            for thread_count in [1, 4, 10] {
+            for thread_count in [1, 3, 4, 5, 10] {
                 maybe_rayon::ThreadPoolBuilder::new()
                     .num_threads(thread_count)
                     .build()
