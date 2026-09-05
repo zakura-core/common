@@ -1324,21 +1324,24 @@ pub struct ProvingKey {
 }
 
 impl ProvingKey {
-    /// Builds and caches prepared fixed-base commitment tables over this
-    /// key's SRS (see
+    /// Builds and caches prepared commitment tables over this key's SRS (see
     /// [`halo2_proofs::poly::commitment::Params::prepare_commitments`]).
-    /// Long-lived provers (wallet backends, proving services) should call
-    /// this once after constructing the key: the prover's polynomial
-    /// commitments then evaluate through the preparations on pools of at
-    /// most eight effective threads, extended to ten on AArch64 macOS for
-    /// Orchard's `k = 11` SRS (measured end to end on Apple M4). Wider pools
-    /// retain their usual multiexp. One-shot provers need not prepare. With
-    /// the default multicore, no-orbits build at `k = 11`, the three large
-    /// tables account for about 25.3 MiB and took about 36 ms to build on the
-    /// benchmarked M4, amortized across proofs. With `orbits`, the two large
-    /// tables account for about 24.8 MiB and took about 34 ms. Key generation
-    /// separately caches about 640 KiB for public-instance and sparse masking
-    /// commitments.
+    /// Long-lived provers (wallet backends, proving services) should call this
+    /// once after constructing the key: the prover's polynomial commitments
+    /// then evaluate through the preparations. With the default multicore,
+    /// no-orbits build, the first four IPA rounds do as well. The preparations
+    /// apply on pools of at most eight effective threads, extended to ten on
+    /// AArch64 macOS for Orchard's `k = 11` SRS. Wider pools retain their usual
+    /// multiexp. One-shot provers need not prepare. At `k = 11`, the four
+    /// retained tables in the default multicore, no-orbits build account for
+    /// about 29.1 MiB. In x86_64 Linux lifecycle measurements, preparation
+    /// took about 130 ms on one worker, about 38 ms more than the previous
+    /// cache set. On four through eight workers, the added construction ran
+    /// under the existing preparations' critical path and total preparation
+    /// remained about 43 ms. With `orbits`, the two large tables account for
+    /// about 24.8 MiB and took about 34 ms on the benchmarked Apple M4. Key
+    /// generation separately caches about 640 KiB for public-instance and
+    /// sparse masking commitments.
     ///
     /// Call this once before entering concurrent Rayon proving work.
     /// Concurrent callers outside that pool safely wait for and share the same

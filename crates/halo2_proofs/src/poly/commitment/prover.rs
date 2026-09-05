@@ -2,6 +2,8 @@ use ff::Field;
 use rand_core::Rng;
 
 use super::super::{Coeff, Polynomial, evaluate_polynomial_with_powers, power_vector};
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+use super::PREPARED_DEFERRED_IPA_ROUNDS;
 use super::{Blind, Params};
 #[cfg(feature = "multicore")]
 use crate::PreparedSparseCommitments;
@@ -173,6 +175,19 @@ fn compute_ipa_hi_evaluation_pasta<F: Field + 'static>(
     compute_inner_product(&polynomial[half..], &powers[..half])
 }
 
+/// Extends the block weights for `G_lo + challenge * G_hi` without retaining
+/// one scalar per generator. Reverse traversal keeps unread weights intact.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+fn extend_deferred_generator_weights<F: Field>(weights: &mut Vec<F>, challenge: F) {
+    let old_len = weights.len();
+    weights.resize(2 * old_len, F::ZERO);
+    for block in (0..old_len).rev() {
+        let weight = weights[block];
+        weights[2 * block] = weight;
+        weights[2 * block + 1] = weight * challenge;
+    }
+}
+
 /// Create a polynomial commitment opening proof for the polynomial defined
 /// by the coefficients `px`, the blinding factor `blind` used for the
 /// polynomial commitment, and the point `x` that the polynomial is
@@ -267,8 +282,25 @@ pub(in crate::poly) fn create_proof_with_powers<
     // determine both IPA inner products.
     let mut p_prime_at_x_3 = C::Scalar::ZERO;
 
-    // Initialize the vector `G'` from the URS. We'll be progressively collapsing
-    // this vector into smaller and smaller vectors until it is of length 1.
+    // Snapshot the complete prepared context before choosing the symbolic
+    // generator representation. A missing table or an unmeasured pool width
+    // keeps every round on the existing eager path.
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    let deferred_ipa = params.prepared_deferred_ipa();
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    let mut generator_weights = vec![C::Scalar::ONE];
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    let mut generator_challenges = Vec::with_capacity(PREPARED_DEFERRED_IPA_ROUNDS as usize);
+
+    // The eager path progressively collapses `G'`. The deferred path leaves it
+    // empty until all leading folds are materialized together.
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    let mut g_prime = if deferred_ipa.is_some() {
+        Vec::new()
+    } else {
+        params.g.clone()
+    };
+    #[cfg(any(not(feature = "multicore"), feature = "orbits"))]
     let mut g_prime = params.g.clone();
 
     // Perform the inner product argument, round by round.
@@ -288,35 +320,67 @@ pub(in crate::poly) fn create_proof_with_powers<
         let l_j_randomness = C::Scalar::random(&mut rng);
         let r_j_randomness = C::Scalar::random(&mut rng);
 
-        let l_terms = IpaRoundTerms {
-            coeffs: &p_prime[half..],
-            bases: &g_prime[0..half],
-            value: value_l_j,
-            randomness: l_j_randomness,
-        };
-        let r_terms = IpaRoundTerms {
-            coeffs: &p_prime[0..half],
-            bases: &g_prime[half..],
-            value: value_r_j,
-            randomness: r_j_randomness,
+        let ordinary_round = || {
+            let l_terms = IpaRoundTerms {
+                coeffs: &p_prime[half..],
+                bases: &g_prime[0..half],
+                value: value_l_j,
+                randomness: l_j_randomness,
+            };
+            let r_terms = IpaRoundTerms {
+                coeffs: &p_prime[0..half],
+                bases: &g_prime[half..],
+                value: value_r_j,
+                randomness: r_j_randomness,
+            };
+
+            // The first eager round can still reuse the coefficient table even
+            // when the complete deferred context was unavailable.
+            let prepared_round = (j == 0).then(|| {
+                params.try_prepared_first_ipa_round(
+                    l_terms.coeffs,
+                    r_terms.coeffs,
+                    l_terms.value * z,
+                    l_terms.randomness,
+                    r_terms.value * z,
+                    r_terms.randomness,
+                )
+            });
+            prepared_round
+                .flatten()
+                .unwrap_or_else(|| ipa_round_multiexps(l_terms, r_terms, params, z))
         };
 
-        // The first round uses the original SRS bases, so it can reuse the
-        // coefficient table retained by `prepare_commitments`. Later rounds
-        // use transcript-dependent folded bases and keep the ordinary MSM.
-        let prepared_round = (j == 0).then(|| {
-            params.try_prepared_first_ipa_round(
-                l_terms.coeffs,
-                r_terms.coeffs,
-                l_terms.value * z,
-                l_terms.randomness,
-                r_terms.value * z,
-                r_terms.randomness,
-            )
-        });
-        let (l_j, r_j) = prepared_round
-            .flatten()
-            .unwrap_or_else(|| ipa_round_multiexps(l_terms, r_terms, params, z));
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        let (l_j, r_j) = if let Some(prepared) = deferred_ipa
+            .as_ref()
+            .filter(|_| j < PREPARED_DEFERRED_IPA_ROUNDS)
+        {
+            if j == 0 {
+                prepared.first_round(
+                    &p_prime[half..],
+                    &p_prime[..half],
+                    value_l_j * z,
+                    l_j_randomness,
+                    value_r_j * z,
+                    r_j_randomness,
+                )
+            } else {
+                prepared.round(
+                    &p_prime,
+                    half,
+                    &generator_weights,
+                    value_l_j * z,
+                    l_j_randomness,
+                    value_r_j * z,
+                    r_j_randomness,
+                )
+            }
+        } else {
+            ordinary_round()
+        };
+        #[cfg(any(not(feature = "multicore"), feature = "orbits"))]
+        let (l_j, r_j) = ordinary_round();
         // Normalize the two round points together so they share one field
         // inversion.
         let points = [l_j, r_j];
@@ -343,9 +407,39 @@ pub(in crate::poly) fn create_proof_with_powers<
             b_scale += b_hi_scale * u_j;
         }
 
-        // Collapse `G'`
-        parallel_generator_collapse(&mut g_prime, u_j);
-        g_prime.truncate(half);
+        // Collapse `G'`, or extend the symbolic block weights and materialize
+        // all leading folds once the ordinary rounds take over.
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        if let Some(prepared) = deferred_ipa
+            .as_ref()
+            .filter(|_| j < PREPARED_DEFERRED_IPA_ROUNDS)
+        {
+            extend_deferred_generator_weights(&mut generator_weights, u_j);
+            generator_challenges.push(u_j);
+            if j + 1 == PREPARED_DEFERRED_IPA_ROUNDS {
+                g_prime = prepared
+                    .materialize(&generator_weights, &params.g[..half])
+                    .unwrap_or_else(|| {
+                        // An exotic scalar representation can decline after
+                        // the context probe. Replaying the public folds is
+                        // slower but preserves the proof exactly.
+                        let mut generators = params.g.clone();
+                        for &challenge in &generator_challenges {
+                            parallel_generator_collapse(&mut generators, challenge);
+                            generators.truncate(generators.len() / 2);
+                        }
+                        generators
+                    });
+            }
+        } else {
+            parallel_generator_collapse(&mut g_prime, u_j);
+            g_prime.truncate(half);
+        }
+        #[cfg(any(not(feature = "multicore"), feature = "orbits"))]
+        {
+            parallel_generator_collapse(&mut g_prime, u_j);
+            g_prime.truncate(half);
+        }
 
         // Update randomness (the synthetic blinding factor at the end)
         f += &(l_j_randomness * &u_j_inv);
@@ -393,12 +487,19 @@ fn parallel_generator_collapse<C: CurveAffine>(g: &mut [C], challenge: C::Scalar
 #[cfg(test)]
 mod tests {
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-    use super::create_proof;
+    use super::super::{
+        DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES, DeferredIpaGeneratorTable,
+        PREPARED_DEFERRED_IPA_ROUNDS, deferred_ipa_round_scalars, prepared_deferred_ipa_rounds,
+    };
     use super::{
         Params, compute_ipa_hi_evaluation_pasta, ipa_masking_commitment, ipa_round_multiexp,
         parallel_generator_collapse, sample_ipa_masking_polynomial,
     };
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use super::{create_proof, extend_deferred_generator_weights};
     use crate::arithmetic::{CurveAffine, best_multiexp, compute_inner_product, eval_polynomial};
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use crate::poly::Polynomial;
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
     use crate::poly::commitment::prepared_commitment_max_threads;
     use crate::poly::{EvaluationDomain, commitment::Blind, power_vector};
@@ -407,6 +508,8 @@ mod tests {
     #[cfg(feature = "multicore")]
     use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use ff::Field;
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    use ff::{FromUniformBytes, PrimeField};
     use group::{Curve, Group};
     use pasta_curves::{pallas, vesta};
     use rand::rng;
@@ -539,21 +642,24 @@ mod tests {
     }
 
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-    fn prepared_first_round_preserves_opening_proof() {
+    fn prepared_first_round_preserves_opening_proof<C>()
+    where
+        C: CurveAffine,
+        C::Scalar: FromUniformBytes<64>,
+    {
         const K: u32 = 6;
         const PROOF_SEED: u64 = 0x4950_412d_524f_554e;
 
-        let params = Params::<pallas::Affine>::new(K);
-        let domain = EvaluationDomain::new(1, K);
-        let mut polynomial = domain.empty_coeff();
-        for (index, coefficient) in polynomial.iter_mut().enumerate() {
-            *coefficient = pallas::Scalar::from(index as u64 + 1);
-        }
-        let blind = Blind(pallas::Scalar::from(17));
+        let params = Params::<C>::new(K);
+        let polynomial = Polynomial::from_coefficients(
+            (0..1 << K)
+                .map(|index| C::Scalar::from(index as u64 + 1))
+                .collect(),
+        );
+        let blind = Blind(C::Scalar::from(17));
         let create_seeded_proof = || {
             let commitment = params.commit(&polynomial, blind).to_affine();
-            let mut transcript =
-                Blake2bWrite::<Vec<u8>, pallas::Affine, Challenge255<_>>::init(vec![]);
+            let mut transcript = Blake2bWrite::<Vec<u8>, C, Challenge255<C>>::init(vec![]);
             transcript.write_point(commitment).unwrap();
             let x = *transcript.squeeze_challenge_scalar::<()>();
             transcript
@@ -589,6 +695,233 @@ mod tests {
             let gated_fallback = wide_pool.install(create_seeded_proof);
             assert_eq!(gated_fallback, unprepared);
         }
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn deferred_round_scalars_match_eager<C>()
+    where
+        C: CurveAffine + Debug,
+    {
+        const K: u32 = 6;
+
+        let params = Params::<C>::new(K);
+        let mut coefficient = full_width_scalar::<C>();
+        let mut p_prime = (0..1 << K)
+            .map(|index| {
+                coefficient = coefficient.square() + C::Scalar::from(index as u64 + 1);
+                coefficient
+            })
+            .collect::<Vec<_>>();
+        let mut g_prime = params.g.clone();
+        let mut weights = vec![C::Scalar::ONE];
+        let challenges = [
+            C::Scalar::ONE,
+            -C::Scalar::ONE,
+            C::Scalar::from(2),
+            full_width_scalar::<C>(),
+        ];
+
+        for challenge in challenges {
+            let half = p_prime.len() / 2;
+            let l_scalars = deferred_ipa_round_scalars(&p_prime, half, &weights, false);
+            let r_scalars = deferred_ipa_round_scalars(&p_prime, half, &weights, true);
+            assert_eq!(
+                best_multiexp(&l_scalars, &params.g),
+                best_multiexp(&p_prime[half..], &g_prime[..half]),
+            );
+            assert_eq!(
+                best_multiexp(&r_scalars, &params.g),
+                best_multiexp(&p_prime[..half], &g_prime[half..]),
+            );
+
+            let challenge_inverse = challenge.invert().unwrap();
+            for index in 0..half {
+                let high = p_prime[index + half];
+                p_prime[index] += high * challenge_inverse;
+            }
+            p_prime.truncate(half);
+            parallel_generator_collapse(&mut g_prime, challenge);
+            g_prime.truncate(half);
+            extend_deferred_generator_weights(&mut weights, challenge);
+        }
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn deferred_materialization_matches_native<C>()
+    where
+        C: CurveAffine + Debug,
+    {
+        const K: u32 = 8;
+
+        let params = Params::<C>::new(K);
+        let mut table = DeferredIpaGeneratorTable::new(&params.g)
+            .expect("Pasta scalar encodings support deferred materialization");
+        let count = params.g.len() >> PREPARED_DEFERRED_IPA_ROUNDS;
+        let power = C::Scalar::from(2).pow_vartime([60]);
+        let top = C::Scalar::from(2)
+            .pow_vartime([u64::from(C::Scalar::NUM_BITS.checked_sub(1).unwrap())]);
+        let scalars = [
+            C::Scalar::ONE,
+            C::Scalar::ZERO,
+            -C::Scalar::ONE,
+            C::Scalar::from(31),
+            C::Scalar::from(32),
+            C::Scalar::from(33),
+            C::Scalar::from(63),
+            C::Scalar::from(64),
+            C::Scalar::from(65),
+            power - C::Scalar::ONE,
+            power,
+            power + C::Scalar::ONE,
+            top - C::Scalar::ONE,
+            top,
+            top + C::Scalar::ONE,
+            full_width_scalar::<C>(),
+        ];
+        let actual = table
+            .materialize(&scalars, &params.g[..count])
+            .expect("canonical Pasta scalars must materialize");
+        for (lane, actual) in actual.iter().enumerate() {
+            let bases = (0..scalars.len())
+                .map(|block| params.g[block * count + lane])
+                .collect::<Vec<_>>();
+            assert_eq!(actual.to_curve(), best_multiexp(&scalars, &bases));
+        }
+        assert_eq!(
+            table.retained_bytes(),
+            (params.g.len() - count)
+                * DEFERRED_IPA_MATERIALIZATION_WINDOW_MAGNITUDES
+                * core::mem::size_of::<C>(),
+        );
+
+        let challenges = [
+            C::Scalar::from(3),
+            C::Scalar::from(5),
+            -C::Scalar::ONE,
+            full_width_scalar::<C>(),
+        ];
+        let mut weights = vec![C::Scalar::ONE];
+        let mut eager = params.g.clone();
+        for challenge in challenges {
+            extend_deferred_generator_weights(&mut weights, challenge);
+            parallel_generator_collapse(&mut eager, challenge);
+            eager.truncate(eager.len() / 2);
+        }
+        assert_eq!(
+            table
+                .materialize(&weights, &params.g[..count])
+                .expect("structured fold weights must materialize"),
+            eager,
+        );
+
+        table.byte_order = super::super::ScalarByteOrder::Unsupported;
+        assert!(table.materialize(&weights, &params.g[..count]).is_none());
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn prepared_deferred_rounds_preserve_opening_proof<C>()
+    where
+        C: CurveAffine,
+        C::Scalar: FromUniformBytes<64>,
+    {
+        const K: u32 = 11;
+        const PROOF_SEED: u64 = 0x6465_6665_7272_6564;
+
+        let params = Params::<C>::new(K);
+        let polynomial = Polynomial::from_coefficients(
+            (0..1 << K)
+                .map(|index| C::Scalar::from((index as u64).wrapping_mul(17).wrapping_add(3)))
+                .collect(),
+        );
+        let blind = Blind(C::Scalar::from(23));
+        let create_seeded_proof = || {
+            let commitment = params.commit(&polynomial, blind).to_affine();
+            let mut transcript = Blake2bWrite::<Vec<u8>, C, Challenge255<C>>::init(vec![]);
+            transcript.write_point(commitment).unwrap();
+            let x = *transcript.squeeze_challenge_scalar::<()>();
+            transcript
+                .write_scalar(eval_polynomial(&polynomial, x))
+                .unwrap();
+            create_proof(
+                &params,
+                StdRng::seed_from_u64(PROOF_SEED),
+                &mut transcript,
+                &polynomial,
+                blind,
+                x,
+            )
+            .unwrap();
+            transcript.finalize()
+        };
+        let narrow_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+
+        assert!(narrow_pool.install(|| params.prepared_deferred_ipa().is_none()));
+        let unprepared = narrow_pool.install(create_seeded_proof);
+        let mut serialized_before = vec![];
+        params.write(&mut serialized_before).unwrap();
+        assert!(
+            maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(4)
+                .build()
+                .unwrap()
+                .install(|| params.prepare_commitments())
+        );
+
+        let table = params
+            .commitment_tables_cache
+            .deferred_ipa()
+            .expect("k = 11 preparation retains the materialization table");
+        assert_eq!(table.retained_bytes(), 3_932_160);
+        let cloned_table = params
+            .clone()
+            .commitment_tables_cache
+            .deferred_ipa()
+            .expect("params clones share the materialization table");
+        assert!(std::sync::Arc::ptr_eq(&table, &cloned_table));
+        let mut serialized_after = vec![];
+        params.write(&mut serialized_after).unwrap();
+        assert_eq!(serialized_after, serialized_before);
+        let deserialized = Params::<C>::read(&mut serialized_before.as_slice()).unwrap();
+        assert!(
+            deserialized
+                .commitment_tables_cache
+                .deferred_ipa()
+                .is_none()
+        );
+
+        table.set_force_decline(true);
+        let replay_fallback = narrow_pool.install(|| {
+            assert!(params.prepared_deferred_ipa().is_some());
+            create_seeded_proof()
+        });
+        table.set_force_decline(false);
+        assert_eq!(replay_fallback, unprepared);
+
+        let max_threads = prepared_commitment_max_threads(K);
+        for workers in [1, max_threads] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let prepared = pool.install(|| {
+                assert!(params.prepared_deferred_ipa().is_some());
+                create_seeded_proof()
+            });
+            assert_eq!(prepared, unprepared);
+        }
+
+        let wide_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(max_threads + 1)
+            .build()
+            .unwrap();
+        let gated_fallback = wide_pool.install(|| {
+            assert!(params.prepared_deferred_ipa().is_none());
+            create_seeded_proof()
+        });
+        assert_eq!(gated_fallback, unprepared);
     }
 
     fn masking_polynomial_is_sparse_and_commits_correctly<C>()
@@ -867,8 +1200,58 @@ mod tests {
 
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
     #[test]
-    fn prepared_first_round_preserves_unprepared_opening_proof() {
-        prepared_first_round_preserves_opening_proof();
+    fn prepared_first_round_preserves_unprepared_opening_proof_pallas() {
+        prepared_first_round_preserves_opening_proof::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_first_round_preserves_unprepared_opening_proof_vesta() {
+        prepared_first_round_preserves_opening_proof::<vesta::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_ipa_policy_is_limited_to_k_11() {
+        assert_eq!(prepared_deferred_ipa_rounds(10), None);
+        assert_eq!(prepared_deferred_ipa_rounds(11), Some(4));
+        assert_eq!(prepared_deferred_ipa_rounds(12), None);
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_round_scalars_match_eager_pallas() {
+        deferred_round_scalars_match_eager::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_round_scalars_match_eager_vesta() {
+        deferred_round_scalars_match_eager::<vesta::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_materialization_matches_native_pallas() {
+        deferred_materialization_matches_native::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn deferred_materialization_matches_native_vesta() {
+        deferred_materialization_matches_native::<vesta::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_deferred_rounds_preserve_opening_proof_pallas() {
+        prepared_deferred_rounds_preserve_opening_proof::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    #[test]
+    fn prepared_deferred_rounds_preserve_opening_proof_vesta() {
+        prepared_deferred_rounds_preserve_opening_proof::<vesta::Affine>();
     }
 
     #[test]
