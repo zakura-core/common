@@ -200,8 +200,7 @@ fn compute_b<F: Field>(x: F, u: &[F]) -> F {
 
 /// Computes the coefficients of $g(X) = \prod\limits_{i=0}^{k-1} (1 + u_{k - 1 - i} X^{2^i})$.
 fn compute_s<F: Field>(u: &[F], init: F) -> Vec<F> {
-    // For zero IPA rounds the product is empty, so its sole coefficient is
-    // the caller-provided scale.
+    assert!(!u.is_empty());
     let mut v = vec![F::ZERO; 1 << u.len()];
     v[0] = init;
 
