@@ -10,6 +10,10 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+- On Apple AArch64 with `aarch64-asm`, field addition operators now use an
+  inline assembly carry chain and conditional reduction, speeding up Pallas
+  and Vesta point arithmetic. The inherent `const` methods are unchanged.
+
 ## [1.1.0] - 2026-09-04
 
 ### Added
