@@ -669,14 +669,26 @@ fn prepare_product<C: CurveAffine>(
 /// Prepares an identity permutation set without materializing its fractions.
 ///
 /// Every numerator factor equals its denominator factor, so every nonzero
-/// ratio is one. If that shared factor is zero, the corresponding
-/// grand-product relation is `0 = 0` and does not constrain the next product
-/// value; keeping the product unchanged is therefore still a valid witness.
-/// The generic zero-skipping inversion may choose a different product after a
-/// collision; both choices satisfy the same constraints.
-/// The transcript samples `beta` and `gamma` after the advice commitments,
-/// so such a collision is also negligible, but correctness does not rely on
-/// it.
+/// ratio is one. Without a zero shared factor, retaining the incoming product
+/// agrees with the generic fraction and prefix-product construction.
+///
+/// A zero shared factor makes the local row relation `0 = 0`, but retaining
+/// the product need not give a valid witness for the complete chunk chain.
+/// The generic path takes subsequent product states to zero; this shortcut
+/// can retain a nonzero state. A later nonidentity chunk can then encounter
+/// a zero denominator and nonzero numerator, making its row relation
+/// impossible to satisfy with that incoming state.
+///
+/// This optimization accepts the resulting negligible completeness error:
+/// an exceptional challenge can produce an unverifiable proof. Under the
+/// production Fiat-Shamir transcript's random-oracle assumptions, advice is
+/// committed before `beta` and `gamma` are sampled. For fixed advice and
+/// `beta`, each shared factor vanishes at exactly one value of `gamma`.
+/// With `M` relevant factors over a field of order `q`, a union bound is
+/// `M / q`, up to the negligible bias from reducing 64-byte challenges.
+/// This is not an unconditional correctness guarantee for forced or custom
+/// challenges; see the
+/// [accepted allowance](https://github.com/zakura-core/common/pull/396#issuecomment-5562831454).
 fn prepare_identity_product<C: CurveAffine>(
     params: &Params<C>,
     pk: &plonk::ProvingKey<C>,
@@ -1424,6 +1436,10 @@ mod tests {
 
     #[test]
     fn identity_product_remains_valid_when_a_shared_factor_is_zero() {
+        // This checks only an isolated identity chunk's row and terminal
+        // relations. It does not establish compatibility with a later
+        // nonidentity chunk; see `prepare_identity_product` for the accepted
+        // negligible completeness error in the full chain.
         use group::ff::{Field, PrimeField};
 
         const ROWS: usize = 16;
@@ -1449,8 +1465,8 @@ mod tests {
                 let denominator = values[row] + beta * permutations[row] + gamma;
                 saw_zero |= bool::from(denominator.is_zero());
 
-                // The shortcut keeps z unchanged. This is also valid at the
-                // colliding row because both sides of the relation are zero.
+                // Keeping z unchanged satisfies this local row relation,
+                // including the collision where both sides are zero.
                 assert_eq!(
                     retained_product * denominator - retained_product * numerator,
                     Fp::ZERO
