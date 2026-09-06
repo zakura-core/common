@@ -404,6 +404,14 @@ impl Circuit {
 }
 
 impl Config {
+    fn cache(&self) -> plonk::CircuitConfigCache {
+        plonk::CircuitConfigCache::new(self.clone())
+    }
+
+    fn clone_from_cache(cache: &plonk::CircuitConfigCache) -> Option<Self> {
+        cache.clone_config()
+    }
+
     /// Configures the Orchard Action constraint system shared by every circuit version.
     fn configure(meta: &mut plonk::ConstraintSystem<pallas::Base>) -> Self {
         // Advice columns used in the Orchard circuit.
@@ -1204,6 +1212,8 @@ impl plonk::Circuit<pallas::Base> for CircuitWithPreparedMerklePath {
     type Config = Config;
     type FloorPlanner = floor_planner::V1Named;
 
+    const CACHE_CONFIGURATION: bool = true;
+
     fn without_witnesses(&self) -> Self {
         Self {
             circuit: Circuit::empty(self.circuit.circuit_version),
@@ -1213,6 +1223,14 @@ impl plonk::Circuit<pallas::Base> for CircuitWithPreparedMerklePath {
 
     fn configure(meta: &mut plonk::ConstraintSystem<pallas::Base>) -> Self::Config {
         Config::configure(meta)
+    }
+
+    fn cache_configuration(config: &Self::Config) -> Option<plonk::CircuitConfigCache> {
+        Some(config.cache())
+    }
+
+    fn configuration_from_cache(cache: &plonk::CircuitConfigCache) -> Option<Self::Config> {
+        Config::clone_from_cache(cache)
     }
 
     fn synthesize(
@@ -1232,12 +1250,22 @@ impl plonk::Circuit<pallas::Base> for Circuit {
     type Config = Config;
     type FloorPlanner = floor_planner::V1;
 
+    const CACHE_CONFIGURATION: bool = true;
+
     fn without_witnesses(&self) -> Self {
         Self::empty(self.circuit_version)
     }
 
     fn configure(meta: &mut plonk::ConstraintSystem<pallas::Base>) -> Self::Config {
         Config::configure(meta)
+    }
+
+    fn cache_configuration(config: &Self::Config) -> Option<plonk::CircuitConfigCache> {
+        Some(config.cache())
+    }
+
+    fn configuration_from_cache(cache: &plonk::CircuitConfigCache) -> Option<Self::Config> {
+        Config::clone_from_cache(cache)
     }
 
     fn synthesize(
