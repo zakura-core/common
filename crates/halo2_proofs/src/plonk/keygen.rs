@@ -467,7 +467,10 @@ where
     ))
 }
 
-/// Generate a `ProvingKey` from a `VerifyingKey` and an instance of `Circuit`.
+/// Generate a [`ProvingKey`] from a [`VerifyingKey`] and a [`Circuit`] instance.
+///
+/// The circuit configuration must be `'static` because the proving key retains
+/// a clone for later proofs.
 pub fn keygen_pk<C, ConcreteCircuit>(
     params: &Params<C>,
     vk: VerifyingKey<C>,

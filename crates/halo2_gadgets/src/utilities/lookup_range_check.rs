@@ -1055,7 +1055,7 @@ mod tests {
         }
     }
 
-    fn test_short_range_check<Lookup: PallasLookupRangeCheck + Send + Sync>(
+    fn test_short_range_check<Lookup: PallasLookupRangeCheck + Send + Sync + 'static>(
         element: pallas::Base,
         num_bits: usize,
         proof_result: &Result<(), Vec<VerifyFailure>>,

@@ -686,9 +686,10 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
 /// Every element of `circuits` must have the circuit shape used to generate
 /// `pk`.
 ///
-/// The circuit type must be `Sync` and its configuration `Send` so that
-/// compatible floor planners can synthesize independent circuit witnesses in
-/// parallel.
+/// The circuit type must be `Sync` and its configuration `Send` so compatible
+/// floor planners can synthesize independent circuit witnesses in parallel.
+/// The configuration must also be `'static` because the proving key retains a
+/// clone for later proofs.
 pub fn create_proof<
     C: CurveAffine,
     E: EncodedChallenge<C>,
@@ -1898,14 +1899,15 @@ fn prepared_instance_commitments_match_generic_msm() {
 fn test_create_proof() {
     use crate::{
         circuit::SimpleFloorPlanner,
-        plonk::{keygen_pk, keygen_vk},
-        transcript::{Blake2bWrite, Challenge255},
+        plonk::{SingleVerifier, keygen_pk, keygen_vk, verify_proof},
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
     use pasta_curves::EqAffine;
-    use rand::rng;
+    use rand::{SeedableRng, rng, rngs::StdRng};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static ALTERNATE_CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
+    const SAME_SHAPE_PROOF_SEED: u64 = 0x434f_4e46_4947_0001;
 
     #[derive(Clone, Copy)]
     struct MyCircuit;
@@ -1986,8 +1988,21 @@ fn test_create_proof() {
     )
     .expect("proof generation should not fail");
 
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[MyCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("cached-configuration proof generation should not fail");
+    let cached_config_proof = transcript.finalize();
+
     // A circuit with the same shape but a different configuration type keeps
-    // the established fallback of configuring itself at proving time.
+    // the established fallback of configuring itself at proving time. With
+    // identical randomness, both configuration paths produce the same proof.
     ALTERNATE_CONFIGURATIONS.store(0, Ordering::Relaxed);
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
     create_proof(
@@ -1995,11 +2010,18 @@ fn test_create_proof() {
         &pk,
         &[AlternateCircuit],
         &[&[]],
-        rng(),
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
         &mut transcript,
     )
     .expect("same-shape proof generation should not fail");
+    let alternate_config_proof = transcript.finalize();
     assert_eq!(ALTERNATE_CONFIGURATIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(alternate_config_proof, cached_config_proof);
+
+    let strategy = SingleVerifier::new(&params);
+    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&alternate_config_proof[..]);
+    verify_proof(&params, pk.get_vk(), strategy, &[&[]], &mut transcript)
+        .expect("same-shape proof verification should not fail");
 }
 
 #[test]
