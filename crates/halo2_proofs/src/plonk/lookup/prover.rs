@@ -3,6 +3,11 @@ use super::super::{
     circuit::Expression, evaluator_schedule::QuotientPoly,
 };
 use super::Argument;
+#[cfg(feature = "multicore")]
+use crate::{
+    PREPARED_SORTED_U10_COMMITMENT_K, PreparedLookupCommitments, SORTED_U10_SUFFIX_MULTIPLES,
+    arithmetic::best_multiexp,
+};
 use crate::{
     arithmetic::{CurveAffine, parallelize},
     plonk::evaluation::{EvaluationPoint, EvaluationQuery},
@@ -14,6 +19,8 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ff::{PrimeField, WithSmallOrderMulGroup};
+#[cfg(feature = "multicore")]
+use group::Group;
 use group::{Curve, ff::Field};
 use maybe_rayon::prelude::*;
 use rand_core::Rng;
@@ -98,6 +105,8 @@ struct PreparedTable<F: Field, Ev> {
     sorted_values: Vec<F>,
     sorted_keys: Vec<PastaSortKey>,
     sinsemilla_q_0: Option<(F, usize)>,
+    #[cfg(feature = "multicore")]
+    sorted_u10_range: bool,
 }
 
 struct PreparedInput<F: Field, Ev> {
@@ -141,6 +150,87 @@ impl PastaSortKey {
     };
 }
 
+#[cfg(feature = "multicore")]
+const SORTED_U10_BITS: usize = 10;
+#[cfg(feature = "multicore")]
+const SORTED_U10_MAX_VALUE: u16 = (1 << SORTED_U10_BITS) - 1;
+/// Upper bound on the independently blinded tail handled by this route.
+/// This covers Orchard's current blind rows while keeping the tail on-stack.
+#[cfg(feature = "multicore")]
+const SORTED_U10_MAX_SUFFIX: usize = 8;
+
+#[cfg(feature = "multicore")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SortedU10Transition {
+    row: u16,
+    delta: u16,
+}
+
+#[cfg(feature = "multicore")]
+struct SortedU10 {
+    transitions: Vec<SortedU10Transition>,
+    first: u16,
+    last: u16,
+}
+
+#[cfg(feature = "multicore")]
+fn pasta_u10(key: &PastaSortKey) -> Option<u16> {
+    if key.limbs[1..].iter().any(|&limb| limb != 0)
+        || key.limbs[0] > u64::from(SORTED_U10_MAX_VALUE)
+    {
+        return None;
+    }
+    u16::try_from(key.limbs[0]).ok()
+}
+
+#[cfg(feature = "multicore")]
+impl SortedU10 {
+    fn new(first_key: &PastaSortKey) -> Option<Self> {
+        let first = pasta_u10(first_key)?;
+        Some(Self {
+            transitions: Vec::with_capacity(usize::from(SORTED_U10_MAX_VALUE)),
+            first,
+            last: first,
+        })
+    }
+
+    fn push_distinct(&mut self, row: usize, key: &PastaSortKey) -> Option<()> {
+        let value = pasta_u10(key)?;
+        let delta = value.checked_sub(self.last)?;
+        if delta == 0 {
+            return None;
+        }
+        self.transitions.push(SortedU10Transition {
+            row: u16::try_from(row).ok()?,
+            delta,
+        });
+        self.last = value;
+        Some(())
+    }
+}
+
+#[cfg(feature = "multicore")]
+fn prepared_sorted_u10_suffix_multiples<C: CurveAffine>(
+    params: &Params<C>,
+    sorted_u10_range: bool,
+    usable_rows: usize,
+    input_len: usize,
+) -> Option<&[C]> {
+    if !sorted_u10_range
+        || usable_rows == 0
+        || usable_rows > params.n as usize
+        || input_len != usable_rows
+        || params.n as usize - usable_rows > SORTED_U10_MAX_SUFFIX
+    {
+        return None;
+    }
+    let suffix_multiples = params.prepared_lagrange_suffix_multiples()?;
+    if suffix_multiples.len() != params.g_lagrange.len() * SORTED_U10_SUFFIX_MULTIPLES {
+        return None;
+    }
+    Some(suffix_multiples)
+}
+
 impl PartialEq for PastaSortKey {
     fn eq(&self, other: &Self) -> bool {
         self.limbs == other.limbs
@@ -175,9 +265,17 @@ fn uses_pasta_sort_keys<F: Field>() -> bool {
 pub(in crate::plonk) struct TablePlan {
     representatives: Vec<usize>,
     groups: Vec<usize>,
-    sinsemilla_tables: Vec<bool>,
+    table_kinds: Vec<PreparedTableKind>,
     table_sort_scratch: Vec<Vec<PastaSortKey>>,
     input_sort_scratch: Vec<Vec<PastaSortKey>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreparedTableKind {
+    Generic,
+    Sinsemilla,
+    #[cfg(feature = "multicore")]
+    SortedU10Range,
 }
 
 fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
@@ -408,7 +506,7 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
         group_uses[group] += 1;
     }
     // Orchard's Sinsemilla table is the reused three-column generator lookup
-    // whose index column is also used by the unary range lookup. This private
+    // whose index column is also used by the 10-bit range check. This private
     // structural marker avoids adding a circuit-configuration hint to the
     // public API. The q_0 repetition threshold below guards lookalike tables.
     let sinsemilla_tables = representatives
@@ -418,7 +516,41 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
             lookup_arguments[representative]
                 .has_sinsemilla_table_shape(lookup_arguments, group_uses[group])
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let table_kinds = representatives
+        .iter()
+        .enumerate()
+        .map(|(group, &_representative)| {
+            if sinsemilla_tables[group] {
+                return PreparedTableKind::Sinsemilla;
+            }
+            // The 10-bit range-check table is the one-column view of the index
+            // column in the structurally identified Sinsemilla generator
+            // table. This only hints at routing; the sorted input must still
+            // validate as an exact u10 profile.
+            #[cfg(feature = "multicore")]
+            if let [range_expression] = lookup_arguments[_representative]
+                .table_expressions
+                .as_slice()
+                && representatives.iter().zip(&sinsemilla_tables).any(
+                    |(&sinsemilla_representative, &is_sinsemilla)| {
+                        is_sinsemilla
+                            && Argument::has_same_fixed_query(
+                                range_expression,
+                                &lookup_arguments[sinsemilla_representative].table_expressions[0],
+                            )
+                    },
+                )
+            {
+                return PreparedTableKind::SortedU10Range;
+            }
+            PreparedTableKind::Generic
+        })
+        .collect::<Vec<_>>();
+    #[cfg(all(feature = "multicore", debug_assertions))]
+    if sinsemilla_tables.iter().any(|&is_sinsemilla| is_sinsemilla) {
+        debug_assert!(table_kinds.contains(&PreparedTableKind::SortedU10Range));
+    }
 
     let scratch_len = if uses_pasta_sort_keys::<F>() {
         usable_rows
@@ -440,7 +572,7 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
     TablePlan {
         representatives,
         groups,
-        sinsemilla_tables,
+        table_kinds,
         table_sort_scratch,
         input_sort_scratch,
     }
@@ -457,7 +589,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         fixed_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         usable_rows: usize,
         build_quotient_asts: bool,
-        sinsemilla_table: bool,
+        table_kind: PreparedTableKind,
         mut sort_scratch: Vec<PastaSortKey>,
     ) -> PreparedTable<F, Ec> {
         let unpermuted_expressions = self.table_expressions.iter().map(|expression| {
@@ -499,7 +631,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         // theta-compressed value is therefore repeated over roughly half of
         // the table commitment. Keep this specialization at the table-MSM
         // boundary instead of changing generic MSM routing.
-        let sinsemilla_q_0 = sinsemilla_table
+        let sinsemilla_q_0 = (table_kind == PreparedTableKind::Sinsemilla)
             .then(|| factorable_sinsemilla_q_0(&sorted_values, q_0))
             .flatten();
 
@@ -509,6 +641,8 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             sorted_values,
             sorted_keys: sort_scratch,
             sinsemilla_q_0,
+            #[cfg(feature = "multicore")]
+            sorted_u10_range: table_kind == PreparedTableKind::SortedU10Range,
         }
     }
 
@@ -624,6 +758,32 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             sorted_values: sorted_input_values,
             sorted_keys: sorted_input_keys,
         } = input;
+        #[cfg(feature = "multicore")]
+        let sorted_u10_suffix_multiples = prepared_sorted_u10_suffix_multiples(
+            params,
+            table.sorted_u10_range,
+            table.sorted_values.len(),
+            sorted_input_keys.len(),
+        );
+        #[cfg(feature = "multicore")]
+        let (mut permuted_input_values, mut permuted_table_values, sorted_u10) =
+            if sorted_u10_suffix_multiples.is_some() {
+                permute_sorted_values_with_sorted_u10(
+                    sorted_input_values,
+                    &sorted_input_keys,
+                    &table.sorted_values,
+                    &table.sorted_keys,
+                )?
+            } else {
+                let (input, table) = permute_sorted_values(
+                    sorted_input_values,
+                    &sorted_input_keys,
+                    &table.sorted_values,
+                    &table.sorted_keys,
+                )?;
+                (input, table, None)
+            };
+        #[cfg(not(feature = "multicore"))]
         let (mut permuted_input_values, mut permuted_table_values) = permute_sorted_values(
             sorted_input_values,
             &sorted_input_keys,
@@ -658,6 +818,27 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         let permuted_input_expression = domain.lagrange_from_vec(permuted_input_values);
         let permuted_table_expression = domain.lagrange_from_vec(permuted_table_values);
 
+        #[cfg(all(feature = "multicore", debug_assertions))]
+        if let Some(profile) = &sorted_u10 {
+            let mut current = profile.first;
+            let mut transitions = profile.transitions.iter().peekable();
+            for (row, scalar) in permuted_input_expression
+                .iter()
+                .take(table.sorted_values.len())
+                .enumerate()
+            {
+                if transitions
+                    .peek()
+                    .is_some_and(|transition| usize::from(transition.row) == row)
+                {
+                    current += transitions.next().unwrap().delta;
+                }
+                debug_assert_eq!(*scalar, F::from(u64::from(current)));
+            }
+            debug_assert!(transitions.next().is_none());
+            debug_assert_eq!(current, profile.last);
+        }
+
         let permuted_input_blind = blinding.input_blind;
         let permuted_table_blind = blinding.table_blind;
 
@@ -673,6 +854,8 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             permuted_table_blind,
             table.sinsemilla_q_0,
             table.sorted_values.len(),
+            #[cfg(feature = "multicore")]
+            sorted_u10.as_ref().zip(sorted_u10_suffix_multiples),
         );
 
         Ok(PreparedPermuted {
@@ -690,6 +873,91 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
     }
 }
 
+#[cfg(feature = "multicore")]
+fn commit_sorted_u10<C: CurveAffine>(
+    params: &Params<C>,
+    poly: &Polynomial<C::Scalar, LagrangeCoeff>,
+    blind: Blind<C::Scalar>,
+    usable_rows: usize,
+    profile: &SortedU10,
+    suffix_multiples: &[C],
+) -> Option<C::Curve> {
+    if params.k != PREPARED_SORTED_U10_COMMITMENT_K
+        || poly.len() != params.n as usize
+        || usable_rows == 0
+        || usable_rows > poly.len()
+        || poly.len() - usable_rows > SORTED_U10_MAX_SUFFIX
+        || profile.first > profile.last
+        || profile.last > SORTED_U10_MAX_VALUE
+        || suffix_multiples.len() != params.g_lagrange.len() * SORTED_U10_SUFFIX_MULTIPLES
+    {
+        return None;
+    }
+
+    let mut previous_row = 0;
+    let mut total_delta = 0u16;
+    for transition in &profile.transitions {
+        let row = usize::from(transition.row);
+        if row == 0
+            || row >= usable_rows
+            || row <= previous_row
+            || transition.delta == 0
+            || total_delta.checked_add(transition.delta)? > profile.last - profile.first
+        {
+            return None;
+        }
+        previous_row = row;
+        total_delta += transition.delta;
+    }
+    if total_delta != profile.last - profile.first {
+        return None;
+    }
+
+    // Abel summation over full-domain suffix sums H_i:
+    // x_0 H_0 + sum (x_i - x_{i - 1}) H_i
+    //   = sum_{i < usable} x_i G_i + x_last H_usable.
+    // Subtract x_last from every suffix scalar to cancel the final term.
+    // Two independent projective chains expose instruction-level parallelism;
+    // the outer scheduler supplies lookup- and Action-level concurrency.
+    let mut prefix = [C::Curve::identity(); 2];
+    let mut lane = 0;
+    let mut add_multiple = |row: usize, scalar: u16| {
+        let offset = row * SORTED_U10_SUFFIX_MULTIPLES;
+        for _ in 0..scalar / 4 {
+            prefix[lane] += suffix_multiples[offset + 2];
+            lane ^= 1;
+        }
+        let remainder = scalar % 4;
+        if remainder >= 2 {
+            prefix[lane] += suffix_multiples[offset + 1];
+            lane ^= 1;
+        }
+        if remainder & 1 != 0 {
+            prefix[lane] += suffix_multiples[offset];
+            lane ^= 1;
+        }
+    };
+    add_multiple(0, profile.first);
+    for transition in &profile.transitions {
+        add_multiple(usize::from(transition.row), transition.delta);
+    }
+    let prefix = prefix[0] + prefix[1];
+
+    let suffix_len = poly.len() - usable_rows;
+    let term_len = suffix_len + 1;
+    let correction = C::Scalar::from(u64::from(profile.last));
+    let mut scalars = [C::Scalar::ZERO; SORTED_U10_MAX_SUFFIX + 1];
+    for (scalar, value) in scalars[..suffix_len].iter_mut().zip(&poly[usable_rows..]) {
+        *scalar = *value - correction;
+    }
+    scalars[suffix_len] = blind.0;
+    let mut bases = [C::identity(); SORTED_U10_MAX_SUFFIX + 1];
+    bases[..suffix_len].copy_from_slice(&params.g_lagrange[usable_rows..]);
+    bases[suffix_len] = params.w;
+
+    Some(prefix + best_multiexp::<C>(&scalars[..term_len], &bases[..term_len]))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn commit_permuted_pair<C: CurveAffine>(
     params: &Params<C>,
@@ -700,23 +968,51 @@ fn commit_permuted_pair<C: CurveAffine>(
     table_blind: Blind<C::Scalar>,
     sinsemilla_q_0: Option<(C::Scalar, usize)>,
     usable_rows: usize,
+    #[cfg(feature = "multicore")] sorted_u10: Option<(&SortedU10, &[C])>,
 ) -> (C, C) {
-    // By linearity, C(input, r_i) = C(table, r_t) +
-    // C(input - table, r_i - r_t). The sorted lookup construction makes the
-    // delta sparse, which the retained commitment table handles efficiently.
-    let (table_commitment, difference_commitment) = crate::multicore::join(
+    // The 10-bit range-check input stays sorted, so its prefix can use cached
+    // Lagrange suffix sums. Other inputs use linearity:
+    // C(input, r_i) = C(table, r_t) + C(input - table, r_i - r_t).
+    // The lookup construction makes that delta sparse.
+    let (table_commitment, (input_or_difference, direct_input)) = crate::multicore::join(
         || commit_sinsemilla_table(params, table, table_blind, sinsemilla_q_0, usable_rows),
         || {
-            commit_lagrange_difference(
-                params,
-                domain,
-                input,
-                table,
-                Blind(input_blind.0 - table_blind.0),
-            )
+            #[cfg(feature = "multicore")]
+            let direct_input = sorted_u10.and_then(|(profile, suffix_multiples)| {
+                commit_sorted_u10(
+                    params,
+                    input,
+                    input_blind,
+                    usable_rows,
+                    profile,
+                    suffix_multiples,
+                )
+            });
+            #[cfg(not(feature = "multicore"))]
+            let direct_input: Option<C::Curve> = None;
+
+            if let Some(commitment) = direct_input {
+                (commitment, true)
+            } else {
+                (
+                    commit_lagrange_difference(
+                        params,
+                        domain,
+                        input,
+                        table,
+                        Blind(input_blind.0 - table_blind.0),
+                    ),
+                    false,
+                )
+            }
         },
     );
-    let projective = [table_commitment + difference_commitment, table_commitment];
+    let input_commitment = if direct_input {
+        input_or_difference
+    } else {
+        table_commitment + input_or_difference
+    };
+    let projective = [input_commitment, table_commitment];
     let mut affine = [C::identity(); 2];
     C::Curve::batch_normalize(&projective, &mut affine);
     (affine[0], affine[1])
@@ -791,7 +1087,7 @@ where
     let TablePlan {
         representatives: table_representatives,
         groups: table_groups,
-        sinsemilla_tables,
+        table_kinds,
         table_sort_scratch,
         input_sort_scratch,
     } = table_plan;
@@ -804,8 +1100,8 @@ where
         let prepared_tables = table_representatives
             .into_par_iter()
             .zip(table_sort_scratch.into_par_iter())
-            .zip(sinsemilla_tables.into_par_iter())
-            .map(|((lookup_index, sort_scratch), sinsemilla_table)| {
+            .zip(table_kinds.into_par_iter())
+            .map(|((lookup_index, sort_scratch), table_kind)| {
                 lookup_arguments[lookup_index].prepare_table(
                     domain,
                     value_evaluator,
@@ -814,7 +1110,7 @@ where
                     fixed_cosets,
                     usable_rows,
                     build_quotient_asts,
-                    sinsemilla_table,
+                    table_kind,
                     sort_scratch,
                 )
             })
@@ -923,10 +1219,10 @@ where
             });
         }
 
-        for (((representative, sort_scratch), sinsemilla_table), state) in table_representatives
+        for (((representative, sort_scratch), table_kind), state) in table_representatives
             .into_iter()
             .zip(table_sort_scratch)
-            .zip(sinsemilla_tables)
+            .zip(table_kinds)
             .zip(&table_states)
         {
             let prepared = &prepared;
@@ -939,7 +1235,7 @@ where
                     fixed_cosets,
                     usable_rows,
                     build_quotient_asts,
-                    sinsemilla_table,
+                    table_kind,
                     sort_scratch,
                 ));
                 let pending = {
@@ -1516,16 +1812,56 @@ fn permute_sorted_values<F: Field + Ord>(
     Ok((input_values, permuted_table_values))
 }
 
+#[cfg(feature = "multicore")]
+fn permute_sorted_values_with_sorted_u10<F: Field + Ord>(
+    input_values: Vec<F>,
+    input_keys: &[PastaSortKey],
+    table_values: &[F],
+    table_keys: &[PastaSortKey],
+) -> Result<(Vec<F>, Vec<F>, Option<SortedU10>), Error> {
+    assert_eq!(input_values.len(), table_values.len());
+    assert_eq!(input_keys.is_empty(), table_keys.is_empty());
+    if input_keys.is_empty() {
+        return permute_sorted_values(input_values, input_keys, table_values, table_keys)
+            .map(|(input, table)| (input, table, None));
+    }
+
+    assert_eq!(input_values.len(), input_keys.len());
+    assert_eq!(table_values.len(), table_keys.len());
+    debug_assert!(input_keys.windows(2).all(|pair| pair[0] <= pair[1]));
+    debug_assert!(table_keys.windows(2).all(|pair| pair[0] <= pair[1]));
+    let output_capacity = input_values.capacity();
+    let mut sorted_u10 = input_keys.first().and_then(SortedU10::new);
+    let permuted_table_values = permute_sorted_values_by(
+        &input_values,
+        table_values,
+        output_capacity,
+        |row| {
+            let same = input_keys[row] == input_keys[row - 1];
+            if !same
+                && let Some(profile) = &mut sorted_u10
+                && profile.push_distinct(row, &input_keys[row]).is_none()
+            {
+                sorted_u10 = None;
+            }
+            same
+        },
+        |table_row, input_row| table_keys[table_row] < input_keys[input_row],
+        |table_row, input_row| table_keys[table_row] == input_keys[input_row],
+    )?;
+    Ok((input_values, permuted_table_values, sorted_u10))
+}
+
 fn permute_sorted_values_by<F: Field, SameInput, TableLess, TableSame>(
     input_values: &[F],
     table_values: &[F],
     output_capacity: usize,
-    same_input: SameInput,
+    mut same_input: SameInput,
     table_less: TableLess,
     table_same: TableSame,
 ) -> Result<Vec<F>, Error>
 where
-    SameInput: Fn(usize) -> bool,
+    SameInput: FnMut(usize) -> bool,
     TableLess: Fn(usize, usize) -> bool,
     TableSame: Fn(usize, usize) -> bool,
 {
@@ -1582,6 +1918,347 @@ mod tests {
     use crate::plonk::circuit::FixedQuery;
 
     const TEST_ALPHABET_SIZE: usize = 3;
+    #[cfg(feature = "multicore")]
+    const OVER_PREPARED_ROUTE_THREADS: usize = 11;
+
+    #[cfg(feature = "multicore")]
+    fn pasta_key(value: u64) -> PastaSortKey {
+        PastaSortKey {
+            limbs: [value, 0, 0, 0],
+            source: 0,
+        }
+    }
+
+    #[cfg(feature = "multicore")]
+    fn test_sorted_u10(keys: &[PastaSortKey]) -> Option<SortedU10> {
+        let first_key = keys.first()?;
+        let mut profile = SortedU10::new(first_key)?;
+        for row in 1..keys.len() {
+            if keys[row] != keys[row - 1] {
+                profile.push_distinct(row, &keys[row])?;
+            }
+        }
+        Some(profile)
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn collects_sorted_u10_range_profile_during_permutation() {
+        let input_values = [0, 0, 2, 2, 7, u64::from(SORTED_U10_MAX_VALUE)];
+        let input_keys = input_values.into_iter().map(pasta_key).collect::<Vec<_>>();
+        let maximum = u64::from(SORTED_U10_MAX_VALUE);
+        let table_values = [0, 0, 2, 7, maximum, maximum];
+        let table_keys = table_values.map(pasta_key);
+        let (fused_input, fused_table, profile) = permute_sorted_values_with_sorted_u10(
+            input_values.map(pallas::Scalar::from).to_vec(),
+            &input_keys,
+            &table_values.map(pallas::Scalar::from),
+            &table_keys,
+        )
+        .unwrap();
+        let profile = profile.unwrap();
+        assert_eq!(profile.first, 0);
+        assert_eq!(profile.last, SORTED_U10_MAX_VALUE);
+        assert_eq!(
+            profile.transitions,
+            [
+                SortedU10Transition { row: 2, delta: 2 },
+                SortedU10Transition { row: 4, delta: 5 },
+                SortedU10Transition {
+                    row: 5,
+                    delta: SORTED_U10_MAX_VALUE - 7,
+                },
+            ]
+        );
+
+        let (plain_input, plain_table) = permute_sorted_values(
+            input_values.map(pallas::Scalar::from).to_vec(),
+            &input_keys,
+            &table_values.map(pallas::Scalar::from),
+            &table_keys,
+        )
+        .unwrap();
+        assert_eq!(fused_input, plain_input);
+        assert_eq!(fused_table, plain_table);
+
+        let outside_u10 = maximum + 1;
+        let non_u10 = [pallas::Scalar::from(outside_u10); 2];
+        let non_u10_keys = [pasta_key(outside_u10); 2];
+        let (_, _, profile) = permute_sorted_values_with_sorted_u10(
+            non_u10.to_vec(),
+            &non_u10_keys,
+            &non_u10,
+            &non_u10_keys,
+        )
+        .unwrap();
+        assert!(profile.is_none());
+
+        assert!(test_sorted_u10(&[pasta_key(2), pasta_key(1)]).is_none());
+        assert!(test_sorted_u10(&[pasta_key(outside_u10)]).is_none());
+        assert_eq!(std::mem::size_of::<SortedU10Transition>(), 4);
+    }
+
+    #[cfg(feature = "multicore")]
+    fn check_sorted_u10_commitments<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+        C::Curve: core::fmt::Debug,
+    {
+        use rand::{SeedableRng, rngs::StdRng};
+
+        const K: u32 = PREPARED_SORTED_U10_COMMITMENT_K;
+
+        let params = Params::<C>::new(K);
+        let domain = EvaluationDomain::<C::Scalar>::new(1, K);
+        let domain_len = 1usize << K;
+        let eligibility_keys = vec![pasta_key(0); domain_len - SORTED_U10_MAX_SUFFIX];
+
+        // An eligible-looking input must not enable profiling unless
+        // preparation has built the suffix cache.
+        assert!(
+            prepared_sorted_u10_suffix_multiples(
+                &params,
+                true,
+                eligibility_keys.len(),
+                eligibility_keys.len(),
+            )
+            .is_none()
+        );
+        assert!(params.prepare_commitments());
+        let suffix_multiples = params.prepared_lagrange_suffix_multiples().unwrap();
+        let wide_pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(OVER_PREPARED_ROUTE_THREADS)
+            .build()
+            .unwrap();
+        assert!(
+            wide_pool
+                .install(|| {
+                    prepared_sorted_u10_suffix_multiples(
+                        &params,
+                        true,
+                        eligibility_keys.len(),
+                        eligibility_keys.len(),
+                    )
+                })
+                .is_none()
+        );
+        let constant_profile = test_sorted_u10(&eligibility_keys).unwrap();
+        let prepared_suffix_multiples = prepared_sorted_u10_suffix_multiples(
+            &params,
+            true,
+            eligibility_keys.len(),
+            eligibility_keys.len(),
+        )
+        .unwrap();
+        assert_eq!((constant_profile.first, constant_profile.last), (0, 0));
+        assert!(constant_profile.transitions.is_empty());
+        assert!(std::ptr::eq(suffix_multiples, prepared_suffix_multiples));
+        let cloned_params = params.clone();
+        let cloned_suffix_multiples = cloned_params
+            .prepared_lagrange_suffix_multiples()
+            .expect("cloned params share their prepared suffix multiples");
+        assert!(std::ptr::eq(suffix_multiples, cloned_suffix_multiples));
+
+        let mut encoded = Vec::new();
+        params.write(&mut encoded).unwrap();
+        let decoded = Params::<C>::read(&mut encoded.as_slice()).unwrap();
+        assert!(decoded.prepared_lagrange_suffix_multiples().is_none());
+
+        assert!(
+            prepared_sorted_u10_suffix_multiples(
+                &params,
+                false,
+                eligibility_keys.len(),
+                eligibility_keys.len(),
+            )
+            .is_none()
+        );
+        assert!(
+            prepared_sorted_u10_suffix_multiples(
+                &params,
+                true,
+                domain_len - SORTED_U10_MAX_SUFFIX - 1,
+                eligibility_keys.len(),
+            )
+            .is_none()
+        );
+        assert!(
+            prepared_sorted_u10_suffix_multiples(
+                &params,
+                true,
+                domain_len - SORTED_U10_MAX_SUFFIX - 1,
+                domain_len - SORTED_U10_MAX_SUFFIX - 1,
+            )
+            .is_none()
+        );
+        let mut invalid_keys = eligibility_keys.clone();
+        invalid_keys[0] = pasta_key(u64::from(SORTED_U10_MAX_VALUE) + 1);
+        assert!(test_sorted_u10(&invalid_keys).is_none());
+        let wrong_k = Params::<C>::new(K - 1);
+        assert!(wrong_k.prepare_commitments());
+        let wrong_k_usable = (1usize << (K - 1)) - SORTED_U10_MAX_SUFFIX;
+        assert!(
+            prepared_sorted_u10_suffix_multiples(&wrong_k, true, wrong_k_usable, wrong_k_usable,)
+                .is_none()
+        );
+
+        let mut rng = StdRng::seed_from_u64(0x7531_302d_6c6f_6f6b);
+        let cases = [
+            (
+                0usize,
+                (0..domain_len)
+                    .map(|row| ((row / 7) * 3).min(usize::from(SORTED_U10_MAX_VALUE)) as u16)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                6usize,
+                (0..domain_len - 6)
+                    .map(|row| (5 + (row / 9) * 4).min(usize::from(SORTED_U10_MAX_VALUE)) as u16)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                SORTED_U10_MAX_SUFFIX,
+                (0..domain_len - SORTED_U10_MAX_SUFFIX)
+                    .map(|row| {
+                        if row + 1 == domain_len - SORTED_U10_MAX_SUFFIX {
+                            SORTED_U10_MAX_VALUE
+                        } else {
+                            0
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        ];
+
+        for (suffix_len, prefix_values) in cases {
+            let usable_rows = domain_len - suffix_len;
+            let keys = prefix_values
+                .iter()
+                .map(|&value| pasta_key(u64::from(value)))
+                .collect::<Vec<_>>();
+            let profile = test_sorted_u10(&keys).unwrap();
+            let mut values = prefix_values
+                .iter()
+                .map(|&value| C::Scalar::from(u64::from(value)))
+                .collect::<Vec<_>>();
+            values.extend((0..suffix_len).map(|_| C::Scalar::random(&mut rng)));
+            let polynomial = domain.lagrange_from_vec(values);
+            let blind = loop {
+                let candidate = C::Scalar::random(&mut rng);
+                if !bool::from(candidate.is_zero()) {
+                    break Blind(candidate);
+                }
+            };
+
+            assert_eq!(keys.len(), usable_rows);
+            assert_eq!(
+                commit_sorted_u10(
+                    &params,
+                    &polynomial,
+                    blind,
+                    usable_rows,
+                    &profile,
+                    suffix_multiples,
+                )
+                .unwrap(),
+                params.commit_lagrange(&polynomial, blind),
+            );
+        }
+
+        let usable_rows = domain_len - SORTED_U10_MAX_SUFFIX;
+        let zero = domain.lagrange_from_vec(vec![C::Scalar::ZERO; domain_len]);
+        let malformed = SortedU10 {
+            transitions: vec![SortedU10Transition { row: 1, delta: 1 }],
+            first: 0,
+            last: 2,
+        };
+        assert!(
+            commit_sorted_u10(
+                &params,
+                &zero,
+                Blind(C::Scalar::ONE),
+                usable_rows,
+                &malformed,
+                suffix_multiples,
+            )
+            .is_none()
+        );
+        assert!(
+            commit_sorted_u10(
+                &params,
+                &zero,
+                Blind(C::Scalar::ONE),
+                usable_rows,
+                &SortedU10 {
+                    transitions: vec![SortedU10Transition { row: 0, delta: 2 }],
+                    first: 0,
+                    last: 2,
+                },
+                suffix_multiples,
+            )
+            .is_none()
+        );
+        assert!(
+            commit_sorted_u10(
+                &params,
+                &zero,
+                Blind(C::Scalar::ONE),
+                usable_rows,
+                &SortedU10 {
+                    transitions: Vec::new(),
+                    first: 0,
+                    last: 0,
+                },
+                &suffix_multiples[..suffix_multiples.len() - 1],
+            )
+            .is_none()
+        );
+
+        let input_blind = Blind(C::Scalar::ONE);
+        let table_blind = Blind(C::Scalar::from(2));
+        assert_eq!(
+            commit_permuted_pair(
+                &params,
+                &domain,
+                &zero,
+                input_blind,
+                &zero,
+                table_blind,
+                None,
+                usable_rows,
+                Some((&malformed, suffix_multiples)),
+            ),
+            (
+                params.commit_lagrange(&zero, input_blind).to_affine(),
+                params.commit_lagrange(&zero, table_blind).to_affine(),
+            ),
+        );
+    }
+
+    #[cfg(feature = "multicore")]
+    fn run_sorted_u10_commitment_check<C>()
+    where
+        C: CurveAffine + core::fmt::Debug,
+        C::Curve: core::fmt::Debug,
+    {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(check_sorted_u10_commitments::<C>);
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn sorted_u10_commitment_matches_lagrange_pallas() {
+        run_sorted_u10_commitment_check::<pallas::Affine>();
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn sorted_u10_commitment_matches_lagrange_vesta() {
+        run_sorted_u10_commitment_check::<vesta::Affine>();
+    }
 
     // This is the previous BTreeMap implementation, retained as an oracle for
     // exact output ordering and error behavior.
@@ -1658,6 +2335,8 @@ mod tests {
                 Blind(C::Scalar::ZERO),
                 None,
                 0,
+                #[cfg(feature = "multicore")]
+                None,
             ),
             (C::identity(), C::identity()),
         );
@@ -1742,6 +2421,8 @@ mod tests {
                         table_blind,
                         sinsemilla_q_0,
                         15,
+                        #[cfg(feature = "multicore")]
+                        None,
                     ),
                     expected,
                 );
@@ -2008,7 +2689,10 @@ mod tests {
         );
         assert_eq!(plan.representatives, [0, 2]);
         assert_eq!(plan.groups, [0, 0, 1]);
-        assert_eq!(plan.sinsemilla_tables, [false, false]);
+        assert_eq!(
+            plan.table_kinds,
+            [PreparedTableKind::Generic, PreparedTableKind::Generic]
+        );
         assert_eq!(plan.table_sort_scratch.len(), 2);
         assert!(
             plan.table_sort_scratch
@@ -2038,7 +2722,19 @@ mod tests {
         );
         assert_eq!(plan.representatives, [0, 1]);
         assert_eq!(plan.groups, [0, 1, 1]);
-        assert_eq!(plan.sinsemilla_tables, [false, true]);
+        #[cfg(feature = "multicore")]
+        assert_eq!(
+            plan.table_kinds,
+            [
+                PreparedTableKind::SortedU10Range,
+                PreparedTableKind::Sinsemilla,
+            ]
+        );
+        #[cfg(not(feature = "multicore"))]
+        assert_eq!(
+            plan.table_kinds,
+            [PreparedTableKind::Generic, PreparedTableKind::Sinsemilla]
+        );
 
         let one_off = prepare_table_plan(
             &[
@@ -2048,7 +2744,10 @@ mod tests {
             1,
             17,
         );
-        assert_eq!(one_off.sinsemilla_tables, [false, false]);
+        assert_eq!(
+            one_off.table_kinds,
+            [PreparedTableKind::Generic, PreparedTableKind::Generic]
+        );
 
         let no_index_lookup = prepare_table_plan(
             &[
@@ -2058,7 +2757,7 @@ mod tests {
             1,
             17,
         );
-        assert_eq!(no_index_lookup.sinsemilla_tables, [false]);
+        assert_eq!(no_index_lookup.table_kinds, [PreparedTableKind::Generic]);
 
         let rotated = prepare_table_plan(
             &[
@@ -2069,7 +2768,10 @@ mod tests {
             1,
             17,
         );
-        assert_eq!(rotated.sinsemilla_tables, [false, false]);
+        assert_eq!(
+            rotated.table_kinds,
+            [PreparedTableKind::Generic, PreparedTableKind::Generic]
+        );
     }
 
     fn check_lookup_permutation_exhaustively<F>()

@@ -101,7 +101,10 @@ use crate::{
     PreparedInstanceTable,
 };
 #[cfg(feature = "multicore")]
-use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
+use crate::{
+    PREPARED_SORTED_U10_COMMITMENT_K, PREPARED_SPARSE_COMMITMENT_K, PreparedLookupCommitments,
+    PreparedSparseCommitments, SORTED_U10_SUFFIX_MULTIPLES,
+};
 
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 use core::panic::AssertUnwindSafe;
@@ -225,6 +228,8 @@ pub struct Params<C: CurveAffine> {
     lagrange_table_cache: ZeroCheckCache<C>,
     #[cfg(feature = "multicore")]
     sparse_commitment_cache: SparseCommitmentCache<C>,
+    #[cfg(feature = "multicore")]
+    lagrange_suffix_multiples_cache: LagrangeSuffixMultiplesCache<C>,
 }
 
 /// A lazily built prepared fixed-base multiexp table — over `[g..., w, u]`
@@ -1068,6 +1073,57 @@ impl<C: CurveAffine> fmt::Debug for SparseCommitmentCache<C> {
     }
 }
 
+/// Clone-shared affine multiples of the Lagrange suffix sums.
+#[cfg(feature = "multicore")]
+#[derive(Clone)]
+struct LagrangeSuffixMultiplesCache<C: CurveAffine>(Arc<OnceLock<Vec<C>>>);
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> Default for LagrangeSuffixMultiplesCache<C> {
+    fn default() -> Self {
+        Self(Arc::new(OnceLock::new()))
+    }
+}
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> LagrangeSuffixMultiplesCache<C> {
+    fn initialize(&self, bases: &[C]) {
+        self.0.get_or_init(|| {
+            let mut accumulator = C::Curve::identity();
+            let capacity = bases
+                .len()
+                .checked_mul(SORTED_U10_SUFFIX_MULTIPLES)
+                .expect("Lagrange suffix-multiple table length fits in usize");
+            let mut projective = Vec::with_capacity(capacity);
+            for base in bases.iter().rev() {
+                accumulator += *base;
+                let twice = accumulator.double();
+                projective.extend([accumulator, twice, twice.double()]);
+            }
+            let (rows, remainder) = projective.as_chunks_mut::<SORTED_U10_SUFFIX_MULTIPLES>();
+            debug_assert!(remainder.is_empty());
+            rows.reverse();
+            let mut affine = vec![C::identity(); projective.len()];
+            C::Curve::batch_normalize(&projective, &mut affine);
+            affine
+        });
+    }
+
+    fn get(&self) -> Option<&[C]> {
+        self.0.get().map(Vec::as_slice)
+    }
+}
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> fmt::Debug for LagrangeSuffixMultiplesCache<C> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("LagrangeSuffixMultiplesCache")
+            .field(&self.0.get().is_some())
+            .finish()
+    }
+}
+
 /// A signed-width-four positioned-window table over the generators needed
 /// by the two sparse prover commitments.
 #[cfg(feature = "multicore")]
@@ -1617,6 +1673,8 @@ impl<C: CurveAffine> Params<C> {
             lagrange_table_cache: ZeroCheckCache::default(),
             #[cfg(feature = "multicore")]
             sparse_commitment_cache: SparseCommitmentCache::default(),
+            #[cfg(feature = "multicore")]
+            lagrange_suffix_multiples_cache: LagrangeSuffixMultiplesCache::default(),
         }
     }
 
@@ -1914,6 +1972,8 @@ impl<C: CurveAffine> Params<C> {
             lagrange_table_cache: ZeroCheckCache::default(),
             #[cfg(feature = "multicore")]
             sparse_commitment_cache: SparseCommitmentCache::default(),
+            #[cfg(feature = "multicore")]
+            lagrange_suffix_multiples_cache: LagrangeSuffixMultiplesCache::default(),
         })
     }
 
@@ -2095,6 +2155,10 @@ impl<C: CurveAffine> Params<C> {
     /// table omits the scalar-one block and adds exactly 3.75 MiB. The
     /// signed-width-four sparse commitment table adds 416 KiB, and the
     /// signed-width-four public-instance table adds about 224 KiB on Pasta.
+    /// With `multicore`, the three affine multiples retained per Lagrange
+    /// suffix sum for sorted 10-bit range-check commitments add 384 KiB at
+    /// `k = 11`. Construction allocates another 576 KiB of projective scratch,
+    /// reaching a 960 KiB combined peak.
     ///
     /// Concurrent and repeat calls share their initialization attempts,
     /// including a backend decline. Without `orbits`, one atomic initialization
@@ -2132,6 +2196,7 @@ impl<C: CurveAffine> Params<C> {
             #[cfg(feature = "multicore")]
             if prepared {
                 let _ = self.prepare_sparse_commitment();
+                self.prepare_lagrange_suffix_multiples();
             }
             prepared
         }
@@ -2179,12 +2244,21 @@ impl<C: CurveAffine> Params<C> {
             }
             if prepared {
                 let _ = self.prepare_sparse_commitment();
+                self.prepare_lagrange_suffix_multiples();
             }
             prepared
         }
         #[cfg(all(not(feature = "multicore"), not(feature = "orbits")))]
         {
             false
+        }
+    }
+
+    #[cfg(feature = "multicore")]
+    fn prepare_lagrange_suffix_multiples(&self) {
+        if self.k == PREPARED_SORTED_U10_COMMITMENT_K {
+            self.lagrange_suffix_multiples_cache
+                .initialize(&self.g_lagrange);
         }
     }
 
@@ -2200,6 +2274,18 @@ impl<C: CurveAffine> Params<C> {
         {
             self.commitment_tables_cache.lagrange()
         }
+    }
+}
+
+#[cfg(feature = "multicore")]
+impl<C: CurveAffine> PreparedLookupCommitments<C> for Params<C> {
+    fn prepared_lagrange_suffix_multiples(&self) -> Option<&[C]> {
+        // Wider pools let the planned difference MSM use more parallelism than
+        // this serial prefix reduction, matching the other prepared routes.
+        (self.k == PREPARED_SORTED_U10_COMMITMENT_K
+            && crate::multicore::current_num_threads() <= prepared_commitment_max_threads(self.k))
+        .then(|| self.lagrange_suffix_multiples_cache.get())
+        .flatten()
     }
 }
 
@@ -2311,6 +2397,39 @@ fn lagrange_basis_hash<C: CurveAffine>(basis: &[C]) -> [u8; LAGRANGE_BASIS_HASH_
         .as_bytes()
         .try_into()
         .expect("configured digest length matches the output array")
+}
+
+#[cfg(all(test, feature = "multicore"))]
+fn check_lagrange_suffix_multiples<C: CurveAffine>() {
+    let params = Params::<C>::new(4);
+    let cache = LagrangeSuffixMultiplesCache::default();
+    cache.initialize(&params.g_lagrange);
+    let multiples = cache.get().unwrap();
+    assert_eq!(
+        multiples.len(),
+        params.g_lagrange.len() * SORTED_U10_SUFFIX_MULTIPLES
+    );
+
+    let mut suffix = C::Curve::identity();
+    for (row, base) in params.g_lagrange.iter().enumerate().rev() {
+        suffix += *base;
+        let offset = row * SORTED_U10_SUFFIX_MULTIPLES;
+        assert_eq!(C::Curve::from(multiples[offset]), suffix);
+        assert_eq!(C::Curve::from(multiples[offset + 1]), suffix.double());
+        assert_eq!(
+            C::Curve::from(multiples[offset + 2]),
+            suffix.double().double()
+        );
+    }
+}
+
+#[cfg(feature = "multicore")]
+#[test]
+fn lagrange_suffix_multiples_match_native_doubling() {
+    use crate::pasta::{EpAffine, EqAffine};
+
+    check_lagrange_suffix_multiples::<EpAffine>();
+    check_lagrange_suffix_multiples::<EqAffine>();
 }
 
 #[test]
