@@ -42,21 +42,21 @@ use crate::{
 const NO_DENOMINATOR: u32 = u32::MAX;
 
 // These routing thresholds were measured for the prepared no-orbits backend
-// at the Ironwood Action circuit's k. For each later circuit, a 256-row
-// stratified sample must show that no advice column gains nonzero coefficients,
-// while the aggregate removes more than one eighth of its nonzero coefficients
-// and at least 256 sampled coefficients. Eight-row per-column prepared-work
-// samples then reject adverse recoding and active-window costs, and each
-// direct sample must span every prepared main window. Blinds are excluded
-// because both routes evaluate one independent blind term.
+// at the Ironwood Action circuit's k. For each later circuit, an exact count
+// pass must show that no advice column gains nonzero coefficients, while the
+// aggregate removes more than one eighth of its nonzero coefficients and at
+// least 256 coefficients. Eight-row per-column prepared-work samples reject
+// adverse recoding costs that they observe, and each direct sample must span
+// every prepared main window. Those small samples do not bound unseen digit
+// visits or residual-tail work, so this remains a performance heuristic after
+// the exact density guard. Commitment blinds are excluded because both routes
+// evaluate one independent blind term.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const ADVICE_DELTA_PREPARED_K: u32 = 11;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const ADVICE_DELTA_ROUTE_DENOMINATOR: usize = 8;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const ADVICE_DELTA_COUNT_SAMPLES: usize = 256;
-#[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const ADVICE_DELTA_MIN_SAMPLED_SAVINGS: usize = ADVICE_DELTA_COUNT_SAMPLES;
+const ADVICE_DELTA_MIN_SAVINGS: usize = 256;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const ADVICE_DELTA_WORK_SAMPLES: usize = 8;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -99,25 +99,24 @@ fn advice_delta_stratified_row(
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-fn sampled_advice_delta_nonzero_counts<F: Field>(
-    direct: &[F],
-    reference: &[F],
-    sample_rows: usize,
-) -> Option<(usize, usize)> {
-    debug_assert_eq!(direct.len(), reference.len());
-    debug_assert!(!direct.is_empty());
-    let sample_rows = sample_rows.min(direct.len());
-    (0..sample_rows).try_fold((0_usize, 0_usize), |(direct_count, delta_count), sample| {
-        let row = advice_delta_stratified_row(direct.len(), sample_rows, sample)?;
-        Some((
-            direct_count.checked_add(usize::from(!direct[row].is_zero_vartime()))?,
-            delta_count.checked_add(usize::from(direct[row] != reference[row]))?,
-        ))
-    })
+fn advice_delta_nonzero_counts<F: Field>(direct: &[F], reference: &[F]) -> Option<(usize, usize)> {
+    if direct.len() != reference.len() {
+        return None;
+    }
+
+    direct.iter().zip(reference).try_fold(
+        (0_usize, 0_usize),
+        |(direct_count, delta_count), (direct, reference)| {
+            Some((
+                direct_count.checked_add(usize::from(!direct.is_zero_vartime()))?,
+                delta_count.checked_add(usize::from(direct != reference))?,
+            ))
+        },
+    )
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-fn use_sampled_advice_delta_counts(counts: &[(usize, usize)]) -> Option<bool> {
+fn use_advice_delta_counts(counts: &[(usize, usize)]) -> Option<bool> {
     let every_column_nonincreasing = counts.iter().all(|&(direct, delta)| delta <= direct);
     if !every_column_nonincreasing {
         return Some(false);
@@ -131,7 +130,7 @@ fn use_sampled_advice_delta_counts(counts: &[(usize, usize)]) -> Option<bool> {
     let saved = direct.checked_sub(delta)?;
     Some(
         every_column_nonincreasing
-            && saved >= ADVICE_DELTA_MIN_SAMPLED_SAVINGS
+            && saved >= ADVICE_DELTA_MIN_SAVINGS
             && saved > direct / ADVICE_DELTA_ROUTE_DENOMINATOR,
     )
 }
@@ -178,23 +177,17 @@ fn plan_advice_deltas<C: CurveAffine>(
         return None;
     }
 
-    // Evaluate each later circuit independently. The count pass only reads
-    // sampled coefficients and does not invoke the prepared evaluator.
+    // Evaluate each later circuit independently. The exact count pass only
+    // reads coefficients and does not invoke the prepared evaluator.
     let count_candidates = advice_witnesses[1..]
         .par_iter()
         .map(|(advice, _)| {
             let counts = advice
-                .iter()
-                .zip(reference)
-                .map(|(direct, reference)| {
-                    sampled_advice_delta_nonzero_counts(
-                        direct,
-                        reference,
-                        ADVICE_DELTA_COUNT_SAMPLES,
-                    )
-                })
+                .par_iter()
+                .zip(reference.par_iter())
+                .map(|(direct, reference)| advice_delta_nonzero_counts(direct, reference))
                 .collect::<Option<Vec<_>>>()?;
-            use_sampled_advice_delta_counts(&counts)
+            use_advice_delta_counts(&counts)
         })
         .collect::<Option<Vec<_>>>()?;
     if !count_candidates.iter().any(|&candidate| candidate) {
@@ -2499,37 +2492,31 @@ fn test_create_proof() {
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
-fn sampled_advice_delta_counts_require_global_savings() {
+fn advice_delta_counts_require_global_savings() {
     assert_eq!(
-        use_sampled_advice_delta_counts(&[(ADVICE_DELTA_MIN_SAMPLED_SAVINGS - 1, 0)]),
+        use_advice_delta_counts(&[(ADVICE_DELTA_MIN_SAVINGS - 1, 0)]),
         Some(false),
     );
     assert_eq!(
-        use_sampled_advice_delta_counts(&[(ADVICE_DELTA_MIN_SAMPLED_SAVINGS, 0)]),
+        use_advice_delta_counts(&[(ADVICE_DELTA_MIN_SAVINGS, 0)]),
         Some(true),
     );
 
     // The fractional threshold is strict.
-    let direct = ADVICE_DELTA_COUNT_SAMPLES;
+    let direct = ADVICE_DELTA_MIN_SAVINGS;
     let delta = direct - direct / ADVICE_DELTA_ROUTE_DENOMINATOR;
     let exactly_one_eighth = [(direct, delta); ADVICE_DELTA_ROUTE_DENOMINATOR];
-    assert_eq!(
-        use_sampled_advice_delta_counts(&exactly_one_eighth),
-        Some(false),
-    );
+    assert_eq!(use_advice_delta_counts(&exactly_one_eighth), Some(false),);
     let mut more_than_one_eighth = exactly_one_eighth;
     more_than_one_eighth[0].1 -= 1;
-    assert_eq!(
-        use_sampled_advice_delta_counts(&more_than_one_eighth),
-        Some(true),
-    );
+    assert_eq!(use_advice_delta_counts(&more_than_one_eighth), Some(true),);
 
-    // No individual column may gain sampled nonzero coefficients, even when
-    // the aggregate would otherwise pass.
+    // No individual column may gain nonzero coefficients, even when the
+    // aggregate would otherwise pass.
     assert_eq!(
-        use_sampled_advice_delta_counts(&[
-            (ADVICE_DELTA_COUNT_SAMPLES, 0),
-            (ADVICE_DELTA_COUNT_SAMPLES, 0),
+        use_advice_delta_counts(&[
+            (ADVICE_DELTA_MIN_SAVINGS, 0),
+            (ADVICE_DELTA_MIN_SAVINGS, 0),
             (0, 1),
         ]),
         Some(false),
@@ -2537,21 +2524,21 @@ fn sampled_advice_delta_counts_require_global_savings() {
 
     // Overflow declines the route instead of wrapping into a decision.
     assert_eq!(
-        use_sampled_advice_delta_counts(&[(usize::MAX, usize::MAX), (usize::MAX, usize::MAX),]),
+        use_advice_delta_counts(&[(usize::MAX, usize::MAX), (usize::MAX, usize::MAX),]),
         None,
     );
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
-fn advice_delta_samples_one_row_per_stratum() {
+fn advice_delta_work_samples_one_row_per_stratum() {
     const POLYNOMIAL_LEN: usize = 1 << ADVICE_DELTA_PREPARED_K;
 
-    for sample in 0..ADVICE_DELTA_COUNT_SAMPLES {
-        let row = advice_delta_stratified_row(POLYNOMIAL_LEN, ADVICE_DELTA_COUNT_SAMPLES, sample)
-            .unwrap();
-        let start = sample * POLYNOMIAL_LEN / ADVICE_DELTA_COUNT_SAMPLES;
-        let end = (sample + 1) * POLYNOMIAL_LEN / ADVICE_DELTA_COUNT_SAMPLES;
+    for sample in 0..ADVICE_DELTA_WORK_SAMPLES {
+        let row =
+            advice_delta_stratified_row(POLYNOMIAL_LEN, ADVICE_DELTA_WORK_SAMPLES, sample).unwrap();
+        let start = sample * POLYNOMIAL_LEN / ADVICE_DELTA_WORK_SAMPLES;
+        let end = (sample + 1) * POLYNOMIAL_LEN / ADVICE_DELTA_WORK_SAMPLES;
         assert!((start..end).contains(&row));
     }
 
@@ -2562,15 +2549,16 @@ fn advice_delta_samples_one_row_per_stratum() {
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 #[test]
-fn advice_delta_sample_counts_zeroes_and_equalities() {
+fn advice_delta_counts_zeroes_and_equalities() {
     use pasta_curves::Fp;
 
     let reference = [Fp::ZERO, Fp::ONE, Fp::from(2), Fp::ZERO];
     let direct = [Fp::ZERO, Fp::ONE, Fp::ZERO, Fp::from(3)];
     assert_eq!(
-        sampled_advice_delta_nonzero_counts(&direct, &reference, direct.len()),
+        advice_delta_nonzero_counts(&direct, &reference),
         Some((2, 2)),
     );
+    assert_eq!(advice_delta_nonzero_counts(&direct, &reference[..3]), None);
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -2643,18 +2631,20 @@ fn advice_delta_commitments_preserve_proofs() {
     }
 
     impl AdviceDeltaCircuit {
-        fn is_router_sample(row: usize) -> bool {
+        fn is_work_sample(row: usize) -> bool {
             static SAMPLE_ROWS: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
 
             SAMPLE_ROWS.get_or_init(|| {
                 let polynomial_len = 1_usize << ADVICE_DELTA_PREPARED_K;
                 let mut rows = vec![false; polynomial_len];
-                for sample_rows in [ADVICE_DELTA_COUNT_SAMPLES, ADVICE_DELTA_WORK_SAMPLES] {
-                    for sample in 0..sample_rows {
-                        let row = advice_delta_stratified_row(polynomial_len, sample_rows, sample)
-                            .unwrap();
-                        rows[row] = true;
-                    }
+                for sample in 0..ADVICE_DELTA_WORK_SAMPLES {
+                    let row = advice_delta_stratified_row(
+                        polynomial_len,
+                        ADVICE_DELTA_WORK_SAMPLES,
+                        sample,
+                    )
+                    .unwrap();
+                    rows[row] = true;
                 }
                 rows
             })[row]
@@ -2707,7 +2697,10 @@ fn advice_delta_commitments_preserve_proofs() {
                 }
                 AdviceDeltaProfile::MissedHighWindow => {
                     let direct = Fp::ONE;
-                    if self.circuit_index == 0 && !Self::is_router_sample(row) {
+                    if self.circuit_index == 0
+                        && row < MAGNITUDE_SHARED_ROWS
+                        && !Self::is_work_sample(row)
+                    {
                         direct - Fp::from_u128(1_u128 << 119)
                     } else {
                         direct
@@ -2755,6 +2748,85 @@ fn advice_delta_commitments_preserve_proofs() {
                 },
             )
         }
+    }
+
+    fn exact_counts_reject_known_sample_evasion(params: &Params<EqAffine>) {
+        const LEGACY_COUNT_SAMPLES: usize = 256;
+        let polynomial_len = 1_usize << ADVICE_DELTA_PREPARED_K;
+        let mut count_rows = vec![false; polynomial_len];
+        let mut work_rows = vec![false; polynomial_len];
+        for sample in 0..LEGACY_COUNT_SAMPLES {
+            count_rows[advice_delta_stratified_row(polynomial_len, LEGACY_COUNT_SAMPLES, sample)
+                .unwrap()] = true;
+        }
+        for sample in 0..ADVICE_DELTA_WORK_SAMPLES {
+            work_rows[advice_delta_stratified_row(
+                polynomial_len,
+                ADVICE_DELTA_WORK_SAMPLES,
+                sample,
+            )
+            .unwrap()] = true;
+        }
+
+        // A deterministic count sample could see 256 equal nonzero pairs and
+        // miss a dense delta everywhere else. Give the work-sample rows
+        // full-width direct values too, so its zero delta passes the remaining
+        // sampled prepared-work comparison.
+        let mut direct = vec![Fp::ZERO; polynomial_len];
+        let mut reference = vec![Fp::ONE; polynomial_len];
+        for row in 0..polynomial_len {
+            if count_rows[row] || work_rows[row] {
+                direct[row] = if work_rows[row] {
+                    AdviceDeltaCircuit::random_value(0, row)
+                } else {
+                    Fp::ONE
+                };
+                reference[row] = direct[row];
+            }
+        }
+
+        let legacy_counts = count_rows.iter().enumerate().fold(
+            (0_usize, 0_usize),
+            |(direct_count, delta_count), (row, &sampled)| {
+                if sampled {
+                    (
+                        direct_count + usize::from(!direct[row].is_zero_vartime()),
+                        delta_count + usize::from(direct[row] != reference[row]),
+                    )
+                } else {
+                    (direct_count, delta_count)
+                }
+            },
+        );
+        assert_eq!(legacy_counts, (LEGACY_COUNT_SAMPLES, 0));
+        assert_eq!(
+            use_advice_delta_counts(&[legacy_counts; ADVICE_COLUMNS]),
+            Some(true),
+        );
+
+        let direct_work = work_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &sampled)| sampled.then_some(direct[row]))
+            .collect::<Vec<_>>();
+        let delta_work = vec![Fp::ZERO; direct_work.len()];
+        let prepared = params.lagrange_table().unwrap();
+        assert_eq!(
+            prepared.scalar_work_is_at_most_vartime(&delta_work, &direct_work),
+            Some(true),
+        );
+
+        let equal_rows = count_rows
+            .iter()
+            .zip(&work_rows)
+            .filter(|&(&count_sample, &work_sample)| count_sample || work_sample)
+            .count();
+        let exact_counts = advice_delta_nonzero_counts(&direct, &reference).unwrap();
+        assert_eq!(exact_counts, (equal_rows, polynomial_len - equal_rows));
+        assert_eq!(
+            use_advice_delta_counts(&[exact_counts; ADVICE_COLUMNS]),
+            Some(false),
+        );
     }
 
     fn proof(
@@ -2834,6 +2906,7 @@ fn advice_delta_commitments_preserve_proofs() {
     let vk = keygen_vk(&unarmed, &keygen_circuit).expect("keygen_vk should not fail");
     let pk = keygen_pk(&unarmed, vk, &keygen_circuit).expect("keygen_pk should not fail");
     assert!(armed.prepare_commitments());
+    exact_counts_reject_known_sample_evasion(&armed);
 
     for (circuit_count, worker_counts) in [(1, &[1][..]), (2, &[1, 4][..]), (4, &[1][..])] {
         let circuits = (0..circuit_count)
@@ -2882,7 +2955,7 @@ fn advice_delta_commitments_preserve_proofs() {
     ];
     compare_profiles(&armed, &unarmed, &pk, &mixed, ADVICE_COLUMNS, &[1, 4]);
 
-    // One useful column cannot amortize the circuit-wide path, so the sampled
+    // One useful column cannot amortize the circuit-wide path, so the exact
     // aggregate gate retains the fallback.
     let globally_too_small = [
         keygen_circuit,
@@ -2936,12 +3009,10 @@ fn advice_delta_commitments_preserve_proofs() {
         })
         .collect::<Vec<_>>();
     let counts = (0..ADVICE_COLUMNS)
-        .map(|_| {
-            sampled_advice_delta_nonzero_counts(&direct, &reference, ADVICE_DELTA_COUNT_SAMPLES)
-        })
+        .map(|_| advice_delta_nonzero_counts(&direct, &reference))
         .collect::<Option<Vec<_>>>()
         .unwrap();
-    assert_eq!(use_sampled_advice_delta_counts(&counts), Some(true));
+    assert_eq!(use_advice_delta_counts(&counts), Some(true));
 
     let high_window_sparse = [
         AdviceDeltaCircuit {
@@ -2974,7 +3045,7 @@ fn advice_delta_commitments_preserve_proofs() {
         .iter()
         .enumerate()
         .map(|(row, &direct)| {
-            if row < ASSIGNED_ROWS && !AdviceDeltaCircuit::is_router_sample(row) {
+            if row < MAGNITUDE_SHARED_ROWS && !AdviceDeltaCircuit::is_work_sample(row) {
                 direct - Fp::from_u128(1_u128 << 119)
             } else {
                 direct
@@ -2982,12 +3053,10 @@ fn advice_delta_commitments_preserve_proofs() {
         })
         .collect::<Vec<_>>();
     let counts = (0..ADVICE_COLUMNS)
-        .map(|_| {
-            sampled_advice_delta_nonzero_counts(&direct, &reference, ADVICE_DELTA_COUNT_SAMPLES)
-        })
+        .map(|_| advice_delta_nonzero_counts(&direct, &reference))
         .collect::<Option<Vec<_>>>()
         .unwrap();
-    assert_eq!(use_sampled_advice_delta_counts(&counts), Some(true));
+    assert_eq!(use_advice_delta_counts(&counts), Some(true));
 
     let missed_high_window = [
         AdviceDeltaCircuit {
