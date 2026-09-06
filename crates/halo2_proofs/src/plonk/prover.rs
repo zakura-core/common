@@ -1039,7 +1039,6 @@ where
     let meta = &pk.vk.cs;
     let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
 
-    let instance_commitments = normalize_prover_instance_commitments(params, instances);
     let instance_values = instances
         .into_par_iter()
         .map(|instance| -> Result<_, Error> {
@@ -1061,18 +1060,10 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Preserve circuit and column order while updating the transcript. Keeping
-    // each preparation result in order also preserves the transcript prefix
-    // before an instance error.
+    // Preserve circuit and column order while collecting the prepared values.
     let mut prepared_instance_values = Vec::with_capacity(instance_values.len());
-    for (instance_commitments, instance_values) in
-        instance_commitments.into_iter().zip(instance_values)
-    {
-        let instance_values = instance_values?;
-        for commitment in instance_commitments {
-            transcript.common_point(commitment)?;
-        }
-        prepared_instance_values.push(instance_values);
+    for instance_values in instance_values {
+        prepared_instance_values.push(instance_values?);
     }
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
@@ -1155,6 +1146,21 @@ where
             })
             .collect::<Vec<_>>()
     };
+    let prepare_instance = || {
+        crate::multicore::join(
+            || normalize_prover_instance_commitments(params, instances),
+            prepare_instance_polynomials,
+        )
+    };
+    let absorb_instance_commitments =
+        |instance_commitments: Vec<Vec<C>>, transcript: &mut T| -> Result<(), Error> {
+            for commitments in instance_commitments {
+                for commitment in commitments {
+                    transcript.common_point(commitment)?;
+                }
+            }
+            Ok(())
+        };
     let synthesize = |witnesses: &mut Vec<WitnessCollection<'_, C::Scalar>>| {
         // Synthesize every circuit while allowing its floor planner to share
         // circuit-shape-dependent work across the batch.
@@ -1272,24 +1278,29 @@ where
             // advice preparation can enter the same worker pool immediately.
             // The in-place body also keeps the potentially non-Send RNG on
             // the calling thread.
-            let mut instance = Vec::new();
+            let mut prepared_instance = (Vec::new(), Vec::new());
             let advice_result = maybe_rayon::in_place_scope(|scope| {
                 scope.spawn(|_| {
-                    instance = prepare_instance_polynomials();
+                    prepared_instance = prepare_instance();
                 });
                 synthesize(&mut witnesses)?;
                 Ok::<_, Error>(prepare_advice(witnesses, &mut rng))
             });
+
+            let (instance_commitments, instance) = prepared_instance;
+            absorb_instance_commitments(instance_commitments, transcript)?;
             (instance, advice_result?)
         } else {
-            let instance = prepare_instance_polynomials();
+            let (instance_commitments, instance) = prepare_instance();
+            absorb_instance_commitments(instance_commitments, transcript)?;
             synthesize(&mut witnesses)?;
             (instance, prepare_advice(witnesses, &mut rng))
         };
 
     #[cfg(not(feature = "multicore"))]
     let (instance, (prepared_advice, lookup_table_plan)) = {
-        let instance = prepare_instance_polynomials();
+        let (instance_commitments, instance) = prepare_instance();
+        absorb_instance_commitments(instance_commitments, transcript)?;
         synthesize(&mut witnesses)?;
         (instance, prepare_advice(witnesses, &mut rng))
     };
