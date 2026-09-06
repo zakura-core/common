@@ -1,9 +1,9 @@
 //! The Orchard Action circuit implementation.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 #[cfg(feature = "multicore")]
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Mutex, mpsc};
 
 use group::{Curve, GroupEncoding};
 use halo2_proofs::{
@@ -59,7 +59,7 @@ use halo2_gadgets::{
         merkle::{
             MerklePath, PreparedMerklePathWitness,
             chip::{MerkleChip, MerkleConfig},
-            prepare_merkle_path_witness,
+            prepare_merkle_path_witness_with_output_hints,
         },
     },
     utilities::lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
@@ -203,6 +203,7 @@ impl OrchardCircuitVersion {
 #[derive(Clone, Debug)]
 pub struct Circuit {
     pub(crate) path: Value<[MerkleHashOrchard; MERKLE_DEPTH_ORCHARD]>,
+    pub(crate) path_parent_nodes: Value<Arc<[MerkleHashOrchard; MERKLE_DEPTH_ORCHARD]>>,
     pub(crate) pos: Value<u32>,
     pub(crate) g_d_old: Value<NonIdentityPallasPoint>,
     pub(crate) pk_d_old: Value<DiversifiedTransmissionKey>,
@@ -257,18 +258,22 @@ impl MerklePreparation {
 impl Circuit {
     fn prepare_merkle_path(
         path: Value<[MerkleHashOrchard; MERKLE_DEPTH_ORCHARD]>,
+        path_parent_nodes: Value<Arc<[MerkleHashOrchard; MERKLE_DEPTH_ORCHARD]>>,
         pos: Value<u32>,
         cm_old: Value<NoteCommitment>,
     ) -> Option<OrchardPreparedMerklePath> {
         let mut prepared = None;
-        path.zip(pos).zip(cm_old).map(|((path, pos), cm)| {
-            prepared = prepare_merkle_path_witness(
-                OrchardHashDomains::MerkleCrh.Q(),
-                pos,
-                path.map(|node| node.inner()),
-                ExtractedNoteCommitment::from(cm).inner(),
-            );
-        });
+        path.zip(path_parent_nodes).zip(pos).zip(cm_old).map(
+            |(((path, path_parent_nodes), pos), cm)| {
+                prepared = prepare_merkle_path_witness_with_output_hints(
+                    OrchardHashDomains::MerkleCrh.Q(),
+                    pos,
+                    path.map(|node| node.inner()),
+                    ExtractedNoteCommitment::from(cm).inner(),
+                    (*path_parent_nodes).map(|node| node.inner()),
+                );
+            },
+        );
         prepared
     }
 
@@ -308,6 +313,7 @@ impl Circuit {
     fn empty(circuit_version: OrchardCircuitVersion) -> Self {
         Circuit {
             path: Value::unknown(),
+            path_parent_nodes: Value::unknown(),
             pos: Value::unknown(),
             g_d_old: Value::unknown(),
             pk_d_old: Value::unknown(),
@@ -374,12 +380,16 @@ impl Circuit {
         let merkle_path = spend
             .merkle_path
             .expect("a spend used as a circuit witness carries a Merkle path");
+        let merkle_path_parent_nodes = spend
+            .merkle_path_parent_nodes
+            .expect("a spend used as a circuit witness carries Merkle path parent nodes");
 
         let psi_new = output_note.psi();
         let rcm_new = output_note.rcm();
 
         Circuit {
             path: Value::known(merkle_path.auth_path()),
+            path_parent_nodes: Value::known(merkle_path_parent_nodes),
             pos: Value::known(merkle_path.position()),
             g_d_old: Value::known(sender_address.g_d()),
             pk_d_old: Value::known(*sender_address.pk_d()),
@@ -1188,6 +1198,7 @@ struct CircuitWithPreparedMerklePath {
 impl CircuitWithPreparedMerklePath {
     fn new(circuit: &Circuit) -> Self {
         let preparation_path = circuit.path;
+        let preparation_path_parent_nodes = circuit.path_parent_nodes.clone();
         let preparation_pos = circuit.pos;
         let preparation_cm_old = circuit.cm_old.clone();
         let circuit = circuit.clone();
@@ -1195,6 +1206,7 @@ impl CircuitWithPreparedMerklePath {
         maybe_rayon::spawn(move || {
             let _ = sender.send(Circuit::prepare_merkle_path(
                 preparation_path,
+                preparation_path_parent_nodes,
                 preparation_pos,
                 preparation_cm_old,
             ));
@@ -1717,16 +1729,18 @@ mod benchmark;
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec::Vec;
+    use alloc::{sync::Arc, vec::Vec};
     use core::iter;
 
-    use ff::Field;
+    use ff::{Field, PrimeField};
     use halo2_proofs::{circuit::Value, dev::MockProver, poly::commitment::Params};
     use pasta_curves::{pallas, vesta};
     use rand::Rng;
 
     use crate::rng_compat::OsRng;
 
+    #[cfg(feature = "multicore")]
+    use super::CircuitWithPreparedMerklePath;
     use super::{
         Circuit, Instance, K, ORCHARD_K11_PARAMS, OrchardCircuitVersion, Proof, VerifyingKey,
         orchard_k11_params,
@@ -1735,7 +1749,7 @@ mod tests {
         bundle::{BundleVersion, Flags},
         keys::SpendValidatingKey,
         note::{Note, NoteVersion, Rho},
-        tree::MerklePath,
+        tree::{MerkleHashOrchard, MerklePath},
         value::{ValueCommitTrapdoor, ValueCommitment},
     };
 
@@ -1809,12 +1823,18 @@ mod tests {
         let cv_net = ValueCommitment::derive(value, rcv.clone());
 
         let path = MerklePath::dummy(&mut rng);
-        let anchor = path.root(spent_note.commitment().into());
+        let path_parent_nodes = path.parent_nodes(spent_note.commitment().into());
+        let anchor = path_parent_nodes
+            .last()
+            .copied()
+            .expect("an Orchard Merkle path is non-empty")
+            .into();
 
         (
             Circuit {
                 circuit_version,
                 path: Value::known(path.auth_path()),
+                path_parent_nodes: Value::known(Arc::new(path_parent_nodes)),
                 pos: Value::known(path.position()),
                 g_d_old: Value::known(sender_address.g_d()),
                 pk_d_old: Value::known(*sender_address.pk_d()),
@@ -1979,6 +1999,36 @@ mod tests {
         assert!(!OrchardCircuitVersion::InsecurePreNu6_2.supports_cross_address_restriction());
         assert!(!OrchardCircuitVersion::FixedPostNu6_2.supports_cross_address_restriction());
         assert!(OrchardCircuitVersion::PostNu6_3.supports_cross_address_restriction());
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn prepared_merkle_path_constrains_output_hints() {
+        let (mut circuit, instance) =
+            generate_circuit_instance(OsRng, OrchardCircuitVersion::FixedPostNu6_2);
+        circuit.path_parent_nodes = circuit.path_parent_nodes.map(|nodes| {
+            let mut nodes = *nodes;
+            let zero = MerkleHashOrchard::from_bytes(&pallas::Base::ZERO.to_repr()).unwrap();
+            let one = MerkleHashOrchard::from_bytes(&pallas::Base::ONE.to_repr()).unwrap();
+            nodes[0] = if nodes[0] == zero { one } else { zero };
+            Arc::new(nodes)
+        });
+
+        let prepared = CircuitWithPreparedMerklePath::new(&circuit);
+        let prover = MockProver::run(
+            K,
+            &prepared,
+            instance
+                .to_halo2_instance()
+                .iter()
+                .map(|column| column.to_vec())
+                .collect(),
+        );
+        match prover {
+            Ok(prover) => assert!(prover.verify().is_err()),
+            Err(halo2_proofs::plonk::Error::Synthesis) => {}
+            Err(error) => panic!("unexpected prover error: {error:?}"),
+        }
     }
 
     #[test]
