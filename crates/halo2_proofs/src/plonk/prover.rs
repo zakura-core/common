@@ -688,14 +688,14 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
 ///
 /// The circuit type must be `Sync` and its configuration `Send` so compatible
 /// floor planners can synthesize independent circuit witnesses in parallel.
-/// The configuration must also be `'static` because the proving key retains a
-/// clone for later proofs.
+/// The circuit and its configuration must also be `'static` because the proving
+/// key retains their type identity and a configuration clone for later proofs.
 pub fn create_proof<
     C: CurveAffine,
     E: EncodedChallenge<C>,
     R: Rng,
     T: TranscriptWrite<C, E>,
-    ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
+    ConcreteCircuit: Circuit<C::ScalarExt> + Sync + 'static,
 >(
     params: &Params<C>,
     pk: &ProvingKey<C>,
@@ -721,11 +721,14 @@ where
     pk.vk.hash_into(transcript)?;
 
     let domain = &pk.vk.domain;
-    let config = pk.circuit_config.clone_config().unwrap_or_else(|| {
-        // Preserve support for proving with another circuit type that has the
-        // same shape but uses a different configuration type.
-        ConcreteCircuit::configure(&mut ConstraintSystem::default())
-    });
+    let config = pk
+        .circuit_config
+        .clone_config::<ConcreteCircuit, _>()
+        .unwrap_or_else(|| {
+            // Preserve support for proving with another circuit type that has
+            // the same shape.
+            ConcreteCircuit::configure(&mut ConstraintSystem::default())
+        });
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
@@ -1933,13 +1936,10 @@ fn test_create_proof() {
     }
 
     #[derive(Clone, Copy)]
-    struct AlternateConfig;
-
-    #[derive(Clone, Copy)]
     struct AlternateCircuit;
 
     impl<F: Field> Circuit<F> for AlternateCircuit {
-        type Config = AlternateConfig;
+        type Config = ();
 
         type FloorPlanner = SimpleFloorPlanner;
 
@@ -1949,7 +1949,6 @@ fn test_create_proof() {
 
         fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {
             ALTERNATE_CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
-            AlternateConfig
         }
 
         fn synthesize(
@@ -2000,9 +1999,10 @@ fn test_create_proof() {
     .expect("cached-configuration proof generation should not fail");
     let cached_config_proof = transcript.finalize();
 
-    // A circuit with the same shape but a different configuration type keeps
-    // the established fallback of configuring itself at proving time. With
-    // identical randomness, both configuration paths produce the same proof.
+    // A different circuit type with the same shape and configuration type
+    // keeps the established fallback of configuring itself at proving time.
+    // With identical randomness, both configuration paths produce the same
+    // proof.
     ALTERNATE_CONFIGURATIONS.store(0, Ordering::Relaxed);
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
     create_proof(

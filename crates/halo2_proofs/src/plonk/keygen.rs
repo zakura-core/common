@@ -469,8 +469,8 @@ where
 
 /// Generate a [`ProvingKey`] from a [`VerifyingKey`] and a [`Circuit`] instance.
 ///
-/// The circuit configuration must be `'static` because the proving key retains
-/// a clone for later proofs.
+/// The circuit and its configuration must be `'static` because the proving key
+/// retains their type identity and a configuration clone for later proofs.
 pub fn keygen_pk<C, ConcreteCircuit>(
     params: &Params<C>,
     vk: VerifyingKey<C>,
@@ -478,12 +478,12 @@ pub fn keygen_pk<C, ConcreteCircuit>(
 ) -> Result<ProvingKey<C>, Error>
 where
     C: CurveAffine,
-    ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
+    ConcreteCircuit: Circuit<C::ScalarExt> + Sync + 'static,
     <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send + 'static,
 {
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
-    let circuit_config = CachedCircuitConfig::new(config.clone());
+    let circuit_config = CachedCircuitConfig::new::<ConcreteCircuit, _>(config.clone());
 
     let cs = cs;
 

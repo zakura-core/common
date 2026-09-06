@@ -448,19 +448,28 @@ pub struct ProvingKey<C: CurveAffine> {
 /// key. The mutex makes a merely `Send` configuration safe to share while it
 /// is cloned for a proof.
 #[derive(Clone)]
-struct CachedCircuitConfig(Arc<Mutex<Box<dyn StdAny + Send>>>);
+struct CachedCircuitConfig {
+    circuit_type: TypeId,
+    config: Arc<Mutex<Box<dyn StdAny + Send>>>,
+}
 
 impl CachedCircuitConfig {
-    fn new<T: StdAny + Send>(config: T) -> Self {
-        Self(Arc::new(Mutex::new(Box::new(config))))
+    fn new<Circuit: 'static, Config: StdAny + Send>(config: Config) -> Self {
+        Self {
+            circuit_type: TypeId::of::<Circuit>(),
+            config: Arc::new(Mutex::new(Box::new(config))),
+        }
     }
 
-    fn clone_config<T: StdAny + Clone>(&self) -> Option<T> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .downcast_ref::<T>()
-            .cloned()
+    fn clone_config<Circuit: 'static, Config: StdAny + Clone>(&self) -> Option<Config> {
+        (self.circuit_type == TypeId::of::<Circuit>()).then(|| {
+            self.config
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .downcast_ref::<Config>()
+                .expect("cached circuit configuration should have its original type")
+                .clone()
+        })
     }
 }
 

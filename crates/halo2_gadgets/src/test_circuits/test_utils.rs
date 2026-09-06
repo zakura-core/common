@@ -37,7 +37,7 @@ impl Proof {
         circuit: C,
     ) -> Result<Self, plonk::Error>
     where
-        C: Circuit<pallas::Base> + Sync,
+        C: Circuit<pallas::Base> + Sync + 'static,
         C::Config: Send + 'static,
     {
         let pk = plonk::keygen_pk(params, vk.clone(), &circuit).unwrap();
@@ -74,7 +74,7 @@ pub(crate) fn test_against_stored_circuit<C>(
     circuit_name: &str,
     expected_proof_size: usize,
 ) where
-    C: Circuit<pallas::Base> + Sync,
+    C: Circuit<pallas::Base> + Sync + 'static,
     C::Config: Send + 'static,
 {
     let vk_file_path = Path::new(TEST_DATA_DIR)
