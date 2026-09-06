@@ -10,9 +10,6 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-- On Apple AArch64 with `aarch64-asm`, field subtraction operators now use
-  inline assembly for the borrow chain and conditional modulus addition.
-  The inherent `const` methods are unchanged.
 - On Apple AArch64 with `aarch64-asm`, field addition operators now use an
   inline assembly carry chain and conditional reduction, speeding up Pallas
   and Vesta point arithmetic. The inherent `const` methods are unchanged.
