@@ -3385,8 +3385,13 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             self.virtual_poly_count.is_none(),
             "a virtual evaluator cannot evaluate polynomial rows"
         );
-        // We're working in a single basis, so all polynomials are the same length.
-        let poly_len = self.polys.first().unwrap().len();
+        // We're working in a single basis, so all registered polynomials are
+        // the same length. Constant-only expressions have no registered
+        // polynomial from which to obtain it.
+        let poly_len = self
+            .polys
+            .first()
+            .map_or_else(|| B::empty_poly(domain).len(), |poly| poly.len());
         let (chunk_size, _num_chunks) = get_chunk_params(poly_len);
 
         struct AstContext<'a, F: Field, B: Basis> {
@@ -4989,6 +4994,32 @@ mod tests {
         test_case(k, new_evaluator::<_, _, Coeff>(|| {}));
         test_case(k, new_evaluator::<_, _, LagrangeCoeff>(|| {}));
         test_case(k, new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {}));
+    }
+
+    #[test]
+    fn constant_only_evaluator_needs_no_registered_polynomial() {
+        const K: u32 = 4;
+        const VALUE: u64 = 7;
+
+        let domain = EvaluationDomain::new(1, K);
+        let value = pallas::Base::from(VALUE);
+
+        let coefficient =
+            new_evaluator::<_, _, Coeff>(|| {}).evaluate(&Ast::ConstantTerm(value), &domain);
+        assert_eq!(coefficient[0], value);
+        assert!(
+            coefficient[1..]
+                .iter()
+                .all(|entry| *entry == pallas::Base::ZERO)
+        );
+
+        let lagrange = new_evaluator::<_, _, LagrangeCoeff>(|| {})
+            .evaluate(&Ast::ConstantTerm(value), &domain);
+        assert!(lagrange.iter().all(|entry| *entry == value));
+
+        let extended = new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {})
+            .evaluate(&Ast::ConstantTerm(value), &domain);
+        assert!(extended.iter().all(|entry| *entry == value));
     }
 
     #[test]
