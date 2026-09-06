@@ -142,7 +142,7 @@ fn bench_poseidon<S, const WIDTH: usize, const RATE: usize, const L: usize>(
     name: &str,
     c: &mut Criterion,
 ) where
-    S: Spec<Fp, WIDTH, RATE> + Copy + Clone + Sync,
+    S: Spec<Fp, WIDTH, RATE> + Copy + Clone + Sync + 'static,
 {
     // Initialize the polynomial commitment parameters
     let params: Params<vesta::Affine> = Params::new(K);
