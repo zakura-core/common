@@ -2582,6 +2582,29 @@ fn benchmark_lagrange_suffix_preparation_strategies() {
     }
 }
 
+#[cfg(feature = "multicore")]
+#[test]
+#[ignore = "manual complete-preparation benchmark"]
+fn benchmark_complete_commitment_preparation() {
+    use std::{hint::black_box, time::Instant};
+
+    use crate::pasta::EqAffine;
+
+    let samples = std::env::var("ZAKURA_BENCH_SAMPLES")
+        .ok()
+        .and_then(|samples| samples.parse::<usize>().ok())
+        .unwrap_or(50);
+    for sample in 0..samples {
+        let params = Params::<EqAffine>::new(PREPARED_SORTED_U10_COMMITMENT_K);
+        let start = Instant::now();
+        assert!(black_box(&params).prepare_commitments());
+        println!(
+            "complete-prep sample={sample} nanos={}",
+            start.elapsed().as_nanos()
+        );
+    }
+}
+
 #[test]
 fn selected_lagrange_bases_are_stable() {
     use crate::pasta::EqAffine;
