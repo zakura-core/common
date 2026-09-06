@@ -898,6 +898,7 @@ enum FactorBodyWork<F: Field> {
 struct WeightedTerm<F: Field> {
     term: EvaluationPlan<F>,
     power: ScalarId<F>,
+    split_scaled_addends: bool,
 }
 
 /// A challenge-independent compiled quotient plan retained by a proving key.
@@ -1674,6 +1675,7 @@ impl<F: Field> EvaluationPlan<F> {
                             WeightedTerm {
                                 term: EvaluationPlan::compile(term, scalars),
                                 power: scalars.intern(powers[terms.len() - 1 - position]),
+                                split_scaled_addends: false,
                             }
                         })
                         .collect();
@@ -2690,6 +2692,111 @@ fn apply_factor_body_cache_actions<F: Field>(
     }
 }
 
+fn scaled_addend_split_stats<F: Field>(
+    plan: &EvaluationPlan<F>,
+    scalars: &[PlanScalar<F>],
+) -> (usize, usize) {
+    match plan {
+        EvaluationPlan::Add(lhs, rhs) => {
+            let lhs = scaled_addend_split_stats(lhs, scalars);
+            let rhs = scaled_addend_split_stats(rhs, scalars);
+            (lhs.0 + rhs.0, lhs.1 + rhs.1)
+        }
+        _ => {
+            let two = F::ONE.double();
+            let mut plan = plan;
+            let mut nontrivial_scales = 0;
+            while let EvaluationPlan::Scale(inner, scalar) = plan {
+                if let PlanScalar::Literal(value) = scalars[scalar.index()]
+                    && value != F::ONE
+                    && value != -F::ONE
+                    && value != two
+                {
+                    nontrivial_scales += 1;
+                }
+                plan = inner;
+            }
+            (1, nontrivial_scales)
+        }
+    }
+}
+
+fn mark_factor_body_scaled_addends<F: Field>(
+    plan: &mut FactorBodyPlan<F>,
+    scalars: &[PlanScalar<F>],
+) {
+    match plan {
+        FactorBodyPlan::Sequential(bodies) => {
+            for body in bodies {
+                body.mark_scaled_addends(scalars);
+            }
+        }
+        FactorBodyPlan::Factored(work) => {
+            for work in work {
+                match work {
+                    FactorBodyWork::Term(term) => term.mark_scaled_addends(scalars),
+                    FactorBodyWork::SharedFactor { factor, terms } => {
+                        factor.mark_scaled_addends(scalars);
+                        for term in terms {
+                            term.mark_scaled_addends(scalars);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<F: Field> WeightedTerm<F> {
+    fn mark_scaled_addends(&mut self, scalars: &[PlanScalar<F>]) {
+        self.term.mark_scaled_addends(scalars);
+        let (addends, nontrivial_scales) = scaled_addend_split_stats(&self.term, scalars);
+        let has_deferred_fold = TypeId::of::<F>() == TypeId::of::<pallas::Base>()
+            || TypeId::of::<F>() == TypeId::of::<vesta::Base>();
+        self.split_scaled_addends =
+            has_deferred_fold && addends > 1 && nontrivial_scales >= addends - 1;
+    }
+}
+
+impl<F: Field> EvaluationPlan<F> {
+    fn mark_scaled_addends(&mut self, scalars: &[PlanScalar<F>]) {
+        match self {
+            Self::Add(lhs, rhs) | Self::Mul(lhs, rhs) => {
+                lhs.mark_scaled_addends(scalars);
+                rhs.mark_scaled_addends(scalars);
+            }
+            Self::Square(inner) | Self::Scale(inner, _) | Self::CacheStore { inner, .. } => {
+                inner.mark_scaled_addends(scalars);
+            }
+            Self::Horner { base, .. } => base.mark_scaled_addends(scalars),
+            Self::DistributePowers { work, .. } => {
+                for work in work {
+                    match work {
+                        DistributionWork::Term { term, .. } => {
+                            term.mark_scaled_addends(scalars);
+                        }
+                        DistributionWork::WeightedSharedFactor { factor, terms } => {
+                            factor.mark_scaled_addends(scalars);
+                            for term in terms {
+                                term.mark_scaled_addends(scalars);
+                            }
+                        }
+                        DistributionWork::SelectorFamily { runs, .. } => {
+                            for run in runs {
+                                mark_factor_body_scaled_addends(&mut run.bodies, scalars);
+                            }
+                        }
+                    }
+                }
+            }
+            Self::Poly(_)
+            | Self::CacheLoad { .. }
+            | Self::LinearTerm(_)
+            | Self::ConstantTerm(_) => {}
+        }
+    }
+}
+
 impl<F: Field> FactorBodyPlan<F> {
     fn compile<E: Copy, B: Basis>(
         terms: &[&Ast<E, F, B>],
@@ -2722,6 +2829,7 @@ impl<F: Field> FactorBodyPlan<F> {
                     WeightedTerm {
                         term: EvaluationPlan::compile(term, scalars),
                         power: scalars.intern(powers[position]),
+                        split_scaled_addends: false,
                     }
                 })
                 .collect();
@@ -2735,6 +2843,7 @@ impl<F: Field> FactorBodyPlan<F> {
                 work.push(FactorBodyWork::Term(WeightedTerm {
                     term: EvaluationPlan::compile(term, scalars),
                     power: scalars.intern(powers[position]),
+                    split_scaled_addends: false,
                 }));
             }
         }
@@ -2906,6 +3015,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             retain_layout,
             &scalar_descriptors,
         );
+        plan.mark_scaled_addends(&scalar_descriptors);
         let scratch_slots = plan.required_scratch_slots();
         let max_challenge_exponents = max_challenge_exponents(&scalar_descriptors);
         let evaluator_shape =
@@ -3405,33 +3515,13 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         fn root_scale_chain<'a, F: Field>(
             mut plan: &'a EvaluationPlan<F>,
             scalars: &BoundPlanScalars<F>,
-        ) -> (&'a EvaluationPlan<F>, F, usize) {
+        ) -> (&'a EvaluationPlan<F>, F) {
             let mut factor = F::ONE;
-            let mut nontrivial_scales = 0;
             while let EvaluationPlan::Scale(inner, scalar) = plan {
-                let (scalar, kind) = scalars.scale(*scalar);
-                factor *= scalar;
-                nontrivial_scales += usize::from(matches!(kind, ScaleKind::Other));
+                factor *= scalars.get(*scalar);
                 plan = inner;
             }
-            (plan, factor, nontrivial_scales)
-        }
-
-        fn weighted_addend_stats<F: Field>(
-            plan: &EvaluationPlan<F>,
-            scalars: &BoundPlanScalars<F>,
-        ) -> (usize, usize) {
-            match plan {
-                EvaluationPlan::Add(lhs, rhs) => {
-                    let lhs = weighted_addend_stats(lhs, scalars);
-                    let rhs = weighted_addend_stats(rhs, scalars);
-                    (lhs.0 + rhs.0, lhs.1 + rhs.1)
-                }
-                _ => {
-                    let (_, _, nontrivial_scales) = root_scale_chain(plan, scalars);
-                    (1, nontrivial_scales)
-                }
-            }
+            (plan, factor)
         }
 
         fn accumulate_weighted_addends<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
@@ -3449,7 +3539,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     accumulate_weighted_addends(rhs, power, ctx, output, cache, scratch, fold);
                 }
                 _ => {
-                    let (plan, factor, _) = root_scale_chain(plan, ctx.scalars);
+                    let (plan, factor) = root_scale_chain(plan, ctx.scalars);
                     let power = power * factor;
                     if let EvaluationPlan::CacheLoad { slot } = plan {
                         let chunk_len = output.len();
@@ -3474,17 +3564,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             fold.reset();
             for term in terms {
                 let power = ctx.scalars.get(term.power);
-                let has_deferred_fold = TypeId::of::<F>() == TypeId::of::<pallas::Base>()
-                    || TypeId::of::<F>() == TypeId::of::<vesta::Base>();
-                let (addends, nontrivial_scales) = if has_deferred_fold {
-                    weighted_addend_stats(&term.term, ctx.scalars)
-                } else {
-                    (1, 0)
-                };
-                // A split adds one deferred product for every addend after
-                // the first. Two products are cheaper than one ordinary
-                // scaled addition on both Pasta fields.
-                if addends > 1 && 2 * nontrivial_scales >= addends - 1 {
+                if term.split_scaled_addends {
                     accumulate_weighted_addends(
                         &term.term, power, ctx, output, cache, scratch, fold,
                     );
