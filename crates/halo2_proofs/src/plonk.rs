@@ -51,30 +51,6 @@ fn commit_instance<C: CurveAffine>(params: &Params<C>, instance: &[C::Scalar]) -
     commitment
 }
 
-fn parallelize_two<A: Send, B: Send>(
-    left: &mut [A],
-    right: &mut [B],
-    f: impl Fn(&mut [A], &mut [B], usize) + Send + Sync + Clone,
-) {
-    assert_eq!(left.len(), right.len());
-    let num_threads = crate::multicore::current_num_threads();
-    let mut chunk = left.len() / num_threads;
-    if chunk < num_threads {
-        chunk = left.len();
-    }
-
-    crate::multicore::scope(|scope| {
-        for (chunk_num, (left, right)) in left
-            .chunks_mut(chunk)
-            .zip(right.chunks_mut(chunk))
-            .enumerate()
-        {
-            let f = f.clone();
-            scope.spawn(move |_| f(left, right, chunk_num * chunk));
-        }
-    });
-}
-
 /// Builds the prefix products of `numerators[i] / denominators[i]`.
 ///
 /// The common nonzero-denominator path uses one field inversion. A zero

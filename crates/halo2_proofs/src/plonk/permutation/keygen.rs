@@ -3,7 +3,7 @@ use group::{
     ff::{Field, PrimeField},
 };
 
-use super::{Argument, ProvingKey, VerifyingKey};
+use super::{Argument, IdentityCells, ProvingKey, VerifyingKey};
 use crate::{
     arithmetic::CurveAffine,
     plonk::{Any, Column, Error},
@@ -170,6 +170,11 @@ impl Assembly {
         p: &Argument,
         fft_twiddles: &ProvingKeyTwiddles<C::Scalar>,
     ) -> ProvingKey<C> {
+        // Retain the cells that the permutation leaves fixed. The prover can
+        // cancel these factors before constructing each grand-product ratio.
+        let identity_cells = IdentityCells::from_mapping(&self.mapping);
+        let identity_columns = identity_cells.identity_columns(params.n as usize);
+
         // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
         let mut omega_powers = Vec::with_capacity(params.n as usize);
         {
@@ -198,26 +203,23 @@ impl Assembly {
 
         // Compute permutation polynomials, convert to coset form.
         let mut permutations = vec![];
-        let mut identity_columns = Vec::with_capacity(p.columns.len());
         for i in 0..p.columns.len() {
             // Computes the permutation polynomial based on the permutation
             // description in the assembly.
             let mut permutation_poly = domain.empty_lagrange();
-            let mut is_identity = true;
             for (j, p) in permutation_poly.iter_mut().enumerate() {
                 let (permuted_i, permuted_j) = self.mapping[i][j];
-                is_identity &= (permuted_i, permuted_j) == (i, j);
                 *p = deltaomega[permuted_i][permuted_j];
             }
 
             permutations.push(permutation_poly);
-            identity_columns.push(is_identity);
         }
         let (polys, cosets) =
             domain.batch_lagrange_to_coeff_and_extended(&permutations, fft_twiddles);
         ProvingKey {
             permutations,
             identity_columns,
+            identity_cells,
             polys,
             cosets,
         }
