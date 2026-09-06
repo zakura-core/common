@@ -101,6 +101,8 @@ impl<C: CurveAffine> VerifyingKey<C> {
 #[derive(Clone, Debug)]
 pub(crate) struct ProvingKey<C: CurveAffine> {
     permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    /// Whether each permutation column leaves every cell in place.
+    identity_columns: Vec<bool>,
     polys: Vec<Polynomial<C::Scalar, Coeff>>,
     pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
 }
