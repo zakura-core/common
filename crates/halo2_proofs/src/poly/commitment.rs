@@ -2469,6 +2469,119 @@ fn lagrange_suffix_multiples_match_native_doubling() {
     check_lagrange_suffix_multiples::<EqAffine>();
 }
 
+#[cfg(all(test, feature = "multicore"))]
+fn build_lagrange_suffix_multiples<C: CurveAffine>(bases: &[C], strategy: &str) -> Vec<C> {
+    let capacity = bases.len() * SORTED_U10_SUFFIX_MULTIPLES;
+    let mut projective = Vec::with_capacity(capacity);
+
+    if strategy == "parallel-all" {
+        let threads = crate::multicore::current_num_threads();
+        let chunk_size = bases.len().div_ceil(threads);
+        let totals = bases
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .fold(C::Curve::identity(), |sum, base| sum + *base)
+            })
+            .collect::<Vec<_>>();
+        let mut offsets = vec![C::Curve::identity(); totals.len()];
+        let mut suffix = C::Curve::identity();
+        for (offset, total) in offsets.iter_mut().zip(&totals).rev() {
+            *offset = suffix;
+            suffix += total;
+        }
+
+        projective.resize(capacity, C::Curve::identity());
+        projective
+            .par_chunks_mut(chunk_size * SORTED_U10_SUFFIX_MULTIPLES)
+            .zip(bases.par_chunks(chunk_size))
+            .zip(offsets.into_par_iter())
+            .for_each(|((output, bases), mut accumulator)| {
+                let (rows, remainder) = output.as_chunks_mut::<SORTED_U10_SUFFIX_MULTIPLES>();
+                debug_assert!(remainder.is_empty());
+                for (row, base) in rows.iter_mut().zip(bases).rev() {
+                    accumulator += *base;
+                    let twice = accumulator.double();
+                    *row = [accumulator, twice, twice.double()];
+                }
+            });
+    } else {
+        let mut accumulator = C::Curve::identity();
+        for base in bases.iter().rev() {
+            accumulator += *base;
+            let twice = accumulator.double();
+            projective.extend([accumulator, twice, twice.double()]);
+        }
+        let (rows, remainder) = projective.as_chunks_mut::<SORTED_U10_SUFFIX_MULTIPLES>();
+        debug_assert!(remainder.is_empty());
+        rows.reverse();
+    }
+
+    let mut affine = vec![C::identity(); projective.len()];
+    if strategy == "serial" {
+        C::Curve::batch_normalize(&projective, &mut affine);
+    } else {
+        let threads = crate::multicore::current_num_threads();
+        let chunk_size = projective.len().div_ceil(threads);
+        projective
+            .par_chunks(chunk_size)
+            .zip(affine.par_chunks_mut(chunk_size))
+            .for_each(|(projective, affine)| C::Curve::batch_normalize(projective, affine));
+    }
+    affine
+}
+
+#[cfg(feature = "multicore")]
+#[test]
+#[ignore = "manual suffix-preparation benchmark"]
+fn benchmark_lagrange_suffix_preparation_strategies() {
+    use std::{hint::black_box, time::Instant};
+
+    use crate::pasta::EqAffine;
+
+    let params = Params::<EqAffine>::new(PREPARED_SORTED_U10_COMMITMENT_K);
+    let samples = std::env::var("ZAKURA_BENCH_SAMPLES")
+        .ok()
+        .and_then(|samples| samples.parse::<usize>().ok())
+        .unwrap_or(100);
+    let expected = build_lagrange_suffix_multiples(&params.g_lagrange, "serial");
+
+    let strategies = ["serial", "parallel-normalize", "parallel-all"];
+    for strategy in strategies {
+        for _ in 0..10 {
+            black_box(build_lagrange_suffix_multiples(
+                black_box(&params.g_lagrange),
+                strategy,
+            ));
+        }
+    }
+    let orders = [
+        [0, 1, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+        [1, 0, 2],
+        [0, 2, 1],
+    ];
+    for sample in 0..samples {
+        for &strategy in &orders[sample % orders.len()] {
+            let strategy = strategies[strategy];
+            let start = Instant::now();
+            let actual = black_box(build_lagrange_suffix_multiples(
+                black_box(&params.g_lagrange),
+                strategy,
+            ));
+            let elapsed = start.elapsed();
+            assert_eq!(actual, expected);
+            println!(
+                "suffix-prep strategy={strategy} sample={sample} nanos={}",
+                elapsed.as_nanos()
+            );
+        }
+    }
+}
+
 #[test]
 fn selected_lagrange_bases_are_stable() {
     use crate::pasta::EqAffine;
