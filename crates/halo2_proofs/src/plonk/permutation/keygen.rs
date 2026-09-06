@@ -198,21 +198,26 @@ impl Assembly {
 
         // Compute permutation polynomials, convert to coset form.
         let mut permutations = vec![];
+        let mut identity_columns = Vec::with_capacity(p.columns.len());
         for i in 0..p.columns.len() {
             // Computes the permutation polynomial based on the permutation
             // description in the assembly.
             let mut permutation_poly = domain.empty_lagrange();
+            let mut is_identity = true;
             for (j, p) in permutation_poly.iter_mut().enumerate() {
                 let (permuted_i, permuted_j) = self.mapping[i][j];
+                is_identity &= (permuted_i, permuted_j) == (i, j);
                 *p = deltaomega[permuted_i][permuted_j];
             }
 
             permutations.push(permutation_poly);
+            identity_columns.push(is_identity);
         }
         let (polys, cosets) =
             domain.batch_lagrange_to_coeff_and_extended(&permutations, fft_twiddles);
         ProvingKey {
             permutations,
+            identity_columns,
             polys,
             cosets,
         }

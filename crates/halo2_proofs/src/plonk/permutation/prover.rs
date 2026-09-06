@@ -44,9 +44,22 @@ struct PreparedFractions<F: Field> {
     blinding: SetBlinding<F>,
 }
 
+enum PreparedProduct<F: Field> {
+    Fractions(PreparedFractions<F>),
+    Identity(SetBlinding<F>),
+}
+
 struct UntransformedSet<F: Field> {
     product: Polynomial<F, LagrangeCoeff>,
     product_blind: Blind<F>,
+}
+
+enum UnpreparedSet<F: Field> {
+    Dense(UntransformedSet<F>),
+    Identity {
+        constant: F,
+        blinding: SetBlinding<F>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -241,6 +254,9 @@ impl Argument {
         let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         let blinding_factors = pk.vk.cs.blinding_factors();
 
+        assert_eq!(self.columns.len(), pkey.permutations.len());
+        assert_eq!(self.columns.len(), pkey.identity_columns.len());
+
         // Record the initial delta power for each set. The numerator ratios
         // are then independent across sets.
         let mut deltaomega = C::Scalar::ONE;
@@ -248,67 +264,89 @@ impl Argument {
             .columns
             .chunks(chunk_len)
             .zip(pkey.permutations.chunks(chunk_len))
-            .map(|(columns, permutations)| {
+            .zip(pkey.identity_columns.chunks(chunk_len))
+            .map(|((columns, permutations), identity_columns)| {
                 let initial_deltaomega = deltaomega;
                 for _ in columns {
                     deltaomega *= &C::Scalar::DELTA;
                 }
-                (columns, permutations, initial_deltaomega)
+                (
+                    columns,
+                    permutations,
+                    initial_deltaomega,
+                    identity_columns.iter().all(|&identity| identity),
+                )
             })
             .collect::<Vec<_>>();
         assert_eq!(set_inputs.len(), blinding.sets.len());
 
         // Indexed collection preserves set order for the dependent prefix
         // chain and eventual transcript writes.
-        let prepared_fractions = set_inputs
+        let prepared_products = set_inputs
             .into_par_iter()
             .zip(blinding.sets.into_par_iter())
-            .map(|((columns, permutations, initial_deltaomega), blinding)| {
-                let (numerators, denominators, _) = prepare_fractions(
-                    params,
-                    domain,
-                    columns,
-                    permutations,
-                    advice,
-                    fixed,
-                    instance,
-                    beta,
-                    gamma,
-                    initial_deltaomega,
-                    blinding_factors,
-                );
-                PreparedFractions {
-                    numerators,
-                    denominators,
-                    blinding,
-                }
-            })
+            .map(
+                |((columns, permutations, initial_deltaomega, is_identity), blinding)| {
+                    if is_identity && blinding_factors <= MAX_DIRECT_TRANSFORM_TAIL_LEN {
+                        return PreparedProduct::Identity(blinding);
+                    }
+                    let (numerators, denominators, _) = prepare_fractions(
+                        params,
+                        domain,
+                        columns,
+                        permutations,
+                        advice,
+                        fixed,
+                        instance,
+                        beta,
+                        gamma,
+                        initial_deltaomega,
+                        blinding_factors,
+                    );
+                    PreparedProduct::Fractions(PreparedFractions {
+                        numerators,
+                        denominators,
+                        blinding,
+                    })
+                },
+            )
             .collect::<Vec<_>>();
 
         // Each set starts with the preceding set's final product, so this
         // short prefix chain remains serial.
         let mut last_z = C::Scalar::ONE;
-        let products = prepared_fractions
+        let products = prepared_products
             .into_iter()
-            .map(|prepared| {
-                let blinding = prepared.blinding;
-                build_product::<C>(
-                    domain,
-                    blinding_factors,
-                    &mut last_z,
-                    prepared.numerators,
-                    prepared.denominators,
-                    |rows| {
-                        rows.copy_from_slice(&blinding.rows);
-                        blinding.product_blind
-                    },
-                )
+            .map(|prepared| match prepared {
+                PreparedProduct::Fractions(prepared) => {
+                    let blinding = prepared.blinding;
+                    UnpreparedSet::Dense(build_product::<C>(
+                        domain,
+                        blinding_factors,
+                        &mut last_z,
+                        prepared.numerators,
+                        prepared.denominators,
+                        |rows| {
+                            rows.copy_from_slice(&blinding.rows);
+                            blinding.product_blind
+                        },
+                    ))
+                }
+                PreparedProduct::Identity(blinding) => UnpreparedSet::Identity {
+                    constant: last_z,
+                    blinding,
+                },
             })
             .collect::<Vec<_>>();
 
         let sets = products
             .into_par_iter()
-            .map(|set| prepare_product(params, pk, set))
+            .map(|set| match set {
+                UnpreparedSet::Dense(set) => prepare_product(params, pk, set),
+                UnpreparedSet::Identity { constant, blinding } => {
+                    prepare_identity_product(params, pk, constant, blinding)
+                }
+            })
             .collect();
 
         Prepared { sets }
@@ -337,17 +375,41 @@ impl Argument {
         let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         let blinding_factors = pk.vk.cs.blinding_factors();
 
+        assert_eq!(self.columns.len(), pkey.permutations.len());
+        assert_eq!(self.columns.len(), pkey.identity_columns.len());
+
         // Each column gets its own delta power.
         let mut deltaomega = C::Scalar::ONE;
 
         // Track the "last" value from the previous column set
         let mut last_z = C::Scalar::ONE;
 
-        for (columns, permutations) in self
+        for ((columns, permutations), identity_columns) in self
             .columns
             .chunks(chunk_len)
             .zip(pkey.permutations.chunks(chunk_len))
+            .zip(pkey.identity_columns.chunks(chunk_len))
         {
+            let is_identity = identity_columns.iter().all(|&identity| identity)
+                && blinding_factors <= MAX_DIRECT_TRANSFORM_TAIL_LEN;
+            if is_identity {
+                for _ in columns {
+                    deltaomega *= &C::Scalar::DELTA;
+                }
+                let mut rows = vec![C::Scalar::ZERO; blinding_factors];
+                let product_blind = set_blinding(&mut rows);
+                finish_set(prepare_identity_product(
+                    params,
+                    pk,
+                    last_z,
+                    SetBlinding {
+                        rows,
+                        product_blind,
+                    },
+                ))?;
+                continue;
+            }
+
             let (numerators, denominators, next_deltaomega) = prepare_fractions(
                 params,
                 domain,
@@ -594,6 +656,55 @@ fn prepare_product<C: CurveAffine>(
                     (polynomial, coset)
                 })
         },
+    );
+
+    PreparedSet {
+        permutation_product_poly: polynomial,
+        permutation_product_coset: coset,
+        permutation_product_commitment: commitment.to_affine(),
+        permutation_product_blind: blind,
+    }
+}
+
+/// Prepares an identity permutation set without materializing its fractions.
+///
+/// Every numerator factor equals its denominator factor, so every nonzero
+/// ratio is one. Without a zero shared factor, retaining the incoming product
+/// agrees with the generic fraction and prefix-product construction.
+///
+/// A zero shared factor makes the local row relation `0 = 0`, but retaining
+/// the product need not give a valid witness for the complete chunk chain.
+/// The generic path takes subsequent product states to zero; this shortcut
+/// can retain a nonzero state. A later nonidentity chunk can then encounter
+/// a zero denominator and nonzero numerator, making its row relation
+/// impossible to satisfy with that incoming state.
+///
+/// This optimization accepts the resulting negligible completeness error:
+/// an exceptional challenge can produce an unverifiable proof. Under the
+/// production Fiat-Shamir transcript's random-oracle assumptions, advice is
+/// committed before `beta` and `gamma` are sampled. For fixed advice and
+/// `beta`, each shared factor vanishes at exactly one value of `gamma`.
+/// With `M` relevant factors over a field of order `q`, a union bound is
+/// `M / q`, up to the negligible bias from reducing 64-byte challenges.
+/// This is not an unconditional correctness guarantee for forced or custom
+/// challenges; see the
+/// [accepted allowance](https://github.com/zakura-core/common/pull/396#issuecomment-5562831454).
+fn prepare_identity_product<C: CurveAffine>(
+    params: &Params<C>,
+    pk: &plonk::ProvingKey<C>,
+    constant: C::Scalar,
+    blinding: SetBlinding<C::Scalar>,
+) -> PreparedSet<C> {
+    assert!(blinding.rows.len() <= MAX_DIRECT_TRANSFORM_TAIL_LEN);
+    let prefix = ConstantPrefix {
+        constant,
+        prefix_len: params.n as usize - blinding.rows.len(),
+        tail: &blinding.rows,
+    };
+    let blind = blinding.product_blind;
+    let (commitment, (polynomial, coset)) = crate::multicore::join(
+        || commit_constant_prefix(params, prefix, blind),
+        || transform_constant_prefix(&pk.vk.domain, &pk.l0, prefix),
     );
 
     PreparedSet {
@@ -1175,7 +1286,8 @@ mod tests {
     use pasta_curves::{EqAffine, Fp};
     use rand::{SeedableRng, rngs::StdRng};
 
-    const EQUALITY_COLUMNS: usize = 3;
+    const COPIED_COLUMNS: usize = 3;
+    const EQUALITY_COLUMNS: usize = 7;
     const MINIMUM_DEGREE: usize = 4;
     const PROOF_K: u32 = 7;
     const MAX_PROOF_CIRCUITS: usize = 4;
@@ -1218,8 +1330,8 @@ mod tests {
             layouter.assign_region(
                 || "permutation copies",
                 |mut region| {
-                    let mut cells = Vec::with_capacity(EQUALITY_COLUMNS);
-                    for (offset, column) in config.columns.iter().enumerate() {
+                    let mut cells = Vec::with_capacity(COPIED_COLUMNS);
+                    for (offset, column) in config.columns[..COPIED_COLUMNS].iter().enumerate() {
                         cells.push(
                             region
                                 .assign_advice(
@@ -1241,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_bytes_match_across_permutation_preparation_schedules() {
+    fn proof_bytes_match_identity_shortcut_and_preparation_schedules() {
         // This domain is large enough for `parallelize` to assign more than
         // one chunk at the tested worker counts, covering nonzero offsets.
         let params: Params<EqAffine> = Params::new(PROOF_K);
@@ -1251,6 +1363,10 @@ mod tests {
 
         let columns = pk.vk.cs.permutation.get_columns();
         assert_eq!(columns.len(), EQUALITY_COLUMNS);
+        assert_eq!(
+            pk.permutation.identity_columns,
+            [false, false, false, true, true, true, true]
+        );
         let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         assert!(
             columns.chunks(chunk_len).count() > 1,
@@ -1269,7 +1385,10 @@ mod tests {
         let no_instance_columns: &[&[Fp]] = &[];
         let instances = [no_instance_columns; MAX_PROOF_CIRCUITS];
 
-        let prove = |circuit_count, threads| {
+        let mut generic_pk = pk.clone();
+        generic_pk.permutation.identity_columns.fill(false);
+
+        let prove = |pk: &crate::plonk::ProvingKey<EqAffine>, circuit_count, threads| {
             let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
             maybe_rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
@@ -1278,7 +1397,7 @@ mod tests {
                 .install(|| {
                     create_proof(
                         &params,
-                        &pk,
+                        pk,
                         &circuits[..circuit_count],
                         &instances[..circuit_count],
                         StdRng::seed_from_u64(PROOF_SEED),
@@ -1303,13 +1422,58 @@ mod tests {
         };
 
         for circuit_count in PROOF_CIRCUIT_COUNTS {
-            let serial = prove(circuit_count, 1);
+            let serial = prove(&pk, circuit_count, 1);
+            let generic = prove(&generic_pk, circuit_count, 1);
+            assert_eq!(serial, generic);
             verify(&serial, circuit_count);
             for threads in PROOF_THREAD_COUNTS {
-                let parallel = prove(circuit_count, threads);
+                let parallel = prove(&pk, circuit_count, threads);
                 assert_eq!(serial, parallel);
                 verify(&parallel, circuit_count);
             }
+        }
+    }
+
+    #[test]
+    fn identity_product_remains_valid_when_a_shared_factor_is_zero() {
+        // This checks only an isolated identity chunk's row and terminal
+        // relations. It does not establish compatibility with a later
+        // nonidentity chunk; see `prepare_identity_product` for the accepted
+        // negligible completeness error in the full chain.
+        use group::ff::{Field, PrimeField};
+
+        const ROWS: usize = 16;
+        const COLLISION_ROW: usize = 7;
+
+        let beta = Fp::from(17);
+        let gamma = Fp::from(29);
+        let omega = Fp::ROOT_OF_UNITY;
+        let mut delta_omega = Fp::ONE;
+        let mut values = [Fp::ZERO; ROWS];
+        let mut permutations = [Fp::ZERO; ROWS];
+        for row in 0..ROWS {
+            permutations[row] = delta_omega;
+            values[row] = Fp::from(row as u64 + 1);
+            delta_omega *= omega;
+        }
+        values[COLLISION_ROW] = -(beta * permutations[COLLISION_ROW] + gamma);
+
+        for retained_product in [Fp::ZERO, Fp::ONE] {
+            let mut saw_zero = false;
+            for row in 0..ROWS - 1 {
+                let numerator = values[row] + beta * permutations[row] + gamma;
+                let denominator = values[row] + beta * permutations[row] + gamma;
+                saw_zero |= bool::from(denominator.is_zero());
+
+                // Keeping z unchanged satisfies this local row relation,
+                // including the collision where both sides are zero.
+                assert_eq!(
+                    retained_product * denominator - retained_product * numerator,
+                    Fp::ZERO
+                );
+            }
+            assert!(saw_zero);
+            assert_eq!(retained_product.square() - retained_product, Fp::ZERO);
         }
     }
 }
