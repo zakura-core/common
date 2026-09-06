@@ -8,6 +8,14 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- On Apple AArch64 with `aarch64-asm`, field addition operators now use an
+  inline assembly carry chain and conditional reduction, speeding up Pallas
+  and Vesta point arithmetic. The inherent `const` methods are unchanged.
+- Parallel MSM window sums now share point doublings through a balanced
+  reduction tree. Affine bucket reductions reuse their scratch allocations
+  across tree levels.
+- Added a partial Montgomery reduction for multiplying `Fp` and `Fq` by an
+  inverse power of two without a full field multiplication.
 - `DeferredField` now exposes serial `inner_product` and `weighted_sum` bulk
   operations. On AArch64, the Pasta implementations privately use four-limb
   block kernels that shorten carry dependency chains; other targets retain

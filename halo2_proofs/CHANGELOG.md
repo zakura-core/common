@@ -8,10 +8,23 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Prepared proving now reuses the coefficient commitment table for the first
+  IPA round's two MSMs, without additional persistent tables. Opening proofs
+  also omit the unused final generator fold.
+- Multi-circuit proofs now prepare identical fixed lookup tables once per
+  proof. Fixed-table and per-circuit input preparation use nonblocking
+  continuations, and Pasta table sorts reuse proof-local canonical-key
+  workspace.
+- Cached inverse FFTs over Pasta fields now use partial Montgomery reduction
+  for normalization. Extended inverse FFTs also combine output reversal,
+  normalization, and coset removal in one pass.
 - Pasta deferred-product loops now use serial bulk inner-product and
   weighted-sum APIs, leaving parallelism at the query, expression-chunk,
   polynomial-group, and paired-IPA levels. Their AArch64 implementations use
   private paired block accumulation; other targets retain their scalar loops.
+- Verifying-key generation now omits zero terms from sufficiently sparse fixed
+  polynomial commitments and batch-normalizes fixed and permutation
+  commitments.
 - Advice-witness denominators now use the prover's two-lane batch inversion.
 - Added `Params::prepare_commitments`: builds prepared fixed-base multiexp
   tables over `[g..., w, u]` (shared with `prepare_zero_checks`) and
@@ -37,9 +50,9 @@ and this project adheres to Rust's notion of
 - IPA opening proofs now compute independent round terms in parallel and fuse
   the blinding and value terms into each round commitment's multiscalar
   multiplication.
-- Public-instance commitments and polynomial transforms for independent proof
-  circuits are now prepared in parallel when multicore support is enabled,
-  while retaining transcript order.
+- Public-instance commitments and polynomial transforms are prepared in
+  parallel with witness synthesis and across independent proof circuits when
+  multicore support is enabled, while retaining transcript order.
 - Added an opt-in (default-off) `orbits` feature (forwarding `pasta_curves/orbits`)
   gating the prepared zero-check integration below. Built without it,
   `Params::prepare_zero_checks` is a no-op returning `false` and

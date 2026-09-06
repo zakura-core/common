@@ -8,6 +8,8 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Variable-base multiplication witness generation now computes its incomplete
+  double-and-add chain in Jacobian coordinates before assigning circuit cells.
 - Range-check running-sum witnesses now derive inverse powers of two from the
   field's existing `TWO_INV` constant instead of repeating field inversions.
 - Sinsemilla witness generation now uses the configured field backend for

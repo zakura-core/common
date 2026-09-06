@@ -8,6 +8,12 @@ and this project adheres to Rust's notion of
 
 ## [Unreleased]
 
+- Sped up Orchard proving- and verifying-key construction by loading the
+  deterministic `k = 11` Halo 2 parameters from their canonical encoding
+  instead of regenerating them for every key.
+- Added an opt-in `orbits` feature that enables halo2's prepared fixed-base
+  MSM backend. With the feature enabled, the Orchard prover benchmark arms
+  `circuit::ProvingKey::prepare_proving` before its timed routine.
 - Added `circuit::ProvingKey::prepare_proving`, which builds and caches
   prepared fixed-base commitment tables over the key's SRS (see
   `halo2_proofs::poly::commitment::Params::prepare_commitments`).
