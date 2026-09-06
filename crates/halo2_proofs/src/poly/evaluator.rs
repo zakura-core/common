@@ -3402,6 +3402,67 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             scalars: &'a BoundPlanScalars<F>,
         }
 
+        fn root_scale_chain<'a, F: Field>(
+            mut plan: &'a EvaluationPlan<F>,
+            scalars: &BoundPlanScalars<F>,
+        ) -> (&'a EvaluationPlan<F>, F, usize) {
+            let mut factor = F::ONE;
+            let mut nontrivial_scales = 0;
+            while let EvaluationPlan::Scale(inner, scalar) = plan {
+                let (scalar, kind) = scalars.scale(*scalar);
+                factor *= scalar;
+                nontrivial_scales += usize::from(matches!(kind, ScaleKind::Other));
+                plan = inner;
+            }
+            (plan, factor, nontrivial_scales)
+        }
+
+        fn weighted_addend_stats<F: Field>(
+            plan: &EvaluationPlan<F>,
+            scalars: &BoundPlanScalars<F>,
+        ) -> (usize, usize) {
+            match plan {
+                EvaluationPlan::Add(lhs, rhs) => {
+                    let lhs = weighted_addend_stats(lhs, scalars);
+                    let rhs = weighted_addend_stats(rhs, scalars);
+                    (lhs.0 + rhs.0, lhs.1 + rhs.1)
+                }
+                _ => {
+                    let (_, _, nontrivial_scales) = root_scale_chain(plan, scalars);
+                    (1, nontrivial_scales)
+                }
+            }
+        }
+
+        fn accumulate_weighted_addends<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
+            plan: &EvaluationPlan<F>,
+            power: F,
+            ctx: &AstContext<'_, F, B>,
+            output: &mut [F],
+            cache: &mut [F],
+            scratch: &mut [F],
+            fold: &mut ReusablePowerFold<F>,
+        ) {
+            match plan {
+                EvaluationPlan::Add(lhs, rhs) => {
+                    accumulate_weighted_addends(lhs, power, ctx, output, cache, scratch, fold);
+                    accumulate_weighted_addends(rhs, power, ctx, output, cache, scratch, fold);
+                }
+                _ => {
+                    let (plan, factor, _) = root_scale_chain(plan, ctx.scalars);
+                    let power = power * factor;
+                    if let EvaluationPlan::CacheLoad { slot } = plan {
+                        let chunk_len = output.len();
+                        let start = slot * chunk_len;
+                        fold.accumulate_values(&cache[start..start + chunk_len], power);
+                    } else {
+                        recurse_into(plan, ctx, fold.terms(), cache, scratch);
+                        fold.accumulate(power);
+                    }
+                }
+            }
+        }
+
         fn recurse_weighted_terms<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
             terms: &[WeightedTerm<F>],
             ctx: &AstContext<'_, F, B>,
@@ -3413,7 +3474,21 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             fold.reset();
             for term in terms {
                 let power = ctx.scalars.get(term.power);
-                if let EvaluationPlan::CacheLoad { slot } = &term.term {
+                let has_deferred_fold = TypeId::of::<F>() == TypeId::of::<pallas::Base>()
+                    || TypeId::of::<F>() == TypeId::of::<vesta::Base>();
+                let (addends, nontrivial_scales) = if has_deferred_fold {
+                    weighted_addend_stats(&term.term, ctx.scalars)
+                } else {
+                    (1, 0)
+                };
+                // A split adds one deferred product for every addend after
+                // the first. Two products are cheaper than one ordinary
+                // scaled addition on both Pasta fields.
+                if addends > 1 && 2 * nontrivial_scales >= addends - 1 {
+                    accumulate_weighted_addends(
+                        &term.term, power, ctx, output, cache, scratch, fold,
+                    );
+                } else if let EvaluationPlan::CacheLoad { slot } = &term.term {
                     let chunk_len = output.len();
                     let start = slot * chunk_len;
                     fold.accumulate_values(&cache[start..start + chunk_len], power);
