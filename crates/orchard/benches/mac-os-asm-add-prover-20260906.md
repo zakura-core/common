@@ -2,8 +2,9 @@
 
 These measurements predate the PR's transplant to main at `5033f91c`.
 Paths and commands below describe the archived benchmark snapshots, before
-the repository moved its packages under `crates/`. The approximately 3%
-result has not been remeasured on the PR base.
+the repository moved its packages under `crates/`. For the independent
+current-main comparison using real payments, see
+[the latest-main report](mac-os-asm-add-main-prover-20260906.md).
 
 This compares the new inline assembly field addition against portable field
 addition inside complete Ironwood proofs. Both variants retain the existing

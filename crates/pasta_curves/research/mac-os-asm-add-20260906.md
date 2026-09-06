@@ -1,8 +1,9 @@
 # Apple AArch64 field addition experiment, 2026-09-06
 
 These measurements predate the PR's transplant to main at `5033f91c`.
-Paths below refer to the archived snapshots before the move to `crates/`;
-these timing results have not been remeasured on the PR base.
+Paths below refer to the archived snapshots before the move to `crates/`.
+The full prover was separately remeasured on that base; see
+[the latest-main report](../../orchard/benches/mac-os-asm-add-main-prover-20260906.md).
 
 The transplanted PR was validated locally on Apple AArch64 with Rust 1.97.1:
 258 all-features release tests and one doc test passed (three existing tests
