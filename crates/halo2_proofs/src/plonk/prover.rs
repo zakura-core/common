@@ -785,6 +785,13 @@ where
         pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
+    struct AdviceSingle<C: CurveAffine> {
+        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+        pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+        pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+        pub advice_blinds: Vec<Blind<C::Scalar>>,
+    }
+
     let prepare_instance_polynomials = || {
         prepared_instance_values
             .into_par_iter()
@@ -812,11 +819,11 @@ where
             })
             .collect::<Vec<_>>()
     };
-    let synthesize = || {
+    let synthesize = |witnesses: &mut Vec<WitnessCollection<'_, C::Scalar>>| {
         // Synthesize every circuit while allowing its floor planner to share
         // circuit-shape-dependent work across the batch.
         ConcreteCircuit::FloorPlanner::synthesize_batch(
-            &mut witnesses,
+            witnesses,
             circuits,
             config,
             &meta.constants,
@@ -824,113 +831,132 @@ where
         )
     };
 
-    // Instance polynomial preparation and witness synthesis are independent.
-    // Run them concurrently while preserving the ordered results consumed
-    // below.
-    let (instance, synthesis_result) = if crate::multicore::current_num_threads() > 1 {
-        crate::multicore::join(prepare_instance_polynomials, synthesize)
-    } else {
-        (prepare_instance_polynomials(), synthesize())
-    };
-    synthesis_result?;
-
-    struct AdviceSingle<C: CurveAffine> {
-        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-        pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
-        pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-        pub advice_blinds: Vec<Blind<C::Scalar>>,
-    }
-
-    // Rational advice evaluation is independent across circuits. Keep every
-    // RNG draw below in circuit order and after successful synthesis.
-    let evaluate_in_parallel = witnesses.len() > 1 && crate::multicore::current_num_threads() > 1;
-    let advice_values = if evaluate_in_parallel {
-        witnesses
-            .into_par_iter()
-            .map(|witness| witness.advice.evaluate())
-            .collect::<Vec<_>>()
-    } else {
-        witnesses
-            .into_iter()
-            .map(|witness| witness.advice.evaluate())
-            .collect::<Vec<_>>()
-    };
-    // Consume randomness in circuit order before preparing the independent
-    // commitments and polynomial transforms in parallel.
-    let advice_witnesses = advice_values
-        .into_iter()
-        .map(|mut advice| {
-            // Add blinding factors to advice columns
-            for advice in &mut advice {
-                for cell in &mut advice[unusable_rows_start..] {
-                    *cell = C::Scalar::random(&mut rng);
-                }
-            }
-
-            // Compute commitments to advice column polynomials
-            let advice_blinds: Vec<_> = advice
-                .iter()
-                .map(|_| Blind(C::Scalar::random(&mut rng)))
-                .collect();
-            (advice, advice_blinds)
-        })
-        .collect::<Vec<_>>();
-
-    let circuit_count = advice_witnesses.len();
-    let (prepared_advice, lookup_table_plan) = crate::multicore::join(
-        || {
-            advice_witnesses
+    let prepare_advice = |witnesses: Vec<WitnessCollection<'_, C::Scalar>>, rng: &mut R| {
+        // Rational advice evaluation is independent across circuits. Keep
+        // every RNG draw below in circuit order and after successful
+        // synthesis.
+        let evaluate_in_parallel =
+            witnesses.len() > 1 && crate::multicore::current_num_threads() > 1;
+        let advice_values = if evaluate_in_parallel {
+            witnesses
                 .into_par_iter()
-                .map(|(advice, advice_blinds)| {
-                    let (advice_commitments, (advice_polys, advice_cosets)) =
-                        crate::multicore::join(
-                            || {
-                                #[cfg(feature = "multicore")]
-                                let advice_commitments_projective: Vec<_> = advice
-                                    .par_iter()
-                                    .zip(advice_blinds.par_iter())
-                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                                    .collect();
-                                #[cfg(not(feature = "multicore"))]
-                                let advice_commitments_projective: Vec<_> = advice
-                                    .iter()
-                                    .zip(advice_blinds.iter())
-                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                                    .collect();
-                                let mut advice_commitments =
-                                    vec![C::identity(); advice_commitments_projective.len()];
-                                C::Curve::batch_normalize(
-                                    &advice_commitments_projective,
-                                    &mut advice_commitments,
-                                );
-                                advice_commitments
-                            },
-                            || {
-                                domain
-                                    .batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles)
-                            },
-                        );
-
-                    (
-                        advice_commitments,
-                        AdviceSingle::<C> {
-                            advice_values: advice,
-                            advice_polys,
-                            advice_cosets,
-                            advice_blinds,
-                        },
-                    )
-                })
+                .map(|witness| witness.advice.evaluate())
                 .collect::<Vec<_>>()
-        },
-        || {
-            lookup::prover::prepare_table_plan(
-                &pk.vk.cs.lookups,
-                circuit_count,
-                unusable_rows_start,
-            )
-        },
-    );
+        } else {
+            witnesses
+                .into_iter()
+                .map(|witness| witness.advice.evaluate())
+                .collect::<Vec<_>>()
+        };
+
+        // Consume randomness in circuit order before preparing the
+        // independent commitments and polynomial transforms in parallel.
+        let advice_witnesses = advice_values
+            .into_iter()
+            .map(|mut advice| {
+                // Add blinding factors to advice columns
+                for advice in &mut advice {
+                    for cell in &mut advice[unusable_rows_start..] {
+                        *cell = C::Scalar::random(&mut *rng);
+                    }
+                }
+
+                // Compute commitments to advice column polynomials
+                let advice_blinds: Vec<_> = advice
+                    .iter()
+                    .map(|_| Blind(C::Scalar::random(&mut *rng)))
+                    .collect();
+                (advice, advice_blinds)
+            })
+            .collect::<Vec<_>>();
+
+        let circuit_count = advice_witnesses.len();
+        crate::multicore::join(
+            || {
+                advice_witnesses
+                    .into_par_iter()
+                    .map(|(advice, advice_blinds)| {
+                        let (advice_commitments, (advice_polys, advice_cosets)) =
+                            crate::multicore::join(
+                                || {
+                                    #[cfg(feature = "multicore")]
+                                    let advice_commitments_projective: Vec<_> = advice
+                                        .par_iter()
+                                        .zip(advice_blinds.par_iter())
+                                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                        .collect();
+                                    #[cfg(not(feature = "multicore"))]
+                                    let advice_commitments_projective: Vec<_> = advice
+                                        .iter()
+                                        .zip(advice_blinds.iter())
+                                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                        .collect();
+                                    let mut advice_commitments =
+                                        vec![C::identity(); advice_commitments_projective.len()];
+                                    C::Curve::batch_normalize(
+                                        &advice_commitments_projective,
+                                        &mut advice_commitments,
+                                    );
+                                    advice_commitments
+                                },
+                                || {
+                                    domain.batch_lagrange_to_coeff_and_extended(
+                                        &advice,
+                                        &pk.fft_twiddles,
+                                    )
+                                },
+                            );
+
+                        (
+                            advice_commitments,
+                            AdviceSingle::<C> {
+                                advice_values: advice,
+                                advice_polys,
+                                advice_cosets,
+                                advice_blinds,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+            || {
+                lookup::prover::prepare_table_plan(
+                    &pk.vk.cs.lookups,
+                    circuit_count,
+                    unusable_rows_start,
+                )
+            },
+        )
+    };
+
+    #[cfg(feature = "multicore")]
+    let (instance, (prepared_advice, lookup_table_plan)) =
+        if crate::multicore::current_num_threads() > 1 {
+            // Keep instance transforms stealable after synthesis so that
+            // advice preparation can enter the same worker pool immediately.
+            // The in-place body also keeps the potentially non-Send RNG on
+            // the calling thread.
+            let mut instance = Vec::new();
+            let advice_result = maybe_rayon::in_place_scope(|scope| {
+                scope.spawn(|_| {
+                    instance = prepare_instance_polynomials();
+                });
+                synthesize(&mut witnesses)?;
+                Ok::<_, Error>(prepare_advice(witnesses, &mut rng))
+            });
+            (instance, advice_result?)
+        } else {
+            let instance = prepare_instance_polynomials();
+            synthesize(&mut witnesses)?;
+            (instance, prepare_advice(witnesses, &mut rng))
+        };
+
+    #[cfg(not(feature = "multicore"))]
+    let (instance, (prepared_advice, lookup_table_plan)) = {
+        let instance = prepare_instance_polynomials();
+        synthesize(&mut witnesses)?;
+        (instance, prepare_advice(witnesses, &mut rng))
+    };
 
     let mut advice = Vec::with_capacity(prepared_advice.len());
     for (advice_commitments, advice_single) in prepared_advice {
