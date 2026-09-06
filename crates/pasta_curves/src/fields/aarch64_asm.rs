@@ -68,14 +68,26 @@ use core::arch::asm;
 
 type Limbs = [u64; 4];
 
-/// Adds canonical Pasta residues and conditionally subtracts the modulus.
-/// Since `2p < 2^256`, the sum fits in four limbs. Keeping both carry chains
-/// in one block avoids materializing carries between Rust operations.
+/// Adds two residues for a Pasta modulus and conditionally subtracts the
+/// modulus. Like [`mul`], the block hardcodes the Pasta modulus shape
+/// (`modulus[2] == 0`). Both inputs must be canonical (debug-asserted; a
+/// violation yields an incorrect residue): the top carry of the addition is
+/// dropped and only one subtraction is attempted, both justified by
+/// `2p < 2^256`. This contract is narrower than the inherent portable `add`,
+/// which carries into a fifth limb; unreduced values (such as `mul`'s lazy
+/// `lhs`) must be reduced before reaching this path. Keeping both carry
+/// chains in one block avoids materializing carries between Rust operations.
 #[cfg(target_vendor = "apple")]
 #[inline(always)]
 pub(super) fn add(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs) -> Limbs {
-    debug_assert!(is_canonical(lhs, modulus));
-    debug_assert!(is_canonical(rhs, modulus));
+    debug_assert!(
+        is_canonical(lhs, modulus),
+        "aarch64_asm::add requires a canonical lhs"
+    );
+    debug_assert!(
+        is_canonical(rhs, modulus),
+        "aarch64_asm::add requires a canonical rhs"
+    );
     let [mut r0, mut r1, mut r2, mut r3] = *lhs;
     // SAFETY: register-only arithmetic with declared inputs and outputs;
     // no memory or stack access and no data-dependent control flow.
