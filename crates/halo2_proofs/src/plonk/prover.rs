@@ -46,12 +46,14 @@ const DENOMINATOR_SLOT_MASK: u32 = DENOMINATOR_SOURCE_MASK - 1;
 const DENOMINATOR_SLOT_LIMIT: u32 = DENOMINATOR_SLOT_MASK - 1;
 
 #[cfg(all(test, feature = "batch"))]
-static PREPARED_INSTANCE_ROUTE_HITS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+std::thread_local! {
+    static PREPARED_INSTANCE_ROUTE_HITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 #[cfg(all(test, feature = "batch"))]
 fn prepared_instance_route_hits() -> usize {
-    PREPARED_INSTANCE_ROUTE_HITS.load(std::sync::atomic::Ordering::Relaxed)
+    PREPARED_INSTANCE_ROUTE_HITS.get()
 }
 
 #[cfg(feature = "batch")]
@@ -325,7 +327,7 @@ fn commit_prover_instances<C: CurveAffine>(
     #[cfg(feature = "batch")]
     if let Some(commitments) = commit_prepared_instances(params, instances) {
         #[cfg(test)]
-        PREPARED_INSTANCE_ROUTE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
         return commitments;
     }
 
@@ -1037,6 +1039,7 @@ where
     let meta = &pk.vk.cs;
     let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
 
+    let instance_commitments = normalize_prover_instance_commitments(params, instances);
     let instance_values = instances
         .into_par_iter()
         .map(|instance| -> Result<_, Error> {
@@ -1058,10 +1061,18 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Preserve circuit and column order while collecting the prepared values.
+    // Preserve circuit and column order while updating the transcript. Keeping
+    // each preparation result in order also preserves the transcript prefix
+    // before an instance error.
     let mut prepared_instance_values = Vec::with_capacity(instance_values.len());
-    for instance_values in instance_values {
-        prepared_instance_values.push(instance_values?);
+    for (instance_commitments, instance_values) in
+        instance_commitments.into_iter().zip(instance_values)
+    {
+        let instance_values = instance_values?;
+        for commitment in instance_commitments {
+            transcript.common_point(commitment)?;
+        }
+        prepared_instance_values.push(instance_values);
     }
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
@@ -1144,21 +1155,6 @@ where
             })
             .collect::<Vec<_>>()
     };
-    let prepare_instance = || {
-        (
-            normalize_prover_instance_commitments(params, instances),
-            prepare_instance_polynomials(),
-        )
-    };
-    let absorb_instance_commitments =
-        |instance_commitments: Vec<Vec<C>>, transcript: &mut T| -> Result<(), Error> {
-            for commitments in instance_commitments {
-                for commitment in commitments {
-                    transcript.common_point(commitment)?;
-                }
-            }
-            Ok(())
-        };
     let synthesize = |witnesses: &mut Vec<WitnessCollection<'_, C::Scalar>>| {
         // Synthesize every circuit while allowing its floor planner to share
         // circuit-shape-dependent work across the batch.
@@ -1272,33 +1268,28 @@ where
     #[cfg(feature = "multicore")]
     let (instance, (prepared_advice, lookup_table_plan)) =
         if crate::multicore::current_num_threads() > 1 {
-            // Keep instance preparation stealable after synthesis so that
+            // Keep instance transforms stealable after synthesis so that
             // advice preparation can enter the same worker pool immediately.
             // The in-place body also keeps the potentially non-Send RNG on
             // the calling thread.
-            let mut prepared_instance = (Vec::new(), Vec::new());
+            let mut instance = Vec::new();
             let advice_result = maybe_rayon::in_place_scope(|scope| {
                 scope.spawn(|_| {
-                    prepared_instance = prepare_instance();
+                    instance = prepare_instance_polynomials();
                 });
                 synthesize(&mut witnesses)?;
                 Ok::<_, Error>(prepare_advice(witnesses, &mut rng))
             });
-
-            let (instance_commitments, instance) = prepared_instance;
-            absorb_instance_commitments(instance_commitments, transcript)?;
             (instance, advice_result?)
         } else {
-            let (instance_commitments, instance) = prepare_instance();
-            absorb_instance_commitments(instance_commitments, transcript)?;
+            let instance = prepare_instance_polynomials();
             synthesize(&mut witnesses)?;
             (instance, prepare_advice(witnesses, &mut rng))
         };
 
     #[cfg(not(feature = "multicore"))]
     let (instance, (prepared_advice, lookup_table_plan)) = {
-        let (instance_commitments, instance) = prepare_instance();
-        absorb_instance_commitments(instance_commitments, transcript)?;
+        let instance = prepare_instance_polynomials();
         synthesize(&mut witnesses)?;
         (instance, prepare_advice(witnesses, &mut rng))
     };
@@ -2981,7 +2972,7 @@ fn parallel_advice_evaluation_preserves_proof_bytes() {
 }
 
 #[test]
-fn instance_preparation_preserves_proofs_and_validates_batch_first() {
+fn instance_preparation_preserves_proof_and_error_order() {
     use crate::{
         circuit::SimpleFloorPlanner,
         plonk::{keygen_pk, keygen_vk},
@@ -3131,10 +3122,11 @@ fn instance_preparation_preserves_proofs_and_validates_batch_first() {
 
         let unprepared_params = Params::new(5);
         assert!(unprepared_params.prepared_instance_table().is_none());
-        let unprepared_proof = create_exact_shape_proof(&unprepared_params);
         let route_hits = prepared_instance_route_hits();
+        let unprepared_proof = create_exact_shape_proof(&unprepared_params);
+        assert_eq!(prepared_instance_route_hits(), route_hits);
         let prepared_proof = create_exact_shape_proof(&params);
-        assert!(prepared_instance_route_hits() > route_hits);
+        assert_eq!(prepared_instance_route_hits(), route_hits + 1);
         assert_eq!(prepared_proof, unprepared_proof);
     }
 
@@ -3161,6 +3153,9 @@ fn instance_preparation_preserves_proofs_and_validates_batch_first() {
     pk.vk
         .hash_into(&mut expected)
         .expect("verification-key hashing should not fail");
+    expected
+        .common_point(commit_instance(&params, &valid).to_affine())
+        .expect("valid instance commitment should not fail");
     assert_eq!(actual_prefix, expected.squeeze_challenge().get_scalar());
 
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
@@ -3316,7 +3311,8 @@ fn instance_failures_do_not_run_synthesis_or_consume_rng() {
         rng_bytes.load(Ordering::SeqCst),
     );
 
-    // Batch-wide instance validation precedes transcript absorption.
+    // A transcript failure for an earlier instance must still precede a later
+    // oversized instance.
     let valid = [Fp::ONE];
     let valid_columns = [valid.as_slice()];
     syntheses.store(0, Ordering::SeqCst);
@@ -3334,7 +3330,7 @@ fn instance_failures_do_not_run_synthesis_or_consume_rng() {
         },
         &mut transcript,
     );
-    assert!(matches!(result, Err(Error::InstanceTooLarge)));
+    assert!(matches!(result, Err(Error::Transcript(_))));
     let transcript_effects = (
         syntheses.load(Ordering::SeqCst),
         rng_bytes.load(Ordering::SeqCst),
