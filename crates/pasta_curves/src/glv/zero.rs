@@ -521,7 +521,18 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 };
                 return Some((zero, zero));
             }
-            checked_signed_magnitudes(decompose::<C>(scalar_at(index)))
+            let scalar = scalar_at(index);
+            // Recoding and bucket staging are already variable-time in scalar
+            // digits. Avoid canonicalizing and decomposing an exact zero before
+            // those existing zero paths omit it.
+            if scalar.is_zero_vartime() {
+                let zero = SignedMagnitude {
+                    negative: false,
+                    magnitude: 0,
+                };
+                return Some((zero, zero));
+            }
+            checked_signed_magnitudes(decompose::<C>(scalar))
         };
         let Some(recoded) =
             codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
