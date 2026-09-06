@@ -1145,10 +1145,17 @@ where
             .collect::<Vec<_>>()
     };
     let prepare_instance = || {
-        crate::multicore::join(
-            || normalize_prover_instance_commitments(params, instances),
-            prepare_instance_polynomials,
-        )
+        if crate::multicore::current_num_threads() > 1 {
+            crate::multicore::join(
+                || normalize_prover_instance_commitments(params, instances),
+                prepare_instance_polynomials,
+            )
+        } else {
+            (
+                normalize_prover_instance_commitments(params, instances),
+                prepare_instance_polynomials(),
+            )
+        }
     };
     let absorb_instance_commitments =
         |instance_commitments: Vec<Vec<C>>, transcript: &mut T| -> Result<(), Error> {
