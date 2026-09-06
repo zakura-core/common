@@ -3,6 +3,8 @@ use super::super::{
     circuit::Expression, evaluator_schedule::QuotientPoly,
 };
 use super::Argument;
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+use crate::PERMUTED_U10_TABLE_SUFFIX_TERMS;
 #[cfg(feature = "multicore")]
 use crate::{
     PREPARED_SORTED_U10_COMMITMENT_K, PreparedLookupCommitments, SORTED_U10_SUFFIX_MULTIPLES,
@@ -958,6 +960,23 @@ fn commit_sorted_u10<C: CurveAffine>(
     Some(prefix + best_multiexp::<C>(&scalars[..term_len], &bases[..term_len]))
 }
 
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+fn try_commit_permuted_u10_table<C: CurveAffine>(
+    params: &Params<C>,
+    poly: &Polynomial<C::Scalar, LagrangeCoeff>,
+    blind: Blind<C::Scalar>,
+    usable_rows: usize,
+) -> Option<C::Curve> {
+    if params.k != PREPARED_SORTED_U10_COMMITMENT_K
+        || poly.len() != params.n as usize
+        || usable_rows.checked_add(PERMUTED_U10_TABLE_SUFFIX_TERMS)? != poly.len()
+    {
+        return None;
+    }
+    let values: &[C::Scalar] = poly;
+    params.commit_permuted_u10_table(&values[..usable_rows], &values[usable_rows..], blind)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn commit_permuted_pair<C: CurveAffine>(
     params: &Params<C>,
@@ -974,8 +993,19 @@ fn commit_permuted_pair<C: CurveAffine>(
     // Lagrange suffix sums. Other inputs use linearity:
     // C(input, r_i) = C(table, r_t) + C(input - table, r_i - r_t).
     // The lookup construction makes that delta sparse.
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    let permuted_u10_table = sorted_u10.is_some();
     let (table_commitment, (input_or_difference, direct_input)) = crate::multicore::join(
-        || commit_sinsemilla_table(params, table, table_blind, sinsemilla_q_0, usable_rows),
+        || {
+            #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+            if permuted_u10_table
+                && let Some(commitment) =
+                    try_commit_permuted_u10_table(params, table, table_blind, usable_rows)
+            {
+                return commitment;
+            }
+            commit_sinsemilla_table(params, table, table_blind, sinsemilla_q_0, usable_rows)
+        },
         || {
             #[cfg(feature = "multicore")]
             let direct_input = sorted_u10.and_then(|(profile, suffix_multiples)| {
@@ -2162,6 +2192,54 @@ mod tests {
                 )
                 .unwrap(),
                 params.commit_lagrange(&polynomial, blind),
+            );
+        }
+
+        #[cfg(not(feature = "orbits"))]
+        {
+            let usable_rows = domain_len - PERMUTED_U10_TABLE_SUFFIX_TERMS;
+            let mut values = vec![C::Scalar::ZERO; usable_rows];
+            for (value, scalar) in (1..=u64::from(SORTED_U10_MAX_VALUE)).zip(&mut values) {
+                *scalar = C::Scalar::from(value);
+            }
+            let mut state = 0x7065_726d_2d75_3130u64;
+            for end in (1..values.len()).rev() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                values.swap(end, state as usize % (end + 1));
+            }
+            values
+                .extend((0..PERMUTED_U10_TABLE_SUFFIX_TERMS).map(|_| C::Scalar::random(&mut rng)));
+            let mut malformed_values = values.clone();
+            malformed_values[0] = C::Scalar::from(u64::from(SORTED_U10_MAX_VALUE) + 1);
+            let polynomial = domain.lagrange_from_vec(values);
+            let malformed = domain.lagrange_from_vec(malformed_values);
+            let blind = Blind(C::Scalar::random(&mut rng));
+
+            assert_eq!(
+                try_commit_permuted_u10_table(&params, &polynomial, blind, usable_rows),
+                Some(params.commit_lagrange(&polynomial, blind)),
+            );
+            // An out-of-range prefix value makes direct recoding decline; the
+            // prepared evaluator must still return the exact commitment.
+            assert_eq!(
+                try_commit_permuted_u10_table(&params, &malformed, blind, usable_rows),
+                Some(params.commit_lagrange(&malformed, blind)),
+            );
+            assert!(
+                try_commit_permuted_u10_table(&params, &polynomial, blind, usable_rows - 1)
+                    .is_none()
+            );
+            assert!(
+                wide_pool
+                    .install(|| {
+                        try_commit_permuted_u10_table(&params, &polynomial, blind, usable_rows)
+                    })
+                    .is_none()
+            );
+            assert!(
+                try_commit_permuted_u10_table(&decoded, &polynomial, blind, usable_rows).is_none()
             );
         }
 

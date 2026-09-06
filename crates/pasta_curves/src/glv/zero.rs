@@ -133,6 +133,23 @@ const TAIL_WIDTHS: [usize; 3] = [3, 4, 5];
 /// per-window costs.
 const EXTRAS_PLANNED_MIN: usize = super::MIN_GLV_MULTIEXP_TERMS;
 
+/// Canonical values in the 10-bit range-check table.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const U10_VALUE_COUNT: usize = 1 << 10;
+
+/// Random suffix split from the usable 10-bit range-check table rows.
+///
+/// This intentionally mirrors halo2's private route constant: keeping the
+/// defensive check here avoids exposing this value through a cross-crate API.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const U10_TABLE_SUFFIX_TERMS: usize = 6;
+
+/// Fixed table shape selected by halo2's private structural route.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const U10_TABLE_TERMS: usize = 2 * U10_VALUE_COUNT;
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const U10_TABLE_PREFIX_TERMS: usize = U10_TABLE_TERMS - U10_TABLE_SUFFIX_TERMS;
+
 /// Default per-table ceiling for the large allocations accounted by
 /// [`PreparedZeroMsm::prepared_bytes`]. A 13 MiB ceiling selects the α7
 /// mode for an Orchard-sized SRS; its two prover tables account for about
@@ -383,6 +400,21 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 main_window_fold,
             );
         }
+        // The 10-bit range-check caller splits off this random suffix. The
+        // cheap length guard avoids scanning unrelated split inputs such as
+        // the two half-SRS MSMs in the first IPA round.
+        #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+        if prefix.len() == U10_TABLE_PREFIX_TERMS
+            && suffix.len() == U10_TABLE_SUFFIX_TERMS
+            && extra.is_empty()
+        {
+            let num_threads = current_num_threads();
+            if let Some(recoded) = self.try_recode_u10_prefix(prefix, suffix, num_threads)
+                && let Some(sum) = self.evaluate(&recoded, &[], num_threads, main_window_fold)
+            {
+                return sum;
+            }
+        }
         if suffix.is_empty() {
             self.multiexp_with_scalar_at(terms, |index| &prefix[index], extra, main_window_fold)
         } else {
@@ -402,6 +434,44 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 main_window_fold,
             )
         }
+    }
+
+    /// Recodes each canonical 10-bit prefix scalar as `(q, 0)`, a valid split
+    /// because `q = q + 0 λ`. The random suffix retains ordinary decomposition.
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn try_recode_u10_prefix(
+        &self,
+        prefix: &[C::ScalarExt],
+        suffix: &[C::ScalarExt],
+        num_threads: usize,
+    ) -> Option<codebook::Recoded> {
+        if prefix.len() != U10_TABLE_PREFIX_TERMS || suffix.len() != U10_TABLE_SUFFIX_TERMS {
+            return None;
+        }
+
+        let zero = SignedMagnitude {
+            negative: false,
+            magnitude: 0,
+        };
+        codebook::try_recode_with(&self.codebook, self.live.len(), num_threads, |index| {
+            if !self.live[index] {
+                return Some((zero, zero));
+            }
+            if index < prefix.len() {
+                let limbs = super::scalar_limbs(&prefix[index]);
+                if limbs[1..].iter().any(|&limb| limb != 0) || limbs[0] >= U10_VALUE_COUNT as u64 {
+                    return None;
+                }
+                return Some((
+                    SignedMagnitude {
+                        negative: false,
+                        magnitude: u128::from(limbs[0]),
+                    },
+                    zero,
+                ));
+            }
+            checked_signed_magnitudes(decompose::<C>(&suffix[index - prefix.len()]))
+        })
     }
 
     /// Copies and folds scalars only when preparation found related bases.
@@ -1427,6 +1497,120 @@ mod tests {
         );
     }
 
+    /// Canonical 10-bit range-check values bypass decomposition; out-of-range
+    /// values and non-target shapes decline to the ordinary exact evaluator.
+    #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+    fn u10_prefix_slices_match_generic<C: GlvParams>() {
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>(U10_TABLE_TERMS as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut bases = vec![C::AffineExt::identity(); U10_TABLE_TERMS];
+        C::batch_normalize(&projective, &mut bases);
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(7));
+        assert!(prepared.merges.is_empty());
+
+        let mut prefix = vec![C::ScalarExt::ZERO; U10_TABLE_PREFIX_TERMS];
+        for (value, scalar) in (1..U10_VALUE_COUNT).zip(&mut prefix) {
+            *scalar = C::ScalarExt::from(value as u64);
+        }
+        let mut state = 0x7261_6e67_652d_7531u64;
+        for end in (1..prefix.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            prefix.swap(end, state as usize % (end + 1));
+        }
+        let suffix = super::super::testutil::scalars::<C::ScalarExt>(U10_TABLE_SUFFIX_TERMS as u64)
+            .collect::<Vec<_>>();
+
+        assert!(
+            prepared
+                .try_recode_u10_prefix(&prefix, &suffix, 1)
+                .is_some()
+        );
+        let mut scalars = prefix.clone();
+        scalars.extend_from_slice(&suffix);
+        let expected =
+            prepared.naive_multiexp_with_scalar_at(U10_TABLE_TERMS, &|index| &scalars[index], &[]);
+        assert_eq!(
+            prepared.multiexp_with_scalar_slices(&prefix, &suffix, &[]),
+            expected
+        );
+        let extra = (C::ScalarExt::from(13), generator.to_affine());
+        assert_eq!(
+            prepared.multiexp_with_scalar_slices(&prefix, &suffix, &[extra]),
+            expected + generator * extra.0,
+        );
+
+        let one = prefix
+            .iter()
+            .position(|scalar| *scalar == C::ScalarExt::ONE)
+            .unwrap();
+        let zero = prefix
+            .iter()
+            .position(|scalar| bool::from(scalar.is_zero()))
+            .unwrap();
+
+        let mut duplicate = prefix.clone();
+        duplicate[one] = C::ScalarExt::from(2);
+        assert!(
+            prepared
+                .try_recode_u10_prefix(&duplicate, &suffix, 1)
+                .is_some()
+        );
+        scalars[..U10_TABLE_PREFIX_TERMS].copy_from_slice(&duplicate);
+        let expected =
+            prepared.naive_multiexp_with_scalar_at(U10_TABLE_TERMS, &|index| &scalars[index], &[]);
+        assert_eq!(
+            prepared.multiexp_with_scalar_slices(&duplicate, &suffix, &[]),
+            expected
+        );
+        let zero_prefix = vec![C::ScalarExt::ZERO; U10_TABLE_PREFIX_TERMS];
+        assert!(
+            prepared
+                .try_recode_u10_prefix(&zero_prefix, &suffix, 1)
+                .is_some()
+        );
+
+        let mut out_of_range = prefix.clone();
+        out_of_range[zero] = C::ScalarExt::from(U10_VALUE_COUNT as u64);
+        assert!(
+            prepared
+                .try_recode_u10_prefix(&out_of_range, &suffix, 1)
+                .is_none()
+        );
+        scalars[..U10_TABLE_PREFIX_TERMS].copy_from_slice(&out_of_range);
+        let expected =
+            prepared.naive_multiexp_with_scalar_at(U10_TABLE_TERMS, &|index| &scalars[index], &[]);
+        assert_eq!(
+            prepared.multiexp_with_scalar_slices(&out_of_range, &suffix, &[]),
+            expected,
+        );
+
+        let mut noncanonical = prefix.clone();
+        noncanonical[zero] = -C::ScalarExt::ONE;
+        assert!(
+            prepared
+                .try_recode_u10_prefix(&noncanonical, &suffix, 1)
+                .is_none()
+        );
+        assert!(
+            prepared
+                .try_recode_u10_prefix(&prefix[..U10_VALUE_COUNT - 1], &suffix, 1)
+                .is_none()
+        );
+        assert!(prepared.try_recode_u10_prefix(&prefix, &[], 1).is_none());
+        let wrong_suffix =
+            super::super::testutil::scalars::<C::ScalarExt>((U10_TABLE_SUFFIX_TERMS - 1) as u64)
+                .collect::<Vec<_>>();
+        assert!(
+            prepared
+                .try_recode_u10_prefix(&prefix, &wrong_suffix, 1)
+                .is_none()
+        );
+    }
+
     /// Splitting terms between the prepared set and the extras never
     /// changes the verdict.
     fn extras_match_inline_terms<C: GlvParams>() {
@@ -1729,6 +1913,11 @@ mod tests {
                 #[test]
                 fn generic_agreement() {
                     matches_generic_msm::<$curve>();
+                }
+                #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+                #[test]
+                fn u10_prefix_slices() {
+                    u10_prefix_slices_match_generic::<$curve>();
                 }
                 #[test]
                 fn extras() {
