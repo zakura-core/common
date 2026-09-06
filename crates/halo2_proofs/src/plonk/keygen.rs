@@ -478,6 +478,10 @@ where
     ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
     <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
 {
+    if !vk.domain.has_base_size(params.n) {
+        return Err(Error::InvalidParameters);
+    }
+
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
     let circuit_config = if ConcreteCircuit::CACHE_CONFIGURATION {
