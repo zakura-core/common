@@ -1094,11 +1094,15 @@ impl<C: CurveAffine> Default for LagrangeSuffixMultiplesCache<C> {
 impl<C: CurveAffine> LagrangeSuffixMultiplesCache<C> {
     fn initialize(&self, bases: &[C]) {
         self.0.get_or_init(|| {
-            let mut accumulator = C::Curve::identity();
             let capacity = bases
                 .len()
                 .checked_mul(SORTED_U10_SUFFIX_MULTIPLES)
                 .expect("Lagrange suffix-multiple table length fits in usize");
+            if crate::multicore::current_num_threads() > 1 {
+                return build_lagrange_suffix_multiples_parallel(bases, capacity);
+            }
+
+            let mut accumulator = C::Curve::identity();
             let mut projective = Vec::with_capacity(capacity);
             for base in bases.iter().rev() {
                 accumulator += *base;
@@ -1117,6 +1121,52 @@ impl<C: CurveAffine> LagrangeSuffixMultiplesCache<C> {
     fn get(&self) -> Option<&[C]> {
         self.0.get().map(Vec::as_slice)
     }
+}
+
+#[cfg(feature = "multicore")]
+fn build_lagrange_suffix_multiples_parallel<C: CurveAffine>(
+    bases: &[C],
+    capacity: usize,
+) -> Vec<C> {
+    let threads = crate::multicore::current_num_threads();
+    let chunk_size = bases.len().div_ceil(threads);
+    let totals = bases
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .fold(C::Curve::identity(), |sum, base| sum + *base)
+        })
+        .collect::<Vec<_>>();
+    let mut offsets = vec![C::Curve::identity(); totals.len()];
+    let mut suffix = C::Curve::identity();
+    for (offset, total) in offsets.iter_mut().zip(&totals).rev() {
+        *offset = suffix;
+        suffix += total;
+    }
+
+    let mut projective = vec![C::Curve::identity(); capacity];
+    projective
+        .par_chunks_mut(chunk_size * SORTED_U10_SUFFIX_MULTIPLES)
+        .zip(bases.par_chunks(chunk_size))
+        .zip(offsets.into_par_iter())
+        .for_each(|((output, bases), mut accumulator)| {
+            let (rows, remainder) = output.as_chunks_mut::<SORTED_U10_SUFFIX_MULTIPLES>();
+            debug_assert!(remainder.is_empty());
+            for (row, base) in rows.iter_mut().zip(bases).rev() {
+                accumulator += *base;
+                let twice = accumulator.double();
+                *row = [accumulator, twice, twice.double()];
+            }
+        });
+
+    let mut affine = vec![C::identity(); projective.len()];
+    let normalize_chunk = projective.len().div_ceil(threads);
+    projective
+        .par_chunks(normalize_chunk)
+        .zip(affine.par_chunks_mut(normalize_chunk))
+        .for_each(|(projective, affine)| C::Curve::batch_normalize(projective, affine));
+    affine
 }
 
 #[cfg(feature = "multicore")]
@@ -2579,6 +2629,29 @@ fn benchmark_lagrange_suffix_preparation_strategies() {
                 elapsed.as_nanos()
             );
         }
+    }
+}
+
+#[cfg(feature = "multicore")]
+#[test]
+#[ignore = "manual complete-preparation benchmark"]
+fn benchmark_complete_commitment_preparation() {
+    use std::{hint::black_box, time::Instant};
+
+    use crate::pasta::EqAffine;
+
+    let samples = std::env::var("ZAKURA_BENCH_SAMPLES")
+        .ok()
+        .and_then(|samples| samples.parse::<usize>().ok())
+        .unwrap_or(50);
+    for sample in 0..samples {
+        let params = Params::<EqAffine>::new(PREPARED_SORTED_U10_COMMITMENT_K);
+        let start = Instant::now();
+        assert!(black_box(&params).prepare_commitments());
+        println!(
+            "complete-prep sample={sample} nanos={}",
+            start.elapsed().as_nanos()
+        );
     }
 }
 
