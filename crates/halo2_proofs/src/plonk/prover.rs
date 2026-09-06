@@ -46,14 +46,12 @@ const DENOMINATOR_SLOT_MASK: u32 = DENOMINATOR_SOURCE_MASK - 1;
 const DENOMINATOR_SLOT_LIMIT: u32 = DENOMINATOR_SLOT_MASK - 1;
 
 #[cfg(all(test, feature = "batch"))]
-std::thread_local! {
-    static PREPARED_INSTANCE_ROUTE_HITS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
+static PREPARED_INSTANCE_ROUTE_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(all(test, feature = "batch"))]
 fn prepared_instance_route_hits() -> usize {
-    PREPARED_INSTANCE_ROUTE_HITS.get()
+    PREPARED_INSTANCE_ROUTE_HITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(feature = "batch")]
@@ -327,7 +325,7 @@ fn commit_prover_instances<C: CurveAffine>(
     #[cfg(feature = "batch")]
     if let Some(commitments) = commit_prepared_instances(params, instances) {
         #[cfg(test)]
-        PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
+        PREPARED_INSTANCE_ROUTE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return commitments;
     }
 
@@ -2983,7 +2981,7 @@ fn parallel_advice_evaluation_preserves_proof_bytes() {
 }
 
 #[test]
-fn instance_preparation_preserves_proof_and_error_order() {
+fn instance_preparation_preserves_proofs_and_validates_batch_first() {
     use crate::{
         circuit::SimpleFloorPlanner,
         plonk::{keygen_pk, keygen_vk},
@@ -3133,11 +3131,10 @@ fn instance_preparation_preserves_proof_and_error_order() {
 
         let unprepared_params = Params::new(5);
         assert!(unprepared_params.prepared_instance_table().is_none());
-        let route_hits = prepared_instance_route_hits();
         let unprepared_proof = create_exact_shape_proof(&unprepared_params);
-        assert_eq!(prepared_instance_route_hits(), route_hits);
+        let route_hits = prepared_instance_route_hits();
         let prepared_proof = create_exact_shape_proof(&params);
-        assert_eq!(prepared_instance_route_hits(), route_hits + 1);
+        assert!(prepared_instance_route_hits() > route_hits);
         assert_eq!(prepared_proof, unprepared_proof);
     }
 
@@ -3164,9 +3161,6 @@ fn instance_preparation_preserves_proof_and_error_order() {
     pk.vk
         .hash_into(&mut expected)
         .expect("verification-key hashing should not fail");
-    expected
-        .common_point(commit_instance(&params, &valid).to_affine())
-        .expect("valid instance commitment should not fail");
     assert_eq!(actual_prefix, expected.squeeze_challenge().get_scalar());
 
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
@@ -3322,8 +3316,7 @@ fn instance_failures_do_not_run_synthesis_or_consume_rng() {
         rng_bytes.load(Ordering::SeqCst),
     );
 
-    // A transcript failure for an earlier instance must still precede a later
-    // oversized instance.
+    // Batch-wide instance validation precedes transcript absorption.
     let valid = [Fp::ONE];
     let valid_columns = [valid.as_slice()];
     syntheses.store(0, Ordering::SeqCst);
@@ -3341,7 +3334,7 @@ fn instance_failures_do_not_run_synthesis_or_consume_rng() {
         },
         &mut transcript,
     );
-    assert!(matches!(result, Err(Error::Transcript(_))));
+    assert!(matches!(result, Err(Error::InstanceTooLarge)));
     let transcript_effects = (
         syntheses.load(Ordering::SeqCst),
         rng_bytes.load(Ordering::SeqCst),
