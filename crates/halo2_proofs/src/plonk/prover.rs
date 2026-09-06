@@ -1145,17 +1145,10 @@ where
             .collect::<Vec<_>>()
     };
     let prepare_instance = || {
-        if crate::multicore::current_num_threads() > 1 {
-            crate::multicore::join(
-                || normalize_prover_instance_commitments(params, instances),
-                prepare_instance_polynomials,
-            )
-        } else {
-            (
-                normalize_prover_instance_commitments(params, instances),
-                prepare_instance_polynomials(),
-            )
-        }
+        (
+            normalize_prover_instance_commitments(params, instances),
+            prepare_instance_polynomials(),
+        )
     };
     let absorb_instance_commitments =
         |instance_commitments: Vec<Vec<C>>, transcript: &mut T| -> Result<(), Error> {
@@ -1279,7 +1272,7 @@ where
     #[cfg(feature = "multicore")]
     let (instance, (prepared_advice, lookup_table_plan)) =
         if crate::multicore::current_num_threads() > 1 {
-            // Keep instance transforms stealable after synthesis so that
+            // Keep instance preparation stealable after synthesis so that
             // advice preparation can enter the same worker pool immediately.
             // The in-place body also keeps the potentially non-Send RNG on
             // the calling thread.
