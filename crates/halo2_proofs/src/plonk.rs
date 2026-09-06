@@ -75,8 +75,11 @@ fn parallelize_two<A: Send, B: Send>(
     });
 }
 
-/// Builds the prefix products of `numerators[i] / denominators[i]` with one
-/// field inversion.
+/// Builds the prefix products of `numerators[i] / denominators[i]`.
+///
+/// The common nonzero-denominator path uses one field inversion. A zero
+/// denominator causes one failed aggregate inversion and at most one
+/// successful inversion of the nonempty prefix before the first zero.
 fn prefix_products_of_fractions<F: Field>(
     mut numerators: Vec<F>,
     mut denominators: Vec<F>,
@@ -91,63 +94,155 @@ fn prefix_products_of_fractions<F: Field>(
         return numerators;
     }
 
-    // Compute the inverse of the complete denominator product with two
-    // independent multiplication chains. A zero denominator is negligible
-    // for challenge-blinded products, but retain the current zero-skipping
-    // behavior below for exactness on every input.
-    let denominator_product = if fraction_rows == 1 {
-        denominators[0]
-    } else {
-        // Seed both lanes from their first values instead of multiplying
-        // those values by one.
-        let mut denominator_even = denominators[0];
-        let mut denominator_odd = denominators[1];
-        let mut pairs = denominators[2..fraction_rows].chunks_exact(2);
-        for pair in &mut pairs {
-            denominator_even *= pair[0];
-            denominator_odd *= pair[1];
-        }
-        if let Some(value) = pairs.remainder().first() {
-            denominator_even *= value;
+    // Build numerator prefixes while the independent denominator product
+    // chains are in flight. Starting at row one, store each denominator pair
+    // as `[d_low * d_high, d_high]`; this is sufficient to process both rows
+    // independently during the reverse walk below.
+    let mut numerator_prefix = initial;
+    let first_numerator = numerators[0];
+    numerators[0] = numerator_prefix;
+    numerator_prefix *= first_numerator;
+
+    let mut denominator_even = denominators[0];
+    let mut denominator_odd = None;
+    let mut pair_count = 0;
+    let mut low_row = 1;
+    while low_row + 1 < fraction_rows {
+        let high_row = low_row + 1;
+        let low = denominators[low_row];
+        let high = denominators[high_row];
+        let pair = low * high;
+        pair_count += 1;
+
+        // These challenge-blinded denominators already enter the variable-time
+        // inversion below. Retaining `low` when `high` is zero makes this
+        // encoding recoverable without any backup allocation.
+        if !high.is_zero_vartime() {
+            denominators[low_row] = pair;
         }
 
-        denominator_even * denominator_odd
-    };
-    if let Some(mut denominator_inverse) = Option::<F>::from(denominator_product.invert()) {
-        // First form every numerator prefix. The following reverse walk uses
-        // D_i / (D_0 ... D_i) = 1 / (D_0 ... D_{i-1}) to recover the matching
-        // denominator prefix without inverting each row separately.
-        let mut numerator_prefix = initial;
-        for numerator in &mut numerators[..fraction_rows] {
-            let current = *numerator;
-            *numerator = numerator_prefix;
-            numerator_prefix *= current;
-        }
-        numerators[fraction_rows] = numerator_prefix * denominator_inverse;
+        let low_numerator = numerators[low_row];
+        numerators[low_row] = numerator_prefix;
+        numerator_prefix *= low_numerator;
+        let high_numerator = numerators[high_row];
+        numerators[high_row] = numerator_prefix;
+        numerator_prefix *= high_numerator;
 
-        // Row zero already contains `initial`. Stop at row one rather than
-        // multiplying the final denominator inverse and output by one.
-        for row in (1..fraction_rows).rev() {
-            denominator_inverse *= denominators[row];
-            numerators[row] *= denominator_inverse;
+        if let Some(denominator_odd) = denominator_odd.as_mut() {
+            if pair_count % 2 == 0 {
+                denominator_even *= pair;
+            } else {
+                *denominator_odd *= pair;
+            }
+        } else {
+            denominator_odd = Some(pair);
         }
+        low_row += 2;
+    }
+    if low_row < fraction_rows {
+        let numerator = numerators[low_row];
+        numerators[low_row] = numerator_prefix;
+        numerator_prefix *= numerator;
+
+        if let Some(denominator_odd) = denominator_odd.as_mut() {
+            if pair_count % 2 == 0 {
+                *denominator_odd *= denominators[low_row];
+            } else {
+                denominator_even *= denominators[low_row];
+            }
+        } else {
+            denominator_odd = Some(denominators[low_row]);
+        }
+    }
+    let denominator_product = denominator_odd
+        .map(|denominator_odd| denominator_even * denominator_odd)
+        .unwrap_or(denominator_even);
+    numerators[fraction_rows] = numerator_prefix;
+
+    if let Some(denominator_inverse) = Option::<F>::from(denominator_product.invert()) {
+        apply_denominator_prefixes(
+            &mut numerators,
+            &denominators,
+            fraction_rows,
+            denominator_inverse,
+        );
     } else {
-        // Match `batch_invert_multi` for the vanishingly unlikely case in
-        // which a challenge-blinded denominator is zero.
-        crate::arithmetic::batch_invert_multi(&mut denominators[..fraction_rows]);
-        let mut state = initial;
-        for (numerator, denominator_inverse) in numerators[..fraction_rows]
-            .iter_mut()
-            .zip(&denominators[..fraction_rows])
-        {
-            let ratio = *numerator * denominator_inverse;
-            *numerator = state;
-            state *= ratio;
+        // Find the first original zero while multiplying the encoded factors
+        // strictly before it. If a high denominator is zero, its low partner
+        // was deliberately retained rather than encoded as a pair product.
+        let mut denominator_prefix = F::ONE;
+        let mut first_zero = None;
+        if denominators[0].is_zero_vartime() {
+            first_zero = Some(0);
+        } else {
+            denominator_prefix = denominators[0];
+            for pair_index in 0..pair_count {
+                let low_row = 1 + 2 * pair_index;
+                let high_row = low_row + 1;
+                let low_or_pair = denominators[low_row];
+                let high = denominators[high_row];
+                if low_or_pair.is_zero_vartime() {
+                    first_zero = Some(low_row);
+                    break;
+                }
+                denominator_prefix *= low_or_pair;
+                if high.is_zero_vartime() {
+                    first_zero = Some(high_row);
+                    break;
+                }
+            }
         }
-        numerators[fraction_rows] = state;
+
+        let remainder_row = 1 + 2 * pair_count;
+        if first_zero.is_none() && remainder_row < fraction_rows {
+            if denominators[remainder_row].is_zero_vartime() {
+                first_zero = Some(remainder_row);
+            } else {
+                denominator_prefix *= denominators[remainder_row];
+            }
+        }
+
+        let first_zero = first_zero.expect("a zero product has a zero factor");
+        if first_zero > 0 {
+            apply_denominator_prefixes(
+                &mut numerators,
+                &denominators,
+                first_zero,
+                denominator_prefix.invert().unwrap(),
+            );
+        }
+        numerators[first_zero + 1..=fraction_rows].fill(F::ZERO);
     }
 
     numerators
+}
+
+fn apply_denominator_prefixes<F: Field>(
+    numerators: &mut [F],
+    denominators: &[F],
+    fraction_rows: usize,
+    mut denominator_inverse: F,
+) {
+    debug_assert!(fraction_rows > 0);
+    numerators[fraction_rows] *= denominator_inverse;
+
+    // Handle an unpaired final denominator before walking pairs backward.
+    let pair_count = (fraction_rows - 1) / 2;
+    let remainder_row = 1 + 2 * pair_count;
+    if remainder_row < fraction_rows {
+        denominator_inverse *= denominators[remainder_row];
+        numerators[remainder_row] *= denominator_inverse;
+    }
+
+    for pair_index in (0..pair_count).rev() {
+        let low_row = 1 + 2 * pair_index;
+        let high_row = low_row + 1;
+        let high_inverse = denominator_inverse * denominators[high_row];
+        let next_inverse = denominator_inverse * denominators[low_row];
+        numerators[high_row] *= high_inverse;
+        numerators[low_row] *= next_inverse;
+        denominator_inverse = next_inverse;
+    }
 }
 
 #[cfg(test)]
@@ -156,12 +251,16 @@ mod prefix_products_of_fractions_tests {
     use group::ff::Field;
     use pasta_curves::Fp;
 
+    const TEST_LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+    const TEST_LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
+    const FULL_FRACTION_ROWS: usize = 2_042;
+
     fn pseudo_random_values(len: usize, mut state: u64) -> Vec<Fp> {
         (0..len)
             .map(|_| {
                 state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
+                    .wrapping_mul(TEST_LCG_MULTIPLIER)
+                    .wrapping_add(TEST_LCG_INCREMENT);
                 Fp::from(state)
             })
             .collect()
@@ -188,9 +287,29 @@ mod prefix_products_of_fractions_tests {
         numerators
     }
 
+    fn assert_zero_denominators_match_reference(fraction_rows: usize, zero_rows: &[usize]) {
+        let len = fraction_rows + 6;
+        let numerators = pseudo_random_values(len, 0x3141_5926_5358_9793);
+        let mut denominators = pseudo_random_values(len, 0x2718_2818_2845_9045);
+        for row in zero_rows {
+            denominators[*row] = Fp::ZERO;
+        }
+        let initial = Fp::from(42);
+
+        let expected = reference_prefix_products(
+            numerators.clone(),
+            denominators.clone(),
+            fraction_rows,
+            initial,
+        );
+        let actual = prefix_products_of_fractions(numerators, denominators, fraction_rows, initial);
+
+        assert_eq!(actual, expected, "zero rows: {zero_rows:?}");
+    }
+
     #[test]
     fn matches_batch_inversion_for_random_nonzero_products() {
-        for fraction_rows in [0, 1, 2, 31, 32, 33, 2_042] {
+        for fraction_rows in [0, 1, 2, 31, 32, 33, FULL_FRACTION_ROWS] {
             let len = fraction_rows + 6;
             let numerators = pseudo_random_values(len, 0x1234_5678_9abc_def0);
             let mut denominators = pseudo_random_values(len, 0xfedc_ba98_7654_3210);
@@ -216,30 +335,63 @@ mod prefix_products_of_fractions_tests {
 
     #[test]
     fn zero_denominators_match_zero_skipping_batch_inversion() {
-        let fraction_rows = 65;
-        let numerators = pseudo_random_values(fraction_rows + 6, 0x3141_5926_5358_9793);
-        let base_denominators = pseudo_random_values(fraction_rows + 6, 0x2718_2818_2845_9045);
-        let initial = Fp::from(42);
+        const FRACTION_ROWS: usize = 65;
 
-        for zero_rows in [vec![0], vec![32], vec![64], vec![0, 17, 64]] {
-            let mut denominators = base_denominators.clone();
-            for row in zero_rows {
-                denominators[row] = Fp::ZERO;
+        for row in 0..FRACTION_ROWS {
+            assert_zero_denominators_match_reference(FRACTION_ROWS, &[row]);
+        }
+
+        // Exercise adjacent zeros and cases where the first zero is in the
+        // low or high half of a pair.
+        for zero_rows in [
+            &[1, 2][..],
+            &[1, 18, 33],
+            &[2, 3],
+            &[2, 17, 34],
+            &[0, 17, 64],
+        ] {
+            assert_zero_denominators_match_reference(FRACTION_ROWS, zero_rows);
+        }
+
+        // An even number of fraction rows leaves the final denominator
+        // unpaired.
+        assert_zero_denominators_match_reference(FRACTION_ROWS + 1, &[FRACTION_ROWS]);
+    }
+
+    #[test]
+    fn zero_denominator_bitmasks_match_zero_skipping_batch_inversion() {
+        for fraction_rows in 0..=8 {
+            for zero_mask in 0..(1_usize << fraction_rows) {
+                let zero_rows = (0..fraction_rows)
+                    .filter(|row| zero_mask & (1 << row) != 0)
+                    .collect::<Vec<_>>();
+                assert_zero_denominators_match_reference(fraction_rows, &zero_rows);
             }
-            let expected = reference_prefix_products(
-                numerators.clone(),
-                denominators.clone(),
-                fraction_rows,
-                initial,
-            );
-            let actual = prefix_products_of_fractions(
-                numerators.clone(),
-                denominators,
-                fraction_rows,
-                initial,
-            );
+        }
+    }
 
-            assert_eq!(actual, expected);
+    #[test]
+    fn random_and_full_length_zero_patterns_match_the_reference() {
+        let mut state = 0x6a09_e667_f3bc_c909_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(TEST_LCG_MULTIPLIER)
+                .wrapping_add(TEST_LCG_INCREMENT);
+            state
+        };
+
+        for _ in 0..32 {
+            let fraction_rows = next() as usize % (FULL_FRACTION_ROWS + 1);
+            let mut zero_rows = (0..4)
+                .filter_map(|_| (fraction_rows > 0).then(|| next() as usize % fraction_rows))
+                .collect::<Vec<_>>();
+            zero_rows.sort_unstable();
+            zero_rows.dedup();
+            assert_zero_denominators_match_reference(fraction_rows, &zero_rows);
+        }
+
+        for zero_rows in [&[0][..], &[1], &[2], &[1_023, 1_500], &[2_040], &[2_041]] {
+            assert_zero_denominators_match_reference(FULL_FRACTION_ROWS, zero_rows);
         }
     }
 
