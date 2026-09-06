@@ -896,6 +896,48 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
             .assign_advice_batch(annotation, column, offset, len, to)
     }
 
+    fn assign_advice_batch_with_previous_denominator<'v>(
+        &'v mut self,
+        annotation: &'v (dyn Fn(usize) -> String + 'v),
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        to: &'v mut (dyn FnMut(usize) -> Value<Assigned<F>> + 'v),
+    ) -> Result<(), Error> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let offset = self.plan.regions[*self.region_index]
+            .checked_add(offset)
+            .ok_or(Error::BoundsFailure)?;
+        self.plan
+            .cs
+            .assign_advice_batch_with_previous_denominator(annotation, column, offset, len, to)
+    }
+
+    fn assign_advice_batch_with_previous_denominator_squared<'v>(
+        &'v mut self,
+        annotation: &'v (dyn Fn(usize) -> String + 'v),
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        to: &'v mut (dyn FnMut(usize) -> Value<Assigned<F>> + 'v),
+    ) -> Result<(), Error> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let offset = self.plan.regions[*self.region_index]
+            .checked_add(offset)
+            .ok_or(Error::BoundsFailure)?;
+        self.plan
+            .cs
+            .assign_advice_batch_with_previous_denominator_squared(
+                annotation, column, offset, len, to,
+            )
+    }
+
     fn assign_advice_from_constant<'v>(
         &'v mut self,
         annotation: &'v (dyn Fn() -> String + 'v),

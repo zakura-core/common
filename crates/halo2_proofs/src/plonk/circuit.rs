@@ -415,6 +415,50 @@ pub trait Assignment<F: Field> {
         Ok(())
     }
 
+    /// Assigns rational advice whose denominators equal the corresponding
+    /// denominators in the immediately preceding batch.
+    ///
+    /// Backends may derive the denominators from this untrusted relationship
+    /// hint. An incorrect hint can cause synthesis or constraint verification
+    /// to fail.
+    fn assign_advice_batch_with_previous_denominator<V, A, AR>(
+        &mut self,
+        annotation: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        self.assign_advice_batch(annotation, column, row, len, to)
+    }
+
+    /// Assigns rational advice whose denominators are the squares of the
+    /// corresponding denominators in the immediately preceding batch.
+    ///
+    /// Backends may derive the denominators from this untrusted relationship
+    /// hint. An incorrect hint can cause synthesis or constraint verification
+    /// to fail.
+    fn assign_advice_batch_with_previous_denominator_squared<V, A, AR>(
+        &mut self,
+        annotation: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        self.assign_advice_batch(annotation, column, row, len, to)
+    }
+
     /// Assign a fixed value
     fn assign_fixed<V, VR, A, AR>(
         &mut self,
