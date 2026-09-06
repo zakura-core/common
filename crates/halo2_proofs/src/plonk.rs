@@ -42,7 +42,7 @@ pub use verifier::*;
 use std::{
     any::{Any as StdAny, TypeId},
     io,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 fn commit_instance<C: CurveAffine>(params: &Params<C>, instance: &[C::Scalar]) -> C::Curve {
@@ -437,9 +437,40 @@ pub struct ProvingKey<C: CurveAffine> {
     fft_twiddles: ProvingKeyTwiddles<C::Scalar>,
     /// Circuit-type-erased floor-planning data produced during key generation.
     floor_plan: Option<FloorPlan>,
+    /// Circuit configuration produced during key generation.
+    circuit_config: CachedCircuitConfig,
     /// Bounded, prover-only compiled quotient plans prepared during keygen and
     /// replaced lazily if evaluator-shape validation rejects them.
     quotient_plans: Arc<evaluator_schedule::QuotientPlans<C::Scalar>>,
+}
+
+/// A clone-shared, circuit-type-erased configuration retained by a proving
+/// key. The mutex makes a merely `Send` configuration safe to share while it
+/// is cloned for a proof.
+#[derive(Clone)]
+struct CachedCircuitConfig(Arc<Mutex<Box<dyn StdAny + Send>>>);
+
+impl CachedCircuitConfig {
+    fn new<T: StdAny + Send>(config: T) -> Self {
+        Self(Arc::new(Mutex::new(Box::new(config))))
+    }
+
+    fn clone_config<T: StdAny + Clone>(&self) -> Option<T> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .downcast_ref::<T>()
+            .cloned()
+    }
+}
+
+impl std::fmt::Debug for CachedCircuitConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("CachedCircuitConfig")
+            .field(&"..")
+            .finish()
+    }
 }
 
 #[derive(Debug)]

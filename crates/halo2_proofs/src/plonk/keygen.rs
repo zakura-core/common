@@ -12,7 +12,7 @@ use crate::PreparedSparseCommitments;
 use crate::{InstanceWindowTable, PREPARED_INSTANCE_COLUMNS};
 
 use super::{
-    Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
+    Assigned, CachedCircuitConfig, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
     circuit::{
         Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
         Selector,
@@ -476,10 +476,11 @@ pub fn keygen_pk<C, ConcreteCircuit>(
 where
     C: CurveAffine,
     ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
-    <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
+    <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send + 'static,
 {
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
+    let circuit_config = CachedCircuitConfig::new(config.clone());
 
     let cs = cs;
 
@@ -627,6 +628,7 @@ where
         permutation: permutation_pk,
         fft_twiddles,
         floor_plan,
+        circuit_config,
         quotient_plans: Arc::new(Default::default()),
     };
     super::evaluator_schedule::prepare_quotient_plans(&pk);

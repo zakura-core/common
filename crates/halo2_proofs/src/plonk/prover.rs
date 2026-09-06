@@ -704,7 +704,7 @@ pub fn create_proof<
     transcript: &mut T,
 ) -> Result<(), Error>
 where
-    <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
+    <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send + 'static,
 {
     if circuits.len() != instances.len() {
         return Err(Error::InvalidInstances);
@@ -720,8 +720,11 @@ where
     pk.vk.hash_into(transcript)?;
 
     let domain = &pk.vk.domain;
-    let mut meta = ConstraintSystem::default();
-    let config = ConcreteCircuit::configure(&mut meta);
+    let config = pk.circuit_config.clone_config().unwrap_or_else(|| {
+        // Preserve support for proving with another circuit type that has the
+        // same shape but uses a different configuration type.
+        ConcreteCircuit::configure(&mut ConstraintSystem::default())
+    });
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
@@ -1900,6 +1903,9 @@ fn test_create_proof() {
     };
     use pasta_curves::EqAffine;
     use rand::rng;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ALTERNATE_CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Clone, Copy)]
     struct MyCircuit;
@@ -1914,6 +1920,35 @@ fn test_create_proof() {
         }
 
         fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {}
+
+        fn synthesize(
+            &self,
+            _config: Self::Config,
+            _layouter: impl crate::circuit::Layouter<F>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AlternateConfig;
+
+    #[derive(Clone, Copy)]
+    struct AlternateCircuit;
+
+    impl<F: Field> Circuit<F> for AlternateCircuit {
+        type Config = AlternateConfig;
+
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            *self
+        }
+
+        fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {
+            ALTERNATE_CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
+            AlternateConfig
+        }
 
         fn synthesize(
             &self,
@@ -1950,6 +1985,21 @@ fn test_create_proof() {
         &mut transcript,
     )
     .expect("proof generation should not fail");
+
+    // A circuit with the same shape but a different configuration type keeps
+    // the established fallback of configuring itself at proving time.
+    ALTERNATE_CONFIGURATIONS.store(0, Ordering::Relaxed);
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[AlternateCircuit],
+        &[&[]],
+        rng(),
+        &mut transcript,
+    )
+    .expect("same-shape proof generation should not fail");
+    assert_eq!(ALTERNATE_CONFIGURATIONS.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -2581,6 +2631,7 @@ fn v1_proving_key_reuses_floor_plan() {
     use rand::{SeedableRng, rngs::StdRng};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    static CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
     static MEASUREMENTS: AtomicUsize = AtomicUsize::new(0);
     static TABLE_ASSIGNMENTS: AtomicUsize = AtomicUsize::new(0);
     static FAIL_TABLE: AtomicBool = AtomicBool::new(false);
@@ -2605,6 +2656,7 @@ fn v1_proving_key_reuses_floor_plan() {
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
+            CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
             let advice = meta.advice_column();
             let table = meta.lookup_table_column();
             meta.lookup(|meta| vec![(meta.query_advice(advice, Rotation::cur()), table)]);
@@ -2637,13 +2689,17 @@ fn v1_proving_key_reuses_floor_plan() {
     }
 
     let params: Params<EqAffine> = Params::new(3);
+    CONFIGURATIONS.store(0, Ordering::Relaxed);
     TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 1);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
     let mut pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 2);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 2);
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
 
+    CONFIGURATIONS.store(0, Ordering::Relaxed);
     MEASUREMENTS.store(0, Ordering::Relaxed);
     TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     create_proof(
@@ -2656,9 +2712,11 @@ fn v1_proving_key_reuses_floor_plan() {
     )
     .expect("proof generation should not fail");
     // The plan cached in the proving key is reused, so proving re-measures
-    // nothing. The fixed table values are already part of the proving key,
-    // but each circuit's table closure still runs: its side effects and
-    // errors are observable behavior.
+    // nothing. Its circuit configuration is also reused instead of rebuilding
+    // the constraint system. The fixed table values are already part of the
+    // proving key, but each circuit's table closure still runs: its side
+    // effects and errors are observable behavior.
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 0);
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
     let first_proof = transcript.finalize();
