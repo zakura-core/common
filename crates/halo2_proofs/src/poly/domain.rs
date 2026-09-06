@@ -347,7 +347,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             &twiddles.base_inverse,
             &twiddles.base_inverse_tables,
             0,
-            parallel_depth(),
+            ButterflyParallelism::new(parallel_depth(), false),
         );
         normalize_inverse_fft(&mut polynomial.values, self.k, self.ifft_divisor, true);
 
@@ -424,10 +424,52 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             &twiddles.extended_forward,
             &twiddles.extended_forward_tables,
             parallel_depth(),
+            false,
         );
 
         Polynomial {
             values: polynomial.values,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Evaluates a short coefficient polynomial over the extended coset and
+    /// multiplies it by a factor that is already evaluated there.
+    ///
+    /// The coefficients are padded to their next power-of-two length. This
+    /// retains only the corresponding FFT stages instead of treating them as
+    /// a full base-domain coefficient vector.
+    #[cfg(feature = "batch")]
+    pub(crate) fn coeff_prefix_to_extended_with_factor(
+        &self,
+        mut coefficients: Vec<F>,
+        factor: &Polynomial<F, ExtendedLagrangeCoeff>,
+        twiddles: &ProvingKeyTwiddles<F>,
+    ) -> Polynomial<F, ExtendedLagrangeCoeff> {
+        assert!(!coefficients.is_empty());
+        let padded_len = coefficients.len().next_power_of_two();
+        assert!(padded_len <= 1 << self.k);
+        assert_eq!(factor.len(), self.extended_len());
+        assert_eq!(twiddles.extended_forward.len(), self.extended_len() / 2);
+
+        coefficients.resize(padded_len, F::ZERO);
+        self.distribute_powers_zeta_serial(&mut coefficients, true);
+        Self::fft_zero_padded_with_twiddles(
+            &mut coefficients,
+            padded_len.trailing_zeros(),
+            self.extended_k,
+            &twiddles.extended_forward,
+            &twiddles.extended_forward_tables,
+            parallel_depth(),
+            true,
+        );
+
+        for (value, factor) in coefficients.iter_mut().zip(factor.iter()) {
+            *value *= factor;
+        }
+
+        Polynomial {
+            values: coefficients,
             _marker: PhantomData,
         }
     }
@@ -478,7 +520,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 &twiddles.base_inverse,
                 &twiddles.base_inverse_tables,
                 0,
-                INNER_PARALLEL_DEPTH,
+                ButterflyParallelism::new(INNER_PARALLEL_DEPTH, false),
             );
             normalize_inverse_fft(&mut values, self.k, self.ifft_divisor, false);
             let polynomial = Polynomial {
@@ -495,6 +537,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 &twiddles.extended_forward,
                 &twiddles.extended_forward_tables,
                 INNER_PARALLEL_DEPTH,
+                false,
             );
             let extended = Polynomial {
                 values: extended.values,
@@ -598,7 +641,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             &twiddles.extended_forward,
             &twiddles.extended_forward_tables,
             0,
-            parallel_depth(),
+            ButterflyParallelism::new(parallel_depth(), false),
         );
 
         let block_len = self.n as usize;
@@ -659,7 +702,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             &twiddles.extended_forward,
             &twiddles.extended_forward_tables,
             0,
-            parallel_depth(),
+            ButterflyParallelism::new(parallel_depth(), false),
         );
         polynomial.values[1..].reverse();
 
@@ -777,6 +820,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             &twiddles,
             &tables,
             parallel_depth(),
+            false,
         );
     }
 
@@ -787,6 +831,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         twiddles: &[F],
         tables: &[Vec<F>],
         parallel_depth: u32,
+        avoid_waiter_stealing: bool,
     ) {
         assert!(log_n <= extended_log_n);
 
@@ -851,7 +896,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             twiddles,
             tables,
             0,
-            parallel_depth,
+            ButterflyParallelism {
+                depth: parallel_depth,
+                avoid_waiter_stealing,
+            },
         );
         *coefficients = values;
     }
@@ -1086,6 +1134,84 @@ fn bitreverse(value: usize, bits: u32) -> usize {
 /// loop; larger nodes use a contiguous per-level twiddle table.
 const CACHED_TWIDDLE_MIN_HALF: usize = 32;
 
+// A standard Rayon join lets its waiting worker steal from other workers. That
+// is useful for substantial FFT subtrees, but a short transform running beside
+// witness synthesis can accidentally put a much longer synthesis task on its
+// critical path. Prefer the current worker's queue while this short fork is
+// outstanding.
+#[cfg(feature = "multicore")]
+fn join_without_waiter_stealing(left: impl FnOnce() + Send, right: impl FnOnce() + Send) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct MarkComplete<'a>(&'a AtomicBool);
+
+    impl Drop for MarkComplete<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let right_complete = AtomicBool::new(false);
+    maybe_rayon::scope(|scope| {
+        scope.spawn(|_| {
+            let _complete = MarkComplete(&right_complete);
+            right();
+        });
+        left();
+        while !right_complete.load(Ordering::Acquire) {
+            // Prefer this worker's queued FFT jobs. Running only local work
+            // prevents this short join from stealing a much longer synthesis
+            // task from another worker.
+            if !matches!(
+                maybe_rayon::yield_local(),
+                Some(maybe_rayon::Yield::Executed)
+            ) {
+                std::hint::spin_loop();
+            }
+        }
+    });
+}
+
+#[cfg(not(feature = "multicore"))]
+fn join_without_waiter_stealing(left: impl FnOnce() + Send, right: impl FnOnce() + Send) {
+    left();
+    right();
+}
+
+fn join_butterfly(
+    avoid_waiter_stealing: bool,
+    left: impl FnOnce() + Send,
+    right: impl FnOnce() + Send,
+) {
+    if avoid_waiter_stealing {
+        join_without_waiter_stealing(left, right);
+    } else {
+        multicore::join(left, right);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ButterflyParallelism {
+    depth: u32,
+    avoid_waiter_stealing: bool,
+}
+
+impl ButterflyParallelism {
+    fn new(depth: u32, avoid_waiter_stealing: bool) -> Self {
+        Self {
+            depth,
+            avoid_waiter_stealing,
+        }
+    }
+
+    fn descend(self) -> Self {
+        Self {
+            depth: self.depth - 1,
+            ..self
+        }
+    }
+}
+
 /// Builds contiguous per-level twiddle tables for the butterfly combine step.
 fn butterfly_twiddle_tables<F: Field>(twiddles: &[F], len: usize) -> Vec<Vec<F>> {
     let mut tables = Vec::new();
@@ -1106,7 +1232,7 @@ fn recursive_butterfly_after_prefix<F: Field>(
     twiddles: &[F],
     tables: &[Vec<F>],
     level: usize,
-    parallel_depth: u32,
+    parallelism: ButterflyParallelism,
 ) {
     let len = values.len();
     if len == completed_chunk_len {
@@ -1115,8 +1241,9 @@ fn recursive_butterfly_after_prefix<F: Field>(
 
     let (left, right) = values.split_at_mut(len / 2);
     if len / 2 > completed_chunk_len {
-        if parallel_depth > 0 {
-            multicore::join(
+        if parallelism.depth > 0 {
+            join_butterfly(
+                parallelism.avoid_waiter_stealing,
                 || {
                     recursive_butterfly_after_prefix(
                         left,
@@ -1125,7 +1252,7 @@ fn recursive_butterfly_after_prefix<F: Field>(
                         twiddles,
                         tables,
                         level + 1,
-                        parallel_depth - 1,
+                        parallelism.descend(),
                     )
                 },
                 || {
@@ -1136,7 +1263,7 @@ fn recursive_butterfly_after_prefix<F: Field>(
                         twiddles,
                         tables,
                         level + 1,
-                        parallel_depth - 1,
+                        parallelism.descend(),
                     )
                 },
             );

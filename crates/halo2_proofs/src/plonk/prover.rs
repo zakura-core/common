@@ -1115,27 +1115,40 @@ where
         prepared_instance_values
             .into_par_iter()
             .map(|instance_values| {
-                let (instance_values, instance_polys): (Vec<_>, Vec<_>) = instance_values
-                    .into_iter()
-                    .map(|(poly, prefix_len)| {
-                        let coefficients = domain.lagrange_prefix_to_coeff_with_twiddles(
-                            poly.clone(),
-                            prefix_len,
-                            &pk.fft_twiddles,
-                        );
-                        (poly, coefficients)
-                    })
-                    .unzip();
+                let mut prepared_values = Vec::with_capacity(instance_values.len());
+                let mut instance_polys = Vec::with_capacity(instance_values.len());
+                let mut instance_cosets = Vec::with_capacity(instance_values.len());
+                for (poly, prefix_len) in instance_values {
+                    let coefficients = domain.lagrange_prefix_to_coeff_with_twiddles(
+                        poly.clone(),
+                        prefix_len,
+                        &pk.fft_twiddles,
+                    );
+                    #[cfg(feature = "batch")]
+                    let coset = pk
+                        .prepared_instance_coset
+                        .as_ref()
+                        .filter(|_| prefix_len == PREPARED_INSTANCE_ROWS)
+                        .map(|prepared| {
+                            prepared.evaluate(&poly[..][..prefix_len], domain, &pk.fft_twiddles)
+                        })
+                        .unwrap_or_else(|| {
+                            domain.coeff_to_extended_with_twiddles(
+                                coefficients.clone(),
+                                &pk.fft_twiddles,
+                            )
+                        });
+                    #[cfg(not(feature = "batch"))]
+                    let coset = domain
+                        .coeff_to_extended_with_twiddles(coefficients.clone(), &pk.fft_twiddles);
 
-                let instance_cosets: Vec<_> = instance_polys
-                    .iter()
-                    .map(|poly| {
-                        domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles)
-                    })
-                    .collect();
+                    prepared_values.push(poly);
+                    instance_polys.push(coefficients);
+                    instance_cosets.push(coset);
+                }
 
                 InstanceSingle::<C> {
-                    instance_values,
+                    instance_values: prepared_values,
                     instance_polys,
                     instance_cosets,
                 }
