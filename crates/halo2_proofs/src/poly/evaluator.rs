@@ -393,7 +393,24 @@ enum ScaleKind {
     MinusOne,
     One,
     Two,
+    Four,
     Other,
+}
+
+fn scale_kind<F: Field>(value: F) -> ScaleKind {
+    let two = F::ONE.double();
+    let four = two.double();
+    if value == -F::ONE {
+        ScaleKind::MinusOne
+    } else if value == F::ONE {
+        ScaleKind::One
+    } else if value == two {
+        ScaleKind::Two
+    } else if value == four {
+        ScaleKind::Four
+    } else {
+        ScaleKind::Other
+    }
 }
 
 struct BoundPlanScalars<F> {
@@ -473,22 +490,7 @@ impl<F: Field> BoundPlanScalars<F> {
             .iter()
             .map(|descriptor| descriptor.resolve(&challenges))
             .collect::<Box<[_]>>();
-        let minus_one = -F::ONE;
-        let two = F::ONE.double();
-        let scale_kinds = values
-            .iter()
-            .map(|value| {
-                if *value == minus_one {
-                    ScaleKind::MinusOne
-                } else if *value == F::ONE {
-                    ScaleKind::One
-                } else if *value == two {
-                    ScaleKind::Two
-                } else {
-                    ScaleKind::Other
-                }
-            })
-            .collect();
+        let scale_kinds = values.iter().map(|value| scale_kind(*value)).collect();
         Self {
             values,
             scale_kinds,
@@ -2708,14 +2710,13 @@ fn scaled_addend_split_stats<F: Field>(
             (lhs.0 + rhs.0, lhs.1 + rhs.1)
         }
         _ => {
-            let two = F::ONE.double();
             let mut plan = plan;
             let mut nontrivial_scales = 0;
             while let EvaluationPlan::Scale(inner, scalar) = plan {
                 let PlanScalar::Literal(value) = scalars[scalar.index()] else {
                     unreachable!("compiled scale factors are literals");
                 };
-                if value != F::ONE && value != -F::ONE && value != two {
+                if matches!(scale_kind(value), ScaleKind::Other) {
                     nontrivial_scales += 1;
                 }
                 plan = inner;
@@ -3798,6 +3799,11 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         *sum += value.double();
                     }
                 }
+                ScaleKind::Four => {
+                    for (sum, value) in sums.iter_mut().zip(values) {
+                        *sum += value.double().double();
+                    }
+                }
                 ScaleKind::Other => {
                     let mut sum_blocks = sums.chunks_exact_mut(4);
                     let mut value_blocks = values.chunks_exact(4);
@@ -3838,6 +3844,11 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         *output = value.double();
                     }
                 }
+                ScaleKind::Four => {
+                    for (output, value) in output.iter_mut().zip(values) {
+                        *output = value.double().double();
+                    }
+                }
                 ScaleKind::Other => {
                     for (output, value) in output.iter_mut().zip(values) {
                         *output = *value * scalar;
@@ -3871,6 +3882,11 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         *output = *lhs + rhs.double();
                     }
                 }
+                ScaleKind::Four => {
+                    for ((output, lhs), rhs) in output.iter_mut().zip(lhs).zip(rhs) {
+                        *output = *lhs + rhs.double().double();
+                    }
+                }
                 ScaleKind::Other => {
                     for ((output, lhs), rhs) in output.iter_mut().zip(lhs).zip(rhs) {
                         *output = *lhs + *rhs * scalar;
@@ -3884,6 +3900,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 ScaleKind::MinusOne => -value,
                 ScaleKind::One => value,
                 ScaleKind::Two => value.double(),
+                ScaleKind::Four => value.double().double(),
                 ScaleKind::Other => value * scalar,
             }
         }
@@ -3904,6 +3921,11 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 ScaleKind::Two => {
                     for (value, addend) in values.iter_mut().zip(addends) {
                         *value = value.double() + addend;
+                    }
+                }
+                ScaleKind::Four => {
+                    for (value, addend) in values.iter_mut().zip(addends) {
+                        *value = value.double().double() + addend;
                     }
                 }
                 ScaleKind::Other => {
@@ -3979,6 +4001,12 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                                     scalar,
                                     output,
                                     |value, constant| constant + value.double(),
+                                ),
+                                ScaleKind::Four => B::combine_constant(
+                                    ctx.chunk_index,
+                                    scalar,
+                                    output,
+                                    |value, constant| constant + value.double().double(),
                                 ),
                                 ScaleKind::Other => B::combine_constant(
                                     ctx.chunk_index,
@@ -4353,6 +4381,11 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                             *output = value.double();
                         }
                     }
+                    ScaleKind::Four => {
+                        for (output, value) in output.iter_mut().zip(chunk.iter()) {
+                            *output = value.double().double();
+                        }
+                    }
                     ScaleKind::Other => {
                         for (output, value) in output.iter_mut().zip(chunk.iter()) {
                             *output = *value * scalar;
@@ -4379,6 +4412,11 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 ScaleKind::Two => {
                     for value in output.iter_mut() {
                         *value = value.double();
+                    }
+                }
+                ScaleKind::Four => {
+                    for value in output.iter_mut() {
+                        *value = value.double().double();
                     }
                 }
                 ScaleKind::Other => {
@@ -5074,8 +5112,10 @@ mod tests {
         let general_scale = Ast::from(leaves[0]) + Ast::from(leaves[1]) * F::from(3);
         assert!(make_term(general_scale));
 
-        let cheap_scale = Ast::from(leaves[0]) + Ast::from(leaves[1]) * F::from(2);
-        assert!(!make_term(cheap_scale));
+        for scale in [2, 4] {
+            let cheap_scale = Ast::from(leaves[0]) + Ast::from(leaves[1]) * F::from(scale);
+            assert!(!make_term(cheap_scale));
+        }
 
         let too_few_scales =
             Ast::from(leaves[0]) + Ast::from(leaves[1]) * F::from(3) + Ast::from(leaves[2]);
@@ -5371,10 +5411,13 @@ mod tests {
         evaluator.register_poly(ExtendedLagrangeCoeff::empty_poly(&domain));
 
         let value = pallas::Base::from(42);
+        let two = pallas::Base::ONE.double();
+        let four = two.double();
         for (scalar, expected) in [
             (pallas::Base::ONE, value),
             (-pallas::Base::ONE, -value),
-            (pallas::Base::ONE.double(), value.double()),
+            (two, value.double()),
+            (four, value.double().double()),
         ] {
             let result = evaluator.evaluate(&(Ast::ConstantTerm(value) * scalar), &domain);
             assert!(result.iter().all(|result| *result == expected));
@@ -5397,10 +5440,13 @@ mod tests {
             for rotation in [Rotation::cur(), Rotation::prev(), Rotation::next()] {
                 let leaf = leaf.with_rotation(rotation);
                 let expected = evaluator.evaluate(&Ast::from(leaf), &domain);
+                let two = pallas::Base::ONE.double();
+                let four = two.double();
                 for scalar in [
                     -pallas::Base::ONE,
                     pallas::Base::ONE,
-                    pallas::Base::ONE.double(),
+                    two,
+                    four,
                     pallas::Base::from(7),
                 ] {
                     let ast = Ast::from(leaf) * scalar;
@@ -5443,11 +5489,13 @@ mod tests {
             let mut evaluator = new_evaluator::<fn(), _, B>(context);
             let leaf = evaluator.register_poly(poly);
             let two = pallas::Base::ONE.double();
+            let four = two.double();
 
             for scalar in [
                 -pallas::Base::ONE,
                 pallas::Base::ONE,
                 two,
+                four,
                 pallas::Base::from(7),
             ] {
                 let constant = Ast::ConstantTerm(scalar);
@@ -5806,11 +5854,13 @@ mod tests {
             .collect::<Vec<_>>();
 
         let lhs = Ast::from(leaves[0]);
+        let two = F::ONE.double();
+        let four = two.double();
         for rhs in [
             Ast::from(leaves[1]),
             Ast::from(leaves[1]) + Ast::from(leaves[2]),
         ] {
-            for scalar in [-F::ONE, F::ONE, F::ONE.double(), F::from(7)] {
+            for scalar in [-F::ONE, F::ONE, two, four, F::from(7)] {
                 let ast = lhs.clone() + rhs.clone() * scalar;
                 assert!(matches!(
                     compile_plan_only(&ast),
