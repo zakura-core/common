@@ -126,15 +126,26 @@ pub(super) fn add(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs) -> Limbs {
     [r0, r1, r2, r3]
 }
 
-/// Subtracts canonical Pasta residues, adding the modulus on underflow.
-/// The difference lies strictly between `-p` and `p`, so one conditional
-/// addition suffices. The final carry is discarded after wrapping modulo
-/// `2^256`, leaving a canonical result in either case.
+/// Subtracts two residues for a Pasta modulus, adding the modulus back on
+/// underflow. Like [`add`] and [`mul`], the block hardcodes the Pasta
+/// modulus shape (`modulus[2] == 0`). Canonical inputs (debug-asserted)
+/// guarantee a canonical result: the difference lies strictly between `-p`
+/// and `p`, so one conditional addition suffices, and the final carry is
+/// discarded after wrapping modulo `2^256`. Unlike [`add`], this computes
+/// the same function as the inherent portable `sub` on all inputs — both
+/// drop the top borrow and mask-add the modulus — so the contract is not
+/// narrower than the portable path.
 #[cfg(target_vendor = "apple")]
 #[inline(always)]
 pub(super) fn sub(lhs: &Limbs, rhs: &Limbs, modulus: &Limbs) -> Limbs {
-    debug_assert!(is_canonical(lhs, modulus));
-    debug_assert!(is_canonical(rhs, modulus));
+    debug_assert!(
+        is_canonical(lhs, modulus),
+        "aarch64_asm::sub requires a canonical lhs"
+    );
+    debug_assert!(
+        is_canonical(rhs, modulus),
+        "aarch64_asm::sub requires a canonical rhs"
+    );
     let [mut r0, mut r1, mut r2, mut r3] = *lhs;
     // SAFETY: register-only arithmetic with declared inputs and outputs;
     // no memory or stack access and no data-dependent control flow.
