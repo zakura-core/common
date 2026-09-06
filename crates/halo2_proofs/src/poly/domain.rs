@@ -357,6 +357,55 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
     }
 
+    /// Converts a zero-padded prefix of Lagrange evaluations to coefficient
+    /// form using proving-key twiddles.
+    ///
+    /// Every value at `prefix_len..` must be zero. The sparse path is selected
+    /// only when its butterfly count is at most half that of the dense FFT.
+    pub(crate) fn lagrange_prefix_to_coeff_with_twiddles(
+        &self,
+        mut polynomial: Polynomial<F, LagrangeCoeff>,
+        prefix_len: usize,
+        twiddles: &ProvingKeyTwiddles<F>,
+    ) -> Polynomial<F, Coeff> {
+        let len = 1 << self.k;
+        assert_eq!(polynomial.len(), len);
+        assert!(prefix_len <= len);
+        assert_eq!(twiddles.base_inverse.len(), len / 2);
+        debug_assert!(
+            polynomial[prefix_len..]
+                .iter()
+                .all(|value| bool::from(value.is_zero()))
+        );
+
+        let dense_butterflies = len / 2 * self.k as usize;
+        if sparse_prefix_butterfly_count(len, prefix_len) > dense_butterflies / 2 {
+            return self.lagrange_to_coeff_with_twiddles(polynomial, twiddles);
+        }
+
+        bitreverse_permute_prefix(&mut polynomial.values, self.k, prefix_len);
+        if prefix_len != 0 {
+            // This kernel is too small to amortize nested Rayon work. The
+            // prover parallelizes independent instance polynomials instead.
+            recursive_butterfly_sparse_prefix(
+                &mut polynomial.values,
+                prefix_len,
+                0,
+                1,
+                1,
+                &twiddles.base_inverse,
+                &twiddles.base_inverse_tables,
+                0,
+            );
+            normalize_inverse_fft(&mut polynomial.values, self.k, self.ifft_divisor, false);
+        }
+
+        Polynomial {
+            values: polynomial.values,
+            _marker: PhantomData,
+        }
+    }
+
     /// Converts a coefficient polynomial to extended-coset form using
     /// proving-key twiddles.
     pub(crate) fn coeff_to_extended_with_twiddles(
@@ -954,6 +1003,26 @@ fn bitreverse_permute<F>(values: &mut [F], log_n: u32) {
     }
 }
 
+fn bitreverse_permute_prefix<F>(values: &mut [F], log_n: u32, prefix_len: usize) {
+    for index in 0..prefix_len {
+        let reversed = bitreverse(index, log_n);
+        if index < reversed {
+            values.swap(index, reversed);
+        }
+    }
+}
+
+fn sparse_prefix_butterfly_count(len: usize, prefix_len: usize) -> usize {
+    let mut butterflies = 0;
+    let mut input_stride = 1;
+    while input_stride < len {
+        let paired_nodes = prefix_len.saturating_sub(input_stride).min(input_stride);
+        butterflies += paired_nodes * (len / (input_stride * 2));
+        input_stride *= 2;
+    }
+    butterflies
+}
+
 fn normalize_inverse_fft<F: Field>(values: &mut Vec<F>, exponent: u32, divisor: F, parallel: bool) {
     // Pasta exposes a partial Montgomery reduction for this exact scaling.
     // Downcast the allocation once so the element loop has no type checks.
@@ -1085,6 +1154,66 @@ fn recursive_butterfly_after_prefix<F: Field>(
     }
 
     butterfly_chunk(left, right, twiddle_chunk, twiddles, tables, level);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recursive_butterfly_sparse_prefix<F: Field>(
+    values: &mut [F],
+    prefix_len: usize,
+    input_offset: usize,
+    input_stride: usize,
+    twiddle_chunk: usize,
+    twiddles: &[F],
+    tables: &[Vec<F>],
+    level: usize,
+) {
+    debug_assert!(input_offset < prefix_len);
+    if values.len() == 1 {
+        return;
+    }
+
+    let (left, right) = values.split_at_mut(values.len() / 2);
+    let right_input_offset = input_offset + input_stride;
+    let child_input_stride = input_stride * 2;
+    let child_twiddle_chunk = twiddle_chunk * 2;
+    if right_input_offset < prefix_len {
+        recursive_butterfly_sparse_prefix(
+            left,
+            prefix_len,
+            input_offset,
+            child_input_stride,
+            child_twiddle_chunk,
+            twiddles,
+            tables,
+            level + 1,
+        );
+        recursive_butterfly_sparse_prefix(
+            right,
+            prefix_len,
+            right_input_offset,
+            child_input_stride,
+            child_twiddle_chunk,
+            twiddles,
+            tables,
+            level + 1,
+        );
+        butterfly_chunk(left, right, twiddle_chunk, twiddles, tables, level);
+    } else {
+        recursive_butterfly_sparse_prefix(
+            left,
+            prefix_len,
+            input_offset,
+            child_input_stride,
+            child_twiddle_chunk,
+            twiddles,
+            tables,
+            level + 1,
+        );
+        // The right subtree started entirely at zero. Combining it with the
+        // transformed left subtree would leave `left` unchanged and copy it
+        // into `right`, so skip the field arithmetic.
+        right.copy_from_slice(left);
+    }
 }
 
 /// Recursively processes two equal-sized field FFT chunks together. The FFT
@@ -1590,6 +1719,46 @@ fn test_cached_base_inverse_transform_for_both_pasta_fields() {
         let expected = domain.lagrange_to_coeff(lagrange.clone());
         let actual = domain.lagrange_to_coeff_with_twiddles(lagrange, &twiddles);
         assert_eq!(&actual[..], &expected[..]);
+    }
+
+    check::<Fp>();
+    check::<Fq>();
+}
+
+#[test]
+fn test_sparse_prefix_inverse_transform_matches_dense() {
+    use crate::pasta::{Fp, Fq};
+
+    fn check_prefix<F>(k: u32, prefix_len: usize)
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::<F>::new(9, k);
+        let twiddles = domain.proving_key_twiddles();
+        let mut values = vec![F::ZERO; 1 << k];
+        for (index, value) in values[..prefix_len].iter_mut().enumerate() {
+            if index % 3 != 1 {
+                *value = F::from((index + 1) as u64);
+            }
+        }
+        let lagrange = domain.lagrange_from_vec(values);
+        let expected = domain.lagrange_to_coeff_with_twiddles(lagrange.clone(), &twiddles);
+        let actual = domain.lagrange_prefix_to_coeff_with_twiddles(lagrange, prefix_len, &twiddles);
+        assert_eq!(&actual[..], &expected[..], "k={k}, prefix_len={prefix_len}");
+    }
+
+    fn check<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        for k in 0..=8 {
+            for prefix_len in 0..=1 << k {
+                check_prefix::<F>(k, prefix_len);
+            }
+        }
+
+        #[cfg(feature = "batch")]
+        check_prefix::<F>(11, crate::PREPARED_INSTANCE_ROWS);
     }
 
     check::<Fp>();

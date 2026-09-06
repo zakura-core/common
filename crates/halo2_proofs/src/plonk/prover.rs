@@ -742,15 +742,16 @@ where
             instance
                 .iter()
                 .map(|values| {
+                    let prefix_len = values.len();
                     let mut poly = domain.empty_lagrange();
                     assert_eq!(poly.len(), params.n as usize);
-                    if values.len() > max_instance_len {
+                    if prefix_len > max_instance_len {
                         return Err(Error::InstanceTooLarge);
                     }
                     for (poly, value) in poly.iter_mut().zip(values.iter()) {
                         *poly = *value;
                     }
-                    Ok(poly)
+                    Ok((poly, prefix_len))
                 })
                 .collect::<Result<Vec<_>, _>>()
         })
@@ -803,13 +804,17 @@ where
         prepared_instance_values
             .into_par_iter()
             .map(|instance_values| {
-                let instance_polys: Vec<_> = instance_values
-                    .iter()
-                    .map(|poly| {
-                        let lagrange_vec = domain.lagrange_from_vec(poly.to_vec());
-                        domain.lagrange_to_coeff_with_twiddles(lagrange_vec, &pk.fft_twiddles)
+                let (instance_values, instance_polys): (Vec<_>, Vec<_>) = instance_values
+                    .into_iter()
+                    .map(|(poly, prefix_len)| {
+                        let coefficients = domain.lagrange_prefix_to_coeff_with_twiddles(
+                            poly.clone(),
+                            prefix_len,
+                            &pk.fft_twiddles,
+                        );
+                        (poly, coefficients)
                     })
-                    .collect();
+                    .unzip();
 
                 let instance_cosets: Vec<_> = instance_polys
                     .iter()
