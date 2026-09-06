@@ -720,8 +720,15 @@ where
     pk.vk.hash_into(transcript)?;
 
     let domain = &pk.vk.domain;
-    let mut meta = ConstraintSystem::default();
-    let config = ConcreteCircuit::configure(&mut meta);
+    let cached_config = if ConcreteCircuit::CACHE_CONFIGURATION {
+        pk.circuit_config
+            .as_ref()
+            .and_then(ConcreteCircuit::configuration_from_cache)
+    } else {
+        None
+    };
+    let config = cached_config
+        .unwrap_or_else(|| ConcreteCircuit::configure(&mut ConstraintSystem::default()));
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
@@ -1921,11 +1928,16 @@ fn prepared_instance_commitments_match_generic_msm() {
 fn test_create_proof() {
     use crate::{
         circuit::SimpleFloorPlanner,
-        plonk::{keygen_pk, keygen_vk},
-        transcript::{Blake2bWrite, Challenge255},
+        plonk::{SingleVerifier, keygen_pk, keygen_vk, verify_proof},
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
     use pasta_curves::EqAffine;
-    use rand::rng;
+    use rand::{SeedableRng, rng, rngs::StdRng};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ALTERNATE_CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
+    static OPTED_IN_CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
+    const SAME_SHAPE_PROOF_SEED: u64 = 0x434f_4e46_4947_0001;
 
     #[derive(Clone, Copy)]
     struct MyCircuit;
@@ -1935,11 +1947,85 @@ fn test_create_proof() {
 
         type FloorPlanner = SimpleFloorPlanner;
 
+        const CACHE_CONFIGURATION: bool = true;
+
         fn without_witnesses(&self) -> Self {
             *self
         }
 
         fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {}
+
+        fn cache_configuration(_config: &Self::Config) -> Option<crate::plonk::CircuitConfigCache> {
+            Some(crate::plonk::CircuitConfigCache::new(()))
+        }
+
+        fn configuration_from_cache(
+            cache: &crate::plonk::CircuitConfigCache,
+        ) -> Option<Self::Config> {
+            cache.clone_config()
+        }
+
+        fn synthesize(
+            &self,
+            _config: Self::Config,
+            _layouter: impl crate::circuit::Layouter<F>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AlternateCircuit;
+
+    impl<F: Field> Circuit<F> for AlternateCircuit {
+        type Config = ();
+
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            *self
+        }
+
+        fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {
+            ALTERNATE_CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn synthesize(
+            &self,
+            _config: Self::Config,
+            _layouter: impl crate::circuit::Layouter<F>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct OptedInAlternateCircuit;
+
+    impl<F: Field> Circuit<F> for OptedInAlternateCircuit {
+        type Config = ();
+
+        type FloorPlanner = SimpleFloorPlanner;
+
+        const CACHE_CONFIGURATION: bool = true;
+
+        fn without_witnesses(&self) -> Self {
+            *self
+        }
+
+        fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {
+            OPTED_IN_CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn cache_configuration(_config: &Self::Config) -> Option<crate::plonk::CircuitConfigCache> {
+            Some(crate::plonk::CircuitConfigCache::new(()))
+        }
+
+        fn configuration_from_cache(
+            cache: &crate::plonk::CircuitConfigCache,
+        ) -> Option<Self::Config> {
+            cache.clone_config()
+        }
 
         fn synthesize(
             &self,
@@ -1976,6 +2062,70 @@ fn test_create_proof() {
         &mut transcript,
     )
     .expect("proof generation should not fail");
+
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[MyCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("cached-configuration proof generation should not fail");
+    let cached_config_proof = transcript.finalize();
+
+    // A different circuit type with the same shape and configuration type
+    // keeps the established fallback of configuring itself at proving time.
+    // With identical randomness, both configuration paths produce the same
+    // proof.
+    ALTERNATE_CONFIGURATIONS.store(0, Ordering::Relaxed);
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[AlternateCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("same-shape proof generation should not fail");
+    let alternate_config_proof = transcript.finalize();
+    assert_eq!(ALTERNATE_CONFIGURATIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(alternate_config_proof, cached_config_proof);
+
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[AlternateCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("repeated same-shape proof generation should not fail");
+    assert_eq!(ALTERNATE_CONFIGURATIONS.load(Ordering::Relaxed), 2);
+
+    // Compatible circuit types may deliberately recognize and reuse the same
+    // cached configuration.
+    OPTED_IN_CONFIGURATIONS.store(0, Ordering::Relaxed);
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[OptedInAlternateCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("opted-in same-shape proof generation should not fail");
+    assert_eq!(OPTED_IN_CONFIGURATIONS.load(Ordering::Relaxed), 0);
+    assert_eq!(transcript.finalize(), cached_config_proof);
+
+    let strategy = SingleVerifier::new(&params);
+    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&alternate_config_proof[..]);
+    verify_proof(&params, pk.get_vk(), strategy, &[&[]], &mut transcript)
+        .expect("same-shape proof verification should not fail");
 }
 
 #[test]
@@ -2607,6 +2757,7 @@ fn v1_proving_key_reuses_floor_plan() {
     use rand::{SeedableRng, rngs::StdRng};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    static CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
     static MEASUREMENTS: AtomicUsize = AtomicUsize::new(0);
     static TABLE_ASSIGNMENTS: AtomicUsize = AtomicUsize::new(0);
     static FAIL_TABLE: AtomicBool = AtomicBool::new(false);
@@ -2625,16 +2776,29 @@ fn v1_proving_key_reuses_floor_plan() {
         type Config = MyConfig;
         type FloorPlanner = V1;
 
+        const CACHE_CONFIGURATION: bool = true;
+
         fn without_witnesses(&self) -> Self {
             MEASUREMENTS.fetch_add(1, Ordering::Relaxed);
             *self
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
+            CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
             let advice = meta.advice_column();
             let table = meta.lookup_table_column();
             meta.lookup(|meta| vec![(meta.query_advice(advice, Rotation::cur()), table)]);
             MyConfig { advice, table }
+        }
+
+        fn cache_configuration(config: &Self::Config) -> Option<crate::plonk::CircuitConfigCache> {
+            Some(crate::plonk::CircuitConfigCache::new(*config))
+        }
+
+        fn configuration_from_cache(
+            cache: &crate::plonk::CircuitConfigCache,
+        ) -> Option<Self::Config> {
+            cache.clone_config()
         }
 
         fn synthesize(
@@ -2663,13 +2827,17 @@ fn v1_proving_key_reuses_floor_plan() {
     }
 
     let params: Params<EqAffine> = Params::new(3);
+    CONFIGURATIONS.store(0, Ordering::Relaxed);
     TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 1);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
     let mut pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 2);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 2);
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
 
+    CONFIGURATIONS.store(0, Ordering::Relaxed);
     MEASUREMENTS.store(0, Ordering::Relaxed);
     TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     create_proof(
@@ -2682,9 +2850,11 @@ fn v1_proving_key_reuses_floor_plan() {
     )
     .expect("proof generation should not fail");
     // The plan cached in the proving key is reused, so proving re-measures
-    // nothing. The fixed table values are already part of the proving key,
-    // but each circuit's table closure still runs: its side effects and
-    // errors are observable behavior.
+    // nothing. Its circuit configuration is also reused instead of rebuilding
+    // the constraint system. The fixed table values are already part of the
+    // proving key, but each circuit's table closure still runs: its side
+    // effects and errors are observable behavior.
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 0);
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
     let first_proof = transcript.finalize();

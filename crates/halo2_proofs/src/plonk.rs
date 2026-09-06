@@ -437,6 +437,8 @@ pub struct ProvingKey<C: CurveAffine> {
     fft_twiddles: ProvingKeyTwiddles<C::Scalar>,
     /// Circuit-type-erased floor-planning data produced during key generation.
     floor_plan: Option<FloorPlan>,
+    /// Circuit configuration retained by an opted-in circuit.
+    circuit_config: Option<CircuitConfigCache>,
     /// Bounded, prover-only compiled quotient plans prepared during keygen and
     /// replaced lazily if evaluator-shape validation rejects them.
     quotient_plans: Arc<evaluator_schedule::QuotientPlans<C::Scalar>>,

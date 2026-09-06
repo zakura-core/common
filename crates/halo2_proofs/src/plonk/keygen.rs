@@ -467,7 +467,7 @@ where
     ))
 }
 
-/// Generate a `ProvingKey` from a `VerifyingKey` and an instance of `Circuit`.
+/// Generate a [`ProvingKey`] from a [`VerifyingKey`] and a [`Circuit`] instance.
 pub fn keygen_pk<C, ConcreteCircuit>(
     params: &Params<C>,
     vk: VerifyingKey<C>,
@@ -480,6 +480,11 @@ where
 {
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
+    let circuit_config = if ConcreteCircuit::CACHE_CONFIGURATION {
+        ConcreteCircuit::cache_configuration(&config)
+    } else {
+        None
+    };
 
     let cs = cs;
 
@@ -627,6 +632,7 @@ where
         permutation: permutation_pk,
         fft_twiddles,
         floor_plan,
+        circuit_config,
         quotient_plans: Arc::new(Default::default()),
     };
     super::evaluator_schedule::prepare_quotient_plans(&pk);
