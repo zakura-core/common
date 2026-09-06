@@ -9,7 +9,7 @@ use std::{convert::Infallible, iter};
 use super::super::{ChallengeBeta, ChallengeGamma, ChallengeX, circuit::Any};
 use super::{Argument, ProvingKey, permutation_chunk_len};
 use crate::{
-    arithmetic::{CurveAffine, best_multiexp},
+    arithmetic::{CurveAffine, best_multiexp, parallelize},
     plonk::{
         self, Error,
         evaluation::{EvaluationPoint, EvaluationQuery},
@@ -48,6 +48,17 @@ struct UntransformedSet<F: Field> {
     product: Polynomial<F, LagrangeCoeff>,
     product_blind: Blind<F>,
 }
+
+#[derive(Clone, Copy)]
+struct ConstantPrefix<'a, F: Field> {
+    constant: F,
+    prefix_len: usize,
+    tail: &'a [F],
+}
+
+// Bounds both the stack storage and the per-coefficient work of the direct
+// transform.
+const MAX_DIRECT_TRANSFORM_TAIL_LEN: usize = 8;
 
 pub(in crate::plonk) struct PermutationBlinding<F: Field> {
     sets: Vec<SetBlinding<F>>,
@@ -557,21 +568,31 @@ fn prepare_product<C: CurveAffine>(
 ) -> PreparedSet<C> {
     let blind = set.product_blind;
     let z = set.product;
+    let constant_prefix = (z.len() == params.g_lagrange.len())
+        .then(|| detect_constant_prefix(&z, pk.vk.cs.blinding_factors()))
+        .flatten();
+    let sparse_transform_prefix =
+        constant_prefix.filter(|prefix| prefix.tail.len() <= MAX_DIRECT_TRANSFORM_TAIL_LEN);
     let (commitment, (polynomial, coset)) = crate::multicore::join(
         || {
-            try_commit_constant_prefix(params, &z, blind, pk.vk.cs.blinding_factors())
+            constant_prefix
+                .map(|prefix| commit_constant_prefix(params, prefix, blind))
                 .unwrap_or_else(|| params.commit_lagrange(&z, blind))
         },
         || {
-            let polynomial = pk
-                .vk
-                .domain
-                .lagrange_to_coeff_with_twiddles(z.clone(), &pk.fft_twiddles);
-            let coset = pk
-                .vk
-                .domain
-                .coeff_to_extended_with_twiddles(polynomial.clone(), &pk.fft_twiddles);
-            (polynomial, coset)
+            sparse_transform_prefix
+                .map(|prefix| transform_constant_prefix(&pk.vk.domain, &pk.l0, prefix))
+                .unwrap_or_else(|| {
+                    let polynomial = pk
+                        .vk
+                        .domain
+                        .lagrange_to_coeff_with_twiddles(z.clone(), &pk.fft_twiddles);
+                    let coset = pk
+                        .vk
+                        .domain
+                        .coeff_to_extended_with_twiddles(polynomial.clone(), &pk.fft_twiddles);
+                    (polynomial, coset)
+                })
         },
     );
 
@@ -583,40 +604,45 @@ fn prepare_product<C: CurveAffine>(
     }
 }
 
-/// Commits to Lagrange evaluations whose non-blinding rows are constant.
-///
-/// A constant Lagrange vector represents a constant coefficient polynomial,
-/// so its commitment is the constant times `g[0]`. The remaining terms are
-/// the differences between the blinded tail and that constant, plus the
-/// commitment blind. Returns [`None`] when the input length does not match the
-/// SRS or the prefix is not constant.
-fn try_commit_constant_prefix<C: CurveAffine>(
-    params: &Params<C>,
-    values: &[C::Scalar],
-    blind: Blind<C::Scalar>,
+fn detect_constant_prefix<'a, F: Field>(
+    values: &'a [F],
     blinding_factors: usize,
-) -> Option<C::Curve> {
-    if values.len() != params.g_lagrange.len() {
-        return None;
-    }
-
+) -> Option<ConstantPrefix<'a, F>> {
     let prefix_len = values.len().checked_sub(blinding_factors)?;
     let (&constant, prefix) = values.get(..prefix_len)?.split_first()?;
     if prefix.iter().any(|value| *value != constant) {
         return None;
     }
 
-    let mut scalars = Vec::with_capacity(blinding_factors + 2);
-    let mut bases = Vec::with_capacity(blinding_factors + 2);
-    if !bool::from(constant.is_zero()) {
-        scalars.push(constant);
+    Some(ConstantPrefix {
+        constant,
+        prefix_len,
+        tail: &values[prefix_len..],
+    })
+}
+
+/// Commits to a polynomial whose non-blinding rows are constant.
+///
+/// A constant Lagrange vector represents a constant coefficient polynomial,
+/// so its commitment is the constant times `g[0]`. The remaining terms are
+/// the differences between the blinded tail and that constant, plus the
+/// commitment blind.
+fn commit_constant_prefix<C: CurveAffine>(
+    params: &Params<C>,
+    prefix: ConstantPrefix<'_, C::Scalar>,
+    blind: Blind<C::Scalar>,
+) -> C::Curve {
+    let mut scalars = Vec::with_capacity(prefix.tail.len() + 2);
+    let mut bases = Vec::with_capacity(prefix.tail.len() + 2);
+    if !bool::from(prefix.constant.is_zero()) {
+        scalars.push(prefix.constant);
         bases.push(params.g[0]);
     }
-    for (offset, &value) in values[prefix_len..].iter().enumerate() {
-        let delta = value - constant;
+    for (offset, &value) in prefix.tail.iter().enumerate() {
+        let delta = value - prefix.constant;
         if !bool::from(delta.is_zero()) {
             scalars.push(delta);
-            bases.push(params.g_lagrange[prefix_len + offset]);
+            bases.push(params.g_lagrange[prefix.prefix_len + offset]);
         }
     }
     if !bool::from(blind.0.is_zero()) {
@@ -624,11 +650,105 @@ fn try_commit_constant_prefix<C: CurveAffine>(
         bases.push(params.w);
     }
 
-    Some(if scalars.is_empty() {
+    if scalars.is_empty() {
         C::Curve::identity()
     } else {
         best_multiexp::<C>(&scalars, &bases)
-    })
+    }
+}
+
+/// Transforms a constant prefix plus a short tail without running FFTs.
+///
+/// For base-domain size `n`, the tail evaluation at row `n - r` contributes
+/// `delta / n * (omega^k)^r` to coefficient `k`. On the extended coset it
+/// contributes `delta * L_0(g * Omega^(k + extension * r))`, which is a cyclic
+/// shift of the already-retained `L_0` evaluations.
+fn transform_constant_prefix<F: WithSmallOrderMulGroup<3>>(
+    domain: &poly::EvaluationDomain<F>,
+    l0_extended: &Polynomial<F, ExtendedLagrangeCoeff>,
+    prefix: ConstantPrefix<'_, F>,
+) -> (Polynomial<F, Coeff>, Polynomial<F, ExtendedLagrangeCoeff>) {
+    let tail_len = prefix.tail.len();
+    assert!(tail_len <= MAX_DIRECT_TRANSFORM_TAIL_LEN);
+
+    let n = prefix.prefix_len + tail_len;
+    let mut coefficients = domain.empty_coeff();
+    let mut extended = domain.empty_extended();
+    assert_eq!(coefficients.len(), n);
+    assert_eq!(l0_extended.len(), extended.len());
+    assert_eq!(extended.len() % n, 0);
+
+    if tail_len == 0 {
+        coefficients[0] = prefix.constant;
+        parallelize(&mut extended, |values, _| values.fill(prefix.constant));
+        return (coefficients, extended);
+    }
+
+    // Index `r - 1` holds the correction for evaluation row `n - r`.
+    assert!(n.is_power_of_two());
+    let inverse_n = (0..n.trailing_zeros()).fold(F::ONE, |value, _| value * F::TWO_INV);
+    let mut deltas = [F::ZERO; MAX_DIRECT_TRANSFORM_TAIL_LEN];
+    let mut scaled_deltas = [F::ZERO; MAX_DIRECT_TRANSFORM_TAIL_LEN];
+    for (index, &value) in prefix.tail.iter().rev().enumerate() {
+        let delta = value - prefix.constant;
+        deltas[index] = delta;
+        scaled_deltas[index] = delta * inverse_n;
+    }
+
+    let extension = extended.len() / n;
+    crate::multicore::join(
+        || {
+            let omega = domain.get_omega();
+            parallelize(&mut coefficients, |coefficients, start| {
+                let mut omega_power = omega.pow_vartime([start as u64]);
+                for (offset, coefficient) in coefficients.iter_mut().enumerate() {
+                    let mut value = scaled_deltas[tail_len - 1];
+                    for delta in scaled_deltas[..tail_len - 1].iter().rev() {
+                        value = value * omega_power + delta;
+                    }
+                    value *= omega_power;
+                    if start + offset == 0 {
+                        value += prefix.constant;
+                    }
+                    *coefficient = value;
+                    omega_power *= omega;
+                }
+            });
+        },
+        || {
+            let extended_len = extended.len();
+            let wrapped_len = extension * tail_len;
+            let unwrapped_len = extended_len - wrapped_len;
+            let (unwrapped, wrapped) = extended.split_at_mut(unwrapped_len);
+
+            parallelize(unwrapped, |values, start| {
+                for (offset, value) in values.iter_mut().enumerate() {
+                    let mut result = prefix.constant;
+                    let mut l0_index = start + offset + extension;
+                    for delta in &deltas[..tail_len] {
+                        result += *delta * l0_extended[l0_index];
+                        l0_index += extension;
+                    }
+                    *value = result;
+                }
+            });
+
+            for (offset, value) in wrapped.iter_mut().enumerate() {
+                let mut result = prefix.constant;
+                let mut l0_index = unwrapped_len + offset + extension;
+                for delta in &deltas[..tail_len] {
+                    if l0_index >= extended_len {
+                        l0_index -= extended_len;
+                    }
+                    result += *delta * l0_extended[l0_index];
+                    l0_index += extension;
+                }
+                *value = result;
+            }
+        },
+    );
+
+    (coefficients, extended)
 }
 
 impl<C: CurveAffine> Prepared<C> {
@@ -859,8 +979,8 @@ impl<C: CurveAffine> Evaluated<C> {
 }
 
 #[cfg(test)]
-mod constant_prefix_commitment_tests {
-    use super::try_commit_constant_prefix;
+mod constant_prefix_tests {
+    use super::{commit_constant_prefix, detect_constant_prefix};
     use crate::{
         arithmetic::CurveAffine,
         poly::{
@@ -868,12 +988,26 @@ mod constant_prefix_commitment_tests {
             commitment::{Blind, Params},
         },
     };
-    use group::ff::Field;
-    use pasta_curves::{EpAffine, EqAffine, Fp};
+    use group::ff::{Field, WithSmallOrderMulGroup};
+    use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
     use proptest::prelude::*;
 
     const K: u32 = 4;
     const BLINDING_FACTORS: usize = 5;
+
+    fn try_commit_constant_prefix<C: CurveAffine>(
+        params: &Params<C>,
+        values: &[C::Scalar],
+        blind: Blind<C::Scalar>,
+        blinding_factors: usize,
+    ) -> Option<C::Curve> {
+        if values.len() != params.g_lagrange.len() {
+            return None;
+        }
+
+        detect_constant_prefix(values, blinding_factors)
+            .map(|prefix| commit_constant_prefix(params, prefix, blind))
+    }
 
     fn polynomial_with_constant_prefix<C: CurveAffine>(
         constant: C::Scalar,
@@ -922,10 +1056,51 @@ mod constant_prefix_commitment_tests {
         }
     }
 
+    fn assert_sparse_tail_transforms_match<F: WithSmallOrderMulGroup<3>>() {
+        let domain = EvaluationDomain::<F>::new(9, K);
+        let twiddles = domain.proving_key_twiddles();
+        let mut l0 = domain.empty_lagrange();
+        l0[0] = F::ONE;
+        let l0 = domain.lagrange_to_coeff_with_twiddles(l0, &twiddles);
+        let l0 = domain.coeff_to_extended_with_twiddles(l0, &twiddles);
+
+        for tail_len in 0..=super::MAX_DIRECT_TRANSFORM_TAIL_LEN {
+            for constant in [F::ZERO, F::from(17)] {
+                let mut values = vec![constant; 1 << K];
+                for (index, value) in values[(1 << K) - tail_len..].iter_mut().enumerate() {
+                    *value = match index % 3 {
+                        0 => constant,
+                        1 => F::ZERO,
+                        _ => F::from(41 + index as u64),
+                    };
+                }
+                let polynomial = domain.lagrange_from_vec(values);
+                let prefix = detect_constant_prefix(&polynomial, tail_len)
+                    .expect("the test polynomial has a constant prefix");
+
+                let expected_coefficients =
+                    domain.lagrange_to_coeff_with_twiddles(polynomial.clone(), &twiddles);
+                let expected_extended = domain
+                    .coeff_to_extended_with_twiddles(expected_coefficients.clone(), &twiddles);
+                let (actual_coefficients, actual_extended) =
+                    super::transform_constant_prefix(&domain, &l0, prefix);
+
+                assert_eq!(&actual_coefficients[..], &expected_coefficients[..]);
+                assert_eq!(&actual_extended[..], &expected_extended[..]);
+            }
+        }
+    }
+
     #[test]
     fn constant_prefix_matches_dense_commitment_for_edge_constants() {
         assert_edge_constants_match::<EqAffine>();
         assert_edge_constants_match::<EpAffine>();
+    }
+
+    #[test]
+    fn sparse_tail_transforms_match_ffts_for_both_pasta_fields() {
+        assert_sparse_tail_transforms_match::<Fp>();
+        assert_sparse_tail_transforms_match::<Fq>();
     }
 
     #[test]
