@@ -258,10 +258,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
         with:
           components: clippy
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       # One package per invocation: a grouped invocation lets Cargo unify
@@ -323,7 +323,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned nightly; action uses orphan commits
         with:
           components: rustfmt
       - name: Check formatting
@@ -352,7 +352,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Run tests
         shell: bash
         env:
@@ -392,7 +392,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Compile tests
         run: >-
           cargo +stable test --verbose --release
@@ -434,7 +434,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: i686-unknown-linux-gnu
       - name: Install cross-platform support dependencies
@@ -504,7 +504,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: ${{ matrix.target }}
       - name: Build target
@@ -527,7 +527,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Run tests with the legacy floor-planner sort
         # floor-planner-v1-legacy-pdqsort swaps the V1 floor planner's region
         # sort for the vendored halo2_legacy_pdqsort quicksort (the 32/64-bit
@@ -551,7 +551,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned nightly; action uses orphan commits
       - name: Install build dependencies
         # --all-features enables plotters' TTF text rendering, which links the
         # system fontconfig (same as the rust-checks all-feature check).
@@ -579,21 +579,48 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Run tests
         run: cargo +stable test -p zakura-orchard --verbose
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  orchard-weighted-test:
+    name: orchard / Test weighted Merkle on Linux
+    needs: changes
+    if: needs.changes.outputs.orchard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Run weighted-merkle library tests
         # The weighted-merkle feature is not in the crate defaults, so its
         # gated tests (e.g. the weighted/unweighted Merkle equivalence
-        # proptest in tree.rs) never execute under the default-feature run
-        # above. They live in the library target, so --lib re-runs only the
-        # cheap lib suite with the feature enabled rather than repeating the
-        # integration tests.
+        # proptest in tree.rs) never execute under the default-feature job.
+        # They live in the library target, so --lib runs only the lib suite
+        # with the feature enabled rather than the integration tests.
         run: >-
           cargo +stable test -p zakura-orchard
           --features weighted-merkle
           --lib
           --verbose
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  orchard-fingerprint-check:
+    name: orchard / Compile-check verifier fingerprint
+    needs: changes
+    if: needs.changes.outputs.orchard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Compile-check verifier-fingerprint capture
         run: >-
           cargo +stable test -p zakura-orchard
@@ -613,7 +640,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Run the multiexp tests with multicore
         # `halo2-test` runs with `--no-default-features`, which drops
         # `multicore`, so the parallel Pasta GLV multiscalar path
@@ -645,7 +672,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Run weighted Merkle evaluator tests
         run: >-
           cargo +stable test -p zakura-sinsemilla
@@ -667,7 +694,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Compile tests
         run: cargo +stable test -p zakura-orchard --verbose --no-run
       - name: Create and verify a proof individually and in a batch
@@ -705,7 +732,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: ${{ matrix.target }}
       - name: Build no_std target
@@ -731,7 +758,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Run tests
         run: >-
           cargo +stable test -p zakura-pasta-curves
@@ -755,7 +782,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Compile tests
         run: >-
           cargo +stable test -p zakura-pasta-curves
@@ -796,7 +823,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
         with:
           targets: aarch64-unknown-linux-gnu
       - name: Install AArch64 cross linker
@@ -831,7 +858,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: i686-unknown-linux-gnu
       - name: Install cross-platform support dependencies
@@ -862,7 +889,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: ${{ matrix.target }}
       - name: Build target
@@ -884,7 +911,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - run: cargo +stable test -p zakura-reddsa --all-features --locked
 
   reddsa-no-std:
@@ -897,7 +924,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: thumbv6m-none-eabi
       - run: >-
@@ -917,7 +944,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - run: cargo +stable test -p zakura-redjubjub --all-features --locked
 
   redjubjub-no-std:
@@ -936,7 +963,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: ${{ matrix.target }}
       - run: >-
@@ -957,7 +984,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Run tests
         run: >-
           cargo +stable test
@@ -986,7 +1013,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Compile tests
         run: >-
           cargo +stable test
@@ -1025,7 +1052,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: ${{ matrix.target }}
       - name: Build target
@@ -1055,7 +1082,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
       - name: Run tests
         run: >-
           cargo +1.91.0 test
@@ -1077,7 +1104,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           components: clippy
       - name: Check no-default-features
@@ -1155,7 +1182,7 @@ jobs:
       - name: Install beta Clippy
         if: ${{ !cancelled() }}
         continue-on-error: true
-        uses: dtolnay/rust-toolchain@482f49bd06e5fc9083e4fd71e1327793b1c839fe # beta
+        uses: dtolnay/rust-toolchain@482f49bd06e5fc9083e4fd71e1327793b1c839fe # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned beta; action uses orphan commits
         with:
           components: clippy
       - name: Clippy on beta
@@ -1191,7 +1218,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           targets: ${{ matrix.target }}
       - name: Install cross-platform support dependencies
@@ -1219,6 +1246,8 @@ jobs:
       - halo2-test-32-bit
       - halo2-build
       - orchard-test
+      - orchard-weighted-test
+      - orchard-fingerprint-check
       - orchard-platform-smoke
       - orchard-no-std
       - pasta-test
@@ -1257,6 +1286,8 @@ jobs:
             halo2-test-32-bit,
             halo2-build,
             orchard-test,
+            orchard-weighted-test,
+            orchard-fingerprint-check,
             orchard-platform-smoke,
             orchard-no-std,
             pasta-test,
