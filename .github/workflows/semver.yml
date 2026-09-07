@@ -104,10 +104,30 @@ jobs:
       - name: Check public API compatibility
         env:
           PACKAGE: ${{ matrix.package }}
-        run: >-
-          cargo semver-checks
-          --package "$PACKAGE"
-          --default-features
+        shell: bash
+        run: |
+          # A crate that has never been published has no baseline to compare
+          # against: its first release sets one. Look the crate up in the
+          # sparse index (the same lookup cargo-semver-checks performs) and
+          # skip, with a visible notice, when it is absent; any other lookup
+          # failure is an error, so a registry outage cannot pass as "new".
+          name=${PACKAGE,,}
+          case ${#name} in
+            1) path="1/$name" ;;
+            2) path="2/$name" ;;
+            3) path="3/${name:0:1}/$name" ;;
+            *) path="${name:0:2}/${name:2:2}/$name" ;;
+          esac
+          status=$(curl -sS -o /dev/null -w '%{http_code}' \
+            "https://index.crates.io/$path")
+          if [[ "$status" == 404 ]]; then
+            echo "::notice::$PACKAGE has no crates.io release yet; nothing to compare against"
+            exit 0
+          elif [[ "$status" != 200 ]]; then
+            echo "crates.io index lookup for $PACKAGE returned HTTP $status" >&2
+            exit 1
+          fi
+          cargo semver-checks --package "$PACKAGE" --default-features
 
   semver-checks:
     name: semver-checks
