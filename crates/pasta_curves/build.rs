@@ -15,10 +15,13 @@ fn build_aarch64_asm() {
     let target_family = env::var("CARGO_CFG_TARGET_FAMILY").ok();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_pointer_width = env::var("CARGO_CFG_TARGET_POINTER_WIDTH").unwrap();
+    let target_is_unix = target_family
+        .as_deref()
+        .is_some_and(|families| families.split(',').any(|family| family == "unix"));
 
     if target_arch == "aarch64"
         && target_endian == "little"
-        && (target_family.as_deref() == Some("unix") || target_os == "none")
+        && (target_is_unix || target_os == "none")
         && target_pointer_width == "64"
     {
         cc::Build::new()
