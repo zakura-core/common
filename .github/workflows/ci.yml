@@ -1303,6 +1303,7 @@ jobs:
       - pasta-test
       - pasta-platform-smoke
       - pasta-aarch64-linux-build
+      - pasta-aarch64-none-build
       - pasta-test-32-bit
       - pasta-no-std
       - reddsa-test
@@ -1343,6 +1344,7 @@ jobs:
             pasta-test,
             pasta-platform-smoke,
             pasta-aarch64-linux-build,
+            pasta-aarch64-none-build,
             pasta-test-32-bit,
             pasta-no-std,
             reddsa-test,
