@@ -7,7 +7,7 @@ use rand_core::Rng;
 use std::{convert::Infallible, iter};
 
 use super::super::{ChallengeBeta, ChallengeGamma, ChallengeX, circuit::Any};
-use super::{Argument, ProvingKey, permutation_chunk_len};
+use super::{Argument, IdentityCells, ProvingKey, permutation_chunk_len};
 use crate::{
     arithmetic::{CurveAffine, best_multiexp, parallelize},
     plonk::{
@@ -39,9 +39,27 @@ struct SetBlinding<F: Field> {
 }
 
 struct PreparedFractions<F: Field> {
+    fractions: FractionValues<F>,
+    blinding: SetBlinding<F>,
+}
+
+enum FractionValues<F: Field> {
+    Dense {
+        numerators: Vec<F>,
+        denominators: Vec<F>,
+    },
+    Sparse(SparseFractions<F>),
+}
+
+struct SparseFractions<F: Field> {
+    // Rows with at least one non-identity permutation cell.
+    rows: Vec<usize>,
     numerators: Vec<F>,
     denominators: Vec<F>,
-    blinding: SetBlinding<F>,
+    // First row whose cancelled common factor is zero, if any.
+    first_cancelled_zero: Option<usize>,
+    fraction_rows: usize,
+    domain_size: usize,
 }
 
 enum PreparedProduct<F: Field> {
@@ -253,8 +271,8 @@ impl Argument {
         let domain = &pk.vk.domain;
         let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         let blinding_factors = pk.vk.cs.blinding_factors();
-
         assert_eq!(self.columns.len(), pkey.permutations.len());
+        assert_eq!(self.columns.len(), pkey.identity_cells.len());
         assert_eq!(self.columns.len(), pkey.identity_columns.len());
 
         // Record the initial delta power for each set. The numerator ratios
@@ -264,19 +282,23 @@ impl Argument {
             .columns
             .chunks(chunk_len)
             .zip(pkey.permutations.chunks(chunk_len))
+            .zip(pkey.identity_cells.chunks(chunk_len))
             .zip(pkey.identity_columns.chunks(chunk_len))
-            .map(|((columns, permutations), identity_columns)| {
-                let initial_deltaomega = deltaomega;
-                for _ in columns {
-                    deltaomega *= &C::Scalar::DELTA;
-                }
-                (
-                    columns,
-                    permutations,
-                    initial_deltaomega,
-                    identity_columns.iter().all(|&identity| identity),
-                )
-            })
+            .map(
+                |(((columns, permutations), identity_cells), identity_columns)| {
+                    let initial_deltaomega = deltaomega;
+                    for _ in columns {
+                        deltaomega *= &C::Scalar::DELTA;
+                    }
+                    (
+                        columns,
+                        permutations,
+                        identity_cells,
+                        initial_deltaomega,
+                        identity_columns.iter().all(|&identity| identity),
+                    )
+                },
+            )
             .collect::<Vec<_>>();
         assert_eq!(set_inputs.len(), blinding.sets.len());
 
@@ -285,31 +307,30 @@ impl Argument {
         let prepared_products = set_inputs
             .into_par_iter()
             .zip(blinding.sets.into_par_iter())
-            .map(
-                |((columns, permutations, initial_deltaomega, is_identity), blinding)| {
-                    if is_identity && blinding_factors <= MAX_DIRECT_TRANSFORM_TAIL_LEN {
-                        return PreparedProduct::Identity(blinding);
-                    }
-                    let (numerators, denominators, _) = prepare_fractions(
-                        params,
-                        domain,
-                        columns,
-                        permutations,
-                        advice,
-                        fixed,
-                        instance,
-                        beta,
-                        gamma,
-                        initial_deltaomega,
-                        blinding_factors,
-                    );
-                    PreparedProduct::Fractions(PreparedFractions {
-                        numerators,
-                        denominators,
-                        blinding,
-                    })
-                },
-            )
+            .map(|(set, blinding)| {
+                let (columns, permutations, identity_cells, initial_deltaomega, is_identity) = set;
+                if is_identity && blinding_factors <= MAX_DIRECT_TRANSFORM_TAIL_LEN {
+                    return PreparedProduct::Identity(blinding);
+                }
+                let (fractions, _) = prepare_fractions(
+                    params,
+                    domain,
+                    columns,
+                    permutations,
+                    identity_cells,
+                    advice,
+                    fixed,
+                    instance,
+                    beta,
+                    gamma,
+                    initial_deltaomega,
+                    blinding_factors,
+                );
+                PreparedProduct::Fractions(PreparedFractions {
+                    fractions,
+                    blinding,
+                })
+            })
             .collect::<Vec<_>>();
 
         // Each set starts with the preceding set's final product, so this
@@ -324,8 +345,7 @@ impl Argument {
                         domain,
                         blinding_factors,
                         &mut last_z,
-                        prepared.numerators,
-                        prepared.denominators,
+                        prepared.fractions,
                         |rows| {
                             rows.copy_from_slice(&blinding.rows);
                             blinding.product_blind
@@ -374,8 +394,8 @@ impl Argument {
         // 3 circuit for the permutation argument.
         let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
         let blinding_factors = pk.vk.cs.blinding_factors();
-
         assert_eq!(self.columns.len(), pkey.permutations.len());
+        assert_eq!(self.columns.len(), pkey.identity_cells.len());
         assert_eq!(self.columns.len(), pkey.identity_columns.len());
 
         // Each column gets its own delta power.
@@ -384,10 +404,11 @@ impl Argument {
         // Track the "last" value from the previous column set
         let mut last_z = C::Scalar::ONE;
 
-        for ((columns, permutations), identity_columns) in self
+        for (((columns, permutations), identity_cells), identity_columns) in self
             .columns
             .chunks(chunk_len)
             .zip(pkey.permutations.chunks(chunk_len))
+            .zip(pkey.identity_cells.chunks(chunk_len))
             .zip(pkey.identity_columns.chunks(chunk_len))
         {
             let is_identity = identity_columns.iter().all(|&identity| identity)
@@ -410,11 +431,12 @@ impl Argument {
                 continue;
             }
 
-            let (numerators, denominators, next_deltaomega) = prepare_fractions(
+            let (fractions, next_deltaomega) = prepare_fractions(
                 params,
                 domain,
                 columns,
                 permutations,
+                identity_cells,
                 advice,
                 fixed,
                 instance,
@@ -424,14 +446,10 @@ impl Argument {
                 blinding_factors,
             );
             deltaomega = next_deltaomega;
-            let product = build_product::<C>(
-                domain,
-                blinding_factors,
-                &mut last_z,
-                numerators,
-                denominators,
-                |rows| set_blinding(rows),
-            );
+            let product =
+                build_product::<C>(domain, blinding_factors, &mut last_z, fractions, |rows| {
+                    set_blinding(rows)
+                });
             finish_set(prepare_product(params, pk, product))?;
         }
 
@@ -539,6 +557,7 @@ fn prepare_fractions<C: CurveAffine>(
     domain: &poly::EvaluationDomain<C::Scalar>,
     columns: &[plonk::Column<Any>],
     permutations: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    identity_cells: &[Vec<u8>],
     advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
     fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
     instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
@@ -546,13 +565,170 @@ fn prepare_fractions<C: CurveAffine>(
     gamma: ChallengeGamma<C>,
     mut deltaomega: C::Scalar,
     blinding_factors: usize,
-) -> (Vec<C::Scalar>, Vec<C::Scalar>, C::Scalar) {
+) -> (FractionValues<C::Scalar>, C::Scalar) {
+    let fraction_rows = params.n as usize - (blinding_factors + 1);
+    assert_eq!(columns.len(), permutations.len());
+    assert_eq!(columns.len(), identity_cells.len());
+
+    assert!(
+        permutations
+            .iter()
+            .all(|permutation| permutation.len() == params.n as usize)
+    );
+    assert!(
+        identity_cells
+            .iter()
+            .all(|identity| identity.len() == IdentityCells::encoded_column_len(params.n as usize))
+    );
+
+    // A sparse prefix allocates a full output alongside two field elements
+    // and one index per active row. Restricting it to at most a third of
+    // rows leaves headroom for indices and common-factor markers relative to
+    // the dense route's two full field arrays.
+    if !IdentityCells::should_use_sparse(identity_cells, fraction_rows) {
+        return prepare_dense_fractions(
+            params,
+            domain,
+            columns,
+            permutations,
+            advice,
+            fixed,
+            instance,
+            beta,
+            gamma,
+            deltaomega,
+            blinding_factors,
+        );
+    }
+
+    let values = columns
+        .iter()
+        .map(|column| match column.column_type() {
+            Any::Advice => &advice[column.index()],
+            Any::Fixed => &fixed[column.index()],
+            Any::Instance => &instance[column.index()],
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        values
+            .iter()
+            .all(|values| values.len() == params.n as usize)
+    );
+
+    let omega = domain.get_omega();
+    let beta_delta = deltaomega * &*beta;
+    let thread_count = crate::multicore::current_num_threads();
+    let mut chunk_size = fraction_rows / thread_count;
+    if chunk_size < thread_count {
+        chunk_size = fraction_rows;
+    }
+    let chunk_size = chunk_size.max(1);
+    let chunks = (0..fraction_rows)
+        .step_by(chunk_size)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|start| {
+            let end = (start + chunk_size).min(fraction_rows);
+            let omega_start = omega.pow_vartime([start as u64]);
+            let mut row_beta_deltaomega = beta_delta * &omega_start;
+            let mut rows = Vec::new();
+            let mut numerators = Vec::new();
+            let mut denominators = Vec::new();
+            let mut first_cancelled_zero = None;
+
+            // Identity cells contribute the same factor to the numerator and
+            // denominator. Build fractions only for rows where some factor
+            // remains after cancelling those common terms.
+            for row in start..end {
+                let mut column_beta_deltaomega = row_beta_deltaomega;
+                let (fraction, cancelled_nonzero) = permutation_fraction_row(
+                    (0..columns.len()).map(|column| {
+                        let factor = PermutationFactor {
+                            value: values[column][row],
+                            permuted_value: permutations[column][row],
+                            beta_deltaomega: column_beta_deltaomega,
+                            identity: IdentityCells::contains(&identity_cells[column], row),
+                        };
+                        if column + 1 < columns.len() {
+                            column_beta_deltaomega *= &C::Scalar::DELTA;
+                        }
+                        factor
+                    }),
+                    *beta,
+                    *gamma,
+                );
+                if !cancelled_nonzero && first_cancelled_zero.is_none() {
+                    first_cancelled_zero = Some(row);
+                }
+                if let Some((numerator, denominator)) = fraction {
+                    rows.push(row);
+                    numerators.push(numerator);
+                    denominators.push(denominator);
+                }
+                row_beta_deltaomega *= &omega;
+            }
+
+            (rows, numerators, denominators, first_cancelled_zero)
+        })
+        .collect::<Vec<_>>();
+
+    let event_count = chunks.iter().map(|(rows, _, _, _)| rows.len()).sum();
+    let mut rows = Vec::with_capacity(event_count);
+    let mut numerators = Vec::with_capacity(event_count + 1);
+    let mut denominators = Vec::with_capacity(event_count + 1);
+    let mut first_cancelled_zero = None;
+    for (
+        mut chunk_rows,
+        mut chunk_numerators,
+        mut chunk_denominators,
+        chunk_first_cancelled_zero,
+    ) in chunks
+    {
+        rows.append(&mut chunk_rows);
+        numerators.append(&mut chunk_numerators);
+        denominators.append(&mut chunk_denominators);
+        if first_cancelled_zero.is_none() {
+            first_cancelled_zero = chunk_first_cancelled_zero;
+        }
+    }
+
+    for _ in columns {
+        deltaomega *= &C::Scalar::DELTA;
+    }
+
+    (
+        FractionValues::Sparse(SparseFractions {
+            rows,
+            numerators,
+            denominators,
+            first_cancelled_zero,
+            fraction_rows,
+            domain_size: params.n as usize,
+        }),
+        deltaomega,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_dense_fractions<C: CurveAffine>(
+    params: &Params<C>,
+    domain: &poly::EvaluationDomain<C::Scalar>,
+    columns: &[plonk::Column<Any>],
+    permutations: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    advice: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    instance: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    beta: ChallengeBeta<C>,
+    gamma: ChallengeGamma<C>,
+    mut deltaomega: C::Scalar,
+    blinding_factors: usize,
+) -> (FractionValues<C::Scalar>, C::Scalar) {
     let fraction_rows = params.n as usize - (blinding_factors + 1);
     let mut numerators = vec![C::Scalar::ZERO; params.n as usize];
     let mut denominators = vec![C::Scalar::ZERO; params.n as usize];
     let omega = domain.get_omega();
     let beta_delta = deltaomega * &*beta;
-    super::super::parallelize_two(
+    parallelize_two(
         &mut numerators[..fraction_rows],
         &mut denominators[..fraction_rows],
         |numerators, denominators, start| {
@@ -594,26 +770,169 @@ fn prepare_fractions<C: CurveAffine>(
         deltaomega *= &C::Scalar::DELTA;
     }
 
-    (numerators, denominators, deltaomega)
+    (
+        FractionValues::Dense {
+            numerators,
+            denominators,
+        },
+        deltaomega,
+    )
+}
+
+fn parallelize_two<A: Send, B: Send>(
+    left: &mut [A],
+    right: &mut [B],
+    f: impl Fn(&mut [A], &mut [B], usize) + Send + Sync + Clone,
+) {
+    assert_eq!(left.len(), right.len());
+    let thread_count = crate::multicore::current_num_threads();
+    let mut chunk_size = left.len() / thread_count;
+    if chunk_size < thread_count {
+        chunk_size = left.len();
+    }
+
+    crate::multicore::scope(|scope| {
+        for (chunk_index, (left, right)) in left
+            .chunks_mut(chunk_size)
+            .zip(right.chunks_mut(chunk_size))
+            .enumerate()
+        {
+            let f = f.clone();
+            scope.spawn(move |_| f(left, right, chunk_index * chunk_size));
+        }
+    });
+}
+
+#[derive(Clone, Copy)]
+struct PermutationFactor<F: Field> {
+    value: F,
+    permuted_value: F,
+    beta_deltaomega: F,
+    identity: bool,
+}
+
+fn permutation_fraction_row<F: Field>(
+    factors: impl IntoIterator<Item = PermutationFactor<F>>,
+    beta: F,
+    gamma: F,
+) -> (Option<(F, F)>, bool) {
+    let mut fraction = None;
+    let mut identity_nonzero = true;
+    for factor in factors {
+        let numerator_factor = factor.beta_deltaomega + gamma + factor.value;
+        if factor.identity {
+            debug_assert_eq!(
+                factor.beta_deltaomega,
+                beta * factor.permuted_value,
+                "an identity-cell marker must match its permutation value",
+            );
+            identity_nonzero &= !numerator_factor.is_zero_vartime();
+        } else {
+            let denominator_factor = beta * factor.permuted_value + gamma + factor.value;
+            fraction = Some(match fraction {
+                None => (numerator_factor, denominator_factor),
+                Some((numerator, denominator)) => (
+                    numerator * numerator_factor,
+                    denominator * denominator_factor,
+                ),
+            });
+        }
+    }
+    (fraction, identity_nonzero)
+}
+
+fn sparse_prefix_products<F: Field>(
+    domain_size: usize,
+    fraction_rows: usize,
+    rows: &[usize],
+    mut numerators: Vec<F>,
+    mut denominators: Vec<F>,
+    first_cancelled_zero: Option<usize>,
+    initial: F,
+) -> Vec<F> {
+    assert_eq!(rows.len(), numerators.len());
+    assert_eq!(rows.len(), denominators.len());
+    assert!(fraction_rows < domain_size);
+    assert!(rows.iter().all(|&row| row < fraction_rows));
+    assert!(rows.windows(2).all(|rows| rows[0] < rows[1]));
+
+    let mut product = vec![F::ZERO; domain_size];
+    if rows.is_empty() {
+        product[..=fraction_rows].fill(initial);
+    } else {
+        let event_count = rows.len();
+        numerators.push(F::ZERO);
+        denominators.push(F::ZERO);
+        let prefixes = super::super::prefix_products_of_fractions(
+            numerators,
+            denominators,
+            event_count,
+            initial,
+        );
+
+        let mut fill_start = 0;
+        for (event, &row) in rows.iter().enumerate() {
+            product[fill_start..=row].fill(prefixes[event]);
+            fill_start = row + 1;
+        }
+        product[fill_start..=fraction_rows].fill(prefixes[event_count]);
+    }
+
+    if let Some(row) = first_cancelled_zero {
+        assert!(row < fraction_rows);
+        // `z[row]` precedes the ratio at `row`, so a cancelled common zero
+        // zeros the product only after that row. This reproduces the dense
+        // batch-inversion convention for a zero denominator.
+        product[row + 1..=fraction_rows].fill(F::ZERO);
+    }
+    product
 }
 
 fn build_product<C: CurveAffine>(
     domain: &poly::EvaluationDomain<C::Scalar>,
     blinding_factors: usize,
     last_z: &mut C::Scalar,
-    numerators: Vec<C::Scalar>,
-    denominators: Vec<C::Scalar>,
+    fractions: FractionValues<C::Scalar>,
     set_blinding: impl FnOnce(&mut [C::Scalar]) -> Blind<C::Scalar>,
 ) -> UntransformedSet<C::Scalar> {
-    let usable_rows = numerators.len() - blinding_factors;
-    let product = super::super::prefix_products_of_fractions(
-        numerators,
-        denominators,
-        usable_rows - 1,
-        *last_z,
-    );
+    let (product, usable_rows) = match fractions {
+        FractionValues::Dense {
+            numerators,
+            denominators,
+        } => {
+            let usable_rows = numerators.len() - blinding_factors;
+            let product = super::super::prefix_products_of_fractions(
+                numerators,
+                denominators,
+                usable_rows - 1,
+                *last_z,
+            );
+            (product, usable_rows)
+        }
+        FractionValues::Sparse(fractions) => {
+            let SparseFractions {
+                rows,
+                numerators,
+                denominators,
+                first_cancelled_zero,
+                fraction_rows,
+                domain_size,
+            } = fractions;
+            let product = sparse_prefix_products(
+                domain_size,
+                fraction_rows,
+                &rows,
+                numerators,
+                denominators,
+                first_cancelled_zero,
+                *last_z,
+            );
+            (product, fraction_rows + 1)
+        }
+    };
 
     let mut product = domain.lagrange_from_vec(product);
+    assert_eq!(product.len(), usable_rows + blinding_factors);
     let product_blind = set_blinding(&mut product[usable_rows..]);
     *last_z = product[usable_rows - 1];
 
@@ -1273,7 +1592,10 @@ mod constant_prefix_tests {
 
 #[cfg(all(test, feature = "multicore"))]
 mod tests {
-    use super::permutation_chunk_len;
+    use super::{
+        IdentityCells, PermutationFactor, permutation_chunk_len, permutation_fraction_row,
+        sparse_prefix_products,
+    };
     use crate::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
         plonk::{
@@ -1283,6 +1605,7 @@ mod tests {
         poly::commitment::Params,
         transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
+    use ff::Field;
     use pasta_curves::{EqAffine, Fp};
     use rand::{SeedableRng, rngs::StdRng};
 
@@ -1294,6 +1617,125 @@ mod tests {
     const PROOF_CIRCUIT_COUNTS: [usize; 3] = [1, 2, MAX_PROOF_CIRCUITS];
     const PROOF_THREAD_COUNTS: [usize; 2] = [6, 10];
     const PROOF_SEED: u64 = 0x5045_524d_5554_4508;
+
+    fn dense_fraction(factors: &[PermutationFactor<Fp>], beta: Fp, gamma: Fp) -> (Fp, Fp) {
+        factors
+            .iter()
+            .map(|factor| {
+                (
+                    factor.beta_deltaomega + gamma + factor.value,
+                    beta * factor.permuted_value + gamma + factor.value,
+                )
+            })
+            .reduce(
+                |(numerator, denominator), (next_numerator, next_denominator)| {
+                    (numerator * next_numerator, denominator * next_denominator)
+                },
+            )
+            .expect("a test row has at least one permutation factor")
+    }
+
+    fn assert_sparse_matches_dense(rows: &[Vec<PermutationFactor<Fp>>]) {
+        let beta = Fp::ONE;
+        let gamma = Fp::from(2);
+        let initial = Fp::from(19);
+        let fraction_rows = rows.len();
+        let domain_size = fraction_rows + 2;
+        let mut dense_numerators = vec![Fp::ZERO; domain_size];
+        let mut dense_denominators = vec![Fp::ZERO; domain_size];
+        let mut sparse_rows = Vec::new();
+        let mut sparse_numerators = Vec::new();
+        let mut sparse_denominators = Vec::new();
+        let mut first_cancelled_zero = None;
+
+        for (row, factors) in rows.iter().enumerate() {
+            (dense_numerators[row], dense_denominators[row]) = dense_fraction(factors, beta, gamma);
+            let (fraction, row_identity_nonzero) =
+                permutation_fraction_row(factors.iter().copied(), beta, gamma);
+            if !row_identity_nonzero && first_cancelled_zero.is_none() {
+                first_cancelled_zero = Some(row);
+            }
+            if let Some((numerator, denominator)) = fraction {
+                sparse_rows.push(row);
+                sparse_numerators.push(numerator);
+                sparse_denominators.push(denominator);
+            }
+        }
+
+        let dense = crate::plonk::prefix_products_of_fractions(
+            dense_numerators,
+            dense_denominators,
+            fraction_rows,
+            initial,
+        );
+        let sparse = sparse_prefix_products(
+            domain_size,
+            fraction_rows,
+            &sparse_rows,
+            sparse_numerators,
+            sparse_denominators,
+            first_cancelled_zero,
+            initial,
+        );
+        assert_eq!(sparse, dense);
+    }
+
+    fn identity_factor(beta_deltaomega: u64, value: Fp) -> PermutationFactor<Fp> {
+        PermutationFactor {
+            value,
+            permuted_value: Fp::from(beta_deltaomega),
+            beta_deltaomega: Fp::from(beta_deltaomega),
+            identity: true,
+        }
+    }
+
+    fn active_factor(
+        beta_deltaomega: u64,
+        permuted_value: u64,
+        value: Fp,
+    ) -> PermutationFactor<Fp> {
+        PermutationFactor {
+            value,
+            permuted_value: Fp::from(permuted_value),
+            beta_deltaomega: Fp::from(beta_deltaomega),
+            identity: false,
+        }
+    }
+
+    #[test]
+    fn sparse_product_preserves_identity_common_zero() {
+        let gamma = Fp::from(2);
+        assert_sparse_matches_dense(&[
+            vec![identity_factor(3, Fp::from(7))],
+            vec![identity_factor(5, -(Fp::from(5) + gamma))],
+            vec![active_factor(7, 11, Fp::from(13))],
+        ]);
+    }
+
+    #[test]
+    fn sparse_product_preserves_common_zeros_at_boundaries() {
+        let gamma = Fp::from(2);
+        for zero_row in [0, 2] {
+            let mut rows = [3, 5, 7]
+                .map(|beta_deltaomega| vec![identity_factor(beta_deltaomega, Fp::from(11))]);
+            let beta_deltaomega = Fp::from([3, 5, 7][zero_row]);
+            rows[zero_row][0].value = -(beta_deltaomega + gamma);
+            assert_sparse_matches_dense(&rows);
+        }
+    }
+
+    #[test]
+    fn sparse_product_preserves_mixed_common_and_denominator_zero() {
+        let gamma = Fp::from(2);
+        assert_sparse_matches_dense(&[
+            vec![active_factor(3, 5, Fp::from(7))],
+            vec![
+                identity_factor(11, -(Fp::from(11) + gamma)),
+                active_factor(13, 17, -(Fp::from(17) + gamma)),
+            ],
+            vec![active_factor(19, 23, Fp::from(29))],
+        ]);
+    }
 
     #[derive(Clone, Copy)]
     struct PermutationConfig {
@@ -1353,13 +1795,17 @@ mod tests {
     }
 
     #[test]
-    fn proof_bytes_match_identity_shortcut_and_preparation_schedules() {
-        // This domain is large enough for `parallelize` to assign more than
-        // one chunk at the tested worker counts, covering nonzero offsets.
+    fn proof_bytes_match_identity_sparse_dense_and_parallel_paths() {
+        // This domain is large enough for fraction preparation to assign more
+        // than one chunk at the tested worker counts, covering nonzero offsets.
         let params: Params<EqAffine> = Params::new(PROOF_K);
         let circuit = PermutationCircuit { value: Fp::from(0) };
         let vk = keygen_vk(&params, &circuit).expect("keygen_vk should not fail");
         let pk = keygen_pk(&params, vk, &circuit).expect("keygen_pk should not fail");
+        // Retain the whole-set identity shortcut but force the partial sets
+        // through the dense fraction path.
+        let mut dense_pk = pk.clone();
+        dense_pk.permutation.identity_cells.clear();
 
         let columns = pk.vk.cs.permutation.get_columns();
         assert_eq!(columns.len(), EQUALITY_COLUMNS);
@@ -1368,6 +1814,26 @@ mod tests {
             [false, false, false, true, true, true, true]
         );
         let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
+        let fraction_rows = params.n as usize - (pk.vk.cs.blinding_factors() + 1);
+        assert!(
+            pk.permutation
+                .identity_cells
+                .chunks(chunk_len)
+                .all(|identity_cells| IdentityCells::should_use_sparse(
+                    identity_cells,
+                    fraction_rows
+                ))
+        );
+        assert!(
+            dense_pk
+                .permutation
+                .identity_cells
+                .chunks(chunk_len)
+                .all(|identity_cells| !IdentityCells::should_use_sparse(
+                    identity_cells,
+                    fraction_rows
+                ))
+        );
         assert!(
             columns.chunks(chunk_len).count() > 1,
             "the test requires several permutation sets",
@@ -1385,7 +1851,7 @@ mod tests {
         let no_instance_columns: &[&[Fp]] = &[];
         let instances = [no_instance_columns; MAX_PROOF_CIRCUITS];
 
-        let mut generic_pk = pk.clone();
+        let mut generic_pk = dense_pk.clone();
         generic_pk.permutation.identity_columns.fill(false);
 
         let prove = |pk: &crate::plonk::ProvingKey<EqAffine>, circuit_count, threads| {
@@ -1423,7 +1889,9 @@ mod tests {
 
         for circuit_count in PROOF_CIRCUIT_COUNTS {
             let serial = prove(&pk, circuit_count, 1);
+            let dense = prove(&dense_pk, circuit_count, 1);
             let generic = prove(&generic_pk, circuit_count, 1);
+            assert_eq!(serial, dense);
             assert_eq!(serial, generic);
             verify(&serial, circuit_count);
             for threads in PROOF_THREAD_COUNTS {
