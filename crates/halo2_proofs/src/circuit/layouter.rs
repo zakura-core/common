@@ -80,6 +80,30 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
         Ok(())
     }
 
+    /// Assigns rational advice with an untrusted previous-batch equality hint.
+    fn assign_advice_batch_with_previous_denominator<'v>(
+        &'v mut self,
+        annotation: &'v (dyn Fn(usize) -> String + 'v),
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        to: &'v mut (dyn FnMut(usize) -> Value<Assigned<F>> + 'v),
+    ) -> Result<(), Error> {
+        self.assign_advice_batch(annotation, column, offset, len, to)
+    }
+
+    /// Assigns rational advice with an untrusted previous-batch square hint.
+    fn assign_advice_batch_with_previous_denominator_squared<'v>(
+        &'v mut self,
+        annotation: &'v (dyn Fn(usize) -> String + 'v),
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        to: &'v mut (dyn FnMut(usize) -> Value<Assigned<F>> + 'v),
+    ) -> Result<(), Error> {
+        self.assign_advice_batch(annotation, column, offset, len, to)
+    }
+
     /// Assigns a constant value to the column `advice` at `offset` within this region.
     ///
     /// The constant value will be assigned to a cell within one of the fixed columns

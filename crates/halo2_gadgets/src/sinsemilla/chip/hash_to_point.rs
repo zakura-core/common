@@ -115,7 +115,7 @@ fn assign_hash_rounds(
         len,
         |row| round(row).map(|round| round.lambda_1),
     )?;
-    region.assign_advice_batch(
+    region.assign_advice_batch_with_previous_denominator(
         |_| "lambda_2",
         double_and_add.lambda_2,
         offset,
@@ -124,7 +124,7 @@ fn assign_hash_rounds(
     )?;
 
     // Only the final accumulator cell is referenced after assignment.
-    region.assign_advice_batch(
+    region.assign_advice_batch_with_previous_denominator_squared(
         |_| "x_a",
         double_and_add.x_a,
         offset + 1,

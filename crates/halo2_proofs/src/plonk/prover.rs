@@ -40,6 +40,10 @@ use crate::{
 };
 
 const NO_DENOMINATOR: u32 = u32::MAX;
+const RELATED_DENOMINATOR: u32 = u32::MAX - 1;
+const DENOMINATOR_SOURCE_MASK: u32 = 1 << 31;
+const DENOMINATOR_SLOT_MASK: u32 = DENOMINATOR_SOURCE_MASK - 1;
+const DENOMINATOR_SLOT_LIMIT: u32 = DENOMINATOR_SLOT_MASK - 1;
 
 #[cfg(all(test, feature = "batch"))]
 std::thread_local! {
@@ -373,11 +377,35 @@ struct AdviceWitness<F: Field> {
     denominator_cells: Vec<usize>,
     denominators: Vec<F>,
     denominator_slots: Vec<Vec<u32>>,
+    last_denominator_batch: Option<DenominatorBatch>,
+    related_denominator_batches: Vec<RelatedDenominatorBatch>,
+    related_batch_numerators: Vec<F>,
+    reuse_related_denominators: bool,
     row_count: usize,
 }
 
+#[derive(Clone, Copy)]
+struct DenominatorBatch {
+    start: usize,
+    len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RelatedDenominatorBatch {
+    len: usize,
+    source: usize,
+    cell_start: usize,
+    inverse_power: DenominatorInversePower,
+}
+
+#[derive(Clone, Copy)]
+enum DenominatorInversePower {
+    One,
+    Two,
+}
+
 impl<F: Field> AdviceWitness<F> {
-    fn new(values: Vec<Polynomial<F, LagrangeCoeff>>) -> Self {
+    fn new(values: Vec<Polynomial<F, LagrangeCoeff>>, reuse_related_denominators: bool) -> Self {
         let row_count = values.first().map_or(0, |column| column.len());
         assert!(values.iter().all(|column| column.len() == row_count));
 
@@ -386,6 +414,10 @@ impl<F: Field> AdviceWitness<F> {
             values,
             denominator_cells: Vec::new(),
             denominators: Vec::new(),
+            last_denominator_batch: None,
+            related_denominator_batches: Vec::new(),
+            related_batch_numerators: Vec::new(),
+            reuse_related_denominators,
             row_count,
         }
     }
@@ -400,6 +432,7 @@ impl<F: Field> AdviceWitness<F> {
             return Err(Error::BoundsFailure);
         }
 
+        self.last_denominator_batch = None;
         self.assign_valid(column, row, assigned);
         Ok(())
     }
@@ -428,13 +461,174 @@ impl<F: Field> AdviceWitness<F> {
             return Err(Error::BoundsFailure);
         }
 
-        for index in 0..len {
-            self.assign_valid(column, row + index, to(index)?);
+        if !self.reuse_related_denominators {
+            for index in 0..len {
+                self.assign_valid(column, row + index, to(index)?);
+            }
+            return Ok(());
         }
+
+        self.last_denominator_batch = None;
+        let denominator_start = self.denominators.len();
+        let mut expanded_related_denominators = false;
+        for index in 0..len {
+            expanded_related_denominators |= self.assign_valid(column, row + index, to(index)?);
+        }
+        if expanded_related_denominators {
+            return Ok(());
+        }
+        self.record_denominator_batch(len, denominator_start);
         Ok(())
     }
 
-    fn assign_valid(&mut self, column: usize, row: usize, assigned: Assigned<F>) {
+    fn assign_batch_with_previous_denominator<V>(
+        &mut self,
+        column: usize,
+        row: usize,
+        len: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Result<Assigned<F>, Error>,
+    {
+        self.assign_batch_with_denominator_relation(
+            column,
+            row,
+            len,
+            to,
+            DenominatorInversePower::One,
+            true,
+        )
+    }
+
+    fn assign_batch_with_previous_denominator_squared<V>(
+        &mut self,
+        column: usize,
+        row: usize,
+        len: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Result<Assigned<F>, Error>,
+    {
+        self.assign_batch_with_denominator_relation(
+            column,
+            row,
+            len,
+            to,
+            DenominatorInversePower::Two,
+            false,
+        )
+    }
+
+    fn assign_batch_with_denominator_relation<V>(
+        &mut self,
+        column: usize,
+        row: usize,
+        len: usize,
+        mut to: V,
+        inverse_power: DenominatorInversePower,
+        preserve_as_last_batch: bool,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Result<Assigned<F>, Error>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if self
+            .values
+            .get(column)
+            .and_then(|values| values.get(row..end))
+            .is_none()
+        {
+            return Err(Error::BoundsFailure);
+        }
+
+        if !self.reuse_related_denominators {
+            for index in 0..len {
+                self.assign_valid(column, row + index, to(index)?);
+            }
+            return Ok(());
+        }
+
+        let Some(previous) = self
+            .last_denominator_batch
+            .filter(|previous| previous.len >= len)
+        else {
+            return self.assign_batch(column, row, len, to);
+        };
+
+        if self.denominator_slots[column][row..end]
+            .iter()
+            .any(|slot| *slot != NO_DENOMINATOR)
+        {
+            return self.assign_batch(column, row, len, to);
+        }
+
+        self.related_batch_numerators.clear();
+        let collect_result = (0..len).try_for_each(|index| {
+            let Assigned::Rational(numerator, denominator) = to(index)? else {
+                return Err(Error::Synthesis);
+            };
+            debug_assert_eq!(
+                denominator,
+                match inverse_power {
+                    DenominatorInversePower::One => self.denominators[previous.start + index],
+                    DenominatorInversePower::Two => {
+                        self.denominators[previous.start + index].square()
+                    }
+                }
+            );
+            self.related_batch_numerators.push(numerator);
+            Ok(())
+        });
+        if let Err(err) = collect_result {
+            self.related_batch_numerators.clear();
+            return Err(err);
+        }
+
+        for index in 0..len {
+            self.values[column][row + index] = self.related_batch_numerators[index];
+            self.denominator_slots[column][row + index] = RELATED_DENOMINATOR;
+        }
+        self.related_batch_numerators.clear();
+        for index in 0..len {
+            let cell = self.denominator_cells[previous.start + index];
+            let source_column = cell / self.row_count;
+            let source_row = cell % self.row_count;
+            self.denominator_slots[source_column][source_row] |= DENOMINATOR_SOURCE_MASK;
+        }
+        self.related_denominator_batches
+            .push(RelatedDenominatorBatch {
+                len,
+                source: previous.start,
+                cell_start: column * self.row_count + row,
+                inverse_power,
+            });
+        self.last_denominator_batch = preserve_as_last_batch.then_some(DenominatorBatch {
+            start: previous.start,
+            len,
+        });
+        Ok(())
+    }
+
+    /// Assigns a value, returning whether existing denominator relationships
+    /// were expanded before the assignment.
+    fn assign_valid(&mut self, column: usize, row: usize, assigned: Assigned<F>) -> bool {
+        let slot = self.denominator_slots[column][row];
+        let removes_denominator = !matches!(assigned, Assigned::Rational(_, _));
+        let expand_relationships = slot == RELATED_DENOMINATOR
+            || (slot != NO_DENOMINATOR && slot & DENOMINATOR_SOURCE_MASK != 0)
+            || (removes_denominator
+                && slot != NO_DENOMINATOR
+                && !self.related_denominator_batches.is_empty());
+        if expand_relationships {
+            self.expand_related_denominator_batches();
+        }
+
         match assigned {
             Assigned::Zero => {
                 self.remove_denominator(column, row);
@@ -449,6 +643,7 @@ impl<F: Field> AdviceWitness<F> {
                 if slot == NO_DENOMINATOR {
                     let slot = u32::try_from(self.denominators.len())
                         .expect("the number of advice cells fits into u32");
+                    assert!(slot < DENOMINATOR_SLOT_LIMIT);
                     self.denominator_slots[column][row] = slot;
                     self.denominator_cells.push(column * self.row_count + row);
                     self.denominators.push(denominator);
@@ -458,6 +653,7 @@ impl<F: Field> AdviceWitness<F> {
                 self.values[column][row] = numerator;
             }
         }
+        expand_relationships
     }
 
     fn remove_denominator(&mut self, column: usize, row: usize) {
@@ -465,9 +661,10 @@ impl<F: Field> AdviceWitness<F> {
         if slot == NO_DENOMINATOR {
             return;
         }
+        debug_assert!(self.related_denominator_batches.is_empty());
 
         self.denominator_slots[column][row] = NO_DENOMINATOR;
-        let slot = slot as usize;
+        let slot = (slot & DENOMINATOR_SLOT_MASK) as usize;
         self.denominator_cells.swap_remove(slot);
         self.denominators.swap_remove(slot);
 
@@ -480,13 +677,62 @@ impl<F: Field> AdviceWitness<F> {
 
     fn evaluate(mut self) -> Vec<Polynomial<F, LagrangeCoeff>> {
         batch_invert_multi(&mut self.denominators);
-        for (cell, denominator_inverse) in self.denominator_cells.into_iter().zip(self.denominators)
-        {
+        for (&cell, &denominator_inverse) in self.denominator_cells.iter().zip(&self.denominators) {
             let column = cell / self.row_count;
             let row = cell % self.row_count;
             self.values[column][row] *= denominator_inverse;
         }
+        for related in self.related_denominator_batches {
+            for index in 0..related.len {
+                let cell = related.cell_start + index;
+                let column = cell / self.row_count;
+                let row = cell % self.row_count;
+                let denominator_inverse = self.denominators[related.source + index];
+                self.values[column][row] *= match related.inverse_power {
+                    DenominatorInversePower::One => denominator_inverse,
+                    DenominatorInversePower::Two => denominator_inverse.square(),
+                };
+            }
+        }
         self.values
+    }
+
+    fn record_denominator_batch(&mut self, len: usize, start: usize) {
+        if self.denominators.len() != start + len {
+            self.last_denominator_batch = None;
+            return;
+        }
+
+        self.last_denominator_batch = Some(DenominatorBatch { start, len });
+    }
+
+    fn expand_related_denominator_batches(&mut self) {
+        for slot in self.denominator_slots.iter_mut().flatten() {
+            if *slot != NO_DENOMINATOR && *slot != RELATED_DENOMINATOR {
+                *slot &= DENOMINATOR_SLOT_MASK;
+            }
+        }
+        for related in core::mem::take(&mut self.related_denominator_batches) {
+            for index in 0..related.len {
+                let cell = related.cell_start + index;
+                let column = cell / self.row_count;
+                let row = cell % self.row_count;
+                debug_assert_eq!(self.denominator_slots[column][row], RELATED_DENOMINATOR);
+
+                let basis = self.denominators[related.source + index];
+                let denominator = match related.inverse_power {
+                    DenominatorInversePower::One => basis,
+                    DenominatorInversePower::Two => basis.square(),
+                };
+                let slot = u32::try_from(self.denominators.len())
+                    .expect("the number of advice cells fits into u32");
+                assert!(slot < DENOMINATOR_SLOT_LIMIT);
+                self.denominator_slots[column][row] = slot;
+                self.denominator_cells.push(cell);
+                self.denominators.push(denominator);
+            }
+        }
+        self.last_denominator_batch = None;
     }
 }
 
@@ -634,6 +880,64 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
             .assign_batch(column.index(), row, len, |index| to(index).assign())
     }
 
+    fn assign_advice_batch_with_previous_denominator<V, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if !self.usable_rows.contains(&row) || end > self.usable_rows.end {
+            return Err(Error::not_enough_rows_available(self.k));
+        }
+
+        self.advice
+            .assign_batch_with_previous_denominator(column.index(), row, len, |index| {
+                to(index).assign()
+            })
+    }
+
+    fn assign_advice_batch_with_previous_denominator_squared<V, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if !self.usable_rows.contains(&row) || end > self.usable_rows.end {
+            return Err(Error::not_enough_rows_available(self.k));
+        }
+
+        self.advice.assign_batch_with_previous_denominator_squared(
+            column.index(),
+            row,
+            len,
+            |index| to(index).assign(),
+        )
+    }
+
     fn assign_fixed<V, VR, A, AR>(
         &mut self,
         _: A,
@@ -772,11 +1076,18 @@ where
     }
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
+    // The smaller inversion walk amortizes relationship tracking once several
+    // circuit witnesses are evaluated together. Keep the single-circuit path
+    // on its existing denominator collection and evaluation flow.
+    let reuse_related_denominators = instances.len() > 1;
     let mut witnesses = instances
         .iter()
         .map(|instances| WitnessCollection {
             k: params.k,
-            advice: AdviceWitness::new(vec![domain.empty_lagrange(); meta.num_advice_columns]),
+            advice: AdviceWitness::new(
+                vec![domain.empty_lagrange(); meta.num_advice_columns],
+                reuse_related_denominators,
+            ),
             instances,
             // The prover will not be allowed to assign values to advice
             // cells that exist within inactive rows, which include some
@@ -2138,7 +2449,7 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
     use pasta_curves::Fp;
 
     let domain = poly::EvaluationDomain::new(3, 3);
-    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2]);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2], false);
 
     advice
         .assign(0, 0, Assigned::Rational(Fp::from(6), Fp::from(3)))
@@ -2213,6 +2524,296 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
     assert_eq!(advice[0][7], Fp::from(7));
     assert_eq!(advice[1][1], Fp::from(3));
     assert_eq!(advice[1][4], Fp::from(11));
+}
+
+#[test]
+fn advice_witness_reuses_related_batch_denominators() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let make_advice = || {
+        let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+        advice
+            .assign_batch(0, 0, 2, |row| {
+                Ok(Assigned::Rational(
+                    Fp::from((row + 1) as u64),
+                    Fp::from((row * 2 + 3) as u64),
+                ))
+            })
+            .unwrap();
+        for column in 1..3 {
+            advice
+                .assign_batch_with_previous_denominator(column, 0, 2, |row| {
+                    let numerator = Fp::from((column * 10 + row + 1) as u64);
+                    let denominator = Fp::from((row * 2 + 3) as u64);
+                    Ok(Assigned::Rational(numerator, denominator))
+                })
+                .unwrap();
+        }
+        advice
+    };
+
+    let advice = make_advice();
+    assert_eq!(advice.related_denominator_batches.len(), 2);
+    assert_eq!(advice.denominators.len(), 2);
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(1) * Fp::from(3).invert().unwrap());
+    assert_eq!(advice[1][1], Fp::from(12) * Fp::from(5).invert().unwrap());
+    assert_eq!(advice[2][0], Fp::from(7));
+
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+    advice
+        .assign_batch(0, 0, 2, |row| {
+            Ok(Assigned::Rational(
+                Fp::from((row + 1) as u64),
+                Fp::from((row * 2 + 3) as u64),
+            ))
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(1, 0, 2, |row| {
+            Ok(Assigned::Rational(
+                Fp::from((row + 11) as u64),
+                Fp::from((row * 2 + 3) as u64),
+            ))
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator_squared(2, 0, 2, |row| {
+            let denominator_basis = Fp::from((row * 2 + 3) as u64);
+            Ok(Assigned::Rational(
+                Fp::from((row + 21) as u64),
+                denominator_basis.square(),
+            ))
+        })
+        .unwrap();
+    assert_eq!(advice.related_denominator_batches.len(), 2);
+    assert_eq!(advice.denominators.len(), 2);
+    let advice = advice.evaluate();
+    assert_eq!(advice[2][0], Fp::from(21) * Fp::from(9).invert().unwrap());
+    assert_eq!(advice[2][1], Fp::from(22) * Fp::from(25).invert().unwrap());
+
+    // Reassigning a source cell expands the related denominators and uses the
+    // original per-cell representation.
+    let mut advice = make_advice();
+    advice.assign(0, 0, Assigned::Trivial(Fp::from(9))).unwrap();
+    advice
+        .assign(1, 1, Assigned::Rational(Fp::from(14), Fp::from(7)))
+        .unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(9));
+    assert_eq!(advice[0][1], Fp::from(2) * Fp::from(5).invert().unwrap());
+    assert_eq!(advice[1][0], Fp::from(11) * Fp::from(3).invert().unwrap());
+    assert_eq!(advice[1][1], Fp::from(2));
+    assert_eq!(advice[2][0], Fp::from(7));
+    assert_eq!(advice[2][1], Fp::from(22) * Fp::from(5).invert().unwrap());
+
+    // Reassigning a related cell takes the same expansion fallback.
+    let mut advice = make_advice();
+    advice
+        .assign(2, 1, Assigned::Rational(Fp::from(18), Fp::from(9)))
+        .unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(1) * Fp::from(3).invert().unwrap());
+    assert_eq!(advice[1][1], Fp::from(12) * Fp::from(5).invert().unwrap());
+    assert_eq!(advice[2][1], Fp::from(2));
+}
+
+#[test]
+fn advice_witness_related_batch_tracks_shortened_predecessor() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+    advice
+        .assign_batch(0, 0, 3, |row| {
+            Ok(Assigned::Rational(
+                Fp::from((row + 1) as u64),
+                Fp::from((row * 2 + 3) as u64),
+            ))
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(1, 0, 1, |_| {
+            Ok(Assigned::Rational(Fp::from(6), Fp::from(3)))
+        })
+        .unwrap();
+
+    // The second denominator has no corresponding entry in the immediately
+    // preceding one-element batch, so this hint must fall back.
+    advice
+        .assign_batch_with_previous_denominator_squared(2, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(18), Fp::from(9)),
+                1 => Assigned::Rational(Fp::from(22), Fp::from(11)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+
+    assert_eq!(advice.related_denominator_batches.len(), 1);
+    assert_eq!(advice.denominators.len(), 5);
+    let advice = advice.evaluate();
+    assert_eq!(advice[1][0], Fp::from(2));
+    assert_eq!(advice[2][0], Fp::from(2));
+    assert_eq!(advice[2][1], Fp::from(2));
+}
+
+#[test]
+fn advice_witness_unrelated_removal_preserves_denominator_relations() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+    advice
+        .assign(0, 0, Assigned::Rational(Fp::from(6), Fp::from(2)))
+        .unwrap();
+    advice
+        .assign_batch(1, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(3), Fp::from(3)),
+                1 => Assigned::Rational(Fp::from(10), Fp::from(5)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(2, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(9), Fp::from(3)),
+                1 => Assigned::Rational(Fp::from(20), Fp::from(5)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+
+    advice.assign(0, 0, Assigned::Trivial(Fp::from(7))).unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(7));
+    assert_eq!(advice[1][0], Fp::from(1));
+    assert_eq!(advice[1][1], Fp::from(2));
+    assert_eq!(advice[2][0], Fp::from(3));
+    assert_eq!(advice[2][1], Fp::from(4));
+}
+
+#[test]
+fn advice_witness_source_overwrite_does_not_record_expansion_as_batch() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+    advice
+        .assign_batch(0, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(3), Fp::from(3)),
+                1 => Assigned::Rational(Fp::from(10), Fp::from(5)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(1, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(9), Fp::from(3)),
+                1 => Assigned::Rational(Fp::from(20), Fp::from(5)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    advice
+        .assign_batch(0, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(14), Fp::from(7)),
+                1 => Assigned::Rational(Fp::from(33), Fp::from(11)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+    assert!(advice.last_denominator_batch.is_none());
+
+    advice
+        .assign_batch_with_previous_denominator(2, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(28), Fp::from(7)),
+                1 => Assigned::Rational(Fp::from(55), Fp::from(11)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(2));
+    assert_eq!(advice[0][1], Fp::from(3));
+    assert_eq!(advice[1][0], Fp::from(3));
+    assert_eq!(advice[1][1], Fp::from(4));
+    assert_eq!(advice[2][0], Fp::from(4));
+    assert_eq!(advice[2][1], Fp::from(5));
+}
+
+#[test]
+fn advice_witness_related_batch_falls_back_for_rational_target_overwrite() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2], true);
+    advice
+        .assign(1, 0, Assigned::Rational(Fp::from(35), Fp::from(7)))
+        .unwrap();
+    advice
+        .assign_batch(0, 0, 1, |_| {
+            Ok(Assigned::Rational(Fp::from(6), Fp::from(3)))
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(1, 0, 1, |_| {
+            Ok(Assigned::Rational(Fp::from(12), Fp::from(3)))
+        })
+        .unwrap();
+
+    assert!(advice.related_denominator_batches.is_empty());
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(2));
+    assert_eq!(advice[1][0], Fp::from(4));
+}
+
+#[test]
+fn advice_witness_failed_related_batch_is_atomic() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2], true);
+    advice
+        .assign_batch(0, 0, 2, |row| {
+            Ok(Assigned::Rational(
+                Fp::from((row + 1) as u64),
+                Fp::from((row * 2 + 3) as u64),
+            ))
+        })
+        .unwrap();
+
+    let result = advice.assign_batch_with_previous_denominator(1, 0, 2, |row| {
+        if row == 0 {
+            Ok(Assigned::Rational(Fp::from(9), Fp::from(3)))
+        } else {
+            Err(Error::Synthesis)
+        }
+    });
+    assert!(matches!(result, Err(Error::Synthesis)));
+    assert_eq!(advice.denominator_slots[1][0], NO_DENOMINATOR);
+    assert!(advice.related_denominator_batches.is_empty());
+
+    advice
+        .assign(1, 0, Assigned::Rational(Fp::from(14), Fp::from(7)))
+        .unwrap();
+    let advice = advice.evaluate();
+    assert_eq!(advice[1][0], Fp::from(2));
 }
 
 #[cfg(feature = "multicore")]
