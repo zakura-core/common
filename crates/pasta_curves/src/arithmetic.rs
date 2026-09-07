@@ -54,6 +54,29 @@ pub fn square_fq_n(value: &crate::Fq, count: u32) -> crate::Fq {
     }
 }
 
+/// The internal Montgomery-form limbs (`a * 2^256 mod p`, little-endian
+/// `u64`s) of an [`Fp`](crate::Fp) element.
+///
+/// This is an internal cross-crate bridge for MSM accelerator backends,
+/// which keep their own copy of the Montgomery representation and would
+/// otherwise pay a full reduction and re-multiplication per coordinate.
+#[doc(hidden)]
+#[inline]
+pub fn fp_montgomery_limbs(value: &crate::Fp) -> [u64; 4] {
+    value.0
+}
+
+/// The internal Montgomery-form limbs (`a * 2^256 mod q`, little-endian
+/// `u64`s) of an [`Fq`](crate::Fq) element.
+///
+/// This is an internal cross-crate bridge for MSM accelerator backends;
+/// see [`fp_montgomery_limbs`].
+#[doc(hidden)]
+#[inline]
+pub fn fq_montgomery_limbs(value: &crate::Fq) -> [u64; 4] {
+    value.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::{square_fp_n, square_fq_n};

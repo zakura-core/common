@@ -45,6 +45,10 @@ serde_json = "1.0"
 
 [features]
 aarch64-asm = ["dep:cc"]
+# The process-wide MSM accelerator registry (`glv::accelerator`): lets an
+# external backend, such as a GPU crate, take large multiscalar
+# multiplications ahead of the CPU planner. Implies `glv`.
+accelerator = ["glv", "dep:once_cell"]
 alloc = ["group/alloc", "blake2b_simd"]
 bits = ["ff/bits"]
 default = ["bits", "sqrt-table"]

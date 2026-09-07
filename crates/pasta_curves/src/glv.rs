@@ -90,6 +90,9 @@ use maybe_rayon::prelude::*;
 use crate::arithmetic::{CurveExt, mac, sbb};
 use crate::{pallas, vesta};
 
+#[cfg(feature = "accelerator")]
+#[cfg_attr(docsrs, doc(cfg(feature = "accelerator")))]
+pub mod accelerator;
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 mod orbit;
 #[cfg(feature = "orbits")]
@@ -138,6 +141,15 @@ mod private {
             z: Self::Base,
             token: CrateToken,
         ) -> Self;
+
+        /// Offers an MSM to the installed accelerator through the method
+        /// for this curve.
+        #[cfg(feature = "accelerator")]
+        fn accelerated_multiexp(
+            accelerator: &dyn super::accelerator::MultiexpAccelerator,
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+        ) -> Option<Self>;
     }
 
     impl Sealed for crate::pallas::Point {
@@ -158,6 +170,15 @@ mod private {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
         }
+
+        #[cfg(feature = "accelerator")]
+        fn accelerated_multiexp(
+            accelerator: &dyn super::accelerator::MultiexpAccelerator,
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+        ) -> Option<Self> {
+            accelerator.multiexp_pallas(scalars, bases)
+        }
     }
 
     impl Sealed for crate::vesta::Point {
@@ -177,6 +198,15 @@ mod private {
         ) -> Self {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
+        }
+
+        #[cfg(feature = "accelerator")]
+        fn accelerated_multiexp(
+            accelerator: &dyn super::accelerator::MultiexpAccelerator,
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+        ) -> Option<Self> {
+            accelerator.multiexp_vesta(scalars, bases)
         }
     }
 }
@@ -1956,6 +1986,18 @@ pub(crate) fn try_multiexp<C: GlvParams>(
     bases: &[C::AffineExt],
 ) -> Option<C> {
     assert_eq!(scalars.len(), bases.len());
+
+    // An installed accelerator (see `accelerator`) gets first refusal on
+    // every MSM at or above its own size threshold; the CPU planner below
+    // is the fallback when it declines.
+    #[cfg(feature = "accelerator")]
+    if let Some(accelerator) = accelerator::installed()
+        && scalars.len() >= accelerator.min_terms()
+        && let Some(result) = C::accelerated_multiexp(accelerator, scalars, bases)
+    {
+        return Some(result);
+    }
+
     let num_threads = current_num_threads();
     if let Some(result) = planned_strauss_multiexp::<C>(scalars, bases, num_threads) {
         return Some(result);

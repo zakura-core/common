@@ -1,0 +1,35 @@
+[package]
+name = "zakura-pasta-msm-metal"
+description = "Apple GPU (Metal) multiscalar multiplication backend for the Pasta curves"
+keywords = ["cryptography", "pallas", "vesta", "msm", "metal"]
+categories = ["cryptography"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "pasta_msm_metal"
+
+[dependencies]
+ff = { version = "0.14", default-features = false }
+group = { version = "0.14", default-features = false }
+maybe-rayon = { version = "0.1.0", optional = true, default-features = false }
+pasta_curves = { workspace = true, features = ["default", "accelerator"] }
+
+[dev-dependencies]
+rand = { version = "0.10", features = ["sys_rng", "thread_rng"], default-features = false }
+rand_xorshift = "0.5"
+
+[features]
+default = []
+# Parallel host-side preparation and the reference backend's parallel
+# bucket loops through the Rayon pool of `pasta_curves/multicore`.
+multicore = ["pasta_curves/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]

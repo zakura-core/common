@@ -61,6 +61,9 @@ audit-as-crates-io = false
 [policy.zakura-pasta-curves]
 audit-as-crates-io = false
 
+[policy.zakura-pasta-msm-metal]
+audit-as-crates-io = false
+
 [policy.zakura-primitives]
 audit-as-crates-io = false
 

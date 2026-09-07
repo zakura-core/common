@@ -48,6 +48,7 @@ members = [
     "crates/orchard",
     "crates/pairing",
     "crates/pasta_curves",
+    "crates/pasta_msm_metal",
     "crates/reddsa",
     "crates/redjubjub",
     "crates/sapling-crypto",
@@ -92,6 +93,7 @@ jubjub = { package = "zakura-jubjub", version = "1.1.0", path = "crates/jubjub",
 orchard = { package = "zakura-orchard", version = "1.1.0", path = "crates/orchard", default-features = false }
 pairing = { package = "zakura-pairing", version = "1.1.0", path = "crates/pairing", default-features = false }
 pasta_curves = { package = "zakura-pasta-curves", version = "1.1.0", path = "crates/pasta_curves", default-features = false }
+pasta_msm_metal = { package = "zakura-pasta-msm-metal", version = "1.1.0", path = "crates/pasta_msm_metal", default-features = false }
 poseidon = { package = "zakura-halo2-poseidon", version = "1.1.0", path = "crates/halo2_poseidon", default-features = false }
 reddsa = { package = "zakura-reddsa", version = "1.1.0", path = "crates/reddsa", default-features = false }
 redjubjub = { package = "zakura-redjubjub", version = "1.1.0", path = "crates/redjubjub", default-features = false }

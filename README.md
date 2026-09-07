@@ -27,6 +27,7 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 - [`zakura-jubjub`](crates/jubjub) (forked from [`jubjub 0.10.0`](https://github.com/zkcrypto/jubjub/tree/47dfe5181ccf39166c0c479c35c0644d708f4294))
 - [`zakura-bellman`](crates/bellman) (forked from [`bellman 0.14.0`](https://github.com/zkcrypto/bellman/tree/e137775023a647716793a362ace008e058679b2a))
 - [`zakura-pasta-curves`](crates/pasta_curves) (forked from [`pasta_curves 0.5.2`](https://github.com/zcash/pasta_curves/tree/c41c5149d8e6deebada48afa5ed8fadce3ff875c))
+- [`zakura-pasta-msm-metal`](crates/pasta_msm_metal) (new: an experimental Apple GPU multiscalar-multiplication backend that plugs into `zakura-pasta-curves`' accelerator registry)
 - [`zakura-sinsemilla`](crates/sinsemilla) (forked from [`sinsemilla 0.1.0`](https://github.com/zcash/sinsemilla/tree/206f7a960c55222a138a85447f1ddc666822cac0))
 - [`zakura-reddsa`](crates/reddsa) (forked from [`reddsa 0.5.2`](https://github.com/ZcashFoundation/reddsa/tree/3792daa95e588c1af6bd4805105bfb6ea7e9ad49))
 - [`zakura-redjubjub`](crates/redjubjub) (forked from [`redjubjub 0.8.0`](https://github.com/ZcashFoundation/redjubjub/tree/2f618e9b47617ae9d4112913391a5c3fbb8106f0))
