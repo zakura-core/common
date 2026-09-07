@@ -23,7 +23,7 @@ use self::objc::{
     sel,
 };
 use crate::curve::{Affine, Jacobian};
-use crate::field::Field;
+use crate::field::{Field, Limbs};
 use crate::pipeline::{Backend, Error, Job};
 
 /// Threads per threadgroup for the one-dimensional dispatches; capped by
@@ -34,8 +34,8 @@ const THREADS_PER_THREADGROUP: usize = 64;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FieldParams {
-    modulus: [u32; 8],
-    one: [u32; 8],
+    modulus: Limbs,
+    one: Limbs,
 }
 
 /// `AccumulateParams` in the shader.

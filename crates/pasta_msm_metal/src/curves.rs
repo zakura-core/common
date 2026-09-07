@@ -6,7 +6,7 @@ use pasta_curves::glv::accelerator::split_scalar_vartime;
 use pasta_curves::{Fp, Fq, pallas, vesta};
 
 use crate::curve::{Affine, Jacobian};
-use crate::field::{Field, Limbs, PALLAS_BASE, VESTA_BASE, limbs_from_u64, limbs_to_bytes};
+use crate::field::{Field, Limbs, PALLAS_BASE, VESTA_BASE, to_bytes};
 use crate::pipeline::PastaCurve;
 
 /// The Pallas curve (base field $\mathbb{F}_p$, scalar field $\mathbb{F}_q$).
@@ -18,11 +18,11 @@ pub struct Pallas;
 pub struct Vesta;
 
 fn fp_limbs(value: &Fp) -> Limbs {
-    limbs_from_u64(fp_montgomery_limbs(value))
+    PALLAS_BASE.from_pasta(&fp_montgomery_limbs(value))
 }
 
 fn fq_limbs(value: &Fq) -> Limbs {
-    limbs_from_u64(fq_montgomery_limbs(value))
+    VESTA_BASE.from_pasta(&fq_montgomery_limbs(value))
 }
 
 impl PastaCurve for Pallas {
@@ -58,9 +58,8 @@ impl PastaCurve for Pallas {
 
     fn point(jacobian: &Jacobian) -> Option<Self::Point> {
         let field = &Self::FIELD;
-        let coordinate = |limbs: &Limbs| {
-            Option::from(Fp::from_repr(limbs_to_bytes(&field.from_montgomery(limbs))))
-        };
+        let coordinate =
+            |limbs: &Limbs| Option::from(Fp::from_repr(to_bytes(&field.to_canonical(limbs))));
         let (x, y, z) = (
             coordinate(&jacobian.x)?,
             coordinate(&jacobian.y)?,
@@ -101,9 +100,8 @@ impl PastaCurve for Vesta {
 
     fn point(jacobian: &Jacobian) -> Option<Self::Point> {
         let field = &Self::FIELD;
-        let coordinate = |limbs: &Limbs| {
-            Option::from(Fq::from_repr(limbs_to_bytes(&field.from_montgomery(limbs))))
-        };
+        let coordinate =
+            |limbs: &Limbs| Option::from(Fq::from_repr(to_bytes(&field.to_canonical(limbs))));
         let (x, y, z) = (
             coordinate(&jacobian.x)?,
             coordinate(&jacobian.y)?,

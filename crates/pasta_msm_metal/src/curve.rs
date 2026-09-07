@@ -12,7 +12,9 @@
 //! arithmetic exact for duplicate bases.
 //!
 //! As in `field.rs`, every function has a twin in
-//! `shaders/pasta_msm.metal`; keep them in step.
+//! `shaders/pasta_msm.metal`; keep them in step. The formulas are written
+//! over the abstract field operations, so they are independent of the limb
+//! representation.
 
 use crate::field::{Field, Limbs};
 
@@ -219,7 +221,7 @@ impl Jacobian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::{PALLAS_BASE, VESTA_BASE, limbs_from_u64, limbs_to_bytes};
+    use crate::field::{PALLAS_BASE, VESTA_BASE, to_bytes};
     use ff::{Field as _, PrimeField};
     use group::CurveAffine as _;
     use group::{Curve, Group};
@@ -233,8 +235,8 @@ mod tests {
     fn pallas_affine(p: &pallas::Affine) -> Affine {
         match Option::<pasta_curves::arithmetic::Coordinates<_>>::from(p.coordinates()) {
             Some(c) => Affine {
-                x: limbs_from_u64(fp_montgomery_limbs(c.x())),
-                y: limbs_from_u64(fp_montgomery_limbs(c.y())),
+                x: PALLAS_BASE.from_pasta(&fp_montgomery_limbs(c.x())),
+                y: PALLAS_BASE.from_pasta(&fp_montgomery_limbs(c.y())),
             },
             None => Affine::IDENTITY,
         }
@@ -242,7 +244,7 @@ mod tests {
 
     fn pallas_point(j: &Jacobian) -> pallas::Point {
         let f = &PALLAS_BASE;
-        let coord = |l: &Limbs| Fp::from_repr(limbs_to_bytes(&f.from_montgomery(l))).unwrap();
+        let coord = |l: &Limbs| Fp::from_repr(to_bytes(&f.to_canonical(l))).unwrap();
         Option::from(pallas::Point::new_jacobian(
             coord(&j.x),
             coord(&j.y),
@@ -254,8 +256,8 @@ mod tests {
     fn vesta_affine(p: &vesta::Affine) -> Affine {
         match Option::<pasta_curves::arithmetic::Coordinates<_>>::from(p.coordinates()) {
             Some(c) => Affine {
-                x: limbs_from_u64(fq_montgomery_limbs(c.x())),
-                y: limbs_from_u64(fq_montgomery_limbs(c.y())),
+                x: VESTA_BASE.from_pasta(&fq_montgomery_limbs(c.x())),
+                y: VESTA_BASE.from_pasta(&fq_montgomery_limbs(c.y())),
             },
             None => Affine::IDENTITY,
         }
@@ -263,7 +265,7 @@ mod tests {
 
     fn vesta_point(j: &Jacobian) -> vesta::Point {
         let f = &VESTA_BASE;
-        let coord = |l: &Limbs| Fq::from_repr(limbs_to_bytes(&f.from_montgomery(l))).unwrap();
+        let coord = |l: &Limbs| Fq::from_repr(to_bytes(&f.to_canonical(l))).unwrap();
         Option::from(vesta::Point::new_jacobian(
             coord(&j.x),
             coord(&j.y),

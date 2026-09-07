@@ -601,12 +601,15 @@ mod tests {
                 0xf0f0_f0f0_f0f0_f0f0_f0f0 & ((1 << 127) - 1),
             ] {
                 signed_digits(magnitude, window_bits, windows, &mut digits);
-                let mut value = 0i128;
+                // Summed modulo 2^128: a top digit can carry the sum past
+                // i128 mid-way even though the total fits.
+                let mut value = 0u128;
                 for (w, &digit) in digits.iter().enumerate().take(windows as usize) {
                     assert!((digit as i64).abs() <= half);
-                    value += (digit as i128) << (window_bits * w as u32);
+                    value = value
+                        .wrapping_add((digit as i128 as u128).wrapping_shl(window_bits * w as u32));
                 }
-                assert_eq!(value, magnitude as i128, "c = {window_bits}");
+                assert_eq!(value, magnitude, "c = {window_bits}");
             }
         }
     }

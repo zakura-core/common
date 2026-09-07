@@ -16,8 +16,9 @@ is not a fork: the code is original to this repository.
 - Added the `pipeline` module — a GPU-shaped Pasta multiscalar
   multiplication (GLV split, signed digits, bucket sort, bucket
   accumulation, chunked bucket reduction, Horner combination) with a CPU
-  `Reference` backend, and the `field` and `curve` modules holding the
-  portable 32-bit-limb arithmetic that the Metal kernels mirror.
+  `Reference` backend, and the `field` and `curve` modules holding the portable
+  arithmetic that the Metal kernels mirror: twenty 13-bit limbs with a
+  carry-free Montgomery multiplication in 32-bit integer arithmetic.
 - Added the `Accelerator` wrapper implementing
   `pasta_curves::glv::accelerator::MultiexpAccelerator` over any backend,
   with `install` (Metal, Apple AArch64 only) and `install_reference`.

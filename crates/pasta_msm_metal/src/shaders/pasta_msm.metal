@@ -6,10 +6,14 @@
 // oracle. Buffer layouts, limb order, arithmetic schedules, and index
 // conventions are identical; change the Rust and this file together.
 //
-// Representation: field elements are eight little-endian 32-bit limbs in
-// Montgomery form with R = 2^256, the same bytes `pasta_curves` holds in
-// its four 64-bit limbs. Both Pasta primes are 1 mod 2^32, so the
-// per-limb Montgomery factor -p^{-1} mod 2^32 is 0xffffffff for both.
+// Representation: field elements are twenty little-endian 13-bit limbs,
+// each in a uint, in Montgomery form with R = 2^260 (see `src/field.rs`
+// for why: a 26-bit limb product lets a whole Montgomery column — up to
+// forty products plus a carry — accumulate in a uint, so multiplication
+// needs neither 64-bit emulation nor multiply-high). Both Pasta primes are
+// 1 mod 2^13, so the per-column Montgomery factor -p^{-1} mod 2^13 is
+// 2^13 - 1 for both. Every value is canonical: limbs below 2^13 and the
+// integer below p.
 // Points: affine (x, y) with (0, 0) the identity; Jacobian (X, Y, Z) with
 // Z = 0 the identity. The curves have a = 0, b = 5.
 //
@@ -18,11 +22,14 @@
 #include <metal_stdlib>
 using namespace metal;
 
-constant uint INV32 = 0xffffffffu;
+constant uint LIMB_BITS = 13u;
+constant uint LIMBS = 20u;
+constant uint LIMB_MASK = 0x1fffu;
+constant uint MU = 0x1fffu;
 constant uint TERM_NEGATE = 0x80000000u;
 
 struct Fe {
-    uint v[8];
+    uint v[20];
 };
 
 struct Affine {
@@ -37,8 +44,8 @@ struct Jacobian {
 };
 
 struct FieldParams {
-    uint modulus[8];
-    uint one[8];  // R mod p: the Montgomery form of 1
+    uint modulus[20];
+    uint one[20];  // R mod p: the Montgomery form of 1
 };
 
 struct AccumulateParams {
@@ -57,51 +64,51 @@ struct ReduceParams {
 
 static inline Fe fe_zero() {
     Fe out;
-    for (uint i = 0; i < 8; i++) out.v[i] = 0u;
+    for (uint i = 0; i < LIMBS; i++) out.v[i] = 0u;
     return out;
 }
 
 static inline Fe fe_from_params(constant uint* limbs) {
     Fe out;
-    for (uint i = 0; i < 8; i++) out.v[i] = limbs[i];
+    for (uint i = 0; i < LIMBS; i++) out.v[i] = limbs[i];
     return out;
 }
 
 static inline bool fe_is_zero(Fe a) {
     uint acc = 0u;
-    for (uint i = 0; i < 8; i++) acc |= a.v[i];
+    for (uint i = 0; i < LIMBS; i++) acc |= a.v[i];
     return acc == 0u;
 }
 
-// a - modulus, with the final borrow (true when a < modulus).
+// a - modulus over 13-bit limbs, with the final borrow (true when a < p).
 static inline Fe fe_sub_modulus(Fe a, constant FieldParams& f, thread bool& borrow_out) {
     Fe out;
-    ulong borrow = 0;
-    for (uint i = 0; i < 8; i++) {
-        ulong r = (ulong)a.v[i] - ((ulong)f.modulus[i] + borrow);
-        out.v[i] = (uint)r;
-        borrow = (r >> 63) & 1;
+    uint borrow = 0u;
+    for (uint i = 0; i < LIMBS; i++) {
+        uint d = a.v[i] - f.modulus[i] - borrow;
+        out.v[i] = d & LIMB_MASK;
+        borrow = d >> 31;  // limbs are 13 bits: a negative difference sets bit 31
     }
-    borrow_out = borrow == 1;
+    borrow_out = borrow == 1u;
     return out;
 }
 
-// Reduces a + carry * 2^256 (< 2 modulus) into [0, modulus).
-static inline Fe fe_reduce_once(Fe a, bool carry, constant FieldParams& f) {
+// Reduces a carried value below 2p into [0, p).
+static inline Fe fe_reduce_once(Fe a, constant FieldParams& f) {
     bool borrow;
     Fe reduced = fe_sub_modulus(a, f, borrow);
-    return (carry || !borrow) ? reduced : a;
+    return borrow ? a : reduced;
 }
 
 static inline Fe fe_add(Fe a, Fe b, constant FieldParams& f) {
     Fe sum;
-    ulong carry = 0;
-    for (uint i = 0; i < 8; i++) {
-        ulong r = (ulong)a.v[i] + (ulong)b.v[i] + carry;
-        sum.v[i] = (uint)r;
-        carry = r >> 32;
+    uint carry = 0u;
+    for (uint i = 0; i < LIMBS; i++) {
+        uint s = a.v[i] + b.v[i] + carry;
+        sum.v[i] = s & LIMB_MASK;
+        carry = s >> LIMB_BITS;
     }
-    return fe_reduce_once(sum, carry == 1, f);
+    return fe_reduce_once(sum, f);
 }
 
 static inline Fe fe_double(Fe a, constant FieldParams& f) {
@@ -110,18 +117,18 @@ static inline Fe fe_double(Fe a, constant FieldParams& f) {
 
 static inline Fe fe_sub(Fe a, Fe b, constant FieldParams& f) {
     Fe diff;
-    ulong borrow = 0;
-    for (uint i = 0; i < 8; i++) {
-        ulong r = (ulong)a.v[i] - ((ulong)b.v[i] + borrow);
-        diff.v[i] = (uint)r;
-        borrow = (r >> 63) & 1;
+    uint borrow = 0u;
+    for (uint i = 0; i < LIMBS; i++) {
+        uint d = a.v[i] - b.v[i] - borrow;
+        diff.v[i] = d & LIMB_MASK;
+        borrow = d >> 31;
     }
-    if (borrow == 1) {
-        ulong carry = 0;
-        for (uint i = 0; i < 8; i++) {
-            ulong r = (ulong)diff.v[i] + (ulong)f.modulus[i] + carry;
-            diff.v[i] = (uint)r;
-            carry = r >> 32;
+    if (borrow == 1u) {
+        uint carry = 0u;
+        for (uint i = 0; i < LIMBS; i++) {
+            uint s = diff.v[i] + f.modulus[i] + carry;
+            diff.v[i] = s & LIMB_MASK;
+            carry = s >> LIMB_BITS;
         }
     }
     return diff;
@@ -132,40 +139,27 @@ static inline Fe fe_neg(Fe a, constant FieldParams& f) {
     return fe_sub(fe_from_params(f.modulus), a, f);
 }
 
-// Montgomery product a * b * R^-1 mod p (CIOS over eight 32-bit limbs).
+// Montgomery product a * b * R^-1 mod p: the carry-free schoolbook
+// schedule of `Field::mul`. Column t[k] accumulates at most 2 * LIMBS
+// 26-bit products plus one 19-bit carry before its own carry is taken,
+// which fits a uint.
 static inline Fe fe_mul(Fe a, Fe b, constant FieldParams& f) {
-    uint t[10];
-    for (uint i = 0; i < 10; i++) t[i] = 0u;
-    for (uint i = 0; i < 8; i++) {
-        // t += a * b[i]
-        ulong bi = (ulong)b.v[i];
-        ulong carry = 0;
-        for (uint j = 0; j < 8; j++) {
-            ulong r = (ulong)t[j] + (ulong)a.v[j] * bi + carry;
-            t[j] = (uint)r;
-            carry = r >> 32;
-        }
-        ulong r = (ulong)t[8] + carry;
-        t[8] = (uint)r;
-        t[9] = (uint)(r >> 32);
-
-        // t = (t + m * p) / 2^32 with m = t[0] * INV32 mod 2^32.
-        ulong m = (ulong)(t[0] * INV32);
-        r = (ulong)t[0] + m * (ulong)f.modulus[0];
-        carry = r >> 32;
-        for (uint j = 1; j < 8; j++) {
-            r = (ulong)t[j] + m * (ulong)f.modulus[j] + carry;
-            t[j - 1] = (uint)r;
-            carry = r >> 32;
-        }
-        r = (ulong)t[8] + carry;
-        t[7] = (uint)r;
-        t[8] = t[9] + (uint)(r >> 32);
-        t[9] = 0u;
+    uint t[40];
+    for (uint i = 0; i < 2u * LIMBS; i++) t[i] = 0u;
+    for (uint i = 0; i < LIMBS; i++) {
+        uint bi = b.v[i];
+        for (uint j = 0; j < LIMBS; j++) t[i + j] += a.v[j] * bi;
+        uint m = ((t[i] & LIMB_MASK) * MU) & LIMB_MASK;
+        for (uint j = 0; j < LIMBS; j++) t[i + j] += m * f.modulus[j];
+        t[i + 1] += t[i] >> LIMB_BITS;
+    }
+    for (uint k = LIMBS; k < 2u * LIMBS - 1u; k++) {
+        t[k + 1] += t[k] >> LIMB_BITS;
+        t[k] &= LIMB_MASK;
     }
     Fe out;
-    for (uint i = 0; i < 8; i++) out.v[i] = t[i];
-    return fe_reduce_once(out, t[8] != 0u, f);
+    for (uint i = 0; i < LIMBS; i++) out.v[i] = t[LIMBS + i];
+    return fe_reduce_once(out, f);
 }
 
 static inline Fe fe_square(Fe a, constant FieldParams& f) {

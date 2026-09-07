@@ -11,9 +11,12 @@
 //!
 //! # Layout
 //!
-//! - [`field`] and [`curve`]: portable 32-bit-limb Montgomery field and
-//!   Jacobian curve arithmetic — the executable specification of the
-//!   shader's arithmetic, tested against `pasta_curves`.
+//! - [`field`] and [`curve`]: the device field (twenty 13-bit limbs with a
+//!   carry-free Montgomery multiplication that stays in native 32-bit
+//!   integer arithmetic — Apple GPUs have no fast wide multiply) and
+//!   Jacobian curve arithmetic, as portable Rust: the executable
+//!   specification of the shader's arithmetic, tested against
+//!   `pasta_curves`.
 //! - [`pipeline`]: the MSM algorithm (GLV split, signed digits, bucket
 //!   sort, bucket accumulation, chunked bucket reduction, Horner
 //!   combination), with its two device kernels written as portable
