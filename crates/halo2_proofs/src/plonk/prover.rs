@@ -53,6 +53,11 @@ const NO_DENOMINATOR: u32 = u32::MAX;
 // evaluate one independent blind term.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const ADVICE_DELTA_PREPARED_K: u32 = 11;
+// End-to-end Ironwood measurements found a benefit at eight and ten workers,
+// while two- and four-worker screens did not support enabling overlap. Narrower
+// pools retain the per-circuit commitment/transform schedule.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const ADVICE_DELTA_OVERLAP_MIN_WORKERS: usize = 8;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const ADVICE_DELTA_ROUTE_DENOMINATOR: usize = 8;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -67,8 +72,17 @@ static ADVICE_DELTA_ROUTE_HITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(all(test, feature = "multicore", not(feature = "orbits")))]
+static ADVICE_DELTA_OVERLAP_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, feature = "multicore", not(feature = "orbits")))]
 fn take_advice_delta_route_hits() -> usize {
     ADVICE_DELTA_ROUTE_HITS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(test, feature = "multicore", not(feature = "orbits")))]
+fn take_advice_delta_overlap_hits() -> usize {
+    ADVICE_DELTA_OVERLAP_HITS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -135,23 +149,40 @@ fn use_advice_delta_counts(counts: &[(usize, usize)]) -> Option<bool> {
     )
 }
 
-#[cfg(all(feature = "multicore", not(feature = "orbits")))]
 type AdvicePolynomialsAndBlinds<C> = (
     Vec<Polynomial<<C as CurveAffine>::ScalarExt, LagrangeCoeff>>,
     Vec<Blind<<C as CurveAffine>::ScalarExt>>,
 );
 
-#[cfg(all(feature = "multicore", not(feature = "orbits")))]
 type AdviceDeltaPlan<C> =
     Vec<Vec<Option<Polynomial<<C as CurveAffine>::ScalarExt, LagrangeCoeff>>>>;
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-#[inline(never)]
-fn plan_advice_deltas<C: CurveAffine>(
+struct AdviceDeltaCountCandidates {
+    routes: Vec<bool>,
+    polynomial_len: usize,
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+fn overlap_advice_delta_planning<C: CurveAffine>(
     params: &Params<C>,
-    domain: &poly::EvaluationDomain<C::Scalar>,
     advice_witnesses: &[AdvicePolynomialsAndBlinds<C>],
-) -> Option<AdviceDeltaPlan<C>> {
+) -> bool {
+    advice_witnesses.len() > 1
+        && crate::multicore::current_num_threads() >= ADVICE_DELTA_OVERLAP_MIN_WORKERS
+        && params.k() == ADVICE_DELTA_PREPARED_K
+        && advice_witnesses
+            .first()
+            .and_then(|(advice, _)| advice.first())
+            .is_some_and(|polynomial| params.prepared_lagrange_commitments_active(polynomial.len()))
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[inline(never)]
+fn advice_delta_count_candidates<C: CurveAffine>(
+    params: &Params<C>,
+    advice_witnesses: &[AdvicePolynomialsAndBlinds<C>],
+) -> Option<AdviceDeltaCountCandidates> {
     if advice_witnesses.len() <= 1 || params.k() != ADVICE_DELTA_PREPARED_K {
         return None;
     }
@@ -179,7 +210,7 @@ fn plan_advice_deltas<C: CurveAffine>(
 
     // Evaluate each later circuit independently. The exact count pass only
     // reads coefficients and does not invoke the prepared evaluator.
-    let count_candidates = advice_witnesses[1..]
+    let routes = advice_witnesses[1..]
         .par_iter()
         .map(|(advice, _)| {
             let counts = advice
@@ -190,17 +221,36 @@ fn plan_advice_deltas<C: CurveAffine>(
             use_advice_delta_counts(&counts)
         })
         .collect::<Option<Vec<_>>>()?;
-    if !count_candidates.iter().any(|&candidate| candidate) {
+    if !routes.iter().any(|&candidate| candidate) {
+        return None;
+    }
+
+    Some(AdviceDeltaCountCandidates {
+        routes,
+        polynomial_len,
+    })
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+fn finish_advice_delta_plan<C: CurveAffine>(
+    params: &Params<C>,
+    domain: &poly::EvaluationDomain<C::Scalar>,
+    advice_witnesses: &[AdvicePolynomialsAndBlinds<C>],
+    count_candidates: &AdviceDeltaCountCandidates,
+) -> Option<AdviceDeltaPlan<C>> {
+    let (reference, _) = advice_witnesses.first()?;
+    if count_candidates.routes.len() != advice_witnesses.len().checked_sub(1)? {
         return None;
     }
 
     // Only count-qualified circuits acquire the prepared handle and pay for
     // the per-column work comparison.
     let prepared = params.lagrange_table()?;
+    let polynomial_len = count_candidates.polynomial_len;
     let work_rows = ADVICE_DELTA_WORK_SAMPLES.min(polynomial_len);
     let decisions = advice_witnesses[1..]
         .par_iter()
-        .zip(count_candidates.par_iter())
+        .zip(count_candidates.routes.par_iter())
         .map(|((advice, _), &count_candidate)| {
             if !count_candidate {
                 return Some(false);
@@ -250,6 +300,17 @@ fn plan_advice_deltas<C: CurveAffine>(
             })
             .collect(),
     )
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[inline(never)]
+fn plan_advice_deltas<C: CurveAffine>(
+    params: &Params<C>,
+    domain: &poly::EvaluationDomain<C::Scalar>,
+    advice_witnesses: &[AdvicePolynomialsAndBlinds<C>],
+) -> Option<AdviceDeltaPlan<C>> {
+    let count_candidates = advice_delta_count_candidates(params, advice_witnesses)?;
+    finish_advice_delta_plan(params, domain, advice_witnesses, &count_candidates)
 }
 
 #[cfg(all(test, feature = "batch"))]
@@ -1103,8 +1164,197 @@ where
         let circuit_count = advice_witnesses.len();
         crate::multicore::join(
             || {
+                let prepare_transforms = || {
+                    #[cfg(feature = "multicore")]
+                    let advice = advice_witnesses.par_iter();
+                    #[cfg(not(feature = "multicore"))]
+                    let advice = advice_witnesses.iter();
+                    advice
+                        .map(|(advice, _)| {
+                            domain.batch_lagrange_to_coeff_and_extended(advice, &pk.fft_twiddles)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let prepare_commitments = |delta_plan: Option<&AdviceDeltaPlan<C>>| {
+                    let Some(delta_plan) = delta_plan else {
+                        #[cfg(feature = "multicore")]
+                        let advice_witnesses = advice_witnesses.par_iter();
+                        #[cfg(not(feature = "multicore"))]
+                        let advice_witnesses = advice_witnesses.iter();
+                        return advice_witnesses
+                            .map(|(advice, advice_blinds)| {
+                                #[cfg(feature = "multicore")]
+                                let advice = advice.par_iter().zip(advice_blinds.par_iter());
+                                #[cfg(not(feature = "multicore"))]
+                                let advice = advice.iter().zip(advice_blinds.iter());
+                                let projective = advice
+                                    .map(|(polynomial, blind)| {
+                                        params.commit_lagrange(polynomial, *blind)
+                                    })
+                                    .collect::<Vec<_>>();
+                                let mut commitments = vec![C::identity(); projective.len()];
+                                C::Curve::batch_normalize(&projective, &mut commitments);
+                                commitments
+                            })
+                            .collect::<Vec<_>>();
+                    };
+
+                    let reference_blinds = &advice_witnesses[0].1;
+                    let candidates = (0..circuit_count)
+                        .into_par_iter()
+                        .map(|circuit| {
+                            let (advice, advice_blinds) = &advice_witnesses[circuit];
+                            (0..advice.len())
+                                .into_par_iter()
+                                .map(|column| {
+                                    let direct = &advice[column];
+                                    if circuit == 0 {
+                                        return (
+                                            params.commit_lagrange(direct, advice_blinds[column]),
+                                            false,
+                                        );
+                                    }
+
+                                    let Some(delta) = delta_plan[circuit - 1][column].as_ref()
+                                    else {
+                                        return (
+                                            params.commit_lagrange(direct, advice_blinds[column]),
+                                            false,
+                                        );
+                                    };
+
+                                    // Com(a, r) = Com(a_ref, r_ref)
+                                    //     + Com(a - a_ref, r - r_ref).
+                                    (
+                                        params.commit_lagrange(
+                                            delta,
+                                            Blind(
+                                                advice_blinds[column].0
+                                                    - reference_blinds[column].0,
+                                            ),
+                                        ),
+                                        true,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>();
+
+                    let Some(reference) = candidates.first() else {
+                        return Vec::new();
+                    };
+                    let reference = reference
+                        .iter()
+                        .map(|(commitment, _)| *commitment)
+                        .collect::<Vec<_>>();
+                    candidates
+                        .into_par_iter()
+                        .map(|candidates| {
+                            debug_assert_eq!(reference.len(), candidates.len());
+                            // Reconstruct in the original circuit and column
+                            // order, so later transcript writes remain
+                            // unchanged.
+                            let projective = reference
+                                .iter()
+                                .zip(candidates)
+                                .map(|(reference, (candidate, use_delta))| {
+                                    if use_delta {
+                                        *reference + candidate
+                                    } else {
+                                        candidate
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            let mut commitments = vec![C::identity(); projective.len()];
+                            C::Curve::batch_normalize(&projective, &mut commitments);
+                            commitments
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let finish_preparation = |advice_witnesses: Vec<AdvicePolynomialsAndBlinds<C>>,
+                                          advice_commitments: Vec<Vec<C>>,
+                                          transforms: Vec<(
+                    Vec<Polynomial<C::Scalar, Coeff>>,
+                    Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+                )>| {
+                    advice_witnesses
+                        .into_iter()
+                        .zip(advice_commitments)
+                        .zip(transforms)
+                        .map(
+                            |(
+                                ((advice, advice_blinds), advice_commitments),
+                                (advice_polys, advice_cosets),
+                            )| {
+                                (
+                                    advice_commitments,
+                                    AdviceSingle::<C> {
+                                        advice_values: advice,
+                                        advice_polys,
+                                        advice_cosets,
+                                        advice_blinds,
+                                    },
+                                )
+                            },
+                        )
+                        .collect::<Vec<_>>()
+                };
+
                 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-                let delta_plan = plan_advice_deltas(params, domain, &advice_witnesses);
+                let overlap_planning = overlap_advice_delta_planning(params, &advice_witnesses);
+                #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+                if overlap_planning {
+                    // The full-row density pass is memory-bandwidth-heavy.
+                    // Finish it before starting advice transforms, then
+                    // overlap the remaining work check, delta materialization,
+                    // MSMs, and reconstruction with those transforms.
+                    if let Some(count_candidates) =
+                        advice_delta_count_candidates(params, &advice_witnesses)
+                    {
+                        #[cfg(test)]
+                        ADVICE_DELTA_OVERLAP_HITS
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        let (advice_commitments, transforms) = crate::multicore::join(
+                            || {
+                                let delta_plan = finish_advice_delta_plan(
+                                    params,
+                                    domain,
+                                    &advice_witnesses,
+                                    &count_candidates,
+                                );
+                                #[cfg(test)]
+                                if let Some(plan) = &delta_plan {
+                                    ADVICE_DELTA_ROUTE_HITS.fetch_add(
+                                        plan.iter()
+                                            .flatten()
+                                            .filter(|delta| delta.is_some())
+                                            .count(),
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                }
+                                prepare_commitments(delta_plan.as_ref())
+                            },
+                            prepare_transforms,
+                        );
+
+                        return finish_preparation(
+                            advice_witnesses,
+                            advice_commitments,
+                            transforms,
+                        );
+                    }
+                }
+
+                #[cfg(all(feature = "multicore", not(feature = "orbits")))]
+                let delta_plan = if overlap_planning {
+                    // The exact density pass above rejected every circuit;
+                    // retain #328's original per-circuit fallback without
+                    // scanning the same coefficients again.
+                    None
+                } else {
+                    plan_advice_deltas(params, domain, &advice_witnesses)
+                };
                 #[cfg(any(not(feature = "multicore"), feature = "orbits"))]
                 let delta_plan: Option<
                     Vec<Vec<Option<Polynomial<C::Scalar, LagrangeCoeff>>>>,
@@ -1121,8 +1371,8 @@ where
                     );
                 }
 
-                // Preserve the original scheduling and normalization path unless
-                // the selected deltas collectively amortize its batch-wide work.
+                // Preserve the original per-circuit schedule when the prepared
+                // multicore overlap above is disabled or inapplicable.
                 let Some(delta_plan) = delta_plan else {
                     return advice_witnesses
                         .into_par_iter()
@@ -1177,116 +1427,14 @@ where
                         .collect::<Vec<_>>();
                 };
 
-                let reference_blinds = &advice_witnesses[0].1;
                 // Keep every transform concurrent with the complete routed
                 // commitment path, including reconstruction and normalization.
                 let (advice_commitments, transforms) = crate::multicore::join(
-                    || {
-                        let candidates = (0..circuit_count)
-                            .into_par_iter()
-                            .map(|circuit| {
-                                let (advice, advice_blinds) = &advice_witnesses[circuit];
-                                (0..advice.len())
-                                    .into_par_iter()
-                                    .map(|column| {
-                                        let direct = &advice[column];
-                                        if circuit == 0 {
-                                            return (
-                                                params
-                                                    .commit_lagrange(direct, advice_blinds[column]),
-                                                false,
-                                            );
-                                        }
-
-                                        let Some(delta) = delta_plan[circuit - 1][column].as_ref()
-                                        else {
-                                            return (
-                                                params
-                                                    .commit_lagrange(direct, advice_blinds[column]),
-                                                false,
-                                            );
-                                        };
-
-                                        // Com(a, r) = Com(a_ref, r_ref)
-                                        //     + Com(a - a_ref, r - r_ref).
-                                        (
-                                            params.commit_lagrange(
-                                                delta,
-                                                Blind(
-                                                    advice_blinds[column].0
-                                                        - reference_blinds[column].0,
-                                                ),
-                                            ),
-                                            true,
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect::<Vec<_>>();
-
-                        let reference = candidates[0]
-                            .iter()
-                            .map(|(commitment, _)| *commitment)
-                            .collect::<Vec<_>>();
-                        candidates
-                            .into_par_iter()
-                            .map(|candidates| {
-                                debug_assert_eq!(reference.len(), candidates.len());
-                                // Reconstruct in the original circuit and column
-                                // order, so later transcript writes remain
-                                // unchanged.
-                                let projective = reference
-                                    .iter()
-                                    .zip(candidates)
-                                    .map(|(reference, (candidate, use_delta))| {
-                                        if use_delta {
-                                            *reference + candidate
-                                        } else {
-                                            candidate
-                                        }
-                                    })
-                                    .collect::<Vec<_>>();
-                                let mut commitments = vec![C::identity(); projective.len()];
-                                C::Curve::batch_normalize(&projective, &mut commitments);
-                                commitments
-                            })
-                            .collect::<Vec<_>>()
-                    },
-                    || {
-                        #[cfg(feature = "multicore")]
-                        let advice = advice_witnesses.par_iter();
-                        #[cfg(not(feature = "multicore"))]
-                        let advice = advice_witnesses.iter();
-                        advice
-                            .map(|(advice, _)| {
-                                domain
-                                    .batch_lagrange_to_coeff_and_extended(advice, &pk.fft_twiddles)
-                            })
-                            .collect::<Vec<_>>()
-                    },
+                    || prepare_commitments(Some(&delta_plan)),
+                    prepare_transforms,
                 );
 
-                advice_witnesses
-                    .into_iter()
-                    .zip(advice_commitments)
-                    .zip(transforms)
-                    .map(
-                        |(
-                            ((advice, advice_blinds), advice_commitments),
-                            (advice_polys, advice_cosets),
-                        )| {
-                            (
-                                advice_commitments,
-                                AdviceSingle::<C> {
-                                    advice_values: advice,
-                                    advice_polys,
-                                    advice_cosets,
-                                    advice_blinds,
-                                },
-                            )
-                        },
-                    )
-                    .collect::<Vec<_>>()
+                finish_preparation(advice_witnesses, advice_commitments, transforms)
             },
             || {
                 lookup::prover::prepare_table_plan(
@@ -2881,17 +3029,28 @@ fn advice_delta_commitments_preserve_proofs() {
         pk: &ProvingKey<EqAffine>,
         circuits: &[AdviceDeltaCircuit],
         expected_route_hits: usize,
+        expected_count_candidate: bool,
         worker_counts: &[usize],
     ) {
         take_advice_delta_route_hits();
+        take_advice_delta_overlap_hits();
         let expected = proof(unarmed, pk, circuits, 1, false);
         assert_eq!(take_advice_delta_route_hits(), 0);
+        assert_eq!(take_advice_delta_overlap_hits(), 0);
         verify(unarmed, pk, circuits.len(), &expected);
 
         for &threads in worker_counts {
             take_advice_delta_route_hits();
+            take_advice_delta_overlap_hits();
             let actual = proof(armed, pk, circuits, threads, true);
             assert_eq!(take_advice_delta_route_hits(), expected_route_hits);
+            let expected_overlap = expected_count_candidate
+                && circuits.len() > 1
+                && threads >= ADVICE_DELTA_OVERLAP_MIN_WORKERS;
+            assert_eq!(
+                take_advice_delta_overlap_hits(),
+                usize::from(expected_overlap),
+            );
             assert_eq!(actual, expected);
         }
     }
@@ -2907,8 +3066,14 @@ fn advice_delta_commitments_preserve_proofs() {
     let pk = keygen_pk(&unarmed, vk, &keygen_circuit).expect("keygen_pk should not fail");
     assert!(armed.prepare_commitments());
     exact_counts_reject_known_sample_evasion(&armed);
+    let worker_counts = [
+        1,
+        4,
+        ADVICE_DELTA_OVERLAP_MIN_WORKERS - 1,
+        ADVICE_DELTA_OVERLAP_MIN_WORKERS,
+    ];
 
-    for (circuit_count, worker_counts) in [(1, &[1][..]), (2, &[1, 4][..]), (4, &[1][..])] {
+    for circuit_count in [1, 2, 4] {
         let circuits = (0..circuit_count)
             .map(|circuit_index| AdviceDeltaCircuit {
                 circuit_index,
@@ -2922,12 +3087,13 @@ fn advice_delta_commitments_preserve_proofs() {
             &pk,
             &circuits,
             ADVICE_COLUMNS * circuit_count.saturating_sub(1),
-            worker_counts,
+            circuit_count > 1,
+            &worker_counts,
         );
     }
 
-    // A dissimilar second circuit exercises the exact original-schedule
-    // fallback after the route scan finds no useful delta.
+    // A dissimilar second circuit exercises the direct-commitment fallback
+    // after the route scan finds no useful delta.
     let direct_only = [
         keygen_circuit,
         AdviceDeltaCircuit {
@@ -2936,7 +3102,15 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::Similar,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &direct_only, 0, &[1]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &direct_only,
+        0,
+        false,
+        &worker_counts,
+    );
 
     // Routing is independent per later circuit: a useful second circuit can
     // reuse the reference while a dissimilar third circuit commits directly.
@@ -2953,7 +3127,15 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::Similar,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &mixed, ADVICE_COLUMNS, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &mixed,
+        ADVICE_COLUMNS,
+        true,
+        &worker_counts,
+    );
 
     // One useful column cannot amortize the circuit-wide path, so the exact
     // aggregate gate retains the fallback.
@@ -2965,7 +3147,15 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::Similar,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &globally_too_small, 0, &[1]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &globally_too_small,
+        0,
+        false,
+        &worker_counts,
+    );
 
     // Counts alone strongly prefer these deltas, but their few nonzero
     // values are full-width while the direct scalars are small. The sampled
@@ -2982,7 +3172,15 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::MagnitudeInversion,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &magnitude_inversion, 0, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &magnitude_inversion,
+        0,
+        true,
+        &worker_counts,
+    );
 
     // The count guard prefers a delta with one quarter zeroes over an all-one
     // direct polynomial. Its nonzero terms are 2^119, however, so they activate
@@ -3026,7 +3224,15 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::HighWindowSparse,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &high_window_sparse, 0, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &high_window_sparse,
+        0,
+        true,
+        &worker_counts,
+    );
 
     // A fixed work sample could otherwise miss every high-window delta. The
     // direct sample only contains unit scalars and therefore does not span the
@@ -3070,7 +3276,15 @@ fn advice_delta_commitments_preserve_proofs() {
             profile: AdviceDeltaProfile::MissedHighWindow,
         },
     ];
-    compare_profiles(&armed, &unarmed, &pk, &missed_high_window, 0, &[1, 4]);
+    compare_profiles(
+        &armed,
+        &unarmed,
+        &pk,
+        &missed_high_window,
+        0,
+        true,
+        &worker_counts,
+    );
 }
 
 #[test]
