@@ -152,7 +152,7 @@ impl<'a, 'b> Sub<&'b Fq> for &'a Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little",
         ))]
@@ -162,7 +162,7 @@ impl<'a, 'b> Sub<&'b Fq> for &'a Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little",
         )))]
@@ -180,7 +180,7 @@ impl<'a, 'b> Add<&'b Fq> for &'a Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little",
         ))]
@@ -190,7 +190,7 @@ impl<'a, 'b> Add<&'b Fq> for &'a Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little",
         )))]
@@ -439,7 +439,7 @@ impl Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         ))]
@@ -450,7 +450,7 @@ impl Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         )))]
@@ -464,7 +464,7 @@ impl Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         ))]
@@ -475,7 +475,7 @@ impl Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         )))]
@@ -494,7 +494,7 @@ impl Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         ))]
@@ -507,7 +507,7 @@ impl Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         )))]
@@ -528,7 +528,7 @@ impl Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         ))]
@@ -547,7 +547,7 @@ impl Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         )))]
@@ -904,7 +904,7 @@ impl ff::PrimeField for Fq {
         #[cfg(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         ))]
@@ -913,7 +913,7 @@ impl ff::PrimeField for Fq {
         #[cfg(not(all(
             feature = "aarch64-asm",
             target_arch = "aarch64",
-            target_family = "unix",
+            any(target_family = "unix", target_os = "none"),
             target_pointer_width = "64",
             target_endian = "little"
         )))]
@@ -1086,7 +1086,7 @@ impl ec_gpu::GpuField for Fq {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_family = "unix",
+    any(target_family = "unix", target_os = "none"),
     target_pointer_width = "64",
     target_endian = "little"
 ))]
@@ -1103,7 +1103,7 @@ fn aarch64_asm_portable_repr(value: Fq) -> [u8; 32] {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_family = "unix",
+    any(target_family = "unix", target_os = "none"),
     target_pointer_width = "64",
     target_endian = "little"
 ))]
@@ -1118,7 +1118,7 @@ fn aarch64_asm_check_repr(value: Fq) {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_family = "unix",
+    any(target_family = "unix", target_os = "none"),
     target_pointer_width = "64",
     target_endian = "little"
 ))]
@@ -1138,7 +1138,7 @@ fn aarch64_asm_portable_cmp(lhs: Fq, rhs: Fq) -> core::cmp::Ordering {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_family = "unix",
+    any(target_family = "unix", target_os = "none"),
     target_pointer_width = "64",
     target_endian = "little"
 ))]
@@ -1647,7 +1647,7 @@ fn test_from_u512() {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_family = "unix",
+    any(target_family = "unix", target_os = "none"),
     target_pointer_width = "64",
     target_endian = "little"
 ))]
@@ -1783,7 +1783,7 @@ fn constants_are_canonical() {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_family = "unix",
+    any(target_family = "unix", target_os = "none"),
     target_pointer_width = "64",
     target_endian = "little"
 ))]
@@ -1814,7 +1814,7 @@ fn aarch64_asm_mul_canonical_sweep_matches_portable() {
     test,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_family = "unix",
+    any(target_family = "unix", target_os = "none"),
     target_pointer_width = "64",
     target_endian = "little"
 ))]
@@ -1863,7 +1863,7 @@ fn aarch64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
     debug_assertions,
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_family = "unix",
+    any(target_family = "unix", target_os = "none"),
     target_pointer_width = "64",
     target_endian = "little"
 ))]
