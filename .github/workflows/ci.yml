@@ -851,7 +851,7 @@ jobs:
             -name libpasta_curves_aarch64.a -print -quit)"
           test -n "${archive_path}"
           aarch64-linux-gnu-readelf --notes "${archive_path}" \
-            | grep -Eqi 'aarch64 feature:.*BTI.*PAC'
+            | grep -Eqi 'aarch64 feature:[[:space:]]*BTI[[:space:]]*$'
           aarch64-linux-gnu-readelf --sections --wide "${archive_path}" \
             | grep -q '[.]note.GNU-stack'
 
@@ -890,7 +890,7 @@ jobs:
           aarch64-linux-gnu-nm --defined-only "${archive_path}" \
             | grep -q pasta_curves_sqr_n_mul_mont_pasta
           aarch64-linux-gnu-readelf --notes "${archive_path}" \
-            | grep -Eqi 'aarch64 feature:.*BTI.*PAC'
+            | grep -Eqi 'aarch64 feature:[[:space:]]*BTI[[:space:]]*$'
           aarch64-linux-gnu-readelf --sections --wide "${archive_path}" \
             | grep -q '[.]note.GNU-stack'
 

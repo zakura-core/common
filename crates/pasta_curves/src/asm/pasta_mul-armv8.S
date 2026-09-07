@@ -730,14 +730,14 @@ L$pasta_curves_sqr_n_loop:
     b L$pasta_curves_sqr_n_canonicalize
 
 #ifdef __ELF__
-// Mark the stack non-executable and preserve BTI/PAC marking when this object
-// is linked into a hardened ELF image.
+// Mark the stack non-executable and preserve BTI marking when this object is
+// linked into a hardened ELF image.
 .section .note.GNU-stack,"",@progbits
 .section .note.gnu.property,"a",@note
     .long 4,2f-1f,5
     .byte 0x47,0x4e,0x55,0
-    // GNU_PROPERTY_AARCH64_FEATURE_1_AND: BTI | PAC.
-1:  .long 0xc0000000,4,3
+    // GNU_PROPERTY_AARCH64_FEATURE_1_AND: BTI.
+1:  .long 0xc0000000,4,1
 .align 3
 2:
 #endif
