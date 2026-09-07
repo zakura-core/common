@@ -104,8 +104,8 @@ pub const fn join(limbs: &Limbs) -> [u64; 4] {
 /// Little-endian bytes of a 256-bit integer.
 pub fn to_bytes(value: &[u64; 4]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    for (chunk, limb) in out.chunks_exact_mut(8).zip(value) {
-        chunk.copy_from_slice(&limb.to_le_bytes());
+    for (i, limb) in value.iter().enumerate() {
+        out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
     }
     out
 }
