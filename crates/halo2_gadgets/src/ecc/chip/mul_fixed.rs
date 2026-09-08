@@ -4,6 +4,7 @@ use super::{
 };
 use crate::utilities::decompose_running_sum::RunningSumConfig;
 
+use arrayvec::ArrayVec;
 use std::{
     marker::PhantomData,
     sync::{Arc, LazyLock, Mutex},
@@ -13,7 +14,7 @@ use group::ff::{Field, PrimeField, PrimeFieldBits};
 #[cfg(test)]
 use group::{Curve, CurveAffine as _, Group};
 use halo2_proofs::{
-    circuit::{AssignedCell, Region, Value},
+    circuit::{Region, Value},
     plonk::{
         Advice, Assigned, Column, ConstraintSystem, Constraints, Error, Expression, Fixed,
         Selector, VirtualCells,
@@ -455,18 +456,14 @@ impl<FixedPoints: super::FixedPoints<pallas::Affine>> Config<FixedPoints> {
             coords_check_toggle,
         )?;
 
-        let scalar_windows_usize = scalar.windows_usize();
-        assert_eq!(scalar_windows_usize.len(), NUM_WINDOWS);
-        let window_witnesses: Value<Vec<_>> = scalar_windows_usize.iter().copied().collect();
-        let window_witnesses = window_witnesses
-            .map(|windows| {
-                windows
-                    .iter()
-                    .enumerate()
-                    .map(|(index, window)| cached.windows[index][*window])
-                    .collect::<Vec<_>>()
+        assert_eq!(scalar.num_windows(), NUM_WINDOWS);
+        let window_witnesses = (0..NUM_WINDOWS)
+            .map(|index| {
+                scalar
+                    .window_usize(index)
+                    .map(|window| cached.windows[index][window])
             })
-            .transpose_vec(NUM_WINDOWS);
+            .collect::<ArrayVec<_, NUM_WINDOWS>>();
 
         // Initialize accumulator
         let mut accumulator = window_witnesses[0].map(WindowAccumulator::from_affine);
@@ -645,68 +642,61 @@ impl From<&EccBaseFieldElemFixed> for ScalarFixed {
 }
 
 impl ScalarFixed {
-    /// The scalar decomposition was done in the base field. For computation
-    /// outside the circuit, we now convert them back into the scalar field.
-    ///
-    /// This function does not require that the base field fits inside the scalar field,
-    /// because the window size fits into either field.
-    fn windows_field(&self) -> Vec<Value<pallas::Scalar>> {
-        let running_sum_to_windows = |zs: Vec<AssignedCell<pallas::Base, pallas::Base>>| {
-            (0..(zs.len() - 1))
-                .map(|idx| {
-                    let z_cur = zs[idx].value();
-                    let z_next = zs[idx + 1].value();
-                    let word = z_cur - z_next * Value::known(*H_BASE);
-                    // This assumes that the endianness of the encodings of pallas::Base
-                    // and pallas::Scalar are the same. They happen to be, but we need to
-                    // be careful if this is generalised.
-                    word.map(|word| pallas::Scalar::from_repr(word.to_repr()).unwrap())
-                })
-                .collect::<Vec<_>>()
-        };
+    fn num_windows(&self) -> usize {
         match self {
-            Self::BaseFieldElem(scalar) => running_sum_to_windows(scalar.running_sum.to_vec()),
-            Self::Short(scalar) => running_sum_to_windows(
+            Self::BaseFieldElem(scalar) => scalar.running_sum.len() - 1,
+            Self::Short(scalar) => {
                 scalar
                     .running_sum
                     .as_ref()
                     .expect("EccScalarFixedShort has been constrained")
-                    .to_vec(),
-            ),
+                    .len()
+                    - 1
+            }
             Self::FullWidth(scalar) => scalar
                 .windows
                 .as_ref()
                 .expect("EccScalarFixed has been witnessed")
-                .iter()
-                .map(|bits| {
-                    // This assumes that the endianness of the encodings of pallas::Base
-                    // and pallas::Scalar are the same. They happen to be, but we need to
-                    // be careful if this is generalised.
-                    bits.value()
-                        .map(|value| pallas::Scalar::from_repr(value.to_repr()).unwrap())
-                })
-                .collect::<Vec<_>>(),
+                .len(),
         }
     }
 
-    /// The scalar decomposition is guaranteed to be in three-bit windows, so we construct
-    /// `usize` indices from the lowest three bits of each window field element for
-    /// convenient indexing into `u`-values.
-    fn windows_usize(&self) -> Vec<Value<usize>> {
-        self.windows_field()
-            .iter()
-            .map(|window| {
-                window.map(|window| {
-                    window
-                        .to_le_bits()
-                        .iter()
-                        .by_vals()
-                        .take(FIXED_BASE_WINDOW_SIZE)
-                        .rev()
-                        .fold(0, |acc, b| 2 * acc + usize::from(b))
-                })
-            })
-            .collect::<Vec<_>>()
+    /// Returns the `index`th three-bit window as a table index.
+    fn window_usize(&self, index: usize) -> Value<usize> {
+        let window = match self {
+            Self::BaseFieldElem(scalar) => {
+                let z_cur = scalar.running_sum[index].value();
+                let z_next = scalar.running_sum[index + 1].value();
+                z_cur - z_next * Value::known(*H_BASE)
+            }
+            Self::Short(scalar) => {
+                let running_sum = scalar
+                    .running_sum
+                    .as_ref()
+                    .expect("EccScalarFixedShort has been constrained");
+                let z_cur = running_sum[index].value();
+                let z_next = running_sum[index + 1].value();
+                z_cur - z_next * Value::known(*H_BASE)
+            }
+            Self::FullWidth(scalar) => scalar
+                .windows
+                .as_ref()
+                .expect("EccScalarFixed has been witnessed")[index]
+                .value()
+                .copied(),
+        };
+
+        // The scalar decomposition is constrained to three-bit windows. Read
+        // those bits directly from the base-field element for table indexing.
+        window.map(|window| {
+            window
+                .to_le_bits()
+                .iter()
+                .by_vals()
+                .take(FIXED_BASE_WINDOW_SIZE)
+                .rev()
+                .fold(0, |acc, bit| 2 * acc + usize::from(bit))
+        })
     }
 }
 
