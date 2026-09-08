@@ -6,7 +6,7 @@ use halo2_proofs::{
     plonk::{Advice, Column, ConstraintSystem, Constraints, Error, Selector, TableColumn},
     poly::Rotation,
 };
-use std::{convert::TryInto, fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, marker::PhantomData};
 
 use ff::PrimeFieldBits;
 
@@ -177,28 +177,11 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
     ) -> Result<RunningSum<F>, Error> {
         // `num_words` must fit into a single field element.
         assert!(num_words * K <= F::CAPACITY as usize);
-        let num_bits = num_words * K;
 
-        // Chunk the first num_bits bits into K-bit words.
-        let words = {
-            // Take first num_bits bits of `element`.
-            let bits = element.value().map(|element| {
-                element
-                    .to_le_bits()
-                    .into_iter()
-                    .take(num_bits)
-                    .collect::<Vec<_>>()
-            });
+        let bits = element.value().map(|element| element.to_le_bits());
 
-            bits.map(|bits| {
-                bits.chunks_exact(K)
-                    .map(|word| F::from(lebs2ip::<K>(&(word.try_into().unwrap()))))
-                    .collect::<Vec<_>>()
-            })
-            .transpose_vec(num_words)
-        };
-
-        let mut zs = vec![element.clone()];
+        let mut zs = Vec::with_capacity(num_words + 1);
+        zs.push(element.clone());
 
         // Assign cumulative sum such that
         //          z_i = 2^{K}⋅z_{i + 1} + a_i
@@ -207,7 +190,7 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
         // For `element` = a_0 + 2^10 a_1 + ... + 2^{120} a_{12}}, initialize z_0 = `element`.
         // If `element` fits in 130 bits, we end up with z_{13} = 0.
         let mut z = element;
-        for (idx, word) in words.iter().enumerate() {
+        for idx in 0..num_words {
             // Enable q_lookup on this row
             self.config().q_lookup.enable(region, idx)?;
             // Enable q_running on this row
@@ -215,9 +198,13 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
 
             // z_next = (z_cur - m_cur) / 2^K
             z = {
+                let word = bits.as_ref().map(|bits| {
+                    let word = std::array::from_fn(|bit| bits[idx * K + bit]);
+                    F::from(lebs2ip::<K>(&word))
+                });
                 let z_val = z
                     .value()
-                    .zip(*word)
+                    .zip(word)
                     .map(|(z, word)| mul_by_inverse_power_of_two(*z - word, K));
 
                 // Assign z_next

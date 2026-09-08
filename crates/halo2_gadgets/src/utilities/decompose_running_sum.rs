@@ -165,21 +165,21 @@ impl<F: PrimeFieldBits, const WINDOW_NUM_BITS: usize> RunningSumConfig<F, WINDOW
         // Decompose base field element into K-bit words.
         let words = z_0
             .value()
-            .map(|word| super::decompose_word::<F>(word, word_num_bits, WINDOW_NUM_BITS))
-            .transpose_vec(num_windows);
+            .map(|word| super::decompose_word::<F>(word, word_num_bits, WINDOW_NUM_BITS));
 
         // Initialize empty vector to store running sum values [z_0, ..., z_W].
-        let mut zs: Vec<AssignedCell<F, F>> = vec![z_0.clone()];
+        let mut zs = Vec::with_capacity(num_windows + 1);
+        zs.push(z_0.clone());
         let mut z = z_0;
 
         // Assign running sum `z_{i+1}` = (z_i - k_i) / (2^K) for i = 0..=n-1.
         // Outside of this helper, z_0 = alpha must have already been loaded into the
         // `z` column at `offset`.
-        for (i, word) in words.iter().enumerate() {
+        for i in 0..num_windows {
             // z_next = (z_cur - word) / (2^K)
             let z_next = {
                 let z_cur_val = z.value().copied();
-                let word = word.map(|word| F::from(word as u64));
+                let word = words.as_ref().map(|words| F::from(words[i] as u64));
                 let z_next_val =
                     (z_cur_val - word).map(|z| mul_by_inverse_power_of_two(z, WINDOW_NUM_BITS));
                 region.assign_advice(
