@@ -45,13 +45,14 @@ const INCOMPLETE_LO_LEN: usize = INCOMPLETE_LEN - INCOMPLETE_HI_LEN;
 const COMPLETE_RANGE: Range<usize> = INCOMPLETE_LEN..(INCOMPLETE_LEN + NUM_COMPLETE_BITS);
 
 #[derive(Clone, Copy, Debug)]
-struct JacobianPoint {
+struct ProjectivePoint {
     x: pallas::Base,
     y: pallas::Base,
     z: pallas::Base,
+    z_sq: pallas::Base,
 }
 
-impl JacobianPoint {
+impl ProjectivePoint {
     fn from_affine(point: pallas::Affine) -> Self {
         let coordinates = point
             .coordinates()
@@ -60,67 +61,105 @@ impl JacobianPoint {
             x: *coordinates.x(),
             y: *coordinates.y(),
             z: pallas::Base::ONE,
+            z_sq: pallas::Base::ONE,
         }
+    }
+
+    fn x(&self) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.x, self.z_sq)
+    }
+
+    fn y(&self) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.y, self.z_sq * self.z)
     }
 
     /// Doubles a nonidentity Pallas point without exceptional-case handling.
     fn double_unchecked(self) -> Self {
         // dbl-2009-l for a short-Weierstrass curve with a = 0.
-        let a = self.x.square();
-        let b = self.y.square();
-        let c = b.square();
-        let d = ((self.x + b).square() - a - c).double();
+        let a = square_with_runtime_backend(&self.x);
+        let b = square_with_runtime_backend(&self.y);
+        let c = square_with_runtime_backend(&b);
+        let d = (square_with_runtime_backend(&(self.x + b)) - a - c).double();
         let e = a.double() + a;
-        let f = e.square();
+        let f = square_with_runtime_backend(&e);
         let z = (self.z * self.y).double();
+        let z_sq = square_with_runtime_backend(&z);
         let x = f - d.double();
         let y = e * (d - x) - c.double().double().double();
 
-        Self { x, y, z }
+        Self { x, y, z, z_sq }
     }
 
-    /// Adds a nonidentity affine point that is neither equal to nor the
-    /// negation of `self`.
-    fn add_mixed_unchecked(self, x: pallas::Base, y: pallas::Base) -> Self {
-        let z_squared = self.z.square();
-        let u = x * z_squared;
-        let s = y * z_squared * self.z;
-        let h = u - self.x;
-        let hh = h.square();
-        let i = hh.double().double();
-        let j = h * i;
-        let r = (s - self.y).double();
-        let v = self.x * i;
-        let result_x = r.square() - j - v.double();
-        let result_y = r * (v - result_x) - (self.y * j).double();
-        let result_z = (self.z + h).square() - z_squared - hh;
+    /// Computes witnesses for the incomplete addition `2A + P` while keeping
+    /// the accumulator in projective coordinates.
+    fn double_and_add(&mut self, (x_p, y_p): (pallas::Base, pallas::Base)) -> DoubleAndAddWitness {
+        let z_cubed = self.z_sq * self.z;
+        let h = x_p * self.z_sq - self.x;
+        let r = y_p * z_cubed - self.y;
 
-        Self {
-            x: result_x,
-            y: result_y,
-            z: result_z,
+        let h_sq = square_with_runtime_backend(&h);
+        let h_cubed = h_sq * h;
+        let x_h_sq = self.x * h_sq;
+        let x_r = square_with_runtime_backend(&r) - h_cubed - Field::double(&x_h_sq);
+        let d = x_h_sq - x_r;
+
+        let d_sq = square_with_runtime_backend(&d);
+        let d_cubed = d_sq * d;
+        let y_h_cubed = self.y * h_cubed;
+        // Scale lambda_1 by d so that both slopes use z_new as their
+        // denominator.
+        let r_d = r * d;
+        let lambda_2_numerator = Field::double(&y_h_cubed) - r_d;
+
+        let x_h_sq_d_sq = x_h_sq * d_sq;
+        let x_new = square_with_runtime_backend(&lambda_2_numerator) - Field::double(&x_h_sq_d_sq)
+            + d_cubed;
+        let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
+        let z_new = self.z * h * d;
+        let z_new_sq = square_with_runtime_backend(&z_new);
+
+        *self = Self {
+            x: x_new,
+            y: y_new,
+            z: z_new,
+            z_sq: z_new_sq,
+        };
+
+        DoubleAndAddWitness {
+            lambda_1_numerator: r_d,
+            lambda_2_numerator,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-struct AffinePoint {
-    x: pallas::Base,
-    y: pallas::Base,
+struct DoubleAndAddWitness {
+    lambda_1_numerator: pallas::Base,
+    lambda_2_numerator: pallas::Base,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct IncompleteRowWitness {
     z: pallas::Base,
-    point: AffinePoint,
-    lambda_1: pallas::Base,
-    lambda_2: pallas::Base,
+    point: ProjectivePoint,
+    lambda_1_numerator: pallas::Base,
+    lambda_2_numerator: pallas::Base,
+}
+
+impl IncompleteRowWitness {
+    fn lambda_1(&self) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.lambda_1_numerator, self.point.z)
+    }
+
+    fn lambda_2(&self) -> Assigned<pallas::Base> {
+        Assigned::Rational(self.lambda_2_numerator, self.point.z)
+    }
 }
 
 #[derive(Clone, Debug)]
 struct IncompleteMulWitness {
+    initial: ProjectivePoint,
     rows: Vec<IncompleteRowWitness>,
-    output: AffinePoint,
 }
 
 impl IncompleteMulWitness {
@@ -138,92 +177,39 @@ impl IncompleteMulWitness {
         // and 3 * 2^i - 1. Thus c < 2^252 and 3c < 9 * 2^250 < q, so neither c
         // nor 3c can be 0 or +/-1 modulo the Pallas group order q. The final
         // output coefficient is also nonzero because it is less than 2^253.
-        let mut accumulator = JacobianPoint::from_affine(base).double_unchecked();
-        let mut accumulators = Vec::with_capacity(INCOMPLETE_LEN + 1);
-        accumulators.push(accumulator);
-        for bit in &bits[..INCOMPLETE_LEN] {
-            accumulator = accumulator.double_unchecked();
-            let addend_y = if *bit { base_y } else { -base_y };
-            accumulator = accumulator.add_mixed_unchecked(base_x, addend_y);
-            accumulators.push(accumulator);
-        }
-
-        let affine = batch_normalize_nonidentity(&accumulators);
-        let mut denominators = Vec::with_capacity(INCOMPLETE_LEN * 2);
-        for points in affine.windows(2) {
-            let current = points[0];
-            let next = points[1];
-            denominators.push(current.x - base_x);
-            denominators.push(current.x - next.x);
-        }
-        batch_invert_nonzero(&mut denominators);
-
-        let mut z = pallas::Base::ZERO;
+        let mut accumulator = ProjectivePoint::from_affine(base).double_unchecked();
+        let initial = accumulator;
         let mut rows = Vec::with_capacity(INCOMPLETE_LEN);
-        for ((bit, points), inverses) in bits[..INCOMPLETE_LEN]
-            .iter()
-            .zip(affine.windows(2))
-            .zip(denominators.chunks_exact(2))
-        {
-            let current = points[0];
-            let next = points[1];
+        let mut z = pallas::Base::ZERO;
+        for bit in &bits[..INCOMPLETE_LEN] {
             let addend_y = if *bit { base_y } else { -base_y };
+            let witness = accumulator.double_and_add((base_x, addend_y));
             z = z.double() + pallas::Base::from(*bit as u64);
             rows.push(IncompleteRowWitness {
                 z,
-                point: current,
-                lambda_1: (current.y - addend_y) * inverses[0],
-                lambda_2: (current.y + next.y) * inverses[1],
+                point: accumulator,
+                lambda_1_numerator: witness.lambda_1_numerator,
+                lambda_2_numerator: witness.lambda_2_numerator,
             });
         }
 
-        Self {
-            rows,
-            output: *affine.last().expect("the accumulator list is nonempty"),
-        }
+        Self { initial, rows }
     }
 
-    fn point(&self, index: usize) -> AffinePoint {
-        if index == self.rows.len() {
-            self.output
+    fn point(&self, index: usize) -> ProjectivePoint {
+        if index == 0 {
+            self.initial
         } else {
-            self.rows[index].point
+            self.rows[index - 1].point
         }
     }
 }
 
-fn batch_normalize_nonidentity(points: &[JacobianPoint]) -> Vec<AffinePoint> {
-    let mut z_inverses = points.iter().map(|point| point.z).collect::<Vec<_>>();
-    batch_invert_nonzero(&mut z_inverses);
-    points
-        .iter()
-        .zip(z_inverses)
-        .map(|(point, z_inverse)| {
-            let z_squared = z_inverse.square();
-            AffinePoint {
-                x: point.x * z_squared,
-                y: point.y * z_squared * z_inverse,
-            }
-        })
-        .collect()
-}
-
-fn batch_invert_nonzero(values: &mut [pallas::Base]) {
-    let mut scratch = Vec::with_capacity(values.len());
-    let mut accumulator = pallas::Base::ONE;
-    for value in values.iter() {
-        scratch.push(accumulator);
-        accumulator *= value;
-    }
-
-    accumulator = accumulator
-        .invert()
-        .expect("incomplete multiplication denominators are nonzero");
-    for (value, prefix) in values.iter_mut().zip(scratch).rev() {
-        let original = *value;
-        *value = accumulator * prefix;
-        accumulator *= original;
-    }
+#[inline(always)]
+fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
+    // Method syntax selects `pallas::Base`'s portable inherent square.
+    // Trait dispatch selects the configured runtime backend instead.
+    Field::square(value)
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -684,25 +670,27 @@ pub mod tests {
 
             for (index, bit) in bits[..super::INCOMPLETE_LEN].iter().enumerate() {
                 let row = witness.rows[index];
+                let point = witness.point(index);
+                let point_x = point.x().evaluate();
+                let point_y = point.y().evaluate();
+                let lambda_1 = row.lambda_1().evaluate();
+                let lambda_2 = row.lambda_2().evaluate();
                 let current = accumulator.to_affine();
                 let current_coordinates = current.coordinates().unwrap();
-                assert_eq!(row.point.x, *current_coordinates.x());
-                assert_eq!(row.point.y, *current_coordinates.y());
+                assert_eq!(point_x, *current_coordinates.x());
+                assert_eq!(point_y, *current_coordinates.y());
 
                 let addend_y = if *bit { base_y } else { -base_y };
                 let next = witness.point(index + 1);
-                let x_r = row.lambda_1.square() - row.point.x - base_x;
-                let reconstructed_y = mul_fp_by_inverse_power_of_two(
-                    &((row.lambda_1 + row.lambda_2) * (row.point.x - x_r)),
-                    1,
-                );
-                assert_eq!(reconstructed_y, row.point.y);
-                assert_eq!(
-                    row.lambda_1 * (row.point.x - base_x),
-                    row.point.y - addend_y,
-                );
-                assert_eq!(row.lambda_2.square() - x_r - row.point.x, next.x,);
-                assert_eq!(row.lambda_2 * (row.point.x - next.x), row.point.y + next.y,);
+                let next_x = next.x().evaluate();
+                let next_y = next.y().evaluate();
+                let x_r = lambda_1.square() - point_x - base_x;
+                let reconstructed_y =
+                    mul_fp_by_inverse_power_of_two(&((lambda_1 + lambda_2) * (point_x - x_r)), 1);
+                assert_eq!(reconstructed_y, point_y);
+                assert_eq!(lambda_1 * (point_x - base_x), point_y - addend_y,);
+                assert_eq!(lambda_2.square() - x_r - point_x, next_x);
+                assert_eq!(lambda_2 * (point_x - next_x), point_y + next_y);
 
                 accumulator = accumulator.double()
                     + if *bit {
@@ -714,8 +702,9 @@ pub mod tests {
 
             let output = accumulator.to_affine();
             let output_coordinates = output.coordinates().unwrap();
-            assert_eq!(witness.output.x, *output_coordinates.x());
-            assert_eq!(witness.output.y, *output_coordinates.y());
+            let output = witness.point(super::INCOMPLETE_LEN);
+            assert_eq!(output.x().evaluate(), *output_coordinates.x());
+            assert_eq!(output.y().evaluate(), *output_coordinates.y());
         }
     }
 
