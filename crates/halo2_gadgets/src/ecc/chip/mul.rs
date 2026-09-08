@@ -744,6 +744,29 @@ pub mod tests {
         utilities::{UtilitiesInstructions, lookup_range_check::PallasLookupRangeCheck},
     };
 
+    /// Exercises empty, singleton, even, and odd inversion batches.
+    const MAX_BATCH_INVERSION_TEST_LEN: usize = 64;
+
+    #[test]
+    fn batch_invert_nonzero_matches_individual_inversion() {
+        for len in 0..=MAX_BATCH_INVERSION_TEST_LEN {
+            let mut values = (1..=len)
+                .map(|value| {
+                    pallas::Base::from(u64::try_from(value).expect("test length fits into u64"))
+                })
+                .collect::<Vec<_>>();
+            let expected = values
+                .iter()
+                .map(|value| value.invert().unwrap())
+                .collect::<Vec<_>>();
+            let mut scratch = vec![pallas::Base::ZERO; len];
+
+            super::batch_invert_nonzero(&mut values, &mut scratch);
+
+            assert_eq!(values, expected);
+        }
+    }
+
     #[test]
     fn incomplete_witness_matches_group_arithmetic_and_gate_equations() {
         let mut rng = rng();
