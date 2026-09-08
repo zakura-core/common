@@ -10,9 +10,60 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-08
+
+### Changed
+
 - On Apple AArch64 with `aarch64-asm`, field addition operators now use an
   inline assembly carry chain and conditional reduction, speeding up Pallas
-  and Vesta point arithmetic. The inherent `const` methods are unchanged.
+  and Vesta point arithmetic. The inherent `const` methods are unchanged
+  ([#397](https://github.com/zakura-core/common/pull/397)).
+- Extended the `aarch64-asm` field-arithmetic backend from Apple AArch64 to
+  Unix AArch64 targets, with platform-specific Mach-O and ELF symbols
+  ([#370](https://github.com/zakura-core/common/pull/370)).
+- Added an internal prepared-MSM fast path that directly recodes the bounded
+  prefix used by Halo2's 10-bit range-check table commitment, with exact
+  fallback for other inputs
+  ([#384](https://github.com/zakura-core/common/pull/384)).
+- Prepared fixed-base MSMs now skip scalar canonicalization and GLV
+  decomposition for exact-zero scalars. Orchard advice polynomials are about
+  23% zero after blinding, so this removes about 4,640 decompositions across
+  the ten advice commitments per Action. Same-binary 2,048-term measurements
+  project about 0.03 ms of advice-commitment work per Action on a 10-worker
+  Apple M4, and 0.04 ms on six-worker AMD Linux, with no resolved dense-scalar
+  cost. First-proof instance/advice measurements were noise-limited at one
+  Action; whole-proof latency was not separately resolved
+  ([#393](https://github.com/zakura-core/common/pull/393)).
+- On Apple AArch64 with `aarch64-asm`, field subtraction operators now use
+  inline assembly for the borrow chain and conditional modulus addition.
+  The inherent `const` methods are unchanged
+  ([#398](https://github.com/zakura-core/common/pull/398)).
+- The `aarch64-asm` inline-assembly field addition and subtraction operators
+  are now enabled on all 64-bit little-endian Unix AArch64 targets instead of
+  only Apple ones, matching the multiplication and squaring gates. Measured
+  on Apple M4; other cores are expected but not verified to benefit
+  ([#403](https://github.com/zakura-core/common/pull/403)).
+- Improved runtime field-doubling performance on Apple AArch64 when the
+  `aarch64-asm` feature is enabled, preserving const-compatible doubling
+  ([#405](https://github.com/zakura-core/common/pull/405)).
+
+### Fixed
+
+- Restricted the AArch64 assembly field backend to 64-bit-pointer Unix
+  targets so ILP32 configurations use the portable implementation
+  ([#378](https://github.com/zakura-core/common/pull/378)).
+- Restricted the AArch64 assembly field backend to little-endian targets so
+  big-endian configurations use the portable implementation
+  ([#383](https://github.com/zakura-core/common/pull/383)).
+- Fixed `aarch64-unknown-none` builds with the `aarch64-asm` feature to use
+  the assembly backend instead of panicking in the build script
+  ([#406](https://github.com/zakura-core/common/pull/406)).
+
+### Security
+
+- Preserved BTI hardening metadata and declared a non-executable stack when
+  the `aarch64-asm` backend is linked into ELF applications
+  ([#406](https://github.com/zakura-core/common/pull/406)).
 
 ## [1.1.0] - 2026-09-04
 

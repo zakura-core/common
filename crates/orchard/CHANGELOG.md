@@ -10,6 +10,16 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-08
+
+### Added
+
+- Added `circuit::VerifyingKey::pinned_description` and
+  `circuit::VerifyingKey::fingerprint`: the pinned circuit description of a
+  verifying key as text, and a BLAKE2b-256 digest of it, so consumers can pin
+  the verifying key they were built against
+  ([#362](https://github.com/zakura-core/common/pull/362)).
+
 ## [1.1.0] - 2026-09-04
 
 ### Changed
