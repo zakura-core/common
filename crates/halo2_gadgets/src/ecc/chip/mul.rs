@@ -65,14 +65,6 @@ impl ProjectivePoint {
         }
     }
 
-    fn x(&self) -> Assigned<pallas::Base> {
-        Assigned::Rational(self.x, self.z_sq)
-    }
-
-    fn y(&self) -> Assigned<pallas::Base> {
-        Assigned::Rational(self.y, self.z_sq * self.z)
-    }
-
     /// Doubles a nonidentity Pallas point without exceptional-case handling.
     fn double_unchecked(self) -> Self {
         // dbl-2009-l for a short-Weierstrass curve with a = 0.
@@ -141,25 +133,17 @@ struct DoubleAndAddWitness {
 #[derive(Clone, Copy, Debug)]
 struct IncompleteRowWitness {
     z: pallas::Base,
-    point: ProjectivePoint,
-    lambda_1_numerator: pallas::Base,
-    lambda_2_numerator: pallas::Base,
-}
-
-impl IncompleteRowWitness {
-    fn lambda_1(&self) -> Assigned<pallas::Base> {
-        Assigned::Rational(self.lambda_1_numerator, self.point.z)
-    }
-
-    fn lambda_2(&self) -> Assigned<pallas::Base> {
-        Assigned::Rational(self.lambda_2_numerator, self.point.z)
-    }
+    point_x: pallas::Base,
+    lambda_1: pallas::Base,
+    lambda_2: pallas::Base,
 }
 
 #[derive(Clone, Debug)]
 struct IncompleteMulWitness {
-    initial: ProjectivePoint,
+    initial_x: pallas::Base,
     rows: Vec<IncompleteRowWitness>,
+    hi_output_y: pallas::Base,
+    output_y: pallas::Base,
 }
 
 impl IncompleteMulWitness {
@@ -179,30 +163,142 @@ impl IncompleteMulWitness {
         // output coefficient is also nonzero because it is less than 2^253.
         let mut accumulator = ProjectivePoint::from_affine(base).double_unchecked();
         let initial = accumulator;
-        let mut rows = Vec::with_capacity(INCOMPLETE_LEN);
+        let mut projective_rows = Vec::with_capacity(INCOMPLETE_LEN);
         let mut z = pallas::Base::ZERO;
         for bit in &bits[..INCOMPLETE_LEN] {
             let addend_y = if *bit { base_y } else { -base_y };
             let witness = accumulator.double_and_add((base_x, addend_y));
             z = z.double() + pallas::Base::from(*bit as u64);
-            rows.push(IncompleteRowWitness {
-                z,
-                point: accumulator,
-                lambda_1_numerator: witness.lambda_1_numerator,
-                lambda_2_numerator: witness.lambda_2_numerator,
-            });
+            projective_rows.push((z, accumulator, witness));
         }
 
-        Self { initial, rows }
+        let mut z_inverses = Vec::with_capacity(INCOMPLETE_LEN + 1);
+        z_inverses.push(initial.z);
+        z_inverses.extend(projective_rows.iter().map(|(_, point, _)| point.z));
+        let mut scratch = vec![pallas::Base::ZERO; z_inverses.len()];
+        batch_invert_nonzero(&mut z_inverses, &mut scratch);
+
+        let initial_z_inverse_sq = square_with_runtime_backend(&z_inverses[0]);
+        let initial_x = initial.x * initial_z_inverse_sq;
+        let mut hi_output_y = None;
+        let mut output_y = None;
+        let rows = projective_rows
+            .into_iter()
+            .zip(z_inverses.into_iter().skip(1))
+            .enumerate()
+            .map(|(index, ((z, point, witness), z_inverse))| {
+                let z_inverse_sq = square_with_runtime_backend(&z_inverse);
+                let point_x = point.x * z_inverse_sq;
+                if index + 1 == INCOMPLETE_HI_LEN {
+                    hi_output_y = Some(point.y * z_inverse_sq * z_inverse);
+                }
+                if index + 1 == INCOMPLETE_LEN {
+                    output_y = Some(point.y * z_inverse_sq * z_inverse);
+                }
+                IncompleteRowWitness {
+                    z,
+                    point_x,
+                    lambda_1: witness.lambda_1_numerator * z_inverse,
+                    lambda_2: witness.lambda_2_numerator * z_inverse,
+                }
+            })
+            .collect();
+
+        Self {
+            initial_x,
+            rows,
+            hi_output_y: hi_output_y.expect("the high incomplete half is nonempty"),
+            output_y: output_y.expect("the incomplete multiplication is nonempty"),
+        }
     }
 
-    fn point(&self, index: usize) -> ProjectivePoint {
+    fn point_x(&self, index: usize) -> pallas::Base {
         if index == 0 {
-            self.initial
+            self.initial_x
         } else {
-            self.rows[index - 1].point
+            self.rows[index - 1].point_x
         }
     }
+
+    fn point_y(&self, index: usize) -> pallas::Base {
+        if index == INCOMPLETE_HI_LEN {
+            self.hi_output_y
+        } else {
+            assert_eq!(index, INCOMPLETE_LEN);
+            self.output_y
+        }
+    }
+}
+
+fn batch_invert_nonzero(values: &mut [pallas::Base], scratch: &mut [pallas::Base]) {
+    assert_eq!(values.len(), scratch.len());
+    let Some((first, values)) = values.split_first_mut() else {
+        return;
+    };
+
+    debug_assert!(!first.is_zero_vartime());
+    if values.is_empty() {
+        *first = first.invert().unwrap();
+        return;
+    }
+
+    let (second, values) = values.split_first_mut().unwrap();
+    debug_assert!(!second.is_zero_vartime());
+    let scratch = &mut scratch[2..];
+
+    // Keep even and odd prefix products in independent dependency chains.
+    // Joining them before the one field inversion adds three multiplications
+    // per call, but exposes multiplication throughput throughout both walks.
+    // A trailing element has an even index and belongs to the first chain.
+    let mut acc_0 = *first;
+    let mut acc_1 = *second;
+    for (pair, slots) in values.chunks_exact(2).zip(scratch.chunks_exact_mut(2)) {
+        debug_assert!(!pair[0].is_zero_vartime());
+        debug_assert!(!pair[1].is_zero_vartime());
+        slots[0] = acc_0;
+        acc_0 *= pair[0];
+        slots[1] = acc_1;
+        acc_1 *= pair[1];
+    }
+    if let (Some(value), Some(slot)) = (
+        values.chunks_exact(2).remainder().first(),
+        scratch.chunks_exact_mut(2).into_remainder().first_mut(),
+    ) {
+        debug_assert!(!value.is_zero_vartime());
+        *slot = acc_0;
+        acc_0 *= value;
+    }
+
+    let inverse = (acc_0 * acc_1)
+        .invert()
+        .expect("incomplete multiplication denominators are nonzero");
+    let seed_0 = inverse * acc_1;
+    let seed_1 = inverse * acc_0;
+    let mut acc_0 = seed_0;
+    let mut acc_1 = seed_1;
+
+    if let (Some(value), Some(slot)) = (
+        values.chunks_exact_mut(2).into_remainder().first_mut(),
+        scratch.chunks_exact(2).remainder().first(),
+    ) {
+        let inverted = acc_0 * slot;
+        acc_0 *= *value;
+        *value = inverted;
+    }
+    for (pair, slots) in values
+        .chunks_exact_mut(2)
+        .zip(scratch.chunks_exact(2))
+        .rev()
+    {
+        let inverted_0 = acc_0 * slots[0];
+        let inverted_1 = acc_1 * slots[1];
+        acc_0 *= pair[0];
+        acc_1 *= pair[1];
+        pair[0] = inverted_0;
+        pair[1] = inverted_1;
+    }
+    *first = acc_0;
+    *second = acc_1;
 }
 
 #[inline(always)]
@@ -670,20 +766,24 @@ pub mod tests {
 
             for (index, bit) in bits[..super::INCOMPLETE_LEN].iter().enumerate() {
                 let row = witness.rows[index];
-                let point = witness.point(index);
-                let point_x = point.x().evaluate();
-                let point_y = point.y().evaluate();
-                let lambda_1 = row.lambda_1().evaluate();
-                let lambda_2 = row.lambda_2().evaluate();
+                let point_x = witness.point_x(index);
+                let lambda_1 = row.lambda_1;
+                let lambda_2 = row.lambda_2;
                 let current = accumulator.to_affine();
                 let current_coordinates = current.coordinates().unwrap();
                 assert_eq!(point_x, *current_coordinates.x());
-                assert_eq!(point_y, *current_coordinates.y());
+                let point_y = *current_coordinates.y();
 
                 let addend_y = if *bit { base_y } else { -base_y };
-                let next = witness.point(index + 1);
-                let next_x = next.x().evaluate();
-                let next_y = next.y().evaluate();
+                let next_x = witness.point_x(index + 1);
+                let next = (accumulator.double()
+                    + if *bit {
+                        base.to_curve()
+                    } else {
+                        -base.to_curve()
+                    })
+                .to_affine();
+                let next_y = *next.coordinates().unwrap().y();
                 let x_r = lambda_1.square() - point_x - base_x;
                 let reconstructed_y =
                     mul_fp_by_inverse_power_of_two(&((lambda_1 + lambda_2) * (point_x - x_r)), 1);
@@ -702,9 +802,14 @@ pub mod tests {
 
             let output = accumulator.to_affine();
             let output_coordinates = output.coordinates().unwrap();
-            let output = witness.point(super::INCOMPLETE_LEN);
-            assert_eq!(output.x().evaluate(), *output_coordinates.x());
-            assert_eq!(output.y().evaluate(), *output_coordinates.y());
+            assert_eq!(
+                witness.point_x(super::INCOMPLETE_LEN),
+                *output_coordinates.x()
+            );
+            assert_eq!(
+                witness.point_y(super::INCOMPLETE_LEN),
+                *output_coordinates.y()
+            );
         }
     }
 

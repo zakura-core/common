@@ -6,7 +6,8 @@ use group::ff::PrimeField;
 use halo2_proofs::{
     circuit::{Region, Value},
     plonk::{
-        Advice, Column, ConstraintSystem, Constraints, Error, Expression, Selector, VirtualCells,
+        Advice, Assigned, Column, ConstraintSystem, Constraints, Error, Expression, Selector,
+        VirtualCells,
     },
     poly::Rotation,
 };
@@ -340,29 +341,45 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             self.double_and_add.lambda_1,
             offset,
             bits.len(),
-            |row| witness.map(|witness| witness.rows[witness_range.start + row].lambda_1()),
+            |row| {
+                witness
+                    .map(|witness| witness.rows[witness_range.start + row].lambda_1)
+                    .map(Assigned::Trivial)
+            },
         )?;
-        region.assign_advice_batch_with_previous_denominator(
+        region.assign_advice_batch(
             |_| "lambda2",
             self.double_and_add.lambda_2,
             offset,
             bits.len(),
-            |row| witness.map(|witness| witness.rows[witness_range.start + row].lambda_2()),
+            |row| {
+                witness
+                    .map(|witness| witness.rows[witness_range.start + row].lambda_2)
+                    .map(Assigned::Trivial)
+            },
         )?;
 
         // Only the final `x_a` cell is used after assignment.
-        region.assign_advice_batch_with_previous_denominator_squared(
+        region.assign_advice_batch(
             |_| "x_a",
             self.double_and_add.x_a,
             offset + 1,
             bits.len() - 1,
-            |row| witness.map(|witness| witness.point(witness_range.start + row + 1).x()),
+            |row| {
+                witness
+                    .map(|witness| witness.point_x(witness_range.start + row + 1))
+                    .map(Assigned::Trivial)
+            },
         )?;
         let x_a = region.assign_advice(
             || "x_a",
             self.double_and_add.x_a,
             offset + NUM_BITS,
-            || witness.map(|witness| witness.point(witness_range.end).x()),
+            || {
+                witness
+                    .map(|witness| witness.point_x(witness_range.end))
+                    .map(Assigned::Trivial)
+            },
         )?;
 
         // Witness final y_a
@@ -370,7 +387,11 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             || "y_a",
             self.double_and_add.lambda_1,
             offset + NUM_BITS,
-            || witness.map(|witness| witness.point(witness_range.end).y()),
+            || {
+                witness
+                    .map(|witness| witness.point_y(witness_range.end))
+                    .map(Assigned::Trivial)
+            },
         )?;
 
         Ok((
