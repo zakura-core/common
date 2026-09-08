@@ -172,6 +172,10 @@ impl IncompleteMulWitness {
             projective_rows.push((z, accumulator, witness));
         }
 
+        // Each round's two slopes have denominator z_new, while its affine
+        // x-coordinate has denominator z_new^2. Invert every accumulator z
+        // once, then materialize those three witnesses together. Only the
+        // boundary between halves and the final row require affine y.
         let mut z_inverses = Vec::with_capacity(INCOMPLETE_LEN + 1);
         z_inverses.push(initial.z);
         z_inverses.extend(projective_rows.iter().map(|(_, point, _)| point.z));
