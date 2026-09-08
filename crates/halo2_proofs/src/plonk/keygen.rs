@@ -9,7 +9,7 @@ use maybe_rayon::prelude::*;
 #[cfg(feature = "multicore")]
 use crate::PreparedSparseCommitments;
 #[cfg(feature = "batch")]
-use crate::{InstanceWindowTable, PREPARED_INSTANCE_COLUMNS};
+use crate::{InstanceWindowTable, ORCHARD_K, PREPARED_INSTANCE_COLUMNS};
 
 use super::{
     Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
@@ -478,6 +478,10 @@ where
     ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
     <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
 {
+    if !vk.domain.has_base_size(params.n) {
+        return Err(Error::InvalidParameters);
+    }
+
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
     let circuit_config = if ConcreteCircuit::CACHE_CONFIGURATION {
@@ -620,6 +624,17 @@ where
     let l0 = special_cosets.pop().expect("l_0 transform exists");
     debug_assert!(special_cosets.is_empty());
 
+    #[cfg(feature = "batch")]
+    let prepared_instance_coset = (params.k() == ORCHARD_K
+        && cs.num_instance_columns == PREPARED_INSTANCE_COLUMNS)
+        .then(|| {
+            Arc::new(super::PreparedInstanceCoset::new(
+                &vk.domain,
+                &fft_twiddles,
+                params.n,
+            ))
+        });
+
     let pk = ProvingKey {
         vk,
         l0,
@@ -633,6 +648,8 @@ where
         fft_twiddles,
         floor_plan,
         circuit_config,
+        #[cfg(feature = "batch")]
+        prepared_instance_coset,
         quotient_plans: Arc::new(Default::default()),
     };
     super::evaluator_schedule::prepare_quotient_plans(&pk);

@@ -46,14 +46,12 @@ const DENOMINATOR_SLOT_MASK: u32 = DENOMINATOR_SOURCE_MASK - 1;
 const DENOMINATOR_SLOT_LIMIT: u32 = DENOMINATOR_SLOT_MASK - 1;
 
 #[cfg(all(test, feature = "batch"))]
-std::thread_local! {
-    static PREPARED_INSTANCE_ROUTE_HITS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
+static PREPARED_INSTANCE_ROUTE_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(all(test, feature = "batch"))]
 fn prepared_instance_route_hits() -> usize {
-    PREPARED_INSTANCE_ROUTE_HITS.get()
+    PREPARED_INSTANCE_ROUTE_HITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(feature = "batch")]
@@ -327,7 +325,7 @@ fn commit_prover_instances<C: CurveAffine>(
     #[cfg(feature = "batch")]
     if let Some(commitments) = commit_prepared_instances(params, instances) {
         #[cfg(test)]
-        PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
+        PREPARED_INSTANCE_ROUTE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return commitments;
     }
 
@@ -1039,7 +1037,6 @@ where
     let meta = &pk.vk.cs;
     let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
 
-    let instance_commitments = normalize_prover_instance_commitments(params, instances);
     let instance_values = instances
         .into_par_iter()
         .map(|instance| -> Result<_, Error> {
@@ -1061,18 +1058,10 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Preserve circuit and column order while updating the transcript. Keeping
-    // each preparation result in order also preserves the transcript prefix
-    // before an instance error.
+    // Preserve circuit and column order while collecting the prepared values.
     let mut prepared_instance_values = Vec::with_capacity(instance_values.len());
-    for (instance_commitments, instance_values) in
-        instance_commitments.into_iter().zip(instance_values)
-    {
-        let instance_values = instance_values?;
-        for commitment in instance_commitments {
-            transcript.common_point(commitment)?;
-        }
-        prepared_instance_values.push(instance_values);
+    for instance_values in instance_values {
+        prepared_instance_values.push(instance_values?);
     }
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
@@ -1115,33 +1104,60 @@ where
         prepared_instance_values
             .into_par_iter()
             .map(|instance_values| {
-                let (instance_values, instance_polys): (Vec<_>, Vec<_>) = instance_values
-                    .into_iter()
-                    .map(|(poly, prefix_len)| {
-                        let coefficients = domain.lagrange_prefix_to_coeff_with_twiddles(
-                            poly.clone(),
-                            prefix_len,
-                            &pk.fft_twiddles,
-                        );
-                        (poly, coefficients)
-                    })
-                    .unzip();
+                let mut prepared_values = Vec::with_capacity(instance_values.len());
+                let mut instance_polys = Vec::with_capacity(instance_values.len());
+                let mut instance_cosets = Vec::with_capacity(instance_values.len());
+                for (poly, prefix_len) in instance_values {
+                    let coefficients = domain.lagrange_prefix_to_coeff_with_twiddles(
+                        poly.clone(),
+                        prefix_len,
+                        &pk.fft_twiddles,
+                    );
+                    #[cfg(feature = "batch")]
+                    let coset = pk
+                        .prepared_instance_coset
+                        .as_ref()
+                        .filter(|_| prefix_len == PREPARED_INSTANCE_ROWS)
+                        .map(|prepared| {
+                            prepared.evaluate(&poly[..][..prefix_len], domain, &pk.fft_twiddles)
+                        })
+                        .unwrap_or_else(|| {
+                            domain.coeff_to_extended_with_twiddles(
+                                coefficients.clone(),
+                                &pk.fft_twiddles,
+                            )
+                        });
+                    #[cfg(not(feature = "batch"))]
+                    let coset = domain
+                        .coeff_to_extended_with_twiddles(coefficients.clone(), &pk.fft_twiddles);
 
-                let instance_cosets: Vec<_> = instance_polys
-                    .iter()
-                    .map(|poly| {
-                        domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles)
-                    })
-                    .collect();
+                    prepared_values.push(poly);
+                    instance_polys.push(coefficients);
+                    instance_cosets.push(coset);
+                }
 
                 InstanceSingle::<C> {
-                    instance_values,
+                    instance_values: prepared_values,
                     instance_polys,
                     instance_cosets,
                 }
             })
             .collect::<Vec<_>>()
     };
+    let prepare_instance = || {
+        let instance = prepare_instance_polynomials();
+        let commitments = normalize_prover_instance_commitments(params, instances);
+        (commitments, instance)
+    };
+    let absorb_instance_commitments =
+        |instance_commitments: Vec<Vec<C>>, transcript: &mut T| -> Result<(), Error> {
+            for commitments in instance_commitments {
+                for commitment in commitments {
+                    transcript.common_point(commitment)?;
+                }
+            }
+            Ok(())
+        };
     let synthesize = |witnesses: &mut Vec<WitnessCollection<'_, C::Scalar>>| {
         // Synthesize every circuit while allowing its floor planner to share
         // circuit-shape-dependent work across the batch.
@@ -1255,28 +1271,33 @@ where
     #[cfg(feature = "multicore")]
     let (instance, (prepared_advice, lookup_table_plan)) =
         if crate::multicore::current_num_threads() > 1 {
-            // Keep instance transforms stealable after synthesis so that
+            // Keep instance preparation stealable after synthesis so that
             // advice preparation can enter the same worker pool immediately.
             // The in-place body also keeps the potentially non-Send RNG on
             // the calling thread.
-            let mut instance = Vec::new();
+            let mut prepared_instance = (Vec::new(), Vec::new());
             let advice_result = maybe_rayon::in_place_scope(|scope| {
                 scope.spawn(|_| {
-                    instance = prepare_instance_polynomials();
+                    prepared_instance = prepare_instance();
                 });
                 synthesize(&mut witnesses)?;
                 Ok::<_, Error>(prepare_advice(witnesses, &mut rng))
             });
+
+            let (instance_commitments, instance) = prepared_instance;
+            absorb_instance_commitments(instance_commitments, transcript)?;
             (instance, advice_result?)
         } else {
-            let instance = prepare_instance_polynomials();
+            let (instance_commitments, instance) = prepare_instance();
+            absorb_instance_commitments(instance_commitments, transcript)?;
             synthesize(&mut witnesses)?;
             (instance, prepare_advice(witnesses, &mut rng))
         };
 
     #[cfg(not(feature = "multicore"))]
     let (instance, (prepared_advice, lookup_table_plan)) = {
-        let instance = prepare_instance_polynomials();
+        let (instance_commitments, instance) = prepare_instance();
+        absorb_instance_commitments(instance_commitments, transcript)?;
         synthesize(&mut witnesses)?;
         (instance, prepare_advice(witnesses, &mut rng))
     };
@@ -2959,7 +2980,7 @@ fn parallel_advice_evaluation_preserves_proof_bytes() {
 }
 
 #[test]
-fn instance_preparation_preserves_proof_and_error_order() {
+fn instance_preparation_preserves_proofs_and_validates_batch_first() {
     use crate::{
         circuit::SimpleFloorPlanner,
         plonk::{keygen_pk, keygen_vk},
@@ -3109,11 +3130,10 @@ fn instance_preparation_preserves_proof_and_error_order() {
 
         let unprepared_params = Params::new(5);
         assert!(unprepared_params.prepared_instance_table().is_none());
-        let route_hits = prepared_instance_route_hits();
         let unprepared_proof = create_exact_shape_proof(&unprepared_params);
-        assert_eq!(prepared_instance_route_hits(), route_hits);
+        let route_hits = prepared_instance_route_hits();
         let prepared_proof = create_exact_shape_proof(&params);
-        assert_eq!(prepared_instance_route_hits(), route_hits + 1);
+        assert!(prepared_instance_route_hits() > route_hits);
         assert_eq!(prepared_proof, unprepared_proof);
     }
 
@@ -3140,9 +3160,6 @@ fn instance_preparation_preserves_proof_and_error_order() {
     pk.vk
         .hash_into(&mut expected)
         .expect("verification-key hashing should not fail");
-    expected
-        .common_point(commit_instance(&params, &valid).to_affine())
-        .expect("valid instance commitment should not fail");
     assert_eq!(actual_prefix, expected.squeeze_challenge().get_scalar());
 
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
@@ -3298,8 +3315,7 @@ fn instance_failures_do_not_run_synthesis_or_consume_rng() {
         rng_bytes.load(Ordering::SeqCst),
     );
 
-    // A transcript failure for an earlier instance must still precede a later
-    // oversized instance.
+    // Batch-wide instance validation precedes transcript absorption.
     let valid = [Fp::ONE];
     let valid_columns = [valid.as_slice()];
     syntheses.store(0, Ordering::SeqCst);
@@ -3317,7 +3333,7 @@ fn instance_failures_do_not_run_synthesis_or_consume_rng() {
         },
         &mut transcript,
     );
-    assert!(matches!(result, Err(Error::Transcript(_))));
+    assert!(matches!(result, Err(Error::InstanceTooLarge)));
     let transcript_effects = (
         syntheses.load(Ordering::SeqCst),
         rng_bytes.load(Ordering::SeqCst),

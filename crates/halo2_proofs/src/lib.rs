@@ -55,8 +55,11 @@ fn decode_scalar_repr<F: ff::PrimeField>(mut bytes: impl ExactSizeIterator<Item 
     decoded.unwrap_or(F::ZERO)
 }
 
+#[cfg(any(feature = "batch", feature = "multicore"))]
+const ORCHARD_K: u32 = 11;
+
 #[cfg(feature = "multicore")]
-const PREPARED_SPARSE_COMMITMENT_K: u32 = 11;
+const PREPARED_SPARSE_COMMITMENT_K: u32 = ORCHARD_K;
 
 /// The Orchard-sized domain used by the sorted 10-bit range-check commitment.
 #[cfg(feature = "multicore")]

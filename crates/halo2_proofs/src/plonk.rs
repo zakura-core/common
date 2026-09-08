@@ -6,8 +6,12 @@
 //! [plonk]: https://eprint.iacr.org/2019/953
 
 use blake2b_simd::Params as Blake2bParams;
+#[cfg(feature = "batch")]
+use ff::WithSmallOrderMulGroup;
 use group::ff::{Field, FromUniformBytes, PrimeField};
 
+#[cfg(feature = "batch")]
+use crate::PREPARED_INSTANCE_ROWS;
 use crate::arithmetic::{CurveAffine, best_multiexp};
 use crate::poly::{
     Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, PinnedEvaluationDomain,
@@ -567,9 +571,188 @@ pub struct ProvingKey<C: CurveAffine> {
     floor_plan: Option<FloorPlan>,
     /// Circuit configuration retained by an opted-in circuit.
     circuit_config: Option<CircuitConfigCache>,
+    /// Orchard's public-instance interpolation and extended-coset factor.
+    #[cfg(feature = "batch")]
+    prepared_instance_coset: Option<Arc<PreparedInstanceCoset<C::Scalar>>>,
     /// Bounded, prover-only compiled quotient plans prepared during keygen and
     /// replaced lazily if evaluator-shape validation rejects them.
     quotient_plans: Arc<evaluator_schedule::QuotientPlans<C::Scalar>>,
+}
+
+#[cfg(feature = "batch")]
+#[derive(Debug)]
+struct PreparedInstanceCoset<F> {
+    // Coefficient-major basis for q(X), where the zero-padded instance
+    // polynomial is S(X)q(X).
+    interpolation: [[F; PREPARED_INSTANCE_ROWS]; PREPARED_INSTANCE_ROWS],
+    // Extended-coset evaluations of
+    // S(X) = (X^n - 1) / product_{i=0}^{9}(X - omega^i).
+    support: Polynomial<F, ExtendedLagrangeCoeff>,
+}
+
+#[cfg(feature = "batch")]
+impl<F: Field + From<u64>> PreparedInstanceCoset<F> {
+    fn new(domain: &EvaluationDomain<F>, twiddles: &ProvingKeyTwiddles<F>, n: u64) -> Self
+    where
+        F: WithSmallOrderMulGroup<3>,
+    {
+        let omega = domain.get_omega();
+        let roots: [F; PREPARED_INSTANCE_ROWS] =
+            std::array::from_fn(|index| omega.pow_vartime([index as u64]));
+        let support_divisor = roots.iter().fold(vec![F::ONE], |coefficients, root| {
+            multiply_by_linear_factor(&coefficients, *root)
+        });
+
+        // The support is independent of instance values, so key generation
+        // pays for its full transform once.
+        let mut vanishing = vec![F::ZERO; n as usize + 1];
+        vanishing[0] = -F::ONE;
+        vanishing[n as usize] = F::ONE;
+        let mut support = divide_by_monic(&vanishing, &support_divisor);
+        support.resize(n as usize, F::ZERO);
+        let support =
+            domain.coeff_to_extended_with_twiddles(domain.coeff_from_vec(support), twiddles);
+
+        let n_inverse = F::from(n).invert().unwrap();
+        let mut interpolation = [[F::ZERO; PREPARED_INSTANCE_ROWS]; PREPARED_INSTANCE_ROWS];
+        for (row, root) in roots.iter().enumerate() {
+            // The full-domain Lagrange basis is
+            //
+            // L_i(X) = (root_i / n) (X^n - 1) / (X - root_i).
+            //
+            // Dividing out the shared support leaves this degree-nine basis
+            // for q(X).
+            let basis = divide_by_monic_linear(&support_divisor, *root);
+            let scale = *root * n_inverse;
+            for (coefficient, basis) in interpolation.iter_mut().zip(basis) {
+                coefficient[row] = basis * scale;
+            }
+        }
+
+        Self {
+            interpolation,
+            support,
+        }
+    }
+
+    fn evaluate(
+        &self,
+        values: &[F],
+        domain: &EvaluationDomain<F>,
+        twiddles: &ProvingKeyTwiddles<F>,
+    ) -> Polynomial<F, ExtendedLagrangeCoeff>
+    where
+        F: WithSmallOrderMulGroup<3>,
+    {
+        assert_eq!(values.len(), PREPARED_INSTANCE_ROWS);
+        let coefficients = self
+            .interpolation
+            .iter()
+            .map(|basis| {
+                basis
+                    .iter()
+                    .zip(values)
+                    .fold(F::ZERO, |sum, (basis, value)| sum + *basis * value)
+            })
+            .collect();
+        domain.coeff_prefix_to_extended_with_factor(coefficients, &self.support, twiddles)
+    }
+}
+
+#[cfg(feature = "batch")]
+fn multiply_by_linear_factor<F: Field>(coefficients: &[F], root: F) -> Vec<F> {
+    let mut product = vec![F::ZERO; coefficients.len() + 1];
+    for (index, coefficient) in coefficients.iter().enumerate() {
+        product[index] -= *coefficient * root;
+        product[index + 1] += coefficient;
+    }
+    product
+}
+
+#[cfg(feature = "batch")]
+fn divide_by_monic<F: Field>(dividend: &[F], divisor: &[F]) -> Vec<F> {
+    assert!(!divisor.is_empty());
+    assert_eq!(divisor.last(), Some(&F::ONE));
+    assert!(dividend.len() >= divisor.len());
+
+    let divisor_degree = divisor.len() - 1;
+    let mut remainder = dividend.to_vec();
+    let mut quotient = vec![F::ZERO; dividend.len() - divisor_degree];
+    for degree in (divisor_degree..dividend.len()).rev() {
+        let coefficient = remainder[degree];
+        let quotient_index = degree - divisor_degree;
+        quotient[quotient_index] = coefficient;
+        for (index, divisor) in divisor.iter().enumerate() {
+            remainder[quotient_index + index] -= coefficient * divisor;
+        }
+    }
+    debug_assert!(
+        remainder[..divisor_degree]
+            .iter()
+            .all(|coefficient| bool::from(coefficient.is_zero()))
+    );
+    quotient
+}
+
+#[cfg(feature = "batch")]
+fn divide_by_monic_linear<F: Field>(dividend: &[F], root: F) -> Vec<F> {
+    divide_by_monic(dividend, &[-root, F::ONE])
+}
+
+#[cfg(all(test, feature = "batch"))]
+mod prepared_instance_coset_tests {
+    use std::fmt::Debug;
+
+    use ff::WithSmallOrderMulGroup;
+    use pasta_curves::{Fp, Fq};
+
+    use super::{EvaluationDomain, PREPARED_INSTANCE_ROWS, PreparedInstanceCoset};
+
+    const ORCHARD_DEGREE: u32 = 9;
+
+    fn check<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64> + Debug + Eq,
+    {
+        let n = 1 << crate::ORCHARD_K;
+        let domain = EvaluationDomain::<F>::new(ORCHARD_DEGREE, crate::ORCHARD_K);
+        let twiddles = domain.proving_key_twiddles();
+        let prepared = PreparedInstanceCoset::new(&domain, &twiddles, n);
+        let pools = [1, 2, 6].map(|threads| {
+            maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+        });
+
+        let check_values = |values: [F; PREPARED_INSTANCE_ROWS]| {
+            let mut lagrange = domain.empty_lagrange();
+            lagrange[..][..PREPARED_INSTANCE_ROWS].copy_from_slice(&values);
+            let coefficients = domain.lagrange_prefix_to_coeff_with_twiddles(
+                lagrange,
+                PREPARED_INSTANCE_ROWS,
+                &twiddles,
+            );
+            let expected = domain.coeff_to_extended_with_twiddles(coefficients, &twiddles);
+            for pool in &pools {
+                let actual = pool.install(|| prepared.evaluate(&values, &domain, &twiddles));
+                assert_eq!(actual[..], expected[..]);
+            }
+        };
+
+        for row in 0..PREPARED_INSTANCE_ROWS {
+            let mut values = [F::ZERO; PREPARED_INSTANCE_ROWS];
+            values[row] = F::ONE;
+            check_values(values);
+        }
+        check_values(std::array::from_fn(|row| F::from(row as u64 + 1)));
+    }
+
+    #[test]
+    fn prepared_instance_coset_matches_full_transform() {
+        check::<Fp>();
+        check::<Fq>();
+    }
 }
 
 #[derive(Debug)]
