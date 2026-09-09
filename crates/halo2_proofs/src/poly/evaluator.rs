@@ -567,7 +567,23 @@ pub(crate) fn new_virtual_evaluator<E: Fn() + Clone, F: Field, B: Basis>(
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static SAME_AST_VISIT_BUDGET: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn same_ast<E, F: Field, B: Basis>(lhs: &Ast<E, F, B>, rhs: &Ast<E, F, B>) -> bool {
+    #[cfg(test)]
+    SAME_AST_VISIT_BUDGET.with(|budget| {
+        if let Some(remaining) = budget.get() {
+            assert!(remaining > 0, "same_ast exceeded its test visit budget");
+            budget.set(Some(remaining - 1));
+        }
+    });
+    if std::ptr::eq(lhs, rhs) {
+        return true;
+    }
     match (lhs, rhs) {
         (Ast::Poly(lhs), Ast::Poly(rhs)) => lhs == rhs,
         (Ast::Add(lhs_a, lhs_b), Ast::Add(rhs_a, rhs_b)) => {
@@ -612,6 +628,194 @@ fn same_ast<E, F: Field, B: Basis>(lhs: &Ast<E, F, B>, rhs: &Ast<E, F, B>) -> bo
         ) => lhs_challenge == rhs_challenge && lhs_factor == rhs_factor,
         (Ast::ChallengeTerm(lhs), Ast::ChallengeTerm(rhs)) => lhs == rhs,
         _ => false,
+    }
+}
+
+struct AffineBlend<'a, E, F: Field, B: Basis> {
+    weight: &'a Ast<E, F, B>,
+    selected: &'a Ast<E, F, B>,
+    selected_scale: F,
+    fallback: &'a Ast<E, F, B>,
+    total_scale: F,
+}
+
+fn constant_minus_ast<E, F: Field, B: Basis>(ast: &Ast<E, F, B>) -> Option<(F, &Ast<E, F, B>)> {
+    let Ast::Add(lhs, rhs) = ast else {
+        return None;
+    };
+    for (constant, negated) in [(lhs.as_ref(), rhs.as_ref()), (rhs.as_ref(), lhs.as_ref())] {
+        if let (Ast::ConstantTerm(constant), Ast::Scale(inner, scalar)) = (constant, negated)
+            && *scalar == -F::ONE
+        {
+            return Some((*constant, inner));
+        }
+    }
+    None
+}
+
+fn weight_scale<E, F: Field, B: Basis>(
+    candidate: &Ast<E, F, B>,
+    weight: &Ast<E, F, B>,
+) -> Option<F> {
+    if same_ast(candidate, weight) {
+        Some(F::ONE)
+    } else if let Ast::Scale(inner, scalar) = candidate
+        && same_ast(inner, weight)
+    {
+        Some(*scalar)
+    } else {
+        None
+    }
+}
+
+fn ordered_affine_blend<'a, E, F: Field, B: Basis>(
+    selected_term: &'a Ast<E, F, B>,
+    fallback_term: &'a Ast<E, F, B>,
+) -> Option<AffineBlend<'a, E, F, B>> {
+    let (fallback_lhs, fallback_rhs) = mul_terms(fallback_term)?;
+    let (selected_lhs, selected_rhs) = mul_terms(selected_term)?;
+    // Equal factors compile as squares, so replacing either product would not
+    // remove a general multiplication and could regress the specialized path.
+    if same_ast(fallback_lhs, fallback_rhs) || same_ast(selected_lhs, selected_rhs) {
+        return None;
+    }
+
+    for (complement, fallback) in [(fallback_lhs, fallback_rhs), (fallback_rhs, fallback_lhs)] {
+        let Some((total_scale, weight)) = constant_minus_ast(complement) else {
+            continue;
+        };
+        for (candidate, selected) in [(selected_lhs, selected_rhs), (selected_rhs, selected_lhs)] {
+            if let Some(selected_scale) = weight_scale(candidate, weight) {
+                return Some(AffineBlend {
+                    weight,
+                    selected,
+                    selected_scale,
+                    fallback,
+                    total_scale,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn affine_blend<E, F: Field, B: Basis>(ast: &Ast<E, F, B>) -> Option<AffineBlend<'_, E, F, B>> {
+    let Ast::Add(lhs, rhs) = ast else {
+        return None;
+    };
+    ordered_affine_blend(lhs, rhs).or_else(|| ordered_affine_blend(rhs, lhs))
+}
+
+fn ast_is_row_constant<E, F: Field, B: Basis>(ast: &Ast<E, F, B>) -> bool {
+    match ast {
+        Ast::Poly(_) | Ast::LinearTerm(_) | Ast::LinearChallengeTerm { .. } => false,
+        Ast::Add(lhs, rhs) | Ast::Mul(AstMul(lhs, rhs)) => {
+            ast_is_row_constant(lhs) && ast_is_row_constant(rhs)
+        }
+        Ast::Scale(inner, _) => ast_is_row_constant(inner),
+        Ast::DistributePowers(terms, _) | Ast::DistributeChallengePowers(terms, _) => {
+            terms.iter().all(ast_is_row_constant)
+        }
+        Ast::ConstantTerm(_) | Ast::ChallengeTerm(_) => true,
+    }
+}
+
+fn scale_ast<E: Clone, F: Field, B: Basis>(ast: &Ast<E, F, B>, scalar: F) -> Ast<E, F, B> {
+    if scalar == F::ONE {
+        ast.clone()
+    } else {
+        Ast::Scale(Arc::new(ast.clone()), scalar)
+    }
+}
+
+fn multiply_ast<E: Clone, F: Field, B: Basis>(
+    lhs: &Ast<E, F, B>,
+    rhs: &Ast<E, F, B>,
+) -> Ast<E, F, B> {
+    Ast::Mul(AstMul(Arc::new(lhs.clone()), Arc::new(rhs.clone())))
+}
+
+// A generic affine blend introduces a second reference to its fallback. Keep
+// that expansion bounded before `EvaluationPlan::compile` turns the shared
+// AST into an owned tree.
+const MAX_DUPLICATED_AFFINE_FALLBACK_NODES: usize = 4;
+
+fn ast_has_at_most_nodes<E, F: Field, B: Basis>(ast: &Ast<E, F, B>, max_nodes: usize) -> bool {
+    fn visit<E, F: Field, B: Basis>(ast: &Ast<E, F, B>, remaining: &mut usize) -> bool {
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+
+        match ast {
+            Ast::Add(lhs, rhs) | Ast::Mul(AstMul(lhs, rhs)) => {
+                visit(lhs, remaining) && visit(rhs, remaining)
+            }
+            Ast::Scale(inner, _) => visit(inner, remaining),
+            Ast::DistributePowers(terms, _) | Ast::DistributeChallengePowers(terms, _) => {
+                terms.iter().all(|term| visit(term, remaining))
+            }
+            Ast::Poly(_)
+            | Ast::LinearTerm(_)
+            | Ast::LinearChallengeTerm { .. }
+            | Ast::ConstantTerm(_)
+            | Ast::ChallengeTerm(_) => true,
+        }
+    }
+
+    let mut remaining = max_nodes;
+    visit(ast, &mut remaining)
+}
+
+fn reassociate_affine_blend<E: Clone, F: Field, B: Basis>(
+    ast: &Ast<E, F, B>,
+) -> Option<Ast<E, F, B>> {
+    let blend = affine_blend(ast)?;
+    if ast_is_row_constant(blend.selected)
+        || matches!(scale_kind(blend.total_scale), ScaleKind::Other)
+    {
+        return None;
+    }
+    let direct_delta = affine_blend_delta(&blend);
+    if (direct_delta.is_none()
+        && !ast_has_at_most_nodes(blend.fallback, MAX_DUPLICATED_AFFINE_FALLBACK_NODES))
+        || ast_is_row_constant(blend.fallback)
+    {
+        return None;
+    }
+
+    // k*w*a + (c-w)*b = c*b + w*(k*a-b). This identity does
+    // not require `w` to be boolean. A general `c` or row-constant branch
+    // would not guarantee that the rewrite removes a field multiplication.
+    let delta = if let Some(delta) = direct_delta {
+        delta.clone()
+    } else {
+        Ast::Add(
+            Arc::new(scale_ast(blend.selected, blend.selected_scale)),
+            Arc::new(scale_ast(blend.fallback, -F::ONE)),
+        )
+    };
+    Some(Ast::Add(
+        Arc::new(scale_ast(blend.fallback, blend.total_scale)),
+        Arc::new(multiply_ast(blend.weight, &delta)),
+    ))
+}
+
+fn affine_blend_delta<'a, E, F: Field, B: Basis>(
+    blend: &AffineBlend<'a, E, F, B>,
+) -> Option<&'a Ast<E, F, B>> {
+    if blend.selected_scale != F::ONE {
+        return None;
+    }
+    let Ast::Add(lhs, rhs) = blend.selected else {
+        return None;
+    };
+    if same_ast(lhs, blend.fallback) {
+        Some(rhs)
+    } else if same_ast(rhs, blend.fallback) {
+        Some(lhs)
+    } else {
+        None
     }
 }
 
@@ -1973,34 +2177,30 @@ fn collect_factor_body_occurrences<'a, F: Field>(
     }
 }
 
-fn plan_cost<F: Field>(
-    plan: &EvaluationPlan<F>,
-    two: F,
-    scalars: &[PlanScalar<F>],
-) -> (usize, usize) {
+fn plan_cost<F: Field>(plan: &EvaluationPlan<F>, scalars: &[PlanScalar<F>]) -> (usize, usize) {
     match plan {
         EvaluationPlan::Poly(_)
         | EvaluationPlan::LinearTerm(_)
         | EvaluationPlan::ConstantTerm(_) => (0, 1),
         EvaluationPlan::Add(lhs, rhs) => {
-            let lhs = plan_cost(lhs, two, scalars);
-            let rhs = plan_cost(rhs, two, scalars);
+            let lhs = plan_cost(lhs, scalars);
+            let rhs = plan_cost(rhs, scalars);
             (lhs.0 + rhs.0, 1 + lhs.1 + rhs.1)
         }
         EvaluationPlan::Mul(lhs, rhs) => {
-            let lhs = plan_cost(lhs, two, scalars);
-            let rhs = plan_cost(rhs, two, scalars);
+            let lhs = plan_cost(lhs, scalars);
+            let rhs = plan_cost(rhs, scalars);
             (1 + lhs.0 + rhs.0, 1 + lhs.1 + rhs.1)
         }
         EvaluationPlan::Square(inner) => {
-            let inner = plan_cost(inner, two, scalars);
+            let inner = plan_cost(inner, scalars);
             (1 + inner.0, 1 + inner.1)
         }
         EvaluationPlan::Scale(inner, scalar) => {
-            let inner = plan_cost(inner, two, scalars);
+            let inner = plan_cost(inner, scalars);
             let multiplication = match scalars[scalar.index()] {
                 PlanScalar::Literal(scalar) => {
-                    usize::from(scalar != -F::ONE && scalar != F::ONE && scalar != two)
+                    usize::from(matches!(scale_kind(scalar), ScaleKind::Other))
                 }
                 PlanScalar::Challenge(_)
                 | PlanScalar::ScaledChallenge { .. }
@@ -2009,7 +2209,7 @@ fn plan_cost<F: Field>(
             (multiplication + inner.0, 1 + inner.1)
         }
         EvaluationPlan::Horner { base, coefficients } => {
-            let base = plan_cost(base, two, scalars);
+            let base = plan_cost(base, scalars);
             (
                 base.0 + coefficients.len() - 1,
                 1 + base.1 + coefficients.len(),
@@ -2221,7 +2421,6 @@ impl<F: Field> EvaluationPlan<F> {
             }
             let mut grouped = vec![false; occurrences.len()];
             let mut shapes = vec![];
-            let two = F::ONE.double();
 
             for index in 0..occurrences.len() {
                 if grouped[index] {
@@ -2241,7 +2440,7 @@ impl<F: Field> EvaluationPlan<F> {
                     for candidate in &matching {
                         grouped[*candidate] = true;
                     }
-                    let cost = plan_cost(occurrences[index].plan, two, scalars);
+                    let cost = plan_cost(occurrences[index].plan, scalars);
                     shapes.push(RepeatShape {
                         saved_multiplications: (matching.len() - 1) * cost.0,
                         saved_visits: (matching.len() - 1) * cost.1,
@@ -2276,7 +2475,7 @@ impl<F: Field> EvaluationPlan<F> {
                     continue;
                 }
 
-                let cost = plan_cost(occurrences[matching[0]].plan, two, scalars);
+                let cost = plan_cost(occurrences[matching[0]].plan, scalars);
                 let is_linear_term =
                     matches!(occurrences[matching[0]].plan, EvaluationPlan::LinearTerm(_));
                 if is_linear_term {
@@ -3008,9 +3207,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         E: Copy,
         B: BasisOps,
     {
-        let ast = self
-            .replace_compressed_selectors(ast)
-            .unwrap_or_else(|| ast.clone());
+        let ast = self.normalize_ast(ast).unwrap_or_else(|| ast.clone());
         let mut scalar_interner = PlanScalarInterner::new();
         let mut plan = EvaluationPlan::compile(&ast, &mut scalar_interner);
         let scalar_descriptors = scalar_interner.finish();
@@ -3222,9 +3419,9 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         });
     }
 
-    // Returns `None` when this subtree needs no replacement, so its parent can
-    // retain the existing `Arc` instead of rebuilding it.
-    fn replace_compressed_selectors(&self, ast: &Ast<E, F, B>) -> Option<Ast<E, F, B>>
+    // Returns `None` when this subtree needs no normalization, so its parent
+    // can retain the existing `Arc` instead of rebuilding it.
+    fn normalize_ast(&self, ast: &Ast<E, F, B>) -> Option<Ast<E, F, B>>
     where
         E: Copy,
     {
@@ -3238,7 +3435,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
-        match ast {
+        let normalized = match ast {
             Ast::Poly(query) => {
                 // A selector family may reuse its source polynomial as the
                 // first precomputed selector. Reaching that source outside a
@@ -3257,8 +3454,8 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             | Ast::ConstantTerm(_)
             | Ast::ChallengeTerm(_) => None,
             Ast::Add(lhs, rhs) => {
-                let replaced_lhs = self.replace_compressed_selectors(lhs);
-                let replaced_rhs = self.replace_compressed_selectors(rhs);
+                let replaced_lhs = self.normalize_ast(lhs);
+                let replaced_rhs = self.normalize_ast(rhs);
                 if replaced_lhs.is_none() && replaced_rhs.is_none() {
                     None
                 } else {
@@ -3273,8 +3470,8 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 }
             }
             Ast::Mul(AstMul(lhs, rhs)) => {
-                let replaced_lhs = self.replace_compressed_selectors(lhs);
-                let replaced_rhs = self.replace_compressed_selectors(rhs);
+                let replaced_lhs = self.normalize_ast(lhs);
+                let replaced_rhs = self.normalize_ast(rhs);
                 if replaced_lhs.is_none() && replaced_rhs.is_none() {
                     None
                 } else {
@@ -3289,15 +3486,12 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 }
             }
             Ast::Scale(inner, scalar) => self
-                .replace_compressed_selectors(inner)
+                .normalize_ast(inner)
                 .map(|inner| Ast::Scale(Arc::new(inner), *scalar)),
             Ast::DistributePowers(terms, base) => {
                 let mut replaced_terms = None;
                 for (index, term) in terms.iter().enumerate() {
-                    match (
-                        replaced_terms.as_mut(),
-                        self.replace_compressed_selectors(term),
-                    ) {
+                    match (replaced_terms.as_mut(), self.normalize_ast(term)) {
                         (None, None) => {}
                         (None, Some(replacement)) => {
                             let mut output = Vec::with_capacity(terms.len());
@@ -3314,10 +3508,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             Ast::DistributeChallengePowers(terms, challenge) => {
                 let mut replaced_terms = None;
                 for (index, term) in terms.iter().enumerate() {
-                    match (
-                        replaced_terms.as_mut(),
-                        self.replace_compressed_selectors(term),
-                    ) {
+                    match (replaced_terms.as_mut(), self.normalize_ast(term)) {
                         (None, None) => {}
                         (None, Some(replacement)) => {
                             let mut output = Vec::with_capacity(terms.len());
@@ -3332,7 +3523,9 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 replaced_terms
                     .map(|terms| Ast::DistributeChallengePowers(Arc::new(terms), *challenge))
             }
-        }
+        };
+        let normalized_ast = normalized.as_ref().unwrap_or(ast);
+        reassociate_affine_blend(normalized_ast).or(normalized)
     }
 
     /// Evaluates the given polynomial operation against this context.
@@ -5033,14 +5226,210 @@ mod tests {
         Ast, AstLeaf, AstMul, BasisOps, BoundPlanScalars, CacheAction, DistributionWork,
         EvaluationChallenge, EvaluationChallenges, EvaluationPlan, EvaluationPolyTag, Evaluator,
         FactorBodyPlan, FactorSide, LinearTermCacheBudget, LinearTermCacheOccupancy,
-        MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_LINEAR_TERM_CACHE_ENTRIES, PlanScalar,
-        PlanScalarInterner, ReusablePowerFold, ScalarId, WeightedTerm, compressed_selector,
+        MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_DUPLICATED_AFFINE_FALLBACK_NODES,
+        MAX_LINEAR_TERM_CACHE_ENTRIES, PlanScalar, PlanScalarInterner, ReusablePowerFold, ScalarId,
+        WeightedTerm, ast_has_at_most_nodes, collect_plan_occurrences, compressed_selector,
         get_chunk_params, linear_term_cache_budget, new_evaluator, new_virtual_evaluator,
-        reuse_cache_slots, selector_family_matches,
+        reassociate_affine_blend, reuse_cache_slots, same_ast, selector_family_matches,
     };
     use crate::poly::{
         Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
     };
+
+    fn check_affine_blend_rewrite<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(3, 4);
+        let raw_values = (0..4)
+            .map(|column| {
+                (0..domain.extended_len())
+                    .map(|row| F::from(((column + 2) * (row + 3) + 1) as u64))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut evaluator = new_evaluator::<_, F, ExtendedLagrangeCoeff>(|| {});
+        let leaves = raw_values
+            .iter()
+            .map(|values| {
+                let mut polynomial = domain.empty_extended();
+                polynomial.copy_from_slice(values);
+                evaluator.register_poly(polynomial)
+            })
+            .collect::<Vec<_>>();
+        let weight = Ast::from(leaves[0]);
+        let selected = Ast::from(leaves[1]);
+        let fallback = Ast::from(leaves[2]);
+        let delta = Ast::from(leaves[3]);
+        let complement = Ast::ConstantTerm(F::ONE) - weight.clone();
+
+        let blend = weight.clone() * selected.clone() + complement.clone() * fallback.clone();
+        let rewritten = reassociate_affine_blend(&blend).expect("the affine blend is recognized");
+        let expected = fallback.clone() + weight.clone() * (selected.clone() - fallback.clone());
+        assert!(same_ast(&rewritten, &expected));
+
+        let direct =
+            weight.clone() * (fallback.clone() + delta.clone()) + complement * fallback.clone();
+        let rewritten = reassociate_affine_blend(&direct).expect("the direct delta is recognized");
+        let direct_expected = fallback.clone() + weight.clone() * delta;
+        assert!(same_ast(&rewritten, &direct_expected));
+
+        let scaled_weight = weight.clone() * F::from(3);
+        let scaled_complement = Ast::ConstantTerm(F::from(2)) - weight.clone();
+        let scaled = scaled_weight * selected.clone() + scaled_complement * fallback.clone();
+        let rewritten =
+            reassociate_affine_blend(&scaled).expect("the scaled affine blend is recognized");
+        let scaled_expected = fallback.clone() * F::from(2)
+            + weight.clone() * (selected.clone() * F::from(3) - fallback.clone());
+        assert!(same_ast(&rewritten, &scaled_expected));
+
+        let actual = evaluator.evaluate(&rewritten, &domain);
+        for (row, actual) in actual.iter().enumerate() {
+            let weight = raw_values[0][row];
+            let selected = raw_values[1][row];
+            let fallback = raw_values[2][row];
+            let expected = F::from(3) * weight * selected + (F::from(2) - weight) * fallback;
+            assert_eq!(*actual, expected);
+        }
+
+        let constant_fallback = weight.clone() * Ast::from(leaves[1])
+            + (Ast::ConstantTerm(F::ONE) - weight.clone()) * Ast::ConstantTerm(F::from(7));
+        assert!(reassociate_affine_blend(&constant_fallback).is_none());
+
+        let constant_selected = weight.clone() * Ast::ConstantTerm(F::from(7))
+            + (Ast::ConstantTerm(F::ONE) - weight.clone()) * Ast::from(leaves[2]);
+        assert!(reassociate_affine_blend(&constant_selected).is_none());
+
+        let costly_total = weight.clone() * Ast::from(leaves[1])
+            + (Ast::ConstantTerm(F::from(7)) - weight) * Ast::from(leaves[2]);
+        assert!(reassociate_affine_blend(&costly_total).is_none());
+
+        let weight = Ast::from(leaves[0]);
+        let selected = Ast::from(leaves[1]);
+        let fallback = Ast::from(leaves[2]);
+        let complement = Ast::ConstantTerm(F::ONE) - weight.clone();
+        let selected_square =
+            weight.clone() * weight.clone() + complement.clone() * fallback.clone();
+        assert!(reassociate_affine_blend(&selected_square).is_none());
+
+        let fallback_square = weight * selected + complement.clone() * complement;
+        assert!(reassociate_affine_blend(&fallback_square).is_none());
+    }
+
+    #[test]
+    fn affine_blend_rewrites_preserve_values_and_reduce_multiplications() {
+        check_affine_blend_rewrite::<pallas::Base>();
+        check_affine_blend_rewrite::<vesta::Base>();
+    }
+
+    #[test]
+    fn same_ast_short_circuits_shared_subtrees() {
+        type TestAst = Ast<fn(), pallas::Base, ExtendedLagrangeCoeff>;
+        const SHARED_DEPTH: usize = 64;
+
+        let mut shared = Arc::new(TestAst::LinearTerm(pallas::Base::ONE));
+        for _ in 0..SHARED_DEPTH {
+            shared = Arc::new(Ast::Add(Arc::clone(&shared), Arc::clone(&shared)));
+        }
+        let lhs = shared.as_ref().clone();
+        let rhs = shared.as_ref().clone();
+
+        // One root comparison reaches the two shared child pointers.
+        super::SAME_AST_VISIT_BUDGET.with(|budget| budget.set(Some(3)));
+        assert!(same_ast(&lhs, &rhs));
+        super::SAME_AST_VISIT_BUDGET.with(|budget| {
+            assert_eq!(budget.get(), Some(0));
+            budget.set(None);
+        });
+    }
+
+    #[test]
+    fn affine_blend_fallback_bound_preserves_small_and_direct_rewrites() {
+        type F = pallas::Base;
+        type TestAst = Ast<fn(), F, ExtendedLagrangeCoeff>;
+
+        let term = |value: u64| TestAst::LinearTerm(F::from(value));
+        let weight = term(2);
+        let selected = term(3);
+        let fallback = (term(5) + term(7)) * F::from(11);
+        assert!(ast_has_at_most_nodes(
+            &fallback,
+            MAX_DUPLICATED_AFFINE_FALLBACK_NODES
+        ));
+        assert!(!ast_has_at_most_nodes(
+            &fallback,
+            MAX_DUPLICATED_AFFINE_FALLBACK_NODES - 1
+        ));
+
+        let blend = weight.clone() * selected
+            + (TestAst::ConstantTerm(F::ONE) - weight.clone()) * fallback.clone();
+        assert!(reassociate_affine_blend(&blend).is_some());
+
+        let large_fallback = (0..16)
+            .map(|offset| term(offset + 20))
+            .reduce(|lhs, rhs| lhs + rhs)
+            .expect("the fallback is nonempty");
+        assert!(!ast_has_at_most_nodes(
+            &large_fallback,
+            MAX_DUPLICATED_AFFINE_FALLBACK_NODES
+        ));
+        let delta = term(37);
+        let direct = weight.clone() * (large_fallback.clone() + delta.clone())
+            + (TestAst::ConstantTerm(F::ONE) - weight.clone()) * large_fallback.clone();
+        let rewritten = reassociate_affine_blend(&direct)
+            .expect("a direct delta does not duplicate its fallback");
+        let expected = large_fallback + weight * delta;
+        assert!(same_ast(&rewritten, &expected));
+    }
+
+    #[test]
+    fn affine_blend_rewrites_bound_fallback_expansion() {
+        type F = pallas::Base;
+        const RECURRENCE_DEPTH: usize = 64;
+
+        fn context() {}
+
+        let mut recurrence: Ast<fn(), F, ExtendedLagrangeCoeff> = Ast::LinearTerm(F::ONE);
+        for depth in 0..RECURRENCE_DEPTH {
+            let weight = Ast::LinearTerm(F::from(2 * depth as u64 + 2));
+            let selected = Ast::LinearTerm(F::from(2 * depth as u64 + 3));
+            recurrence =
+                weight.clone() * selected + (Ast::ConstantTerm(F::ONE) - weight) * recurrence;
+        }
+
+        let evaluator = new_virtual_evaluator::<fn(), F, ExtendedLagrangeCoeff>(context);
+        let normalized = evaluator
+            .normalize_ast(&recurrence)
+            .expect("the inner affine blends are normalized");
+        let plan = compile_plan_only(&normalized);
+        let mut occurrences = vec![];
+        collect_plan_occurrences(&plan, &mut occurrences);
+
+        // Every source level adds nine nodes, and a generic rewrite may add at
+        // most the bounded fallback plus its scale node.
+        assert!(occurrences.len() <= 1 + 14 * RECURRENCE_DEPTH);
+    }
+
+    #[test]
+    fn repeated_scale_four_shapes_do_not_allocate_cache_slots() {
+        type F = pallas::Base;
+        const SHAPE_COUNT: usize = 32;
+
+        let four = F::ONE.double().double();
+        let shapes = (0..SHAPE_COUNT)
+            .map(|shape| Ast::LinearTerm(F::from(shape as u64 + 2)) * four)
+            .collect::<Vec<Ast<fn(), F, ExtendedLagrangeCoeff>>>();
+        let ast = Ast::distribute_powers(
+            shapes.iter().cloned().chain(shapes.iter().cloned()),
+            F::from(7),
+        );
+        let (mut plan, scalars) = compile_plan(&ast);
+
+        assert_eq!(
+            plan.cache_common_subexpressions(LinearTermCacheBudget::default(), &scalars),
+            0
+        );
+    }
 
     fn check_reusable_power_fold<F: Field + From<u64>>() {
         let terms = |seed: u64| {
@@ -7593,18 +7982,14 @@ mod tests {
         evaluator.register_compressed_selector(query, COMBINATION_LEN, 1, selector);
 
         let unchanged = Arc::new(Ast::from(unrelated) + Ast::ConstantTerm(pallas::Base::ONE));
-        assert!(
-            evaluator
-                .replace_compressed_selectors(unchanged.as_ref())
-                .is_none()
-        );
+        assert!(evaluator.normalize_ast(unchanged.as_ref()).is_none());
 
         let ast = Ast::Add(
             Arc::new(compressed_selector_expression(query, COMBINATION_LEN, 1)),
             Arc::clone(&unchanged),
         );
         let replaced = evaluator
-            .replace_compressed_selectors(&ast)
+            .normalize_ast(&ast)
             .expect("the compressed selector should be replaced");
 
         match replaced {
@@ -7652,7 +8037,7 @@ mod tests {
         ];
 
         for case in cases {
-            assert!(evaluator.replace_compressed_selectors(&case).is_some());
+            assert!(evaluator.normalize_ast(&case).is_some());
         }
     }
 
@@ -7672,7 +8057,7 @@ mod tests {
             query_and_first_selector,
         );
 
-        evaluator.replace_compressed_selectors(&Ast::Add(
+        evaluator.normalize_ast(&Ast::Add(
             Arc::new(Ast::from(unrelated)),
             Arc::new(Ast::from(
                 query_and_first_selector.with_rotation(Rotation::next()),
