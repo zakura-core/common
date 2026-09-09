@@ -55,8 +55,25 @@ fn decode_scalar_repr<F: ff::PrimeField>(mut bytes: impl ExactSizeIterator<Item 
     decoded.unwrap_or(F::ZERO)
 }
 
+#[cfg(any(feature = "batch", feature = "multicore"))]
+const ORCHARD_K: u32 = 11;
+
 #[cfg(feature = "multicore")]
-const PREPARED_SPARSE_COMMITMENT_K: u32 = 11;
+const PREPARED_SPARSE_COMMITMENT_K: u32 = ORCHARD_K;
+
+/// The Orchard-sized domain used by the sorted 10-bit range-check commitment.
+#[cfg(feature = "multicore")]
+const PREPARED_SORTED_U10_COMMITMENT_K: u32 = PREPARED_SPARSE_COMMITMENT_K;
+
+/// Cached multiples `H`, `2H`, and `4H` for each Lagrange suffix sum.
+#[cfg(feature = "multicore")]
+const SORTED_U10_SUFFIX_MULTIPLES: usize = 3;
+/// Blinded suffix terms in the permuted 10-bit range-check table.
+///
+/// The Pasta backend privately mirrors this value so it can reject accidental
+/// callers without requiring a public cross-crate protocol constant.
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+const PERMUTED_U10_TABLE_SUFFIX_TERMS: usize = 6;
 
 #[cfg(feature = "multicore")]
 trait PreparedSparseCommitments<C: pasta_curves::arithmetic::CurveAffine> {
@@ -65,6 +82,19 @@ trait PreparedSparseCommitments<C: pasta_curves::arithmetic::CurveAffine> {
     fn commit_sparse(
         &self,
         coefficients: &[(usize, C::Scalar)],
+        blind: poly::commitment::Blind<C::Scalar>,
+    ) -> Option<C::Curve>;
+}
+
+#[cfg(feature = "multicore")]
+trait PreparedLookupCommitments<C: pasta_curves::arithmetic::CurveAffine> {
+    fn prepared_lagrange_suffix_multiples(&self) -> Option<&[C]>;
+
+    #[cfg(not(feature = "orbits"))]
+    fn commit_permuted_u10_table(
+        &self,
+        prefix: &[C::Scalar],
+        suffix: &[C::Scalar],
         blind: poly::commitment::Blind<C::Scalar>,
     ) -> Option<C::Curve>;
 }

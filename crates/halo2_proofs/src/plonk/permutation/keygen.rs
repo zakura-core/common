@@ -3,7 +3,7 @@ use group::{
     ff::{Field, PrimeField},
 };
 
-use super::{Argument, ProvingKey, VerifyingKey};
+use super::{Argument, IdentityCells, ProvingKey, VerifyingKey};
 use crate::{
     arithmetic::CurveAffine,
     plonk::{Any, Column, Error},
@@ -105,6 +105,9 @@ impl Assembly {
         domain: &EvaluationDomain<C::Scalar>,
         p: &Argument,
     ) -> VerifyingKey<C> {
+        #[cfg(feature = "multicore")]
+        use maybe_rayon::prelude::*;
+
         // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
         let mut omega_powers = Vec::with_capacity(params.n as usize);
         {
@@ -145,6 +148,12 @@ impl Assembly {
             permutation_polys.push(permutation_poly);
         }
 
+        #[cfg(feature = "multicore")]
+        let commitments_projective = permutation_polys
+            .par_iter()
+            .map(|polynomial| params.commit_lagrange(polynomial, Blind::default()))
+            .collect::<Vec<_>>();
+        #[cfg(not(feature = "multicore"))]
         let commitments_projective = permutation_polys
             .iter()
             .map(|polynomial| params.commit_lagrange(polynomial, Blind::default()))
@@ -161,6 +170,11 @@ impl Assembly {
         p: &Argument,
         fft_twiddles: &ProvingKeyTwiddles<C::Scalar>,
     ) -> ProvingKey<C> {
+        // Retain the cells that the permutation leaves fixed. The prover can
+        // cancel these factors before constructing each grand-product ratio.
+        let identity_cells = IdentityCells::from_mapping(&self.mapping);
+        let identity_columns = identity_cells.identity_columns(params.n as usize);
+
         // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
         let mut omega_powers = Vec::with_capacity(params.n as usize);
         {
@@ -204,6 +218,8 @@ impl Assembly {
             domain.batch_lagrange_to_coeff_and_extended(&permutations, fft_twiddles);
         ProvingKey {
             permutations,
+            identity_columns,
+            identity_cells,
             polys,
             cosets,
         }

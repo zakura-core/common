@@ -115,7 +115,7 @@ fn assign_hash_rounds(
         len,
         |row| round(row).map(|round| round.lambda_1),
     )?;
-    region.assign_advice_batch(
+    region.assign_advice_batch_with_previous_denominator(
         |_| "lambda_2",
         double_and_add.lambda_2,
         offset,
@@ -124,7 +124,7 @@ fn assign_hash_rounds(
     )?;
 
     // Only the final accumulator cell is referenced after assignment.
-    region.assign_advice_batch(
+    region.assign_advice_batch_with_previous_denominator_squared(
         |_| "x_a",
         double_and_add.x_a,
         offset + 1,
@@ -174,7 +174,7 @@ impl ProjectivePoint {
         let h_sq = square_with_runtime_backend(&h);
         let h_cubed = h_sq * h;
         let x_h_sq = self.x * h_sq;
-        let x_r = square_with_runtime_backend(&r) - h_cubed - x_h_sq.double();
+        let x_r = square_with_runtime_backend(&r) - h_cubed - Field::double(&x_h_sq);
         let d = x_h_sq - x_r;
 
         let d_sq = square_with_runtime_backend(&d);
@@ -183,13 +183,13 @@ impl ProjectivePoint {
         // Scale lambda_1 by d so it shares z_new as its denominator with
         // lambda_2. The product is also needed for lambda_2's numerator.
         let r_d = r * d;
-        let lambda_2_numerator = y_h_cubed.double() - r_d;
+        let lambda_2_numerator = Field::double(&y_h_cubed) - r_d;
 
         let x_h_sq_d_sq = x_h_sq * d_sq;
         // Since d = x_h_sq - x_r, this saves a field multiplication over
         // computing (x_h_sq + x_r) * d_sq directly.
-        let x_new =
-            square_with_runtime_backend(&lambda_2_numerator) - x_h_sq_d_sq.double() + d_cubed;
+        let x_new = square_with_runtime_backend(&lambda_2_numerator) - Field::double(&x_h_sq_d_sq)
+            + d_cubed;
         let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
         let z_new = self.z * h * d;
         let z_new_sq = square_with_runtime_backend(&z_new);

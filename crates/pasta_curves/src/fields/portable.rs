@@ -252,7 +252,9 @@ const fn reduce_square_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64;
     all(
         feature = "aarch64-asm",
         target_arch = "aarch64",
-        target_vendor = "apple"
+        any(target_family = "unix", target_os = "none"),
+        target_pointer_width = "64",
+        target_endian = "little"
     ),
     allow(dead_code)
 )]
@@ -292,7 +294,9 @@ pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 
     all(
         feature = "aarch64-asm",
         target_arch = "aarch64",
-        target_vendor = "apple"
+        any(target_family = "unix", target_os = "none"),
+        target_pointer_width = "64",
+        target_endian = "little"
     ),
     allow(dead_code)
 )]

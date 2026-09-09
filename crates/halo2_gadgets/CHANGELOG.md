@@ -10,6 +10,23 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-08
+
+### Changed
+
+- Reduced prepared Orchard Merkle witness-assignment latency by retaining only
+  required Sinsemilla running-sum handles and batching remaining assignments
+  ([#360](https://github.com/zakura-core/common/pull/360)).
+- Improved Sinsemilla witness-generation performance on Apple AArch64 when
+  the Pasta `aarch64-asm` feature is enabled
+  ([#405](https://github.com/zakura-core/common/pull/405)).
+- Reduced Orchard witness-synthesis latency by avoiding temporary allocations
+  while decomposing range-check and full-width fixed-base witnesses
+  ([#407](https://github.com/zakura-core/common/pull/407)).
+- Reduced Orchard witness-synthesis latency by streamlining fixed-base scalar
+  multiplication witnesses
+  ([#408](https://github.com/zakura-core/common/pull/408)).
+
 ## [1.1.0] - 2026-09-04
 
 ### Added

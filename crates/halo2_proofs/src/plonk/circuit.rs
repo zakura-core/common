@@ -415,6 +415,50 @@ pub trait Assignment<F: Field> {
         Ok(())
     }
 
+    /// Assigns rational advice whose denominators equal the corresponding
+    /// denominators in the immediately preceding batch.
+    ///
+    /// Backends may derive the denominators from this untrusted relationship
+    /// hint. An incorrect hint can cause synthesis or constraint verification
+    /// to fail.
+    fn assign_advice_batch_with_previous_denominator<V, A, AR>(
+        &mut self,
+        annotation: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        self.assign_advice_batch(annotation, column, row, len, to)
+    }
+
+    /// Assigns rational advice whose denominators are the squares of the
+    /// corresponding denominators in the immediately preceding batch.
+    ///
+    /// Backends may derive the denominators from this untrusted relationship
+    /// hint. An incorrect hint can cause synthesis or constraint verification
+    /// to fail.
+    fn assign_advice_batch_with_previous_denominator_squared<V, A, AR>(
+        &mut self,
+        annotation: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        self.assign_advice_batch(annotation, column, row, len, to)
+    }
+
     /// Assign a fixed value
     fn assign_fixed<V, VR, A, AR>(
         &mut self,
@@ -558,6 +602,14 @@ pub trait Circuit<F: Field> {
     /// `Circuit` trait because its behaviour is circuit-critical.
     type FloorPlanner: FloorPlanner;
 
+    /// Whether proving keys may retain and reuse this circuit's configuration.
+    ///
+    /// Implementations may opt in only when [`Circuit::configure`] always
+    /// returns an equivalent synthesis configuration for a given circuit
+    /// shape, and configuration clones do not share mutable state that can
+    /// affect synthesis across key generation or proofs.
+    const CACHE_CONFIGURATION: bool = false;
+
     /// Returns a copy of this circuit with no witness values (i.e. all witnesses set to
     /// `None`). For most circuits, this will be equal to `Self::default()`.
     fn without_witnesses(&self) -> Self;
@@ -566,10 +618,52 @@ pub trait Circuit<F: Field> {
     /// arrangement, column arrangement, etc.
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config;
 
+    /// Creates the opaque configuration retained by a proving key.
+    ///
+    /// Circuits that set [`Circuit::CACHE_CONFIGURATION`] must override this
+    /// method and [`Circuit::configuration_from_cache`]. Returning `None`
+    /// preserves proving-time configuration.
+    fn cache_configuration(_config: &Self::Config) -> Option<CircuitConfigCache> {
+        None
+    }
+
+    /// Clones this circuit's configuration from a proving-key cache.
+    ///
+    /// This may also recognize caches created by another circuit type with an
+    /// identical shape and compatible configuration.
+    fn configuration_from_cache(_cache: &CircuitConfigCache) -> Option<Self::Config> {
+        None
+    }
+
     /// Given the provided `cs`, synthesize the circuit. The concrete type of
     /// the caller will be different depending on the context, and they may or
     /// may not expect to have a witness present.
     fn synthesize(&self, config: Self::Config, layouter: impl Layouter<F>) -> Result<(), Error>;
+}
+
+/// An opaque circuit configuration retained by an opted-in proving key.
+#[derive(Clone)]
+pub struct CircuitConfigCache(Arc<dyn StdAny + Send + Sync>);
+
+impl CircuitConfigCache {
+    /// Creates a cache from an independently reusable configuration.
+    pub fn new<T: StdAny + Send + Sync>(config: T) -> Self {
+        Self(Arc::new(config))
+    }
+
+    /// Clones a configuration when its concrete type matches the cache.
+    pub fn clone_config<T: StdAny + Clone>(&self) -> Option<T> {
+        self.0.downcast_ref::<T>().cloned()
+    }
+}
+
+impl std::fmt::Debug for CircuitConfigCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("CircuitConfigCache")
+            .field(&"..")
+            .finish()
+    }
 }
 
 /// Low-degree expression representing an identity that must hold over the committed columns.

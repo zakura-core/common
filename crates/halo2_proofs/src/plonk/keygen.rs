@@ -9,7 +9,7 @@ use maybe_rayon::prelude::*;
 #[cfg(feature = "multicore")]
 use crate::PreparedSparseCommitments;
 #[cfg(feature = "batch")]
-use crate::{InstanceWindowTable, PREPARED_INSTANCE_COLUMNS};
+use crate::{InstanceWindowTable, ORCHARD_K, PREPARED_INSTANCE_COLUMNS};
 
 use super::{
     Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
@@ -446,6 +446,12 @@ where
         .permutation
         .build_vk(params, &domain, &cs.permutation);
 
+    #[cfg(feature = "multicore")]
+    let fixed_commitments_projective = fixed
+        .par_iter()
+        .map(|polynomial| commit_fixed_lagrange(params, polynomial))
+        .collect::<Vec<_>>();
+    #[cfg(not(feature = "multicore"))]
     let fixed_commitments_projective = fixed
         .iter()
         .map(|polynomial| commit_fixed_lagrange(params, polynomial))
@@ -461,7 +467,7 @@ where
     ))
 }
 
-/// Generate a `ProvingKey` from a `VerifyingKey` and an instance of `Circuit`.
+/// Generate a [`ProvingKey`] from a [`VerifyingKey`] and a [`Circuit`] instance.
 pub fn keygen_pk<C, ConcreteCircuit>(
     params: &Params<C>,
     vk: VerifyingKey<C>,
@@ -472,8 +478,17 @@ where
     ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
     <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
 {
+    if !vk.domain.has_base_size(params.n) {
+        return Err(Error::InvalidParameters);
+    }
+
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
+    let circuit_config = if ConcreteCircuit::CACHE_CONFIGURATION {
+        ConcreteCircuit::cache_configuration(&config)
+    } else {
+        None
+    };
 
     let cs = cs;
 
@@ -586,12 +601,9 @@ where
             .permutation
             .build_pk(params, &vk.domain, &cs.permutation, &fft_twiddles);
 
-    // Compute l_0(X)
-    // TODO: this can be done more efficiently
+    // Compute l_0(X).
     let mut l0 = vk.domain.empty_lagrange();
     l0[0] = C::Scalar::ONE;
-    let l0 = vk.domain.lagrange_to_coeff_with_twiddles(l0, &fft_twiddles);
-    let l0 = vk.domain.coeff_to_extended_with_twiddles(l0, &fft_twiddles);
 
     // Compute l_blind(X) which evaluates to 1 for each blinding factor row
     // and 0 otherwise over the domain.
@@ -599,23 +611,29 @@ where
     for evaluation in l_blind[..].iter_mut().rev().take(cs.blinding_factors()) {
         *evaluation = C::Scalar::ONE;
     }
-    let l_blind = vk
-        .domain
-        .lagrange_to_coeff_with_twiddles(l_blind, &fft_twiddles);
-    let l_blind = vk
-        .domain
-        .coeff_to_extended_with_twiddles(l_blind, &fft_twiddles);
 
     // Compute l_last(X) which evaluates to 1 on the first inactive row (just
     // before the blinding factors) and 0 otherwise over the domain
     let mut l_last = vk.domain.empty_lagrange();
     l_last[params.n as usize - cs.blinding_factors() - 1] = C::Scalar::ONE;
-    let l_last = vk
+    let (_, mut special_cosets) = vk
         .domain
-        .lagrange_to_coeff_with_twiddles(l_last, &fft_twiddles);
-    let l_last = vk
-        .domain
-        .coeff_to_extended_with_twiddles(l_last, &fft_twiddles);
+        .batch_lagrange_to_coeff_and_extended(&[l0, l_blind, l_last], &fft_twiddles);
+    let l_last = special_cosets.pop().expect("l_last transform exists");
+    let l_blind = special_cosets.pop().expect("l_blind transform exists");
+    let l0 = special_cosets.pop().expect("l_0 transform exists");
+    debug_assert!(special_cosets.is_empty());
+
+    #[cfg(feature = "batch")]
+    let prepared_instance_coset = (params.k() == ORCHARD_K
+        && cs.num_instance_columns == PREPARED_INSTANCE_COLUMNS)
+        .then(|| {
+            Arc::new(super::PreparedInstanceCoset::new(
+                &vk.domain,
+                &fft_twiddles,
+                params.n,
+            ))
+        });
 
     let pk = ProvingKey {
         vk,
@@ -629,6 +647,9 @@ where
         permutation: permutation_pk,
         fft_twiddles,
         floor_plan,
+        circuit_config,
+        #[cfg(feature = "batch")]
+        prepared_instance_coset,
         quotient_plans: Arc::new(Default::default()),
     };
     super::evaluator_schedule::prepare_quotient_plans(&pk);

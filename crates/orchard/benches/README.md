@@ -66,9 +66,10 @@ RNG initialization happen outside the timed routines.
 
 Both groups use ten flat samples, a two-second warmup, and a 15-second
 measurement interval. The semantic-cold group is much more expensive in wall
-time because it repeats key generation and roughly 25 MiB of commitment-table
-preparation for every warmup and measured iteration, even though Criterion
-excludes that setup from each reported proof duration.
+time because it repeats key generation and roughly 29 MiB of commitment-table
+preparation under the default no-orbits build (roughly 25 MiB with `orbits`)
+for every warmup and measured iteration, even though Criterion excludes that
+setup from each reported proof duration.
 
 For a multicore run, set both thread-count variables to the same value:
 

@@ -40,16 +40,18 @@ use crate::{
 };
 
 const NO_DENOMINATOR: u32 = u32::MAX;
+const RELATED_DENOMINATOR: u32 = u32::MAX - 1;
+const DENOMINATOR_SOURCE_MASK: u32 = 1 << 31;
+const DENOMINATOR_SLOT_MASK: u32 = DENOMINATOR_SOURCE_MASK - 1;
+const DENOMINATOR_SLOT_LIMIT: u32 = DENOMINATOR_SLOT_MASK - 1;
 
 #[cfg(all(test, feature = "batch"))]
-std::thread_local! {
-    static PREPARED_INSTANCE_ROUTE_HITS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
+static PREPARED_INSTANCE_ROUTE_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(all(test, feature = "batch"))]
 fn prepared_instance_route_hits() -> usize {
-    PREPARED_INSTANCE_ROUTE_HITS.get()
+    PREPARED_INSTANCE_ROUTE_HITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(feature = "batch")]
@@ -323,7 +325,7 @@ fn commit_prover_instances<C: CurveAffine>(
     #[cfg(feature = "batch")]
     if let Some(commitments) = commit_prepared_instances(params, instances) {
         #[cfg(test)]
-        PREPARED_INSTANCE_ROUTE_HITS.set(PREPARED_INSTANCE_ROUTE_HITS.get() + 1);
+        PREPARED_INSTANCE_ROUTE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return commitments;
     }
 
@@ -373,11 +375,35 @@ struct AdviceWitness<F: Field> {
     denominator_cells: Vec<usize>,
     denominators: Vec<F>,
     denominator_slots: Vec<Vec<u32>>,
+    last_denominator_batch: Option<DenominatorBatch>,
+    related_denominator_batches: Vec<RelatedDenominatorBatch>,
+    related_batch_numerators: Vec<F>,
+    reuse_related_denominators: bool,
     row_count: usize,
 }
 
+#[derive(Clone, Copy)]
+struct DenominatorBatch {
+    start: usize,
+    len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RelatedDenominatorBatch {
+    len: usize,
+    source: usize,
+    cell_start: usize,
+    inverse_power: DenominatorInversePower,
+}
+
+#[derive(Clone, Copy)]
+enum DenominatorInversePower {
+    One,
+    Two,
+}
+
 impl<F: Field> AdviceWitness<F> {
-    fn new(values: Vec<Polynomial<F, LagrangeCoeff>>) -> Self {
+    fn new(values: Vec<Polynomial<F, LagrangeCoeff>>, reuse_related_denominators: bool) -> Self {
         let row_count = values.first().map_or(0, |column| column.len());
         assert!(values.iter().all(|column| column.len() == row_count));
 
@@ -386,6 +412,10 @@ impl<F: Field> AdviceWitness<F> {
             values,
             denominator_cells: Vec::new(),
             denominators: Vec::new(),
+            last_denominator_batch: None,
+            related_denominator_batches: Vec::new(),
+            related_batch_numerators: Vec::new(),
+            reuse_related_denominators,
             row_count,
         }
     }
@@ -400,6 +430,7 @@ impl<F: Field> AdviceWitness<F> {
             return Err(Error::BoundsFailure);
         }
 
+        self.last_denominator_batch = None;
         self.assign_valid(column, row, assigned);
         Ok(())
     }
@@ -428,13 +459,174 @@ impl<F: Field> AdviceWitness<F> {
             return Err(Error::BoundsFailure);
         }
 
-        for index in 0..len {
-            self.assign_valid(column, row + index, to(index)?);
+        if !self.reuse_related_denominators {
+            for index in 0..len {
+                self.assign_valid(column, row + index, to(index)?);
+            }
+            return Ok(());
         }
+
+        self.last_denominator_batch = None;
+        let denominator_start = self.denominators.len();
+        let mut expanded_related_denominators = false;
+        for index in 0..len {
+            expanded_related_denominators |= self.assign_valid(column, row + index, to(index)?);
+        }
+        if expanded_related_denominators {
+            return Ok(());
+        }
+        self.record_denominator_batch(len, denominator_start);
         Ok(())
     }
 
-    fn assign_valid(&mut self, column: usize, row: usize, assigned: Assigned<F>) {
+    fn assign_batch_with_previous_denominator<V>(
+        &mut self,
+        column: usize,
+        row: usize,
+        len: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Result<Assigned<F>, Error>,
+    {
+        self.assign_batch_with_denominator_relation(
+            column,
+            row,
+            len,
+            to,
+            DenominatorInversePower::One,
+            true,
+        )
+    }
+
+    fn assign_batch_with_previous_denominator_squared<V>(
+        &mut self,
+        column: usize,
+        row: usize,
+        len: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Result<Assigned<F>, Error>,
+    {
+        self.assign_batch_with_denominator_relation(
+            column,
+            row,
+            len,
+            to,
+            DenominatorInversePower::Two,
+            false,
+        )
+    }
+
+    fn assign_batch_with_denominator_relation<V>(
+        &mut self,
+        column: usize,
+        row: usize,
+        len: usize,
+        mut to: V,
+        inverse_power: DenominatorInversePower,
+        preserve_as_last_batch: bool,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Result<Assigned<F>, Error>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if self
+            .values
+            .get(column)
+            .and_then(|values| values.get(row..end))
+            .is_none()
+        {
+            return Err(Error::BoundsFailure);
+        }
+
+        if !self.reuse_related_denominators {
+            for index in 0..len {
+                self.assign_valid(column, row + index, to(index)?);
+            }
+            return Ok(());
+        }
+
+        let Some(previous) = self
+            .last_denominator_batch
+            .filter(|previous| previous.len >= len)
+        else {
+            return self.assign_batch(column, row, len, to);
+        };
+
+        if self.denominator_slots[column][row..end]
+            .iter()
+            .any(|slot| *slot != NO_DENOMINATOR)
+        {
+            return self.assign_batch(column, row, len, to);
+        }
+
+        self.related_batch_numerators.clear();
+        let collect_result = (0..len).try_for_each(|index| {
+            let Assigned::Rational(numerator, denominator) = to(index)? else {
+                return Err(Error::Synthesis);
+            };
+            debug_assert_eq!(
+                denominator,
+                match inverse_power {
+                    DenominatorInversePower::One => self.denominators[previous.start + index],
+                    DenominatorInversePower::Two => {
+                        self.denominators[previous.start + index].square()
+                    }
+                }
+            );
+            self.related_batch_numerators.push(numerator);
+            Ok(())
+        });
+        if let Err(err) = collect_result {
+            self.related_batch_numerators.clear();
+            return Err(err);
+        }
+
+        for index in 0..len {
+            self.values[column][row + index] = self.related_batch_numerators[index];
+            self.denominator_slots[column][row + index] = RELATED_DENOMINATOR;
+        }
+        self.related_batch_numerators.clear();
+        for index in 0..len {
+            let cell = self.denominator_cells[previous.start + index];
+            let source_column = cell / self.row_count;
+            let source_row = cell % self.row_count;
+            self.denominator_slots[source_column][source_row] |= DENOMINATOR_SOURCE_MASK;
+        }
+        self.related_denominator_batches
+            .push(RelatedDenominatorBatch {
+                len,
+                source: previous.start,
+                cell_start: column * self.row_count + row,
+                inverse_power,
+            });
+        self.last_denominator_batch = preserve_as_last_batch.then_some(DenominatorBatch {
+            start: previous.start,
+            len,
+        });
+        Ok(())
+    }
+
+    /// Assigns a value, returning whether existing denominator relationships
+    /// were expanded before the assignment.
+    fn assign_valid(&mut self, column: usize, row: usize, assigned: Assigned<F>) -> bool {
+        let slot = self.denominator_slots[column][row];
+        let removes_denominator = !matches!(assigned, Assigned::Rational(_, _));
+        let expand_relationships = slot == RELATED_DENOMINATOR
+            || (slot != NO_DENOMINATOR && slot & DENOMINATOR_SOURCE_MASK != 0)
+            || (removes_denominator
+                && slot != NO_DENOMINATOR
+                && !self.related_denominator_batches.is_empty());
+        if expand_relationships {
+            self.expand_related_denominator_batches();
+        }
+
         match assigned {
             Assigned::Zero => {
                 self.remove_denominator(column, row);
@@ -449,6 +641,7 @@ impl<F: Field> AdviceWitness<F> {
                 if slot == NO_DENOMINATOR {
                     let slot = u32::try_from(self.denominators.len())
                         .expect("the number of advice cells fits into u32");
+                    assert!(slot < DENOMINATOR_SLOT_LIMIT);
                     self.denominator_slots[column][row] = slot;
                     self.denominator_cells.push(column * self.row_count + row);
                     self.denominators.push(denominator);
@@ -458,6 +651,7 @@ impl<F: Field> AdviceWitness<F> {
                 self.values[column][row] = numerator;
             }
         }
+        expand_relationships
     }
 
     fn remove_denominator(&mut self, column: usize, row: usize) {
@@ -465,9 +659,10 @@ impl<F: Field> AdviceWitness<F> {
         if slot == NO_DENOMINATOR {
             return;
         }
+        debug_assert!(self.related_denominator_batches.is_empty());
 
         self.denominator_slots[column][row] = NO_DENOMINATOR;
-        let slot = slot as usize;
+        let slot = (slot & DENOMINATOR_SLOT_MASK) as usize;
         self.denominator_cells.swap_remove(slot);
         self.denominators.swap_remove(slot);
 
@@ -480,13 +675,62 @@ impl<F: Field> AdviceWitness<F> {
 
     fn evaluate(mut self) -> Vec<Polynomial<F, LagrangeCoeff>> {
         batch_invert_multi(&mut self.denominators);
-        for (cell, denominator_inverse) in self.denominator_cells.into_iter().zip(self.denominators)
-        {
+        for (&cell, &denominator_inverse) in self.denominator_cells.iter().zip(&self.denominators) {
             let column = cell / self.row_count;
             let row = cell % self.row_count;
             self.values[column][row] *= denominator_inverse;
         }
+        for related in self.related_denominator_batches {
+            for index in 0..related.len {
+                let cell = related.cell_start + index;
+                let column = cell / self.row_count;
+                let row = cell % self.row_count;
+                let denominator_inverse = self.denominators[related.source + index];
+                self.values[column][row] *= match related.inverse_power {
+                    DenominatorInversePower::One => denominator_inverse,
+                    DenominatorInversePower::Two => denominator_inverse.square(),
+                };
+            }
+        }
         self.values
+    }
+
+    fn record_denominator_batch(&mut self, len: usize, start: usize) {
+        if self.denominators.len() != start + len {
+            self.last_denominator_batch = None;
+            return;
+        }
+
+        self.last_denominator_batch = Some(DenominatorBatch { start, len });
+    }
+
+    fn expand_related_denominator_batches(&mut self) {
+        for slot in self.denominator_slots.iter_mut().flatten() {
+            if *slot != NO_DENOMINATOR && *slot != RELATED_DENOMINATOR {
+                *slot &= DENOMINATOR_SLOT_MASK;
+            }
+        }
+        for related in core::mem::take(&mut self.related_denominator_batches) {
+            for index in 0..related.len {
+                let cell = related.cell_start + index;
+                let column = cell / self.row_count;
+                let row = cell % self.row_count;
+                debug_assert_eq!(self.denominator_slots[column][row], RELATED_DENOMINATOR);
+
+                let basis = self.denominators[related.source + index];
+                let denominator = match related.inverse_power {
+                    DenominatorInversePower::One => basis,
+                    DenominatorInversePower::Two => basis.square(),
+                };
+                let slot = u32::try_from(self.denominators.len())
+                    .expect("the number of advice cells fits into u32");
+                assert!(slot < DENOMINATOR_SLOT_LIMIT);
+                self.denominator_slots[column][row] = slot;
+                self.denominator_cells.push(cell);
+                self.denominators.push(denominator);
+            }
+        }
+        self.last_denominator_batch = None;
     }
 }
 
@@ -634,6 +878,64 @@ impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
             .assign_batch(column.index(), row, len, |index| to(index).assign())
     }
 
+    fn assign_advice_batch_with_previous_denominator<V, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if !self.usable_rows.contains(&row) || end > self.usable_rows.end {
+            return Err(Error::not_enough_rows_available(self.k));
+        }
+
+        self.advice
+            .assign_batch_with_previous_denominator(column.index(), row, len, |index| {
+                to(index).assign()
+            })
+    }
+
+    fn assign_advice_batch_with_previous_denominator_squared<V, A, AR>(
+        &mut self,
+        _: A,
+        column: Column<Advice>,
+        row: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>>,
+        A: Fn(usize) -> AR,
+        AR: Into<String>,
+    {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = row.checked_add(len).ok_or(Error::BoundsFailure)?;
+        if !self.usable_rows.contains(&row) || end > self.usable_rows.end {
+            return Err(Error::not_enough_rows_available(self.k));
+        }
+
+        self.advice.assign_batch_with_previous_denominator_squared(
+            column.index(),
+            row,
+            len,
+            |index| to(index).assign(),
+        )
+    }
+
     fn assign_fixed<V, VR, A, AR>(
         &mut self,
         _: A,
@@ -720,55 +1022,61 @@ where
     pk.vk.hash_into(transcript)?;
 
     let domain = &pk.vk.domain;
-    let mut meta = ConstraintSystem::default();
-    let config = ConcreteCircuit::configure(&mut meta);
+    let cached_config = if ConcreteCircuit::CACHE_CONFIGURATION {
+        pk.circuit_config
+            .as_ref()
+            .and_then(ConcreteCircuit::configuration_from_cache)
+    } else {
+        None
+    };
+    let config = cached_config
+        .unwrap_or_else(|| ConcreteCircuit::configure(&mut ConstraintSystem::default()));
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
     let meta = &pk.vk.cs;
     let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
 
-    let instance_commitments = normalize_prover_instance_commitments(params, instances);
     let instance_values = instances
         .into_par_iter()
         .map(|instance| -> Result<_, Error> {
             instance
                 .iter()
                 .map(|values| {
+                    let prefix_len = values.len();
                     let mut poly = domain.empty_lagrange();
                     assert_eq!(poly.len(), params.n as usize);
-                    if values.len() > max_instance_len {
+                    if prefix_len > max_instance_len {
                         return Err(Error::InstanceTooLarge);
                     }
                     for (poly, value) in poly.iter_mut().zip(values.iter()) {
                         *poly = *value;
                     }
-                    Ok(poly)
+                    Ok((poly, prefix_len))
                 })
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Vec<_>>();
 
-    // Preserve circuit and column order while updating the transcript. Keeping
-    // each preparation result in order also preserves the transcript prefix
-    // before an instance error.
+    // Preserve circuit and column order while collecting the prepared values.
     let mut prepared_instance_values = Vec::with_capacity(instance_values.len());
-    for (instance_commitments, instance_values) in
-        instance_commitments.into_iter().zip(instance_values)
-    {
-        let instance_values = instance_values?;
-        for commitment in instance_commitments {
-            transcript.common_point(commitment)?;
-        }
-        prepared_instance_values.push(instance_values);
+    for instance_values in instance_values {
+        prepared_instance_values.push(instance_values?);
     }
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
+    // The smaller inversion walk amortizes relationship tracking once several
+    // circuit witnesses are evaluated together. Keep the single-circuit path
+    // on its existing denominator collection and evaluation flow.
+    let reuse_related_denominators = instances.len() > 1;
     let mut witnesses = instances
         .iter()
         .map(|instances| WitnessCollection {
             k: params.k,
-            advice: AdviceWitness::new(vec![domain.empty_lagrange(); meta.num_advice_columns]),
+            advice: AdviceWitness::new(
+                vec![domain.empty_lagrange(); meta.num_advice_columns],
+                reuse_related_denominators,
+            ),
             instances,
             // The prover will not be allowed to assign values to advice
             // cells that exist within inactive rows, which include some
@@ -785,55 +1093,6 @@ where
         pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
-    let prepare_instance_polynomials = || {
-        prepared_instance_values
-            .into_par_iter()
-            .map(|instance_values| {
-                let instance_polys: Vec<_> = instance_values
-                    .iter()
-                    .map(|poly| {
-                        let lagrange_vec = domain.lagrange_from_vec(poly.to_vec());
-                        domain.lagrange_to_coeff_with_twiddles(lagrange_vec, &pk.fft_twiddles)
-                    })
-                    .collect();
-
-                let instance_cosets: Vec<_> = instance_polys
-                    .iter()
-                    .map(|poly| {
-                        domain.coeff_to_extended_with_twiddles(poly.clone(), &pk.fft_twiddles)
-                    })
-                    .collect();
-
-                InstanceSingle::<C> {
-                    instance_values,
-                    instance_polys,
-                    instance_cosets,
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-    let synthesize = || {
-        // Synthesize every circuit while allowing its floor planner to share
-        // circuit-shape-dependent work across the batch.
-        ConcreteCircuit::FloorPlanner::synthesize_batch(
-            &mut witnesses,
-            circuits,
-            config,
-            &meta.constants,
-            pk.floor_plan.as_ref(),
-        )
-    };
-
-    // Instance polynomial preparation and witness synthesis are independent.
-    // Run them concurrently while preserving the ordered results consumed
-    // below.
-    let (instance, synthesis_result) = if crate::multicore::current_num_threads() > 1 {
-        crate::multicore::join(prepare_instance_polynomials, synthesize)
-    } else {
-        (prepare_instance_polynomials(), synthesize())
-    };
-    synthesis_result?;
-
     struct AdviceSingle<C: CurveAffine> {
         pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
         pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
@@ -841,96 +1100,207 @@ where
         pub advice_blinds: Vec<Blind<C::Scalar>>,
     }
 
-    // Rational advice evaluation is independent across circuits. Keep every
-    // RNG draw below in circuit order and after successful synthesis.
-    let evaluate_in_parallel = witnesses.len() > 1 && crate::multicore::current_num_threads() > 1;
-    let advice_values = if evaluate_in_parallel {
-        witnesses
+    let prepare_instance_polynomials = || {
+        prepared_instance_values
             .into_par_iter()
-            .map(|witness| witness.advice.evaluate())
-            .collect::<Vec<_>>()
-    } else {
-        witnesses
-            .into_iter()
-            .map(|witness| witness.advice.evaluate())
+            .map(|instance_values| {
+                let mut prepared_values = Vec::with_capacity(instance_values.len());
+                let mut instance_polys = Vec::with_capacity(instance_values.len());
+                let mut instance_cosets = Vec::with_capacity(instance_values.len());
+                for (poly, prefix_len) in instance_values {
+                    let coefficients = domain.lagrange_prefix_to_coeff_with_twiddles(
+                        poly.clone(),
+                        prefix_len,
+                        &pk.fft_twiddles,
+                    );
+                    #[cfg(feature = "batch")]
+                    let coset = pk
+                        .prepared_instance_coset
+                        .as_ref()
+                        .filter(|_| prefix_len == PREPARED_INSTANCE_ROWS)
+                        .map(|prepared| {
+                            prepared.evaluate(&poly[..][..prefix_len], domain, &pk.fft_twiddles)
+                        })
+                        .unwrap_or_else(|| {
+                            domain.coeff_to_extended_with_twiddles(
+                                coefficients.clone(),
+                                &pk.fft_twiddles,
+                            )
+                        });
+                    #[cfg(not(feature = "batch"))]
+                    let coset = domain
+                        .coeff_to_extended_with_twiddles(coefficients.clone(), &pk.fft_twiddles);
+
+                    prepared_values.push(poly);
+                    instance_polys.push(coefficients);
+                    instance_cosets.push(coset);
+                }
+
+                InstanceSingle::<C> {
+                    instance_values: prepared_values,
+                    instance_polys,
+                    instance_cosets,
+                }
+            })
             .collect::<Vec<_>>()
     };
-    // Consume randomness in circuit order before preparing the independent
-    // commitments and polynomial transforms in parallel.
-    let advice_witnesses = advice_values
-        .into_iter()
-        .map(|mut advice| {
-            // Add blinding factors to advice columns
-            for advice in &mut advice {
-                for cell in &mut advice[unusable_rows_start..] {
-                    *cell = C::Scalar::random(&mut rng);
+    let prepare_instance = || {
+        let instance = prepare_instance_polynomials();
+        let commitments = normalize_prover_instance_commitments(params, instances);
+        (commitments, instance)
+    };
+    let absorb_instance_commitments =
+        |instance_commitments: Vec<Vec<C>>, transcript: &mut T| -> Result<(), Error> {
+            for commitments in instance_commitments {
+                for commitment in commitments {
+                    transcript.common_point(commitment)?;
                 }
             }
+            Ok(())
+        };
+    let synthesize = |witnesses: &mut Vec<WitnessCollection<'_, C::Scalar>>| {
+        // Synthesize every circuit while allowing its floor planner to share
+        // circuit-shape-dependent work across the batch.
+        ConcreteCircuit::FloorPlanner::synthesize_batch(
+            witnesses,
+            circuits,
+            config,
+            &meta.constants,
+            pk.floor_plan.as_ref(),
+        )
+    };
 
-            // Compute commitments to advice column polynomials
-            let advice_blinds: Vec<_> = advice
-                .iter()
-                .map(|_| Blind(C::Scalar::random(&mut rng)))
-                .collect();
-            (advice, advice_blinds)
-        })
-        .collect::<Vec<_>>();
-
-    let circuit_count = advice_witnesses.len();
-    let (prepared_advice, lookup_table_plan) = crate::multicore::join(
-        || {
-            advice_witnesses
+    let prepare_advice = |witnesses: Vec<WitnessCollection<'_, C::Scalar>>, rng: &mut R| {
+        // Rational advice evaluation is independent across circuits. Keep
+        // every RNG draw below in circuit order and after successful
+        // synthesis.
+        let evaluate_in_parallel =
+            witnesses.len() > 1 && crate::multicore::current_num_threads() > 1;
+        let advice_values = if evaluate_in_parallel {
+            witnesses
                 .into_par_iter()
-                .map(|(advice, advice_blinds)| {
-                    let (advice_commitments, (advice_polys, advice_cosets)) =
-                        crate::multicore::join(
-                            || {
-                                #[cfg(feature = "multicore")]
-                                let advice_commitments_projective: Vec<_> = advice
-                                    .par_iter()
-                                    .zip(advice_blinds.par_iter())
-                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                                    .collect();
-                                #[cfg(not(feature = "multicore"))]
-                                let advice_commitments_projective: Vec<_> = advice
-                                    .iter()
-                                    .zip(advice_blinds.iter())
-                                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                                    .collect();
-                                let mut advice_commitments =
-                                    vec![C::identity(); advice_commitments_projective.len()];
-                                C::Curve::batch_normalize(
-                                    &advice_commitments_projective,
-                                    &mut advice_commitments,
-                                );
-                                advice_commitments
-                            },
-                            || {
-                                domain
-                                    .batch_lagrange_to_coeff_and_extended(&advice, &pk.fft_twiddles)
-                            },
-                        );
-
-                    (
-                        advice_commitments,
-                        AdviceSingle::<C> {
-                            advice_values: advice,
-                            advice_polys,
-                            advice_cosets,
-                            advice_blinds,
-                        },
-                    )
-                })
+                .map(|witness| witness.advice.evaluate())
                 .collect::<Vec<_>>()
-        },
-        || {
-            lookup::prover::prepare_table_plan(
-                &pk.vk.cs.lookups,
-                circuit_count,
-                unusable_rows_start,
-            )
-        },
-    );
+        } else {
+            witnesses
+                .into_iter()
+                .map(|witness| witness.advice.evaluate())
+                .collect::<Vec<_>>()
+        };
+
+        // Consume randomness in circuit order before preparing the
+        // independent commitments and polynomial transforms in parallel.
+        let advice_witnesses = advice_values
+            .into_iter()
+            .map(|mut advice| {
+                // Add blinding factors to advice columns
+                for advice in &mut advice {
+                    for cell in &mut advice[unusable_rows_start..] {
+                        *cell = C::Scalar::random(&mut *rng);
+                    }
+                }
+
+                // Compute commitments to advice column polynomials
+                let advice_blinds: Vec<_> = advice
+                    .iter()
+                    .map(|_| Blind(C::Scalar::random(&mut *rng)))
+                    .collect();
+                (advice, advice_blinds)
+            })
+            .collect::<Vec<_>>();
+
+        let circuit_count = advice_witnesses.len();
+        crate::multicore::join(
+            || {
+                advice_witnesses
+                    .into_par_iter()
+                    .map(|(advice, advice_blinds)| {
+                        let (advice_commitments, (advice_polys, advice_cosets)) =
+                            crate::multicore::join(
+                                || {
+                                    #[cfg(feature = "multicore")]
+                                    let advice_commitments_projective: Vec<_> = advice
+                                        .par_iter()
+                                        .zip(advice_blinds.par_iter())
+                                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                        .collect();
+                                    #[cfg(not(feature = "multicore"))]
+                                    let advice_commitments_projective: Vec<_> = advice
+                                        .iter()
+                                        .zip(advice_blinds.iter())
+                                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                        .collect();
+                                    let mut advice_commitments =
+                                        vec![C::identity(); advice_commitments_projective.len()];
+                                    C::Curve::batch_normalize(
+                                        &advice_commitments_projective,
+                                        &mut advice_commitments,
+                                    );
+                                    advice_commitments
+                                },
+                                || {
+                                    domain.batch_lagrange_to_coeff_and_extended(
+                                        &advice,
+                                        &pk.fft_twiddles,
+                                    )
+                                },
+                            );
+
+                        (
+                            advice_commitments,
+                            AdviceSingle::<C> {
+                                advice_values: advice,
+                                advice_polys,
+                                advice_cosets,
+                                advice_blinds,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+            || {
+                lookup::prover::prepare_table_plan(
+                    &pk.vk.cs.lookups,
+                    circuit_count,
+                    unusable_rows_start,
+                )
+            },
+        )
+    };
+
+    #[cfg(feature = "multicore")]
+    let (instance, (prepared_advice, lookup_table_plan)) =
+        if crate::multicore::current_num_threads() > 1 {
+            // Keep instance preparation stealable after synthesis so that
+            // advice preparation can enter the same worker pool immediately.
+            // The in-place body also keeps the potentially non-Send RNG on
+            // the calling thread.
+            let mut prepared_instance = (Vec::new(), Vec::new());
+            let advice_result = maybe_rayon::in_place_scope(|scope| {
+                scope.spawn(|_| {
+                    prepared_instance = prepare_instance();
+                });
+                synthesize(&mut witnesses)?;
+                Ok::<_, Error>(prepare_advice(witnesses, &mut rng))
+            });
+
+            let (instance_commitments, instance) = prepared_instance;
+            absorb_instance_commitments(instance_commitments, transcript)?;
+            (instance, advice_result?)
+        } else {
+            let (instance_commitments, instance) = prepare_instance();
+            absorb_instance_commitments(instance_commitments, transcript)?;
+            synthesize(&mut witnesses)?;
+            (instance, prepare_advice(witnesses, &mut rng))
+        };
+
+    #[cfg(not(feature = "multicore"))]
+    let (instance, (prepared_advice, lookup_table_plan)) = {
+        let (instance_commitments, instance) = prepare_instance();
+        absorb_instance_commitments(instance_commitments, transcript)?;
+        synthesize(&mut witnesses)?;
+        (instance, prepare_advice(witnesses, &mut rng))
+    };
 
     let mut advice = Vec::with_capacity(prepared_advice.len());
     for (advice_commitments, advice_single) in prepared_advice {
@@ -1895,11 +2265,16 @@ fn prepared_instance_commitments_match_generic_msm() {
 fn test_create_proof() {
     use crate::{
         circuit::SimpleFloorPlanner,
-        plonk::{keygen_pk, keygen_vk},
-        transcript::{Blake2bWrite, Challenge255},
+        plonk::{SingleVerifier, keygen_pk, keygen_vk, verify_proof},
+        transcript::{Blake2bRead, Blake2bWrite, Challenge255},
     };
     use pasta_curves::EqAffine;
-    use rand::rng;
+    use rand::{SeedableRng, rng, rngs::StdRng};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ALTERNATE_CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
+    static OPTED_IN_CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
+    const SAME_SHAPE_PROOF_SEED: u64 = 0x434f_4e46_4947_0001;
 
     #[derive(Clone, Copy)]
     struct MyCircuit;
@@ -1909,11 +2284,85 @@ fn test_create_proof() {
 
         type FloorPlanner = SimpleFloorPlanner;
 
+        const CACHE_CONFIGURATION: bool = true;
+
         fn without_witnesses(&self) -> Self {
             *self
         }
 
         fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {}
+
+        fn cache_configuration(_config: &Self::Config) -> Option<crate::plonk::CircuitConfigCache> {
+            Some(crate::plonk::CircuitConfigCache::new(()))
+        }
+
+        fn configuration_from_cache(
+            cache: &crate::plonk::CircuitConfigCache,
+        ) -> Option<Self::Config> {
+            cache.clone_config()
+        }
+
+        fn synthesize(
+            &self,
+            _config: Self::Config,
+            _layouter: impl crate::circuit::Layouter<F>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AlternateCircuit;
+
+    impl<F: Field> Circuit<F> for AlternateCircuit {
+        type Config = ();
+
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            *self
+        }
+
+        fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {
+            ALTERNATE_CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn synthesize(
+            &self,
+            _config: Self::Config,
+            _layouter: impl crate::circuit::Layouter<F>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct OptedInAlternateCircuit;
+
+    impl<F: Field> Circuit<F> for OptedInAlternateCircuit {
+        type Config = ();
+
+        type FloorPlanner = SimpleFloorPlanner;
+
+        const CACHE_CONFIGURATION: bool = true;
+
+        fn without_witnesses(&self) -> Self {
+            *self
+        }
+
+        fn configure(_meta: &mut ConstraintSystem<F>) -> Self::Config {
+            OPTED_IN_CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn cache_configuration(_config: &Self::Config) -> Option<crate::plonk::CircuitConfigCache> {
+            Some(crate::plonk::CircuitConfigCache::new(()))
+        }
+
+        fn configuration_from_cache(
+            cache: &crate::plonk::CircuitConfigCache,
+        ) -> Option<Self::Config> {
+            cache.clone_config()
+        }
 
         fn synthesize(
             &self,
@@ -1950,6 +2399,70 @@ fn test_create_proof() {
         &mut transcript,
     )
     .expect("proof generation should not fail");
+
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[MyCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("cached-configuration proof generation should not fail");
+    let cached_config_proof = transcript.finalize();
+
+    // A different circuit type with the same shape and configuration type
+    // keeps the established fallback of configuring itself at proving time.
+    // With identical randomness, both configuration paths produce the same
+    // proof.
+    ALTERNATE_CONFIGURATIONS.store(0, Ordering::Relaxed);
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[AlternateCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("same-shape proof generation should not fail");
+    let alternate_config_proof = transcript.finalize();
+    assert_eq!(ALTERNATE_CONFIGURATIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(alternate_config_proof, cached_config_proof);
+
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[AlternateCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("repeated same-shape proof generation should not fail");
+    assert_eq!(ALTERNATE_CONFIGURATIONS.load(Ordering::Relaxed), 2);
+
+    // Compatible circuit types may deliberately recognize and reuse the same
+    // cached configuration.
+    OPTED_IN_CONFIGURATIONS.store(0, Ordering::Relaxed);
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof(
+        &params,
+        &pk,
+        &[OptedInAlternateCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut transcript,
+    )
+    .expect("opted-in same-shape proof generation should not fail");
+    assert_eq!(OPTED_IN_CONFIGURATIONS.load(Ordering::Relaxed), 0);
+    assert_eq!(transcript.finalize(), cached_config_proof);
+
+    let strategy = SingleVerifier::new(&params);
+    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&alternate_config_proof[..]);
+    verify_proof(&params, pk.get_vk(), strategy, &[&[]], &mut transcript)
+        .expect("same-shape proof verification should not fail");
 }
 
 #[test]
@@ -1957,7 +2470,7 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
     use pasta_curves::Fp;
 
     let domain = poly::EvaluationDomain::new(3, 3);
-    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2]);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2], false);
 
     advice
         .assign(0, 0, Assigned::Rational(Fp::from(6), Fp::from(3)))
@@ -2032,6 +2545,296 @@ fn advice_witness_evaluates_rationals_and_reassignments() {
     assert_eq!(advice[0][7], Fp::from(7));
     assert_eq!(advice[1][1], Fp::from(3));
     assert_eq!(advice[1][4], Fp::from(11));
+}
+
+#[test]
+fn advice_witness_reuses_related_batch_denominators() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let make_advice = || {
+        let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+        advice
+            .assign_batch(0, 0, 2, |row| {
+                Ok(Assigned::Rational(
+                    Fp::from((row + 1) as u64),
+                    Fp::from((row * 2 + 3) as u64),
+                ))
+            })
+            .unwrap();
+        for column in 1..3 {
+            advice
+                .assign_batch_with_previous_denominator(column, 0, 2, |row| {
+                    let numerator = Fp::from((column * 10 + row + 1) as u64);
+                    let denominator = Fp::from((row * 2 + 3) as u64);
+                    Ok(Assigned::Rational(numerator, denominator))
+                })
+                .unwrap();
+        }
+        advice
+    };
+
+    let advice = make_advice();
+    assert_eq!(advice.related_denominator_batches.len(), 2);
+    assert_eq!(advice.denominators.len(), 2);
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(1) * Fp::from(3).invert().unwrap());
+    assert_eq!(advice[1][1], Fp::from(12) * Fp::from(5).invert().unwrap());
+    assert_eq!(advice[2][0], Fp::from(7));
+
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+    advice
+        .assign_batch(0, 0, 2, |row| {
+            Ok(Assigned::Rational(
+                Fp::from((row + 1) as u64),
+                Fp::from((row * 2 + 3) as u64),
+            ))
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(1, 0, 2, |row| {
+            Ok(Assigned::Rational(
+                Fp::from((row + 11) as u64),
+                Fp::from((row * 2 + 3) as u64),
+            ))
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator_squared(2, 0, 2, |row| {
+            let denominator_basis = Fp::from((row * 2 + 3) as u64);
+            Ok(Assigned::Rational(
+                Fp::from((row + 21) as u64),
+                denominator_basis.square(),
+            ))
+        })
+        .unwrap();
+    assert_eq!(advice.related_denominator_batches.len(), 2);
+    assert_eq!(advice.denominators.len(), 2);
+    let advice = advice.evaluate();
+    assert_eq!(advice[2][0], Fp::from(21) * Fp::from(9).invert().unwrap());
+    assert_eq!(advice[2][1], Fp::from(22) * Fp::from(25).invert().unwrap());
+
+    // Reassigning a source cell expands the related denominators and uses the
+    // original per-cell representation.
+    let mut advice = make_advice();
+    advice.assign(0, 0, Assigned::Trivial(Fp::from(9))).unwrap();
+    advice
+        .assign(1, 1, Assigned::Rational(Fp::from(14), Fp::from(7)))
+        .unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(9));
+    assert_eq!(advice[0][1], Fp::from(2) * Fp::from(5).invert().unwrap());
+    assert_eq!(advice[1][0], Fp::from(11) * Fp::from(3).invert().unwrap());
+    assert_eq!(advice[1][1], Fp::from(2));
+    assert_eq!(advice[2][0], Fp::from(7));
+    assert_eq!(advice[2][1], Fp::from(22) * Fp::from(5).invert().unwrap());
+
+    // Reassigning a related cell takes the same expansion fallback.
+    let mut advice = make_advice();
+    advice
+        .assign(2, 1, Assigned::Rational(Fp::from(18), Fp::from(9)))
+        .unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(1) * Fp::from(3).invert().unwrap());
+    assert_eq!(advice[1][1], Fp::from(12) * Fp::from(5).invert().unwrap());
+    assert_eq!(advice[2][1], Fp::from(2));
+}
+
+#[test]
+fn advice_witness_related_batch_tracks_shortened_predecessor() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+    advice
+        .assign_batch(0, 0, 3, |row| {
+            Ok(Assigned::Rational(
+                Fp::from((row + 1) as u64),
+                Fp::from((row * 2 + 3) as u64),
+            ))
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(1, 0, 1, |_| {
+            Ok(Assigned::Rational(Fp::from(6), Fp::from(3)))
+        })
+        .unwrap();
+
+    // The second denominator has no corresponding entry in the immediately
+    // preceding one-element batch, so this hint must fall back.
+    advice
+        .assign_batch_with_previous_denominator_squared(2, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(18), Fp::from(9)),
+                1 => Assigned::Rational(Fp::from(22), Fp::from(11)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+
+    assert_eq!(advice.related_denominator_batches.len(), 1);
+    assert_eq!(advice.denominators.len(), 5);
+    let advice = advice.evaluate();
+    assert_eq!(advice[1][0], Fp::from(2));
+    assert_eq!(advice[2][0], Fp::from(2));
+    assert_eq!(advice[2][1], Fp::from(2));
+}
+
+#[test]
+fn advice_witness_unrelated_removal_preserves_denominator_relations() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+    advice
+        .assign(0, 0, Assigned::Rational(Fp::from(6), Fp::from(2)))
+        .unwrap();
+    advice
+        .assign_batch(1, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(3), Fp::from(3)),
+                1 => Assigned::Rational(Fp::from(10), Fp::from(5)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(2, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(9), Fp::from(3)),
+                1 => Assigned::Rational(Fp::from(20), Fp::from(5)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+
+    advice.assign(0, 0, Assigned::Trivial(Fp::from(7))).unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(7));
+    assert_eq!(advice[1][0], Fp::from(1));
+    assert_eq!(advice[1][1], Fp::from(2));
+    assert_eq!(advice[2][0], Fp::from(3));
+    assert_eq!(advice[2][1], Fp::from(4));
+}
+
+#[test]
+fn advice_witness_source_overwrite_does_not_record_expansion_as_batch() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 3], true);
+    advice
+        .assign_batch(0, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(3), Fp::from(3)),
+                1 => Assigned::Rational(Fp::from(10), Fp::from(5)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(1, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(9), Fp::from(3)),
+                1 => Assigned::Rational(Fp::from(20), Fp::from(5)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    advice
+        .assign_batch(0, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(14), Fp::from(7)),
+                1 => Assigned::Rational(Fp::from(33), Fp::from(11)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+    assert!(advice.last_denominator_batch.is_none());
+
+    advice
+        .assign_batch_with_previous_denominator(2, 0, 2, |row| {
+            Ok(match row {
+                0 => Assigned::Rational(Fp::from(28), Fp::from(7)),
+                1 => Assigned::Rational(Fp::from(55), Fp::from(11)),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+    assert!(advice.related_denominator_batches.is_empty());
+
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(2));
+    assert_eq!(advice[0][1], Fp::from(3));
+    assert_eq!(advice[1][0], Fp::from(3));
+    assert_eq!(advice[1][1], Fp::from(4));
+    assert_eq!(advice[2][0], Fp::from(4));
+    assert_eq!(advice[2][1], Fp::from(5));
+}
+
+#[test]
+fn advice_witness_related_batch_falls_back_for_rational_target_overwrite() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2], true);
+    advice
+        .assign(1, 0, Assigned::Rational(Fp::from(35), Fp::from(7)))
+        .unwrap();
+    advice
+        .assign_batch(0, 0, 1, |_| {
+            Ok(Assigned::Rational(Fp::from(6), Fp::from(3)))
+        })
+        .unwrap();
+    advice
+        .assign_batch_with_previous_denominator(1, 0, 1, |_| {
+            Ok(Assigned::Rational(Fp::from(12), Fp::from(3)))
+        })
+        .unwrap();
+
+    assert!(advice.related_denominator_batches.is_empty());
+    let advice = advice.evaluate();
+    assert_eq!(advice[0][0], Fp::from(2));
+    assert_eq!(advice[1][0], Fp::from(4));
+}
+
+#[test]
+fn advice_witness_failed_related_batch_is_atomic() {
+    use pasta_curves::Fp;
+
+    let domain = poly::EvaluationDomain::new(3, 3);
+    let mut advice = AdviceWitness::new(vec![domain.empty_lagrange(); 2], true);
+    advice
+        .assign_batch(0, 0, 2, |row| {
+            Ok(Assigned::Rational(
+                Fp::from((row + 1) as u64),
+                Fp::from((row * 2 + 3) as u64),
+            ))
+        })
+        .unwrap();
+
+    let result = advice.assign_batch_with_previous_denominator(1, 0, 2, |row| {
+        if row == 0 {
+            Ok(Assigned::Rational(Fp::from(9), Fp::from(3)))
+        } else {
+            Err(Error::Synthesis)
+        }
+    });
+    assert!(matches!(result, Err(Error::Synthesis)));
+    assert_eq!(advice.denominator_slots[1][0], NO_DENOMINATOR);
+    assert!(advice.related_denominator_batches.is_empty());
+
+    advice
+        .assign(1, 0, Assigned::Rational(Fp::from(14), Fp::from(7)))
+        .unwrap();
+    let advice = advice.evaluate();
+    assert_eq!(advice[1][0], Fp::from(2));
 }
 
 #[cfg(feature = "multicore")]
@@ -2177,7 +2980,7 @@ fn parallel_advice_evaluation_preserves_proof_bytes() {
 }
 
 #[test]
-fn instance_preparation_preserves_proof_and_error_order() {
+fn instance_preparation_preserves_proofs_and_validates_batch_first() {
     use crate::{
         circuit::SimpleFloorPlanner,
         plonk::{keygen_pk, keygen_vk},
@@ -2327,11 +3130,10 @@ fn instance_preparation_preserves_proof_and_error_order() {
 
         let unprepared_params = Params::new(5);
         assert!(unprepared_params.prepared_instance_table().is_none());
-        let route_hits = prepared_instance_route_hits();
         let unprepared_proof = create_exact_shape_proof(&unprepared_params);
-        assert_eq!(prepared_instance_route_hits(), route_hits);
+        let route_hits = prepared_instance_route_hits();
         let prepared_proof = create_exact_shape_proof(&params);
-        assert_eq!(prepared_instance_route_hits(), route_hits + 1);
+        assert!(prepared_instance_route_hits() > route_hits);
         assert_eq!(prepared_proof, unprepared_proof);
     }
 
@@ -2358,9 +3160,6 @@ fn instance_preparation_preserves_proof_and_error_order() {
     pk.vk
         .hash_into(&mut expected)
         .expect("verification-key hashing should not fail");
-    expected
-        .common_point(commit_instance(&params, &valid).to_affine())
-        .expect("valid instance commitment should not fail");
     assert_eq!(actual_prefix, expected.squeeze_challenge().get_scalar());
 
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
@@ -2516,8 +3315,7 @@ fn instance_failures_do_not_run_synthesis_or_consume_rng() {
         rng_bytes.load(Ordering::SeqCst),
     );
 
-    // A transcript failure for an earlier instance must still precede a later
-    // oversized instance.
+    // Batch-wide instance validation precedes transcript absorption.
     let valid = [Fp::ONE];
     let valid_columns = [valid.as_slice()];
     syntheses.store(0, Ordering::SeqCst);
@@ -2535,7 +3333,7 @@ fn instance_failures_do_not_run_synthesis_or_consume_rng() {
         },
         &mut transcript,
     );
-    assert!(matches!(result, Err(Error::Transcript(_))));
+    assert!(matches!(result, Err(Error::InstanceTooLarge)));
     let transcript_effects = (
         syntheses.load(Ordering::SeqCst),
         rng_bytes.load(Ordering::SeqCst),
@@ -2581,6 +3379,7 @@ fn v1_proving_key_reuses_floor_plan() {
     use rand::{SeedableRng, rngs::StdRng};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    static CONFIGURATIONS: AtomicUsize = AtomicUsize::new(0);
     static MEASUREMENTS: AtomicUsize = AtomicUsize::new(0);
     static TABLE_ASSIGNMENTS: AtomicUsize = AtomicUsize::new(0);
     static FAIL_TABLE: AtomicBool = AtomicBool::new(false);
@@ -2599,16 +3398,29 @@ fn v1_proving_key_reuses_floor_plan() {
         type Config = MyConfig;
         type FloorPlanner = V1;
 
+        const CACHE_CONFIGURATION: bool = true;
+
         fn without_witnesses(&self) -> Self {
             MEASUREMENTS.fetch_add(1, Ordering::Relaxed);
             *self
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
+            CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
             let advice = meta.advice_column();
             let table = meta.lookup_table_column();
             meta.lookup(|meta| vec![(meta.query_advice(advice, Rotation::cur()), table)]);
             MyConfig { advice, table }
+        }
+
+        fn cache_configuration(config: &Self::Config) -> Option<crate::plonk::CircuitConfigCache> {
+            Some(crate::plonk::CircuitConfigCache::new(*config))
+        }
+
+        fn configuration_from_cache(
+            cache: &crate::plonk::CircuitConfigCache,
+        ) -> Option<Self::Config> {
+            cache.clone_config()
         }
 
         fn synthesize(
@@ -2637,13 +3449,17 @@ fn v1_proving_key_reuses_floor_plan() {
     }
 
     let params: Params<EqAffine> = Params::new(3);
+    CONFIGURATIONS.store(0, Ordering::Relaxed);
     TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     let vk = keygen_vk(&params, &MyCircuit).expect("keygen_vk should not fail");
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 1);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 1);
     let mut pk = keygen_pk(&params, vk, &MyCircuit).expect("keygen_pk should not fail");
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 2);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 2);
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
 
+    CONFIGURATIONS.store(0, Ordering::Relaxed);
     MEASUREMENTS.store(0, Ordering::Relaxed);
     TABLE_ASSIGNMENTS.store(0, Ordering::Relaxed);
     create_proof(
@@ -2656,9 +3472,11 @@ fn v1_proving_key_reuses_floor_plan() {
     )
     .expect("proof generation should not fail");
     // The plan cached in the proving key is reused, so proving re-measures
-    // nothing. The fixed table values are already part of the proving key,
-    // but each circuit's table closure still runs: its side effects and
-    // errors are observable behavior.
+    // nothing. Its circuit configuration is also reused instead of rebuilding
+    // the constraint system. The fixed table values are already part of the
+    // proving key, but each circuit's table closure still runs: its side
+    // effects and errors are observable behavior.
+    assert_eq!(CONFIGURATIONS.load(Ordering::Relaxed), 0);
     assert_eq!(MEASUREMENTS.load(Ordering::Relaxed), 0);
     assert_eq!(TABLE_ASSIGNMENTS.load(Ordering::Relaxed), 3);
     let first_proof = transcript.finalize();

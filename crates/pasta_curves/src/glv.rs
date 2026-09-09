@@ -67,9 +67,9 @@
 //!
 //! The costs split into three independently reusable pieces:
 //!
-//! - [`Table`]: per *point*. [`Table::batch`] builds many tables with one
-//!   shared batch normalization (a single field inversion for the whole
-//!   batch).
+//! - [`Table`]: per *point*. For sufficiently large inputs, [`Table::batch`]
+//!   builds many tables with a small sequence of batched affine additions,
+//!   sharing each inversion across the batch.
 //! - [`Decomposed`]: per *scalar*. Decomposition and joint digit recoding
 //!   are hoisted so one scalar can be multiplied against many tables.
 //! - [`Table::mul_decomposed`] / [`Table::mul_decomposed_batch`]: the
@@ -556,6 +556,9 @@ fn joint_digits(mut a: i128, mut b: i128) -> ([u8; MAX_JOINT_DIGITS], usize) {
 /// was 512: the cheaper inversion moved break-even to 64, and dropping
 /// `ff::BatchInverter`'s per-element zero handling moved it to 32.)
 const BATCH_AFFINE_MIN_POINTS: usize = 32;
+/// Minimum live inputs needed to amortize the table builder's five batched
+/// affine inversions over its projective builder.
+const TABLE_BATCH_AFFINE_MIN_POINTS: usize = 8;
 // This range is tuned for the k = 11 parameter generation used by Orchard.
 // Larger domains retain the point-major schedule above the measured range.
 #[cfg(feature = "multicore")]
@@ -2003,7 +2006,7 @@ pub(crate) fn try_multiexp<C: GlvParams>(
 /// endomorphism part of a digit is a lookup, not a multiplication) alongside
 /// the shared y-coordinates. 1 KiB per table.
 ///
-/// Build one with [`Table::new`], or many with one shared normalization via
+/// Build one with [`Table::new`], or many with batched affine additions via
 /// [`Table::batch`].
 #[derive(Clone, Copy, Debug)]
 pub struct Table<C: GlvParams> {
@@ -2023,10 +2026,10 @@ impl<C: GlvParams> Table<C> {
         Self::from_window(&affine)
     }
 
-    /// Builds [`Table`]s for a batch of points with one shared
-    /// batch normalization across all `8 * n` window entries — a single field
-    /// inversion for the whole batch, where building each window individually
-    /// pays one inversion per point.
+    /// Builds [`Table`]s for a batch of points. Large batches use affine
+    /// addition layers that share one inversion across their non-identity
+    /// inputs, avoiding the seven full projective additions used by
+    /// [`Table::new`]. Small batches retain the projective construction.
     ///
     /// Identity inputs produce identity tables and may be mixed with
     /// non-identity points in the same batch.
@@ -2035,14 +2038,107 @@ impl<C: GlvParams> Table<C> {
         if n == 0 {
             return Vec::new();
         }
-        let mut proj = Vec::with_capacity(n * 8);
-        for p in points {
-            proj.extend_from_slice(&Self::window_proj(p));
+        if n < TABLE_BATCH_AFFINE_MIN_POINTS {
+            return Self::batch_projective(points);
         }
-        // One inversion for the whole batch.
-        let mut affine = alloc::vec![C::AffineExt::identity(); n * 8];
-        C::batch_normalize(&proj, &mut affine);
+
+        let mut live_indices = Vec::with_capacity(n);
+        let mut live_points = Vec::with_capacity(n);
+        for (i, point) in points.iter().enumerate() {
+            if !bool::from(point.is_identity()) {
+                live_indices.push(i);
+                live_points.push(*point);
+            }
+        }
+        if live_points.is_empty() {
+            let identity_window = [C::AffineExt::identity(); 8];
+            return alloc::vec![Self::from_window(&identity_window); n];
+        }
+        if live_points.len() < TABLE_BATCH_AFFINE_MIN_POINTS {
+            return Self::batch_projective(points);
+        }
+
+        // Normalize the live inputs once, then keep the complete window chain
+        // in affine form. Identity lanes are omitted because affine chord
+        // formulas do not handle them; their output tables stay identities.
+        let identity_window = [C::AffineExt::identity(); 8];
+        let mut tables = alloc::vec![Self::from_window(&identity_window); n];
+        let mut p = alloc::vec![C::AffineExt::identity(); live_points.len()];
+        C::batch_normalize(&live_points, &mut p);
+
+        let len = p.len();
+        let phi_p: Vec<_> = p.iter().map(Self::affine_endo).collect();
+        let mut spare = alloc::vec![C::AffineExt::identity(); len];
+        let mut d1 = alloc::vec![C::AffineExt::identity(); len];
+        let mut scratch = AffineTwiddleScratch::new();
+        let mut identity_free = true;
+
+        identity_free =
+            affine_add_sub_pairs::<C>(&p, &phi_p, &mut spare, &mut d1, &mut scratch, identity_free);
+        let d1_endo: Vec<_> = d1.iter().map(Self::affine_endo).collect();
+        let mut b = alloc::vec![C::AffineExt::identity(); len];
+        identity_free = affine_add_sub_pairs::<C>(
+            &d1,
+            &d1_endo,
+            &mut spare,
+            &mut b,
+            &mut scratch,
+            identity_free,
+        );
+
+        let b_endo: Vec<_> = b.iter().map(Self::affine_endo).collect();
+        let m3: Vec<_> = b_endo.iter().map(Self::affine_endo).collect();
+        let mut t3a = alloc::vec![C::AffineExt::identity(); len];
+        let mut t3b = alloc::vec![C::AffineExt::identity(); len];
+        identity_free =
+            affine_add_sub_pairs::<C>(&phi_p, &m3, &mut t3a, &mut t3b, &mut scratch, identity_free);
+
+        let r3: Vec<_> = b_endo.iter().map(|point| -*point).collect();
+        let mut t4a = alloc::vec![C::AffineExt::identity(); len];
+        let mut t4b = alloc::vec![C::AffineExt::identity(); len];
+        identity_free =
+            affine_add_sub_pairs::<C>(&phi_p, &r3, &mut t4a, &mut t4b, &mut scratch, identity_free);
+
+        let mut t19 = alloc::vec![C::AffineExt::identity(); len];
+        affine_add_sub_pairs::<C>(
+            &phi_p,
+            &t4b,
+            &mut t19,
+            &mut spare,
+            &mut scratch,
+            identity_free,
+        );
+
+        for (lane, table_index) in live_indices.into_iter().enumerate() {
+            let window = [
+                p[lane],
+                d1[lane],
+                Self::affine_endo(&t4a[lane]),
+                -Self::affine_endo(&t3b[lane]),
+                -m3[lane],
+                -t3a[lane],
+                Self::affine_endo(&Self::affine_endo(&t4b[lane])),
+                Self::affine_endo(&Self::affine_endo(&t19[lane])),
+            ];
+            tables[table_index] = Self::from_window(&window);
+        }
+        tables
+    }
+
+    fn batch_projective(points: &[C]) -> Vec<Table<C>> {
+        let mut projective = Vec::with_capacity(points.len() * 8);
+        for point in points {
+            projective.extend_from_slice(&Self::window_proj(point));
+        }
+        let mut affine = alloc::vec![C::AffineExt::identity(); projective.len()];
+        C::batch_normalize(&projective, &mut affine);
         affine.chunks_exact(8).map(Self::from_window).collect()
+    }
+
+    #[inline(always)]
+    fn affine_endo(p: &C::AffineExt) -> C::AffineExt {
+        let (x, y) = C::affine_xy(p);
+        C::affine_unchecked(x * C::Base::ZETA, y, private::CrateToken(()))
     }
 
     /// The eight projective orbit representatives $[\Delta_i]P$, in orbit
@@ -2235,11 +2331,10 @@ impl<C: GlvParams> Table<C> {
         restore_and_normalize(xs, ys, &tables)
     }
 
-    /// The normalized same-scalar route: batched table build with one
-    /// shared normalization over all `8n` entries, then the affine ladder
-    /// (which needs no output conversion) or, off the gate, per-table
-    /// ladders plus one output normalization. Retained as the sub-gate
-    /// fallback and as the forced benchmark backend.
+    /// The normalized same-scalar route: batched affine table construction,
+    /// then the affine ladder (which needs no output conversion) or, off the
+    /// gate, per-table ladders plus one output normalization. Retained as the
+    /// sub-gate fallback and as the forced benchmark backend.
     fn mul_decomposed_same_scalar_affine_normalized(
         points: &[C],
         scalar: &Decomposed<C>,
@@ -2560,8 +2655,7 @@ fn batch_affine_ladder_raw<C: GlvParams, W: WindowCoords<C>>(
 /// $y_i^2 = x_i^3 + bz^6$, equivalently $(x_i, y_i, z)$ is the ordinary
 /// projective orbit point. Building one costs a projective doubling, an
 /// isomorphism map, seven incomplete mixed additions, and one backward
-/// ratio pass — no inversion and no shared normalization, unlike
-/// [`Table::batch`].
+/// ratio pass — no inversion, unlike [`Table::batch`].
 ///
 /// The batch-affine ladder consumes these directly; results return to the
 /// original curve through [`private::Sealed::projective_unchecked`], never
@@ -2643,9 +2737,8 @@ impl<C: GlvParams> EffectiveTable<C> {
         }
     }
 
-    /// Effective tables for a batch of points. Unlike [`Table::batch`]
-    /// there is no shared normalization to amortize — each table is built
-    /// independently, with no `8n`-point temporaries.
+    /// Effective tables for a batch of points. Unlike [`Table::batch`], each
+    /// table is built independently without batched inversions.
     fn batch(points: &[C]) -> Vec<EffectiveTable<C>> {
         points.iter().map(Self::new).collect()
     }
@@ -5037,6 +5130,20 @@ mod tests {
         assert_eq!(batched[0].mul(&k), identity);
         assert_eq!(batched[1].point(), generator);
         assert_eq!(batched[1].mul(&k), generator * k);
+
+        // Exercise the affine table builder with identity lanes on both
+        // sides of enough live inputs to cross its batching threshold.
+        let mut points = Vec::with_capacity(TABLE_BATCH_AFFINE_MIN_POINTS + 2);
+        points.push(identity);
+        points.extend(
+            (1..=TABLE_BATCH_AFFINE_MIN_POINTS).map(|i| generator * C::ScalarExt::from(i as u64)),
+        );
+        points.push(identity);
+        let batched = Table::batch(&points);
+        for (point, table) in points.iter().zip(&batched) {
+            assert_eq!(table.point(), *point);
+            assert_eq!(table.mul(&k), *point * k);
+        }
     }
 
     /// A reused [`Decomposed`] gives the same products as decomposing

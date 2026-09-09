@@ -241,18 +241,15 @@ pub fn decompose_word<F: PrimeFieldBits>(
 ) -> Vec<u8> {
     assert!(window_num_bits <= 8);
 
-    // Pad bits to multiple of window_num_bits
-    let padding = (window_num_bits - (word_num_bits % window_num_bits)) % window_num_bits;
-    let bits: Vec<bool> = word
-        .to_le_bits()
-        .into_iter()
-        .take(word_num_bits)
-        .chain(std::iter::repeat(false).take(padding))
-        .collect();
-    assert_eq!(bits.len(), word_num_bits + padding);
-
-    bits.chunks_exact(window_num_bits)
-        .map(|chunk| chunk.iter().rev().fold(0, |acc, b| (acc << 1) + (*b as u8)))
+    let bits = word.to_le_bits();
+    let num_windows = word_num_bits.div_ceil(window_num_bits);
+    (0..num_windows)
+        .map(|window| {
+            (0..window_num_bits).rev().fold(0, |acc, bit| {
+                let bit = window * window_num_bits + bit;
+                (acc << 1) + u8::from(bit < word_num_bits && bits[bit])
+            })
+        })
         .collect()
 }
 

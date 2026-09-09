@@ -404,6 +404,14 @@ impl Circuit {
 }
 
 impl Config {
+    fn cache(&self) -> plonk::CircuitConfigCache {
+        plonk::CircuitConfigCache::new(self.clone())
+    }
+
+    fn clone_from_cache(cache: &plonk::CircuitConfigCache) -> Option<Self> {
+        cache.clone_config()
+    }
+
     /// Configures the Orchard Action constraint system shared by every circuit version.
     fn configure(meta: &mut plonk::ConstraintSystem<pallas::Base>) -> Self {
         // Advice columns used in the Orchard circuit.
@@ -510,6 +518,9 @@ impl Config {
 
         // We have a lot of free space in the right-most advice columns; use one of them
         // for all of our range checks.
+        // Keep this lookup on the Sinsemilla index column: the prepared prover
+        // recognizes that shared fixed column when routing sorted 10-bit
+        // range-check inputs.
         let range_check = LookupRangeCheckConfig::configure(meta, advices[9], table_idx);
 
         // Configuration for curve point operations.
@@ -1201,6 +1212,8 @@ impl plonk::Circuit<pallas::Base> for CircuitWithPreparedMerklePath {
     type Config = Config;
     type FloorPlanner = floor_planner::V1Named;
 
+    const CACHE_CONFIGURATION: bool = true;
+
     fn without_witnesses(&self) -> Self {
         Self {
             circuit: Circuit::empty(self.circuit.circuit_version),
@@ -1210,6 +1223,14 @@ impl plonk::Circuit<pallas::Base> for CircuitWithPreparedMerklePath {
 
     fn configure(meta: &mut plonk::ConstraintSystem<pallas::Base>) -> Self::Config {
         Config::configure(meta)
+    }
+
+    fn cache_configuration(config: &Self::Config) -> Option<plonk::CircuitConfigCache> {
+        Some(config.cache())
+    }
+
+    fn configuration_from_cache(cache: &plonk::CircuitConfigCache) -> Option<Self::Config> {
+        Config::clone_from_cache(cache)
     }
 
     fn synthesize(
@@ -1229,12 +1250,22 @@ impl plonk::Circuit<pallas::Base> for Circuit {
     type Config = Config;
     type FloorPlanner = floor_planner::V1;
 
+    const CACHE_CONFIGURATION: bool = true;
+
     fn without_witnesses(&self) -> Self {
         Self::empty(self.circuit_version)
     }
 
     fn configure(meta: &mut plonk::ConstraintSystem<pallas::Base>) -> Self::Config {
         Config::configure(meta)
+    }
+
+    fn cache_configuration(config: &Self::Config) -> Option<plonk::CircuitConfigCache> {
+        Some(config.cache())
+    }
+
+    fn configuration_from_cache(cache: &plonk::CircuitConfigCache) -> Option<Self::Config> {
+        Config::clone_from_cache(cache)
     }
 
     fn synthesize(
@@ -1283,6 +1314,29 @@ impl VerifyingKey {
         self.circuit_version.supports_cross_address_restriction()
     }
 
+    /// The pinned circuit description of this verifying key: the exact text the
+    /// `round_trip_*` tests compare against `src/circuit_data/circuit_description_*`.
+    /// Stable across platforms and releases for a given circuit version.
+    pub fn pinned_description(&self) -> alloc::string::String {
+        format!("{:#?}\n", self.vk.pinned())
+    }
+
+    /// A 32-byte fingerprint of this verifying key: BLAKE2b-256 over
+    /// [`Self::pinned_description`], personalized with `Orchard-VkFprint`.
+    ///
+    /// Downstream consensus code can pin this constant and refuse to start (or to
+    /// verify) if the key it built does not match, so that a circuit change is a
+    /// deliberate hard fork rather than a silent dependency bump.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        let hash = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"Orchard-VkFprint")
+            .hash(self.pinned_description().as_bytes());
+        let mut out = [0u8; 32];
+        out.copy_from_slice(hash.as_bytes());
+        out
+    }
+
     /// Prepares this key for repeated proof verification: builds and caches
     /// a prepared fixed-base zero-check over the key's SRS, which the halo2
     /// verifier's final identity test then routes through (see
@@ -1324,19 +1378,21 @@ pub struct ProvingKey {
 }
 
 impl ProvingKey {
-    /// Builds and caches prepared fixed-base commitment tables over this
-    /// key's SRS (see
+    /// Builds and caches prepared commitment tables over this key's SRS (see
     /// [`halo2_proofs::poly::commitment::Params::prepare_commitments`]).
-    /// Long-lived provers (wallet backends, proving services) should call
-    /// this once after constructing the key: the prover's polynomial
-    /// commitments then evaluate through the preparations on pools of at
-    /// most eight effective threads, extended to ten on AArch64 macOS for
-    /// Orchard's `k = 11` SRS (measured end to end on Apple M4). Wider pools
-    /// retain their usual multiexp. One-shot provers need not prepare. With
-    /// the default multicore, no-orbits build at `k = 11`, the three large
-    /// tables account for about 25.3 MiB and took about 36 ms to build on the
-    /// benchmarked M4, amortized across proofs. With `orbits`, the two large
-    /// tables account for about 24.8 MiB and took about 34 ms. Key generation
+    /// Long-lived provers (wallet backends, proving services) should call this
+    /// once after constructing the key: the prover's polynomial commitments
+    /// then evaluate through the preparations. With the default multicore,
+    /// no-orbits build, the first four IPA rounds do as well. The preparations
+    /// apply on pools of at most eight effective threads, extended to ten on
+    /// AArch64 macOS for Orchard's `k = 11` SRS. Wider pools retain their usual
+    /// multiexp. One-shot provers need not prepare. At `k = 11`, the five
+    /// retained tables in the default multicore, no-orbits build account for
+    /// about 29.5 MiB. With `orbits`, the two large tables account for about
+    /// 24.8 MiB. With `multicore`, both backends additionally retain three
+    /// affine multiples per Lagrange suffix sum for sorted 10-bit range-check
+    /// commitments. These occupy 384 KiB; construction adds 576 KiB of
+    /// projective scratch and reaches a 960 KiB combined peak. Key generation
     /// separately caches about 640 KiB for public-instance and sparse masking
     /// commitments.
     ///
@@ -2152,6 +2208,37 @@ mod tests {
             include_str!("circuit_data/circuit_description_fixed"),
         );
         round_trip_for_version(OrchardCircuitVersion::FixedPostNu6_2, vk, 2);
+    }
+
+    /// Fingerprints of the three pinned circuit descriptions. Computed as
+    /// BLAKE2b-256(person="Orchard-VkFprint") over the fixture files; a change here
+    /// means the verifying key changed.
+    #[test]
+    fn verifying_key_fingerprints_are_pinned() {
+        let expect = |hex: &str| -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for (i, b) in out.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+            }
+            out
+        };
+        for (version, hex) in [
+            (
+                OrchardCircuitVersion::InsecurePreNu6_2,
+                "6e6df0842e34ccdf251813ce52e1db353e03b0330ccb64ce8fa1cf9b3cfef6ce",
+            ),
+            (
+                OrchardCircuitVersion::FixedPostNu6_2,
+                "1bee049ad3ff027c8d448e64b4413b3c4a483a743b5f39bcfbb6102f626591fb",
+            ),
+            (
+                OrchardCircuitVersion::PostNu6_3,
+                "3409b1d4c3e45906d283bdf402fdc61a3eb22b2ff72b25943a738d0e4558ab72",
+            ),
+        ] {
+            let vk = VerifyingKey::build(version);
+            assert_eq!(vk.fingerprint(), expect(hex), "{version:?}");
+        }
     }
 
     #[test]

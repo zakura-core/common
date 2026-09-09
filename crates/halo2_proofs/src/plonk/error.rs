@@ -15,6 +15,8 @@ pub enum Error {
     Synthesis,
     /// The provided instances do not match the circuit parameters.
     InvalidInstances,
+    /// The polynomial commitment parameters do not match the verifying key.
+    InvalidParameters,
     /// The constraint system is not satisfied.
     ConstraintSystemFailure,
     /// Out of bounds index passed to a backend
@@ -63,6 +65,12 @@ impl fmt::Display for Error {
         match self {
             Error::Synthesis => write!(f, "General synthesis error"),
             Error::InvalidInstances => write!(f, "Provided instances do not match the circuit"),
+            Error::InvalidParameters => {
+                write!(
+                    f,
+                    "Polynomial commitment parameters do not match the verifying key"
+                )
+            }
             Error::ConstraintSystemFailure => write!(f, "The constraint system is not satisfied"),
             Error::BoundsFailure => write!(f, "An out-of-bounds index was passed to the backend"),
             Error::Opening => write!(f, "Multi-opening proof was invalid"),

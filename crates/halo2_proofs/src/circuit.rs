@@ -277,6 +277,63 @@ impl<'r, F: Field> Region<'r, F> {
         )
     }
 
+    /// Assigns rational advice whose denominators equal the corresponding
+    /// denominators in the immediately preceding batch.
+    ///
+    /// This is equivalent to [`Self::assign_advice_batch`] when the hint is
+    /// correct. Proving backends may derive the denominators from the batch
+    /// relationship.
+    pub fn assign_advice_batch_with_previous_denominator<'v, V, A, AR>(
+        &'v mut self,
+        annotation: A,
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>> + 'v,
+        A: Fn(usize) -> AR + 'v,
+        AR: Into<String>,
+    {
+        self.region.assign_advice_batch_with_previous_denominator(
+            &|index| annotation(index).into(),
+            column,
+            offset,
+            len,
+            &mut to,
+        )
+    }
+
+    /// Assigns rational advice whose denominators are the squares of the
+    /// corresponding denominators in the immediately preceding batch.
+    ///
+    /// This is equivalent to [`Self::assign_advice_batch`] when the hint is
+    /// correct. Proving backends may derive the denominators from the batch
+    /// relationship.
+    pub fn assign_advice_batch_with_previous_denominator_squared<'v, V, A, AR>(
+        &'v mut self,
+        annotation: A,
+        column: Column<Advice>,
+        offset: usize,
+        len: usize,
+        mut to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnMut(usize) -> Value<Assigned<F>> + 'v,
+        A: Fn(usize) -> AR + 'v,
+        AR: Into<String>,
+    {
+        self.region
+            .assign_advice_batch_with_previous_denominator_squared(
+                &|index| annotation(index).into(),
+                column,
+                offset,
+                len,
+                &mut to,
+            )
+    }
+
     /// Assigns a constant value to the column `advice` at `offset` within this region.
     ///
     /// The constant value will be assigned to a cell within one of the fixed columns

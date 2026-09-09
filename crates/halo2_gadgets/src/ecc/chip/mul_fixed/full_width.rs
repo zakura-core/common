@@ -88,19 +88,13 @@ impl<Fixed: FixedPoints<pallas::Affine>> Config<Fixed> {
             decompose_word::<pallas::Scalar>(&scalar, SCALAR_NUM_BITS, FIXED_BASE_WINDOW_SIZE)
         });
 
-        // Transpose `Value<Vec<u8>>` into `Vec<Value<pallas::Base>>`.
-        let scalar_windows = scalar_windows
-            .map(|windows| {
-                windows
-                    .into_iter()
-                    .map(|window| pallas::Base::from(window as u64))
-            })
-            .transpose_vec(NUM_WINDOWS);
-
         // Store the scalar decomposition
         let mut windows: ArrayVec<AssignedCell<pallas::Base, pallas::Base>, NUM_WINDOWS> =
             ArrayVec::new();
-        for (idx, window) in scalar_windows.into_iter().enumerate() {
+        for idx in 0..NUM_WINDOWS {
+            let window = scalar_windows
+                .as_ref()
+                .map(|windows| pallas::Base::from(windows[idx] as u64));
             let window_cell = region.assign_advice(
                 || format!("k[{:?}]", offset + idx),
                 self.super_config.window,

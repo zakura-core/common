@@ -54,7 +54,9 @@ fn mul_by_inverse_power_of_two(
 #[cfg(all(
     feature = "aarch64-asm",
     target_arch = "aarch64",
-    target_vendor = "apple"
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
 ))]
 mod aarch64_asm;
 
