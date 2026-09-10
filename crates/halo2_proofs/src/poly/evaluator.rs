@@ -1830,12 +1830,59 @@ fn max_challenge_exponents<F: Field>(
     max_exponents
 }
 
+// The current Orchard match is a three-node product. Eight nodes also admits
+// a product with one binary operand while bounding unordered-tree backtracking
+// to constant work.
+const MAX_COMMUTATIVE_MATCH_NODES: usize = 8;
+
+fn plan_has_at_most_nodes<F: Field>(plan: &EvaluationPlan<F>, max_nodes: usize) -> bool {
+    fn visit<F: Field>(plan: &EvaluationPlan<F>, remaining: &mut usize) -> bool {
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+
+        match plan {
+            EvaluationPlan::Add(lhs, rhs) | EvaluationPlan::Mul(lhs, rhs) => {
+                visit(lhs, remaining) && visit(rhs, remaining)
+            }
+            EvaluationPlan::Square(inner) | EvaluationPlan::Scale(inner, _) => {
+                visit(inner, remaining)
+            }
+            EvaluationPlan::Horner { base, coefficients } => {
+                if coefficients.len() > *remaining {
+                    return false;
+                }
+                *remaining -= coefficients.len();
+                visit(base, remaining)
+            }
+            EvaluationPlan::Poly(_)
+            | EvaluationPlan::LinearTerm(_)
+            | EvaluationPlan::ConstantTerm(_) => true,
+            EvaluationPlan::DistributePowers { .. } => false,
+            EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
+                unreachable!("common-subexpression planning runs once")
+            }
+        }
+    }
+
+    let mut remaining = max_nodes;
+    visit(plan, &mut remaining)
+}
+
 fn same_plan<F: Field>(lhs: &EvaluationPlan<F>, rhs: &EvaluationPlan<F>) -> bool {
     match (lhs, rhs) {
-        (EvaluationPlan::Poly(lhs), EvaluationPlan::Poly(rhs)) => lhs == rhs,
         (EvaluationPlan::Add(lhs_a, lhs_b), EvaluationPlan::Add(rhs_a, rhs_b))
         | (EvaluationPlan::Mul(lhs_a, lhs_b), EvaluationPlan::Mul(rhs_a, rhs_b)) => {
-            same_plan(lhs_a, rhs_a) && same_plan(lhs_b, rhs_b)
+            // Both operations are commutative in a field, so operand order is
+            // not part of their common-subexpression identity. Preserve the
+            // unrestricted ordered comparison, but only branch into the
+            // swapped comparison for small plans.
+            (same_plan(lhs_a, rhs_a) && same_plan(lhs_b, rhs_b))
+                || (plan_has_at_most_nodes(lhs, MAX_COMMUTATIVE_MATCH_NODES)
+                    && plan_has_at_most_nodes(rhs, MAX_COMMUTATIVE_MATCH_NODES)
+                    && same_plan(lhs_a, rhs_b)
+                    && same_plan(lhs_b, rhs_a))
         }
         (EvaluationPlan::Square(lhs), EvaluationPlan::Square(rhs)) => same_plan(lhs, rhs),
         (EvaluationPlan::Scale(lhs, lhs_scalar), EvaluationPlan::Scale(rhs, rhs_scalar)) => {
@@ -1858,6 +1905,7 @@ fn same_plan<F: Field>(lhs: &EvaluationPlan<F>, rhs: &EvaluationPlan<F>) -> bool
                     .zip(rhs_coefficients.iter())
                     .all(|(lhs, rhs)| lhs == rhs)
         }
+        (EvaluationPlan::Poly(lhs), EvaluationPlan::Poly(rhs)) => lhs == rhs,
         (EvaluationPlan::LinearTerm(lhs), EvaluationPlan::LinearTerm(rhs))
         | (EvaluationPlan::ConstantTerm(lhs), EvaluationPlan::ConstantTerm(rhs)) => lhs == rhs,
         (EvaluationPlan::CacheStore { .. }, _)
@@ -1876,6 +1924,21 @@ struct PlanOccurrence<'a, F: Field> {
     fingerprint: u64,
 }
 
+#[derive(Clone, Copy)]
+struct CollectedPlanFingerprint {
+    value: u64,
+    commutative_match_nodes: Option<usize>,
+}
+
+fn capped_plan_nodes(own_nodes: usize, child_nodes: &[Option<usize>]) -> Option<usize> {
+    child_nodes
+        .iter()
+        .try_fold(own_nodes, |nodes, child_nodes| {
+            nodes.checked_add((*child_nodes)?)
+        })
+        .filter(|nodes| *nodes <= MAX_COMMUTATIVE_MATCH_NODES)
+}
+
 fn fingerprint<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
@@ -1885,31 +1948,58 @@ fn fingerprint<T: Hash>(value: &T) -> u64 {
 fn collect_plan_occurrences<'a, F: Field>(
     plan: &'a EvaluationPlan<F>,
     nodes: &mut Vec<PlanOccurrence<'a, F>>,
-) -> u64 {
+) -> CollectedPlanFingerprint {
     let index = nodes.len();
     nodes.push(PlanOccurrence {
         plan,
         end: usize::MAX,
         fingerprint: 0,
     });
-    let plan_fingerprint = match plan {
+    let collected = match plan {
         EvaluationPlan::Add(lhs, rhs) | EvaluationPlan::Mul(lhs, rhs) => {
             let lhs = collect_plan_occurrences(lhs, nodes);
             let rhs = collect_plan_occurrences(rhs, nodes);
+            let commutative_match_nodes = capped_plan_nodes(
+                1,
+                &[lhs.commutative_match_nodes, rhs.commutative_match_nodes],
+            );
+            let (mut lhs, mut rhs) = (lhs.value, rhs.value);
+            // Mirror [`same_plan`]: only small plans admit a swapped match.
+            // Larger plans retain operand order so deliberately commuted
+            // shapes do not share a fingerprint bucket without matching.
+            if commutative_match_nodes.is_some() && lhs > rhs {
+                std::mem::swap(&mut lhs, &mut rhs);
+            }
             let tag = usize::from(matches!(plan, EvaluationPlan::Mul(_, _)));
-            fingerprint(&(tag, lhs, rhs))
+            CollectedPlanFingerprint {
+                value: fingerprint(&(tag, commutative_match_nodes.is_some(), lhs, rhs)),
+                commutative_match_nodes,
+            }
         }
         EvaluationPlan::Square(inner) => {
             let inner = collect_plan_occurrences(inner, nodes);
-            fingerprint(&(2usize, inner))
+            CollectedPlanFingerprint {
+                value: fingerprint(&(2usize, inner.value)),
+                commutative_match_nodes: capped_plan_nodes(1, &[inner.commutative_match_nodes]),
+            }
         }
         EvaluationPlan::Scale(inner, scalar) => {
             let inner = collect_plan_occurrences(inner, nodes);
-            fingerprint(&(3usize, inner, scalar))
+            CollectedPlanFingerprint {
+                value: fingerprint(&(3usize, inner.value, scalar)),
+                commutative_match_nodes: capped_plan_nodes(1, &[inner.commutative_match_nodes]),
+            }
         }
         EvaluationPlan::Horner { base, coefficients } => {
             let base = collect_plan_occurrences(base, nodes);
-            fingerprint(&(4usize, base, coefficients.as_ref()))
+            CollectedPlanFingerprint {
+                value: fingerprint(&(4usize, base.value, coefficients.as_ref())),
+                commutative_match_nodes: (coefficients.len() < MAX_COMMUTATIVE_MATCH_NODES)
+                    .then(|| {
+                        capped_plan_nodes(1 + coefficients.len(), &[base.commutative_match_nodes])
+                    })
+                    .flatten(),
+            }
         }
         EvaluationPlan::DistributePowers { work, .. } => {
             for work in work {
@@ -1931,18 +2021,30 @@ fn collect_plan_occurrences<'a, F: Field>(
                 }
             }
             // Distribution plans are never themselves cache candidates.
-            fingerprint(&(5usize, index))
+            CollectedPlanFingerprint {
+                value: fingerprint(&(5usize, index)),
+                commutative_match_nodes: None,
+            }
         }
-        EvaluationPlan::Poly(leaf) => fingerprint(&(6usize, leaf)),
-        EvaluationPlan::LinearTerm(scalar) => fingerprint(&(7usize, scalar)),
-        EvaluationPlan::ConstantTerm(scalar) => fingerprint(&(8usize, scalar)),
+        EvaluationPlan::Poly(leaf) => CollectedPlanFingerprint {
+            value: fingerprint(&(6usize, leaf)),
+            commutative_match_nodes: Some(1),
+        },
+        EvaluationPlan::LinearTerm(scalar) => CollectedPlanFingerprint {
+            value: fingerprint(&(7usize, scalar)),
+            commutative_match_nodes: Some(1),
+        },
+        EvaluationPlan::ConstantTerm(scalar) => CollectedPlanFingerprint {
+            value: fingerprint(&(8usize, scalar)),
+            commutative_match_nodes: Some(1),
+        },
         EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
             unreachable!("common-subexpression planning runs once")
         }
     };
     nodes[index].end = nodes.len();
-    nodes[index].fingerprint = plan_fingerprint;
-    plan_fingerprint
+    nodes[index].fingerprint = collected.value;
+    collected
 }
 
 fn collect_factor_body_occurrences<'a, F: Field>(
@@ -7058,6 +7160,123 @@ mod tests {
     fn nested_arithmetic_and_linear_common_subexpressions_are_cached() {
         check_nested_arithmetic_and_linear_common_subexpressions_are_cached::<pallas::Base>();
         check_nested_arithmetic_and_linear_common_subexpressions_are_cached::<vesta::Base>();
+    }
+
+    fn check_commuted_common_subexpressions_are_cached<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(3, 4);
+        let mut evaluator = new_evaluator::<_, _, ExtendedLagrangeCoeff>(|| {});
+        let mut values = vec![];
+        let leaves = (0..3)
+            .map(|poly_index| {
+                let mut poly = domain.empty_extended();
+                let poly_len = poly.len();
+                for (row, value) in poly.iter_mut().enumerate() {
+                    *value = F::from((poly_index * poly_len + row + 1) as u64);
+                }
+                values.push(poly.clone());
+                evaluator.register_poly(poly)
+            })
+            .collect::<Vec<_>>();
+
+        let lhs = Ast::from(leaves[0]);
+        let rhs = Ast::from(leaves[1]);
+        let factor = Ast::from(leaves[2]);
+        let forward = (lhs.clone() + rhs.clone()) * factor.clone();
+        let commuted = factor * (rhs + lhs);
+        let ast = forward + commuted;
+
+        let (mut plan, scalars) = compile_plan(&ast);
+        assert_eq!(
+            plan.cache_common_subexpressions(LinearTermCacheBudget::default(), &scalars),
+            1
+        );
+        match plan {
+            EvaluationPlan::Add(lhs, rhs) => match (*lhs, *rhs) {
+                (
+                    EvaluationPlan::CacheStore { slot, inner },
+                    EvaluationPlan::CacheLoad { slot: loaded },
+                ) => {
+                    assert_eq!(slot, loaded);
+                    assert!(matches!(*inner, EvaluationPlan::Mul(_, _)));
+                }
+                _ => panic!("commuted expressions use one cache store and one cache load"),
+            },
+            _ => panic!("commuted expressions preserve the addition plan"),
+        }
+
+        let actual = evaluator.evaluate(&ast, &domain);
+        for (row, actual) in actual.iter().enumerate() {
+            assert_eq!(
+                *actual,
+                ((values[0][row] + values[1][row]) * values[2][row]).double()
+            );
+        }
+    }
+
+    #[test]
+    fn commuted_common_subexpressions_are_cached() {
+        check_commuted_common_subexpressions_are_cached::<pallas::Base>();
+        check_commuted_common_subexpressions_are_cached::<vesta::Base>();
+    }
+
+    #[test]
+    fn commutative_plan_matching_is_bounded_for_large_trees() {
+        type F = pallas::Base;
+        type TestAst = Ast<fn(), F, ExtendedLagrangeCoeff>;
+        const SYMMETRIC_DEPTH: usize = 12;
+
+        fn symmetric_ast(
+            depth: usize,
+            regular: AstLeaf<fn(), ExtendedLagrangeCoeff>,
+            mismatch: AstLeaf<fn(), ExtendedLagrangeCoeff>,
+            include_mismatch: bool,
+        ) -> TestAst {
+            if depth == 0 {
+                return Ast::from(if include_mismatch { mismatch } else { regular });
+            }
+            Ast::Add(
+                Arc::new(symmetric_ast(depth - 1, regular, mismatch, false)),
+                Arc::new(symmetric_ast(
+                    depth - 1,
+                    regular,
+                    mismatch,
+                    include_mismatch,
+                )),
+            )
+        }
+
+        let mut evaluator = new_virtual_evaluator::<fn(), F, ExtendedLagrangeCoeff>(|| {});
+        let regular = evaluator.register_virtual_poly();
+        let mismatch = evaluator.register_virtual_poly();
+        let factor = evaluator.register_virtual_poly();
+        let symmetric =
+            compile_plan_only(&symmetric_ast(SYMMETRIC_DEPTH, regular, mismatch, false));
+        let near_miss = compile_plan_only(&symmetric_ast(SYMMETRIC_DEPTH, regular, mismatch, true));
+        assert!(!super::plan_has_at_most_nodes(
+            &symmetric,
+            super::MAX_COMMUTATIVE_MATCH_NODES
+        ));
+        assert!(super::same_plan(&symmetric, &symmetric));
+        assert!(!super::same_plan(&symmetric, &near_miss));
+
+        let deep = (0..super::MAX_COMMUTATIVE_MATCH_NODES)
+            .fold(TestAst::from(regular), |sum, _| sum + regular);
+        let forward = compile_plan_only(&(deep.clone() * factor));
+        let commuted = compile_plan_only(&(TestAst::from(factor) * deep));
+        assert!(!super::plan_has_at_most_nodes(
+            &forward,
+            super::MAX_COMMUTATIVE_MATCH_NODES
+        ));
+        assert!(!super::same_plan(&forward, &commuted));
+
+        let forward_fingerprint = super::collect_plan_occurrences(&forward, &mut vec![]);
+        let commuted_fingerprint = super::collect_plan_occurrences(&commuted, &mut vec![]);
+        assert_eq!(forward_fingerprint.commutative_match_nodes, None);
+        assert_eq!(commuted_fingerprint.commutative_match_nodes, None);
+        assert_ne!(forward_fingerprint.value, commuted_fingerprint.value);
     }
 
     #[test]
