@@ -630,6 +630,44 @@ jobs:
       - name: Verify working directory is clean
         run: git diff --exit-code
 
+  orchard-prover-fingerprint:
+    name: orchard / Test prover fingerprint
+    needs: changes
+    if: needs.changes.outputs.orchard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
+      - name: Test the observational recorder
+        run: >-
+          cargo +stable test --locked --release --lib
+          -p zakura-halo2-proofs --features unstable-prover-fingerprint
+          plonk::prover_fingerprint::tests
+      - name: Capture complete prover executions without the verifier feature
+        env:
+          RAYON_NUM_THREADS: '1'
+        run: >-
+          cargo +stable test --locked --release --lib
+          -p zakura-orchard --features prover-fingerprint
+          circuit::prover_fingerprint::
+      - name: Test both fingerprint features together
+        env:
+          RAYON_NUM_THREADS: '1'
+        run: >-
+          cargo +stable test --locked --release --lib
+          -p zakura-orchard --features prover-fingerprint,verifier-fingerprint
+          circuit::prover_fingerprint::
+      - name: Test captures through the serial prover
+        run: >-
+          cargo +stable test --locked --release --lib
+          -p zakura-orchard --no-default-features --features std,prover-fingerprint
+          circuit::prover_fingerprint::
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
   halo2-multicore-test:
     name: halo2 / Test multicore multiexp on Linux
     needs: changes
@@ -1298,6 +1336,7 @@ jobs:
       - orchard-test
       - orchard-weighted-test
       - orchard-fingerprint-check
+      - orchard-prover-fingerprint
       - orchard-platform-smoke
       - orchard-no-std
       - pasta-test
@@ -1339,6 +1378,7 @@ jobs:
             orchard-test,
             orchard-weighted-test,
             orchard-fingerprint-check,
+            orchard-prover-fingerprint,
             orchard-platform-smoke,
             orchard-no-std,
             pasta-test,

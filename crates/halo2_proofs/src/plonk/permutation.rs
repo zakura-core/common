@@ -198,6 +198,13 @@ impl IdentityCells {
     }
 }
 
+#[cfg(feature = "unstable-prover-fingerprint")]
+impl<C: CurveAffine> ProvingKey<C> {
+    pub(super) fn record_fixture_rows(&self) {
+        super::prover_fingerprint::record_sigma(&self.permutations);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{IDENTITY_BITS_PER_BYTE, IdentityCells, SPARSE_ACTIVE_ROW_FRACTION_DENOMINATOR};

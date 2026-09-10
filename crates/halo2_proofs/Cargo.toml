@@ -72,6 +72,9 @@ test-dev-graph = [
 ]
 unstable-verifier-fingerprint = []
 
+# Capture complete selected prover executions for Rust/Lean correspondence fixtures.
+unstable-prover-fingerprint = []
+
 [[example]]
 name = "circuit-layout"
 required-features = ["test-dev-graph"]
