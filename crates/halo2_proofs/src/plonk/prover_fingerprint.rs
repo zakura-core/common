@@ -25,7 +25,7 @@ use rand_core::{Rng, TryRng};
 use crate::{
     arithmetic::{Coordinates, CurveAffine},
     poly::{LagrangeCoeff, Polynomial, commitment::Params},
-    transcript::{Blake2bWrite, EncodedChallenge, Transcript, TranscriptWrite},
+    transcript::{Blake2bWrite, ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite},
 };
 
 /// Format identifier, including its version.
@@ -317,6 +317,21 @@ impl<C: CurveAffine, E: EncodedChallenge<C>, T: Transcript<C, E>> Transcript<C, 
         challenge
     }
 
+    fn squeeze_challenge_scalar<Challenge>(&mut self) -> ChallengeScalar<C, Challenge> {
+        // Preserve any typed-challenge override on the original transcript.
+        let challenge = self
+            .inner
+            .as_mut()
+            .expect("transcript is live")
+            .squeeze_challenge_scalar::<Challenge>();
+        if active() {
+            let mut out = Vec::new();
+            field(&mut out, &*challenge);
+            emit(Tag::Challenge, &out, false);
+        }
+        challenge
+    }
+
     fn common_point(&mut self, value: C) -> std::io::Result<()> {
         let result = self
             .inner
@@ -416,6 +431,31 @@ mod tests {
 
     type TestTranscript = Blake2bWrite<Vec<u8>, EqAffine, Challenge255<EqAffine>>;
 
+    /// A custom transcript that domain-separates typed challenge requests.
+    struct TypedChallengeTranscript {
+        inner: TestTranscript,
+        domain_separator: Fp,
+    }
+
+    impl Transcript<EqAffine, Challenge255<EqAffine>> for TypedChallengeTranscript {
+        fn squeeze_challenge(&mut self) -> Challenge255<EqAffine> {
+            self.inner.squeeze_challenge()
+        }
+
+        fn squeeze_challenge_scalar<T>(&mut self) -> ChallengeScalar<EqAffine, T> {
+            self.inner.common_scalar(self.domain_separator).unwrap();
+            self.inner.squeeze_challenge_scalar()
+        }
+
+        fn common_point(&mut self, point: EqAffine) -> std::io::Result<()> {
+            self.inner.common_point(point)
+        }
+
+        fn common_scalar(&mut self, scalar: Fp) -> std::io::Result<()> {
+            self.inner.common_scalar(scalar)
+        }
+    }
+
     fn records(bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
         assert_eq!(&bytes[..HEADER.len()], HEADER);
         let mut bytes = &bytes[HEADER.len()..];
@@ -497,6 +537,34 @@ mod tests {
             prop_assert_eq!(&captured[1].1, &expected_point);
             prop_assert_eq!(&captured[2].1, &expected_scalar);
             prop_assert_eq!(&captured[3].1, &expected_point);
+        }
+
+        #[test]
+        fn typed_challenge_overrides_are_preserved(domain_separator: u64) {
+            for recording in [false, true] {
+                let capture = recording.then(ProverCapture::start);
+                let make_transcript = || TypedChallengeTranscript {
+                    inner: TestTranscript::init(Vec::new()),
+                    domain_separator: Fp::from(domain_separator),
+                };
+                let mut original = make_transcript();
+                let mut wrapped = RecordingTranscript::new(make_transcript());
+
+                let typed = *original.squeeze_challenge_scalar::<()>();
+                prop_assert_eq!(*wrapped.squeeze_challenge_scalar::<()>(), typed);
+                // A subsequent squeeze also observes any state changes in the override.
+                let encoded = original.squeeze_challenge().get_scalar();
+                prop_assert_eq!(wrapped.squeeze_challenge().get_scalar(), encoded);
+
+                if let Some(capture) = capture {
+                    emit(Tag::Success, &[], true);
+                    prop_assert_eq!(records(&capture.finish()), vec![
+                        (Tag::Challenge as u8, typed.to_repr().to_vec()),
+                        (Tag::Challenge as u8, encoded.to_repr().to_vec()),
+                        (Tag::Success as u8, Vec::new()),
+                    ]);
+                }
+            }
         }
     }
 
