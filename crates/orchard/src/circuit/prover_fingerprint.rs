@@ -4,14 +4,14 @@
 //! execution before exporting. The capture is a finite execution anchor, not a
 //! proof of Rust/Lean equivalence or of a private randomness distribution.
 //!
-//! Export one or two Actions using `ORCHARD_LEAN_SINGLE_PROVER_OUT` or
+//! Export Lean source for one or two Actions using `ORCHARD_LEAN_SINGLE_PROVER_OUT` or
 //! `ORCHARD_LEAN_MULTI_PROVER_OUT` and the corresponding exact test name:
 //! `cargo test --release -p zakura-orchard --features prover-fingerprint --lib
 //! circuit::prover_fingerprint::prover_capture -- --exact` (append `_two_actions`
 //! to the test name for two Actions). Use `RAYON_NUM_THREADS=1` for the pinned
 //! deterministic fixture profile. Neither command requires `verifier-fingerprint`.
 
-use halo2_proofs::plonk::prover_fingerprint::ProverCapture;
+use halo2_proofs::plonk::prover_fingerprint::{ProverCapture, dump_vesta_lean_prover_fixture};
 
 use super::{
     OrchardCircuitVersion,
@@ -23,7 +23,7 @@ const SINGLE_SEED: u8 = 0x53;
 /// Existing verifier fixture's public two-Action seed (ASCII `M`).
 const MULTI_SEED: u8 = 0x4d;
 
-fn capture_fixture(seed: u8, actions: u8, output_var: &str) {
+fn capture_fixture(seed: u8, actions: u8, output_var: &str, namespace: &str) {
     let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
     let pk = keys.proving_key();
     let vk = keys.verifying_key();
@@ -41,19 +41,32 @@ fn capture_fixture(seed: u8, actions: u8, output_var: &str) {
     );
     assert_eq!(rng.get_word_pos(), baseline_rng.get_word_pos());
 
+    let fixture =
+        dump_vesta_lean_prover_fixture(namespace, &bytes, &bundle.authorization().proof().0)
+            .expect("the complete successful capture exports to Lean");
     if let Some(path) = std::env::var_os(output_var) {
-        std::fs::write(path, bytes).expect("the requested fixture output is writable");
+        std::fs::write(path, fixture).expect("the requested fixture output is writable");
     }
 }
 
 /// Export one complete real prover call with `ORCHARD_LEAN_SINGLE_PROVER_OUT`.
 #[test]
 fn prover_capture() {
-    capture_fixture(SINGLE_SEED, 1, "ORCHARD_LEAN_SINGLE_PROVER_OUT");
+    capture_fixture(
+        SINGLE_SEED,
+        1,
+        "ORCHARD_LEAN_SINGLE_PROVER_OUT",
+        "Zcash.Snark.Fixtures.Prover.SingleAction",
+    );
 }
 
 /// Export a complete two-Action call with `ORCHARD_LEAN_MULTI_PROVER_OUT`.
 #[test]
 fn prover_capture_two_actions() {
-    capture_fixture(MULTI_SEED, 2, "ORCHARD_LEAN_MULTI_PROVER_OUT");
+    capture_fixture(
+        MULTI_SEED,
+        2,
+        "ORCHARD_LEAN_MULTI_PROVER_OUT",
+        "Zcash.Snark.Fixtures.Prover.MultiAction",
+    );
 }

@@ -28,6 +28,9 @@ use crate::{
     transcript::{Blake2bWrite, ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite},
 };
 
+mod vesta_lean;
+pub use vesta_lean::dump_vesta_lean_prover_fixture;
+
 /// Format identifier, including its version.
 const HEADER: &[u8; 8] = b"IZKCAP01";
 /// Both Pasta fields have canonical 256-bit encodings.
