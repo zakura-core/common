@@ -1623,6 +1623,104 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "multicore")]
+    #[test]
+    #[ignore = "manual benchmark for the first IPA round's zero halves"]
+    fn benchmark_zero_half_pair() {
+        fn run<C: GlvParams>() {
+            const HALF: usize = 1 << 10;
+            const WARMUPS: usize = 20;
+            const SAMPLES: usize = 256;
+
+            let generator = C::generator();
+            let projective = super::super::testutil::scalars::<C::ScalarExt>((2 * HALF) as u64)
+                .map(|scalar| generator * scalar)
+                .collect::<Vec<_>>();
+            let mut bases = vec![C::AffineExt::identity(); 2 * HALF];
+            C::batch_normalize(&projective, &mut bases);
+            let prepared =
+                PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(7));
+            assert!(prepared.merges.is_empty());
+
+            let scalars = super::super::testutil::scalars::<C::ScalarExt>((2 * HALF) as u64)
+                .collect::<Vec<_>>();
+            let (lower, upper) = scalars.split_at(HALF);
+            let zeroes = vec![C::ScalarExt::ZERO; HALF];
+
+            let full_width = || {
+                maybe_rayon::join(
+                    || {
+                        prepared.multiexp_with_scalar_at(
+                            2 * HALF,
+                            |index| {
+                                if index < HALF {
+                                    &lower[index]
+                                } else {
+                                    &zeroes[index - HALF]
+                                }
+                            },
+                            &[],
+                            MainWindowFold::Horner,
+                        )
+                    },
+                    || {
+                        prepared.multiexp_with_scalar_at(
+                            2 * HALF,
+                            |index| {
+                                if index < HALF {
+                                    &zeroes[index]
+                                } else {
+                                    &upper[index - HALF]
+                                }
+                            },
+                            &[],
+                            MainWindowFold::Horner,
+                        )
+                    },
+                )
+            };
+            let half_width = || {
+                maybe_rayon::join(
+                    || prepared.multiexp_with_scalar_slices(lower, &zeroes, &[]),
+                    || prepared.multiexp_with_scalar_slices(&zeroes, upper, &[]),
+                )
+            };
+
+            assert_eq!(full_width(), half_width());
+            for sample in 0..(WARMUPS + SAMPLES) {
+                let control_first = sample % 2 == 0;
+                let start = std::time::Instant::now();
+                let first = if control_first {
+                    full_width()
+                } else {
+                    half_width()
+                };
+                let first_ns = start.elapsed().as_nanos();
+                let start = std::time::Instant::now();
+                let second = if control_first {
+                    half_width()
+                } else {
+                    full_width()
+                };
+                let second_ns = start.elapsed().as_nanos();
+                std::hint::black_box((first, second));
+                if sample >= WARMUPS {
+                    let (control_ns, candidate_ns) = if control_first {
+                        (first_ns, second_ns)
+                    } else {
+                        (second_ns, first_ns)
+                    };
+                    println!(
+                        "ZERO_HALF_PAIR,{},{control_ns},{candidate_ns}",
+                        sample - WARMUPS,
+                    );
+                }
+            }
+        }
+
+        run::<pallas::Point>();
+    }
+
     /// Canonical 10-bit range-check values bypass decomposition; out-of-range
     /// values and non-target shapes decline to the ordinary exact evaluator.
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
