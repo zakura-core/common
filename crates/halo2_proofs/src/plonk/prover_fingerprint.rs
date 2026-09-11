@@ -67,7 +67,9 @@ thread_local! {
 }
 
 fn active() -> bool {
-    CURRENT.with(|slot| slot.borrow().strong_count() != 0)
+    CURRENT
+        .try_with(|slot| slot.borrow().strong_count() != 0)
+        .unwrap_or(false)
 }
 
 fn append(capture: &mut Capture, tag: Tag, payload: &[u8], terminal: bool) {
@@ -86,7 +88,8 @@ fn append(capture: &mut Capture, tag: Tag, payload: &[u8], terminal: bool) {
 }
 
 fn emit(tag: Tag, payload: &[u8], terminal: bool) {
-    CURRENT.with(|slot| {
+    // Another thread-local destructor can still use a wrapper after CURRENT is gone.
+    let _ = CURRENT.try_with(|slot| {
         if let Some(capture) = slot.borrow().upgrade() {
             append(&mut capture.borrow_mut(), tag, payload, terminal);
         }
@@ -611,6 +614,60 @@ mod tests {
             vec![(Tag::Error as u8, b"Opening".to_vec())]
         );
         assert!(!active());
+    }
+
+    #[test]
+    fn inactive_wrappers_survive_thread_local_destruction() {
+        struct OnDrop(std::sync::mpsc::Sender<std::thread::Result<()>>);
+
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                // Catch failures here so a destructor panic does not abort the test process.
+                let result = std::panic::catch_unwind(|| {
+                    let mut original = StdRng::seed_from_u64(0);
+                    let mut wrapped = RecordingRng::new(StdRng::seed_from_u64(0));
+                    assert_eq!(wrapped.next_u32(), original.next_u32());
+                    assert_eq!(wrapped.next_u64(), original.next_u64());
+                    let mut expected = [0; 13];
+                    let mut actual = [0; 13];
+                    original.fill_bytes(&mut expected);
+                    wrapped.fill_bytes(&mut actual);
+                    assert_eq!(actual, expected);
+
+                    assert!(!active());
+                    let mut original = TestTranscript::init(Vec::new());
+                    let mut wrapped = RecordingTranscript::new(TestTranscript::init(Vec::new()));
+                    let scalar = Fp::from(7);
+                    original.common_scalar(scalar).unwrap();
+                    wrapped.common_scalar(scalar).unwrap();
+                    original.write_scalar(scalar).unwrap();
+                    wrapped.write_scalar(scalar).unwrap();
+                    assert_eq!(
+                        original.squeeze_challenge().get_scalar(),
+                        wrapped.squeeze_challenge().get_scalar()
+                    );
+                    assert_eq!(original.finalize(), wrapped.finalize());
+                });
+                let _ = self.0.send(result);
+            }
+        }
+
+        thread_local! {
+            static ON_DROP: RefCell<Option<OnDrop>> = const { RefCell::new(None) };
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            ON_DROP.with(|slot| *slot.borrow_mut() = Some(OnDrop(sender)));
+            // Initialize the recorder second so its TLS is destroyed before ON_DROP.
+            assert!(!active());
+        })
+        .join()
+        .unwrap();
+        assert!(
+            receiver.recv().unwrap().is_ok(),
+            "inactive wrappers must preserve operations during thread-local destruction"
+        );
     }
 
     #[test]
