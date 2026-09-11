@@ -1788,19 +1788,20 @@ impl<F: Field> EvaluationPlan<F> {
                 Box::new(Self::compile(lhs, scalars)),
                 Box::new(Self::compile(rhs, scalars)),
             ),
-            Ast::Mul(AstMul(lhs, rhs))
+            Ast::Mul(AstMul(lhs, rhs)) => {
                 if let (Ast::ConstantTerm(lhs), Ast::ConstantTerm(rhs)) =
-                    (lhs.as_ref(), rhs.as_ref()) =>
-            {
-                Self::ConstantTerm(scalars.intern(PlanScalar::Literal(*lhs * rhs)))
+                    (lhs.as_ref(), rhs.as_ref())
+                {
+                    Self::ConstantTerm(scalars.intern(PlanScalar::Literal(*lhs * rhs)))
+                } else if same_ast(lhs, rhs) {
+                    Self::Square(Box::new(Self::compile(lhs, scalars)))
+                } else {
+                    Self::Mul(
+                        Box::new(Self::compile(lhs, scalars)),
+                        Box::new(Self::compile(rhs, scalars)),
+                    )
+                }
             }
-            Ast::Mul(AstMul(lhs, rhs)) if same_ast(lhs, rhs) => {
-                Self::Square(Box::new(Self::compile(lhs, scalars)))
-            }
-            Ast::Mul(AstMul(lhs, rhs)) => Self::Mul(
-                Box::new(Self::compile(lhs, scalars)),
-                Box::new(Self::compile(rhs, scalars)),
-            ),
             Ast::Scale(inner, scalar) => Self::Scale(
                 Box::new(Self::compile(inner, scalars)),
                 scalars.intern(PlanScalar::Literal(*scalar)),
