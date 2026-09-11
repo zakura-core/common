@@ -85,6 +85,7 @@ unstable-voting-circuits = ["dep:visibility"]
 verifier-fingerprint = ["circuit", "halo2_proofs/unstable-verifier-fingerprint"]
 # Capture the prover's private tape and complete transcript for formal-model fixtures.
 prover-fingerprint = ["circuit", "halo2_proofs/unstable-prover-fingerprint"]
+circuit-fixtures = ["circuit", "halo2_proofs/unstable-circuit-fixtures"]
 weighted-merkle = []
 
 [[example]]

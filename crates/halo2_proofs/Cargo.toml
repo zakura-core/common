@@ -75,6 +75,9 @@ unstable-verifier-fingerprint = []
 # Capture complete selected prover executions for Rust/Lean correspondence fixtures.
 unstable-prover-fingerprint = []
 
+# Capture-only circuit and key-generation layout exporters.
+unstable-circuit-fixtures = []
+
 [[example]]
 name = "circuit-layout"
 required-features = ["test-dev-graph"]
