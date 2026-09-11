@@ -410,9 +410,32 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         {
             let num_threads = current_num_threads();
             if let Some(recoded) = self.try_recode_u10_prefix(prefix, suffix, num_threads)
-                && let Some(sum) = self.evaluate(&recoded, &[], num_threads, main_window_fold)
+                && let Some(sum) = self.evaluate(&recoded, 0, &[], num_threads, main_window_fold)
             {
                 return sum;
+            }
+        }
+        // The first IPA round pairs one scalar half with one SRS half in
+        // each of two concurrent MSMs. Avoid recoding, transposing, and
+        // staging the explicit zero half when either split slice is zero.
+        if !prefix.is_empty() && prefix.len() == suffix.len() {
+            if suffix.iter().all(|scalar| scalar.is_zero_vartime()) {
+                return self.multiexp_with_scalar_range_at(
+                    0,
+                    prefix.len(),
+                    |index| &prefix[index],
+                    extra,
+                    main_window_fold,
+                );
+            }
+            if prefix.iter().all(|scalar| scalar.is_zero_vartime()) {
+                return self.multiexp_with_scalar_range_at(
+                    prefix.len(),
+                    suffix.len(),
+                    |index| &suffix[index],
+                    extra,
+                    main_window_fold,
+                );
             }
         }
         if suffix.is_empty() {
@@ -505,6 +528,25 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         extra: &[(C::ScalarExt, C::AffineExt)],
         main_window_fold: MainWindowFold,
     ) -> C {
+        self.multiexp_with_scalar_range_at(0, terms, scalar_at, extra, main_window_fold)
+    }
+
+    /// Evaluates scalars paired with one contiguous prepared-base range.
+    fn multiexp_with_scalar_range_at<'a>(
+        &self,
+        base_offset: usize,
+        terms: usize,
+        scalar_at: impl Fn(usize) -> &'a C::ScalarExt + Sync,
+        extra: &[(C::ScalarExt, C::AffineExt)],
+        main_window_fold: MainWindowFold,
+    ) -> C {
+        let range_end = base_offset
+            .checked_add(terms)
+            .expect("prepared base range overflow");
+        assert!(
+            range_end <= self.live.len(),
+            "prepared base range in bounds"
+        );
         let num_threads = current_num_threads();
 
         // Dead rows (identity bases, merge sources) contribute nothing;
@@ -514,7 +556,8 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         // whole check degrades to the exact naive evaluation, matching
         // `try_multiexp`'s posture toward the same guard.
         let decompose_checked = |index: usize| {
-            if !self.live[index] {
+            let prepared_index = base_offset + index;
+            if !self.live[prepared_index] {
                 let zero = SignedMagnitude {
                     negative: false,
                     magnitude: 0,
@@ -537,7 +580,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let Some(recoded) =
             codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
         else {
-            return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
+            return self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra);
         };
         // Extras with zero scalars or identity points contribute nothing.
         let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
@@ -547,13 +590,19 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             })
             .copied()
             .collect();
-        match self.evaluate(&recoded, &extras, num_threads, main_window_fold) {
+        match self.evaluate(
+            &recoded,
+            base_offset,
+            &extras,
+            num_threads,
+            main_window_fold,
+        ) {
             Some(sum) => sum,
             // Unreachable for valid curve points (the batched-affine
             // reduction's inversions cannot actually hit zero), but never
             // trust that with the result's correctness: fall back to a
             // naive exact evaluation.
-            None => self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra),
+            None => self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra),
         }
     }
 
@@ -621,6 +670,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     fn evaluate(
         &self,
         recoded: &Recoded,
+        base_offset: usize,
         extras: &[(C::ScalarExt, C::AffineExt)],
         num_threads: usize,
         main_window_fold: MainWindowFold,
@@ -642,16 +692,16 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                     || match main_window_fold {
                         MainWindowFold::Paired => {
                             super::paired_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum(recoded, window)
+                                self.window_sum(recoded, base_offset, window)
                             })
                         }
                         MainWindowFold::Horner => {
                             super::parallel_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum(recoded, window)
+                                self.window_sum(recoded, base_offset, window)
                             })
                         }
                     },
-                    || self.tail_sum(&recoded.residuals, num_threads),
+                    || self.tail_sum_range(&recoded.residuals, base_offset, num_threads),
                 )
             };
             let (extras_part, (windows_part, tail)) = if extras.is_empty() {
@@ -669,7 +719,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             return Some(windows_part + tail + extras_part?);
         }
 
-        let mut acc = self.tail_sum(&recoded.residuals, num_threads)?;
+        let mut acc = self.tail_sum_range(&recoded.residuals, base_offset, num_threads)?;
         if !bool::from(acc.is_identity()) {
             for _ in 0..window_bits * (main_windows - active) {
                 acc = acc.double();
@@ -679,7 +729,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             for _ in 0..window_bits {
                 acc = acc.double();
             }
-            acc += self.window_sum(recoded, window)?;
+            acc += self.window_sum(recoded, base_offset, window)?;
         }
         Some(acc + self.extras_sum(extras)?)
     }
@@ -687,10 +737,10 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// One main window: stage the unit-rotated prepared points by bucket,
     /// reduce each bucket batch-affine, and run the static coefficient
     /// program over the bucket sums.
-    fn window_sum(&self, recoded: &Recoded, window: usize) -> Option<C> {
-        let (points, offsets) = self.stage_window(recoded, window);
+    fn window_sum(&self, recoded: &Recoded, base_offset: usize, window: usize) -> Option<C> {
+        let (points, offsets) = self.stage_window(recoded, base_offset, window);
         let buckets = reduce_affine_buckets_in_place(points, offsets).or_else(|| {
-            let (points, offsets) = self.stage_window(recoded, window);
+            let (points, offsets) = self.stage_window(recoded, base_offset, window);
             reduce_affine_buckets(points, offsets)
         })?;
         integrate_coefficients::<C>(self.codebook.program(), &buckets)
@@ -703,6 +753,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     fn stage_window(
         &self,
         recoded: &Recoded,
+        base_offset: usize,
         window: usize,
     ) -> (Vec<AffinePoint<C::Base>>, Vec<usize>) {
         let terms = recoded.terms;
@@ -729,7 +780,8 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 continue;
             }
             let (bucket, variant, unit) = unpack_code(code);
-            let (x, y) = unit_coords(self.table.get(variant, base), unit);
+            let prepared_base = base_offset + base;
+            let (x, y) = unit_coords(self.table.get(variant, prepared_base), unit);
             let position = positions[bucket];
             points[position] = AffinePoint { x, y };
             positions[bucket] = position + 1;
@@ -741,13 +793,25 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// The tail MSM $T = \sum_i \[\tau_i\] P_i$ over the (tiny) residuals,
     /// via the unprepared orbit machinery at the width fixed at
     /// preparation.
+    #[cfg(test)]
     fn tail_sum(
         &self,
         residuals: &[(SignedMagnitude, SignedMagnitude)],
         num_threads: usize,
     ) -> Option<C> {
+        self.tail_sum_range(residuals, 0, num_threads)
+    }
+
+    fn tail_sum_range(
+        &self,
+        residuals: &[(SignedMagnitude, SignedMagnitude)],
+        base_offset: usize,
+        num_threads: usize,
+    ) -> Option<C> {
         let params = &self.tail_params[self.tail_width];
-        tail_multiexp::<C>(params, residuals, &self.tail_bases, num_threads)
+        let range_end = base_offset.checked_add(residuals.len())?;
+        let bases = self.tail_bases.get(base_offset..range_end)?;
+        tail_multiexp::<C>(params, residuals, bases, num_threads)
     }
 
     /// $E = \sum_j \[s_j\] Q_j$ over the per-check extra terms (already
@@ -807,19 +871,38 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     }
 
     /// Exact fallback evaluation (never taken in practice; see the caller).
+    #[cfg(test)]
     fn naive_multiexp_with_scalar_at<'a>(
         &self,
         terms: usize,
         scalar_at: &(impl Fn(usize) -> &'a C::ScalarExt + Sync),
         extra: &[(C::ScalarExt, C::AffineExt)],
     ) -> C {
+        self.naive_multiexp_with_scalar_range_at(0, terms, scalar_at, extra)
+    }
+
+    fn naive_multiexp_with_scalar_range_at<'a>(
+        &self,
+        base_offset: usize,
+        terms: usize,
+        scalar_at: &(impl Fn(usize) -> &'a C::ScalarExt + Sync),
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        let range_end = base_offset
+            .checked_add(terms)
+            .expect("prepared base range overflow");
+        assert!(
+            range_end <= self.live.len(),
+            "prepared base range in bounds"
+        );
         let mut acc = C::identity();
         for index in 0..terms {
+            let prepared_index = base_offset + index;
             let scalar = scalar_at(index);
-            if !self.live[index] || bool::from(scalar.is_zero()) {
+            if !self.live[prepared_index] || bool::from(scalar.is_zero()) {
                 continue;
             }
-            let base = &self.tail_bases[index];
+            let base = &self.tail_bases[prepared_index];
             let point = C::from(C::affine_unchecked(
                 base.xs[0],
                 base.y,
@@ -1508,6 +1591,38 @@ mod tests {
         );
     }
 
+    /// An all-zero half evaluates only the matching contiguous base range.
+    fn zero_half_slices_match_full_msm<C: GlvParams>() {
+        const HALF: usize = 64;
+
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>((2 * HALF) as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut bases = vec![C::AffineExt::identity(); 2 * HALF];
+        C::batch_normalize(&projective, &mut bases);
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(6));
+        assert!(prepared.merges.is_empty());
+
+        let mut scalars =
+            super::super::testutil::scalars::<C::ScalarExt>(HALF as u64).collect::<Vec<_>>();
+        scalars[HALF / 2] = C::ScalarExt::ZERO;
+        let zeroes = vec![C::ScalarExt::ZERO; HALF];
+        let extra = (C::ScalarExt::from(41), generator.to_affine());
+
+        for (prefix, suffix) in [(&scalars[..], &zeroes[..]), (&zeroes[..], &scalars[..])] {
+            let mut full = Vec::with_capacity(2 * HALF);
+            full.extend_from_slice(prefix);
+            full.extend_from_slice(suffix);
+            let expected =
+                prepared.naive_multiexp_with_scalar_at(2 * HALF, &|index| &full[index], &[extra]);
+            assert_eq!(
+                prepared.multiexp_with_scalar_slices(prefix, suffix, &[extra]),
+                expected,
+            );
+        }
+    }
+
     /// Canonical 10-bit range-check values bypass decomposition; out-of-range
     /// values and non-target shapes decline to the ordinary exact evaluator.
     #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -1925,6 +2040,10 @@ mod tests {
                 fn generic_agreement() {
                     matches_generic_msm::<$curve>();
                 }
+                #[test]
+                fn zero_half_slices() {
+                    zero_half_slices_match_full_msm::<$curve>();
+                }
                 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
                 #[test]
                 fn u10_prefix_slices() {
@@ -2036,7 +2155,7 @@ mod tests {
                     lap(&mut phases[1]); // recode
                     let mut window_sums = Vec::with_capacity(recoded.active_windows);
                     for window in 0..recoded.active_windows {
-                        let (points, offsets) = prepared.stage_window(&recoded, window);
+                        let (points, offsets) = prepared.stage_window(&recoded, 0, window);
                         lap(&mut phases[2]); // stage (fetch + placement)
                         let buckets = reduce_affine_buckets(points, offsets).expect("valid points");
                         lap(&mut phases[3]); // batched-affine reduction
@@ -2173,7 +2292,7 @@ mod tests {
                             .into_par_iter()
                             .map(|window| {
                                 let mark = Instant::now();
-                                let (points, offsets) = prepared.stage_window(&recoded, window);
+                                let (points, offsets) = prepared.stage_window(&recoded, 0, window);
                                 stage_ns
                                     .fetch_add(mark.elapsed().as_nanos() as u64, Ordering::Relaxed);
                                 let mark = Instant::now();
