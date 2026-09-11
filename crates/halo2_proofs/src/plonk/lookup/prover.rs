@@ -1350,6 +1350,21 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         gamma: ChallengeGamma<C>,
         blinding: ProductBlinding<C::Scalar>,
     ) -> PreparedProduct<C, Ev> {
+        let Permuted {
+            mut compressed_input_expression,
+            permuted_input_expression,
+            compressed_input_coset,
+            permuted_input_coset,
+            permuted_input_blind,
+            compressed_table_expression,
+            compressed_table_coset,
+            permuted_table_expression,
+            permuted_table_coset,
+            permuted_table_blind,
+        } = self;
+        #[cfg(feature = "sanity-checks")]
+        let original_compressed_input = compressed_input_expression.clone();
+
         let blinding_factors = pk.vk.cs.blinding_factors();
         assert_eq!(blinding.rows.len(), blinding_factors);
         // Goal is to compute the products of fractions
@@ -1369,8 +1384,8 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         parallelize(&mut denominators[..fraction_rows], |denominators, start| {
             for ((denominator, permuted_input_value), permuted_table_value) in denominators
                 .iter_mut()
-                .zip(self.permuted_input_expression[start..].iter())
-                .zip(self.permuted_table_expression[start..].iter())
+                .zip(permuted_input_expression[start..].iter())
+                .zip(permuted_table_expression[start..].iter())
             {
                 *denominator = (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
             }
@@ -1379,17 +1394,23 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         // Compute the numerators for the lookup product polynomial.
         // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
         // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
-        let mut numerators = vec![C::Scalar::ZERO; params.n as usize];
-        parallelize(&mut numerators[..fraction_rows], |numerators, start| {
-            for ((numerator, &input_term), &table_term) in numerators
-                .iter_mut()
-                .zip(self.compressed_input_expression[start..].iter())
-                .zip(self.compressed_table_expression[start..].iter())
-            {
-                *numerator = (input_term + &*beta) * &(table_term + &*gamma);
-            }
-        });
-
+        // The compressed input is not used after this point. Overwrite its
+        // uniquely-owned buffer instead of allocating a second domain-sized
+        // vector for the numerators.
+        {
+            let numerator_values: &mut [C::Scalar] = &mut compressed_input_expression;
+            parallelize(
+                &mut numerator_values[..fraction_rows],
+                |numerators, start| {
+                    for (numerator, &table_term) in numerators
+                        .iter_mut()
+                        .zip(compressed_table_expression[start..].iter())
+                    {
+                        *numerator = (*numerator + &*beta) * &(table_term + &*gamma);
+                    }
+                },
+            );
+        }
         // The product vector is a vector of products of fractions of the form
         //
         // Numerator: (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
@@ -1407,16 +1428,14 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         // domain, starting with z[0] = 1. Reuse the numerator vector for z
         // instead of allocating a third domain-sized vector.
         let usable_rows = params.n as usize - blinding_factors;
-        let mut lookup_product = super::super::prefix_products_of_fractions(
-            numerators,
-            denominators,
+        super::super::prefix_products_of_fractions_in_place(
+            &mut compressed_input_expression,
+            &mut denominators,
             fraction_rows,
             C::Scalar::ONE,
         );
-        lookup_product.truncate(usable_rows);
-        lookup_product.extend(blinding.rows);
-        assert_eq!(lookup_product.len(), params.n as usize);
-        let z = pk.vk.domain.lagrange_from_vec(lookup_product);
+        compressed_input_expression[usable_rows..].copy_from_slice(&blinding.rows);
+        let z = compressed_input_expression;
 
         #[cfg(feature = "sanity-checks")]
         // This test works only with intermediate representations in this method.
@@ -1432,17 +1451,17 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
             // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
             for i in 0..u {
                 let mut left = z[i + 1];
-                let permuted_input_value = &self.permuted_input_expression[i];
+                let permuted_input_value = &permuted_input_expression[i];
 
-                let permuted_table_value = &self.permuted_table_expression[i];
+                let permuted_table_value = &permuted_table_expression[i];
 
                 left *= &(*beta + permuted_input_value);
                 left *= &(*gamma + permuted_table_value);
 
                 let mut right = z[i];
-                let mut input_term = self.compressed_input_expression[i];
+                let mut input_term = original_compressed_input[i];
 
-                let mut table_term = self.compressed_table_expression[i];
+                let mut table_term = compressed_table_expression[i];
 
                 input_term += &(*beta);
                 table_term += &(*gamma);
@@ -1457,18 +1476,6 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
             assert_eq!(z[u], C::Scalar::ONE);
         }
 
-        let Permuted {
-            compressed_input_expression: _,
-            permuted_input_expression,
-            compressed_input_coset,
-            permuted_input_coset,
-            permuted_input_blind,
-            compressed_table_expression: _,
-            compressed_table_coset,
-            permuted_table_expression,
-            permuted_table_coset,
-            permuted_table_blind,
-        } = self;
         let transform_permuted = |values| {
             let polynomial = pk
                 .vk
