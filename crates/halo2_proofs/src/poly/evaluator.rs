@@ -1768,39 +1768,42 @@ impl<F: Field> PowerBase<F> {
 
 impl<F: Field> EvaluationPlan<F> {
     fn compile_scale<E: Copy, B: Basis>(
-        original_inner: &Ast<E, F, B>,
-        original_scalar: F,
+        inner: &Ast<E, F, B>,
+        scalar: F,
         scalars: &mut PlanScalarInterner<F>,
     ) -> Self {
-        let mut inner = original_inner;
-        let mut scalar = original_scalar;
-        let mut combined = false;
-        let mut has_general_scale = matches!(scale_kind(scalar), ScaleKind::Other);
-        while let Ast::Scale(nested, nested_scalar) = inner {
-            combined = true;
-            has_general_scale |= matches!(scale_kind(*nested_scalar), ScaleKind::Other);
-            scalar *= nested_scalar;
-            inner = nested;
-        }
+        let compiled = Self::compile(inner, scalars);
+        let Self::Scale(nested, nested_scalar_id) = compiled else {
+            return Self::Scale(
+                Box::new(compiled),
+                scalars.intern(PlanScalar::Literal(scalar)),
+            );
+        };
+        let PlanScalar::Literal(nested_scalar) = scalars.descriptors[nested_scalar_id.index()]
+        else {
+            return Self::Scale(
+                Box::new(Self::Scale(nested, nested_scalar_id)),
+                scalars.intern(PlanScalar::Literal(scalar)),
+            );
+        };
+        let combined = scalar * nested_scalar;
 
         // Preserve chains of cheap kernels when their product would require a
         // general multiplication, such as negation followed by doubling.
-        if combined && !has_general_scale && matches!(scale_kind(scalar), ScaleKind::Other) {
-            return Self::Scale(
-                Box::new(Self::compile(original_inner, scalars)),
-                scalars.intern(PlanScalar::Literal(original_scalar)),
-            );
-        }
-
-        if combined && scalar == F::ZERO {
-            Self::ConstantTerm(scalars.intern(PlanScalar::Literal(F::ZERO)))
-        } else if combined && scalar == F::ONE {
-            Self::compile(inner, scalars)
-        } else {
+        if !matches!(scale_kind(scalar), ScaleKind::Other)
+            && !matches!(scale_kind(nested_scalar), ScaleKind::Other)
+            && matches!(scale_kind(combined), ScaleKind::Other)
+        {
             Self::Scale(
-                Box::new(Self::compile(inner, scalars)),
+                Box::new(Self::Scale(nested, nested_scalar_id)),
                 scalars.intern(PlanScalar::Literal(scalar)),
             )
+        } else if combined == F::ZERO {
+            Self::ConstantTerm(scalars.intern(PlanScalar::Literal(F::ZERO)))
+        } else if combined == F::ONE {
+            *nested
+        } else {
+            Self::Scale(nested, scalars.intern(PlanScalar::Literal(combined)))
         }
     }
 
@@ -5694,7 +5697,8 @@ mod tests {
         type B = ExtendedLagrangeCoeff;
 
         let inner = Ast::<fn(), F, B>::LinearTerm(F::from(7));
-        let cheap = -(inner.clone() * F::from(2));
+        let two = F::from(2);
+        let cheap = -(inner.clone() * two);
         let (plan, scalars) = compile_plan(&cheap);
         let EvaluationPlan::Scale(nested, outer_scalar) = plan else {
             panic!("a negated doubling retains both cheap kernels");
@@ -5708,7 +5712,7 @@ mod tests {
         };
         assert_eq!(
             plan_scalar(&scalars, *inner_scalar),
-            PlanScalar::Literal(F::from(2))
+            PlanScalar::Literal(two)
         );
 
         let general = -(inner.clone() * F::from(GENERAL_LITERAL_SCALE));
@@ -5722,16 +5726,36 @@ mod tests {
             PlanScalar::Literal(-F::from(GENERAL_LITERAL_SCALE))
         );
 
-        let four = (inner.clone() * F::from(2)) * F::from(2);
-        let (plan, scalars) = compile_plan(&four);
+        let quadrupled = (inner.clone() * two) * two;
+        let (plan, scalars) = compile_plan(&quadrupled);
         let EvaluationPlan::Scale(plan_inner, scalar) = plan else {
             panic!("two doublings compile to one quadrupling");
         };
         assert!(!matches!(plan_inner.as_ref(), EvaluationPlan::Scale(_, _)));
         assert_eq!(
             plan_scalar(&scalars, scalar),
-            PlanScalar::Literal(F::from(4))
+            PlanScalar::Literal(two.double())
         );
+
+        let eight = ((inner.clone() * two) * two) * two;
+        let (plan, scalars) = compile_plan(&eight);
+        let mut current = &plan;
+        let mut product = F::ONE;
+        let mut kernel_count = 0;
+        while let EvaluationPlan::Scale(inner, scalar) = current {
+            let PlanScalar::Literal(scalar) = plan_scalar(&scalars, *scalar) else {
+                panic!("literal AST scales compile to literal plan scales");
+            };
+            assert!(!matches!(
+                super::scale_kind(scalar),
+                super::ScaleKind::Other
+            ));
+            product *= scalar;
+            kernel_count += 1;
+            current = inner;
+        }
+        assert_eq!(product, two.double().double());
+        assert_eq!(kernel_count, 2);
 
         assert!(matches!(
             compile_plan_only(&(-(-inner.clone()))),
