@@ -688,7 +688,7 @@ where
         params,
         rng,
         transcript,
-        &p_poly,
+        p_poly,
         p_poly_blind,
         *x_3,
         powers,
