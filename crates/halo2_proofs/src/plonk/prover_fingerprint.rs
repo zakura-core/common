@@ -289,18 +289,25 @@ impl<T> RecordingTranscript<T> {
     pub fn new(inner: T) -> Self {
         Self { inner: Some(inner) }
     }
+
+    /// Record a successful proof call and return the original transcript.
+    ///
+    /// Call this only after [`super::create_proof`] succeeds. Custom transcripts
+    /// can then be finalized using their own API. On error, use [`record_error`]
+    /// instead and drop this wrapper.
+    pub fn finish(mut self) -> T {
+        let output = self.inner.take().expect("transcript is live");
+        emit(Tag::Success, &[], true);
+        output
+    }
 }
 
 impl<W: Write, C: CurveAffine, E: EncodedChallenge<C>> RecordingTranscript<Blake2bWrite<W, C, E>> {
     /// Return the original proof buffer after recording successful completion.
-    pub fn finalize(mut self) -> W {
-        let output = self
-            .inner
-            .take()
-            .expect("transcript has not been finalized")
-            .finalize();
-        emit(Tag::Success, &[], true);
-        output
+    ///
+    /// Like [`Self::finish`], call this only after proving succeeds.
+    pub fn finalize(self) -> W {
+        self.finish().finalize()
     }
 }
 
@@ -397,10 +404,32 @@ impl<C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptWrite<C, E>> Transcrip
     }
 }
 
-/// Observe the exact error before the caller propagates it unchanged.
+/// Observe an error before the caller propagates it unchanged.
+///
+/// Transcript errors record only their [`std::io::ErrorKind`], without formatting
+/// any caller-provided error. Other variants record their library-owned details.
 pub fn record_error(error: &super::Error) {
     if active() {
-        emit(Tag::Error, format!("{error:?}").as_bytes(), true);
+        use super::Error;
+
+        // Keep this match exhaustive so new variants are checked for caller-provided
+        // formatters, which could panic or have other observable side effects.
+        let payload = match error {
+            Error::Transcript(error) => format!("Transcript({:?})", error.kind()),
+            Error::Synthesis
+            | Error::InvalidInstances
+            | Error::InvalidParameters
+            | Error::ConstraintSystemFailure
+            | Error::BoundsFailure
+            | Error::Opening
+            | Error::NotEnoughRowsAvailable { .. }
+            | Error::InstanceTooLarge
+            | Error::NotEnoughColumnsForConstants
+            | Error::ColumnNotInPermutation(_)
+            | Error::TableError(_)
+            | Error::IllegalHashFromPrivatePoint => format!("{error:?}"),
+        };
+        emit(Tag::Error, payload.as_bytes(), true);
     }
 }
 
@@ -560,8 +589,8 @@ mod tests {
                 let encoded = original.squeeze_challenge().get_scalar();
                 prop_assert_eq!(wrapped.squeeze_challenge().get_scalar(), encoded);
 
+                prop_assert_eq!(original.inner.finalize(), wrapped.finish().inner.finalize());
                 if let Some(capture) = capture {
-                    emit(Tag::Success, &[], true);
                     prop_assert_eq!(records(&capture.finish()), vec![
                         (Tag::Challenge as u8, typed.to_repr().to_vec()),
                         (Tag::Challenge as u8, encoded.to_repr().to_vec()),

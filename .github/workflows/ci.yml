@@ -646,6 +646,10 @@ jobs:
           cargo +stable test --locked --release --lib
           -p zakura-halo2-proofs --features unstable-prover-fingerprint
           plonk::prover_fingerprint::
+      - name: Test the public recorder API
+        run: >-
+          cargo +stable test --locked --release --test prover_fingerprint
+          -p zakura-halo2-proofs --features unstable-prover-fingerprint
       - name: Capture complete prover executions without the verifier feature
         env:
           RAYON_NUM_THREADS: '1'
