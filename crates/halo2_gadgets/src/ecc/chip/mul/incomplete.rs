@@ -367,7 +367,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             bits.len() - 1,
             |row| {
                 witness
-                    .map(|witness| witness.point(witness_range.start + row + 1).x)
+                    .map(|witness| witness.point_x(witness_range.start + row + 1))
                     .map(Assigned::Trivial)
             },
         )?;
@@ -377,7 +377,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             offset + NUM_BITS,
             || {
                 witness
-                    .map(|witness| witness.point(witness_range.end).x)
+                    .map(|witness| witness.point_x(witness_range.end))
                     .map(Assigned::Trivial)
             },
         )?;
@@ -389,7 +389,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             offset + NUM_BITS,
             || {
                 witness
-                    .map(|witness| witness.point(witness_range.end).y)
+                    .map(|witness| witness.point_y(witness_range.end))
                     .map(Assigned::Trivial)
             },
         )?;
