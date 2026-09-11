@@ -213,7 +213,14 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
     let powers = power_vector(x_3, params.n as usize);
     let evaluation = evaluate_polynomial_with_powers(p_poly, &powers);
     create_proof_with_powers(
-        params, rng, transcript, p_poly, p_blind, x_3, powers, evaluation,
+        params,
+        rng,
+        transcript,
+        p_poly.clone(),
+        p_blind,
+        x_3,
+        powers,
+        evaluation,
     )
 }
 
@@ -232,7 +239,7 @@ pub(in crate::poly) fn create_proof_with_powers<
     params: &Params<C>,
     mut rng: R,
     transcript: &mut T,
-    p_poly: &Polynomial<C::Scalar, Coeff>,
+    p_poly: Polynomial<C::Scalar, Coeff>,
     p_blind: Blind<C::Scalar>,
     x_3: C::Scalar,
     powers: Vec<C::Scalar>,
@@ -263,7 +270,7 @@ pub(in crate::poly) fn create_proof_with_powers<
 
     // We'll be opening `P' = P - [v] G_0 + [ξ] S` to ensure it has a root at
     // zero.
-    let mut p_prime_poly = p_poly.clone();
+    let mut p_prime_poly = p_poly;
     for (index, mask) in &s_poly {
         p_prime_poly[*index] += *mask * xi;
     }
@@ -565,7 +572,7 @@ mod tests {
             &params,
             StdRng::seed_from_u64(PROOF_SEED),
             &mut precomputed,
-            &polynomial,
+            polynomial,
             blind,
             point,
             powers,
