@@ -675,7 +675,9 @@ fn prepare_fractions<C: CurveAffine>(
     let event_count = chunks.iter().map(|(rows, _, _, _)| rows.len()).sum();
     let mut rows = Vec::with_capacity(event_count);
     let mut numerators = Vec::with_capacity(event_count + 1);
-    let mut denominators = Vec::with_capacity(event_count + 1);
+    // This buffer is dead after batch inversion. Reserve the eventual product
+    // size now so sparse product construction can reuse the allocation.
+    let mut denominators = Vec::with_capacity(params.n as usize);
     let mut first_cancelled_zero = None;
     for (
         mut chunk_rows,
@@ -855,20 +857,30 @@ fn sparse_prefix_products<F: Field>(
     assert!(fraction_rows < domain_size);
     assert!(rows.iter().all(|&row| row < fraction_rows));
     assert!(rows.windows(2).all(|rows| rows[0] < rows[1]));
+    debug_assert!(denominators.capacity() >= domain_size);
 
-    let mut product = vec![F::ZERO; domain_size];
+    let prefixes;
     if rows.is_empty() {
-        product[..=fraction_rows].fill(initial);
+        prefixes = None;
     } else {
         let event_count = rows.len();
         numerators.push(F::ZERO);
         denominators.push(F::ZERO);
-        let prefixes = super::super::prefix_products_of_fractions(
-            numerators,
-            denominators,
+        super::super::prefix_products_of_fractions_in_place(
+            &mut numerators,
+            &mut denominators,
             event_count,
             initial,
         );
+        prefixes = Some(numerators);
+    }
+
+    // The denominator values are dead after inversion. Grow that allocation
+    // into the product rather than allocating and zeroing a separate vector.
+    let mut product = denominators;
+    product.resize(domain_size, F::ZERO);
+    if let Some(prefixes) = prefixes {
+        let event_count = rows.len();
 
         let mut fill_start = 0;
         for (event, &row) in rows.iter().enumerate() {
@@ -876,6 +888,8 @@ fn sparse_prefix_products<F: Field>(
             fill_start = row + 1;
         }
         product[fill_start..=fraction_rows].fill(prefixes[event_count]);
+    } else {
+        product[..=fraction_rows].fill(initial);
     }
 
     if let Some(row) = first_cancelled_zero {
@@ -1645,7 +1659,7 @@ mod tests {
         let mut dense_denominators = vec![Fp::ZERO; domain_size];
         let mut sparse_rows = Vec::new();
         let mut sparse_numerators = Vec::new();
-        let mut sparse_denominators = Vec::new();
+        let mut sparse_denominators = Vec::with_capacity(domain_size);
         let mut first_cancelled_zero = None;
 
         for (row, factors) in rows.iter().enumerate() {
@@ -1668,6 +1682,7 @@ mod tests {
             fraction_rows,
             initial,
         );
+        let sparse_storage = sparse_denominators.as_ptr();
         let sparse = sparse_prefix_products(
             domain_size,
             fraction_rows,
@@ -1677,6 +1692,7 @@ mod tests {
             first_cancelled_zero,
             initial,
         );
+        assert_eq!(sparse.as_ptr(), sparse_storage);
         assert_eq!(sparse, dense);
     }
 
