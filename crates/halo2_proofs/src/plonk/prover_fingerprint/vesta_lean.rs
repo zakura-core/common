@@ -120,8 +120,13 @@ impl<'a> Reader<'a> {
             1 => {
                 let (x, x_text) = self.field::<Fq>()?;
                 let (y, y_text) = self.field::<Fq>()?;
+                // Pasta accepts (0, 0) as identity, which must use the separate wire tag.
                 require(
-                    bool::from(EqAffine::from_xy(x, y).is_some()),
+                    bool::from(
+                        EqAffine::from_xy(x, y)
+                            .and_then(|point| point.coordinates())
+                            .is_some(),
+                    ),
                     "point is not on Vesta",
                 )?;
                 Ok(format!("(.affine {x_text} {y_text})"))
@@ -359,6 +364,18 @@ mod tests {
             lean_namespace("Fixture_2.match.end").unwrap(),
             "«Fixture_2».«match».«end»"
         );
+    }
+
+    #[test]
+    fn affine_identity_encoding_is_rejected() {
+        let mut affine_identity = [0; 1 + 2 * FIELD_BYTES];
+        affine_identity[0] = 1;
+        for identity_allowed in [false, true] {
+            assert!(Reader(&affine_identity).point(identity_allowed).is_err());
+        }
+        // Identity has its own wire tag and is permitted only in the setup.
+        assert_eq!(Reader(&[0]).point(true).unwrap(), ".identity");
+        assert!(Reader(&[0]).point(false).is_err());
     }
 
     #[test]
