@@ -10,7 +10,7 @@ on:
   # Allow maintainers to toggle the ci-backfill label when an unchanged PR
   # needs a fresh required test success check.
   pull_request:
-    branches: [main, "feat/**", "release/**", "agent/**"]
+    branches: [main, "feat/**", "release/**", "agent/**", prover-execution-fixtures]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
@@ -618,8 +618,6 @@ jobs:
     timeout-minutes: 60
     env:
       RAYON_NUM_THREADS: '1'
-      IRONWOOD_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
-      IRONWOOD_ACTION_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -641,11 +639,15 @@ jobs:
           --features verifier-fingerprint,circuit-fixtures
           --lib circuit::fingerprint::
       - name: Regenerate the Add and Mul circuit fixtures
+        env:
+          IRONWOOD_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
         run: >-
           cargo +stable test --locked --release -p zakura-halo2-gadgets
           --lib ecc::chip::layout_dump::dump_ironwood_fixtures
           -- --exact --ignored
       - name: Regenerate the Orchard Action circuit fixtures
+        env:
+          IRONWOOD_ACTION_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
         run: >-
           cargo +stable test --locked --release -p zakura-orchard
           --features verifier-fingerprint,circuit-fixtures

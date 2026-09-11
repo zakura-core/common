@@ -7,7 +7,7 @@ name: Changelog fragments
 
 on:
   pull_request:
-    branches: [main, "feat/**", "release/**", "agent/**"]
+    branches: [main, "feat/**", "release/**", "agent/**", prover-execution-fixtures]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:

@@ -4,7 +4,7 @@ name: Semver policy
 
 on:
   pull_request:
-    branches: [main, "feat/**", "release/**", "agent/**"]
+    branches: [main, "feat/**", "release/**", "agent/**", prover-execution-fixtures]
     paths:
       - "**/*.rs"
       - "**/Cargo.toml"
