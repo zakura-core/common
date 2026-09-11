@@ -51,6 +51,25 @@ fn array(values: &[String]) -> String {
     format!("#[{}]", values.join(", "))
 }
 
+fn lean_namespace(namespace: &str) -> io::Result<String> {
+    require(
+        namespace.split('.').all(|part| {
+            !part.is_empty()
+                && part.as_bytes()[0].is_ascii_alphabetic()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }),
+        "invalid Lean namespace",
+    )?;
+    // Quoting each component preserves the name even when a component is a Lean keyword.
+    Ok(namespace
+        .split('.')
+        .map(|part| format!("«{part}»"))
+        .collect::<Vec<_>>()
+        .join("."))
+}
+
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
@@ -158,6 +177,7 @@ fn columns(out: &mut String, prefix: &str, rows: &[Vec<String>]) -> String {
 /// independent decoder validates the data before replaying the prover. `proof`
 /// must be the original proof buffer from the same call; it is exported unchanged
 /// alongside the recorded messages as a separate comparison target.
+/// Namespace components are quoted so that Lean keywords remain identifiers.
 ///
 /// Returns an error for malformed or unsupported captures and invalid namespaces.
 pub fn dump_vesta_lean_prover_fixture(
@@ -165,16 +185,7 @@ pub fn dump_vesta_lean_prover_fixture(
     bytes: &[u8],
     proof: &[u8],
 ) -> io::Result<String> {
-    require(
-        namespace.split('.').all(|part| {
-            !part.is_empty()
-                && part.as_bytes()[0].is_ascii_alphabetic()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        }),
-        "invalid Lean namespace",
-    )?;
+    let namespace = lean_namespace(namespace)?;
     require(
         bytes.len() <= MAX_BYTES,
         "prover capture exceeds supported capacity",
@@ -327,12 +338,27 @@ mod tests {
             "Fixture; axiom injected : False",
             "Fixture..Case",
             "1Fixture",
+            "Fixture.«match»",
         ] {
-            assert!(dump_vesta_lean_prover_fixture(namespace, HEADER, &[]).is_err());
+            assert_eq!(
+                dump_vesta_lean_prover_fixture(namespace, HEADER, &[])
+                    .unwrap_err()
+                    .to_string(),
+                "invalid Lean namespace"
+            );
         }
         for bytes in [b"".as_slice(), HEADER.as_slice(), b"IZKCAP02".as_slice()] {
             assert!(dump_vesta_lean_prover_fixture("Fixture", bytes, &[]).is_err());
         }
+    }
+
+    #[test]
+    fn reserved_namespace_components_are_quoted() {
+        assert_eq!(lean_namespace("match").unwrap(), "«match»");
+        assert_eq!(
+            lean_namespace("Fixture_2.match.end").unwrap(),
+            "«Fixture_2».«match».«end»"
+        );
     }
 
     #[test]
