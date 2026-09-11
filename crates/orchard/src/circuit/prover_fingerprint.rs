@@ -1,8 +1,9 @@
 //! Complete prover captures using the same synthetic Actions as the verifier fixtures.
 //!
-//! Each test compares the captured proof and final RNG position with an uncaptured
-//! execution through the production `Proof::create` before exporting. Recording
-//! wrappers are installed only here. The capture is a finite execution anchor,
+//! Each test replays a pinned RNG tape, checks the proof against committed bytes,
+//! and compares the proof and final RNG position with an uncaptured execution
+//! through the production `Proof::create` before exporting. Recording wrappers
+//! are installed only here. The capture is a finite execution anchor,
 //! not a proof of Rust/Lean equivalence or of a private randomness distribution.
 //!
 //! Export Lean source for one or two Actions using `ORCHARD_LEAN_SINGLE_PROVER_OUT` or
@@ -13,6 +14,7 @@
 //! deterministic fixture profile. Neither command requires `verifier-fingerprint`.
 
 use alloc::vec::Vec;
+use core::{convert::Infallible, mem::size_of};
 
 use halo2_proofs::{
     plonk::{
@@ -25,7 +27,7 @@ use halo2_proofs::{
     transcript::{Blake2bWrite, Challenge255},
 };
 use pasta_curves::vesta;
-use rand::Rng;
+use rand::{Rng, TryRng};
 
 #[cfg(feature = "multicore")]
 use super::CircuitWithPreparedMerklePath;
@@ -39,6 +41,38 @@ use crate::BenchmarkCircuitWitnesses as _;
 const SINGLE_SEED: u8 = 0x53;
 /// Existing verifier fixture's public two-Action seed (ASCII `M`).
 const MULTI_SEED: u8 = 0x4d;
+
+/// A fixed tape of `next_u64` outputs from the independently pinned Lean fixture.
+/// Also check the seeded input stream so witness construction cannot silently
+/// change which randomness reaches the prover. Other RNG methods are outside
+/// this fixture's captured profile and must fail instead of adapting the tape.
+struct PinnedRng<R> {
+    inner: R,
+    remaining: &'static [u8],
+}
+
+impl<R: Rng> TryRng for PinnedRng<R> {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        panic!("the pinned prover RNG tape contains only next_u64 calls");
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        let (word, remaining) = self
+            .remaining
+            .split_first_chunk::<{ size_of::<u64>() }>()
+            .expect("the prover consumed more randomness than the pinned tape");
+        let word = u64::from_le_bytes(*word);
+        assert_eq!(self.inner.next_u64(), word, "the fixture RNG input changed");
+        self.remaining = remaining;
+        Ok(word)
+    }
+
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), Infallible> {
+        panic!("the pinned prover RNG tape contains only next_u64 calls");
+    }
+}
 
 fn record_proof<C: plonk::Circuit<vesta::Scalar> + Sync>(
     pk: &ProvingKey,
@@ -94,7 +128,14 @@ fn capture_proof(
     record_proof(pk, circuits, &instances, rng)
 }
 
-fn capture_fixture(seed: u8, actions: u8, output_var: &str, namespace: &str) {
+fn capture_fixture(
+    seed: u8,
+    actions: u8,
+    expected_tape: &'static [u8],
+    expected_proof: &[u8],
+    output_var: &str,
+    namespace: &str,
+) {
     let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
     let pk = keys.proving_key();
     let vk = keys.verifying_key();
@@ -104,7 +145,16 @@ fn capture_fixture(seed: u8, actions: u8, output_var: &str, namespace: &str) {
     let mut baseline_rng = rng.clone();
 
     let capture = ProverCapture::start();
-    let proof = capture_proof(pk, bundle.benchmark_circuits(), &instances, &mut rng).unwrap();
+    let mut pinned_rng = PinnedRng {
+        inner: &mut rng,
+        remaining: expected_tape,
+    };
+    let proof =
+        capture_proof(pk, bundle.benchmark_circuits(), &instances, &mut pinned_rng).unwrap();
+    assert!(
+        pinned_rng.remaining.is_empty(),
+        "the prover consumed less randomness than the pinned tape"
+    );
     let bytes = capture.finish();
     assert!(proof.verify(vk, &instances).is_ok());
 
@@ -113,6 +163,10 @@ fn capture_fixture(seed: u8, actions: u8, output_var: &str, namespace: &str) {
         .create_proof(pk, &instances, &mut baseline_rng)
         .unwrap();
     assert_eq!(proof.0, baseline.0);
+    assert_eq!(
+        baseline.0, expected_proof,
+        "the production prover changed the pinned proof bytes"
+    );
     assert_eq!(rng.get_word_pos(), baseline_rng.get_word_pos());
 
     let fixture = dump_vesta_lean_prover_fixture(namespace, &bytes, &proof.0)
@@ -128,6 +182,8 @@ fn prover_capture() {
     capture_fixture(
         SINGLE_SEED,
         1,
+        include_bytes!("prover_fingerprint/single-action.rng-u64s-le"),
+        include_bytes!("prover_fingerprint/single-action.proof"),
         "ORCHARD_LEAN_SINGLE_PROVER_OUT",
         "Zcash.Snark.Fixtures.Prover.SingleAction",
     );
@@ -139,6 +195,8 @@ fn prover_capture_two_actions() {
     capture_fixture(
         MULTI_SEED,
         2,
+        include_bytes!("prover_fingerprint/multi-action.rng-u64s-le"),
+        include_bytes!("prover_fingerprint/multi-action.proof"),
         "ORCHARD_LEAN_MULTI_PROVER_OUT",
         "Zcash.Snark.Fixtures.Prover.MultiAction",
     );
