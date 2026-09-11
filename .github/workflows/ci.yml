@@ -136,7 +136,7 @@ jobs:
 
           while IFS= read -r path; do
             case "$path" in
-              crates/halo2_gadgets/*|crates/halo2_poseidon/*|crates/halo2_proofs/*)
+              crates/halo2_gadgets/*|crates/halo2_poseidon/*|crates/halo2_proofs/*|.github/fixtures/ironwood-circuits.sha256)
                 halo2=true
                 ;;
               crates/halo2_legacy_pdqsort/*)
@@ -607,6 +607,55 @@ jobs:
           --features weighted-merkle
           --lib
           --verbose
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  ironwood-fixtures:
+    name: halo2 / Test Ironwood fixture exporters
+    needs: changes
+    if: needs.changes.outputs.halo2 == 'true' || needs.changes.outputs.orchard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RAYON_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
+      - name: Test proof-byte verifier fixture exports
+        run: >-
+          cargo +stable test --locked --release -p zakura-halo2-proofs
+          --features unstable-verifier-fingerprint
+          --test fingerprint_export
+      - name: Test transcript-read serialization
+        run: >-
+          cargo +stable test --locked --release -p zakura-halo2-proofs
+          --features unstable-verifier-fingerprint
+          --lib plonk::fingerprint::vesta_lean::
+      - name: Test Orchard captures and malformed proof encodings
+        run: >-
+          cargo +stable test --locked --release -p zakura-orchard
+          --features verifier-fingerprint,circuit-fixtures
+          --lib circuit::fingerprint::
+      - name: Regenerate the Add and Mul circuit fixtures
+        env:
+          IRONWOOD_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
+        run: >-
+          cargo +stable test --locked --release -p zakura-halo2-gadgets
+          --lib ecc::chip::layout_dump::dump_ironwood_fixtures
+          -- --exact --ignored
+      - name: Regenerate the Orchard Action circuit fixtures
+        env:
+          IRONWOOD_ACTION_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
+        run: >-
+          cargo +stable test --locked --release -p zakura-orchard
+          --features verifier-fingerprint,circuit-fixtures
+          --lib circuit::layout_dump::dump_ironwood_action_fixtures
+          -- --exact --ignored
+      - name: Compare all ten outputs with the pinned Ironwood fixtures
+        working-directory: ${{ runner.temp }}/ironwood-circuit-fixtures
+        run: sha256sum --check "$GITHUB_WORKSPACE/.github/fixtures/ironwood-circuits.sha256"
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -1341,6 +1390,7 @@ jobs:
       - orchard-weighted-test
       - orchard-fingerprint-check
       - orchard-prover-fingerprint
+      - ironwood-fixtures
       - orchard-platform-smoke
       - orchard-no-std
       - pasta-test
@@ -1383,6 +1433,7 @@ jobs:
             orchard-weighted-test,
             orchard-fingerprint-check,
             orchard-prover-fingerprint,
+            ironwood-fixtures,
             orchard-platform-smoke,
             orchard-no-std,
             pasta-test,

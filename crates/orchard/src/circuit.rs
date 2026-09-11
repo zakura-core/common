@@ -1744,6 +1744,9 @@ mod prover_fingerprint;
 ))]
 mod fixtures;
 
+#[cfg(all(test, feature = "circuit-fixtures"))]
+mod layout_dump;
+
 #[cfg(test)]
 mod benchmark;
 
