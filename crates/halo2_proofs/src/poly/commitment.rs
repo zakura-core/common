@@ -426,6 +426,7 @@ struct DeferredIpaGeneratorTable<C: CurveAffine> {
     points: Vec<C>,
     terms: usize,
     first_cached_generator: usize,
+    lane_contiguous: bool,
     byte_order: ScalarByteOrder,
     #[cfg(test)]
     force_decline: std::sync::atomic::AtomicBool,
@@ -483,10 +484,31 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             }
         });
 
+        let lane_contiguous = std::env::var_os("ZAKURA_TRANSPOSED_MATERIALIZER").is_some();
+        if lane_contiguous {
+            // Store each point magnitude contiguously across the output lanes.
+            // Materialization walks all lanes for one scalar digit at a time.
+            let count = first_cached_generator;
+            let cached_blocks = cached_generators.len() / count;
+            let mut transposed = vec![C::identity(); points.len()];
+            for block in 0..cached_blocks {
+                let block_base = block * count * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES;
+                for lane in 0..count {
+                    for point_offset in 0..DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES {
+                        transposed[block_base + point_offset * count + lane] = points[block_base
+                            + lane * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
+                            + point_offset];
+                    }
+                }
+            }
+            points = transposed;
+        }
+
         Some(Self {
             points,
             terms: generators.len(),
             first_cached_generator,
+            lane_contiguous,
             byte_order,
             #[cfg(test)]
             force_decline: std::sync::atomic::AtomicBool::new(false),
@@ -613,6 +635,54 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
         {
             return None;
         }
+        if std::env::var_os("ZAKURA_BATCH_MATERIALIZE").is_some() {
+            let mut partials = scalars[1..]
+                .par_iter()
+                .enumerate()
+                .map(|(cached_block, scalar)| {
+                    let mut bases = Vec::with_capacity(count);
+                    for lane in 0..count {
+                        let index = if self.lane_contiguous {
+                            cached_block * count * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES + lane
+                        } else {
+                            (cached_block * count + lane)
+                                * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
+                        };
+                        bases.push(self.points[index]);
+                    }
+                    let mut products = vec![C::Curve::identity(); count];
+                    C::Curve::batch_mul_same_scalar_vartime(&bases, scalar, &mut products);
+                    products
+                })
+                .collect::<Vec<_>>();
+            let mut projective = scalar_one_bases
+                .iter()
+                .copied()
+                .map(C::Curve::from)
+                .collect::<Vec<_>>();
+            for products in &mut partials {
+                for (output, product) in projective.iter_mut().zip(products) {
+                    *output += *product;
+                }
+            }
+            let mut affine = vec![C::identity(); count];
+            C::Curve::batch_normalize(&projective, &mut affine);
+            return Some(affine);
+        }
+        let profile = std::env::var_os("ZAKURA_MATERIALIZER_PROFILE").is_some();
+        let mut profile_start = profile.then(std::time::Instant::now);
+        macro_rules! profile_mark {
+            ($phase:literal) => {
+                if let Some(start) = profile_start {
+                    eprintln!(
+                        "MATERIALIZER phase={} ns={}",
+                        $phase,
+                        start.elapsed().as_nanos(),
+                    );
+                    profile_start = Some(std::time::Instant::now());
+                }
+            };
+        }
         let little = self.little_endian()?;
         let reprs = scalars[1..]
             .iter()
@@ -638,8 +708,16 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                 .iter()
                 .any(|&digit| digit != 0)
         });
+        profile_mark!("recode");
         let mut projective = vec![C::Curve::identity(); count];
-        let chunk_size = count.div_ceil(crate::multicore::current_num_threads());
+        let chunk_size = std::env::var("ZAKURA_MATERIALIZER_CHUNK_SIZE")
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .expect("numeric materializer chunk size")
+            })
+            .unwrap_or_else(|| count.div_ceil(crate::multicore::current_num_threads()));
         crate::multicore::scope(|scope| {
             for (chunk_index, output) in projective.chunks_mut(chunk_size).enumerate() {
                 let start = chunk_index * chunk_size;
@@ -658,12 +736,21 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                                     continue;
                                 }
                                 let point_offset = (usize::from(digit.unsigned_abs()) - 1) / 2;
+                                let block_base = cached_block
+                                    * count
+                                    * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES;
+                                let (point_base, lane_stride) = if self.lane_contiguous {
+                                    (block_base + point_offset * count + start, 1)
+                                } else {
+                                    (
+                                        block_base
+                                            + start * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
+                                            + point_offset,
+                                        DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES,
+                                    )
+                                };
                                 for (lane, output) in output.iter_mut().enumerate() {
-                                    let generator = (cached_block + 1) * count + start + lane;
-                                    let point = self.points[(generator
-                                        - self.first_cached_generator)
-                                        * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
-                                        + point_offset];
+                                    let point = self.points[point_base + lane * lane_stride];
                                     *output += if digit < 0 { -point } else { point };
                                 }
                             }
@@ -672,13 +759,17 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                 });
             }
         });
+        profile_mark!("ladder");
 
         for (output, &base) in projective.iter_mut().zip(scalar_one_bases) {
             *output += base;
         }
+        profile_mark!("unit_block_add");
 
         let mut affine = vec![C::identity(); count];
         C::Curve::batch_normalize(&projective, &mut affine);
+        profile_mark!("normalize");
+        let _ = profile_start;
         Some(affine)
     }
 
