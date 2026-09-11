@@ -2,7 +2,7 @@ name: Workflow security
 
 on:
   pull_request:
-    branches: [main, "feat/**", "release/**", "agent/**", prover-execution-fixtures]
+    branches: [main, "feat/**", "release/**", "agent/**"]
     paths:
       - .github/**
   push:
