@@ -1601,7 +1601,7 @@ impl Proof {
         pk: &ProvingKey,
         circuits: &[Circuit],
         instances: &[Instance],
-        rng: impl Rng,
+        mut rng: impl Rng,
     ) -> Result<Self, plonk::Error> {
         if circuits
             .iter()
@@ -1625,16 +1625,10 @@ impl Proof {
             .collect();
         let instances: Vec<_> = instances.iter().map(|i| &i[..]).collect();
 
-        let transcript = Blake2bWrite::<_, vesta::Affine, _>::init(vec![]);
-        #[cfg(all(test, feature = "prover-fingerprint"))]
-        let transcript = plonk::prover_fingerprint::RecordingTranscript::new(transcript);
-        #[cfg(all(test, feature = "prover-fingerprint"))]
-        let rng = plonk::prover_fingerprint::RecordingRng::new(rng);
-        let mut transcript = transcript;
-        let mut rng = rng;
+        let mut transcript = Blake2bWrite::<_, vesta::Affine, _>::init(vec![]);
 
         #[cfg(feature = "multicore")]
-        let result = {
+        {
             // Prefer Action-level synthesis parallelism for batches that fill
             // the worker pool. A single Action has no higher-level work to use
             // instead, while smaller batches leave workers for Merkle
@@ -1654,7 +1648,7 @@ impl Proof {
                     &instances,
                     &mut rng,
                     &mut transcript,
-                )
+                )?;
             } else {
                 plonk::create_proof(
                     &pk.params,
@@ -1663,23 +1657,18 @@ impl Proof {
                     &instances,
                     &mut rng,
                     &mut transcript,
-                )
+                )?;
             }
-        };
+        }
         #[cfg(not(feature = "multicore"))]
-        let result = plonk::create_proof(
+        plonk::create_proof(
             &pk.params,
             &pk.pk,
             circuits,
             &instances,
             &mut rng,
             &mut transcript,
-        );
-        #[cfg(all(test, feature = "prover-fingerprint"))]
-        if let Err(error) = &result {
-            plonk::prover_fingerprint::record_error(error);
-        }
-        result?;
+        )?;
         Ok(Proof(transcript.finalize()))
     }
 

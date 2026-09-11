@@ -6,7 +6,7 @@ use rand_chacha::ChaCha20Rng;
 
 use super::ProvingKey;
 use crate::{
-    builder::{Builder, BundleType},
+    builder::{Builder, BundleType, UnauthorizedBundle},
     bundle::BundleVersion,
     constants::MERKLE_DEPTH_ORCHARD,
     tree::MerkleHashOrchard,
@@ -21,6 +21,17 @@ pub(super) fn build_fixture_bundle(
     pk: &ProvingKey,
     num_actions: u8,
 ) -> crate::Bundle<crate::bundle::Authorized, i64> {
+    build_unproven_fixture_bundle(rng, num_actions)
+        .create_proof(pk, &mut *rng)
+        .unwrap()
+        .apply_signatures(&mut *rng, [0; 32], &[])
+        .unwrap()
+}
+
+pub(super) fn build_unproven_fixture_bundle(
+    rng: &mut ChaCha20Rng,
+    num_actions: u8,
+) -> UnauthorizedBundle<i64> {
     let bundle_version = BundleVersion::orchard_v3();
     let builder = Builder::new(
         BundleType::Transactional {
@@ -37,8 +48,4 @@ pub(super) fn build_fixture_bundle(
     assert!(!bundle.flags().cross_address_enabled());
 
     bundle
-        .create_proof(pk, &mut *rng)
-        .unwrap()
-        .apply_signatures(&mut *rng, [0; 32], &[])
-        .unwrap()
 }

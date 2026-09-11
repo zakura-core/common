@@ -200,8 +200,9 @@ impl IdentityCells {
 
 #[cfg(feature = "unstable-prover-fingerprint")]
 impl<C: CurveAffine> ProvingKey<C> {
-    pub(super) fn record_fixture_rows(&self) {
-        super::prover_fingerprint::record_sigma(&self.permutations);
+    /// Permutation rows for the opt-in prover fixture exporter.
+    pub(super) fn permutations(&self) -> &[Polynomial<C::Scalar, LagrangeCoeff>] {
+        &self.permutations
     }
 }
 

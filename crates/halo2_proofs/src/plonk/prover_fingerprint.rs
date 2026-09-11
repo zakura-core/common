@@ -5,6 +5,10 @@
 //! replace any prover computation or establish equality of message distributions.
 //! Captures contain the private witness and masks; use synthetic fixture inputs.
 //!
+//! Fixture drivers install the RNG and transcript wrappers explicitly. The prover
+//! only exposes two read-only observation points for setup and synthesized rows;
+//! those return immediately unless a capture scope is active.
+//!
 //! The `IZKCAP01` format starts with an eight-byte header. Each record contains a
 //! one-byte tag, a little-endian `u32` payload length, and the payload. Dimensions
 //! are little-endian `u32`s; Pasta field elements are canonical 32-byte little-endian
@@ -184,9 +188,7 @@ fn matrix<F: PrimeField>(out: &mut Vec<u8>, columns: &[Polynomial<F, LagrangeCoe
 
 pub(super) fn record_setup<C: CurveAffine>(
     params: &Params<C>,
-    blinding_factors: usize,
-    degree: usize,
-    fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    pk: &super::ProvingKey<C>,
     instances: &[&[&[C::Scalar]]],
 ) {
     if !active() {
@@ -195,15 +197,15 @@ pub(super) fn record_setup<C: CurveAffine>(
     let mut out = Vec::new();
     number(&mut out, params.k as usize);
     number(&mut out, params.n as usize);
-    number(&mut out, blinding_factors);
-    number(&mut out, degree);
+    number(&mut out, pk.vk.cs.blinding_factors());
+    number(&mut out, pk.vk.cs.degree());
     number(&mut out, params.g.len());
     for generator in &params.g {
         point(&mut out, generator);
     }
     point(&mut out, &params.w);
     point(&mut out, &params.u);
-    matrix(&mut out, fixed);
+    matrix(&mut out, &pk.fixed_values);
     number(&mut out, instances.len());
     for instance in instances {
         number(&mut out, instance.len());
@@ -215,14 +217,10 @@ pub(super) fn record_setup<C: CurveAffine>(
         }
     }
     emit(Tag::Setup, &out, false);
-}
 
-pub(super) fn record_sigma<F: PrimeField>(columns: &[Polynomial<F, LagrangeCoeff>]) {
-    if active() {
-        let mut out = Vec::new();
-        matrix(&mut out, columns);
-        emit(Tag::Sigma, &out, false);
-    }
+    out.clear();
+    matrix(&mut out, pk.permutation.permutations());
+    emit(Tag::Sigma, &out, false);
 }
 
 pub(super) fn record_witness<F: PrimeField>(actions: &[Vec<Polynomial<F, LagrangeCoeff>>]) {

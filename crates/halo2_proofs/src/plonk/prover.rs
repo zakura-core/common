@@ -1065,16 +1065,7 @@ where
     }
 
     #[cfg(feature = "unstable-prover-fingerprint")]
-    {
-        super::prover_fingerprint::record_setup(
-            params,
-            meta.blinding_factors(),
-            meta.degree(),
-            &pk.fixed_values,
-            instances,
-        );
-        pk.permutation.record_fixture_rows();
-    }
+    super::prover_fingerprint::record_setup(params, pk, instances);
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
     // The smaller inversion walk amortizes relationship tracking once several
