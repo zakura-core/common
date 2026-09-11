@@ -158,7 +158,9 @@ fn bench_fq_square(b: &mut Bencher) {
     let mut count = 0;
     b.iter(|| {
         let mut tmp = v[count];
-        tmp = tmp.square();
+        // The inherent portable method shadows the runtime-dispatched trait
+        // method, so call the latter when benchmarking the selected backend.
+        tmp = Field::square(&tmp);
         count = (count + 1) % SAMPLES;
         tmp
     });
