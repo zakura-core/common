@@ -1735,6 +1735,15 @@ impl Proof {
 #[cfg(all(test, feature = "verifier-fingerprint"))]
 mod fingerprint;
 
+#[cfg(all(test, feature = "prover-fingerprint"))]
+mod prover_fingerprint;
+
+#[cfg(all(
+    test,
+    any(feature = "verifier-fingerprint", feature = "prover-fingerprint")
+))]
+mod fixtures;
+
 #[cfg(test)]
 mod benchmark;
 

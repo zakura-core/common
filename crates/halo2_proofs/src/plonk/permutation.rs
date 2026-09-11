@@ -198,6 +198,14 @@ impl IdentityCells {
     }
 }
 
+#[cfg(feature = "unstable-prover-fingerprint")]
+impl<C: CurveAffine> ProvingKey<C> {
+    /// Permutation rows for the opt-in prover fixture exporter.
+    pub(super) fn permutations(&self) -> &[Polynomial<C::Scalar, LagrangeCoeff>] {
+        &self.permutations
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{IDENTITY_BITS_PER_BYTE, IdentityCells, SPARSE_ACTIVE_ROW_FRACTION_DENOMINATOR};

@@ -1064,6 +1064,9 @@ where
         prepared_instance_values.push(instance_values?);
     }
 
+    #[cfg(feature = "unstable-prover-fingerprint")]
+    super::prover_fingerprint::record_setup(params, pk, instances);
+
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
     // The smaller inversion walk amortizes relationship tracking once several
     // circuit witnesses are evaluated together. Keep the single-circuit path
@@ -1187,6 +1190,9 @@ where
                 .map(|witness| witness.advice.evaluate())
                 .collect::<Vec<_>>()
         };
+
+        #[cfg(feature = "unstable-prover-fingerprint")]
+        super::prover_fingerprint::record_witness(&advice_values);
 
         // Consume randomness in circuit order before preparing the
         // independent commitments and polynomial transforms in parallel.

@@ -36,6 +36,10 @@ mod verifier;
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable-verifier-fingerprint")))]
 pub mod fingerprint;
 
+#[cfg(feature = "unstable-prover-fingerprint")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable-prover-fingerprint")))]
+pub mod prover_fingerprint;
+
 pub use assigned::*;
 pub use circuit::*;
 pub use error::*;

@@ -83,6 +83,8 @@ test-dependencies = ["proptest", "rand/std", "rand/std_rng"]
 unstable-frost = []
 unstable-voting-circuits = ["dep:visibility"]
 verifier-fingerprint = ["circuit", "halo2_proofs/unstable-verifier-fingerprint"]
+# Capture the prover's private tape and complete transcript for formal-model fixtures.
+prover-fingerprint = ["circuit", "halo2_proofs/unstable-prover-fingerprint"]
 weighted-merkle = []
 
 [[example]]
