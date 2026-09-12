@@ -458,15 +458,23 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             .checked_mul(DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES)?;
         let mut points = vec![C::identity(); table_len];
         let cached_blocks = cached_generators.len() / first_cached_generator;
-        let block_chunk = cached_blocks.div_ceil(crate::multicore::current_num_threads());
-        let generator_chunk = block_chunk.checked_mul(first_cached_generator)?;
-        let point_chunk =
-            generator_chunk.checked_mul(DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES)?;
+        // Keep complete scalar blocks together while distributing the
+        // remainder instead of leaving an available worker idle.
+        let task_count = cached_blocks.min(crate::multicore::current_num_threads());
+        let blocks_per_task = cached_blocks / task_count;
+        let extra_blocks = cached_blocks % task_count;
         crate::multicore::scope(|scope| {
-            for (generators, points) in cached_generators
-                .chunks(generator_chunk)
-                .zip(points.chunks_mut(point_chunk))
-            {
+            let mut generator_start = 0;
+            let mut remaining_points = points.as_mut_slice();
+            for task in 0..task_count {
+                let task_blocks = blocks_per_task + usize::from(task < extra_blocks);
+                let generator_count = task_blocks * first_cached_generator;
+                let generator_end = generator_start + generator_count;
+                let generators = &cached_generators[generator_start..generator_end];
+                generator_start = generator_end;
+                let point_count = generator_count * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES;
+                let (points, tail) = remaining_points.split_at_mut(point_count);
+                remaining_points = tail;
                 scope.spawn(move |_| {
                     let mut projective = Vec::with_capacity(points.len());
                     for generators in generators.chunks(first_cached_generator) {
@@ -491,6 +499,8 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                     C::Curve::batch_normalize(&projective, points);
                 });
             }
+            debug_assert_eq!(generator_start, cached_generators.len());
+            debug_assert!(remaining_points.is_empty());
         });
 
         Some(Self {
@@ -3010,6 +3020,38 @@ fn fixed_base_pair_table_is_stable_across_worker_counts() {
         assert_eq!(parallel.points, single.points);
         assert_eq!(parallel.scalar_bits, single.scalar_bits);
         assert_eq!(parallel.windows, single.windows);
+        assert_eq!(
+            std::mem::discriminant(&parallel.byte_order),
+            std::mem::discriminant(&single.byte_order),
+        );
+    }
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn deferred_ipa_generator_table_is_stable_across_worker_counts() {
+    use crate::pasta::EqAffine;
+
+    let params = Params::<EqAffine>::new(PREPARED_DEFERRED_IPA_K);
+    let build = |workers| {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .expect("test pool must build")
+            .install(|| {
+                DeferredIpaGeneratorTable::new(&params.g)
+                    .expect("Pasta generators support deferred IPA preparation")
+            })
+    };
+    let single = build(1);
+    for workers in [6, 10] {
+        let parallel = build(workers);
+        assert_eq!(parallel.points, single.points);
+        assert_eq!(parallel.terms, single.terms);
+        assert_eq!(
+            parallel.first_cached_generator,
+            single.first_cached_generator,
+        );
         assert_eq!(
             std::mem::discriminant(&parallel.byte_order),
             std::mem::discriminant(&single.byte_order),
