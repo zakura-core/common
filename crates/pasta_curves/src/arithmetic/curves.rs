@@ -187,9 +187,32 @@ pub trait CurveExt:
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "multicore", feature = "orbits"))))]
 pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
-    /// The number of fixed bases this preparation covers; `scalars` below
-    /// must have exactly this length.
+    /// The number of fixed bases this preparation covers; scalar slices
+    /// passed to the evaluation methods must have exactly this length.
     fn terms(&self) -> usize;
+
+    /// Compares the variable-time scalar work of this prepared backend.
+    ///
+    /// Returns `Some(true)` when the backend's conservative scalar-work model
+    /// accepts `candidate` over `baseline`, and `Some(false)` when it does not.
+    /// Returns `None` when the backend cannot compare the inputs at all. The
+    /// slices must have equal length and represent one evaluation each. Unlike
+    /// the evaluation methods, they may be samples of any length. The result
+    /// describes only the backend's modeled dimensions for these slices; it is
+    /// not an elapsed-time guarantee, a prediction for unsampled values, or a
+    /// statement of algebraic equivalence.
+    ///
+    /// # Security
+    ///
+    /// Variable-time in both scalar slices; callers must not use this with
+    /// secret scalars unless they already accept scalar-dependent timing.
+    fn scalar_work_is_at_most_vartime(
+        &self,
+        _candidate: &[C::ScalarExt],
+        _baseline: &[C::ScalarExt],
+    ) -> Option<bool> {
+        None
+    }
 
     /// Whether $\sum_i \[k_i\] P_i + \sum_j \[s_j\] Q_j$ is the identity.
     ///
