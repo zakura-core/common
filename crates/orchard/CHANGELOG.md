@@ -15,7 +15,8 @@ internal implementation details are not tracked here.
 - Added an opt-in `x86_64-asm` Cargo feature that forwards through the direct
   Pasta dependency and, when enabled, the optional Halo 2 dependency. Enabling
   it on an x86-64 CPU without BMI2 and ADX support can fault; generic binaries
-  should leave it disabled.
+  should leave it disabled
+  ([#432](https://github.com/zakura-core/common/pull/432)).
 
 ## [1.2.0] - 2026-09-08
 
