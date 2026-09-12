@@ -227,6 +227,13 @@ impl<T: ::core::borrow::Borrow<Fq>> ::core::iter::Product<T> for Fq {
 /// INV = -(q^{-1} mod 2^64) mod 2^64
 const INV: u64 = 0x8c46eb20ffffffff;
 
+#[cfg(all(
+    feature = "x86_64-asm",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+const X86_64_ASM_PARAMS: [u64; 5] = [MODULUS.0[0], MODULUS.0[1], MODULUS.0[2], MODULUS.0[3], INV];
+
 /// R = 2^256 mod q
 const R: Fq = Fq([
     0x5b2b3e9cfffffffd,
@@ -447,12 +454,28 @@ impl Fq {
             Fq(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
+        #[cfg(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))]
+        {
+            Fq(super::x86_64_asm::mul(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                any(target_family = "unix", target_os = "none"),
+                target_pointer_width = "64",
+                target_endian = "little"
+            ),
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
         )))]
         {
             self.mul(rhs)
@@ -472,12 +495,28 @@ impl Fq {
             Fq(super::aarch64_asm::square(&self.0, &MODULUS.0, INV))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
+        #[cfg(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))]
+        {
+            Fq(super::x86_64_asm::square(&self.0, &X86_64_ASM_PARAMS))
+        }
+
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                any(target_family = "unix", target_os = "none"),
+                target_pointer_width = "64",
+                target_endian = "little"
+            ),
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
         )))]
         {
             self.square()
@@ -485,7 +524,7 @@ impl Fq {
     }
 
     /// Squares `self` `n` times (`n` must be at least 1), then multiplies the
-    /// result by `by`. The assembly backend keeps the accumulator in
+    /// result by `by`. The AArch64 assembly backend keeps the accumulator in
     /// registers for the whole chain.
     #[inline]
     fn sqr_n_mul_runtime(&self, n: u32, by: &Self) -> Self {
@@ -514,7 +553,7 @@ impl Fq {
         {
             // Leave the accumulator unreduced between squarings. The closing
             // multiplication canonicalizes its result.
-            Fq(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul(by)
+            Fq(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul_runtime(by)
         }
     }
 
@@ -1744,7 +1783,7 @@ fn is_canonical(x: &Fq) -> bool {
 
 #[test]
 fn constants_are_canonical() {
-    // Every named constant must be a reduced residue: the `aarch64-asm`
+    // Every named constant must be a reduced residue: the assembly
     // multiplication requires a canonical rhs, and constants are the one
     // class of values that bypass the reducing constructors.
     assert!(
@@ -1781,18 +1820,27 @@ fn constants_are_canonical() {
 
 #[cfg(all(
     test,
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
+    any(
+        all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ),
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )
+    )
 ))]
 #[test]
-fn aarch64_asm_mul_canonical_sweep_matches_portable() {
+fn asm_mul_and_square_canonical_sweep_match_portable() {
     use rand::{Rng, SeedableRng};
 
-    // Random canonical operands: the inline `mul` must agree with the
-    // portable implementation and return a canonical residue.
+    // Random canonical operands: the selected assembly `mul` must agree
+    // with the portable implementation and return a canonical residue.
     let mut rng = rand_xorshift::XorShiftRng::from_seed([0x42; 16]);
     let mut random = || {
         let mut l = [0u64; 4];
@@ -1807,22 +1855,32 @@ fn aarch64_asm_mul_canonical_sweep_matches_portable() {
         let asm = a.mul_runtime(&b);
         assert_eq!(asm, Fq::mul(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
         assert!(is_canonical(&asm));
+        assert_eq!(a.square_runtime(), a.square(), "value {:x?}", a.0);
     }
 }
 
 #[cfg(all(
     test,
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
+    any(
+        all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ),
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )
+    )
 ))]
 #[test]
-fn aarch64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
+fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
     use rand::{Rng, SeedableRng};
 
-    // The inline `mul` omits the fifth candidate limb on the strength of
+    // The assembly `mul` omits the fifth candidate limb on the strength of
     // `(lhs * rhs + m * modulus) / R < 2 * modulus < R`, which holds for any
     // 256-bit lhs once the rhs is canonical. Stress that bound where it is
     // tightest: lhs with its top bit set, rhs within a few limbs of the
@@ -1861,15 +1919,24 @@ fn aarch64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
 #[cfg(all(
     test,
     debug_assertions,
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
+    any(
+        all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ),
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )
+    )
 ))]
 #[test]
 #[should_panic(expected = "requires a canonical rhs")]
-fn aarch64_asm_mul_rejects_non_canonical_rhs_in_debug() {
+fn asm_mul_rejects_non_canonical_rhs_in_debug() {
     // The modulus itself is the smallest non-canonical value.
     let _ = Fq::one().mul_runtime(&MODULUS);
 }

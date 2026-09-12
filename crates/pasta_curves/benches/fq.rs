@@ -17,7 +17,9 @@ fn criterion_benchmark(c: &mut Criterion) {
     group.bench_function("add_assign", bench_fq_add_assign);
     group.bench_function("sub_assign", bench_fq_sub_assign);
     group.bench_function("mul_assign", bench_fq_mul_assign);
+    group.bench_function("mul_assign/dependent-chain", bench_fq_mul_dependent);
     group.bench_function("square", bench_fq_square);
+    group.bench_function("square/dependent-chain", bench_fq_square_dependent);
     group.bench_function("invert", bench_fq_invert);
     group.bench_function("neg", bench_fq_neg);
     group.bench_function("sqrt", bench_fq_sqrt);
@@ -145,6 +147,20 @@ fn bench_fq_mul_assign(b: &mut Bencher) {
     });
 }
 
+fn bench_fq_mul_dependent(b: &mut Bencher) {
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+    let mut state = Fq::random(&mut rng);
+    let rhs = Fq::random(&mut rng);
+
+    b.iter(|| {
+        state *= black_box(&rhs);
+        black_box(state)
+    });
+}
+
 fn bench_fq_square(b: &mut Bencher) {
     const SAMPLES: usize = 1000;
 
@@ -158,9 +174,24 @@ fn bench_fq_square(b: &mut Bencher) {
     let mut count = 0;
     b.iter(|| {
         let mut tmp = v[count];
-        tmp = tmp.square();
+        // The inherent portable method shadows the runtime-dispatched trait
+        // method, so call the latter when benchmarking the selected backend.
+        tmp = Field::square(&tmp);
         count = (count + 1) % SAMPLES;
         tmp
+    });
+}
+
+fn bench_fq_square_dependent(b: &mut Bencher) {
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+    let mut state = Fq::random(&mut rng);
+
+    b.iter(|| {
+        state = Field::square(black_box(&state));
+        black_box(state)
     });
 }
 
