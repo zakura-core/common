@@ -71,6 +71,7 @@ test-dev-graph = [
     "plotters/ttf",
 ]
 unstable-verifier-fingerprint = []
+x86_64-asm = ["pasta_curves/x86_64-asm"]
 
 # Capture complete selected prover executions for Rust/Lean correspondence fixtures.
 unstable-prover-fingerprint = []

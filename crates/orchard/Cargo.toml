@@ -87,6 +87,7 @@ verifier-fingerprint = ["circuit", "halo2_proofs/unstable-verifier-fingerprint"]
 prover-fingerprint = ["circuit", "halo2_proofs/unstable-prover-fingerprint"]
 circuit-fixtures = ["circuit", "halo2_proofs/unstable-circuit-fixtures"]
 weighted-merkle = []
+x86_64-asm = ["pasta_curves/x86_64-asm", "halo2_proofs?/x86_64-asm"]
 
 [[example]]
 name = "generate_lagrange_coeffs"
