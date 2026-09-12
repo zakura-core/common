@@ -1,9 +1,10 @@
 //! Private x86-64 backend for the Pasta fields.
 //!
-//! Montgomery multiplication and squaring are implemented as inline `asm!`
-//! blocks using MULX (BMI2) with ADCX/ADOX dual carry chains (ADX) in the
-//! multiplication rows. Two negative scheduling results are pinned here so
-//! they are not retried on this microarchitecture family: routing squaring
+//! Modular addition, subtraction, Montgomery multiplication, and squaring are
+//! implemented as inline `asm!` blocks. Multiplication uses MULX (BMI2) with
+//! ADCX/ADOX dual carry chains (ADX) in the multiplication rows. Two negative
+//! scheduling results are pinned here so they are not retried on this
+//! microarchitecture family: routing squaring
 //! through the multiplication measured 2–5% *slower* (run-dependent) than
 //! the dedicated squaring below (21.0 vs 20.0–20.7 ns on Skylake-X —
 //! mirroring the AArch64 backend, whose inline square also beats its
@@ -70,6 +71,113 @@ fn is_canonical(value: &Limbs, params: &[u64; 5]) -> bool {
         }
     }
     false
+}
+
+/// Adds two canonical residues and conditionally subtracts the modulus.
+///
+/// Like [`mul`], this hardcodes the Pasta modulus shape (`modulus[2] == 0`).
+/// Both inputs must be canonical (debug-asserted). Their sum is below
+/// `2 * modulus < 2^256`, so the top carry can be discarded and one
+/// conditional subtraction produces a canonical result.
+#[inline(always)]
+pub(super) fn add(lhs: &Limbs, rhs: &Limbs, params: &[u64; 5]) -> Limbs {
+    debug_assert!(
+        is_canonical(lhs, params),
+        "x86_64_asm::add requires a canonical lhs"
+    );
+    debug_assert!(
+        is_canonical(rhs, params),
+        "x86_64_asm::add requires a canonical rhs"
+    );
+    let [mut r0, mut r1, mut r2, mut r3] = *lhs;
+    // SAFETY: straight-line arithmetic reading only the words behind the two
+    // passed references (`readonly`); no stack use, and outputs depend only
+    // on the declared inputs. `params` starts with the four modulus limbs.
+    // All memory addresses are input-independent.
+    unsafe {
+        asm!(
+            "add {r0}, qword ptr [{b}]",
+            "adc {r1}, qword ptr [{b} + 8]",
+            "adc {r2}, qword ptr [{b} + 16]",
+            "adc {r3}, qword ptr [{b} + 24]",
+            "mov {t0}, {r0}",
+            "mov {t1}, {r1}",
+            "mov {t2}, {r2}",
+            "mov {t3}, {r3}",
+            "sub {t0}, qword ptr [{p}]",
+            "sbb {t1}, qword ptr [{p} + 8]",
+            "sbb {t2}, 0",
+            "sbb {t3}, qword ptr [{p} + 24]",
+            "cmovnc {r0}, {t0}",
+            "cmovnc {r1}, {t1}",
+            "cmovnc {r2}, {t2}",
+            "cmovnc {r3}, {t3}",
+            r0 = inout(reg) r0,
+            r1 = inout(reg) r1,
+            r2 = inout(reg) r2,
+            r3 = inout(reg) r3,
+            b = in(reg) rhs,
+            p = in(reg) params,
+            t0 = out(reg) _,
+            t1 = out(reg) _,
+            t2 = out(reg) _,
+            t3 = out(reg) _,
+            options(pure, readonly, nostack),
+        );
+    }
+    [r0, r1, r2, r3]
+}
+
+/// Subtracts two canonical residues, adding the modulus back on underflow.
+///
+/// Like [`add`] and [`mul`], this hardcodes the Pasta modulus shape
+/// (`modulus[2] == 0`). The difference lies strictly between `-modulus` and
+/// `modulus`, so one conditional addition produces a canonical result.
+#[inline(always)]
+pub(super) fn sub(lhs: &Limbs, rhs: &Limbs, params: &[u64; 5]) -> Limbs {
+    debug_assert!(
+        is_canonical(lhs, params),
+        "x86_64_asm::sub requires a canonical lhs"
+    );
+    debug_assert!(
+        is_canonical(rhs, params),
+        "x86_64_asm::sub requires a canonical rhs"
+    );
+    let [mut r0, mut r1, mut r2, mut r3] = *lhs;
+    // SAFETY: straight-line arithmetic reading only the words behind the two
+    // passed references (`readonly`); no stack use, and outputs depend only
+    // on the declared inputs. The conditional loads use fixed,
+    // input-independent addresses.
+    unsafe {
+        asm!(
+            "sub {r0}, qword ptr [{b}]",
+            "sbb {r1}, qword ptr [{b} + 8]",
+            "sbb {r2}, qword ptr [{b} + 16]",
+            "sbb {r3}, qword ptr [{b} + 24]",
+            // MOV and CMOV preserve the borrow flag from the subtraction.
+            "mov {m0}, 0",
+            "mov {m1}, 0",
+            "mov {m3}, 0",
+            "cmovc {m0}, qword ptr [{p}]",
+            "cmovc {m1}, qword ptr [{p} + 8]",
+            "cmovc {m3}, qword ptr [{p} + 24]",
+            "add {r0}, {m0}",
+            "adc {r1}, {m1}",
+            "adc {r2}, 0",
+            "adc {r3}, {m3}",
+            r0 = inout(reg) r0,
+            r1 = inout(reg) r1,
+            r2 = inout(reg) r2,
+            r3 = inout(reg) r3,
+            b = in(reg) rhs,
+            p = in(reg) params,
+            m0 = out(reg) _,
+            m1 = out(reg) _,
+            m3 = out(reg) _,
+            options(pure, readonly, nostack),
+        );
+    }
+    [r0, r1, r2, r3]
 }
 
 /// Multiplies two Montgomery residues for a Pasta modulus. `rhs` must be

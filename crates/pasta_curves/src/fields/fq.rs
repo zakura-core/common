@@ -159,12 +159,27 @@ impl<'a, 'b> Sub<&'b Fq> for &'a Fq {
         {
             Fq(super::aarch64_asm::sub(&self.0, &rhs.0, &MODULUS.0))
         }
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little",
+        #[cfg(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))]
+        {
+            Fq(super::x86_64_asm::sub(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
+        }
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                any(target_family = "unix", target_os = "none"),
+                target_pointer_width = "64",
+                target_endian = "little",
+            ),
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
         )))]
         {
             self.sub(rhs)
@@ -187,12 +202,27 @@ impl<'a, 'b> Add<&'b Fq> for &'a Fq {
         {
             Fq(super::aarch64_asm::add(&self.0, &rhs.0, &MODULUS.0))
         }
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little",
+        #[cfg(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))]
+        {
+            Fq(super::x86_64_asm::add(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
+        }
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                any(target_family = "unix", target_os = "none"),
+                target_pointer_width = "64",
+                target_endian = "little",
+            ),
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
         )))]
         {
             self.add(rhs)
@@ -779,12 +809,27 @@ impl ff::Field for Fq {
         {
             Self(super::aarch64_asm::add(&self.0, &self.0, &MODULUS.0))
         }
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple",
-            target_pointer_width = "64",
-            target_endian = "little",
+        #[cfg(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))]
+        {
+            Self(super::x86_64_asm::add(&self.0, &self.0, &X86_64_ASM_PARAMS))
+        }
+        #[cfg(not(any(
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple",
+                target_pointer_width = "64",
+                target_endian = "little",
+            ),
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
         )))]
         {
             self.double()
@@ -1836,11 +1881,11 @@ fn constants_are_canonical() {
     )
 ))]
 #[test]
-fn asm_mul_and_square_canonical_sweep_match_portable() {
+fn asm_arithmetic_canonical_sweep_matches_portable() {
     use rand::{Rng, SeedableRng};
 
-    // Random canonical operands: the selected assembly `mul` must agree
-    // with the portable implementation and return a canonical residue.
+    // Random canonical operands: the selected assembly operations must agree
+    // with the portable implementations and return canonical residues.
     let mut rng = rand_xorshift::XorShiftRng::from_seed([0x42; 16]);
     let mut random = || {
         let mut l = [0u64; 4];
@@ -1852,9 +1897,15 @@ fn asm_mul_and_square_canonical_sweep_match_portable() {
     for _ in 0..200_000u32 {
         let a = random();
         let b = random();
-        let asm = a.mul_runtime(&b);
-        assert_eq!(asm, Fq::mul(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
-        assert!(is_canonical(&asm));
+        let add = &a + &b;
+        let sub = &a - &b;
+        let mul = a.mul_runtime(&b);
+        assert_eq!(add, Fq::add(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
+        assert_eq!(sub, Fq::sub(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
+        assert_eq!(mul, Fq::mul(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
+        assert!(is_canonical(&add));
+        assert!(is_canonical(&sub));
+        assert!(is_canonical(&mul));
         assert_eq!(a.square_runtime(), a.square(), "value {:x?}", a.0);
     }
 }
