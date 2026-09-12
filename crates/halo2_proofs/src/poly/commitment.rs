@@ -987,17 +987,16 @@ impl<C: CurveAffine> PreparedDeferredIpa<C> {
         let half = self.coefficient.terms() / 2;
         assert_eq!(p_hi.len(), half, "one scalar per lower-half base");
         assert_eq!(p_lo.len(), half, "one scalar per upper-half base");
-        let zeroes = vec![C::Scalar::ZERO; half];
         let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
             || {
                 crate::multicore::join(
                     || {
                         self.coefficient
-                            .multiexp_with_prefix_and_suffix(p_hi, &zeroes, &[])
+                            .multiexp_with_base_offset_vartime(0, p_hi, &[])
                     },
                     || {
                         self.coefficient
-                            .multiexp_with_prefix_and_suffix(&zeroes, p_lo, &[])
+                            .multiexp_with_base_offset_vartime(half, p_lo, &[])
                     },
                 )
             },
@@ -2157,12 +2156,11 @@ impl<C: CurveAffine> Params<C> {
                 return None;
             }
             let fixed_bases = self.fixed_base_table()?;
-            let zeroes = vec![C::Scalar::ZERO; half];
             let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
                 || {
                     crate::multicore::join(
-                        || prepared.multiexp_with_prefix_and_suffix(p_hi, &zeroes, &[]),
-                        || prepared.multiexp_with_prefix_and_suffix(&zeroes, p_lo, &[]),
+                        || prepared.multiexp_with_base_offset_vartime(0, p_hi, &[]),
+                        || prepared.multiexp_with_base_offset_vartime(half, p_lo, &[]),
                     )
                 },
                 || fixed_bases.multiply_ipa_rounds(l_u, l_w, r_u, r_w),
@@ -2208,14 +2206,13 @@ impl<C: CurveAffine> Params<C> {
     /// benchmarked M4 system. Wider pools and unmeasured SRS shapes keep the
     /// planned commitment multiexp. Without `orbits`, the first IPA round also
     /// reuses the coefficient table. Its two generator MSMs each have one
-    /// active half and one zero half: the backend still recodes and scans all
-    /// scalar slots, but zero scalars do not fetch prepared points or populate
-    /// buckets. At `k = 11`, the next three rounds expand their symbolic folded
-    /// generators over the same prepared coefficient table, then the retained
-    /// full-SRS table materializes all four folds at once. Later IPA rounds keep
-    /// their normal planner, while the small fixed pair handles `u` and `w` in
-    /// every round. Measurements covered full-width and witness-like (boolean,
-    /// byte, zero-padded) coefficient distributions.
+    /// active half and one implicit zero half, so the backend recodes and scans
+    /// only the active scalar range. At `k = 11`, the next three rounds expand
+    /// their symbolic folded generators over the same prepared coefficient
+    /// table, then the retained full-SRS table materializes all four folds at
+    /// once. Later IPA rounds keep their normal planner, while the small fixed
+    /// pair handles `u` and `w` in every round. Measurements covered full-width
+    /// and witness-like (boolean, byte, zero-padded) coefficient distributions.
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// signed-width-eight pair adds exactly 512 KiB of affine-point payload for
