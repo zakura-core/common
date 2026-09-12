@@ -260,6 +260,38 @@ pub trait PreparedZeroCheck<C: CurveExt>: core::fmt::Debug + Send + Sync {
         scalars.extend_from_slice(suffix);
         self.multiexp_with_terms_vartime(&scalars, extra)
     }
+
+    /// The same exact multiscalar multiplication as
+    /// [`Self::multiexp_with_terms_vartime`], with `scalars` paired with the
+    /// contiguous prepared bases beginning at `base_offset`. Prepared bases
+    /// outside that range have implicit zero scalars.
+    ///
+    /// The default implementation materializes the implicit zero scalars.
+    /// Backends can override this method to evaluate only the selected range.
+    ///
+    /// # Security
+    ///
+    /// Variable-time in everything; callers committing to secret data must
+    /// already accept a variable-time multiexp.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the selected range extends past [`Self::terms`].
+    fn multiexp_with_base_offset_vartime(
+        &self,
+        base_offset: usize,
+        scalars: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        let range_end = base_offset
+            .checked_add(scalars.len())
+            .expect("prepared base range overflow");
+        assert!(range_end <= self.terms(), "prepared base range in bounds");
+
+        let mut full_scalars = alloc::vec![<C::ScalarExt as ff::Field>::ZERO; self.terms()];
+        full_scalars[base_offset..range_end].copy_from_slice(scalars);
+        self.multiexp_with_terms_vartime(&full_scalars, extra)
+    }
 }
 
 /// Internal construction for coordinates produced by trusted curve formulas.
