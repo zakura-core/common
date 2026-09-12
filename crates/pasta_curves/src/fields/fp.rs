@@ -227,7 +227,11 @@ impl<T: ::core::borrow::Borrow<Fp>> ::core::iter::Product<T> for Fp {
 /// INV = -(p^{-1} mod 2^64) mod 2^64
 const INV: u64 = 0x992d30ecffffffff;
 
-#[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "x86_64-asm",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
 const X86_64_ASM_PARAMS: [u64; 5] = [MODULUS.0[0], MODULUS.0[1], MODULUS.0[2], MODULUS.0[3], INV];
 
 /// R = 2^256 mod p
@@ -450,7 +454,11 @@ impl Fp {
             Fp(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
         }
 
-        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+        #[cfg(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))]
         {
             Fp(super::x86_64_asm::mul(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
         }
@@ -463,7 +471,11 @@ impl Fp {
                 target_pointer_width = "64",
                 target_endian = "little"
             ),
-            all(feature = "x86_64-asm", target_arch = "x86_64")
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
         )))]
         {
             self.mul(rhs)
@@ -483,7 +495,11 @@ impl Fp {
             Fp(super::aarch64_asm::square(&self.0, &MODULUS.0, INV))
         }
 
-        #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+        #[cfg(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))]
         {
             Fp(super::x86_64_asm::square(&self.0, &X86_64_ASM_PARAMS))
         }
@@ -496,7 +512,11 @@ impl Fp {
                 target_pointer_width = "64",
                 target_endian = "little"
             ),
-            all(feature = "x86_64-asm", target_arch = "x86_64")
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
         )))]
         {
             self.square()
@@ -1809,7 +1829,11 @@ fn constants_are_canonical() {
             target_pointer_width = "64",
             target_endian = "little"
         ),
-        all(feature = "x86_64-asm", target_arch = "x86_64")
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )
     )
 ))]
 #[test]
@@ -1846,7 +1870,11 @@ fn asm_mul_and_square_canonical_sweep_match_portable() {
             target_pointer_width = "64",
             target_endian = "little"
         ),
-        all(feature = "x86_64-asm", target_arch = "x86_64")
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )
     )
 ))]
 #[test]
@@ -1900,7 +1928,11 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
             target_pointer_width = "64",
             target_endian = "little"
         ),
-        all(feature = "x86_64-asm", target_arch = "x86_64")
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )
     )
 ))]
 #[test]
