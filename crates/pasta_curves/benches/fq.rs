@@ -78,7 +78,7 @@ fn bench_fq_double(b: &mut Bencher) {
     let mut count = 0;
     b.iter(|| {
         let mut tmp = v[count];
-        tmp = tmp.double();
+        tmp = <Fq as ff::Field>::double(&tmp);
         count = (count + 1) % SAMPLES;
         tmp
     });
