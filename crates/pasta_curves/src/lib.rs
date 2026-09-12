@@ -25,6 +25,9 @@ extern crate alloc;
 #[macro_use]
 extern crate std;
 
+#[cfg(all(feature = "ifma", not(test)))]
+extern crate std;
+
 #[macro_use]
 mod macros;
 mod curves;

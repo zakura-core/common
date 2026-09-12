@@ -11,6 +11,67 @@ pub use pasta_curves::arithmetic::*;
 
 use crate::multicore::{self, TheBestReduce};
 
+// Batched slice arithmetic, dispatching to the vectorized Pasta
+// implementations when the field type matches. The unsafe code is contained
+// to slice casts whose element type is verified by `TypeId` equality.
+pub(crate) mod batch {
+    use core::any::TypeId;
+
+    use group::ff::Field;
+    use pasta_curves::{pallas, vesta};
+
+    #[allow(unsafe_code)]
+    fn downcast_mut<F: Field, T: 'static>(s: &mut [F]) -> Option<&mut [T]> {
+        (TypeId::of::<F>() == TypeId::of::<T>()).then(|| {
+            // SAFETY: `TypeId` equality guarantees `F` and `T` are the same
+            // type, so the layouts and element values are identical.
+            unsafe { core::slice::from_raw_parts_mut(s.as_mut_ptr().cast::<T>(), s.len()) }
+        })
+    }
+
+    #[allow(unsafe_code)]
+    fn downcast_ref<F: Field, T: 'static>(s: &[F]) -> Option<&[T]> {
+        (TypeId::of::<F>() == TypeId::of::<T>()).then(|| {
+            // SAFETY: `TypeId` equality guarantees `F` and `T` are the same
+            // type, so the layouts and element values are identical.
+            unsafe { core::slice::from_raw_parts(s.as_ptr().cast::<T>(), s.len()) }
+        })
+    }
+
+    /// Deferred-reduction inner product `sum_i a[i] * b[i]`, when a
+    /// specialized implementation exists for `F`.
+    pub(crate) fn inner_product<F: Field>(a: &[F], b: &[F]) -> Option<F> {
+        if let Some(a) = downcast_ref::<F, pallas::Base>(a) {
+            let b = downcast_ref::<F, pallas::Base>(b).expect("same field type");
+            let out = pasta_curves::fp_inner_product(a, b);
+            downcast_ref::<pallas::Base, F>(core::slice::from_ref(&out)).map(|s| s[0])
+        } else if let Some(a) = downcast_ref::<F, vesta::Base>(a) {
+            let b = downcast_ref::<F, vesta::Base>(b).expect("same field type");
+            let out = pasta_curves::fq_inner_product(a, b);
+            downcast_ref::<vesta::Base, F>(core::slice::from_ref(&out)).map(|s| s[0])
+        } else {
+            None
+        }
+    }
+
+    /// Elementwise in-place scaling by one factor: `x[i] *= k`.
+    pub(crate) fn scale_slice<F: Field>(x: &mut [F], k: &F) {
+        if let Some(x) = downcast_mut::<F, pallas::Base>(x) {
+            let k =
+                downcast_ref::<F, pallas::Base>(core::slice::from_ref(k)).expect("same field type");
+            pasta_curves::fp_scale_slice(x, &k[0]);
+        } else if let Some(x) = downcast_mut::<F, vesta::Base>(x) {
+            let k =
+                downcast_ref::<F, vesta::Base>(core::slice::from_ref(k)).expect("same field type");
+            pasta_curves::fq_scale_slice(x, &k[0]);
+        } else {
+            for v in x.iter_mut() {
+                *v *= *k;
+            }
+        }
+    }
+}
+
 /// This represents an element of a group with basic operations that can be
 /// performed. This allows an FFT implementation (for example) to operate
 /// generically over either a field or elliptic curve group.
