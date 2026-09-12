@@ -89,6 +89,39 @@ fn prefix_products_of_fractions_in_place<F: Field>(
     fraction_rows: usize,
     initial: F,
 ) {
+    prefix_products_of_fractions_in_place_inner::<F, false>(
+        numerators,
+        denominators,
+        fraction_rows,
+        initial,
+    );
+}
+
+/// Builds prefix products when the total numerator and denominator products
+/// are equal, including when both are zero.
+///
+/// This specialization is valid only when the caller structurally guarantees
+/// that the numerator and denominator factors are the same multiset. It must
+/// not be selected from an observed equality of their products.
+fn prefix_products_of_equal_product_fractions_in_place<F: Field>(
+    numerators: &mut [F],
+    denominators: &mut [F],
+    fraction_rows: usize,
+) {
+    prefix_products_of_fractions_in_place_inner::<F, true>(
+        numerators,
+        denominators,
+        fraction_rows,
+        F::ONE,
+    );
+}
+
+fn prefix_products_of_fractions_in_place_inner<F: Field, const EQUAL_PRODUCTS: bool>(
+    numerators: &mut [F],
+    denominators: &mut [F],
+    fraction_rows: usize,
+    initial: F,
+) {
     assert_eq!(numerators.len(), denominators.len());
     assert!(fraction_rows < numerators.len());
 
@@ -131,14 +164,16 @@ fn prefix_products_of_fractions_in_place<F: Field>(
         numerators[high_row] = numerator_prefix;
         numerator_prefix *= high_numerator;
 
-        if let Some(denominator_odd) = denominator_odd.as_mut() {
-            if pair_count % 2 == 0 {
-                denominator_even *= pair;
+        if !EQUAL_PRODUCTS {
+            if let Some(denominator_odd) = denominator_odd.as_mut() {
+                if pair_count % 2 == 0 {
+                    denominator_even *= pair;
+                } else {
+                    *denominator_odd *= pair;
+                }
             } else {
-                *denominator_odd *= pair;
+                denominator_odd = Some(pair);
             }
-        } else {
-            denominator_odd = Some(pair);
         }
         low_row += 2;
     }
@@ -147,23 +182,43 @@ fn prefix_products_of_fractions_in_place<F: Field>(
         numerators[low_row] = numerator_prefix;
         numerator_prefix *= numerator;
 
-        if let Some(denominator_odd) = denominator_odd.as_mut() {
-            if pair_count % 2 == 0 {
-                *denominator_odd *= denominators[low_row];
+        if !EQUAL_PRODUCTS {
+            if let Some(denominator_odd) = denominator_odd.as_mut() {
+                if pair_count % 2 == 0 {
+                    *denominator_odd *= denominators[low_row];
+                } else {
+                    denominator_even *= denominators[low_row];
+                }
             } else {
-                denominator_even *= denominators[low_row];
+                denominator_odd = Some(denominators[low_row]);
             }
-        } else {
-            denominator_odd = Some(denominators[low_row]);
         }
     }
-    let denominator_product = denominator_odd
-        .map(|denominator_odd| denominator_even * denominator_odd)
-        .unwrap_or(denominator_even);
-    numerators[fraction_rows] = numerator_prefix;
+    // Lookup fractions enter the equal-products route. Their numerator and
+    // denominator factors are the same two multisets in different orders, so
+    // the numerator prefix is also the denominator total. This remains true
+    // when both products are zero; the existing fallback below then locates
+    // the first zero denominator from the pair encoding.
+    let denominator_product = if EQUAL_PRODUCTS {
+        numerator_prefix
+    } else {
+        denominator_odd
+            .map(|denominator_odd| denominator_even * denominator_odd)
+            .unwrap_or(denominator_even)
+    };
 
     if let Some(denominator_inverse) = Option::<F>::from(denominator_product.invert()) {
-        apply_denominator_prefixes(numerators, denominators, fraction_rows, denominator_inverse);
+        if EQUAL_PRODUCTS {
+            numerators[fraction_rows] = F::ONE;
+        } else {
+            numerators[fraction_rows] = numerator_prefix;
+        }
+        apply_denominator_prefixes::<F, EQUAL_PRODUCTS>(
+            numerators,
+            denominators,
+            fraction_rows,
+            denominator_inverse,
+        );
     } else {
         // Find the first original zero while multiplying the encoded factors
         // strictly before it. If a high denominator is zero, its low partner
@@ -202,7 +257,7 @@ fn prefix_products_of_fractions_in_place<F: Field>(
 
         let first_zero = first_zero.expect("a zero product has a zero factor");
         if first_zero > 0 {
-            apply_denominator_prefixes(
+            apply_denominator_prefixes::<F, false>(
                 numerators,
                 denominators,
                 first_zero,
@@ -213,14 +268,16 @@ fn prefix_products_of_fractions_in_place<F: Field>(
     }
 }
 
-fn apply_denominator_prefixes<F: Field>(
+fn apply_denominator_prefixes<F: Field, const EQUAL_ENDPOINT: bool>(
     numerators: &mut [F],
     denominators: &[F],
     fraction_rows: usize,
     mut denominator_inverse: F,
 ) {
     debug_assert!(fraction_rows > 0);
-    numerators[fraction_rows] *= denominator_inverse;
+    if !EQUAL_ENDPOINT {
+        numerators[fraction_rows] *= denominator_inverse;
+    }
 
     // Handle an unpaired final denominator before walking pairs backward.
     let pair_count = (fraction_rows - 1) / 2;
@@ -243,7 +300,10 @@ fn apply_denominator_prefixes<F: Field>(
 
 #[cfg(test)]
 mod prefix_products_of_fractions_tests {
-    use super::{prefix_products_of_fractions, prefix_products_of_fractions_in_place};
+    use super::{
+        prefix_products_of_equal_product_fractions_in_place, prefix_products_of_fractions,
+        prefix_products_of_fractions_in_place,
+    };
     use group::ff::Field;
     use pasta_curves::Fp;
 
@@ -324,6 +384,46 @@ mod prefix_products_of_fractions_tests {
             );
             let actual =
                 prefix_products_of_fractions(numerators, denominators, fraction_rows, initial);
+
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn equal_product_route_matches_permuted_factors_and_displaced_zeros() {
+        for (fraction_rows, shift, zero_rows) in [
+            (0, 0, &[][..]),
+            (1, 0, &[]),
+            (2, 1, &[]),
+            (65, 17, &[0, 32, 64]),
+            (FULL_FRACTION_ROWS, 713, &[1, 1_023, 2_041]),
+        ] {
+            let len = fraction_rows + 6;
+            let mut numerators = pseudo_random_values(len, 0x1234_5678_9abc_def0);
+            for numerator in &mut numerators[..fraction_rows] {
+                if bool::from(numerator.is_zero()) {
+                    *numerator = Fp::ONE;
+                }
+            }
+            for &row in zero_rows {
+                numerators[row] = Fp::ZERO;
+            }
+            let mut denominators = pseudo_random_values(len, 0xfedc_ba98_7654_3210);
+            denominators[..fraction_rows].copy_from_slice(&numerators[..fraction_rows]);
+            denominators[..fraction_rows].rotate_left(shift);
+
+            let expected = reference_prefix_products(
+                numerators.clone(),
+                denominators.clone(),
+                fraction_rows,
+                Fp::ONE,
+            );
+            let mut actual = numerators;
+            prefix_products_of_equal_product_fractions_in_place(
+                &mut actual,
+                &mut denominators,
+                fraction_rows,
+            );
 
             assert_eq!(actual, expected);
         }

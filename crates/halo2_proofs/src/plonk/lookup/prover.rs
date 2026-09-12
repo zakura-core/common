@@ -1428,11 +1428,14 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         // domain, starting with z[0] = 1. Reuse the numerator vector for z
         // instead of allocating a third domain-sized vector.
         let usable_rows = params.n as usize - blinding_factors;
-        super::super::prefix_products_of_fractions_in_place(
+        // The permuted input and table values are independent permutations of
+        // their compressed values over exactly these rows. Thus the total
+        // numerator and denominator products are equal for every `beta` and
+        // `gamma`, including when the shared total is zero.
+        super::super::prefix_products_of_equal_product_fractions_in_place(
             &mut compressed_input_expression,
             &mut denominators,
             fraction_rows,
-            C::Scalar::ONE,
         );
         compressed_input_expression[usable_rows..].copy_from_slice(&blinding.rows);
         let z = compressed_input_expression;
