@@ -845,14 +845,31 @@ fn factor_terms<E, F: Field, B: Basis>(
     })
 }
 
+#[derive(Clone, Copy)]
+enum FactorBody<'a, E, F: Field, B: Basis> {
+    Existing(&'a Ast<E, F, B>),
+    // Reassociate `outer * (factor * body)` as
+    // `factor * (outer * body)` while retaining the original term position.
+    Product(&'a Ast<E, F, B>, &'a Ast<E, F, B>),
+}
+
+impl<'a, E: Copy, F: Field, B: Basis> FactorBody<'a, E, F, B> {
+    fn compile(self, scalars: &mut PlanScalarInterner<F>) -> EvaluationPlan<F> {
+        match self {
+            Self::Existing(term) => EvaluationPlan::compile(term, scalars),
+            Self::Product(lhs, rhs) => EvaluationPlan::compile(&multiply_ast(lhs, rhs), scalars),
+        }
+    }
+}
+
 struct FactorGroup<'a, E, F: Field, B: Basis> {
     factor: &'a Ast<E, F, B>,
-    terms: Vec<(usize, &'a Ast<E, F, B>)>,
+    terms: Vec<(usize, FactorBody<'a, E, F, B>)>,
 }
 
 // Partitions product terms into repeated left factors, followed by repeated
 // right factors among terms that were not claimed by a left-factor group.
-fn factor_groups<'a, E, F: Field, B: Basis>(
+fn direct_factor_groups<'a, E, F: Field, B: Basis>(
     terms: &[&'a Ast<E, F, B>],
 ) -> Vec<FactorGroup<'a, E, F, B>> {
     let mut claimed = vec![false; terms.len()];
@@ -885,13 +902,146 @@ fn factor_groups<'a, E, F: Field, B: Basis>(
                     claimed[position] = true;
                     let (_, term) = factor_terms(terms[position], side)
                         .expect("a factor group only contains product terms");
-                    (position, term)
+                    (position, FactorBody::Existing(term))
                 })
                 .collect();
             groups.push(FactorGroup { factor, terms });
         }
     }
 
+    groups
+}
+
+fn push_nested_poly_factor<'a, E: Copy, F: Field, B: Basis>(
+    position: usize,
+    outer: &'a Ast<E, F, B>,
+    nested: &'a Ast<E, F, B>,
+    groups: &mut Vec<FactorGroup<'a, E, F, B>>,
+) {
+    let Ast::Mul(AstMul(lhs, rhs)) = nested else {
+        return;
+    };
+    for (factor, body) in [(lhs.as_ref(), rhs.as_ref()), (rhs.as_ref(), lhs.as_ref())] {
+        let (Ast::Poly(factor_leaf), Ast::Poly(body_leaf)) = (factor, body) else {
+            continue;
+        };
+        // Preserve the specialized Square plan for `p * p`.
+        if factor_leaf == body_leaf {
+            continue;
+        }
+        let group = match groups
+            .iter_mut()
+            .find(|group| same_ast(group.factor, factor))
+        {
+            Some(group) => group,
+            None => {
+                groups.push(FactorGroup {
+                    factor,
+                    terms: vec![],
+                });
+                groups.last_mut().expect("a nested factor group was added")
+            }
+        };
+        // Both top-level operands can expose the same factor in one term.
+        if group
+            .terms
+            .last()
+            .is_some_and(|(candidate, _)| *candidate == position)
+        {
+            continue;
+        }
+        group
+            .terms
+            .push((position, FactorBody::Product(outer, body)));
+    }
+}
+
+fn nested_poly_factor_groups<'a, E: Copy, F: Field, B: Basis>(
+    terms: &[&'a Ast<E, F, B>],
+) -> Vec<FactorGroup<'a, E, F, B>> {
+    // Inspect exactly one nested product. Besides bounding caller-controlled
+    // setup work, this avoids a general reassociation policy that could hide
+    // specialized plans or useful common subexpressions deeper in the tree.
+    let mut groups = vec![];
+    for (position, term) in terms.iter().enumerate() {
+        let Some((lhs, rhs)) = mul_terms(term) else {
+            continue;
+        };
+        push_nested_poly_factor(position, lhs, rhs, &mut groups);
+        push_nested_poly_factor(position, rhs, lhs, &mut groups);
+    }
+    groups
+}
+
+fn factor_group_savings<E, F: Field, B: Basis>(groups: &[FactorGroup<'_, E, F, B>]) -> usize {
+    groups
+        .iter()
+        .map(|group| group.terms.len().saturating_sub(1))
+        .sum()
+}
+
+// Require at least two repeated outer-factor pairs. The strict comparison
+// below handles cost; this threshold leaves smaller local expressions alone.
+const MIN_NESTED_POLY_FACTOR_TERMS: usize = 4;
+
+fn factor_groups<'a, E: Copy, F: Field, B: Basis>(
+    terms: &[&'a Ast<E, F, B>],
+) -> Vec<FactorGroup<'a, E, F, B>> {
+    let direct = direct_factor_groups(terms);
+    let direct_savings = factor_group_savings(&direct);
+    let mut candidates = nested_poly_factor_groups(terms);
+    candidates.retain(|candidate| candidate.terms.len() >= MIN_NESTED_POLY_FACTOR_TERMS);
+
+    let best = candidates
+        .iter()
+        .enumerate()
+        .map(|(candidate_index, candidate)| {
+            let retained_direct_savings = direct
+                .iter()
+                .map(|group| {
+                    group
+                        .terms
+                        .iter()
+                        .filter(|(position, _)| {
+                            !candidate
+                                .terms
+                                .iter()
+                                .any(|(candidate, _)| candidate == position)
+                        })
+                        .count()
+                        .saturating_sub(1)
+                })
+                .sum::<usize>();
+            (
+                candidate_index,
+                candidate.terms.len() - 1 + retained_direct_savings,
+            )
+        })
+        .max_by_key(|(_, savings)| *savings);
+    let Some((candidate_index, candidate_savings)) = best else {
+        return direct;
+    };
+    if candidate_savings <= direct_savings {
+        return direct;
+    }
+
+    let candidate = candidates.swap_remove(candidate_index);
+    let nested_positions = candidate
+        .terms
+        .iter()
+        .map(|(position, _)| *position)
+        .collect::<Vec<_>>();
+    let mut groups = vec![candidate];
+    for mut group in direct {
+        group.terms.retain(|(position, _)| {
+            !nested_positions
+                .iter()
+                .any(|candidate| candidate == position)
+        });
+        if group.terms.len() >= 2 {
+            groups.push(group);
+        }
+    }
     groups
 }
 
@@ -1932,7 +2082,7 @@ impl<F: Field> EvaluationPlan<F> {
                             let position = available_positions[available_position];
                             claimed[position] = true;
                             WeightedTerm {
-                                term: EvaluationPlan::compile(term, scalars),
+                                term: term.compile(scalars),
                                 power: scalars.intern(powers[terms.len() - 1 - position]),
                                 split_scaled_addends: false,
                             }
@@ -3264,7 +3414,7 @@ impl<F: Field> FactorBodyPlan<F> {
                 .map(|(position, term)| {
                     claimed[position] = true;
                     WeightedTerm {
-                        term: EvaluationPlan::compile(term, scalars),
+                        term: term.compile(scalars),
                         power: scalars.intern(powers[position]),
                         split_scaled_addends: false,
                     }
@@ -5466,8 +5616,9 @@ mod tests {
         MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES, MAX_DUPLICATED_AFFINE_FALLBACK_NODES,
         MAX_LINEAR_TERM_CACHE_ENTRIES, PlanScalar, PlanScalarInterner, ReusablePowerFold, ScalarId,
         WeightedTerm, ast_has_at_most_nodes, collect_plan_occurrences, compressed_selector,
-        get_chunk_params, linear_term_cache_budget, new_evaluator, new_virtual_evaluator,
-        reassociate_affine_blend, reuse_cache_slots, same_ast, selector_family_matches,
+        get_chunk_params, linear_term_cache_budget, nested_poly_factor_groups, new_evaluator,
+        new_virtual_evaluator, reassociate_affine_blend, reuse_cache_slots, same_ast,
+        selector_family_matches,
     };
     use crate::poly::{
         Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
@@ -8363,6 +8514,124 @@ mod tests {
     fn shared_factor_groups_match_generic_evaluation() {
         check_shared_factor_groups::<pallas::Base>();
         check_shared_factor_groups::<vesta::Base>();
+    }
+
+    fn check_nested_poly_factor_group<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(1, 3);
+        let raw_values = (0..7)
+            .map(|column| {
+                (0..8)
+                    .map(|row| F::from((column + 2) * (row + 3) + 1))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut evaluator = new_evaluator::<_, F, LagrangeCoeff>(|| {});
+        let leaves = raw_values
+            .iter()
+            .map(|values| evaluator.register_poly(domain.lagrange_from_vec(values.clone())))
+            .collect::<Vec<_>>();
+
+        let common = Ast::from(leaves[0]);
+        let terms = (0..2)
+            .flat_map(|outer| {
+                (0..2).map({
+                    let common = common.clone();
+                    let leaves = &leaves;
+                    move |body| {
+                        Ast::from(leaves[outer + 1])
+                            * (common.clone() * Ast::from(leaves[outer * 2 + body + 3]))
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let base = F::from(13);
+
+        let (pair_plan, _) =
+            compile_plan(&Ast::distribute_powers(terms.iter().take(2).cloned(), base));
+        match pair_plan {
+            EvaluationPlan::DistributePowers { work, .. } => match work.as_slice() {
+                [DistributionWork::WeightedSharedFactor { factor, terms }] => {
+                    assert!(
+                        matches!(factor, EvaluationPlan::Poly(leaf) if *leaf == leaves[1].into())
+                    );
+                    assert_eq!(terms.len(), 2);
+                }
+                _ => panic!("a pair retains its direct outer factor"),
+            },
+            _ => panic!("multiple terms compile to distributed work"),
+        }
+
+        let tie_terms = (0..4)
+            .map(|body| Ast::from(leaves[1]) * (common.clone() * Ast::from(leaves[body + 3])))
+            .collect::<Vec<_>>();
+        let (tie_plan, _) = compile_plan(&Ast::distribute_powers(tie_terms, base));
+        match tie_plan {
+            EvaluationPlan::DistributePowers { work, .. } => match work.as_slice() {
+                [DistributionWork::WeightedSharedFactor { factor, terms }] => {
+                    assert!(
+                        matches!(factor, EvaluationPlan::Poly(leaf) if *leaf == leaves[1].into())
+                    );
+                    assert_eq!(terms.len(), 4);
+                }
+                _ => panic!("a tie retains the direct outer factor"),
+            },
+            _ => panic!("multiple terms compile to distributed work"),
+        }
+
+        let square_terms = (0..4)
+            .map(|outer| Ast::from(leaves[outer + 1]) * (common.clone() * common.clone()))
+            .collect::<Vec<_>>();
+        let square_terms = square_terms.iter().collect::<Vec<_>>();
+        assert!(nested_poly_factor_groups(&square_terms).is_empty());
+
+        let planned_ast = Ast::distribute_powers(terms, base);
+        let (plan, scalars) = compile_plan(&planned_ast);
+        let weighted_terms = match &plan {
+            EvaluationPlan::DistributePowers { work, .. } => match work.as_slice() {
+                [DistributionWork::WeightedSharedFactor { factor, terms }] => {
+                    assert!(
+                        matches!(factor, EvaluationPlan::Poly(leaf) if *leaf == leaves[0].into())
+                    );
+                    terms
+                }
+                _ => panic!("the nested polynomial should be the shared factor"),
+            },
+            _ => panic!("multiple terms compile to distributed work"),
+        };
+        assert_eq!(weighted_terms.len(), 4);
+        assert!(
+            weighted_terms
+                .iter()
+                .all(|term| matches!(term.term, EvaluationPlan::Mul(_, _)))
+        );
+        for (index, term) in weighted_terms.iter().enumerate() {
+            assert_eq!(
+                plan_scalar(&scalars, term.power),
+                PlanScalar::Literal(base.pow_vartime([(3 - index) as u64]))
+            );
+        }
+
+        let actual = evaluator.evaluate(&planned_ast, &domain);
+        for row in 0..actual.len() {
+            let expected = (0..2)
+                .flat_map(|outer| (0..2).map(move |body| (outer, body)))
+                .fold(F::ZERO, |accumulator, (outer, body)| {
+                    accumulator * base
+                        + raw_values[outer + 1][row]
+                            * raw_values[0][row]
+                            * raw_values[outer * 2 + body + 3][row]
+                });
+            assert_eq!(actual[row], expected);
+        }
+    }
+
+    #[test]
+    fn nested_poly_factor_group_removes_more_multiplications() {
+        check_nested_poly_factor_group::<pallas::Base>();
+        check_nested_poly_factor_group::<vesta::Base>();
     }
 
     fn check_nested_shared_factor_groups<F>()
