@@ -10,6 +10,12 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in `x86_64-asm` Cargo feature that forwards to Pasta's
+  BMI2/ADX field-arithmetic backend. Enabling it on an x86-64 CPU without
+  BMI2 and ADX support can fault; generic binaries should leave it disabled.
+
 ## [1.2.0] - 2026-09-08
 
 ### Added
