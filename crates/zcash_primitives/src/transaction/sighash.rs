@@ -51,5 +51,10 @@ pub fn signature_hash<
         TxVersion::V5 => v5_signature_hash(tx, signable_input, txid_parts),
 
         TxVersion::V6 => v6_signature_hash(tx, signable_input, txid_parts),
+
+        #[cfg(zcash_unstable = "nutachyon")]
+        TxVersion::V7 => {
+            crate::transaction::sighash_v6::v7_signature_hash(tx, signable_input, txid_parts)
+        }
     })
 }

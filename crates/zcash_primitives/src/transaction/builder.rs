@@ -905,6 +905,8 @@ impl<P, U> Builder<P, U> {
                 BranchId::Nu6_3 => true,
                 #[cfg(zcash_unstable = "nu7")]
                 BranchId::Nu7 => true,
+                #[cfg(zcash_unstable = "nutachyon")]
+                BranchId::NuTachyon => true,
                 _ => false,
             };
             let ironwood_available = version.has_ironwood() && ironwood_branch;
@@ -1580,6 +1582,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
+            #[cfg(zcash_unstable = "nutachyon")]
+            tachyon_bundle: zcash_tachyon::TachyonBundle::NoBundle,
         };
 
         //
@@ -1689,6 +1693,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
+            #[cfg(zcash_unstable = "nutachyon")]
+            tachyon_bundle: zcash_tachyon::TachyonBundle::NoBundle,
         };
 
         // The unwrap() here is safe because the txid hashing
@@ -1955,6 +1961,8 @@ mod tests {
             nu6_3: Some(BlockHeight::from_u32(10)),
             #[cfg(zcash_unstable = "nu7")]
             nu7: None,
+            #[cfg(zcash_unstable = "nutachyon")]
+            nu_tachyon: None,
         }
     }
 
@@ -1974,6 +1982,8 @@ mod tests {
             nu6_2: Some(BlockHeight::from_u32(9)),
             nu6_3: Some(BlockHeight::from_u32(10)),
             nu7: Some(BlockHeight::from_u32(11)),
+            #[cfg(zcash_unstable = "nutachyon")]
+            nu_tachyon: None,
         }
     }
 

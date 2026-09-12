@@ -44,11 +44,14 @@ redjubjub = { workspace = true }
 sapling = { workspace = true }
 secp256k1 = { version = "0.29", features = ["alloc"], optional = true, default-features = false }
 sha2 = { version = "0.10", default-features = false }
-transparent = { version = "0.10.0", default-features = false, package = "zcash_transparent" }
+transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "c7235b1fc4b4296b8af2e26bf2f6adb24f873f56", version = "0.10.0", default-features = false, package = "zcash_transparent" }
 zcash_encoding = { version = "0.4", default-features = false }
 zcash_note_encryption = { version = "0.4.1", features = ["pre-zip-212"] }
-zcash_protocol = { version = "0.10.0", default-features = false }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "c7235b1fc4b4296b8af2e26bf2f6adb24f873f56", version = "0.10.5", default-features = false }
 zcash_script = { version = "0.4.3", default-features = false }
+
+[target.'cfg(zcash_unstable = "nutachyon")'.dependencies]
+zcash_tachyon = { git = "https://github.com/tachyon-zcash/tachyon", rev = "2dc7010c3e7771c539fd1c03a06bc6be1a7316c7", version = "0.0.0", default-features = false }
 
 [dev-dependencies]
 assert_matches = "1.5"
@@ -61,8 +64,8 @@ proptest = ">=1,<1.7"
 rand = "0.10"
 rand_xorshift = "0.5"
 sapling = { workspace = true, features = ["test-dependencies"] }
-transparent = { version = "0.10.0", features = ["test-dependencies"], default-features = false, package = "zcash_transparent" }
-zcash_protocol = { version = "0.10.0", features = ["local-consensus", "test-dependencies"], default-features = false }
+transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "c7235b1fc4b4296b8af2e26bf2f6adb24f873f56", version = "0.10.0", features = ["test-dependencies"], default-features = false, package = "zcash_transparent" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "c7235b1fc4b4296b8af2e26bf2f6adb24f873f56", version = "0.10.5", features = ["local-consensus", "test-dependencies"], default-features = false }
 zip32 = { version = "0.2", default-features = false }
 
 [target."cfg(unix)".dev-dependencies]
@@ -81,6 +84,7 @@ std = [
     "sapling/std",
     "orchard/std",
     "transparent/std",
+    "zcash_tachyon/std",
 ]
 temporary-zcashd = []
 test-dependencies = [
@@ -99,7 +103,7 @@ level = "warn"
 priority = 0
 check-cfg = [
     "cfg(tokio_unstable)",
-    'cfg(zcash_unstable, values("nu7"))',
+    'cfg(zcash_unstable, values("nu7", "nutachyon"))',
     "cfg(live_network_tests)",
 ]
 
