@@ -418,9 +418,11 @@ fn scalar_byte_order<F: PrimeField>() -> ScalarByteOrder {
     }
 }
 
-/// Unpositioned odd multiples for every coefficient-SRS generator. The table
-/// materializes several IPA folds whose scalar vector is shared by every
-/// output lane.
+/// Unpositioned odd multiples for every coefficient-SRS generator. Within
+/// each scalar block, points are ordered by odd multiple and then output lane,
+/// so the materializer's innermost lane loop reads contiguous affine points.
+/// The table materializes several IPA folds whose scalar vector is shared by
+/// every output lane.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 struct DeferredIpaGeneratorTable<C: CurveAffine> {
     points: Vec<C>,
@@ -455,9 +457,9 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             .len()
             .checked_mul(DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES)?;
         let mut points = vec![C::identity(); table_len];
-        let generator_chunk = cached_generators
-            .len()
-            .div_ceil(crate::multicore::current_num_threads());
+        let cached_blocks = cached_generators.len() / first_cached_generator;
+        let block_chunk = cached_blocks.div_ceil(crate::multicore::current_num_threads());
+        let generator_chunk = block_chunk.checked_mul(first_cached_generator)?;
         let point_chunk =
             generator_chunk.checked_mul(DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES)?;
         crate::multicore::scope(|scope| {
@@ -467,14 +469,22 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             {
                 scope.spawn(move |_| {
                     let mut projective = Vec::with_capacity(points.len());
-                    for &generator in generators {
-                        let generator = C::Curve::from(generator);
-                        let step = generator.double();
-                        let mut odd_multiple = generator;
+                    for generators in generators.chunks(first_cached_generator) {
+                        let mut odd_multiples = generators
+                            .iter()
+                            .copied()
+                            .map(C::Curve::from)
+                            .collect::<Vec<_>>();
+                        let steps = odd_multiples
+                            .iter()
+                            .map(C::Curve::double)
+                            .collect::<Vec<_>>();
                         for index in 0..DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES {
-                            projective.push(odd_multiple);
+                            projective.extend(odd_multiples.iter().copied());
                             if index + 1 != DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES {
-                                odd_multiple += step;
+                                for (odd_multiple, &step) in odd_multiples.iter_mut().zip(&steps) {
+                                    *odd_multiple += step;
+                                }
                             }
                         }
                     }
@@ -658,12 +668,13 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                                     continue;
                                 }
                                 let point_offset = (usize::from(digit.unsigned_abs()) - 1) / 2;
+                                let point_base = cached_block
+                                    * count
+                                    * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
+                                    + point_offset * count
+                                    + start;
                                 for (lane, output) in output.iter_mut().enumerate() {
-                                    let generator = (cached_block + 1) * count + start + lane;
-                                    let point = self.points[(generator
-                                        - self.first_cached_generator)
-                                        * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
-                                        + point_offset];
+                                    let point = self.points[point_base + lane];
                                     *output += if digit < 0 { -point } else { point };
                                 }
                             }
