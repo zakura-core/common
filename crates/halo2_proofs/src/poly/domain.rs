@@ -528,24 +528,23 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 ButterflyParallelism::new(INNER_PARALLEL_DEPTH, false),
             );
             normalize_inverse_fft(&mut values, self.k, self.ifft_divisor, false);
+            let extended_values = Self::fft_zero_padded_into_coset_with_twiddles(
+                &values,
+                self.k,
+                self.extended_k,
+                &twiddles.extended_forward,
+                &twiddles.extended_forward_tables,
+                [self.g_coset, self.g_coset_inv],
+                INNER_PARALLEL_DEPTH,
+                false,
+            );
             let polynomial = Polynomial {
                 values,
                 _marker: PhantomData,
             };
 
-            let mut extended = polynomial.clone();
-            self.distribute_powers_zeta_serial(&mut extended.values, true);
-            Self::fft_zero_padded_with_twiddles(
-                &mut extended.values,
-                self.k,
-                self.extended_k,
-                &twiddles.extended_forward,
-                &twiddles.extended_forward_tables,
-                INNER_PARALLEL_DEPTH,
-                false,
-            );
-            let extended = Polynomial {
-                values: extended.values,
+            let extended: Polynomial<F, ExtendedLagrangeCoeff> = Polynomial {
+                values: extended_values,
                 _marker: PhantomData,
             };
             (polynomial, extended)
@@ -838,19 +837,69 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         parallel_depth: u32,
         avoid_waiter_stealing: bool,
     ) {
+        let values = Self::fft_zero_padded_from_fn_with_twiddles(
+            log_n,
+            extended_log_n,
+            twiddles,
+            tables,
+            parallel_depth,
+            avoid_waiter_stealing,
+            |index| coefficients[index],
+        );
+        *coefficients = values;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fft_zero_padded_into_coset_with_twiddles(
+        coefficients: &[F],
+        log_n: u32,
+        extended_log_n: u32,
+        twiddles: &[F],
+        tables: &[Vec<F>],
+        coset_powers: [F; 2],
+        parallel_depth: u32,
+        avoid_waiter_stealing: bool,
+    ) -> Vec<F> {
+        assert_eq!(coefficients.len(), 1 << log_n);
+        Self::fft_zero_padded_from_fn_with_twiddles(
+            log_n,
+            extended_log_n,
+            twiddles,
+            tables,
+            parallel_depth,
+            avoid_waiter_stealing,
+            |index| {
+                let mut value = coefficients[index];
+                let power = index % (coset_powers.len() + 1);
+                if power != 0 {
+                    value *= &coset_powers[power - 1];
+                }
+                value
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fft_zero_padded_from_fn_with_twiddles(
+        log_n: u32,
+        extended_log_n: u32,
+        twiddles: &[F],
+        tables: &[Vec<F>],
+        parallel_depth: u32,
+        avoid_waiter_stealing: bool,
+        coefficient: impl Fn(usize) -> F,
+    ) -> Vec<F> {
         assert!(log_n <= extended_log_n);
 
         let n = 1 << log_n;
         let extended_n = 1 << extended_log_n;
         let extension = extended_n / n;
 
-        assert_eq!(coefficients.len(), n);
         assert_eq!(twiddles.len(), extended_n / 2);
 
         // A constant polynomial needs no butterfly arithmetic.
         if n == 1 {
-            coefficients.resize(extended_n, coefficients[0]);
-            return;
+            return vec![coefficient(0); extended_n];
         }
 
         // For an n-length input, bitreverse_extended(i) is
@@ -867,8 +916,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         // L = 2 * extension, so its stride is N / (2 * extension) = n / 2.
         let first_twiddle_chunk = n / 2;
         for pair in 0..n / 2 {
-            let left = coefficients[bitreverse(2 * pair, log_n)];
-            let right = coefficients[bitreverse(2 * pair + 1, log_n)];
+            let left = coefficient(bitreverse(2 * pair, log_n));
+            let right = coefficient(bitreverse(2 * pair + 1, log_n));
 
             let mut left_value = left;
             left_value += &right;
@@ -906,7 +955,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 avoid_waiter_stealing,
             },
         );
-        *coefficients = values;
+        values
     }
 
     /// Get the size of the extended domain
