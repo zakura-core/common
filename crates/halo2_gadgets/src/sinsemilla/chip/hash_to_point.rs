@@ -218,6 +218,22 @@ pub(crate) fn prepare_hash_witness(
     initial_q: pallas::Affine,
     words: &[u32],
 ) -> Option<PreparedHashWitness> {
+    prepare_hash_witness_inner(initial_q, words, None)
+}
+
+pub(crate) fn prepare_hash_witness_with_output_hint(
+    initial_q: pallas::Affine,
+    words: &[u32],
+    output_x_hint: pallas::Base,
+) -> Option<PreparedHashWitness> {
+    prepare_hash_witness_inner(initial_q, words, Some(output_x_hint))
+}
+
+fn prepare_hash_witness_inner(
+    initial_q: pallas::Affine,
+    words: &[u32],
+    output_x_hint: Option<pallas::Base>,
+) -> Option<PreparedHashWitness> {
     let mut point = ProjectivePoint::from_affine(initial_q);
     let cache_first_word = has_merkle_initial_q(initial_q);
     let mut rounds = Vec::with_capacity(words.len());
@@ -242,7 +258,8 @@ pub(crate) fn prepare_hash_witness(
         return None;
     }
 
-    let output_x = Assigned::Rational(point.x, point.z_sq).evaluate();
+    let output_x =
+        output_x_hint.unwrap_or_else(|| Assigned::Rational(point.x, point.z_sq).evaluate());
     rounds.last_mut()?.x_a = Assigned::Trivial(output_x);
     Some(PreparedHashWitness {
         rounds,
