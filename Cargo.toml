@@ -38,6 +38,7 @@
 # CI can no longer build. Feature unification is unchanged.
 resolver = "3"
 members = [
+    "benchmarks/ios-orchard",
     "crates/bellman",
     "crates/bls12_381",
     "crates/halo2_gadgets",
