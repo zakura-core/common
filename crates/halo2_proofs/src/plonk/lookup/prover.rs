@@ -758,7 +758,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             compressed_expression: compressed_input_expression,
             compressed_coset: compressed_input_coset,
             sorted_values: sorted_input_values,
-            sorted_keys: sorted_input_keys,
+            sorted_keys: mut sorted_input_keys,
         } = input;
         #[cfg(feature = "multicore")]
         let sorted_u10_suffix_multiples = prepared_sorted_u10_suffix_multiples(
@@ -772,14 +772,14 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             if sorted_u10_suffix_multiples.is_some() {
                 permute_sorted_values_with_sorted_u10(
                     sorted_input_values,
-                    &sorted_input_keys,
+                    &mut sorted_input_keys,
                     &table.sorted_values,
                     &table.sorted_keys,
                 )?
             } else {
                 let (input, table) = permute_sorted_values(
                     sorted_input_values,
-                    &sorted_input_keys,
+                    &mut sorted_input_keys,
                     &table.sorted_values,
                     &table.sorted_keys,
                 )?;
@@ -788,7 +788,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         #[cfg(not(feature = "multicore"))]
         let (mut permuted_input_values, mut permuted_table_values) = permute_sorted_values(
             sorted_input_values,
-            &sorted_input_keys,
+            &mut sorted_input_keys,
             &table.sorted_values,
             &table.sorted_keys,
         )?;
@@ -1811,12 +1811,12 @@ fn permute_usable_values<F: Field + Ord>(
         || sort_lookup_values(&mut table_values, &mut table_keys),
     );
 
-    permute_sorted_values(input_values, &input_keys, &table_values, &table_keys)
+    permute_sorted_values(input_values, &mut input_keys, &table_values, &table_keys)
 }
 
 fn permute_sorted_values<F: Field + Ord>(
     input_values: Vec<F>,
-    input_keys: &[PastaSortKey],
+    input_keys: &mut [PastaSortKey],
     table_values: &[F],
     table_keys: &[PastaSortKey],
 ) -> Result<(Vec<F>, Vec<F>), Error> {
@@ -1841,13 +1841,13 @@ fn permute_sorted_values<F: Field + Ord>(
     assert_eq!(table_values.len(), table_keys.len());
     debug_assert!(input_keys.windows(2).all(|pair| pair[0] <= pair[1]));
     debug_assert!(table_keys.windows(2).all(|pair| pair[0] <= pair[1]));
-    let permuted_table_values = permute_sorted_values_by(
+    let permuted_table_values = permute_sorted_pasta_values(
         &input_values,
+        input_keys,
         table_values,
+        table_keys,
         output_capacity,
-        |row| input_keys[row] == input_keys[row - 1],
-        |table_row, input_row| table_keys[table_row] < input_keys[input_row],
-        |table_row, input_row| table_keys[table_row] == input_keys[input_row],
+        |_, _| {},
     )?;
     Ok((input_values, permuted_table_values))
 }
@@ -1855,7 +1855,7 @@ fn permute_sorted_values<F: Field + Ord>(
 #[cfg(feature = "multicore")]
 fn permute_sorted_values_with_sorted_u10<F: Field + Ord>(
     input_values: Vec<F>,
-    input_keys: &[PastaSortKey],
+    input_keys: &mut [PastaSortKey],
     table_values: &[F],
     table_keys: &[PastaSortKey],
 ) -> Result<(Vec<F>, Vec<F>, Option<SortedU10>), Error> {
@@ -1872,24 +1872,88 @@ fn permute_sorted_values_with_sorted_u10<F: Field + Ord>(
     debug_assert!(table_keys.windows(2).all(|pair| pair[0] <= pair[1]));
     let output_capacity = input_values.capacity();
     let mut sorted_u10 = input_keys.first().and_then(SortedU10::new);
-    let permuted_table_values = permute_sorted_values_by(
+    let permuted_table_values = permute_sorted_pasta_values(
         &input_values,
+        input_keys,
         table_values,
+        table_keys,
         output_capacity,
-        |row| {
-            let same = input_keys[row] == input_keys[row - 1];
-            if !same
-                && let Some(profile) = &mut sorted_u10
-                && profile.push_distinct(row, &input_keys[row]).is_none()
+        |row, key| {
+            if let Some(profile) = &mut sorted_u10
+                && profile.push_distinct(row, key).is_none()
             {
                 sorted_u10 = None;
             }
-            same
         },
-        |table_row, input_row| table_keys[table_row] < input_keys[input_row],
-        |table_row, input_row| table_keys[table_row] == input_keys[input_row],
     )?;
     Ok((input_values, permuted_table_values, sorted_u10))
+}
+
+fn permute_sorted_pasta_values<F: Field, OnDistinct>(
+    input_values: &[F],
+    input_keys: &mut [PastaSortKey],
+    table_values: &[F],
+    table_keys: &[PastaSortKey],
+    output_capacity: usize,
+    mut on_distinct: OnDistinct,
+) -> Result<Vec<F>, Error>
+where
+    OnDistinct: FnMut(usize, &PastaSortKey),
+{
+    let usable_rows = input_values.len();
+    assert_eq!(input_keys.len(), usable_rows);
+    assert_eq!(table_values.len(), usable_rows);
+    assert_eq!(table_keys.len(), usable_rows);
+
+    let mut permuted_table_values = Vec::with_capacity(output_capacity);
+    permuted_table_values.resize(usable_rows, F::ZERO);
+    // Sorting has finished, and key comparisons deliberately ignore `source`.
+    // Reuse those lanes for the two monotone row lists instead of allocating
+    // a pair of temporary vectors. Consumed rows grow from the front. Repeated
+    // input rows grow from the back, which leaves them in the same descending
+    // order produced by popping the previous repeated-row vector.
+    let mut consumed_len = 0;
+    let mut repeated_start = usable_rows;
+    let mut table_row = 0;
+
+    for row in 0..usable_rows {
+        let input_key = input_keys[row];
+        if row == 0 || input_key != input_keys[row - 1] {
+            if row != 0 {
+                on_distinct(row, &input_key);
+            }
+            permuted_table_values[row] = input_values[row];
+            while table_row < usable_rows && table_keys[table_row] < input_key {
+                table_row += 1;
+            }
+            if table_row < usable_rows && table_keys[table_row] == input_key {
+                input_keys[consumed_len].source = table_row;
+                consumed_len += 1;
+                table_row += 1;
+            } else {
+                return Err(Error::ConstraintSystemFailure);
+            }
+        } else {
+            repeated_start -= 1;
+            input_keys[repeated_start].source = row;
+        }
+    }
+
+    assert_eq!(consumed_len, repeated_start);
+    let (consumed_rows, repeated_rows) = input_keys.split_at(consumed_len);
+    let mut consumed_rows = consumed_rows.iter().map(|key| key.source).peekable();
+    let mut repeated_rows = repeated_rows.iter().map(|key| key.source);
+    for (row, value) in table_values.iter().copied().enumerate() {
+        if consumed_rows.peek() == Some(&row) {
+            consumed_rows.next();
+        } else {
+            permuted_table_values[repeated_rows.next().unwrap()] = value;
+        }
+    }
+    assert!(consumed_rows.next().is_none());
+    assert!(repeated_rows.next().is_none());
+
+    Ok(permuted_table_values)
 }
 
 fn permute_sorted_values_by<F: Field, SameInput, TableLess, TableSame>(
@@ -1985,13 +2049,13 @@ mod tests {
     #[test]
     fn collects_sorted_u10_range_profile_during_permutation() {
         let input_values = [0, 0, 2, 2, 7, u64::from(SORTED_U10_MAX_VALUE)];
-        let input_keys = input_values.into_iter().map(pasta_key).collect::<Vec<_>>();
+        let mut input_keys = input_values.into_iter().map(pasta_key).collect::<Vec<_>>();
         let maximum = u64::from(SORTED_U10_MAX_VALUE);
         let table_values = [0, 0, 2, 7, maximum, maximum];
         let table_keys = table_values.map(pasta_key);
         let (fused_input, fused_table, profile) = permute_sorted_values_with_sorted_u10(
             input_values.map(pallas::Scalar::from).to_vec(),
-            &input_keys,
+            &mut input_keys,
             &table_values.map(pallas::Scalar::from),
             &table_keys,
         )
@@ -2013,7 +2077,7 @@ mod tests {
 
         let (plain_input, plain_table) = permute_sorted_values(
             input_values.map(pallas::Scalar::from).to_vec(),
-            &input_keys,
+            &mut input_keys,
             &table_values.map(pallas::Scalar::from),
             &table_keys,
         )
@@ -2023,12 +2087,13 @@ mod tests {
 
         let outside_u10 = maximum + 1;
         let non_u10 = [pallas::Scalar::from(outside_u10); 2];
-        let non_u10_keys = [pasta_key(outside_u10); 2];
+        let mut non_u10_keys = [pasta_key(outside_u10); 2];
+        let non_u10_table_keys = non_u10_keys;
         let (_, _, profile) = permute_sorted_values_with_sorted_u10(
             non_u10.to_vec(),
-            &non_u10_keys,
+            &mut non_u10_keys,
             &non_u10,
-            &non_u10_keys,
+            &non_u10_table_keys,
         )
         .unwrap();
         assert!(profile.is_none());
@@ -2396,6 +2461,23 @@ mod tests {
         values.iter().copied().map(pallas::Scalar::from).collect()
     }
 
+    #[cfg(feature = "multicore")]
+    fn permute_pasta_rows(input: &[u64], table: &[u64]) -> Result<Vec<pallas::Scalar>, Error> {
+        let input_values = values(input);
+        let table_values = values(table);
+        let mut input_keys = input.iter().copied().map(pasta_key).collect::<Vec<_>>();
+        let table_keys = table.iter().copied().map(pasta_key).collect::<Vec<_>>();
+
+        permute_sorted_pasta_values(
+            &input_values,
+            &mut input_keys,
+            &table_values,
+            &table_keys,
+            input_values.capacity(),
+            |_, _| {},
+        )
+    }
+
     fn check_permuted_pair_commitments<C>()
     where
         C: CurveAffine + core::fmt::Debug,
@@ -2646,6 +2728,22 @@ mod tests {
         check_table_sort::<pallas::Scalar>();
     }
 
+    #[test]
+    fn pasta_sort_key_order_ignores_source() {
+        let left = PastaSortKey {
+            limbs: [17, 23, 42, 99],
+            source: 0,
+        };
+        let right = PastaSortKey {
+            limbs: left.limbs,
+            source: usize::MAX,
+        };
+
+        assert!(left == right);
+        assert_eq!(left.cmp(&right), Ordering::Equal);
+        assert_eq!(right.cmp(&left), Ordering::Equal);
+    }
+
     fn sorted_values_with_counts(counts: &[(u64, usize)]) -> Vec<pallas::Scalar> {
         let mut values = counts
             .iter()
@@ -2889,8 +2987,38 @@ mod tests {
         check_lookup_permutation_exhaustively::<pallas::Scalar>();
     }
 
+    #[cfg(feature = "multicore")]
     #[test]
-    fn sorted_lookup_permutation_preserves_output_order() {
+    fn pasta_lookup_permutation_handles_scratch_boundaries() {
+        let maximum = u64::from(SORTED_U10_MAX_VALUE);
+
+        assert_eq!(permute_pasta_rows(&[], &[]).unwrap(), values(&[]));
+        assert_eq!(
+            permute_pasta_rows(&[maximum], &[maximum]).unwrap(),
+            values(&[maximum]),
+        );
+        assert_eq!(
+            permute_pasta_rows(&[0, 1, 2, maximum], &[0, 1, 2, maximum]).unwrap(),
+            values(&[0, 1, 2, maximum]),
+        );
+        assert_eq!(
+            permute_pasta_rows(&[maximum, maximum, maximum, maximum], &[0, 1, 2, maximum],)
+                .unwrap(),
+            values(&[maximum, 2, 1, 0]),
+        );
+    }
+
+    #[test]
+    fn sorted_lookup_permutation_preserves_extreme_and_mixed_output_order() {
+        assert_eq!(
+            permute_usable_values(values(&[4, 1, 3, 2]), values(&[2, 4, 1, 3])).unwrap(),
+            (values(&[1, 2, 3, 4]), values(&[1, 2, 3, 4])),
+        );
+        assert_eq!(
+            permute_usable_values(values(&[2, 2, 2, 2]), values(&[1, 2, 3, 4])).unwrap(),
+            (values(&[2, 2, 2, 2]), values(&[2, 4, 3, 1])),
+        );
+
         let input = values(&[2, 2, 5, 1, 7, 2, 6, 4]);
         let table = values(&[5, 1, 2, 3, 2, 4, 6, 7]);
 
