@@ -1040,6 +1040,66 @@ fn selector_family_matches<E: Copy, F: Field, B: Basis>(
     families
 }
 
+fn scaled_polynomial<E: Copy, F: Field, B: Basis>(
+    ast: &Ast<E, F, B>,
+) -> Option<(AstLeaf<E, B>, F)> {
+    match ast {
+        Ast::Poly(leaf) => Some((*leaf, F::ONE)),
+        Ast::Scale(inner, scalar) => match inner.as_ref() {
+            Ast::Poly(leaf) => Some((*leaf, *scalar)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn scaled_constant<E, F: Field, B: Basis>(ast: &Ast<E, F, B>) -> Option<F> {
+    match ast {
+        Ast::ConstantTerm(constant) => Some(*constant),
+        Ast::Scale(inner, scalar) => match inner.as_ref() {
+            Ast::ConstantTerm(constant) => Some(*constant * scalar),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn affine_polynomial<E: Copy, F: Field, B: Basis>(
+    ast: &Ast<E, F, B>,
+) -> Option<(AstLeaf<E, B>, F, F)> {
+    let Ast::Add(lhs, rhs) = ast else {
+        return None;
+    };
+    [(lhs.as_ref(), rhs.as_ref()), (rhs.as_ref(), lhs.as_ref())]
+        .into_iter()
+        .find_map(|(constant, polynomial)| {
+            let constant = scaled_constant(constant)?;
+            let (polynomial, scale) = scaled_polynomial(polynomial)?;
+            Some((polynomial, constant, scale))
+        })
+}
+
+fn affine_self_product<E: Copy, F: Field, B: Basis>(
+    ast: &Ast<E, F, B>,
+) -> Option<(IndexedLeaf, F, F)> {
+    let Ast::Mul(AstMul(lhs, rhs)) = ast else {
+        return None;
+    };
+    [(lhs.as_ref(), rhs.as_ref()), (rhs.as_ref(), lhs.as_ref())]
+        .into_iter()
+        .find_map(|(factor, affine)| {
+            let (factor, factor_scale) = scaled_polynomial(factor)?;
+            let (affine, constant, affine_scale) = affine_polynomial(affine)?;
+            (factor == affine).then(|| {
+                (
+                    factor.into(),
+                    factor_scale * constant,
+                    factor_scale * affine_scale,
+                )
+            })
+        })
+}
+
 // A private evaluation plan compiled once before parallel chunk evaluation.
 // Structural AST matching and challenge-power calculation happen only while
 // constructing this plan.
@@ -1048,6 +1108,11 @@ enum EvaluationPlan<F: Field> {
     Add(Box<Self>, Box<Self>),
     Mul(Box<Self>, Box<Self>),
     Square(Box<Self>),
+    AffineSelfProduct {
+        leaf: IndexedLeaf,
+        linear: ScalarId<F>,
+        quadratic: ScalarId<F>,
+    },
     Scale(Box<Self>, ScalarId<F>),
     Horner {
         base: Box<Self>,
@@ -1812,6 +1877,14 @@ impl<F: Field> EvaluationPlan<F> {
     }
 
     fn compile<E: Copy, B: Basis>(ast: &Ast<E, F, B>, scalars: &mut PlanScalarInterner<F>) -> Self {
+        if let Some((leaf, linear, quadratic)) = affine_self_product(ast) {
+            return Self::AffineSelfProduct {
+                leaf,
+                linear: scalars.intern(PlanScalar::Literal(linear)),
+                quadratic: scalars.intern(PlanScalar::Literal(quadratic)),
+            };
+        }
+
         if let Ast::Add(_, _) = ast
             && let Some(polynomial) = expanded_polynomial(ast)
         {
@@ -1966,7 +2039,10 @@ impl<F: Field> EvaluationPlan<F> {
 
     fn required_scratch_slots(&self) -> usize {
         match self {
-            Self::Poly(_) | Self::LinearTerm(_) | Self::ConstantTerm(_) => 0,
+            Self::Poly(_)
+            | Self::AffineSelfProduct { .. }
+            | Self::LinearTerm(_)
+            | Self::ConstantTerm(_) => 0,
             Self::Add(lhs, rhs) | Self::Mul(lhs, rhs) => lhs
                 .required_scratch_slots()
                 .max(1 + rhs.required_scratch_slots()),
@@ -2005,6 +2081,7 @@ impl<F: Field> EvaluationPlan<F> {
                         .sum::<usize>()
             }
             Self::Poly(_)
+            | Self::AffineSelfProduct { .. }
             | Self::CacheLoad { .. }
             | Self::LinearTerm(_)
             | Self::ConstantTerm(_) => 0,
@@ -2109,6 +2186,7 @@ fn plan_has_at_most_nodes<F: Field>(plan: &EvaluationPlan<F>, max_nodes: usize) 
                 visit(base, remaining)
             }
             EvaluationPlan::Poly(_)
+            | EvaluationPlan::AffineSelfProduct { .. }
             | EvaluationPlan::LinearTerm(_)
             | EvaluationPlan::ConstantTerm(_) => true,
             EvaluationPlan::DistributePowers { .. } => false,
@@ -2137,6 +2215,18 @@ fn same_plan<F: Field>(lhs: &EvaluationPlan<F>, rhs: &EvaluationPlan<F>) -> bool
                     && same_plan(lhs_b, rhs_a))
         }
         (EvaluationPlan::Square(lhs), EvaluationPlan::Square(rhs)) => same_plan(lhs, rhs),
+        (
+            EvaluationPlan::AffineSelfProduct {
+                leaf: lhs_leaf,
+                linear: lhs_linear,
+                quadratic: lhs_quadratic,
+            },
+            EvaluationPlan::AffineSelfProduct {
+                leaf: rhs_leaf,
+                linear: rhs_linear,
+                quadratic: rhs_quadratic,
+            },
+        ) => lhs_leaf == rhs_leaf && lhs_linear == rhs_linear && lhs_quadratic == rhs_quadratic,
         (EvaluationPlan::Scale(lhs, lhs_scalar), EvaluationPlan::Scale(rhs, rhs_scalar)) => {
             lhs_scalar == rhs_scalar && same_plan(lhs, rhs)
         }
@@ -2235,6 +2325,14 @@ fn collect_plan_occurrences<'a, F: Field>(
                 commutative_match_nodes: capped_plan_nodes(1, &[inner.commutative_match_nodes]),
             }
         }
+        EvaluationPlan::AffineSelfProduct {
+            leaf,
+            linear,
+            quadratic,
+        } => CollectedPlanFingerprint {
+            value: fingerprint(&(9usize, leaf, linear, quadratic)),
+            commutative_match_nodes: Some(1),
+        },
         EvaluationPlan::Scale(inner, scalar) => {
             let inner = collect_plan_occurrences(inner, nodes);
             CollectedPlanFingerprint {
@@ -2332,6 +2430,7 @@ fn plan_cost<F: Field>(plan: &EvaluationPlan<F>, scalars: &[PlanScalar<F>]) -> (
         EvaluationPlan::Poly(_)
         | EvaluationPlan::LinearTerm(_)
         | EvaluationPlan::ConstantTerm(_) => (0, 1),
+        EvaluationPlan::AffineSelfProduct { .. } => (1, 1),
         EvaluationPlan::Add(lhs, rhs) => {
             let lhs = plan_cost(lhs, scalars);
             let rhs = plan_cost(rhs, scalars);
@@ -2811,6 +2910,7 @@ fn validate_cache_events<F: Field>(
                 })
             }
             EvaluationPlan::Poly(_)
+            | EvaluationPlan::AffineSelfProduct { .. }
             | EvaluationPlan::LinearTerm(_)
             | EvaluationPlan::ConstantTerm(_) => true,
             EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => false,
@@ -2930,6 +3030,7 @@ fn apply_cache_events<F: Field>(plan: &mut EvaluationPlan<F>, layout: &Evaluatio
                 }
             }
             EvaluationPlan::Poly(_)
+            | EvaluationPlan::AffineSelfProduct { .. }
             | EvaluationPlan::LinearTerm(_)
             | EvaluationPlan::ConstantTerm(_) => {}
             EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
@@ -3003,6 +3104,7 @@ fn apply_cache_actions<F: Field>(
             }
         }
         EvaluationPlan::Poly(_)
+        | EvaluationPlan::AffineSelfProduct { .. }
         | EvaluationPlan::LinearTerm(_)
         | EvaluationPlan::ConstantTerm(_) => {}
         EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
@@ -3144,6 +3246,7 @@ impl<F: Field> EvaluationPlan<F> {
                 }
             }
             Self::Poly(_)
+            | Self::AffineSelfProduct { .. }
             | Self::CacheLoad { .. }
             | Self::LinearTerm(_)
             | Self::ConstantTerm(_) => {}
@@ -4200,6 +4303,44 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
+        fn unit_affine_self_product<F: Field, const ONE_MINUS_SELF: bool>(
+            output: &mut [F],
+            values: &[F],
+        ) {
+            debug_assert_eq!(output.len(), values.len());
+            let mut output_blocks = output.chunks_exact_mut(4);
+            let mut value_blocks = values.chunks_exact(4);
+            for (output, values) in (&mut output_blocks).zip(&mut value_blocks) {
+                let square_0 = values[0].square();
+                let square_1 = values[1].square();
+                let square_2 = values[2].square();
+                let square_3 = values[3].square();
+                if ONE_MINUS_SELF {
+                    output[0] = values[0] - square_0;
+                    output[1] = values[1] - square_1;
+                    output[2] = values[2] - square_2;
+                    output[3] = values[3] - square_3;
+                } else {
+                    output[0] = square_0 - values[0];
+                    output[1] = square_1 - values[1];
+                    output[2] = square_2 - values[2];
+                    output[3] = square_3 - values[3];
+                }
+            }
+            for (output, value) in output_blocks
+                .into_remainder()
+                .iter_mut()
+                .zip(value_blocks.remainder())
+            {
+                let square = value.square();
+                *output = if ONE_MINUS_SELF {
+                    *value - square
+                } else {
+                    square - value
+                };
+            }
+        }
+
         fn copy_add_scaled<F: Field>(
             output: &mut [F],
             lhs: &[F],
@@ -4606,6 +4747,43 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     recurse_into(inner, ctx, output, cache, scratch);
                     for value in output.iter_mut() {
                         *value = value.square();
+                    }
+                }
+                EvaluationPlan::AffineSelfProduct {
+                    leaf,
+                    linear,
+                    quadratic,
+                } => {
+                    let values = leaf_chunk(leaf, ctx, output.len());
+                    let (linear, linear_kind) = ctx.scalars.scale(*linear);
+                    let (quadratic, quadratic_kind) = ctx.scalars.scale(*quadratic);
+                    let unit_signs = match (linear_kind, quadratic_kind) {
+                        (ScaleKind::One, ScaleKind::MinusOne) => Some(true),
+                        (ScaleKind::MinusOne, ScaleKind::One) => Some(false),
+                        _ => None,
+                    };
+                    if let Some(one_minus_self) = unit_signs {
+                        let (first, second) = values.into_slices();
+                        let (first_output, second_output) = output.split_at_mut(first.len());
+                        if one_minus_self {
+                            unit_affine_self_product::<_, true>(first_output, first);
+                            if !second.is_empty() {
+                                unit_affine_self_product::<_, true>(second_output, second);
+                            }
+                        } else {
+                            unit_affine_self_product::<_, false>(first_output, first);
+                            if !second.is_empty() {
+                                unit_affine_self_product::<_, false>(second_output, second);
+                            }
+                        }
+                        return;
+                    }
+                    // `Ast::Mul` can only be constructed for pointwise bases,
+                    // where a constant polynomial has the same value at every
+                    // row.
+                    for (output, value) in output.iter_mut().zip(values.iter()) {
+                        *output = scale_value(*value, linear, linear_kind)
+                            + scale_value(value.square(), quadratic, quadratic_kind);
                     }
                 }
                 EvaluationPlan::Scale(a, scalar) => {
@@ -5735,6 +5913,7 @@ mod tests {
                 }
                 EvaluationPlan::Horner { base, .. } => scaled_cache_kind(base),
                 EvaluationPlan::Poly(_)
+                | EvaluationPlan::AffineSelfProduct { .. }
                 | EvaluationPlan::DistributePowers { .. }
                 | EvaluationPlan::CacheLoad { .. }
                 | EvaluationPlan::LinearTerm(_)
@@ -7113,6 +7292,135 @@ mod tests {
     fn repeated_squares_are_cached() {
         check_repeated_squares_are_cached::<pallas::Base>();
         check_repeated_squares_are_cached::<vesta::Base>();
+    }
+
+    fn check_affine_self_products<F, B>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+        B: BasisOps,
+    {
+        fn context() {}
+
+        let domain = EvaluationDomain::new(3, 4);
+        let mut values = B::empty_poly(&domain);
+        for (row, value) in values.iter_mut().enumerate() {
+            *value = F::from((3 * row + 5) as u64);
+        }
+
+        let mut evaluator = new_evaluator::<fn(), _, B>(context);
+        let x = evaluator.register_poly(values.clone());
+        let factor_scale = F::from(3);
+        let constant = F::from(5);
+        let affine_scale = F::from(7);
+        let x_ast = Ast::from(x);
+        let affine = Ast::Add(
+            Arc::new(Ast::ConstantTerm(constant)),
+            Arc::new(Ast::Scale(Arc::new(x_ast.clone()), affine_scale)),
+        );
+        let factor = Ast::Scale(Arc::new(x_ast.clone()), factor_scale);
+        let expression = Ast::Mul(AstMul(Arc::new(affine), Arc::new(factor)));
+
+        let (plan, scalars) = compile_plan(&expression);
+        let EvaluationPlan::AffineSelfProduct {
+            leaf,
+            linear,
+            quadratic,
+        } = plan
+        else {
+            panic!("an affine self-product uses the fused plan");
+        };
+        assert_eq!(leaf, x.into());
+        assert_eq!(
+            plan_scalar(&scalars, linear),
+            PlanScalar::Literal(factor_scale * constant)
+        );
+        assert_eq!(
+            plan_scalar(&scalars, quadratic),
+            PlanScalar::Literal(factor_scale * affine_scale)
+        );
+
+        let actual = evaluator.evaluate(&expression, &domain);
+        let rotated = evaluator.evaluate(&x_ast, &domain);
+        let constants = evaluator.evaluate(&Ast::ConstantTerm(constant), &domain);
+        for (((actual, x), constant), row) in actual
+            .iter()
+            .zip(rotated.iter())
+            .zip(constants.iter())
+            .zip(0..)
+        {
+            assert_eq!(
+                *actual,
+                (*x * factor_scale) * (*constant + *x * affine_scale),
+                "row {row}",
+            );
+        }
+
+        let one_minus_self = Ast::Mul(AstMul(
+            Arc::new(x_ast.clone()),
+            Arc::new(Ast::Add(
+                Arc::new(Ast::ConstantTerm(F::ONE)),
+                Arc::new(Ast::Scale(Arc::new(x_ast.clone()), -F::ONE)),
+            )),
+        ));
+        let self_minus_one = Ast::Mul(AstMul(
+            Arc::new(Ast::Add(
+                Arc::new(x_ast.clone()),
+                Arc::new(Ast::Scale(Arc::new(Ast::ConstantTerm(F::ONE)), -F::ONE)),
+            )),
+            Arc::new(x_ast.clone()),
+        ));
+        for (expression, linear, quadratic) in [
+            (one_minus_self, F::ONE, -F::ONE),
+            (self_minus_one, -F::ONE, F::ONE),
+        ] {
+            let (plan, scalars) = compile_plan(&expression);
+            let EvaluationPlan::AffineSelfProduct {
+                linear: actual_linear,
+                quadratic: actual_quadratic,
+                ..
+            } = plan
+            else {
+                panic!("a unit affine self-product uses the fused plan");
+            };
+            assert_eq!(
+                plan_scalar(&scalars, actual_linear),
+                PlanScalar::Literal(linear),
+            );
+            assert_eq!(
+                plan_scalar(&scalars, actual_quadratic),
+                PlanScalar::Literal(quadratic),
+            );
+            let actual = evaluator.evaluate(&expression, &domain);
+            assert!(
+                actual
+                    .iter()
+                    .zip(values.iter())
+                    .all(|(actual, value)| *actual == *value * linear + value.square() * quadratic)
+            );
+        }
+
+        let near_miss = Ast::Mul(AstMul(
+            Arc::new(x_ast.clone()),
+            Arc::new(Ast::Add(
+                Arc::new(Ast::ConstantTerm(F::ONE)),
+                Arc::new(Ast::Scale(
+                    Arc::new(Ast::from(x.with_rotation(Rotation::next()))),
+                    -F::ONE,
+                )),
+            )),
+        ));
+        assert!(!matches!(
+            compile_plan(&near_miss).0,
+            EvaluationPlan::AffineSelfProduct { .. }
+        ));
+    }
+
+    #[test]
+    fn affine_self_products_are_fused() {
+        check_affine_self_products::<pallas::Base, LagrangeCoeff>();
+        check_affine_self_products::<pallas::Base, ExtendedLagrangeCoeff>();
+        check_affine_self_products::<vesta::Base, LagrangeCoeff>();
+        check_affine_self_products::<vesta::Base, ExtendedLagrangeCoeff>();
     }
 
     fn check_cached_rhs_consumers<F>()
