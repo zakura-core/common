@@ -151,7 +151,7 @@ const PREPARED_DEFERRED_IPA_K: u32 = 11;
 const PREPARED_DEFERRED_IPA_ROUNDS: u32 = 4;
 /// Width of the wNAF used by the deferred-fold materialization table.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
-const DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH: usize = 7;
+const DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH: usize = 8;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 const DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES: usize =
     1 << (DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH - 2);
@@ -2240,8 +2240,8 @@ impl<C: CurveAffine> Params<C> {
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// signed-width-eight pair adds exactly 512 KiB of affine-point payload for
-    /// 255-bit Pasta scalars. At `k = 11`, the width-seven wNAF deferred-fold
-    /// table omits the scalar-one block and adds exactly 3.75 MiB. The
+    /// 255-bit Pasta scalars. At `k = 11`, the width-eight wNAF deferred-fold
+    /// table omits the scalar-one block and adds exactly 7.5 MiB. The
     /// signed-width-four sparse commitment table adds 416 KiB, and the
     /// signed-width-four public-instance table adds about 224 KiB on Pasta.
     /// With `multicore`, the three affine multiples retained per Lagrange
