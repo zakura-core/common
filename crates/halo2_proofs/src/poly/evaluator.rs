@@ -1772,6 +1772,10 @@ impl<F: Field> EvaluationPlan<F> {
         scalar: F,
         scalars: &mut PlanScalarInterner<F>,
     ) -> Self {
+        if let Ast::ConstantTerm(value) = inner {
+            return Self::ConstantTerm(scalars.intern(PlanScalar::Literal(*value * scalar)));
+        }
+
         let compiled = Self::compile(inner, scalars);
         let Self::Scale(nested, nested_scalar_id) = compiled else {
             return Self::Scale(
@@ -6039,7 +6043,12 @@ mod tests {
             (two, value.double()),
             (four, value.double().double()),
         ] {
-            let result = evaluator.evaluate(&(Ast::ConstantTerm(value) * scalar), &domain);
+            let ast = Ast::ConstantTerm(value) * scalar;
+            assert!(matches!(
+                compile_plan_only(&ast),
+                EvaluationPlan::ConstantTerm(_)
+            ));
+            let result = evaluator.evaluate(&ast, &domain);
             assert!(result.iter().all(|result| *result == expected));
         }
     }
