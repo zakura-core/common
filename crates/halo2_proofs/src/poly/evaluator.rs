@@ -1982,6 +1982,64 @@ impl<F: Field> EvaluationPlan<F> {
         }
     }
 
+    fn lower_constant_products_to_scales(&mut self) {
+        match self {
+            Self::Add(lhs, rhs) | Self::Mul(lhs, rhs) => {
+                lhs.lower_constant_products_to_scales();
+                rhs.lower_constant_products_to_scales();
+            }
+            Self::Square(inner) | Self::Scale(inner, _) | Self::CacheStore { inner, .. } => {
+                inner.lower_constant_products_to_scales();
+            }
+            Self::Horner { base, .. } => base.lower_constant_products_to_scales(),
+            Self::DistributePowers { work, .. } => {
+                for work in work {
+                    match work {
+                        DistributionWork::Term { term, .. } => {
+                            term.lower_constant_products_to_scales();
+                        }
+                        DistributionWork::WeightedSharedFactor { factor, terms } => {
+                            factor.lower_constant_products_to_scales();
+                            for term in terms {
+                                term.term.lower_constant_products_to_scales();
+                            }
+                        }
+                        DistributionWork::SelectorFamily { runs, .. } => {
+                            for run in runs {
+                                run.bodies.lower_constant_products_to_scales();
+                            }
+                        }
+                    }
+                }
+            }
+            Self::Poly(_)
+            | Self::CacheLoad { .. }
+            | Self::LinearTerm(_)
+            | Self::ConstantTerm(_) => {}
+        }
+
+        let replacement = match self {
+            Self::Mul(lhs, rhs) => match (lhs.as_ref(), rhs.as_ref()) {
+                (Self::ConstantTerm(_), Self::ConstantTerm(_)) => None,
+                (Self::ConstantTerm(scalar), _) => {
+                    let scalar = *scalar;
+                    let inner = std::mem::replace(rhs, Box::new(Self::ConstantTerm(scalar)));
+                    Some((inner, scalar))
+                }
+                (_, Self::ConstantTerm(scalar)) => {
+                    let scalar = *scalar;
+                    let inner = std::mem::replace(lhs, Box::new(Self::ConstantTerm(scalar)));
+                    Some((inner, scalar))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((inner, scalar)) = replacement {
+            *self = Self::Scale(inner, scalar);
+        }
+    }
+
     // Counts retained allocation payloads exactly, excluding allocator and
     // [`Arc`] headers and rounding.
     fn heap_payload_bytes(&self) -> usize {
@@ -3152,6 +3210,31 @@ impl<F: Field> EvaluationPlan<F> {
 }
 
 impl<F: Field> FactorBodyPlan<F> {
+    fn lower_constant_products_to_scales(&mut self) {
+        match self {
+            Self::Sequential(plans) => {
+                for plan in plans {
+                    plan.lower_constant_products_to_scales();
+                }
+            }
+            Self::Factored(work) => {
+                for work in work {
+                    match work {
+                        FactorBodyWork::Term(term) => {
+                            term.term.lower_constant_products_to_scales();
+                        }
+                        FactorBodyWork::SharedFactor { factor, terms } => {
+                            factor.lower_constant_products_to_scales();
+                            for term in terms {
+                                term.term.lower_constant_products_to_scales();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn compile<E: Copy, B: Basis>(
         terms: &[&Ast<E, F, B>],
         base: PowerBase<F>,
@@ -3370,6 +3453,10 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         if supports_deferred_power_fold::<F>() {
             plan.mark_scaled_addends(&scalar_descriptors);
         }
+        // Preserve the AST-shaped cache and deferred-fold decisions above.
+        // A single row-constant product operand is then a scalar in either
+        // pointwise basis, so expose it to the executor's fused consumers.
+        plan.lower_constant_products_to_scales();
         let scratch_slots = plan.required_scratch_slots();
         let max_challenge_exponents = max_challenge_exponents(&scalar_descriptors);
         let evaluator_shape =
@@ -6134,6 +6221,18 @@ mod tests {
 
                 for ast in [constant_lhs, constant_rhs] {
                     assert!(matches!(&ast, Ast::Mul(_)));
+                    let (mut plan, scalars) = compile_plan(&ast);
+                    assert!(matches!(&plan, EvaluationPlan::Mul(_, _)));
+                    plan.lower_constant_products_to_scales();
+                    assert!(matches!(
+                        plan,
+                        EvaluationPlan::Scale(inner, plan_scalar_id)
+                            if matches!(inner.as_ref(), EvaluationPlan::Poly(_))
+                                && matches!(
+                                    plan_scalar(&scalars, plan_scalar_id),
+                                    PlanScalar::Literal(value) if value == scalar
+                                )
+                    ));
 
                     let result = evaluator.evaluate(&ast, &domain);
                     assert!(
@@ -6148,6 +6247,43 @@ mod tests {
 
         check::<LagrangeCoeff>();
         check::<ExtendedLagrangeCoeff>();
+    }
+
+    #[test]
+    fn challenge_product_addends_compile_as_scales() {
+        type F = pallas::Base;
+
+        let mut evaluator = new_virtual_evaluator::<fn(), F, ExtendedLagrangeCoeff>(|| {});
+        let lhs = evaluator.register_virtual_poly();
+        let rhs = evaluator.register_virtual_poly();
+        for product in [
+            Ast::<fn(), F, ExtendedLagrangeCoeff>::ChallengeTerm(EvaluationChallenge::Theta)
+                * Ast::from(rhs),
+            Ast::from(rhs)
+                * Ast::<fn(), F, ExtendedLagrangeCoeff>::ChallengeTerm(EvaluationChallenge::Theta),
+        ] {
+            let (mut plan, scalars) = compile_plan(&(Ast::from(lhs) + product));
+            assert!(matches!(
+                &plan,
+                EvaluationPlan::Add(_, rhs)
+                    if matches!(rhs.as_ref(), EvaluationPlan::Mul(_, _))
+            ));
+            plan.lower_constant_products_to_scales();
+            assert!(matches!(
+                plan,
+                EvaluationPlan::Add(lhs, rhs)
+                    if matches!(lhs.as_ref(), EvaluationPlan::Poly(_))
+                        && matches!(
+                            rhs.as_ref(),
+                            EvaluationPlan::Scale(inner, scalar)
+                                if matches!(inner.as_ref(), EvaluationPlan::Poly(_))
+                                    && matches!(
+                                        plan_scalar(&scalars, *scalar),
+                                        PlanScalar::Challenge(EvaluationChallenge::Theta)
+                                    )
+                        )
+            ));
+        }
     }
 
     #[test]
