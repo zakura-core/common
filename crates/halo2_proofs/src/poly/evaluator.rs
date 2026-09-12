@@ -2239,6 +2239,7 @@ impl<F: Field> EvaluationPlan<F> {
                 }
             }
             Self::Poly(_)
+            | Self::AffineSelfProduct { .. }
             | Self::CacheLoad { .. }
             | Self::LinearTerm(_)
             | Self::ConstantTerm(_) => {}
