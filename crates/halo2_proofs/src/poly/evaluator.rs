@@ -4929,6 +4929,49 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
+        fn negate_add<F: Field>(sums: &mut [F], values: &[F]) {
+            debug_assert_eq!(sums.len(), values.len());
+            for (sum, value) in sums.iter_mut().zip(values) {
+                *sum = -(*sum + value);
+            }
+        }
+
+        fn recurse_negated_unit_add_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
+            lhs: &EvaluationPlan<F>,
+            rhs: &EvaluationPlan<F>,
+            ctx: &AstContext<'_, F, B>,
+            output: &mut [F],
+            cache: &mut [F],
+            scratch: &mut [F],
+        ) -> bool {
+            if !matches!(lhs, EvaluationPlan::Add(_, _) | EvaluationPlan::Poly(_)) {
+                return false;
+            }
+
+            if let EvaluationPlan::Poly(leaf) = rhs {
+                recurse_into(lhs, ctx, output, cache, scratch);
+                let values = leaf_chunk(leaf, ctx, output.len());
+                let (first, second) = values.into_slices();
+                let (first_output, second_output) = output.split_at_mut(first.len());
+                negate_add(first_output, first);
+                if !second.is_empty() {
+                    negate_add(second_output, second);
+                }
+                return true;
+            }
+
+            if matches!(lhs, EvaluationPlan::Add(_, _))
+                && let EvaluationPlan::CacheLoad { slot } = rhs
+            {
+                recurse_into(lhs, ctx, output, cache, scratch);
+                let start = slot * output.len();
+                negate_add(output, &cache[start..start + output.len()]);
+                return true;
+            }
+
+            false
+        }
+
         fn recurse_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
             plan: &EvaluationPlan<F>,
             ctx: &AstContext<'_, F, B>,
@@ -5313,6 +5356,12 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 }
                 EvaluationPlan::Scale(a, scalar) => {
                     let (scalar, kind) = ctx.scalars.scale(*scalar);
+                    if matches!(kind, ScaleKind::MinusOne)
+                        && let EvaluationPlan::Add(lhs, rhs) = a.as_ref()
+                        && recurse_negated_unit_add_into(lhs, rhs, ctx, output, cache, scratch)
+                    {
+                        return;
+                    }
                     recurse_scaled_into(a, scalar, kind, ctx, output, cache, scratch);
                 }
                 EvaluationPlan::Horner { base, coefficients } => {
