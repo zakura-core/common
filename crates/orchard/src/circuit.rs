@@ -1394,7 +1394,9 @@ impl ProvingKey {
     /// commitments. These occupy 384 KiB; construction adds 576 KiB of
     /// projective scratch and reaches a 960 KiB combined peak. Key generation
     /// separately caches about 640 KiB for public-instance and sparse masking
-    /// commitments.
+    /// commitments. With a prepared Pasta backend, the post-NU6.3 key also
+    /// retains 903 terms across two permutation-difference tables, accounting
+    /// for about 14.1 MiB with the current narrow-pool table planner.
     ///
     /// Call this once before entering concurrent Rayon proving work.
     /// Concurrent callers outside that pool safely wait for and share the same

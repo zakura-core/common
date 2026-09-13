@@ -7,6 +7,8 @@ use rand_core::Rng;
 use std::{convert::Infallible, iter};
 
 use super::super::{ChallengeBeta, ChallengeGamma, ChallengeX, circuit::Any};
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use super::PreparedDifferenceCommitment;
 use super::{ActivePermutationSet, Argument, IdentityCells, ProvingKey, permutation_chunk_len};
 use crate::{
     arithmetic::{CurveAffine, best_multiexp, parallelize},
@@ -74,6 +76,10 @@ struct UntransformedSet<F: Field> {
 
 enum UnpreparedSet<F: Field> {
     Dense(UntransformedSet<F>),
+    Scheduled {
+        set: UntransformedSet<F>,
+        set_index: usize,
+    },
     Identity {
         constant: F,
         blinding: SetBlinding<F>,
@@ -363,6 +369,9 @@ impl Argument {
             .into_par_iter()
             .map(|set| match set {
                 UnpreparedSet::Dense(set) => prepare_product(params, pk, set),
+                UnpreparedSet::Scheduled { .. } => {
+                    unreachable!("the single-circuit path does not use a shared schedule")
+                }
                 UnpreparedSet::Identity { constant, blinding } => {
                     prepare_identity_product(params, pk, constant, blinding)
                 }
@@ -409,6 +418,8 @@ impl Argument {
 
         let set_count = self.columns.chunks(chunk_len).count();
         assert_eq!(pkey.active_sets.len(), set_count);
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        assert_eq!(pkey.prepared_difference_commitments.len(), set_count);
         let mut blindings = blindings
             .into_iter()
             .map(|blinding| blinding.sets.into_iter())
@@ -489,7 +500,10 @@ impl Argument {
                 };
                 last_z = Vec::with_capacity(circuit_count);
                 for (circuit_index, (product, next)) in built_products.into_iter().enumerate() {
-                    products[circuit_index].push(UnpreparedSet::Dense(product));
+                    products[circuit_index].push(UnpreparedSet::Scheduled {
+                        set: product,
+                        set_index,
+                    });
                     last_z.push(next);
                 }
             } else {
@@ -535,7 +549,7 @@ impl Argument {
                 .map(|sets| Prepared {
                     sets: sets
                         .into_par_iter()
-                        .map(|set| prepare_unprepared_set(params, pk, set))
+                        .map(|set| prepare_unprepared_set(params, pk, pkey, set))
                         .collect(),
                 })
                 .collect()
@@ -545,7 +559,7 @@ impl Argument {
                 .map(|sets| Prepared {
                     sets: sets
                         .into_iter()
-                        .map(|set| prepare_unprepared_set(params, pk, set))
+                        .map(|set| prepare_unprepared_set(params, pk, pkey, set))
                         .collect(),
                 })
                 .collect()
@@ -555,7 +569,7 @@ impl Argument {
                 .map(|sets| Prepared {
                     sets: sets
                         .into_iter()
-                        .map(|set| prepare_unprepared_set(params, pk, set))
+                        .map(|set| prepare_unprepared_set(params, pk, pkey, set))
                         .collect(),
                 })
                 .collect()
@@ -650,10 +664,20 @@ impl Argument {
 fn prepare_unprepared_set<C: CurveAffine>(
     params: &Params<C>,
     pk: &plonk::ProvingKey<C>,
+    pkey: &ProvingKey<C>,
     set: UnpreparedSet<C::Scalar>,
 ) -> PreparedSet<C> {
     match set {
         UnpreparedSet::Dense(set) => prepare_product(params, pk, set),
+        UnpreparedSet::Scheduled { set, set_index } => {
+            #[cfg(any(feature = "multicore", feature = "orbits"))]
+            if let Some(prepared) = &pkey.prepared_difference_commitments[set_index] {
+                return prepare_difference_product(params, pk, set, prepared);
+            }
+            #[cfg(not(any(feature = "multicore", feature = "orbits")))]
+            let _ = (pkey, set_index);
+            prepare_product(params, pk, set)
+        }
         UnpreparedSet::Identity { constant, blinding } => {
             prepare_identity_product(params, pk, constant, blinding)
         }
@@ -1254,6 +1278,41 @@ fn prepare_product<C: CurveAffine>(
     pk: &plonk::ProvingKey<C>,
     set: UntransformedSet<C::Scalar>,
 ) -> PreparedSet<C> {
+    prepare_product_using(
+        params,
+        pk,
+        set,
+        ProductCommitment::BestAvailable(std::marker::PhantomData),
+    )
+}
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+fn prepare_difference_product<C: CurveAffine>(
+    params: &Params<C>,
+    pk: &plonk::ProvingKey<C>,
+    set: UntransformedSet<C::Scalar>,
+    prepared: &PreparedDifferenceCommitment<C>,
+) -> PreparedSet<C> {
+    prepare_product_using(
+        params,
+        pk,
+        set,
+        ProductCommitment::PreparedDifference(prepared),
+    )
+}
+
+enum ProductCommitment<'a, C: CurveAffine> {
+    BestAvailable(std::marker::PhantomData<&'a C>),
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    PreparedDifference(&'a PreparedDifferenceCommitment<C>),
+}
+
+fn prepare_product_using<C: CurveAffine>(
+    params: &Params<C>,
+    pk: &plonk::ProvingKey<C>,
+    set: UntransformedSet<C::Scalar>,
+    commitment: ProductCommitment<'_, C>,
+) -> PreparedSet<C> {
     let blind = set.product_blind;
     let z = set.product;
     let constant_prefix = (z.len() == params.g_lagrange.len())
@@ -1262,10 +1321,14 @@ fn prepare_product<C: CurveAffine>(
     let sparse_transform_prefix =
         constant_prefix.filter(|prefix| prefix.tail.len() <= MAX_DIRECT_TRANSFORM_TAIL_LEN);
     let (commitment, (polynomial, coset)) = crate::multicore::join(
-        || {
-            constant_prefix
+        || match commitment {
+            ProductCommitment::BestAvailable(_) => constant_prefix
                 .map(|prefix| commit_constant_prefix(params, prefix, blind))
-                .unwrap_or_else(|| params.commit_lagrange(&z, blind))
+                .unwrap_or_else(|| params.commit_lagrange(&z, blind)),
+            #[cfg(any(feature = "multicore", feature = "orbits"))]
+            ProductCommitment::PreparedDifference(prepared) => {
+                commit_prepared_difference(prepared, &z, blind)
+            }
         },
         || {
             sparse_transform_prefix
@@ -1290,6 +1353,37 @@ fn prepare_product<C: CurveAffine>(
         permutation_product_commitment: commitment.to_affine(),
         permutation_product_blind: blind,
     }
+}
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+fn commit_prepared_difference<C: CurveAffine>(
+    prepared: &PreparedDifferenceCommitment<C>,
+    polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
+    blind: Blind<C::Scalar>,
+) -> C::Curve {
+    assert_eq!(prepared.table.terms(), prepared.suffix_rows.len() + 1);
+    assert!(
+        prepared
+            .suffix_rows
+            .last()
+            .is_some_and(|&row| row < polynomial.len())
+    );
+    debug_assert!((1..polynomial.len()).all(|row| {
+        prepared.suffix_rows.binary_search(&row).is_ok() || polynomial[row] == polynomial[row - 1]
+    }));
+
+    let mut scalars = Vec::with_capacity(prepared.table.terms());
+    scalars.extend(prepared.suffix_rows.iter().map(|&row| {
+        if row == 0 {
+            polynomial[0]
+        } else {
+            polynomial[row] - polynomial[row - 1]
+        }
+    }));
+    scalars.push(blind.0);
+    // This is variable-time in the product values, as are the prover's generic
+    // polynomial commitments.
+    prepared.table.multiexp_with_terms_vartime(&scalars, &[])
 }
 
 /// Prepares an identity permutation set without materializing its fractions.
@@ -2102,7 +2196,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_bytes_match_sparse_dense_and_parallel_paths() {
+    fn proof_bytes_match_sparse_dense_prepared_difference_and_parallel_paths() {
         // This domain is large enough for fraction preparation to assign more
         // than one chunk at the tested worker counts, covering nonzero offsets.
         let params: Params<EqAffine> = Params::new(PROOF_K);
@@ -2144,6 +2238,13 @@ mod tests {
         assert!(
             columns.chunks(chunk_len).count() > 1,
             "the test requires several permutation sets",
+        );
+        assert!(
+            pk.permutation
+                .prepared_difference_commitments
+                .iter()
+                .any(Option::is_some),
+            "the sparse batch path must exercise a prepared difference MSM",
         );
         assert_ne!(
             columns.len() % chunk_len,

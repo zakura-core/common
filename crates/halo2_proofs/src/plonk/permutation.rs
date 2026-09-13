@@ -1,8 +1,12 @@
 use super::circuit::{Any, Column};
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use crate::arithmetic::PreparedZeroCheck;
 use crate::{
     arithmetic::CurveAffine,
     poly::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial},
 };
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use std::sync::Arc;
 
 pub(crate) mod keygen;
 pub(crate) mod prover;
@@ -107,6 +111,9 @@ pub(crate) struct ProvingKey<C: CurveAffine> {
     identity_cells: IdentityCells,
     /// Usable non-identity cells grouped by product set and row.
     active_sets: Vec<ActivePermutationSet<C::Scalar>>,
+    #[cfg(any(feature = "multicore", feature = "orbits"))]
+    /// Key-specific prepared commitments for sparse product sets.
+    prepared_difference_commitments: Vec<Option<PreparedDifferenceCommitment<C>>>,
     polys: Vec<Polynomial<C::Scalar, Coeff>>,
     pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
 }
@@ -127,6 +134,18 @@ struct ActivePermutationRow<F> {
 #[derive(Clone, Debug)]
 struct ActivePermutationSet<F> {
     rows: Vec<ActivePermutationRow<F>>,
+}
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+/// Fixed-base MSM data for a piecewise-constant permutation product.
+///
+/// Each row identifies a Lagrange-basis suffix sum. The corresponding scalar
+/// is the product's change at that row, except that row zero carries its
+/// initial value. The table's final base is the commitment blinding generator.
+#[derive(Clone, Debug)]
+struct PreparedDifferenceCommitment<C: CurveAffine> {
+    suffix_rows: Vec<usize>,
+    table: Arc<dyn PreparedZeroCheck<C::CurveExt>>,
 }
 
 impl<F: Copy> ActivePermutationSet<F> {
@@ -173,6 +192,13 @@ impl<F: Copy> ActivePermutationSet<F> {
 
 const IDENTITY_BITS_PER_BYTE: usize = u8::BITS as usize;
 const SPARSE_ACTIVE_ROW_FRACTION_DENOMINATOR: usize = 3;
+// Prepared backends may retain a large table per set. Bound both the number of
+// tables and their aggregate input size, while covering Ironwood's two sparse
+// non-identity sets (903 total terms at k = 11).
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+const MAX_PREPARED_DIFFERENCE_COMMITMENT_TABLES: usize = 2;
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+const MAX_PREPARED_DIFFERENCE_COMMITMENT_TERMS: usize = 1 << 11;
 
 #[derive(Clone, Debug)]
 struct IdentityCells(Vec<Vec<u8>>);

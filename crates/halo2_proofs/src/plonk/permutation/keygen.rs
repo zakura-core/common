@@ -6,6 +6,13 @@ use group::{
 use super::{
     ActivePermutationSet, Argument, IdentityCells, ProvingKey, VerifyingKey, permutation_chunk_len,
 };
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use super::{
+    MAX_PREPARED_DIFFERENCE_COMMITMENT_TABLES, MAX_PREPARED_DIFFERENCE_COMMITMENT_TERMS,
+    PreparedDifferenceCommitment,
+};
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use crate::arithmetic::{CurveExt, PreparedZeroCheck};
 use crate::{
     arithmetic::CurveAffine,
     plonk::{Any, Column, Error},
@@ -14,6 +21,8 @@ use crate::{
         commitment::{Blind, Params},
     },
 };
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct Assembly {
@@ -236,6 +245,14 @@ impl Assembly {
                 )
             })
             .collect();
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        let prepared_difference_commitments = prepare_difference_commitments(
+            params,
+            &identity_cells,
+            &active_sets,
+            chunk_len,
+            blinding_factors,
+        );
         let (polys, cosets) =
             domain.batch_lagrange_to_coeff_and_extended(&permutations, fft_twiddles);
         ProvingKey {
@@ -243,8 +260,88 @@ impl Assembly {
             identity_columns,
             identity_cells,
             active_sets,
+            #[cfg(any(feature = "multicore", feature = "orbits"))]
+            prepared_difference_commitments,
             polys,
             cosets,
         }
     }
+}
+
+#[cfg(any(feature = "multicore", feature = "orbits"))]
+fn prepare_difference_commitments<C: CurveAffine>(
+    params: &Params<C>,
+    identity_cells: &IdentityCells,
+    active_sets: &[ActivePermutationSet<C::Scalar>],
+    chunk_len: usize,
+    blinding_factors: usize,
+) -> Vec<Option<PreparedDifferenceCommitment<C>>> {
+    let domain_size = params.n as usize;
+    let fraction_rows = domain_size - (blinding_factors + 1);
+    let mut retained_tables = 0_usize;
+    let mut retained_terms = 0_usize;
+    let eligible = identity_cells
+        .chunks(chunk_len)
+        .zip(active_sets)
+        .map(|(identity_cells, active)| {
+            let active_rows = active.rows.len();
+            let terms = 1 + active_rows + blinding_factors + 1;
+            let eligible = IdentityCells::should_use_sparse(identity_cells, fraction_rows)
+                && !active.rows.is_empty()
+                && retained_tables < MAX_PREPARED_DIFFERENCE_COMMITMENT_TABLES
+                && retained_terms
+                    .checked_add(terms)
+                    .is_some_and(|terms| terms <= MAX_PREPARED_DIFFERENCE_COMMITMENT_TERMS);
+            if eligible {
+                retained_tables += 1;
+                retained_terms += terms;
+            }
+            eligible
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(eligible.len(), active_sets.len());
+    if !eligible.iter().any(|&eligible| eligible) {
+        return (0..active_sets.len()).map(|_| None).collect();
+    }
+
+    // For H_i = sum_{j=i}^{n-1} L_j, linearity gives
+    //
+    //   commit(z) = z_0 H_0 + sum_{i=1}^{n-1} (z_i - z_{i-1}) H_i.
+    //
+    // Sparse permutation products change only after an active row and in the
+    // random tail. Build those fixed H_i values once during key generation.
+    let mut suffix_sums = vec![C::Curve::default(); domain_size];
+    let mut suffix_sum = C::Curve::default();
+    for row in (0..domain_size).rev() {
+        suffix_sum += params.g_lagrange[row];
+        suffix_sums[row] = suffix_sum;
+    }
+
+    active_sets
+        .iter()
+        .zip(eligible)
+        .map(|(active, eligible)| {
+            if !eligible {
+                return None;
+            }
+
+            let suffix_rows = std::iter::once(0)
+                .chain(active.rows.iter().map(|active| active.row + 1))
+                .chain(fraction_rows + 1..domain_size)
+                .collect::<Vec<_>>();
+            debug_assert!(suffix_rows.windows(2).all(|rows| rows[0] < rows[1]));
+
+            let projective = suffix_rows
+                .iter()
+                .map(|&row| suffix_sums[row])
+                .collect::<Vec<_>>();
+            let mut bases = vec![C::identity(); projective.len()];
+            C::Curve::batch_normalize(&projective, &mut bases);
+            bases.push(params.w);
+            C::CurveExt::try_prepare_zero_check(&bases).map(|table| PreparedDifferenceCommitment {
+                suffix_rows,
+                table: Arc::<dyn PreparedZeroCheck<C::CurveExt>>::from(table),
+            })
+        })
+        .collect()
 }
