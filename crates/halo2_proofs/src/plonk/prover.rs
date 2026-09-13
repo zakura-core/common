@@ -1,5 +1,5 @@
 use ff::Field;
-#[cfg(feature = "batch")]
+#[cfg(all(test, feature = "batch"))]
 use ff::PrimeField;
 use group::{Curve, Group};
 use maybe_rayon::prelude::*;
@@ -19,14 +19,21 @@ use super::{
     lookup, permutation, vanishing,
 };
 
+#[cfg(all(test, feature = "batch"))]
+use super::PreparedInstanceDigit;
+#[cfg(feature = "batch")]
+use super::{instance_scalar_digit, prepared_instance_scalar_repr};
+
 #[cfg(test)]
 use super::circuit::FloorPlan;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
+#[cfg(all(test, feature = "batch"))]
+use crate::{InstanceScalarByteOrder, PREPARED_INSTANCE_WINDOW_BITS};
 #[cfg(feature = "batch")]
 use crate::{
-    InstanceScalarByteOrder, InstanceWindowTable, PREPARED_INSTANCE_BOOLEAN_ROWS,
-    PREPARED_INSTANCE_COLUMNS, PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_ROWS,
-    PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_MAGNITUDES, PreparedInstanceTable,
+    InstanceWindowTable, PREPARED_INSTANCE_BOOLEAN_ROWS, PREPARED_INSTANCE_COLUMNS,
+    PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_ROWS, PREPARED_INSTANCE_WINDOW_MAGNITUDES,
+    PreparedInstanceTable,
 };
 use crate::{
     arithmetic::{CurveAffine, batch_invert_multi},
@@ -54,71 +61,6 @@ fn prepared_instance_route_hits() -> usize {
     PREPARED_INSTANCE_ROUTE_HITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-#[cfg(feature = "batch")]
-fn instance_scalar_bit(bytes: &[u8], bit: usize, byte_order: InstanceScalarByteOrder) -> bool {
-    let byte_from_edge = bit / u8::BITS as usize;
-    let byte = match byte_order {
-        InstanceScalarByteOrder::LittleEndian => bytes[byte_from_edge],
-        InstanceScalarByteOrder::BigEndian => bytes[bytes.len() - byte_from_edge - 1],
-        InstanceScalarByteOrder::Unsupported => unreachable!("byte order checked by caller"),
-    };
-    byte & (1 << (bit % u8::BITS as usize)) != 0
-}
-
-#[cfg(feature = "batch")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PreparedInstanceDigit {
-    magnitude: usize,
-    negative: bool,
-}
-
-#[cfg(feature = "batch")]
-fn instance_scalar_digit(
-    bytes: &[u8],
-    window: usize,
-    scalar_bits: usize,
-    byte_order: InstanceScalarByteOrder,
-) -> PreparedInstanceDigit {
-    let bit_start = window * PREPARED_INSTANCE_WINDOW_BITS;
-    debug_assert_eq!(u8::BITS as usize % PREPARED_INSTANCE_WINDOW_BITS, 0);
-    let value = if bit_start < scalar_bits {
-        let byte_from_edge = bit_start / u8::BITS as usize;
-        let byte = match byte_order {
-            InstanceScalarByteOrder::LittleEndian => bytes[byte_from_edge],
-            InstanceScalarByteOrder::BigEndian => bytes[bytes.len() - byte_from_edge - 1],
-            InstanceScalarByteOrder::Unsupported => unreachable!("byte order checked by caller"),
-        };
-        let bit_offset = bit_start % u8::BITS as usize;
-        let live_bits = (scalar_bits - bit_start).min(PREPARED_INSTANCE_WINDOW_BITS);
-        let mask = (1 << live_bits) - 1;
-        (usize::from(byte) >> bit_offset) & mask
-    } else {
-        0
-    };
-    let overlap = if bit_start == 0 {
-        0
-    } else {
-        usize::from(instance_scalar_bit(bytes, bit_start - 1, byte_order))
-    };
-
-    // The bit below each window is its carry-in, while the window's high bit
-    // is its carry-out. These terms cancel between adjacent windows, leaving a
-    // signed digit whose magnitude is at most half the radix.
-    let radix = PREPARED_INSTANCE_WINDOW_MAGNITUDES * 2;
-    if value < radix / 2 {
-        PreparedInstanceDigit {
-            magnitude: value + overlap,
-            negative: false,
-        }
-    } else {
-        let magnitude = radix - value - overlap;
-        PreparedInstanceDigit {
-            magnitude,
-            negative: magnitude != 0,
-        }
-    }
-}
-
 /// Evaluates independent fixed-base products while splitting their bit ranges
 /// across the entire worker pool. Each job accumulates affine table entries
 /// locally; only job boundaries require projective-to-projective additions.
@@ -127,45 +69,12 @@ fn evaluate_prepared_instance_terms<C: CurveAffine>(
     table: &PreparedInstanceTable<C>,
     terms: &[(usize, C::Scalar)],
 ) -> Option<Vec<C::Curve>> {
-    if matches!(table.byte_order, InstanceScalarByteOrder::Unsupported) {
-        return None;
-    }
     let representations = terms
         .iter()
-        .map(|(_, scalar)| scalar.to_repr())
-        .collect::<Vec<_>>();
-    if representations
-        .iter()
-        .zip(terms)
-        .any(|(repr, (_, scalar))| {
-            let bytes = repr.as_ref();
-            let Some(repr_bits) = bytes.len().checked_mul(u8::BITS as usize) else {
-                return true;
-            };
-            if table.scalar_bits > repr_bits
-                || (table.scalar_bits..repr_bits)
-                    .any(|bit| instance_scalar_bit(bytes, bit, table.byte_order))
-            {
-                return true;
-            }
-
-            // [`PrimeField::Repr`] is opaque. The construction-time probe only
-            // selects a candidate order; validate every term before its digits
-            // index the positioned table.
-            let decoded = match table.byte_order {
-                InstanceScalarByteOrder::LittleEndian => {
-                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().rev().copied())
-                }
-                InstanceScalarByteOrder::BigEndian => {
-                    crate::decode_scalar_repr::<C::Scalar>(bytes.iter().copied())
-                }
-                InstanceScalarByteOrder::Unsupported => unreachable!("checked above"),
-            };
-            decoded != *scalar
+        .map(|(_, scalar)| {
+            prepared_instance_scalar_repr(scalar, table.scalar_bits, table.byte_order)
         })
-    {
-        return None;
-    }
+        .collect::<Option<Vec<_>>>()?;
 
     let work = terms.len().checked_mul(table.windows)?;
     if work == 0 {

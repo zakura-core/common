@@ -32,6 +32,18 @@ use crate::{
 // fixed polynomial's terms are zero.
 const SPARSE_FIXED_COMMITMENT_ZERO_FRACTION_DENOMINATOR: usize = 4;
 
+#[cfg(feature = "batch")]
+fn prepare_instance_first_row_table<C: CurveAffine>(
+    params: &Params<C>,
+    num_instance_columns: usize,
+) {
+    // This table is verifier-only and deliberately restricted to Orchard's
+    // production circuit shape.
+    if params.k() == ORCHARD_K && num_instance_columns == PREPARED_INSTANCE_COLUMNS {
+        let _ = params.prepare_instance_first_row_table();
+    }
+}
+
 #[cfg(any(feature = "batch", feature = "multicore"))]
 fn prepare_small_fixed_base_tables<C: CurveAffine>(
     params: &Params<C>,
@@ -436,6 +448,10 @@ where
 
     let mut fixed = batch_invert_assigned(assembly.fixed);
     let (cs, selector_polys, _) = cs.compress_selectors(assembly.selectors);
+
+    #[cfg(feature = "batch")]
+    prepare_instance_first_row_table(params, cs.num_instance_columns);
+
     fixed.extend(
         selector_polys
             .into_iter()
@@ -657,12 +673,16 @@ where
 }
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "batch")]
+    use super::prepare_instance_first_row_table;
     #[cfg(feature = "multicore")]
     use super::prepare_small_fixed_base_tables;
     use super::{
         CompressedSelectorFamily, MAX_ADDITIONAL_COMPRESSED_SELECTOR_CACHE_BYTES,
         commit_fixed_lagrange, evaluate_compressed_selector_family, plan_compressed_selector_cache,
     };
+    #[cfg(feature = "batch")]
+    use crate::{InstanceWindowTable, ORCHARD_K};
     #[cfg(feature = "multicore")]
     use crate::{PREPARED_SPARSE_COMMITMENT_K, PreparedSparseCommitments};
     use crate::{
@@ -689,6 +709,23 @@ mod tests {
             commit_fixed_lagrange(&params, &polynomial),
             params.commit_lagrange(&polynomial, Blind::default())
         );
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn orchard_verifying_key_prepares_first_instance_row() {
+        let params = Params::<EqAffine>::new(ORCHARD_K);
+        assert!(params.prepared_instance_first_row_table().is_none());
+
+        prepare_instance_first_row_table(&params, 0);
+        assert!(params.prepared_instance_first_row_table().is_none());
+
+        prepare_instance_first_row_table(&params, crate::PREPARED_INSTANCE_COLUMNS);
+        assert!(params.prepared_instance_first_row_table().is_some());
+
+        let smaller = Params::<EqAffine>::new(ORCHARD_K - 1);
+        prepare_instance_first_row_table(&smaller, crate::PREPARED_INSTANCE_COLUMNS);
+        assert!(smaller.prepared_instance_first_row_table().is_none());
     }
 
     #[cfg(feature = "multicore")]

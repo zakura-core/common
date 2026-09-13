@@ -224,6 +224,8 @@ pub struct Params<C: CurveAffine> {
     #[cfg(feature = "batch")]
     instance_window_cache: InstanceWindowCache<C>,
     #[cfg(feature = "batch")]
+    prepared_instance_first_row_cache: PreparedInstanceFirstRowCache<C>,
+    #[cfg(feature = "batch")]
     prepared_instance_cache: PreparedInstanceCache<C>,
     #[cfg(feature = "orbits")]
     zero_check_cache: ZeroCheckCache<C>,
@@ -1477,6 +1479,34 @@ impl<C: CurveAffine> Default for PreparedInstanceCache<C> {
 }
 
 #[cfg(feature = "batch")]
+#[derive(Clone)]
+struct PreparedInstanceFirstRowCache<C: CurveAffine>(
+    Arc<OnceLock<Arc<crate::PreparedInstanceFirstRowTable<C>>>>,
+);
+
+#[cfg(feature = "batch")]
+impl<C: CurveAffine> Default for PreparedInstanceFirstRowCache<C> {
+    fn default() -> Self {
+        Self(Arc::new(OnceLock::new()))
+    }
+}
+
+#[cfg(feature = "batch")]
+impl<C: CurveAffine> PreparedInstanceFirstRowCache<C> {
+    fn initialize(
+        &self,
+        initialize: impl FnOnce() -> crate::PreparedInstanceFirstRowTable<C>,
+    ) -> bool {
+        self.0.get_or_init(|| Arc::new(initialize()));
+        true
+    }
+
+    fn get(&self) -> Option<Arc<crate::PreparedInstanceFirstRowTable<C>>> {
+        self.0.get().map(Arc::clone)
+    }
+}
+
+#[cfg(feature = "batch")]
 impl<C: CurveAffine> PreparedInstanceCache<C> {
     fn initialize(&self, initialize: impl FnOnce() -> PreparedInstanceTable<C>) -> bool {
         self.0.get_or_init(|| Arc::new(initialize()));
@@ -1541,6 +1571,20 @@ fn prepared_instance_points<C: CurveAffine>(bases: &[C], windows: usize) -> Vec<
     let mut points = vec![C::identity(); capacity];
     C::Curve::batch_normalize(&projective, &mut points);
     points
+}
+
+#[cfg(feature = "batch")]
+fn instance_scalar_byte_order<C: CurveAffine>() -> InstanceScalarByteOrder {
+    let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
+    let probe_repr = probe.to_repr();
+    let probe_bytes = probe_repr.as_ref();
+    let little = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().rev().copied()) == probe;
+    let big = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().copied()) == probe;
+    match (little, big) {
+        (true, false) => InstanceScalarByteOrder::LittleEndian,
+        (false, true) => InstanceScalarByteOrder::BigEndian,
+        _ => InstanceScalarByteOrder::Unsupported,
+    }
 }
 
 #[cfg(feature = "batch")]
@@ -1615,6 +1659,30 @@ impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
         })
     }
 
+    fn prepare_instance_first_row_table(&self) -> bool {
+        let Some(&base) = self.g_lagrange.first() else {
+            return false;
+        };
+
+        self.prepared_instance_first_row_cache.initialize(|| {
+            let scalar_bits = C::Scalar::NUM_BITS as usize;
+            let windows = crate::prepared_instance_window_count(scalar_bits);
+            crate::PreparedInstanceFirstRowTable {
+                points: prepared_instance_points(core::slice::from_ref(&base), windows),
+                scalar_bits,
+                windows,
+                byte_order: instance_scalar_byte_order::<C>(),
+                products: Mutex::new(Vec::new()),
+            }
+        })
+    }
+
+    fn prepared_instance_first_row_table(
+        &self,
+    ) -> Option<Arc<crate::PreparedInstanceFirstRowTable<C>>> {
+        self.prepared_instance_first_row_cache.get()
+    }
+
     fn prepare_instance_table(&self) -> bool {
         if self.g_lagrange.len() < crate::PREPARED_INSTANCE_ROWS {
             return false;
@@ -1625,18 +1693,6 @@ impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
             let windows = crate::prepared_instance_window_count(scalar_bits);
             let points =
                 prepared_instance_points(&self.g_lagrange[..PREPARED_INSTANCE_DENSE_ROWS], windows);
-
-            let probe = C::Scalar::from(SCALAR_BYTE_ORDER_PROBE);
-            let probe_repr = probe.to_repr();
-            let probe_bytes = probe_repr.as_ref();
-            let little =
-                crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().rev().copied()) == probe;
-            let big = crate::decode_scalar_repr::<C::Scalar>(probe_bytes.iter().copied()) == probe;
-            let byte_order = match (little, big) {
-                (true, false) => InstanceScalarByteOrder::LittleEndian,
-                (false, true) => InstanceScalarByteOrder::BigEndian,
-                _ => InstanceScalarByteOrder::Unsupported,
-            };
 
             let mut offsets = [C::Curve::identity(); PREPARED_INSTANCE_OFFSETS];
             for (mask, offset) in offsets.iter_mut().enumerate() {
@@ -1652,7 +1708,7 @@ impl<C: CurveAffine> InstanceWindowTable<C> for Params<C> {
                 points,
                 scalar_bits,
                 windows,
-                byte_order,
+                byte_order: instance_scalar_byte_order::<C>(),
                 offsets,
             }
         })
@@ -1746,6 +1802,8 @@ impl<C: CurveAffine> Params<C> {
             u,
             #[cfg(feature = "batch")]
             instance_window_cache: InstanceWindowCache::default(),
+            #[cfg(feature = "batch")]
+            prepared_instance_first_row_cache: PreparedInstanceFirstRowCache::default(),
             #[cfg(feature = "batch")]
             prepared_instance_cache: PreparedInstanceCache::default(),
             #[cfg(feature = "orbits")]
@@ -2051,6 +2109,8 @@ impl<C: CurveAffine> Params<C> {
             u,
             #[cfg(feature = "batch")]
             instance_window_cache: InstanceWindowCache::default(),
+            #[cfg(feature = "batch")]
+            prepared_instance_first_row_cache: PreparedInstanceFirstRowCache::default(),
             #[cfg(feature = "batch")]
             prepared_instance_cache: PreparedInstanceCache::default(),
             #[cfg(feature = "orbits")]
@@ -2618,8 +2678,17 @@ fn instance_window_cache_is_shared_by_clones_only() {
     let mut serialized_before = vec![];
     params.write(&mut serialized_before).unwrap();
     assert!(params.prepared_instance_table().is_none());
+    assert!(params.prepared_instance_first_row_table().is_none());
+    assert!(params.prepare_instance_first_row_table());
     assert!(params.prepare_instance_table());
+    let prepared_first_row = params.prepared_instance_first_row_table().unwrap();
     let prepared = params.prepared_instance_table().unwrap();
+    assert_eq!(
+        prepared_first_row.points.len(),
+        crate::prepared_instance_window_count(
+            <EqAffine as group::CurveAffine>::Scalar::NUM_BITS as usize,
+        ) * PREPARED_INSTANCE_WINDOW_MAGNITUDES,
+    );
     let expected_prepared_points = PREPARED_INSTANCE_DENSE_ROWS
         * crate::prepared_instance_window_count(
             <EqAffine as group::CurveAffine>::Scalar::NUM_BITS as usize,
@@ -2656,6 +2725,10 @@ fn instance_window_cache_is_shared_by_clones_only() {
         &prepared,
         &cloned.prepared_instance_table().unwrap()
     ));
+    assert!(Arc::ptr_eq(
+        &prepared_first_row,
+        &cloned.prepared_instance_first_row_table().unwrap(),
+    ));
     assert_eq!(format!("{params:?}"), debug_before);
 
     let mut serialized_after = vec![];
@@ -2664,6 +2737,7 @@ fn instance_window_cache_is_shared_by_clones_only() {
 
     let deserialized = Params::<EqAffine>::read(&mut serialized_before.as_slice()).unwrap();
     assert!(deserialized.prepared_instance_table().is_none());
+    assert!(deserialized.prepared_instance_first_row_table().is_none());
     let smaller_table = params.instance_window_table(BASE_COUNT - 1);
     assert!(Arc::ptr_eq(&tables[0], &smaller_table));
 
