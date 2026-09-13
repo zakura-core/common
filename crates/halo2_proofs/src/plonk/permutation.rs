@@ -1,13 +1,8 @@
 use super::circuit::{Any, Column};
-#[cfg(any(feature = "multicore", feature = "orbits"))]
-use crate::arithmetic::PreparedZeroCheck;
 use crate::{
     arithmetic::CurveAffine,
     poly::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial},
 };
-#[cfg(any(feature = "multicore", feature = "orbits"))]
-use std::sync::Arc;
-
 pub(crate) mod keygen;
 pub(crate) mod prover;
 pub(crate) mod verifier;
@@ -141,11 +136,11 @@ struct ActivePermutationSet<F> {
 ///
 /// Each row identifies a Lagrange-basis suffix sum. The corresponding scalar
 /// is the product's change at that row, except that row zero carries its
-/// initial value. The table's final base is the commitment blinding generator.
+/// initial value. The final base is the commitment blinding generator.
 #[derive(Clone, Debug)]
 struct PreparedDifferenceCommitment<C: CurveAffine> {
     suffix_rows: Vec<usize>,
-    table: Arc<dyn PreparedZeroCheck<C::CurveExt>>,
+    bases: Vec<C>,
 }
 
 impl<F: Copy> ActivePermutationSet<F> {
@@ -192,11 +187,11 @@ impl<F: Copy> ActivePermutationSet<F> {
 
 const IDENTITY_BITS_PER_BYTE: usize = u8::BITS as usize;
 const SPARSE_ACTIVE_ROW_FRACTION_DENOMINATOR: usize = 3;
-// Prepared backends may retain a large table per set. Bound both the number of
-// tables and their aggregate input size, while covering Ironwood's two sparse
-// non-identity sets (903 total terms at k = 11).
+// Prepared difference commitments retain one affine base per term. Bound both
+// the number of commitments and their aggregate input size, while covering
+// Ironwood's two sparse non-identity sets (903 total terms at k = 11).
 #[cfg(any(feature = "multicore", feature = "orbits"))]
-const MAX_PREPARED_DIFFERENCE_COMMITMENT_TABLES: usize = 2;
+const MAX_PREPARED_DIFFERENCE_COMMITMENTS: usize = 2;
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 const MAX_PREPARED_DIFFERENCE_COMMITMENT_TERMS: usize = 1 << 11;
 

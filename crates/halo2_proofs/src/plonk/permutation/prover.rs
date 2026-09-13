@@ -1361,7 +1361,7 @@ fn commit_prepared_difference<C: CurveAffine>(
     polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
     blind: Blind<C::Scalar>,
 ) -> C::Curve {
-    assert_eq!(prepared.table.terms(), prepared.suffix_rows.len() + 1);
+    assert_eq!(prepared.bases.len(), prepared.suffix_rows.len() + 1);
     assert!(
         prepared
             .suffix_rows
@@ -1372,7 +1372,7 @@ fn commit_prepared_difference<C: CurveAffine>(
         prepared.suffix_rows.binary_search(&row).is_ok() || polynomial[row] == polynomial[row - 1]
     }));
 
-    let mut scalars = Vec::with_capacity(prepared.table.terms());
+    let mut scalars = Vec::with_capacity(prepared.bases.len());
     scalars.extend(prepared.suffix_rows.iter().map(|&row| {
         if row == 0 {
             polynomial[0]
@@ -1383,7 +1383,7 @@ fn commit_prepared_difference<C: CurveAffine>(
     scalars.push(blind.0);
     // This is variable-time in the product values, as are the prover's generic
     // polynomial commitments.
-    prepared.table.multiexp_with_terms_vartime(&scalars, &[])
+    best_multiexp(&scalars, &prepared.bases)
 }
 
 /// Prepares an identity permutation set without materializing its fractions.

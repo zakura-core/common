@@ -8,11 +8,9 @@ use super::{
 };
 #[cfg(any(feature = "multicore", feature = "orbits"))]
 use super::{
-    MAX_PREPARED_DIFFERENCE_COMMITMENT_TABLES, MAX_PREPARED_DIFFERENCE_COMMITMENT_TERMS,
+    MAX_PREPARED_DIFFERENCE_COMMITMENT_TERMS, MAX_PREPARED_DIFFERENCE_COMMITMENTS,
     PreparedDifferenceCommitment,
 };
-#[cfg(any(feature = "multicore", feature = "orbits"))]
-use crate::arithmetic::{CurveExt, PreparedZeroCheck};
 use crate::{
     arithmetic::CurveAffine,
     plonk::{Any, Column, Error},
@@ -21,9 +19,6 @@ use crate::{
         commitment::{Blind, Params},
     },
 };
-#[cfg(any(feature = "multicore", feature = "orbits"))]
-use std::sync::Arc;
-
 #[derive(Debug)]
 pub(crate) struct Assembly {
     columns: Vec<Column<Any>>,
@@ -278,7 +273,7 @@ fn prepare_difference_commitments<C: CurveAffine>(
 ) -> Vec<Option<PreparedDifferenceCommitment<C>>> {
     let domain_size = params.n as usize;
     let fraction_rows = domain_size - (blinding_factors + 1);
-    let mut retained_tables = 0_usize;
+    let mut retained_commitments = 0_usize;
     let mut retained_terms = 0_usize;
     let eligible = identity_cells
         .chunks(chunk_len)
@@ -288,12 +283,12 @@ fn prepare_difference_commitments<C: CurveAffine>(
             let terms = 1 + active_rows + blinding_factors + 1;
             let eligible = IdentityCells::should_use_sparse(identity_cells, fraction_rows)
                 && !active.rows.is_empty()
-                && retained_tables < MAX_PREPARED_DIFFERENCE_COMMITMENT_TABLES
+                && retained_commitments < MAX_PREPARED_DIFFERENCE_COMMITMENTS
                 && retained_terms
                     .checked_add(terms)
                     .is_some_and(|terms| terms <= MAX_PREPARED_DIFFERENCE_COMMITMENT_TERMS);
             if eligible {
-                retained_tables += 1;
+                retained_commitments += 1;
                 retained_terms += terms;
             }
             eligible
@@ -338,10 +333,7 @@ fn prepare_difference_commitments<C: CurveAffine>(
             let mut bases = vec![C::identity(); projective.len()];
             C::Curve::batch_normalize(&projective, &mut bases);
             bases.push(params.w);
-            C::CurveExt::try_prepare_zero_check(&bases).map(|table| PreparedDifferenceCommitment {
-                suffix_rows,
-                table: Arc::<dyn PreparedZeroCheck<C::CurveExt>>::from(table),
-            })
+            Some(PreparedDifferenceCommitment { suffix_rows, bases })
         })
         .collect()
 }
