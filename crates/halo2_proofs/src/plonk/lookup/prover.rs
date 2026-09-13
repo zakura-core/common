@@ -155,6 +155,8 @@ impl PastaSortKey {
 #[cfg(feature = "multicore")]
 const SORTED_U10_BITS: usize = 10;
 #[cfg(feature = "multicore")]
+const SORTED_U10_VALUES: usize = 1 << SORTED_U10_BITS;
+#[cfg(feature = "multicore")]
 const SORTED_U10_MAX_VALUE: u16 = (1 << SORTED_U10_BITS) - 1;
 /// Upper bound on the independently blinded tail handled by this route.
 /// This covers Orchard's current blind rows while keeping the tail on-stack.
@@ -313,6 +315,68 @@ fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
             position = source;
         }
     }
+}
+
+#[cfg(feature = "multicore")]
+/// Attempts a counting sort for a structurally identified 10-bit lookup.
+///
+/// The structural marker is only a routing hint. This validates every
+/// canonical field encoding before mutating either output, so callers can
+/// safely fall back to the generic sort for malformed witnesses.
+fn try_sort_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut [F],
+    scratch: &mut [PastaSortKey],
+) -> bool {
+    if values.len() > usize::from(u16::MAX) {
+        return false;
+    }
+    assert_eq!(values.len(), scratch.len());
+    // The length guard ensures each bin count fits in `u16`.
+    let mut counts = [0u16; SORTED_U10_VALUES];
+    for value in values.iter() {
+        let key = PastaSortKey {
+            limbs: pasta_sort_limbs(value.to_repr()),
+            source: 0,
+        };
+        let Some(value) = pasta_u10(&key) else {
+            return false;
+        };
+        counts[usize::from(value)] += 1;
+    }
+
+    let mut destination = 0;
+    let mut field_value = F::ZERO;
+    for (value, count) in (0..=SORTED_U10_MAX_VALUE).zip(counts) {
+        let limbs = [u64::from(value), 0, 0, 0];
+        for _ in 0..count {
+            values[destination] = field_value;
+            scratch[destination] = PastaSortKey {
+                limbs,
+                source: destination,
+            };
+            destination += 1;
+        }
+        field_value += F::ONE;
+    }
+    debug_assert_eq!(destination, values.len());
+    true
+}
+
+#[cfg(feature = "multicore")]
+// A `Vec` is required here for safe runtime specialization through `Any`.
+#[allow(clippy::ptr_arg)]
+fn try_sort_u10_lookup_values<F: Field + Ord>(
+    values: &mut Vec<F>,
+    scratch: &mut [PastaSortKey],
+) -> bool {
+    let dynamic_values = values as &mut dyn Any;
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fp>>() {
+        return try_sort_pasta_u10_values(values, scratch);
+    }
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fq>>() {
+        return try_sort_pasta_u10_values(values, scratch);
+    }
+    false
 }
 
 // A `Vec` is required here for safe runtime specialization through `Any`.
@@ -628,7 +692,14 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             .take(usable_rows)
             .copied()
             .collect::<Vec<_>>();
-        sort_lookup_values(&mut sorted_values, &mut sort_scratch);
+        #[cfg(feature = "multicore")]
+        let sorted_u10 = table_kind == PreparedTableKind::SortedU10Range
+            && try_sort_u10_lookup_values(&mut sorted_values, &mut sort_scratch);
+        #[cfg(not(feature = "multicore"))]
+        let sorted_u10 = false;
+        if !sorted_u10 {
+            sort_lookup_values(&mut sorted_values, &mut sort_scratch);
+        }
         // The Sinsemilla generator lookup is padded with its first tuple. Its
         // theta-compressed value is therefore repeated over roughly half of
         // the table commitment. Keep this specialization at the table-MSM
@@ -662,6 +733,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         instance_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         usable_rows: usize,
         build_quotient_asts: bool,
+        _table_kind: PreparedTableKind,
         mut sort_scratch: Vec<PastaSortKey>,
     ) -> PreparedInput<F, Ec> {
         let unpermuted_expressions = self.input_expressions.iter().map(|expression| {
@@ -731,7 +803,14 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         // for both vectors.
         let mut sorted_values = Vec::with_capacity(compressed_expression.len());
         sorted_values.extend(compressed_expression.iter().take(usable_rows).copied());
-        sort_lookup_values(&mut sorted_values, &mut sort_scratch);
+        #[cfg(feature = "multicore")]
+        let sorted_u10 = _table_kind == PreparedTableKind::SortedU10Range
+            && try_sort_u10_lookup_values(&mut sorted_values, &mut sort_scratch);
+        #[cfg(not(feature = "multicore"))]
+        let sorted_u10 = false;
+        if !sorted_u10 {
+            sort_lookup_values(&mut sorted_values, &mut sort_scratch);
+        }
 
         PreparedInput {
             compressed_expression,
@@ -1130,8 +1209,8 @@ where
         let prepared_tables = table_representatives
             .into_par_iter()
             .zip(table_sort_scratch.into_par_iter())
-            .zip(table_kinds.into_par_iter())
-            .map(|((lookup_index, sort_scratch), table_kind)| {
+            .enumerate()
+            .map(|(group, (lookup_index, sort_scratch))| {
                 lookup_arguments[lookup_index].prepare_table(
                     domain,
                     value_evaluator,
@@ -1140,7 +1219,7 @@ where
                     fixed_cosets,
                     usable_rows,
                     build_quotient_asts,
-                    table_kind,
+                    table_kinds[group],
                     sort_scratch,
                 )
             })
@@ -1162,6 +1241,7 @@ where
                     &instance_cosets[circuit_index],
                     usable_rows,
                     build_quotient_asts,
+                    table_kinds[table_groups[lookup_index]],
                     sort_scratch,
                 );
                 lookup_arguments[lookup_index].finish_permuted(
@@ -1199,6 +1279,7 @@ where
             lookup_tasks.into_iter().zip(input_sort_scratch).enumerate()
         {
             let state = &table_states[table_groups[lookup_index]];
+            let table_kind = table_kinds[table_groups[lookup_index]];
             let prepared = &prepared;
             scope.spawn(move |_| {
                 let input = lookup_arguments[lookup_index].prepare_input(
@@ -1213,6 +1294,7 @@ where
                     &instance_cosets[circuit_index],
                     usable_rows,
                     build_quotient_asts,
+                    table_kind,
                     sort_scratch,
                 );
 
@@ -2726,6 +2808,72 @@ mod tests {
     fn table_sort_matches_field_order() {
         check_table_sort::<pallas::Base>();
         check_table_sort::<pallas::Scalar>();
+    }
+
+    #[cfg(feature = "multicore")]
+    fn assert_u10_counting_sort_matches<F>(input: Vec<F>)
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord,
+    {
+        let mut expected = input.clone();
+        let mut expected_keys = vec![PastaSortKey::EMPTY; input.len()];
+        sort_pasta_values(&mut expected, &mut expected_keys);
+
+        let mut actual = input;
+        let mut actual_keys = vec![PastaSortKey::EMPTY; actual.len()];
+        assert!(try_sort_pasta_u10_values(&mut actual, &mut actual_keys));
+        assert_eq!(actual, expected);
+        assert!(actual_keys == expected_keys);
+    }
+
+    #[cfg(feature = "multicore")]
+    fn check_u10_counting_sort<F>()
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord,
+    {
+        let maximum = u64::from(SORTED_U10_MAX_VALUE);
+        assert_u10_counting_sort_matches::<F>(vec![]);
+        assert_u10_counting_sort_matches(vec![
+            F::from(maximum),
+            F::ZERO,
+            F::ONE,
+            F::from(maximum),
+            F::ZERO,
+        ]);
+        assert_u10_counting_sort_matches(vec![F::from(maximum); 2042]);
+        assert_u10_counting_sort_matches(
+            (0..2042_u64)
+                .map(|index| F::from((index * 613 + 17) % (maximum + 1)))
+                .collect(),
+        );
+
+        let mut actual = vec![F::ZERO, F::ONE];
+        let mut actual_keys = vec![PastaSortKey::EMPTY; actual.len()];
+        for invalid in [F::from(u64::from(SORTED_U10_MAX_VALUE) + 1), -F::ONE] {
+            actual[0] = invalid;
+            let unchanged_values = actual.clone();
+            let unchanged_keys = actual_keys.clone();
+            assert!(!try_sort_pasta_u10_values(&mut actual, &mut actual_keys));
+            assert_eq!(actual, unchanged_values);
+            assert!(actual_keys == unchanged_keys);
+        }
+
+        let oversized_len = usize::from(u16::MAX) + 1;
+        let mut oversized = vec![F::ZERO; oversized_len];
+        let mut oversized_keys = vec![PastaSortKey::EMPTY; oversized_len];
+        assert!(!try_sort_pasta_u10_values(
+            &mut oversized,
+            &mut oversized_keys,
+        ));
+        assert!(oversized.iter().all(|value| *value == F::ZERO));
+        assert!(oversized_keys.iter().all(|key| *key == PastaSortKey::EMPTY));
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn u10_counting_sort_matches_field_order() {
+        check_u10_counting_sort::<pallas::Base>();
+        check_u10_counting_sort::<pallas::Scalar>();
     }
 
     #[test]
