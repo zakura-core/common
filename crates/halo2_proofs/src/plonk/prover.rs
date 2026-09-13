@@ -774,17 +774,25 @@ fn prepare_permutation_sets_in_parallel<C: CurveAffine>(
     permutation_parallel_scratch_fits::<C>(set_count.saturating_sub(1), domain_size)
 }
 
+fn prepare_permutation_circuits_in_parallel<C: CurveAffine>(
+    circuit_count: usize,
+    worker_count: usize,
+    domain_size: usize,
+) -> bool {
+    prepare_permutations_in_parallel(circuit_count, worker_count)
+        && permutation_parallel_scratch_fits::<C>(circuit_count.saturating_sub(1), domain_size)
+}
+
 fn prepare_nested_permutation_sets_in_parallel<C: CurveAffine>(
     circuit_count: usize,
     set_count: usize,
     worker_count: usize,
     domain_size: usize,
 ) -> bool {
-    circuit_count > 1
-        && set_count > 1
-        && prepare_permutations_in_parallel(circuit_count, worker_count)
+    set_count > 1
+        && prepare_permutation_circuits_in_parallel::<C>(circuit_count, worker_count, domain_size)
         && permutation_parallel_scratch_fits::<C>(
-            circuit_count.saturating_mul(set_count.saturating_sub(1)),
+            circuit_count.saturating_mul(set_count).saturating_sub(1),
             domain_size,
         )
 }
@@ -1523,6 +1531,11 @@ where
 
     let permutation_workers = crate::multicore::current_num_threads();
     let permutation_set_count = pk.vk.cs.permutation.set_count(pk.vk.cs_degree);
+    let prepare_permutation_circuits = prepare_permutation_circuits_in_parallel::<C>(
+        instance.len(),
+        permutation_workers,
+        params.n as usize,
+    );
     let prepare_nested_permutation_sets = prepare_nested_permutation_sets_in_parallel::<C>(
         instance.len(),
         permutation_set_count,
@@ -1551,47 +1564,34 @@ where
             blinding,
         );
         vec![prepared.commit(&mut coset_evaluator, transcript, 0)?]
-    } else if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
+    } else if instance.len() > 1 {
         // Draw every permutation's blinding values in circuit and set
         // order before preparing the independent arguments in parallel.
         let permutation_blindings = (0..instance.len())
             .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
             .collect::<Vec<_>>();
 
-        // When the aggregate scratch remains bounded, let each circuit expose
-        // its independent set work to the same pool. The per-circuit product
-        // prefix and the eventual transcript writes retain their order.
-        let prepared_permutations = (0..instance.len())
-            .into_par_iter()
-            .zip(permutation_blindings.into_par_iter())
-            .map(|(circuit_index, blinding)| {
-                if prepare_nested_permutation_sets {
-                    pk.vk.cs.permutation.prepare_sets_in_parallel(
-                        params,
-                        pk,
-                        &pk.permutation,
-                        &advice[circuit_index].advice_values,
-                        &pk.fixed_values,
-                        &instance[circuit_index].instance_values,
-                        beta,
-                        gamma,
-                        blinding,
-                    )
-                } else {
-                    pk.vk.cs.permutation.prepare(
-                        params,
-                        pk,
-                        &pk.permutation,
-                        &advice[circuit_index].advice_values,
-                        &pk.fixed_values,
-                        &instance[circuit_index].instance_values,
-                        beta,
-                        gamma,
-                        blinding,
-                    )
-                }
-            })
+        let advice = advice
+            .iter()
+            .map(|advice| advice.advice_values.as_slice())
             .collect::<Vec<_>>();
+        let instance = instance
+            .iter()
+            .map(|instance| instance.instance_values.as_slice())
+            .collect::<Vec<_>>();
+        let prepared_permutations = pk.vk.cs.permutation.prepare_batch(
+            params,
+            pk,
+            &pk.permutation,
+            &advice,
+            &pk.fixed_values,
+            &instance,
+            beta,
+            gamma,
+            permutation_blindings,
+            prepare_permutation_circuits,
+            prepare_nested_permutation_sets,
+        );
 
         prepared_permutations
             .into_iter()
@@ -1992,7 +1992,29 @@ fn permutation_set_parallelism_limits_scratch() {
         LARGE_DOMAIN_SIZE,
     ));
 
+    assert!(prepare_permutation_circuits_in_parallel::<EqAffine>(
+        4,
+        6,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_permutation_circuits_in_parallel::<EqAffine>(
+        4,
+        5,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_permutation_circuits_in_parallel::<EqAffine>(
+        4,
+        6,
+        LARGE_DOMAIN_SIZE,
+    ));
+
     assert!(prepare_nested_permutation_sets_in_parallel::<EqAffine>(
+        3,
+        3,
+        8,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_nested_permutation_sets_in_parallel::<EqAffine>(
         4,
         3,
         10,

@@ -103,9 +103,72 @@ pub(crate) struct ProvingKey<C: CurveAffine> {
     permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     /// Whether each permutation column leaves every cell in place.
     identity_columns: Vec<bool>,
+    /// Packed markers for cells left in place by the permutation.
     identity_cells: IdentityCells,
+    /// Usable non-identity cells grouped by product set and row.
+    active_sets: Vec<ActivePermutationSet<C::Scalar>>,
     polys: Vec<Polynomial<C::Scalar, Coeff>>,
     pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+}
+
+#[derive(Clone, Debug)]
+struct ActivePermutationCell<F> {
+    column: Column<Any>,
+    identity: F,
+    permuted: F,
+}
+
+#[derive(Clone, Debug)]
+struct ActivePermutationRow<F> {
+    row: usize,
+    cells: Vec<ActivePermutationCell<F>>,
+}
+
+#[derive(Clone, Debug)]
+struct ActivePermutationSet<F> {
+    rows: Vec<ActivePermutationRow<F>>,
+}
+
+impl<F: Copy> ActivePermutationSet<F> {
+    fn from_columns<I, P>(
+        columns: &[Column<Any>],
+        identity_cells: &[Vec<u8>],
+        identities: &[I],
+        permutations: &[P],
+        row_count: usize,
+    ) -> Self
+    where
+        I: std::ops::Index<usize, Output = F>,
+        P: std::ops::Index<usize, Output = F>,
+    {
+        assert_eq!(columns.len(), identity_cells.len());
+        assert_eq!(columns.len(), identities.len());
+        assert_eq!(columns.len(), permutations.len());
+
+        let rows = (0..row_count)
+            .filter_map(|row| {
+                let cells = columns
+                    .iter()
+                    .copied()
+                    .zip(identity_cells)
+                    .zip(identities)
+                    .zip(permutations)
+                    .filter_map(|(((column, identity_cells), identities), permutation)| {
+                        (!IdentityCells::contains(identity_cells, row)).then_some(
+                            ActivePermutationCell {
+                                column,
+                                identity: identities[row],
+                                permuted: permutation[row],
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (!cells.is_empty()).then_some(ActivePermutationRow { row, cells })
+            })
+            .collect();
+
+        Self { rows }
+    }
 }
 
 const IDENTITY_BITS_PER_BYTE: usize = u8::BITS as usize;
@@ -208,7 +271,10 @@ impl<C: CurveAffine> ProvingKey<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IDENTITY_BITS_PER_BYTE, IdentityCells, SPARSE_ACTIVE_ROW_FRACTION_DENOMINATOR};
+    use super::{
+        ActivePermutationSet, Any, Column, IDENTITY_BITS_PER_BYTE, IdentityCells,
+        SPARSE_ACTIVE_ROW_FRACTION_DENOMINATOR,
+    };
 
     fn mapping_with_identity_rows(
         column: usize,
@@ -302,5 +368,34 @@ mod tests {
             &over_threshold.0,
             ROW_COUNT
         ));
+    }
+
+    #[test]
+    fn active_set_retains_only_non_identity_cells_in_row_order() {
+        let columns = [Column::new(0, Any::Advice), Column::new(1, Any::Advice)];
+        let mapping = vec![vec![(0, 0), (1, 2), (0, 2)], vec![(0, 0), (1, 1), (1, 2)]];
+        let identity_cells = IdentityCells::from_mapping(&mapping);
+        let identities = [vec![10, 11, 12], vec![20, 21, 22]];
+        let permutations = [vec![30, 31, 32], vec![40, 41, 42]];
+
+        let active = ActivePermutationSet::from_columns(
+            &columns,
+            &identity_cells.0,
+            &identities,
+            &permutations,
+            3,
+        );
+
+        assert_eq!(active.rows.len(), 2);
+        assert_eq!(active.rows[0].row, 0);
+        assert_eq!(active.rows[0].cells.len(), 1);
+        assert_eq!(active.rows[0].cells[0].column, columns[1]);
+        assert_eq!(active.rows[0].cells[0].identity, 20);
+        assert_eq!(active.rows[0].cells[0].permuted, 40);
+        assert_eq!(active.rows[1].row, 1);
+        assert_eq!(active.rows[1].cells.len(), 1);
+        assert_eq!(active.rows[1].cells[0].column, columns[0]);
+        assert_eq!(active.rows[1].cells[0].identity, 11);
+        assert_eq!(active.rows[1].cells[0].permuted, 31);
     }
 }

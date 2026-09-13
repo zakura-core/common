@@ -3,7 +3,9 @@ use group::{
     ff::{Field, PrimeField},
 };
 
-use super::{Argument, IdentityCells, ProvingKey, VerifyingKey};
+use super::{
+    ActivePermutationSet, Argument, IdentityCells, ProvingKey, VerifyingKey, permutation_chunk_len,
+};
 use crate::{
     arithmetic::CurveAffine,
     plonk::{Any, Column, Error},
@@ -168,6 +170,8 @@ impl Assembly {
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
         p: &Argument,
+        cs_degree: usize,
+        blinding_factors: usize,
         fft_twiddles: &ProvingKeyTwiddles<C::Scalar>,
     ) -> ProvingKey<C> {
         // Retain the cells that the permutation leaves fixed. The prover can
@@ -214,12 +218,31 @@ impl Assembly {
 
             permutations.push(permutation_poly);
         }
+        let chunk_len = permutation_chunk_len(cs_degree);
+        let fraction_rows = params.n as usize - (blinding_factors + 1);
+        let active_sets: Vec<ActivePermutationSet<C::Scalar>> = p
+            .columns
+            .chunks(chunk_len)
+            .zip(identity_cells.chunks(chunk_len))
+            .zip(deltaomega.chunks(chunk_len))
+            .zip(permutations.chunks(chunk_len))
+            .map(|(((columns, identity_cells), identities), permutations)| {
+                ActivePermutationSet::from_columns(
+                    columns,
+                    identity_cells,
+                    identities,
+                    permutations,
+                    fraction_rows,
+                )
+            })
+            .collect();
         let (polys, cosets) =
             domain.batch_lagrange_to_coeff_and_extended(&permutations, fft_twiddles);
         ProvingKey {
             permutations,
             identity_columns,
             identity_cells,
+            active_sets,
             polys,
             cosets,
         }

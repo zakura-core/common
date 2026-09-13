@@ -7,7 +7,7 @@ use rand_core::Rng;
 use std::{convert::Infallible, iter};
 
 use super::super::{ChallengeBeta, ChallengeGamma, ChallengeX, circuit::Any};
-use super::{Argument, IdentityCells, ProvingKey, permutation_chunk_len};
+use super::{ActivePermutationSet, Argument, IdentityCells, ProvingKey, permutation_chunk_len};
 use crate::{
     arithmetic::{CurveAffine, best_multiexp, parallelize},
     plonk::{
@@ -372,6 +372,196 @@ impl Argument {
         Prepared { sets }
     }
 
+    /// Prepares several circuits against one precomputed equality schedule.
+    ///
+    /// Identity-cell factors are omitted with the same negligible completeness
+    /// allowance documented by [`prepare_identity_product`].
+    /// Circuit and nested-set parallelism must be admitted independently by
+    /// the caller's worker-headroom and scratch-space policy.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::plonk) fn prepare_batch<C: CurveAffine>(
+        &self,
+        params: &Params<C>,
+        pk: &plonk::ProvingKey<C>,
+        pkey: &ProvingKey<C>,
+        advice: &[&[Polynomial<C::Scalar, LagrangeCoeff>]],
+        fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
+        instance: &[&[Polynomial<C::Scalar, LagrangeCoeff>]],
+        beta: ChallengeBeta<C>,
+        gamma: ChallengeGamma<C>,
+        blindings: Vec<PermutationBlinding<C::Scalar>>,
+        prepare_circuits_in_parallel: bool,
+        prepare_sets_in_parallel: bool,
+    ) -> Vec<Prepared<C>> {
+        let circuit_count = advice.len();
+        assert!(circuit_count > 1);
+        assert_eq!(instance.len(), circuit_count);
+        assert_eq!(blindings.len(), circuit_count);
+        debug_assert!(!prepare_sets_in_parallel || prepare_circuits_in_parallel);
+
+        let domain = &pk.vk.domain;
+        let chunk_len = permutation_chunk_len(pk.vk.cs_degree);
+        let blinding_factors = pk.vk.cs.blinding_factors();
+        let fraction_rows = params.n as usize - (blinding_factors + 1);
+        assert_eq!(self.columns.len(), pkey.permutations.len());
+        assert_eq!(self.columns.len(), pkey.identity_cells.len());
+        assert_eq!(self.columns.len(), pkey.identity_columns.len());
+
+        let set_count = self.columns.chunks(chunk_len).count();
+        assert_eq!(pkey.active_sets.len(), set_count);
+        let mut blindings = blindings
+            .into_iter()
+            .map(|blinding| blinding.sets.into_iter())
+            .collect::<Vec<_>>();
+        let mut last_z = vec![C::Scalar::ONE; circuit_count];
+        let mut products = (0..circuit_count)
+            .map(|_| Vec::with_capacity(set_count))
+            .collect::<Vec<_>>();
+        let mut deltaomega = C::Scalar::ONE;
+
+        for (set_index, (((columns, permutations), identity_cells), identity_columns)) in self
+            .columns
+            .chunks(chunk_len)
+            .zip(pkey.permutations.chunks(chunk_len))
+            .zip(pkey.identity_cells.chunks(chunk_len))
+            .zip(pkey.identity_columns.chunks(chunk_len))
+            .enumerate()
+        {
+            let set_blindings = blindings
+                .iter_mut()
+                .map(|blindings| {
+                    blindings
+                        .next()
+                        .expect("one blinding value set is sampled per permutation set")
+                })
+                .collect::<Vec<_>>();
+            let is_identity = identity_columns.iter().all(|&identity| identity)
+                && blinding_factors <= MAX_DIRECT_TRANSFORM_TAIL_LEN;
+
+            if is_identity {
+                for (circuit_index, blinding) in set_blindings.into_iter().enumerate() {
+                    products[circuit_index].push(UnpreparedSet::Identity {
+                        constant: last_z[circuit_index],
+                        blinding,
+                    });
+                }
+            } else if IdentityCells::should_use_sparse(identity_cells, fraction_rows) {
+                let fractions = prepare_scheduled_fractions(
+                    params,
+                    &pkey.active_sets[set_index],
+                    advice,
+                    fixed,
+                    instance,
+                    beta,
+                    gamma,
+                    fraction_rows,
+                );
+                let build_product = |((fractions, blinding), mut previous): (
+                    (FractionValues<C::Scalar>, SetBlinding<C::Scalar>),
+                    C::Scalar,
+                )| {
+                    let product = build_product::<C>(
+                        domain,
+                        blinding_factors,
+                        &mut previous,
+                        fractions,
+                        |rows| {
+                            rows.copy_from_slice(&blinding.rows);
+                            blinding.product_blind
+                        },
+                    );
+                    (product, previous)
+                };
+                let built_products = if prepare_circuits_in_parallel {
+                    fractions
+                        .into_par_iter()
+                        .zip(set_blindings.into_par_iter())
+                        .zip(last_z.into_par_iter())
+                        .map(build_product)
+                        .collect::<Vec<_>>()
+                } else {
+                    fractions
+                        .into_iter()
+                        .zip(set_blindings)
+                        .zip(last_z)
+                        .map(build_product)
+                        .collect::<Vec<_>>()
+                };
+                last_z = Vec::with_capacity(circuit_count);
+                for (circuit_index, (product, next)) in built_products.into_iter().enumerate() {
+                    products[circuit_index].push(UnpreparedSet::Dense(product));
+                    last_z.push(next);
+                }
+            } else {
+                for (circuit_index, blinding) in set_blindings.into_iter().enumerate() {
+                    let (fractions, _) = prepare_dense_fractions(
+                        params,
+                        domain,
+                        columns,
+                        permutations,
+                        advice[circuit_index],
+                        fixed,
+                        instance[circuit_index],
+                        beta,
+                        gamma,
+                        deltaomega,
+                        blinding_factors,
+                    );
+                    products[circuit_index].push(UnpreparedSet::Dense(build_product::<C>(
+                        domain,
+                        blinding_factors,
+                        &mut last_z[circuit_index],
+                        fractions,
+                        |rows| {
+                            rows.copy_from_slice(&blinding.rows);
+                            blinding.product_blind
+                        },
+                    )));
+                }
+            }
+            for _ in columns {
+                deltaomega *= &C::Scalar::DELTA;
+            }
+        }
+        debug_assert!(
+            blindings
+                .iter_mut()
+                .all(|blindings| blindings.next().is_none())
+        );
+
+        if prepare_circuits_in_parallel && prepare_sets_in_parallel {
+            products
+                .into_par_iter()
+                .map(|sets| Prepared {
+                    sets: sets
+                        .into_par_iter()
+                        .map(|set| prepare_unprepared_set(params, pk, set))
+                        .collect(),
+                })
+                .collect()
+        } else if prepare_circuits_in_parallel {
+            products
+                .into_par_iter()
+                .map(|sets| Prepared {
+                    sets: sets
+                        .into_iter()
+                        .map(|set| prepare_unprepared_set(params, pk, set))
+                        .collect(),
+                })
+                .collect()
+        } else {
+            products
+                .into_iter()
+                .map(|sets| Prepared {
+                    sets: sets
+                        .into_iter()
+                        .map(|set| prepare_unprepared_set(params, pk, set))
+                        .collect(),
+                })
+                .collect()
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare_sets<C: CurveAffine, E>(
         &self,
@@ -455,6 +645,123 @@ impl Argument {
 
         Ok(())
     }
+}
+
+fn prepare_unprepared_set<C: CurveAffine>(
+    params: &Params<C>,
+    pk: &plonk::ProvingKey<C>,
+    set: UnpreparedSet<C::Scalar>,
+) -> PreparedSet<C> {
+    match set {
+        UnpreparedSet::Dense(set) => prepare_product(params, pk, set),
+        UnpreparedSet::Identity { constant, blinding } => {
+            prepare_identity_product(params, pk, constant, blinding)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_scheduled_fractions<C: CurveAffine>(
+    params: &Params<C>,
+    active_set: &ActivePermutationSet<C::Scalar>,
+    advice: &[&[Polynomial<C::Scalar, LagrangeCoeff>]],
+    fixed: &[Polynomial<C::Scalar, LagrangeCoeff>],
+    instance: &[&[Polynomial<C::Scalar, LagrangeCoeff>]],
+    beta: ChallengeBeta<C>,
+    gamma: ChallengeGamma<C>,
+    fraction_rows: usize,
+) -> Vec<FractionValues<C::Scalar>> {
+    let circuit_count = advice.len();
+    assert!(
+        active_set
+            .rows
+            .iter()
+            .all(|active| active.row < fraction_rows)
+    );
+    let event_count = active_set.rows.len();
+    // The identity and permutation labels depend only on the proving key and
+    // shared challenges. Compute each offset once, then apply every circuit's
+    // witness values. Split the retained rows across the worker pool while
+    // keeping every circuit lane together for each shared offset.
+    let worker_count = crate::multicore::current_num_threads();
+    let chunk_size = event_count.div_ceil(worker_count).max(1);
+    let chunks = active_set
+        .rows
+        .chunks(chunk_size)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|active_rows| {
+            let mut numerators = vec![vec![C::Scalar::ONE; active_rows.len()]; circuit_count];
+            let mut denominators = vec![vec![C::Scalar::ONE; active_rows.len()]; circuit_count];
+
+            for (event, active) in active_rows.iter().enumerate() {
+                for cell in &active.cells {
+                    let numerator_offset = *beta * cell.identity + &*gamma;
+                    let denominator_offset = *beta * cell.permuted + &*gamma;
+                    match cell.column.column_type() {
+                        Any::Advice => {
+                            for circuit_index in 0..circuit_count {
+                                let value = advice[circuit_index][cell.column.index()][active.row];
+                                numerators[circuit_index][event] *= numerator_offset + value;
+                                denominators[circuit_index][event] *= denominator_offset + value;
+                            }
+                        }
+                        Any::Fixed => {
+                            let value = fixed[cell.column.index()][active.row];
+                            let numerator_factor = numerator_offset + value;
+                            let denominator_factor = denominator_offset + value;
+                            for circuit_index in 0..circuit_count {
+                                numerators[circuit_index][event] *= numerator_factor;
+                                denominators[circuit_index][event] *= denominator_factor;
+                            }
+                        }
+                        Any::Instance => {
+                            for circuit_index in 0..circuit_count {
+                                let value =
+                                    instance[circuit_index][cell.column.index()][active.row];
+                                numerators[circuit_index][event] *= numerator_offset + value;
+                                denominators[circuit_index][event] *= denominator_offset + value;
+                            }
+                        }
+                    }
+                }
+            }
+
+            (active_rows, numerators, denominators)
+        })
+        .collect::<Vec<_>>();
+
+    let mut rows = Vec::with_capacity(event_count);
+    let mut numerators = (0..circuit_count)
+        .map(|_| Vec::with_capacity(event_count))
+        .collect::<Vec<_>>();
+    let mut denominators = (0..circuit_count)
+        .map(|_| Vec::with_capacity(event_count))
+        .collect::<Vec<_>>();
+    for (active_rows, chunk_numerators, chunk_denominators) in chunks {
+        rows.extend(active_rows.iter().map(|active| active.row));
+        for (numerators, mut chunk) in numerators.iter_mut().zip(chunk_numerators) {
+            numerators.append(&mut chunk);
+        }
+        for (denominators, mut chunk) in denominators.iter_mut().zip(chunk_denominators) {
+            denominators.append(&mut chunk);
+        }
+    }
+
+    numerators
+        .into_iter()
+        .zip(denominators)
+        .map(|(numerators, denominators)| {
+            FractionValues::Sparse(SparseFractions {
+                rows: rows.clone(),
+                numerators,
+                denominators,
+                first_cancelled_zero: None,
+                fraction_rows,
+                domain_size: params.n as usize,
+            })
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -994,7 +1301,7 @@ fn prepare_product<C: CurveAffine>(
 /// A zero shared factor makes the local row relation `0 = 0`, but retaining
 /// the product need not give a valid witness for the complete chunk chain.
 /// The generic path takes subsequent product states to zero; this shortcut
-/// can retain a nonzero state. A later nonidentity chunk can then encounter
+/// can retain a nonzero state. A later non-identity chunk can then encounter
 /// a zero denominator and nonzero numerator, making its row relation
 /// impossible to satisfy with that incoming state.
 ///
@@ -1615,7 +1922,7 @@ mod tests {
     const PROOF_K: u32 = 7;
     const MAX_PROOF_CIRCUITS: usize = 4;
     const PROOF_CIRCUIT_COUNTS: [usize; 3] = [1, 2, MAX_PROOF_CIRCUITS];
-    const PROOF_THREAD_COUNTS: [usize; 2] = [6, 10];
+    const PROOF_THREAD_COUNTS: [usize; 4] = [2, 4, 6, 10];
     const PROOF_SEED: u64 = 0x5045_524d_5554_4508;
 
     fn dense_fraction(factors: &[PermutationFactor<Fp>], beta: Fp, gamma: Fp) -> (Fp, Fp) {
@@ -1795,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_bytes_match_identity_sparse_dense_and_parallel_paths() {
+    fn proof_bytes_match_sparse_dense_and_parallel_paths() {
         // This domain is large enough for fraction preparation to assign more
         // than one chunk at the tested worker counts, covering nonzero offsets.
         let params: Params<EqAffine> = Params::new(PROOF_K);
@@ -1906,7 +2213,7 @@ mod tests {
     fn identity_product_remains_valid_when_a_shared_factor_is_zero() {
         // This checks only an isolated identity chunk's row and terminal
         // relations. It does not establish compatibility with a later
-        // nonidentity chunk; see `prepare_identity_product` for the accepted
+        // non-identity chunk; see `prepare_identity_product` for the accepted
         // negligible completeness error in the full chain.
         use group::ff::{Field, PrimeField};
 
