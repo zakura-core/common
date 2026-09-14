@@ -595,6 +595,7 @@ fn same_ast<E, F: Field, B: Basis>(lhs: &Ast<E, F, B>, rhs: &Ast<E, F, B>) -> bo
         (Ast::Scale(lhs, lhs_scalar), Ast::Scale(rhs, rhs_scalar)) => {
             lhs_scalar == rhs_scalar && same_ast(lhs, rhs)
         }
+        #[cfg(test)]
         (Ast::DistributePowers(lhs, lhs_base), Ast::DistributePowers(rhs, rhs_base)) => {
             lhs_base == rhs_base
                 && lhs.len() == rhs.len()
@@ -713,9 +714,9 @@ fn ast_is_row_constant<E, F: Field, B: Basis>(ast: &Ast<E, F, B>) -> bool {
             ast_is_row_constant(lhs) && ast_is_row_constant(rhs)
         }
         Ast::Scale(inner, _) => ast_is_row_constant(inner),
-        Ast::DistributePowers(terms, _) | Ast::DistributeChallengePowers(terms, _) => {
-            terms.iter().all(ast_is_row_constant)
-        }
+        #[cfg(test)]
+        Ast::DistributePowers(terms, _) => terms.iter().all(ast_is_row_constant),
+        Ast::DistributeChallengePowers(terms, _) => terms.iter().all(ast_is_row_constant),
         Ast::ConstantTerm(_) | Ast::ChallengeTerm(_) => true,
     }
 }
@@ -752,7 +753,9 @@ fn ast_has_at_most_nodes<E, F: Field, B: Basis>(ast: &Ast<E, F, B>, max_nodes: u
                 visit(lhs, remaining) && visit(rhs, remaining)
             }
             Ast::Scale(inner, _) => visit(inner, remaining),
-            Ast::DistributePowers(terms, _) | Ast::DistributeChallengePowers(terms, _) => {
+            #[cfg(test)]
+            Ast::DistributePowers(terms, _) => terms.iter().all(|term| visit(term, remaining)),
+            Ast::DistributeChallengePowers(terms, _) => {
                 terms.iter().all(|term| visit(term, remaining))
             }
             Ast::Poly(_)
@@ -2013,6 +2016,12 @@ fn reduce_deferred_into<T: DeferredField + 'static, F: Field>(
 
 #[derive(Clone, Copy)]
 enum PowerBase<F> {
+    /// Only reachable from the test-only [`Ast::DistributePowers`]; kept as
+    /// a real (rather than `#[cfg(test)]`) variant purely so `F` stays a
+    /// used type parameter outside tests. Production expressions always
+    /// distribute powers of a proof challenge instead (see
+    /// [`Ast::DistributeChallengePowers`]).
+    #[allow(dead_code)]
     Literal(F),
     Challenge(EvaluationChallenge),
 }
@@ -2147,6 +2156,7 @@ impl<F: Field> EvaluationPlan<F> {
                 }
             }
             Ast::Scale(inner, scalar) => Self::compile_scale(inner, *scalar, scalars),
+            #[cfg(test)]
             Ast::DistributePowers(terms, base) => {
                 Self::compile_distribute_powers(terms, PowerBase::Literal(*base), scalars)
             }
@@ -4204,6 +4214,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             Ast::Scale(inner, scalar) => self
                 .normalize_ast(inner)
                 .map(|inner| Ast::Scale(Arc::new(inner), *scalar)),
+            #[cfg(test)]
             Ast::DistributePowers(terms, base) => {
                 let mut replaced_terms = None;
                 for (index, term) in terms.iter().enumerate() {
@@ -5553,11 +5564,18 @@ pub(crate) enum Ast<E, F: Field, B: Basis> {
     Mul(AstMul<E, F, B>),
     Scale(Arc<Ast<E, F, B>>, F),
     /// Represents a linear combination of a vector of nodes and the powers of a
-    /// field element, where the nodes are ordered from highest to lowest degree
-    /// terms.
-    #[allow(dead_code)]
+    /// literal field element, where the nodes are ordered from highest to
+    /// lowest degree terms.
+    ///
+    /// Production expressions always distribute powers of a proof challenge
+    /// (see [`Ast::DistributeChallengePowers`]); this literal-base form
+    /// exists only so tests can build distribution trees without staging a
+    /// full challenge set.
+    #[cfg(test)]
     DistributePowers(Arc<Vec<Ast<E, F, B>>>, F),
-    /// As [`Ast::DistributePowers`], with a proof challenge as the base.
+    /// Represents a linear combination of a vector of nodes and the powers
+    /// of a proof challenge, where the nodes are ordered from highest to
+    /// lowest degree terms.
     DistributeChallengePowers(Arc<Vec<Ast<E, F, B>>>, EvaluationChallenge),
     /// The degree-1 term of a polynomial.
     ///
@@ -5579,7 +5597,9 @@ pub(crate) enum Ast<E, F: Field, B: Basis> {
 }
 
 impl<E, F: Field, B: Basis> Ast<E, F, B> {
-    #[allow(dead_code)]
+    /// Test-only convenience: builds an [`Ast::DistributePowers`] node from
+    /// a literal base, without staging a proof challenge.
+    #[cfg(test)]
     pub fn distribute_powers<I: IntoIterator<Item = Self>>(i: I, base: F) -> Self {
         Ast::DistributePowers(Arc::new(i.into_iter().collect()), base)
     }
@@ -5599,6 +5619,7 @@ impl<E, F: Field, B: Basis> fmt::Debug for Ast<E, F, B> {
             Self::Add(lhs, rhs) => f.debug_tuple("Add").field(lhs).field(rhs).finish(),
             Self::Mul(x) => f.debug_tuple("Mul").field(x).finish(),
             Self::Scale(base, scalar) => f.debug_tuple("Scale").field(base).field(scalar).finish(),
+            #[cfg(test)]
             Self::DistributePowers(terms, base) => f
                 .debug_tuple("DistributePowers")
                 .field(terms)
