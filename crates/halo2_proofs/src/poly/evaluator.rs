@@ -4936,7 +4936,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
-        fn recurse_negated_unit_add_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
+        fn recurse_negated_plain_add_into<F: WithSmallOrderMulGroup<3>, B: BasisOps>(
             lhs: &EvaluationPlan<F>,
             rhs: &EvaluationPlan<F>,
             ctx: &AstContext<'_, F, B>,
@@ -4949,6 +4949,8 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
 
             if let EvaluationPlan::Poly(leaf) = rhs {
+                // A polynomial leaf has no cache event, so consuming it in
+                // the outer negation preserves the plan's execution order.
                 recurse_into(lhs, ctx, output, cache, scratch);
                 let values = leaf_chunk(leaf, ctx, output.len());
                 let (first, second) = values.into_slices();
@@ -4963,6 +4965,8 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             if matches!(lhs, EvaluationPlan::Add(_, _))
                 && let EvaluationPlan::CacheLoad { slot } = rhs
             {
+                // Evaluate every store in the left subtree before loading the
+                // right-hand cached value.
                 recurse_into(lhs, ctx, output, cache, scratch);
                 let start = slot * output.len();
                 negate_add(output, &cache[start..start + output.len()]);
@@ -5358,7 +5362,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     let (scalar, kind) = ctx.scalars.scale(*scalar);
                     if matches!(kind, ScaleKind::MinusOne)
                         && let EvaluationPlan::Add(lhs, rhs) = a.as_ref()
-                        && recurse_negated_unit_add_into(lhs, rhs, ctx, output, cache, scratch)
+                        && recurse_negated_plain_add_into(lhs, rhs, ctx, output, cache, scratch)
                     {
                         return;
                     }
@@ -8485,6 +8489,122 @@ mod tests {
     fn cached_lhs_addends_read_cache_storage_directly() {
         check_cached_lhs_addends::<pallas::Base>();
         check_cached_lhs_addends::<vesta::Base>();
+    }
+
+    fn check_negated_plain_addends<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(4, 4);
+        let mut values = (0..2)
+            .map(|column| {
+                let mut values = domain.empty_extended();
+                for (row, value) in values.iter_mut().enumerate() {
+                    *value = F::from((column * domain.extended_len() + row + 3) as u64);
+                }
+                values
+            })
+            .collect::<Vec<_>>();
+        let mut evaluator = new_evaluator::<_, F, ExtendedLagrangeCoeff>(|| {});
+        let lhs = evaluator.register_poly(values.remove(0));
+        let rhs = evaluator.register_poly(values.remove(0));
+        let lhs = Ast::from(lhs.with_rotation(Rotation::next()));
+        let rhs = Ast::from(rhs.with_rotation(Rotation::prev()));
+        let lhs_values = evaluator.evaluate(&lhs, &domain);
+        let rhs_values = evaluator.evaluate(&rhs, &domain);
+        let lhs_sum = lhs.clone() + Ast::ConstantTerm(F::from(7));
+        let lhs_sum_values = evaluator.evaluate(&lhs_sum, &domain);
+
+        for (ast, lhs_values) in [
+            (-(lhs + rhs.clone()), &lhs_values),
+            (-(lhs_sum + rhs), &lhs_sum_values),
+        ] {
+            let actual = evaluator.evaluate(&ast, &domain);
+            for ((actual, lhs), rhs) in actual.iter().zip(lhs_values.iter()).zip(rhs_values.iter())
+            {
+                assert_eq!(*actual, -(*lhs + rhs));
+            }
+        }
+    }
+
+    #[test]
+    fn negated_plain_addends_are_fused_across_rotations() {
+        check_negated_plain_addends::<pallas::Base>();
+        check_negated_plain_addends::<vesta::Base>();
+    }
+
+    fn check_negated_plain_add_cache_order<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(4, 4);
+        let mut values = (0..3)
+            .map(|column| {
+                let mut values = domain.empty_extended();
+                for (row, value) in values.iter_mut().enumerate() {
+                    *value = F::from((column * domain.extended_len() + row + 5) as u64);
+                }
+                values
+            })
+            .collect::<Vec<_>>();
+        let mut evaluator = new_evaluator::<_, F, ExtendedLagrangeCoeff>(|| {});
+        let lhs = evaluator.register_poly(values.remove(0));
+        let other = evaluator.register_poly(values.remove(0));
+        let rhs = evaluator.register_poly(values.remove(0));
+        let base = Ast::from(lhs.with_rotation(Rotation::prev()))
+            + Ast::from(other.with_rotation(Rotation::next()));
+        let shared = base.clone() * base.clone();
+        let rhs = Ast::from(rhs.with_rotation(Rotation(-6)));
+        let ast = -((shared.clone() + rhs.clone()) + shared.clone()) + shared.clone();
+
+        let (mut plan, scalars) = compile_plan(&ast);
+        assert_eq!(
+            plan.cache_common_subexpressions(LinearTermCacheBudget::default(), &scalars),
+            1,
+        );
+        let EvaluationPlan::Add(negated, loaded_after) = &plan else {
+            panic!("the final cached value remains outside the negated add");
+        };
+        let EvaluationPlan::Scale(negated, scalar) = negated.as_ref() else {
+            panic!("the add remains negated");
+        };
+        assert!(matches!(
+            scalars[scalar.index()],
+            PlanScalar::Literal(value) if value == -F::ONE
+        ));
+        let EvaluationPlan::Add(prefix, loaded_inside) = negated.as_ref() else {
+            panic!("the negated add retains its operands");
+        };
+        let EvaluationPlan::Add(stored, _) = prefix.as_ref() else {
+            panic!("the repeated value retains its execution order");
+        };
+        let EvaluationPlan::CacheStore { slot, .. } = stored.as_ref() else {
+            panic!("the first repeated value is stored");
+        };
+        assert!(matches!(
+            (loaded_inside.as_ref(), loaded_after.as_ref()),
+            (
+                EvaluationPlan::CacheLoad { slot: inside },
+                EvaluationPlan::CacheLoad { slot: after },
+            ) if inside == slot && after == slot
+        ));
+
+        let shared_values = evaluator.evaluate(&base, &domain);
+        let rhs_values = evaluator.evaluate(&rhs, &domain);
+        let actual = evaluator.evaluate(&ast, &domain);
+        for ((actual, shared), rhs) in actual
+            .iter()
+            .zip(shared_values.iter())
+            .zip(rhs_values.iter())
+        {
+            assert_eq!(*actual, -shared.square() - rhs);
+        }
+    }
+
+    #[test]
+    fn negated_plain_add_preserves_cached_lhs_values() {
+        check_negated_plain_add_cache_order::<pallas::Base>();
+        check_negated_plain_add_cache_order::<vesta::Base>();
     }
 
     #[test]
