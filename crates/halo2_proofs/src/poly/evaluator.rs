@@ -15,6 +15,7 @@ use pasta_curves::{deferred::DeferredField, pallas, vesta};
 
 use super::{
     Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
+    power_vector,
 };
 use crate::multicore;
 
@@ -442,12 +443,7 @@ impl<F: Field> BoundEvaluationChallenges<F> {
                 3 => values.y,
                 _ => unreachable!(),
             };
-            let mut powers = Vec::with_capacity(max_exponent + 1);
-            powers.push(F::ONE);
-            for exponent in 1..=max_exponent {
-                powers.push(powers[exponent - 1] * challenge);
-            }
-            powers
+            power_vector(challenge, max_exponent + 1)
         });
         Self { values, powers }
     }

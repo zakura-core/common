@@ -197,13 +197,7 @@ fn collapse_polynomials_deferred<F: DeferredField>(
     }
 
     let max_group_len = groups.iter().map(Vec::len).max().unwrap_or(0);
-    let mut powers = Vec::with_capacity(max_group_len);
-    if max_group_len > 0 {
-        powers.push(F::ONE);
-        for exponent in 1..max_group_len {
-            powers.push(powers[exponent - 1] * challenge);
-        }
-    }
+    let powers = power_vector(challenge, max_group_len);
 
     collapse_polynomials_with(groups, |values, start, group| {
         if group.len() <= 2 {
