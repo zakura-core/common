@@ -631,19 +631,39 @@ macro_rules! new_curve_impl {
                             $name::identity()
                         }
                     } else {
+                        // This unscaled formula divides the conventional
+                        // mixed-add output coordinates by (4, 8, 2), which
+                        // represents the same Jacobian point.
                         let h = u2 - self.x;
                         let hh = Field::square(&h);
-                        let i = hh + hh;
-                        let i = i + i;
-                        let j = h * i;
+                        let j = h * hh;
                         let r = s2 - self.y;
-                        let r = r + r;
-                        let v = self.x * i;
+                        let v = self.x * hh;
                         let x3 = Field::square(&r) - j - v - v;
-                        let j = self.y * j;
-                        let j = j + j;
-                        let y3 = r * (v - x3) - j;
-                        let z3 = Field::square(&(self.z + h)) - z1z1 - hh;
+                        let z3 = self.z * h;
+                        #[cfg(all(
+                            feature = "aarch64-asm",
+                            target_arch = "aarch64",
+                            any(target_family = "unix", target_os = "none"),
+                            target_pointer_width = "64",
+                            target_endian = "little"
+                        ))]
+                        // A nonidentity point cannot have y = 0 in this odd,
+                        // prime-order group: such a point would have order 2.
+                        let y3 = $base::mul_sub_mul_nonzero_c(
+                            &r,
+                            &(v - x3),
+                            &self.y,
+                            &j,
+                        );
+                        #[cfg(not(all(
+                            feature = "aarch64-asm",
+                            target_arch = "aarch64",
+                            any(target_family = "unix", target_os = "none"),
+                            target_pointer_width = "64",
+                            target_endian = "little"
+                        )))]
+                        let y3 = r * (v - x3) - self.y * j;
 
                         $name {
                             x: x3, y: y3, z: z3
