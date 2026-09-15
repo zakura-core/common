@@ -471,6 +471,24 @@ impl Fq {
         ))
     }
 
+    /// Computes `a * b - c * d` with one Montgomery reduction.
+    ///
+    /// `c` must be nonzero. This is the narrow field hook for the AArch64
+    /// incomplete mixed-add path; it is not a general field operation.
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        any(target_family = "unix", target_os = "none"),
+        target_pointer_width = "64",
+        target_endian = "little"
+    ))]
+    #[inline(always)]
+    pub(crate) fn mul_sub_mul_nonzero_c(a: &Self, b: &Self, c: &Self, d: &Self) -> Self {
+        Self(super::aarch64_asm::mul_sub_mul_nonzero_c(
+            &a.0, &b.0, &c.0, &d.0, &MODULUS.0, INV,
+        ))
+    }
+
     #[inline]
     fn mul_runtime(&self, rhs: &Self) -> Self {
         #[cfg(all(
@@ -1256,6 +1274,16 @@ fn aarch64_asm_matches_portable_arithmetic() {
         (0..n).fold(value, |acc, _| Fq::square(&acc))
     }
 
+    for i in 0..boundaries.len() {
+        let a = boundaries[i];
+        let b = boundaries[(i + 1) % boundaries.len()];
+        let c = boundaries[(i + 3) % boundaries.len()];
+        let c = if c == Fq::ZERO { Fq::ONE } else { c };
+        let d = boundaries[(i + 5) % boundaries.len()];
+        let expected = Fq::sub(&Fq::mul(&a, &b), &Fq::mul(&c, &d));
+        assert_eq!(Fq::mul_sub_mul_nonzero_c(&a, &b, &c, &d), expected);
+    }
+
     for lhs in boundaries {
         aarch64_asm_check_repr(lhs);
         assert_eq!(<Fq as Field>::double(&lhs), Fq::double(&lhs));
@@ -1311,6 +1339,19 @@ fn aarch64_asm_matches_portable_arithmetic() {
             rng.next_u64(),
             rng.next_u64(),
         ]);
+        let c = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+        let c = if c == Fq::ZERO { Fq::ONE } else { c };
+        let d = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
 
         assert_eq!(<Fq as Field>::double(&lhs), Fq::double(&lhs));
         aarch64_asm_check_repr(lhs);
@@ -1320,6 +1361,8 @@ fn aarch64_asm_matches_portable_arithmetic() {
         assert_eq!(&lhs - &rhs, Fq::sub(&lhs, &rhs));
         assert_eq!(&lhs + &lhs, Fq::double(&lhs));
         assert_eq!(<Fq as Field>::square(&lhs), Fq::square(&lhs));
+        let expected = Fq::sub(&Fq::mul(&lhs, &rhs), &Fq::mul(&c, &d));
+        assert_eq!(Fq::mul_sub_mul_nonzero_c(&lhs, &rhs, &c, &d), expected);
         for n in [1, 129] {
             assert_eq!(lhs.sqr_n_runtime(n), portable_sqr_n(lhs, n));
             assert_eq!(
@@ -1328,6 +1371,21 @@ fn aarch64_asm_matches_portable_arithmetic() {
             );
         }
     }
+}
+
+#[cfg(all(
+    test,
+    debug_assertions,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+#[test]
+#[should_panic(expected = "requires nonzero c")]
+fn aarch64_asm_mul_sub_mul_rejects_zero_c_in_debug() {
+    let _ = Fq::mul_sub_mul_nonzero_c(&Fq::ONE, &Fq::ONE, &Fq::ZERO, &Fq::ONE);
 }
 
 #[test]
