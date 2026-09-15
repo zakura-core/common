@@ -324,13 +324,13 @@ fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
 }
 
 #[cfg(feature = "multicore")]
-/// Attempts a counting sort for a structurally identified 10-bit lookup.
+/// Counts a structurally identified 10-bit lookup.
 ///
 /// The structural marker is only a routing hint. This validates every
-/// canonical field encoding before mutating the values, so callers can safely
-/// fall back to the generic sort for malformed witnesses.
-fn try_count_sort_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
-    values: &mut [F],
+/// canonical field encoding before returning the histogram, so callers can
+/// safely fall back to the generic sort for malformed witnesses.
+fn try_count_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &[F],
 ) -> Option<SortedU10Counts> {
     if values.len() > usize::from(u16::MAX) {
         return None;
@@ -346,6 +346,14 @@ fn try_count_sort_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>
         counts[usize::from(value)] += 1;
     }
 
+    Some(counts)
+}
+
+#[cfg(feature = "multicore")]
+fn try_count_sort_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut [F],
+) -> Option<SortedU10Counts> {
+    let counts = try_count_pasta_u10_values(values)?;
     let mut destination = 0;
     let mut field_value = F::ZERO;
     for count in counts.iter().copied() {
@@ -373,6 +381,41 @@ fn try_count_sort_u10_lookup_values<F: Field + Ord>(
         return try_count_sort_pasta_u10_values(values);
     }
     None
+}
+
+#[cfg(feature = "multicore")]
+fn try_count_u10_polynomial<F: Field + Ord>(
+    values: &Polynomial<F, LagrangeCoeff>,
+    usable_rows: usize,
+) -> Option<SortedU10Counts> {
+    let dynamic_values = values as &dyn Any;
+    if let Some(values) =
+        dynamic_values.downcast_ref::<Polynomial<crate::pasta::Fp, LagrangeCoeff>>()
+    {
+        return try_count_pasta_u10_values(values.get(..usable_rows)?);
+    }
+    if let Some(values) =
+        dynamic_values.downcast_ref::<Polynomial<crate::pasta::Fq, LagrangeCoeff>>()
+    {
+        return try_count_pasta_u10_values(values.get(..usable_rows)?);
+    }
+    None
+}
+
+#[cfg(feature = "multicore")]
+fn materialize_sorted_u10_values<F: Field>(
+    counts: &[u16; SORTED_U10_VALUES],
+    usable_rows: usize,
+    output_capacity: usize,
+) -> Vec<F> {
+    let mut values = Vec::with_capacity(output_capacity);
+    let mut field_value = F::ZERO;
+    for count in counts.iter().copied() {
+        values.extend(iter::repeat_n(field_value, usize::from(count)));
+        field_value += F::ONE;
+    }
+    debug_assert_eq!(values.len(), usable_rows);
+    values
 }
 
 #[cfg(feature = "multicore")]
@@ -438,6 +481,26 @@ fn sort_lookup_values_for_kind<F: Field + Ord>(
     }
     sort_lookup_values(values, &mut key_scratch);
     SortedLookup::Keys(key_scratch)
+}
+
+fn prepare_sorted_input_values<F: Field + Ord>(
+    source: &Polynomial<F, LagrangeCoeff>,
+    usable_rows: usize,
+    _table_kind: PreparedTableKind,
+    sort_scratch: Vec<PastaSortKey>,
+) -> (Vec<F>, SortedLookup) {
+    #[cfg(feature = "multicore")]
+    if _table_kind == PreparedTableKind::SortedU10Range
+        && let Some(counts) = try_count_u10_polynomial(source, usable_rows)
+    {
+        let values = materialize_sorted_u10_values(&counts, usable_rows, source.len());
+        return (values, SortedLookup::U10(counts));
+    }
+
+    let mut values = Vec::with_capacity(source.len());
+    values.extend(source.iter().take(usable_rows).copied());
+    let sort = sort_lookup_values_for_kind(&mut values, _table_kind, sort_scratch);
+    (values, sort)
 }
 
 fn factorable_sinsemilla_q_0<F: Field + Ord>(sorted_values: &[F], q_0: F) -> Option<(F, usize)> {
@@ -848,9 +911,12 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         // These values gain blind rows in `finish_permuted`, as does the
         // table permutation derived from them. Retain full-domain capacity
         // for both vectors.
-        let mut sorted_values = Vec::with_capacity(compressed_expression.len());
-        sorted_values.extend(compressed_expression.iter().take(usable_rows).copied());
-        let sort = sort_lookup_values_for_kind(&mut sorted_values, _table_kind, sort_scratch);
+        let (sorted_values, sort) = prepare_sorted_input_values(
+            &compressed_expression,
+            usable_rows,
+            _table_kind,
+            sort_scratch,
+        );
 
         PreparedInput {
             compressed_expression,
@@ -3162,10 +3228,16 @@ mod tests {
             )] += 1;
         }
 
-        let mut actual = input;
+        let mut actual = input.clone();
         let actual_counts = try_count_sort_pasta_u10_values(&mut actual).unwrap();
         assert_eq!(actual, expected);
         assert_eq!(*actual_counts, expected_counts);
+
+        let direct_counts = try_count_pasta_u10_values(&input).unwrap();
+        let direct: Vec<F> =
+            materialize_sorted_u10_values(&direct_counts, input.len(), input.len());
+        assert_eq!(direct, expected);
+        assert_eq!(*direct_counts, expected_counts);
     }
 
     #[cfg(feature = "multicore")]
@@ -3479,10 +3551,12 @@ mod tests {
             for input in &vectors {
                 for table in &vectors {
                     let expected = permute_usable_values(input.clone(), table.clone());
-                    let mut sorted_input = input.clone();
-                    let input_counts = try_count_sort_pasta_u10_values(&mut sorted_input).unwrap();
-                    let mut sorted_table = table.clone();
-                    let table_counts = try_count_sort_pasta_u10_values(&mut sorted_table).unwrap();
+                    let input_counts = try_count_pasta_u10_values(input).unwrap();
+                    let sorted_input =
+                        materialize_sorted_u10_values(&input_counts, input.len(), input.len());
+                    let table_counts = try_count_pasta_u10_values(table).unwrap();
+                    let sorted_table =
+                        materialize_sorted_u10_values(&table_counts, table.len(), table.len());
                     let actual = permute_sorted_u10_from_counts(
                         sorted_input,
                         &input_counts,
