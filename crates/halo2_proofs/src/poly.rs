@@ -21,7 +21,30 @@ pub mod multiopen;
 pub use domain::*;
 pub(crate) use evaluator::*;
 
-fn power_vector<F: Field>(point: F, len: usize) -> Vec<F> {
+// Two residue classes expose independent field multiplications while sharing
+// one squared step. Appending avoids zero-filling the output before it is
+// overwritten; short vectors retain the smaller scalar loop.
+const TWO_LANE_POWER_VECTOR_MIN_LEN: usize = 16;
+
+/// Returns `[1, point, point^2, ...]` with exactly `len` entries.
+pub(crate) fn power_vector<F: Field>(point: F, len: usize) -> Vec<F> {
+    if len >= TWO_LANE_POWER_VECTOR_MIN_LEN {
+        let step = point.square();
+        let mut lane_powers = [F::ONE, point];
+        let mut powers = Vec::with_capacity(len);
+        powers.extend_from_slice(&lane_powers);
+        while len - powers.len() >= lane_powers.len() {
+            lane_powers[0] *= step;
+            lane_powers[1] *= step;
+            powers.extend_from_slice(&lane_powers);
+        }
+        if powers.len() != len {
+            lane_powers[0] *= step;
+            powers.push(lane_powers[0]);
+        }
+        return powers;
+    }
+
     let mut powers = Vec::with_capacity(len);
     if len == 0 {
         return powers;
@@ -408,10 +431,26 @@ mod tests {
         }
     }
 
+    fn check_power_vector<F: Field + From<u64> + std::fmt::Debug>() {
+        for point in [F::ZERO, F::ONE, -F::ONE, F::from(7)] {
+            for len in [0, 1, 2, 3, 15, 16, 17, 31, 32, 2_048, 2_049] {
+                let mut expected = Vec::with_capacity(len);
+                let mut power = F::ONE;
+                for _ in 0..len {
+                    expected.push(power);
+                    power *= point;
+                }
+                assert_eq!(power_vector(point, len), expected);
+            }
+        }
+    }
+
     #[test]
     fn polynomial_evaluation_with_powers_matches_horner() {
         check_evaluate_polynomial_with_powers::<pallas::Base>();
         check_evaluate_polynomial_with_powers::<vesta::Base>();
+        check_power_vector::<pallas::Base>();
+        check_power_vector::<vesta::Base>();
     }
 
     #[test]
