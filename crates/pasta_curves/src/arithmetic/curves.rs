@@ -109,6 +109,41 @@ pub trait CurveExt:
         }
     }
 
+    /// Attempts several fixed-base multiscalar multiplications that share
+    /// `scalars`.
+    ///
+    /// `output.len()` is the number of independent lanes. The number of
+    /// prepared odd multiples per base is inferred from the slice lengths and
+    /// must be a supported power of two. `prepared_odd_multiples` is laid out
+    /// by scalar, odd multiple, then lane. Its entry
+    /// `(scalar, multiple, lane)` is
+    /// $(2 \mathit{multiple} + 1) P_{\mathit{scalar}, \mathit{lane}}$. A
+    /// successful implementation writes
+    /// $\sum_i \mathit{scalars}_i P_{i, \mathit{lane}}$ to each output lane.
+    ///
+    /// Implementations return `false` without modifying `output` when this
+    /// operation is unsupported or the input shape is invalid.
+    ///
+    /// # Correctness
+    ///
+    /// Callers must supply odd multiples in the documented layout.
+    /// Implementations need not validate the semantic contents of a
+    /// shape-valid table; malformed entries can produce an incorrect group
+    /// result even when this method returns `true`.
+    ///
+    /// # Security
+    ///
+    /// This method may run in variable time with respect to `scalars`.
+    /// **The scalars must be public.** Do not use this method with secret
+    /// scalar material.
+    fn try_batch_multiexp_shared_scalars_vartime(
+        _prepared_odd_multiples: &[Self::AffineExt],
+        _scalars: &[Self::ScalarExt],
+        _output: &mut [Self],
+    ) -> bool {
+        false
+    }
+
     /// Attempts an optimized variable-time multiscalar multiplication.
     ///
     /// Implementations own the backend and tuning decisions. Implementations
@@ -410,7 +445,7 @@ mod tests {
     use super::*;
     use crate::{pallas, vesta};
     use ff::{Field, PrimeField, WithSmallOrderMulGroup};
-    use group::CurveAffine as _;
+    use group::{CurveAffine as _, Group as _};
 
     // Sizes 33 and up cross the GLV batch-affine threshold of 32 live points
     // (the identity injected at size/2 keeps one lane inert, so size 32 stays
@@ -480,5 +515,17 @@ mod tests {
         let points = [pallas::Affine::generator()];
         let mut output = [];
         pallas::Point::batch_mul_same_scalar_vartime(&points, &pallas::Scalar::ONE, &mut output);
+    }
+
+    #[test]
+    fn shared_scalar_batch_invalid_shape_leaves_output_unchanged() {
+        let mut output = [pallas::Point::generator()];
+        let expected = output;
+        assert!(!pallas::Point::try_batch_multiexp_shared_scalars_vartime(
+            &[],
+            &[pallas::Scalar::ONE],
+            &mut output,
+        ));
+        assert_eq!(output, expected);
     }
 }

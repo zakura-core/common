@@ -430,7 +430,7 @@ struct DeferredIpaGeneratorTable<C: CurveAffine> {
     first_cached_generator: usize,
     byte_order: ScalarByteOrder,
     #[cfg(test)]
-    force_decline: std::sync::atomic::AtomicBool,
+    force_shared_scalar_hook_decline: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -509,7 +509,7 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             first_cached_generator,
             byte_order,
             #[cfg(test)]
-            force_decline: std::sync::atomic::AtomicBool::new(false),
+            force_shared_scalar_hook_decline: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -619,13 +619,6 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
     /// Materializes `output[i] = sum_b scalars[b] * G[b * count + i]`.
     /// The scalars are prior Fiat-Shamir challenges and therefore public.
     fn materialize(&self, scalars: &[C::Scalar], scalar_one_bases: &[C]) -> Option<Vec<C>> {
-        #[cfg(test)]
-        if self
-            .force_decline
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return None;
-        }
         let count = scalar_one_bases.len();
         if scalars.len().checked_mul(count)? != self.terms
             || count != self.first_cached_generator
@@ -634,6 +627,27 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             return None;
         }
         let little = self.little_endian()?;
+        let mut projective = vec![C::Curve::identity(); count];
+        #[cfg(test)]
+        let try_shared_scalar_hook = !self
+            .force_shared_scalar_hook_decline
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let try_shared_scalar_hook = true;
+        if try_shared_scalar_hook
+            && C::Curve::try_batch_multiexp_shared_scalars_vartime(
+                &self.points,
+                &scalars[1..],
+                &mut projective,
+            )
+        {
+            for (output, &base) in projective.iter_mut().zip(scalar_one_bases) {
+                *output += base;
+            }
+            let mut affine = vec![C::identity(); count];
+            C::Curve::batch_normalize(&projective, &mut affine);
+            return Some(affine);
+        }
         let reprs = scalars[1..]
             .iter()
             .map(|&scalar| {
@@ -658,7 +672,7 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                 .iter()
                 .any(|&digit| digit != 0)
         });
-        let mut projective = vec![C::Curve::identity(); count];
+        projective.fill(C::Curve::identity());
         let chunk_size = count.div_ceil(crate::multicore::current_num_threads());
         crate::multicore::scope(|scope| {
             for (chunk_index, output) in projective.chunks_mut(chunk_size).enumerate() {
@@ -709,8 +723,8 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
     }
 
     #[cfg(test)]
-    fn set_force_decline(&self, force_decline: bool) {
-        self.force_decline
+    fn set_force_shared_scalar_hook_decline(&self, force_decline: bool) {
+        self.force_shared_scalar_hook_decline
             .store(force_decline, std::sync::atomic::Ordering::Relaxed);
     }
 }

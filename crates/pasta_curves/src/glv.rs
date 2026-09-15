@@ -1264,6 +1264,162 @@ fn current_num_threads() -> usize {
     }
 }
 
+// A width-w NAF of a value below the GLV bound can carry into the next bit.
+const SHARED_SCALAR_WNAF_DIGITS: usize = GLV_COMPONENT_BITS + 1;
+
+fn signed_wnaf(
+    mut magnitude: u128,
+    negative: bool,
+    width: usize,
+) -> Option<([i8; SHARED_SCALAR_WNAF_DIGITS], usize)> {
+    let radix = 1u128 << width;
+    let midpoint = radix / 2;
+    let mask = radix - 1;
+    let mut digits = [0; SHARED_SCALAR_WNAF_DIGITS];
+    let mut len = 0;
+
+    while magnitude != 0 {
+        if len == digits.len() {
+            return None;
+        }
+        let mut digit = 0i16;
+        if magnitude & 1 != 0 {
+            digit = (magnitude & mask) as i16;
+            if digit >= midpoint as i16 {
+                digit -= radix as i16;
+                magnitude += (-digit) as u128;
+            } else {
+                magnitude -= digit as u128;
+            }
+            if negative {
+                digit = -digit;
+            }
+        }
+        digits[len] = i8::try_from(digit).ok()?;
+        len += 1;
+        magnitude >>= 1;
+    }
+
+    Some((digits, len))
+}
+
+fn shared_scalar_chunk<C: GlvParams>(
+    prepared_odd_multiples: &[C::AffineExt],
+    digits: &[[[i8; SHARED_SCALAR_WNAF_DIGITS]; 2]],
+    top: usize,
+    multiples: usize,
+    lanes: usize,
+    lane_start: usize,
+    output: &mut [C],
+) {
+    for position in (0..top).rev() {
+        if position + 1 != top {
+            for output in output.iter_mut() {
+                *output = output.double();
+            }
+        }
+        for (scalar, components) in digits.iter().enumerate() {
+            for (component, digits) in components.iter().enumerate() {
+                let digit = digits[position];
+                if digit == 0 {
+                    continue;
+                }
+                let multiple = (usize::from(digit.unsigned_abs()) - 1) / 2;
+                let point_start = (scalar * multiples + multiple) * lanes + lane_start;
+                let selected = &prepared_odd_multiples[point_start..point_start + output.len()];
+                for (output, &point) in output.iter_mut().zip(selected) {
+                    let mut point = if component == 0 {
+                        point
+                    } else {
+                        let (x, y) = C::affine_xy(&point);
+                        C::affine_unchecked(x * C::Base::ZETA, y, private::CrateToken(()))
+                    };
+                    if digit < 0 {
+                        point = -point;
+                    }
+                    *output += point;
+                }
+            }
+        }
+    }
+}
+
+/// Attempts a batch of prepared fixed-base MSMs whose scalar vector is shared
+/// across every output lane.
+pub(crate) fn try_batch_multiexp_shared_scalars<C: GlvParams>(
+    prepared_odd_multiples: &[C::AffineExt],
+    scalars: &[C::ScalarExt],
+    output: &mut [C],
+) -> bool {
+    if output.is_empty() || scalars.is_empty() {
+        return false;
+    }
+    let Some(terms) = scalars
+        .len()
+        .checked_mul(output.len())
+        .filter(|&terms| prepared_odd_multiples.len().is_multiple_of(terms))
+    else {
+        return false;
+    };
+    let multiples = prepared_odd_multiples.len() / terms;
+    const MAX_MULTIPLES: usize = 1 << (i8::BITS as usize - 2);
+    if !multiples.is_power_of_two() || multiples > MAX_MULTIPLES {
+        return false;
+    }
+    let window_width = multiples.ilog2() as usize + 2;
+
+    let mut all_digits = Vec::with_capacity(scalars.len());
+    let mut top = 0;
+    for scalar in scalars {
+        let (first, second) = match checked_signed_magnitudes(decompose::<C>(scalar)) {
+            Some(components) => components,
+            None => return false,
+        };
+        let (first, first_len) = match signed_wnaf(first.magnitude, first.negative, window_width) {
+            Some(component) => component,
+            None => return false,
+        };
+        let (second, second_len) =
+            match signed_wnaf(second.magnitude, second.negative, window_width) {
+                Some(component) => component,
+                None => return false,
+            };
+        top = top.max(first_len).max(second_len);
+        all_digits.push([first, second]);
+    }
+
+    output.fill(C::identity());
+    let lanes = output.len();
+    #[cfg(feature = "multicore")]
+    let chunk_size = lanes.div_ceil(current_num_threads());
+    #[cfg(feature = "multicore")]
+    output
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(chunk, output)| {
+            shared_scalar_chunk::<C>(
+                prepared_odd_multiples,
+                &all_digits,
+                top,
+                multiples,
+                lanes,
+                chunk * chunk_size,
+                output,
+            );
+        });
+    #[cfg(not(feature = "multicore"))]
+    shared_scalar_chunk::<C>(
+        prepared_odd_multiples,
+        &all_digits,
+        top,
+        multiples,
+        lanes,
+        0,
+        output,
+    );
+    true
+}
+
 /// A small MSM through one shared doubling ladder over jointly recoded GLV
 /// scalars. Each point's eight orbit representatives are batch-normalized with
 /// every other table, then each nonzero digit contributes one mixed addition.
@@ -5768,6 +5924,62 @@ mod tests {
         }
     }
 
+    /// Every table width accepted by the shared-scalar hook matches an
+    /// ordinary MSM. This covers all power-of-two odd-multiple counts that
+    /// fit the hook's signed `i8` digits.
+    fn shared_scalar_batch_matches_native_at_all_widths<C: GlvParams>() {
+        const LANES: usize = 5;
+
+        let random = scalars::<C::ScalarExt>(1)
+            .next()
+            .expect("the deterministic scalar corpus is nonempty");
+        let shared_scalars = [
+            C::ScalarExt::ZERO,
+            C::ScalarExt::ONE,
+            -C::ScalarExt::ONE,
+            C::ScalarExt::ZETA + C::ScalarExt::from(17),
+            random,
+        ];
+        let generator = C::generator();
+        let mut bases = Vec::with_capacity(shared_scalars.len() * LANES);
+        for scalar in 0..shared_scalars.len() {
+            for lane in 0..LANES {
+                let base = if scalar == 2 && lane == 3 {
+                    C::identity()
+                } else {
+                    let factor = u64::try_from(scalar * LANES + lane + 1).unwrap();
+                    generator * C::ScalarExt::from(factor)
+                };
+                bases.push(base);
+            }
+        }
+
+        let mut expected = vec![C::identity(); LANES];
+        for (&scalar, bases) in shared_scalars.iter().zip(bases.chunks_exact(LANES)) {
+            for (expected, &base) in expected.iter_mut().zip(bases) {
+                *expected += base * scalar;
+            }
+        }
+
+        for multiples in [1usize, 2, 4, 8, 16, 32, 64] {
+            let mut prepared = Vec::with_capacity(shared_scalars.len() * multiples * LANES);
+            for bases in bases.chunks_exact(LANES) {
+                for multiple in 0..multiples {
+                    let odd = C::ScalarExt::from(u64::try_from(2 * multiple + 1).unwrap());
+                    prepared.extend(bases.iter().map(|&base| C::AffineExt::from(base * odd)));
+                }
+            }
+
+            let mut actual = vec![generator; LANES];
+            assert!(C::try_batch_multiexp_shared_scalars_vartime(
+                &prepared,
+                &shared_scalars,
+                &mut actual,
+            ));
+            assert_eq!(actual, expected, "mismatch with {multiples} odd multiples");
+        }
+    }
+
     /// The routed FFT multiplication layers (same-scalar and pairs)
     /// against their normalized backends and native multiplication, across
     /// the gate and with an identity lane forcing the fallback.
@@ -6474,6 +6686,10 @@ mod tests {
                 #[test]
                 fn same_scalar_routing() {
                     same_scalar_routing_matches_native::<$curve>();
+                }
+                #[test]
+                fn shared_scalar_batch() {
+                    shared_scalar_batch_matches_native_at_all_widths::<$curve>();
                 }
                 #[test]
                 fn fft_mul_layers() {
