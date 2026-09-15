@@ -17,6 +17,9 @@ use {
     zcash_script::script,
 };
 
+#[cfg(all(test, zcash_unstable = "nutachyon"))]
+use zcash_protocol::constants::{V7_TX_VERSION, V7_VERSION_GROUP_ID};
+
 #[cfg(all(test, not(zcash_unstable = "nu7")))]
 use crate::transaction::{
     TransactionDigest,
@@ -68,6 +71,289 @@ fn suggested_version_for_v5_branches_is_not_v6() {
         TxVersion::suggested_for_branch(BranchId::Nu6_1),
         TxVersion::V5
     );
+}
+
+#[test]
+#[cfg(zcash_unstable = "nutachyon")]
+fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
+    assert_eq!(
+        TxVersion::suggested_for_branch(BranchId::NuTachyon),
+        TxVersion::V7
+    );
+    assert!(TxVersion::V7.valid_in_branch(BranchId::NuTachyon));
+    assert!(!TxVersion::V7.valid_in_branch(BranchId::Nu6_3));
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    assert!(TxVersion::V7.has_zip233());
+
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    let zip233_amount = Zatoshis::const_from_u64(123_456);
+
+    let tx = TransactionData::from_parts_v7(
+        BranchId::NuTachyon,
+        0,
+        0u32.into(),
+        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        zip233_amount,
+        None,
+        None,
+        None,
+        None,
+        zcash_tachyon::TachyonBundle::NoBundle,
+    )
+    .freeze()
+    .unwrap();
+    assert!(tx.tachyon_bundle().is_no_bundle());
+
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    {
+        let tx_without_burn = TransactionData::from_parts_v7(
+            BranchId::NuTachyon,
+            0,
+            0u32.into(),
+            Zatoshis::ZERO,
+            None,
+            None,
+            None,
+            None,
+            zcash_tachyon::TachyonBundle::NoBundle,
+        )
+        .freeze()
+        .unwrap();
+        assert_ne!(tx.txid(), tx_without_burn.txid());
+    }
+
+    let mut encoded = Vec::new();
+    tx.write(&mut encoded).unwrap();
+    assert_eq!(&encoded[..4], &(V7_TX_VERSION | (1 << 31)).to_le_bytes());
+    assert_eq!(&encoded[4..8], &V7_VERSION_GROUP_ID.to_le_bytes());
+    assert_eq!(
+        &encoded[8..12],
+        &u32::from(BranchId::NuTachyon).to_le_bytes()
+    );
+
+    let decoded = Transaction::read(&encoded[..], BranchId::Sprout).unwrap();
+    assert_eq!(decoded.version(), TxVersion::V7);
+    assert_eq!(decoded.consensus_branch_id(), BranchId::NuTachyon);
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    assert_eq!(decoded.zip233_amount(), zip233_amount);
+    assert!(decoded.tachyon_bundle().is_no_bundle());
+    let mut reencoded = Vec::new();
+    decoded.write(&mut reencoded).unwrap();
+    assert_eq!(reencoded, encoded);
+}
+
+#[test]
+#[cfg(zcash_unstable = "nutachyon")]
+fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
+    use crate::transaction::{Authorized, sighash_v6::v7_signature_hash};
+    use rand::{SeedableRng, rngs::StdRng};
+    use zcash_tachyon::{
+        ActionPlan, Bundle, BundlePlan, Note, PointerStamp, TachyonBundle,
+        effect::Output,
+        entropy::ActionEntropy,
+        keys::private::SpendingKey,
+        note::CommitmentTrapdoor,
+        nullifier,
+        value::{Positive, Trapdoor},
+    };
+
+    let rng = &mut StdRng::seed_from_u64(0);
+    let spending_key = SpendingKey::from([1; 32]);
+    let note = Note {
+        pk: spending_key.derive_payment_key(),
+        value: Positive::try_from(1u64).unwrap(),
+        psi: nullifier::Trapdoor::random(rng),
+        rcm: CommitmentTrapdoor::random(rng),
+    };
+    let plan = BundlePlan::new(
+        Vec::new(),
+        alloc::vec![ActionPlan::<Output>::output(
+            note,
+            ActionEntropy::random(rng),
+            Trapdoor::random(rng),
+        )],
+    );
+    let unproven = plan
+        .sign(rng, &[0; 32], &spending_key.derive_auth_private())
+        .unwrap();
+    let tachyon_bundle = TachyonBundle::Adjunct(Bundle {
+        actions: unproven.actions,
+        value_balance: unproven.value_balance,
+        binding_sig: unproven.binding_sig,
+        memo: unproven.memo,
+        stamp: PointerStamp::try_from([0xee; 64]).unwrap(),
+    });
+
+    let transaction = TransactionData::<Authorized>::from_parts_v7(
+        BranchId::NuTachyon,
+        0,
+        0u32.into(),
+        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        Zatoshis::ZERO,
+        None,
+        None,
+        None,
+        None,
+        tachyon_bundle.clone(),
+    )
+    .freeze()
+    .unwrap();
+    let transaction_without_tachyon = TransactionData::<Authorized>::from_parts_v7(
+        BranchId::NuTachyon,
+        0,
+        0u32.into(),
+        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        Zatoshis::ZERO,
+        None,
+        None,
+        None,
+        None,
+        TachyonBundle::NoBundle,
+    )
+    .freeze()
+    .unwrap();
+
+    assert!(matches!(
+        transaction.tachyon_bundle(),
+        TachyonBundle::Adjunct(_)
+    ));
+    assert_ne!(transaction.txid(), transaction_without_tachyon.txid());
+    assert_ne!(
+        transaction.auth_commitment(),
+        transaction_without_tachyon.auth_commitment()
+    );
+
+    let sighash_transaction = TransactionData::<TestUnauthorized>::from_parts_v7(
+        BranchId::NuTachyon,
+        0,
+        0u32.into(),
+        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        Zatoshis::ZERO,
+        None,
+        None,
+        None,
+        None,
+        tachyon_bundle,
+    );
+    let sighash_transaction_without_tachyon = TransactionData::<TestUnauthorized>::from_parts_v7(
+        BranchId::NuTachyon,
+        0,
+        0u32.into(),
+        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        Zatoshis::ZERO,
+        None,
+        None,
+        None,
+        None,
+        TachyonBundle::NoBundle,
+    );
+    let txid_parts = sighash_transaction.digest(TxIdDigester);
+    let txid_parts_without_tachyon = sighash_transaction_without_tachyon.digest(TxIdDigester);
+    assert_ne!(
+        v7_signature_hash(&sighash_transaction, &SignableInput::Shielded, &txid_parts,),
+        v7_signature_hash(
+            &sighash_transaction_without_tachyon,
+            &SignableInput::Shielded,
+            &txid_parts_without_tachyon,
+        ),
+    );
+
+    assert!(
+        transaction
+            .fee_paid::<zcash_protocol::value::BalanceError, _>(|_| unreachable!())
+            .is_err()
+    );
+    assert_eq!(
+        transaction_without_tachyon
+            .fee_paid::<zcash_protocol::value::BalanceError, _>(|_| unreachable!()),
+        Ok(Some(Zatoshis::ZERO))
+    );
+
+    let mut encoded = Vec::new();
+    transaction.write(&mut encoded).unwrap();
+    let decoded = Transaction::read(&encoded[..], BranchId::Sprout).unwrap();
+    assert!(matches!(
+        decoded.tachyon_bundle(),
+        TachyonBundle::Adjunct(_)
+    ));
+
+    let mut reencoded = Vec::new();
+    decoded.write(&mut reencoded).unwrap();
+    assert_eq!(reencoded, encoded);
+}
+
+#[test]
+#[cfg(all(zcash_unstable = "nutachyon", not(zcash_unstable = "nu7")))]
+fn v7_zakura_serialization_vectors_deserialize_and_reserialize_exactly() {
+    use zcash_tachyon::TachyonBundle;
+
+    #[derive(Clone, Copy)]
+    enum ExpectedBundle {
+        None,
+        Adjunct,
+        Proven,
+    }
+
+    let vectors = [
+        (
+            "empty",
+            include_str!("tests/data/v7_empty.hex"),
+            ExpectedBundle::None,
+            0,
+        ),
+        (
+            "adjunct",
+            include_str!("tests/data/v7_tachyon_adjunct.hex"),
+            ExpectedBundle::Adjunct,
+            1,
+        ),
+        (
+            "proven",
+            include_str!("tests/data/v7_tachyon_proven.hex"),
+            ExpectedBundle::Proven,
+            1,
+        ),
+        (
+            "multi-action proven",
+            include_str!("tests/data/v7_tachyon_multi_action_proven.hex"),
+            ExpectedBundle::Proven,
+            2,
+        ),
+    ];
+
+    for (name, encoded_hex, expected_bundle, expected_action_count) in vectors {
+        let encoded = hex::decode(encoded_hex.trim()).unwrap();
+        let transaction = Transaction::read(&encoded[..], BranchId::Sprout)
+            .unwrap_or_else(|error| panic!("{name} vector did not deserialize: {error}"));
+
+        assert_eq!(transaction.version(), TxVersion::V7, "{name}");
+        assert_eq!(
+            transaction.consensus_branch_id(),
+            BranchId::NuTachyon,
+            "{name}"
+        );
+        assert_eq!(
+            transaction
+                .tachyon_bundle()
+                .as_dyn()
+                .map_or(0, |bundle| bundle.actions.len()),
+            expected_action_count,
+            "{name}"
+        );
+        assert!(
+            matches!(
+                (transaction.tachyon_bundle(), expected_bundle),
+                (TachyonBundle::NoBundle, ExpectedBundle::None)
+                    | (TachyonBundle::Adjunct(_), ExpectedBundle::Adjunct)
+                    | (TachyonBundle::Proven(_), ExpectedBundle::Proven)
+            ),
+            "{name} bundle state differs"
+        );
+
+        let mut reencoded = Vec::new();
+        transaction.write(&mut reencoded).unwrap();
+        assert_eq!(reencoded, encoded, "{name} reserialization differs");
+    }
 }
 
 #[cfg(all(test, not(zcash_unstable = "nu7")))]
@@ -881,6 +1167,15 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn tx_serialization_roundtrip_nu7(tx in arb_tx(BranchId::Nu7)) {
+        check_roundtrip(tx)?;
+    }
+}
+
+#[cfg(zcash_unstable = "nutachyon")]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
+    #[test]
+    fn tx_serialization_roundtrip_nu_tachyon(tx in arb_tx(BranchId::NuTachyon)) {
         check_roundtrip(tx)?;
     }
 }

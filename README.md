@@ -7,6 +7,10 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 - [`zakura-primitives`](crates/zcash_primitives) (forked from [`zcash_primitives 0.30.0`](https://github.com/zcash/librustzcash/tree/57b844dc00bf1f25254b5859b8d5faa8e5730f98/zcash_primitives))
 - [`zakura-keys`](crates/zcash_keys) (forked from [`zcash_keys 0.16.1`](https://github.com/zcash/librustzcash/tree/cb356a7def26d0bd8e1f21709951aeea137f58fa/zcash_keys))
 
+## Chain history
+
+- [`zakura-history`](crates/zcash_history) (forked from [`zcash_history 0.6.0`](https://github.com/zcash/librustzcash/tree/b74429f9e4e3600c27492f1d936fb3b9c818c224/zcash_history))
+
 ## Shielded protocols
 
 - [`zakura-orchard`](crates/orchard) (forked from [`orchard 0.15.5`](https://github.com/zcash/orchard/tree/29d1d55db62153dcaeef8ef631c8991c53ed1248))
