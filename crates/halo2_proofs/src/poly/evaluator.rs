@@ -4870,6 +4870,18 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             }
         }
 
+        fn copy_add_rotated<F: Field, const SUBTRACT: bool>(
+            output: &mut [F],
+            lhs: RotatedChunk<'_, F>,
+            rhs: RotatedChunk<'_, F>,
+        ) {
+            debug_assert_eq!(output.len(), lhs.first.len() + lhs.second.len());
+            debug_assert_eq!(output.len(), rhs.first.len() + rhs.second.len());
+            for ((output, lhs), rhs) in output.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                *output = if SUBTRACT { *lhs - rhs } else { *lhs + rhs };
+            }
+        }
+
         fn scale_value<F: Field>(value: F, scalar: F, kind: ScaleKind) -> F {
             match kind {
                 ScaleKind::MinusOne => -value,
@@ -4993,6 +5005,30 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     output,
                 ),
                 EvaluationPlan::Add(a, b) => {
+                    if let EvaluationPlan::Poly(lhs) = a.as_ref() {
+                        if let EvaluationPlan::Poly(rhs) = b.as_ref() {
+                            copy_add_rotated::<F, false>(
+                                output,
+                                leaf_chunk(lhs, ctx, output.len()),
+                                leaf_chunk(rhs, ctx, output.len()),
+                            );
+                            return;
+                        }
+                        if let EvaluationPlan::Scale(rhs, scalar) = b.as_ref()
+                            && let EvaluationPlan::Poly(rhs) = rhs.as_ref()
+                        {
+                            let (scalar, kind) = ctx.scalars.scale(*scalar);
+                            if matches!(kind, ScaleKind::MinusOne) {
+                                debug_assert_eq!(scalar, -F::ONE);
+                                copy_add_rotated::<F, true>(
+                                    output,
+                                    leaf_chunk(lhs, ctx, output.len()),
+                                    leaf_chunk(rhs, ctx, output.len()),
+                                );
+                                return;
+                            }
+                        }
+                    }
                     if let EvaluationPlan::ConstantTerm(scalar) = a.as_ref() {
                         // A constant leaf has no cache event, so evaluating its
                         // sibling directly preserves the plan's cache order.
@@ -7308,6 +7344,77 @@ mod tests {
         let result =
             evaluator.evaluate(&(Ast::ConstantTerm(lhs) - Ast::ConstantTerm(rhs)), &domain);
         assert!(result.iter().all(|result| *result == lhs - rhs));
+    }
+
+    fn check_direct_polynomial_addition_and_subtraction<F, B>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+        B: BasisOps,
+    {
+        let domain = EvaluationDomain::new(4, 4);
+        let mut evaluator = new_evaluator::<_, F, B>(|| {});
+        let leaves = (0..2)
+            .map(|column| {
+                let mut values = B::empty_poly(&domain);
+                for (row, value) in values.iter_mut().enumerate() {
+                    *value = F::from(((column + 3) * (row + 5) + 1) as u64);
+                }
+                evaluator.register_poly(values)
+            })
+            .collect::<Vec<_>>();
+
+        for (lhs_rotation, rhs_rotation) in [
+            (Rotation::next(), Rotation::next()),
+            (Rotation::prev(), Rotation::next()),
+            (Rotation(-6), Rotation::cur()),
+        ] {
+            let lhs = Ast::from(leaves[0].with_rotation(lhs_rotation));
+            let rhs = Ast::from(leaves[1].with_rotation(rhs_rotation));
+            let lhs_values = evaluator.evaluate(&lhs, &domain);
+            let rhs_values = evaluator.evaluate(&rhs, &domain);
+            let sum = lhs.clone() + rhs.clone();
+            assert!(matches!(
+                compile_plan_only(&sum),
+                EvaluationPlan::Add(lhs, rhs)
+                    if matches!(lhs.as_ref(), EvaluationPlan::Poly(_))
+                        && matches!(rhs.as_ref(), EvaluationPlan::Poly(_))
+            ));
+            let actual = evaluator.evaluate(&sum, &domain);
+            for ((actual, lhs), rhs) in actual.iter().zip(lhs_values.iter()).zip(rhs_values.iter())
+            {
+                assert_eq!(*actual, *lhs + rhs);
+            }
+
+            let difference = lhs - rhs;
+            let (plan, scalars) = compile_plan(&difference);
+            assert!(matches!(
+                plan,
+                EvaluationPlan::Add(lhs, rhs)
+                    if matches!(lhs.as_ref(), EvaluationPlan::Poly(_))
+                        && matches!(rhs.as_ref(), EvaluationPlan::Scale(inner, scalar)
+                            if matches!(inner.as_ref(), EvaluationPlan::Poly(_))
+                                && matches!(scalars[scalar.index()],
+                                    PlanScalar::Literal(value) if value == -F::ONE))
+            ));
+
+            for (expression, negate) in [(difference.clone(), false), (-difference, true)] {
+                let actual = evaluator.evaluate(&expression, &domain);
+                for ((actual, lhs), rhs) in
+                    actual.iter().zip(lhs_values.iter()).zip(rhs_values.iter())
+                {
+                    let expected = *lhs - rhs;
+                    assert_eq!(*actual, if negate { -expected } else { expected });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_polynomial_addition_and_subtraction_fuse_across_rotations() {
+        check_direct_polynomial_addition_and_subtraction::<pallas::Base, LagrangeCoeff>();
+        check_direct_polynomial_addition_and_subtraction::<pallas::Base, ExtendedLagrangeCoeff>();
+        check_direct_polynomial_addition_and_subtraction::<vesta::Base, LagrangeCoeff>();
+        check_direct_polynomial_addition_and_subtraction::<vesta::Base, ExtendedLagrangeCoeff>();
     }
 
     fn check_scaled_addends<F, B>()
