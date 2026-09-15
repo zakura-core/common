@@ -493,6 +493,7 @@ impl Fq {
     /// the narrow field hook for the AArch64 batch-affine ladder; it is not a
     /// general field operation.
     #[cfg(all(
+        feature = "glv",
         feature = "aarch64-asm",
         target_arch = "aarch64",
         any(target_family = "unix", target_os = "none"),
@@ -1299,12 +1300,15 @@ fn aarch64_asm_matches_portable_arithmetic() {
         let d = boundaries[(i + 5) % boundaries.len()];
         let expected = Fq::sub(&Fq::mul(&a, &b), &Fq::mul(&c, &d));
         assert_eq!(Fq::mul_sub_mul_nonzero_c(&a, &b, &c, &d), expected);
-        let expected = Fq::sub(&Fq::mul(&a, &b), &Fq::square(&d));
-        assert_eq!(
-            Fq::mul_sub_square(&a, &b, &d),
-            expected,
-            "fused boundary {i}: a={a:?}, b={b:?}, d={d:?}"
-        );
+        #[cfg(feature = "glv")]
+        {
+            let expected = Fq::sub(&Fq::mul(&a, &b), &Fq::square(&d));
+            assert_eq!(
+                Fq::mul_sub_square(&a, &b, &d),
+                expected,
+                "fused boundary {i}: a={a:?}, b={b:?}, d={d:?}"
+            );
+        }
     }
 
     for lhs in boundaries {
@@ -1386,8 +1390,11 @@ fn aarch64_asm_matches_portable_arithmetic() {
         assert_eq!(<Fq as Field>::square(&lhs), Fq::square(&lhs));
         let expected = Fq::sub(&Fq::mul(&lhs, &rhs), &Fq::mul(&c, &d));
         assert_eq!(Fq::mul_sub_mul_nonzero_c(&lhs, &rhs, &c, &d), expected);
-        let expected = Fq::sub(&Fq::mul(&lhs, &rhs), &Fq::square(&d));
-        assert_eq!(Fq::mul_sub_square(&lhs, &rhs, &d), expected);
+        #[cfg(feature = "glv")]
+        {
+            let expected = Fq::sub(&Fq::mul(&lhs, &rhs), &Fq::square(&d));
+            assert_eq!(Fq::mul_sub_square(&lhs, &rhs, &d), expected);
+        }
         for n in [1, 129] {
             assert_eq!(lhs.sqr_n_runtime(n), portable_sqr_n(lhs, n));
             assert_eq!(

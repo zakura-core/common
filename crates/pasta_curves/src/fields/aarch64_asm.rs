@@ -365,6 +365,7 @@ pub(super) fn mul_sub_mul_nonzero_c(
 /// All inputs are canonical Montgomery residues. Each round adds one product
 /// row, subtracts one square row, cancels the completed low limb, and shifts
 /// it away in a signed five-limb accumulator.
+#[cfg(feature = "glv")]
 #[inline(always)]
 pub(super) fn mul_sub_square(a: &Limbs, b: &Limbs, c: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
     debug_assert!(is_canonical(a, modulus));
