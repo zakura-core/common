@@ -624,17 +624,19 @@ mod tests {
         };
         let recode = |scalar: C::Scalar| {
             DeferredIpaGeneratorTable::<C>::wnaf_digits(scalar.to_repr().as_ref(), little)
-                .expect("canonical Pasta scalars have a width-seven wNAF")
+                .expect("canonical Pasta scalars have the configured wNAF")
         };
         assert!(recode(C::Scalar::ZERO).into_iter().all(|digit| digit == 0));
-        let positive_max = recode(C::Scalar::from(63));
-        assert_eq!(positive_max[0], 63);
-        let negative_max = recode(C::Scalar::from(65));
-        assert_eq!(negative_max[0], -63);
-        assert_eq!(negative_max[7], 1);
-        let boundary_carry = recode(C::Scalar::from(127));
+        let radix = 1u64 << DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH;
+        let max_magnitude = radix / 2 - 1;
+        let positive_max = recode(C::Scalar::from(max_magnitude));
+        assert_eq!(i64::from(positive_max[0]), max_magnitude as i64);
+        let negative_max = recode(C::Scalar::from(radix - max_magnitude));
+        assert_eq!(i64::from(negative_max[0]), -(max_magnitude as i64));
+        assert_eq!(negative_max[DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH], 1,);
+        let boundary_carry = recode(C::Scalar::from(radix - 1));
         assert_eq!(boundary_carry[0], -1);
-        assert_eq!(boundary_carry[7], 1);
+        assert_eq!(boundary_carry[DEFERRED_IPA_MATERIALIZATION_WNAF_WIDTH], 1,);
         let top_exponent = u64::from(C::Scalar::NUM_BITS - 1);
         let top_carry_scalar = C::Scalar::from(2).pow_vartime([top_exponent]) - C::Scalar::ONE;
         let top_carry = recode(top_carry_scalar);
@@ -1150,7 +1152,7 @@ mod tests {
             .commitment_tables_cache
             .deferred_ipa()
             .expect("k = 11 preparation retains the materialization table");
-        assert_eq!(table.retained_bytes(), 3_932_160);
+        assert_eq!(table.retained_bytes(), 7_864_320);
         let cloned_table = params
             .clone()
             .commitment_tables_cache
