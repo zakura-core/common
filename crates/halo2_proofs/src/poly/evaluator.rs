@@ -4488,6 +4488,22 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     let chunk_len = output.len();
                     let start = slot * chunk_len;
                     fold.accumulate_values(&cache[start..start + chunk_len], power);
+                } else if let EvaluationPlan::CacheStore { slot, inner } = &term.term
+                    && let EvaluationPlan::Mul(lhs, rhs) = inner.as_ref()
+                    && let (EvaluationPlan::Poly(lhs), EvaluationPlan::Poly(rhs)) =
+                        (lhs.as_ref(), rhs.as_ref())
+                {
+                    // Leaf products have no cache events, so they can write
+                    // directly to the new cache slot before the fold reads it.
+                    let chunk_len = output.len();
+                    let start = slot * chunk_len;
+                    let stored = &mut cache[start..start + chunk_len];
+                    let lhs = leaf_chunk(lhs, ctx, chunk_len);
+                    let rhs = leaf_chunk(rhs, ctx, chunk_len);
+                    for ((stored, lhs), rhs) in stored.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                        *stored = *lhs * rhs;
+                    }
+                    fold.accumulate_values(stored, power);
                 } else {
                     recurse_into(&term.term, ctx, fold.terms(), cache, scratch);
                     fold.accumulate(power);
@@ -6172,9 +6188,9 @@ mod tests {
         MAX_DUPLICATED_AFFINE_FALLBACK_NODES, MAX_LINEAR_TERM_CACHE_ENTRIES, PlanScalar,
         PlanScalarInterner, ReusablePowerFold, ScalarId, SelectorFamilyRun, SquareReuse,
         WeightedTerm, ast_has_at_most_nodes, collect_plan_occurrences, compressed_selector,
-        get_chunk_params, linear_term_cache_budget, nested_poly_factor_groups, new_evaluator,
-        new_virtual_evaluator, reassociate_affine_blend, reuse_cache_slots, same_ast,
-        selector_family_matches,
+        get_chunk_params, linear_term_cache_budget, multiply_ast, nested_poly_factor_groups,
+        new_evaluator, new_virtual_evaluator, reassociate_affine_blend, reuse_cache_slots,
+        same_ast, selector_family_matches,
     };
     use crate::poly::{
         Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
@@ -10344,5 +10360,96 @@ mod tests {
         check_compressed_selector_families::<vesta::Base>();
         check_orchard_selector_family_lengths::<pallas::Base>();
         check_orchard_selector_family_lengths::<vesta::Base>();
+    }
+
+    fn check_weighted_cached_leaf_product<F, B>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+        B: BasisOps,
+    {
+        let domain = EvaluationDomain::new(3, 4);
+        let mut polynomials = (0..3)
+            .map(|column| {
+                let mut polynomial = B::empty_poly(&domain);
+                for (row, value) in polynomial.iter_mut().enumerate() {
+                    *value = F::from(((column + 2) * (row + 3) + 1) as u64);
+                }
+                polynomial
+            })
+            .collect::<Vec<_>>();
+        let rotated = [Rotation::next(), Rotation::prev()]
+            .into_iter()
+            .zip(&polynomials)
+            .map(|(rotation, polynomial)| {
+                let (first, second) = B::rotated_chunk(
+                    &domain,
+                    polynomial.len(),
+                    0,
+                    polynomial,
+                    rotation,
+                    polynomial.len(),
+                );
+                first.iter().chain(second).copied().collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let factor_values = polynomials[2].iter().copied().collect::<Vec<_>>();
+
+        let mut evaluator = new_evaluator::<_, F, B>(|| {});
+        let leaves = polynomials
+            .drain(..)
+            .map(|polynomial| evaluator.register_poly(polynomial))
+            .collect::<Vec<_>>();
+        let lhs: Ast<_, F, B> = Ast::from(leaves[0].with_rotation(Rotation::next()));
+        let rhs: Ast<_, F, B> = Ast::from(leaves[1].with_rotation(Rotation::prev()));
+        let product = multiply_ast(&lhs, &rhs);
+        let factor: Ast<_, F, B> = Ast::from(leaves[2]);
+        let base = F::from(23);
+        let term = multiply_ast(&factor, &product);
+        let expression = Ast::distribute_powers([term.clone(), term], base);
+
+        let (mut plan, scalars) = compile_plan(&expression);
+        assert_eq!(
+            plan.cache_common_subexpressions(LinearTermCacheBudget::default(), &scalars),
+            1,
+        );
+        let EvaluationPlan::DistributePowers { work, .. } = &plan else {
+            panic!("two terms compile to distributed work");
+        };
+        let terms = work
+            .iter()
+            .find_map(|work| match work {
+                DistributionWork::WeightedSharedFactor { terms, .. } => Some(terms),
+                _ => None,
+            })
+            .expect("the repeated factor compiles to weighted terms");
+        assert_eq!(terms.len(), 2);
+        assert!(!terms[0].split_scaled_addends);
+        let EvaluationPlan::CacheStore { slot, inner } = &terms[0].term else {
+            panic!("the first leaf product populates the cache");
+        };
+        assert!(matches!(
+            inner.as_ref(),
+            EvaluationPlan::Mul(lhs, rhs)
+                if matches!(lhs.as_ref(), EvaluationPlan::Poly(_))
+                    && matches!(rhs.as_ref(), EvaluationPlan::Poly(_))
+        ));
+        assert!(matches!(
+            terms[1].term,
+            EvaluationPlan::CacheLoad { slot: loaded } if loaded == *slot
+        ));
+
+        let actual = evaluator.evaluate(&expression, &domain);
+        for row in 0..actual.len() {
+            let term = factor_values[row] * rotated[0][row] * rotated[1][row];
+            assert_eq!(actual[row], term * base + term);
+        }
+    }
+
+    #[test]
+    fn weighted_leaf_products_write_directly_to_cache() {
+        check_weighted_cached_leaf_product::<pallas::Base, LagrangeCoeff>();
+        check_weighted_cached_leaf_product::<pallas::Base, ExtendedLagrangeCoeff>();
+        check_weighted_cached_leaf_product::<vesta::Base, LagrangeCoeff>();
+        check_weighted_cached_leaf_product::<vesta::Base, ExtendedLagrangeCoeff>();
     }
 }
