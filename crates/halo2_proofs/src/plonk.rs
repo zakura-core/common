@@ -691,6 +691,9 @@ pub struct ProvingKey<C: CurveAffine> {
     floor_plan: Option<FloorPlan>,
     /// Circuit configuration retained by an opted-in circuit.
     circuit_config: Option<CircuitConfigCache>,
+    /// Validated fixed lookup-table preparation retained from key generation.
+    #[cfg(feature = "multicore")]
+    prepared_u10_tables: Arc<[bool]>,
     /// Orchard's public-instance interpolation and extended-coset factor.
     #[cfg(feature = "batch")]
     prepared_instance_coset: Option<Arc<PreparedInstanceCoset<C::Scalar>>>,

@@ -1277,6 +1277,10 @@ where
                     &pk.vk.cs.lookups,
                     circuit_count,
                     unusable_rows_start,
+                    #[cfg(feature = "multicore")]
+                    Some(pk.prepared_u10_tables.as_ref()),
+                    #[cfg(feature = "multicore")]
+                    None,
                 )
             },
         )
