@@ -1076,10 +1076,9 @@ where
     super::prover_fingerprint::record_setup(params, pk, instances);
 
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
-    // The smaller inversion walk amortizes relationship tracking once several
-    // circuit witnesses are evaluated together. Keep the single-circuit path
-    // on its existing denominator collection and evaluation flow.
-    let reuse_related_denominators = instances.len() > 1;
+    // Use explicit denominator relationships for every non-empty proof. The
+    // smaller inversion walk now outweighs tracking even for one circuit.
+    let reuse_related_denominators = !instances.is_empty();
     let mut witnesses = instances
         .iter()
         .map(|instances| WitnessCollection {
