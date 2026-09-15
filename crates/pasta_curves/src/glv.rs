@@ -138,6 +138,9 @@ mod private {
             z: Self::Base,
             token: CrateToken,
         ) -> Self;
+
+        /// Computes `a * b - c^2` with the field-specific batch-affine path.
+        fn mul_sub_square(a: Self::Base, b: Self::Base, c: Self::Base) -> Self::Base;
     }
 
     impl Sealed for crate::pallas::Point {
@@ -158,6 +161,30 @@ mod private {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
         }
+
+        fn mul_sub_square(a: Self::Base, b: Self::Base, c: Self::Base) -> Self::Base {
+            #[cfg(all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                any(target_family = "unix", target_os = "none"),
+                target_pointer_width = "64",
+                target_endian = "little"
+            ))]
+            {
+                return crate::Fp::mul_sub_square(&a, &b, &c);
+            }
+
+            #[cfg(not(all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                any(target_family = "unix", target_os = "none"),
+                target_pointer_width = "64",
+                target_endian = "little"
+            )))]
+            {
+                a * b - ff::Field::square(&c)
+            }
+        }
     }
 
     impl Sealed for crate::vesta::Point {
@@ -177,6 +204,30 @@ mod private {
         ) -> Self {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
+        }
+
+        fn mul_sub_square(a: Self::Base, b: Self::Base, c: Self::Base) -> Self::Base {
+            #[cfg(all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                any(target_family = "unix", target_os = "none"),
+                target_pointer_width = "64",
+                target_endian = "little"
+            ))]
+            {
+                return crate::Fq::mul_sub_square(&a, &b, &c);
+            }
+
+            #[cfg(not(all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                any(target_family = "unix", target_os = "none"),
+                target_pointer_width = "64",
+                target_endian = "little"
+            )))]
+            {
+                a * b - ff::Field::square(&c)
+            }
         }
     }
 }
@@ -2563,12 +2614,10 @@ fn batch_affine_ladder_pairs_raw<C: GlvParams, W: WindowCoords<C>>(
             a[j] = xs[i].double() + u;
         }
         if addition_count != 0 {
-            mul_assign_batch(&mut a, &h_squares);
-            denominators.extend(
-                a.iter()
-                    .zip(&r)
-                    .map(|(product, difference)| *product - difference.square()),
-            );
+            for j in 0..addition_count {
+                a[j] = <C as private::Sealed>::mul_sub_square(a[j], h_squares[j], r[j]);
+            }
+            denominators.extend_from_slice(&a);
         }
 
         scratch.resize(denominators.len(), C::Base::ZERO);
@@ -2722,9 +2771,8 @@ fn batch_affine_ladder_raw<C: GlvParams, W: WindowCoords<C>>(
                 h_squares[i] = h[i].square();
                 a[i] = xs[i].double() + u;
             }
-            mul_assign_batch(&mut a, &h_squares);
             for i in 0..n {
-                a[i] -= r[i].square();
+                a[i] = <C as private::Sealed>::mul_sub_square(a[i], h_squares[i], r[i]);
             }
             batch_invert_nonzero(&mut a, &mut scratch);
             double_add_finish_batch(&ys, &mut h, &mut r, &mut h_squares, &mut a);

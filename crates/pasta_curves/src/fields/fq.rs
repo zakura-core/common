@@ -489,6 +489,23 @@ impl Fq {
         ))
     }
 
+    /// Computes `a * b - c.square()` with one Montgomery reduction. This is
+    /// the narrow field hook for the AArch64 batch-affine ladder; it is not a
+    /// general field operation.
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        any(target_family = "unix", target_os = "none"),
+        target_pointer_width = "64",
+        target_endian = "little"
+    ))]
+    #[inline(always)]
+    pub(crate) fn mul_sub_square(a: &Self, b: &Self, c: &Self) -> Self {
+        Self(super::aarch64_asm::mul_sub_square(
+            &a.0, &b.0, &c.0, &MODULUS.0, INV,
+        ))
+    }
+
     #[inline]
     fn mul_runtime(&self, rhs: &Self) -> Self {
         #[cfg(all(
@@ -1282,6 +1299,12 @@ fn aarch64_asm_matches_portable_arithmetic() {
         let d = boundaries[(i + 5) % boundaries.len()];
         let expected = Fq::sub(&Fq::mul(&a, &b), &Fq::mul(&c, &d));
         assert_eq!(Fq::mul_sub_mul_nonzero_c(&a, &b, &c, &d), expected);
+        let expected = Fq::sub(&Fq::mul(&a, &b), &Fq::square(&d));
+        assert_eq!(
+            Fq::mul_sub_square(&a, &b, &d),
+            expected,
+            "fused boundary {i}: a={a:?}, b={b:?}, d={d:?}"
+        );
     }
 
     for lhs in boundaries {
@@ -1363,6 +1386,8 @@ fn aarch64_asm_matches_portable_arithmetic() {
         assert_eq!(<Fq as Field>::square(&lhs), Fq::square(&lhs));
         let expected = Fq::sub(&Fq::mul(&lhs, &rhs), &Fq::mul(&c, &d));
         assert_eq!(Fq::mul_sub_mul_nonzero_c(&lhs, &rhs, &c, &d), expected);
+        let expected = Fq::sub(&Fq::mul(&lhs, &rhs), &Fq::square(&d));
+        assert_eq!(Fq::mul_sub_square(&lhs, &rhs, &d), expected);
         for n in [1, 129] {
             assert_eq!(lhs.sqr_n_runtime(n), portable_sqr_n(lhs, n));
             assert_eq!(

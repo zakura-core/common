@@ -61,9 +61,9 @@
 //! caller that breaks it fails loudly under test instead of silently.
 //!
 //! The inline blocks have no data-dependent branches or memory accesses. The
-//! fused product-difference block reads its inputs through declared pointers
-//! at fixed offsets. The out-of-line repeated-squaring chains branch only on
-//! their public counts, so the code is constant-time.
+//! fused product-difference blocks read their inputs through declared
+//! pointers at fixed offsets. The out-of-line repeated-squaring chains branch
+//! only on their public counts, so the code is constant-time.
 
 use core::arch::asm;
 
@@ -333,6 +333,190 @@ pub(super) fn mul_sub_mul_nonzero_c(
             inout("x2") b.as_ptr() => _,
             lateout("x3") _,
             inout("x4") d.as_ptr() => _,
+            lateout("x5") _,
+            lateout("x7") _,
+            lateout("x8") _,
+            lateout("x9") _,
+            lateout("x10") _,
+            lateout("x11") _,
+            lateout("x12") _,
+            lateout("x13") _,
+            lateout("x14") _,
+            lateout("x15") _,
+            lateout("x16") _,
+            lateout("x17") _,
+            lateout("x20") o0,
+            lateout("x21") o1,
+            lateout("x22") o2,
+            lateout("x23") o3,
+            lateout("x24") _,
+            inout("x25") modulus[0] => _,
+            inout("x26") modulus[1] => _,
+            inout("x27") inv => _,
+            options(readonly, nostack),
+        );
+    }
+
+    [o0, o1, o2, o3]
+}
+
+/// Computes `a * b - c.square()` with one interleaved Montgomery reduction.
+///
+/// All inputs are canonical Montgomery residues. Each round adds one product
+/// row, subtracts one square row, cancels the completed low limb, and shifts
+/// it away in a signed five-limb accumulator.
+#[inline(always)]
+pub(super) fn mul_sub_square(a: &Limbs, b: &Limbs, c: &Limbs, modulus: &Limbs, inv: u64) -> Limbs {
+    debug_assert!(is_canonical(a, modulus));
+    debug_assert!(is_canonical(b, modulus));
+    debug_assert!(is_canonical(c, modulus));
+    let (o0, o1, o2, o3): (u64, u64, u64, u64);
+
+    // SAFETY: all memory accesses use declared input pointers. The block
+    // balances every carry in registers, does not touch the stack, and has
+    // no data-dependent control flow.
+    unsafe {
+        asm!(
+            r#"
+            // Keep both multiplicands resident across the four rows.
+            ldp x8, x9, [x0]
+            ldp x10, x11, [x0, #16]
+            ldp x12, x13, [x4]
+            ldp x14, x15, [x4, #16]
+
+            .macro PASTA_ADD_ROW scalar
+                mul x0, x8, \scalar
+                mul x1, x9, \scalar
+                mul x3, x10, \scalar
+                mul x5, x11, \scalar
+                adds x20, x20, x0
+                umulh x0, x8, \scalar
+                adcs x21, x21, x1
+                umulh x1, x9, \scalar
+                adcs x22, x22, x3
+                umulh x3, x10, \scalar
+                adcs x23, x23, x5
+                umulh x5, x11, \scalar
+                adc x24, x24, xzr
+                adds x21, x21, x0
+                adcs x22, x22, x1
+                adcs x23, x23, x3
+                adc x24, x24, x5
+            .endm
+
+            .macro PASTA_SUB_ROW scalar
+                mul x3, x12, \scalar
+                umulh x0, x12, \scalar
+                subs x20, x20, x3
+
+                mul x3, x13, \scalar
+                umulh x5, x13, \scalar
+                ccmp xzr, xzr, #0, cc
+                adcs x3, x3, x0
+                adc x0, x5, xzr
+                subs x21, x21, x3
+
+                mul x3, x14, \scalar
+                umulh x5, x14, \scalar
+                ccmp xzr, xzr, #0, cc
+                adcs x3, x3, x0
+                adc x0, x5, xzr
+                subs x22, x22, x3
+
+                mul x3, x15, \scalar
+                umulh x5, x15, \scalar
+                ccmp xzr, xzr, #0, cc
+                adcs x3, x3, x0
+                adc x0, x5, xzr
+                subs x23, x23, x3
+                sbc x24, x24, x0
+            .endm
+
+            .macro PASTA_CANCEL_AND_SHIFT
+                mul x3, x27, x20
+                mul x5, x26, x3
+                lsl x7, x3, #62
+                subs xzr, x20, #1
+                umulh x0, x25, x3
+                adcs x21, x21, x5
+                umulh x1, x26, x3
+                adcs x22, x22, xzr
+                adcs x23, x23, x7
+                lsr x7, x3, #2
+                adc x24, x24, xzr
+
+                adds x20, x21, x0
+                adcs x21, x22, x1
+                adcs x22, x23, xzr
+                adcs x23, x24, x7
+                asr x24, x23, #63
+            .endm
+
+            // The first positive row initializes the accumulator directly.
+            ldp x16, x17, [x2]
+            mul x20, x8, x16
+            mul x21, x9, x16
+            mul x22, x10, x16
+            mul x23, x11, x16
+            umulh x0, x8, x16
+            umulh x1, x9, x16
+            umulh x3, x10, x16
+            umulh x5, x11, x16
+            adds x21, x21, x0
+            adcs x22, x22, x1
+            adcs x23, x23, x3
+            adc x24, x5, xzr
+
+            ldr x7, [x4]
+            PASTA_SUB_ROW x7
+            PASTA_CANCEL_AND_SHIFT
+
+            PASTA_ADD_ROW x17
+            ldr x16, [x4, #8]
+            PASTA_SUB_ROW x16
+            PASTA_CANCEL_AND_SHIFT
+
+            ldp x16, x17, [x2, #16]
+            PASTA_ADD_ROW x16
+            ldr x16, [x4, #16]
+            PASTA_SUB_ROW x16
+            PASTA_CANCEL_AND_SHIFT
+
+            PASTA_ADD_ROW x17
+            ldr x16, [x4, #24]
+            PASTA_SUB_ROW x16
+            PASTA_CANCEL_AND_SHIFT
+
+            // Here |ab-c^2| < p^2 and the Montgomery multiple is below pR,
+            // so the signed result lies in (-p, 2p). Add p once when
+            // negative, then subtract p once when it is at least p.
+            and x0, x25, x24
+            and x1, x26, x24
+            mov x7, #0x4000000000000000
+            and x3, x24, x7
+            adds x20, x20, x0
+            adcs x21, x21, x1
+            adcs x22, x22, xzr
+            adc x23, x23, x3
+
+            subs x0, x20, x25
+            sbcs x1, x21, x26
+            sbcs x3, x22, xzr
+            sbcs x5, x23, x7
+            csel x20, x0, x20, cs
+            csel x21, x1, x21, cs
+            csel x22, x3, x22, cs
+            csel x23, x5, x23, cs
+
+            .purgem PASTA_CANCEL_AND_SHIFT
+            .purgem PASTA_SUB_ROW
+            .purgem PASTA_ADD_ROW
+            "#,
+            inout("x0") a.as_ptr() => _,
+            lateout("x1") _,
+            inout("x2") b.as_ptr() => _,
+            lateout("x3") _,
+            inout("x4") c.as_ptr() => _,
             lateout("x5") _,
             lateout("x7") _,
             lateout("x8") _,
