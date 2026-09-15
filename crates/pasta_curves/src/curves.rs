@@ -86,6 +86,14 @@ macro_rules! impl_multiexp_vartime {
         ) -> Option<Self> {
             crate::glv::try_multiexp::<$name>(scalars, bases)
         }
+
+        #[cfg(feature = "glv")]
+        fn try_multiexp_full_width_is_identity_vartime(
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+        ) -> Option<bool> {
+            crate::glv::try_multiexp_full_width_is_identity::<$name>(scalars, bases)
+        }
     };
     (native, $name:ident) => {};
 }
