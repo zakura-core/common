@@ -374,12 +374,43 @@ struct AdviceWitness<F: Field> {
     values: Vec<Polynomial<F, LagrangeCoeff>>,
     denominator_cells: Vec<usize>,
     denominators: Vec<F>,
-    denominator_slots: Vec<Vec<u32>>,
+    denominator_slots: Vec<u32>,
     last_denominator_batch: Option<DenominatorBatch>,
     related_denominator_batches: Vec<RelatedDenominatorBatch>,
     related_batch_numerators: Vec<F>,
     reuse_related_denominators: bool,
-    row_count: usize,
+    cell_layout: AdviceCellLayout,
+}
+
+/// Encodes an advice cell as an index into flattened column-major storage.
+///
+/// Non-empty advice columns have evaluation-domain length, so the row count is
+/// a power of two and encoding and decoding need only shifts and masks.
+#[derive(Clone, Copy)]
+struct AdviceCellLayout {
+    row_mask: usize,
+    row_bits: u32,
+}
+
+impl AdviceCellLayout {
+    fn new(row_count: usize) -> Self {
+        assert!(row_count == 0 || row_count.is_power_of_two());
+        Self {
+            row_mask: row_count.wrapping_sub(1),
+            row_bits: row_count.checked_ilog2().unwrap_or(0),
+        }
+    }
+
+    fn encode(self, column: usize, row: usize) -> usize {
+        debug_assert_ne!(self.row_mask, usize::MAX);
+        debug_assert!(row <= self.row_mask);
+        (column << self.row_bits) | row
+    }
+
+    fn decode(self, cell: usize) -> (usize, usize) {
+        debug_assert_ne!(self.row_mask, usize::MAX);
+        (cell >> self.row_bits, cell & self.row_mask)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -406,9 +437,13 @@ impl<F: Field> AdviceWitness<F> {
     fn new(values: Vec<Polynomial<F, LagrangeCoeff>>, reuse_related_denominators: bool) -> Self {
         let row_count = values.first().map_or(0, |column| column.len());
         assert!(values.iter().all(|column| column.len() == row_count));
+        let cell_count = values
+            .len()
+            .checked_mul(row_count)
+            .expect("the advice matrix size fits into usize");
 
         Self {
-            denominator_slots: vec![vec![NO_DENOMINATOR; row_count]; values.len()],
+            denominator_slots: vec![NO_DENOMINATOR; cell_count],
             values,
             denominator_cells: Vec::new(),
             denominators: Vec::new(),
@@ -416,7 +451,7 @@ impl<F: Field> AdviceWitness<F> {
             related_denominator_batches: Vec::new(),
             related_batch_numerators: Vec::new(),
             reuse_related_denominators,
-            row_count,
+            cell_layout: AdviceCellLayout::new(row_count),
         }
     }
 
@@ -559,7 +594,8 @@ impl<F: Field> AdviceWitness<F> {
             return self.assign_batch(column, row, len, to);
         };
 
-        if self.denominator_slots[column][row..end]
+        let cell_start = self.cell_layout.encode(column, row);
+        if self.denominator_slots[cell_start..cell_start + len]
             .iter()
             .any(|slot| *slot != NO_DENOMINATOR)
         {
@@ -590,20 +626,18 @@ impl<F: Field> AdviceWitness<F> {
 
         for index in 0..len {
             self.values[column][row + index] = self.related_batch_numerators[index];
-            self.denominator_slots[column][row + index] = RELATED_DENOMINATOR;
+            self.denominator_slots[cell_start + index] = RELATED_DENOMINATOR;
         }
         self.related_batch_numerators.clear();
         for index in 0..len {
             let cell = self.denominator_cells[previous.start + index];
-            let source_column = cell / self.row_count;
-            let source_row = cell % self.row_count;
-            self.denominator_slots[source_column][source_row] |= DENOMINATOR_SOURCE_MASK;
+            self.denominator_slots[cell] |= DENOMINATOR_SOURCE_MASK;
         }
         self.related_denominator_batches
             .push(RelatedDenominatorBatch {
                 len,
                 source: previous.start,
-                cell_start: column * self.row_count + row,
+                cell_start,
                 inverse_power,
             });
         self.last_denominator_batch = preserve_as_last_batch.then_some(DenominatorBatch {
@@ -616,7 +650,8 @@ impl<F: Field> AdviceWitness<F> {
     /// Assigns a value, returning whether existing denominator relationships
     /// were expanded before the assignment.
     fn assign_valid(&mut self, column: usize, row: usize, assigned: Assigned<F>) -> bool {
-        let slot = self.denominator_slots[column][row];
+        let cell = self.cell_layout.encode(column, row);
+        let slot = self.denominator_slots[cell];
         let removes_denominator = !matches!(assigned, Assigned::Rational(_, _));
         let expand_relationships = slot == RELATED_DENOMINATOR
             || (slot != NO_DENOMINATOR && slot & DENOMINATOR_SOURCE_MASK != 0)
@@ -637,13 +672,13 @@ impl<F: Field> AdviceWitness<F> {
                 self.values[column][row] = value;
             }
             Assigned::Rational(numerator, denominator) => {
-                let slot = self.denominator_slots[column][row];
+                let slot = self.denominator_slots[cell];
                 if slot == NO_DENOMINATOR {
                     let slot = u32::try_from(self.denominators.len())
                         .expect("the number of advice cells fits into u32");
                     assert!(slot < DENOMINATOR_SLOT_LIMIT);
-                    self.denominator_slots[column][row] = slot;
-                    self.denominator_cells.push(column * self.row_count + row);
+                    self.denominator_slots[cell] = slot;
+                    self.denominator_cells.push(cell);
                     self.denominators.push(denominator);
                 } else {
                     self.denominators[slot as usize] = denominator;
@@ -655,41 +690,47 @@ impl<F: Field> AdviceWitness<F> {
     }
 
     fn remove_denominator(&mut self, column: usize, row: usize) {
-        let slot = self.denominator_slots[column][row];
+        let cell = self.cell_layout.encode(column, row);
+        let slot = self.denominator_slots[cell];
         if slot == NO_DENOMINATOR {
             return;
         }
         debug_assert!(self.related_denominator_batches.is_empty());
 
-        self.denominator_slots[column][row] = NO_DENOMINATOR;
+        self.denominator_slots[cell] = NO_DENOMINATOR;
         let slot = (slot & DENOMINATOR_SLOT_MASK) as usize;
         self.denominator_cells.swap_remove(slot);
         self.denominators.swap_remove(slot);
 
         if let Some(&moved_cell) = self.denominator_cells.get(slot) {
-            let moved_column = moved_cell / self.row_count;
-            let moved_row = moved_cell % self.row_count;
-            self.denominator_slots[moved_column][moved_row] = slot as u32;
+            self.denominator_slots[moved_cell] = slot as u32;
         }
     }
 
     fn evaluate(mut self) -> Vec<Polynomial<F, LagrangeCoeff>> {
         batch_invert_multi(&mut self.denominators);
         for (&cell, &denominator_inverse) in self.denominator_cells.iter().zip(&self.denominators) {
-            let column = cell / self.row_count;
-            let row = cell % self.row_count;
+            let (column, row) = self.cell_layout.decode(cell);
             self.values[column][row] *= denominator_inverse;
         }
         for related in self.related_denominator_batches {
-            for index in 0..related.len {
-                let cell = related.cell_start + index;
-                let column = cell / self.row_count;
-                let row = cell % self.row_count;
-                let denominator_inverse = self.denominators[related.source + index];
-                self.values[column][row] *= match related.inverse_power {
-                    DenominatorInversePower::One => denominator_inverse,
-                    DenominatorInversePower::Two => denominator_inverse.square(),
-                };
+            let (column, row) = self.cell_layout.decode(related.cell_start);
+            let values = &mut self.values[column][..][row..row + related.len];
+            let denominator_inverses =
+                &self.denominators[related.source..related.source + related.len];
+            match related.inverse_power {
+                DenominatorInversePower::One => {
+                    for (value, &denominator_inverse) in values.iter_mut().zip(denominator_inverses)
+                    {
+                        *value *= denominator_inverse;
+                    }
+                }
+                DenominatorInversePower::Two => {
+                    for (value, denominator_inverse) in values.iter_mut().zip(denominator_inverses)
+                    {
+                        *value *= denominator_inverse.square();
+                    }
+                }
             }
         }
         self.values
@@ -705,7 +746,7 @@ impl<F: Field> AdviceWitness<F> {
     }
 
     fn expand_related_denominator_batches(&mut self) {
-        for slot in self.denominator_slots.iter_mut().flatten() {
+        for slot in &mut self.denominator_slots {
             if *slot != NO_DENOMINATOR && *slot != RELATED_DENOMINATOR {
                 *slot &= DENOMINATOR_SLOT_MASK;
             }
@@ -713,9 +754,7 @@ impl<F: Field> AdviceWitness<F> {
         for related in core::mem::take(&mut self.related_denominator_batches) {
             for index in 0..related.len {
                 let cell = related.cell_start + index;
-                let column = cell / self.row_count;
-                let row = cell % self.row_count;
-                debug_assert_eq!(self.denominator_slots[column][row], RELATED_DENOMINATOR);
+                debug_assert_eq!(self.denominator_slots[cell], RELATED_DENOMINATOR);
 
                 let basis = self.denominators[related.source + index];
                 let denominator = match related.inverse_power {
@@ -725,7 +764,7 @@ impl<F: Field> AdviceWitness<F> {
                 let slot = u32::try_from(self.denominators.len())
                     .expect("the number of advice cells fits into u32");
                 assert!(slot < DENOMINATOR_SLOT_LIMIT);
-                self.denominator_slots[column][row] = slot;
+                self.denominator_slots[cell] = slot;
                 self.denominator_cells.push(cell);
                 self.denominators.push(denominator);
             }
@@ -2855,7 +2894,8 @@ fn advice_witness_failed_related_batch_is_atomic() {
         }
     });
     assert!(matches!(result, Err(Error::Synthesis)));
-    assert_eq!(advice.denominator_slots[1][0], NO_DENOMINATOR);
+    let cell = advice.cell_layout.encode(1, 0);
+    assert_eq!(advice.denominator_slots[cell], NO_DENOMINATOR);
     assert!(advice.related_denominator_batches.is_empty());
 
     advice
@@ -2863,6 +2903,19 @@ fn advice_witness_failed_related_batch_is_atomic() {
         .unwrap();
     let advice = advice.evaluate();
     assert_eq!(advice[1][0], Fp::from(2));
+}
+
+#[test]
+fn advice_cell_layout_round_trips() {
+    for row_count in [1, 2, 8, 2_048] {
+        let layout = AdviceCellLayout::new(row_count);
+        for column in 0..4 {
+            for row in [0, row_count / 2, row_count - 1] {
+                let cell = layout.encode(column, row);
+                assert_eq!(layout.decode(cell), (column, row));
+            }
+        }
+    }
 }
 
 #[cfg(feature = "multicore")]
