@@ -2794,8 +2794,8 @@ fn plan_cost<F: Field>(plan: &EvaluationPlan<F>, scalars: &[PlanScalar<F>]) -> (
 }
 
 // Each cached polynomial occupies one chunk-sized buffer. One avoided field
-// multiplication amortizes storing and loading that buffer; copy-only shapes
-// remain uncached.
+// multiplication amortizes storing and loading that buffer. Add-only shapes
+// use a separate traffic model below and cannot increase the buffer count.
 const MIN_CSE_SAVED_MULTIPLICATIONS: usize = 1;
 
 #[derive(Clone, Copy)]
@@ -2912,13 +2912,13 @@ fn reuse_cache_slots(actions: &mut [Option<CacheAction>], cache_slots: usize) ->
     next_slot
 }
 
-struct LinearTermCacheOccupancy {
+struct CacheOccupancy {
     active_slots: Vec<usize>,
     max_allowed_slots: usize,
     remaining_entries: usize,
 }
 
-impl LinearTermCacheOccupancy {
+impl CacheOccupancy {
     fn new(
         actions: &[Option<CacheAction>],
         cache_slots: usize,
@@ -2974,15 +2974,206 @@ struct RepeatShape {
     occurrences: Vec<usize>,
 }
 
-impl<F: Field> EvaluationPlan<F> {
-    fn reuse_cached_leaf_squares(&mut self, cache_slots: usize) {
-        fn cached_square(stores: &[Option<IndexedLeaf>], leaf: IndexedLeaf) -> Option<u16> {
-            stores
-                .iter()
-                .position(|stored| *stored == Some(leaf))
-                .and_then(|slot| slot.try_into().ok())
+struct AddOnlyRepeat {
+    additions: usize,
+    occurrences: Vec<usize>,
+}
+
+fn add_only_additions<F: Field>(
+    plan: &EvaluationPlan<F>,
+    scalars: &[PlanScalar<F>],
+) -> Option<usize> {
+    match plan {
+        EvaluationPlan::Poly(_)
+        | EvaluationPlan::LinearTerm(_)
+        | EvaluationPlan::ConstantTerm(_) => Some(0),
+        EvaluationPlan::Add(lhs, rhs) => add_only_additions(lhs, scalars)?
+            .checked_add(add_only_additions(rhs, scalars)?)?
+            .checked_add(1),
+        EvaluationPlan::Scale(inner, scalar) => match scalars[scalar.index()] {
+            PlanScalar::Literal(scalar) if !matches!(scale_kind(scalar), ScaleKind::Other) => {
+                add_only_additions(inner, scalars)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+const ADDITION_FIELD_WORD_TRAFFIC: usize = 3;
+const CACHE_COPY_FIELD_WORD_TRAFFIC: usize = 2;
+
+fn add_only_cache_traffic_savings(additions: usize, occurrences: usize) -> Option<usize> {
+    // Conservatively model an additive pass as two reads and one write, and a
+    // cache copy as one read and one write. The store plus subsequent loads
+    // must cost less traffic than reevaluating every repeated subtree. Return
+    // the saved field words per row.
+    let uncached = additions
+        .checked_mul(occurrences.checked_sub(1)?)?
+        .checked_mul(ADDITION_FIELD_WORD_TRAFFIC)?;
+    let cached = occurrences.checked_mul(CACHE_COPY_FIELD_WORD_TRAFFIC)?;
+    uncached.checked_sub(cached)
+}
+
+fn add_only_cache_saves_traffic(additions: usize, occurrences: usize) -> bool {
+    add_only_cache_traffic_savings(additions, occurrences).is_some_and(|savings| savings > 0)
+}
+
+fn cached_square_slot(stores: &[Option<IndexedLeaf>], leaf: IndexedLeaf) -> Option<u16> {
+    stores
+        .iter()
+        .position(|stored| *stored == Some(leaf))
+        .and_then(|slot| slot.try_into().ok())
+}
+
+// Predict the annotations made by [`EvaluationPlan::reuse_cached_leaf_squares`]
+// after applying a cache-action schedule, without cloning or mutating the plan.
+fn cached_leaf_square_reuse_count<F: Field>(
+    plan: &EvaluationPlan<F>,
+    actions: &[Option<CacheAction>],
+    cache_slots: usize,
+) -> Option<usize> {
+    fn visit_factor_body<F: Field>(
+        body: &FactorBodyPlan<F>,
+        actions: &[Option<CacheAction>],
+        occurrence: &mut usize,
+        stores: &mut [Option<IndexedLeaf>],
+        reused_squares: &mut usize,
+    ) -> Option<()> {
+        match body {
+            FactorBodyPlan::Sequential(terms) => {
+                for term in terms {
+                    visit(term, actions, occurrence, stores, reused_squares)?;
+                }
+            }
+            FactorBodyPlan::Factored(work) => {
+                for work in work {
+                    match work {
+                        FactorBodyWork::Term(term) => {
+                            visit(&term.term, actions, occurrence, stores, reused_squares)?;
+                        }
+                        FactorBodyWork::SharedFactor { factor, terms } => {
+                            visit(factor, actions, occurrence, stores, reused_squares)?;
+                            for term in terms {
+                                visit(&term.term, actions, occurrence, stores, reused_squares)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some(())
+    }
+
+    fn visit<F: Field>(
+        plan: &EvaluationPlan<F>,
+        actions: &[Option<CacheAction>],
+        occurrence: &mut usize,
+        stores: &mut [Option<IndexedLeaf>],
+        reused_squares: &mut usize,
+    ) -> Option<()> {
+        let start = *occurrence;
+        let action = *actions.get(start)?;
+        *occurrence = occurrence.checked_add(1)?;
+        if let Some(action) = action
+            && !action.store
+        {
+            if action.end < *occurrence || action.end > actions.len() {
+                return None;
+            }
+            *occurrence = action.end;
+            return Some(());
         }
 
+        match plan {
+            EvaluationPlan::Add(lhs, rhs) | EvaluationPlan::Mul(lhs, rhs) => {
+                visit(lhs, actions, occurrence, stores, reused_squares)?;
+                visit(rhs, actions, occurrence, stores, reused_squares)?;
+            }
+            EvaluationPlan::Square(inner) | EvaluationPlan::Scale(inner, _) => {
+                visit(inner, actions, occurrence, stores, reused_squares)?;
+            }
+            EvaluationPlan::AffineSelfProduct { leaf, .. } => {
+                if cached_square_slot(stores, *leaf).is_some() {
+                    *reused_squares = reused_squares.checked_add(1)?;
+                }
+            }
+            EvaluationPlan::FixedRangeProduct { input, .. } => {
+                let input_occurrence = *occurrence;
+                visit(input, actions, occurrence, stores, reused_squares)?;
+                if let EvaluationPlan::Poly(leaf) = input.as_ref()
+                    && actions.get(input_occurrence)?.is_none()
+                    && cached_square_slot(stores, *leaf).is_some()
+                {
+                    *reused_squares = reused_squares.checked_add(1)?;
+                }
+            }
+            EvaluationPlan::Horner { base, .. } => {
+                visit(base, actions, occurrence, stores, reused_squares)?;
+            }
+            EvaluationPlan::DistributePowers { work, .. } => {
+                for work in work {
+                    match work {
+                        DistributionWork::Term { term, .. } => {
+                            visit(term, actions, occurrence, stores, reused_squares)?;
+                        }
+                        DistributionWork::WeightedSharedFactor { factor, terms } => {
+                            visit(factor, actions, occurrence, stores, reused_squares)?;
+                            for term in terms {
+                                visit(&term.term, actions, occurrence, stores, reused_squares)?;
+                            }
+                        }
+                        DistributionWork::SelectorFamily { runs, .. } => {
+                            for run in runs.iter().rev() {
+                                visit_factor_body(
+                                    &run.bodies,
+                                    actions,
+                                    occurrence,
+                                    stores,
+                                    reused_squares,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+            EvaluationPlan::Poly(_)
+            | EvaluationPlan::LinearTerm(_)
+            | EvaluationPlan::ConstantTerm(_) => {}
+            EvaluationPlan::CacheStore { .. } | EvaluationPlan::CacheLoad { .. } => {
+                unreachable!("common-subexpression planning runs once")
+            }
+        }
+
+        if let Some(action) = action {
+            let stored_leaf = if let EvaluationPlan::Square(inner) = plan
+                && let EvaluationPlan::Poly(leaf) = inner.as_ref()
+                && actions.get(start.checked_add(1)?)?.is_none()
+            {
+                Some(*leaf)
+            } else {
+                None
+            };
+            *stores.get_mut(action.slot)? = stored_leaf;
+        }
+        Some(())
+    }
+
+    let mut occurrence = 0;
+    let mut stores = vec![None; cache_slots];
+    let mut reused_squares = 0;
+    visit(
+        plan,
+        actions,
+        &mut occurrence,
+        &mut stores,
+        &mut reused_squares,
+    )?;
+    (occurrence == actions.len()).then_some(reused_squares)
+}
+
+impl<F: Field> EvaluationPlan<F> {
+    fn reuse_cached_leaf_squares(&mut self, cache_slots: usize) {
         fn visit_factor_body<F: Field>(
             body: &mut FactorBodyPlan<F>,
             stores: &mut [Option<IndexedLeaf>],
@@ -3019,13 +3210,13 @@ impl<F: Field> EvaluationPlan<F> {
                 }
                 EvaluationPlan::Square(inner) => visit(inner, stores),
                 EvaluationPlan::AffineSelfProduct { leaf, square, .. } => {
-                    *square = cached_square(stores, *leaf)
+                    *square = cached_square_slot(stores, *leaf)
                         .map_or(SquareReuse::Fused, |slot| SquareReuse::Cached { slot });
                 }
                 EvaluationPlan::FixedRangeProduct { input, square, .. } => {
                     visit(input, stores);
                     *square = if let EvaluationPlan::Poly(leaf) = input.as_ref() {
-                        cached_square(stores, *leaf)
+                        cached_square_slot(stores, *leaf)
                             .map_or(SquareReuse::Fused, |slot| SquareReuse::Cached { slot })
                     } else {
                         SquareReuse::Fused
@@ -3131,6 +3322,7 @@ impl<F: Field> EvaluationPlan<F> {
             let mut covered = vec![false; occurrences.len()];
             let mut cache_slots = 0;
             let mut linear_term_occupancy = None;
+            let mut add_only_repeats = vec![];
             for shape in shapes {
                 let matching = shape
                     .occurrences
@@ -3153,12 +3345,21 @@ impl<F: Field> EvaluationPlan<F> {
                     // cost and sort before linear terms, so this occupancy
                     // includes every existing CSE lifetime.
                     let occupancy = linear_term_occupancy.get_or_insert_with(|| {
-                        LinearTermCacheOccupancy::new(&actions, cache_slots, linear_term_budget)
+                        CacheOccupancy::new(&actions, cache_slots, linear_term_budget)
                     });
                     if !occupancy.try_reserve(matching[0], *matching.last().unwrap()) {
                         continue;
                     }
                 } else if (matching.len() - 1) * cost.0 < MIN_CSE_SAVED_MULTIPLICATIONS {
+                    let plan = occurrences[matching[0]].plan;
+                    if matches!(plan, EvaluationPlan::Add(_, _))
+                        && let Some(additions) = add_only_additions(plan, scalars)
+                    {
+                        add_only_repeats.push(AddOnlyRepeat {
+                            additions,
+                            occurrences: matching,
+                        });
+                    }
                     continue;
                 } else {
                     debug_assert!(linear_term_occupancy.is_none());
@@ -3175,8 +3376,84 @@ impl<F: Field> EvaluationPlan<F> {
                     covered[occurrence..occurrences[occurrence].end].fill(true);
                 }
             }
+
+            // Additive subexpressions are cheaper than the multiplication CSEs
+            // above, so cache them only in gaps between existing lifetimes.
+            add_only_repeats.sort_unstable_by(|lhs, rhs| {
+                let traffic_savings = |repeat: &AddOnlyRepeat| {
+                    add_only_cache_traffic_savings(repeat.additions, repeat.occurrences.len())
+                        .unwrap_or(0)
+                };
+                let lifetime = |repeat: &AddOnlyRepeat| {
+                    repeat.occurrences.last().unwrap() - repeat.occurrences[0]
+                };
+                traffic_savings(rhs)
+                    .cmp(&traffic_savings(lhs))
+                    .then_with(|| lifetime(lhs).cmp(&lifetime(rhs)))
+                    .then_with(|| lhs.occurrences[0].cmp(&rhs.occurrences[0]))
+            });
+            let mut occupancy = CacheOccupancy::new(
+                &actions,
+                cache_slots,
+                LinearTermCacheBudget {
+                    // Give add-only entries the same independent logical-entry
+                    // cap, but never allowance for new physical slots.
+                    max_entries: linear_term_budget.max_entries,
+                    max_additional_slots: 0,
+                },
+            );
+            let baseline_cache_slots = cache_slots;
+            let mut baseline_actions = None;
+            for repeat in add_only_repeats {
+                let matching = repeat
+                    .occurrences
+                    .into_iter()
+                    .filter(|candidate| {
+                        !covered[*candidate..occurrences[*candidate].end]
+                            .iter()
+                            .any(|value| *value)
+                    })
+                    .collect::<Vec<_>>();
+                if matching.len() < 2
+                    || !add_only_cache_saves_traffic(repeat.additions, matching.len())
+                    || !occupancy.try_reserve(matching[0], *matching.last().unwrap())
+                {
+                    continue;
+                }
+
+                baseline_actions.get_or_insert_with(|| actions.clone());
+                let slot = cache_slots;
+                cache_slots += 1;
+                for (index, occurrence) in matching.into_iter().enumerate() {
+                    actions[occurrence] = Some(CacheAction {
+                        slot,
+                        store: index == 0,
+                        end: occurrences[occurrence].end,
+                    });
+                    covered[occurrence..occurrences[occurrence].end].fill(true);
+                }
+            }
             let cache_slots = reuse_cache_slots(&mut actions, cache_slots);
-            (actions, cache_slots)
+            if let Some(mut baseline_actions) = baseline_actions {
+                let baseline_cache_slots =
+                    reuse_cache_slots(&mut baseline_actions, baseline_cache_slots);
+                // An explicitly dead slot can still contain a square reused by
+                // a later specialized node. Reject additions that overwrite
+                // any net square reuse while occupying those physical gaps.
+                let baseline_reuses =
+                    cached_leaf_square_reuse_count(self, &baseline_actions, baseline_cache_slots);
+                let candidate_reuses = cached_leaf_square_reuse_count(self, &actions, cache_slots);
+                if baseline_reuses
+                    .zip(candidate_reuses)
+                    .is_some_and(|(baseline, candidate)| candidate >= baseline)
+                {
+                    (actions, cache_slots)
+                } else {
+                    (baseline_actions, baseline_cache_slots)
+                }
+            } else {
+                (actions, cache_slots)
+            }
         };
 
         (actions, cache_slots)
@@ -6165,10 +6442,10 @@ mod tests {
     use pasta_curves::{pallas, vesta};
 
     use super::{
-        Ast, AstLeaf, AstMul, BasisOps, BoundPlanScalars, CacheAction, DistributionWork,
-        EvaluationChallenge, EvaluationChallenges, EvaluationPlan, EvaluationPolyTag, Evaluator,
-        FactorBodyPlan, FactorSide, FixedRange, IndexedLeaf, LinearTermCacheBudget,
-        LinearTermCacheOccupancy, MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES,
+        Ast, AstLeaf, AstMul, BasisOps, BoundPlanScalars, CacheAction, CacheOccupancy,
+        DistributionWork, EvaluationChallenge, EvaluationChallenges, EvaluationPlan,
+        EvaluationPolyTag, Evaluator, FactorBodyPlan, FactorSide, FixedRange, IndexedLeaf,
+        LinearTermCacheBudget, MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES,
         MAX_DUPLICATED_AFFINE_FALLBACK_NODES, MAX_LINEAR_TERM_CACHE_ENTRIES, PlanScalar,
         PlanScalarInterner, ReusablePowerFold, ScalarId, SelectorFamilyRun, SquareReuse,
         WeightedTerm, ast_has_at_most_nodes, collect_plan_occurrences, compressed_selector,
@@ -9337,6 +9614,112 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repeated_additions_only_reuse_existing_cache_capacity() {
+        type F = pallas::Base;
+        let leaf = |index| EvaluationPlan::Poly(square_reuse_test_leaf(index));
+        let sum = || EvaluationPlan::Add(Box::new(leaf(0)), Box::new(leaf(1)));
+        let product = || EvaluationPlan::Mul(Box::new(leaf(0)), Box::new(leaf(1)));
+        let power = ScalarId::<F>::from_index(0).unwrap();
+        let distribution = |terms: Vec<EvaluationPlan<F>>| EvaluationPlan::DistributePowers {
+            work: terms
+                .into_iter()
+                .map(|term| DistributionWork::Term { term, power })
+                .collect(),
+            base: power,
+        };
+        let budget = LinearTermCacheBudget {
+            max_entries: MAX_LINEAR_TERM_CACHE_ENTRIES,
+            max_additional_slots: 0,
+        };
+
+        let mut no_capacity = distribution(vec![sum(), sum(), sum(), sum()]);
+        assert_eq!(no_capacity.cache_common_subexpressions(budget, &[]), 0);
+
+        let mut plan = distribution(vec![product(), product(), sum(), sum(), sum(), sum()]);
+        assert_eq!(plan.cache_common_subexpressions(budget, &[]), 1);
+        let EvaluationPlan::DistributePowers { work, .. } = plan else {
+            panic!("distributed powers compile to a distribution plan");
+        };
+        assert_eq!(
+            work.iter()
+                .filter(|work| {
+                    matches!(
+                        work,
+                        DistributionWork::Term {
+                            term: EvaluationPlan::CacheStore { .. },
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            2,
+        );
+    }
+
+    #[test]
+    fn additive_cache_does_not_overwrite_a_live_cached_square() {
+        type F = pallas::Base;
+        let leaf = |index| EvaluationPlan::Poly(square_reuse_test_leaf(index));
+        let square = || EvaluationPlan::Square(Box::new(leaf(0)));
+        let sum = || EvaluationPlan::Add(Box::new(leaf(1)), Box::new(leaf(2)));
+        let power = ScalarId::<F>::from_index(0).unwrap();
+        let mut plan = EvaluationPlan::DistributePowers {
+            work: vec![
+                square(),
+                square(),
+                sum(),
+                sum(),
+                sum(),
+                sum(),
+                square_reuse_test_affine(square_reuse_test_leaf(0)),
+            ]
+            .into_iter()
+            .map(|term| DistributionWork::Term { term, power })
+            .collect(),
+            base: power,
+        };
+        let budget = LinearTermCacheBudget {
+            max_entries: MAX_LINEAR_TERM_CACHE_ENTRIES,
+            max_additional_slots: 0,
+        };
+
+        assert_eq!(plan.cache_common_subexpressions(budget, &[]), 1);
+        let EvaluationPlan::DistributePowers { work, .. } = plan else {
+            panic!("distributed powers compile to a distribution plan");
+        };
+        assert_eq!(
+            work.iter()
+                .filter(|work| {
+                    matches!(
+                        work,
+                        DistributionWork::Term {
+                            term: EvaluationPlan::CacheStore { .. },
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            1,
+        );
+        let DistributionWork::Term { term: affine, .. } = &work[6] else {
+            panic!("the last distribution term is the affine product");
+        };
+        assert!(matches!(
+            affine_square_reuse(affine),
+            SquareReuse::Cached { slot: 0 }
+        ));
+    }
+
+    #[test]
+    fn additive_cache_traffic_threshold_is_conservative() {
+        assert!(!super::add_only_cache_saves_traffic(1, 2));
+        assert!(!super::add_only_cache_saves_traffic(1, 3));
+        assert!(super::add_only_cache_saves_traffic(1, 4));
+        assert!(super::add_only_cache_saves_traffic(2, 2));
+        assert_eq!(super::add_only_cache_traffic_savings(usize::MAX, 4), None);
+    }
+
     fn check_repeated_linear_term_evaluation<F, B>()
     where
         F: WithSmallOrderMulGroup<3> + From<u64>,
@@ -9475,7 +9858,7 @@ mod tests {
             end: 4,
         });
 
-        let mut occupancy = LinearTermCacheOccupancy::new(
+        let mut occupancy = CacheOccupancy::new(
             &actions,
             2,
             LinearTermCacheBudget {
@@ -9494,7 +9877,7 @@ mod tests {
         let budget = linear_term_cache_budget::<pallas::Base, ExtendedLagrangeCoeff>(poly_len);
         assert_eq!(budget.max_additional_slots, 2);
 
-        let mut occupancy = LinearTermCacheOccupancy::new(&[None; 5], 0, budget);
+        let mut occupancy = CacheOccupancy::new(&[None; 5], 0, budget);
         assert!(occupancy.try_reserve(0, 4));
         assert!(occupancy.try_reserve(1, 3));
         assert!(!occupancy.try_reserve(2, 2));
