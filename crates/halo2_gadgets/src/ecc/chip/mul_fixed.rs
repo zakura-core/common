@@ -32,10 +32,19 @@ pub mod short;
 static H_BASE: LazyLock<pallas::Base> = LazyLock::new(|| pallas::Base::from(H as u64));
 
 #[inline(always)]
-fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
-    // Method syntax selects `pallas::Base`'s portable inherent square.
-    // Trait dispatch selects the configured runtime backend instead.
-    Field::square(value)
+fn square_for_fixed_witness(value: &pallas::Base) -> pallas::Base {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Trait dispatch reaches the faster AArch64 assembly backend.
+        Field::square(value)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // This short dependency chain is faster with the inlined portable
+        // implementation on x86-64, including with `x86_64-asm` enabled.
+        value.square()
+    }
 }
 
 /// Computes the points selected by a fixed-base scalar's windows.
@@ -156,10 +165,10 @@ impl WindowAccumulator {
         let y_p = point.y * self.z_cubed;
         let h = x_p - self.x;
         let r = y_p - self.y;
-        let h_sq = square_with_runtime_backend(&h);
+        let h_sq = square_for_fixed_witness(&h);
         let h_cubed = h_sq * h;
         let x_h_sq = self.x * h_sq;
-        let x = square_with_runtime_backend(&r) - h_cubed - x_h_sq.double();
+        let x = square_for_fixed_witness(&r) - h_cubed - x_h_sq.double();
         let y = r * (x_h_sq - x) - self.y * h_cubed;
         // Since z_new = z * h, update its cached powers directly using the
         // powers of h that the mixed-add formula already computed.
@@ -877,5 +886,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn window_accumulator_preserves_zero_projective_powers() {
+        let point = WindowWitness {
+            x: pallas::Base::from(5),
+            y: pallas::Base::from(7),
+            u: pallas::Base::ZERO,
+        };
+
+        // Z = 0 is preserved for every affine input.
+        let mut zero_z = WindowAccumulator {
+            x: pallas::Base::from(11),
+            y: pallas::Base::from(13),
+            z_sq: pallas::Base::ZERO,
+            z_cubed: pallas::Base::ZERO,
+        };
+        zero_z.add_mixed(point);
+        assert_eq!(zero_z.z_sq, pallas::Base::ZERO);
+        assert_eq!(zero_z.z_cubed, pallas::Base::ZERO);
+
+        // H = x_p * Z^2 - X = 0 also makes the updated powers zero.
+        let mut zero_h = WindowAccumulator::from_affine(point);
+        zero_h.add_mixed(point);
+        assert_eq!(zero_h.z_sq, pallas::Base::ZERO);
+        assert_eq!(zero_h.z_cubed, pallas::Base::ZERO);
     }
 }
