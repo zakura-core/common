@@ -134,7 +134,6 @@ const MAX_CACHED_WINDOW_TABLES: usize = 16;
 struct WindowAccumulator {
     x: pallas::Base,
     y: pallas::Base,
-    z: pallas::Base,
     z_sq: pallas::Base,
     z_cubed: pallas::Base,
 }
@@ -144,7 +143,6 @@ impl WindowAccumulator {
         Self {
             x: point.x,
             y: point.y,
-            z: pallas::Base::ONE,
             z_sq: pallas::Base::ONE,
             z_cubed: pallas::Base::ONE,
         }
@@ -163,14 +161,14 @@ impl WindowAccumulator {
         let x_h_sq = self.x * h_sq;
         let x = square_with_runtime_backend(&r) - h_cubed - x_h_sq.double();
         let y = r * (x_h_sq - x) - self.y * h_cubed;
-        let z = self.z * h;
-        let z_sq = square_with_runtime_backend(&z);
-        let z_cubed = z_sq * z;
+        // Since z_new = z * h, update its cached powers directly using the
+        // powers of h that the mixed-add formula already computed.
+        let z_sq = self.z_sq * h_sq;
+        let z_cubed = self.z_cubed * h_cubed;
 
         *self = Self {
             x,
             y,
-            z,
             z_sq,
             z_cubed,
         };
