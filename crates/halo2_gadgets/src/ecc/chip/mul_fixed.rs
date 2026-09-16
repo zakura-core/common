@@ -31,6 +31,13 @@ pub mod short;
 
 static H_BASE: LazyLock<pallas::Base> = LazyLock::new(|| pallas::Base::from(H as u64));
 
+#[inline(always)]
+fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
+    // Method syntax selects `pallas::Base`'s portable inherent square.
+    // Trait dispatch selects the configured runtime backend instead.
+    Field::square(value)
+}
+
 /// Computes the points selected by a fixed-base scalar's windows.
 #[cfg(test)]
 fn compute_window_points(base: pallas::Affine, windows: &[usize]) -> Vec<pallas::Affine> {
@@ -151,13 +158,13 @@ impl WindowAccumulator {
         let y_p = point.y * self.z_cubed;
         let h = x_p - self.x;
         let r = y_p - self.y;
-        let h_sq = h.square();
+        let h_sq = square_with_runtime_backend(&h);
         let h_cubed = h_sq * h;
         let x_h_sq = self.x * h_sq;
-        let x = r.square() - h_cubed - x_h_sq.double();
+        let x = square_with_runtime_backend(&r) - h_cubed - x_h_sq.double();
         let y = r * (x_h_sq - x) - self.y * h_cubed;
         let z = self.z * h;
-        let z_sq = z.square();
+        let z_sq = square_with_runtime_backend(&z);
         let z_cubed = z_sq * z;
 
         *self = Self {
