@@ -35,7 +35,8 @@ static H_BASE: LazyLock<pallas::Base> = LazyLock::new(|| pallas::Base::from(H as
 fn square_for_fixed_witness(value: &pallas::Base) -> pallas::Base {
     #[cfg(target_arch = "aarch64")]
     {
-        // Trait dispatch reaches the faster AArch64 assembly backend.
+        // Trait dispatch uses the configured AArch64 backend, including the
+        // faster assembly implementation on supported builds.
         Field::square(value)
     }
 
