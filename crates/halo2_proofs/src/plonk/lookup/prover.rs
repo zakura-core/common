@@ -272,6 +272,10 @@ fn uses_pasta_sort_keys<F: Field>() -> bool {
         || TypeId::of::<F>() == TypeId::of::<crate::pasta::Fq>()
 }
 
+const PASTA_SORT_RADIX_BITS: usize = 12;
+const PASTA_SORT_RADIX_BUCKETS: usize = 1 << PASTA_SORT_RADIX_BITS;
+const PASTA_SORT_RADIX_SHIFT: usize = u64::BITS as usize - PASTA_SORT_RADIX_BITS;
+
 pub(in crate::plonk) struct TablePlan {
     representatives: Vec<usize>,
     groups: Vec<usize>,
@@ -299,8 +303,72 @@ fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
             source,
         };
     }
-    scratch.sort_unstable();
+    sort_pasta_keys(scratch);
+    apply_pasta_key_permutation(values, scratch);
+}
 
+fn sort_pasta_keys(scratch: &mut [PastaSortKey]) {
+    if scratch.len() > usize::from(u16::MAX) {
+        scratch.sort_unstable();
+    } else {
+        let bucket = |key: &PastaSortKey| {
+            (key.limbs[PASTA_REPR_LIMBS - 1] >> PASTA_SORT_RADIX_SHIFT) as usize
+        };
+        let Some(first) = scratch.first() else {
+            return;
+        };
+        let first_bucket = bucket(first);
+        // A radix pass cannot separate a single-prefix input.
+        if scratch[1..].iter().all(|key| bucket(key) == first_bucket) {
+            scratch.sort_unstable();
+            return;
+        }
+
+        // At least two buckets are nonempty, so every count fits in `u16`.
+        let mut ends = [0u16; PASTA_SORT_RADIX_BUCKETS];
+        for key in scratch.iter() {
+            ends[bucket(key)] += 1;
+        }
+
+        let mut next = [0u16; PASTA_SORT_RADIX_BUCKETS];
+        let mut end = 0u16;
+        for (count, next) in ends.iter_mut().zip(next.iter_mut()) {
+            *next = end;
+            end += *count;
+            *count = end;
+        }
+        debug_assert_eq!(usize::from(end), scratch.len());
+
+        // The most-significant prefix determines the order between buckets.
+        // An in-place American-flag pass leaves only small equal-prefix
+        // buckets for the comparison sort.
+        for radix in 0..PASTA_SORT_RADIX_BUCKETS {
+            while next[radix] < ends[radix] {
+                let position = usize::from(next[radix]);
+                let destination_bucket = bucket(&scratch[position]);
+                if destination_bucket == radix {
+                    next[radix] += 1;
+                } else {
+                    debug_assert!(next[destination_bucket] < ends[destination_bucket]);
+                    let destination = usize::from(next[destination_bucket]);
+                    scratch.swap(position, destination);
+                    next[destination_bucket] += 1;
+                }
+            }
+        }
+
+        let mut start = 0;
+        for end in ends {
+            let end = usize::from(end);
+            if end - start > 1 {
+                scratch[start..end].sort_unstable();
+            }
+            start = end;
+        }
+    }
+}
+
+fn apply_pasta_key_permutation<F: Field>(values: &mut [F], scratch: &mut [PastaSortKey]) {
     // Equal canonical encodings represent equal field elements, so their
     // relative input positions do not affect the lookup output.
     for destination in 0..values.len() {
@@ -321,6 +389,22 @@ fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
             position = source;
         }
     }
+}
+
+#[cfg(test)]
+fn sort_pasta_values_pdq<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut [F],
+    scratch: &mut [PastaSortKey],
+) {
+    assert_eq!(values.len(), scratch.len());
+    for (source, (value, entry)) in values.iter().zip(scratch.iter_mut()).enumerate() {
+        *entry = PastaSortKey {
+            limbs: pasta_sort_limbs(value.to_repr()),
+            source,
+        };
+    }
+    scratch.sort_unstable();
+    apply_pasta_key_permutation(values, scratch);
 }
 
 #[cfg(feature = "multicore")]
@@ -3142,6 +3226,60 @@ mod tests {
     fn table_sort_matches_field_order() {
         check_table_sort::<pallas::Base>();
         check_table_sort::<pallas::Scalar>();
+    }
+
+    fn check_radix_pasta_sort<F>()
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord,
+    {
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let mut rng = StdRng::seed_from_u64(0x6d73_642d_736f_7274);
+        let random = (0..2_042).map(|_| F::random(&mut rng)).collect::<Vec<_>>();
+        let mut sorted = random.clone();
+        sorted.sort_unstable();
+        let mut reverse = sorted.clone();
+        reverse.reverse();
+
+        let cases = [
+            Vec::new(),
+            vec![F::ZERO],
+            vec![F::ONE; 2_042],
+            vec![F::ZERO, F::ONE, -F::ONE, F::ZERO, -F::ONE],
+            (0..2_042_u64).map(|index| F::from(index % 17)).collect(),
+            random,
+            sorted,
+            reverse,
+            // Exercise the safe fallback just above the `u16` offset limit.
+            (0..=u16::MAX)
+                .map(|index| F::from(u64::from(index).wrapping_mul(0x9e37_79b9)))
+                .collect(),
+        ];
+
+        for input in cases {
+            let mut expected = input.clone();
+            let mut expected_scratch = vec![PastaSortKey::EMPTY; input.len()];
+            sort_pasta_values_pdq(&mut expected, &mut expected_scratch);
+
+            let mut actual = input;
+            let mut actual_scratch = vec![PastaSortKey::EMPTY; actual.len()];
+            sort_pasta_values(&mut actual, &mut actual_scratch);
+
+            assert_eq!(actual, expected);
+            assert!(actual_scratch == expected_scratch);
+            assert!(
+                actual_scratch
+                    .iter()
+                    .enumerate()
+                    .all(|(index, key)| key.source == index)
+            );
+        }
+    }
+
+    #[test]
+    fn radix_pasta_sort_matches_current_sort() {
+        check_radix_pasta_sort::<pallas::Base>();
+        check_radix_pasta_sort::<pallas::Scalar>();
     }
 
     #[cfg(feature = "multicore")]
