@@ -92,7 +92,6 @@ test-dependencies = [
     "zcash_protocol/test-dependencies",
 ]
 transparent-inputs = ["transparent/transparent-inputs", "dep:secp256k1"]
-zip-233 = []
 
 [lints.rust.unexpected_cfgs]
 level = "warn"
