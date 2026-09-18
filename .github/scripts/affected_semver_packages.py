@@ -9,6 +9,10 @@ import sys
 
 
 SEMVER_POLICY_FILES = {
+    Path(".github/semver-feature-exceptions.toml"),
+    Path(".github/scripts/check_semver.py"),
+    Path(".github/scripts/test_check_semver.py"),
+    Path(".github/scripts/test_check_semver_integration.py"),
     Path(".github/scripts/affected_semver_packages.py"),
     Path(".github/scripts/test_affected_semver_packages.py"),
     Path(".github/workflows/semver.yml"),
