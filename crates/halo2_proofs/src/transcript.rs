@@ -19,6 +19,11 @@ const BLAKE2B_PREFIX_POINT: u8 = 1;
 /// Prefix to a prover's message containing a scalar
 const BLAKE2B_PREFIX_SCALAR: u8 = 2;
 
+fn squeeze_challenge_input(state: &mut Blake2bState) -> [u8; 64] {
+    state.update(&[BLAKE2B_PREFIX_CHALLENGE]);
+    state.clone().finalize().as_bytes().try_into().unwrap()
+}
+
 /// Generic transcript view (from either the prover or verifier's perspective)
 pub trait Transcript<C: CurveAffine, E: EncodedChallenge<C>> {
     /// Squeeze an encoded verifier challenge from the transcript.
@@ -119,10 +124,14 @@ where
     C::Scalar: FromUniformBytes<64>,
 {
     fn squeeze_challenge(&mut self) -> Challenge255<C> {
-        self.state.update(&[BLAKE2B_PREFIX_CHALLENGE]);
-        let hasher = self.state.clone();
-        let result: [u8; 64] = hasher.finalize().as_bytes().try_into().unwrap();
-        Challenge255::<C>::new(&result)
+        Challenge255::<C>::new(&squeeze_challenge_input(&mut self.state))
+    }
+
+    fn squeeze_challenge_scalar<T>(&mut self) -> ChallengeScalar<C, T> {
+        ChallengeScalar {
+            inner: C::Scalar::from_uniform_bytes(&squeeze_challenge_input(&mut self.state)),
+            _marker: PhantomData,
+        }
     }
 
     fn common_point(&mut self, point: C) -> io::Result<()> {
@@ -203,10 +212,14 @@ where
     C::Scalar: FromUniformBytes<64>,
 {
     fn squeeze_challenge(&mut self) -> Challenge255<C> {
-        self.state.update(&[BLAKE2B_PREFIX_CHALLENGE]);
-        let hasher = self.state.clone();
-        let result: [u8; 64] = hasher.finalize().as_bytes().try_into().unwrap();
-        Challenge255::<C>::new(&result)
+        Challenge255::<C>::new(&squeeze_challenge_input(&mut self.state))
+    }
+
+    fn squeeze_challenge_scalar<T>(&mut self) -> ChallengeScalar<C, T> {
+        ChallengeScalar {
+            inner: C::Scalar::from_uniform_bytes(&squeeze_challenge_input(&mut self.state)),
+            _marker: PhantomData,
+        }
     }
 
     fn common_point(&mut self, point: C) -> io::Result<()> {
@@ -351,5 +364,60 @@ mod scalar_repr_tests {
         let new_challenge = new.squeeze_challenge().get_scalar();
         assert_eq!(old_challenge, new_challenge);
         assert_eq!(old.finalize(), new.finalize());
+    }
+}
+
+#[cfg(test)]
+mod typed_challenge_tests {
+    use super::*;
+    use crate::pasta::vesta;
+
+    type TestCurve = vesta::Affine;
+    type TestScalar = vesta::Scalar;
+    type TestChallenge = Challenge255<TestCurve>;
+
+    fn legacy_scalar<T: Transcript<TestCurve, TestChallenge>>(transcript: &mut T) -> TestScalar {
+        transcript.squeeze_challenge().get_scalar()
+    }
+
+    #[test]
+    fn typed_challenge_matches_encoded_write_transcript() {
+        let mut legacy = Blake2bWrite::<_, TestCurve, TestChallenge>::init(Vec::new());
+        let mut direct = Blake2bWrite::<_, TestCurve, TestChallenge>::init(Vec::new());
+
+        for value in 0..32 {
+            let scalar = TestScalar::from(value);
+            legacy.write_scalar(scalar).unwrap();
+            direct.write_scalar(scalar).unwrap();
+
+            assert_eq!(
+                legacy_scalar(&mut legacy),
+                *direct.squeeze_challenge_scalar::<()>(),
+            );
+        }
+
+        assert_eq!(&*legacy.squeeze_challenge(), &*direct.squeeze_challenge(),);
+        assert_eq!(legacy.finalize(), direct.finalize());
+    }
+
+    #[test]
+    fn typed_challenge_matches_encoded_read_transcript() {
+        let proof = (0..32)
+            .flat_map(|value| TestScalar::from(value).to_repr())
+            .collect::<Vec<_>>();
+        let mut legacy = Blake2bRead::<_, TestCurve, TestChallenge>::init(&proof[..]);
+        let mut direct = Blake2bRead::<_, TestCurve, TestChallenge>::init(&proof[..]);
+
+        for value in 0..32 {
+            let expected = TestScalar::from(value);
+            assert_eq!(legacy.read_scalar().unwrap(), expected);
+            assert_eq!(direct.read_scalar().unwrap(), expected);
+            assert_eq!(
+                legacy_scalar(&mut legacy),
+                *direct.squeeze_challenge_scalar::<()>(),
+            );
+        }
+
+        assert_eq!(&*legacy.squeeze_challenge(), &*direct.squeeze_challenge(),);
     }
 }
