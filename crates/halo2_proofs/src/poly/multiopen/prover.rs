@@ -556,24 +556,34 @@ where
     )
 }
 
-fn scale_and_add_polynomial<F: Field>(
-    polynomial: Polynomial<F, Coeff>,
-    scale: F,
-    addend: &Polynomial<F, Coeff>,
+fn fold_polynomials<F: Field>(
+    mut accumulator: Polynomial<F, Coeff>,
+    challenge: F,
+    polynomials: &[Polynomial<F, Coeff>],
 ) -> Polynomial<F, Coeff> {
-    if multicore::current_num_threads() == 1 {
-        return polynomial * scale + addend;
+    for polynomial in polynomials {
+        debug_assert_eq!(accumulator.len(), polynomial.len());
+    }
+    if polynomials.is_empty() {
+        return accumulator;
     }
 
-    debug_assert_eq!(polynomial.len(), addend.len());
-    let mut polynomial = polynomial;
-    crate::arithmetic::parallelize(&mut polynomial.values, |values, start| {
-        for (value, addend) in values.iter_mut().zip(&addend.values[start..]) {
-            *value *= scale;
-            *value += addend;
+    let fold_coefficients = |values: &mut [F], start: usize| {
+        let end = start + values.len();
+        for polynomial in polynomials {
+            for (value, addend) in values.iter_mut().zip(&polynomial.values[start..end]) {
+                *value *= challenge;
+                *value += addend;
+            }
         }
-    });
-    polynomial
+    };
+
+    if multicore::current_num_threads() == 1 {
+        fold_coefficients(&mut accumulator.values, 0);
+    } else {
+        crate::arithmetic::parallelize(&mut accumulator.values, fold_coefficients);
+    }
+    accumulator
 }
 
 /// Create a multi-opening proof.
@@ -668,15 +678,13 @@ where
             evaluation * *x_4 + q_evaluation
         });
 
-    let (p_poly, p_poly_blind) = q_polys.into_iter().zip(q_blinds).fold(
-        (q_prime_poly, q_prime_blind),
-        |(q_prime_poly, q_prime_blind), (poly, blind)| {
-            (
-                scale_and_add_polynomial(q_prime_poly, *x_4, &poly),
-                Blind((q_prime_blind.0 * &(*x_4)) + &blind.0),
-            )
-        },
-    );
+    debug_assert_eq!(q_polys.len(), q_blinds.len());
+    let p_poly = fold_polynomials(q_prime_poly, *x_4, &q_polys);
+    let p_poly_blind = q_blinds
+        .into_iter()
+        .fold(q_prime_blind, |accumulator, blind| {
+            Blind((accumulator.0 * &(*x_4)) + &blind.0)
+        });
 
     commitment::create_proof_with_powers(
         params,
@@ -731,8 +739,8 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 mod tests {
     use super::{
         Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial, collapse_polynomials,
-        evaluate_polynomials_with_side_work, finish_q_prime_evaluation, kate_division_in_place,
-        power_vector, prepare_q_prime, prepare_q_prime_evaluation, scale_and_add_polynomial,
+        evaluate_polynomials_with_side_work, finish_q_prime_evaluation, fold_polynomials,
+        kate_division_in_place, power_vector, prepare_q_prime, prepare_q_prime_evaluation,
     };
     use crate::arithmetic::{eval_polynomial, kate_division};
     use ff::Field;
@@ -1041,39 +1049,53 @@ mod tests {
         }
     }
 
-    fn scale_and_add_matches_operators<F>()
+    fn chunk_major_fold_matches_operator_fold<F>()
     where
         F: Field + From<u64> + Debug,
     {
         let len = MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD * 2 + 1;
-        let polynomial = Polynomial {
+        let accumulator = Polynomial {
             values: (0..len).map(|index| F::from(index as u64 + 1)).collect(),
             _marker: PhantomData,
         };
-        let addend = Polynomial {
-            values: (0..len)
-                .map(|index| F::from(index as u64 * 3 + 2))
-                .collect(),
-            _marker: PhantomData,
-        };
+        let polynomials = (0..5)
+            .map(|polynomial_index| Polynomial {
+                values: (0..len)
+                    .map(|index| {
+                        F::from(polynomial_index as u64 * len as u64 + index as u64 * 3 + 2)
+                    })
+                    .collect(),
+                _marker: PhantomData,
+            })
+            .collect::<Vec<_>>();
 
-        for scale in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
-            let expected = polynomial.clone() * scale + &addend;
-            let check = || {
-                let actual = scale_and_add_polynomial(polynomial.clone(), scale, &addend);
-                assert_eq!(&expected[..], &actual[..]);
-            };
+        for polynomial_count in [0, 1, polynomials.len()] {
+            for challenge in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+                let expected = polynomials[..polynomial_count]
+                    .iter()
+                    .fold(accumulator.clone(), |accumulator, polynomial| {
+                        accumulator * challenge + polynomial
+                    });
+                let check = || {
+                    let actual = fold_polynomials(
+                        accumulator.clone(),
+                        challenge,
+                        &polynomials[..polynomial_count],
+                    );
+                    assert_eq!(&expected[..], &actual[..]);
+                };
 
-            #[cfg(feature = "multicore")]
-            for thread_count in [1, 4, 10] {
-                maybe_rayon::ThreadPoolBuilder::new()
-                    .num_threads(thread_count)
-                    .build()
-                    .unwrap()
-                    .install(check);
+                #[cfg(feature = "multicore")]
+                for thread_count in [1, 4, 10] {
+                    maybe_rayon::ThreadPoolBuilder::new()
+                        .num_threads(thread_count)
+                        .build()
+                        .unwrap()
+                        .install(check);
+                }
+                #[cfg(not(feature = "multicore"))]
+                check();
             }
-            #[cfg(not(feature = "multicore"))]
-            check();
         }
     }
 
@@ -1138,12 +1160,12 @@ mod tests {
     }
 
     #[test]
-    fn scale_and_add_matches_operators_fp() {
-        scale_and_add_matches_operators::<Fp>();
+    fn chunk_major_fold_matches_operator_fold_fp() {
+        chunk_major_fold_matches_operator_fold::<Fp>();
     }
 
     #[test]
-    fn scale_and_add_matches_operators_fq() {
-        scale_and_add_matches_operators::<Fq>();
+    fn chunk_major_fold_matches_operator_fold_fq() {
+        chunk_major_fold_matches_operator_fold::<Fq>();
     }
 }
