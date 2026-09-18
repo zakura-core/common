@@ -1,5 +1,0 @@
-# Exact package and feature names only. Each entry needs a reason.
-# These unused experimental features are outside the compatibility promise.
-# Default features and the supported API remain subject to semver checks.
-[excluded_features.zakura-primitives]
-zip-233 = "Unused experimental V6 amount field, superseded by the current NU7 design."

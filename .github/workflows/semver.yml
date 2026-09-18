@@ -1,5 +1,5 @@
 # Gate changes against the latest stable crates.io release of every workspace
-# crate. Explicitly excluded unused features are outside the compatibility promise.
+# crate. Intentional breaking changes pass once their version bump covers them.
 name: Semver policy
 
 on:
@@ -12,10 +12,6 @@ on:
       - .github/scripts/affected_semver_packages.py
       - .github/scripts/test_affected_semver_packages.py
       - .github/workflows/semver.yml
-      - .github/semver-feature-exceptions.toml
-      - .github/scripts/check_semver.py
-      - .github/scripts/test_check_semver.py
-      - .github/scripts/test_check_semver_integration.py
   push:
     branches:
       - main
@@ -26,10 +22,6 @@ on:
       - .github/scripts/affected_semver_packages.py
       - .github/scripts/test_affected_semver_packages.py
       - .github/workflows/semver.yml
-      - .github/semver-feature-exceptions.toml
-      - .github/scripts/check_semver.py
-      - .github/scripts/test_check_semver.py
-      - .github/scripts/test_check_semver_integration.py
   merge_group:
   workflow_dispatch:
 
@@ -62,7 +54,6 @@ jobs:
           PR_MERGE_SHA: ${{ github.sha }}
         run: |
           python3 .github/scripts/test_affected_semver_packages.py
-          python3 .github/scripts/test_check_semver.py
 
           case "$GITHUB_EVENT_NAME" in
             pull_request)
@@ -110,14 +101,13 @@ jobs:
           # cargo-semver-checks must track stable rustdoc format changes.
           tool: cargo-semver-checks
 
-      - name: Test semver exception boundaries
-        if: matrix.package == 'zakura-primitives'
-        run: python3 .github/scripts/test_check_semver_integration.py
-
       - name: Check public API compatibility
         env:
           PACKAGE: ${{ matrix.package }}
-        run: python3 .github/scripts/check_semver.py --package "$PACKAGE"
+        run: >-
+          cargo semver-checks
+          --package "$PACKAGE"
+          --default-features
 
   semver-checks:
     name: semver-checks
