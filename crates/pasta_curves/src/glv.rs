@@ -1368,7 +1368,10 @@ pub(crate) fn try_batch_multiexp_shared_scalars<C: GlvParams>(
     }
     let window_width = multiples.ilog2() as usize + 2;
 
-    let mut all_digits = Vec::with_capacity(scalars.len());
+    let mut all_digits = Vec::new();
+    if all_digits.try_reserve_exact(scalars.len()).is_err() {
+        return false;
+    }
     let mut top = 0;
     for scalar in scalars {
         let (first, second) = match checked_signed_magnitudes(decompose::<C>(scalar)) {
