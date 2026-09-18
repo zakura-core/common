@@ -1823,77 +1823,95 @@ where
     }
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
-    let xn = super::pow_by_power_of_two(*x, params.k);
-    let polynomial_evaluator = PolynomialEvaluator::new(
-        [
-            *x,
-            domain.rotate_omega(*x, poly::Rotation::next()),
-            domain.rotate_omega(*x, poly::Rotation::prev()),
-            domain.rotate_omega(*x, poly::Rotation(-((meta.blinding_factors() + 1) as i32))),
-        ],
-        params.n as usize,
-        advice.len(),
-    );
+    // The quotient fold and x^n depend on x but not on these evaluation tables
+    // or query descriptors. Prepare both concurrently, then retain the
+    // protocol's original transcript-write order below.
+    let ((polynomial_evaluator, queries, initial_evaluation_count), (vanishing, random_eval)) =
+        crate::multicore::join(
+            || {
+                let polynomial_evaluator = PolynomialEvaluator::new(
+                    [
+                        *x,
+                        domain.rotate_omega(*x, poly::Rotation::next()),
+                        domain.rotate_omega(*x, poly::Rotation::prev()),
+                        domain.rotate_omega(
+                            *x,
+                            poly::Rotation(-((meta.blinding_factors() + 1) as i32)),
+                        ),
+                    ],
+                    params.n as usize,
+                    advice.len(),
+                );
 
-    // Compute and hash instance evals for each circuit instance
-    let instance_queries = instance
-        .iter()
-        .flat_map(|instance| {
-            meta.instance_queries
-                .iter()
-                .map(move |&(column, rotation)| EvaluationQuery {
-                    polynomial: &instance.instance_polys[column.index()],
-                    point: EvaluationPoint::from_rotation(
-                        rotation,
-                        meta.blinding_factors(),
-                        || domain.rotate_omega(*x, rotation),
-                    ),
-                })
-        })
-        .collect::<Vec<_>>();
-    // Collect advice evals for each circuit instance.
-    let advice_queries = advice
-        .iter()
-        .flat_map(|advice| {
-            meta.advice_queries
-                .iter()
-                .map(move |&(column, rotation)| EvaluationQuery {
-                    polynomial: &advice.advice_polys[column.index()],
-                    point: EvaluationPoint::from_rotation(
-                        rotation,
-                        meta.blinding_factors(),
-                        || domain.rotate_omega(*x, rotation),
-                    ),
-                })
-        })
-        .collect::<Vec<_>>();
-    // Collect fixed evals, which are shared across all circuit instances.
-    let fixed_queries = meta
-        .fixed_queries
-        .iter()
-        .map(|&(column, rotation)| EvaluationQuery {
-            polynomial: &pk.fixed_polys[column.index()],
-            point: EvaluationPoint::from_rotation(rotation, meta.blinding_factors(), || {
-                domain.rotate_omega(*x, rotation)
-            }),
-        })
-        .collect::<Vec<_>>();
-    let queries = instance_queries
-        .into_iter()
-        .chain(advice_queries)
-        .chain(fixed_queries)
-        .collect::<Vec<_>>();
-    let initial_evaluation_count = queries.len();
-    let mut queries = queries;
-    queries.extend(pk.permutation.evaluation_queries());
-    for permutation in &permutations {
-        queries.extend(permutation.evaluation_queries());
-    }
-    for lookups in &lookups {
-        for lookup in lookups {
-            queries.extend(lookup.evaluation_queries());
-        }
-    }
+                // Collect instance evals for each circuit instance.
+                let instance_queries = instance
+                    .iter()
+                    .flat_map(|instance| {
+                        meta.instance_queries
+                            .iter()
+                            .map(move |&(column, rotation)| EvaluationQuery {
+                                polynomial: &instance.instance_polys[column.index()],
+                                point: EvaluationPoint::from_rotation(
+                                    rotation,
+                                    meta.blinding_factors(),
+                                    || domain.rotate_omega(*x, rotation),
+                                ),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                // Collect advice evals for each circuit instance.
+                let advice_queries = advice
+                    .iter()
+                    .flat_map(|advice| {
+                        meta.advice_queries
+                            .iter()
+                            .map(move |&(column, rotation)| EvaluationQuery {
+                                polynomial: &advice.advice_polys[column.index()],
+                                point: EvaluationPoint::from_rotation(
+                                    rotation,
+                                    meta.blinding_factors(),
+                                    || domain.rotate_omega(*x, rotation),
+                                ),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                // Collect fixed evals, which are shared across all circuit instances.
+                let fixed_queries = meta
+                    .fixed_queries
+                    .iter()
+                    .map(|&(column, rotation)| EvaluationQuery {
+                        polynomial: &pk.fixed_polys[column.index()],
+                        point: EvaluationPoint::from_rotation(
+                            rotation,
+                            meta.blinding_factors(),
+                            || domain.rotate_omega(*x, rotation),
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+                let queries = instance_queries
+                    .into_iter()
+                    .chain(advice_queries)
+                    .chain(fixed_queries)
+                    .collect::<Vec<_>>();
+                let initial_evaluation_count = queries.len();
+                let mut queries = queries;
+                queries.extend(pk.permutation.evaluation_queries());
+                for permutation in &permutations {
+                    queries.extend(permutation.evaluation_queries());
+                }
+                for lookups in &lookups {
+                    for lookup in lookups {
+                        queries.extend(lookup.evaluation_queries());
+                    }
+                }
+
+                (polynomial_evaluator, queries, initial_evaluation_count)
+            },
+            || {
+                let xn = super::pow_by_power_of_two(*x, params.k);
+                vanishing.prepare_evaluation(*x, xn, domain)
+            },
+        );
 
     // All evaluations below depend only on x. Evaluate them as one batch so
     // that small argument-local query sets share the same worker wave, then
@@ -1908,7 +1926,7 @@ where
         transcript.write_scalar(evaluation)?;
     }
 
-    let vanishing = vanishing.evaluate(*x, xn, domain, transcript)?;
+    transcript.write_scalar(random_eval)?;
 
     // Evaluate common permutation data
     pk.permutation.evaluate(&mut evaluations, transcript)?;

@@ -334,13 +334,12 @@ impl<C: CurveAffine> CommittedRandomPolynomial<C> {
 }
 
 impl<C: CurveAffine> ConstructedQuotient<C> {
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+    pub(in crate::plonk) fn prepare_evaluation(
         self,
         x: C::Scalar,
         xn: C::Scalar,
         domain: &EvaluationDomain<C::Scalar>,
-        transcript: &mut T,
-    ) -> Result<EvaluatedQuotient<C>, Error> {
+    ) -> (EvaluatedQuotient<C>, C::Scalar) {
         let h_poly = fold_quotient_pieces(domain, self.h_pieces, xn);
 
         let h_blind = self
@@ -350,13 +349,15 @@ impl<C: CurveAffine> ConstructedQuotient<C> {
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
         let random_eval = evaluate_quotient_evaluation_mask(&self.random_poly.poly, x);
-        transcript.write_scalar(random_eval)?;
 
-        Ok(EvaluatedQuotient {
-            h_poly,
-            h_blind,
-            random_poly: self.random_poly,
-        })
+        (
+            EvaluatedQuotient {
+                h_poly,
+                h_blind,
+                random_poly: self.random_poly,
+            },
+            random_eval,
+        )
     }
 }
 
