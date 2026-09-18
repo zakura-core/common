@@ -173,6 +173,11 @@ impl<W: Write, C: CurveAffine, E: EncodedChallenge<C>> Blake2bWrite<W, C, E> {
         // TODO: handle outstanding scalars? see issue #138
         self.writer
     }
+
+    fn common_scalar_repr(&mut self, data: &<C::Scalar as PrimeField>::Repr) {
+        self.state.update(&[BLAKE2B_PREFIX_SCALAR]);
+        self.state.update(data.as_ref());
+    }
 }
 
 impl<W: Write, C: CurveAffine> TranscriptWrite<C, Challenge255<C>>
@@ -186,8 +191,8 @@ where
         self.writer.write_all(compressed.as_ref())
     }
     fn write_scalar(&mut self, scalar: C::Scalar) -> io::Result<()> {
-        self.common_scalar(scalar)?;
         let data = scalar.to_repr();
+        self.common_scalar_repr(&data);
         self.writer.write_all(data.as_ref())
     }
 }
@@ -219,8 +224,7 @@ where
     }
 
     fn common_scalar(&mut self, scalar: C::Scalar) -> io::Result<()> {
-        self.state.update(&[BLAKE2B_PREFIX_SCALAR]);
-        self.state.update(scalar.to_repr().as_ref());
+        self.common_scalar_repr(&scalar.to_repr());
 
         Ok(())
     }
@@ -315,4 +319,37 @@ pub(crate) fn read_n_scalars<C: CurveAffine, E: EncodedChallenge<C>, T: Transcri
     n: usize,
 ) -> io::Result<Vec<C::Scalar>> {
     (0..n).map(|_| transcript.read_scalar()).collect()
+}
+
+#[cfg(test)]
+mod scalar_repr_tests {
+    use super::*;
+    use crate::pasta::vesta;
+
+    type TestCurve = vesta::Affine;
+    type TestScalar = vesta::Scalar;
+    type TestTranscript<W> = Blake2bWrite<W, TestCurve, Challenge255<TestCurve>>;
+
+    fn write_scalar_old<W: Write>(
+        transcript: &mut TestTranscript<W>,
+        scalar: TestScalar,
+    ) -> io::Result<()> {
+        transcript.common_scalar(scalar)?;
+        transcript.writer.write_all(scalar.to_repr().as_ref())
+    }
+
+    #[test]
+    fn scalar_repr_reuse_preserves_transcript() {
+        let scalars = (0..257).map(TestScalar::from).collect::<Vec<_>>();
+        let mut old = TestTranscript::init(Vec::new());
+        let mut new = TestTranscript::init(Vec::new());
+        for scalar in scalars {
+            write_scalar_old(&mut old, scalar).unwrap();
+            new.write_scalar(scalar).unwrap();
+        }
+        let old_challenge = old.squeeze_challenge().get_scalar();
+        let new_challenge = new.squeeze_challenge().get_scalar();
+        assert_eq!(old_challenge, new_challenge);
+        assert_eq!(old.finalize(), new.finalize());
+    }
 }
