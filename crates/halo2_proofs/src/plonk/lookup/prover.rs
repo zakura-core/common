@@ -1314,11 +1314,11 @@ fn commit_sinsemilla_q_0<C: CurveAffine>(
     };
 
     // Factor the repeated q_0 without changing any other scalar. The
-    // dedicated prepared-table path sums the selected Lagrange bases into
+    // dedicated prepared-commitment path sums the selected Lagrange bases into
     // S_U, then adds [q_0] S_U. Existing zero and low-magnitude behavior is
     // therefore preserved for every remaining coefficient.
     params
-        .try_commit_sinsemilla_table(polynomial, blind, q_0, q_0_count, usable_rows)
+        .try_commit_sinsemilla_q_0(polynomial, blind, q_0, q_0_count, usable_rows)
         .unwrap_or_else(|| params.commit_lagrange(polynomial, blind))
 }
 
@@ -3161,7 +3161,7 @@ mod tests {
             // blind-tail row that happens to equal q_0.
             #[cfg(feature = "multicore")]
             let routed_table = prepared_pool.install(|| {
-                params.try_commit_sinsemilla_table(
+                params.try_commit_sinsemilla_q_0(
                     &table,
                     table_blind,
                     q_0,
@@ -3170,7 +3170,7 @@ mod tests {
                 )
             });
             #[cfg(all(not(feature = "multicore"), feature = "orbits"))]
-            let routed_table = params.try_commit_sinsemilla_table(
+            let routed_table = params.try_commit_sinsemilla_q_0(
                 &table,
                 table_blind,
                 q_0,
@@ -3233,7 +3233,7 @@ mod tests {
         {
             #[cfg(feature = "multicore")]
             let routed = prepared_pool.install(|| {
-                params.try_commit_sinsemilla_table(
+                params.try_commit_sinsemilla_q_0(
                     &constant,
                     Blind(C::Scalar::ZERO),
                     q_0,
@@ -3242,7 +3242,7 @@ mod tests {
                 )
             });
             #[cfg(not(feature = "multicore"))]
-            let routed = params.try_commit_sinsemilla_table(
+            let routed = params.try_commit_sinsemilla_q_0(
                 &constant,
                 Blind(C::Scalar::ZERO),
                 q_0,
@@ -3253,7 +3253,7 @@ mod tests {
 
             assert!(
                 params
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         C::Scalar::ZERO,
@@ -3264,7 +3264,7 @@ mod tests {
             );
             assert!(
                 params
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         q_0,
@@ -3275,7 +3275,7 @@ mod tests {
             );
             assert!(
                 params
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         q_0,
@@ -3286,7 +3286,7 @@ mod tests {
             );
             assert!(
                 params
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         q_0,
@@ -3299,7 +3299,7 @@ mod tests {
             let unprepared = Params::<C>::new(K);
             assert!(
                 unprepared
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         q_0,

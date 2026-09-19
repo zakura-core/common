@@ -1886,11 +1886,11 @@ impl<C: CurveAffine> Params<C> {
         best_multiexp::<C>(&tmp_scalars, &tmp_bases)
     }
 
-    /// Attempts the dedicated prepared-table commitment for a permuted
-    /// Sinsemilla lookup table. It factors the repeated `q_0` terms into one
-    /// multiplication by the sum of their Lagrange bases, so every other
+    /// Attempts the dedicated prepared-commitment path for a permuted
+    /// Sinsemilla lookup polynomial. It factors the repeated `q_0` terms into
+    /// one multiplication by the sum of their Lagrange bases, so every other
     /// scalar retains its existing zero and low-magnitude behavior.
-    pub(crate) fn try_commit_sinsemilla_table(
+    pub(crate) fn try_commit_sinsemilla_q_0(
         &self,
         poly: &Polynomial<C::Scalar, LagrangeCoeff>,
         r: Blind<C::Scalar>,
