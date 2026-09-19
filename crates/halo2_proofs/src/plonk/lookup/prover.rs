@@ -30,9 +30,15 @@ use std::{
     any::{Any, TypeId},
     cmp::Ordering,
     iter,
-    ops::{Mul, MulAssign},
+    ops::{Mul, MulAssign, Range},
     sync::{Arc, Mutex},
 };
+
+#[derive(Debug, PartialEq, Eq)]
+struct SinsemillaQ0Range<F> {
+    value: F,
+    rows: Range<usize>,
+}
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Permuted<C: CurveAffine, Ev> {
@@ -538,19 +544,19 @@ fn factorable_sinsemilla_q_0<F: Field + Ord>(sorted_values: &[F], q_0: F) -> Opt
     .then_some((q_0, q_0_terms))
 }
 
-fn count_sorted_value<F: Ord>(sorted_values: &[F], value: &F) -> usize {
+fn sorted_value_range<F: Ord>(sorted_values: &[F], value: &F) -> Range<usize> {
     let start = sorted_values.partition_point(|candidate| candidate < value);
     let end = sorted_values.partition_point(|candidate| candidate <= value);
-    end - start
+    start..end
 }
 
 fn factorable_input_sinsemilla_q_0<F: Ord>(
     sorted_input_values: &[F],
     table_sinsemilla_q_0: Option<(F, usize)>,
-) -> Option<(F, usize)> {
+) -> Option<SinsemillaQ0Range<F>> {
     let (q_0, table_count) = table_sinsemilla_q_0?;
-    let input_count = count_sorted_value(sorted_input_values, &q_0);
-    (input_count > table_count).then_some((q_0, input_count))
+    let rows = sorted_value_range(sorted_input_values, &q_0);
+    (rows.len() > table_count).then_some(SinsemillaQ0Range { value: q_0, rows })
 }
 
 pub(in crate::plonk) struct PreparedProduct<C: CurveAffine, Ev> {
@@ -1202,7 +1208,7 @@ fn commit_permuted_pair<C: CurveAffine>(
     table: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_blind: Blind<C::Scalar>,
     table_sinsemilla_q_0: Option<(C::Scalar, usize)>,
-    input_sinsemilla_q_0: Option<(C::Scalar, usize)>,
+    input_sinsemilla_q_0: Option<SinsemillaQ0Range<C::Scalar>>,
     usable_rows: usize,
     #[cfg(feature = "multicore")] sorted_u10: Option<(&SortedU10, &[C])>,
 ) -> (C, C) {
@@ -1213,13 +1219,22 @@ fn commit_permuted_pair<C: CurveAffine>(
         // transcript order.
         let (input_commitment, difference_commitment) = crate::multicore::join(
             || {
-                commit_sinsemilla_q_0(
+                try_commit_sinsemilla_q_0_range(
                     params,
                     input,
                     input_blind,
-                    Some(input_sinsemilla_q_0),
+                    &input_sinsemilla_q_0,
                     usable_rows,
                 )
+                .unwrap_or_else(|| {
+                    commit_sinsemilla_q_0(
+                        params,
+                        input,
+                        input_blind,
+                        Some((input_sinsemilla_q_0.value, input_sinsemilla_q_0.rows.len())),
+                        usable_rows,
+                    )
+                })
             },
             || {
                 commit_lagrange_difference(
@@ -1300,6 +1315,65 @@ fn commit_permuted_pair<C: CurveAffine>(
     let mut affine = [C::identity(); 2];
     C::Curve::batch_normalize(&projective, &mut affine);
     (affine[0], affine[1])
+}
+
+#[cfg(feature = "multicore")]
+fn try_commit_sinsemilla_q_0_range<C: CurveAffine>(
+    params: &Params<C>,
+    polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
+    blind: Blind<C::Scalar>,
+    sinsemilla_q_0: &SinsemillaQ0Range<C::Scalar>,
+    usable_rows: usize,
+) -> Option<C::Curve> {
+    let rows = sinsemilla_q_0.rows.clone();
+    if polynomial.len() != params.n as usize
+        || rows.is_empty()
+        || rows.end > usable_rows
+        || usable_rows > polynomial.len()
+        || bool::from(sinsemilla_q_0.value.is_zero())
+    {
+        return None;
+    }
+
+    let suffix_multiples = params.prepared_lagrange_suffix_multiples()?;
+    if suffix_multiples.len() != params.g_lagrange.len() * SORTED_U10_SUFFIX_MULTIPLES {
+        return None;
+    }
+
+    let mut remaining = polynomial.clone();
+    let remaining_values: &mut [C::Scalar] = &mut remaining;
+    for value in &mut remaining_values[rows.clone()] {
+        if *value != sinsemilla_q_0.value {
+            return None;
+        }
+        *value = C::Scalar::ZERO;
+    }
+    // The sorted q_0 run occupies `[start, end)`. For suffix sums
+    // `S_i = sum_{j=i}^{n-1} G_j`, its bases sum to `S_start - S_end`.
+    let suffix_sum = |row: usize| {
+        if row == params.g_lagrange.len() {
+            C::Curve::identity()
+        } else {
+            C::Curve::from(suffix_multiples[row * SORTED_U10_SUFFIX_MULTIPLES])
+        }
+    };
+    let selected_sum = suffix_sum(rows.start) - suffix_sum(rows.end);
+    let (remaining, correction) = crate::multicore::join(
+        || params.commit_lagrange(&remaining, blind),
+        || best_multiexp::<C>(&[sinsemilla_q_0.value], &[selected_sum.to_affine()]),
+    );
+    Some(remaining + correction)
+}
+
+#[cfg(not(feature = "multicore"))]
+fn try_commit_sinsemilla_q_0_range<C: CurveAffine>(
+    _params: &Params<C>,
+    _polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
+    _blind: Blind<C::Scalar>,
+    _sinsemilla_q_0: &SinsemillaQ0Range<C::Scalar>,
+    _usable_rows: usize,
+) -> Option<C::Curve> {
+    None
 }
 
 fn commit_sinsemilla_q_0<C: CurveAffine>(
@@ -2826,6 +2900,87 @@ mod tests {
             );
         }
 
+        let usable_rows = domain_len - SORTED_U10_MAX_SUFFIX;
+        let q_0 = C::Scalar::from(29);
+        let q_0_rows = 173..1_223;
+        let mut values = (0..domain_len)
+            .map(|row| C::Scalar::from(row as u64 + 1_000))
+            .collect::<Vec<_>>();
+        values[q_0_rows.clone()].fill(q_0);
+        let polynomial = domain.lagrange_from_vec(values);
+        let blind = Blind(C::Scalar::random(&mut rng));
+        let expected = params.commit_lagrange(&polynomial, blind);
+        assert_eq!(
+            try_commit_sinsemilla_q_0_range(
+                &params,
+                &polynomial,
+                blind,
+                &SinsemillaQ0Range {
+                    value: q_0,
+                    rows: q_0_rows.clone(),
+                },
+                usable_rows,
+            ),
+            Some(expected),
+        );
+        let constant = domain.lagrange_from_vec(vec![q_0; domain_len]);
+        let constant_blind = Blind(C::Scalar::random(&mut rng));
+        assert_eq!(
+            try_commit_sinsemilla_q_0_range(
+                &params,
+                &constant,
+                constant_blind,
+                &SinsemillaQ0Range {
+                    value: q_0,
+                    rows: 0..domain_len,
+                },
+                domain_len,
+            ),
+            Some(params.commit_lagrange(&constant, constant_blind)),
+        );
+        assert!(
+            try_commit_sinsemilla_q_0_range(
+                &params,
+                &polynomial,
+                blind,
+                &SinsemillaQ0Range {
+                    value: q_0,
+                    rows: q_0_rows.start - 1..q_0_rows.end,
+                },
+                usable_rows,
+            )
+            .is_none()
+        );
+        assert!(
+            wide_pool
+                .install(|| {
+                    try_commit_sinsemilla_q_0_range(
+                        &params,
+                        &polynomial,
+                        blind,
+                        &SinsemillaQ0Range {
+                            value: q_0,
+                            rows: q_0_rows.clone(),
+                        },
+                        usable_rows,
+                    )
+                })
+                .is_none()
+        );
+        assert!(
+            try_commit_sinsemilla_q_0_range(
+                &decoded,
+                &polynomial,
+                blind,
+                &SinsemillaQ0Range {
+                    value: q_0,
+                    rows: q_0_rows,
+                },
+                usable_rows,
+            )
+            .is_none()
+        );
+
         #[cfg(not(feature = "orbits"))]
         {
             let usable_rows = domain_len - PERMUTED_U10_TABLE_SUFFIX_TERMS;
@@ -3079,7 +3234,10 @@ mod tests {
                 &zero,
                 Blind(C::Scalar::ZERO),
                 Some((C::Scalar::ZERO, 1 << K)),
-                Some((C::Scalar::ZERO, 1 << K)),
+                Some(SinsemillaQ0Range {
+                    value: C::Scalar::ZERO,
+                    rows: 0..1 << K,
+                }),
                 1 << K,
                 #[cfg(feature = "multicore")]
                 None,
@@ -3193,9 +3351,18 @@ mod tests {
                 (Some((q_0, TABLE_Q_0_COUNT)), None),
                 (
                     Some((q_0, TABLE_Q_0_COUNT)),
-                    (input_q_0_count > TABLE_Q_0_COUNT).then_some((q_0, input_q_0_count)),
+                    (input_q_0_count > TABLE_Q_0_COUNT).then_some(SinsemillaQ0Range {
+                        value: q_0,
+                        rows: 0..input_q_0_count,
+                    }),
                 ),
-                (Some((q_0, TABLE_Q_0_COUNT)), Some((q_0, input_q_0_count))),
+                (
+                    Some((q_0, TABLE_Q_0_COUNT)),
+                    Some(SinsemillaQ0Range {
+                        value: q_0,
+                        rows: 0..input_q_0_count,
+                    }),
+                ),
             ] {
                 assert_eq!(
                     commit_permuted_pair(
@@ -3334,7 +3501,10 @@ mod tests {
         );
         assert_eq!(
             factorable_input_sinsemilla_q_0(&with_q_0, Some((q_0, 1))),
-            Some((q_0, 2)),
+            Some(SinsemillaQ0Range {
+                value: q_0,
+                rows: 2..4,
+            }),
         );
         assert_eq!(
             factorable_input_sinsemilla_q_0(&with_q_0, Some((q_0, 2))),
