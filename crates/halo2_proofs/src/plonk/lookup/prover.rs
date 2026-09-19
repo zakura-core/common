@@ -313,6 +313,70 @@ fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
     apply_pasta_key_permutation(values, scratch);
 }
 
+/// Sorts only the values outside a dominant nonzero run, then inserts that run
+/// into its canonical position. A declined specialization leaves both buffers
+/// untouched so the caller can safely fall back to the generic Pasta sort.
+fn try_sort_pasta_values_with_repeated_value<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut Vec<F>,
+    scratch: &mut [PastaSortKey],
+    repeated: F,
+) -> Option<usize> {
+    assert_eq!(values.len(), scratch.len());
+    if values.is_empty() || bool::from(repeated.is_zero()) {
+        return None;
+    }
+
+    let original_len = values.len();
+    let repeated_count = values.iter().filter(|&&value| value == repeated).count();
+    if repeated_count < original_len.div_ceil(SINSEMILLA_Q_0_MIN_REPETITION_FRACTION_DENOMINATOR) {
+        return None;
+    }
+
+    values.retain(|&value| value != repeated);
+    let residual_len = values.len();
+    sort_pasta_values(values, &mut scratch[..residual_len]);
+
+    let repeated_key = PastaSortKey {
+        limbs: pasta_sort_limbs(repeated.to_repr()),
+        source: 0,
+    };
+    let insertion = scratch[..residual_len].partition_point(|key| key < &repeated_key);
+
+    values.resize(original_len, repeated);
+    values.copy_within(insertion..residual_len, insertion + repeated_count);
+    values[insertion..insertion + repeated_count].fill(repeated);
+
+    scratch.copy_within(insertion..residual_len, insertion + repeated_count);
+    scratch[insertion..insertion + repeated_count].fill(repeated_key);
+    // Downstream permutation consumes row indices in the reconstructed
+    // buffers, matching the generic key-permutation route.
+    for (source, key) in scratch.iter_mut().enumerate() {
+        key.source = source;
+    }
+
+    Some(repeated_count)
+}
+
+// A `Vec` is required here for safe runtime specialization through `Any`.
+#[allow(clippy::ptr_arg)]
+fn try_sort_lookup_values_with_repeated_value<F: Field + Ord>(
+    values: &mut Vec<F>,
+    scratch: &mut [PastaSortKey],
+    repeated: F,
+) -> Option<usize> {
+    let dynamic_repeated = &repeated as &dyn Any;
+    let dynamic_values = values as &mut dyn Any;
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fp>>() {
+        let repeated = *dynamic_repeated.downcast_ref::<crate::pasta::Fp>()?;
+        return try_sort_pasta_values_with_repeated_value(values, scratch, repeated);
+    }
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fq>>() {
+        let repeated = *dynamic_repeated.downcast_ref::<crate::pasta::Fq>()?;
+        return try_sort_pasta_values_with_repeated_value(values, scratch, repeated);
+    }
+    None
+}
+
 fn sort_pasta_keys(scratch: &mut [PastaSortKey]) {
     if scratch.len() > usize::from(u16::MAX) {
         scratch.sort_unstable();
@@ -853,13 +917,36 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             .take(usable_rows)
             .copied()
             .collect::<Vec<_>>();
-        let sort = sort_lookup_values_for_kind(&mut sorted_values, table_kind, sort_scratch);
+        // The Sinsemilla table is padded with its first tuple over roughly
+        // half of the usable rows. Sort the non-padding values, then insert
+        // the repeated run at its canonical position. This preserves the
+        // generic sorted representation while avoiding key generation and
+        // comparison sorting for the padding rows.
+        let mut sort_scratch = sort_scratch;
+        let sorted_q_0_count = (table_kind == PreparedTableKind::Sinsemilla)
+            .then(|| {
+                try_sort_lookup_values_with_repeated_value(
+                    &mut sorted_values,
+                    &mut sort_scratch,
+                    q_0,
+                )
+            })
+            .flatten();
+        let sort = if sorted_q_0_count.is_some() {
+            SortedLookup::Keys(sort_scratch)
+        } else {
+            sort_lookup_values_for_kind(&mut sorted_values, table_kind, sort_scratch)
+        };
         // The Sinsemilla generator lookup is padded with its first tuple. Its
         // theta-compressed value is therefore repeated over roughly half of
         // the table commitment. Keep this specialization at the table-MSM
         // boundary instead of changing generic MSM routing.
         let sinsemilla_q_0 = (table_kind == PreparedTableKind::Sinsemilla)
-            .then(|| factorable_sinsemilla_q_0(&sorted_values, q_0))
+            .then(|| {
+                sorted_q_0_count
+                    .map(|count| (q_0, count))
+                    .or_else(|| factorable_sinsemilla_q_0(&sorted_values, q_0))
+            })
             .flatten();
 
         PreparedTable {
@@ -3592,6 +3679,97 @@ mod tests {
     fn radix_pasta_sort_matches_current_sort() {
         check_radix_pasta_sort::<pallas::Base>();
         check_radix_pasta_sort::<pallas::Scalar>();
+    }
+
+    fn assert_pasta_sort_keys_match(actual: &[PastaSortKey], expected: &[PastaSortKey]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(actual.limbs, expected.limbs, "key mismatch at {index}");
+            assert_eq!(actual.source, expected.source, "source mismatch at {index}");
+        }
+    }
+
+    fn check_repeated_value_sort_case<F>(input: Vec<F>, repeated: F, expected_count: Option<usize>)
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord + core::fmt::Debug,
+    {
+        let mut expected_values = input.clone();
+        let mut expected_scratch = vec![PastaSortKey::EMPTY; input.len()];
+        sort_pasta_values(&mut expected_values, &mut expected_scratch);
+
+        let sentinel = PastaSortKey {
+            limbs: [u64::MAX; PASTA_REPR_LIMBS],
+            source: usize::MAX,
+        };
+        let mut actual_values = input;
+        let mut actual_scratch = vec![sentinel; actual_values.len()];
+        let original_values = actual_values.clone();
+        let original_scratch = actual_scratch.clone();
+        let actual_count = try_sort_lookup_values_with_repeated_value(
+            &mut actual_values,
+            &mut actual_scratch,
+            repeated,
+        );
+        assert_eq!(actual_count, expected_count);
+
+        if actual_count.is_none() {
+            // A declined specialization must leave both buffers untouched so
+            // the caller can safely use the generic Pasta sort.
+            assert_eq!(actual_values, original_values);
+            assert_pasta_sort_keys_match(&actual_scratch, &original_scratch);
+            sort_pasta_values(&mut actual_values, &mut actual_scratch);
+        }
+
+        assert_eq!(actual_values, expected_values);
+        assert_pasta_sort_keys_match(&actual_scratch, &expected_scratch);
+    }
+
+    fn check_repeated_value_sort<F>()
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord + core::fmt::Debug,
+    {
+        let values = |values: &[u64]| values.iter().copied().map(F::from).collect::<Vec<_>>();
+
+        // An all-repeated input exercises the empty residual sort.
+        check_repeated_value_sort_case(vec![F::from(7); 16], F::from(7), Some(16));
+
+        // The repeated value is inserted at the beginning, middle, and end
+        // of the sorted residual. Each run is exactly the one-quarter gate.
+        check_repeated_value_sort_case(
+            values(&[1, 8, 4, 1, 11, 5, 2, 1, 13, 6, 3, 1, 12, 9, 7, 10]),
+            F::ONE,
+            Some(4),
+        );
+        check_repeated_value_sort_case(
+            values(&[5, 9, 0, 5, 4, 7, 5, 2, 10, 3, 5, 8, 1, 6, 11, 12, 5]),
+            F::from(5),
+            Some(5),
+        );
+        check_repeated_value_sort_case(
+            values(&[20, 8, 4, 20, 11, 5, 2, 20, 0, 6, 3, 20, 10, 9, 7, 1]),
+            F::from(20),
+            Some(4),
+        );
+
+        // Falling below the gate, choosing zero, or receiving no rows must
+        // decline without mutation before the generic fallback runs.
+        check_repeated_value_sort_case(
+            values(&[5, 9, 0, 13, 4, 7, 5, 2, 10, 3, 5, 8, 1, 6, 11, 12]),
+            F::from(5),
+            None,
+        );
+        check_repeated_value_sort_case(
+            values(&[0, 9, 0, 13, 4, 0, 5, 2, 10, 0, 7, 8, 1, 6, 11, 12]),
+            F::ZERO,
+            None,
+        );
+        check_repeated_value_sort_case(Vec::new(), F::ONE, None);
+    }
+
+    #[test]
+    fn repeated_value_pasta_sort_matches_generic_sort_and_fallback() {
+        check_repeated_value_sort::<pallas::Base>();
+        check_repeated_value_sort::<pallas::Scalar>();
     }
 
     #[cfg(feature = "multicore")]
