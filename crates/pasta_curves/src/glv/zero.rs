@@ -507,6 +507,15 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     ) -> C {
         let num_threads = current_num_threads();
 
+        // Extras with zero scalars or identity points contribute nothing.
+        let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
+            .iter()
+            .filter(|(scalar, point)| {
+                !bool::from(point.is_identity()) && !bool::from(scalar.is_zero())
+            })
+            .copied()
+            .collect();
+
         // A prepared MSM normally recodes one row per prepared base, even
         // when a caller supplies many exact zeros. Preserve the prepared
         // point table while compacting sufficiently sparse inputs: code
@@ -521,6 +530,14 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             if live_scalars > compact_limit {
                 break;
             }
+        }
+        // Exact-zero density is deliberately observable, as permitted by
+        // this API's existing variable-time contract. Avoid constructing an
+        // empty code matrix while preserving any independent extra terms.
+        if live_scalars == 0 {
+            return self
+                .extras_sum(&extras)
+                .unwrap_or_else(|| self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra));
         }
         let base_indices = (live_scalars != 0 && live_scalars <= compact_limit).then(|| {
             (0..terms)
@@ -568,14 +585,6 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
         };
         recoded.base_indices = base_indices;
-        // Extras with zero scalars or identity points contribute nothing.
-        let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
-            .iter()
-            .filter(|(scalar, point)| {
-                !bool::from(point.is_identity()) && !bool::from(scalar.is_zero())
-            })
-            .copied()
-            .collect();
         match self.evaluate(&recoded, &extras, num_threads, main_window_fold) {
             Some(sum) => sum,
             // Unreachable for valid curve points (the batched-affine
@@ -1876,6 +1885,88 @@ mod tests {
         );
     }
 
+    /// Compact recoding preserves the original base pairing at its exact
+    /// threshold and on either side, including folded dead rows and extras.
+    #[cfg(feature = "multicore")]
+    fn compact_rows_match_generic_msm<C: GlvParams>() {
+        const TERMS: usize = 128;
+        const MAX_TEST_WORKERS: usize = 10;
+
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut independent_bases = vec![C::AffineExt::identity(); TERMS];
+        C::batch_normalize(&projective, &mut independent_bases);
+        let independent = PreparedZeroMsm::<C>::prepare_with_mode(
+            &independent_bases,
+            CodebookMode::alpha_only(6),
+        );
+        assert!(independent.merges.is_empty());
+
+        let dense =
+            super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64).collect::<Vec<_>>();
+        let identity = C::identity().to_affine();
+        let extras = [
+            (C::ScalarExt::from(41), generator.to_affine()),
+            (C::ScalarExt::ZERO, generator.to_affine()),
+            (C::ScalarExt::from(73), identity),
+        ];
+        let extra_sum = generator * C::ScalarExt::from(41);
+
+        let check = |prepared: &PreparedZeroMsm<C>, bases: &[C::AffineExt], live: usize| {
+            let mut scalars = vec![C::ScalarExt::ZERO; TERMS];
+            for slot in 0..live {
+                // 37 is coprime to 128, so every selected row is distinct
+                // and the live rows are interleaved across the whole table.
+                let index = slot * 37 % TERMS;
+                scalars[index] = dense[index];
+            }
+            let expected = scalars
+                .iter()
+                .zip(bases)
+                .fold(C::identity(), |sum, (&scalar, &base)| {
+                    sum + C::from(base) * scalar
+                })
+                + extra_sum;
+            for workers in [1, MAX_TEST_WORKERS] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .expect("test thread pool must build")
+                    .install(|| {
+                        assert_eq!(
+                            prepared.multiexp_with_terms_vartime(&scalars, &extras),
+                            expected,
+                            "{live} live rows at {workers} workers"
+                        );
+                        let split = TERMS / 3;
+                        assert_eq!(
+                            crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
+                                prepared,
+                                &scalars[..split],
+                                &scalars[split..],
+                                &extras,
+                            ),
+                            expected,
+                            "split input with {live} live rows at {workers} workers"
+                        );
+                    });
+            }
+        };
+
+        for live in [0, 1, TERMS / 2, TERMS / 2 + 1] {
+            check(&independent, &independent_bases, live);
+        }
+
+        let (_, related_bases, _) = super::super::testutil::verifier_multiexp_inputs::<C>(TERMS);
+        let related =
+            PreparedZeroMsm::<C>::prepare_with_mode(&related_bases, CodebookMode::alpha_only(6));
+        assert!(!related.merges.is_empty());
+        assert!(related.live.iter().any(|live| !live));
+        check(&related, &related_bases, TERMS / 3);
+    }
+
     /// A live scalar range evaluates only its matching contiguous bases.
     fn base_offset_range_matches_full_msm<C: GlvParams>() {
         const HALF: usize = 64;
@@ -2374,6 +2465,11 @@ mod tests {
                 #[test]
                 fn generic_agreement() {
                     matches_generic_msm::<$curve>();
+                }
+                #[cfg(feature = "multicore")]
+                #[test]
+                fn compact_rows() {
+                    compact_rows_match_generic_msm::<$curve>();
                 }
                 #[test]
                 fn base_offset_range() {

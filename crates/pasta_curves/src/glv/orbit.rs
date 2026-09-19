@@ -452,16 +452,67 @@ fn digit_matrix<C: GlvParams>(
 
 /// Stages one window's bucket contents: counts per orbit, then scatters
 /// each nonzero digit's unit-rotated point into its orbit's range.
-fn window_points_with<F: Field>(
+fn window_points<F: Field>(
     params: &OrbitParams,
     digits: &[u16],
     window: usize,
-    terms: usize,
-    rotated_at: impl Fn(usize) -> RotatedBase<F>,
+    rotated: &[RotatedBase<F>],
 ) -> (Vec<AffinePoint<F>>, Vec<usize>) {
-    debug_assert_ne!(terms, 0);
-    debug_assert_eq!(digits.len() % terms, 0);
-    let width = digits.len() / terms;
+    debug_assert!(!rotated.is_empty());
+    debug_assert_eq!(digits.len() % rotated.len(), 0);
+    let width = digits.len() / rotated.len();
+    debug_assert!(window < width);
+    let mut counts = alloc::vec![0usize; params.bucket_count()];
+    for row in digits.chunks_exact(width) {
+        let code = row[window];
+        if code != 0 {
+            counts[usize::from(code - 1) / 6] += 1;
+        }
+    }
+
+    let mut offsets = Vec::with_capacity(counts.len() + 1);
+    offsets.push(0);
+    for count in counts {
+        offsets.push(offsets.last().copied().unwrap() + count);
+    }
+
+    let mut positions = offsets[..offsets.len() - 1].to_vec();
+    let mut points = alloc::vec![
+        AffinePoint {
+            x: F::ZERO,
+            y: F::ZERO,
+        };
+        *offsets.last().unwrap()
+    ];
+    for (row, base) in digits.chunks_exact(width).zip(rotated) {
+        let code = usize::from(row[window]);
+        if code == 0 {
+            continue;
+        }
+        let (orbit, unit) = ((code - 1) / 6, (code - 1) % 6);
+        let position = positions[orbit];
+        points[position] = AffinePoint {
+            x: base.xs[unit >> 1],
+            y: if unit & 1 == 1 { -base.y } else { base.y },
+        };
+        positions[orbit] = position + 1;
+    }
+
+    (points, offsets)
+}
+
+/// The [`window_points`] counterpart for compact digit rows that retain
+/// their original positions in a larger prepared-base array.
+fn window_points_indexed<F: Field>(
+    params: &OrbitParams,
+    digits: &[u16],
+    window: usize,
+    rotated: &[RotatedBase<F>],
+    base_indices: &[usize],
+) -> (Vec<AffinePoint<F>>, Vec<usize>) {
+    debug_assert!(!base_indices.is_empty());
+    debug_assert_eq!(digits.len() % base_indices.len(), 0);
+    let width = digits.len() / base_indices.len();
     debug_assert!(window < width);
     let mut counts = alloc::vec![0usize; params.bucket_count()];
     for row in digits.chunks_exact(width) {
@@ -490,7 +541,7 @@ fn window_points_with<F: Field>(
         if code == 0 {
             continue;
         }
-        let base = rotated_at(base_index);
+        let base = &rotated[base_indices[base_index]];
         let (orbit, unit) = ((code - 1) / 6, (code - 1) % 6);
         let position = positions[orbit];
         points[position] = AffinePoint {
@@ -555,7 +606,18 @@ pub(super) fn windows_sum<C: GlvParams>(
         debug_assert!(digits.is_empty());
         return Some(C::identity());
     }
-    windows_sum_with::<C>(params, digits, rotated.len(), |index| rotated[index], range)
+    let mut acc = C::identity();
+    for window in range.clone().rev() {
+        if window + 1 != range.end {
+            for _ in 0..params.window_bits {
+                acc = acc.double();
+            }
+        }
+        let (points, offsets) = window_points(params, digits, window, rotated);
+        let buckets = reduce_affine_buckets(points, offsets)?;
+        acc += reduce_hex_weighted::<C>(params, &buckets);
+    }
+    Some(acc)
 }
 
 /// The [`windows_sum`] counterpart for compact digit rows that retain their
@@ -567,23 +629,7 @@ pub(super) fn windows_sum_indexed<C: GlvParams>(
     base_indices: &[usize],
     range: core::ops::Range<usize>,
 ) -> Option<C> {
-    windows_sum_with::<C>(
-        params,
-        digits,
-        base_indices.len(),
-        |index| rotated[base_indices[index]],
-        range,
-    )
-}
-
-fn windows_sum_with<C: GlvParams>(
-    params: &OrbitParams,
-    digits: &[u16],
-    terms: usize,
-    rotated_at: impl Fn(usize) -> RotatedBase<C::Base>,
-    range: core::ops::Range<usize>,
-) -> Option<C> {
-    if terms == 0 {
+    if base_indices.is_empty() {
         debug_assert!(digits.is_empty());
         return Some(C::identity());
     }
@@ -594,7 +640,8 @@ fn windows_sum_with<C: GlvParams>(
                 acc = acc.double();
             }
         }
-        let (points, offsets) = window_points_with(params, digits, window, terms, &rotated_at);
+        let (points, offsets) =
+            window_points_indexed(params, digits, window, rotated, base_indices);
         let buckets = reduce_affine_buckets(points, offsets)?;
         acc += reduce_hex_weighted::<C>(params, &buckets);
     }

@@ -882,7 +882,7 @@ pub(crate) struct Recoded {
     /// Original prepared-base indices when zero scalar rows were compacted
     /// before recoding. `None` means code column `i` still belongs to base
     /// `i`.
-    pub(crate) base_indices: Option<Vec<usize>>,
+    pub(super) base_indices: Option<Vec<usize>>,
     /// Residuals as signed-magnitude component pairs, ready for the
     /// unprepared tail backend. Rows recoded to zero (including all rows
     /// the caller zeroed) have zero residuals.
