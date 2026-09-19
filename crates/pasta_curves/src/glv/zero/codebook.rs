@@ -840,7 +840,12 @@ impl Codebook {
     /// by the caller), returning one past the highest nonzero window and
     /// the residual `t` with `z = Σ B^j d_j + B^L t`. The residual is
     /// asserted against [`Self::tail_bound`].
-    fn recode_pair(&self, mut a: i128, mut b: i128, row: &mut [u32]) -> (usize, (i64, i64)) {
+    pub(super) fn recode_pair(
+        &self,
+        mut a: i128,
+        mut b: i128,
+        row: &mut [u32],
+    ) -> (usize, (i64, i64)) {
         debug_assert_eq!(row.len(), self.main_windows);
         let c = self.mode.window_bits();
         let mask = (1i128 << c) - 1;
