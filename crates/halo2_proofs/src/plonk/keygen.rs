@@ -633,6 +633,13 @@ where
     let l0 = special_cosets.pop().expect("l_0 transform exists");
     debug_assert!(special_cosets.is_empty());
 
+    #[cfg(feature = "multicore")]
+    let prepared_u10_tables = super::lookup::prover::prepare_u10_table_markers(
+        &vk.cs.lookups,
+        params.n as usize - (vk.cs.blinding_factors() + 1),
+        &fixed,
+    );
+
     #[cfg(feature = "batch")]
     let prepared_instance_coset = (params.k() == ORCHARD_K
         && cs.num_instance_columns == PREPARED_INSTANCE_COLUMNS)
@@ -657,6 +664,8 @@ where
         fft_twiddles,
         floor_plan,
         circuit_config,
+        #[cfg(feature = "multicore")]
+        prepared_u10_tables,
         #[cfg(feature = "batch")]
         prepared_instance_coset,
         quotient_plans: Arc::new(Default::default()),

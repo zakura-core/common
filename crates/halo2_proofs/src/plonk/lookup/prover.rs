@@ -280,6 +280,8 @@ pub(in crate::plonk) struct TablePlan {
     representatives: Vec<usize>,
     groups: Vec<usize>,
     table_kinds: Vec<PreparedTableKind>,
+    #[cfg(feature = "multicore")]
+    prepared_u10_tables: Vec<bool>,
     table_sort_scratch: Vec<Vec<PastaSortKey>>,
     input_sort_scratch: Vec<Vec<PastaSortKey>>,
 }
@@ -408,13 +410,13 @@ fn sort_pasta_values_pdq<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
 }
 
 #[cfg(feature = "multicore")]
-/// Attempts a counting sort for a structurally identified 10-bit lookup.
+/// Counts a structurally identified 10-bit lookup.
 ///
 /// The structural marker is only a routing hint. This validates every
-/// canonical field encoding before mutating the values, so callers can safely
-/// fall back to the generic sort for malformed witnesses.
-fn try_count_sort_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
-    values: &mut [F],
+/// canonical field encoding before returning the histogram, so callers can
+/// safely fall back to the generic sort for malformed witnesses.
+fn try_count_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &[F],
 ) -> Option<SortedU10Counts> {
     if values.len() > usize::from(u16::MAX) {
         return None;
@@ -430,6 +432,14 @@ fn try_count_sort_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>
         counts[usize::from(value)] += 1;
     }
 
+    Some(counts)
+}
+
+#[cfg(feature = "multicore")]
+fn try_count_sort_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut [F],
+) -> Option<SortedU10Counts> {
+    let counts = try_count_pasta_u10_values(values)?;
     let mut destination = 0;
     let mut field_value = F::ZERO;
     for count in counts.iter().copied() {
@@ -457,6 +467,41 @@ fn try_count_sort_u10_lookup_values<F: Field + Ord>(
         return try_count_sort_pasta_u10_values(values);
     }
     None
+}
+
+#[cfg(feature = "multicore")]
+fn try_count_u10_polynomial<F: Field + Ord>(
+    values: &Polynomial<F, LagrangeCoeff>,
+    usable_rows: usize,
+) -> Option<SortedU10Counts> {
+    let dynamic_values = values as &dyn Any;
+    if let Some(values) =
+        dynamic_values.downcast_ref::<Polynomial<crate::pasta::Fp, LagrangeCoeff>>()
+    {
+        return try_count_pasta_u10_values(values.get(..usable_rows)?);
+    }
+    if let Some(values) =
+        dynamic_values.downcast_ref::<Polynomial<crate::pasta::Fq, LagrangeCoeff>>()
+    {
+        return try_count_pasta_u10_values(values.get(..usable_rows)?);
+    }
+    None
+}
+
+#[cfg(feature = "multicore")]
+fn materialize_sorted_u10_values<F: Field>(
+    counts: &[u16; SORTED_U10_VALUES],
+    usable_rows: usize,
+    output_capacity: usize,
+) -> Vec<F> {
+    let mut values = Vec::with_capacity(output_capacity);
+    let mut field_value = F::ZERO;
+    for count in counts.iter().copied() {
+        values.extend(iter::repeat_n(field_value, usize::from(count)));
+        field_value += F::ONE;
+    }
+    debug_assert_eq!(values.len(), usable_rows);
+    values
 }
 
 #[cfg(feature = "multicore")]
@@ -522,6 +567,26 @@ fn sort_lookup_values_for_kind<F: Field + Ord>(
     }
     sort_lookup_values(values, &mut key_scratch);
     SortedLookup::Keys(key_scratch)
+}
+
+fn prepare_sorted_input_values<F: Field + Ord>(
+    source: &Polynomial<F, LagrangeCoeff>,
+    usable_rows: usize,
+    _table_kind: PreparedTableKind,
+    sort_scratch: Vec<PastaSortKey>,
+) -> (Vec<F>, SortedLookup) {
+    #[cfg(feature = "multicore")]
+    if _table_kind == PreparedTableKind::SortedU10Range
+        && let Some(counts) = try_count_u10_polynomial(source, usable_rows)
+    {
+        let values = materialize_sorted_u10_values(&counts, usable_rows, source.len());
+        return (values, SortedLookup::U10(counts));
+    }
+
+    let mut values = Vec::with_capacity(source.len());
+    values.extend(source.iter().take(usable_rows).copied());
+    let sort = sort_lookup_values_for_kind(&mut values, _table_kind, sort_scratch);
+    (values, sort)
 }
 
 fn factorable_sinsemilla_q_0<F: Field + Ord>(sorted_values: &[F], q_0: F) -> Option<(F, usize)> {
@@ -674,11 +739,50 @@ impl<F: Field> Argument<F> {
     }
 }
 
+#[cfg(feature = "multicore")]
+fn is_exact_u10_table<F: Field>(values: &Polynomial<F, LagrangeCoeff>, usable_rows: usize) -> bool {
+    if !uses_pasta_sort_keys::<F>()
+        || !(SORTED_U10_VALUES..=usize::from(u16::MAX)).contains(&usable_rows)
+    {
+        return false;
+    }
+    let Some(values) = values.get(..usable_rows) else {
+        return false;
+    };
+
+    let mut expected = F::ZERO;
+    values.iter().enumerate().all(|(row, &value)| {
+        let matches = value == expected;
+        expected = if row + 1 < SORTED_U10_VALUES {
+            expected + F::ONE
+        } else {
+            F::ZERO
+        };
+        matches
+    })
+}
+
+#[cfg(feature = "multicore")]
+fn canonical_u10_counts(usable_rows: usize) -> Option<SortedU10Counts> {
+    let zero_count = usable_rows
+        .checked_sub(usize::from(SORTED_U10_MAX_VALUE))
+        .and_then(|count| u16::try_from(count).ok())?;
+    let mut counts = Box::new([1u16; SORTED_U10_VALUES]);
+    counts[0] = zero_count;
+    Some(counts)
+}
+
 /// Plans fixed-table sharing and allocates lookup sort workspace.
+///
+/// Passing `fixed_values` during key generation validates and marks eligible
+/// fixed tables. The marker stays inseparable from the [`ProvingKey`] whose
+/// fixed values and lookup arguments produced it.
 pub(in crate::plonk) fn prepare_table_plan<F: Field>(
     lookup_arguments: &[Argument<F>],
     circuit_count: usize,
     usable_rows: usize,
+    #[cfg(feature = "multicore")] prepared: Option<&[bool]>,
+    #[cfg(feature = "multicore")] fixed_values: Option<&[Polynomial<F, LagrangeCoeff>]>,
 ) -> TablePlan {
     let mut representatives = Vec::<usize>::new();
     let groups = lookup_arguments
@@ -747,6 +851,45 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
         debug_assert!(table_kinds.contains(&PreparedTableKind::SortedU10Range));
     }
 
+    #[cfg(feature = "multicore")]
+    let retain_for_keygen = fixed_values.is_some();
+    #[cfg(feature = "multicore")]
+    let prepared_u10_tables = if let Some(fixed_values) = fixed_values {
+        representatives
+            .iter()
+            .enumerate()
+            .map(|(group, &representative)| {
+                if table_kinds[group] != PreparedTableKind::SortedU10Range {
+                    return false;
+                }
+                let [Expression::Fixed(query)] = lookup_arguments[representative]
+                    .table_expressions
+                    .as_slice()
+                else {
+                    return false;
+                };
+                if query.rotation != Rotation::cur() {
+                    return false;
+                }
+                fixed_values
+                    .get(query.column_index)
+                    .is_some_and(|values| is_exact_u10_table(values, usable_rows))
+            })
+            .collect()
+    } else if let Some(prepared) = prepared.filter(|prepared| {
+        prepared.len() == representatives.len()
+            && prepared
+                .iter()
+                .zip(&table_kinds)
+                .all(|(&prepared, table_kind)| {
+                    !prepared || *table_kind == PreparedTableKind::SortedU10Range
+                })
+    }) {
+        prepared.to_vec()
+    } else {
+        vec![false; representatives.len()]
+    };
+
     let scratch_len = if uses_pasta_sort_keys::<F>() {
         usable_rows
     } else {
@@ -762,7 +905,13 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
     let table_sort_scratch = representatives
         .iter()
         .enumerate()
-        .map(|(group, _)| vec![PastaSortKey::EMPTY; scratch_len_for(table_kinds[group])])
+        .map(|(group, _)| {
+            #[cfg(feature = "multicore")]
+            if retain_for_keygen {
+                return Vec::new();
+            }
+            vec![PastaSortKey::EMPTY; scratch_len_for(table_kinds[group])]
+        })
         .collect();
     let input_sort_scratch = (0..circuit_count)
         .flat_map(|_| {
@@ -779,9 +928,22 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
         representatives,
         groups,
         table_kinds,
+        #[cfg(feature = "multicore")]
+        prepared_u10_tables,
         table_sort_scratch,
         input_sort_scratch,
     }
+}
+
+#[cfg(feature = "multicore")]
+pub(in crate::plonk) fn prepare_u10_table_markers<F: Field>(
+    lookup_arguments: &[Argument<F>],
+    usable_rows: usize,
+    fixed_values: &[Polynomial<F, LagrangeCoeff>],
+) -> Arc<[bool]> {
+    prepare_table_plan(lookup_arguments, 0, usable_rows, None, Some(fixed_values))
+        .prepared_u10_tables
+        .into()
 }
 
 impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
@@ -796,6 +958,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         usable_rows: usize,
         build_quotient_asts: bool,
         table_kind: PreparedTableKind,
+        #[cfg(feature = "multicore")] prepared_u10_table: bool,
         sort_scratch: Vec<PastaSortKey>,
     ) -> PreparedTable<F, Ec> {
         let unpermuted_expressions = self.table_expressions.iter().map(|expression| {
@@ -827,12 +990,35 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         });
         let compressed_expression = value_evaluator.evaluate(&compressed_expression, domain);
         let q_0 = compressed_expression[0];
-        let mut sorted_values = compressed_expression
-            .iter()
-            .take(usable_rows)
-            .copied()
-            .collect::<Vec<_>>();
-        let sort = sort_lookup_values_for_kind(&mut sorted_values, table_kind, sort_scratch);
+        #[cfg(feature = "multicore")]
+        let prepared_u10_counts = prepared_u10_table
+            .then(|| canonical_u10_counts(usable_rows))
+            .flatten();
+        #[cfg(feature = "multicore")]
+        let (sorted_values, sort) = if let Some(counts) = prepared_u10_counts {
+            (
+                materialize_sorted_u10_values(&counts, usable_rows, usable_rows),
+                SortedLookup::U10(counts),
+            )
+        } else {
+            let mut values = compressed_expression
+                .iter()
+                .take(usable_rows)
+                .copied()
+                .collect::<Vec<_>>();
+            let sort = sort_lookup_values_for_kind(&mut values, table_kind, sort_scratch);
+            (values, sort)
+        };
+        #[cfg(not(feature = "multicore"))]
+        let (sorted_values, sort) = {
+            let mut values = compressed_expression
+                .iter()
+                .take(usable_rows)
+                .copied()
+                .collect::<Vec<_>>();
+            let sort = sort_lookup_values_for_kind(&mut values, table_kind, sort_scratch);
+            (values, sort)
+        };
         // The Sinsemilla generator lookup is padded with its first tuple. Its
         // theta-compressed value is therefore repeated over roughly half of
         // the table commitment. Keep this specialization at the table-MSM
@@ -932,9 +1118,12 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         // These values gain blind rows in `finish_permuted`, as does the
         // table permutation derived from them. Retain full-domain capacity
         // for both vectors.
-        let mut sorted_values = Vec::with_capacity(compressed_expression.len());
-        sorted_values.extend(compressed_expression.iter().take(usable_rows).copied());
-        let sort = sort_lookup_values_for_kind(&mut sorted_values, _table_kind, sort_scratch);
+        let (sorted_values, sort) = prepare_sorted_input_values(
+            &compressed_expression,
+            usable_rows,
+            _table_kind,
+            sort_scratch,
+        );
 
         PreparedInput {
             compressed_expression,
@@ -1316,6 +1505,8 @@ where
         representatives: table_representatives,
         groups: table_groups,
         table_kinds,
+        #[cfg(feature = "multicore")]
+        prepared_u10_tables,
         table_sort_scratch,
         input_sort_scratch,
     } = table_plan;
@@ -1339,6 +1530,8 @@ where
                     usable_rows,
                     build_quotient_asts,
                     table_kinds[group],
+                    #[cfg(feature = "multicore")]
+                    prepared_u10_tables[group],
                     sort_scratch,
                 )
             })
@@ -1450,13 +1643,16 @@ where
             });
         }
 
-        for (((representative, sort_scratch), table_kind), state) in table_representatives
+        for (_group, (((representative, sort_scratch), table_kind), state)) in table_representatives
             .into_iter()
             .zip(table_sort_scratch)
             .zip(table_kinds)
             .zip(&table_states)
+            .enumerate()
         {
             let prepared = &prepared;
+            #[cfg(feature = "multicore")]
+            let prepared_u10_table = prepared_u10_tables[_group];
             scope.spawn(move |_| {
                 let table = Arc::new(lookup_arguments[representative].prepare_table(
                     domain,
@@ -1467,6 +1663,8 @@ where
                     usable_rows,
                     build_quotient_asts,
                     table_kind,
+                    #[cfg(feature = "multicore")]
+                    prepared_u10_table,
                     sort_scratch,
                 ));
                 let pending = {
@@ -3300,10 +3498,16 @@ mod tests {
             )] += 1;
         }
 
-        let mut actual = input;
+        let mut actual = input.clone();
         let actual_counts = try_count_sort_pasta_u10_values(&mut actual).unwrap();
         assert_eq!(actual, expected);
         assert_eq!(*actual_counts, expected_counts);
+
+        let direct_counts = try_count_pasta_u10_values(&input).unwrap();
+        let direct: Vec<F> =
+            materialize_sorted_u10_values(&direct_counts, input.len(), input.len());
+        assert_eq!(direct, expected);
+        assert_eq!(*direct_counts, expected_counts);
     }
 
     #[cfg(feature = "multicore")]
@@ -3492,6 +3696,10 @@ mod tests {
             ],
             2,
             17,
+            #[cfg(feature = "multicore")]
+            None,
+            #[cfg(feature = "multicore")]
+            None,
         );
         assert_eq!(plan.representatives, [0, 2]);
         assert_eq!(plan.groups, [0, 0, 1]);
@@ -3525,6 +3733,10 @@ mod tests {
             ],
             2,
             17,
+            #[cfg(feature = "multicore")]
+            None,
+            #[cfg(feature = "multicore")]
+            None,
         );
         assert_eq!(plan.representatives, [0, 1]);
         assert_eq!(plan.groups, [0, 1, 1]);
@@ -3549,6 +3761,10 @@ mod tests {
             ],
             1,
             17,
+            #[cfg(feature = "multicore")]
+            None,
+            #[cfg(feature = "multicore")]
+            None,
         );
         assert_eq!(
             one_off.table_kinds,
@@ -3562,6 +3778,10 @@ mod tests {
             ],
             1,
             17,
+            #[cfg(feature = "multicore")]
+            None,
+            #[cfg(feature = "multicore")]
+            None,
         );
         assert_eq!(no_index_lookup.table_kinds, [PreparedTableKind::Generic]);
 
@@ -3573,11 +3793,100 @@ mod tests {
             ],
             1,
             17,
+            #[cfg(feature = "multicore")]
+            None,
+            #[cfg(feature = "multicore")]
+            None,
         );
         assert_eq!(
             rotated.table_kinds,
             [PreparedTableKind::Generic, PreparedTableKind::Generic]
         );
+    }
+
+    #[cfg(feature = "multicore")]
+    fn exact_u10_fixed_values() -> Vec<Polynomial<pallas::Scalar, LagrangeCoeff>> {
+        const K: u32 = 11;
+        const USABLE_ROWS: usize = (1 << K) - 6;
+
+        let domain = EvaluationDomain::new(1, K);
+        let mut range_values = (0..u64::try_from(SORTED_U10_VALUES).unwrap())
+            .map(pallas::Scalar::from)
+            .chain(iter::repeat_n(
+                pallas::Scalar::ZERO,
+                USABLE_ROWS - SORTED_U10_VALUES,
+            ))
+            .collect::<Vec<_>>();
+        range_values.resize(1 << K, pallas::Scalar::ZERO);
+        vec![
+            domain.lagrange_from_vec(range_values),
+            domain.empty_lagrange(),
+            domain.empty_lagrange(),
+        ]
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn prepared_u10_table_requires_exact_values_and_matching_markers() {
+        const USABLE_ROWS: usize = (1 << 11) - 6;
+
+        let arguments = vec![
+            lookup_with_table(&[(1, 0, 0)]),
+            lookup_with_table(&[(1, 0, 0), (11, 1, 0), (12, 2, 0)]),
+            lookup_with_table(&[(1, 0, 0), (11, 1, 0), (12, 2, 0)]),
+        ];
+        let fixed_values = exact_u10_fixed_values();
+        let has_no_marker =
+            |plan: &TablePlan| plan.prepared_u10_tables.iter().all(|&prepared| !prepared);
+
+        let prepared = prepare_table_plan(&arguments, 0, USABLE_ROWS, None, Some(&fixed_values));
+        assert_eq!(prepared.prepared_u10_tables, [true, false]);
+        let plan = prepare_table_plan(
+            &arguments,
+            4,
+            USABLE_ROWS,
+            Some(&prepared.prepared_u10_tables),
+            None,
+        );
+        assert_eq!(plan.prepared_u10_tables, [true, false]);
+        let counts = canonical_u10_counts(USABLE_ROWS).unwrap();
+        assert_eq!(
+            counts[0],
+            u16::try_from(USABLE_ROWS - usize::from(SORTED_U10_MAX_VALUE)).unwrap()
+        );
+        assert!(counts[1..].iter().all(|&count| count == 1));
+
+        let mut short_markers =
+            prepare_table_plan(&arguments, 0, USABLE_ROWS, None, Some(&fixed_values));
+        short_markers.prepared_u10_tables.pop();
+        let mut wrong_kind =
+            prepare_table_plan(&arguments, 0, USABLE_ROWS, None, Some(&fixed_values));
+        wrong_kind.prepared_u10_tables[1] = true;
+        for tampered in [&short_markers, &wrong_kind] {
+            let fallback = prepare_table_plan(
+                &arguments,
+                4,
+                USABLE_ROWS,
+                Some(&tampered.prepared_u10_tables),
+                None,
+            );
+            assert!(has_no_marker(&fallback));
+        }
+
+        for (row, value) in [
+            (17, pallas::Scalar::ZERO),
+            (SORTED_U10_VALUES, pallas::Scalar::ONE),
+        ] {
+            let mut malformed = exact_u10_fixed_values();
+            malformed[0][row] = value;
+            assert!(has_no_marker(&prepare_table_plan(
+                &arguments,
+                0,
+                USABLE_ROWS,
+                None,
+                Some(&malformed),
+            )));
+        }
     }
 
     fn check_lookup_permutation_exhaustively<F>()
@@ -3617,10 +3926,12 @@ mod tests {
             for input in &vectors {
                 for table in &vectors {
                     let expected = permute_usable_values(input.clone(), table.clone());
-                    let mut sorted_input = input.clone();
-                    let input_counts = try_count_sort_pasta_u10_values(&mut sorted_input).unwrap();
-                    let mut sorted_table = table.clone();
-                    let table_counts = try_count_sort_pasta_u10_values(&mut sorted_table).unwrap();
+                    let input_counts = try_count_pasta_u10_values(input).unwrap();
+                    let sorted_input =
+                        materialize_sorted_u10_values(&input_counts, input.len(), input.len());
+                    let table_counts = try_count_pasta_u10_values(table).unwrap();
+                    let sorted_table =
+                        materialize_sorted_u10_values(&table_counts, table.len(), table.len());
                     let actual = permute_sorted_u10_from_counts(
                         sorted_input,
                         &input_counts,
