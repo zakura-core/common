@@ -2197,12 +2197,35 @@ mod tests {
 
     #[test]
     fn proof_bytes_match_sparse_dense_prepared_difference_and_parallel_paths() {
+        use std::io::Cursor;
+
         // This domain is large enough for fraction preparation to assign more
         // than one chunk at the tested worker counts, covering nonzero offsets.
         let params: Params<EqAffine> = Params::new(PROOF_K);
         let circuit = PermutationCircuit { value: Fp::from(0) };
         let vk = keygen_vk(&params, &circuit).expect("keygen_vk should not fail");
         let pk = keygen_pk(&params, vk, &circuit).expect("keygen_pk should not fail");
+        // No fixed columns or selectors: the VK and permutation polynomials suffice.
+        let mut storage = vec![0; 5 + EQUALITY_COLUMNS * (32 + 4 + (1 << PROOF_K) * 32)];
+        let mut writer = Cursor::new(storage.as_mut_slice());
+        pk.write(&mut writer).unwrap();
+        let written = writer.position();
+        let mut reader = Cursor::new(&storage[..written as usize]);
+        let restored_pk =
+            crate::plonk::ProvingKey::<EqAffine>::read::<_, PermutationCircuit>(&mut reader)
+                .unwrap();
+        assert_eq!(reader.position(), written);
+        assert_eq!(
+            restored_pk.permutation.identity_columns,
+            pk.permutation.identity_columns
+        );
+        assert!(
+            restored_pk
+                .permutation
+                .prepared_difference_commitments
+                .iter()
+                .all(Option::is_none)
+        );
         // Retain the whole-set identity shortcut but force the partial sets
         // through the dense fraction path.
         let mut dense_pk = pk.clone();
@@ -2299,8 +2322,10 @@ mod tests {
             let serial = prove(&pk, circuit_count, 1);
             let dense = prove(&dense_pk, circuit_count, 1);
             let generic = prove(&generic_pk, circuit_count, 1);
+            let restored = prove(&restored_pk, circuit_count, 1);
             assert_eq!(serial, dense);
             assert_eq!(serial, generic);
+            assert_eq!(serial, restored);
             verify(&serial, circuit_count);
             for threads in PROOF_THREAD_COUNTS {
                 let parallel = prove(&pk, circuit_count, threads);

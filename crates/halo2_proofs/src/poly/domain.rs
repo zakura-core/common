@@ -206,6 +206,11 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
     }
 
+    /// Returns the base-domain size exponent.
+    pub(crate) fn k(&self) -> u32 {
+        self.k
+    }
+
     /// Returns whether this domain has the given base-domain size.
     pub(crate) fn has_base_size(&self, n: u64) -> bool {
         self.n == n
