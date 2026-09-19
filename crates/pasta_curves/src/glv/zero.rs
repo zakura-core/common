@@ -507,6 +507,28 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     ) -> C {
         let num_threads = current_num_threads();
 
+        // A prepared MSM normally recodes one row per prepared base, even
+        // when a caller supplies many exact zeros. Preserve the prepared
+        // point table while compacting sufficiently sparse inputs: code
+        // matrices, transposes, and per-window scans then cover only live
+        // scalar rows. Stop the census as soon as a compact representation
+        // cannot halve the row count, keeping dense inputs on their existing
+        // path with only a partial zero scan and no allocation.
+        let compact_limit = terms / 2;
+        let mut live_scalars = 0;
+        for index in 0..terms {
+            live_scalars += usize::from(self.live[index] && !scalar_at(index).is_zero_vartime());
+            if live_scalars > compact_limit {
+                break;
+            }
+        }
+        let base_indices = (live_scalars != 0 && live_scalars <= compact_limit).then(|| {
+            (0..terms)
+                .filter(|&index| self.live[index] && !scalar_at(index).is_zero_vartime())
+                .collect::<Vec<_>>()
+        });
+        let recoded_terms = base_indices.as_ref().map_or(terms, Vec::len);
+
         // Dead rows (identity bases, merge sources) contribute nothing;
         // force their recoding rows and residuals to zero. A decomposition
         // half out of bound is unreachable (`decompose` guarantees the
@@ -514,14 +536,17 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         // whole check degrades to the exact naive evaluation, matching
         // `try_multiexp`'s posture toward the same guard.
         let decompose_checked = |index: usize| {
-            if !self.live[index] {
+            let prepared_index = base_indices
+                .as_ref()
+                .map_or(index, |indices| indices[index]);
+            if !self.live[prepared_index] {
                 let zero = SignedMagnitude {
                     negative: false,
                     magnitude: 0,
                 };
                 return Some((zero, zero));
             }
-            let scalar = scalar_at(index);
+            let scalar = scalar_at(prepared_index);
             // Recoding and bucket staging are already variable-time in scalar
             // digits. Avoid canonicalizing and decomposing an exact zero before
             // those existing zero paths omit it.
@@ -534,11 +559,15 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             }
             checked_signed_magnitudes(decompose::<C>(scalar))
         };
-        let Some(recoded) =
-            codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
-        else {
+        let Some(mut recoded) = codebook::try_recode_with(
+            &self.codebook,
+            recoded_terms,
+            num_threads,
+            decompose_checked,
+        ) else {
             return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
         };
+        recoded.base_indices = base_indices;
         // Extras with zero scalars or identity points contribute nothing.
         let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
             .iter()
@@ -736,7 +765,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                             })
                         }
                     },
-                    || self.tail_sum(&recoded.residuals, num_threads),
+                    || self.tail_sum(recoded, num_threads),
                 )
             };
             let (extras_part, (windows_part, tail)) = if extras.is_empty() {
@@ -754,7 +783,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             return Some(windows_part + tail + extras_part?);
         }
 
-        let mut acc = self.tail_sum(&recoded.residuals, num_threads)?;
+        let mut acc = self.tail_sum(recoded, num_threads)?;
         if !bool::from(acc.is_identity()) {
             for _ in 0..window_bits * (main_windows - active) {
                 acc = acc.double();
@@ -814,7 +843,11 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 continue;
             }
             let (bucket, variant, unit) = unpack_code(code);
-            let (x, y) = unit_coords(self.table.get(variant, base), unit);
+            let prepared_base = recoded
+                .base_indices
+                .as_ref()
+                .map_or(base, |indices| indices[base]);
+            let (x, y) = unit_coords(self.table.get(variant, prepared_base), unit);
             let position = positions[bucket];
             points[position] = AffinePoint { x, y };
             positions[bucket] = position + 1;
@@ -951,15 +984,18 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// via the unprepared orbit machinery at the width fixed at
     /// preparation.
     #[inline(never)]
-    fn tail_sum(
-        &self,
-        residuals: &[(SignedMagnitude, SignedMagnitude)],
-        num_threads: usize,
-    ) -> Option<C> {
+    fn tail_sum(&self, recoded: &Recoded, num_threads: usize) -> Option<C> {
         let params = &self.tail_params[self.tail_width];
         let stride =
             params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
-        tail_multiexp::<C>(params, residuals, &self.tail_bases, stride, num_threads)
+        tail_multiexp::<C>(
+            params,
+            &recoded.residuals,
+            &self.tail_bases,
+            recoded.base_indices.as_deref(),
+            stride,
+            num_threads,
+        )
     }
 
     /// The range counterpart of [`Self::tail_sum`].
@@ -974,7 +1010,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let bases = self.tail_bases.get(base_offset..range_end)?;
         let stride =
             params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
-        tail_multiexp::<C>(params, residuals, bases, stride, num_threads)
+        tail_multiexp::<C>(params, residuals, bases, None, stride, num_threads)
     }
 
     /// $E = \sum_j \[s_j\] Q_j$ over the per-check extra terms (already
@@ -1172,10 +1208,14 @@ fn tail_multiexp<C: GlvParams>(
     params: &orbit::OrbitParams,
     components: &[(SignedMagnitude, SignedMagnitude)],
     rotated: &[orbit::RotatedBase<C::Base>],
+    base_indices: Option<&[usize]>,
     stride: usize,
     num_threads: usize,
 ) -> Option<C> {
-    debug_assert_eq!(components.len(), rotated.len());
+    debug_assert_eq!(
+        components.len(),
+        base_indices.map_or(rotated.len(), <[usize]>::len)
+    );
     debug_assert!(stride <= params.window_stride());
     if stride == 0 {
         return Some(C::identity());
@@ -1193,7 +1233,17 @@ fn tail_multiexp<C: GlvParams>(
             .max()
             .unwrap_or(0);
         return super::paired_windows_sum::<C>(active, params.width(), |window| {
-            orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1)
+            if let Some(base_indices) = base_indices {
+                orbit::windows_sum_indexed::<C>(
+                    params,
+                    &digits,
+                    rotated,
+                    base_indices,
+                    window..window + 1,
+                )
+            } else {
+                orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1)
+            }
         });
     }
 
@@ -1201,7 +1251,11 @@ fn tail_multiexp<C: GlvParams>(
     for (row, &(first, second)) in digits.chunks_exact_mut(stride).zip(components) {
         active = active.max(orbit::recode_row(params, first, second, row));
     }
-    orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
+    if let Some(base_indices) = base_indices {
+        orbit::windows_sum_indexed::<C>(params, &digits, rotated, base_indices, 0..active)
+    } else {
+        orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
+    }
 }
 
 /// Scans the fixed bases for exact relations $P_j = \[\mu\] P_i$ with
@@ -2446,9 +2500,7 @@ mod tests {
                         );
                         lap(&mut phases[4]); // coefficient integration
                     }
-                    let tail = prepared
-                        .tail_sum(&recoded.residuals, 1)
-                        .expect("valid points");
+                    let tail = prepared.tail_sum(&recoded, 1).expect("valid points");
                     lap(&mut phases[5]); // tail MSM
                     let window_bits = prepared.codebook.window_bits();
                     let main_windows = prepared.codebook.main_windows();
@@ -2598,9 +2650,7 @@ mod tests {
                             })
                             .expect("valid points");
                         wall += start.elapsed().as_secs_f64() * 1e3;
-                        let mut tail = prepared
-                            .tail_sum(&recoded.residuals, threads)
-                            .expect("valid points");
+                        let mut tail = prepared.tail_sum(&recoded, threads).expect("valid points");
                         if !bool::from(tail.is_identity()) {
                             for _ in 0..window_bits * prepared.codebook.main_windows() {
                                 tail = tail.double();
