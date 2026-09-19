@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the named feature removal policy."""
+"""Regression tests for the SemVer feature-removal ignore list."""
 
 import contextlib
 import io
@@ -21,40 +21,40 @@ Failed in:
      Summary semver requires new major version: 1 major and 0 minor checks failed
     Finished [  46.700s] zakura-primitives
 """
-ALLOWED = {"zip-233": "Approved unused feature removal."}
+IGNORED = {"zip-233": "Ignored unused feature removal."}
 
 
 class SemverPolicyTest(unittest.TestCase):
-    def check(self, report=REPORT, status=100, allowed=ALLOWED):
+    def check(self, report=REPORT, status=100, ignored=IGNORED):
         with (
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
             result = check_semver.check_result(
-                "zakura-primitives", status, report, allowed
+                "zakura-primitives", status, report, ignored
             )
         return result, errors.getvalue()
 
-    def test_approvals_and_failures(self):
+    def test_ignored_removals_and_failures(self):
         extra = REPORT.replace(
             "     Summary",
             "  feature multicore in the package's Cargo.toml\n     Summary",
         )
         cases = [
-            (REPORT, ALLOWED, 0),
-            (REPORT.replace("1.3.0-alpha.1", "1.3.0"), ALLOWED, 0),
+            (REPORT, IGNORED, 0),
+            (REPORT.replace("1.3.0-alpha.1", "1.3.0"), IGNORED, 0),
             (REPORT, {}, 100),
             (REPORT, {"zip-23": "Typo"}, 100),
-            (extra, ALLOWED, 100),
-            (extra, {**ALLOWED, "multicore": "Approved"}, 0),
-            (REPORT.replace("zakura-primitives", "another-crate"), ALLOWED, 100),
-            (REPORT.replace("minor change", "patch change"), ALLOWED, 100),
-            (REPORT.replace("minor change", "no change"), ALLOWED, 100),
-            (REPORT.replace("feature_missing", "function_missing"), ALLOWED, 100),
+            (extra, IGNORED, 100),
+            (extra, {**IGNORED, "multicore": "Ignored"}, 0),
+            (REPORT.replace("zakura-primitives", "another-crate"), IGNORED, 100),
+            (REPORT.replace("minor change", "patch change"), IGNORED, 100),
+            (REPORT.replace("minor change", "no change"), IGNORED, 100),
+            (REPORT.replace("feature_missing", "function_missing"), IGNORED, 100),
         ]
-        for report, allowed, expected in cases:
-            with self.subTest(report=report, allowed=allowed):
-                self.assertEqual(self.check(report, allowed=allowed)[0], expected)
+        for report, ignored, expected in cases:
+            with self.subTest(report=report, ignored=ignored):
+                self.assertEqual(self.check(report, ignored=ignored)[0], expected)
         for status in [0, 1, 101]:
             self.assertEqual(self.check(status=status)[0], status)
 
@@ -103,19 +103,19 @@ class SemverPolicyTest(unittest.TestCase):
             "not covered", self.check(REPORT.replace("zip-233", "multicore"))[1]
         )
 
-    def test_policy_validation_including_empty_allowlist(self):
-        check_semver.load_allowlist(
-            Path(__file__).resolve().parents[2] / check_semver.ALLOWLIST
+    def test_policy_validation_including_empty_ignore_list(self):
+        check_semver.load_ignore_list(
+            Path(__file__).resolve().parents[2] / check_semver.IGNORE_LIST
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "policy.json"
             for contents in [
                 "{}",
                 '{"crate": {}}',
-                '{"crate": {"feature": "Approved"}}',
+                '{"crate": {"feature": "Ignored"}}',
             ]:
                 path.write_text(contents)
-                check_semver.load_allowlist(path)
+                check_semver.load_ignore_list(path)
             for contents in [
                 "[]",
                 '{"crate": []}',
@@ -124,7 +124,7 @@ class SemverPolicyTest(unittest.TestCase):
             ]:
                 with self.subTest(contents=contents), self.assertRaises(ValueError):
                     path.write_text(contents)
-                    check_semver.load_allowlist(path)
+                    check_semver.load_ignore_list(path)
 
 
 if __name__ == "__main__":

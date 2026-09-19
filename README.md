@@ -50,10 +50,13 @@ rustup toolchain install 1.91.0 --profile minimal
 cargo +1.91.0 check --locked --workspace
 ```
 
-## Compatibility checks
+## Semantic Versioning
 
-See the [semver policy](docs/semver-policy.md) for local checks and the permanent
-allowlist of feature removals approved for minor releases.
+Published crates in this repository follow Semantic Versioning except for
+feature removals explicitly recorded in the permanent
+[SemVer ignore list](.github/semver-ignore-list.json). All other API
+compatibility failures block CI. See the [SemVer policy](docs/semver-policy.md)
+for enforcement details and local checks.
 
 ## License
 

@@ -1,0 +1,5 @@
+{
+  "zakura-primitives": {
+    "zip-233": "Ignored for minor releases in #465 because #458 removed the unused ZIP 233 feature and obsolete transaction field."
+  }
+}

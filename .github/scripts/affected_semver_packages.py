@@ -9,7 +9,7 @@ import sys
 
 
 SEMVER_POLICY_FILES = {
-    Path(".github/semver-feature-removals.json"),
+    Path(".github/semver-ignore-list.json"),
     Path(".github/scripts/affected_semver_packages.py"),
     Path(".github/scripts/check_semver.py"),
     Path(".github/scripts/test_affected_semver_packages.py"),

@@ -1,5 +1,0 @@
-{
-  "zakura-primitives": {
-    "zip-233": "Minor-release exception approved in #465 for the unused ZIP 233 feature and obsolete transaction field removed in #458."
-  }
-}

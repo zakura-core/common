@@ -1,6 +1,6 @@
 # Gate changes against the latest stable crates.io release of every workspace
 # crate. Intentional breaking changes pass once their version bump covers them.
-# Named exceptions for feature removals live in semver-feature-removals.json.
+# Ignored feature removals live in semver-ignore-list.json.
 name: Semver policy
 
 on:
@@ -10,7 +10,7 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "**/Cargo.lock"
-      - .github/semver-feature-removals.json
+      - .github/semver-ignore-list.json
       - .github/scripts/affected_semver_packages.py
       - .github/scripts/check_semver.py
       - .github/scripts/test_affected_semver_packages.py
@@ -23,7 +23,7 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "**/Cargo.lock"
-      - .github/semver-feature-removals.json
+      - .github/semver-ignore-list.json
       - .github/scripts/affected_semver_packages.py
       - .github/scripts/check_semver.py
       - .github/scripts/test_affected_semver_packages.py

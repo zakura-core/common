@@ -55,11 +55,11 @@ pending fragments instead of a PR-owned fragment.
 - Package contents: `cargo package --list -p <crate>` for each crate — no
   stray files; LICENSE/COPYRIGHT/katex symlinks materialize as real files.
 - Semver: use the [semver policy](../../../docs/semver-policy.md), including
-  approved feature removals. For a release, run
+  its feature-removal ignore list. For a release, run
   `python3 .github/scripts/check_semver.py --baseline-version <prev> --package <crate>`.
   This keeps the checker's normal feature selection. Add `--default-features`
   to reproduce CI. The bare checker reports compatibility findings without
-  applying the repository's exceptions.
+  applying the repository's ignore list.
 
 ## Publishing
 

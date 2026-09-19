@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run semver checks with named feature removals accepted in minor releases."""
+"""Run semver checks with named feature removals on an ignore list."""
 
 import argparse
 import json
@@ -9,25 +9,25 @@ import subprocess
 import sys
 
 
-ALLOWLIST = Path(".github/semver-feature-removals.json")
+IGNORE_LIST = Path(".github/semver-ignore-list.json")
 
 
-def load_allowlist(path):
+def load_ignore_list(path):
     """Require an exact package, feature, and nonempty reason for each entry."""
     policy = json.loads(path.read_text())
     if not isinstance(policy, dict):
-        raise ValueError("feature removal allowlist must be an object")
+        raise ValueError("SemVer ignore list must be an object")
     for package, features in policy.items():
         if not package or not isinstance(features, dict):
-            raise ValueError(f"invalid feature removal entries for {package!r}")
+            raise ValueError(f"invalid ignore-list entries for {package!r}")
         for feature, reason in features.items():
             if not feature or not isinstance(reason, str) or not reason.strip():
                 raise ValueError(f"missing reason for {package}/{feature}")
     return policy
 
 
-def accepted_removals(package, report, allowed):
-    """Accept only a complete report whose sole failure is approved feature names.
+def ignored_removals(package, report, ignored):
+    """Ignore only a complete report whose sole failure is listed feature names.
 
     There is no stable structured report. Cross-check the failure count and
     summary, and reject unknown finding text. Warning sections are irrelevant.
@@ -77,30 +77,30 @@ def accepted_removals(package, report, allowed):
     )
     if not features or len(features) != len(lines):
         raise ValueError("unrecognized feature findings")
-    return features if set(features).issubset(allowed) else []
+    return features if set(features).issubset(ignored) else []
 
 
-def check_result(package, status, report, allowed):
+def check_result(package, status, report, ignored):
     """Override only exit 100, which denotes completed, denied semver checks."""
-    if status != 100 or not allowed:
+    if status != 100 or not ignored:
         return status
     try:
-        accepted = accepted_removals(package, report, allowed)
+        ignored_removal_names = ignored_removals(package, report, ignored)
     except ValueError as error:
         print(
-            f"Semver report format not recognized: {error}. Check the tool version above.",
+            f"SemVer report format not recognized: {error}. Check the tool version above.",
             file=sys.stderr,
         )
         return status
-    if not accepted:
+    if not ignored_removal_names:
         print(
-            "Semver failure is not covered by the feature removal allowlist.",
+            "SemVer failure is not covered by the feature-removal ignore list.",
             file=sys.stderr,
         )
         return status
-    for feature in accepted:
+    for feature in ignored_removal_names:
         print(
-            f"Accepted minor-release removal: {package}/{feature}: {allowed[feature]}"
+            f"Ignored minor-release removal: {package}/{feature}: {ignored[feature]}"
         )
     return 0
 
@@ -113,7 +113,7 @@ def main():
     parser.add_argument("--default-features", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    policy = load_allowlist(root / ALLOWLIST)
+    policy = load_ignore_list(root / IGNORE_LIST)
     subprocess.run(["cargo", "semver-checks", "--version"], cwd=root, check=True)
     command = ["cargo", "semver-checks", "--package", args.package, "--color", "never"]
     if args.baseline_version:
