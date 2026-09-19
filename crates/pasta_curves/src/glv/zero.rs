@@ -156,6 +156,40 @@ const U10_TABLE_PREFIX_TERMS: usize = U10_TABLE_TERMS - U10_TABLE_SUFFIX_TERMS;
 /// 24.8 MiB in total, plus small metadata and allocator overhead.
 const DEFAULT_TABLE_FOOTPRINT_BUDGET: usize = 13 << 20;
 
+/// Evenly spaced scalar rows checked before the sparse-row census. Finding
+/// every sample live is only a performance hint that retains the dense path;
+/// it does not affect MSM correctness.
+const DENSE_CENSUS_SAMPLE_POINTS: usize = 16;
+
+/// Returns the live-row count when an input is worth compacting.
+///
+/// The preflight may conservatively retain the dense path for a sparse input;
+/// that only forgoes an optimization. Every result still evaluates the same
+/// exact MSM.
+fn compact_live_scalar_count(terms: usize, live_at: impl Fn(usize) -> bool) -> Option<usize> {
+    let sample_stride = terms / DENSE_CENSUS_SAMPLE_POINTS;
+    if sample_stride != 0
+        && (0..DENSE_CENSUS_SAMPLE_POINTS).all(|sample| {
+            // Stagger the within-stratum offset so periodic zero patterns do
+            // not alias one fixed sample position.
+            let index = sample * sample_stride + sample % sample_stride;
+            live_at(index)
+        })
+    {
+        return None;
+    }
+
+    let compact_limit = terms / 2;
+    let mut live = 0;
+    for index in 0..terms {
+        live += usize::from(live_at(index));
+        if live > compact_limit {
+            return None;
+        }
+    }
+    Some(live)
+}
+
 #[derive(Clone, Copy)]
 enum MainWindowFold {
     Paired,
@@ -522,24 +556,20 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         // matrices, transposes, and per-window scans then cover only live
         // scalar rows. Stop the census as soon as a compact representation
         // cannot halve the row count, keeping dense inputs on their existing
-        // path with only a partial zero scan and no allocation.
-        let compact_limit = terms / 2;
-        let mut live_scalars = 0;
-        for index in 0..terms {
-            live_scalars += usize::from(self.live[index] && !scalar_at(index).is_zero_vartime());
-            if live_scalars > compact_limit {
-                break;
-            }
-        }
+        // path after a small preflight or partial zero scan, without
+        // allocating.
+        let live_scalars = compact_live_scalar_count(terms, |index| {
+            self.live[index] && !scalar_at(index).is_zero_vartime()
+        });
         // Exact-zero density is deliberately observable, as permitted by
         // this API's existing variable-time contract. Avoid constructing an
         // empty code matrix while preserving any independent extra terms.
-        if live_scalars == 0 {
+        if live_scalars == Some(0) {
             return self
                 .extras_sum(&extras)
                 .unwrap_or_else(|| self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra));
         }
-        let base_indices = (live_scalars != 0 && live_scalars <= compact_limit).then(|| {
+        let base_indices = live_scalars.map(|_| {
             (0..terms)
                 .filter(|&index| self.live[index] && !scalar_at(index).is_zero_vartime())
                 .collect::<Vec<_>>()
@@ -1728,6 +1758,25 @@ mod tests {
             }
         }
         assert_eq!(exact_stride, 3);
+    }
+
+    #[test]
+    fn dense_preflight_preserves_sparse_census() {
+        const TERMS: usize = 128;
+
+        assert_eq!(compact_live_scalar_count(TERMS, |_| true), None);
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index < TERMS / 2),
+            Some(TERMS / 2),
+        );
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index % 2 == 0),
+            Some(TERMS / 2),
+        );
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index <= TERMS / 2),
+            None,
+        );
     }
 
     fn modes_under_test() -> Vec<CodebookMode> {
