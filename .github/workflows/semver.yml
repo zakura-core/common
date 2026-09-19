@@ -115,6 +115,7 @@ jobs:
         run: >-
           python3 .github/scripts/check_semver.py
           --package "$PACKAGE"
+          --default-features
 
   semver-checks:
     name: semver-checks

@@ -2,17 +2,28 @@
 """Run semver checks with named feature removals accepted in minor releases."""
 
 import argparse
+import codecs
+import contextlib
 import json
+import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import threading
+import time
 
 
 ALLOWLIST = Path(".github/semver-feature-removals.json")
 
 
+class ReportFormatError(ValueError):
+    """The checker report cannot be safely matched to an exception."""
+
+
 def unique_keys(pairs):
+    """Reject duplicate keys instead of silently replacing policy entries."""
     result = {}
     for key, value in pairs:
         if key in result:
@@ -27,7 +38,7 @@ def load_allowlist(path):
     if not isinstance(allowlist, dict):
         raise ValueError("feature removal allowlist must be an object")
     for package, features in allowlist.items():
-        if not package or not isinstance(features, dict) or not features:
+        if not package or not isinstance(features, dict):
             raise ValueError(f"invalid feature removal entries for {package!r}")
         for feature, reason in features.items():
             if not feature or not isinstance(reason, str) or not reason.strip():
@@ -36,7 +47,7 @@ def load_allowlist(path):
 
 
 def accepted_removals(package, output, allowed_features):
-    """Accept only a complete, recognized report with one feature_missing failure.
+    """Match one feature_missing failure, allowing unrelated warning sections.
 
     cargo-semver-checks has no stable structured diagnostics interface. Require
     matching check counts, failure headers, summary, and every finding rather
@@ -50,80 +61,178 @@ def accepted_removals(package, output, allowed_features):
         output,
         re.MULTILINE,
     )
-    if checking != [(package, "minor")]:
+    if len(checking) != 1 or checking[0][0] != package:
+        raise ReportFormatError("expected one package version comparison")
+    if checking[0][1] not in {"no", "patch", "minor", "major"}:
+        raise ReportFormatError("unrecognized version change type")
+    if checking[0][1] != "minor":
         return []
 
     counts = re.findall(
-        r"^\s*Checked \[[^\]\n]+\] \d+ checks: \d+ pass, (\d+) fail, "
-        r"\d+ warn, \d+ skip\s*$",
+        r"^\s*Checked \[[^\]\n]+\] (\d+) checks: (\d+) pass, (\d+) fail, "
+        r"(\d+) warn, \d+ skip\s*$",
         output,
         re.MULTILINE,
     )
     headers = re.findall(r"^--- failure (\S+): .* ---$", output, re.MULTILINE)
-    if counts != ["1"] or headers != ["feature_missing"]:
+    warnings = re.findall(r"^--- warning (\S+): .* ---$", output, re.MULTILINE)
+    if len(counts) != 1:
+        raise ReportFormatError("missing or repeated check counts")
+    total, passed, failed, warned = map(int, counts[0])
+    if (
+        total != passed + failed + warned
+        or failed != len(headers)
+        or warned != len(warnings)
+        or len(set(headers + warnings)) != failed + warned
+    ):
+        raise ReportFormatError("check counts do not match diagnostic sections")
+    if headers != ["feature_missing"]:
         return []
 
     summaries = re.findall(r"^\s*Summary (.*)$", output, re.MULTILINE)
     if summaries != [
         "semver requires new major version: 1 major and 0 minor checks failed"
     ]:
-        return []
+        raise ReportFormatError("unexpected failure summary")
 
-    # Findings may straddle the summary when stdout and stderr are buffered.
-    # Accept no other content after "Failed in:" except the known footer.
-    failure = output.split("--- failure feature_missing: ", 1)[1]
-    sections = failure.split("Failed in:")
-    if len(sections) != 2:
-        return []
+    warning_counts = re.findall(
+        r"^\s*Warning produced (\d+) major and (\d+) minor level warnings$",
+        output,
+        re.MULTILINE,
+    )
+    if (
+        warned
+        and (len(warning_counts) != 1 or sum(map(int, warning_counts[0])) != warned)
+    ) or (not warned and warning_counts):
+        raise ReportFormatError("unexpected warning summary")
+
+    finished_pattern = r"[ \t]*Finished \[[^\]\n]+\] " + re.escape(package)
+    if len(
+        re.findall("^" + finished_pattern + "$", output, re.MULTILINE)
+    ) != 1 or not re.fullmatch(finished_pattern, output.rstrip().splitlines()[-1]):
+        raise ReportFormatError("missing or unexpected report footer")
+
+    # Status lines can appear between findings because they use stderr.
+    # Remove only recognized status lines before separating lint sections.
+    report = re.sub(
+        r"^[ \t]*(?:Summary "
+        + re.escape(summaries[0])
+        + r"|Warning produced \d+ major and \d+ minor level warnings"
+        + r"|produced warnings suggest new (?:major|minor) version)\n",
+        "",
+        output,
+        flags=re.MULTILINE,
+    )
+    report = re.sub("^" + finished_pattern + r"\n?", "", report, flags=re.MULTILINE)
+    sections = re.split(
+        r"^--- (failure|warning) (\S+): .* ---$", report, flags=re.MULTILINE
+    )
     findings = []
-    finished = 0
-    for line in sections[1].splitlines():
-        line = line.strip()
-        if not line or line == "Summary " + summaries[0]:
+    for index in range(1, len(sections), 3):
+        kind, _, body = sections[index : index + 3]
+        parts = body.split("Failed in:")
+        if len(parts) != 2 or not parts[1].strip():
+            raise ReportFormatError("missing or repeated findings section")
+        if kind == "warning":
             continue
-        if re.fullmatch(r"Finished \[[^\]\n]+\] " + re.escape(package), line):
-            finished += 1
-            continue
+        findings = [line.strip() for line in parts[1].splitlines() if line.strip()]
+
+    features = []
+    for line in findings:
         finding = re.fullmatch(r"feature (\S+) in the package's Cargo.toml", line)
         if finding is None:
-            return []
-        findings.append(finding[1])
+            raise ReportFormatError("unrecognized feature removal finding")
+        features.append(finding[1])
 
-    if (
-        finished != 1
-        or not findings
-        or len(findings) != len(set(findings))
-        or not set(findings).issubset(allowed_features)
-    ):
+    if not features or len(features) != len(set(features)):
+        raise ReportFormatError("missing or repeated feature removal finding")
+    if not set(features).issubset(allowed_features):
         return []
-    return findings
+    return features
 
 
-def check_package(package, allowlist, repo_root):
-    result = subprocess.run(
-        [
-            "cargo",
-            "semver-checks",
-            "--package",
-            package,
-            "--default-features",
-            "--color",
-            "never",
-        ],
-        cwd=repo_root,
+def run_command(command, cwd, timeout):
+    """Stream decoded output and bound the lifetime of the command and its pipes."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        timeout=25 * 60,
+        start_new_session=os.name == "posix",
     )
-    print(result.stdout, end="", flush=True)
+    output, read_errors = [], []
+
+    def stream_output():
+        """Decode across chunk boundaries without losing logs to invalid bytes."""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        try:
+            while chunk := process.stdout.read1(8192):
+                text = decoder.decode(chunk)
+                output.append(text)
+                print(text, end="", flush=True)
+            text = decoder.decode(b"", final=True)
+            output.append(text)
+            print(text, end="", flush=True)
+        except Exception as error:
+            read_errors.append(error)
+
+    reader = threading.Thread(target=stream_output, daemon=True)
+    try:
+        reader.start()
+        deadline = time.monotonic() + timeout
+        process.wait(timeout=timeout)
+        reader.join(timeout=max(0, deadline - time.monotonic()))
+        if reader.is_alive():
+            raise subprocess.TimeoutExpired(command, timeout)
+        if read_errors:
+            raise read_errors[0]
+    except BaseException:
+        # A compiler child can retain the pipe after Cargo exits. On CI and
+        # macOS, kill the whole session on timeout or cancellation.
+        with contextlib.suppress(ProcessLookupError):
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        process.wait(timeout=5)
+        if reader.ident is not None:
+            reader.join(timeout=5)
+        raise
+    finally:
+        if not reader.is_alive():
+            process.stdout.close()
+    return subprocess.CompletedProcess(command, process.returncode, "".join(output))
+
+
+def check_package(
+    package, allowlist, repo_root, *, baseline_version=None, default_features=False
+):
+    """Keep tool failures intact and apply policy only to completed semver checks."""
+    version = run_command(
+        ["cargo", "semver-checks", "--version"], repo_root, timeout=30
+    )
+    if version.returncode:
+        return version.returncode
+    command = ["cargo", "semver-checks", "--package", package, "--color", "never"]
+    if default_features:
+        command.append("--default-features")
+    if baseline_version:
+        command.extend(["--baseline-version", baseline_version])
+    result = run_command(command, repo_root, timeout=25 * 60)
     # 100 means completed checks found denied semver violations. Compilation,
     # resolution, and other tool failures must retain their original status.
     if result.returncode != 100:
         return result.returncode
 
     allowed_features = allowlist.get(package, {})
-    accepted = accepted_removals(package, result.stdout, allowed_features)
+    try:
+        accepted = accepted_removals(package, result.stdout, allowed_features)
+    except ReportFormatError as error:
+        print(
+            f"Semver report format not recognized: {error}. Check the tool version printed above.",
+            file=sys.stderr,
+        )
+        return result.returncode
     if not accepted:
         print(
             "Semver failure is not covered by the feature removal allowlist.",
@@ -138,17 +247,41 @@ def check_package(package, allowlist, repo_root):
     return 0
 
 
+def handle_termination(signum, _frame):
+    """Let command cleanup run when CI terminates the wrapper."""
+    raise SystemExit(128 + signum)
+
+
 def main():
+    """Load the policy and run a bounded check from the repository root."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", required=True)
+    parser.add_argument(
+        "--baseline-version", help="Published baseline for release checks"
+    )
+    parser.add_argument(
+        "--default-features", action="store_true", help="Match CI's feature selection"
+    )
     args = parser.parse_args()
     repo_root = Path(__file__).resolve().parents[2]
+    previous_handler = signal.signal(signal.SIGTERM, handle_termination)
     try:
         allowlist = load_allowlist(repo_root / ALLOWLIST)
-        return check_package(args.package, allowlist, repo_root)
+        return check_package(
+            args.package,
+            allowlist,
+            repo_root,
+            baseline_version=args.baseline_version,
+            default_features=args.default_features,
+        )
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(f"Semver check failed: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("Semver check interrupted.", file=sys.stderr)
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
 
 
 if __name__ == "__main__":

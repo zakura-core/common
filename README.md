@@ -50,6 +50,11 @@ rustup toolchain install 1.91.0 --profile minimal
 cargo +1.91.0 check --locked --workspace
 ```
 
+## Compatibility checks
+
+See the [semver policy](docs/semver-policy.md) for local checks and the permanent
+allowlist of feature removals approved for minor releases.
+
 ## License
 
 All code in this repository is licensed under either of
