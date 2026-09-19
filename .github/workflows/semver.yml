@@ -1,5 +1,6 @@
 # Gate changes against the latest stable crates.io release of every workspace
 # crate. Intentional breaking changes pass once their version bump covers them.
+# Named exceptions for feature removals live in semver-feature-removals.json.
 name: Semver policy
 
 on:
@@ -9,8 +10,11 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - .github/semver-feature-removals.json
       - .github/scripts/affected_semver_packages.py
+      - .github/scripts/check_semver.py
       - .github/scripts/test_affected_semver_packages.py
+      - .github/scripts/test_check_semver.py
       - .github/workflows/semver.yml
   push:
     branches:
@@ -19,8 +23,11 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - .github/semver-feature-removals.json
       - .github/scripts/affected_semver_packages.py
+      - .github/scripts/check_semver.py
       - .github/scripts/test_affected_semver_packages.py
+      - .github/scripts/test_check_semver.py
       - .github/workflows/semver.yml
   merge_group:
   workflow_dispatch:
@@ -54,6 +61,7 @@ jobs:
           PR_MERGE_SHA: ${{ github.sha }}
         run: |
           python3 .github/scripts/test_affected_semver_packages.py
+          python3 .github/scripts/test_check_semver.py
 
           case "$GITHUB_EVENT_NAME" in
             pull_request)
@@ -105,9 +113,8 @@ jobs:
         env:
           PACKAGE: ${{ matrix.package }}
         run: >-
-          cargo semver-checks
+          python3 .github/scripts/check_semver.py
           --package "$PACKAGE"
-          --default-features
 
   semver-checks:
     name: semver-checks
