@@ -538,6 +538,21 @@ fn factorable_sinsemilla_q_0<F: Field + Ord>(sorted_values: &[F], q_0: F) -> Opt
     .then_some((q_0, q_0_terms))
 }
 
+fn count_sorted_value<F: Ord>(sorted_values: &[F], value: &F) -> usize {
+    let start = sorted_values.partition_point(|candidate| candidate < value);
+    let end = sorted_values.partition_point(|candidate| candidate <= value);
+    end - start
+}
+
+fn factorable_input_sinsemilla_q_0<F: Ord>(
+    sorted_input_values: &[F],
+    table_sinsemilla_q_0: Option<(F, usize)>,
+) -> Option<(F, usize)> {
+    let (q_0, table_count) = table_sinsemilla_q_0?;
+    let input_count = count_sorted_value(sorted_input_values, &q_0);
+    (input_count > table_count).then_some((q_0, input_count))
+}
+
 pub(in crate::plonk) struct PreparedProduct<C: CurveAffine, Ev> {
     compressed_input_coset: Option<poly::Ast<Ev, C::Scalar, ExtendedLagrangeCoeff>>,
     permuted_input_poly: Polynomial<C::Scalar, Coeff>,
@@ -963,6 +978,8 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             sorted_values: sorted_input_values,
             sort: sorted_input_sort,
         } = input;
+        let input_sinsemilla_q_0 =
+            factorable_input_sinsemilla_q_0(&sorted_input_values, table.sinsemilla_q_0);
         #[cfg(feature = "multicore")]
         let sorted_u10_suffix_multiples = prepared_sorted_u10_suffix_multiples(
             params,
@@ -1053,6 +1070,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             &permuted_table_expression,
             permuted_table_blind,
             table.sinsemilla_q_0,
+            input_sinsemilla_q_0,
             table.sorted_values.len(),
             #[cfg(feature = "multicore")]
             sorted_u10.as_ref().zip(sorted_u10_suffix_multiples),
@@ -1183,10 +1201,42 @@ fn commit_permuted_pair<C: CurveAffine>(
     input_blind: Blind<C::Scalar>,
     table: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_blind: Blind<C::Scalar>,
-    sinsemilla_q_0: Option<(C::Scalar, usize)>,
+    table_sinsemilla_q_0: Option<(C::Scalar, usize)>,
+    input_sinsemilla_q_0: Option<(C::Scalar, usize)>,
     usable_rows: usize,
     #[cfg(feature = "multicore")] sorted_u10: Option<(&SortedU10, &[C])>,
 ) -> (C, C) {
+    if let Some(input_sinsemilla_q_0) = input_sinsemilla_q_0 {
+        // Let D = Com(input - table, r_input - r_table). Factoring the
+        // repeated q_0 terms out of the input commitment gives I directly,
+        // and linearity then gives T = I - D. Return (I, T) in the original
+        // transcript order.
+        let (input_commitment, difference_commitment) = crate::multicore::join(
+            || {
+                commit_sinsemilla_q_0(
+                    params,
+                    input,
+                    input_blind,
+                    Some(input_sinsemilla_q_0),
+                    usable_rows,
+                )
+            },
+            || {
+                commit_lagrange_difference(
+                    params,
+                    domain,
+                    input,
+                    table,
+                    Blind(input_blind.0 - table_blind.0),
+                )
+            },
+        );
+        let projective = [input_commitment, input_commitment - difference_commitment];
+        let mut affine = [C::identity(); 2];
+        C::Curve::batch_normalize(&projective, &mut affine);
+        return (affine[0], affine[1]);
+    }
+
     // The 10-bit range-check input stays sorted, so its prefix can use cached
     // Lagrange suffix sums. Other inputs use linearity:
     // C(input, r_i) = C(table, r_t) + C(input - table, r_i - r_t).
@@ -1202,7 +1252,13 @@ fn commit_permuted_pair<C: CurveAffine>(
             {
                 return commitment;
             }
-            commit_sinsemilla_table(params, table, table_blind, sinsemilla_q_0, usable_rows)
+            commit_sinsemilla_q_0(
+                params,
+                table,
+                table_blind,
+                table_sinsemilla_q_0,
+                usable_rows,
+            )
         },
         || {
             #[cfg(feature = "multicore")]
@@ -1246,7 +1302,7 @@ fn commit_permuted_pair<C: CurveAffine>(
     (affine[0], affine[1])
 }
 
-fn commit_sinsemilla_table<C: CurveAffine>(
+fn commit_sinsemilla_q_0<C: CurveAffine>(
     params: &Params<C>,
     polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
     blind: Blind<C::Scalar>,
@@ -1257,10 +1313,10 @@ fn commit_sinsemilla_table<C: CurveAffine>(
         return params.commit_lagrange(polynomial, blind);
     };
 
-    // Factor the Sinsemilla table's repeated q_0 without changing any other
-    // scalar. The dedicated prepared-table path sums the selected Lagrange
-    // bases into S_U, then adds [q_0] S_U. Existing zero and low-magnitude
-    // behavior is therefore preserved for every remaining coefficient.
+    // Factor the repeated q_0 without changing any other scalar. The
+    // dedicated prepared-table path sums the selected Lagrange bases into
+    // S_U, then adds [q_0] S_U. Existing zero and low-magnitude behavior is
+    // therefore preserved for every remaining coefficient.
     params
         .try_commit_sinsemilla_table(polynomial, blind, q_0, q_0_count, usable_rows)
         .unwrap_or_else(|| params.commit_lagrange(polynomial, blind))
@@ -2878,6 +2934,7 @@ mod tests {
                 &zero,
                 table_blind,
                 None,
+                None,
                 usable_rows,
                 Some((&malformed, suffix_multiples)),
             ),
@@ -2984,6 +3041,8 @@ mod tests {
         C::Curve: core::fmt::Debug,
     {
         const K: u32 = 4;
+        const USABLE_ROWS: usize = (1 << K) - 1;
+        const TABLE_Q_0_COUNT: usize = 8;
 
         let params = Params::<C>::new(K);
         #[cfg(any(feature = "multicore", feature = "orbits"))]
@@ -3004,7 +3063,24 @@ mod tests {
                 &zero,
                 Blind(C::Scalar::ZERO),
                 None,
+                None,
                 0,
+                #[cfg(feature = "multicore")]
+                None,
+            ),
+            (C::identity(), C::identity()),
+        );
+        assert_eq!(
+            commit_permuted_pair(
+                &params,
+                &domain,
+                &zero,
+                Blind(C::Scalar::ZERO),
+                &zero,
+                Blind(C::Scalar::ZERO),
+                Some((C::Scalar::ZERO, 1 << K)),
+                Some((C::Scalar::ZERO, 1 << K)),
+                1 << K,
                 #[cfg(feature = "multicore")]
                 None,
             ),
@@ -3014,7 +3090,7 @@ mod tests {
         let q_0 = C::Scalar::from(29);
         let table_values = (0..1_usize << K)
             .map(|index| {
-                if (index < 15 && index % 2 == 0) || index == (1 << K) - 1 {
+                if (index < USABLE_ROWS && index % 2 == 0) || index == (1 << K) - 1 {
                     q_0
                 } else {
                     C::Scalar::from(index as u64 + 1)
@@ -3035,6 +3111,15 @@ mod tests {
                     *value + C::Scalar::from(index as u64 + 2)
                 } else {
                     *value
+                }
+            })
+            .collect::<Vec<_>>();
+        let more_repeated_q_0 = (0..1_usize << K)
+            .map(|index| {
+                if index < USABLE_ROWS {
+                    q_0
+                } else {
+                    C::Scalar::from(index as u64 + 1)
                 }
             })
             .collect::<Vec<_>>();
@@ -3060,6 +3145,11 @@ mod tests {
                 Blind(C::Scalar::from(19)),
                 Blind(C::Scalar::from(23)),
             ),
+            (
+                more_repeated_q_0,
+                Blind(C::Scalar::from(29)),
+                Blind(C::Scalar::from(31)),
+            ),
         ] {
             let input = domain.lagrange_from_vec(input_values);
             let table = domain.lagrange_from_vec(table_values.clone());
@@ -3070,17 +3160,43 @@ mod tests {
             // Model noncontiguous witness-dependent positions and a random
             // blind-tail row that happens to equal q_0.
             #[cfg(feature = "multicore")]
-            let routed_table = prepared_pool
-                .install(|| params.try_commit_sinsemilla_table(&table, table_blind, q_0, 8, 15));
+            let routed_table = prepared_pool.install(|| {
+                params.try_commit_sinsemilla_table(
+                    &table,
+                    table_blind,
+                    q_0,
+                    TABLE_Q_0_COUNT,
+                    USABLE_ROWS,
+                )
+            });
             #[cfg(all(not(feature = "multicore"), feature = "orbits"))]
-            let routed_table = params.try_commit_sinsemilla_table(&table, table_blind, q_0, 8, 15);
+            let routed_table = params.try_commit_sinsemilla_table(
+                &table,
+                table_blind,
+                q_0,
+                TABLE_Q_0_COUNT,
+                USABLE_ROWS,
+            );
             #[cfg(any(feature = "multicore", feature = "orbits"))]
             assert_eq!(
                 routed_table.map(|point| point.to_affine()),
                 Some(expected.1)
             );
 
-            for sinsemilla_q_0 in [None, Some((q_0, 8))] {
+            let input_q_0_count = input
+                .iter()
+                .take(USABLE_ROWS)
+                .filter(|&&value| value == q_0)
+                .count();
+            for (sinsemilla_q_0, input_sinsemilla_q_0) in [
+                (None, None),
+                (Some((q_0, TABLE_Q_0_COUNT)), None),
+                (
+                    Some((q_0, TABLE_Q_0_COUNT)),
+                    (input_q_0_count > TABLE_Q_0_COUNT).then_some((q_0, input_q_0_count)),
+                ),
+                (Some((q_0, TABLE_Q_0_COUNT)), Some((q_0, input_q_0_count))),
+            ] {
                 assert_eq!(
                     commit_permuted_pair(
                         &params,
@@ -3090,7 +3206,8 @@ mod tests {
                         &table,
                         table_blind,
                         sinsemilla_q_0,
-                        15,
+                        input_sinsemilla_q_0,
+                        USABLE_ROWS,
                         #[cfg(feature = "multicore")]
                         None,
                     ),
@@ -3102,7 +3219,7 @@ mod tests {
         let constant = domain.lagrange_from_vec(vec![q_0; 1usize << K]);
         let expected_constant = params.commit_lagrange(&constant, Blind(C::Scalar::ZERO));
         assert_eq!(
-            commit_sinsemilla_table(
+            commit_sinsemilla_q_0(
                 &params,
                 &constant,
                 Blind(C::Scalar::ZERO),
@@ -3202,6 +3319,31 @@ mod tests {
     #[test]
     fn permuted_pair_commitments_reuse_table_vesta() {
         check_permuted_pair_commitments::<vesta::Affine>();
+    }
+
+    #[test]
+    fn input_q_0_factor_route_requires_more_repetitions() {
+        let q_0 = pallas::Scalar::from(2);
+        let with_q_0 = values(&[0, 1, 2, 2, 3]);
+        let without_q_0 = values(&[0, 1, 3, 4, 5]);
+
+        assert_eq!(factorable_input_sinsemilla_q_0(&with_q_0, None), None);
+        assert_eq!(
+            factorable_input_sinsemilla_q_0(&without_q_0, Some((q_0, 0))),
+            None,
+        );
+        assert_eq!(
+            factorable_input_sinsemilla_q_0(&with_q_0, Some((q_0, 1))),
+            Some((q_0, 2)),
+        );
+        assert_eq!(
+            factorable_input_sinsemilla_q_0(&with_q_0, Some((q_0, 2))),
+            None,
+        );
+        assert_eq!(
+            factorable_input_sinsemilla_q_0(&with_q_0, Some((q_0, 3))),
+            None,
+        );
     }
 
     fn check_table_sort<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord>() {
