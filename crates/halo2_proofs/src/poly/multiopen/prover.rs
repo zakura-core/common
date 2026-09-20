@@ -28,6 +28,10 @@ const MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD: usize = 1 << 10;
 // This excludes `Vec` metadata and allocator rounding.
 const MAX_PARALLEL_Q_PRIME_FIELD_BYTES: usize = 8 * 1024 * 1024;
 const DEFERRED_FOLD_LANES: usize = 2;
+// Two 32-term Comba blocks cover the largest four-action Orchard group with
+// one reduction.
+#[cfg(any(test, all(feature = "multicore", target_arch = "aarch64")))]
+const AARCH64_INNER_PRODUCT_GATHER_SIZE: usize = 64;
 
 fn fold_polynomial_range<F: Field>(
     values: &mut [F],
@@ -126,6 +130,42 @@ fn fold_polynomial_range_deferred<F: DeferredField>(
     }
 }
 
+#[cfg(any(test, all(feature = "multicore", target_arch = "aarch64")))]
+fn fold_polynomial_range_blocked_inner_product<F: DeferredField>(
+    values: &mut [F],
+    start: usize,
+    polynomials: &[&Polynomial<F, Coeff>],
+    descending_powers: &[F; AARCH64_INNER_PRODUCT_GATHER_SIZE],
+) {
+    for block in polynomials.chunks(AARCH64_INNER_PRODUCT_GATHER_SIZE) {
+        let block_len = block.len();
+        let (last, products) = block.split_last().expect("a polynomial block is nonempty");
+        // A block continues Horner as
+        //
+        // A x^k + P_0 x^(k-1) + ... + P_(k-2) x + P_(k-1).
+        //
+        // Keeping the final addend outside the inner product makes the
+        // result the accumulator for the next consecutive block.
+        let weights = &descending_powers[AARCH64_INNER_PRODUCT_GATHER_SIZE - block_len..];
+        let mut terms = [F::ZERO; AARCH64_INNER_PRODUCT_GATHER_SIZE];
+        for (offset, value) in values.iter_mut().enumerate() {
+            let coefficient_index = start + offset;
+            terms[0] = *value;
+            for (term, polynomial) in terms[1..block_len].iter_mut().zip(products) {
+                *term = polynomial
+                    .values
+                    .get(coefficient_index)
+                    .copied()
+                    .unwrap_or(F::ZERO);
+            }
+            *value = F::inner_product(&terms[..block_len], weights);
+            if let Some(coefficient) = last.values.get(coefficient_index) {
+                *value += coefficient;
+            }
+        }
+    }
+}
+
 fn collapse_polynomials_with<F: Field>(
     groups: &[Vec<&Polynomial<F, Coeff>>],
     fold_range: impl Fn(&mut [F], usize, &[&Polynomial<F, Coeff>]) + Copy + Send + Sync,
@@ -188,11 +228,59 @@ fn collapse_polynomials_horner<F: Field>(
     })
 }
 
+#[cfg(any(test, all(feature = "multicore", target_arch = "aarch64")))]
+fn collapse_polynomials_blocked_inner_product<F: DeferredField>(
+    groups: &[Vec<&Polynomial<F, Coeff>>],
+    challenge: F,
+) -> Vec<Polynomial<F, Coeff>> {
+    let max_block_len = groups
+        .iter()
+        .map(|group| group.len().saturating_sub(1))
+        .max()
+        .unwrap_or(0)
+        .min(AARCH64_INNER_PRODUCT_GATHER_SIZE);
+    if max_block_len <= DEFERRED_FOLD_LANES {
+        return collapse_polynomials_horner(groups, challenge);
+    }
+
+    let mut descending_powers = [F::ZERO; AARCH64_INNER_PRODUCT_GATHER_SIZE];
+    let mut power = F::ONE;
+    for weight in descending_powers[AARCH64_INNER_PRODUCT_GATHER_SIZE - max_block_len..]
+        .iter_mut()
+        .rev()
+    {
+        power *= challenge;
+        *weight = power;
+    }
+    collapse_polynomials_with(groups, |values, start, group| {
+        // The first polynomial was cloned into `values`; fold exactly the
+        // following terms so block boundaries preserve Horner's recurrence.
+        let following = &group[1..];
+        if following.len() <= DEFERRED_FOLD_LANES {
+            // Gathering one or two terms costs more than their direct Horner
+            // steps.
+            fold_polynomial_range(values, start, following, challenge);
+        } else {
+            fold_polynomial_range_blocked_inner_product(
+                values,
+                start,
+                following,
+                &descending_powers,
+            );
+        }
+    })
+}
+
 fn collapse_polynomials_deferred<F: DeferredField>(
     groups: &[Vec<&Polynomial<F, Coeff>>],
     challenge: F,
 ) -> Vec<Polynomial<F, Coeff>> {
-    if multicore::current_num_threads() > 1 {
+    let thread_count = multicore::current_num_threads();
+    #[cfg(all(feature = "multicore", target_arch = "aarch64"))]
+    if thread_count > 1 {
+        return collapse_polynomials_blocked_inner_product(groups, challenge);
+    }
+    if thread_count > 1 {
         return collapse_polynomials_horner(groups, challenge);
     }
 
@@ -848,6 +936,7 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 mod tests {
     use super::{
         Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial, collapse_polynomials,
+        collapse_polynomials_blocked_inner_product, collapse_polynomials_horner,
         divide_by_vanishing_polynomial, evaluate_polynomials_with_side_work,
         finish_q_prime_evaluation, fold_polynomials, kate_division_in_place, power_vector,
         prepare_q_prime, prepare_q_prime_evaluation, vanishing_polynomial,
@@ -872,6 +961,16 @@ mod tests {
                     })
             })
             .collect()
+    }
+
+    fn assert_collapsed_eq<F: Field + Debug>(
+        actual: &[Polynomial<F, Coeff>],
+        expected: &[Polynomial<F, Coeff>],
+    ) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(&actual[..], &expected[..]);
+        }
     }
 
     fn streaming_collapse_matches_operator_collapse<F>()
@@ -922,6 +1021,73 @@ mod tests {
 
             #[cfg(feature = "multicore")]
             for thread_count in [1, 4] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(thread_count)
+                    .build()
+                    .unwrap()
+                    .install(&check);
+            }
+            #[cfg(not(feature = "multicore"))]
+            check();
+        }
+    }
+
+    fn blocked_inner_product_boundaries_match_horner<F>()
+    where
+        F: pasta_curves::deferred::DeferredField + From<u64> + Debug,
+    {
+        const POLYNOMIAL_LEN: usize = 257;
+        const FOLLOWING_LENGTHS: [usize; 5] = [2, 3, 63, 64, 65];
+
+        let groups = FOLLOWING_LENGTHS
+            .iter()
+            .enumerate()
+            .map(|(group_index, following_len)| {
+                let group_len = following_len + 1;
+                (0..group_len)
+                    .map(|polynomial_index| {
+                        let len = if group_index + 1 == FOLLOWING_LENGTHS.len()
+                            && polynomial_index + 1 == group_len
+                        {
+                            2
+                        } else {
+                            POLYNOMIAL_LEN
+                        };
+                        Polynomial {
+                            values: (0..len)
+                                .map(|coefficient_index| {
+                                    F::from(
+                                        1 + (group_index * 1_000_000
+                                            + polynomial_index * POLYNOMIAL_LEN
+                                            + coefficient_index)
+                                            as u64,
+                                    )
+                                })
+                                .collect(),
+                            _marker: PhantomData,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let group_refs = groups
+            .iter()
+            .map(|group| group.iter().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+
+        for challenge in [F::ZERO, F::ONE, -F::ONE, F::from(17)] {
+            let expected = collapse_polynomials_horner(&group_refs, challenge);
+            let small_expected = collapse_polynomials_horner(&group_refs[..1], challenge);
+            let check = || {
+                let actual = collapse_polynomials_blocked_inner_product(&group_refs, challenge);
+                assert_collapsed_eq(&actual, &expected);
+                let small_actual =
+                    collapse_polynomials_blocked_inner_product(&group_refs[..1], challenge);
+                assert_collapsed_eq(&small_actual, &small_expected);
+            };
+
+            #[cfg(feature = "multicore")]
+            for thread_count in [1, 4, 10] {
                 maybe_rayon::ThreadPoolBuilder::new()
                     .num_threads(thread_count)
                     .build()
@@ -1286,6 +1452,16 @@ mod tests {
     #[test]
     fn streaming_collapse_matches_operator_collapse_fq() {
         streaming_collapse_matches_operator_collapse::<Fq>();
+    }
+
+    #[test]
+    fn blocked_inner_product_boundaries_match_horner_fp() {
+        blocked_inner_product_boundaries_match_horner::<Fp>();
+    }
+
+    #[test]
+    fn blocked_inner_product_boundaries_match_horner_fq() {
+        blocked_inner_product_boundaries_match_horner::<Fq>();
     }
 
     #[test]
