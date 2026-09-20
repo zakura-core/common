@@ -6,7 +6,7 @@ use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
     ops::{Add, Mul, MulAssign, Neg, Sub},
-    sync::Arc,
+    sync::{Arc, Mutex, TryLockError},
 };
 
 use ff::WithSmallOrderMulGroup;
@@ -20,6 +20,16 @@ use super::{
 use crate::multicore;
 
 const EVALUATOR_CHUNKS_PER_THREAD: usize = 8;
+
+#[cfg(feature = "multicore")]
+fn current_worker_index() -> Option<usize> {
+    maybe_rayon::current_thread_index()
+}
+
+#[cfg(not(feature = "multicore"))]
+fn current_worker_index() -> Option<usize> {
+    Some(0)
+}
 
 // Repeated linear terms save an evaluation-domain walk, but every additional
 // physical cache slot retains one field element per polynomial row. Bound both
@@ -5883,10 +5893,15 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
         let mut result = B::empty_poly(domain);
         let bound_scalars =
             BoundPlanScalars::new(scalar_descriptors, challenges, max_challenge_exponents);
+        let workspace_len = (cache_slots + scratch_slots) * chunk_size;
+        let workspaces = (0..multicore::current_num_threads())
+            .map(|_| Mutex::new(Vec::new()))
+            .collect::<Vec<_>>();
         multicore::scope(|scope| {
             let bound_scalars = &bound_scalars;
             for (chunk_index, out) in result.chunks_mut(chunk_size).enumerate() {
                 let plan = &plan;
+                let workspaces = &workspaces;
                 scope.spawn(move |_| {
                     let ctx = AstContext {
                         domain,
@@ -5895,9 +5910,33 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         polys: &self.polys,
                         scalars: bound_scalars,
                     };
-                    let mut storage = vec![F::ZERO; (cache_slots + scratch_slots) * out.len()];
-                    let (cache, scratch) = storage.split_at_mut(cache_slots * out.len());
-                    recurse_into(plan, &ctx, out, cache, scratch);
+                    let active_len = (cache_slots + scratch_slots) * out.len();
+                    let mut evaluate = |storage: &mut [F]| {
+                        let storage = &mut storage[..active_len];
+                        let (cache, scratch) = storage.split_at_mut(cache_slots * out.len());
+                        recurse_into(plan, &ctx, out, cache, scratch);
+                    };
+
+                    match current_worker_index().and_then(|index| workspaces.get(index)) {
+                        Some(workspace) => match workspace.try_lock() {
+                            Ok(mut workspace) => {
+                                // First-touch each worker's storage in parallel. The
+                                // plan overwrites every live cache and scratch slot
+                                // before use, so later chunks can reuse the allocation.
+                                workspace.resize(workspace_len, F::ZERO);
+                                evaluate(&mut workspace);
+                            }
+                            // Evaluation is currently sequential within each task.
+                            // Fall back safely if nested Rayon work is added later.
+                            Err(TryLockError::WouldBlock) => {
+                                evaluate(&mut vec![F::ZERO; active_len]);
+                            }
+                            Err(TryLockError::Poisoned(_)) => {
+                                panic!("evaluator workspace lock is poisoned");
+                            }
+                        },
+                        None => evaluate(&mut vec![F::ZERO; active_len]),
+                    }
                 });
             }
         });
@@ -9434,6 +9473,18 @@ mod tests {
     fn nested_arithmetic_and_linear_common_subexpressions_are_cached() {
         check_nested_arithmetic_and_linear_common_subexpressions_are_cached::<pallas::Base>();
         check_nested_arithmetic_and_linear_common_subexpressions_are_cached::<vesta::Base>();
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn reused_worker_workspace_preserves_cached_and_scratch_values() {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(
+                check_nested_arithmetic_and_linear_common_subexpressions_are_cached::<pallas::Base>,
+            );
     }
 
     fn check_commuted_common_subexpressions_are_cached<F>()
