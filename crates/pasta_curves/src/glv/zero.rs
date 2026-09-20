@@ -957,7 +957,9 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         num_threads: usize,
     ) -> Option<C> {
         let params = &self.tail_params[self.tail_width];
-        tail_multiexp::<C>(params, residuals, &self.tail_bases, num_threads)
+        let stride =
+            params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
+        tail_multiexp::<C>(params, residuals, &self.tail_bases, stride, num_threads)
     }
 
     /// The range counterpart of [`Self::tail_sum`].
@@ -970,7 +972,9 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let params = &self.tail_params[self.tail_width];
         let range_end = base_offset.checked_add(residuals.len())?;
         let bases = self.tail_bases.get(base_offset..range_end)?;
-        tail_multiexp::<C>(params, residuals, bases, num_threads)
+        let stride =
+            params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
+        tail_multiexp::<C>(params, residuals, bases, stride, num_threads)
     }
 
     /// $E = \sum_j \[s_j\] Q_j$ over the per-check extra terms (already
@@ -1168,18 +1172,22 @@ fn tail_multiexp<C: GlvParams>(
     params: &orbit::OrbitParams,
     components: &[(SignedMagnitude, SignedMagnitude)],
     rotated: &[orbit::RotatedBase<C::Base>],
+    stride: usize,
     num_threads: usize,
 ) -> Option<C> {
     debug_assert_eq!(components.len(), rotated.len());
-    let width = params.window_stride();
-    let mut digits = alloc::vec![0u16; components.len() * width];
+    debug_assert!(stride <= params.window_stride());
+    if stride == 0 {
+        return Some(C::identity());
+    }
+    let mut digits = alloc::vec![0u16; components.len() * stride];
 
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
     #[cfg(feature = "multicore")]
     if num_threads > 1 {
         let active = digits
-            .par_chunks_mut(width)
+            .par_chunks_mut(stride)
             .zip(components.par_iter())
             .map(|(row, &(first, second))| orbit::recode_row(params, first, second, row))
             .max()
@@ -1190,7 +1198,7 @@ fn tail_multiexp<C: GlvParams>(
     }
 
     let mut active = 0;
-    for (row, &(first, second)) in digits.chunks_exact_mut(width).zip(components) {
+    for (row, &(first, second)) in digits.chunks_exact_mut(stride).zip(components) {
         active = active.max(orbit::recode_row(params, first, second, row));
     }
     orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
@@ -1626,6 +1634,38 @@ pub(crate) mod testutil {
 mod tests {
     use super::*;
     use crate::{pallas, vesta};
+
+    #[test]
+    fn alpha_seven_tail_stride_is_exactly_three() {
+        let codebook = Codebook::new(CodebookMode::alpha_only(7));
+        let bound = codebook.tail_bound();
+        let width_index = tail_width_index(2_048, bound);
+        let params = &TAIL_WIDTHS.map(orbit::OrbitParams::new)[width_index];
+        assert_eq!(TAIL_WIDTHS[width_index], 3);
+        assert_eq!(params.window_stride(), 43);
+        assert_eq!(
+            params.window_stride_for_bound(u128::from(bound.unsigned_abs())),
+            3
+        );
+
+        let component = |value: i64| SignedMagnitude {
+            negative: value < 0,
+            magnitude: value.unsigned_abs() as u128,
+        };
+        let mut row = alloc::vec![0; params.window_stride()];
+        let mut exact_stride = 0;
+        for first in -bound..=bound {
+            for second in -bound..=bound {
+                exact_stride = exact_stride.max(orbit::recode_row(
+                    params,
+                    component(first),
+                    component(second),
+                    &mut row,
+                ));
+            }
+        }
+        assert_eq!(exact_stride, 3);
+    }
 
     fn modes_under_test() -> Vec<CodebookMode> {
         vec![
