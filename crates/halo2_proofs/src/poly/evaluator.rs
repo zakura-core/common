@@ -1,6 +1,7 @@
 use std::{
     any::{Any, TypeId},
     borrow::Cow,
+    cell::RefCell,
     collections::{HashMap, hash_map::DefaultHasher},
     fmt,
     hash::{Hash, Hasher},
@@ -1528,6 +1529,75 @@ fn expanded_polynomial<E: Copy, F: Field, B: Basis>(
     })
 }
 
+type PallasAccumulator = <pallas::Base as DeferredField>::Accumulator;
+type VestaAccumulator = <vesta::Base as DeferredField>::Accumulator;
+
+struct FoldWorkspace<F: Field> {
+    // Live folds own their buffers, so nested folds can take another buffer
+    // without borrowing this workspace across recursive evaluation.
+    values: Vec<Vec<F>>,
+    pallas_accumulators: Vec<Vec<PallasAccumulator>>,
+    vesta_accumulators: Vec<Vec<VestaAccumulator>>,
+}
+
+impl<F: Field> Default for FoldWorkspace<F> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            pallas_accumulators: Vec::new(),
+            vesta_accumulators: Vec::new(),
+        }
+    }
+}
+
+fn take_buffer<T: Clone>(pool: &mut Vec<Vec<T>>, len: usize, value: T) -> Vec<T> {
+    let mut buffer = pool.pop().unwrap_or_default();
+    // Reused entries intentionally remain stale. Term and factor buffers are
+    // overwritten before use, while accumulator flags guard their contents.
+    buffer.resize(len, value);
+    buffer
+}
+
+impl<F: Field> FoldWorkspace<F> {
+    fn take_values(&mut self, len: usize) -> Vec<F> {
+        take_buffer(&mut self.values, len, F::ZERO)
+    }
+
+    fn take_pallas_accumulators(&mut self, len: usize) -> Vec<PallasAccumulator> {
+        take_buffer(&mut self.pallas_accumulators, len, Default::default())
+    }
+
+    fn take_vesta_accumulators(&mut self, len: usize) -> Vec<VestaAccumulator> {
+        take_buffer(&mut self.vesta_accumulators, len, Default::default())
+    }
+
+    fn return_values(&mut self, values: Vec<F>) {
+        self.values.push(values);
+    }
+
+    fn return_pallas_accumulators(&mut self, accumulators: Vec<PallasAccumulator>) {
+        self.pallas_accumulators.push(accumulators);
+    }
+
+    fn return_vesta_accumulators(&mut self, accumulators: Vec<VestaAccumulator>) {
+        self.vesta_accumulators.push(accumulators);
+    }
+}
+
+struct EvaluatorWorkspace<F: Field> {
+    values: Vec<F>,
+    folds: FoldWorkspace<F>,
+}
+
+impl<F: Field> Default for EvaluatorWorkspace<F> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            folds: FoldWorkspace::default(),
+        }
+    }
+}
+
 // Accumulates a polynomial expression against precomputed powers. Pasta
 // fields use their wide product accumulator. Other fields retain ordinary
 // field arithmetic, without adding a bound to the public prover API.
@@ -1538,17 +1608,21 @@ enum PowerFold<'a, F: Field> {
         factors: Option<Vec<F>>,
     },
     Pallas {
-        accumulators: Vec<<pallas::Base as DeferredField>::Accumulator>,
+        accumulators: Vec<PallasAccumulator>,
         terms: Vec<F>,
         factors: Option<Vec<F>>,
         addends: Option<Vec<F>>,
+        // A false flag makes stale pooled accumulators unreachable.
+        has_products: bool,
         output: &'a mut [F],
     },
     Vesta {
-        accumulators: Vec<<vesta::Base as DeferredField>::Accumulator>,
+        accumulators: Vec<VestaAccumulator>,
         terms: Vec<F>,
         factors: Option<Vec<F>>,
         addends: Option<Vec<F>>,
+        // A false flag makes stale pooled accumulators unreachable.
+        has_products: bool,
         output: &'a mut [F],
     },
 }
@@ -1559,26 +1633,30 @@ fn supports_deferred_power_fold<F: Field>() -> bool {
 }
 
 impl<'a, F: Field> PowerFold<'a, F> {
-    fn new(output: &'a mut [F]) -> Self {
+    fn new(output: &'a mut [F], workspace: &mut FoldWorkspace<F>) -> Self {
         if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
             Self::Pallas {
-                accumulators: vec![Default::default(); output.len()],
-                terms: vec![F::ZERO; output.len()],
+                accumulators: workspace.take_pallas_accumulators(output.len()),
+                terms: workspace.take_values(output.len()),
                 factors: None,
                 addends: None,
+                has_products: false,
                 output,
             }
         } else if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
             Self::Vesta {
-                accumulators: vec![Default::default(); output.len()],
-                terms: vec![F::ZERO; output.len()],
+                accumulators: workspace.take_vesta_accumulators(output.len()),
+                terms: workspace.take_values(output.len()),
                 factors: None,
                 addends: None,
+                has_products: false,
                 output,
             }
         } else {
+            let mut accumulators = workspace.take_values(output.len());
+            accumulators.fill(F::ZERO);
             Self::Eager {
-                accumulators: vec![F::ZERO; output.len()],
+                accumulators,
                 terms: output,
                 factors: None,
             }
@@ -1593,14 +1671,14 @@ impl<'a, F: Field> PowerFold<'a, F> {
         }
     }
 
-    fn factors(&mut self) -> &mut [F] {
+    fn factors(&mut self, workspace: &mut FoldWorkspace<F>) -> &mut [F] {
         let (factors, len) = match self {
             Self::Eager { terms, factors, .. } => (factors, terms.len()),
             Self::Pallas { terms, factors, .. } => (factors, terms.len()),
             Self::Vesta { terms, factors, .. } => (factors, terms.len()),
         };
         factors
-            .get_or_insert_with(|| vec![F::ZERO; len])
+            .get_or_insert_with(|| workspace.take_values(len))
             .as_mut_slice()
     }
 
@@ -1623,13 +1701,29 @@ impl<'a, F: Field> PowerFold<'a, F> {
             Self::Pallas {
                 accumulators,
                 terms,
+                has_products,
                 ..
-            } => accumulate_deferred::<pallas::Base>(accumulators, &*terms, &power),
+            } => {
+                if *has_products {
+                    accumulate_deferred::<pallas::Base>(accumulators, &*terms, &power);
+                } else {
+                    initialize_deferred::<pallas::Base>(accumulators, &*terms, &power);
+                    *has_products = true;
+                }
+            }
             Self::Vesta {
                 accumulators,
                 terms,
+                has_products,
                 ..
-            } => accumulate_deferred::<vesta::Base>(accumulators, &*terms, &power),
+            } => {
+                if *has_products {
+                    accumulate_deferred::<vesta::Base>(accumulators, &*terms, &power);
+                } else {
+                    initialize_deferred::<vesta::Base>(accumulators, &*terms, &power);
+                    *has_products = true;
+                }
+            }
         }
     }
 
@@ -1677,63 +1771,101 @@ impl<'a, F: Field> PowerFold<'a, F> {
                 accumulators,
                 terms,
                 factors,
+                has_products,
                 ..
-            } => accumulate_deferred_products::<pallas::Base>(
-                accumulators,
-                &*terms,
-                factors
+            } => {
+                let factors = factors
                     .as_ref()
-                    .expect("factor values are evaluated before accumulation"),
-            ),
+                    .expect("factor values are evaluated before accumulation");
+                if *has_products {
+                    accumulate_deferred_products::<pallas::Base>(accumulators, &*terms, factors);
+                } else {
+                    initialize_deferred_products::<pallas::Base>(accumulators, &*terms, factors);
+                    *has_products = true;
+                }
+            }
             Self::Vesta {
                 accumulators,
                 terms,
                 factors,
+                has_products,
                 ..
-            } => accumulate_deferred_products::<vesta::Base>(
-                accumulators,
-                &*terms,
-                factors
+            } => {
+                let factors = factors
                     .as_ref()
-                    .expect("factor values are evaluated before accumulation"),
-            ),
+                    .expect("factor values are evaluated before accumulation");
+                if *has_products {
+                    accumulate_deferred_products::<vesta::Base>(accumulators, &*terms, factors);
+                } else {
+                    initialize_deferred_products::<vesta::Base>(accumulators, &*terms, factors);
+                    *has_products = true;
+                }
+            }
         }
     }
 
-    fn finish(self) {
+    fn finish(self, workspace: &mut FoldWorkspace<F>) {
         match self {
             Self::Eager {
                 accumulators,
                 terms,
-                ..
-            } => terms.copy_from_slice(&accumulators),
+                factors,
+            } => {
+                terms.copy_from_slice(&accumulators);
+                workspace.return_values(accumulators);
+                if let Some(factors) = factors {
+                    workspace.return_values(factors);
+                }
+            }
             Self::Pallas {
                 accumulators,
                 addends,
+                factors,
+                has_products,
+                mut terms,
                 output,
-                ..
             } => {
-                let mut result = reduce_deferred::<pallas::Base, _>(accumulators);
-                if let Some(addends) = addends {
-                    for (result, addend) in result.iter_mut().zip(addends) {
-                        *result += addend;
+                if has_products {
+                    reduce_deferred_into::<pallas::Base, F>(&accumulators, &mut terms);
+                } else {
+                    terms.fill(F::ZERO);
+                }
+                if let Some(addends) = addends.as_ref() {
+                    for (term, addend) in terms.iter_mut().zip(addends) {
+                        *term += addend;
                     }
                 }
-                output.copy_from_slice(&result);
+                output.copy_from_slice(&terms);
+                workspace.return_pallas_accumulators(accumulators);
+                workspace.return_values(terms);
+                if let Some(factors) = factors {
+                    workspace.return_values(factors);
+                }
             }
             Self::Vesta {
                 accumulators,
                 addends,
+                factors,
+                has_products,
+                mut terms,
                 output,
-                ..
             } => {
-                let mut result = reduce_deferred::<vesta::Base, _>(accumulators);
-                if let Some(addends) = addends {
-                    for (result, addend) in result.iter_mut().zip(addends) {
-                        *result += addend;
+                if has_products {
+                    reduce_deferred_into::<vesta::Base, F>(&accumulators, &mut terms);
+                } else {
+                    terms.fill(F::ZERO);
+                }
+                if let Some(addends) = addends.as_ref() {
+                    for (term, addend) in terms.iter_mut().zip(addends) {
+                        *term += addend;
                     }
                 }
-                output.copy_from_slice(&result);
+                output.copy_from_slice(&terms);
+                workspace.return_vesta_accumulators(accumulators);
+                workspace.return_values(terms);
+                if let Some(factors) = factors {
+                    workspace.return_values(factors);
+                }
             }
         }
     }
@@ -1746,17 +1878,18 @@ impl<'a, F: Field> PowerFold<'a, F> {
 struct DeferredPowerFold<T: DeferredField, F: Field> {
     accumulators: Vec<T::Accumulator>,
     terms: Vec<F>,
-    addends: Vec<F>,
+    addends: Option<Vec<F>>,
     has_products: bool,
     has_addends: bool,
 }
 
 impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
-    fn new(len: usize) -> Self {
+    fn new(accumulators: Vec<T::Accumulator>, terms: Vec<F>) -> Self {
+        debug_assert_eq!(accumulators.len(), terms.len());
         Self {
-            accumulators: vec![Default::default(); len],
-            terms: vec![F::ZERO; len],
-            addends: vec![F::ZERO; len],
+            accumulators,
+            terms,
+            addends: None,
             has_products: false,
             has_addends: false,
         }
@@ -1770,11 +1903,18 @@ impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
     fn accumulate(&mut self, power: F) {
         if power == F::ONE {
             if self.has_addends {
-                for (addend, term) in self.addends.iter_mut().zip(&self.terms) {
+                let addends = self
+                    .addends
+                    .as_mut()
+                    .expect("the addend buffer is initialized when marked present");
+                for (addend, term) in addends.iter_mut().zip(&self.terms) {
                     *addend += term;
                 }
             } else {
-                self.addends.copy_from_slice(&self.terms);
+                match self.addends.as_mut() {
+                    Some(addends) => addends.copy_from_slice(&self.terms),
+                    None => self.addends = Some(self.terms.clone()),
+                }
                 self.has_addends = true;
             }
         } else if self.has_products {
@@ -1789,11 +1929,18 @@ impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
         debug_assert_eq!(self.terms.len(), terms.len());
         if power == F::ONE {
             if self.has_addends {
-                for (addend, term) in self.addends.iter_mut().zip(terms) {
+                let addends = self
+                    .addends
+                    .as_mut()
+                    .expect("the addend buffer is initialized when marked present");
+                for (addend, term) in addends.iter_mut().zip(terms) {
                     *addend += term;
                 }
             } else {
-                self.addends.copy_from_slice(terms);
+                match self.addends.as_mut() {
+                    Some(addends) => addends.copy_from_slice(terms),
+                    None => self.addends = Some(terms.to_vec()),
+                }
                 self.has_addends = true;
             }
         } else if self.has_products {
@@ -1812,7 +1959,11 @@ impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
             output.fill(F::ZERO);
         }
         if self.has_addends {
-            for (result, addend) in output.iter_mut().zip(&self.addends) {
+            let addends = self
+                .addends
+                .as_ref()
+                .expect("the addend buffer is initialized when marked present");
+            for (result, addend) in output.iter_mut().zip(addends) {
                 *result += addend;
             }
         }
@@ -1826,15 +1977,21 @@ enum ReusablePowerFold<F: Field> {
 }
 
 impl<F: Field> ReusablePowerFold<F> {
-    fn new(len: usize) -> Self {
+    fn new(len: usize, workspace: &mut FoldWorkspace<F>) -> Self {
         if TypeId::of::<F>() == TypeId::of::<pallas::Base>() {
-            Self::Pallas(DeferredPowerFold::new(len))
+            Self::Pallas(DeferredPowerFold::new(
+                workspace.take_pallas_accumulators(len),
+                workspace.take_values(len),
+            ))
         } else if TypeId::of::<F>() == TypeId::of::<vesta::Base>() {
-            Self::Vesta(DeferredPowerFold::new(len))
+            Self::Vesta(DeferredPowerFold::new(
+                workspace.take_vesta_accumulators(len),
+                workspace.take_values(len),
+            ))
         } else {
             Self::Eager {
-                accumulators: vec![F::ZERO; len],
-                terms: vec![F::ZERO; len],
+                accumulators: workspace.take_values(len),
+                terms: workspace.take_values(len),
             }
         }
     }
@@ -1899,6 +2056,32 @@ impl<F: Field> ReusablePowerFold<F> {
             Self::Eager { accumulators, .. } => output.copy_from_slice(accumulators),
             Self::Pallas(fold) => fold.finish_into(output),
             Self::Vesta(fold) => fold.finish_into(output),
+        }
+    }
+
+    fn release(self, workspace: &mut FoldWorkspace<F>) {
+        // Deferred addends are deliberately not pooled. They are allocated
+        // lazily only for split-addend work and reused by every reset of this
+        // fold. Pooling them would require either borrowing the workspace on
+        // the accumulation hot path or eagerly retaining a third value buffer
+        // for product-only folds; neither trade has isolated production
+        // evidence yet.
+        match self {
+            Self::Eager {
+                accumulators,
+                terms,
+            } => {
+                workspace.return_values(accumulators);
+                workspace.return_values(terms);
+            }
+            Self::Pallas(fold) => {
+                workspace.return_pallas_accumulators(fold.accumulators);
+                workspace.return_values(fold.terms);
+            }
+            Self::Vesta(fold) => {
+                workspace.return_vesta_accumulators(fold.accumulators);
+                workspace.return_values(fold.terms);
+            }
         }
     }
 }
@@ -1992,14 +2175,21 @@ fn accumulate_deferred_products<T: DeferredField + 'static>(
     }
 }
 
-fn reduce_deferred<T: DeferredField + 'static, F: Field>(
-    accumulators: Vec<T::Accumulator>,
-) -> Vec<F> {
-    let values: Box<dyn Any> =
-        Box::new(accumulators.into_iter().map(T::reduce).collect::<Vec<_>>());
-    match values.downcast::<Vec<F>>() {
-        Ok(values) => *values,
-        Err(_) => unreachable!("field type was checked before accumulation"),
+fn initialize_deferred_products<T: DeferredField + 'static>(
+    accumulators: &mut [T::Accumulator],
+    terms: &dyn Any,
+    factors: &dyn Any,
+) {
+    let terms = terms
+        .downcast_ref::<Vec<T>>()
+        .expect("term buffer matches the deferred field");
+    let factors = factors
+        .downcast_ref::<Vec<T>>()
+        .expect("factor buffer matches the deferred field");
+    for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
+        let mut initialized = T::Accumulator::default();
+        T::mul_accumulate(&mut initialized, term, factor);
+        *accumulator = initialized;
     }
 }
 
@@ -4709,6 +4899,9 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             chunk_index: usize,
             polys: &'a [Cow<'a, Polynomial<F, B>>],
             scalars: &'a BoundPlanScalars<F>,
+            // Fold buffers are taken and returned around recursive calls, so
+            // the dynamic borrow never spans recursive evaluation.
+            fold_workspace: RefCell<&'a mut FoldWorkspace<F>>,
         }
 
         fn root_scale_chain<'a, F: Field>(
@@ -4824,7 +5017,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     }
                 }
                 FactorBodyPlan::Factored(work) => {
-                    let mut fold = PowerFold::new(output);
+                    let mut fold = PowerFold::new(output, &mut ctx.fold_workspace.borrow_mut());
                     let mut reusable_weighted_fold = None;
                     for work in work {
                         match work {
@@ -4833,12 +5026,19 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                                 fold.accumulate(ctx.scalars.get(term.power));
                             }
                             FactorBodyWork::SharedFactor { factor, terms } => {
-                                recurse_into(factor, ctx, fold.factors(), cache, scratch);
+                                let factor_values = {
+                                    let mut workspace = ctx.fold_workspace.borrow_mut();
+                                    fold.factors(&mut workspace)
+                                };
+                                recurse_into(factor, ctx, factor_values, cache, scratch);
                                 {
                                     let body_values = fold.terms();
                                     let reusable_weighted_fold = reusable_weighted_fold
                                         .get_or_insert_with(|| {
-                                            ReusablePowerFold::new(body_values.len())
+                                            ReusablePowerFold::new(
+                                                body_values.len(),
+                                                &mut ctx.fold_workspace.borrow_mut(),
+                                            )
                                         });
                                     recurse_weighted_terms(
                                         terms,
@@ -4853,7 +5053,10 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                             }
                         }
                     }
-                    fold.finish();
+                    if let Some(reusable_weighted_fold) = reusable_weighted_fold {
+                        reusable_weighted_fold.release(&mut ctx.fold_workspace.borrow_mut());
+                    }
+                    fold.finish(&mut ctx.fold_workspace.borrow_mut());
                 }
             }
         }
@@ -5729,7 +5932,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                     }
                 }
                 EvaluationPlan::DistributePowers { work, base } => {
-                    let mut fold = PowerFold::new(output);
+                    let mut fold = PowerFold::new(output, &mut ctx.fold_workspace.borrow_mut());
                     let mut reusable_weighted_fold = None;
                     for work in work {
                         match work {
@@ -5738,12 +5941,19 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                                 fold.accumulate(ctx.scalars.get(*power));
                             }
                             DistributionWork::WeightedSharedFactor { factor, terms } => {
-                                recurse_into(factor, ctx, fold.factors(), cache, scratch);
+                                let factor_values = {
+                                    let mut workspace = ctx.fold_workspace.borrow_mut();
+                                    fold.factors(&mut workspace)
+                                };
+                                recurse_into(factor, ctx, factor_values, cache, scratch);
                                 {
                                     let body_values = fold.terms();
                                     let reusable_weighted_fold = reusable_weighted_fold
                                         .get_or_insert_with(|| {
-                                            ReusablePowerFold::new(body_values.len())
+                                            ReusablePowerFold::new(
+                                                body_values.len(),
+                                                &mut ctx.fold_workspace.borrow_mut(),
+                                            )
                                         });
                                     recurse_weighted_terms(
                                         terms,
@@ -5764,7 +5974,10 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                         }
                     }
 
-                    fold.finish();
+                    if let Some(reusable_weighted_fold) = reusable_weighted_fold {
+                        reusable_weighted_fold.release(&mut ctx.fold_workspace.borrow_mut());
+                    }
+                    fold.finish(&mut ctx.fold_workspace.borrow_mut());
                 }
                 EvaluationPlan::CacheStore { slot, inner } => {
                     recurse_into(inner, ctx, output, cache, scratch);
@@ -5895,7 +6108,7 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
             BoundPlanScalars::new(scalar_descriptors, challenges, max_challenge_exponents);
         let workspace_len = (cache_slots + scratch_slots) * chunk_size;
         let workspaces = (0..multicore::current_num_threads())
-            .map(|_| Mutex::new(Vec::new()))
+            .map(|_| Mutex::new(EvaluatorWorkspace::default()))
             .collect::<Vec<_>>();
         multicore::scope(|scope| {
             let bound_scalars = &bound_scalars;
@@ -5903,16 +6116,18 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                 let plan = &plan;
                 let workspaces = &workspaces;
                 scope.spawn(move |_| {
-                    let ctx = AstContext {
-                        domain,
-                        chunk_size,
-                        chunk_index,
-                        polys: &self.polys,
-                        scalars: bound_scalars,
-                    };
                     let active_len = (cache_slots + scratch_slots) * out.len();
-                    let mut evaluate = |storage: &mut [F]| {
-                        let storage = &mut storage[..active_len];
+                    let mut evaluate = |workspace: &mut EvaluatorWorkspace<F>| {
+                        let EvaluatorWorkspace { values, folds } = workspace;
+                        let ctx = AstContext {
+                            domain,
+                            chunk_size,
+                            chunk_index,
+                            polys: &self.polys,
+                            scalars: bound_scalars,
+                            fold_workspace: RefCell::new(folds),
+                        };
+                        let storage = &mut values[..active_len];
                         let (cache, scratch) = storage.split_at_mut(cache_slots * out.len());
                         recurse_into(plan, &ctx, out, cache, scratch);
                     };
@@ -5923,19 +6138,25 @@ impl<'poly, E, F: Field, B: Basis> Evaluator<'poly, E, F, B> {
                                 // First-touch each worker's storage in parallel. The
                                 // plan overwrites every live cache and scratch slot
                                 // before use, so later chunks can reuse the allocation.
-                                workspace.resize(workspace_len, F::ZERO);
+                                workspace.values.resize(workspace_len, F::ZERO);
                                 evaluate(&mut workspace);
                             }
                             // Evaluation is currently sequential within each task.
                             // Fall back safely if nested Rayon work is added later.
                             Err(TryLockError::WouldBlock) => {
-                                evaluate(&mut vec![F::ZERO; active_len]);
+                                let mut workspace = EvaluatorWorkspace::default();
+                                workspace.values.resize(active_len, F::ZERO);
+                                evaluate(&mut workspace);
                             }
                             Err(TryLockError::Poisoned(_)) => {
                                 panic!("evaluator workspace lock is poisoned");
                             }
                         },
-                        None => evaluate(&mut vec![F::ZERO; active_len]),
+                        None => {
+                            let mut workspace = EvaluatorWorkspace::default();
+                            workspace.values.resize(active_len, F::ZERO);
+                            evaluate(&mut workspace);
+                        }
                     }
                 });
             }
@@ -6495,10 +6716,10 @@ mod tests {
     use super::{
         Ast, AstLeaf, AstMul, BasisOps, BoundPlanScalars, CacheAction, CacheOccupancy,
         DistributionWork, EvaluationChallenge, EvaluationChallenges, EvaluationPlan,
-        EvaluationPolyTag, Evaluator, FactorBodyPlan, FactorSide, FixedRange, IndexedLeaf,
-        LinearTermCacheBudget, MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES,
+        EvaluationPolyTag, Evaluator, FactorBodyPlan, FactorSide, FixedRange, FoldWorkspace,
+        IndexedLeaf, LinearTermCacheBudget, MAX_ADDITIONAL_LINEAR_TERM_CACHE_BYTES,
         MAX_DUPLICATED_AFFINE_FALLBACK_NODES, MAX_LINEAR_TERM_CACHE_ENTRIES, PlanScalar,
-        PlanScalarInterner, ReusablePowerFold, ScalarId, SelectorFamilyRun, SquareReuse,
+        PlanScalarInterner, PowerFold, ReusablePowerFold, ScalarId, SelectorFamilyRun, SquareReuse,
         WeightedTerm, ast_has_at_most_nodes, collect_plan_occurrences, compressed_selector,
         get_chunk_params, linear_term_cache_budget, multiply_ast, nested_poly_factor_groups,
         new_evaluator, new_virtual_evaluator, reassociate_affine_blend, reuse_cache_slots,
@@ -6716,7 +6937,8 @@ mod tests {
             vec![(terms(41), F::from(11)), (terms(47), F::ONE)],
             vec![(terms(53), F::ONE), (terms(61), F::ONE)],
         ];
-        let mut fold = ReusablePowerFold::<F>::new(7);
+        let mut workspace = FoldWorkspace::default();
+        let mut fold = ReusablePowerFold::<F>::new(7, &mut workspace);
         for case in cases {
             fold.reset();
             let mut expected = vec![F::ZERO; 7];
@@ -6744,6 +6966,191 @@ mod tests {
     fn reusable_power_fold_resets_every_buffer() {
         check_reusable_power_fold::<pallas::Base>();
         check_reusable_power_fold::<vesta::Base>();
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestFoldMode {
+        Addends,
+        Products,
+    }
+
+    fn fold_case<F: Field + From<u64>>(
+        len: usize,
+        seed: u64,
+        mode: TestFoldMode,
+    ) -> (Vec<F>, Vec<F>, F, F, Vec<F>) {
+        let lhs = (0..len)
+            .map(|offset| F::from(seed + offset as u64))
+            .collect::<Vec<_>>();
+        let rhs = (0..len)
+            .map(|offset| F::from(seed + len as u64 + offset as u64 + 1))
+            .collect::<Vec<_>>();
+        let (lhs_power, rhs_power) = match mode {
+            TestFoldMode::Addends => (F::ONE, F::ONE),
+            TestFoldMode::Products => (F::from(3), F::from(5)),
+        };
+        let expected = lhs
+            .iter()
+            .zip(&rhs)
+            .map(|(lhs, rhs)| *lhs * lhs_power + *rhs * rhs_power)
+            .collect();
+        (lhs, rhs, lhs_power, rhs_power, expected)
+    }
+
+    fn assert_released_fold_buffers<F: Field>(workspace: &FoldWorkspace<F>, len: usize) {
+        assert_eq!(workspace.values.len(), 1);
+        assert_eq!(workspace.values[0].len(), len);
+        assert_eq!(
+            workspace.pallas_accumulators.len() + workspace.vesta_accumulators.len(),
+            1
+        );
+    }
+
+    fn run_power_fold_case<F>(
+        workspace: &mut FoldWorkspace<F>,
+        len: usize,
+        seed: u64,
+        mode: TestFoldMode,
+    ) where
+        F: Field + From<u64>,
+    {
+        let (lhs, rhs, lhs_power, rhs_power, expected) = fold_case(len, seed, mode);
+        let mut actual = vec![F::from(seed + 101); len];
+        let mut fold = PowerFold::new(&mut actual, workspace);
+        assert!(workspace.values.is_empty());
+        assert!(workspace.pallas_accumulators.is_empty());
+        assert!(workspace.vesta_accumulators.is_empty());
+        fold.terms().copy_from_slice(&lhs);
+        fold.accumulate(lhs_power);
+        fold.terms().copy_from_slice(&rhs);
+        fold.accumulate(rhs_power);
+        fold.finish(workspace);
+        assert_eq!(actual, expected);
+        assert_released_fold_buffers(workspace, len);
+    }
+
+    fn run_reusable_power_fold_case<F>(
+        workspace: &mut FoldWorkspace<F>,
+        len: usize,
+        seed: u64,
+        mode: TestFoldMode,
+    ) where
+        F: Field + From<u64>,
+    {
+        let (lhs, rhs, lhs_power, rhs_power, expected) = fold_case(len, seed, mode);
+        let mut fold = ReusablePowerFold::new(len, workspace);
+        assert!(workspace.values.is_empty());
+        assert!(workspace.pallas_accumulators.is_empty());
+        assert!(workspace.vesta_accumulators.is_empty());
+        fold.terms().copy_from_slice(&lhs);
+        fold.accumulate(lhs_power);
+        fold.terms().copy_from_slice(&rhs);
+        fold.accumulate(rhs_power);
+        let mut actual = vec![F::from(seed + 103); len];
+        fold.finish_into(&mut actual);
+        assert_eq!(actual, expected);
+        fold.release(workspace);
+        assert_released_fold_buffers(workspace, len);
+    }
+
+    fn check_fold_workspace_reacquires_stale_buffers<F>()
+    where
+        F: Field + From<u64>,
+    {
+        const INITIAL_LEN: usize = 9;
+        const SHRUNK_LEN: usize = 3;
+        const GROWN_LEN: usize = 12;
+        const FINAL_LEN: usize = 5;
+
+        for run_case in [
+            run_power_fold_case::<F> as fn(&mut FoldWorkspace<F>, usize, u64, TestFoldMode),
+            run_reusable_power_fold_case::<F>,
+        ] {
+            let mut workspace = FoldWorkspace::default();
+
+            // The next acquisition sees stale term values from this addend-only
+            // fold, then shrinks both pooled buffers.
+            run_case(&mut workspace, INITIAL_LEN, 11, TestFoldMode::Addends);
+            run_case(&mut workspace, SHRUNK_LEN, 31, TestFoldMode::Products);
+
+            // This grows the same buffers and must ignore the preceding
+            // product accumulators on the addend-only path.
+            run_case(&mut workspace, GROWN_LEN, 47, TestFoldMode::Addends);
+            run_case(&mut workspace, FINAL_LEN, 73, TestFoldMode::Products);
+        }
+    }
+
+    #[test]
+    fn fold_workspace_reacquires_stale_pasta_buffers() {
+        check_fold_workspace_reacquires_stale_buffers::<pallas::Base>();
+        check_fold_workspace_reacquires_stale_buffers::<vesta::Base>();
+    }
+
+    fn check_recursive_distribute_power_folds<F>()
+    where
+        F: WithSmallOrderMulGroup<3> + From<u64>,
+    {
+        let domain = EvaluationDomain::new(3, 4);
+        let values = (0..4)
+            .map(|column| {
+                (0..domain.extended_len())
+                    .map(|row| F::from((column * 37 + row * 5 + 2) as u64))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut evaluator = new_evaluator::<_, F, ExtendedLagrangeCoeff>(|| {});
+        let leaves = values
+            .iter()
+            .map(|values| {
+                let mut polynomial = domain.empty_extended();
+                polynomial.copy_from_slice(values);
+                evaluator.register_poly(polynomial)
+            })
+            .collect::<Vec<_>>();
+
+        let inner_base = F::from(7);
+        let outer_base = F::from(11);
+        let factor = Ast::from(leaves[0]) + Ast::ConstantTerm(F::from(13));
+        let inner =
+            Ast::distribute_powers([Ast::from(leaves[1]), Ast::from(leaves[2])], inner_base);
+        let ast = Ast::distribute_powers(
+            [
+                factor.clone() * inner,
+                factor.clone() * Ast::from(leaves[3]),
+            ],
+            outer_base,
+        );
+
+        let plan = compile_plan_only(&ast);
+        let shared_terms = match &plan {
+            EvaluationPlan::DistributePowers { work, .. } => work
+                .iter()
+                .find_map(|work| match work {
+                    DistributionWork::WeightedSharedFactor { terms, .. } => Some(terms),
+                    _ => None,
+                })
+                .expect("the outer distribution has shared-factor work"),
+            _ => panic!("the outer expression compiles to distributed work"),
+        };
+        assert!(
+            shared_terms
+                .iter()
+                .any(|term| matches!(&term.term, EvaluationPlan::DistributePowers { .. }))
+        );
+
+        let actual = evaluator.evaluate(&ast, &domain);
+        for row in 0..actual.len() {
+            let factor = values[0][row] + F::from(13);
+            let inner = values[1][row] * inner_base + values[2][row];
+            let expected = factor * inner * outer_base + factor * values[3][row];
+            assert_eq!(actual[row], expected);
+        }
+    }
+
+    #[test]
+    fn recursive_distribute_power_folds_use_independent_buffers() {
+        check_recursive_distribute_power_folds::<pallas::Base>();
+        check_recursive_distribute_power_folds::<vesta::Base>();
     }
 
     fn check_scaled_addend_split_selection<F>()
