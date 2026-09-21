@@ -214,7 +214,7 @@ impl Add<&ValueCommitment> for ValueCommitment {
     type Output = CommitmentSum;
 
     fn add(self, rhs: &Self) -> Self::Output {
-        CommitmentSum(self.0 + rhs.0)
+        CommitmentSum(self.derived_point() + rhs.derived_point())
     }
 }
 
@@ -222,13 +222,15 @@ impl Add<&ValueCommitment> for CommitmentSum {
     type Output = CommitmentSum;
 
     fn add(self, rhs: &ValueCommitment) -> Self::Output {
-        CommitmentSum(self.0 + rhs.0)
+        CommitmentSum(self.0 + rhs.derived_point())
     }
 }
 
-impl AddAssign<&ValueCommitment> for CommitmentSum {
-    fn add_assign(&mut self, rhs: &ValueCommitment) {
-        self.0 += rhs.0;
+/// Accumulates a value commitment's point. A verifier obtains it with
+/// [`ValueCommitment::try_point`] and rejects the description if that fails.
+impl AddAssign<&jubjub::ExtendedPoint> for CommitmentSum {
+    fn add_assign(&mut self, rhs: &jubjub::ExtendedPoint) {
+        self.0 += rhs;
     }
 }
 
@@ -236,13 +238,14 @@ impl Sub<&ValueCommitment> for ValueCommitment {
     type Output = CommitmentSum;
 
     fn sub(self, rhs: &Self) -> Self::Output {
-        CommitmentSum(self.0 - rhs.0)
+        CommitmentSum(self.derived_point() - rhs.derived_point())
     }
 }
 
-impl SubAssign<&ValueCommitment> for CommitmentSum {
-    fn sub_assign(&mut self, rhs: &ValueCommitment) {
-        self.0 -= rhs.0;
+/// See [`AddAssign<&jubjub::ExtendedPoint>`].
+impl SubAssign<&jubjub::ExtendedPoint> for CommitmentSum {
+    fn sub_assign(&mut self, rhs: &jubjub::ExtendedPoint) {
+        self.0 -= rhs;
     }
 }
 

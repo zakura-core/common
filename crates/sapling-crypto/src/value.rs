@@ -132,8 +132,19 @@ impl ValueCommitTrapdoor {
 ///   produce zero with negligible probability (assuming a non-broken PRNG).
 /// - [`ValueCommitment::from_bytes_not_small_order`] enforces this by definition, and is
 ///   the only constructor that can be used with data received over the network.
+///
+/// # Representation
+///
+/// Held as its 32-byte encoding. Nearly every consumer of a value commitment wants exactly
+/// those bytes - the txid digest, the outgoing cipher key, serialization - and a wallet never
+/// wants anything else, while decompressing the point costs a field square root and
+/// compressing it back an inversion. The point is recovered, and the "not small order" rule
+/// checked, only by [`ValueCommitment::try_point`], which proof and binding-signature
+/// verification call before they use it.
 #[derive(Clone, Debug)]
-pub struct ValueCommitment(jubjub::ExtendedPoint);
+pub struct ValueCommitment {
+    bytes: [u8; 32],
+}
 
 impl ValueCommitment {
     /// Derives a `ValueCommitment` by $\mathsf{ValueCommit^{Sapling}}$.
@@ -145,17 +156,22 @@ impl ValueCommitment {
         let cv = (VALUE_COMMITMENT_VALUE_GENERATOR * jubjub::Scalar::from(value.0))
             + (VALUE_COMMITMENT_RANDOMNESS_GENERATOR * rcv.0);
 
-        ValueCommitment(cv.into())
+        ValueCommitment {
+            bytes: jubjub::ExtendedPoint::from(cv).to_bytes(),
+        }
     }
 
-    /// Returns the inner Jubjub point representing this value commitment.
+    /// Wraps a value commitment's byte representation without validating it.
     ///
-    /// This is public for access by `zcash_proofs`.
-    pub fn as_inner(&self) -> &jubjub::ExtendedPoint {
-        &self.0
+    /// The encoding is checked - canonical, on the curve, not of small order - when a point
+    /// is asked for via [`ValueCommitment::try_point`]. This is what transaction parsing uses,
+    /// so that a wallet decoding a transaction it will only ever trial-decrypt does not pay a
+    /// square root per spend and output for a check that verification performs anyway.
+    pub fn from_bytes_unvalidated(bytes: [u8; 32]) -> Self {
+        ValueCommitment { bytes }
     }
 
-    /// Deserializes a value commitment from its byte representation.
+    /// Deserializes a value commitment from its byte representation, validating it.
     ///
     /// Returns `None` if `bytes` is an invalid representation of a Jubjub point, or the
     /// resulting point is of small order.
@@ -167,13 +183,36 @@ impl ValueCommitment {
     /// [spenddesc]: https://zips.z.cash/protocol/protocol.pdf#spenddesc
     /// [outputdesc]: https://zips.z.cash/protocol/protocol.pdf#outputdesc
     pub fn from_bytes_not_small_order(bytes: &[u8; 32]) -> CtOption<ValueCommitment> {
-        jubjub::ExtendedPoint::from_bytes(bytes)
-            .and_then(|cv| CtOption::new(ValueCommitment(cv), !cv.is_small_order()))
+        let cv = ValueCommitment { bytes: *bytes };
+        cv.try_point().map(|_| cv)
+    }
+
+    /// Recovers the Jubjub point this value commitment encodes.
+    ///
+    /// Returns `None` if the encoding is not a valid Jubjub point, or the point is of small
+    /// order - the consensus rules of [Zcash Protocol Spec § 4.4][spenddesc] and
+    /// [§ 4.5][outputdesc], enforced here rather than at parse time.
+    ///
+    /// [spenddesc]: https://zips.z.cash/protocol/protocol.pdf#spenddesc
+    /// [outputdesc]: https://zips.z.cash/protocol/protocol.pdf#outputdesc
+    pub fn try_point(&self) -> CtOption<jubjub::ExtendedPoint> {
+        jubjub::ExtendedPoint::from_bytes(&self.bytes)
+            .and_then(|cv| CtOption::new(cv, !cv.is_small_order()))
+    }
+
+    /// The point of a value commitment this crate derived itself.
+    ///
+    /// [`ValueCommitment::derive`] only yields a small-order point when both the value and
+    /// the trapdoor are zero, which a random trapdoor makes negligible; this is for the
+    /// builder's and the PCZT finalizer's own commitments, never for parsed ones.
+    pub(crate) fn derived_point(&self) -> jubjub::ExtendedPoint {
+        self.try_point()
+            .expect("a value commitment derived by this crate is a valid point")
     }
 
     /// Serializes this value commitment to its canonical byte representation.
     pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_bytes()
+        self.bytes
     }
 }
 
