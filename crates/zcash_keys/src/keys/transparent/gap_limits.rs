@@ -154,6 +154,23 @@ pub trait AddressStore {
         key_scope: TransparentKeyScope,
         list: Vec<(Address, TransparentAddress, NonHardenedChildIndex)>,
     ) -> Result<(), Self::Error>;
+
+    /// Returns whether every child index in `range` already has a stored address of this
+    /// scope for the account.
+    ///
+    /// Gap regeneration is idempotent, so a store that can answer this lets
+    /// [`generate_gap_addresses`] skip deriving a gap limit's worth of unified addresses
+    /// whose upsert would find every one of them present - which, on a wallet that runs it
+    /// after every stored transaction, was most of what the regeneration cost. The default
+    /// answers `false`, which keeps the derive-and-upsert behaviour.
+    fn address_range_present(
+        &self,
+        _account_id: Self::AccountRef,
+        _key_scope: TransparentKeyScope,
+        _range: core::ops::Range<NonHardenedChildIndex>,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
 }
 
 #[cfg(feature = "zip32-addresses")]
@@ -290,12 +307,19 @@ where
         .find_gap_start(account_id, key_scope, gap_limit)
         .map_err(GapAddressesError::Storage)?
     {
+        let range = gap_start..gap_start.saturating_add(gap_limit);
+        if wallet_db
+            .address_range_present(account_id, key_scope, range.clone())
+            .map_err(GapAddressesError::Storage)?
+        {
+            return Ok(());
+        }
         let address_list = generate_address_list(
             account_uivk,
             account_ufvk,
             key_scope,
             request,
-            gap_start..gap_start.saturating_add(gap_limit),
+            range,
             require_key,
         )
         .map_err(GapAddressesError::AddressGeneration)?;
