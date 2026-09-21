@@ -27,4 +27,4 @@ workspace rather than continuing the original `0.10.5` numbering.
 - Forked from: `zcash_protocol 0.10.5`, published from
   [zcash/librustzcash](https://github.com/zcash/librustzcash) at commit
   [`97aefdc3`](https://github.com/zcash/librustzcash/commit/97aefdc39a037da9c4f19a0e8a450d2c7932f53e).
-- Imported into this repository in commit `IMPORT_COMMIT`.
+- Imported into this repository in commit `80583d0e88b8550b621c59fd1c2db8bf8c1d7e79`.
