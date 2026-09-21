@@ -71,7 +71,7 @@ pub const PREP_DELAY_CAP: NonZeroU32 = NonZeroU32::new(96).expect("96 is nonzero
 /// for an unbounded time.
 ///
 /// [ZIP 318]: https://zips.z.cash/zip-0318
-#[deprecated(note = "DO NOT USE; 
+#[deprecated(note = "DO NOT USE;
 `zcash_protocol::zip318::DELAY_CAP_RATIO`. ZIP 318 no longer relates each
 delay cap to its mean by a shared ratio; use `TRANSFER_DELAY_CAP` and
 `PREP_DELAY_CAP` directly.")]
