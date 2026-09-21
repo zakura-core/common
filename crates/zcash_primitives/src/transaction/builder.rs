@@ -899,11 +899,8 @@ impl<P, U> Builder<P, U> {
         {
             // Ironwood is available only when the target version carries an Ironwood bundle
             // (V6) and the consensus branch is one in which Ironwood is active.
-            let ironwood_branch = match self.consensus_branch_id {
-                BranchId::Nu6_3 => true,
-                BranchId::Nu7 => true,
-                _ => false,
-            };
+            let ironwood_branch =
+                matches!(self.consensus_branch_id, BranchId::Nu6_3 | BranchId::Nu7);
             let ironwood_available = version.has_ironwood() && ironwood_branch;
             if !ironwood_available && self.ironwood_in_use() {
                 return Err(Error::TargetIncompatible(
