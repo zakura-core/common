@@ -1,0 +1,53 @@
+[package]
+name = "zakura-address"
+description = "Zcash address parsing and serialization"
+version.workspace = true
+authors.workspace = true
+homepage = "https://github.com/zakura-core/common"
+repository.workspace = true
+readme.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+categories = ["cryptography::cryptocurrencies", "encoding"]
+keywords = ["zcash", "address", "sapling", "unified"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+bech32 = { version = "0.11", features = ["alloc"], default-features = false }
+bs58 = { version = "0.5", features = ["alloc", "check"], default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+f4jumble = { version = "0.1.1", features = ["alloc"], default-features = false }
+zcash_protocol.workspace = true
+zcash_encoding = { version = "0.4", default-features = false }
+proptest = { version = ">=1,<1.7", optional = true }
+
+[dev-dependencies]
+assert_matches = "1.5"
+proptest = ">=1,<1.7"
+
+[features]
+default = ["std"]
+std = [
+    "corez/std",
+    "f4jumble/std",
+    "zcash_encoding/std",
+    "zcash_protocol/std",
+]
+test-dependencies = ["dep:proptest"]
+
+[lib]
+name = "zcash_address"
+bench = false
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(tokio_unstable)",
+    'cfg(zcash_unstable, values("nu7"))',
+    "cfg(live_network_tests)",
+]

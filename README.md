@@ -5,6 +5,8 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 ## Protocol types
 
 - [`zakura-protocol`](crates/zcash_protocol) (forked from [`zcash_protocol 0.10.5`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/components/zcash_protocol))
+- [`zakura-address`](crates/zcash_address) (forked from [`zcash_address 0.13.0`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/components/zcash_address))
+- [`zakura-transparent`](crates/zcash_transparent) (forked from [`zcash_transparent 0.10.0`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/zcash_transparent))
 
 ## Transactions and keys
 

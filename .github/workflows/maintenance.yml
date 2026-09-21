@@ -86,10 +86,12 @@ jobs:
       - name: Build with latest dependencies
         run: >-
           cargo +stable build
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
           --all-targets
           --all-features
           --verbose

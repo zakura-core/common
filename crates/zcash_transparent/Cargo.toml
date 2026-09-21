@@ -1,0 +1,66 @@
+[package]
+name = "zakura-transparent"
+description = "Rust implementations of the Zcash transparent protocol"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+license.workspace = true
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["zcash"]
+
+[lib]
+name = "zcash_transparent"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+zcash_address.workspace = true
+zcash_encoding = { version = "0.4", default-features = false }
+zcash_protocol.workspace = true
+zip32 = { version = "0.2", default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+subtle = { version = "2.2.3", default-features = false }
+zcash_spec = "0.2"
+proptest = { version = ">=1,<1.7", optional = true }
+bip32 = { version = "=0.6.0-pre.1", features = ["alloc"], default-features = false }
+secp256k1 = { version = "0.29", features = ["alloc"], optional = true, default-features = false }
+zcash_script = { version = "0.4.3", features = ["descriptor"], default-features = false }
+getset = "0.1"
+nonempty = { version = "0.11", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+document-features = { version = "0.2", optional = true }
+bs58 = { version = "0.5", features = ["alloc", "check"], default-features = false }
+hex = { version = "0.4", features = ["alloc"], default-features = false }
+ripemd = { version = "0.1", default-features = false }
+
+[dev-dependencies]
+proptest = ">=1,<1.7"
+zcash_protocol = { workspace = true, features = ["test-dependencies"] }
+
+[features]
+default = ["std"]
+std = [
+    "dep:document-features",
+    "secp256k1?/std",
+    "zcash_address/std",
+    "zcash_script/std",
+]
+transparent-inputs = ["bip32/secp256k1-ffi", "dep:secp256k1"]
+test-dependencies = [
+    "dep:proptest",
+    "zcash_protocol/test-dependencies",
+]
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(tokio_unstable)",
+    'cfg(zcash_unstable, values("nu7"))',
+    "cfg(live_network_tests)",
+]
