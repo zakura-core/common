@@ -260,9 +260,29 @@ mod tests {
     use crate::test_vectors::{INVALID_TEST_VECTORS, VALID_TEST_VECTORS};
 
     #[test]
+    fn unsupported_parameters_return_an_error() {
+        for (n, k, len) in [
+            (24, 3, 7),
+            (56, 7, 128),
+            (112, 3, 29),
+            (528, 21, 6_553_600),
+            (520, 64, 0),
+        ] {
+            let solution = vec![0; len];
+            assert_eq!(
+                is_valid_solution(n, k, b"", b"", &solution).unwrap_err().0,
+                super::Kind::InvalidParams,
+                "n={n}, k={k}"
+            );
+        }
+    }
+
+    #[test]
     fn valid_test_vectors() {
         for tv in VALID_TEST_VECTORS {
             for soln in tv.solutions {
+                let minimal = crate::minimal::minimal_from_indices(tv.params, soln);
+                is_valid_solution(tv.params.n, tv.params.k, tv.input, &tv.nonce, &minimal).unwrap();
                 is_valid_solution_iterative(tv.params, tv.input, &tv.nonce, soln).unwrap();
                 is_valid_solution_recursive(tv.params, tv.input, &tv.nonce, soln).unwrap();
             }

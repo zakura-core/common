@@ -12,12 +12,30 @@ impl Params {
         // - k >= 3 so the encoded solutions have an exact byte length.
         // - k < n, so the collision bit length is at least 1.
         // - n is a multiple of k + 1, so we have an integer collision bit length.
-        if n.is_multiple_of(8) && (k >= 3) && (k < n) && n.is_multiple_of(k + 1) {
-            Some(Params { n, k })
-        } else {
-            None
+        if n > 512 || !n.is_multiple_of(8) || k < 3 || k >= n || !n.is_multiple_of(k + 1) {
+            return None;
         }
+
+        let params = Params { n, k };
+        let collision_bits = params.collision_bit_length();
+        // Hash expansion requires at least 8 bits. Index expansion adds one bit
+        // and requires at most 25 bits for its 32-bit accumulator.
+        if !(8..=24).contains(&collision_bits) {
+            return None;
+        }
+
+        let indices = 1usize.checked_shl(k)?;
+        let encoded_len = indices.checked_mul(collision_bits + 1)? / 8;
+        // Both decoding paths multiply the encoded length by 32 before division.
+        // This bound also covers the expanded bytes and the current index-vector
+        // reservation, whose allocation sizes must fit in isize.
+        if encoded_len.checked_mul(32)? > isize::MAX as usize {
+            return None;
+        }
+
+        Some(params)
     }
+
     pub(crate) fn indices_per_hash_output(&self) -> u32 {
         512 / self.n
     }
@@ -33,5 +51,28 @@ impl Params {
     #[cfg(test)]
     pub(crate) fn hash_length(&self) -> usize {
         ((self.k as usize) + 1) * self.collision_byte_length()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Params;
+
+    #[test]
+    fn supported_consensus_parameters() {
+        assert!(Params::new(48, 5).is_some());
+        assert!(Params::new(200, 9).is_some());
+    }
+
+    #[test]
+    fn decoder_size_limits() {
+        // With eight collision bits, k determines every decoder buffer size.
+        // Exercise the target's allocation bound without allocating those buffers.
+        let k = usize::BITS - 7;
+        assert!(Params::new(8 * (k + 1), k).is_some());
+        let k = usize::BITS - 6;
+        assert!(Params::new(8 * (k + 1), k).is_none());
+        let k = usize::BITS - 1;
+        assert!(Params::new(8 * (k + 1), k).is_none());
     }
 }

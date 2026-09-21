@@ -8,6 +8,11 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Fixed
+
+- Return an invalid-parameters error for unsupported verifier hash sizes,
+  collision widths, and decoder buffer sizes instead of panicking.
+
 ### Changed
 
 - Imported the crate into the Zakura libraries workspace.
