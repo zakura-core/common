@@ -29,6 +29,8 @@
 #   pasta_curves dependency that drags in the Sapling-side crates).
 # - zcash_primitives, zcash_keys: the librustzcash members Zakura consumes
 #   that depend on the crates above.
+# - zcash_protocol: shared protocol constants and value types, maintained here
+#   as a standalone fork until its public-type dependency closure is migrated.
 
 [workspace]
 # Resolver 3 is resolver 2 plus MSRV-aware version selection: `cargo update`
@@ -54,6 +56,7 @@ members = [
     "crates/sinsemilla",
     "crates/zcash_keys",
     "crates/zcash_primitives",
+    "crates/zcash_protocol",
     "crates/zcash_proofs",
 ]
 
@@ -99,4 +102,5 @@ sapling = { package = "zakura-sapling-crypto", version = "1.3.0-alpha.1", path =
 sinsemilla = { package = "zakura-sinsemilla", version = "1.3.0-alpha.1", path = "crates/sinsemilla", default-features = false }
 zcash_keys = { package = "zakura-keys", version = "1.3.0-alpha.1", path = "crates/zcash_keys", default-features = false }
 zcash_primitives = { package = "zakura-primitives", version = "1.3.0-alpha.1", path = "crates/zcash_primitives", default-features = false }
+zcash_protocol = { package = "zakura-protocol", version = "1.3.0-alpha.1", path = "crates/zcash_protocol", default-features = false }
 zcash_proofs = { package = "zakura-proofs", version = "1.3.0-alpha.1", path = "crates/zcash_proofs", default-features = false }

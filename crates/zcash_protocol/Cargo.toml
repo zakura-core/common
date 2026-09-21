@@ -1,0 +1,65 @@
+[package]
+name = "zakura-protocol"
+description = "Zcash protocol network constants and value types."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["zcash"]
+
+[lib]
+name = "zcash_protocol"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# - Logging and metrics
+memuse = { version = "0.2.2", optional = true, default-features = false }
+
+# Dependencies used internally:
+# (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
+# - Documentation
+document-features = { version = "0.2", optional = true }
+
+# - Encodings
+zcash_encoding = { version = "0.4", default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+hex = { version = "0.4", features = ["alloc"], default-features = false }
+
+# - Test dependencies
+proptest = { version = ">=1,<1.7", optional = true }
+incrementalmerkletree = { version = "0.8.2", optional = true, default-features = false }
+incrementalmerkletree-testing = { version = "0.3", optional = true }
+
+[dev-dependencies]
+proptest = ">=1,<1.7"
+
+[features]
+default = ["std"]
+std = ["document-features", "dep:memuse"]
+
+## Exposes APIs that are useful for testing, such as `proptest` strategies.
+test-dependencies = [
+    "dep:incrementalmerkletree",
+    "dep:incrementalmerkletree-testing",
+    "dep:proptest",
+    "incrementalmerkletree?/test-dependencies",
+]
+
+## Exposes support for working with a local consensus (e.g. regtest).
+local-consensus = []
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(tokio_unstable)",
+    'cfg(zcash_unstable, values("nu7"))',
+    "cfg(live_network_tests)",
+]

@@ -88,6 +88,7 @@ jobs:
           cargo +stable build
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
           --all-targets
           --all-features

@@ -64,6 +64,9 @@ audit-as-crates-io = false
 [policy.zakura-primitives]
 audit-as-crates-io = false
 
+[policy.zakura-protocol]
+audit-as-crates-io = false
+
 [policy.zakura-proofs]
 audit-as-crates-io = false
 

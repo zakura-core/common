@@ -4012,6 +4012,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-protocol"
+version = "1.3.0-alpha.1"
+dependencies = [
+ "corez",
+ "document-features",
+ "hex",
+ "incrementalmerkletree",
+ "incrementalmerkletree-testing",
+ "memuse",
+ "proptest",
+ "zcash_encoding",
+]
+
+[[package]]
 name = "zakura-reddsa"
 version = "1.3.0-alpha.1"
 dependencies = [
