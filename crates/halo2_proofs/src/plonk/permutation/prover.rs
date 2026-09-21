@@ -715,11 +715,49 @@ fn prepare_scheduled_fractions<C: CurveAffine>(
         .collect::<Vec<_>>()
         .into_par_iter()
         .map(|active_rows| {
-            let mut numerators = vec![vec![C::Scalar::ONE; active_rows.len()]; circuit_count];
-            let mut denominators = vec![vec![C::Scalar::ONE; active_rows.len()]; circuit_count];
+            let mut numerators = (0..circuit_count)
+                .map(|_| Vec::with_capacity(active_rows.len()))
+                .collect::<Vec<_>>();
+            let mut denominators = (0..circuit_count)
+                .map(|_| Vec::with_capacity(active_rows.len()))
+                .collect::<Vec<_>>();
 
             for (event, active) in active_rows.iter().enumerate() {
-                for cell in &active.cells {
+                // An active row always has a non-identity cell. Store its
+                // first factors directly instead of multiplying them by one.
+                let (first, remaining) = active
+                    .cells
+                    .split_first()
+                    .expect("an active row has a non-identity cell");
+                let numerator_offset = *beta * first.identity + &*gamma;
+                let denominator_offset = *beta * first.permuted + &*gamma;
+                match first.column.column_type() {
+                    Any::Advice => {
+                        for circuit_index in 0..circuit_count {
+                            let value = advice[circuit_index][first.column.index()][active.row];
+                            numerators[circuit_index].push(numerator_offset + value);
+                            denominators[circuit_index].push(denominator_offset + value);
+                        }
+                    }
+                    Any::Fixed => {
+                        let value = fixed[first.column.index()][active.row];
+                        let numerator_factor = numerator_offset + value;
+                        let denominator_factor = denominator_offset + value;
+                        for circuit_index in 0..circuit_count {
+                            numerators[circuit_index].push(numerator_factor);
+                            denominators[circuit_index].push(denominator_factor);
+                        }
+                    }
+                    Any::Instance => {
+                        for circuit_index in 0..circuit_count {
+                            let value = instance[circuit_index][first.column.index()][active.row];
+                            numerators[circuit_index].push(numerator_offset + value);
+                            denominators[circuit_index].push(denominator_offset + value);
+                        }
+                    }
+                }
+
+                for cell in remaining {
                     let numerator_offset = *beta * cell.identity + &*gamma;
                     let denominator_offset = *beta * cell.permuted + &*gamma;
                     match cell.column.column_type() {
