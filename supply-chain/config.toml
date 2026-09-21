@@ -82,6 +82,9 @@ audit-as-crates-io = false
 [policy.zakura-sinsemilla]
 audit-as-crates-io = false
 
+[policy.zakura-zip321]
+audit-as-crates-io = false
+
 [[exemptions.addchain]]
 version = "0.3.0"
 criteria = "safe-to-deploy"
@@ -140,6 +143,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.base16ct]]
 version = "0.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.base64]]
+version = "0.22.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.base64ct]]
@@ -674,6 +681,10 @@ criteria = "safe-to-run"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.minimal-lexical]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.minreq]]
 version = "2.14.1"
 criteria = "safe-to-deploy"
@@ -681,6 +692,10 @@ criteria = "safe-to-deploy"
 [[exemptions.nix]]
 version = "0.23.2"
 criteria = "safe-to-run"
+
+[[exemptions.nom]]
+version = "7.1.3"
+criteria = "safe-to-deploy"
 
 [[exemptions.num-bigint]]
 version = "0.4.8"
@@ -740,6 +755,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pbkdf2]]
 version = "0.12.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.percent-encoding]]
+version = "2.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.pin-project-lite]]
