@@ -124,6 +124,7 @@ jobs:
             crates/zcash_protocol
             crates/zcash_proofs
             crates/zcash_transparent
+            crates/zip321
           )
           workspace_packages=$(python3 .github/scripts/workspace_packages.py)
           workspace_members=()
@@ -170,7 +171,7 @@ jobs:
               crates/sinsemilla/*)
                 sinsemilla=true
                 ;;
-              crates/zcash_address/*|crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_protocol/*|crates/zcash_proofs/*|crates/zcash_transparent/*)
+              crates/zcash_address/*|crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_protocol/*|crates/zcash_proofs/*|crates/zcash_transparent/*|crates/zip321/*)
                 librustzcash=true
                 ;;
               Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|.github/scripts/check_rust_group.sh|.github/scripts/workspace_packages.py|.github/workflows/ci.yml|.github/workflows/maintenance.yml)
@@ -314,7 +315,7 @@ jobs:
         if: ${{ !cancelled() && needs.changes.outputs.librustzcash == 'true' }}
         run: >-
           bash .github/scripts/check_rust_group.sh
-          "zakura-keys zakura-primitives zakura-protocol zakura-proofs" true false
+          "zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321" true false
 
   formatting:
     name: Formatting
@@ -1245,6 +1246,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --all-features
           -- --test-threads=2
       - name: Verify working directory is clean
@@ -1272,6 +1274,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
       - name: Check transparent-inputs-only
@@ -1284,6 +1287,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
           --features zakura-keys/transparent-inputs,zakura-primitives/transparent-inputs
@@ -1297,6 +1301,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
           --features zakura-keys/transparent-key-encoding
@@ -1310,6 +1315,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
           --features zakura-keys/sapling,zakura-primitives/circuits
@@ -1323,6 +1329,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
           --features zakura-keys/orchard,zakura-primitives/circuits
@@ -1342,7 +1349,7 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          for package in zakura-keys zakura-primitives zakura-protocol zakura-proofs; do
+          for package in zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321; do
             cargo +1.91.0 metadata --no-deps --format-version 1 |
               jq -r --arg package "$package" \
                 '.packages[] | select(.name == $package) | .features | keys[]' |
@@ -1370,6 +1377,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --no-deps
           --all-features
           --all-targets

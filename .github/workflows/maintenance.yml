@@ -92,6 +92,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --all-features
           --verbose

@@ -29,9 +29,10 @@
 #   pasta_curves dependency that drags in the Sapling-side crates).
 # - zcash_primitives, zcash_keys: the librustzcash members Zakura consumes
 #   that depend on the crates above.
-# - zcash_protocol, zcash_address, zcash_transparent: shared protocol, address,
-#   and transparent value types. They are kept in the same workspace as their
-#   public-type consumers so the graph contains one coherent family of types.
+# - zcash_protocol, zcash_address, zcash_transparent, zip321: shared protocol,
+#   address, transparent value, and payment request types. They are kept in the
+#   same workspace as their public-type consumers so the graph contains one
+#   coherent family of types.
 
 [workspace]
 # Resolver 3 is resolver 2 plus MSRV-aware version selection: `cargo update`
@@ -61,6 +62,7 @@ members = [
     "crates/zcash_protocol",
     "crates/zcash_proofs",
     "crates/zcash_transparent",
+    "crates/zip321",
 ]
 
 [workspace.package]
@@ -109,3 +111,10 @@ zcash_primitives = { package = "zakura-primitives", version = "1.3.0-alpha.1", p
 zcash_protocol = { package = "zakura-protocol", version = "1.3.0-alpha.1", path = "crates/zcash_protocol", default-features = false }
 zcash_proofs = { package = "zakura-proofs", version = "1.3.0-alpha.1", path = "crates/zcash_proofs", default-features = false }
 transparent = { package = "zakura-transparent", version = "1.3.0-alpha.1", path = "crates/zcash_transparent", default-features = false }
+zip321 = { package = "zakura-zip321", version = "1.3.0-alpha.1", path = "crates/zip321", default-features = false }
+
+# Parsing and encoding dependencies used by ZIP 321 payment requests.
+base64 = "0.22"
+nom = "7"
+percent-encoding = "2.1.0"
+proptest = ">=1,<1.7"
