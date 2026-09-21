@@ -1,5 +1,6 @@
 # Gate changes against the latest stable crates.io release of every workspace
 # crate. Intentional breaking changes pass once their version bump covers them.
+# Ignored feature removals live in semver-ignore-list.json.
 name: Semver policy
 
 on:
@@ -9,8 +10,11 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - .github/semver-ignore-list.json
       - .github/scripts/affected_semver_packages.py
+      - .github/scripts/check_semver.py
       - .github/scripts/test_affected_semver_packages.py
+      - .github/scripts/test_check_semver.py
       - .github/workflows/semver.yml
   push:
     branches:
@@ -19,8 +23,11 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - .github/semver-ignore-list.json
       - .github/scripts/affected_semver_packages.py
+      - .github/scripts/check_semver.py
       - .github/scripts/test_affected_semver_packages.py
+      - .github/scripts/test_check_semver.py
       - .github/workflows/semver.yml
   merge_group:
   workflow_dispatch:
@@ -54,6 +61,7 @@ jobs:
           PR_MERGE_SHA: ${{ github.sha }}
         run: |
           python3 .github/scripts/test_affected_semver_packages.py
+          python3 .github/scripts/test_check_semver.py
 
           case "$GITHUB_EVENT_NAME" in
             pull_request)
@@ -91,11 +99,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           toolchain: stable
           cache: false
-      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+      - uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
         with:
           # Match Zakura's deliberate exception to tool-version pinning:
           # cargo-semver-checks must track stable rustdoc format changes.
@@ -105,7 +113,7 @@ jobs:
         env:
           PACKAGE: ${{ matrix.package }}
         run: >-
-          cargo semver-checks
+          python3 .github/scripts/check_semver.py
           --package "$PACKAGE"
           --default-features
 

@@ -33,6 +33,7 @@ subtle = "2.3"
 
 [dev-dependencies]
 criterion = "0.3"
+halo2_proofs = { workspace = true, features = ["unstable-circuit-fixtures"] }
 halo2_poseidon = { workspace = true, features = ["test-dependencies"] }
 proptest = "1.0.0"
 rand = "0.10"

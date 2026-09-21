@@ -77,6 +77,25 @@ macro_rules! impl_batch_mul_same_scalar_vartime {
 }
 
 #[cfg(feature = "alloc")]
+macro_rules! impl_batch_multiexp_shared_scalars_vartime {
+    (glv, $name:ident) => {
+        #[cfg(feature = "glv")]
+        fn try_batch_multiexp_shared_scalars_vartime(
+            prepared_odd_multiples: &[Self::AffineExt],
+            scalars: &[Self::ScalarExt],
+            output: &mut [Self],
+        ) -> bool {
+            crate::glv::try_batch_multiexp_shared_scalars::<$name>(
+                prepared_odd_multiples,
+                scalars,
+                output,
+            )
+        }
+    };
+    (native, $name:ident) => {};
+}
+
+#[cfg(feature = "alloc")]
 macro_rules! impl_multiexp_vartime {
     (glv, $name:ident) => {
         #[cfg(feature = "glv")]
@@ -268,6 +287,7 @@ macro_rules! new_curve_impl {
             }
 
             impl_batch_mul_same_scalar_vartime!($glv_backend, $name);
+            impl_batch_multiexp_shared_scalars_vartime!($glv_backend, $name);
             impl_multiexp_vartime!($glv_backend, $name);
             impl_prepare_zero_check!($glv_backend, $name);
         }

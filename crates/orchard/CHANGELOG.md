@@ -10,6 +10,30 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.3.0-alpha.1] - 2026-09-18
+
+### Added
+
+- Added the `prover-fingerprint` feature with complete synthetic prover Lean fixture
+  drivers isolated in test tooling, independently of `verifier-fingerprint` and
+  without changing `Proof::create`. The tests pin complete proof bytes and input
+  RNG tapes for one- and two-Action executions
+  ([#415](https://github.com/zakura-core/common/pull/415)).
+- Added the opt-in `circuit-fixtures` feature for regenerating Ironwood Action
+  circuit and key-generation layout fixtures
+  ([#423](https://github.com/zakura-core/common/pull/423)).
+- Added an opt-in `x86_64-asm` Cargo feature that forwards through the direct
+  Pasta dependency and, when enabled, the optional Halo 2 dependency. Enabling
+  it on an x86-64 CPU without BMI2 and ADX support can fault; generic binaries
+  should leave it disabled
+  ([#432](https://github.com/zakura-core/common/pull/432)).
+
+### Changed
+
+- Updated `verifier-fingerprint` exports to include the validated proof bytes
+  and pinned verifying-key description
+  ([#423](https://github.com/zakura-core/common/pull/423)).
+
 ## [1.2.0] - 2026-09-08
 
 ### Added

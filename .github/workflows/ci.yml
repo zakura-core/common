@@ -137,7 +137,7 @@ jobs:
 
           while IFS= read -r path; do
             case "$path" in
-              crates/halo2_gadgets/*|crates/halo2_poseidon/*|crates/halo2_proofs/*)
+              crates/halo2_gadgets/*|crates/halo2_poseidon/*|crates/halo2_proofs/*|.github/fixtures/ironwood-circuits.sha256)
                 halo2=true
                 ;;
               crates/halo2_legacy_pdqsort/*)
@@ -611,6 +611,55 @@ jobs:
       - name: Verify working directory is clean
         run: git diff --exit-code
 
+  ironwood-fixtures:
+    name: halo2 / Test Ironwood fixture exporters
+    needs: changes
+    if: needs.changes.outputs.halo2 == 'true' || needs.changes.outputs.orchard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RAYON_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
+      - name: Test proof-byte verifier fixture exports
+        run: >-
+          cargo +stable test --locked --release -p zakura-halo2-proofs
+          --features unstable-verifier-fingerprint
+          --test fingerprint_export
+      - name: Test transcript-read serialization
+        run: >-
+          cargo +stable test --locked --release -p zakura-halo2-proofs
+          --features unstable-verifier-fingerprint
+          --lib plonk::fingerprint::vesta_lean::
+      - name: Test Orchard captures and malformed proof encodings
+        run: >-
+          cargo +stable test --locked --release -p zakura-orchard
+          --features verifier-fingerprint,circuit-fixtures
+          --lib circuit::fingerprint::
+      - name: Regenerate the Add and Mul circuit fixtures
+        env:
+          IRONWOOD_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
+        run: >-
+          cargo +stable test --locked --release -p zakura-halo2-gadgets
+          --lib ecc::chip::layout_dump::dump_ironwood_fixtures
+          -- --exact --ignored
+      - name: Regenerate the Orchard Action circuit fixtures
+        env:
+          IRONWOOD_ACTION_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
+        run: >-
+          cargo +stable test --locked --release -p zakura-orchard
+          --features verifier-fingerprint,circuit-fixtures
+          --lib circuit::layout_dump::dump_ironwood_action_fixtures
+          -- --exact --ignored
+      - name: Compare all ten outputs with the pinned Ironwood fixtures
+        working-directory: ${{ runner.temp }}/ironwood-circuit-fixtures
+        run: sha256sum --check "$GITHUB_WORKSPACE/.github/fixtures/ironwood-circuits.sha256"
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
   orchard-fingerprint-check:
     name: orchard / Compile-check verifier fingerprint
     needs: changes
@@ -628,6 +677,48 @@ jobs:
           --features verifier-fingerprint
           --no-run
           --verbose
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  orchard-prover-fingerprint:
+    name: orchard / Test prover fingerprint
+    needs: changes
+    if: needs.changes.outputs.orchard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
+      - name: Test the observational recorder
+        run: >-
+          cargo +stable test --locked --release --lib
+          -p zakura-halo2-proofs --features unstable-prover-fingerprint
+          plonk::prover_fingerprint::
+      - name: Test the public recorder API
+        run: >-
+          cargo +stable test --locked --release --test prover_fingerprint
+          -p zakura-halo2-proofs --features unstable-prover-fingerprint
+      - name: Check pinned prover proofs and RNG tapes without the verifier feature
+        env:
+          RAYON_NUM_THREADS: '1'
+        run: >-
+          cargo +stable test --locked --release --lib
+          -p zakura-orchard --features prover-fingerprint
+          circuit::prover_fingerprint::
+      - name: Test both fingerprint features together
+        env:
+          RAYON_NUM_THREADS: '1'
+        run: >-
+          cargo +stable test --locked --release --lib
+          -p zakura-orchard --features prover-fingerprint,verifier-fingerprint
+          circuit::prover_fingerprint::
+      - name: Test captures through the serial prover
+        run: >-
+          cargo +stable test --locked --release --lib
+          -p zakura-orchard --no-default-features --features std,prover-fingerprint
+          circuit::prover_fingerprint::
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -1121,12 +1212,21 @@ jobs:
   # zcash/librustzcash .github/workflows/ci.yml @
   # 82fa052a06e3af0058a73f320538f9b93193439c
   librustzcash-test:
-    name: librustzcash subset / Test all features
+    name: librustzcash subset / Test all features (${{ matrix.configuration }})
     needs: changes
     if: needs.changes.outputs.librustzcash == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: default
+            rustflags: ""
+          - configuration: nu7
+            rustflags: '--cfg zcash_unstable="nu7"'
     env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
       CARGO_PROFILE_TEST_DEBUG: 1
       RAYON_NUM_THREADS: 2
     steps:
@@ -1311,6 +1411,8 @@ jobs:
       - orchard-test
       - orchard-weighted-test
       - orchard-fingerprint-check
+      - orchard-prover-fingerprint
+      - ironwood-fixtures
       - orchard-platform-smoke
       - orchard-no-std
       - pasta-test
@@ -1334,7 +1436,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
           # Every job except the detector is path-gated. A skipped job is valid,
@@ -1352,6 +1454,8 @@ jobs:
             orchard-test,
             orchard-weighted-test,
             orchard-fingerprint-check,
+            orchard-prover-fingerprint,
+            ironwood-fixtures,
             orchard-platform-smoke,
             orchard-no-std,
             pasta-test,

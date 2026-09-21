@@ -10,6 +10,201 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.3.0-alpha.1] - 2026-09-18
+
+### Added
+
+- Added the `unstable-prover-fingerprint` feature and observational prover capture
+  API for recording selected executions and exporting complete Lean fixtures
+  ([#415](https://github.com/zakura-core/common/pull/415)).
+- Added verifier fixture exporters that validate and include the exact proof
+  bytes consumed by the verifier
+  ([#423](https://github.com/zakura-core/common/pull/423)).
+- Added the opt-in `unstable-circuit-fixtures` feature with reusable circuit
+  and key-generation layout capture and Lean/JSON export APIs
+  ([#423](https://github.com/zakura-core/common/pull/423)).
+- Added an opt-in `x86_64-asm` Cargo feature that forwards to Pasta's
+  BMI2/ADX field-arithmetic backend. Enabling it on an x86-64 CPU without
+  BMI2 and ADX support can fault; generic binaries should leave it disabled
+  ([#432](https://github.com/zakura-core/common/pull/432)).
+
+### Changed
+
+- Reduced Orchard quotient-evaluation latency by folding literal-scaled
+  constants when the retained proving plan is compiled. Six-worker cold-proof
+  measurements improved four-Action latency by 0.177 ms on Apple M4; x86_64
+  Linux resolved a 0.058 ms evaluator improvement at one Action and no
+  whole-proof regression ([#409](https://github.com/zakura-core/common/pull/409)).
+- Reduced post-NU6.3 Orchard four-Action proof latency by normalizing affine
+  evaluator blends during retained-plan compilation. Across paired cold proofs
+  with six workers, latency improved by 0.856 ms on Apple M4 and 2.010 ms on
+  x86-64 Linux. Proof bytes and public APIs are unchanged; proving-key setup
+  latency had no measurable change, and evaluator cache and scratch workspace
+  are unchanged
+  ([#413](https://github.com/zakura-core/common/pull/413)).
+- Reduced post-NU6.3 Orchard proving time by recognizing commuted evaluator
+  products during retained-plan compilation. This removes 16,384 field
+  multiplications and 512 KiB of logical evaluator allocation and zero-fill
+  payload per Action. Six-worker four-Action cold proofs improved by 0.172 ms
+  on Apple M4, while x86-64 Linux measurements found no statistically
+  significant change
+  ([#414](https://github.com/zakura-core/common/pull/414)).
+- Reduced IPA prover setup overhead by transferring an already-owned
+  polynomial, eliminating a 64 KiB allocation and copy at `k = 11` (1.57 us
+  isolated on Apple M4; full-proof impact was below measurement resolution)
+  ([#416](https://github.com/zakura-core/common/pull/416)).
+- Reduced retained-plan Orchard quotient-evaluation work by folding literal
+  products before proving. This removes one runtime field multiplication per
+  evaluator chunk (48 with six workers) and, for four Actions, one full-domain
+  cache store plus three cache loads, without adding retained memory
+  ([#417](https://github.com/zakura-core/common/pull/417)).
+- Reduced post-NU6.3 Orchard quotient-evaluator work by composing safe nested
+  literal scales during retained-plan compilation. This eliminates seven
+  16,384-row buffer passes and 7 MiB of logical cache traffic per Action: five
+  passes remove 81,920 field negations, while two move their existing 32,768
+  field multiplications into the following add loop. Paired six-worker cold
+  proofs found no meaningful regression on Apple M4 or x86-64 Linux. Proof
+  bytes, public APIs, and evaluator workspace are unchanged
+  ([#419](https://github.com/zakura-core/common/pull/419)).
+- Reduced retained quotient-evaluation scratch traffic by lowering products
+  with one row-constant operand to scalar operations after cache and
+  deferred-fold planning. At the current Orchard domain size, this avoids 16,
+  6, and 8 MiB of logical scratch writes and reads in one-, two-, and
+  four-Action proofs, respectively, without changing those earlier planning
+  decisions. Proof bytes and public APIs are unchanged
+  ([#420](https://github.com/zakura-core/common/pull/420)).
+- Included the pinned verifying-key description in verifier fingerprint
+  fixtures ([#423](https://github.com/zakura-core/common/pull/423)).
+- Reduced one-Action proof latency by storing each prepared deferred-IPA odd
+  multiple contiguously across its 128 output lanes. This turns roughly
+  3.75 MiB of strided affine-point reads into contiguous reads without changing
+  the group-operation count or retained-table size. With 10 workers on Apple
+  M4, materialization improved by 0.136 ms and complete proofs by 0.111 ms;
+  x86-64 Linux with 6 workers also showed a smaller materialization improvement
+  ([#424](https://github.com/zakura-core/common/pull/424)).
+- Passed only the live prepared-base half in the first IPA round, avoiding its
+  explicit zero-scalar allocation and scan
+  ([#426](https://github.com/zakura-core/common/pull/426)).
+- Reduced deferred-IPA commitment-table preparation overhead by distributing
+  retained generator blocks across every available worker. At `k = 11` on
+  Apple M4, this reduced the table constructor by 0.619 ms with six workers
+  and 0.061 ms with ten, without changing retained memory or proof output
+  ([#427](https://github.com/zakura-core/common/pull/427)).
+- Reduced post-NU6.3 Orchard quotient-evaluator work by fusing affine
+  self-products such as `x * (1 - x)` into one square-and-subtract loop. This
+  replaces 147,456, 262,144, and 491,520 general field multiplications with
+  squarings at one, two, and four Actions, while removing 22.5, 40, and 75 MiB
+  of logical buffer traffic. Six-worker evaluator measurements improved by
+  0.059 ms at one Action and 0.249 ms at four Actions on Apple M4, and by
+  1.004 ms at four Actions on x86-64 Linux. Proof bytes and public APIs are
+  unchanged ([#428](https://github.com/zakura-core/common/pull/428)).
+- Reduced four-Action quotient-evaluator time by about 0.23 ms on Apple M4
+  and 0.63 ms on Linux at six workers by selecting lower-cost, one-level
+  nested polynomial factor groups during proving key preparation. At the
+  current Orchard domain size this avoids 49,152 field multiplications and
+  4.5 MiB of logical evaluator traffic per four-Action proof, while adding
+  about 0.075 ms once during proving key preparation. One-Action evaluation,
+  proof bytes, and public APIs are unchanged
+  ([#429](https://github.com/zakura-core/common/pull/429)).
+- Reduced post-NU6.3 Orchard quotient-evaluator work by factoring its fixed
+  four-value and eight-value range-check products. This removes 212,992 general
+  field multiplications per Action while adding 98,304 squarings, and reduces
+  logical executor traffic by 43.5 MiB per Action. Six-worker evaluator
+  measurements improved by 0.078 ms at one Action and 0.307 ms at four Actions
+  on Apple M4, and by 0.384 ms and 1.844 ms respectively on x86-64 Linux. Proof
+  bytes and public APIs are unchanged
+  ([#430](https://github.com/zakura-core/common/pull/430)).
+- Reused leaf squares already held in the quotient evaluator's
+  common-subexpression cache from fused affine self-products and fixed range
+  products. For post-NU6.3 Orchard proofs, this avoids 49,152 field squarings
+  at one Action and 212,992 at four Actions without adding cache stores, cache
+  slots, or retained proving-key payload; proof bytes and public APIs are
+  unchanged
+  ([#433](https://github.com/zakura-core/common/pull/433)).
+- Reduced lookup grand-product preparation by reusing the numerator total for
+  the structurally equal denominator total. At the current Orchard domain
+  size, this removes exactly 1,022 field multiplications per lookup: 3,066 per
+  Action and 12,264 for four Actions. The inversion schedule, allocation and
+  retained-memory shape, proof bytes, and public APIs are unchanged
+  ([#434](https://github.com/zakura-core/common/pull/434)).
+- Reduced permutation-product preparation work for multi-circuit proofs by
+  reusing a key-specific sparse equality schedule across circuits. Four-Action
+  post-NU6.3 Orchard proving is effectively unchanged with six workers, while
+  circuit and nested-set concurrency now independently observe the worker and
+  scratch-space limits. Proof bytes and public APIs are unchanged
+  ([#436](https://github.com/zakura-core/common/pull/436)).
+- Reduced sparse permutation-product commitment time by preprocessing fixed
+  Lagrange suffix-sum bases during key generation. Incremental four-Action
+  post-NU6.3 Orchard proving with six workers improved by 1.62% on Apple M4
+  and 1.71% on AMD EPYC. On M4, key generation was unchanged within noise and
+  the retained key grew by about 120 KiB over PR 1. Proof bytes and public APIs
+  are unchanged
+  ([#437](https://github.com/zakura-core/common/pull/437)).
+- Reused dead lookup sort-key lanes for temporary row indices while building
+  lookup permutations. This removes two temporary vector allocations and
+  16,336 bytes of logical row-index scratch per lookup at the Orchard domain
+  size: six allocations and 49,008 bytes per Action, or 24 allocations and
+  196,032 bytes for four Actions. Lookup ordering, proof bytes, retained
+  memory, and public APIs are unchanged
+  ([#438](https://github.com/zakura-core/common/pull/438)).
+- Count-sorted structurally identified 10-bit lookup tables and inputs after
+  validating every value, with the generic comparison sort retained as the
+  fallback. On actual Orchard distributions this removes 41.05 microseconds
+  of serial sort work for one Action and 92.20 microseconds for four Actions.
+  It adds a 2 KiB stack histogram per active sort; heap allocation, retained
+  memory, proof bytes, and public APIs are unchanged
+  ([#440](https://github.com/zakura-core/common/pull/440)).
+- Reduced quotient-evaluator traversal overhead for k=11 Ironwood proofs,
+  removing 8 MiB of logical output traffic for one Action and 29 MiB for four
+  Actions; the affected kernel is 5-7% faster on tested ARM64 and x86-64
+  systems ([#442](https://github.com/zakura-core/common/pull/442)).
+- Reused the 1,024-bin histograms produced while count-sorting structurally
+  identified 10-bit lookups to build their lookup permutations directly. For
+  Orchard's k=11 circuit, this replaces each 81,680-byte, 2,042-entry Pasta key
+  vector with a 2,048-byte histogram. Transient sort and permutation scratch
+  falls by 159,264 bytes for one Action and 398,160 bytes for four Actions,
+  while avoiding at least 506,416 and 1,535,584 bytes of key traffic,
+  respectively. The isolated permutation kernel improved by about 5.8 us per
+  2,042-row lookup input on Apple M4; paired cold-proof measurements were
+  neutral. Field arithmetic, proof bytes, the proof system, and public APIs are
+  unchanged ([#443](https://github.com/zakura-core/common/pull/443)).
+- Reduced k=11 Ironwood quotient-evaluator latency by combining direct
+  polynomial-leaf additions and subtractions in one output pass. This removes
+  88 MiB of logical output traffic for one Action and 349 MiB for four Actions,
+  reducing four-Action evaluation time by 0.13 ms on Apple M4 and 0.44 ms on
+  AMD EPYC x86-64 ([#445](https://github.com/zakura-core/common/pull/445)).
+- Wrote cached polynomial-leaf products directly into their compiled evaluator
+  cache slots, removing seven full-domain cache-copy traversals (7 MiB of
+  logical traffic) for one Action and 24 traversals (24 MiB) for four Actions.
+  On Apple M4 with ten workers, this reduced the four-Action retained quotient
+  evaluator from 48.951 ms to 48.845 ms (0.107 ms); the one-Action quick screen
+  was directional and noise-limited. Field arithmetic, cache scheduling,
+  retained memory, proof bytes, and public APIs are unchanged
+  ([#446](https://github.com/zakura-core/common/pull/446)).
+- Generated long field-power vectors through two independent dependency
+  chains, reducing a 2,048-power vector by 7.5 us (35%) on Apple M4 and
+  17.2 us (33%) on x86-64 Linux with assembly. With ten workers on M4, PLONK
+  power-table construction improved by 6.2 us for one proof and 5.0 us for
+  four proofs; with six workers on Linux, it improved by 15.9 us and 15.4 us,
+  respectively. Proofs, the proof system, and public APIs are unchanged. The
+  existing private power-vector helper is now `pub(crate)` so internal prover
+  phases can share it
+  ([#451](https://github.com/zakura-core/common/pull/451)).
+- Reduced prepared `k = 11` IPA generator-fold latency without increasing
+  retained memory or proving-key preparation work. With ten workers on Apple
+  M4, generator materialization fell from 2.11 ms to 1.98 ms; with six workers
+  and the x86-64 assembly field backend, the complete IPA phase improved by
+  0.42 ms for one Action and 0.35 ms for four Actions. Proof bytes are
+  unchanged ([#452](https://github.com/zakura-core/common/pull/452)).
+- Reduced proof-generation evaluation-preparation latency by preparing the
+  quotient fold concurrently with the polynomial-evaluation query batch. With
+  ten workers on Apple M4, this interval fell from 0.3272 ms to 0.2924 ms for
+  one Action and from 0.5808 ms to 0.5251 ms for four Actions. With six workers
+  and the x86-64 assembly field backend, it fell from 0.5452 ms to 0.5129 ms
+  and from 1.1286 ms to 1.0703 ms, respectively. Proof bytes, preparation,
+  retained memory, and public APIs are unchanged
+  ([#460](https://github.com/zakura-core/common/pull/460)).
+
 ## [1.2.0] - 2026-09-08
 
 ### Added

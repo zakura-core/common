@@ -9,7 +9,7 @@ use pasta_curves::{deferred::DeferredField, pallas, vesta};
 
 use crate::{
     arithmetic::eval_polynomial,
-    poly::{Coeff, Polynomial, Rotation},
+    poly::{Coeff, Polynomial, Rotation, power_vector},
 };
 
 #[derive(Clone, Copy)]
@@ -62,13 +62,7 @@ impl<F: Field> PowerTables<F> {
                 if index == LAST_POINT_INDEX && !build_last {
                     None
                 } else {
-                    let mut powers = Vec::with_capacity(polynomial_len);
-                    let mut power = F::ONE;
-                    for _ in 0..polynomial_len {
-                        powers.push(power);
-                        power *= point;
-                    }
-                    Some(powers)
+                    Some(power_vector(point, polynomial_len))
                 }
             })
             .collect::<Vec<_>>()

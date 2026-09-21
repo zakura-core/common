@@ -583,9 +583,14 @@ where
     let permutation_pk = {
         let (permutation_pk, ()) = crate::multicore::join(
             || {
-                assembly
-                    .permutation
-                    .build_pk(params, &vk.domain, &cs.permutation, &fft_twiddles)
+                assembly.permutation.build_pk(
+                    params,
+                    &vk.domain,
+                    &cs.permutation,
+                    vk.cs_degree,
+                    cs.blinding_factors(),
+                    &fft_twiddles,
+                )
             },
             || {
                 // Build small fixed-base tables during independent key
@@ -596,10 +601,14 @@ where
         permutation_pk
     };
     #[cfg(not(any(feature = "batch", feature = "multicore")))]
-    let permutation_pk =
-        assembly
-            .permutation
-            .build_pk(params, &vk.domain, &cs.permutation, &fft_twiddles);
+    let permutation_pk = assembly.permutation.build_pk(
+        params,
+        &vk.domain,
+        &cs.permutation,
+        vk.cs_degree,
+        cs.blinding_factors(),
+        &fft_twiddles,
+    );
 
     // Compute l_0(X).
     let mut l0 = vk.domain.empty_lagrange();

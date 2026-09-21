@@ -30,9 +30,15 @@ use std::{
     any::{Any, TypeId},
     cmp::Ordering,
     iter,
-    ops::{Mul, MulAssign},
+    ops::{Mul, MulAssign, Range},
     sync::{Arc, Mutex},
 };
+
+#[derive(Debug, PartialEq, Eq)]
+struct SinsemillaQ0Range<F> {
+    value: F,
+    rows: Range<usize>,
+}
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Permuted<C: CurveAffine, Ev> {
@@ -105,17 +111,15 @@ struct PreparedTable<F: Field, Ev> {
     compressed_expression: Arc<Polynomial<F, LagrangeCoeff>>,
     compressed_coset: Option<poly::Ast<Ev, F, ExtendedLagrangeCoeff>>,
     sorted_values: Vec<F>,
-    sorted_keys: Vec<PastaSortKey>,
+    sort: SortedLookup,
     sinsemilla_q_0: Option<(F, usize)>,
-    #[cfg(feature = "multicore")]
-    sorted_u10_range: bool,
 }
 
 struct PreparedInput<F: Field, Ev> {
     compressed_expression: Polynomial<F, LagrangeCoeff>,
     compressed_coset: Option<poly::Ast<Ev, F, ExtendedLagrangeCoeff>>,
     sorted_values: Vec<F>,
-    sorted_keys: Vec<PastaSortKey>,
+    sort: SortedLookup,
 }
 
 struct PendingLookup<C: CurveAffine, Ev> {
@@ -155,7 +159,17 @@ impl PastaSortKey {
 #[cfg(feature = "multicore")]
 const SORTED_U10_BITS: usize = 10;
 #[cfg(feature = "multicore")]
+const SORTED_U10_VALUES: usize = 1 << SORTED_U10_BITS;
+#[cfg(feature = "multicore")]
+type SortedU10Counts = Box<[u16; SORTED_U10_VALUES]>;
+#[cfg(feature = "multicore")]
 const SORTED_U10_MAX_VALUE: u16 = (1 << SORTED_U10_BITS) - 1;
+
+enum SortedLookup {
+    Keys(Vec<PastaSortKey>),
+    #[cfg(feature = "multicore")]
+    U10(SortedU10Counts),
+}
 /// Upper bound on the independently blinded tail handled by this route.
 /// This covers Orchard's current blind rows while keeping the tail on-stack.
 #[cfg(feature = "multicore")]
@@ -264,6 +278,10 @@ fn uses_pasta_sort_keys<F: Field>() -> bool {
         || TypeId::of::<F>() == TypeId::of::<crate::pasta::Fq>()
 }
 
+const PASTA_SORT_RADIX_BITS: usize = 12;
+const PASTA_SORT_RADIX_BUCKETS: usize = 1 << PASTA_SORT_RADIX_BITS;
+const PASTA_SORT_RADIX_SHIFT: usize = u64::BITS as usize - PASTA_SORT_RADIX_BITS;
+
 pub(in crate::plonk) struct TablePlan {
     representatives: Vec<usize>,
     groups: Vec<usize>,
@@ -291,8 +309,136 @@ fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
             source,
         };
     }
-    scratch.sort_unstable();
+    sort_pasta_keys(scratch);
+    apply_pasta_key_permutation(values, scratch);
+}
 
+/// Sorts only the values outside a dominant nonzero run, then inserts that run
+/// into its canonical position. A declined specialization leaves both buffers
+/// untouched so the caller can safely fall back to the generic Pasta sort.
+fn try_sort_pasta_values_with_repeated_value<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut Vec<F>,
+    scratch: &mut [PastaSortKey],
+    repeated: F,
+) -> Option<usize> {
+    assert_eq!(values.len(), scratch.len());
+    if values.is_empty() || bool::from(repeated.is_zero()) {
+        return None;
+    }
+
+    let original_len = values.len();
+    let repeated_count = values.iter().filter(|&&value| value == repeated).count();
+    if repeated_count < original_len.div_ceil(SINSEMILLA_Q_0_MIN_REPETITION_FRACTION_DENOMINATOR) {
+        return None;
+    }
+
+    values.retain(|&value| value != repeated);
+    let residual_len = values.len();
+    sort_pasta_values(values, &mut scratch[..residual_len]);
+
+    let repeated_key = PastaSortKey {
+        limbs: pasta_sort_limbs(repeated.to_repr()),
+        source: 0,
+    };
+    let insertion = scratch[..residual_len].partition_point(|key| key < &repeated_key);
+
+    values.resize(original_len, repeated);
+    values.copy_within(insertion..residual_len, insertion + repeated_count);
+    values[insertion..insertion + repeated_count].fill(repeated);
+
+    scratch.copy_within(insertion..residual_len, insertion + repeated_count);
+    scratch[insertion..insertion + repeated_count].fill(repeated_key);
+    // Downstream permutation consumes row indices in the reconstructed
+    // buffers, matching the generic key-permutation route.
+    for (source, key) in scratch.iter_mut().enumerate() {
+        key.source = source;
+    }
+
+    Some(repeated_count)
+}
+
+// A `Vec` is required here for safe runtime specialization through `Any`.
+#[allow(clippy::ptr_arg)]
+fn try_sort_lookup_values_with_repeated_value<F: Field + Ord>(
+    values: &mut Vec<F>,
+    scratch: &mut [PastaSortKey],
+    repeated: F,
+) -> Option<usize> {
+    let dynamic_repeated = &repeated as &dyn Any;
+    let dynamic_values = values as &mut dyn Any;
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fp>>() {
+        let repeated = *dynamic_repeated.downcast_ref::<crate::pasta::Fp>()?;
+        return try_sort_pasta_values_with_repeated_value(values, scratch, repeated);
+    }
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fq>>() {
+        let repeated = *dynamic_repeated.downcast_ref::<crate::pasta::Fq>()?;
+        return try_sort_pasta_values_with_repeated_value(values, scratch, repeated);
+    }
+    None
+}
+
+fn sort_pasta_keys(scratch: &mut [PastaSortKey]) {
+    if scratch.len() > usize::from(u16::MAX) {
+        scratch.sort_unstable();
+    } else {
+        let bucket = |key: &PastaSortKey| {
+            (key.limbs[PASTA_REPR_LIMBS - 1] >> PASTA_SORT_RADIX_SHIFT) as usize
+        };
+        let Some(first) = scratch.first() else {
+            return;
+        };
+        let first_bucket = bucket(first);
+        // A radix pass cannot separate a single-prefix input.
+        if scratch[1..].iter().all(|key| bucket(key) == first_bucket) {
+            scratch.sort_unstable();
+            return;
+        }
+
+        // At least two buckets are nonempty, so every count fits in `u16`.
+        let mut ends = [0u16; PASTA_SORT_RADIX_BUCKETS];
+        for key in scratch.iter() {
+            ends[bucket(key)] += 1;
+        }
+
+        let mut next = [0u16; PASTA_SORT_RADIX_BUCKETS];
+        let mut end = 0u16;
+        for (count, next) in ends.iter_mut().zip(next.iter_mut()) {
+            *next = end;
+            end += *count;
+            *count = end;
+        }
+        debug_assert_eq!(usize::from(end), scratch.len());
+
+        // The most-significant prefix determines the order between buckets.
+        // An in-place American-flag pass leaves only small equal-prefix
+        // buckets for the comparison sort.
+        for radix in 0..PASTA_SORT_RADIX_BUCKETS {
+            while next[radix] < ends[radix] {
+                let position = usize::from(next[radix]);
+                let destination_bucket = bucket(&scratch[position]);
+                if destination_bucket == radix {
+                    next[radix] += 1;
+                } else {
+                    debug_assert!(next[destination_bucket] < ends[destination_bucket]);
+                    let destination = usize::from(next[destination_bucket]);
+                    scratch.swap(position, destination);
+                    next[destination_bucket] += 1;
+                }
+            }
+        }
+
+        let mut start = 0;
+        for end in ends {
+            let end = usize::from(end);
+            if end - start > 1 {
+                scratch[start..end].sort_unstable();
+            }
+            start = end;
+        }
+    }
+}
+
+fn apply_pasta_key_permutation<F: Field>(values: &mut [F], scratch: &mut [PastaSortKey]) {
     // Equal canonical encodings represent equal field elements, so their
     // relative input positions do not affect the lookup output.
     for destination in 0..values.len() {
@@ -315,6 +461,102 @@ fn sort_pasta_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
     }
 }
 
+#[cfg(test)]
+fn sort_pasta_values_pdq<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut [F],
+    scratch: &mut [PastaSortKey],
+) {
+    assert_eq!(values.len(), scratch.len());
+    for (source, (value, entry)) in values.iter().zip(scratch.iter_mut()).enumerate() {
+        *entry = PastaSortKey {
+            limbs: pasta_sort_limbs(value.to_repr()),
+            source,
+        };
+    }
+    scratch.sort_unstable();
+    apply_pasta_key_permutation(values, scratch);
+}
+
+#[cfg(feature = "multicore")]
+/// Attempts a counting sort for a structurally identified 10-bit lookup.
+///
+/// The structural marker is only a routing hint. This validates every
+/// canonical field encoding before mutating the values, so callers can safely
+/// fall back to the generic sort for malformed witnesses.
+fn try_count_sort_pasta_u10_values<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &mut [F],
+) -> Option<SortedU10Counts> {
+    if values.len() > usize::from(u16::MAX) {
+        return None;
+    }
+    // The length guard ensures each bin count fits in `u16`.
+    let mut counts = Box::new([0u16; SORTED_U10_VALUES]);
+    for value in values.iter() {
+        let key = PastaSortKey {
+            limbs: pasta_sort_limbs(value.to_repr()),
+            source: 0,
+        };
+        let value = pasta_u10(&key)?;
+        counts[usize::from(value)] += 1;
+    }
+
+    let mut destination = 0;
+    let mut field_value = F::ZERO;
+    for count in counts.iter().copied() {
+        for _ in 0..count {
+            values[destination] = field_value;
+            destination += 1;
+        }
+        field_value += F::ONE;
+    }
+    debug_assert_eq!(destination, values.len());
+    Some(counts)
+}
+
+#[cfg(feature = "multicore")]
+// A `Vec` is required here for safe runtime specialization through `Any`.
+#[allow(clippy::ptr_arg)]
+fn try_count_sort_u10_lookup_values<F: Field + Ord>(
+    values: &mut Vec<F>,
+) -> Option<SortedU10Counts> {
+    let dynamic_values = values as &mut dyn Any;
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fp>>() {
+        return try_count_sort_pasta_u10_values(values);
+    }
+    if let Some(values) = dynamic_values.downcast_mut::<Vec<crate::pasta::Fq>>() {
+        return try_count_sort_pasta_u10_values(values);
+    }
+    None
+}
+
+#[cfg(feature = "multicore")]
+fn sorted_pasta_keys<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]>>(
+    values: &[F],
+) -> Vec<PastaSortKey> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(source, value)| PastaSortKey {
+            limbs: pasta_sort_limbs(value.to_repr()),
+            source,
+        })
+        .collect()
+}
+
+#[cfg(feature = "multicore")]
+// A `Vec` is required here for safe runtime specialization through `Any`.
+#[allow(clippy::ptr_arg)]
+fn sorted_lookup_keys<F: Field + Ord>(values: &Vec<F>) -> Vec<PastaSortKey> {
+    let dynamic_values = values as &dyn Any;
+    if let Some(values) = dynamic_values.downcast_ref::<Vec<crate::pasta::Fp>>() {
+        return sorted_pasta_keys(values);
+    }
+    if let Some(values) = dynamic_values.downcast_ref::<Vec<crate::pasta::Fq>>() {
+        return sorted_pasta_keys(values);
+    }
+    Vec::new()
+}
+
 // A `Vec` is required here for safe runtime specialization through `Any`.
 #[allow(clippy::ptr_arg)]
 fn sort_lookup_values<F: Field + Ord>(values: &mut Vec<F>, scratch: &mut [PastaSortKey]) {
@@ -331,6 +573,27 @@ fn sort_lookup_values<F: Field + Ord>(values: &mut Vec<F>, scratch: &mut [PastaS
     values.sort_unstable();
 }
 
+fn sort_lookup_values_for_kind<F: Field + Ord>(
+    values: &mut Vec<F>,
+    _table_kind: PreparedTableKind,
+    mut key_scratch: Vec<PastaSortKey>,
+) -> SortedLookup {
+    #[cfg(feature = "multicore")]
+    if _table_kind == PreparedTableKind::SortedU10Range
+        && let Some(counts) = try_count_sort_u10_lookup_values(values)
+    {
+        return SortedLookup::U10(counts);
+    }
+
+    // The u10 route does not normally allocate key scratch. Allocate it only
+    // when validation failed and the generic Pasta fallback needs it.
+    if uses_pasta_sort_keys::<F>() && key_scratch.len() != values.len() {
+        key_scratch.resize(values.len(), PastaSortKey::EMPTY);
+    }
+    sort_lookup_values(values, &mut key_scratch);
+    SortedLookup::Keys(key_scratch)
+}
+
 fn factorable_sinsemilla_q_0<F: Field + Ord>(sorted_values: &[F], q_0: F) -> Option<(F, usize)> {
     debug_assert!(sorted_values.windows(2).all(|pair| pair[0] <= pair[1]));
     if sorted_values.is_empty() || bool::from(q_0.is_zero()) {
@@ -343,6 +606,21 @@ fn factorable_sinsemilla_q_0<F: Field + Ord>(sorted_values: &[F], q_0: F) -> Opt
             .len()
             .div_ceil(SINSEMILLA_Q_0_MIN_REPETITION_FRACTION_DENOMINATOR))
     .then_some((q_0, q_0_terms))
+}
+
+fn sorted_value_range<F: Ord>(sorted_values: &[F], value: &F) -> Range<usize> {
+    let start = sorted_values.partition_point(|candidate| candidate < value);
+    let end = sorted_values.partition_point(|candidate| candidate <= value);
+    start..end
+}
+
+fn factorable_input_sinsemilla_q_0<F: Ord>(
+    sorted_input_values: &[F],
+    table_sinsemilla_q_0: Option<(F, usize)>,
+) -> Option<SinsemillaQ0Range<F>> {
+    let (q_0, table_count) = table_sinsemilla_q_0?;
+    let rows = sorted_value_range(sorted_input_values, &q_0);
+    (rows.len() > table_count).then_some(SinsemillaQ0Range { value: q_0, rows })
 }
 
 pub(in crate::plonk) struct PreparedProduct<C: CurveAffine, Ev> {
@@ -559,15 +837,26 @@ pub(in crate::plonk) fn prepare_table_plan<F: Field>(
     } else {
         0
     };
+    let scratch_len_for = |_table_kind| {
+        #[cfg(feature = "multicore")]
+        if _table_kind == PreparedTableKind::SortedU10Range {
+            return 0;
+        }
+        scratch_len
+    };
     let table_sort_scratch = representatives
         .iter()
-        .map(|_| vec![PastaSortKey::EMPTY; scratch_len])
+        .enumerate()
+        .map(|(group, _)| vec![PastaSortKey::EMPTY; scratch_len_for(table_kinds[group])])
         .collect();
     let input_sort_scratch = (0..circuit_count)
         .flat_map(|_| {
             lookup_arguments
                 .iter()
-                .map(|_| vec![PastaSortKey::EMPTY; scratch_len])
+                .enumerate()
+                .map(|(lookup_index, _)| {
+                    vec![PastaSortKey::EMPTY; scratch_len_for(table_kinds[groups[lookup_index]])]
+                })
         })
         .collect();
 
@@ -592,7 +881,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         usable_rows: usize,
         build_quotient_asts: bool,
         table_kind: PreparedTableKind,
-        mut sort_scratch: Vec<PastaSortKey>,
+        sort_scratch: Vec<PastaSortKey>,
     ) -> PreparedTable<F, Ec> {
         let unpermuted_expressions = self.table_expressions.iter().map(|expression| {
             let Expression::Fixed(query) = expression else {
@@ -628,23 +917,44 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             .take(usable_rows)
             .copied()
             .collect::<Vec<_>>();
-        sort_lookup_values(&mut sorted_values, &mut sort_scratch);
+        // The Sinsemilla table is padded with its first tuple over roughly
+        // half of the usable rows. Sort the non-padding values, then insert
+        // the repeated run at its canonical position. This preserves the
+        // generic sorted representation while avoiding key generation and
+        // comparison sorting for the padding rows.
+        let mut sort_scratch = sort_scratch;
+        let sorted_q_0_count = (table_kind == PreparedTableKind::Sinsemilla)
+            .then(|| {
+                try_sort_lookup_values_with_repeated_value(
+                    &mut sorted_values,
+                    &mut sort_scratch,
+                    q_0,
+                )
+            })
+            .flatten();
+        let sort = if sorted_q_0_count.is_some() {
+            SortedLookup::Keys(sort_scratch)
+        } else {
+            sort_lookup_values_for_kind(&mut sorted_values, table_kind, sort_scratch)
+        };
         // The Sinsemilla generator lookup is padded with its first tuple. Its
         // theta-compressed value is therefore repeated over roughly half of
         // the table commitment. Keep this specialization at the table-MSM
         // boundary instead of changing generic MSM routing.
         let sinsemilla_q_0 = (table_kind == PreparedTableKind::Sinsemilla)
-            .then(|| factorable_sinsemilla_q_0(&sorted_values, q_0))
+            .then(|| {
+                sorted_q_0_count
+                    .map(|count| (q_0, count))
+                    .or_else(|| factorable_sinsemilla_q_0(&sorted_values, q_0))
+            })
             .flatten();
 
         PreparedTable {
             compressed_expression: Arc::new(compressed_expression),
             compressed_coset,
             sorted_values,
-            sorted_keys: sort_scratch,
+            sort,
             sinsemilla_q_0,
-            #[cfg(feature = "multicore")]
-            sorted_u10_range: table_kind == PreparedTableKind::SortedU10Range,
         }
     }
 
@@ -662,7 +972,8 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         instance_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         usable_rows: usize,
         build_quotient_asts: bool,
-        mut sort_scratch: Vec<PastaSortKey>,
+        _table_kind: PreparedTableKind,
+        sort_scratch: Vec<PastaSortKey>,
     ) -> PreparedInput<F, Ec> {
         let unpermuted_expressions = self.input_expressions.iter().map(|expression| {
             expression.evaluate(
@@ -731,13 +1042,13 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         // for both vectors.
         let mut sorted_values = Vec::with_capacity(compressed_expression.len());
         sorted_values.extend(compressed_expression.iter().take(usable_rows).copied());
-        sort_lookup_values(&mut sorted_values, &mut sort_scratch);
+        let sort = sort_lookup_values_for_kind(&mut sorted_values, _table_kind, sort_scratch);
 
         PreparedInput {
             compressed_expression,
             compressed_coset,
             sorted_values,
-            sorted_keys: sort_scratch,
+            sort,
         }
     }
 
@@ -758,40 +1069,37 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             compressed_expression: compressed_input_expression,
             compressed_coset: compressed_input_coset,
             sorted_values: sorted_input_values,
-            sorted_keys: sorted_input_keys,
+            sort: sorted_input_sort,
         } = input;
+        let input_sinsemilla_q_0 =
+            factorable_input_sinsemilla_q_0(&sorted_input_values, table.sinsemilla_q_0);
         #[cfg(feature = "multicore")]
         let sorted_u10_suffix_multiples = prepared_sorted_u10_suffix_multiples(
             params,
-            table.sorted_u10_range,
+            matches!(&table.sort, SortedLookup::U10(_)),
             table.sorted_values.len(),
-            sorted_input_keys.len(),
+            sorted_input_values.len(),
         );
         #[cfg(feature = "multicore")]
         let (mut permuted_input_values, mut permuted_table_values, sorted_u10) =
-            if sorted_u10_suffix_multiples.is_some() {
-                permute_sorted_values_with_sorted_u10(
-                    sorted_input_values,
-                    &sorted_input_keys,
-                    &table.sorted_values,
-                    &table.sorted_keys,
-                )?
-            } else {
-                let (input, table) = permute_sorted_values(
-                    sorted_input_values,
-                    &sorted_input_keys,
-                    &table.sorted_values,
-                    &table.sorted_keys,
-                )?;
-                (input, table, None)
-            };
+            permute_prepared_values(
+                sorted_input_values,
+                sorted_input_sort,
+                &table.sorted_values,
+                &table.sort,
+                sorted_u10_suffix_multiples.is_some(),
+            )?;
         #[cfg(not(feature = "multicore"))]
-        let (mut permuted_input_values, mut permuted_table_values) = permute_sorted_values(
-            sorted_input_values,
-            &sorted_input_keys,
-            &table.sorted_values,
-            &table.sorted_keys,
-        )?;
+        let (mut permuted_input_values, mut permuted_table_values) = {
+            let SortedLookup::Keys(mut sorted_input_keys) = sorted_input_sort;
+            let SortedLookup::Keys(table_keys) = &table.sort;
+            permute_sorted_values(
+                sorted_input_values,
+                &mut sorted_input_keys,
+                &table.sorted_values,
+                table_keys,
+            )?
+        };
         debug_assert_eq!(permuted_table_values.len(), table.sorted_values.len());
 
         let blind_rows = pk.vk.cs.blinding_factors() + 1;
@@ -855,6 +1163,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             &permuted_table_expression,
             permuted_table_blind,
             table.sinsemilla_q_0,
+            input_sinsemilla_q_0,
             table.sorted_values.len(),
             #[cfg(feature = "multicore")]
             sorted_u10.as_ref().zip(sorted_u10_suffix_multiples),
@@ -985,10 +1294,51 @@ fn commit_permuted_pair<C: CurveAffine>(
     input_blind: Blind<C::Scalar>,
     table: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_blind: Blind<C::Scalar>,
-    sinsemilla_q_0: Option<(C::Scalar, usize)>,
+    table_sinsemilla_q_0: Option<(C::Scalar, usize)>,
+    input_sinsemilla_q_0: Option<SinsemillaQ0Range<C::Scalar>>,
     usable_rows: usize,
     #[cfg(feature = "multicore")] sorted_u10: Option<(&SortedU10, &[C])>,
 ) -> (C, C) {
+    if let Some(input_sinsemilla_q_0) = input_sinsemilla_q_0 {
+        // Let D = Com(input - table, r_input - r_table). Factoring the
+        // repeated q_0 terms out of the input commitment gives I directly,
+        // and linearity then gives T = I - D. Return (I, T) in the original
+        // transcript order.
+        let (input_commitment, difference_commitment) = crate::multicore::join(
+            || {
+                try_commit_sinsemilla_q_0_range(
+                    params,
+                    input,
+                    input_blind,
+                    &input_sinsemilla_q_0,
+                    usable_rows,
+                )
+                .unwrap_or_else(|| {
+                    commit_sinsemilla_q_0(
+                        params,
+                        input,
+                        input_blind,
+                        Some((input_sinsemilla_q_0.value, input_sinsemilla_q_0.rows.len())),
+                        usable_rows,
+                    )
+                })
+            },
+            || {
+                commit_lagrange_difference(
+                    params,
+                    domain,
+                    input,
+                    table,
+                    Blind(input_blind.0 - table_blind.0),
+                )
+            },
+        );
+        let projective = [input_commitment, input_commitment - difference_commitment];
+        let mut affine = [C::identity(); 2];
+        C::Curve::batch_normalize(&projective, &mut affine);
+        return (affine[0], affine[1]);
+    }
+
     // The 10-bit range-check input stays sorted, so its prefix can use cached
     // Lagrange suffix sums. Other inputs use linearity:
     // C(input, r_i) = C(table, r_t) + C(input - table, r_i - r_t).
@@ -1004,7 +1354,13 @@ fn commit_permuted_pair<C: CurveAffine>(
             {
                 return commitment;
             }
-            commit_sinsemilla_table(params, table, table_blind, sinsemilla_q_0, usable_rows)
+            commit_sinsemilla_q_0(
+                params,
+                table,
+                table_blind,
+                table_sinsemilla_q_0,
+                usable_rows,
+            )
         },
         || {
             #[cfg(feature = "multicore")]
@@ -1048,7 +1404,66 @@ fn commit_permuted_pair<C: CurveAffine>(
     (affine[0], affine[1])
 }
 
-fn commit_sinsemilla_table<C: CurveAffine>(
+#[cfg(feature = "multicore")]
+fn try_commit_sinsemilla_q_0_range<C: CurveAffine>(
+    params: &Params<C>,
+    polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
+    blind: Blind<C::Scalar>,
+    sinsemilla_q_0: &SinsemillaQ0Range<C::Scalar>,
+    usable_rows: usize,
+) -> Option<C::Curve> {
+    let rows = sinsemilla_q_0.rows.clone();
+    if polynomial.len() != params.n as usize
+        || rows.is_empty()
+        || rows.end > usable_rows
+        || usable_rows > polynomial.len()
+        || bool::from(sinsemilla_q_0.value.is_zero())
+    {
+        return None;
+    }
+
+    let suffix_multiples = params.prepared_lagrange_suffix_multiples()?;
+    if suffix_multiples.len() != params.g_lagrange.len() * SORTED_U10_SUFFIX_MULTIPLES {
+        return None;
+    }
+
+    let mut remaining = polynomial.clone();
+    let remaining_values: &mut [C::Scalar] = &mut remaining;
+    for value in &mut remaining_values[rows.clone()] {
+        if *value != sinsemilla_q_0.value {
+            return None;
+        }
+        *value = C::Scalar::ZERO;
+    }
+    // The sorted q_0 run occupies `[start, end)`. For suffix sums
+    // `S_i = sum_{j=i}^{n-1} G_j`, its bases sum to `S_start - S_end`.
+    let suffix_sum = |row: usize| {
+        if row == params.g_lagrange.len() {
+            C::Curve::identity()
+        } else {
+            C::Curve::from(suffix_multiples[row * SORTED_U10_SUFFIX_MULTIPLES])
+        }
+    };
+    let selected_sum = suffix_sum(rows.start) - suffix_sum(rows.end);
+    let (remaining, correction) = crate::multicore::join(
+        || params.commit_lagrange(&remaining, blind),
+        || best_multiexp::<C>(&[sinsemilla_q_0.value], &[selected_sum.to_affine()]),
+    );
+    Some(remaining + correction)
+}
+
+#[cfg(not(feature = "multicore"))]
+fn try_commit_sinsemilla_q_0_range<C: CurveAffine>(
+    _params: &Params<C>,
+    _polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
+    _blind: Blind<C::Scalar>,
+    _sinsemilla_q_0: &SinsemillaQ0Range<C::Scalar>,
+    _usable_rows: usize,
+) -> Option<C::Curve> {
+    None
+}
+
+fn commit_sinsemilla_q_0<C: CurveAffine>(
     params: &Params<C>,
     polynomial: &Polynomial<C::Scalar, LagrangeCoeff>,
     blind: Blind<C::Scalar>,
@@ -1059,12 +1474,12 @@ fn commit_sinsemilla_table<C: CurveAffine>(
         return params.commit_lagrange(polynomial, blind);
     };
 
-    // Factor the Sinsemilla table's repeated q_0 without changing any other
-    // scalar. The dedicated prepared-table path sums the selected Lagrange
-    // bases into S_U, then adds [q_0] S_U. Existing zero and low-magnitude
-    // behavior is therefore preserved for every remaining coefficient.
+    // Factor the repeated q_0 without changing any other scalar. The
+    // dedicated prepared-commitment path sums the selected Lagrange bases into
+    // S_U, then adds [q_0] S_U. Existing zero and low-magnitude behavior is
+    // therefore preserved for every remaining coefficient.
     params
-        .try_commit_sinsemilla_table(polynomial, blind, q_0, q_0_count, usable_rows)
+        .try_commit_sinsemilla_q_0(polynomial, blind, q_0, q_0_count, usable_rows)
         .unwrap_or_else(|| params.commit_lagrange(polynomial, blind))
 }
 
@@ -1130,8 +1545,8 @@ where
         let prepared_tables = table_representatives
             .into_par_iter()
             .zip(table_sort_scratch.into_par_iter())
-            .zip(table_kinds.into_par_iter())
-            .map(|((lookup_index, sort_scratch), table_kind)| {
+            .enumerate()
+            .map(|(group, (lookup_index, sort_scratch))| {
                 lookup_arguments[lookup_index].prepare_table(
                     domain,
                     value_evaluator,
@@ -1140,7 +1555,7 @@ where
                     fixed_cosets,
                     usable_rows,
                     build_quotient_asts,
-                    table_kind,
+                    table_kinds[group],
                     sort_scratch,
                 )
             })
@@ -1162,6 +1577,7 @@ where
                     &instance_cosets[circuit_index],
                     usable_rows,
                     build_quotient_asts,
+                    table_kinds[table_groups[lookup_index]],
                     sort_scratch,
                 );
                 lookup_arguments[lookup_index].finish_permuted(
@@ -1199,6 +1615,7 @@ where
             lookup_tasks.into_iter().zip(input_sort_scratch).enumerate()
         {
             let state = &table_states[table_groups[lookup_index]];
+            let table_kind = table_kinds[table_groups[lookup_index]];
             let prepared = &prepared;
             scope.spawn(move |_| {
                 let input = lookup_arguments[lookup_index].prepare_input(
@@ -1213,6 +1630,7 @@ where
                     &instance_cosets[circuit_index],
                     usable_rows,
                     build_quotient_asts,
+                    table_kind,
                     sort_scratch,
                 );
 
@@ -1350,6 +1768,21 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         gamma: ChallengeGamma<C>,
         blinding: ProductBlinding<C::Scalar>,
     ) -> PreparedProduct<C, Ev> {
+        let Permuted {
+            mut compressed_input_expression,
+            permuted_input_expression,
+            compressed_input_coset,
+            permuted_input_coset,
+            permuted_input_blind,
+            compressed_table_expression,
+            compressed_table_coset,
+            permuted_table_expression,
+            permuted_table_coset,
+            permuted_table_blind,
+        } = self;
+        #[cfg(feature = "sanity-checks")]
+        let original_compressed_input = compressed_input_expression.clone();
+
         let blinding_factors = pk.vk.cs.blinding_factors();
         assert_eq!(blinding.rows.len(), blinding_factors);
         // Goal is to compute the products of fractions
@@ -1369,8 +1802,8 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         parallelize(&mut denominators[..fraction_rows], |denominators, start| {
             for ((denominator, permuted_input_value), permuted_table_value) in denominators
                 .iter_mut()
-                .zip(self.permuted_input_expression[start..].iter())
-                .zip(self.permuted_table_expression[start..].iter())
+                .zip(permuted_input_expression[start..].iter())
+                .zip(permuted_table_expression[start..].iter())
             {
                 *denominator = (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
             }
@@ -1379,17 +1812,23 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         // Compute the numerators for the lookup product polynomial.
         // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
         // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
-        let mut numerators = vec![C::Scalar::ZERO; params.n as usize];
-        parallelize(&mut numerators[..fraction_rows], |numerators, start| {
-            for ((numerator, &input_term), &table_term) in numerators
-                .iter_mut()
-                .zip(self.compressed_input_expression[start..].iter())
-                .zip(self.compressed_table_expression[start..].iter())
-            {
-                *numerator = (input_term + &*beta) * &(table_term + &*gamma);
-            }
-        });
-
+        // The compressed input is not used after this point. Overwrite its
+        // uniquely-owned buffer instead of allocating a second domain-sized
+        // vector for the numerators.
+        {
+            let numerator_values: &mut [C::Scalar] = &mut compressed_input_expression;
+            parallelize(
+                &mut numerator_values[..fraction_rows],
+                |numerators, start| {
+                    for (numerator, &table_term) in numerators
+                        .iter_mut()
+                        .zip(compressed_table_expression[start..].iter())
+                    {
+                        *numerator = (*numerator + &*beta) * &(table_term + &*gamma);
+                    }
+                },
+            );
+        }
         // The product vector is a vector of products of fractions of the form
         //
         // Numerator: (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
@@ -1407,16 +1846,17 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
         // domain, starting with z[0] = 1. Reuse the numerator vector for z
         // instead of allocating a third domain-sized vector.
         let usable_rows = params.n as usize - blinding_factors;
-        let mut lookup_product = super::super::prefix_products_of_fractions(
-            numerators,
-            denominators,
+        // The permuted input and table values are independent permutations of
+        // their compressed values over exactly these rows. Thus the total
+        // numerator and denominator products are equal for every `beta` and
+        // `gamma`, including when the shared total is zero.
+        super::super::prefix_products_of_equal_product_fractions_in_place(
+            &mut compressed_input_expression,
+            &mut denominators,
             fraction_rows,
-            C::Scalar::ONE,
         );
-        lookup_product.truncate(usable_rows);
-        lookup_product.extend(blinding.rows);
-        assert_eq!(lookup_product.len(), params.n as usize);
-        let z = pk.vk.domain.lagrange_from_vec(lookup_product);
+        compressed_input_expression[usable_rows..].copy_from_slice(&blinding.rows);
+        let z = compressed_input_expression;
 
         #[cfg(feature = "sanity-checks")]
         // This test works only with intermediate representations in this method.
@@ -1432,17 +1872,17 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
             // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
             for i in 0..u {
                 let mut left = z[i + 1];
-                let permuted_input_value = &self.permuted_input_expression[i];
+                let permuted_input_value = &permuted_input_expression[i];
 
-                let permuted_table_value = &self.permuted_table_expression[i];
+                let permuted_table_value = &permuted_table_expression[i];
 
                 left *= &(*beta + permuted_input_value);
                 left *= &(*gamma + permuted_table_value);
 
                 let mut right = z[i];
-                let mut input_term = self.compressed_input_expression[i];
+                let mut input_term = original_compressed_input[i];
 
-                let mut table_term = self.compressed_table_expression[i];
+                let mut table_term = compressed_table_expression[i];
 
                 input_term += &(*beta);
                 table_term += &(*gamma);
@@ -1457,18 +1897,6 @@ impl<C: CurveAffine, Ev: Copy + Send + Sync> Permuted<C, Ev> {
             assert_eq!(z[u], C::Scalar::ONE);
         }
 
-        let Permuted {
-            compressed_input_expression: _,
-            permuted_input_expression,
-            compressed_input_coset,
-            permuted_input_coset,
-            permuted_input_blind,
-            compressed_table_expression: _,
-            compressed_table_coset,
-            permuted_table_expression,
-            permuted_table_coset,
-            permuted_table_blind,
-        } = self;
         let transform_permuted = |values| {
             let polynomial = pk
                 .vk
@@ -1801,12 +2229,12 @@ fn permute_usable_values<F: Field + Ord>(
         || sort_lookup_values(&mut table_values, &mut table_keys),
     );
 
-    permute_sorted_values(input_values, &input_keys, &table_values, &table_keys)
+    permute_sorted_values(input_values, &mut input_keys, &table_values, &table_keys)
 }
 
 fn permute_sorted_values<F: Field + Ord>(
     input_values: Vec<F>,
-    input_keys: &[PastaSortKey],
+    input_keys: &mut [PastaSortKey],
     table_values: &[F],
     table_keys: &[PastaSortKey],
 ) -> Result<(Vec<F>, Vec<F>), Error> {
@@ -1831,21 +2259,168 @@ fn permute_sorted_values<F: Field + Ord>(
     assert_eq!(table_values.len(), table_keys.len());
     debug_assert!(input_keys.windows(2).all(|pair| pair[0] <= pair[1]));
     debug_assert!(table_keys.windows(2).all(|pair| pair[0] <= pair[1]));
-    let permuted_table_values = permute_sorted_values_by(
+    let permuted_table_values = permute_sorted_pasta_values(
         &input_values,
+        input_keys,
         table_values,
+        table_keys,
         output_capacity,
-        |row| input_keys[row] == input_keys[row - 1],
-        |table_row, input_row| table_keys[table_row] < input_keys[input_row],
-        |table_row, input_row| table_keys[table_row] == input_keys[input_row],
+        |_, _| {},
     )?;
     Ok((input_values, permuted_table_values))
 }
 
 #[cfg(feature = "multicore")]
+// A `Vec` is required here to regenerate Pasta keys through `Any` on fallback.
+#[allow(clippy::ptr_arg)]
+fn permute_prepared_values<F: Field + Ord>(
+    input_values: Vec<F>,
+    input_sort: SortedLookup,
+    table_values: &Vec<F>,
+    table_sort: &SortedLookup,
+    collect_sorted_u10: bool,
+) -> Result<(Vec<F>, Vec<F>, Option<SortedU10>), Error> {
+    match (input_sort, table_sort) {
+        (SortedLookup::U10(input_counts), SortedLookup::U10(table_counts)) => {
+            permute_sorted_u10_from_counts(
+                input_values,
+                &input_counts,
+                table_values,
+                table_counts,
+                collect_sorted_u10,
+            )
+        }
+        (input_sort, table_sort) => {
+            let mut input_keys = match input_sort {
+                SortedLookup::Keys(keys) => keys,
+                SortedLookup::U10(_) => sorted_lookup_keys(&input_values),
+            };
+            let generated_table_keys;
+            let table_keys = match table_sort {
+                SortedLookup::Keys(keys) => keys,
+                SortedLookup::U10(_) => {
+                    generated_table_keys = sorted_lookup_keys(table_values);
+                    &generated_table_keys
+                }
+            };
+            if collect_sorted_u10 {
+                permute_sorted_values_with_sorted_u10(
+                    input_values,
+                    &mut input_keys,
+                    table_values,
+                    table_keys,
+                )
+            } else {
+                permute_sorted_values(input_values, &mut input_keys, table_values, table_keys)
+                    .map(|(input, table)| (input, table, None))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "multicore")]
+fn permute_sorted_u10_from_counts<F: Field>(
+    input_values: Vec<F>,
+    input_counts: &[u16; SORTED_U10_VALUES],
+    table_values: &[F],
+    table_counts: &[u16; SORTED_U10_VALUES],
+    collect_sorted_u10: bool,
+) -> Result<(Vec<F>, Vec<F>, Option<SortedU10>), Error> {
+    let usable_rows = input_values.len();
+    if table_values.len() != usable_rows {
+        return Err(Error::ConstraintSystemFailure);
+    }
+
+    let mut permuted_table_values = Vec::with_capacity(input_values.capacity());
+    permuted_table_values.resize(usable_rows, F::ZERO);
+    let mut profile: Option<SortedU10> = None;
+    let mut input_row = 0;
+    for (value, &count) in input_counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let Some(input_value) = input_values.get(input_row) else {
+            return Err(Error::ConstraintSystemFailure);
+        };
+        permuted_table_values[input_row] = *input_value;
+        if collect_sorted_u10 {
+            let value = u16::try_from(value).map_err(|_| Error::ConstraintSystemFailure)?;
+            if let Some(profile) = &mut profile {
+                let Some(delta) = value.checked_sub(profile.last) else {
+                    return Err(Error::ConstraintSystemFailure);
+                };
+                profile.transitions.push(SortedU10Transition {
+                    row: u16::try_from(input_row).map_err(|_| Error::ConstraintSystemFailure)?,
+                    delta,
+                });
+                profile.last = value;
+            } else {
+                profile = Some(SortedU10 {
+                    transitions: Vec::with_capacity(usize::from(SORTED_U10_MAX_VALUE)),
+                    first: value,
+                    last: value,
+                });
+            }
+        }
+        input_row = input_row
+            .checked_add(usize::from(count))
+            .ok_or(Error::ConstraintSystemFailure)?;
+    }
+    if input_row != usable_rows {
+        return Err(Error::ConstraintSystemFailure);
+    }
+
+    // Yield repeated input rows in descending order, matching the generic
+    // permutation's back-filled key-scratch lane.
+    let mut next_bin = SORTED_U10_VALUES;
+    let mut group_start = usable_rows;
+    let mut next_row = usable_rows;
+    let mut next_repeated_row = || loop {
+        if next_row > group_start + 1 {
+            next_row -= 1;
+            return Some(next_row);
+        }
+        if next_bin == 0 {
+            return None;
+        }
+        next_bin -= 1;
+        let group_end = group_start;
+        group_start = group_start.checked_sub(usize::from(input_counts[next_bin]))?;
+        next_row = group_end;
+    };
+
+    let mut table_row = 0;
+    for (&input_count, &table_count) in input_counts.iter().zip(table_counts) {
+        let consumed = u16::from(input_count != 0);
+        let Some(remaining) = table_count.checked_sub(consumed) else {
+            return Err(Error::ConstraintSystemFailure);
+        };
+        if remaining != 0 {
+            let Some(&value) = table_values.get(table_row) else {
+                return Err(Error::ConstraintSystemFailure);
+            };
+            for _ in 0..remaining {
+                let Some(row) = next_repeated_row() else {
+                    return Err(Error::ConstraintSystemFailure);
+                };
+                permuted_table_values[row] = value;
+            }
+        }
+        table_row = table_row
+            .checked_add(usize::from(table_count))
+            .ok_or(Error::ConstraintSystemFailure)?;
+    }
+    if table_row != usable_rows || next_repeated_row().is_some() {
+        return Err(Error::ConstraintSystemFailure);
+    }
+
+    Ok((input_values, permuted_table_values, profile))
+}
+
+#[cfg(feature = "multicore")]
 fn permute_sorted_values_with_sorted_u10<F: Field + Ord>(
     input_values: Vec<F>,
-    input_keys: &[PastaSortKey],
+    input_keys: &mut [PastaSortKey],
     table_values: &[F],
     table_keys: &[PastaSortKey],
 ) -> Result<(Vec<F>, Vec<F>, Option<SortedU10>), Error> {
@@ -1862,24 +2437,88 @@ fn permute_sorted_values_with_sorted_u10<F: Field + Ord>(
     debug_assert!(table_keys.windows(2).all(|pair| pair[0] <= pair[1]));
     let output_capacity = input_values.capacity();
     let mut sorted_u10 = input_keys.first().and_then(SortedU10::new);
-    let permuted_table_values = permute_sorted_values_by(
+    let permuted_table_values = permute_sorted_pasta_values(
         &input_values,
+        input_keys,
         table_values,
+        table_keys,
         output_capacity,
-        |row| {
-            let same = input_keys[row] == input_keys[row - 1];
-            if !same
-                && let Some(profile) = &mut sorted_u10
-                && profile.push_distinct(row, &input_keys[row]).is_none()
+        |row, key| {
+            if let Some(profile) = &mut sorted_u10
+                && profile.push_distinct(row, key).is_none()
             {
                 sorted_u10 = None;
             }
-            same
         },
-        |table_row, input_row| table_keys[table_row] < input_keys[input_row],
-        |table_row, input_row| table_keys[table_row] == input_keys[input_row],
     )?;
     Ok((input_values, permuted_table_values, sorted_u10))
+}
+
+fn permute_sorted_pasta_values<F: Field, OnDistinct>(
+    input_values: &[F],
+    input_keys: &mut [PastaSortKey],
+    table_values: &[F],
+    table_keys: &[PastaSortKey],
+    output_capacity: usize,
+    mut on_distinct: OnDistinct,
+) -> Result<Vec<F>, Error>
+where
+    OnDistinct: FnMut(usize, &PastaSortKey),
+{
+    let usable_rows = input_values.len();
+    assert_eq!(input_keys.len(), usable_rows);
+    assert_eq!(table_values.len(), usable_rows);
+    assert_eq!(table_keys.len(), usable_rows);
+
+    let mut permuted_table_values = Vec::with_capacity(output_capacity);
+    permuted_table_values.resize(usable_rows, F::ZERO);
+    // Sorting has finished, and key comparisons deliberately ignore `source`.
+    // Reuse those lanes for the two monotone row lists instead of allocating
+    // a pair of temporary vectors. Consumed rows grow from the front. Repeated
+    // input rows grow from the back, which leaves them in the same descending
+    // order produced by popping the previous repeated-row vector.
+    let mut consumed_len = 0;
+    let mut repeated_start = usable_rows;
+    let mut table_row = 0;
+
+    for row in 0..usable_rows {
+        let input_key = input_keys[row];
+        if row == 0 || input_key != input_keys[row - 1] {
+            if row != 0 {
+                on_distinct(row, &input_key);
+            }
+            permuted_table_values[row] = input_values[row];
+            while table_row < usable_rows && table_keys[table_row] < input_key {
+                table_row += 1;
+            }
+            if table_row < usable_rows && table_keys[table_row] == input_key {
+                input_keys[consumed_len].source = table_row;
+                consumed_len += 1;
+                table_row += 1;
+            } else {
+                return Err(Error::ConstraintSystemFailure);
+            }
+        } else {
+            repeated_start -= 1;
+            input_keys[repeated_start].source = row;
+        }
+    }
+
+    assert_eq!(consumed_len, repeated_start);
+    let (consumed_rows, repeated_rows) = input_keys.split_at(consumed_len);
+    let mut consumed_rows = consumed_rows.iter().map(|key| key.source).peekable();
+    let mut repeated_rows = repeated_rows.iter().map(|key| key.source);
+    for (row, value) in table_values.iter().copied().enumerate() {
+        if consumed_rows.peek() == Some(&row) {
+            consumed_rows.next();
+        } else {
+            permuted_table_values[repeated_rows.next().unwrap()] = value;
+        }
+    }
+    assert!(consumed_rows.next().is_none());
+    assert!(repeated_rows.next().is_none());
+
+    Ok(permuted_table_values)
 }
 
 fn permute_sorted_values_by<F: Field, SameInput, TableLess, TableSame>(
@@ -1960,6 +2599,15 @@ mod tests {
     }
 
     #[cfg(feature = "multicore")]
+    fn test_u10_counts(values: &[u64]) -> SortedU10Counts {
+        let mut counts = Box::new([0; SORTED_U10_VALUES]);
+        for &value in values {
+            counts[usize::try_from(value).unwrap()] += 1;
+        }
+        counts
+    }
+
+    #[cfg(feature = "multicore")]
     fn test_sorted_u10(keys: &[PastaSortKey]) -> Option<SortedU10> {
         let first_key = keys.first()?;
         let mut profile = SortedU10::new(first_key)?;
@@ -1975,13 +2623,13 @@ mod tests {
     #[test]
     fn collects_sorted_u10_range_profile_during_permutation() {
         let input_values = [0, 0, 2, 2, 7, u64::from(SORTED_U10_MAX_VALUE)];
-        let input_keys = input_values.into_iter().map(pasta_key).collect::<Vec<_>>();
+        let mut input_keys = input_values.into_iter().map(pasta_key).collect::<Vec<_>>();
         let maximum = u64::from(SORTED_U10_MAX_VALUE);
         let table_values = [0, 0, 2, 7, maximum, maximum];
         let table_keys = table_values.map(pasta_key);
         let (fused_input, fused_table, profile) = permute_sorted_values_with_sorted_u10(
             input_values.map(pallas::Scalar::from).to_vec(),
-            &input_keys,
+            &mut input_keys,
             &table_values.map(pallas::Scalar::from),
             &table_keys,
         )
@@ -2003,7 +2651,7 @@ mod tests {
 
         let (plain_input, plain_table) = permute_sorted_values(
             input_values.map(pallas::Scalar::from).to_vec(),
-            &input_keys,
+            &mut input_keys,
             &table_values.map(pallas::Scalar::from),
             &table_keys,
         )
@@ -2013,12 +2661,13 @@ mod tests {
 
         let outside_u10 = maximum + 1;
         let non_u10 = [pallas::Scalar::from(outside_u10); 2];
-        let non_u10_keys = [pasta_key(outside_u10); 2];
+        let mut non_u10_keys = [pasta_key(outside_u10); 2];
+        let non_u10_table_keys = non_u10_keys;
         let (_, _, profile) = permute_sorted_values_with_sorted_u10(
             non_u10.to_vec(),
-            &non_u10_keys,
+            &mut non_u10_keys,
             &non_u10,
-            &non_u10_keys,
+            &non_u10_table_keys,
         )
         .unwrap();
         assert!(profile.is_none());
@@ -2026,6 +2675,149 @@ mod tests {
         assert!(test_sorted_u10(&[pasta_key(2), pasta_key(1)]).is_none());
         assert!(test_sorted_u10(&[pasta_key(outside_u10)]).is_none());
         assert_eq!(std::mem::size_of::<SortedU10Transition>(), 4);
+    }
+
+    #[cfg(feature = "multicore")]
+    fn assert_counted_u10_permutation_matches(input: &[u64], table: &[u64]) {
+        let input_values = input
+            .iter()
+            .copied()
+            .map(pallas::Scalar::from)
+            .collect::<Vec<_>>();
+        let table_values = table
+            .iter()
+            .copied()
+            .map(pallas::Scalar::from)
+            .collect::<Vec<_>>();
+        let mut input_keys = input.iter().copied().map(pasta_key).collect::<Vec<_>>();
+        let table_keys = table.iter().copied().map(pasta_key).collect::<Vec<_>>();
+        let expected = permute_sorted_values_with_sorted_u10(
+            input_values.clone(),
+            &mut input_keys,
+            &table_values,
+            &table_keys,
+        )
+        .unwrap();
+        let actual = permute_sorted_u10_from_counts(
+            input_values,
+            &test_u10_counts(input),
+            &table_values,
+            &test_u10_counts(table),
+            true,
+        )
+        .unwrap();
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
+        assert_eq!(
+            actual.2.as_ref().map(|profile| profile.first),
+            expected.2.as_ref().map(|profile| profile.first),
+        );
+        assert_eq!(
+            actual.2.as_ref().map(|profile| profile.last),
+            expected.2.as_ref().map(|profile| profile.last),
+        );
+        assert_eq!(
+            actual.2.map(|profile| profile.transitions),
+            expected.2.map(|profile| profile.transitions),
+        );
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn counted_u10_permutation_matches_key_scratch_path() {
+        assert_counted_u10_permutation_matches(&[], &[]);
+        assert_counted_u10_permutation_matches(
+            &[0, 0, 2, 2, 7, u64::from(SORTED_U10_MAX_VALUE)],
+            &[
+                0,
+                0,
+                2,
+                7,
+                u64::from(SORTED_U10_MAX_VALUE),
+                u64::from(SORTED_U10_MAX_VALUE),
+            ],
+        );
+
+        let usable_rows = 2_042;
+        let table = iter::repeat_n(0, usable_rows - SORTED_U10_VALUES)
+            .chain(0..u64::try_from(SORTED_U10_VALUES).unwrap())
+            .collect::<Vec<_>>();
+        assert_counted_u10_permutation_matches(&vec![0; usable_rows], &table);
+        let mut broad = (0..usable_rows)
+            .map(|index| u64::try_from((index * 613 + 17) % SORTED_U10_VALUES).unwrap())
+            .collect::<Vec<_>>();
+        broad.sort_unstable();
+        assert_counted_u10_permutation_matches(&broad, &table);
+
+        let missing_input = [1];
+        let missing_table = [0];
+        let result = permute_sorted_u10_from_counts(
+            missing_input.map(pallas::Scalar::from).to_vec(),
+            &test_u10_counts(&missing_input),
+            &missing_table.map(pallas::Scalar::from),
+            &test_u10_counts(&missing_table),
+            true,
+        );
+        assert!(matches!(result, Err(Error::ConstraintSystemFailure)));
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn counted_u10_asymmetric_fallback_regenerates_keys() {
+        let input = [0, 0, 2, 2, 7, u64::from(SORTED_U10_MAX_VALUE)];
+        let table = [
+            0,
+            0,
+            2,
+            7,
+            u64::from(SORTED_U10_MAX_VALUE),
+            u64::from(SORTED_U10_MAX_VALUE),
+        ];
+        let input_values = input.map(pallas::Scalar::from).to_vec();
+        let table_values = table.map(pallas::Scalar::from).to_vec();
+        let input_keys = input.into_iter().map(pasta_key).collect::<Vec<_>>();
+        let table_keys = table.into_iter().map(pasta_key).collect::<Vec<_>>();
+        let input_counts = test_u10_counts(&input);
+        let table_counts = test_u10_counts(&table);
+        let mut expected_input_keys = input_keys.clone();
+        let expected = permute_sorted_values_with_sorted_u10(
+            input_values.clone(),
+            &mut expected_input_keys,
+            &table_values,
+            &table_keys,
+        )
+        .unwrap();
+
+        let input_counted = permute_prepared_values(
+            input_values.clone(),
+            SortedLookup::U10(input_counts),
+            &table_values,
+            &SortedLookup::Keys(table_keys.clone()),
+            true,
+        )
+        .unwrap();
+        let table_counted = permute_prepared_values(
+            input_values,
+            SortedLookup::Keys(input_keys),
+            &table_values,
+            &SortedLookup::U10(table_counts),
+            true,
+        )
+        .unwrap();
+        for actual in [input_counted, table_counted] {
+            assert_eq!(actual.0, expected.0);
+            assert_eq!(actual.1, expected.1);
+            assert_eq!(
+                actual
+                    .2
+                    .map(|profile| (profile.first, profile.last, profile.transitions,)),
+                expected.2.as_ref().map(|profile| (
+                    profile.first,
+                    profile.last,
+                    profile.transitions.clone(),
+                )),
+            );
+        }
     }
 
     #[cfg(feature = "multicore")]
@@ -2195,6 +2987,87 @@ mod tests {
             );
         }
 
+        let usable_rows = domain_len - SORTED_U10_MAX_SUFFIX;
+        let q_0 = C::Scalar::from(29);
+        let q_0_rows = 173..1_223;
+        let mut values = (0..domain_len)
+            .map(|row| C::Scalar::from(row as u64 + 1_000))
+            .collect::<Vec<_>>();
+        values[q_0_rows.clone()].fill(q_0);
+        let polynomial = domain.lagrange_from_vec(values);
+        let blind = Blind(C::Scalar::random(&mut rng));
+        let expected = params.commit_lagrange(&polynomial, blind);
+        assert_eq!(
+            try_commit_sinsemilla_q_0_range(
+                &params,
+                &polynomial,
+                blind,
+                &SinsemillaQ0Range {
+                    value: q_0,
+                    rows: q_0_rows.clone(),
+                },
+                usable_rows,
+            ),
+            Some(expected),
+        );
+        let constant = domain.lagrange_from_vec(vec![q_0; domain_len]);
+        let constant_blind = Blind(C::Scalar::random(&mut rng));
+        assert_eq!(
+            try_commit_sinsemilla_q_0_range(
+                &params,
+                &constant,
+                constant_blind,
+                &SinsemillaQ0Range {
+                    value: q_0,
+                    rows: 0..domain_len,
+                },
+                domain_len,
+            ),
+            Some(params.commit_lagrange(&constant, constant_blind)),
+        );
+        assert!(
+            try_commit_sinsemilla_q_0_range(
+                &params,
+                &polynomial,
+                blind,
+                &SinsemillaQ0Range {
+                    value: q_0,
+                    rows: q_0_rows.start - 1..q_0_rows.end,
+                },
+                usable_rows,
+            )
+            .is_none()
+        );
+        assert!(
+            wide_pool
+                .install(|| {
+                    try_commit_sinsemilla_q_0_range(
+                        &params,
+                        &polynomial,
+                        blind,
+                        &SinsemillaQ0Range {
+                            value: q_0,
+                            rows: q_0_rows.clone(),
+                        },
+                        usable_rows,
+                    )
+                })
+                .is_none()
+        );
+        assert!(
+            try_commit_sinsemilla_q_0_range(
+                &decoded,
+                &polynomial,
+                blind,
+                &SinsemillaQ0Range {
+                    value: q_0,
+                    rows: q_0_rows,
+                },
+                usable_rows,
+            )
+            .is_none()
+        );
+
         #[cfg(not(feature = "orbits"))]
         {
             let usable_rows = domain_len - PERMUTED_U10_TABLE_SUFFIX_TERMS;
@@ -2303,6 +3176,7 @@ mod tests {
                 &zero,
                 table_blind,
                 None,
+                None,
                 usable_rows,
                 Some((&malformed, suffix_multiples)),
             ),
@@ -2386,12 +3260,31 @@ mod tests {
         values.iter().copied().map(pallas::Scalar::from).collect()
     }
 
+    #[cfg(feature = "multicore")]
+    fn permute_pasta_rows(input: &[u64], table: &[u64]) -> Result<Vec<pallas::Scalar>, Error> {
+        let input_values = values(input);
+        let table_values = values(table);
+        let mut input_keys = input.iter().copied().map(pasta_key).collect::<Vec<_>>();
+        let table_keys = table.iter().copied().map(pasta_key).collect::<Vec<_>>();
+
+        permute_sorted_pasta_values(
+            &input_values,
+            &mut input_keys,
+            &table_values,
+            &table_keys,
+            input_values.capacity(),
+            |_, _| {},
+        )
+    }
+
     fn check_permuted_pair_commitments<C>()
     where
         C: CurveAffine + core::fmt::Debug,
         C::Curve: core::fmt::Debug,
     {
         const K: u32 = 4;
+        const USABLE_ROWS: usize = (1 << K) - 1;
+        const TABLE_Q_0_COUNT: usize = 8;
 
         let params = Params::<C>::new(K);
         #[cfg(any(feature = "multicore", feature = "orbits"))]
@@ -2412,7 +3305,27 @@ mod tests {
                 &zero,
                 Blind(C::Scalar::ZERO),
                 None,
+                None,
                 0,
+                #[cfg(feature = "multicore")]
+                None,
+            ),
+            (C::identity(), C::identity()),
+        );
+        assert_eq!(
+            commit_permuted_pair(
+                &params,
+                &domain,
+                &zero,
+                Blind(C::Scalar::ZERO),
+                &zero,
+                Blind(C::Scalar::ZERO),
+                Some((C::Scalar::ZERO, 1 << K)),
+                Some(SinsemillaQ0Range {
+                    value: C::Scalar::ZERO,
+                    rows: 0..1 << K,
+                }),
+                1 << K,
                 #[cfg(feature = "multicore")]
                 None,
             ),
@@ -2422,7 +3335,7 @@ mod tests {
         let q_0 = C::Scalar::from(29);
         let table_values = (0..1_usize << K)
             .map(|index| {
-                if (index < 15 && index % 2 == 0) || index == (1 << K) - 1 {
+                if (index < USABLE_ROWS && index % 2 == 0) || index == (1 << K) - 1 {
                     q_0
                 } else {
                     C::Scalar::from(index as u64 + 1)
@@ -2443,6 +3356,15 @@ mod tests {
                     *value + C::Scalar::from(index as u64 + 2)
                 } else {
                     *value
+                }
+            })
+            .collect::<Vec<_>>();
+        let more_repeated_q_0 = (0..1_usize << K)
+            .map(|index| {
+                if index < USABLE_ROWS {
+                    q_0
+                } else {
+                    C::Scalar::from(index as u64 + 1)
                 }
             })
             .collect::<Vec<_>>();
@@ -2468,6 +3390,11 @@ mod tests {
                 Blind(C::Scalar::from(19)),
                 Blind(C::Scalar::from(23)),
             ),
+            (
+                more_repeated_q_0,
+                Blind(C::Scalar::from(29)),
+                Blind(C::Scalar::from(31)),
+            ),
         ] {
             let input = domain.lagrange_from_vec(input_values);
             let table = domain.lagrange_from_vec(table_values.clone());
@@ -2478,17 +3405,52 @@ mod tests {
             // Model noncontiguous witness-dependent positions and a random
             // blind-tail row that happens to equal q_0.
             #[cfg(feature = "multicore")]
-            let routed_table = prepared_pool
-                .install(|| params.try_commit_sinsemilla_table(&table, table_blind, q_0, 8, 15));
+            let routed_table = prepared_pool.install(|| {
+                params.try_commit_sinsemilla_q_0(
+                    &table,
+                    table_blind,
+                    q_0,
+                    TABLE_Q_0_COUNT,
+                    USABLE_ROWS,
+                )
+            });
             #[cfg(all(not(feature = "multicore"), feature = "orbits"))]
-            let routed_table = params.try_commit_sinsemilla_table(&table, table_blind, q_0, 8, 15);
+            let routed_table = params.try_commit_sinsemilla_q_0(
+                &table,
+                table_blind,
+                q_0,
+                TABLE_Q_0_COUNT,
+                USABLE_ROWS,
+            );
             #[cfg(any(feature = "multicore", feature = "orbits"))]
             assert_eq!(
                 routed_table.map(|point| point.to_affine()),
                 Some(expected.1)
             );
 
-            for sinsemilla_q_0 in [None, Some((q_0, 8))] {
+            let input_q_0_count = input
+                .iter()
+                .take(USABLE_ROWS)
+                .filter(|&&value| value == q_0)
+                .count();
+            for (sinsemilla_q_0, input_sinsemilla_q_0) in [
+                (None, None),
+                (Some((q_0, TABLE_Q_0_COUNT)), None),
+                (
+                    Some((q_0, TABLE_Q_0_COUNT)),
+                    (input_q_0_count > TABLE_Q_0_COUNT).then_some(SinsemillaQ0Range {
+                        value: q_0,
+                        rows: 0..input_q_0_count,
+                    }),
+                ),
+                (
+                    Some((q_0, TABLE_Q_0_COUNT)),
+                    Some(SinsemillaQ0Range {
+                        value: q_0,
+                        rows: 0..input_q_0_count,
+                    }),
+                ),
+            ] {
                 assert_eq!(
                     commit_permuted_pair(
                         &params,
@@ -2498,7 +3460,8 @@ mod tests {
                         &table,
                         table_blind,
                         sinsemilla_q_0,
-                        15,
+                        input_sinsemilla_q_0,
+                        USABLE_ROWS,
                         #[cfg(feature = "multicore")]
                         None,
                     ),
@@ -2510,7 +3473,7 @@ mod tests {
         let constant = domain.lagrange_from_vec(vec![q_0; 1usize << K]);
         let expected_constant = params.commit_lagrange(&constant, Blind(C::Scalar::ZERO));
         assert_eq!(
-            commit_sinsemilla_table(
+            commit_sinsemilla_q_0(
                 &params,
                 &constant,
                 Blind(C::Scalar::ZERO),
@@ -2524,7 +3487,7 @@ mod tests {
         {
             #[cfg(feature = "multicore")]
             let routed = prepared_pool.install(|| {
-                params.try_commit_sinsemilla_table(
+                params.try_commit_sinsemilla_q_0(
                     &constant,
                     Blind(C::Scalar::ZERO),
                     q_0,
@@ -2533,7 +3496,7 @@ mod tests {
                 )
             });
             #[cfg(not(feature = "multicore"))]
-            let routed = params.try_commit_sinsemilla_table(
+            let routed = params.try_commit_sinsemilla_q_0(
                 &constant,
                 Blind(C::Scalar::ZERO),
                 q_0,
@@ -2544,7 +3507,7 @@ mod tests {
 
             assert!(
                 params
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         C::Scalar::ZERO,
@@ -2555,7 +3518,7 @@ mod tests {
             );
             assert!(
                 params
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         q_0,
@@ -2566,7 +3529,7 @@ mod tests {
             );
             assert!(
                 params
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         q_0,
@@ -2577,7 +3540,7 @@ mod tests {
             );
             assert!(
                 params
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         q_0,
@@ -2590,7 +3553,7 @@ mod tests {
             let unprepared = Params::<C>::new(K);
             assert!(
                 unprepared
-                    .try_commit_sinsemilla_table(
+                    .try_commit_sinsemilla_q_0(
                         &constant,
                         Blind(C::Scalar::ZERO),
                         q_0,
@@ -2610,6 +3573,34 @@ mod tests {
     #[test]
     fn permuted_pair_commitments_reuse_table_vesta() {
         check_permuted_pair_commitments::<vesta::Affine>();
+    }
+
+    #[test]
+    fn input_q_0_factor_route_requires_more_repetitions() {
+        let q_0 = pallas::Scalar::from(2);
+        let with_q_0 = values(&[0, 1, 2, 2, 3]);
+        let without_q_0 = values(&[0, 1, 3, 4, 5]);
+
+        assert_eq!(factorable_input_sinsemilla_q_0(&with_q_0, None), None);
+        assert_eq!(
+            factorable_input_sinsemilla_q_0(&without_q_0, Some((q_0, 0))),
+            None,
+        );
+        assert_eq!(
+            factorable_input_sinsemilla_q_0(&with_q_0, Some((q_0, 1))),
+            Some(SinsemillaQ0Range {
+                value: q_0,
+                rows: 2..4,
+            }),
+        );
+        assert_eq!(
+            factorable_input_sinsemilla_q_0(&with_q_0, Some((q_0, 2))),
+            None,
+        );
+        assert_eq!(
+            factorable_input_sinsemilla_q_0(&with_q_0, Some((q_0, 3))),
+            None,
+        );
     }
 
     fn check_table_sort<F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord>() {
@@ -2634,6 +3625,233 @@ mod tests {
     fn table_sort_matches_field_order() {
         check_table_sort::<pallas::Base>();
         check_table_sort::<pallas::Scalar>();
+    }
+
+    fn check_radix_pasta_sort<F>()
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord,
+    {
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let mut rng = StdRng::seed_from_u64(0x6d73_642d_736f_7274);
+        let random = (0..2_042).map(|_| F::random(&mut rng)).collect::<Vec<_>>();
+        let mut sorted = random.clone();
+        sorted.sort_unstable();
+        let mut reverse = sorted.clone();
+        reverse.reverse();
+
+        let cases = [
+            Vec::new(),
+            vec![F::ZERO],
+            vec![F::ONE; 2_042],
+            vec![F::ZERO, F::ONE, -F::ONE, F::ZERO, -F::ONE],
+            (0..2_042_u64).map(|index| F::from(index % 17)).collect(),
+            random,
+            sorted,
+            reverse,
+            // Exercise the safe fallback just above the `u16` offset limit.
+            (0..=u16::MAX)
+                .map(|index| F::from(u64::from(index).wrapping_mul(0x9e37_79b9)))
+                .collect(),
+        ];
+
+        for input in cases {
+            let mut expected = input.clone();
+            let mut expected_scratch = vec![PastaSortKey::EMPTY; input.len()];
+            sort_pasta_values_pdq(&mut expected, &mut expected_scratch);
+
+            let mut actual = input;
+            let mut actual_scratch = vec![PastaSortKey::EMPTY; actual.len()];
+            sort_pasta_values(&mut actual, &mut actual_scratch);
+
+            assert_eq!(actual, expected);
+            assert!(actual_scratch == expected_scratch);
+            assert!(
+                actual_scratch
+                    .iter()
+                    .enumerate()
+                    .all(|(index, key)| key.source == index)
+            );
+        }
+    }
+
+    #[test]
+    fn radix_pasta_sort_matches_current_sort() {
+        check_radix_pasta_sort::<pallas::Base>();
+        check_radix_pasta_sort::<pallas::Scalar>();
+    }
+
+    fn assert_pasta_sort_keys_match(actual: &[PastaSortKey], expected: &[PastaSortKey]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(actual.limbs, expected.limbs, "key mismatch at {index}");
+            assert_eq!(actual.source, expected.source, "source mismatch at {index}");
+        }
+    }
+
+    fn check_repeated_value_sort_case<F>(input: Vec<F>, repeated: F, expected_count: Option<usize>)
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord + core::fmt::Debug,
+    {
+        let mut expected_values = input.clone();
+        let mut expected_scratch = vec![PastaSortKey::EMPTY; input.len()];
+        sort_pasta_values(&mut expected_values, &mut expected_scratch);
+
+        let sentinel = PastaSortKey {
+            limbs: [u64::MAX; PASTA_REPR_LIMBS],
+            source: usize::MAX,
+        };
+        let mut actual_values = input;
+        let mut actual_scratch = vec![sentinel; actual_values.len()];
+        let original_values = actual_values.clone();
+        let original_scratch = actual_scratch.clone();
+        let actual_count = try_sort_lookup_values_with_repeated_value(
+            &mut actual_values,
+            &mut actual_scratch,
+            repeated,
+        );
+        assert_eq!(actual_count, expected_count);
+
+        if actual_count.is_none() {
+            // A declined specialization must leave both buffers untouched so
+            // the caller can safely use the generic Pasta sort.
+            assert_eq!(actual_values, original_values);
+            assert_pasta_sort_keys_match(&actual_scratch, &original_scratch);
+            sort_pasta_values(&mut actual_values, &mut actual_scratch);
+        }
+
+        assert_eq!(actual_values, expected_values);
+        assert_pasta_sort_keys_match(&actual_scratch, &expected_scratch);
+    }
+
+    fn check_repeated_value_sort<F>()
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord + core::fmt::Debug,
+    {
+        let values = |values: &[u64]| values.iter().copied().map(F::from).collect::<Vec<_>>();
+
+        // An all-repeated input exercises the empty residual sort.
+        check_repeated_value_sort_case(vec![F::from(7); 16], F::from(7), Some(16));
+
+        // The repeated value is inserted at the beginning, middle, and end
+        // of the sorted residual. Each run is exactly the one-quarter gate.
+        check_repeated_value_sort_case(
+            values(&[1, 8, 4, 1, 11, 5, 2, 1, 13, 6, 3, 1, 12, 9, 7, 10]),
+            F::ONE,
+            Some(4),
+        );
+        check_repeated_value_sort_case(
+            values(&[5, 9, 0, 5, 4, 7, 5, 2, 10, 3, 5, 8, 1, 6, 11, 12, 5]),
+            F::from(5),
+            Some(5),
+        );
+        check_repeated_value_sort_case(
+            values(&[20, 8, 4, 20, 11, 5, 2, 20, 0, 6, 3, 20, 10, 9, 7, 1]),
+            F::from(20),
+            Some(4),
+        );
+
+        // Falling below the gate, choosing zero, or receiving no rows must
+        // decline without mutation before the generic fallback runs.
+        check_repeated_value_sort_case(
+            values(&[5, 9, 0, 13, 4, 7, 5, 2, 10, 3, 5, 8, 1, 6, 11, 12]),
+            F::from(5),
+            None,
+        );
+        check_repeated_value_sort_case(
+            values(&[0, 9, 0, 13, 4, 0, 5, 2, 10, 0, 7, 8, 1, 6, 11, 12]),
+            F::ZERO,
+            None,
+        );
+        check_repeated_value_sort_case(Vec::new(), F::ONE, None);
+    }
+
+    #[test]
+    fn repeated_value_pasta_sort_matches_generic_sort_and_fallback() {
+        check_repeated_value_sort::<pallas::Base>();
+        check_repeated_value_sort::<pallas::Scalar>();
+    }
+
+    #[cfg(feature = "multicore")]
+    fn assert_u10_counting_sort_matches<F>(input: Vec<F>)
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord,
+    {
+        let mut expected = input.clone();
+        expected.sort_unstable();
+        let mut expected_counts = [0; SORTED_U10_VALUES];
+        for value in &input {
+            expected_counts[usize::from(
+                pasta_u10(&PastaSortKey {
+                    limbs: pasta_sort_limbs(value.to_repr()),
+                    source: 0,
+                })
+                .unwrap(),
+            )] += 1;
+        }
+
+        let mut actual = input;
+        let actual_counts = try_count_sort_pasta_u10_values(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(*actual_counts, expected_counts);
+    }
+
+    #[cfg(feature = "multicore")]
+    fn check_u10_counting_sort<F>()
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord,
+    {
+        let maximum = u64::from(SORTED_U10_MAX_VALUE);
+        assert_u10_counting_sort_matches::<F>(vec![]);
+        assert_u10_counting_sort_matches(vec![
+            F::from(maximum),
+            F::ZERO,
+            F::ONE,
+            F::from(maximum),
+            F::ZERO,
+        ]);
+        assert_u10_counting_sort_matches(vec![F::from(maximum); 2042]);
+        assert_u10_counting_sort_matches(
+            (0..2042_u64)
+                .map(|index| F::from((index * 613 + 17) % (maximum + 1)))
+                .collect(),
+        );
+
+        let mut actual = vec![F::ZERO, F::ONE];
+        for invalid in [F::from(u64::from(SORTED_U10_MAX_VALUE) + 1), -F::ONE] {
+            actual[0] = invalid;
+            let unchanged_values = actual.clone();
+            assert!(try_count_sort_pasta_u10_values(&mut actual).is_none());
+            assert_eq!(actual, unchanged_values);
+        }
+
+        let oversized_len = usize::from(u16::MAX) + 1;
+        let mut oversized = vec![F::ZERO; oversized_len];
+        assert!(try_count_sort_pasta_u10_values(&mut oversized).is_none());
+        assert!(oversized.iter().all(|value| *value == F::ZERO));
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn u10_counting_sort_matches_field_order() {
+        check_u10_counting_sort::<pallas::Base>();
+        check_u10_counting_sort::<pallas::Scalar>();
+    }
+
+    #[test]
+    fn pasta_sort_key_order_ignores_source() {
+        let left = PastaSortKey {
+            limbs: [17, 23, 42, 99],
+            source: 0,
+        };
+        let right = PastaSortKey {
+            limbs: left.limbs,
+            source: usize::MAX,
+        };
+
+        assert!(left == right);
+        assert_eq!(left.cmp(&right), Ordering::Equal);
+        assert_eq!(right.cmp(&left), Ordering::Equal);
     }
 
     fn sorted_values_with_counts(counts: &[(u64, usize)]) -> Vec<pallas::Scalar> {
@@ -2879,8 +4097,82 @@ mod tests {
         check_lookup_permutation_exhaustively::<pallas::Scalar>();
     }
 
+    #[cfg(feature = "multicore")]
+    fn check_counted_lookup_permutation_exhaustively<F>()
+    where
+        F: PrimeField<Repr = [u8; PASTA_REPR_BYTES]> + Ord,
+    {
+        for len in 0..=4 {
+            let vectors = small_vectors::<F>(len);
+            for input in &vectors {
+                for table in &vectors {
+                    let expected = permute_usable_values(input.clone(), table.clone());
+                    let mut sorted_input = input.clone();
+                    let input_counts = try_count_sort_pasta_u10_values(&mut sorted_input).unwrap();
+                    let mut sorted_table = table.clone();
+                    let table_counts = try_count_sort_pasta_u10_values(&mut sorted_table).unwrap();
+                    let actual = permute_sorted_u10_from_counts(
+                        sorted_input,
+                        &input_counts,
+                        &sorted_table,
+                        &table_counts,
+                        false,
+                    )
+                    .map(|(input, table, profile)| {
+                        assert!(profile.is_none());
+                        (input, table)
+                    });
+                    match expected {
+                        Ok(expected) => assert_eq!(actual.unwrap(), expected),
+                        Err(Error::ConstraintSystemFailure) => {
+                            assert!(matches!(actual, Err(Error::ConstraintSystemFailure)))
+                        }
+                        Err(_) => panic!("reference returned an unexpected error"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "multicore")]
     #[test]
-    fn sorted_lookup_permutation_preserves_output_order() {
+    fn counted_lookup_permutation_matches_reference_exhaustively() {
+        check_counted_lookup_permutation_exhaustively::<pallas::Base>();
+        check_counted_lookup_permutation_exhaustively::<pallas::Scalar>();
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn pasta_lookup_permutation_handles_scratch_boundaries() {
+        let maximum = u64::from(SORTED_U10_MAX_VALUE);
+
+        assert_eq!(permute_pasta_rows(&[], &[]).unwrap(), values(&[]));
+        assert_eq!(
+            permute_pasta_rows(&[maximum], &[maximum]).unwrap(),
+            values(&[maximum]),
+        );
+        assert_eq!(
+            permute_pasta_rows(&[0, 1, 2, maximum], &[0, 1, 2, maximum]).unwrap(),
+            values(&[0, 1, 2, maximum]),
+        );
+        assert_eq!(
+            permute_pasta_rows(&[maximum, maximum, maximum, maximum], &[0, 1, 2, maximum],)
+                .unwrap(),
+            values(&[maximum, 2, 1, 0]),
+        );
+    }
+
+    #[test]
+    fn sorted_lookup_permutation_preserves_extreme_and_mixed_output_order() {
+        assert_eq!(
+            permute_usable_values(values(&[4, 1, 3, 2]), values(&[2, 4, 1, 3])).unwrap(),
+            (values(&[1, 2, 3, 4]), values(&[1, 2, 3, 4])),
+        );
+        assert_eq!(
+            permute_usable_values(values(&[2, 2, 2, 2]), values(&[1, 2, 3, 4])).unwrap(),
+            (values(&[2, 2, 2, 2]), values(&[2, 4, 3, 1])),
+        );
+
         let input = values(&[2, 2, 5, 1, 7, 2, 6, 4]);
         let table = values(&[5, 1, 2, 3, 2, 4, 6, 7]);
 

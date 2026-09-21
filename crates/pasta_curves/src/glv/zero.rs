@@ -557,6 +557,91 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         }
     }
 
+    /// Evaluates scalars paired with one contiguous prepared-base range.
+    fn multiexp_with_scalar_range_at<'a>(
+        &self,
+        base_offset: usize,
+        terms: usize,
+        scalar_at: impl Fn(usize) -> &'a C::ScalarExt + Sync,
+        extra: &[(C::ScalarExt, C::AffineExt)],
+        main_window_fold: MainWindowFold,
+    ) -> C {
+        let range_end = base_offset
+            .checked_add(terms)
+            .expect("prepared base range overflow");
+        assert!(
+            range_end <= self.live.len(),
+            "prepared base range in bounds"
+        );
+        if terms == 0 {
+            return self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra);
+        }
+        if !self.merges.is_empty() {
+            let mut scalars = alloc::vec![C::ScalarExt::ZERO; self.live.len()];
+            for index in 0..terms {
+                scalars[base_offset + index] = *scalar_at(index);
+            }
+            return self.multiexp_with_scalar_slices_using(&scalars, &[], extra, main_window_fold);
+        }
+        let num_threads = current_num_threads();
+
+        // Dead rows (identity bases, merge sources) contribute nothing;
+        // force their recoding rows and residuals to zero. A decomposition
+        // half out of bound is unreachable (`decompose` guarantees the
+        // strict 2^127 bound), but rather than trust that with a panic the
+        // whole check degrades to the exact naive evaluation, matching
+        // `try_multiexp`'s posture toward the same guard.
+        let decompose_checked = |index: usize| {
+            let prepared_index = base_offset + index;
+            if !self.live[prepared_index] {
+                let zero = SignedMagnitude {
+                    negative: false,
+                    magnitude: 0,
+                };
+                return Some((zero, zero));
+            }
+            let scalar = scalar_at(index);
+            // Recoding and bucket staging are already variable-time in scalar
+            // digits. Avoid canonicalizing and decomposing an exact zero before
+            // those existing zero paths omit it.
+            if scalar.is_zero_vartime() {
+                let zero = SignedMagnitude {
+                    negative: false,
+                    magnitude: 0,
+                };
+                return Some((zero, zero));
+            }
+            checked_signed_magnitudes(decompose::<C>(scalar))
+        };
+        let Some(recoded) =
+            codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
+        else {
+            return self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra);
+        };
+        // Extras with zero scalars or identity points contribute nothing.
+        let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
+            .iter()
+            .filter(|(scalar, point)| {
+                !bool::from(point.is_identity()) && !bool::from(scalar.is_zero())
+            })
+            .copied()
+            .collect();
+        match self.evaluate_range(
+            &recoded,
+            base_offset,
+            &extras,
+            num_threads,
+            main_window_fold,
+        ) {
+            Some(sum) => sum,
+            // Unreachable for valid curve points (the batched-affine
+            // reduction's inversions cannot actually hit zero), but never
+            // trust that with the result's correctness: fall back to a
+            // naive exact evaluation.
+            None => self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra),
+        }
+    }
+
     /// Checks several equations over the prepared bases at once through a
     /// random linear combination, deriving the combining challenge itself:
     /// $\rho$ = BLAKE2b(prepared-bases digest, every equation's scalars),
@@ -738,16 +823,158 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         (points, offsets)
     }
 
+    /// The range counterpart of [`Self::evaluate`].
+    fn evaluate_range(
+        &self,
+        recoded: &Recoded,
+        base_offset: usize,
+        extras: &[(C::ScalarExt, C::AffineExt)],
+        num_threads: usize,
+        main_window_fold: MainWindowFold,
+    ) -> Option<C> {
+        let window_bits = self.codebook.window_bits();
+        let main_windows = self.codebook.main_windows();
+        let active = recoded.active_windows;
+
+        #[cfg(not(feature = "multicore"))]
+        let _ = (num_threads, main_window_fold);
+        #[cfg(feature = "multicore")]
+        if num_threads > 1 {
+            // Point-returning MSMs reduce the main windows independently
+            // and combine them with one Horner fold. Zero checks retain the
+            // paired schedule tuned for an isolated MSM. The residual tail
+            // and extras MSM run concurrently with the main windows.
+            let main = || {
+                maybe_rayon::join(
+                    || match main_window_fold {
+                        MainWindowFold::Paired => {
+                            super::paired_windows_sum::<C>(active, window_bits, |window| {
+                                self.window_sum_range(recoded, base_offset, window)
+                            })
+                        }
+                        MainWindowFold::Horner => {
+                            super::parallel_windows_sum::<C>(active, window_bits, |window| {
+                                self.window_sum_range(recoded, base_offset, window)
+                            })
+                        }
+                    },
+                    || self.tail_sum_range(&recoded.residuals, base_offset, num_threads),
+                )
+            };
+            let (extras_part, (windows_part, tail)) = if extras.is_empty() {
+                (Some(C::identity()), main())
+            } else {
+                maybe_rayon::join(|| self.extras_sum(extras), main)
+            };
+            let windows_part = windows_part?;
+            let mut tail = tail?;
+            if !bool::from(tail.is_identity()) {
+                for _ in 0..window_bits * main_windows {
+                    tail = tail.double();
+                }
+            }
+            return Some(windows_part + tail + extras_part?);
+        }
+
+        let mut acc = self.tail_sum_range(&recoded.residuals, base_offset, num_threads)?;
+        if !bool::from(acc.is_identity()) {
+            for _ in 0..window_bits * (main_windows - active) {
+                acc = acc.double();
+            }
+        }
+        for window in (0..active).rev() {
+            for _ in 0..window_bits {
+                acc = acc.double();
+            }
+            acc += self.window_sum_range(recoded, base_offset, window)?;
+        }
+        Some(acc + self.extras_sum(extras)?)
+    }
+
+    /// One main window: stage the unit-rotated prepared points by bucket,
+    /// reduce each bucket batch-affine, and run the static coefficient
+    /// program over the bucket sums.
+    fn window_sum_range(&self, recoded: &Recoded, base_offset: usize, window: usize) -> Option<C> {
+        let (points, offsets) = self.stage_window_range(recoded, base_offset, window);
+        let buckets = reduce_affine_buckets_in_place(points, offsets).or_else(|| {
+            let (points, offsets) = self.stage_window_range(recoded, base_offset, window);
+            reduce_affine_buckets(points, offsets)
+        })?;
+        integrate_coefficients::<C>(self.codebook.program(), &buckets)
+    }
+
+    /// Places one window's nonzero digits into per-bucket point ranges,
+    /// fetching each digit's prepared point and applying its unit. The
+    /// bucket histogram was produced during recoding and the codes are
+    /// window-major, so this is a single contiguous pass.
+    fn stage_window_range(
+        &self,
+        recoded: &Recoded,
+        base_offset: usize,
+        window: usize,
+    ) -> (Vec<AffinePoint<C::Base>>, Vec<usize>) {
+        let terms = recoded.terms;
+        let bucket_count = self.codebook.bucket_count();
+        let counts = &recoded.counts[window * bucket_count..][..bucket_count];
+        let codes = &recoded.codes[window * terms..][..terms];
+
+        let mut offsets = Vec::with_capacity(bucket_count + 1);
+        offsets.push(0usize);
+        for &count in counts {
+            offsets.push(offsets.last().copied().unwrap() + count as usize);
+        }
+
+        let mut positions = offsets[..bucket_count].to_vec();
+        let mut points = alloc::vec![
+            AffinePoint {
+                x: C::Base::ZERO,
+                y: C::Base::ZERO,
+            };
+            *offsets.last().unwrap()
+        ];
+        for (base, &code) in codes.iter().enumerate() {
+            if code == 0 {
+                continue;
+            }
+            let (bucket, variant, unit) = unpack_code(code);
+            let prepared_base = base_offset + base;
+            let (x, y) = unit_coords(self.table.get(variant, prepared_base), unit);
+            let position = positions[bucket];
+            points[position] = AffinePoint { x, y };
+            positions[bucket] = position + 1;
+        }
+
+        (points, offsets)
+    }
+
     /// The tail MSM $T = \sum_i \[\tau_i\] P_i$ over the (tiny) residuals,
     /// via the unprepared orbit machinery at the width fixed at
     /// preparation.
+    #[inline(never)]
     fn tail_sum(
         &self,
         residuals: &[(SignedMagnitude, SignedMagnitude)],
         num_threads: usize,
     ) -> Option<C> {
         let params = &self.tail_params[self.tail_width];
-        tail_multiexp::<C>(params, residuals, &self.tail_bases, num_threads)
+        let stride =
+            params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
+        tail_multiexp::<C>(params, residuals, &self.tail_bases, stride, num_threads)
+    }
+
+    /// The range counterpart of [`Self::tail_sum`].
+    fn tail_sum_range(
+        &self,
+        residuals: &[(SignedMagnitude, SignedMagnitude)],
+        base_offset: usize,
+        num_threads: usize,
+    ) -> Option<C> {
+        let params = &self.tail_params[self.tail_width];
+        let range_end = base_offset.checked_add(residuals.len())?;
+        let bases = self.tail_bases.get(base_offset..range_end)?;
+        let stride =
+            params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
+        tail_multiexp::<C>(params, residuals, bases, stride, num_threads)
     }
 
     /// $E = \sum_j \[s_j\] Q_j$ over the per-check extra terms (already
@@ -832,6 +1059,42 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         }
         acc
     }
+
+    /// The range counterpart of [`Self::naive_multiexp_with_scalar_at`].
+    fn naive_multiexp_with_scalar_range_at<'a>(
+        &self,
+        base_offset: usize,
+        terms: usize,
+        scalar_at: &(impl Fn(usize) -> &'a C::ScalarExt + Sync),
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        let range_end = base_offset
+            .checked_add(terms)
+            .expect("prepared base range overflow");
+        assert!(
+            range_end <= self.live.len(),
+            "prepared base range in bounds"
+        );
+        let mut acc = C::identity();
+        for index in 0..terms {
+            let prepared_index = base_offset + index;
+            let scalar = scalar_at(index);
+            if !self.live[prepared_index] || bool::from(scalar.is_zero()) {
+                continue;
+            }
+            let base = &self.tail_bases[prepared_index];
+            let point = C::from(C::affine_unchecked(
+                base.xs[0],
+                base.y,
+                private::CrateToken(()),
+            ));
+            acc += point * scalar;
+        }
+        for (scalar, point) in extra {
+            acc += C::from(*point) * scalar;
+        }
+        acc
+    }
 }
 
 /// The object-safe surface [`crate::arithmetic::CurveExt::try_prepare_zero_check`]
@@ -867,6 +1130,21 @@ impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for PreparedZeroMsm<C
     ) -> C {
         self.multiexp_with_scalar_slices(prefix, suffix, extra)
     }
+
+    fn multiexp_with_base_offset_vartime(
+        &self,
+        base_offset: usize,
+        scalars: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        self.multiexp_with_scalar_range_at(
+            base_offset,
+            scalars.len(),
+            |index| &scalars[index],
+            extra,
+            MainWindowFold::Horner,
+        )
+    }
 }
 
 /// Picks the residual tail's orbit width: residuals are `tail_bound`-sized,
@@ -894,18 +1172,22 @@ fn tail_multiexp<C: GlvParams>(
     params: &orbit::OrbitParams,
     components: &[(SignedMagnitude, SignedMagnitude)],
     rotated: &[orbit::RotatedBase<C::Base>],
+    stride: usize,
     num_threads: usize,
 ) -> Option<C> {
     debug_assert_eq!(components.len(), rotated.len());
-    let width = params.window_stride();
-    let mut digits = alloc::vec![0u16; components.len() * width];
+    debug_assert!(stride <= params.window_stride());
+    if stride == 0 {
+        return Some(C::identity());
+    }
+    let mut digits = alloc::vec![0u16; components.len() * stride];
 
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
     #[cfg(feature = "multicore")]
     if num_threads > 1 {
         let active = digits
-            .par_chunks_mut(width)
+            .par_chunks_mut(stride)
             .zip(components.par_iter())
             .map(|(row, &(first, second))| orbit::recode_row(params, first, second, row))
             .max()
@@ -916,7 +1198,7 @@ fn tail_multiexp<C: GlvParams>(
     }
 
     let mut active = 0;
-    for (row, &(first, second)) in digits.chunks_exact_mut(width).zip(components) {
+    for (row, &(first, second)) in digits.chunks_exact_mut(stride).zip(components) {
         active = active.max(orbit::recode_row(params, first, second, row));
     }
     orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
@@ -1353,6 +1635,38 @@ mod tests {
     use super::*;
     use crate::{pallas, vesta};
 
+    #[test]
+    fn alpha_seven_tail_stride_is_exactly_three() {
+        let codebook = Codebook::new(CodebookMode::alpha_only(7));
+        let bound = codebook.tail_bound();
+        let width_index = tail_width_index(2_048, bound);
+        let params = &TAIL_WIDTHS.map(orbit::OrbitParams::new)[width_index];
+        assert_eq!(TAIL_WIDTHS[width_index], 3);
+        assert_eq!(params.window_stride(), 43);
+        assert_eq!(
+            params.window_stride_for_bound(u128::from(bound.unsigned_abs())),
+            3
+        );
+
+        let component = |value: i64| SignedMagnitude {
+            negative: value < 0,
+            magnitude: value.unsigned_abs() as u128,
+        };
+        let mut row = alloc::vec![0; params.window_stride()];
+        let mut exact_stride = 0;
+        for first in -bound..=bound {
+            for second in -bound..=bound {
+                exact_stride = exact_stride.max(orbit::recode_row(
+                    params,
+                    component(first),
+                    component(second),
+                    &mut row,
+                ));
+            }
+        }
+        assert_eq!(exact_stride, 3);
+    }
+
     fn modes_under_test() -> Vec<CodebookMode> {
         vec![
             CodebookMode::alpha_only(6),
@@ -1409,9 +1723,9 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct DefaultPrefixAndSuffix<'a, C: GlvParams>(&'a PreparedZeroMsm<C>);
+    struct DefaultPreparedMethods<'a, C: GlvParams>(&'a PreparedZeroMsm<C>);
 
-    impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for DefaultPrefixAndSuffix<'_, C> {
+    impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for DefaultPreparedMethods<'_, C> {
         fn terms(&self) -> usize {
             self.0.terms()
         }
@@ -1485,7 +1799,7 @@ mod tests {
                 "prefix/suffix evaluation with extras differs at split {split}"
             );
         }
-        let default_prefix_and_suffix = DefaultPrefixAndSuffix(&prepared);
+        let default_prefix_and_suffix = DefaultPreparedMethods(&prepared);
         let split = scalars.len() - 2;
         assert_eq!(
             crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
@@ -1506,6 +1820,75 @@ mod tests {
             prepared.multiexp_with_terms_vartime(&scalars, &[extra_term]),
             expected_with_extra
         );
+    }
+
+    /// A live scalar range evaluates only its matching contiguous bases.
+    fn base_offset_range_matches_full_msm<C: GlvParams>() {
+        const HALF: usize = 64;
+        const TERMS: usize = 2 * HALF;
+
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut bases = vec![C::AffineExt::identity(); TERMS];
+        C::batch_normalize(&projective, &mut bases);
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(6));
+        assert!(prepared.merges.is_empty());
+
+        let mut scalars =
+            super::super::testutil::scalars::<C::ScalarExt>(HALF as u64).collect::<Vec<_>>();
+        scalars[HALF / 2] = C::ScalarExt::ZERO;
+        let extra = (C::ScalarExt::from(41), generator.to_affine());
+
+        for base_offset in [0, HALF] {
+            let mut full = vec![C::ScalarExt::ZERO; TERMS];
+            full[base_offset..base_offset + HALF].copy_from_slice(&scalars);
+            let expected =
+                prepared.naive_multiexp_with_scalar_at(TERMS, &|index| &full[index], &[extra]);
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                    &prepared,
+                    base_offset,
+                    &scalars,
+                    &[extra],
+                ),
+                expected,
+            );
+            let default_range = DefaultPreparedMethods(&prepared);
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                    &default_range,
+                    base_offset,
+                    &scalars,
+                    &[extra],
+                ),
+                expected,
+            );
+        }
+
+        for base_offset in [0, TERMS] {
+            let expected = generator * extra.0;
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                    &prepared,
+                    base_offset,
+                    &[],
+                    &[extra],
+                ),
+                expected,
+            );
+            let default_range = DefaultPreparedMethods(&prepared);
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                    &default_range,
+                    base_offset,
+                    &[],
+                    &[extra],
+                ),
+                expected,
+            );
+        }
     }
 
     /// Canonical 10-bit range-check values bypass decomposition; out-of-range
@@ -1763,6 +2146,19 @@ mod tests {
             )
             .is_identity()
         ));
+        let mut source_only = vec![C::ScalarExt::ZERO; prepared.terms()];
+        source_only[source] = perturbed[source];
+        let expected = prepared.multiexp_with_terms_vartime(&source_only, &[]);
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                &prepared,
+                source,
+                &source_only[source..=source],
+                &[],
+            ),
+            expected,
+            "a ranged merged source must fold into its surviving target"
+        );
     }
 
     /// The default planner produces a working preparation.
@@ -1924,6 +2320,10 @@ mod tests {
                 #[test]
                 fn generic_agreement() {
                     matches_generic_msm::<$curve>();
+                }
+                #[test]
+                fn base_offset_range() {
+                    base_offset_range_matches_full_msm::<$curve>();
                 }
                 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
                 #[test]

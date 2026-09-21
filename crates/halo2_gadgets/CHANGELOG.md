@@ -10,6 +10,26 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.3.0-alpha.1] - 2026-09-18
+
+### Changed
+
+- Reduced variable-base multiplication witness-generation latency by retaining
+  projective accumulators across fused doubling and addition steps, and by
+  sharing one batch inversion across slope and affine-coordinate witnesses. In
+  two-Action post-NU6.3 Orchard proofs with six workers, the combined witness
+  and rational-advice phase improved by 2.58% on Apple M4 and 1.29% on x86-64
+  Linux. Full-proof point estimates improved by 0.46% and 0.29%, respectively
+  ([#411](https://github.com/zakura-core/common/pull/411)).
+- Updated fixed-base witness accumulation to advance cached projective powers
+  directly, removing 518 field squarings per Action and shrinking its private
+  state from 160 to 128 bytes. One-Action witness assignment improved by
+  14.4 us (2.6%) on Apple M4 with ten workers and by 8.6 us (0.7%) on x86-64
+  Linux with six workers and assembly enabled; four-Action Linux assignment
+  improved by 18.6 us (1.0%). Proofs, constraints, and public APIs are
+  unchanged
+  ([#455](https://github.com/zakura-core/common/pull/455)).
+
 ## [1.2.0] - 2026-09-08
 
 ### Changed

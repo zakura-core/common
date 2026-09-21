@@ -31,6 +31,23 @@ pub mod short;
 
 static H_BASE: LazyLock<pallas::Base> = LazyLock::new(|| pallas::Base::from(H as u64));
 
+#[inline(always)]
+fn square_for_fixed_witness(value: &pallas::Base) -> pallas::Base {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Trait dispatch uses the configured AArch64 backend, including the
+        // faster assembly implementation on supported builds.
+        Field::square(value)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // This short dependency chain is faster with the inlined portable
+        // implementation on x86-64, including with `x86_64-asm` enabled.
+        value.square()
+    }
+}
+
 /// Computes the points selected by a fixed-base scalar's windows.
 #[cfg(test)]
 fn compute_window_points(base: pallas::Affine, windows: &[usize]) -> Vec<pallas::Affine> {
@@ -127,7 +144,6 @@ const MAX_CACHED_WINDOW_TABLES: usize = 16;
 struct WindowAccumulator {
     x: pallas::Base,
     y: pallas::Base,
-    z: pallas::Base,
     z_sq: pallas::Base,
     z_cubed: pallas::Base,
 }
@@ -137,7 +153,6 @@ impl WindowAccumulator {
         Self {
             x: point.x,
             y: point.y,
-            z: pallas::Base::ONE,
             z_sq: pallas::Base::ONE,
             z_cubed: pallas::Base::ONE,
         }
@@ -151,19 +166,19 @@ impl WindowAccumulator {
         let y_p = point.y * self.z_cubed;
         let h = x_p - self.x;
         let r = y_p - self.y;
-        let h_sq = h.square();
+        let h_sq = square_for_fixed_witness(&h);
         let h_cubed = h_sq * h;
         let x_h_sq = self.x * h_sq;
-        let x = r.square() - h_cubed - x_h_sq.double();
+        let x = square_for_fixed_witness(&r) - h_cubed - x_h_sq.double();
         let y = r * (x_h_sq - x) - self.y * h_cubed;
-        let z = self.z * h;
-        let z_sq = z.square();
-        let z_cubed = z_sq * z;
+        // Since z_new = z * h, update its cached powers directly using the
+        // powers of h that the mixed-add formula already computed.
+        let z_sq = self.z_sq * h_sq;
+        let z_cubed = self.z_cubed * h_cubed;
 
         *self = Self {
             x,
             y,
-            z,
             z_sq,
             z_cubed,
         };
@@ -872,5 +887,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn window_accumulator_preserves_zero_projective_powers() {
+        let point = WindowWitness {
+            x: pallas::Base::from(5),
+            y: pallas::Base::from(7),
+            u: pallas::Base::ZERO,
+        };
+
+        // Z = 0 is preserved for every affine input.
+        let mut zero_z = WindowAccumulator {
+            x: pallas::Base::from(11),
+            y: pallas::Base::from(13),
+            z_sq: pallas::Base::ZERO,
+            z_cubed: pallas::Base::ZERO,
+        };
+        zero_z.add_mixed(point);
+        assert_eq!(zero_z.z_sq, pallas::Base::ZERO);
+        assert_eq!(zero_z.z_cubed, pallas::Base::ZERO);
+
+        // H = x_p * Z^2 - X = 0 also makes the updated powers zero.
+        let mut zero_h = WindowAccumulator::from_affine(point);
+        zero_h.add_mixed(point);
+        assert_eq!(zero_h.z_sq, pallas::Base::ZERO);
+        assert_eq!(zero_h.z_cubed, pallas::Base::ZERO);
     }
 }

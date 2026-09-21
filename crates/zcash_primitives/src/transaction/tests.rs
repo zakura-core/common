@@ -20,24 +20,21 @@ use {
 #[cfg(all(test, zcash_unstable = "nutachyon"))]
 use zcash_protocol::constants::{V7_TX_VERSION, V7_VERSION_GROUP_ID};
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 use crate::transaction::{
     TransactionDigest,
     txid::{BlockTxCommitmentDigester, hash_sapling_spends},
 };
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 use crate::transaction::sighash_v6::v6_signature_hash;
-#[cfg(all(test, zcash_unstable = "nu7", feature = "zip-233"))]
-use crate::transaction::sighash_v6::v6_signature_hash;
-
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 use blake2b_simd::Params;
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 use ff::PrimeField;
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 use zcash_protocol::value::ZatBalance;
 
 #[cfg(any(test, feature = "test-dependencies"))]
@@ -82,17 +79,17 @@ fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
     );
     assert!(TxVersion::V7.valid_in_branch(BranchId::NuTachyon));
     assert!(!TxVersion::V7.valid_in_branch(BranchId::Nu6_3));
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(zcash_unstable = "nutachyon")]
     assert!(TxVersion::V7.has_zip233());
 
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(zcash_unstable = "nutachyon")]
     let zip233_amount = Zatoshis::const_from_u64(123_456);
 
     let tx = TransactionData::from_parts_v7(
         BranchId::NuTachyon,
         0,
         0u32.into(),
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(zcash_unstable = "nutachyon")]
         zip233_amount,
         None,
         None,
@@ -104,7 +101,7 @@ fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
     .unwrap();
     assert!(tx.tachyon_bundle().is_no_bundle());
 
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(zcash_unstable = "nutachyon")]
     {
         let tx_without_burn = TransactionData::from_parts_v7(
             BranchId::NuTachyon,
@@ -134,7 +131,7 @@ fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
     let decoded = Transaction::read(&encoded[..], BranchId::Sprout).unwrap();
     assert_eq!(decoded.version(), TxVersion::V7);
     assert_eq!(decoded.consensus_branch_id(), BranchId::NuTachyon);
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(zcash_unstable = "nutachyon")]
     assert_eq!(decoded.zip233_amount(), zip233_amount);
     assert!(decoded.tachyon_bundle().is_no_bundle());
     let mut reencoded = Vec::new();
@@ -188,7 +185,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
         BranchId::NuTachyon,
         0,
         0u32.into(),
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(zcash_unstable = "nutachyon")]
         Zatoshis::ZERO,
         None,
         None,
@@ -202,7 +199,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
         BranchId::NuTachyon,
         0,
         0u32.into(),
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(zcash_unstable = "nutachyon")]
         Zatoshis::ZERO,
         None,
         None,
@@ -227,7 +224,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
         BranchId::NuTachyon,
         0,
         0u32.into(),
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(zcash_unstable = "nutachyon")]
         Zatoshis::ZERO,
         None,
         None,
@@ -239,7 +236,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
         BranchId::NuTachyon,
         0,
         0u32.into(),
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(zcash_unstable = "nutachyon")]
         Zatoshis::ZERO,
         None,
         None,
@@ -283,7 +280,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
 }
 
 #[test]
-#[cfg(all(zcash_unstable = "nutachyon", not(zcash_unstable = "nu7")))]
+#[cfg(zcash_unstable = "nutachyon")]
 fn v7_zakura_serialization_vectors_deserialize_and_reserialize_exactly() {
     use zcash_tachyon::TachyonBundle;
 
@@ -356,13 +353,13 @@ fn v7_zakura_serialization_vectors_deserialize_and_reserialize_exactly() {
     }
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v4_transactions_remain_valid_in_nu6_3() {
     assert!(TxVersion::V4.valid_in_branch(BranchId::Nu6_3));
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v5_auth_commitment_in_nu6_3_does_not_include_ironwood_digest() {
     fn empty_hash(personal: &[u8; 16]) -> Blake2bHash {
@@ -394,7 +391,7 @@ fn v5_auth_commitment_in_nu6_3_does_not_include_ironwood_digest() {
     assert_eq!(tx.auth_commitment(), expected.finalize());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_empty_auth_commitment_uses_v6_shielded_personalizations() {
     fn empty_hash(personal: &[u8; 16]) -> Blake2bHash {
@@ -419,7 +416,7 @@ fn v6_empty_auth_commitment_uses_v6_shielded_personalizations() {
     assert_eq!(tx.auth_commitment(), expected.finalize());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_empty_orchard_txid_uses_v6_orchard_personalization() {
     fn empty_hash(personal: &[u8; 16]) -> Blake2bHash {
@@ -449,7 +446,7 @@ fn v6_empty_orchard_txid_uses_v6_orchard_personalization() {
     assert_eq!(&tx.txid().as_ref()[..], expected.as_bytes());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_branch_reconstruction_preserves_ironwood_bundle() {
     use proptest::test_runner::TestRunner;
@@ -507,14 +504,14 @@ fn v6_branch_reconstruction_preserves_ironwood_bundle() {
     assert_eq!(rebuilt.txid(), original_txid);
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn test_anchor(byte: u8) -> orchard::Anchor {
     let mut bytes = [0u8; 32];
     bytes[0] = byte;
     orchard::Anchor::from_bytes(bytes).unwrap()
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn test_orchard_bundle(
     runner: &mut proptest::test_runner::TestRunner,
 ) -> orchard::Bundle<orchard::bundle::Authorized, ZatBalance> {
@@ -530,7 +527,7 @@ fn test_orchard_bundle(
     )
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn test_ironwood_bundle(
     runner: &mut proptest::test_runner::TestRunner,
 ) -> orchard::Bundle<orchard::bundle::Authorized, ZatBalance> {
@@ -546,7 +543,7 @@ fn test_ironwood_bundle(
     )
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn bundle_with_anchor(
     bundle: &orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
     anchor: orchard::Anchor,
@@ -562,12 +559,12 @@ fn bundle_with_anchor(
     .unwrap()
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn test_sapling_anchor(byte: u8) -> bls12_381::Scalar {
     bls12_381::Scalar::from(u64::from(byte))
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn test_sapling_bundle(
     runner: &mut proptest::test_runner::TestRunner,
 ) -> sapling::Bundle<sapling::bundle::Authorized, ZatBalance> {
@@ -587,7 +584,7 @@ fn test_sapling_bundle(
     panic!("Sapling bundle strategy should generate a bundle with spends");
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn test_sapling_output_only_bundle(
     runner: &mut proptest::test_runner::TestRunner,
 ) -> sapling::Bundle<sapling::bundle::Authorized, ZatBalance> {
@@ -608,7 +605,7 @@ fn test_sapling_output_only_bundle(
     panic!("Sapling bundle strategy should generate an output-only bundle");
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn sapling_bundle_with_anchor(
     bundle: &sapling::Bundle<sapling::bundle::Authorized, ZatBalance>,
     anchor: bls12_381::Scalar,
@@ -637,14 +634,14 @@ fn sapling_bundle_with_anchor(
     .expect("test bundle has Sapling spends")
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn tx_bytes(tx: &Transaction) -> Vec<u8> {
     let mut encoded = Vec::new();
     tx.write(&mut encoded).unwrap();
     encoded
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v5_tx_with_orchard_bundle(
     orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
 ) -> Transaction {
@@ -662,7 +659,7 @@ fn v5_tx_with_orchard_bundle(
     .unwrap()
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v5_tx_data_with_orchard_bundle(
     orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
 ) -> TransactionData<TestUnauthorized> {
@@ -678,7 +675,7 @@ fn v5_tx_data_with_orchard_bundle(
     )
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v5_tx_with_sapling_bundle(
     sapling_bundle: sapling::Bundle<sapling::bundle::Authorized, ZatBalance>,
 ) -> Transaction {
@@ -696,7 +693,7 @@ fn v5_tx_with_sapling_bundle(
     .unwrap()
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v5_tx_data_with_sapling_bundle(
     sapling_bundle: sapling::Bundle<sapling::bundle::Authorized, ZatBalance>,
 ) -> TransactionData<TestUnauthorized> {
@@ -715,7 +712,7 @@ fn v5_tx_data_with_sapling_bundle(
 /// Clears the cross-address flag on an Orchard bundle (preserving spends/outputs)
 /// so it is representable in a v6 Orchard slot ([`orchard::bundle::BundleVersion::orchard_v3`],
 /// which forbids cross-address transfers; cross-address is Ironwood-only).
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn disable_cross_address(
     bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
 ) -> orchard::Bundle<orchard::bundle::Authorized, ZatBalance> {
@@ -735,7 +732,7 @@ fn disable_cross_address(
     .unwrap()
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v6_tx_with_orchard_bundle(
     orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
 ) -> Transaction {
@@ -752,7 +749,7 @@ fn v6_tx_with_orchard_bundle(
     .unwrap()
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v6_tx_with_sapling_bundle(
     sapling_bundle: sapling::Bundle<sapling::bundle::Authorized, ZatBalance>,
 ) -> Transaction {
@@ -769,7 +766,7 @@ fn v6_tx_with_sapling_bundle(
     .unwrap()
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v6_tx_data_with_sapling_bundle(
     sapling_bundle: sapling::Bundle<sapling::bundle::Authorized, ZatBalance>,
 ) -> TransactionData<TestUnauthorized> {
@@ -784,7 +781,7 @@ fn v6_tx_data_with_sapling_bundle(
     )
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v6_tx_data_with_orchard_bundle(
     orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
 ) -> TransactionData<TestUnauthorized> {
@@ -799,7 +796,7 @@ fn v6_tx_data_with_orchard_bundle(
     )
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v6_tx_with_ironwood_bundle(
     ironwood_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
 ) -> Transaction {
@@ -816,7 +813,7 @@ fn v6_tx_with_ironwood_bundle(
     .unwrap()
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v6_tx_data_with_ironwood_bundle(
     ironwood_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
 ) -> TransactionData<TestUnauthorized> {
@@ -831,19 +828,19 @@ fn v6_tx_data_with_ironwood_bundle(
     )
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v5_shielded_sighash(tx_data: &TransactionData<TestUnauthorized>) -> Blake2bHash {
     let txid_parts = tx_data.digest(TxIdDigester);
     v5_signature_hash(tx_data, &SignableInput::Shielded, &txid_parts)
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 fn v6_shielded_sighash(tx_data: &TransactionData<TestUnauthorized>) -> Blake2bHash {
     let txid_parts = tx_data.digest(TxIdDigester);
     v6_signature_hash(tx_data, &SignableInput::Shielded, &txid_parts)
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_orchard_anchor_changes_auth_commitment_not_txid_or_sighash() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -865,7 +862,7 @@ fn v6_orchard_anchor_changes_auth_commitment_not_txid_or_sighash() {
     assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_ironwood_anchor_changes_auth_commitment_not_txid_or_sighash() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -887,7 +884,7 @@ fn v6_ironwood_anchor_changes_auth_commitment_not_txid_or_sighash() {
     assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v5_orchard_anchor_still_changes_txid_and_sighash() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -908,7 +905,7 @@ fn v5_orchard_anchor_still_changes_txid_and_sighash() {
     assert_eq!(tx_a.auth_commitment(), tx_b.auth_commitment());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_sapling_anchor_changes_auth_commitment_not_txid_or_sighash() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -930,7 +927,7 @@ fn v6_sapling_anchor_changes_auth_commitment_not_txid_or_sighash() {
     assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v5_sapling_anchor_still_changes_txid_and_sighash() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -951,7 +948,7 @@ fn v5_sapling_anchor_still_changes_txid_and_sighash() {
     assert_eq!(tx_a.auth_commitment(), tx_b.auth_commitment());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_sapling_spends_digest_uses_v6_noncompact_domain_without_anchor() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -992,7 +989,7 @@ fn v6_sapling_spends_digest_uses_v6_noncompact_domain_without_anchor() {
     );
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_sapling_auth_digest_uses_v6_domain_and_appends_anchor() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -1023,7 +1020,7 @@ fn v6_sapling_auth_digest_uses_v6_domain_and_appends_anchor() {
     assert_eq!(actual, h.finalize());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_sapling_output_only_auth_digest_uses_v6_domain_without_anchor() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -1047,7 +1044,7 @@ fn v6_sapling_output_only_auth_digest_uses_v6_domain_without_anchor() {
     assert_eq!(actual, h.finalize());
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 #[test]
 fn v6_orchard_non_anchor_bundle_data_still_changes_txid_and_sighash() {
     let mut runner = proptest::test_runner::TestRunner::default();
@@ -1085,12 +1082,11 @@ fn check_roundtrip(tx: Transaction) -> Result<(), TestCaseError> {
         tx.orchard_bundle.as_ref().map(|v| *v.value_balance()),
         txo.orchard_bundle.as_ref().map(|v| *v.value_balance())
     );
-    #[cfg(all(test, not(zcash_unstable = "nu7")))]
     prop_assert_eq!(
         tx.ironwood_bundle.as_ref().map(|v| *v.value_balance()),
         txo.ironwood_bundle.as_ref().map(|v| *v.value_balance())
     );
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(zcash_unstable = "nutachyon")]
     if tx.version.has_zip233() {
         prop_assert_eq!(tx.zip233_amount, txo.zip233_amount);
     }
@@ -1153,7 +1149,7 @@ proptest! {
     }
 }
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
+#[cfg(test)]
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
@@ -1320,8 +1316,6 @@ fn zip_0244() {
             txdata.consensus_branch_id(),
             txdata.lock_time(),
             txdata.expiry_height(),
-            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-            txdata.zip233_amount,
             test_bundle,
             txdata.sprout_bundle().cloned(),
             txdata.sapling_bundle().cloned(),
@@ -1411,82 +1405,6 @@ fn zip_0244() {
 
         assert_eq!(
             v5_signature_hash(&txdata, &SignableInput::Shielded, &txid_parts).as_ref(),
-            tv.sighash_shielded
-        );
-    }
-}
-
-#[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-#[test]
-#[ignore = "The ZIP 233 test vectors were generated using the placeholder v6 version group ID \
-            and must be regenerated now that `V6_VERSION_GROUP_ID` has been finalized."]
-fn zip_0233() {
-    fn to_test_txdata(
-        tv: &self::data::zip_0233::TestVector,
-    ) -> (TransactionData<TestUnauthorized>, TxDigests<Blake2bHash>) {
-        let tx = Transaction::read(tv.tx, BranchId::Nu7).unwrap();
-
-        assert_eq!(tx.txid.as_ref(), &tv.txid);
-        assert_eq!(tx.auth_commitment().as_ref(), &tv.auth_digest);
-
-        let txdata = tx.deref();
-
-        let input_amounts = tv
-            .amounts
-            .iter()
-            .map(|amount| Zatoshis::from_nonnegative_i64(*amount).unwrap())
-            .collect();
-        let input_scriptpubkeys = tv
-            .script_pubkeys
-            .iter()
-            .map(|s| Script(script::Code(s.to_vec())))
-            .collect();
-
-        let test_bundle = txdata
-            .transparent_bundle
-            .as_ref()
-            .map(|b| transparent::Bundle {
-                // we have to do this map/clone to make the types line up, since the
-                // Authorization::ScriptSig type is bound to transparent::Authorized, and we need
-                // it to be bound to TestTransparentAuth.
-                vin: b
-                    .vin
-                    .iter()
-                    .map(|vin| {
-                        TxIn::from_parts(
-                            vin.prevout().clone(),
-                            vin.script_sig().clone(),
-                            vin.sequence(),
-                        )
-                    })
-                    .collect(),
-                vout: b.vout.clone(),
-                authorization: TestTransparentAuth {
-                    input_amounts,
-                    input_scriptpubkeys,
-                },
-            });
-
-        let tdata = TransactionData::from_parts(
-            txdata.version(),
-            txdata.consensus_branch_id(),
-            txdata.lock_time(),
-            txdata.expiry_height(),
-            txdata.zip233_amount,
-            test_bundle,
-            txdata.sprout_bundle().cloned(),
-            txdata.sapling_bundle().cloned(),
-            txdata.orchard_bundle().cloned(),
-        );
-
-        (tdata, txdata.digest(TxIdDigester))
-    }
-
-    for tv in self::data::zip_0233::TEST_VECTORS {
-        let (txdata, txid_parts) = to_test_txdata(tv);
-
-        assert_eq!(
-            v6_signature_hash(&txdata, &SignableInput::Shielded, &txid_parts).as_ref(),
             tv.sighash_shielded
         );
     }

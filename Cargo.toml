@@ -29,7 +29,6 @@
 #   pasta_curves dependency that drags in the Sapling-side crates).
 # - zcash_primitives, zcash_keys: the librustzcash members Zakura consumes
 #   that depend on the crates above.
-# - zcash_history: the independent librustzcash history-tree fork Zakura consumes.
 
 [workspace]
 # Resolver 3 is resolver 2 plus MSRV-aware version selection: `cargo update`
@@ -53,14 +52,13 @@ members = [
     "crates/redjubjub",
     "crates/sapling-crypto",
     "crates/sinsemilla",
-    "crates/zcash_history",
     "crates/zcash_keys",
     "crates/zcash_primitives",
     "crates/zcash_proofs",
 ]
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0-alpha.1"
 authors = [
     "Dev Ojha <ValarDragon@users.noreply.github.com>",
     "Sean Bowe <ewillbefull@gmail.com>",
@@ -84,22 +82,22 @@ readme = "crates/README.md"
 # dependency names members use in code and feature syntax, so several keys
 # alias the same package (halo2_poseidon/poseidon, sapling, zcash_primitives).
 [workspace.dependencies]
-bellman = { package = "zakura-bellman", version = "1.2.0", path = "crates/bellman", default-features = false }
-bls12_381 = { package = "zakura-bls12-381", version = "1.2.0", path = "crates/bls12_381", default-features = false }
-halo2_gadgets = { package = "zakura-halo2-gadgets", version = "1.2.0", path = "crates/halo2_gadgets", default-features = false }
-halo2_legacy_pdqsort = { package = "zakura-halo2-legacy-pdqsort", version = "1.2.0", path = "crates/halo2_legacy_pdqsort", default-features = false }
-halo2_poseidon = { package = "zakura-halo2-poseidon", version = "1.2.0", path = "crates/halo2_poseidon", default-features = false }
-halo2_proofs = { package = "zakura-halo2-proofs", version = "1.2.0", path = "crates/halo2_proofs", default-features = false }
-jubjub = { package = "zakura-jubjub", version = "1.2.0", path = "crates/jubjub", default-features = false }
-orchard = { package = "zakura-orchard", version = "1.2.0", path = "crates/orchard", default-features = false }
-pairing = { package = "zakura-pairing", version = "1.2.0", path = "crates/pairing", default-features = false }
-pasta_curves = { package = "zakura-pasta-curves", version = "1.2.0", path = "crates/pasta_curves", default-features = false }
-poseidon = { package = "zakura-halo2-poseidon", version = "1.2.0", path = "crates/halo2_poseidon", default-features = false }
-reddsa = { package = "zakura-reddsa", version = "1.2.0", path = "crates/reddsa", default-features = false }
-redjubjub = { package = "zakura-redjubjub", version = "1.2.0", path = "crates/redjubjub", default-features = false }
-sapling = { package = "zakura-sapling-crypto", version = "1.2.0", path = "crates/sapling-crypto", default-features = false }
-sinsemilla = { package = "zakura-sinsemilla", version = "1.2.0", path = "crates/sinsemilla", default-features = false }
+bellman = { package = "zakura-bellman", version = "1.3.0-alpha.1", path = "crates/bellman", default-features = false }
+bls12_381 = { package = "zakura-bls12-381", version = "1.3.0-alpha.1", path = "crates/bls12_381", default-features = false }
+halo2_gadgets = { package = "zakura-halo2-gadgets", version = "1.3.0-alpha.1", path = "crates/halo2_gadgets", default-features = false }
+halo2_legacy_pdqsort = { package = "zakura-halo2-legacy-pdqsort", version = "1.3.0-alpha.1", path = "crates/halo2_legacy_pdqsort", default-features = false }
+halo2_poseidon = { package = "zakura-halo2-poseidon", version = "1.3.0-alpha.1", path = "crates/halo2_poseidon", default-features = false }
+halo2_proofs = { package = "zakura-halo2-proofs", version = "1.3.0-alpha.1", path = "crates/halo2_proofs", default-features = false }
+jubjub = { package = "zakura-jubjub", version = "1.3.0-alpha.1", path = "crates/jubjub", default-features = false }
+orchard = { package = "zakura-orchard", version = "1.3.0-alpha.1", path = "crates/orchard", default-features = false }
+pairing = { package = "zakura-pairing", version = "1.3.0-alpha.1", path = "crates/pairing", default-features = false }
+pasta_curves = { package = "zakura-pasta-curves", version = "1.3.0-alpha.1", path = "crates/pasta_curves", default-features = false }
+poseidon = { package = "zakura-halo2-poseidon", version = "1.3.0-alpha.1", path = "crates/halo2_poseidon", default-features = false }
+reddsa = { package = "zakura-reddsa", version = "1.3.0-alpha.1", path = "crates/reddsa", default-features = false }
+redjubjub = { package = "zakura-redjubjub", version = "1.3.0-alpha.1", path = "crates/redjubjub", default-features = false }
+sapling = { package = "zakura-sapling-crypto", version = "1.3.0-alpha.1", path = "crates/sapling-crypto", default-features = false }
+sinsemilla = { package = "zakura-sinsemilla", version = "1.3.0-alpha.1", path = "crates/sinsemilla", default-features = false }
 zcash_history = { package = "zakura-history", version = "1.0.0", path = "crates/zcash_history", default-features = false }
-zcash_keys = { package = "zakura-keys", version = "1.2.0", path = "crates/zcash_keys", default-features = false }
-zcash_primitives = { package = "zakura-primitives", version = "1.2.0", path = "crates/zcash_primitives", default-features = false }
-zcash_proofs = { package = "zakura-proofs", version = "1.2.0", path = "crates/zcash_proofs", default-features = false }
+zcash_keys = { package = "zakura-keys", version = "1.3.0-alpha.1", path = "crates/zcash_keys", default-features = false }
+zcash_primitives = { package = "zakura-primitives", version = "1.3.0-alpha.1", path = "crates/zcash_primitives", default-features = false }
+zcash_proofs = { package = "zakura-proofs", version = "1.3.0-alpha.1", path = "crates/zcash_proofs", default-features = false }

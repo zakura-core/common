@@ -374,12 +374,43 @@ struct AdviceWitness<F: Field> {
     values: Vec<Polynomial<F, LagrangeCoeff>>,
     denominator_cells: Vec<usize>,
     denominators: Vec<F>,
-    denominator_slots: Vec<Vec<u32>>,
+    denominator_slots: Vec<u32>,
     last_denominator_batch: Option<DenominatorBatch>,
     related_denominator_batches: Vec<RelatedDenominatorBatch>,
     related_batch_numerators: Vec<F>,
     reuse_related_denominators: bool,
-    row_count: usize,
+    cell_layout: AdviceCellLayout,
+}
+
+/// Encodes an advice cell as an index into flattened column-major storage.
+///
+/// Non-empty advice columns have evaluation-domain length, so the row count is
+/// a power of two and encoding and decoding need only shifts and masks.
+#[derive(Clone, Copy)]
+struct AdviceCellLayout {
+    row_mask: usize,
+    row_bits: u32,
+}
+
+impl AdviceCellLayout {
+    fn new(row_count: usize) -> Self {
+        assert!(row_count == 0 || row_count.is_power_of_two());
+        Self {
+            row_mask: row_count.wrapping_sub(1),
+            row_bits: row_count.checked_ilog2().unwrap_or(0),
+        }
+    }
+
+    fn encode(self, column: usize, row: usize) -> usize {
+        debug_assert_ne!(self.row_mask, usize::MAX);
+        debug_assert!(row <= self.row_mask);
+        (column << self.row_bits) | row
+    }
+
+    fn decode(self, cell: usize) -> (usize, usize) {
+        debug_assert_ne!(self.row_mask, usize::MAX);
+        (cell >> self.row_bits, cell & self.row_mask)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -406,9 +437,13 @@ impl<F: Field> AdviceWitness<F> {
     fn new(values: Vec<Polynomial<F, LagrangeCoeff>>, reuse_related_denominators: bool) -> Self {
         let row_count = values.first().map_or(0, |column| column.len());
         assert!(values.iter().all(|column| column.len() == row_count));
+        let cell_count = values
+            .len()
+            .checked_mul(row_count)
+            .expect("the advice matrix size fits into usize");
 
         Self {
-            denominator_slots: vec![vec![NO_DENOMINATOR; row_count]; values.len()],
+            denominator_slots: vec![NO_DENOMINATOR; cell_count],
             values,
             denominator_cells: Vec::new(),
             denominators: Vec::new(),
@@ -416,7 +451,7 @@ impl<F: Field> AdviceWitness<F> {
             related_denominator_batches: Vec::new(),
             related_batch_numerators: Vec::new(),
             reuse_related_denominators,
-            row_count,
+            cell_layout: AdviceCellLayout::new(row_count),
         }
     }
 
@@ -559,7 +594,8 @@ impl<F: Field> AdviceWitness<F> {
             return self.assign_batch(column, row, len, to);
         };
 
-        if self.denominator_slots[column][row..end]
+        let cell_start = self.cell_layout.encode(column, row);
+        if self.denominator_slots[cell_start..cell_start + len]
             .iter()
             .any(|slot| *slot != NO_DENOMINATOR)
         {
@@ -590,20 +626,18 @@ impl<F: Field> AdviceWitness<F> {
 
         for index in 0..len {
             self.values[column][row + index] = self.related_batch_numerators[index];
-            self.denominator_slots[column][row + index] = RELATED_DENOMINATOR;
+            self.denominator_slots[cell_start + index] = RELATED_DENOMINATOR;
         }
         self.related_batch_numerators.clear();
         for index in 0..len {
             let cell = self.denominator_cells[previous.start + index];
-            let source_column = cell / self.row_count;
-            let source_row = cell % self.row_count;
-            self.denominator_slots[source_column][source_row] |= DENOMINATOR_SOURCE_MASK;
+            self.denominator_slots[cell] |= DENOMINATOR_SOURCE_MASK;
         }
         self.related_denominator_batches
             .push(RelatedDenominatorBatch {
                 len,
                 source: previous.start,
-                cell_start: column * self.row_count + row,
+                cell_start,
                 inverse_power,
             });
         self.last_denominator_batch = preserve_as_last_batch.then_some(DenominatorBatch {
@@ -616,7 +650,8 @@ impl<F: Field> AdviceWitness<F> {
     /// Assigns a value, returning whether existing denominator relationships
     /// were expanded before the assignment.
     fn assign_valid(&mut self, column: usize, row: usize, assigned: Assigned<F>) -> bool {
-        let slot = self.denominator_slots[column][row];
+        let cell = self.cell_layout.encode(column, row);
+        let slot = self.denominator_slots[cell];
         let removes_denominator = !matches!(assigned, Assigned::Rational(_, _));
         let expand_relationships = slot == RELATED_DENOMINATOR
             || (slot != NO_DENOMINATOR && slot & DENOMINATOR_SOURCE_MASK != 0)
@@ -637,13 +672,13 @@ impl<F: Field> AdviceWitness<F> {
                 self.values[column][row] = value;
             }
             Assigned::Rational(numerator, denominator) => {
-                let slot = self.denominator_slots[column][row];
+                let slot = self.denominator_slots[cell];
                 if slot == NO_DENOMINATOR {
                     let slot = u32::try_from(self.denominators.len())
                         .expect("the number of advice cells fits into u32");
                     assert!(slot < DENOMINATOR_SLOT_LIMIT);
-                    self.denominator_slots[column][row] = slot;
-                    self.denominator_cells.push(column * self.row_count + row);
+                    self.denominator_slots[cell] = slot;
+                    self.denominator_cells.push(cell);
                     self.denominators.push(denominator);
                 } else {
                     self.denominators[slot as usize] = denominator;
@@ -655,41 +690,47 @@ impl<F: Field> AdviceWitness<F> {
     }
 
     fn remove_denominator(&mut self, column: usize, row: usize) {
-        let slot = self.denominator_slots[column][row];
+        let cell = self.cell_layout.encode(column, row);
+        let slot = self.denominator_slots[cell];
         if slot == NO_DENOMINATOR {
             return;
         }
         debug_assert!(self.related_denominator_batches.is_empty());
 
-        self.denominator_slots[column][row] = NO_DENOMINATOR;
+        self.denominator_slots[cell] = NO_DENOMINATOR;
         let slot = (slot & DENOMINATOR_SLOT_MASK) as usize;
         self.denominator_cells.swap_remove(slot);
         self.denominators.swap_remove(slot);
 
         if let Some(&moved_cell) = self.denominator_cells.get(slot) {
-            let moved_column = moved_cell / self.row_count;
-            let moved_row = moved_cell % self.row_count;
-            self.denominator_slots[moved_column][moved_row] = slot as u32;
+            self.denominator_slots[moved_cell] = slot as u32;
         }
     }
 
     fn evaluate(mut self) -> Vec<Polynomial<F, LagrangeCoeff>> {
         batch_invert_multi(&mut self.denominators);
         for (&cell, &denominator_inverse) in self.denominator_cells.iter().zip(&self.denominators) {
-            let column = cell / self.row_count;
-            let row = cell % self.row_count;
+            let (column, row) = self.cell_layout.decode(cell);
             self.values[column][row] *= denominator_inverse;
         }
         for related in self.related_denominator_batches {
-            for index in 0..related.len {
-                let cell = related.cell_start + index;
-                let column = cell / self.row_count;
-                let row = cell % self.row_count;
-                let denominator_inverse = self.denominators[related.source + index];
-                self.values[column][row] *= match related.inverse_power {
-                    DenominatorInversePower::One => denominator_inverse,
-                    DenominatorInversePower::Two => denominator_inverse.square(),
-                };
+            let (column, row) = self.cell_layout.decode(related.cell_start);
+            let values = &mut self.values[column][..][row..row + related.len];
+            let denominator_inverses =
+                &self.denominators[related.source..related.source + related.len];
+            match related.inverse_power {
+                DenominatorInversePower::One => {
+                    for (value, &denominator_inverse) in values.iter_mut().zip(denominator_inverses)
+                    {
+                        *value *= denominator_inverse;
+                    }
+                }
+                DenominatorInversePower::Two => {
+                    for (value, denominator_inverse) in values.iter_mut().zip(denominator_inverses)
+                    {
+                        *value *= denominator_inverse.square();
+                    }
+                }
             }
         }
         self.values
@@ -705,7 +746,7 @@ impl<F: Field> AdviceWitness<F> {
     }
 
     fn expand_related_denominator_batches(&mut self) {
-        for slot in self.denominator_slots.iter_mut().flatten() {
+        for slot in &mut self.denominator_slots {
             if *slot != NO_DENOMINATOR && *slot != RELATED_DENOMINATOR {
                 *slot &= DENOMINATOR_SLOT_MASK;
             }
@@ -713,9 +754,7 @@ impl<F: Field> AdviceWitness<F> {
         for related in core::mem::take(&mut self.related_denominator_batches) {
             for index in 0..related.len {
                 let cell = related.cell_start + index;
-                let column = cell / self.row_count;
-                let row = cell % self.row_count;
-                debug_assert_eq!(self.denominator_slots[column][row], RELATED_DENOMINATOR);
+                debug_assert_eq!(self.denominator_slots[cell], RELATED_DENOMINATOR);
 
                 let basis = self.denominators[related.source + index];
                 let denominator = match related.inverse_power {
@@ -725,7 +764,7 @@ impl<F: Field> AdviceWitness<F> {
                 let slot = u32::try_from(self.denominators.len())
                     .expect("the number of advice cells fits into u32");
                 assert!(slot < DENOMINATOR_SLOT_LIMIT);
-                self.denominator_slots[column][row] = slot;
+                self.denominator_slots[cell] = slot;
                 self.denominator_cells.push(cell);
                 self.denominators.push(denominator);
             }
@@ -774,17 +813,25 @@ fn prepare_permutation_sets_in_parallel<C: CurveAffine>(
     permutation_parallel_scratch_fits::<C>(set_count.saturating_sub(1), domain_size)
 }
 
+fn prepare_permutation_circuits_in_parallel<C: CurveAffine>(
+    circuit_count: usize,
+    worker_count: usize,
+    domain_size: usize,
+) -> bool {
+    prepare_permutations_in_parallel(circuit_count, worker_count)
+        && permutation_parallel_scratch_fits::<C>(circuit_count.saturating_sub(1), domain_size)
+}
+
 fn prepare_nested_permutation_sets_in_parallel<C: CurveAffine>(
     circuit_count: usize,
     set_count: usize,
     worker_count: usize,
     domain_size: usize,
 ) -> bool {
-    circuit_count > 1
-        && set_count > 1
-        && prepare_permutations_in_parallel(circuit_count, worker_count)
+    set_count > 1
+        && prepare_permutation_circuits_in_parallel::<C>(circuit_count, worker_count, domain_size)
         && permutation_parallel_scratch_fits::<C>(
-            circuit_count.saturating_mul(set_count.saturating_sub(1)),
+            circuit_count.saturating_mul(set_count).saturating_sub(1),
             domain_size,
         )
 }
@@ -1064,11 +1111,13 @@ where
         prepared_instance_values.push(instance_values?);
     }
 
+    #[cfg(feature = "unstable-prover-fingerprint")]
+    super::prover_fingerprint::record_setup(params, pk, instances);
+
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
-    // The smaller inversion walk amortizes relationship tracking once several
-    // circuit witnesses are evaluated together. Keep the single-circuit path
-    // on its existing denominator collection and evaluation flow.
-    let reuse_related_denominators = instances.len() > 1;
+    // Use explicit denominator relationships for every non-empty proof. The
+    // smaller inversion walk now outweighs tracking even for one circuit.
+    let reuse_related_denominators = !instances.is_empty();
     let mut witnesses = instances
         .iter()
         .map(|instances| WitnessCollection {
@@ -1187,6 +1236,9 @@ where
                 .map(|witness| witness.advice.evaluate())
                 .collect::<Vec<_>>()
         };
+
+        #[cfg(feature = "unstable-prover-fingerprint")]
+        super::prover_fingerprint::record_witness(&advice_values);
 
         // Consume randomness in circuit order before preparing the
         // independent commitments and polynomial transforms in parallel.
@@ -1517,6 +1569,11 @@ where
 
     let permutation_workers = crate::multicore::current_num_threads();
     let permutation_set_count = pk.vk.cs.permutation.set_count(pk.vk.cs_degree);
+    let prepare_permutation_circuits = prepare_permutation_circuits_in_parallel::<C>(
+        instance.len(),
+        permutation_workers,
+        params.n as usize,
+    );
     let prepare_nested_permutation_sets = prepare_nested_permutation_sets_in_parallel::<C>(
         instance.len(),
         permutation_set_count,
@@ -1545,47 +1602,34 @@ where
             blinding,
         );
         vec![prepared.commit(&mut coset_evaluator, transcript, 0)?]
-    } else if prepare_permutations_in_parallel(instance.len(), permutation_workers) {
+    } else if instance.len() > 1 {
         // Draw every permutation's blinding values in circuit and set
         // order before preparing the independent arguments in parallel.
         let permutation_blindings = (0..instance.len())
             .map(|_| pk.vk.cs.permutation.sample_blinding(pk, &mut rng))
             .collect::<Vec<_>>();
 
-        // When the aggregate scratch remains bounded, let each circuit expose
-        // its independent set work to the same pool. The per-circuit product
-        // prefix and the eventual transcript writes retain their order.
-        let prepared_permutations = (0..instance.len())
-            .into_par_iter()
-            .zip(permutation_blindings.into_par_iter())
-            .map(|(circuit_index, blinding)| {
-                if prepare_nested_permutation_sets {
-                    pk.vk.cs.permutation.prepare_sets_in_parallel(
-                        params,
-                        pk,
-                        &pk.permutation,
-                        &advice[circuit_index].advice_values,
-                        &pk.fixed_values,
-                        &instance[circuit_index].instance_values,
-                        beta,
-                        gamma,
-                        blinding,
-                    )
-                } else {
-                    pk.vk.cs.permutation.prepare(
-                        params,
-                        pk,
-                        &pk.permutation,
-                        &advice[circuit_index].advice_values,
-                        &pk.fixed_values,
-                        &instance[circuit_index].instance_values,
-                        beta,
-                        gamma,
-                        blinding,
-                    )
-                }
-            })
+        let advice = advice
+            .iter()
+            .map(|advice| advice.advice_values.as_slice())
             .collect::<Vec<_>>();
+        let instance = instance
+            .iter()
+            .map(|instance| instance.instance_values.as_slice())
+            .collect::<Vec<_>>();
+        let prepared_permutations = pk.vk.cs.permutation.prepare_batch(
+            params,
+            pk,
+            &pk.permutation,
+            &advice,
+            &pk.fixed_values,
+            &instance,
+            beta,
+            gamma,
+            permutation_blindings,
+            prepare_permutation_circuits,
+            prepare_nested_permutation_sets,
+        );
 
         prepared_permutations
             .into_iter()
@@ -1779,77 +1823,95 @@ where
     }
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
-    let xn = super::pow_by_power_of_two(*x, params.k);
-    let polynomial_evaluator = PolynomialEvaluator::new(
-        [
-            *x,
-            domain.rotate_omega(*x, poly::Rotation::next()),
-            domain.rotate_omega(*x, poly::Rotation::prev()),
-            domain.rotate_omega(*x, poly::Rotation(-((meta.blinding_factors() + 1) as i32))),
-        ],
-        params.n as usize,
-        advice.len(),
-    );
+    // The quotient fold and x^n depend on x but not on these evaluation tables
+    // or query descriptors. Prepare both concurrently, then retain the
+    // protocol's original transcript-write order below.
+    let ((polynomial_evaluator, queries, initial_evaluation_count), (vanishing, random_eval)) =
+        crate::multicore::join(
+            || {
+                let polynomial_evaluator = PolynomialEvaluator::new(
+                    [
+                        *x,
+                        domain.rotate_omega(*x, poly::Rotation::next()),
+                        domain.rotate_omega(*x, poly::Rotation::prev()),
+                        domain.rotate_omega(
+                            *x,
+                            poly::Rotation(-((meta.blinding_factors() + 1) as i32)),
+                        ),
+                    ],
+                    params.n as usize,
+                    advice.len(),
+                );
 
-    // Compute and hash instance evals for each circuit instance
-    let instance_queries = instance
-        .iter()
-        .flat_map(|instance| {
-            meta.instance_queries
-                .iter()
-                .map(move |&(column, rotation)| EvaluationQuery {
-                    polynomial: &instance.instance_polys[column.index()],
-                    point: EvaluationPoint::from_rotation(
-                        rotation,
-                        meta.blinding_factors(),
-                        || domain.rotate_omega(*x, rotation),
-                    ),
-                })
-        })
-        .collect::<Vec<_>>();
-    // Collect advice evals for each circuit instance.
-    let advice_queries = advice
-        .iter()
-        .flat_map(|advice| {
-            meta.advice_queries
-                .iter()
-                .map(move |&(column, rotation)| EvaluationQuery {
-                    polynomial: &advice.advice_polys[column.index()],
-                    point: EvaluationPoint::from_rotation(
-                        rotation,
-                        meta.blinding_factors(),
-                        || domain.rotate_omega(*x, rotation),
-                    ),
-                })
-        })
-        .collect::<Vec<_>>();
-    // Collect fixed evals, which are shared across all circuit instances.
-    let fixed_queries = meta
-        .fixed_queries
-        .iter()
-        .map(|&(column, rotation)| EvaluationQuery {
-            polynomial: &pk.fixed_polys[column.index()],
-            point: EvaluationPoint::from_rotation(rotation, meta.blinding_factors(), || {
-                domain.rotate_omega(*x, rotation)
-            }),
-        })
-        .collect::<Vec<_>>();
-    let queries = instance_queries
-        .into_iter()
-        .chain(advice_queries)
-        .chain(fixed_queries)
-        .collect::<Vec<_>>();
-    let initial_evaluation_count = queries.len();
-    let mut queries = queries;
-    queries.extend(pk.permutation.evaluation_queries());
-    for permutation in &permutations {
-        queries.extend(permutation.evaluation_queries());
-    }
-    for lookups in &lookups {
-        for lookup in lookups {
-            queries.extend(lookup.evaluation_queries());
-        }
-    }
+                // Collect instance evals for each circuit instance.
+                let instance_queries = instance
+                    .iter()
+                    .flat_map(|instance| {
+                        meta.instance_queries
+                            .iter()
+                            .map(move |&(column, rotation)| EvaluationQuery {
+                                polynomial: &instance.instance_polys[column.index()],
+                                point: EvaluationPoint::from_rotation(
+                                    rotation,
+                                    meta.blinding_factors(),
+                                    || domain.rotate_omega(*x, rotation),
+                                ),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                // Collect advice evals for each circuit instance.
+                let advice_queries = advice
+                    .iter()
+                    .flat_map(|advice| {
+                        meta.advice_queries
+                            .iter()
+                            .map(move |&(column, rotation)| EvaluationQuery {
+                                polynomial: &advice.advice_polys[column.index()],
+                                point: EvaluationPoint::from_rotation(
+                                    rotation,
+                                    meta.blinding_factors(),
+                                    || domain.rotate_omega(*x, rotation),
+                                ),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                // Collect fixed evals, which are shared across all circuit instances.
+                let fixed_queries = meta
+                    .fixed_queries
+                    .iter()
+                    .map(|&(column, rotation)| EvaluationQuery {
+                        polynomial: &pk.fixed_polys[column.index()],
+                        point: EvaluationPoint::from_rotation(
+                            rotation,
+                            meta.blinding_factors(),
+                            || domain.rotate_omega(*x, rotation),
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+                let queries = instance_queries
+                    .into_iter()
+                    .chain(advice_queries)
+                    .chain(fixed_queries)
+                    .collect::<Vec<_>>();
+                let initial_evaluation_count = queries.len();
+                let mut queries = queries;
+                queries.extend(pk.permutation.evaluation_queries());
+                for permutation in &permutations {
+                    queries.extend(permutation.evaluation_queries());
+                }
+                for lookups in &lookups {
+                    for lookup in lookups {
+                        queries.extend(lookup.evaluation_queries());
+                    }
+                }
+
+                (polynomial_evaluator, queries, initial_evaluation_count)
+            },
+            || {
+                let xn = super::pow_by_power_of_two(*x, params.k);
+                vanishing.prepare_evaluation(*x, xn, domain)
+            },
+        );
 
     // All evaluations below depend only on x. Evaluate them as one batch so
     // that small argument-local query sets share the same worker wave, then
@@ -1864,7 +1926,7 @@ where
         transcript.write_scalar(evaluation)?;
     }
 
-    let vanishing = vanishing.evaluate(*x, xn, domain, transcript)?;
+    transcript.write_scalar(random_eval)?;
 
     // Evaluate common permutation data
     pk.permutation.evaluate(&mut evaluations, transcript)?;
@@ -1986,7 +2048,29 @@ fn permutation_set_parallelism_limits_scratch() {
         LARGE_DOMAIN_SIZE,
     ));
 
+    assert!(prepare_permutation_circuits_in_parallel::<EqAffine>(
+        4,
+        6,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_permutation_circuits_in_parallel::<EqAffine>(
+        4,
+        5,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_permutation_circuits_in_parallel::<EqAffine>(
+        4,
+        6,
+        LARGE_DOMAIN_SIZE,
+    ));
+
     assert!(prepare_nested_permutation_sets_in_parallel::<EqAffine>(
+        3,
+        3,
+        8,
+        SMALL_DOMAIN_SIZE,
+    ));
+    assert!(!prepare_nested_permutation_sets_in_parallel::<EqAffine>(
         4,
         3,
         10,
@@ -2827,7 +2911,8 @@ fn advice_witness_failed_related_batch_is_atomic() {
         }
     });
     assert!(matches!(result, Err(Error::Synthesis)));
-    assert_eq!(advice.denominator_slots[1][0], NO_DENOMINATOR);
+    let cell = advice.cell_layout.encode(1, 0);
+    assert_eq!(advice.denominator_slots[cell], NO_DENOMINATOR);
     assert!(advice.related_denominator_batches.is_empty());
 
     advice
@@ -2835,6 +2920,19 @@ fn advice_witness_failed_related_batch_is_atomic() {
         .unwrap();
     let advice = advice.evaluate();
     assert_eq!(advice[1][0], Fp::from(2));
+}
+
+#[test]
+fn advice_cell_layout_round_trips() {
+    for row_count in [1, 2, 8, 2_048] {
+        let layout = AdviceCellLayout::new(row_count);
+        for column in 0..4 {
+            for row in [0, row_count / 2, row_count - 1] {
+                let cell = layout.encode(column, row);
+                assert_eq!(layout.decode(cell), (column, row));
+            }
+        }
+    }
 }
 
 #[cfg(feature = "multicore")]

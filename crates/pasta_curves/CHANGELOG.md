@@ -10,6 +10,44 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.3.0-alpha.1] - 2026-09-18
+
+### Added
+
+- Added the opt-in `x86_64-asm` Pasta field multiplication and squaring
+  backend for BMI2+ADX CPUs
+  ([#222](https://github.com/zakura-core/common/pull/222)).
+- Added `PreparedZeroCheck::multiexp_with_base_offset_vartime` for evaluating
+  an explicit range of a prepared-base table, while preserving the existing
+  full-width evaluator for dense MSMs
+  ([#426](https://github.com/zakura-core/common/pull/426)).
+- Added the defaulted
+  `CurveExt::try_batch_multiexp_shared_scalars_vartime` backend hook for
+  prepared fixed-base MSM lanes that share a public scalar vector. Existing
+  curve implementations remain source-compatible and decline through the
+  failure-atomic default
+  ([#452](https://github.com/zakura-core/common/pull/452)).
+
+### Changed
+
+- Improved curve FFT performance with a one-inversion affine GLV ladder
+  ([#164](https://github.com/zakura-core/common/pull/164)).
+- Improved curve FFT performance with mixed-radix DFT8/DFT16
+  decompositions ([#166](https://github.com/zakura-core/common/pull/166)).
+- Reduced the first IPA round's two prepared MSMs to their nonzero 1,024-base
+  halves. This removes 2,048 scalar visits, 77,824 code-matrix visits, and
+  432 KiB of temporary allocation and initialization from each k = 11 proof.
+  A same-binary six-worker Apple M4 benchmark saved 0.0147 ms in the affected
+  MSM pair (95% CI [0.0061, 0.0231] ms), consistent with 0.0162 ms in a
+  complete prepared IPA opening; the same Linux benchmark saved 0.0198 ms
+  (95% CI [0.0006, 0.0391] ms). Prepared-key memory, proof bytes, and public
+  APIs are unchanged
+  ([#422](https://github.com/zakura-core/common/pull/422)).
+- Extended the opt-in `x86_64-asm` backend to Pasta field addition,
+  subtraction, and doubling. End-to-end Ironwood proving improved by 3–5% on
+  the benchmarked Intel Ice Lake and AMD Zen 4 hosts
+  ([#435](https://github.com/zakura-core/common/pull/435)).
+
 ## [1.2.0] - 2026-09-08
 
 ### Changed

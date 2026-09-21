@@ -213,7 +213,14 @@ pub fn create_proof<C: CurveAffine, E: EncodedChallenge<C>, R: Rng, T: Transcrip
     let powers = power_vector(x_3, params.n as usize);
     let evaluation = evaluate_polynomial_with_powers(p_poly, &powers);
     create_proof_with_powers(
-        params, rng, transcript, p_poly, p_blind, x_3, powers, evaluation,
+        params,
+        rng,
+        transcript,
+        p_poly.clone(),
+        p_blind,
+        x_3,
+        powers,
+        evaluation,
     )
 }
 
@@ -232,7 +239,7 @@ pub(in crate::poly) fn create_proof_with_powers<
     params: &Params<C>,
     mut rng: R,
     transcript: &mut T,
-    p_poly: &Polynomial<C::Scalar, Coeff>,
+    p_poly: Polynomial<C::Scalar, Coeff>,
     p_blind: Blind<C::Scalar>,
     x_3: C::Scalar,
     powers: Vec<C::Scalar>,
@@ -263,7 +270,7 @@ pub(in crate::poly) fn create_proof_with_powers<
 
     // We'll be opening `P' = P - [v] G_0 + [ξ] S` to ensure it has a root at
     // zero.
-    let mut p_prime_poly = p_poly.clone();
+    let mut p_prime_poly = p_poly;
     for (index, mask) in &s_poly {
         p_prime_poly[*index] += *mask * xi;
     }
@@ -565,7 +572,7 @@ mod tests {
             &params,
             StdRng::seed_from_u64(PROOF_SEED),
             &mut precomputed,
-            &polynomial,
+            polynomial,
             blind,
             point,
             powers,
@@ -1028,14 +1035,22 @@ mod tests {
             full_width_scalar::<C>(),
         ];
         let assert_materialization = |scalars: &[C::Scalar]| {
-            let actual = table
+            table.set_force_shared_scalar_hook_decline(false);
+            let fast = table
                 .materialize(scalars, &params.g[..count])
                 .expect("canonical Pasta scalars must materialize");
-            for (lane, actual) in actual.iter().enumerate() {
+            table.set_force_shared_scalar_hook_decline(true);
+            let generic = table
+                .materialize(scalars, &params.g[..count])
+                .expect("canonical Pasta scalars must use the fallback");
+            table.set_force_shared_scalar_hook_decline(false);
+            for (lane, (fast, generic)) in fast.iter().zip(&generic).enumerate() {
                 let bases = (0..scalars.len())
                     .map(|block| params.g[block * count + lane])
                     .collect::<Vec<_>>();
-                assert_eq!(actual.to_curve(), best_multiexp(scalars, &bases));
+                let native = best_multiexp(scalars, &bases);
+                assert_eq!(fast.to_curve(), native, "fast materializer lane {lane}");
+                assert_eq!(generic.to_curve(), native, "fallback lane {lane}");
             }
         };
         assert_materialization(&scalars);
@@ -1161,25 +1176,25 @@ mod tests {
                 .is_none()
         );
 
-        table.set_force_decline(true);
-        let replay_fallback = narrow_pool.install(|| {
-            assert!(params.prepared_deferred_ipa().is_some());
-            create_seeded_proof()
-        });
-        table.set_force_decline(false);
-        assert_eq!(replay_fallback, unprepared);
-
         let max_threads = prepared_commitment_max_threads(K);
         for workers in [1, max_threads] {
             let pool = maybe_rayon::ThreadPoolBuilder::new()
                 .num_threads(workers)
                 .build()
                 .unwrap();
-            let prepared = pool.install(|| {
+            table.set_force_shared_scalar_hook_decline(false);
+            let fast = pool.install(|| {
                 assert!(params.prepared_deferred_ipa().is_some());
                 create_seeded_proof()
             });
-            assert_eq!(prepared, unprepared);
+            table.set_force_shared_scalar_hook_decline(true);
+            let generic = pool.install(|| {
+                assert!(params.prepared_deferred_ipa().is_some());
+                create_seeded_proof()
+            });
+            table.set_force_shared_scalar_hook_decline(false);
+            assert_eq!(fast, unprepared, "fast proof at {workers} workers");
+            assert_eq!(generic, unprepared, "fallback proof at {workers} workers");
         }
 
         let wide_pool = maybe_rayon::ThreadPoolBuilder::new()

@@ -31,52 +31,14 @@ use alloc::vec::Vec;
 
 use halo2_proofs::plonk::fingerprint::{ChallengeRecorder, capture_proof_fingerprint};
 use halo2_proofs::transcript::Challenge255;
-use incrementalmerkletree::Hashable;
 use pasta_curves::vesta;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
-use super::{K, OrchardCircuitVersion, ProvingKey, VerifyingKey};
-use crate::{
-    builder::{Builder, BundleType},
-    bundle::BundleVersion,
-    constants::MERKLE_DEPTH_ORCHARD,
-    tree::MerkleHashOrchard,
-};
+use super::{K, OrchardCircuitVersion, VerifyingKey};
 
 mod random;
 mod rejected;
 
-fn fixture_rng(seed: u8) -> ChaCha20Rng {
-    ChaCha20Rng::from_seed([seed; 32])
-}
-
-fn build_fixture_bundle(
-    rng: &mut ChaCha20Rng,
-    pk: &ProvingKey,
-    num_actions: u8,
-) -> crate::Bundle<crate::bundle::Authorized, i64> {
-    let bundle_version = BundleVersion::orchard_v3();
-    let builder = Builder::new(
-        BundleType::Transactional {
-            bundle_required: true,
-            pad_to_minimum: Some(num_actions),
-        },
-        bundle_version,
-        bundle_version.default_flags(),
-        MerkleHashOrchard::empty_root((MERKLE_DEPTH_ORCHARD as u8).into()).into(),
-    )
-    .unwrap();
-    let bundle = builder.build::<i64>(&mut *rng).unwrap().unwrap().0;
-    assert_eq!(bundle.actions().len(), usize::from(num_actions));
-    assert!(!bundle.flags().cross_address_enabled());
-
-    bundle
-        .create_proof(pk, &mut *rng)
-        .unwrap()
-        .apply_signatures(&mut *rng, [0; 32], &[])
-        .unwrap()
-}
+use super::fixtures::{build_fixture_bundle, fixture_rng};
 
 fn raw_instances(instances: &[super::Instance]) -> Vec<Vec<Vec<vesta::Scalar>>> {
     instances
@@ -140,13 +102,17 @@ fn capture_fixture(seed: u8, num_actions: u8, namespace: &str, output_var: &str)
         transcript.challenges.len(),
     );
 
-    let fixture = vk.vk.dump_vesta_lean_fixture(
+    // The proof bytes the verifier consumed are handed to the exporter, which checks that the
+    // recorded reads re-serialize to exactly them and carries them in the fixture as
+    // `capturedProofHex`, so a consumer can check its proof-string decoder against them.
+    let fixture = vk.vk.dump_vesta_lean_fixture_honest_with_proof_bytes(
         namespace,
         "PostNu6_3",
         K,
         &raw_instance_refs,
         &transcript,
         &msm,
+        &proof.0,
     );
     if let Some(path) = std::env::var_os(output_var) {
         std::fs::write(std::path::PathBuf::from(path), fixture).unwrap();

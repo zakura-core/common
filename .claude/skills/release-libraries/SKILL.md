@@ -54,9 +54,12 @@ pending fragments instead of a PR-owned fragment.
   `RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --workspace --no-deps --all-features --locked`.
 - Package contents: `cargo package --list -p <crate>` for each crate — no
   stray files; LICENSE/COPYRIGHT/katex symlinks materialize as real files.
-- Semver: CI compares against the latest crates.io release per crate; for a
-  new baseline, run `cargo semver-checks --baseline-version <prev> -p <crate>`
-  locally.
+- Semver: use the [semver policy](../../../docs/semver-policy.md), including
+  its feature-removal ignore list. For a release, run
+  `python3 .github/scripts/check_semver.py --baseline-version <prev> --package <crate>`.
+  This keeps the checker's normal feature selection. Add `--default-features`
+  to reproduce CI. The bare checker reports compatibility findings without
+  applying the repository's ignore list.
 
 ## Publishing
 

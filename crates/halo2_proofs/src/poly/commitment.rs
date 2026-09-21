@@ -418,9 +418,11 @@ fn scalar_byte_order<F: PrimeField>() -> ScalarByteOrder {
     }
 }
 
-/// Unpositioned odd multiples for every coefficient-SRS generator. The table
-/// materializes several IPA folds whose scalar vector is shared by every
-/// output lane.
+/// Unpositioned odd multiples for every coefficient-SRS generator. Within
+/// each scalar block, points are ordered by odd multiple and then output lane,
+/// so the materializer's innermost lane loop reads contiguous affine points.
+/// The table materializes several IPA folds whose scalar vector is shared by
+/// every output lane.
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 struct DeferredIpaGeneratorTable<C: CurveAffine> {
     points: Vec<C>,
@@ -428,7 +430,7 @@ struct DeferredIpaGeneratorTable<C: CurveAffine> {
     first_cached_generator: usize,
     byte_order: ScalarByteOrder,
     #[cfg(test)]
-    force_decline: std::sync::atomic::AtomicBool,
+    force_shared_scalar_hook_decline: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
@@ -455,32 +457,50 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             .len()
             .checked_mul(DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES)?;
         let mut points = vec![C::identity(); table_len];
-        let generator_chunk = cached_generators
-            .len()
-            .div_ceil(crate::multicore::current_num_threads());
-        let point_chunk =
-            generator_chunk.checked_mul(DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES)?;
+        let cached_blocks = cached_generators.len() / first_cached_generator;
+        // Keep complete scalar blocks together while distributing the
+        // remainder instead of leaving an available worker idle.
+        let task_count = cached_blocks.min(crate::multicore::current_num_threads());
+        let blocks_per_task = cached_blocks / task_count;
+        let extra_blocks = cached_blocks % task_count;
         crate::multicore::scope(|scope| {
-            for (generators, points) in cached_generators
-                .chunks(generator_chunk)
-                .zip(points.chunks_mut(point_chunk))
-            {
+            let mut generator_start = 0;
+            let mut remaining_points = points.as_mut_slice();
+            for task in 0..task_count {
+                let task_blocks = blocks_per_task + usize::from(task < extra_blocks);
+                let generator_count = task_blocks * first_cached_generator;
+                let generator_end = generator_start + generator_count;
+                let generators = &cached_generators[generator_start..generator_end];
+                generator_start = generator_end;
+                let point_count = generator_count * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES;
+                let (points, tail) = remaining_points.split_at_mut(point_count);
+                remaining_points = tail;
                 scope.spawn(move |_| {
                     let mut projective = Vec::with_capacity(points.len());
-                    for &generator in generators {
-                        let generator = C::Curve::from(generator);
-                        let step = generator.double();
-                        let mut odd_multiple = generator;
+                    for generators in generators.chunks(first_cached_generator) {
+                        let mut odd_multiples = generators
+                            .iter()
+                            .copied()
+                            .map(C::Curve::from)
+                            .collect::<Vec<_>>();
+                        let steps = odd_multiples
+                            .iter()
+                            .map(C::Curve::double)
+                            .collect::<Vec<_>>();
                         for index in 0..DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES {
-                            projective.push(odd_multiple);
+                            projective.extend(odd_multiples.iter().copied());
                             if index + 1 != DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES {
-                                odd_multiple += step;
+                                for (odd_multiple, &step) in odd_multiples.iter_mut().zip(&steps) {
+                                    *odd_multiple += step;
+                                }
                             }
                         }
                     }
                     C::Curve::batch_normalize(&projective, points);
                 });
             }
+            debug_assert_eq!(generator_start, cached_generators.len());
+            debug_assert!(remaining_points.is_empty());
         });
 
         Some(Self {
@@ -489,7 +509,7 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             first_cached_generator,
             byte_order,
             #[cfg(test)]
-            force_decline: std::sync::atomic::AtomicBool::new(false),
+            force_shared_scalar_hook_decline: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -599,13 +619,6 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
     /// Materializes `output[i] = sum_b scalars[b] * G[b * count + i]`.
     /// The scalars are prior Fiat-Shamir challenges and therefore public.
     fn materialize(&self, scalars: &[C::Scalar], scalar_one_bases: &[C]) -> Option<Vec<C>> {
-        #[cfg(test)]
-        if self
-            .force_decline
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return None;
-        }
         let count = scalar_one_bases.len();
         if scalars.len().checked_mul(count)? != self.terms
             || count != self.first_cached_generator
@@ -614,6 +627,27 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
             return None;
         }
         let little = self.little_endian()?;
+        let mut projective = vec![C::Curve::identity(); count];
+        #[cfg(test)]
+        let try_shared_scalar_hook = !self
+            .force_shared_scalar_hook_decline
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let try_shared_scalar_hook = true;
+        if try_shared_scalar_hook
+            && C::Curve::try_batch_multiexp_shared_scalars_vartime(
+                &self.points,
+                &scalars[1..],
+                &mut projective,
+            )
+        {
+            for (output, &base) in projective.iter_mut().zip(scalar_one_bases) {
+                *output += base;
+            }
+            let mut affine = vec![C::identity(); count];
+            C::Curve::batch_normalize(&projective, &mut affine);
+            return Some(affine);
+        }
         let reprs = scalars[1..]
             .iter()
             .map(|&scalar| {
@@ -638,7 +672,7 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                 .iter()
                 .any(|&digit| digit != 0)
         });
-        let mut projective = vec![C::Curve::identity(); count];
+        projective.fill(C::Curve::identity());
         let chunk_size = count.div_ceil(crate::multicore::current_num_threads());
         crate::multicore::scope(|scope| {
             for (chunk_index, output) in projective.chunks_mut(chunk_size).enumerate() {
@@ -658,12 +692,13 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
                                     continue;
                                 }
                                 let point_offset = (usize::from(digit.unsigned_abs()) - 1) / 2;
+                                let point_base = cached_block
+                                    * count
+                                    * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
+                                    + point_offset * count
+                                    + start;
                                 for (lane, output) in output.iter_mut().enumerate() {
-                                    let generator = (cached_block + 1) * count + start + lane;
-                                    let point = self.points[(generator
-                                        - self.first_cached_generator)
-                                        * DEFERRED_IPA_MATERIALIZATION_ODD_MULTIPLES
-                                        + point_offset];
+                                    let point = self.points[point_base + lane];
                                     *output += if digit < 0 { -point } else { point };
                                 }
                             }
@@ -688,8 +723,8 @@ impl<C: CurveAffine> DeferredIpaGeneratorTable<C> {
     }
 
     #[cfg(test)]
-    fn set_force_decline(&self, force_decline: bool) {
-        self.force_decline
+    fn set_force_shared_scalar_hook_decline(&self, force_decline: bool) {
+        self.force_shared_scalar_hook_decline
             .store(force_decline, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -987,17 +1022,16 @@ impl<C: CurveAffine> PreparedDeferredIpa<C> {
         let half = self.coefficient.terms() / 2;
         assert_eq!(p_hi.len(), half, "one scalar per lower-half base");
         assert_eq!(p_lo.len(), half, "one scalar per upper-half base");
-        let zeroes = vec![C::Scalar::ZERO; half];
         let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
             || {
                 crate::multicore::join(
                     || {
                         self.coefficient
-                            .multiexp_with_prefix_and_suffix(p_hi, &zeroes, &[])
+                            .multiexp_with_base_offset_vartime(0, p_hi, &[])
                     },
                     || {
                         self.coefficient
-                            .multiexp_with_prefix_and_suffix(&zeroes, p_lo, &[])
+                            .multiexp_with_base_offset_vartime(half, p_lo, &[])
                     },
                 )
             },
@@ -1852,11 +1886,11 @@ impl<C: CurveAffine> Params<C> {
         best_multiexp::<C>(&tmp_scalars, &tmp_bases)
     }
 
-    /// Attempts the dedicated prepared-table commitment for a permuted
-    /// Sinsemilla lookup table. It factors the repeated `q_0` terms into one
-    /// multiplication by the sum of their Lagrange bases, so every other
+    /// Attempts the dedicated prepared-commitment path for a permuted
+    /// Sinsemilla lookup polynomial. It factors the repeated `q_0` terms into
+    /// one multiplication by the sum of their Lagrange bases, so every other
     /// scalar retains its existing zero and low-magnitude behavior.
-    pub(crate) fn try_commit_sinsemilla_table(
+    pub(crate) fn try_commit_sinsemilla_q_0(
         &self,
         poly: &Polynomial<C::Scalar, LagrangeCoeff>,
         r: Blind<C::Scalar>,
@@ -2157,12 +2191,11 @@ impl<C: CurveAffine> Params<C> {
                 return None;
             }
             let fixed_bases = self.fixed_base_table()?;
-            let zeroes = vec![C::Scalar::ZERO; half];
             let ((l_body, r_body), (l_auxiliary, r_auxiliary)) = crate::multicore::join(
                 || {
                     crate::multicore::join(
-                        || prepared.multiexp_with_prefix_and_suffix(p_hi, &zeroes, &[]),
-                        || prepared.multiexp_with_prefix_and_suffix(&zeroes, p_lo, &[]),
+                        || prepared.multiexp_with_base_offset_vartime(0, p_hi, &[]),
+                        || prepared.multiexp_with_base_offset_vartime(half, p_lo, &[]),
                     )
                 },
                 || fixed_bases.multiply_ipa_rounds(l_u, l_w, r_u, r_w),
@@ -2208,14 +2241,13 @@ impl<C: CurveAffine> Params<C> {
     /// benchmarked M4 system. Wider pools and unmeasured SRS shapes keep the
     /// planned commitment multiexp. Without `orbits`, the first IPA round also
     /// reuses the coefficient table. Its two generator MSMs each have one
-    /// active half and one zero half: the backend still recodes and scans all
-    /// scalar slots, but zero scalars do not fetch prepared points or populate
-    /// buckets. At `k = 11`, the next three rounds expand their symbolic folded
-    /// generators over the same prepared coefficient table, then the retained
-    /// full-SRS table materializes all four folds at once. Later IPA rounds keep
-    /// their normal planner, while the small fixed pair handles `u` and `w` in
-    /// every round. Measurements covered full-width and witness-like (boolean,
-    /// byte, zero-padded) coefficient distributions.
+    /// active half and one implicit zero half, so the backend recodes and scans
+    /// only the active scalar range. At `k = 11`, the next three rounds expand
+    /// their symbolic folded generators over the same prepared coefficient
+    /// table, then the retained full-SRS table materializes all four folds at
+    /// once. Later IPA rounds keep their normal planner, while the small fixed
+    /// pair handles `u` and `w` in every round. Measurements covered full-width
+    /// and witness-like (boolean, byte, zero-padded) coefficient distributions.
     ///
     /// The two α7 tables account for about 24.8 MiB at `k = 11`; the no-orbits
     /// signed-width-eight pair adds exactly 512 KiB of affine-point payload for
@@ -2999,6 +3031,38 @@ fn fixed_base_pair_table_is_stable_across_worker_counts() {
         assert_eq!(parallel.points, single.points);
         assert_eq!(parallel.scalar_bits, single.scalar_bits);
         assert_eq!(parallel.windows, single.windows);
+        assert_eq!(
+            std::mem::discriminant(&parallel.byte_order),
+            std::mem::discriminant(&single.byte_order),
+        );
+    }
+}
+
+#[cfg(all(feature = "multicore", not(feature = "orbits")))]
+#[test]
+fn deferred_ipa_generator_table_is_stable_across_worker_counts() {
+    use crate::pasta::EqAffine;
+
+    let params = Params::<EqAffine>::new(PREPARED_DEFERRED_IPA_K);
+    let build = |workers| {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .expect("test pool must build")
+            .install(|| {
+                DeferredIpaGeneratorTable::new(&params.g)
+                    .expect("Pasta generators support deferred IPA preparation")
+            })
+    };
+    let single = build(1);
+    for workers in [6, 10] {
+        let parallel = build(workers);
+        assert_eq!(parallel.points, single.points);
+        assert_eq!(parallel.terms, single.terms);
+        assert_eq!(
+            parallel.first_cached_generator,
+            single.first_cached_generator,
+        );
         assert_eq!(
             std::mem::discriminant(&parallel.byte_order),
             std::mem::discriminant(&single.byte_order),
