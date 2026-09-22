@@ -879,6 +879,10 @@ pub(crate) struct Recoded {
     pub(crate) counts: Vec<u32>,
     /// The number of recoded scalars (one code column per window).
     pub(crate) terms: usize,
+    /// Original prepared-base indices when zero scalar rows were compacted
+    /// before recoding. `None` means code column `i` still belongs to base
+    /// `i`.
+    pub(super) base_indices: Option<Vec<usize>>,
     /// Residuals as signed-magnitude component pairs, ready for the
     /// unprepared tail backend. Rows recoded to zero (including all rows
     /// the caller zeroed) have zero residuals.
@@ -970,6 +974,7 @@ pub(super) fn try_recode_with(
             codes,
             counts,
             terms,
+            base_indices: None,
             residuals,
             active_windows,
         });
@@ -997,6 +1002,7 @@ pub(super) fn try_recode_with(
         codes,
         counts,
         terms,
+        base_indices: None,
         residuals,
         active_windows,
     })

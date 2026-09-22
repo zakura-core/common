@@ -501,6 +501,59 @@ fn window_points<F: Field>(
     (points, offsets)
 }
 
+/// The [`window_points`] counterpart for compact digit rows that retain
+/// their original positions in a larger prepared-base array.
+fn window_points_indexed<F: Field>(
+    params: &OrbitParams,
+    digits: &[u16],
+    window: usize,
+    rotated: &[RotatedBase<F>],
+    base_indices: &[usize],
+) -> (Vec<AffinePoint<F>>, Vec<usize>) {
+    debug_assert!(!base_indices.is_empty());
+    debug_assert_eq!(digits.len() % base_indices.len(), 0);
+    let width = digits.len() / base_indices.len();
+    debug_assert!(window < width);
+    let mut counts = alloc::vec![0usize; params.bucket_count()];
+    for row in digits.chunks_exact(width) {
+        let code = row[window];
+        if code != 0 {
+            counts[usize::from(code - 1) / 6] += 1;
+        }
+    }
+
+    let mut offsets = Vec::with_capacity(counts.len() + 1);
+    offsets.push(0);
+    for count in counts {
+        offsets.push(offsets.last().copied().unwrap() + count);
+    }
+
+    let mut positions = offsets[..offsets.len() - 1].to_vec();
+    let mut points = alloc::vec![
+        AffinePoint {
+            x: F::ZERO,
+            y: F::ZERO,
+        };
+        *offsets.last().unwrap()
+    ];
+    for (base_index, row) in digits.chunks_exact(width).enumerate() {
+        let code = usize::from(row[window]);
+        if code == 0 {
+            continue;
+        }
+        let base = &rotated[base_indices[base_index]];
+        let (orbit, unit) = ((code - 1) / 6, (code - 1) % 6);
+        let position = positions[orbit];
+        points[position] = AffinePoint {
+            x: base.xs[unit >> 1],
+            y: if unit & 1 == 1 { -base.y } else { base.y },
+        };
+        positions[orbit] = position + 1;
+    }
+
+    (points, offsets)
+}
+
 /// The hexagonal weighted-bucket reducer: $\sum_\delta [\delta]Q_\delta$ in
 /// $2m - 2$ projective additions plus one endomorphism application, via
 /// children-first subtree accumulation and $A - \phi^2(H)$ (see the module
@@ -561,6 +614,34 @@ pub(super) fn windows_sum<C: GlvParams>(
             }
         }
         let (points, offsets) = window_points(params, digits, window, rotated);
+        let buckets = reduce_affine_buckets(points, offsets)?;
+        acc += reduce_hex_weighted::<C>(params, &buckets);
+    }
+    Some(acc)
+}
+
+/// The [`windows_sum`] counterpart for compact digit rows that retain their
+/// original positions in a larger prepared-base array.
+pub(super) fn windows_sum_indexed<C: GlvParams>(
+    params: &OrbitParams,
+    digits: &[u16],
+    rotated: &[RotatedBase<C::Base>],
+    base_indices: &[usize],
+    range: core::ops::Range<usize>,
+) -> Option<C> {
+    if base_indices.is_empty() {
+        debug_assert!(digits.is_empty());
+        return Some(C::identity());
+    }
+    let mut acc = C::identity();
+    for window in range.clone().rev() {
+        if window + 1 != range.end {
+            for _ in 0..params.window_bits {
+                acc = acc.double();
+            }
+        }
+        let (points, offsets) =
+            window_points_indexed(params, digits, window, rotated, base_indices);
         let buckets = reduce_affine_buckets(points, offsets)?;
         acc += reduce_hex_weighted::<C>(params, &buckets);
     }

@@ -156,6 +156,40 @@ const U10_TABLE_PREFIX_TERMS: usize = U10_TABLE_TERMS - U10_TABLE_SUFFIX_TERMS;
 /// 24.8 MiB in total, plus small metadata and allocator overhead.
 const DEFAULT_TABLE_FOOTPRINT_BUDGET: usize = 13 << 20;
 
+/// Evenly spaced scalar rows checked before the sparse-row census. Finding
+/// every sample live is only a performance hint that retains the dense path;
+/// it does not affect MSM correctness.
+const DENSE_CENSUS_SAMPLE_POINTS: usize = 16;
+
+/// Returns the live-row count when an input is worth compacting.
+///
+/// The preflight may conservatively retain the dense path for a sparse input;
+/// that only forgoes an optimization. Every result still evaluates the same
+/// exact MSM.
+fn compact_live_scalar_count(terms: usize, live_at: impl Fn(usize) -> bool) -> Option<usize> {
+    let sample_stride = terms / DENSE_CENSUS_SAMPLE_POINTS;
+    if sample_stride != 0
+        && (0..DENSE_CENSUS_SAMPLE_POINTS).all(|sample| {
+            // Stagger the within-stratum offset so periodic zero patterns do
+            // not alias one fixed sample position.
+            let index = sample * sample_stride + sample % sample_stride;
+            live_at(index)
+        })
+    {
+        return None;
+    }
+
+    let compact_limit = terms / 2;
+    let mut live = 0;
+    for index in 0..terms {
+        live += usize::from(live_at(index));
+        if live > compact_limit {
+            return None;
+        }
+    }
+    Some(live)
+}
+
 #[derive(Clone, Copy)]
 enum MainWindowFold {
     Paired,
@@ -507,6 +541,41 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     ) -> C {
         let num_threads = current_num_threads();
 
+        // Extras with zero scalars or identity points contribute nothing.
+        let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
+            .iter()
+            .filter(|(scalar, point)| {
+                !bool::from(point.is_identity()) && !bool::from(scalar.is_zero())
+            })
+            .copied()
+            .collect();
+
+        // A prepared MSM normally recodes one row per prepared base, even
+        // when a caller supplies many exact zeros. Preserve the prepared
+        // point table while compacting sufficiently sparse inputs: code
+        // matrices, transposes, and per-window scans then cover only live
+        // scalar rows. Stop the census as soon as a compact representation
+        // cannot halve the row count, keeping dense inputs on their existing
+        // path after a small preflight or partial zero scan, without
+        // allocating.
+        let live_scalars = compact_live_scalar_count(terms, |index| {
+            self.live[index] && !scalar_at(index).is_zero_vartime()
+        });
+        // Exact-zero density is deliberately observable, as permitted by
+        // this API's existing variable-time contract. Avoid constructing an
+        // empty code matrix while preserving any independent extra terms.
+        if live_scalars == Some(0) {
+            return self
+                .extras_sum(&extras)
+                .unwrap_or_else(|| self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra));
+        }
+        let base_indices = live_scalars.map(|_| {
+            (0..terms)
+                .filter(|&index| self.live[index] && !scalar_at(index).is_zero_vartime())
+                .collect::<Vec<_>>()
+        });
+        let recoded_terms = base_indices.as_ref().map_or(terms, Vec::len);
+
         // Dead rows (identity bases, merge sources) contribute nothing;
         // force their recoding rows and residuals to zero. A decomposition
         // half out of bound is unreachable (`decompose` guarantees the
@@ -514,14 +583,17 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         // whole check degrades to the exact naive evaluation, matching
         // `try_multiexp`'s posture toward the same guard.
         let decompose_checked = |index: usize| {
-            if !self.live[index] {
+            let prepared_index = base_indices
+                .as_ref()
+                .map_or(index, |indices| indices[index]);
+            if !self.live[prepared_index] {
                 let zero = SignedMagnitude {
                     negative: false,
                     magnitude: 0,
                 };
                 return Some((zero, zero));
             }
-            let scalar = scalar_at(index);
+            let scalar = scalar_at(prepared_index);
             // Recoding and bucket staging are already variable-time in scalar
             // digits. Avoid canonicalizing and decomposing an exact zero before
             // those existing zero paths omit it.
@@ -534,19 +606,15 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             }
             checked_signed_magnitudes(decompose::<C>(scalar))
         };
-        let Some(recoded) =
-            codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
-        else {
+        let Some(mut recoded) = codebook::try_recode_with(
+            &self.codebook,
+            recoded_terms,
+            num_threads,
+            decompose_checked,
+        ) else {
             return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
         };
-        // Extras with zero scalars or identity points contribute nothing.
-        let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
-            .iter()
-            .filter(|(scalar, point)| {
-                !bool::from(point.is_identity()) && !bool::from(scalar.is_zero())
-            })
-            .copied()
-            .collect();
+        recoded.base_indices = base_indices;
         match self.evaluate(&recoded, &extras, num_threads, main_window_fold) {
             Some(sum) => sum,
             // Unreachable for valid curve points (the batched-affine
@@ -736,7 +804,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                             })
                         }
                     },
-                    || self.tail_sum(&recoded.residuals, num_threads),
+                    || self.tail_sum(recoded, num_threads),
                 )
             };
             let (extras_part, (windows_part, tail)) = if extras.is_empty() {
@@ -754,7 +822,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             return Some(windows_part + tail + extras_part?);
         }
 
-        let mut acc = self.tail_sum(&recoded.residuals, num_threads)?;
+        let mut acc = self.tail_sum(recoded, num_threads)?;
         if !bool::from(acc.is_identity()) {
             for _ in 0..window_bits * (main_windows - active) {
                 acc = acc.double();
@@ -814,7 +882,11 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                 continue;
             }
             let (bucket, variant, unit) = unpack_code(code);
-            let (x, y) = unit_coords(self.table.get(variant, base), unit);
+            let prepared_base = recoded
+                .base_indices
+                .as_ref()
+                .map_or(base, |indices| indices[base]);
+            let (x, y) = unit_coords(self.table.get(variant, prepared_base), unit);
             let position = positions[bucket];
             points[position] = AffinePoint { x, y };
             positions[bucket] = position + 1;
@@ -951,15 +1023,18 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// via the unprepared orbit machinery at the width fixed at
     /// preparation.
     #[inline(never)]
-    fn tail_sum(
-        &self,
-        residuals: &[(SignedMagnitude, SignedMagnitude)],
-        num_threads: usize,
-    ) -> Option<C> {
+    fn tail_sum(&self, recoded: &Recoded, num_threads: usize) -> Option<C> {
         let params = &self.tail_params[self.tail_width];
         let stride =
             params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
-        tail_multiexp::<C>(params, residuals, &self.tail_bases, stride, num_threads)
+        tail_multiexp::<C>(
+            params,
+            &recoded.residuals,
+            &self.tail_bases,
+            recoded.base_indices.as_deref(),
+            stride,
+            num_threads,
+        )
     }
 
     /// The range counterpart of [`Self::tail_sum`].
@@ -974,7 +1049,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let bases = self.tail_bases.get(base_offset..range_end)?;
         let stride =
             params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
-        tail_multiexp::<C>(params, residuals, bases, stride, num_threads)
+        tail_multiexp::<C>(params, residuals, bases, None, stride, num_threads)
     }
 
     /// $E = \sum_j \[s_j\] Q_j$ over the per-check extra terms (already
@@ -1172,10 +1247,14 @@ fn tail_multiexp<C: GlvParams>(
     params: &orbit::OrbitParams,
     components: &[(SignedMagnitude, SignedMagnitude)],
     rotated: &[orbit::RotatedBase<C::Base>],
+    base_indices: Option<&[usize]>,
     stride: usize,
     num_threads: usize,
 ) -> Option<C> {
-    debug_assert_eq!(components.len(), rotated.len());
+    debug_assert_eq!(
+        components.len(),
+        base_indices.map_or(rotated.len(), <[usize]>::len)
+    );
     debug_assert!(stride <= params.window_stride());
     if stride == 0 {
         return Some(C::identity());
@@ -1193,7 +1272,17 @@ fn tail_multiexp<C: GlvParams>(
             .max()
             .unwrap_or(0);
         return super::paired_windows_sum::<C>(active, params.width(), |window| {
-            orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1)
+            if let Some(base_indices) = base_indices {
+                orbit::windows_sum_indexed::<C>(
+                    params,
+                    &digits,
+                    rotated,
+                    base_indices,
+                    window..window + 1,
+                )
+            } else {
+                orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1)
+            }
         });
     }
 
@@ -1201,7 +1290,11 @@ fn tail_multiexp<C: GlvParams>(
     for (row, &(first, second)) in digits.chunks_exact_mut(stride).zip(components) {
         active = active.max(orbit::recode_row(params, first, second, row));
     }
-    orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
+    if let Some(base_indices) = base_indices {
+        orbit::windows_sum_indexed::<C>(params, &digits, rotated, base_indices, 0..active)
+    } else {
+        orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
+    }
 }
 
 /// Scans the fixed bases for exact relations $P_j = \[\mu\] P_i$ with
@@ -1667,6 +1760,25 @@ mod tests {
         assert_eq!(exact_stride, 3);
     }
 
+    #[test]
+    fn dense_preflight_preserves_sparse_census() {
+        const TERMS: usize = 128;
+
+        assert_eq!(compact_live_scalar_count(TERMS, |_| true), None);
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index < TERMS / 2),
+            Some(TERMS / 2),
+        );
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index % 2 == 0),
+            Some(TERMS / 2),
+        );
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index <= TERMS / 2),
+            None,
+        );
+    }
+
     fn modes_under_test() -> Vec<CodebookMode> {
         vec![
             CodebookMode::alpha_only(6),
@@ -1820,6 +1932,88 @@ mod tests {
             prepared.multiexp_with_terms_vartime(&scalars, &[extra_term]),
             expected_with_extra
         );
+    }
+
+    /// Compact recoding preserves the original base pairing at its exact
+    /// threshold and on either side, including folded dead rows and extras.
+    #[cfg(feature = "multicore")]
+    fn compact_rows_match_generic_msm<C: GlvParams>() {
+        const TERMS: usize = 128;
+        const MAX_TEST_WORKERS: usize = 10;
+
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut independent_bases = vec![C::AffineExt::identity(); TERMS];
+        C::batch_normalize(&projective, &mut independent_bases);
+        let independent = PreparedZeroMsm::<C>::prepare_with_mode(
+            &independent_bases,
+            CodebookMode::alpha_only(6),
+        );
+        assert!(independent.merges.is_empty());
+
+        let dense =
+            super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64).collect::<Vec<_>>();
+        let identity = C::identity().to_affine();
+        let extras = [
+            (C::ScalarExt::from(41), generator.to_affine()),
+            (C::ScalarExt::ZERO, generator.to_affine()),
+            (C::ScalarExt::from(73), identity),
+        ];
+        let extra_sum = generator * C::ScalarExt::from(41);
+
+        let check = |prepared: &PreparedZeroMsm<C>, bases: &[C::AffineExt], live: usize| {
+            let mut scalars = vec![C::ScalarExt::ZERO; TERMS];
+            for slot in 0..live {
+                // 37 is coprime to 128, so every selected row is distinct
+                // and the live rows are interleaved across the whole table.
+                let index = slot * 37 % TERMS;
+                scalars[index] = dense[index];
+            }
+            let expected = scalars
+                .iter()
+                .zip(bases)
+                .fold(C::identity(), |sum, (&scalar, &base)| {
+                    sum + C::from(base) * scalar
+                })
+                + extra_sum;
+            for workers in [1, MAX_TEST_WORKERS] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .expect("test thread pool must build")
+                    .install(|| {
+                        assert_eq!(
+                            prepared.multiexp_with_terms_vartime(&scalars, &extras),
+                            expected,
+                            "{live} live rows at {workers} workers"
+                        );
+                        let split = TERMS / 3;
+                        assert_eq!(
+                            crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
+                                prepared,
+                                &scalars[..split],
+                                &scalars[split..],
+                                &extras,
+                            ),
+                            expected,
+                            "split input with {live} live rows at {workers} workers"
+                        );
+                    });
+            }
+        };
+
+        for live in [0, 1, TERMS / 2, TERMS / 2 + 1] {
+            check(&independent, &independent_bases, live);
+        }
+
+        let (_, related_bases, _) = super::super::testutil::verifier_multiexp_inputs::<C>(TERMS);
+        let related =
+            PreparedZeroMsm::<C>::prepare_with_mode(&related_bases, CodebookMode::alpha_only(6));
+        assert!(!related.merges.is_empty());
+        assert!(related.live.iter().any(|live| !live));
+        check(&related, &related_bases, TERMS / 3);
     }
 
     /// A live scalar range evaluates only its matching contiguous bases.
@@ -2321,6 +2515,11 @@ mod tests {
                 fn generic_agreement() {
                     matches_generic_msm::<$curve>();
                 }
+                #[cfg(feature = "multicore")]
+                #[test]
+                fn compact_rows() {
+                    compact_rows_match_generic_msm::<$curve>();
+                }
                 #[test]
                 fn base_offset_range() {
                     base_offset_range_matches_full_msm::<$curve>();
@@ -2446,9 +2645,7 @@ mod tests {
                         );
                         lap(&mut phases[4]); // coefficient integration
                     }
-                    let tail = prepared
-                        .tail_sum(&recoded.residuals, 1)
-                        .expect("valid points");
+                    let tail = prepared.tail_sum(&recoded, 1).expect("valid points");
                     lap(&mut phases[5]); // tail MSM
                     let window_bits = prepared.codebook.window_bits();
                     let main_windows = prepared.codebook.main_windows();
@@ -2598,9 +2795,7 @@ mod tests {
                             })
                             .expect("valid points");
                         wall += start.elapsed().as_secs_f64() * 1e3;
-                        let mut tail = prepared
-                            .tail_sum(&recoded.residuals, threads)
-                            .expect("valid points");
+                        let mut tail = prepared.tail_sum(&recoded, threads).expect("valid points");
                         if !bool::from(tail.is_identity()) {
                             for _ in 0..window_bits * prepared.codebook.main_windows() {
                                 tail = tail.double();
