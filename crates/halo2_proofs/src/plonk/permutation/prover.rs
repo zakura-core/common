@@ -43,6 +43,7 @@ struct SetBlinding<F: Field> {
 struct PreparedFractions<F: Field> {
     fractions: FractionValues<F>,
     blinding: SetBlinding<F>,
+    sparse_set_index: Option<usize>,
 }
 
 enum FractionValues<F: Field> {
@@ -51,6 +52,19 @@ enum FractionValues<F: Field> {
         denominators: Vec<F>,
     },
     Sparse(SparseFractions<F>),
+}
+
+impl<F: Field> FractionValues<F> {
+    fn prepared_difference_set_index(&self, set_index: usize) -> Option<usize> {
+        match self {
+            // A cancelled identity-cell zero creates an additional product
+            // transition after its row. Keygen's prepared bases only cover
+            // transitions after active rows, so retain the generic commitment
+            // for this exceptional challenge instead of omitting that term.
+            Self::Sparse(fractions) if fractions.first_cancelled_zero.is_none() => Some(set_index),
+            Self::Dense { .. } | Self::Sparse(_) => None,
+        }
+    }
 }
 
 struct SparseFractions<F: Field> {
@@ -290,8 +304,9 @@ impl Argument {
             .zip(pkey.permutations.chunks(chunk_len))
             .zip(pkey.identity_cells.chunks(chunk_len))
             .zip(pkey.identity_columns.chunks(chunk_len))
+            .enumerate()
             .map(
-                |(((columns, permutations), identity_cells), identity_columns)| {
+                |(set_index, (((columns, permutations), identity_cells), identity_columns))| {
                     let initial_deltaomega = deltaomega;
                     for _ in columns {
                         deltaomega *= &C::Scalar::DELTA;
@@ -302,6 +317,7 @@ impl Argument {
                         identity_cells,
                         initial_deltaomega,
                         identity_columns.iter().all(|&identity| identity),
+                        set_index,
                     )
                 },
             )
@@ -314,7 +330,14 @@ impl Argument {
             .into_par_iter()
             .zip(blinding.sets.into_par_iter())
             .map(|(set, blinding)| {
-                let (columns, permutations, identity_cells, initial_deltaomega, is_identity) = set;
+                let (
+                    columns,
+                    permutations,
+                    identity_cells,
+                    initial_deltaomega,
+                    is_identity,
+                    set_index,
+                ) = set;
                 if is_identity && blinding_factors <= MAX_DIRECT_TRANSFORM_TAIL_LEN {
                     return PreparedProduct::Identity(blinding);
                 }
@@ -332,9 +355,13 @@ impl Argument {
                     initial_deltaomega,
                     blinding_factors,
                 );
+                // Retain the set identity so the single-circuit path can use
+                // the same prepared difference bases as the batch path.
+                let sparse_set_index = fractions.prepared_difference_set_index(set_index);
                 PreparedProduct::Fractions(PreparedFractions {
                     fractions,
                     blinding,
+                    sparse_set_index,
                 })
             })
             .collect::<Vec<_>>();
@@ -347,7 +374,7 @@ impl Argument {
             .map(|prepared| match prepared {
                 PreparedProduct::Fractions(prepared) => {
                     let blinding = prepared.blinding;
-                    UnpreparedSet::Dense(build_product::<C>(
+                    let set = build_product::<C>(
                         domain,
                         blinding_factors,
                         &mut last_z,
@@ -356,7 +383,12 @@ impl Argument {
                             rows.copy_from_slice(&blinding.rows);
                             blinding.product_blind
                         },
-                    ))
+                    );
+                    if let Some(set_index) = prepared.sparse_set_index {
+                        UnpreparedSet::Scheduled { set, set_index }
+                    } else {
+                        UnpreparedSet::Dense(set)
+                    }
                 }
                 PreparedProduct::Identity(blinding) => UnpreparedSet::Identity {
                     constant: last_z,
@@ -367,15 +399,7 @@ impl Argument {
 
         let sets = products
             .into_par_iter()
-            .map(|set| match set {
-                UnpreparedSet::Dense(set) => prepare_product(params, pk, set),
-                UnpreparedSet::Scheduled { .. } => {
-                    unreachable!("the single-circuit path does not use a shared schedule")
-                }
-                UnpreparedSet::Identity { constant, blinding } => {
-                    prepare_identity_product(params, pk, constant, blinding)
-                }
-            })
+            .map(|set| prepare_unprepared_set(params, pk, pkey, set))
             .collect();
 
         Prepared { sets }
@@ -2032,8 +2056,8 @@ mod constant_prefix_tests {
 #[cfg(all(test, feature = "multicore"))]
 mod tests {
     use super::{
-        IdentityCells, PermutationFactor, permutation_chunk_len, permutation_fraction_row,
-        sparse_prefix_products,
+        FractionValues, IdentityCells, PermutationFactor, SparseFractions, permutation_chunk_len,
+        permutation_fraction_row, sparse_prefix_products,
     };
     use crate::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
@@ -2161,6 +2185,23 @@ mod tests {
             rows[zero_row][0].value = -(beta_deltaomega + gamma);
             assert_sparse_matches_dense(&rows);
         }
+    }
+
+    #[test]
+    fn cancelled_common_zero_disables_prepared_difference_commitment() {
+        let sparse = |first_cancelled_zero| {
+            FractionValues::Sparse(SparseFractions::<Fp> {
+                rows: vec![],
+                numerators: vec![],
+                denominators: vec![],
+                first_cancelled_zero,
+                fraction_rows: 3,
+                domain_size: 5,
+            })
+        };
+
+        assert_eq!(sparse(None).prepared_difference_set_index(7), Some(7));
+        assert_eq!(sparse(Some(1)).prepared_difference_set_index(7), None,);
     }
 
     #[test]
