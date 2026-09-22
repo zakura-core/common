@@ -15,7 +15,7 @@ internal implementation details are not tracked here.
 ### Removed
 
 - Removed the obsolete `zip-233` Cargo feature and its V6 transaction-field encoding. V6 headers remain 20 bytes when `zcash_unstable="nu7"` is enabled ([#458](https://github.com/zakura-core/common/pull/458)).
-- Removed the gated `TxVersion::has_zip233`, `TransactionData::zip233_amount`, and `Builder::set_zip233_amount` APIs, plus the amount arguments on `TransactionData::from_parts`, `TransactionData::from_parts_v6`, and `TransactionDigest::digest_header`. Consumers of the old opt-in API must remove those calls and arguments ([#458](https://github.com/zakura-core/common/pull/458)).
+- Removed the gated ZIP 233 APIs and constructor arguments from V6 and NU7. The corresponding V7 APIs remain available when `zcash_unstable="nutachyon"` is enabled ([#458](https://github.com/zakura-core/common/pull/458)).
 
 ## [1.0.1] - 2026-08-29
 

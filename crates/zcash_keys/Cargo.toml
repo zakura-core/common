@@ -40,7 +40,7 @@ subtle = { version = "2.2.3", default-features = false }
 transparent = { version = "0.10.0", default-features = false, package = "zcash_transparent" }
 zcash_address = { version = "0.13.0", default-features = false }
 zcash_encoding = { version = "0.4", default-features = false }
-zcash_protocol = { version = "0.10.2", default-features = false }
+zcash_protocol = { version = "0.10.6", default-features = false }
 zeroize = { version = "1.7", optional = true, default-features = false }
 zip32 = { version = "0.2", default-features = false }
 

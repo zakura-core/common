@@ -97,6 +97,7 @@ reddsa = { package = "zakura-reddsa", version = "1.3.0-alpha.1", path = "crates/
 redjubjub = { package = "zakura-redjubjub", version = "1.3.0-alpha.1", path = "crates/redjubjub", default-features = false }
 sapling = { package = "zakura-sapling-crypto", version = "1.3.0-alpha.1", path = "crates/sapling-crypto", default-features = false }
 sinsemilla = { package = "zakura-sinsemilla", version = "1.3.0-alpha.1", path = "crates/sinsemilla", default-features = false }
+zcash_history = { package = "zakura-history", version = "1.0.0", path = "crates/zcash_history", default-features = false }
 zcash_keys = { package = "zakura-keys", version = "1.3.0-alpha.1", path = "crates/zcash_keys", default-features = false }
 zcash_primitives = { package = "zakura-primitives", version = "1.3.0-alpha.1", path = "crates/zcash_primitives", default-features = false }
 zcash_proofs = { package = "zakura-proofs", version = "1.3.0-alpha.1", path = "crates/zcash_proofs", default-features = false }

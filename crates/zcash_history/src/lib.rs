@@ -1,0 +1,92 @@
+//! To be used in Zebra. Originally also consumed by zcashd via FFI bindings,
+//! which reached End-of-Support in July 2026.
+
+#![no_std]
+// Catch documentation errors caused by code changes.
+#![deny(rustdoc::broken_intra_doc_links)]
+#![warn(missing_docs)]
+
+#[macro_use]
+extern crate alloc;
+
+mod entry;
+mod node_data;
+mod tree;
+mod version;
+
+#[cfg(test)]
+mod test_vectors;
+
+pub use entry::{Entry, MAX_ENTRY_SIZE};
+#[cfg(zcash_unstable = "nutachyon")]
+pub use node_data::V4 as NodeDataV4;
+pub use node_data::{MAX_NODE_DATA_SIZE, NodeData, V2 as NodeDataV2, V3 as NodeDataV3};
+pub use tree::Tree;
+#[cfg(zcash_unstable = "nutachyon")]
+pub use version::V4;
+pub use version::{V1, V2, V3, Version};
+
+/// Crate-level error type
+#[derive(Debug)]
+pub enum Error {
+    /// Entry expected to be presented in the tree view while it was not.
+    ExpectedInMemory(EntryLink),
+    /// Entry expected to be a node (specifying for which link this is not true).
+    ExpectedNode(Option<EntryLink>),
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::ExpectedInMemory(l) => write!(f, "Node/leaf expected to be in memory: {l}"),
+            Self::ExpectedNode(None) => write!(f, "Node expected"),
+            Self::ExpectedNode(Some(l)) => write!(f, "Node expected, not leaf: {l}"),
+        }
+    }
+}
+
+/// Reference to the tree node.
+#[derive(Clone, Copy, Debug)]
+pub enum EntryLink {
+    /// Reference to the stored (in the array representation) leaf/node.
+    Stored(u32),
+    /// Reference to the generated leaf/node.
+    Generated(u32),
+}
+
+impl core::fmt::Display for EntryLink {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Stored(v) => write!(f, "stored({v})"),
+            Self::Generated(v) => write!(f, "generated({v})"),
+        }
+    }
+}
+
+/// MMR Node. It is leaf when `left`, `right` are `None` and node when they are not.
+#[derive(Debug)]
+pub enum EntryKind {
+    /// Leaf entry.
+    Leaf,
+    /// Node entry with children links.
+    Node(EntryLink, EntryLink),
+}
+
+impl Error {
+    /// Entry expected to be a node (specifying for which link this is not true).
+    pub fn link_node_expected(link: EntryLink) -> Self {
+        Self::ExpectedNode(Some(link))
+    }
+
+    /// Some entry is expected to be node
+    pub fn node_expected() -> Self {
+        Self::ExpectedNode(None)
+    }
+
+    pub(crate) fn augment(self, link: EntryLink) -> Self {
+        match self {
+            Error::ExpectedNode(_) => Error::ExpectedNode(Some(link)),
+            val => val,
+        }
+    }
+}

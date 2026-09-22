@@ -21,6 +21,9 @@ use super::{
     Authorization, Authorized, TransactionDigest, TransparentDigests, TxDigests, TxId, TxVersion,
 };
 
+#[cfg(zcash_unstable = "nutachyon")]
+use zcash_protocol::value::Zatoshis;
+
 /// TxId tree root personalization
 const ZCASH_TX_PERSONALIZATION_PREFIX: &[u8; 12] = b"ZcashTxHash_";
 
@@ -56,6 +59,8 @@ fn sapling_spends_noncompact_personalization(version: TxVersion) -> &'static [u8
             ZCASH_SAPLING_SPENDS_NONCOMPACT_HASH_PERSONALIZATION
         }
         TxVersion::V6 => ZCASH_SAPLING_SPENDS_V6_NONCOMPACT_HASH_PERSONALIZATION,
+        #[cfg(zcash_unstable = "nutachyon")]
+        TxVersion::V7 => ZCASH_SAPLING_SPENDS_V6_NONCOMPACT_HASH_PERSONALIZATION,
     }
 }
 
@@ -65,6 +70,8 @@ fn sapling_auth_personalization(version: TxVersion) -> &'static [u8; 16] {
             ZCASH_SAPLING_SIGS_HASH_PERSONALIZATION
         }
         TxVersion::V6 => ZCASH_SAPLING_V6_SIGS_HASH_PERSONALIZATION,
+        #[cfg(zcash_unstable = "nutachyon")]
+        TxVersion::V7 => ZCASH_SAPLING_V6_SIGS_HASH_PERSONALIZATION,
     }
 }
 
@@ -72,6 +79,8 @@ fn sapling_auth_includes_anchor(version: TxVersion) -> bool {
     match version {
         TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 | TxVersion::V5 => false,
         TxVersion::V6 => true,
+        #[cfg(zcash_unstable = "nutachyon")]
+        TxVersion::V7 => true,
     }
 }
 
@@ -86,6 +95,8 @@ fn orchard_commitment_domain(version: TxVersion) -> (ValuePool, OrchardTxVersion
             (ValuePool::Orchard, OrchardTxVersion::V5)
         }
         TxVersion::V6 => (ValuePool::Orchard, OrchardTxVersion::V6),
+        #[cfg(zcash_unstable = "nutachyon")]
+        TxVersion::V7 => (ValuePool::Orchard, OrchardTxVersion::V6),
     }
 }
 
@@ -162,6 +173,8 @@ pub(crate) fn hash_sapling_spends<A: sapling::bundle::Authorization>(
             let write_anchor = match version {
                 TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 | TxVersion::V5 => true,
                 TxVersion::V6 => false,
+                #[cfg(zcash_unstable = "nutachyon")]
+                TxVersion::V7 => false,
             };
             if write_anchor {
                 nh.write_all(&s_spend.anchor().to_repr()).unwrap();
@@ -229,6 +242,7 @@ fn hash_header_txid_data(
     consensus_branch_id: BranchId,
     lock_time: u32,
     expiry_height: BlockHeight,
+    #[cfg(zcash_unstable = "nutachyon")] zip233_amount: &Zatoshis,
 ) -> Blake2bHash {
     let mut h = hasher(ZCASH_HEADERS_HASH_PERSONALIZATION);
 
@@ -237,6 +251,12 @@ fn hash_header_txid_data(
     h.write_u32_le(consensus_branch_id.into()).unwrap();
     h.write_u32_le(lock_time).unwrap();
     h.write_u32_le(expiry_height.into()).unwrap();
+
+    // TODO: Factor this out into a separate txid computation when implementing ZIP 246 in full.
+    #[cfg(zcash_unstable = "nutachyon")]
+    if version.has_zip233() {
+        h.write_u64_le((*zip233_amount).into()).unwrap();
+    }
 
     h.finalize()
 }
@@ -294,6 +314,8 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
     type SaplingDigest = Option<Blake2bHash>;
     type OrchardDigest = Option<Blake2bHash>;
     type IronwoodDigest = Option<Blake2bHash>;
+    #[cfg(zcash_unstable = "nutachyon")]
+    type TachyonDigest = [u8; 32];
 
     type Digest = TxDigests<Blake2bHash>;
 
@@ -303,8 +325,16 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         consensus_branch_id: BranchId,
         lock_time: u32,
         expiry_height: BlockHeight,
+        #[cfg(zcash_unstable = "nutachyon")] zip233_amount: &Zatoshis,
     ) -> Self::HeaderDigest {
-        hash_header_txid_data(version, consensus_branch_id, lock_time, expiry_height)
+        hash_header_txid_data(
+            version,
+            consensus_branch_id,
+            lock_time,
+            expiry_height,
+            #[cfg(zcash_unstable = "nutachyon")]
+            zip233_amount,
+        )
     }
 
     fn digest_transparent(
@@ -347,6 +377,11 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         })
     }
 
+    #[cfg(zcash_unstable = "nutachyon")]
+    fn digest_tachyon(&self, tachyon_bundle: &zcash_tachyon::TachyonBundle) -> Self::TachyonDigest {
+        tachyon_bundle.commitment()
+    }
+
     fn combine(
         &self,
         header_digest: Self::HeaderDigest,
@@ -354,6 +389,7 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         sapling_digest: Self::SaplingDigest,
         orchard_digest: Self::OrchardDigest,
         ironwood_digest: Self::IronwoodDigest,
+        #[cfg(zcash_unstable = "nutachyon")] tachyon_digest: Self::TachyonDigest,
     ) -> Self::Digest {
         TxDigests {
             header_digest,
@@ -361,6 +397,8 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
             sapling_digest,
             orchard_digest,
             ironwood_digest,
+            #[cfg(zcash_unstable = "nutachyon")]
+            tachyon_digest,
         }
     }
 }
@@ -449,6 +487,57 @@ pub(crate) fn to_hash_v6(
     h.finalize()
 }
 
+/// Combines transaction component digests for a version 7 transaction.
+#[cfg(zcash_unstable = "nutachyon")]
+pub(crate) fn to_hash_v7(
+    consensus_branch_id: BranchId,
+    header_digest: Blake2bHash,
+    transparent_digest: Blake2bHash,
+    sapling_digest: Option<Blake2bHash>,
+    orchard_digest: Option<Blake2bHash>,
+    ironwood_digest: Option<Blake2bHash>,
+    tachyon_digest: [u8; 32],
+) -> Blake2bHash {
+    let mut personal = [0; 16];
+    personal[..12].copy_from_slice(ZCASH_TX_PERSONALIZATION_PREFIX);
+    (&mut personal[12..])
+        .write_u32_le(consensus_branch_id.into())
+        .unwrap();
+
+    let mut h = hasher(&personal);
+    h.write_all(header_digest.as_bytes()).unwrap();
+    h.write_all(transparent_digest.as_bytes()).unwrap();
+    h.write_all(
+        sapling_digest
+            .unwrap_or_else(hash_sapling_txid_empty)
+            .as_bytes(),
+    )
+    .unwrap();
+    h.write_all(
+        orchard_digest
+            .unwrap_or_else(|| {
+                let (value_pool, tx_version) = orchard_commitment_domain(TxVersion::V7);
+                orchard::commitments::hash_bundle_txid_empty(value_pool, tx_version)
+                    .expect("empty Orchard bundle txid commitment is valid for its tx format")
+            })
+            .as_bytes(),
+    )
+    .unwrap();
+    h.write_all(
+        ironwood_digest
+            .unwrap_or_else(|| {
+                let (value_pool, tx_version) = ironwood_v6_domain();
+                orchard::commitments::hash_bundle_txid_empty(value_pool, tx_version)
+                    .expect("empty Ironwood bundle txid commitment is valid")
+            })
+            .as_bytes(),
+    )
+    .unwrap();
+    h.write_all(&tachyon_digest).unwrap();
+
+    h.finalize()
+}
+
 /// Combines transaction component digests into a transaction ID.
 ///
 /// Version 6 transactions include the Ironwood bundle digest as a separate
@@ -459,6 +548,20 @@ pub fn to_txid(
     consensus_branch_id: BranchId,
     digests: &TxDigests<Blake2bHash>,
 ) -> TxId {
+    #[cfg(zcash_unstable = "nutachyon")]
+    if txversion.has_tachyon() {
+        let txid_digest = to_hash_v7(
+            consensus_branch_id,
+            digests.header_digest,
+            hash_transparent_txid_data(digests.transparent_digests.as_ref()),
+            digests.sapling_digest,
+            digests.orchard_digest,
+            digests.ironwood_digest,
+            digests.tachyon_digest,
+        );
+        return TxId::from_bytes(<[u8; 32]>::try_from(txid_digest.as_bytes()).unwrap());
+    }
+
     let txid_digest = if txversion.has_ironwood() {
         to_hash_v6(
             consensus_branch_id,
@@ -497,6 +600,8 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
     type SaplingDigest = Blake2bHash;
     type OrchardDigest = Blake2bHash;
     type IronwoodDigest = Blake2bHash;
+    #[cfg(zcash_unstable = "nutachyon")]
+    type TachyonDigest = [u8; 32];
 
     type Digest = Blake2bHash;
 
@@ -506,6 +611,7 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         consensus_branch_id: BranchId,
         _lock_time: u32,
         _expiry_height: BlockHeight,
+        #[cfg(zcash_unstable = "nutachyon")] _zip233_amount: &Zatoshis,
     ) -> Self::HeaderDigest {
         (_version, consensus_branch_id)
     }
@@ -591,6 +697,11 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         )
     }
 
+    #[cfg(zcash_unstable = "nutachyon")]
+    fn digest_tachyon(&self, tachyon_bundle: &zcash_tachyon::TachyonBundle) -> Self::TachyonDigest {
+        tachyon_bundle.auth_digest()
+    }
+
     fn combine(
         &self,
         tx_context: Self::HeaderDigest,
@@ -598,6 +709,7 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         sapling_digest: Self::SaplingDigest,
         orchard_digest: Self::OrchardDigest,
         ironwood_digest: Self::IronwoodDigest,
+        #[cfg(zcash_unstable = "nutachyon")] tachyon_digest: Self::TachyonDigest,
     ) -> Self::Digest {
         let (_txversion, consensus_branch_id) = tx_context;
         let mut personal = [0; 16];
@@ -613,6 +725,11 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
 
         if _txversion.has_ironwood() {
             h.write_all(ironwood_digest.as_bytes()).unwrap();
+        }
+
+        #[cfg(zcash_unstable = "nutachyon")]
+        if _txversion.has_tachyon() {
+            h.write_all(&tachyon_digest).unwrap();
         }
 
         h.finalize()
