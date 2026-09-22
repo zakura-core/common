@@ -17,6 +17,7 @@ use group::Curve;
 use pasta_curves::{deferred::DeferredField, pallas, vesta};
 use rand_core::Rng;
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::io;
 use std::marker::PhantomData;
@@ -782,6 +783,92 @@ fn fold_polynomials<F: Field>(
     accumulator
 }
 
+const PROVER_POINT_MASK_BITS: usize = usize::BITS as usize;
+
+struct ProverIntermediateSets<'a, C: CurveAffine> {
+    commitments: Vec<(PolynomialPointer<'a, C>, usize)>,
+    point_sets: Vec<Vec<C::Scalar>>,
+}
+
+enum ProverIntermediateSetsResult<'a, C: CurveAffine> {
+    Complete(Option<ProverIntermediateSets<'a, C>>),
+    TooManyPoints,
+}
+
+// The prover normally opens at a handful of challenge rotations. Represent
+// each commitment's point set inline, avoiding several tiny vectors and tree
+// nodes per commitment. Unusual callers with more points retain the generic
+// construction below.
+fn construct_prover_intermediate_sets<'a, C, I>(queries: I) -> ProverIntermediateSetsResult<'a, C>
+where
+    C: CurveAffine,
+    I: IntoIterator<Item = ProverQuery<'a, C>> + Clone,
+{
+    let query_capacity = queries.clone().into_iter().size_hint().0;
+    let mut points = Vec::with_capacity(query_capacity.min(PROVER_POINT_MASK_BITS));
+    let mut commitments = Vec::with_capacity(query_capacity);
+    let mut commitment_indices = HashMap::with_capacity(query_capacity);
+
+    for query in queries {
+        let point_index = if let Some(point_index) = points
+            .iter()
+            .position(|candidate| *candidate == query.point)
+        {
+            point_index
+        } else {
+            if points.len() == PROVER_POINT_MASK_BITS {
+                return ProverIntermediateSetsResult::TooManyPoints;
+            }
+            points.push(query.point);
+            points.len() - 1
+        };
+
+        let commitment = query.get_commitment();
+        let commitment_index = *commitment_indices.entry(commitment).or_insert_with(|| {
+            commitments.push((commitment, 0_usize));
+            commitments.len() - 1
+        });
+        let point_mask = 1_usize << point_index;
+        if commitments[commitment_index].1 & point_mask != 0 {
+            return ProverIntermediateSetsResult::Complete(None);
+        }
+        commitments[commitment_index].1 |= point_mask;
+    }
+
+    if commitments.is_empty() {
+        return ProverIntermediateSetsResult::Complete(None);
+    }
+
+    let mut point_masks = Vec::new();
+    for (_, point_mask) in &mut commitments {
+        let set_index = point_masks
+            .iter()
+            .position(|candidate| candidate == point_mask)
+            .unwrap_or_else(|| {
+                point_masks.push(*point_mask);
+                point_masks.len() - 1
+            });
+        *point_mask = set_index;
+    }
+    let point_sets = point_masks
+        .into_iter()
+        .map(|point_mask| {
+            points
+                .iter()
+                .enumerate()
+                .filter_map(|(point_index, point)| {
+                    ((point_mask >> point_index) & 1 == 1).then_some(*point)
+                })
+                .collect()
+        })
+        .collect();
+
+    ProverIntermediateSetsResult::Complete(Some(ProverIntermediateSets {
+        commitments,
+        point_sets,
+    }))
+}
+
 /// Create a multi-opening proof.
 ///
 /// # Errors
@@ -807,7 +894,25 @@ where
     let x_1: ChallengeX1<_> = transcript.squeeze_challenge_scalar();
     let x_2: ChallengeX2<_> = transcript.squeeze_challenge_scalar();
 
-    let (poly_map, point_sets) = construct_intermediate_sets(queries).ok_or_else(|| {
+    let intermediate_sets = match construct_prover_intermediate_sets(queries.clone()) {
+        ProverIntermediateSetsResult::Complete(intermediate_sets) => intermediate_sets,
+        ProverIntermediateSetsResult::TooManyPoints => {
+            construct_intermediate_sets(queries).map(|(commitments, point_sets)| {
+                let commitments = commitments
+                    .into_iter()
+                    .map(|data| (data.commitment, data.set_index))
+                    .collect();
+                ProverIntermediateSets {
+                    commitments,
+                    point_sets,
+                }
+            })
+        }
+    };
+    let ProverIntermediateSets {
+        commitments: poly_map,
+        point_sets,
+    } = intermediate_sets.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "queries iterator is empty or contains duplicate queries",
@@ -818,11 +923,10 @@ where
     // x_1 challenge.
     let mut polynomial_groups = vec![vec![]; point_sets.len()];
     let mut q_blinds = vec![Blind(C::Scalar::ZERO); point_sets.len()];
-    for commitment_data in poly_map {
-        let set_index = commitment_data.set_index;
-        polynomial_groups[set_index].push(commitment_data.commitment.poly);
+    for (commitment, set_index) in poly_map {
+        polynomial_groups[set_index].push(commitment.poly);
         q_blinds[set_index] *= *x_1;
-        q_blinds[set_index] += commitment_data.commitment.blind;
+        q_blinds[set_index] += commitment.blind;
     }
     let mut q_polys = collapse_polynomials(&polynomial_groups, *x_1);
     // Queried polynomials may be constructed in a domain smaller than the
@@ -935,15 +1039,17 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial, collapse_polynomials,
+        Blind, Coeff, MIN_PARALLEL_FIELD_OPERATIONS_PER_THREAD, Polynomial,
+        ProverIntermediateSetsResult, ProverQuery, collapse_polynomials,
         collapse_polynomials_blocked_inner_product, collapse_polynomials_horner,
+        construct_intermediate_sets, construct_prover_intermediate_sets,
         divide_by_vanishing_polynomial, evaluate_polynomials_with_side_work,
         finish_q_prime_evaluation, fold_polynomials, kate_division_in_place, power_vector,
         prepare_q_prime, prepare_q_prime_evaluation, vanishing_polynomial,
     };
     use crate::arithmetic::{eval_polynomial, kate_division};
     use ff::Field;
-    use pasta_curves::{Fp, Fq};
+    use pasta_curves::{EqAffine, Fp, Fq};
     use std::fmt::Debug;
     use std::marker::PhantomData;
 
@@ -1442,6 +1548,106 @@ mod tests {
                 check();
             }
         }
+    }
+
+    #[test]
+    fn prover_point_masks_match_generic_intermediate_sets() {
+        let polynomials = (0..4)
+            .map(|polynomial_index| {
+                Polynomial::from_coefficients(vec![Fp::from(polynomial_index + 1)])
+            })
+            .collect::<Vec<_>>();
+        let points = [Fp::from(5), Fp::from(7), Fp::from(11)];
+        let blind = Blind(Fp::from(13));
+        let queries = vec![
+            ProverQuery::<EqAffine> {
+                point: points[2],
+                poly: &polynomials[0],
+                blind,
+            },
+            ProverQuery {
+                point: points[0],
+                poly: &polynomials[0],
+                blind,
+            },
+            ProverQuery {
+                point: points[0],
+                poly: &polynomials[1],
+                blind,
+            },
+            ProverQuery {
+                point: points[2],
+                poly: &polynomials[1],
+                blind,
+            },
+            ProverQuery {
+                point: points[1],
+                poly: &polynomials[2],
+                blind,
+            },
+            ProverQuery {
+                point: points[1],
+                poly: &polynomials[3],
+                blind,
+            },
+            ProverQuery {
+                point: points[2],
+                poly: &polynomials[3],
+                blind,
+            },
+        ];
+
+        let (expected_commitments, expected_point_sets) =
+            construct_intermediate_sets(queries.clone()).unwrap();
+        let (actual_commitments, actual_point_sets) =
+            match construct_prover_intermediate_sets(queries) {
+                ProverIntermediateSetsResult::Complete(Some(intermediate_sets)) => {
+                    (intermediate_sets.commitments, intermediate_sets.point_sets)
+                }
+                _ => panic!("the supported query set is valid"),
+            };
+
+        assert_eq!(actual_point_sets, expected_point_sets);
+        assert_eq!(actual_commitments.len(), expected_commitments.len());
+        for ((actual_commitment, actual_set_index), expected) in
+            actual_commitments.iter().zip(expected_commitments)
+        {
+            assert!(*actual_commitment == expected.commitment);
+            assert_eq!(*actual_set_index, expected.set_index);
+        }
+    }
+
+    #[test]
+    fn prover_point_masks_reject_duplicates() {
+        let polynomial = Polynomial::from_coefficients(vec![Fp::ONE]);
+        let query = ProverQuery::<EqAffine> {
+            point: Fp::from(5),
+            poly: &polynomial,
+            blind: Blind(Fp::ZERO),
+        };
+
+        assert!(matches!(
+            construct_prover_intermediate_sets([query.clone(), query]),
+            ProverIntermediateSetsResult::Complete(None),
+        ));
+    }
+
+    #[test]
+    fn prover_point_masks_fall_back_above_mask_width() {
+        let polynomial = Polynomial::from_coefficients(vec![Fp::ONE]);
+        let queries = (0..=super::PROVER_POINT_MASK_BITS)
+            .map(|index| ProverQuery::<EqAffine> {
+                point: Fp::from(index as u64 + 1),
+                poly: &polynomial,
+                blind: Blind(Fp::ZERO),
+            })
+            .collect::<Vec<_>>();
+
+        assert!(construct_intermediate_sets(queries.clone()).is_some());
+        assert!(matches!(
+            construct_prover_intermediate_sets(queries),
+            ProverIntermediateSetsResult::TooManyPoints,
+        ));
     }
 
     #[test]
