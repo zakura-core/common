@@ -757,6 +757,26 @@ impl<F: Field> Argument<F> {
                     )
             })
     }
+
+    /// Returns the first theta-compressed table value when every table
+    /// expression is an unrotated fixed query.
+    fn fixed_table_q_0(
+        &self,
+        fixed_values: &[Polynomial<F, LagrangeCoeff>],
+        theta: F,
+    ) -> Option<F> {
+        self.table_expressions
+            .iter()
+            .try_fold(F::ZERO, |compressed, expression| {
+                let Expression::Fixed(query) = expression else {
+                    return None;
+                };
+                if query.rotation != Rotation::cur() {
+                    return None;
+                }
+                Some(compressed * theta + fixed_values.get(query.column_index)?[0])
+            })
+    }
 }
 
 /// Plans fixed-table sharing and allocates lookup sort workspace.
@@ -972,7 +992,8 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         instance_cosets: &[poly::AstLeaf<Ec, ExtendedLagrangeCoeff>],
         usable_rows: usize,
         build_quotient_asts: bool,
-        _table_kind: PreparedTableKind,
+        table_kind: PreparedTableKind,
+        sinsemilla_q_0: Option<F>,
         sort_scratch: Vec<PastaSortKey>,
     ) -> PreparedInput<F, Ec> {
         let unpermuted_expressions = self.input_expressions.iter().map(|expression| {
@@ -1042,7 +1063,15 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         // for both vectors.
         let mut sorted_values = Vec::with_capacity(compressed_expression.len());
         sorted_values.extend(compressed_expression.iter().take(usable_rows).copied());
-        let sort = sort_lookup_values_for_kind(&mut sorted_values, _table_kind, sort_scratch);
+        let mut sort_scratch = sort_scratch;
+        let sorted_q_0_count = sinsemilla_q_0.and_then(|q_0| {
+            try_sort_lookup_values_with_repeated_value(&mut sorted_values, &mut sort_scratch, q_0)
+        });
+        let sort = if sorted_q_0_count.is_some() {
+            SortedLookup::Keys(sort_scratch)
+        } else {
+            sort_lookup_values_for_kind(&mut sorted_values, table_kind, sort_scratch)
+        };
 
         PreparedInput {
             compressed_expression,
@@ -1539,6 +1568,18 @@ where
     assert_eq!(lookup_tasks.len(), input_sort_scratch.len());
 
     let usable_rows = params.n as usize - (pk.vk.cs.blinding_factors() + 1);
+    // Input and table preparation run independently. Derive the Sinsemilla
+    // table's q_0 directly from its three unrotated fixed values so input
+    // sorting can skip the repeated run without waiting for table sorting.
+    let table_q_0s = table_representatives
+        .iter()
+        .enumerate()
+        .map(|(group, &lookup_index)| {
+            (table_kinds[group] == PreparedTableKind::Sinsemilla)
+                .then(|| lookup_arguments[lookup_index].fixed_table_q_0(&pk.fixed_values, *theta))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
 
     // With one worker, direct table preparation avoids continuation overhead.
     if crate::multicore::current_num_threads() == 1 {
@@ -1578,6 +1619,7 @@ where
                     usable_rows,
                     build_quotient_asts,
                     table_kinds[table_groups[lookup_index]],
+                    table_q_0s[table_groups[lookup_index]],
                     sort_scratch,
                 );
                 lookup_arguments[lookup_index].finish_permuted(
@@ -1616,6 +1658,7 @@ where
         {
             let state = &table_states[table_groups[lookup_index]];
             let table_kind = table_kinds[table_groups[lookup_index]];
+            let table_q_0 = table_q_0s[table_groups[lookup_index]];
             let prepared = &prepared;
             scope.spawn(move |_| {
                 let input = lookup_arguments[lookup_index].prepare_input(
@@ -1631,6 +1674,7 @@ where
                     usable_rows,
                     build_quotient_asts,
                     table_kind,
+                    table_q_0,
                     sort_scratch,
                 );
 
@@ -3964,6 +4008,30 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn derives_unrotated_fixed_table_q_0() {
+        let domain = EvaluationDomain::<pallas::Scalar>::new(1, 2);
+        let fixed_values = [2, 3, 7]
+            .map(|first| {
+                domain.lagrange_from_vec(vec![
+                    pallas::Scalar::from(first),
+                    pallas::Scalar::from(101),
+                    pallas::Scalar::from(102),
+                    pallas::Scalar::from(103),
+                ])
+            })
+            .to_vec();
+        let theta = pallas::Scalar::from(5);
+        let table = lookup_with_table(&[(1, 0, 0), (2, 1, 0), (3, 2, 0)]);
+        assert_eq!(
+            table.fixed_table_q_0(&fixed_values, theta),
+            Some(pallas::Scalar::from(72)),
+        );
+
+        let rotated = lookup_with_table(&[(1, 0, 0), (2, 1, 1), (3, 2, 0)]);
+        assert_eq!(rotated.fixed_table_q_0(&fixed_values, theta), None);
     }
 
     #[test]
