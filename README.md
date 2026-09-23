@@ -65,6 +65,14 @@ feature removals explicitly recorded in the permanent
 compatibility failures block CI. See the [SemVer policy](docs/semver-policy.md)
 for enforcement details and local checks.
 
+## Acknowledgements
+
+The AArch64 and x86-64 assembly field arithmetic in
+[`zakura-pasta-curves`](crates/pasta_curves) is derived from
+[Semolina](https://github.com/supranational/semolina) by
+[Supranational](https://supranational.net/). Thank you to Supranational for
+publishing this work.
+
 ## License
 
 All code in this repository is licensed under either of
