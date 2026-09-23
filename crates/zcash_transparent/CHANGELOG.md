@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-23
+
+### Added
+
+- Added the `zakura-transparent` package as a source-compatible fork of
+  `zcash_transparent 0.10.0`, preserving the `zcash_transparent` library target
+  and public API ([#471](https://github.com/zakura-core/common/pull/471)).
+
 ### Changed
 
 - Renamed the package from `zcash_transparent` to `zakura-transparent`; the

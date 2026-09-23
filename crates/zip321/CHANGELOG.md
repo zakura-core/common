@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-23
+
+### Added
+
+- Added the `zakura-zip321` package as a source-compatible fork of
+  `zip321 0.9.0`, preserving the `zip321` library target and public API
+  ([#471](https://github.com/zakura-core/common/pull/471)).
+
 ### Changed
 
 - Renamed the package from `zip321` to `zakura-zip321`; the library target
