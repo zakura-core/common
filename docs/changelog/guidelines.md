@@ -99,10 +99,11 @@ new version section in each affected crate's changelog. Crates with no entries
 for the release are left untouched. Review and commit the generated changelogs
 and fragment deletions.
 
-Release candidates get temporary version sections. When the matching stable
-version is assembled, the tool combines those sections from oldest to newest
-with any later unreleased entries, removes the release-candidate sections, and
-creates one stable section per crate.
+Pre-releases (`X.Y.Z-alpha.N`, `X.Y.Z-beta.N`, `X.Y.Z-rc.N`) get temporary
+version sections. When the matching stable version is assembled, the tool
+combines those sections from oldest to newest with any later unreleased
+entries, removes the pre-release sections, and creates one stable section per
+crate.
 
 `./scripts/changelog.py release vX.Y.Z --check` fails if fragments remain or
 the assembled changelogs were not committed; release PRs must contain no

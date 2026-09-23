@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-23
+
+### Changed
+
+- Sped up Sapling batch signature verification by about 14–17% for batches
+  of 8–64 signatures ([#481](https://github.com/zakura-core/common/pull/481)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

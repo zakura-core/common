@@ -8,7 +8,7 @@ description: >-
 
 # Release the Zakura Common libraries
 
-The 17 crates version in lockstep from `[workspace.package]` in the root
+The 21 crates version in lockstep from `[workspace.package]` in the root
 `Cargo.toml`. Changelog policy is canonical in `docs/changelog/guidelines.md`;
 this skill adds the mechanics that are easy to miss.
 
@@ -24,7 +24,7 @@ this skill adds the mechanics that are easy to miss.
 2. The intra-workspace `version = "..."` requirements in
    `[workspace.dependencies]` (same file, one place).
 3. `cargo metadata --locked` must still succeed and `Cargo.lock` should show
-   only the 17 member version lines changing.
+   only the 21 member version lines changing.
 
 ## Changelog assembly
 
@@ -36,8 +36,9 @@ After the version bump, on the release branch:
 
 This folds every pending `docs/changelog/unreleased/<PR>.md` fragment into the
 matching crates' `CHANGELOG.md` version sections and deletes the fragments;
-when assembling a stable `X.Y.Z` it also collapses any `X.Y.Z-rc*` sections
-into the stable section. Review and commit the result. The gate form is:
+when assembling a stable `X.Y.Z` it also collapses any pre-release sections
+(`X.Y.Z-alpha.N`, `X.Y.Z-beta.N`, `X.Y.Z-rc.N`) into the stable section.
+Review and commit the result. The gate form is:
 
 ```sh
 ./scripts/changelog.py release vX.Y.Z --check
@@ -67,11 +68,12 @@ pending fragments instead of a PR-owned fragment.
 dependencies against crates.io, so a crate cannot even be packaged until its
 workspace dependencies are published at the new version. Publish bottom-up:
 
-1. `zakura-halo2-legacy-pdqsort`, `zakura-pairing`, `zakura-pasta-curves`
-2. `zakura-bls12-381`, `zakura-jubjub`
+1. `zakura-halo2-legacy-pdqsort`, `zakura-pairing`, `zakura-pasta-curves`,
+   `zakura-protocol`
+2. `zakura-bls12-381`, `zakura-jubjub`, `zakura-address`
 3. `zakura-bellman`, `zakura-reddsa`, `zakura-sinsemilla`,
    `zakura-halo2-poseidon`, then `zakura-halo2-proofs`,
-   `zakura-halo2-gadgets`
+   `zakura-halo2-gadgets`; `zakura-transparent`, `zakura-zip321`
 4. `zakura-redjubjub`, `zakura-sapling-crypto`, `zakura-orchard`
 5. `zakura-keys`, `zakura-primitives`, `zakura-proofs`
 

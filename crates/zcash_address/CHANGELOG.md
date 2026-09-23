@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-23
+
+### Added
+
+- Added the `zakura-address` package as a source-compatible fork of
+  `zcash_address 0.13.0`, preserving the `zcash_address` library target and
+  public API ([#471](https://github.com/zakura-core/common/pull/471)).
+
 ### Changed
 
 - Renamed the package from `zcash_address` to `zakura-address`; the library

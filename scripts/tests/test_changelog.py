@@ -57,6 +57,35 @@ CHANGELOG_WITH_CANDIDATES = """\
 """
 
 
+CHANGELOG_WITH_PRERELEASES = """\
+# Changelog
+
+## [Unreleased]
+
+## [1.3.0-rc.1] - 2026-07-22
+
+### Fixed
+
+- Candidate fix.
+
+## [1.3.0-alpha.1] - 2026-07-21
+
+### Added
+
+- Alpha feature.
+
+## [1.2.0] - 2026-07-20
+
+### Added
+
+- Previous stable feature.
+
+## Record of Fork
+
+`{name}` began as a fork.
+"""
+
+
 def seeded_changelog(name: str, unreleased: str = "", versions: str = "") -> str:
     return SEEDED_CHANGELOG.format(
         name=name, unreleased=unreleased, versions=versions
@@ -342,6 +371,26 @@ class ChangelogTests(unittest.TestCase):
         late_fix = alpha.index("Final fix")
         self.assertLess(early_fix, late_fix)
         self.assertTrue(added)
+
+    def test_stable_release_combines_alpha_and_candidate_prereleases(self):
+        self.member_changelog("alpha").write_text(
+            CHANGELOG_WITH_PRERELEASES.format(name="zakura-alpha")
+        )
+        self.write_fragment(
+            "126.md", "## zakura-alpha\n\n### Fixed\n\n- Final fix.\n"
+        )
+
+        writes, _ = changelog.release_plan(self.root, "v1.3.0", "2026-08-28")
+
+        alpha = writes[self.member_changelog("alpha")]
+        self.assertIn("## [1.3.0] - 2026-08-28", alpha)
+        self.assertNotIn("1.3.0-alpha", alpha)
+        self.assertNotIn("1.3.0-rc", alpha)
+        # Only pre-releases of 1.3.0 fold in; the earlier stable stays put.
+        self.assertIn("## [1.2.0] - 2026-07-20\n\n### Added\n\n- Previous stable", alpha)
+        self.assertIn("### Added\n\n- Alpha feature.\n\n### Fixed", alpha)
+        self.assertLess(alpha.index("Candidate fix"), alpha.index("Final fix"))
+        self.assertLess(alpha.index("## [1.3.0]"), alpha.index("## [1.2.0]"))
 
     def test_release_rejects_existing_version_with_new_entries(self):
         self.member_changelog("alpha").write_text(
