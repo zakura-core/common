@@ -10,11 +10,30 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-23
+
+### Added
+
+- Added the `zakura-protocol` package as a source-compatible fork of
+  `zcash_protocol 0.10.5`, preserving the `zcash_protocol` library target and
+  public API ([#471](https://github.com/zakura-core/common/pull/471)).
+- Exposed NU7 and consensus branch ID `0x77190AD9` without requiring the
+  `zcash_unstable="nu7"` configuration flag; predefined Mainnet and Testnet
+  parameters remain unscheduled
+  ([#474](https://github.com/zakura-core/common/pull/474),
+  [#492](https://github.com/zakura-core/common/pull/492)).
+
 ### Changed
 
 - Renamed the package from `zcash_protocol` to `zakura-protocol`; the library
   target keeps its original name, so existing `use` paths compile unchanged.
 - Raised the minimum supported Rust version from 1.88 to 1.91.
+
+### Fixed
+
+- Made local consensus epoch bounds follow the next configured activation,
+  including partial upgrade schedules
+  ([#474](https://github.com/zakura-core/common/pull/474)).
 
 ## Record of Fork
 

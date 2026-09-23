@@ -10,7 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [1.3.0-alpha.1] - 2026-09-18
+## [1.3.0] - 2026-09-23
 
 ### Added
 
@@ -137,8 +137,8 @@ internal implementation details are not tracked here.
   Lagrange suffix-sum bases during key generation. Incremental four-Action
   post-NU6.3 Orchard proving with six workers improved by 1.62% on Apple M4
   and 1.71% on AMD EPYC. On M4, key generation was unchanged within noise and
-  the retained key grew by about 120 KiB over PR 1. Proof bytes and public APIs
-  are unchanged
+  the retained key grew by about 120 KiB. Proof bytes and public APIs are
+  unchanged
   ([#437](https://github.com/zakura-core/common/pull/437)).
 - Reused dead lookup sort-key lanes for temporary row indices while building
   lookup permutations. This removes two temporary vector allocations and
@@ -186,9 +186,7 @@ internal implementation details are not tracked here.
   17.2 us (33%) on x86-64 Linux with assembly. With ten workers on M4, PLONK
   power-table construction improved by 6.2 us for one proof and 5.0 us for
   four proofs; with six workers on Linux, it improved by 15.9 us and 15.4 us,
-  respectively. Proofs, the proof system, and public APIs are unchanged. The
-  existing private power-vector helper is now `pub(crate)` so internal prover
-  phases can share it
+  respectively. Proofs, the proof system, and public APIs are unchanged
   ([#451](https://github.com/zakura-core/common/pull/451)).
 - Reduced prepared `k = 11` IPA generator-fold latency without increasing
   retained memory or proving-key preparation work. With ten workers on Apple
@@ -204,6 +202,28 @@ internal implementation details are not tracked here.
   and from 1.1286 ms to 1.0703 ms, respectively. Proof bytes, preparation,
   retained memory, and public APIs are unchanged
   ([#460](https://github.com/zakura-core/common/pull/460)).
+- Reduced the final multi-opening polynomial fold to one worker scope while
+  retaining the same per-coefficient Horner order. The standard five-addend,
+  2,048-coefficient fold fell from 39.653 us to 30.121 us with ten workers on
+  Apple M4, and from 40.120 us to 35.583 us with six workers and the x86-64
+  assembly field backend. Field arithmetic, allocations, transcript and proof
+  bytes, retained memory, and public APIs are unchanged
+  ([#461](https://github.com/zakura-core/common/pull/461)).
+- Reduced Sinsemilla table-preparation work by removing the repeated `q_0` run
+  before building and sorting Pasta keys, then inserting it at its canonical
+  sorted position. The focused serial kernel improved by 24.25 us on Apple M4
+  and 25.09 us on six-worker x86-64 Linux with the assembly field backend; the
+  enclosing lookup-permutation and full-proof measurements were noise-neutral.
+  Proof bytes, fallback behavior, retained memory, and public APIs are
+  unchanged
+  ([#467](https://github.com/zakura-core/common/pull/467)).
+- Reduced Sinsemilla input-preparation work by removing the repeated `q_0` run
+  before building and sorting Pasta keys, then inserting it at its canonical
+  sorted position. Across two inputs per Action, focused sorting work improved
+  by 40.6 us on Apple M4 and 56.0 us on six-worker x86-64 Linux with the
+  assembly field backend. Proof bytes, fallback behavior, retained memory, and
+  public APIs are unchanged
+  ([#478](https://github.com/zakura-core/common/pull/478)).
 
 ## [1.2.0] - 2026-09-08
 

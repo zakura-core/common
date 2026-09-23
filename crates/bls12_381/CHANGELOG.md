@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-23
+
+### Changed
+
+- Sped up base-field subtraction and pairing-based proof verification
+  ([#484](https://github.com/zakura-core/common/pull/484)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

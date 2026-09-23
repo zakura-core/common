@@ -10,6 +10,15 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-23
+
+### Changed
+
+- Replaced the `zcash_address 0.13`, `zcash_protocol 0.10`, and
+  `zcash_transparent 0.10` dependencies with `zakura-address`,
+  `zakura-protocol`, and `zakura-transparent` 1.3.0, whose types appear in
+  this crate's API ([#471](https://github.com/zakura-core/common/pull/471)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed
