@@ -191,12 +191,23 @@ impl<T: SigType> VerificationKey<T> {
             }
         };
 
-        // XXX rewrite as normal double scalar mul
         // Verify check is h * ( - s * B + R  + c * A) == 0
         //                 h * ( s * B - c * A - R) == 0
-        let sB = T::basepoint() * s;
-        let cA = self.point * c;
-        let check = sB - cA - r;
+        #[cfg(feature = "alloc")]
+        let check = {
+            use crate::scalar_mul::VartimeMultiscalarMul;
+
+            // Both scalars are public signature data, so variable time is safe.
+            T::Point::optional_multiscalar_mul([s, -c], [Some(T::basepoint()), Some(self.point)])
+                .unwrap()
+                - r
+        };
+        #[cfg(not(feature = "alloc"))]
+        let check = {
+            let sB = T::basepoint() * s;
+            let cA = self.point * c;
+            sB - cA - r
+        };
 
         if check.is_small_order().into() {
             Ok(())
