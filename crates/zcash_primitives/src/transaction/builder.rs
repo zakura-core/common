@@ -899,12 +899,8 @@ impl<P, U> Builder<P, U> {
         {
             // Ironwood is available only when the target version carries an Ironwood bundle
             // (V6) and the consensus branch is one in which Ironwood is active.
-            let ironwood_branch = match self.consensus_branch_id {
-                BranchId::Nu6_3 => true,
-                #[cfg(zcash_unstable = "nu7")]
-                BranchId::Nu7 => true,
-                _ => false,
-            };
+            let ironwood_branch =
+                matches!(self.consensus_branch_id, BranchId::Nu6_3 | BranchId::Nu7);
             let ironwood_available = version.has_ironwood() && ironwood_branch;
             if !ironwood_available && self.ironwood_in_use() {
                 return Err(Error::TargetIncompatible(
@@ -1936,12 +1932,11 @@ mod tests {
             nu6_1: Some(BlockHeight::from_u32(8)),
             nu6_2: Some(BlockHeight::from_u32(9)),
             nu6_3: Some(BlockHeight::from_u32(10)),
-            #[cfg(zcash_unstable = "nu7")]
             nu7: None,
         }
     }
 
-    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    #[cfg(feature = "circuits")]
     fn nu7_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
         use zcash_protocol::consensus::BlockHeight;
 
@@ -2020,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    #[cfg(feature = "circuits")]
     fn nu7_coinbase_builder_does_not_expose_orchard() {
         let builder = Builder::new(
             nu7_test_network(),
