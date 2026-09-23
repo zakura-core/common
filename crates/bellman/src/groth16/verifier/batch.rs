@@ -212,8 +212,9 @@ where
 
         let acc = self
             .items
-            // This chunk size was obtained heuristically.
-            .par_chunks(8)
+            // Give each proof an independent random weight and a separate
+            // parallel task.
+            .par_chunks(1)
             .map(|items| {
                 let mut acc = Accumulator::<E>::new(ic_len);
                 let mut ml_terms: Vec<(E::G1Affine, E::G2Prepared)> = vec![];
