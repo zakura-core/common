@@ -45,4 +45,5 @@ Run `./scripts/changelog.py check` to validate pending fragments. Release PRs
 run `./scripts/changelog.py release vX.Y.Z` after version bumps; that command
 folds each fragment's entries into the matching crate's `CHANGELOG.md` and
 deletes the consumed fragments. Stable assembly also combines and replaces all
-matching `X.Y.Z-rc*` sections with one `X.Y.Z` section.
+matching pre-release sections (`X.Y.Z-alpha.N`, `X.Y.Z-beta.N`, `X.Y.Z-rc.N`)
+with one `X.Y.Z` section.
