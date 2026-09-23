@@ -46,7 +46,7 @@ rand_chacha = "0.10"
 serde_json = "1.0"
 
 [features]
-alloc = ["hex"]
+alloc = ["hex", "jubjub/alloc"]
 default = ["std"]
 frost = ["frost-rerandomized", "rand_core_06", "alloc"]
 nightly = []
