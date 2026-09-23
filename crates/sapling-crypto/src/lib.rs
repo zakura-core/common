@@ -58,7 +58,7 @@ pub use tree::{
 };
 
 #[cfg(feature = "circuit")]
-pub use verifier::{BatchValidator, SaplingVerificationContext};
+pub use verifier::{BatchValidator, PreparedBatchVerifyingKeys, SaplingVerificationContext};
 
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]

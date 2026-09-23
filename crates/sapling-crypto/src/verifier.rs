@@ -12,7 +12,10 @@ mod single;
 pub use single::SaplingVerificationContext;
 
 mod batch;
-pub use batch::BatchValidator;
+pub use batch::{BatchValidator, PreparedBatchVerifyingKeys};
+
+const SPEND_PUBLIC_INPUT_COUNT: usize = 7;
+const OUTPUT_PUBLIC_INPUT_COUNT: usize = 5;
 
 /// A context object for verifying the Sapling components of a Zcash transaction.
 struct SaplingVerificationContextInner {
@@ -40,7 +43,11 @@ impl SaplingVerificationContextInner {
         zkproof: Proof<Bls12>,
         verifier_ctx: &mut C,
         spend_auth_sig_verifier: impl FnOnce(&mut C, &redjubjub::VerificationKey<SpendAuth>) -> bool,
-        proof_verifier: impl FnOnce(&mut C, Proof<Bls12>, [bls12_381::Scalar; 7]) -> bool,
+        proof_verifier: impl FnOnce(
+            &mut C,
+            Proof<Bls12>,
+            [bls12_381::Scalar; SPEND_PUBLIC_INPUT_COUNT],
+        ) -> bool,
     ) -> bool {
         // The "cv is not small order" happens when a SpendDescription is deserialized.
         // This happens when transactions or blocks are received over the network, or when
@@ -62,7 +69,7 @@ impl SaplingVerificationContextInner {
         }
 
         // Construct public input for circuit
-        let mut public_input = [bls12_381::Scalar::zero(); 7];
+        let mut public_input = [bls12_381::Scalar::zero(); SPEND_PUBLIC_INPUT_COUNT];
         {
             let affine = rk_affine;
             let (u, v) = (affine.get_u(), affine.get_v());
@@ -100,7 +107,10 @@ impl SaplingVerificationContextInner {
         cmu: ExtractedNoteCommitment,
         epk: jubjub::ExtendedPoint,
         zkproof: Proof<Bls12>,
-        proof_verifier: impl FnOnce(Proof<Bls12>, [bls12_381::Scalar; 5]) -> bool,
+        proof_verifier: impl FnOnce(
+            Proof<Bls12>,
+            [bls12_381::Scalar; OUTPUT_PUBLIC_INPUT_COUNT],
+        ) -> bool,
     ) -> bool {
         // The "cv is not small order" happens when an OutputDescription is deserialized.
         // This happens when transactions or blocks are received over the network, or when
@@ -113,7 +123,7 @@ impl SaplingVerificationContextInner {
         self.cv_sum -= cv;
 
         // Construct public input for circuit
-        let mut public_input = [bls12_381::Scalar::zero(); 5];
+        let mut public_input = [bls12_381::Scalar::zero(); OUTPUT_PUBLIC_INPUT_COUNT];
         {
             let affine = cv.as_inner().to_affine();
             let (u, v) = (affine.get_u(), affine.get_v());
