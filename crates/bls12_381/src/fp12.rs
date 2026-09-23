@@ -90,6 +90,9 @@ impl ConstantTimeEq for Fp12 {
 
 impl Fp12 {
     // Combine three Fp2 products with one reduction per Fp component.
+    // `sum_of_products` has six terms here. For canonical operands,
+    // 6p < R = 2^384, so its integrated Montgomery reduction produces
+    // a value below 2p and its one final subtraction is sufficient.
     #[inline]
     fn sum_of_three_fp2_products(a: &Fp2, b: &Fp2, c: &Fp2, d: &Fp2, e: &Fp2, f: &Fp2) -> Fp2 {
         Fp2 {
@@ -267,6 +270,39 @@ fn test_mul_by_014_matches_full_multiplication() {
 
         assert_eq!(f.mul_by_014(&c0, &c1, &c4), f * line);
     }
+
+    let near_modulus = Fp2 {
+        c0: -Fp::one(),
+        c1: -Fp::one(),
+    };
+    let f = Fp12 {
+        c0: Fp6 {
+            c0: near_modulus,
+            c1: near_modulus,
+            c2: near_modulus,
+        },
+        c1: Fp6 {
+            c0: near_modulus,
+            c1: near_modulus,
+            c2: near_modulus,
+        },
+    };
+    let line = Fp12 {
+        c0: Fp6 {
+            c0: near_modulus,
+            c1: near_modulus,
+            c2: Fp2::zero(),
+        },
+        c1: Fp6 {
+            c0: Fp2::zero(),
+            c1: near_modulus,
+            c2: Fp2::zero(),
+        },
+    };
+    assert_eq!(
+        f.mul_by_014(&near_modulus, &near_modulus, &near_modulus),
+        f * line,
+    );
 }
 
 impl<'a, 'b> Add<&'b Fp12> for &'a Fp12 {
