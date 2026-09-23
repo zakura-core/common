@@ -51,5 +51,10 @@ name = "batch"
 harness = false
 
 [[bench]]
+name = "prepared_batch"
+harness = false
+required-features = ["groth16"]
+
+[[bench]]
 name = "slow"
 harness = false
