@@ -23,8 +23,9 @@ use alloc::vec::Vec;
 use pairing::MultiMillerLoop;
 
 /// Represents results of a Miller loop, one of the most expensive portions
-/// of the pairing function. `MillerLoopResult`s cannot be compared with each
-/// other until `.final_exponentiation()` is called, which is also expensive.
+/// of the pairing function. [`MillerLoopResult`] values cannot be compared
+/// until [`MillerLoopResult::final_exponentiation`] is called, which is also
+/// expensive.
 #[cfg_attr(docsrs, doc(cfg(feature = "pairings")))]
 #[derive(Copy, Clone, Debug)]
 pub struct MillerLoopResult(pub(crate) Fp12);
