@@ -403,7 +403,7 @@ impl<E: Engine> Parameters<E> {
     }
 }
 
-const PUBLIC_INPUT_WINDOW: usize = 4;
+const PUBLIC_INPUT_WINDOW: usize = 5;
 
 pub struct PreparedVerifyingKey<E: MultiMillerLoop> {
     /// Pairing result of alpha*beta
