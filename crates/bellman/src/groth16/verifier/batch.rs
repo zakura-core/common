@@ -210,11 +210,23 @@ where
 
         let ic_len = vk.ic.len();
 
+        // Expose enough Miller-loop work to occupy the pool while retaining
+        // batching within each loop when parallelism is scarce.
+        const MAX_CHUNK_SIZE: usize = 8;
+        const CHUNKS_PER_THREAD: usize = 4;
+        let threads = rayon::current_num_threads();
+        let chunk_size = if threads == 1 {
+            MAX_CHUNK_SIZE
+        } else {
+            self.items
+                .len()
+                .div_ceil(threads.saturating_mul(CHUNKS_PER_THREAD))
+                .clamp(1, MAX_CHUNK_SIZE)
+        };
+
         let acc = self
             .items
-            // Give each proof an independent random weight and a separate
-            // parallel task.
-            .par_chunks(1)
+            .par_chunks(chunk_size)
             .map(|items| {
                 let mut acc = Accumulator::<E>::new(ic_len);
                 let mut ml_terms: Vec<(E::G1Affine, E::G2Prepared)> = vec![];
