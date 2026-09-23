@@ -2,6 +2,7 @@
 
 use rand::rng as thread_rng;
 
+use jubjub::AffinePoint;
 use reddsa::*;
 
 #[test]
@@ -98,4 +99,53 @@ fn bad_batch_verify() {
             assert!(item.verify_single().is_err());
         }
     }
+}
+
+#[test]
+fn malformed_batch_encodings_preserve_errors() {
+    let mut rng = thread_rng();
+    let sk = SigningKey::<sapling::SpendAuth>::new(&mut rng);
+    let vk_bytes = VerificationKey::from(&sk).into();
+    let msg = b"BatchVerifyTest";
+    let sig = sk.sign(&mut rng, msg);
+    let malformed_vk = VerificationKeyBytes::from([0xff; 32]);
+
+    let mut batch = batch::Verifier::<_, sapling::Binding>::new();
+    batch.queue(batch::Item::from_spendauth(malformed_vk, sig, msg));
+    assert_eq!(batch.verify(&mut rng), Err(Error::MalformedVerificationKey));
+
+    let mut sig_bytes: [u8; 64] = sig.into();
+    sig_bytes[..32].fill(0xff);
+    let mut batch = batch::Verifier::<_, sapling::Binding>::new();
+    batch.queue(batch::Item::from_spendauth(vk_bytes, sig_bytes.into(), msg));
+    assert_eq!(batch.verify(&mut rng), Err(Error::InvalidSignature));
+
+    sig_bytes[32..].fill(0xff);
+    let mut batch = batch::Verifier::<sapling::SpendAuth, sapling::Binding>::new();
+    batch.queue(batch::Item::from_spendauth(
+        malformed_vk,
+        sig_bytes.into(),
+        msg,
+    ));
+    assert_eq!(batch.verify(&mut rng), Err(Error::InvalidSignature));
+
+    let mut batch = batch::Verifier::<_, sapling::Binding>::new();
+    batch.queue(batch::Item::from_spendauth(malformed_vk, sig, msg));
+    batch.queue(batch::Item::from_spendauth(vk_bytes, sig_bytes.into(), msg));
+    assert_eq!(batch.verify(&mut rng), Err(Error::MalformedVerificationKey));
+}
+
+#[test]
+fn small_order_batch_key_is_accepted() {
+    let identity = AffinePoint::identity().to_bytes();
+    let mut sig_bytes = [0; 64];
+    sig_bytes[..32].copy_from_slice(&identity);
+
+    let mut batch = batch::Verifier::<sapling::SpendAuth, sapling::Binding>::new();
+    batch.queue(batch::Item::from_spendauth(
+        VerificationKeyBytes::from(identity),
+        Signature::from(sig_bytes),
+        b"BatchVerifyTest",
+    ));
+    assert_eq!(batch.verify(thread_rng()), Ok(()));
 }

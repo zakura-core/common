@@ -68,6 +68,22 @@ pub trait SpendAuth: SigType {}
 pub(crate) mod private {
     use super::*;
 
+    #[cfg(feature = "alloc")]
+    fn batch_decode_jubjub_points(
+        items: impl Iterator<Item = [u8; 32]>,
+    ) -> alloc::vec::Vec<Option<jubjub::ExtendedPoint>> {
+        jubjub::AffinePoint::batch_from_bytes(items)
+            .into_iter()
+            .map(|point| {
+                if bool::from(point.is_some()) {
+                    Some(point.unwrap().into())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub trait SealedScalar {
         fn from_bytes_wide(bytes: &[u8; 64]) -> Self;
         fn from_raw(val: [u64; 4]) -> Self;
@@ -97,6 +113,13 @@ pub(crate) mod private {
         type Point: group::cofactor::CofactorCurve<Scalar = Self::Scalar>;
 
         fn basepoint() -> T::Point;
+
+        #[cfg(feature = "alloc")]
+        fn batch_decode_points(
+            _items: impl Iterator<Item = [u8; 32]>,
+        ) -> Option<alloc::vec::Vec<Option<Self::Point>>> {
+            None
+        }
     }
     impl Sealed<sapling::Binding> for sapling::Binding {
         const H_STAR_PERSONALIZATION: &'static [u8; 16] = b"Zcash_RedJubjubH";
@@ -118,6 +141,13 @@ pub(crate) mod private {
             jubjub::AffinePoint::from_bytes(constants::SPENDAUTHSIG_BASEPOINT_BYTES)
                 .unwrap()
                 .into()
+        }
+
+        #[cfg(feature = "alloc")]
+        fn batch_decode_points(
+            items: impl Iterator<Item = [u8; 32]>,
+        ) -> Option<alloc::vec::Vec<Option<Self::Point>>> {
+            Some(batch_decode_jubjub_points(items))
         }
     }
 }
