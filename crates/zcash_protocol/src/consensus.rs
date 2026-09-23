@@ -733,6 +733,8 @@ pub enum BranchId {
 #[cfg(feature = "std")]
 memuse::impl_no_dynamic_usage!(BranchId);
 
+const NU7_BRANCH_ID: u32 = 0x7719_0ad9;
+
 impl TryFrom<u32> for BranchId {
     type Error = &'static str;
 
@@ -749,7 +751,7 @@ impl TryFrom<u32> for BranchId {
             0x4dec_4df0 => Ok(BranchId::Nu6_1),
             0x5437_f330 => Ok(BranchId::Nu6_2),
             0x37a5_165b => Ok(BranchId::Nu6_3),
-            0x7719_0ad8 => Ok(BranchId::Nu7),
+            NU7_BRANCH_ID => Ok(BranchId::Nu7),
             _ => Err("Unknown consensus branch ID"),
         }
     }
@@ -769,7 +771,7 @@ impl From<BranchId> for u32 {
             BranchId::Nu6_1 => 0x4dec_4df0,
             BranchId::Nu6_2 => 0x5437_f330,
             BranchId::Nu6_3 => 0x37a5_165b,
-            BranchId::Nu7 => 0x7719_0ad8,
+            BranchId::Nu7 => NU7_BRANCH_ID,
         }
     }
 }
@@ -1064,8 +1066,9 @@ mod tests {
     #[test]
     fn branch_id_from_u32() {
         assert_eq!(BranchId::try_from(0), Ok(BranchId::Sprout));
-        assert_eq!(BranchId::try_from(0x7719_0ad8), Ok(BranchId::Nu7));
-        assert_eq!(u32::from(BranchId::Nu7), 0x7719_0ad8);
+        assert_eq!(BranchId::try_from(0x7719_0ad9), Ok(BranchId::Nu7));
+        assert_eq!(u32::from(BranchId::Nu7), 0x7719_0ad9);
+        assert!(BranchId::try_from(0x7719_0ad8).is_err());
         assert!(BranchId::try_from(1).is_err());
     }
 
