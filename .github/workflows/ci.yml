@@ -118,9 +118,13 @@ jobs:
             crates/redjubjub
             crates/sapling-crypto
             crates/sinsemilla
+            crates/zcash_address
             crates/zcash_keys
             crates/zcash_primitives
+            crates/zcash_protocol
             crates/zcash_proofs
+            crates/zcash_transparent
+            crates/zip321
           )
           workspace_packages=$(python3 .github/scripts/workspace_packages.py)
           workspace_members=()
@@ -167,7 +171,7 @@ jobs:
               crates/sinsemilla/*)
                 sinsemilla=true
                 ;;
-              crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_proofs/*)
+              crates/zcash_address/*|crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_protocol/*|crates/zcash_proofs/*|crates/zcash_transparent/*|crates/zip321/*)
                 librustzcash=true
                 ;;
               Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|.github/scripts/check_rust_group.sh|.github/scripts/workspace_packages.py|.github/workflows/ci.yml|.github/workflows/maintenance.yml)
@@ -311,7 +315,7 @@ jobs:
         if: ${{ !cancelled() && needs.changes.outputs.librustzcash == 'true' }}
         run: >-
           bash .github/scripts/check_rust_group.sh
-          "zakura-keys zakura-primitives zakura-proofs" true false
+          "zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321" true false
 
   formatting:
     name: Formatting
@@ -1236,9 +1240,13 @@ jobs:
       - name: Run tests
         run: >-
           cargo +1.91.0 test
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
+          -p zakura-zip321
           --all-features
           -- --test-threads=2
       - name: Verify working directory is clean
@@ -1260,18 +1268,26 @@ jobs:
       - name: Check no-default-features
         run: >-
           cargo +1.91.0 check
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
       - name: Check transparent-inputs-only
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
           --features zakura-keys/transparent-inputs,zakura-primitives/transparent-inputs
@@ -1279,9 +1295,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
           --features zakura-keys/transparent-key-encoding
@@ -1289,9 +1309,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
           --features zakura-keys/sapling,zakura-primitives/circuits
@@ -1299,9 +1323,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
+          -p zakura-zip321
           --all-targets
           --no-default-features
           --features zakura-keys/orchard,zakura-primitives/circuits
@@ -1309,16 +1337,19 @@ jobs:
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.91.0 check
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
           --all-targets
           --all-features
       - name: Clippy each feature of each imported crate
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          for package in zakura-keys zakura-primitives zakura-proofs; do
+          for package in zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321; do
             cargo +1.91.0 metadata --no-deps --format-version 1 |
               jq -r --arg package "$package" \
                 '.packages[] | select(.name == $package) | .features | keys[]' |
@@ -1340,9 +1371,13 @@ jobs:
         continue-on-error: true
         run: >-
           cargo +beta clippy
+          -p zakura-address
           -p zakura-keys
           -p zakura-primitives
+          -p zakura-protocol
           -p zakura-proofs
+          -p zakura-transparent
+          -p zakura-zip321
           --no-deps
           --all-features
           --all-targets
@@ -1362,7 +1397,7 @@ jobs:
             packages: -p zakura-proofs
             build-deps: gcc-multilib
           - target: thumbv7em-none-eabihf
-            packages: -p zakura-keys -p zakura-primitives
+            packages: -p zakura-address -p zakura-keys -p zakura-primitives -p zakura-protocol -p zakura-transparent
             build-deps: gcc-arm-none-eabi
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
