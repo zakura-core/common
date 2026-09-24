@@ -155,20 +155,12 @@ fn compressed_square(f: CompressedCyclotomic) -> CompressedCyclotomic {
     }
 }
 
-fn invert_fp2_vartime(value: Fp2) -> Option<Fp2> {
-    let inverse = (value.c0.square() + value.c1.square()).invert_vartime()?;
-    Some(Fp2 {
-        c0: value.c0 * inverse,
-        c1: -(value.c1 * inverse),
-    })
-}
-
 fn invert_fp6_vartime(value: Fp6) -> Option<Fp6> {
     let c0 = value.c0.square() - (value.c1 * value.c2).mul_by_nonresidue();
     let c1 = value.c2.square().mul_by_nonresidue() - value.c0 * value.c1;
     let c2 = value.c1.square() - value.c0 * value.c2;
     let determinant = (value.c1 * c2 + value.c2 * c1).mul_by_nonresidue() + value.c0 * c0;
-    let inverse = invert_fp2_vartime(determinant)?;
+    let inverse = determinant.invert_vartime()?;
     Some(Fp6 {
         c0: inverse * c0,
         c1: inverse * c1,
@@ -213,12 +205,7 @@ fn decompress_pair(a: CompressedCyclotomic, b: CompressedCyclotomic) -> Option<(
     let den_b = b.g3 + b.g3 + b.g3 + b.g3;
     // Batch two Fp2 inversions into one Fp inversion. A zero denominator
     // makes the caller use the full cyclotomic exponentiation instead.
-    let product = den_a * den_b;
-    let scalar_inverse = (product.c0.square() + product.c1.square()).invert_vartime()?;
-    let inverse = Fp2 {
-        c0: product.c0 * scalar_inverse,
-        c1: -(product.c1 * scalar_inverse),
-    };
+    let inverse = (den_a * den_b).invert_vartime()?;
     let g4_a = numerator(a) * (den_b * inverse);
     let g4_b = numerator(b) * (den_a * inverse);
     Some((finish(a, g4_a), finish(b, g4_b)))
