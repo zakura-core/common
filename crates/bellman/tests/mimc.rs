@@ -393,6 +393,16 @@ fn joint_prepared_batch_verify() {
             .verify_joint_prepared(make_batch(&proof_b, image_b), &mut rng, &key_a, &key_b)
             .is_ok()
     );
+    assert!(
+        make_batch(&proof_a, image_a)
+            .verify_joint_prepared(batch::Verifier::new(), &mut rng, &key_a, &key_b)
+            .is_ok()
+    );
+    assert!(
+        batch::Verifier::<Bls12>::new()
+            .verify_joint_prepared(batch::Verifier::new(), &mut rng, &key_a, &key_b)
+            .is_ok()
+    );
 
     let mut malformed = batch::Verifier::new();
     malformed.queue((proof_b, vec![]));
