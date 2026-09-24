@@ -7,6 +7,8 @@
 //! * This implementation targets Rust `1.88` or later.
 //! * This implementation does not require the Rust standard library.
 //! * All operations are constant time unless explicitly noted.
+//! * Pairing, final exponentiation, and random target-group generation are
+//!   variable time.
 
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
