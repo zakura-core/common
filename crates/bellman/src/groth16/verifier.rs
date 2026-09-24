@@ -1,4 +1,4 @@
-use group::{Curve, CurveAffine};
+use group::CurveAffine;
 use pairing::{MillerLoopResult, MultiMillerLoop};
 use std::ops::{AddAssign, Neg};
 
@@ -43,10 +43,11 @@ pub fn verify_proof<'a, E: MultiMillerLoop>(
     // A * B + inputs * (-gamma) + C * (-delta) = alpha * beta
     // which allows us to do a single final exponentiation.
 
+    // `acc` depends only on the verifying key and public inputs.
     if pvk.alpha_g1_beta_g2
         == E::multi_miller_loop(&[
             (&proof.a, &proof.b.into()),
-            (&acc.to_affine(), &pvk.neg_gamma_g2),
+            (&E::g1_to_affine_vartime(&acc), &pvk.neg_gamma_g2),
             (&proof.c, &pvk.neg_delta_g2),
         ])
         .final_exponentiation()

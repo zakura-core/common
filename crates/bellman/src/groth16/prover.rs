@@ -3,7 +3,7 @@ use std::ops::{AddAssign, MulAssign};
 use std::sync::Arc;
 
 use ff::{Field, PrimeField, PrimeFieldBits};
-use group::{Curve, CurveAffine};
+use group::CurveAffine;
 use pairing::Engine;
 
 use super::{ParameterSource, Proof};
@@ -344,9 +344,11 @@ where
     AddAssign::<&E::G1>::add_assign(&mut g_c, &h.wait()?);
     AddAssign::<&E::G1>::add_assign(&mut g_c, &l.wait()?);
 
+    // These projective coordinates may depend on the witness and proof
+    // randomness. This prover permits coordinate-dependent conversion timing.
     Ok(Proof {
-        a: g_a.to_affine(),
-        b: g_b.to_affine(),
-        c: g_c.to_affine(),
+        a: E::g1_to_affine_vartime(&g_a),
+        b: E::g2_to_affine_vartime(&g_b),
+        c: E::g1_to_affine_vartime(&g_c),
     })
 }

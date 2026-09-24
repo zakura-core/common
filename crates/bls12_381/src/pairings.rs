@@ -40,11 +40,38 @@ impl ConditionallySelectable for MillerLoopResult {
     }
 }
 
+// These inversions are used only with public pairing inputs. Keep the
+// constant-time `invert` methods for callers that may hold secrets.
+fn invert_fp6_vartime(value: Fp6) -> Option<Fp6> {
+    let c0 = value.c0.square() - (value.c1 * value.c2).mul_by_nonresidue();
+    let c1 = value.c2.square().mul_by_nonresidue() - value.c0 * value.c1;
+    let c2 = value.c1.square() - value.c0 * value.c2;
+    let determinant = (value.c1 * c2 + value.c2 * c1).mul_by_nonresidue() + value.c0 * c0;
+    let inverse = determinant.invert_vartime()?;
+    Some(Fp6 {
+        c0: inverse * c0,
+        c1: inverse * c1,
+        c2: inverse * c2,
+    })
+}
+
+fn invert_fp12_vartime(value: Fp12) -> Option<Fp12> {
+    let determinant = value.c0.square() - value.c1.square().mul_by_nonresidue();
+    let inverse = invert_fp6_vartime(determinant)?;
+    Some(Fp12 {
+        c0: value.c0 * inverse,
+        c1: value.c1 * -inverse,
+    })
+}
+
 impl MillerLoopResult {
     /// This performs a "final exponentiation" routine to convert the result
     /// of a Miller loop into an element of `Gt` with help of efficient squaring
     /// operation in the so-called `cyclotomic subgroup` of `Fq6` so that
     /// it can be compared with other elements of `Gt`.
+    ///
+    /// This operation is variable time because its inversion depends on the
+    /// Miller loop result. Use it only with public pairing inputs.
     pub fn final_exponentiation(&self) -> Gt {
         #[must_use]
         fn fp4_square(a: Fp2, b: Fp2) -> (Fp2, Fp2) {
@@ -139,7 +166,7 @@ impl MillerLoopResult {
             .frobenius_map()
             .frobenius_map()
             .frobenius_map();
-        Gt(f.invert()
+        Gt(invert_fp12_vartime(f)
             .map(|mut t1| {
                 let mut t2 = t0 * t1;
                 t1 = t2;
@@ -605,7 +632,10 @@ pub fn multi_miller_loop(terms: &[(&G1Affine, &G2Prepared)]) -> MillerLoopResult
     MillerLoopResult(tmp)
 }
 
-/// Invoke the pairing function without the use of precomputation and other optimizations.
+/// Invokes the pairing function without precomputation.
+///
+/// This operation is variable time because its final exponentiation depends
+/// on the pairing inputs.
 #[cfg_attr(docsrs, doc(cfg(feature = "pairings")))]
 pub fn pairing(p: &G1Affine, q: &G2Affine) -> Gt {
     struct Adder {
@@ -806,6 +836,14 @@ impl Engine for Bls12 {
     fn pairing(p: &Self::G1Affine, q: &Self::G2Affine) -> Self::Gt {
         pairing(p, q)
     }
+
+    fn g1_to_affine_vartime(point: &Self::G1) -> Self::G1Affine {
+        point.to_affine_vartime()
+    }
+
+    fn g2_to_affine_vartime(point: &Self::G2) -> Self::G2Affine {
+        point.to_affine_vartime()
+    }
 }
 
 impl pairing::MillerLoopResult for MillerLoopResult {
@@ -929,6 +967,20 @@ fn test_miller_loop_result_default() {
         MillerLoopResult::default().final_exponentiation(),
         Gt::identity(),
     );
+}
+
+#[test]
+fn test_vartime_fp12_inversion() {
+    use rand_core::SeedableRng;
+
+    assert_eq!(invert_fp12_vartime(Fp12::zero()), None);
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x52; 16]);
+    for _ in 0..32 {
+        let value = Fp12::try_from_rng(&mut rng).unwrap();
+        let inverse = invert_fp12_vartime(value).unwrap();
+        assert_eq!(inverse, value.invert().unwrap());
+        assert_eq!(value * inverse, Fp12::one());
+    }
 }
 
 #[cfg(feature = "zeroize")]
