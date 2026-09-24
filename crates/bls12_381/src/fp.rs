@@ -361,8 +361,8 @@ impl Fp {
     /// Inverts a canonical field element using variable-time binary GCD.
     /// Returns `None` for zero or a noncanonical raw representation.
     ///
-    /// The running time depends on the element. Use this only for public
-    /// inputs, such as pairing results during verification.
+    /// The running time depends on the element. Callers must accept leakage
+    /// of its representation, including for proof point normalization.
     pub(crate) fn invert_vartime(&self) -> Option<Self> {
         fn is_one(a: &[u64; 6]) -> bool {
             a[0] == 1 && a[1..].iter().all(|&limb| limb == 0)

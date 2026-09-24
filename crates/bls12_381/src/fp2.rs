@@ -318,7 +318,8 @@ impl Fp2 {
         })
     }
 
-    /// Inverts a public value using the variable-time base-field inverse.
+    /// Inverts using the variable-time base-field inverse. Timing depends on
+    /// this element's representation.
     #[cfg(feature = "pairings")]
     pub(crate) fn invert_vartime(&self) -> Option<Self> {
         let inverse = (self.c0.square() + self.c1.square()).invert_vartime()?;
