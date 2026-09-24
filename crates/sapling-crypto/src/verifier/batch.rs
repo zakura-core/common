@@ -10,6 +10,9 @@ use crate::{
     circuit::{OutputVerifyingKey, SpendVerifyingKey},
 };
 
+#[cfg(feature = "multicore")]
+const MAX_JOINT_PROOFS_PER_KIND: usize = 8;
+
 /// Borrowed Sapling verifying keys for repeated [`BatchValidator`]s.
 ///
 /// Each key's fixed G2 terms are prepared on first use. Keeping this value
@@ -50,8 +53,8 @@ impl<'a> PreparedBatchVerifyingKeys<'a> {
 /// Signatures are verified assuming ZIP 216 is active.
 pub struct BatchValidator {
     bundles_added: bool,
-    spend_proofs_added: bool,
-    output_proofs_added: bool,
+    spend_proof_count: usize,
+    output_proof_count: usize,
     spend_proofs: groth16::batch::Verifier<Bls12>,
     output_proofs: groth16::batch::Verifier<Bls12>,
     signatures: redjubjub::batch::Verifier,
@@ -68,8 +71,8 @@ impl BatchValidator {
     pub fn new() -> Self {
         BatchValidator {
             bundles_added: false,
-            spend_proofs_added: false,
-            output_proofs_added: false,
+            spend_proof_count: 0,
+            output_proof_count: 0,
             spend_proofs: groth16::batch::Verifier::new(),
             output_proofs: groth16::batch::Verifier::new(),
             signatures: redjubjub::batch::Verifier::new(),
@@ -115,7 +118,7 @@ impl BatchValidator {
                 },
                 |this, proof, public_inputs| {
                     this.spend_proofs.queue((proof, public_inputs.to_vec()));
-                    this.spend_proofs_added = true;
+                    this.spend_proof_count += 1;
                     true
                 },
             );
@@ -145,7 +148,7 @@ impl BatchValidator {
                 zkproof,
                 |proof, public_inputs| {
                     self.output_proofs.queue((proof, public_inputs.to_vec()));
-                    self.output_proofs_added = true;
+                    self.output_proof_count += 1;
                     true
                 },
             );
@@ -229,7 +232,29 @@ impl BatchValidator {
             return false;
         }
 
-        if self.spend_proofs_added {
+        // Beyond one Rayon chunk per proof kind, the parallel verifier is
+        // faster than sharing the Miller loop and final exponentiation.
+        #[cfg(feature = "multicore")]
+        let use_joint = self.spend_proof_count > 0
+            && self.output_proof_count > 0
+            && self.spend_proof_count <= MAX_JOINT_PROOFS_PER_KIND
+            && self.output_proof_count <= MAX_JOINT_PROOFS_PER_KIND;
+        #[cfg(not(feature = "multicore"))]
+        let use_joint = self.spend_proof_count > 0 && self.output_proof_count > 0;
+
+        if use_joint {
+            if self
+                .spend_proofs
+                .verify_joint_prepared(self.output_proofs, &mut rng, keys.spend(), keys.output())
+                .is_err()
+            {
+                tracing::debug!("Sapling proof batch validation failed");
+                return false;
+            }
+            return true;
+        }
+
+        if self.spend_proof_count > 0 {
             #[cfg(feature = "multicore")]
             let result = self.spend_proofs.verify_multicore_prepared(keys.spend());
             #[cfg(not(feature = "multicore"))]
@@ -241,7 +266,7 @@ impl BatchValidator {
             }
         }
 
-        if self.output_proofs_added {
+        if self.output_proof_count > 0 {
             #[cfg(feature = "multicore")]
             let result = self.output_proofs.verify_multicore_prepared(keys.output());
             #[cfg(not(feature = "multicore"))]
@@ -340,13 +365,13 @@ mod tests {
             validator
                 .spend_proofs
                 .queue((proof.clone(), inputs.to_vec()));
-            validator.spend_proofs_added = true;
+            validator.spend_proof_count = 1;
         }
         if let Some((proof, inputs)) = output {
             validator
                 .output_proofs
                 .queue((proof.clone(), inputs.to_vec()));
-            validator.output_proofs_added = true;
+            validator.output_proof_count = 1;
         }
         validator
     }
@@ -383,6 +408,121 @@ mod tests {
         invalid_inputs[0] += Scalar::ONE;
         let invalid_spend = Some((&spend_proof, invalid_inputs.as_slice()));
         assert!(!validator(invalid_spend, output).validate_prepared(&keys, &mut rng));
+
+        let mut invalid_inputs = output_inputs.clone();
+        invalid_inputs[0] += Scalar::ONE;
+        let invalid_output = Some((&output_proof, invalid_inputs.as_slice()));
+        assert!(!validator(spend, invalid_output).validate_prepared(&keys, &mut rng));
+
+        let mut large = validator(spend, output);
+        for _ in 1..9 {
+            large
+                .spend_proofs
+                .queue((spend_proof.clone(), spend_inputs.clone()));
+            large
+                .output_proofs
+                .queue((output_proof.clone(), output_inputs.clone()));
+        }
+        large.spend_proof_count = 9;
+        large.output_proof_count = 9;
+        assert!(large.validate_prepared(&keys, &mut rng));
+    }
+
+    #[test]
+    #[ignore = "release-mode performance measurement"]
+    fn bench_joint_prepared_validation() {
+        use std::{hint::black_box, time::Instant};
+
+        let mut rng = rand::rng();
+        let (spend_vk, spend_proof, spend_inputs) = proof::<SPEND_PUBLIC_INPUT_COUNT>(&mut rng);
+        let (output_vk, output_proof, output_inputs) = proof::<OUTPUT_PUBLIC_INPUT_COUNT>(&mut rng);
+        let spend_vk = SpendVerifyingKey(spend_vk);
+        let output_vk = OutputVerifyingKey(output_vk);
+        let keys = PreparedBatchVerifyingKeys::new(&spend_vk, &output_vk);
+        let spend = (&spend_proof, spend_inputs.as_slice());
+        let output = (&output_proof, output_inputs.as_slice());
+
+        let make_validator = |count| {
+            let mut validator = BatchValidator::new();
+            validator.bundles_added = true;
+            for _ in 0..count {
+                validator
+                    .spend_proofs
+                    .queue((spend.0.clone(), spend.1.to_vec()));
+                validator
+                    .output_proofs
+                    .queue((output.0.clone(), output.1.to_vec()));
+            }
+            validator.spend_proof_count = count;
+            validator.output_proof_count = count;
+            validator
+        };
+
+        // Warm key preparation and both verifier paths before measuring.
+        assert!(make_validator(1).validate_prepared(&keys, &mut rng));
+
+        for count in [1, 2, 8, 16] {
+            let mut separate = Vec::with_capacity(40);
+            let mut joint = Vec::with_capacity(40);
+            for iteration in 0..40 {
+                let measure_separate = |rng: &mut _, timings: &mut Vec<u128>| {
+                    let validator = make_validator(count);
+                    let start = Instant::now();
+                    assert!(validator.signatures.verify(&mut *rng).is_ok());
+                    #[cfg(feature = "multicore")]
+                    {
+                        assert!(
+                            validator
+                                .spend_proofs
+                                .verify_multicore_prepared(keys.spend())
+                                .is_ok()
+                        );
+                        assert!(
+                            validator
+                                .output_proofs
+                                .verify_multicore_prepared(keys.output())
+                                .is_ok()
+                        );
+                    }
+                    #[cfg(not(feature = "multicore"))]
+                    {
+                        assert!(
+                            validator
+                                .spend_proofs
+                                .verify_prepared(&mut *rng, keys.spend())
+                                .is_ok()
+                        );
+                        assert!(
+                            validator
+                                .output_proofs
+                                .verify_prepared(&mut *rng, keys.output())
+                                .is_ok()
+                        );
+                    }
+                    timings.push(black_box(start.elapsed().as_micros()));
+                };
+                let measure_joint = |rng: &mut _, timings: &mut Vec<u128>| {
+                    let validator = make_validator(count);
+                    let start = Instant::now();
+                    assert!(black_box(validator.validate_prepared(&keys, rng)));
+                    timings.push(black_box(start.elapsed().as_micros()));
+                };
+                if iteration % 2 == 0 {
+                    measure_separate(&mut rng, &mut separate);
+                    measure_joint(&mut rng, &mut joint);
+                } else {
+                    measure_joint(&mut rng, &mut joint);
+                    measure_separate(&mut rng, &mut separate);
+                }
+            }
+            separate.sort_unstable();
+            joint.sort_unstable();
+            std::println!(
+                "{count}+{count}: separate {} us, joint {} us",
+                separate[separate.len() / 2],
+                joint[joint.len() / 2],
+            );
+        }
     }
 
     #[test]
