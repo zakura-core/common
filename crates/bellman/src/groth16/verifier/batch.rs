@@ -77,7 +77,8 @@ pub struct Verifier<E: MultiMillerLoop> {
 
 /// Fixed G2 pairing terms for repeated batches under one verifying key.
 ///
-/// Creating this once avoids preparing beta, gamma, and delta for every batch.
+/// Creating this once prepares beta, gamma, and delta for repeated batches.
+/// Engines can spend more time preparing these terms to speed up verification.
 pub struct PreparedBatchVerifyingKey<'a, E: MultiMillerLoop> {
     vk: &'a VerifyingKey<E>,
     beta_g2: E::G2Prepared,
@@ -94,6 +95,19 @@ impl<E: MultiMillerLoop> std::fmt::Debug for PreparedBatchVerifyingKey<'_, E> {
 
 impl<'a, E: MultiMillerLoop> From<&'a VerifyingKey<E>> for PreparedBatchVerifyingKey<'a, E> {
     fn from(vk: &'a VerifyingKey<E>) -> Self {
+        Self {
+            vk,
+            beta_g2: E::prepare_reusable_g2(vk.beta_g2),
+            gamma_g2: E::prepare_reusable_g2(vk.gamma_g2),
+            delta_g2: E::prepare_reusable_g2(vk.delta_g2),
+        }
+    }
+}
+
+impl<'a, E: MultiMillerLoop> PreparedBatchVerifyingKey<'a, E> {
+    // The raw verifier uses each G2 term once, so extra reusable preparation
+    // would cost more than it saves.
+    fn for_one_batch(vk: &'a VerifyingKey<E>) -> Self {
         Self {
             vk,
             beta_g2: vk.beta_g2.into(),
@@ -143,7 +157,7 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
-        self.verify_prepared_unchecked(rng, &PreparedBatchVerifyingKey::from(vk))
+        self.verify_prepared_unchecked(rng, &PreparedBatchVerifyingKey::for_one_batch(vk))
     }
 
     /// Verify a batch using fixed G2 terms prepared for its verifying key.
@@ -253,7 +267,7 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
-        self.verify_multicore_prepared_unchecked(&PreparedBatchVerifyingKey::from(vk))
+        self.verify_multicore_prepared_unchecked(&PreparedBatchVerifyingKey::for_one_batch(vk))
     }
 
     /// Verify a batch with prepared fixed G2 terms using the global Rayon

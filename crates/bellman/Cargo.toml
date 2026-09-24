@@ -58,3 +58,7 @@ required-features = ["groth16"]
 [[bench]]
 name = "slow"
 harness = false
+
+[[bench]]
+name = "reusable_verify"
+harness = false
