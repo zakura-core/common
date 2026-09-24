@@ -259,8 +259,9 @@ impl MillerLoopResult {
     /// extension.
     ///
     /// This operation is variable time. Its inversions and compressed-square
-    /// fallback depend on the Miller loop result. Use it only with public
-    /// pairing inputs.
+    /// fallback depend on the Miller loop result. Do not use it with long-lived
+    /// secret pairing inputs. Batch verification also includes fresh verifier
+    /// randomizers in this result.
     pub fn final_exponentiation(&self) -> Gt {
         let mut f = self.0;
         // The p^6 Frobenius map conjugates the quadratic Fp12 extension.
