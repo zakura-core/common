@@ -14,8 +14,8 @@ pub fn prepare_verifying_key<E: MultiMillerLoop>(vk: &VerifyingKey<E>) -> Prepar
 
     PreparedVerifyingKey {
         alpha_g1_beta_g2: E::pairing(&vk.alpha_g1, &vk.beta_g2),
-        neg_gamma_g2: gamma.into(),
-        neg_delta_g2: delta.into(),
+        neg_gamma_g2: E::prepare_reusable_g2(gamma),
+        neg_delta_g2: E::prepare_reusable_g2(delta),
         ic: vk.ic.clone(),
     }
 }

@@ -101,6 +101,17 @@ pub trait MultiMillerLoop: Engine {
     /// The prepared form of `Self::G2Affine`.
     type G2Prepared: Clone + Send + Sync + From<Self::G2Affine>;
 
+    /// Prepare a G2 point for repeated use across Miller loops.
+    ///
+    /// Implementations may spend more time here to speed up each later loop.
+    /// The default uses ordinary G2 preparation. The raw Miller loop result
+    /// may differ from ordinary preparation, but final exponentiation must
+    /// produce the same pairing result. Implementations may be variable time
+    /// in `q`; use this for public points.
+    fn prepare_reusable_g2(q: Self::G2Affine) -> Self::G2Prepared {
+        q.into()
+    }
+
     /// The type returned by `Engine::miller_loop`.
     type Result: MillerLoopResult<Gt = Self::Gt>;
 
