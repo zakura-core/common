@@ -601,6 +601,19 @@ fn mul_by_3b(a: Fp) -> Fp {
 }
 
 impl G1Projective {
+    /// Converts a point to affine form with coordinate-dependent timing.
+    #[cfg(feature = "pairings")]
+    pub(crate) fn to_affine_vartime(&self) -> G1Affine {
+        let Some(zinv) = self.z.invert_vartime() else {
+            return G1Affine::identity();
+        };
+        G1Affine {
+            x: self.x * zinv,
+            y: self.y * zinv,
+            infinity: Choice::from(0),
+        }
+    }
+
     /// Returns the identity of the group: the point at infinity.
     pub fn identity() -> G1Projective {
         G1Projective {
@@ -1243,6 +1256,10 @@ fn test_projective_to_affine() {
     };
 
     assert_eq!(G1Affine::from(c), G1Affine::generator());
+    #[cfg(feature = "pairings")]
+    for point in [a, b, c] {
+        assert_eq!(point.to_affine_vartime(), G1Affine::from(point));
+    }
 }
 
 #[test]

@@ -42,20 +42,12 @@ impl ConditionallySelectable for MillerLoopResult {
 
 // These inversions are used only with public pairing inputs. Keep the
 // constant-time `invert` methods for callers that may hold secrets.
-fn invert_fp2_vartime(value: Fp2) -> Option<Fp2> {
-    let inverse = (value.c0.square() + value.c1.square()).invert_vartime()?;
-    Some(Fp2 {
-        c0: value.c0 * inverse,
-        c1: -(value.c1 * inverse),
-    })
-}
-
 fn invert_fp6_vartime(value: Fp6) -> Option<Fp6> {
     let c0 = value.c0.square() - (value.c1 * value.c2).mul_by_nonresidue();
     let c1 = value.c2.square().mul_by_nonresidue() - value.c0 * value.c1;
     let c2 = value.c1.square() - value.c0 * value.c2;
     let determinant = (value.c1 * c2 + value.c2 * c1).mul_by_nonresidue() + value.c0 * c0;
-    let inverse = invert_fp2_vartime(determinant)?;
+    let inverse = determinant.invert_vartime()?;
     Some(Fp6 {
         c0: inverse * c0,
         c1: inverse * c1,
@@ -843,6 +835,14 @@ impl Engine for Bls12 {
 
     fn pairing(p: &Self::G1Affine, q: &Self::G2Affine) -> Self::Gt {
         pairing(p, q)
+    }
+
+    fn g1_to_affine_vartime(point: &Self::G1) -> Self::G1Affine {
+        point.to_affine_vartime()
+    }
+
+    fn g2_to_affine_vartime(point: &Self::G2) -> Self::G2Affine {
+        point.to_affine_vartime()
     }
 }
 
