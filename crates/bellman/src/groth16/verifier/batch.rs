@@ -206,7 +206,8 @@ where
         self.verify_prepared_unchecked(rng, pvk)
     }
 
-    /// Verify two batches with different prepared keys in one Miller loop.
+    /// Verify two batches using different [`PreparedBatchVerifyingKey`] values
+    /// in one Miller loop.
     ///
     /// Independent nonzero randomizers are sampled for every proof in both
     /// batches. This shares the Miller-loop squares and final exponentiation.

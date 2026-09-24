@@ -232,8 +232,8 @@ impl BatchValidator {
             return false;
         }
 
-        // Beyond one Rayon chunk per proof kind, the parallel verifier is
-        // faster than sharing the Miller loop and final exponentiation.
+        // Larger mixed batches run faster with the parallel verifier than
+        // with one shared Miller loop and final exponentiation.
         #[cfg(feature = "multicore")]
         let use_joint = self.spend_proof_count > 0
             && self.output_proof_count > 0
