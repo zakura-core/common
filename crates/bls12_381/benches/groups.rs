@@ -22,6 +22,19 @@ fn criterion_benchmark(c: &mut Criterion) {
         c.bench_function("miller loop for pairing", move |b| {
             b.iter(|| multi_miller_loop(&[(&g, &prep)]))
         });
+        let points = (1..=11)
+            .map(|i| G1Affine::from(G1Projective::generator() * Scalar::from(i)))
+            .collect::<Vec<_>>();
+        let prepared = (1..=11)
+            .map(|i| G2Prepared::from(G2Affine::from(G2Projective::generator() * Scalar::from(i))))
+            .collect::<Vec<_>>();
+        let terms = points.iter().zip(prepared.iter()).collect::<Vec<_>>();
+        c.bench_function("miller loop for three pairings", |b| {
+            b.iter(|| multi_miller_loop(black_box(&terms[..3])))
+        });
+        c.bench_function("miller loop for eleven pairings", |b| {
+            b.iter(|| multi_miller_loop(black_box(&terms)))
+        });
         let prep = G2Prepared::from(h);
         let r = multi_miller_loop(&[(&g, &prep)]);
         c.bench_function("final exponentiation for pairing", move |b| {
