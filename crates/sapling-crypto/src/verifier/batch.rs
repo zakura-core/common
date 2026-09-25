@@ -11,7 +11,7 @@ use crate::{
 };
 
 #[cfg(feature = "multicore")]
-const MAX_JOINT_PROOFS_PER_KIND: usize = 8;
+const MAX_JOINT_PROOFS_PER_KIND: usize = 1;
 
 /// Borrowed Sapling verifying keys for repeated [`BatchValidator`]s.
 ///
@@ -232,8 +232,8 @@ impl BatchValidator {
             return false;
         }
 
-        // Larger mixed batches run faster with the parallel verifier than
-        // with one shared Miller loop and final exponentiation.
+        // The joint path wins for one Spend and one Output proof. Larger
+        // batches can run faster through the parallel verifier.
         #[cfg(feature = "multicore")]
         let use_joint = self.spend_proof_count > 0
             && self.output_proof_count > 0
