@@ -7,7 +7,9 @@ use halo2_proofs::{
 };
 use pasta_curves::{arithmetic::CurveAffine, pallas};
 
-use super::chip::{PreparedHashWitness, prepare_hash_witness};
+use super::chip::{
+    PreparedHashWitness, prepare_hash_witness, prepare_hash_witness_with_output_hint,
+};
 use super::{CommitDomains, HashDomains, SinsemillaInstructions};
 
 use crate::{
@@ -93,6 +95,61 @@ pub fn prepare_merkle_path_witness<const PATH_LENGTH: usize>(
     Some(PreparedMerklePathWitness {
         layers: layers.try_into().ok()?,
     })
+}
+
+/// Prepares a [`PreparedMerklePathWitness`] using the output of every Merkle
+/// layer as an untrusted witness hint.
+///
+/// Supplying every output removes the sequential affine conversion between
+/// layers. The circuit still constrains each output to the corresponding
+/// Sinsemilla hash result.
+///
+/// Returns `None` if `q` is the identity or any incomplete addition in the
+/// path has an exceptional result.
+pub fn prepare_merkle_path_witness_with_output_hints<const PATH_LENGTH: usize>(
+    q: pallas::Affine,
+    leaf_pos: u32,
+    path: [pallas::Base; PATH_LENGTH],
+    leaf: pallas::Base,
+    output_hints: [pallas::Base; PATH_LENGTH],
+) -> Option<PreparedMerklePathWitness<PATH_LENGTH>> {
+    if bool::from(group::CurveAffine::is_identity(&q)) {
+        return None;
+    }
+
+    let layers = (0..PATH_LENGTH)
+        .map(|layer| {
+            prepare_merkle_layer_with_output_hint(q, leaf_pos, &path, leaf, &output_hints, layer)
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(PreparedMerklePathWitness {
+        layers: layers.try_into().ok()?,
+    })
+}
+
+fn prepare_merkle_layer_with_output_hint<const PATH_LENGTH: usize>(
+    q: pallas::Affine,
+    leaf_pos: u32,
+    path: &[pallas::Base; PATH_LENGTH],
+    leaf: pallas::Base,
+    output_hints: &[pallas::Base; PATH_LENGTH],
+    layer: usize,
+) -> Option<PreparedHashWitness> {
+    let node = if layer == 0 {
+        leaf
+    } else {
+        output_hints[layer - 1]
+    };
+    let sibling = path[layer];
+    let output_hint = output_hints[layer];
+    let position_bit = leaf_pos.checked_shr(layer as u32).unwrap_or(0) & 1;
+    let (left, right) = if position_bit == 0 {
+        (node, sibling)
+    } else {
+        (sibling, node)
+    };
+    prepare_hash_witness_with_output_hint(q, &merkle_message_words(layer, left, right), output_hint)
 }
 
 /// SWU hash-to-curve personalization for the Merkle CRH generator
@@ -311,7 +368,7 @@ pub mod tests {
     use super::{
         MerklePath,
         chip::{MerkleChip, MerkleConfig},
-        prepare_merkle_path_witness,
+        prepare_merkle_path_witness, prepare_merkle_path_witness_with_output_hints,
     };
 
     use crate::{
@@ -343,7 +400,13 @@ pub mod tests {
     };
 
     use rand::{Rng, rng};
-    use std::{convert::TryInto, iter, marker::PhantomData};
+    use std::{
+        convert::TryInto,
+        hint::black_box,
+        iter,
+        marker::PhantomData,
+        time::{Duration, Instant},
+    };
 
     const MERKLE_DEPTH: usize = 32;
 
@@ -357,6 +420,53 @@ pub mod tests {
                 pallas::Base::ZERO,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual Merkle preparation performance benchmark"]
+    fn benchmark_prepared_output_hints() {
+        const WARMUPS: usize = 100;
+        const SAMPLES: usize = 10_000;
+
+        let mut rng = rng();
+        let q = TestHashDomain.Q();
+        let leaf = pallas::Base::random(&mut rng);
+        let leaf_pos = rng.next_u32();
+        let path: [pallas::Base; MERKLE_DEPTH] =
+            core::array::from_fn(|_| pallas::Base::random(&mut rng));
+        let outputs = prepare_merkle_path_witness(q, leaf_pos, path, leaf)
+            .unwrap()
+            .layers
+            .map(|layer| layer.output_x());
+
+        for _ in 0..WARMUPS {
+            black_box(prepare_merkle_path_witness(q, leaf_pos, path, leaf).unwrap());
+            black_box(
+                prepare_merkle_path_witness_with_output_hints(q, leaf_pos, path, leaf, outputs)
+                    .unwrap(),
+            );
+        }
+
+        let mut ordinary = Duration::ZERO;
+        let mut hinted = Duration::ZERO;
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            black_box(prepare_merkle_path_witness(q, leaf_pos, path, leaf).unwrap());
+            ordinary += started.elapsed();
+
+            let started = Instant::now();
+            black_box(
+                prepare_merkle_path_witness_with_output_hints(q, leaf_pos, path, leaf, outputs)
+                    .unwrap(),
+            );
+            hinted += started.elapsed();
+        }
+
+        println!(
+            "MERKLE_PREPARATION ordinary_ns={} hinted_ns={}",
+            ordinary.as_nanos() / SAMPLES as u128,
+            hinted.as_nanos() / SAMPLES as u128,
         );
     }
 

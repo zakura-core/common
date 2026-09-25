@@ -226,18 +226,29 @@ impl MerklePath {
     ///        layer = 31, l = 0
     ///      - when hashing to the final root, we produce the anchor with layer = 0, l = 31.
     pub fn root(&self, cmx: ExtractedNoteCommitment) -> Anchor {
-        self.auth_path
-            .iter()
-            .enumerate()
-            .fold(MerkleHashOrchard::from_cmx(&cmx), |node, (l, sibling)| {
-                let l = l as u8;
-                if self.position & (1 << l) == 0 {
-                    MerkleHashOrchard::combine(l.into(), &node, sibling)
-                } else {
-                    MerkleHashOrchard::combine(l.into(), sibling, &node)
-                }
-            })
+        self.parent_nodes(cmx)
+            .last()
+            .copied()
+            .expect("an Orchard Merkle path is non-empty")
             .into()
+    }
+
+    /// Computes the node produced by each layer of this authentication path.
+    pub(crate) fn parent_nodes(
+        &self,
+        cmx: ExtractedNoteCommitment,
+    ) -> [MerkleHashOrchard; MERKLE_DEPTH_ORCHARD] {
+        let mut node = MerkleHashOrchard::from_cmx(&cmx);
+        core::array::from_fn(|l| {
+            let l = l as u8;
+            let sibling = &self.auth_path[usize::from(l)];
+            node = if self.position & (1 << l) == 0 {
+                MerkleHashOrchard::combine(l.into(), &node, sibling)
+            } else {
+                MerkleHashOrchard::combine(l.into(), sibling, &node)
+            };
+            node
+        })
     }
 
     /// Returns the position of the leaf using this Merkle path.
