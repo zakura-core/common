@@ -364,50 +364,52 @@ mod tests {
         let (output_vk, output_proof, output_inputs) = proof::<OUTPUT_PUBLIC_INPUT_COUNT>(&mut rng);
         let mut spend_vk = SpendVerifyingKey::new(spend_vk);
         let mut output_vk = OutputVerifyingKey::new(output_vk);
-        let keys = PreparedBatchVerifyingKeys::new(&spend_vk, &output_vk);
-
-        assert!(BatchValidator::new().validate(&spend_vk, &output_vk, &mut rng));
-        assert!(BatchValidator::new().validate_prepared(&keys, &mut rng));
-        assert!(validator(None, None).validate(&spend_vk, &output_vk, &mut rng));
-        assert!(validator(None, None).validate_prepared(&keys, &mut rng));
-
         let spend = Some((&spend_proof, spend_inputs.as_slice()));
-        assert!(validator(spend, None).validate(&spend_vk, &output_vk, &mut rng));
-        assert!(validator(spend, None).validate_prepared(&keys, &mut rng));
-
         let output = Some((&output_proof, output_inputs.as_slice()));
-        assert!(validator(None, output).validate(&spend_vk, &output_vk, &mut rng));
-        assert!(validator(None, output).validate_prepared(&keys, &mut rng));
 
-        assert!(validator(spend, output).validate(&spend_vk, &output_vk, &mut rng));
-        assert!(validator(spend, output).validate_prepared(&keys, &mut rng));
+        {
+            let keys = PreparedBatchVerifyingKeys::new(&spend_vk, &output_vk);
 
-        let mut invalid_inputs = spend_inputs.clone();
-        invalid_inputs[0] += Scalar::ONE;
-        let invalid_spend = Some((&spend_proof, invalid_inputs.as_slice()));
-        assert!(!validator(invalid_spend, output).validate(&spend_vk, &output_vk, &mut rng));
-        assert!(!validator(invalid_spend, output).validate_prepared(&keys, &mut rng));
+            assert!(BatchValidator::new().validate(&spend_vk, &output_vk, &mut rng));
+            assert!(BatchValidator::new().validate_prepared(&keys, &mut rng));
+            assert!(validator(None, None).validate(&spend_vk, &output_vk, &mut rng));
+            assert!(validator(None, None).validate_prepared(&keys, &mut rng));
 
-        let mut invalid_inputs = output_inputs.clone();
-        invalid_inputs[0] += Scalar::ONE;
-        let invalid_output = Some((&output_proof, invalid_inputs.as_slice()));
-        assert!(!validator(spend, invalid_output).validate(&spend_vk, &output_vk, &mut rng));
-        assert!(!validator(spend, invalid_output).validate_prepared(&keys, &mut rng));
+            assert!(validator(spend, None).validate(&spend_vk, &output_vk, &mut rng));
+            assert!(validator(spend, None).validate_prepared(&keys, &mut rng));
 
-        let mut large = validator(spend, output);
-        for _ in 1..9 {
-            large
-                .spend_proofs
-                .queue((spend_proof.clone(), spend_inputs.clone()));
-            large
-                .output_proofs
-                .queue((output_proof.clone(), output_inputs.clone()));
+            assert!(validator(None, output).validate(&spend_vk, &output_vk, &mut rng));
+            assert!(validator(None, output).validate_prepared(&keys, &mut rng));
+
+            assert!(validator(spend, output).validate(&spend_vk, &output_vk, &mut rng));
+            assert!(validator(spend, output).validate_prepared(&keys, &mut rng));
+
+            let mut invalid_inputs = spend_inputs.clone();
+            invalid_inputs[0] += Scalar::ONE;
+            let invalid_spend = Some((&spend_proof, invalid_inputs.as_slice()));
+            assert!(!validator(invalid_spend, output).validate(&spend_vk, &output_vk, &mut rng));
+            assert!(!validator(invalid_spend, output).validate_prepared(&keys, &mut rng));
+
+            let mut invalid_inputs = output_inputs.clone();
+            invalid_inputs[0] += Scalar::ONE;
+            let invalid_output = Some((&output_proof, invalid_inputs.as_slice()));
+            assert!(!validator(spend, invalid_output).validate(&spend_vk, &output_vk, &mut rng));
+            assert!(!validator(spend, invalid_output).validate_prepared(&keys, &mut rng));
+
+            let mut large = validator(spend, output);
+            for _ in 1..9 {
+                large
+                    .spend_proofs
+                    .queue((spend_proof.clone(), spend_inputs.clone()));
+                large
+                    .output_proofs
+                    .queue((output_proof.clone(), output_inputs.clone()));
+            }
+            large.spend_proof_count = 9;
+            large.output_proof_count = 9;
+            assert!(large.validate_prepared(&keys, &mut rng));
         }
-        large.spend_proof_count = 9;
-        large.output_proof_count = 9;
-        assert!(large.validate_prepared(&keys, &mut rng));
 
-        drop(keys);
         spend_vk.0.delta_g2 = G2Affine::identity();
         assert!(matches!(
             spend_vk.prepared_batch(),
