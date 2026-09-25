@@ -2,6 +2,7 @@ use crate::fp::Fp;
 use crate::fp2::Fp2;
 use crate::fp6::Fp6;
 use crate::fp12::Fp12;
+use crate::g1::BETA;
 use crate::{BLS_X, BLS_X_IS_NEGATIVE, G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
 
 use core::borrow::Borrow;
@@ -16,7 +17,6 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 const COMPRESSED_FIRST_SQUARES: usize = 15;
 const COMPRESSED_NEXT_SQUARES: usize = 32;
 const CYCLOTOMIC_TAIL_SQUARES: [usize; 4] = [9, 3, 2, 1];
-
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
@@ -57,6 +57,34 @@ fn fp4_square(a: Fp2, b: Fp2) -> (Fp2, Fp2) {
     let c1 = t2 - t1;
 
     (c0, c1)
+}
+
+#[inline(always)]
+fn mul_fp2_by_fp(value: Fp2, factor: Fp) -> Fp2 {
+    Fp2 {
+        c0: value.c0 * factor,
+        c1: value.c1 * factor,
+    }
+}
+
+#[inline]
+fn frobenius_map_2(value: Fp12) -> Fp12 {
+    // BETA = (u + 1)^((p^2 - 1) / 3), which lies in Fp.
+    let gamma = BETA;
+    // gamma^2 + gamma + 1 = 0, and the w coefficient is -gamma^2.
+    let delta = gamma + Fp::one();
+    Fp12 {
+        c0: Fp6 {
+            c0: value.c0.c0,
+            c1: mul_fp2_by_fp(value.c0.c1, gamma),
+            c2: mul_fp2_by_fp(value.c0.c2, -delta),
+        },
+        c1: Fp6 {
+            c0: mul_fp2_by_fp(value.c1.c0, delta),
+            c1: -value.c1.c1,
+            c2: mul_fp2_by_fp(value.c1.c2, -gamma),
+        },
+    }
 }
 // Adaptation of Algorithm 5.5.4, Guide to Pairing-Based Cryptography
 // Faster Squaring in the Cyclotomic Subgroup of Sixth Degree Extensions
@@ -270,7 +298,7 @@ impl MillerLoopResult {
             .map(|mut t1| {
                 let mut t2 = t0 * t1;
                 t1 = t2;
-                t2 = t2.frobenius_map().frobenius_map();
+                t2 = frobenius_map_2(t2);
                 t2 *= t1;
                 t1 = cyclotomic_square(t2).conjugate();
                 let mut t3 = cyclotomic_exp(t2);
@@ -285,11 +313,11 @@ impl MillerLoopResult {
                 t4 *= t5 * t2;
                 t5 = t2.conjugate();
                 t1 *= t2;
-                t1 = t1.frobenius_map().frobenius_map().frobenius_map();
+                t1 = frobenius_map_2(t1.frobenius_map());
                 t6 *= t5;
                 t6 = t6.frobenius_map();
                 t3 *= t0;
-                t3 = t3.frobenius_map().frobenius_map();
+                t3 = frobenius_map_2(t3);
                 t3 *= t1;
                 t3 *= t6;
                 f = t3 * t4;
@@ -1217,6 +1245,20 @@ fn test_miller_loop_result_default() {
         MillerLoopResult::default().final_exponentiation(),
         Gt::identity(),
     );
+}
+
+#[test]
+fn test_frobenius_map_2_matches_two_maps() {
+    use rand_core::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x2f; 16]);
+    for _ in 0..32 {
+        let value = Fp12::try_from_rng(&mut rng).unwrap();
+        assert_eq!(
+            frobenius_map_2(value),
+            value.frobenius_map().frobenius_map()
+        );
+    }
 }
 
 #[test]
