@@ -149,3 +149,61 @@ fn small_order_batch_key_is_accepted() {
     ));
     assert_eq!(batch.verify(thread_rng()), Ok(()));
 }
+
+#[test]
+fn single_signature_batches_verify() {
+    let mut rng = thread_rng();
+    let msg = b"BatchVerifyTest";
+
+    let spend_sk = SigningKey::<sapling::SpendAuth>::new(&mut rng);
+    let spend_vk = VerificationKey::from(&spend_sk).into();
+    let spend_sig = spend_sk.sign(&mut rng, msg);
+    let mut valid = batch::Verifier::<sapling::SpendAuth, sapling::Binding>::new();
+    valid.queue(batch::Item::from_spendauth(spend_vk, spend_sig, msg));
+    assert_eq!(valid.verify(&mut rng), Ok(()));
+    let mut invalid = batch::Verifier::<sapling::SpendAuth, sapling::Binding>::new();
+    invalid.queue(batch::Item::from_spendauth(spend_vk, spend_sig, b"wrong"));
+    assert_eq!(invalid.verify(&mut rng), Err(Error::InvalidSignature));
+
+    let binding_sk = SigningKey::<sapling::Binding>::new(&mut rng);
+    let binding_vk = VerificationKey::from(&binding_sk).into();
+    let binding_sig = binding_sk.sign(&mut rng, msg);
+    let mut valid = batch::Verifier::<sapling::SpendAuth, sapling::Binding>::new();
+    valid.queue(batch::Item::from_binding(binding_vk, binding_sig, msg));
+    assert_eq!(valid.verify(&mut rng), Ok(()));
+    let mut invalid = batch::Verifier::<sapling::SpendAuth, sapling::Binding>::new();
+    invalid.queue(batch::Item::from_binding(binding_vk, binding_sig, b"wrong"));
+    assert_eq!(invalid.verify(&mut rng), Err(Error::InvalidSignature));
+}
+
+#[test]
+fn empty_batch_is_valid() {
+    let batch = batch::Verifier::<sapling::SpendAuth, sapling::Binding>::new();
+    assert_eq!(batch.verify(thread_rng()), Ok(()));
+}
+
+#[test]
+fn orchard_single_signature_batches_verify() {
+    let mut rng = thread_rng();
+    let msg = b"BatchVerifyTest";
+
+    let spend_sk = SigningKey::<orchard::SpendAuth>::new(&mut rng);
+    let spend_vk = VerificationKey::from(&spend_sk);
+    let spend_sig = spend_sk.sign(&mut rng, msg);
+    assert_eq!(spend_vk.verify(msg, &spend_sig), Ok(()));
+    let mut valid = batch::Verifier::<orchard::SpendAuth, orchard::Binding>::new();
+    valid.queue(batch::Item::from_spendauth(spend_vk.into(), spend_sig, msg));
+    assert_eq!(valid.verify(&mut rng), Ok(()));
+
+    let binding_sk = SigningKey::<orchard::Binding>::new(&mut rng);
+    let binding_vk = VerificationKey::from(&binding_sk);
+    let binding_sig = binding_sk.sign(&mut rng, msg);
+    assert_eq!(binding_vk.verify(msg, &binding_sig), Ok(()));
+    let mut invalid = batch::Verifier::<orchard::SpendAuth, orchard::Binding>::new();
+    invalid.queue(batch::Item::from_binding(
+        binding_vk.into(),
+        binding_sig,
+        b"wrong",
+    ));
+    assert_eq!(invalid.verify(&mut rng), Err(Error::InvalidSignature));
+}
