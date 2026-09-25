@@ -307,25 +307,37 @@ fn prepared_batch_verify() {
     for count in [1, 2] {
         let mut valid = batch::Verifier::new();
         let mut invalid = batch::Verifier::new();
+        let mut valid_raw = batch::Verifier::new();
+        let mut invalid_raw = batch::Verifier::new();
         #[cfg(feature = "multicore")]
         let mut valid_multicore = batch::Verifier::new();
         #[cfg(feature = "multicore")]
         let mut invalid_multicore = batch::Verifier::new();
+        #[cfg(feature = "multicore")]
+        let mut valid_multicore_raw = batch::Verifier::new();
+        #[cfg(feature = "multicore")]
+        let mut invalid_multicore_raw = batch::Verifier::new();
 
         for i in 0..count {
             let valid_item = (proof.clone(), vec![image]);
             let invalid_item = (proof.clone(), vec![image + Scalar::from((i == 0) as u64)]);
             valid.queue(valid_item.clone());
             invalid.queue(invalid_item.clone());
+            valid_raw.queue(valid_item.clone());
+            invalid_raw.queue(invalid_item.clone());
             #[cfg(feature = "multicore")]
             {
-                valid_multicore.queue(valid_item);
-                invalid_multicore.queue(invalid_item);
+                valid_multicore.queue(valid_item.clone());
+                invalid_multicore.queue(invalid_item.clone());
+                valid_multicore_raw.queue(valid_item);
+                invalid_multicore_raw.queue(invalid_item);
             }
         }
 
         assert!(valid.verify_prepared(&mut rng, &prepared).is_ok());
         assert!(invalid.verify_prepared(&mut rng, &prepared).is_err());
+        assert!(valid_raw.verify(&mut rng, &params.vk).is_ok());
+        assert!(invalid_raw.verify(&mut rng, &params.vk).is_err());
         #[cfg(feature = "multicore")]
         {
             assert!(valid_multicore.verify_multicore_prepared(&prepared).is_ok());
@@ -334,6 +346,8 @@ fn prepared_batch_verify() {
                     .verify_multicore_prepared(&prepared)
                     .is_err()
             );
+            assert!(valid_multicore_raw.verify_multicore(&params.vk).is_ok());
+            assert!(invalid_multicore_raw.verify_multicore(&params.vk).is_err());
         }
     }
 }
