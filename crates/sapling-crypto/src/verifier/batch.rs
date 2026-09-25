@@ -2,7 +2,6 @@ use bellman::groth16;
 use bls12_381::Bls12;
 use group::GroupEncoding;
 use rand_core::{CryptoRng, Rng};
-use std::sync::OnceLock;
 
 use super::SaplingVerificationContextInner;
 use crate::{
@@ -15,13 +14,11 @@ const MAX_JOINT_PROOFS_PER_KIND: usize = 1;
 
 /// Borrowed Sapling verifying keys for repeated [`BatchValidator`]s.
 ///
-/// Each key's fixed G2 terms are prepared on first use. Keeping this value
-/// across batches reuses that preparation without preparing an unused key.
+/// Each key retains its fixed G2 terms after first use. This wrapper keeps
+/// the existing prepared validation API for callers with both keys.
 pub struct PreparedBatchVerifyingKeys<'a> {
     spend_vk: &'a SpendVerifyingKey,
     output_vk: &'a OutputVerifyingKey,
-    spend: OnceLock<groth16::batch::PreparedBatchVerifyingKey<'a, Bls12>>,
-    output: OnceLock<groth16::batch::PreparedBatchVerifyingKey<'a, Bls12>>,
 }
 
 impl<'a> PreparedBatchVerifyingKeys<'a> {
@@ -30,19 +27,21 @@ impl<'a> PreparedBatchVerifyingKeys<'a> {
         Self {
             spend_vk,
             output_vk,
-            spend: OnceLock::new(),
-            output: OnceLock::new(),
         }
     }
 
-    fn spend(&self) -> &groth16::batch::PreparedBatchVerifyingKey<'a, Bls12> {
-        self.spend
-            .get_or_init(|| groth16::batch::PreparedBatchVerifyingKey::from(&self.spend_vk.0))
+    fn spend(
+        &self,
+    ) -> Result<groth16::batch::PreparedBatchVerifyingKey<'_, Bls12>, bellman::VerificationError>
+    {
+        self.spend_vk.prepared_batch()
     }
 
-    fn output(&self) -> &groth16::batch::PreparedBatchVerifyingKey<'a, Bls12> {
-        self.output
-            .get_or_init(|| groth16::batch::PreparedBatchVerifyingKey::from(&self.output_vk.0))
+    fn output(
+        &self,
+    ) -> Result<groth16::batch::PreparedBatchVerifyingKey<'_, Bls12>, bellman::VerificationError>
+    {
+        self.output_vk.prepared_batch()
     }
 }
 
@@ -175,39 +174,9 @@ impl BatchValidator {
         self,
         spend_vk: &SpendVerifyingKey,
         output_vk: &OutputVerifyingKey,
-        mut rng: R,
+        rng: R,
     ) -> bool {
-        if !self.bundles_added {
-            // An empty batch is always valid, but is not free to run; skip it.
-            return true;
-        }
-
-        if let Err(e) = self.signatures.verify(&mut rng) {
-            #[cfg(feature = "std")]
-            tracing::debug!("Signature batch validation failed: {}", e);
-            #[cfg(not(feature = "std"))]
-            tracing::debug!("Signature batch validation failed: {:?}", e);
-            return false;
-        }
-
-        #[cfg(feature = "multicore")]
-        let verify_proofs = |batch: groth16::batch::Verifier<Bls12>, vk| batch.verify_multicore(vk);
-
-        #[cfg(not(feature = "multicore"))]
-        let mut verify_proofs =
-            |batch: groth16::batch::Verifier<Bls12>, vk| batch.verify(&mut rng, vk);
-
-        if verify_proofs(self.spend_proofs, &spend_vk.0).is_err() {
-            tracing::debug!("Spend proof batch validation failed");
-            return false;
-        }
-
-        if verify_proofs(self.output_proofs, &output_vk.0).is_err() {
-            tracing::debug!("Output proof batch validation failed");
-            return false;
-        }
-
-        true
+        self.validate_prepared(&PreparedBatchVerifyingKeys::new(spend_vk, output_vk), rng)
     }
 
     /// Batch-validates using keys prepared across multiple validators.
@@ -243,9 +212,13 @@ impl BatchValidator {
         let use_joint = self.spend_proof_count > 0 && self.output_proof_count > 0;
 
         if use_joint {
+            let (Ok(spend), Ok(output)) = (keys.spend(), keys.output()) else {
+                tracing::debug!("Sapling proof verifying key validation failed");
+                return false;
+            };
             if self
                 .spend_proofs
-                .verify_joint_prepared(self.output_proofs, &mut rng, keys.spend(), keys.output())
+                .verify_joint_prepared(self.output_proofs, &mut rng, &spend, &output)
                 .is_err()
             {
                 tracing::debug!("Sapling proof batch validation failed");
@@ -255,10 +228,14 @@ impl BatchValidator {
         }
 
         if self.spend_proof_count > 0 {
+            let Ok(spend) = keys.spend() else {
+                tracing::debug!("Spend proof verifying key validation failed");
+                return false;
+            };
             #[cfg(feature = "multicore")]
-            let result = self.spend_proofs.verify_multicore_prepared(keys.spend());
+            let result = self.spend_proofs.verify_multicore_prepared(&spend);
             #[cfg(not(feature = "multicore"))]
-            let result = self.spend_proofs.verify_prepared(&mut rng, keys.spend());
+            let result = self.spend_proofs.verify_prepared(&mut rng, &spend);
 
             if result.is_err() {
                 tracing::debug!("Spend proof batch validation failed");
@@ -267,10 +244,14 @@ impl BatchValidator {
         }
 
         if self.output_proof_count > 0 {
+            let Ok(output) = keys.output() else {
+                tracing::debug!("Output proof verifying key validation failed");
+                return false;
+            };
             #[cfg(feature = "multicore")]
-            let result = self.output_proofs.verify_multicore_prepared(keys.output());
+            let result = self.output_proofs.verify_multicore_prepared(&output);
             #[cfg(not(feature = "multicore"))]
-            let result = self.output_proofs.verify_prepared(&mut rng, keys.output());
+            let result = self.output_proofs.verify_prepared(&mut rng, &output);
 
             if result.is_err() {
                 tracing::debug!("Output proof batch validation failed");
@@ -289,7 +270,7 @@ mod tests {
     use crate::circuit::{OutputVerifyingKey, SpendVerifyingKey};
     use alloc::vec::Vec;
     use bellman::{Circuit, ConstraintSystem, SynthesisError, groth16};
-    use bls12_381::{Bls12, Scalar};
+    use bls12_381::{Bls12, G2Affine, Scalar};
     use ff::Field;
 
     struct PublicInputs<const N: usize> {
@@ -377,29 +358,26 @@ mod tests {
     }
 
     #[test]
-    fn prepared_validation_reuses_only_needed_keys() {
+    fn validation_reuses_key_owned_preparation() {
         let mut rng = rand::rng();
         let (spend_vk, spend_proof, spend_inputs) = proof::<SPEND_PUBLIC_INPUT_COUNT>(&mut rng);
         let (output_vk, output_proof, output_inputs) = proof::<OUTPUT_PUBLIC_INPUT_COUNT>(&mut rng);
-        let spend_vk = SpendVerifyingKey(spend_vk);
-        let output_vk = OutputVerifyingKey(output_vk);
+        let mut spend_vk = SpendVerifyingKey::new(spend_vk);
+        let mut output_vk = OutputVerifyingKey::new(output_vk);
         let keys = PreparedBatchVerifyingKeys::new(&spend_vk, &output_vk);
 
+        assert!(BatchValidator::new().validate(&spend_vk, &output_vk, &mut rng));
         assert!(BatchValidator::new().validate_prepared(&keys, &mut rng));
+        assert!(validator(None, None).validate(&spend_vk, &output_vk, &mut rng));
         assert!(validator(None, None).validate_prepared(&keys, &mut rng));
-        assert!(keys.spend.get().is_none());
-        assert!(keys.output.get().is_none());
 
         let spend = Some((&spend_proof, spend_inputs.as_slice()));
         assert!(validator(spend, None).validate(&spend_vk, &output_vk, &mut rng));
         assert!(validator(spend, None).validate_prepared(&keys, &mut rng));
-        assert!(keys.spend.get().is_some());
-        assert!(keys.output.get().is_none());
 
         let output = Some((&output_proof, output_inputs.as_slice()));
         assert!(validator(None, output).validate(&spend_vk, &output_vk, &mut rng));
         assert!(validator(None, output).validate_prepared(&keys, &mut rng));
-        assert!(keys.output.get().is_some());
 
         assert!(validator(spend, output).validate(&spend_vk, &output_vk, &mut rng));
         assert!(validator(spend, output).validate_prepared(&keys, &mut rng));
@@ -407,11 +385,13 @@ mod tests {
         let mut invalid_inputs = spend_inputs.clone();
         invalid_inputs[0] += Scalar::ONE;
         let invalid_spend = Some((&spend_proof, invalid_inputs.as_slice()));
+        assert!(!validator(invalid_spend, output).validate(&spend_vk, &output_vk, &mut rng));
         assert!(!validator(invalid_spend, output).validate_prepared(&keys, &mut rng));
 
         let mut invalid_inputs = output_inputs.clone();
         invalid_inputs[0] += Scalar::ONE;
         let invalid_output = Some((&output_proof, invalid_inputs.as_slice()));
+        assert!(!validator(spend, invalid_output).validate(&spend_vk, &output_vk, &mut rng));
         assert!(!validator(spend, invalid_output).validate_prepared(&keys, &mut rng));
 
         let mut large = validator(spend, output);
@@ -426,6 +406,20 @@ mod tests {
         large.spend_proof_count = 9;
         large.output_proof_count = 9;
         assert!(large.validate_prepared(&keys, &mut rng));
+
+        spend_vk.0.delta_g2 = G2Affine::identity();
+        assert!(matches!(
+            spend_vk.prepared_batch(),
+            Err(bellman::VerificationError::InvalidVerifyingKey)
+        ));
+        assert!(!validator(spend, None).validate(&spend_vk, &output_vk, &mut rng));
+
+        output_vk.0.delta_g2 = G2Affine::identity();
+        assert!(matches!(
+            output_vk.prepared_batch(),
+            Err(bellman::VerificationError::InvalidVerifyingKey)
+        ));
+        assert!(!validator(None, output).validate(&spend_vk, &output_vk, &mut rng));
     }
 
     #[test]
@@ -436,8 +430,8 @@ mod tests {
         let mut rng = rand::rng();
         let (spend_vk, spend_proof, spend_inputs) = proof::<SPEND_PUBLIC_INPUT_COUNT>(&mut rng);
         let (output_vk, output_proof, output_inputs) = proof::<OUTPUT_PUBLIC_INPUT_COUNT>(&mut rng);
-        let spend_vk = SpendVerifyingKey(spend_vk);
-        let output_vk = OutputVerifyingKey(output_vk);
+        let spend_vk = SpendVerifyingKey::new(spend_vk);
+        let output_vk = OutputVerifyingKey::new(output_vk);
         let keys = PreparedBatchVerifyingKeys::new(&spend_vk, &output_vk);
         let spend = (&spend_proof, spend_inputs.as_slice());
         let output = (&output_proof, output_inputs.as_slice());
@@ -474,13 +468,13 @@ mod tests {
                         assert!(
                             validator
                                 .spend_proofs
-                                .verify_multicore_prepared(keys.spend())
+                                .verify_multicore_prepared(&keys.spend().unwrap())
                                 .is_ok()
                         );
                         assert!(
                             validator
                                 .output_proofs
-                                .verify_multicore_prepared(keys.output())
+                                .verify_multicore_prepared(&keys.output().unwrap())
                                 .is_ok()
                         );
                     }
@@ -489,13 +483,13 @@ mod tests {
                         assert!(
                             validator
                                 .spend_proofs
-                                .verify_prepared(&mut *rng, keys.spend())
+                                .verify_prepared(&mut *rng, &keys.spend().unwrap())
                                 .is_ok()
                         );
                         assert!(
                             validator
                                 .output_proofs
-                                .verify_prepared(&mut *rng, keys.output())
+                                .verify_prepared(&mut *rng, &keys.output().unwrap())
                                 .is_ok()
                         );
                     }
@@ -533,47 +527,64 @@ mod tests {
         let mut rng = rand::rng();
         let (spend_vk, spend_proof, spend_inputs) = proof::<SPEND_PUBLIC_INPUT_COUNT>(&mut rng);
         let (output_vk, output_proof, output_inputs) = proof::<OUTPUT_PUBLIC_INPUT_COUNT>(&mut rng);
-        let spend_vk = SpendVerifyingKey(spend_vk);
-        let output_vk = OutputVerifyingKey(output_vk);
+        let spend_vk = SpendVerifyingKey::new(spend_vk);
+        let output_vk = OutputVerifyingKey::new(output_vk);
         let keys = PreparedBatchVerifyingKeys::new(&spend_vk, &output_vk);
         let spend = Some((&spend_proof, spend_inputs.as_slice()));
         let output = Some((&output_proof, output_inputs.as_slice()));
 
         // Warm both keys before timing repeated validations.
-        assert!(validator(spend, output).validate_prepared(&keys, &mut rng));
+        assert!(validator(spend, output).validate(&spend_vk, &output_vk, &mut rng));
 
         for (name, spend, output) in [
             ("Spend only", spend, None),
             ("Output only", None, output),
             ("Spend + Output", spend, output),
         ] {
-            let mut raw = Vec::with_capacity(100);
+            let mut default = Vec::with_capacity(100);
             let mut prepared = Vec::with_capacity(100);
+            let mut cold = Vec::with_capacity(100);
             for iteration in 0..100 {
-                let measure_raw = |rng: &mut _, timings: &mut Vec<u128>| {
+                let measure_default = |rng: &mut _, timings: &mut Vec<u128>| {
                     let start = Instant::now();
-                    black_box(validator(spend, output).validate(&spend_vk, &output_vk, rng));
+                    assert!(black_box(
+                        validator(spend, output).validate(&spend_vk, &output_vk, rng)
+                    ));
                     timings.push(start.elapsed().as_micros());
                 };
                 let measure_prepared = |rng: &mut _, timings: &mut Vec<u128>| {
                     let start = Instant::now();
-                    black_box(validator(spend, output).validate_prepared(&keys, rng));
+                    assert!(black_box(
+                        validator(spend, output).validate_prepared(&keys, rng)
+                    ));
                     timings.push(start.elapsed().as_micros());
                 };
                 if iteration % 2 == 0 {
-                    measure_raw(&mut rng, &mut raw);
+                    measure_default(&mut rng, &mut default);
                     measure_prepared(&mut rng, &mut prepared);
                 } else {
                     measure_prepared(&mut rng, &mut prepared);
-                    measure_raw(&mut rng, &mut raw);
+                    measure_default(&mut rng, &mut default);
                 }
+
+                let fresh_spend = SpendVerifyingKey::new(spend_vk.0.clone());
+                let fresh_output = OutputVerifyingKey::new(output_vk.0.clone());
+                let start = Instant::now();
+                assert!(black_box(validator(spend, output).validate(
+                    &fresh_spend,
+                    &fresh_output,
+                    &mut rng,
+                )));
+                cold.push(start.elapsed().as_micros());
             }
-            raw.sort_unstable();
+            default.sort_unstable();
             prepared.sort_unstable();
+            cold.sort_unstable();
             std::println!(
-                "{name}: raw median {} us, prepared median {} us",
-                raw[raw.len() / 2],
+                "{name}: default {} us, prepared {} us, cold {} us",
+                default[default.len() / 2],
                 prepared[prepared.len() / 2],
+                cold[cold.len() / 2],
             );
         }
     }

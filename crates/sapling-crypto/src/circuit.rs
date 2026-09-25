@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 use corez::io;
+use std::sync::OnceLock;
 
 use group::{Curve, ff::PrimeField};
 
@@ -570,7 +571,7 @@ impl SpendParameters {
 
     /// Returns the verifying key for the Sapling Spend circuit.
     pub fn verifying_key(&self) -> SpendVerifyingKey {
-        SpendVerifyingKey(self.0.vk.clone())
+        SpendVerifyingKey::new(self.0.vk.clone())
     }
 
     /// Returns the verifying key for the Sapling Spend circuit, with precomputations
@@ -581,9 +582,26 @@ impl SpendParameters {
 }
 
 /// The verifying key for the Sapling Spend circuit.
-pub struct SpendVerifyingKey(pub(crate) groth16::VerifyingKey<Bls12>);
+pub struct SpendVerifyingKey(
+    pub(crate) groth16::VerifyingKey<Bls12>,
+    OnceLock<groth16::batch::PreparedBatchG2<Bls12>>,
+);
 
 impl SpendVerifyingKey {
+    pub(crate) fn new(vk: groth16::VerifyingKey<Bls12>) -> Self {
+        Self(vk, OnceLock::new())
+    }
+
+    pub(crate) fn prepared_batch(
+        &self,
+    ) -> Result<groth16::batch::PreparedBatchVerifyingKey<'_, Bls12>, bellman::VerificationError>
+    {
+        let g2 = self
+            .1
+            .get_or_init(|| groth16::batch::PreparedBatchG2::from(&self.0));
+        groth16::batch::PreparedBatchVerifyingKey::from_cached(&self.0, g2)
+    }
+
     /// Performs precomputations optimized for verifying individual proofs.
     pub fn prepare(&self) -> PreparedSpendVerifyingKey {
         PreparedSpendVerifyingKey(groth16::prepare_verifying_key(&self.0))
@@ -608,7 +626,7 @@ impl OutputParameters {
 
     /// Returns the verifying key for the Sapling Output circuit.
     pub fn verifying_key(&self) -> OutputVerifyingKey {
-        OutputVerifyingKey(self.0.vk.clone())
+        OutputVerifyingKey::new(self.0.vk.clone())
     }
 
     /// Returns the verifying key for the Sapling Output circuit, with precomputations
@@ -619,9 +637,26 @@ impl OutputParameters {
 }
 
 /// The verifying key for the Sapling Output circuit.
-pub struct OutputVerifyingKey(pub(crate) groth16::VerifyingKey<Bls12>);
+pub struct OutputVerifyingKey(
+    pub(crate) groth16::VerifyingKey<Bls12>,
+    OnceLock<groth16::batch::PreparedBatchG2<Bls12>>,
+);
 
 impl OutputVerifyingKey {
+    pub(crate) fn new(vk: groth16::VerifyingKey<Bls12>) -> Self {
+        Self(vk, OnceLock::new())
+    }
+
+    pub(crate) fn prepared_batch(
+        &self,
+    ) -> Result<groth16::batch::PreparedBatchVerifyingKey<'_, Bls12>, bellman::VerificationError>
+    {
+        let g2 = self
+            .1
+            .get_or_init(|| groth16::batch::PreparedBatchG2::from(&self.0));
+        groth16::batch::PreparedBatchVerifyingKey::from_cached(&self.0, g2)
+    }
+
     /// Performs precomputations optimized for verifying individual proofs.
     pub fn prepare(&self) -> PreparedOutputVerifyingKey {
         PreparedOutputVerifyingKey(groth16::prepare_verifying_key(&self.0))
