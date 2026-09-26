@@ -119,6 +119,10 @@ const PREPARED_INSTANCE_BOOLEAN_ROWS: usize = 3;
 const PREPARED_INSTANCE_ROWS: usize = PREPARED_INSTANCE_DENSE_ROWS + PREPARED_INSTANCE_BOOLEAN_ROWS;
 #[cfg(feature = "batch")]
 const PREPARED_INSTANCE_OFFSETS: usize = 1 << PREPARED_INSTANCE_BOOLEAN_ROWS;
+// A block-sized verifier batch can retain one first-row product per proof
+// without allowing caller-controlled cache growth.
+#[cfg(feature = "batch")]
+const PREPARED_INSTANCE_FIRST_ROW_CACHE_ENTRIES: usize = 64;
 // Signed width four retains about 224 KiB for Pasta and needs at most 64
 // additions per dense scalar.
 #[cfg(feature = "batch")]
@@ -160,8 +164,27 @@ struct PreparedInstanceTable<C: pasta_curves::arithmetic::CurveAffine> {
 }
 
 #[cfg(feature = "batch")]
+/// Positioned signed-window multiples for the first public-instance row.
+///
+/// The bounded product cache is variable-time over public inputs and is shared
+/// by cloned parameters, but is neither serialized nor part of the SRS.
+struct PreparedInstanceFirstRowTable<C: pasta_curves::arithmetic::CurveAffine> {
+    points: Vec<C>,
+    scalar_bits: usize,
+    windows: usize,
+    byte_order: InstanceScalarByteOrder,
+    products: std::sync::Mutex<Vec<(C::Scalar, C::Curve)>>,
+}
+
+#[cfg(feature = "batch")]
 trait InstanceWindowTable<C: pasta_curves::arithmetic::CurveAffine> {
     fn instance_window_table(&self, base_count: usize) -> std::sync::Arc<Vec<C>>;
+
+    fn prepare_instance_first_row_table(&self) -> bool;
+
+    fn prepared_instance_first_row_table(
+        &self,
+    ) -> Option<std::sync::Arc<PreparedInstanceFirstRowTable<C>>>;
 
     fn prepare_instance_table(&self) -> bool;
 
