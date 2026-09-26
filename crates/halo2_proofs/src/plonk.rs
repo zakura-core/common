@@ -30,6 +30,7 @@ pub(crate) mod permutation;
 mod vanishing;
 
 mod prover;
+mod serialization;
 mod verifier;
 
 #[cfg(feature = "unstable-verifier-fingerprint")]
@@ -592,6 +593,8 @@ pub struct VerifyingKey<C: CurveAffine> {
     cs_degree: usize,
     /// The representative of this `VerifyingKey` in transcripts.
     transcript_repr: C::Scalar,
+    /// Bit-packed selector activations, excluded from the pinned representation.
+    selectors: Vec<Vec<u8>>,
 }
 
 impl<C: CurveAffine> VerifyingKey<C>
@@ -603,6 +606,7 @@ where
         fixed_commitments: Vec<C>,
         permutation: permutation::VerifyingKey<C>,
         cs: ConstraintSystem<C::Scalar>,
+        selectors: Vec<Vec<u8>>,
     ) -> Self {
         // Compute cached values.
         let cs_degree = cs.degree();
@@ -615,6 +619,7 @@ where
             cs_degree,
             // Temporary, this is not pinned.
             transcript_repr: C::Scalar::ZERO,
+            selectors,
         };
 
         let mut hasher = Blake2bParams::new()
