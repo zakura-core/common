@@ -42,3 +42,20 @@ pub(crate) const MAINNET_415000_SOLUTION: &str = concat!(
     "e8b59ac6b0fd416bee56b72f0a5845153557ff0f4950a0dc5be65ce942d22e18534c4e0efabb2d1525dc4858b9b0f77d",
     "474a125ebc250e08fedbfaa66f453d90932cab3ff45221909968e51e6bc254d509adeb75cba76d48fe024e3e66d8df5e",
 );
+
+// The zcashd Regtest genesis block, via `zakura-chain`'s
+// `block-regtest-0-000-000.txt`.
+
+/// The Regtest genesis header up to, but excluding, the nonce.
+pub(crate) const REGTEST_GENESIS_HEADER: &str = concat!(
+    "040000000000000000000000000000000000000000000000000000000000000000000000db4d7a85b768123f1dff1d4c",
+    "4cece70083b2d27e117b4ac2e31d087988a5eac400000000000000000000000000000000000000000000000000000000",
+    "00000000dae5494d0f0f0f20",
+);
+
+pub(crate) const REGTEST_GENESIS_NONCE: &str =
+    "0900000000000000000000000000000000000000000000000000000000000000";
+
+/// The minimally encoded `(48, 5)` solution.
+pub(crate) const REGTEST_GENESIS_SOLUTION: &str =
+    "01936b7db1eb4ac39f151b8704642d0a8bda13ec547d54cd5e43ba142fc6d8877cab07b3";

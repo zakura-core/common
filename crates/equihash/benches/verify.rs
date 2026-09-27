@@ -5,7 +5,12 @@
 
 use std::{hint::black_box, time::Instant};
 
-include!("../src/test_vectors/zcash.rs");
+// The vector file also holds a Regtest header this benchmark does not use.
+#[allow(dead_code)]
+mod vectors {
+    include!("../src/test_vectors/zcash.rs");
+}
+use vectors::{MAINNET_415000_HEADER, MAINNET_415000_NONCE, MAINNET_415000_SOLUTION};
 
 const VERIFICATIONS: u32 = 2_000;
 

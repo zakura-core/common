@@ -409,6 +409,7 @@ mod tests {
     use crate::params::Params;
     use crate::test_vectors::{
         INVALID_TEST_VECTORS, MAINNET_415000_HEADER, MAINNET_415000_NONCE, MAINNET_415000_SOLUTION,
+        REGTEST_GENESIS_HEADER, REGTEST_GENESIS_NONCE, REGTEST_GENESIS_SOLUTION,
         VALID_TEST_VECTORS,
     };
 
@@ -473,6 +474,37 @@ mod tests {
 
         let mut nonce = nonce;
         nonce[31] ^= 1;
+        is_valid_solution(200, 9, &header, &nonce, &soln).unwrap_err();
+    }
+
+    #[test]
+    fn regtest_genesis() {
+        let header = hex::decode(REGTEST_GENESIS_HEADER).unwrap();
+        let nonce = hex::decode(REGTEST_GENESIS_NONCE).unwrap();
+        let soln = hex::decode(REGTEST_GENESIS_SOLUTION).unwrap();
+        is_valid_solution(48, 5, &header, &nonce, &soln).unwrap();
+
+        let p = Params::new(48, 5).unwrap();
+        let indices = indices_from_minimal(p, &soln).unwrap();
+        is_valid_solution_recursive(p, &header, &nonce, &indices).unwrap();
+        for kernel in Kernel::supported() {
+            let hasher = LeafHasher::with_kernel(&p, &header, &nonce, kernel).unwrap();
+            validate_tree(&p, &indices, |blocks, digests| hasher.hash(blocks, digests))
+                .unwrap_or_else(|e| panic!("{kernel:?}: {e}"));
+        }
+
+        // Every bit of the solution and nonce matters.
+        for i in 0..soln.len() * 8 {
+            let mut mutated = soln.clone();
+            mutated[i / 8] ^= 1 << (i % 8);
+            is_valid_solution(48, 5, &header, &nonce, &mutated).unwrap_err();
+        }
+        for i in 0..nonce.len() * 8 {
+            let mut mutated = nonce.clone();
+            mutated[i / 8] ^= 1 << (i % 8);
+            is_valid_solution(48, 5, &header, &mutated, &soln).unwrap_err();
+        }
+        // Mainnet parameters reject the Regtest solution.
         is_valid_solution(200, 9, &header, &nonce, &soln).unwrap_err();
     }
 

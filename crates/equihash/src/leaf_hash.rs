@@ -430,6 +430,41 @@ mod tests {
         }
     }
 
+    /// Compares every kernel with `blake2b_simd` on every block index a
+    /// Zcash solution can reach: indices have `collision_bit_length + 1`
+    /// bits, and each block covers `indices_per_hash_output` of them.
+    ///
+    /// Run with `cargo test --release -p zakura-equihash -- --ignored`.
+    #[test]
+    #[ignore = "exhaustive; about 2^20 hashes per kernel"]
+    fn kernels_match_blake2b_simd_on_every_reachable_block() {
+        let prefix: Vec<u8> = (0..HEADER_BYTES + NONCE_BYTES)
+            .map(|i| (i * 131 + 89) as u8)
+            .collect();
+        let (input, nonce) = prefix.split_at(HEADER_BYTES);
+        for (n, k) in [(200, 9), (48, 5)] {
+            let p = Params::new(n, k).unwrap();
+            let max_index = (1u32 << (p.collision_bit_length() + 1)) - 1;
+            let blocks: Vec<u32> = (0..=max_index / p.indices_per_hash_output()).collect();
+            let expected: Vec<Digest> = blocks
+                .iter()
+                .map(|block| reference(&p, input, nonce, *block))
+                .collect();
+            for kernel in Kernel::supported() {
+                let hasher = LeafHasher::with_kernel(&p, input, nonce, kernel).unwrap();
+                let mut out = vec![[0; 64]; blocks.len()];
+                hasher.hash(&blocks, &mut out);
+                for (block, (digest, expected)) in out.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        digest[..],
+                        expected[..],
+                        "{kernel:?} ({n}, {k}) block {block}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn rejects_other_prefix_lengths() {
         let p = Params::new(200, 9).unwrap();
