@@ -373,7 +373,7 @@ unsafe fn vg8(
         vc = _mm512_add_epi64(vc, vd);
         vb = _mm512_ror_epi64::<24>(_mm512_xor_si512(vb, vc));
         va = _mm512_add_epi64(_mm512_add_epi64(va, vb), y);
-        vd = _mm512_ror_epi64::<GENERAL_INDEX_WORD>(_mm512_xor_si512(vd, va));
+        vd = _mm512_ror_epi64::<16>(_mm512_xor_si512(vd, va));
         vc = _mm512_add_epi64(vc, vd);
         vb = _mm512_ror_epi64::<63>(_mm512_xor_si512(vb, vc));
         v[a] = va;
@@ -412,7 +412,7 @@ mod tests {
             let prefix: std::vec::Vec<u8> = (0..len).map(|i| (i * 197) as u8).collect();
             for hash_len in [1, 32, 50, 64] {
                 let Some(ctx) =
-                    Context::new(&prefix[..len / 2], &prefix[len / 2..], 200, 9, hash_len)
+                    Context::new(&prefix[..len / 2], &prefix[len / 2..], n, k, hash_len)
                 else {
                     continue;
                 };
