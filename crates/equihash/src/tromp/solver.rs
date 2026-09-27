@@ -25,7 +25,7 @@ const RESTS: usize = 1 << REST_BITS;
 const COLLISION_CAPACITY: usize = 16;
 const PROOF_SIZE: usize = 1 << ROUNDS;
 const MAX_SOLUTIONS: usize = 8;
-const LEAF_INDEX_HASH_MULTIPLIER: u32 = 0x9e37_79b1;
+const HASH_TABLE_MULTIPLIER: u32 = 0x9e37_79b1;
 const HASHES: usize = 1 << (DIGIT_BITS + 1);
 const HASHES_PER_BLAKE: usize = 512 / SOLVER_PARAMS.n as usize;
 const HASH_BYTES: usize = SOLVER_PARAMS.n as usize / 8;
@@ -35,6 +35,10 @@ const HASH_BATCH: usize = 64;
 const OUTPUT_BATCH: usize = 64;
 const INITIAL_WORDS: usize = TABLE_WORDS[0] - 1;
 const FINAL_WORDS: usize = HASH_WORDS[ROUNDS - 1];
+const FINAL_MAP_BITS: usize = SLOT_BITS + 1;
+const FINAL_MAP_SIZE: usize = 1 << FINAL_MAP_BITS;
+const FINAL_MAP_MASK: usize = FINAL_MAP_SIZE - 1;
+const _: () = assert!(FINAL_WORDS == 1);
 const INITIAL_BYTES: usize = INITIAL_WORDS * core::mem::size_of::<u32>();
 const HASH_WORDS: [usize; ROUNDS] = {
     let mut words = [0; ROUNDS];
@@ -222,38 +226,92 @@ fn row_bucket<const WORDS: usize>(
     }
 }
 
-// Candidate nodes retain right-slot and prior-prefix order. Processing
-// starts after the immutable hash-table borrow ends, and the buffer is reused.
+// Full-word matches form insertion-ordered chains. Epoch tags reuse the
+// map between buckets without clearing every key, head or tail.
+struct FinalGroups {
+    keys: [u32; FINAL_MAP_SIZE],
+    tags: [u32; FINAL_MAP_SIZE],
+    heads: [u16; FINAL_MAP_SIZE],
+    tails: [u16; FINAL_MAP_SIZE],
+    next: [u16; SLOTS],
+    epoch: u32,
+}
+
+impl FinalGroups {
+    fn new() -> Self {
+        // At most one entry exists per retained source row. The spare entry
+        // guarantees termination of linear probing, even for adverse words.
+        assert!(FINAL_MAP_SIZE.is_power_of_two() && FINAL_MAP_SIZE > SLOTS);
+        Self {
+            keys: [0; FINAL_MAP_SIZE],
+            tags: [0; FINAL_MAP_SIZE],
+            heads: [0; FINAL_MAP_SIZE],
+            tails: [0; FINAL_MAP_SIZE],
+            next: [0; SLOTS],
+            epoch: 0,
+        }
+    }
+
+    fn advance_epoch(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.tags.fill(0);
+            self.epoch = 1;
+        }
+    }
+
+    fn insert(&mut self, right: usize, word: u32) -> Option<(u16, u16)> {
+        debug_assert!(right < SLOTS);
+        let mut position = (word.wrapping_mul(HASH_TABLE_MULTIPLIER)
+            >> (u32::BITS as usize - FINAL_MAP_BITS)) as usize;
+        loop {
+            if self.tags[position] != self.epoch {
+                self.keys[position] = word;
+                self.tags[position] = self.epoch;
+                self.heads[position] = right as u16;
+                self.tails[position] = right as u16;
+                return None;
+            }
+            if self.keys[position] == word {
+                let head = self.heads[position];
+                let tail = self.tails[position];
+                self.next[tail as usize] = right as u16;
+                self.tails[position] = right as u16;
+                return Some((head, tail));
+            }
+            position = (position + 1) & FINAL_MAP_MASK;
+        }
+    }
+}
+
+// Apply the original per-rest cap before considering full-word equality.
+// Equal complete words necessarily have the same rest key. Their retained
+// slot chains therefore emit the same prior matches in the same order.
 fn collect_final_candidates(
     bucket: usize,
     rows: &[[u32; FINAL_WORDS]],
-    collisions: &mut Collisions,
-    active: &mut [ActiveRow; SLOTS],
+    groups: &mut FinalGroups,
     candidates: &mut Vec<u32>,
 ) {
-    collisions.clear();
+    groups.advance_epoch();
+    let mut rest_counts = [0_u16; RESTS];
     let layout = Layout::new(ROUNDS);
-    let mut active_count = 0;
     for (right, right_row) in rows.iter().enumerate() {
         let key = row_extra_hash(right_row, layout.previous_padding, true);
-        let previous = collisions.counts[key] as usize;
-        let _ = collisions.add(right, key);
-        active[active_count] = ActiveRow {
-            right: right as u16,
-            key: key as u8,
-            previous: previous.min(COLLISION_CAPACITY) as u8,
+        let previous = rest_counts[key] as usize;
+        rest_counts[key] += 1;
+        if previous >= COLLISION_CAPACITY {
+            continue;
+        }
+        let Some((mut left, tail)) = groups.insert(right, right_row[0]) else {
+            continue;
         };
-        active_count += usize::from(previous != 0 && previous < COLLISION_CAPACITY);
-    }
-    for descriptor in &active[..active_count] {
-        let right = descriptor.right as usize;
-        let right_row = &rows[right];
-        let colliding = &collisions.slots[descriptor.key as usize][..descriptor.previous as usize];
-        for &left in colliding {
-            let left = left as usize;
-            if rows[left][FINAL_WORDS - 1] == right_row[FINAL_WORDS - 1] {
-                candidates.push(tree(bucket, left, right));
+        loop {
+            candidates.push(tree(bucket, left as usize, right));
+            if left == tail {
+                break;
             }
+            left = groups.next[left as usize];
         }
     }
 }
@@ -450,8 +508,7 @@ impl Solver {
     }
 
     fn final_round(&mut self) {
-        let mut collisions = Collisions::new();
-        let mut active = [ActiveRow::default(); SLOTS];
+        let mut groups = FinalGroups::new();
         let mut candidates = Vec::with_capacity(COLLISION_CAPACITY);
         for bucket in 0..BUCKETS {
             let count = (self.counts[0][bucket] as usize).min(SLOTS);
@@ -461,7 +518,7 @@ impl Solver {
             let (rows, remainder) = input.as_chunks::<FINAL_WORDS>();
             debug_assert!(remainder.is_empty());
             candidates.clear();
-            collect_final_candidates(bucket, rows, &mut collisions, &mut active, &mut candidates);
+            collect_final_candidates(bucket, rows, &mut groups, &mut candidates);
             for &node in &candidates {
                 self.candidate(node);
             }
@@ -484,7 +541,7 @@ impl Solver {
     fn unique(&mut self, round: usize, node: u32) -> bool {
         if round == 0 {
             let mut slot =
-                (node.wrapping_mul(LEAF_INDEX_HASH_MULTIPLIER) >> (32 - (ROUNDS + 1))) as usize;
+                (node.wrapping_mul(HASH_TABLE_MULTIPLIER) >> (32 - (ROUNDS + 1))) as usize;
             while self.index_tags[slot] == self.index_epoch {
                 if self.index_keys[slot] == node {
                     return false;
@@ -532,8 +589,7 @@ mod tests {
 
     #[test]
     fn final_scan_preserves_candidate_order_capacity_and_reset() {
-        let mut collisions = Collisions::new();
-        let mut active = [super::ActiveRow::default(); SLOTS];
+        let mut groups = super::FinalGroups::new();
         let mut candidates = Vec::new();
         for pattern in 0..5 {
             let mut rows = Vec::new();
@@ -570,13 +626,13 @@ mod tests {
                 previous.push((right, word));
             }
             candidates.clear();
-            super::collect_final_candidates(
-                pattern,
-                &rows,
-                &mut collisions,
-                &mut active,
-                &mut candidates,
-            );
+            super::collect_final_candidates(pattern, &rows, &mut groups, &mut candidates);
+            assert_eq!(candidates, expected);
+            // Old epoch-one entries must not survive wraparound.
+            groups.epoch = u32::MAX;
+            candidates.clear();
+            super::collect_final_candidates(pattern, &rows, &mut groups, &mut candidates);
+            assert_eq!(groups.epoch, 1);
             assert_eq!(candidates, expected);
         }
     }
