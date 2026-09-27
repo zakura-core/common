@@ -102,10 +102,11 @@ trait PreparedLookupCommitments<C: pasta_curves::arithmetic::CurveAffine> {
 // Selector families smaller than this are cheaper to evaluate directly.
 const MIN_SELECTOR_FAMILY_LEN: usize = 4;
 
+// Signed width nine needs one more cached multiple than unsigned width eight.
 #[cfg(feature = "batch")]
-const INSTANCE_WINDOW_BITS: usize = 8;
+const INSTANCE_WINDOW_BITS: usize = 9;
 #[cfg(feature = "batch")]
-const INSTANCE_WINDOW_ENTRIES_PER_BASE: usize = (1 << INSTANCE_WINDOW_BITS) - 1;
+const INSTANCE_WINDOW_ENTRIES_PER_BASE: usize = 1 << (INSTANCE_WINDOW_BITS - 1);
 // Orchard's current public instance has seven full-width field elements
 // followed by three Boolean flags. The fixed-base prover path is deliberately
 // restricted to this exact shape.
@@ -131,8 +132,8 @@ const fn prepared_instance_window_count(scalar_bits: usize) -> usize {
     // window boundary. A partial high window cannot carry out.
     scalar_bits / PREPARED_INSTANCE_WINDOW_BITS + 1
 }
-// Each cached row retains 255 affine points, so this bounds the Pasta cache at
-// just under one MiB while covering Orchard's ten-row instance columns.
+// Each cached row retains 256 affine points, so this bounds the Pasta cache at
+// one MiB while covering Orchard's ten-row instance columns.
 #[cfg(feature = "batch")]
 const MAX_CACHED_INSTANCE_ROWS: usize = 64;
 
