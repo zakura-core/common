@@ -1,7 +1,14 @@
-use super::circuit::{Any, Column};
+use std::io;
+
+use group::ff::{Field, PrimeField};
+
+use super::{
+    circuit::{Any, Column},
+    serialization::{read_polynomial, write_polynomial},
+};
 use crate::{
     arithmetic::CurveAffine,
-    poly::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial},
+    poly::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, ProvingKeyTwiddles},
 };
 pub(crate) mod keygen;
 pub(crate) mod prover;
@@ -89,6 +96,29 @@ pub(crate) struct VerifyingKey<C: CurveAffine> {
 }
 
 impl<C: CurveAffine> VerifyingKey<C> {
+    /// Writes compressed commitments in permutation-column order, without a count.
+    pub(super) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        for commitment in &self.commitments {
+            writer.write_all(commitment.to_bytes().as_ref())?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn read<R: io::Read>(reader: &mut R, argument: &Argument) -> io::Result<Self> {
+        let commitments = argument
+            .columns
+            .iter()
+            .map(|_| {
+                let mut compressed = C::Repr::default();
+                reader.read_exact(compressed.as_mut())?;
+                Option::from(C::from_bytes(&compressed)).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid permutation commitment")
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        Ok(Self { commitments })
+    }
+
     /// The commitments to the permutation columns (one per column), for Lean fixture export.
     #[cfg(feature = "unstable-verifier-fingerprint")]
     pub(crate) fn commitments(&self) -> &[C] {
@@ -111,6 +141,89 @@ pub(crate) struct ProvingKey<C: CurveAffine> {
     prepared_difference_commitments: Vec<Option<PreparedDifferenceCommitment<C>>>,
     polys: Vec<Polynomial<C::Scalar, Coeff>>,
     pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+}
+
+impl<C: CurveAffine> ProvingKey<C> {
+    /// Writes only the Lagrange-basis permutation polynomials, without a column count.
+    pub(super) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        for permutation in &self.permutations {
+            write_polynomial(writer, permutation)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn read<R: io::Read>(
+        reader: &mut R,
+        vk: &super::VerifyingKey<C>,
+    ) -> io::Result<(Self, ProvingKeyTwiddles<C::Scalar>)> {
+        let domain = &vk.domain;
+        let argument = &vk.cs.permutation;
+        let n = 1usize << domain.k();
+        let permutations = argument
+            .columns
+            .iter()
+            .map(|_| read_polynomial(reader, domain))
+            .collect::<io::Result<Vec<_>>>()?;
+        // Do not allocate domain-sized caches until all polynomial payloads were read.
+        let fft_twiddles = domain.proving_key_twiddles();
+
+        // Reconstruct fixed cells from the canonical labels, not serialized hints.
+        let mut delta = C::Scalar::ONE;
+        let mut deltaomega = Vec::with_capacity(permutations.len());
+        let mut identity_cells = IdentityCells(Vec::with_capacity(permutations.len()));
+        for permutation in &permutations {
+            let mut identity = delta;
+            let mut identities = Vec::with_capacity(n);
+            let mut cells = vec![0; IdentityCells::encoded_column_len(n)];
+            for (row, &permuted) in permutation.iter().enumerate() {
+                identities.push(identity);
+                if permuted == identity {
+                    cells[row / IDENTITY_BITS_PER_BYTE] |= 1_u8 << (row % IDENTITY_BITS_PER_BYTE);
+                }
+                identity *= &domain.get_omega();
+            }
+            deltaomega.push(identities);
+            identity_cells.0.push(cells);
+            delta *= &C::Scalar::DELTA;
+        }
+        let identity_columns = identity_cells.identity_columns(n);
+        let chunk_len = permutation_chunk_len(vk.cs_degree);
+        let fraction_rows = n - (vk.cs.blinding_factors() + 1);
+        let active_sets: Vec<_> = argument
+            .columns
+            .chunks(chunk_len)
+            .zip(identity_cells.chunks(chunk_len))
+            .zip(deltaomega.chunks(chunk_len))
+            .zip(permutations.chunks(chunk_len))
+            .map(|(((columns, identity_cells), identities), permutations)| {
+                ActivePermutationSet::from_columns(
+                    columns,
+                    identity_cells,
+                    identities,
+                    permutations,
+                    fraction_rows,
+                )
+            })
+            .collect();
+        // Reading has no commitment parameters; the prover uses its ordinary fallback.
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        let prepared_difference_commitments = vec![None; active_sets.len()];
+        let (polys, cosets) =
+            domain.batch_lagrange_to_coeff_and_extended(&permutations, &fft_twiddles);
+        Ok((
+            Self {
+                permutations,
+                identity_columns,
+                identity_cells,
+                active_sets,
+                #[cfg(any(feature = "multicore", feature = "orbits"))]
+                prepared_difference_commitments,
+                polys,
+                cosets,
+            },
+            fft_twiddles,
+        ))
+    }
 }
 
 #[derive(Clone, Debug)]

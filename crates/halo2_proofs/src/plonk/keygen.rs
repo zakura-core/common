@@ -12,7 +12,8 @@ use crate::PreparedSparseCommitments;
 use crate::{InstanceWindowTable, ORCHARD_K, PREPARED_INSTANCE_COLUMNS};
 
 use super::{
-    Assigned, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
+    Assigned, CircuitConfigCache, Error, FloorPlan, LagrangeCoeff, Polynomial, ProvingKey,
+    VerifyingKey,
     circuit::{
         Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
         Selector,
@@ -23,7 +24,7 @@ use crate::{
     arithmetic::{CurveAffine, best_multiexp},
     circuit::Value,
     poly::{
-        EvaluationDomain, batch_invert_assigned,
+        EvaluationDomain, ProvingKeyTwiddles, batch_invert_assigned,
         commitment::{Blind, Params},
     },
 };
@@ -435,6 +436,20 @@ where
     )?;
 
     let mut fixed = batch_invert_assigned(assembly.fixed);
+    let selectors = assembly
+        .selectors
+        .iter()
+        .map(|selector| {
+            selector
+                .chunks(8)
+                .map(|bits| {
+                    bits.iter()
+                        .enumerate()
+                        .fold(0, |byte, (i, &bit)| byte | (u8::from(bit) << i))
+                })
+                .collect()
+        })
+        .collect();
     let (cs, selector_polys, _) = cs.compress_selectors(assembly.selectors);
     fixed.extend(
         selector_polys
@@ -464,6 +479,7 @@ where
         fixed_commitments,
         permutation_vk,
         cs,
+        selectors,
     ))
 }
 
@@ -523,6 +539,47 @@ where
     );
 
     let fft_twiddles = vk.domain.proving_key_twiddles();
+    let build_permutation = || {
+        assembly.permutation.build_pk(
+            params,
+            &vk.domain,
+            &cs.permutation,
+            vk.cs_degree,
+            cs.blinding_factors(),
+            &fft_twiddles,
+        )
+    };
+    #[cfg(any(feature = "batch", feature = "multicore"))]
+    let (permutation_pk, ()) = crate::multicore::join(build_permutation, || {
+        // Build small fixed-base tables during independent key generation work.
+        prepare_small_fixed_base_tables(params, cs.num_instance_columns);
+    });
+    #[cfg(not(any(feature = "batch", feature = "multicore")))]
+    let permutation_pk = build_permutation();
+
+    Ok(build_pk(
+        vk,
+        fixed,
+        permutation_pk,
+        fft_twiddles,
+        compressed_selectors,
+        floor_plan,
+        circuit_config,
+    ))
+}
+
+// Key generation and deserialization must build the same coupled selector caches.
+pub(super) fn build_pk<C: CurveAffine>(
+    vk: VerifyingKey<C>,
+    fixed: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    permutation_pk: permutation::ProvingKey<C>,
+    fft_twiddles: ProvingKeyTwiddles<C::Scalar>,
+    compressed_selectors: Vec<(usize, usize, usize)>,
+    floor_plan: Option<FloorPlan>,
+    circuit_config: Option<CircuitConfigCache>,
+) -> ProvingKey<C> {
+    let cs = &vk.cs;
+    let n = 1usize << vk.domain.k();
     let (fixed_polys, mut fixed_cosets) = vk
         .domain
         .batch_lagrange_to_coeff_and_extended(&fixed, &fft_twiddles);
@@ -579,37 +636,6 @@ where
         })
         .collect::<Vec<_>>();
 
-    #[cfg(any(feature = "batch", feature = "multicore"))]
-    let permutation_pk = {
-        let (permutation_pk, ()) = crate::multicore::join(
-            || {
-                assembly.permutation.build_pk(
-                    params,
-                    &vk.domain,
-                    &cs.permutation,
-                    vk.cs_degree,
-                    cs.blinding_factors(),
-                    &fft_twiddles,
-                )
-            },
-            || {
-                // Build small fixed-base tables during independent key
-                // generation work, not on the first proof.
-                prepare_small_fixed_base_tables(params, cs.num_instance_columns);
-            },
-        );
-        permutation_pk
-    };
-    #[cfg(not(any(feature = "batch", feature = "multicore")))]
-    let permutation_pk = assembly.permutation.build_pk(
-        params,
-        &vk.domain,
-        &cs.permutation,
-        vk.cs_degree,
-        cs.blinding_factors(),
-        &fft_twiddles,
-    );
-
     // Compute l_0(X).
     let mut l0 = vk.domain.empty_lagrange();
     l0[0] = C::Scalar::ONE;
@@ -624,7 +650,7 @@ where
     // Compute l_last(X) which evaluates to 1 on the first inactive row (just
     // before the blinding factors) and 0 otherwise over the domain
     let mut l_last = vk.domain.empty_lagrange();
-    l_last[params.n as usize - cs.blinding_factors() - 1] = C::Scalar::ONE;
+    l_last[n - cs.blinding_factors() - 1] = C::Scalar::ONE;
     let (_, mut special_cosets) = vk
         .domain
         .batch_lagrange_to_coeff_and_extended(&[l0, l_blind, l_last], &fft_twiddles);
@@ -634,13 +660,13 @@ where
     debug_assert!(special_cosets.is_empty());
 
     #[cfg(feature = "batch")]
-    let prepared_instance_coset = (params.k() == ORCHARD_K
+    let prepared_instance_coset = (vk.domain.k() == ORCHARD_K
         && cs.num_instance_columns == PREPARED_INSTANCE_COLUMNS)
         .then(|| {
             Arc::new(super::PreparedInstanceCoset::new(
                 &vk.domain,
                 &fft_twiddles,
-                params.n,
+                n as u64,
             ))
         });
 
@@ -662,7 +688,7 @@ where
         quotient_plans: Arc::new(Default::default()),
     };
     super::evaluator_schedule::prepare_quotient_plans(&pk);
-    Ok(pk)
+    pk
 }
 #[cfg(test)]
 mod tests {
