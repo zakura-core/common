@@ -25,6 +25,7 @@ const RESTS: usize = 1 << REST_BITS;
 const COLLISION_CAPACITY: usize = 16;
 const PROOF_SIZE: usize = 1 << ROUNDS;
 const MAX_SOLUTIONS: usize = 8;
+const LEAF_INDEX_HASH_MULTIPLIER: u32 = 0x9e37_79b1;
 const HASHES: usize = 1 << (DIGIT_BITS + 1);
 const HASHES_PER_BLAKE: usize = 512 / SOLVER_PARAMS.n as usize;
 const HASH_BYTES: usize = SOLVER_PARAMS.n as usize / 8;
@@ -32,6 +33,17 @@ const HASH_OUTPUT: usize = HASHES_PER_BLAKE * HASH_BYTES;
 const HASH_BLOCKS: usize = HASHES / HASHES_PER_BLAKE;
 const HASH_BATCH: usize = 64;
 const OUTPUT_BATCH: usize = 64;
+const INITIAL_WORDS: usize = TABLE_WORDS[0] - 1;
+const INITIAL_BYTES: usize = INITIAL_WORDS * core::mem::size_of::<u32>();
+const HASH_WORDS: [usize; ROUNDS] = {
+    let mut words = [0; ROUNDS];
+    let mut round = 0;
+    while round < ROUNDS {
+        words[round] = hash_size(round).div_ceil(4);
+        round += 1;
+    }
+    words
+};
 const TABLE_WORDS: [usize; 2] = [
     1 + (SOLVER_PARAMS.n as usize - DIGIT_BITS + REST_BITS).div_ceil(32),
     1 + (SOLVER_PARAMS.n as usize - 2 * DIGIT_BITS + REST_BITS).div_ceil(32),
@@ -41,7 +53,6 @@ const TABLE_WORDS: [usize; 2] = [
 struct Layout {
     previous_words: usize,
     next_words: usize,
-    drop_words: usize,
     previous_padding: usize,
     next_padding: usize,
 }
@@ -55,14 +66,13 @@ impl Layout {
         Self {
             previous_words,
             next_words,
-            drop_words: previous_words.saturating_sub(next_words),
             previous_padding: previous_words * 4 - previous_bytes,
             next_padding: next_words * 4 - bytes,
         }
     }
 }
 
-fn hash_size(round: usize) -> usize {
+const fn hash_size(round: usize) -> usize {
     (SOLVER_PARAMS.n as usize - (round + 1) * DIGIT_BITS + REST_BITS).div_ceil(8)
 }
 
@@ -95,16 +105,6 @@ fn extra_hash(table: &[u32], row: usize, padding: usize, odd: bool) -> usize {
     }
 }
 
-fn xor_bucket(table: &[u32], left: usize, right: usize, padding: usize, odd: bool) -> usize {
-    let first = byte(table, left, padding + 1) ^ byte(table, right, padding + 1);
-    let second = byte(table, left, padding + 2) ^ byte(table, right, padding + 2);
-    if odd {
-        (((first & 0xf) as usize) << 8) | second as usize
-    } else {
-        ((first as usize) << 4) | (second >> 4) as usize
-    }
-}
-
 // Prefetch only addresses inside a live table. On other architectures the
 // ordinary reads and writes retain the same behavior.
 #[allow(unsafe_code)]
@@ -127,18 +127,14 @@ fn prefetch(table: &[u32], index: usize) {
 
 struct Collisions {
     counts: [u16; RESTS],
-    head: [u16; RESTS],
-    tail: [u16; RESTS],
-    next: [u16; SLOTS],
+    slots: [[u16; COLLISION_CAPACITY]; RESTS],
 }
 
 impl Collisions {
     fn new() -> Self {
         Self {
             counts: [0; RESTS],
-            head: [0; RESTS],
-            tail: [0; RESTS],
-            next: [0; SLOTS],
+            slots: [[0; COLLISION_CAPACITY]; RESTS],
         }
     }
 
@@ -146,65 +142,95 @@ impl Collisions {
         self.counts.fill(0);
     }
 
-    fn add(&mut self, slot: usize, key: usize) -> Option<(usize, usize)> {
+    fn add(&mut self, slot: usize, key: usize) -> Option<&[u16]> {
         let count = self.counts[key] as usize;
         self.counts[key] += 1;
         if count >= COLLISION_CAPACITY {
             return None;
         }
-        if count == 0 {
-            self.head[key] = slot as u16;
-        } else {
-            self.next[self.tail[key] as usize] = slot as u16;
-        }
-        self.tail[key] = slot as u16;
-        Some((count, self.head[key] as usize))
+        let slots = &mut self.slots[key];
+        slots[count] = slot as u16;
+        Some(&slots[..count])
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct InitialOutput {
+#[derive(Clone, Copy)]
+struct InitialOutput<'a> {
     attribute: usize,
     hash: usize,
-    source: usize,
+    source: &'a [u8; INITIAL_BYTES],
     index: u32,
 }
 
-fn flush_initial(table: &mut [u32], pending: &[InitialOutput], hashes: &[u8]) {
+fn flush_initial(table: &mut [u32], pending: &[InitialOutput<'_>]) {
     for output in pending {
         table[output.attribute] = output.index;
-        for (word, bytes) in hashes[output.source..output.source + hash_size(0)]
-            .chunks_exact(4)
-            .enumerate()
-        {
-            table[output.hash + word] = u32::from_ne_bytes(bytes.try_into().unwrap());
+        let (source, remainder) = output.source.as_chunks::<4>();
+        debug_assert!(remainder.is_empty());
+        let destination = &mut table[output.hash..output.hash + INITIAL_WORDS];
+        for (destination, source) in destination.iter_mut().zip(source) {
+            *destination = u32::from_ne_bytes(*source);
         }
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct Output {
+#[derive(Clone, Copy)]
+struct RowOutput<'a, const WORDS: usize> {
     attribute: usize,
     hash: usize,
     node: u32,
-    left: usize,
-    right: usize,
+    left: &'a [u32; WORDS],
+    right: &'a [u32; WORDS],
 }
 
-fn flush_output(previous: &[u32], next: &mut [u32], pending: &[Output], layout: Layout) {
+fn flush_rows<const PREVIOUS: usize, const NEXT: usize>(
+    next: &mut [u32],
+    pending: &[RowOutput<'_, PREVIOUS>],
+) {
     for output in pending {
         next[output.attribute] = output.node;
-        for word in 0..layout.next_words {
-            next[output.hash + word] = previous[output.left + layout.drop_words + word]
-                ^ previous[output.right + layout.drop_words + word];
+        let destination: &mut [u32; NEXT] = (&mut next[output.hash..output.hash + NEXT])
+            .try_into()
+            .unwrap();
+        for (word, destination) in destination.iter_mut().enumerate() {
+            *destination =
+                output.left[word + PREVIOUS - NEXT] ^ output.right[word + PREVIOUS - NEXT];
         }
+    }
+}
+
+fn row_byte<const WORDS: usize>(row: &[u32; WORDS], offset: usize) -> u8 {
+    row[offset / 4].to_ne_bytes()[offset % 4]
+}
+
+fn row_extra_hash<const WORDS: usize>(row: &[u32; WORDS], padding: usize, odd: bool) -> usize {
+    if odd {
+        (((row_byte(row, padding) & 0xf) as usize) << 4)
+            | (row_byte(row, padding + 1) >> 4) as usize
+    } else {
+        row_byte(row, padding) as usize
+    }
+}
+
+fn row_bucket<const WORDS: usize>(
+    left: &[u32; WORDS],
+    right: &[u32; WORDS],
+    padding: usize,
+    odd: bool,
+) -> usize {
+    let first = row_byte(left, padding + 1) ^ row_byte(right, padding + 1);
+    let second = row_byte(left, padding + 2) ^ row_byte(right, padding + 2);
+    if odd {
+        (((first & 0xf) as usize) << 8) | second as usize
+    } else {
+        ((first as usize) << 4) | (second >> 4) as usize
     }
 }
 
 /// Owns the tables for one single-threaded Tromp solver instance.
 pub(super) struct Solver {
     tables: [Table; 2],
-    counts: [Vec<u32>; 2],
+    counts: [[u32; BUCKETS]; 2],
     index_keys: [u32; 2 * PROOF_SIZE],
     index_tags: [u32; 2 * PROOF_SIZE],
     index_epoch: u32,
@@ -221,7 +247,7 @@ impl Solver {
                 Table::new_zeroed(BUCKETS * SLOTS * TABLE_WORDS[0]),
                 Table::new_zeroed(BUCKETS * SLOTS * TABLE_WORDS[1]),
             ],
-            counts: [vec![0; BUCKETS], vec![0; BUCKETS]],
+            counts: [[0; BUCKETS]; 2],
             index_keys: [0; 2 * PROOF_SIZE],
             index_tags: [0; 2 * PROOF_SIZE],
             index_epoch: 0,
@@ -235,9 +261,14 @@ impl Solver {
         self.index_epoch = 0;
         self.solutions.clear();
         self.initial(state);
-        for round in 1..ROUNDS {
-            self.round(round);
-        }
+        self.round::<1, { HASH_WORDS[0] }, { HASH_WORDS[1] }>();
+        self.round::<2, { HASH_WORDS[1] }, { HASH_WORDS[2] }>();
+        self.round::<3, { HASH_WORDS[2] }, { HASH_WORDS[3] }>();
+        self.round::<4, { HASH_WORDS[3] }, { HASH_WORDS[4] }>();
+        self.round::<5, { HASH_WORDS[4] }, { HASH_WORDS[5] }>();
+        self.round::<6, { HASH_WORDS[5] }, { HASH_WORDS[6] }>();
+        self.round::<7, { HASH_WORDS[6] }, { HASH_WORDS[7] }>();
+        self.round::<8, { HASH_WORDS[7] }, { HASH_WORDS[8] }>();
         self.final_round();
         let mut solutions = core::mem::take(&mut self.solutions);
         solutions.sort();
@@ -249,18 +280,26 @@ impl Solver {
         let layout = Layout::new(0);
         debug_assert_eq!(layout.next_padding, 0);
         let mut hashes = [0; HASH_BATCH * HASH_OUTPUT];
-        let mut pending = [InitialOutput::default(); HASH_BATCH];
         let table = &mut self.tables[0];
         let counts = &mut self.counts[0];
         for block in (0..HASH_BLOCKS).step_by(HASH_BATCH) {
             let count = HASH_BATCH.min(HASH_BLOCKS - block);
             state.generate(block as u32, &mut hashes[..count * HASH_OUTPUT]);
+            let dummy = hashes[..INITIAL_BYTES].try_into().unwrap();
+            let mut pending = [InitialOutput {
+                attribute: 0,
+                hash: 0,
+                source: dummy,
+                index: 0,
+            }; HASH_BATCH];
             let mut buffered = 0;
-            for offset in 0..count {
-                for part in 0..HASHES_PER_BLAKE {
-                    let source = offset * HASH_OUTPUT + part * HASH_BYTES;
-                    let bucket =
-                        ((hashes[source] as usize) << 4) | (hashes[source + 1] >> 4) as usize;
+            let (digests, remainder) = hashes[..count * HASH_OUTPUT].as_chunks::<HASH_OUTPUT>();
+            debug_assert!(remainder.is_empty());
+            for (offset, digest) in digests.iter().enumerate() {
+                let (parts, remainder) = digest.as_chunks::<HASH_BYTES>();
+                debug_assert!(remainder.is_empty());
+                for (part, source) in parts.iter().enumerate() {
+                    let bucket = ((source[0] as usize) << 4) | (source[1] >> 4) as usize;
                     let slot = counts[bucket] as usize;
                     counts[bucket] += 1;
                     if slot >= SLOTS {
@@ -274,21 +313,22 @@ impl Solver {
                     pending[buffered] = InitialOutput {
                         attribute: attr,
                         hash,
-                        source: source + HASH_BYTES - hash_size(0),
+                        source: source[HASH_BYTES - INITIAL_BYTES..].try_into().unwrap(),
                         index: ((block + offset) * HASHES_PER_BLAKE + part) as u32,
                     };
                     buffered += 1;
                     if buffered == HASH_BATCH {
-                        flush_initial(table, &pending, &hashes);
+                        flush_initial(table, &pending);
                         buffered = 0;
                     }
                 }
             }
-            flush_initial(table, &pending[..buffered], &hashes);
+            flush_initial(table, &pending[..buffered]);
         }
     }
 
-    fn round(&mut self, round: usize) {
+    fn round<const ROUND: usize, const PREVIOUS: usize, const NEXT: usize>(&mut self) {
+        let round = ROUND;
         let layout = Layout::new(round);
         let odd = round & 1 != 0;
         let [first, second] = &mut self.tables;
@@ -304,32 +344,37 @@ impl Solver {
             (second, first)
         };
         let mut collisions = Collisions::new();
-        let mut pending = [Output::default(); OUTPUT_BATCH];
+        debug_assert_eq!(layout.previous_words, PREVIOUS);
+        debug_assert_eq!(layout.next_words, NEXT);
+        let dummy: &[u32; PREVIOUS] = previous[..PREVIOUS].try_into().unwrap();
+        let mut pending = [RowOutput {
+            attribute: 0,
+            hash: 0,
+            node: 0,
+            left: dummy,
+            right: dummy,
+        }; OUTPUT_BATCH];
         let mut buffered = 0;
         for (bucket, previous_count) in previous_counts.iter_mut().enumerate() {
             collisions.clear();
             let rows = attributes(round - 1, bucket) + SLOTS;
             let count = (*previous_count as usize).min(SLOTS);
             *previous_count = 0;
-            for right in 0..count {
-                let right_row = rows + right * layout.previous_words;
-                let key = extra_hash(previous, right_row, layout.previous_padding, odd);
-                let Some((colliding, mut left)) = collisions.add(right, key) else {
+            let input = &previous[rows..rows + count * PREVIOUS];
+            let (rows, remainder) = input.as_chunks::<PREVIOUS>();
+            debug_assert!(remainder.is_empty());
+            for (right, right_row) in rows.iter().enumerate() {
+                let key = row_extra_hash(right_row, layout.previous_padding, odd);
+                let Some(colliding) = collisions.add(right, key) else {
                     continue;
                 };
-                for position in 0..colliding {
-                    let current_left = left;
-                    if position + 1 < colliding {
-                        left = collisions.next[left] as usize;
-                    }
-                    let left_row = rows + current_left * layout.previous_words;
-                    if previous[left_row + layout.previous_words - 1]
-                        == previous[right_row + layout.previous_words - 1]
-                    {
+                for &current_left in colliding {
+                    let current_left = current_left as usize;
+                    let left_row = &rows[current_left];
+                    if left_row[PREVIOUS - 1] == right_row[PREVIOUS - 1] {
                         continue;
                     }
-                    let next_bucket =
-                        xor_bucket(previous, left_row, right_row, layout.previous_padding, odd);
+                    let next_bucket = row_bucket(left_row, right_row, layout.previous_padding, odd);
                     let slot = next_counts[next_bucket] as usize;
                     next_counts[next_bucket] += 1;
                     if slot >= SLOTS {
@@ -340,7 +385,7 @@ impl Solver {
                     prefetch(next, attr);
                     prefetch(next, hash);
                     prefetch(next, hash + layout.next_words - 1);
-                    pending[buffered] = Output {
+                    pending[buffered] = RowOutput {
                         attribute: attr,
                         hash,
                         node: tree(bucket, current_left, right),
@@ -349,13 +394,13 @@ impl Solver {
                     };
                     buffered += 1;
                     if buffered == OUTPUT_BATCH {
-                        flush_output(previous, next, &pending, layout);
+                        flush_rows::<PREVIOUS, NEXT>(next, &pending);
                         buffered = 0;
                     }
                 }
             }
         }
-        flush_output(previous, next, &pending[..buffered], layout);
+        flush_rows::<PREVIOUS, NEXT>(next, &pending[..buffered]);
     }
 
     fn final_round(&mut self) {
@@ -369,14 +414,11 @@ impl Solver {
             for right in 0..count {
                 let right_row = rows + right * layout.previous_words;
                 let key = extra_hash(&self.tables[0], right_row, layout.previous_padding, true);
-                let Some((colliding, mut left)) = collisions.add(right, key) else {
+                let Some(colliding) = collisions.add(right, key) else {
                     continue;
                 };
-                for position in 0..colliding {
-                    let current_left = left;
-                    if position + 1 < colliding {
-                        left = collisions.next[left] as usize;
-                    }
+                for &current_left in colliding {
+                    let current_left = current_left as usize;
                     let left_row = rows + current_left * layout.previous_words;
                     if self.tables[0][left_row + layout.previous_words - 1]
                         == self.tables[0][right_row + layout.previous_words - 1]
@@ -403,7 +445,8 @@ impl Solver {
 
     fn unique(&mut self, round: usize, node: u32) -> bool {
         if round == 0 {
-            let mut slot = (node.wrapping_mul(0x9e3779b1) >> (32 - (ROUNDS + 1))) as usize;
+            let mut slot =
+                (node.wrapping_mul(LEAF_INDEX_HASH_MULTIPLIER) >> (32 - (ROUNDS + 1))) as usize;
             while self.index_tags[slot] == self.index_epoch {
                 if self.index_keys[slot] == node {
                     return false;
@@ -444,7 +487,36 @@ impl Solver {
 mod tests {
     use alloc::vec::Vec;
 
-    use super::{MAX_SOLUTIONS, PROOF_SIZE, ROUNDS, Solver, attributes, tree};
+    use super::{
+        COLLISION_CAPACITY, Collisions, MAX_SOLUTIONS, PROOF_SIZE, RESTS, ROUNDS, SLOTS, Solver,
+        attributes, tree,
+    };
+
+    #[test]
+    fn collision_groups_preserve_insertion_order_capacity_and_reset() {
+        let mut collisions = Collisions::new();
+        for pattern in 0..4 {
+            collisions.clear();
+            let mut reference = vec![Vec::new(); RESTS];
+            for slot in 0..SLOTS {
+                let key = match pattern {
+                    0 => 7,
+                    1 => slot % RESTS,
+                    2 => slot % 8,
+                    _ => (slot * 97 + slot / 5) % RESTS,
+                };
+                let previous = &mut reference[key];
+                let result = collisions.add(slot, key);
+                if previous.len() == COLLISION_CAPACITY {
+                    assert!(result.is_none());
+                    continue;
+                }
+                let expected: Vec<_> = previous.iter().map(|&slot| slot as u16).collect();
+                assert_eq!(result.unwrap(), expected);
+                previous.push(slot);
+            }
+        }
+    }
 
     #[test]
     fn repeated_leaf_rejection_solution_cap_and_epoch_wrap() {

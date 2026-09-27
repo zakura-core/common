@@ -12,7 +12,6 @@ use crate::params::Params;
 mod native;
 
 /// Owns the reference state and an optional cache for solver hash batches.
-#[derive(Clone)]
 pub(super) struct SolverHashState {
     reference: State,
     hash_len: usize,
@@ -73,10 +72,12 @@ mod tests {
     use crate::params::Params;
     use crate::verify::initialise_state;
 
+    const PARAMS: Params = Params { n: 200, k: 9 };
+
     #[test]
     fn generated_hashes_match_reference() {
-        let hash_len = 50;
-        let mut state = initialise_state(200, 9, hash_len);
+        let hash_len = PARAMS.hash_output();
+        let mut state = initialise_state(PARAMS.n, PARAMS.k, hash_len);
         let header: Vec<_> = (0..108).map(|i| i as u8).collect();
         state.update(&header);
         state.update(&[0x5a; 32]);
@@ -88,7 +89,7 @@ mod tests {
                 #[cfg(target_arch = "x86_64")]
                 native: None,
             },
-            SolverHashState::new(state, &header, &[0x5a; 32], Params { n: 200, k: 9 }),
+            SolverHashState::new(state, &header, &[0x5a; 32], PARAMS),
         ];
 
         // Include a batch spanning more than one solver buffer and an empty
@@ -111,7 +112,7 @@ mod tests {
 
     #[test]
     fn boundary_prefixes_match_reference() {
-        let params = Params { n: 200, k: 9 };
+        let params = PARAMS;
         for prefix_len in [124, 125, 126, 127, 128, 2048, 2049] {
             let prefix: Vec<_> = (0..prefix_len).map(|i| (i * 197) as u8).collect();
             let split = prefix_len / 2;

@@ -45,7 +45,6 @@ const SIGMA: [[u8; 16]; 12] = [
     [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
 ];
 
-#[derive(Clone)]
 pub(super) struct Context {
     words: [u64; 8],
     message: [u64; 16],
