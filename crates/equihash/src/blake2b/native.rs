@@ -14,6 +14,11 @@ use blake2b_simd::{BLOCKBYTES, OUTBYTES};
 
 const INDEX_BYTES: usize = core::mem::size_of::<u32>();
 const GENERAL_INDEX_WORD: usize = BLOCKBYTES / core::mem::size_of::<u64>();
+// The common (200, 9) solver layout uses fifty-byte BLAKE2b digests.
+const TRANSPOSE_HASH_BYTES: usize = 50;
+const TRANSPOSE_WORD_BYTES: usize =
+    TRANSPOSE_HASH_BYTES / core::mem::size_of::<u64>() * core::mem::size_of::<u64>();
+const TRANSPOSE_WORD_MASK: u8 = (1 << (TRANSPOSE_WORD_BYTES / core::mem::size_of::<u64>())) - 1;
 
 const IV: [u64; 8] = [
     0x6A09E667F3BCC908,
@@ -281,17 +286,73 @@ impl Context {
                 let hashes: [__m512i; 8] = std::array::from_fn(|i| {
                     _mm512_xor_si512(h[i], _mm512_xor_si512(v[i], v[i + 8]))
                 });
-                for (word, hash) in hashes.iter().enumerate().take(self.hash_len.div_ceil(8)) {
-                    let mut lanes = [0u64; 8];
-                    _mm512_storeu_si512(lanes.as_mut_ptr().cast(), *hash);
-                    for (lane, out) in output.chunks_exact_mut(self.hash_len).enumerate() {
-                        let start = word * 8;
-                        let end = (start + 8).min(self.hash_len);
-                        out[start..end].copy_from_slice(&lanes[lane].to_le_bytes()[..end - start]);
+                if self.hash_len == TRANSPOSE_HASH_BYTES {
+                    let hashes = transpose8(hashes);
+                    for (hash, out) in hashes
+                        .iter()
+                        .zip(output.chunks_exact_mut(TRANSPOSE_HASH_BYTES))
+                    {
+                        // The masked store writes only the six complete words;
+                        // the final two bytes stay inside this digest's bounds.
+                        _mm512_mask_storeu_epi64(
+                            out.as_mut_ptr().cast(),
+                            TRANSPOSE_WORD_MASK,
+                            *hash,
+                        );
+                        let tail = _mm_cvtsi128_si64(_mm512_castsi512_si128(
+                            _mm512_shuffle_i64x2::<0xff>(*hash, *hash),
+                        ));
+                        out[TRANSPOSE_WORD_BYTES..].copy_from_slice(
+                            &tail.to_le_bytes()[..TRANSPOSE_HASH_BYTES - TRANSPOSE_WORD_BYTES],
+                        );
+                    }
+                } else {
+                    for (word, hash) in hashes.iter().enumerate().take(self.hash_len.div_ceil(8)) {
+                        let mut lanes = [0u64; 8];
+                        _mm512_storeu_si512(lanes.as_mut_ptr().cast(), *hash);
+                        for (lane, out) in output.chunks_exact_mut(self.hash_len).enumerate() {
+                            let start = word * 8;
+                            let end = (start + 8).min(self.hash_len);
+                            out[start..end]
+                                .copy_from_slice(&lanes[lane].to_le_bytes()[..end - start]);
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// Changes independent-hash lanes into contiguous digest words.
+#[inline(always)]
+unsafe fn transpose8(v: [__m512i; 8]) -> [__m512i; 8] {
+    unsafe {
+        let t0 = _mm512_unpacklo_epi64(v[0], v[1]);
+        let t1 = _mm512_unpackhi_epi64(v[0], v[1]);
+        let t2 = _mm512_unpacklo_epi64(v[2], v[3]);
+        let t3 = _mm512_unpackhi_epi64(v[2], v[3]);
+        let t4 = _mm512_unpacklo_epi64(v[4], v[5]);
+        let t5 = _mm512_unpackhi_epi64(v[4], v[5]);
+        let t6 = _mm512_unpacklo_epi64(v[6], v[7]);
+        let t7 = _mm512_unpackhi_epi64(v[6], v[7]);
+        let u0 = _mm512_shuffle_i64x2::<0x88>(t0, t2);
+        let u1 = _mm512_shuffle_i64x2::<0x88>(t1, t3);
+        let u2 = _mm512_shuffle_i64x2::<0xdd>(t0, t2);
+        let u3 = _mm512_shuffle_i64x2::<0xdd>(t1, t3);
+        let u4 = _mm512_shuffle_i64x2::<0x88>(t4, t6);
+        let u5 = _mm512_shuffle_i64x2::<0x88>(t5, t7);
+        let u6 = _mm512_shuffle_i64x2::<0xdd>(t4, t6);
+        let u7 = _mm512_shuffle_i64x2::<0xdd>(t5, t7);
+        [
+            _mm512_shuffle_i64x2::<0x88>(u0, u4),
+            _mm512_shuffle_i64x2::<0x88>(u1, u5),
+            _mm512_shuffle_i64x2::<0x88>(u2, u6),
+            _mm512_shuffle_i64x2::<0x88>(u3, u7),
+            _mm512_shuffle_i64x2::<0xdd>(u0, u4),
+            _mm512_shuffle_i64x2::<0xdd>(u1, u5),
+            _mm512_shuffle_i64x2::<0xdd>(u2, u6),
+            _mm512_shuffle_i64x2::<0xdd>(u3, u7),
+        ]
     }
 }
 
@@ -431,6 +492,9 @@ mod tests {
                     (17, 3),
                     (100, 4),
                     (65534, 7),
+                    (123456, 8),
+                    (200000, 9),
+                    (1048512, 64),
                     (u32::MAX - 3, 4),
                 ] {
                     let mut out = std::vec![0u8;count*hash_len];
