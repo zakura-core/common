@@ -23,9 +23,6 @@
 
 #include "equi.h"
 
-// Provides htole32() on macOS and Windows
-#include "portable_endian.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -241,8 +238,7 @@ struct equi {
   BLAKE2bState* blake_ctx;
   blake2b_clone blake2b_clone;
   blake2b_free blake2b_free;
-  blake2b_update blake2b_update;
-  blake2b_finalize blake2b_finalize;
+  blake2b_generate_hashes blake2b_generate_hashes;
   htalloc hta;
   bsizes *nslots; // PUT IN BUCKET STRUCT
   proof *sols;
@@ -256,15 +252,13 @@ typedef struct equi equi;
   equi *equi_new(
     blake2b_clone blake2b_clone,
     blake2b_free blake2b_free,
-    blake2b_update blake2b_update,
-    blake2b_finalize blake2b_finalize
+    blake2b_generate_hashes blake2b_generate_hashes
   ) {
     assert(sizeof(hashunit) == 4);
     equi *eq = malloc(sizeof(equi));
     eq->blake2b_clone = blake2b_clone;
     eq->blake2b_free = blake2b_free;
-    eq->blake2b_update = blake2b_update;
-    eq->blake2b_finalize = blake2b_finalize;
+    eq->blake2b_generate_hashes = blake2b_generate_hashes;
 
     alloctrees(&eq->hta);
     eq->nslots = (bsizes *)htalloc_alloc(&eq->hta, 2 * NBUCKETS, sizeof(au32));
@@ -521,44 +515,43 @@ typedef struct equi equi;
     }
 
   void equi_digit0(equi *eq, const u32 id) {
-    uchar hash[HASHOUT];
-    BLAKE2bState* state;
+    // Keep hash-state clones in Rust and amortize the callback over a batch.
+    enum { HASH_BATCH_SIZE = 64 };
+    uchar hashes[HASH_BATCH_SIZE * HASHOUT];
     htlayout htl = htlayout_new(eq, 0);
     const u32 hashbytes = hashsize(0);
-    for (u32 block = id; block < NBLOCKS; block++) {
-      state = eq->blake2b_clone(eq->blake_ctx);
-      u32 leb = htole32(block);
-      eq->blake2b_update(state, (uchar *)&leb, sizeof(u32));
-      eq->blake2b_finalize(state, hash, HASHOUT);
-      eq->blake2b_free(state);
-      // Avoid use-after-free and double-free
-      state = NULL;
-
-      for (u32 i = 0; i<HASHESPERBLAKE; i++) {
-        const uchar *ph = hash + i * WN/8;
+    for (u32 block = id; block < NBLOCKS;) {
+      const u32 count = minu32(HASH_BATCH_SIZE, NBLOCKS - block);
+      eq->blake2b_generate_hashes(eq->blake_ctx, block, count, hashes, HASHOUT);
+      for (u32 offset = 0; offset < count; offset++) {
+        const uchar *hash = hashes + offset * HASHOUT;
+        for (u32 i = 0; i<HASHESPERBLAKE; i++) {
+          const uchar *ph = hash + i * WN/8;
 #if BUCKBITS == 16 && RESTBITS == 4
-        const u32 bucketid = ((u32)ph[0] << 8) | ph[1];
+          const u32 bucketid = ((u32)ph[0] << 8) | ph[1];
 #elif BUCKBITS == 12 && RESTBITS == 8
-        const u32 bucketid = ((u32)ph[0] << 4) | ph[1] >> 4;
+          const u32 bucketid = ((u32)ph[0] << 4) | ph[1] >> 4;
 #elif BUCKBITS == 11 && RESTBITS == 9
-        const u32 bucketid = ((u32)ph[0] << 3) | ph[1] >> 5;
+          const u32 bucketid = ((u32)ph[0] << 3) | ph[1] >> 5;
 #elif BUCKBITS == 20 && RESTBITS == 4
-        const u32 bucketid = ((((u32)ph[0] << 8) | ph[1]) << 4) | ph[2] >> 4;
+          const u32 bucketid = ((((u32)ph[0] << 8) | ph[1]) << 4) | ph[2] >> 4;
 #elif BUCKBITS == 12 && RESTBITS == 4
-        const u32 bucketid = ((u32)ph[0] << 4) | ph[1] >> 4;
-        const u32 xhash = ph[1] & 0xf;
+          const u32 bucketid = ((u32)ph[0] << 4) | ph[1] >> 4;
+          const u32 xhash = ph[1] & 0xf;
 #else
 #error not implemented
 #endif
-        const u32 slot = getslot(eq, 0, bucketid);
-        if (slot >= NSLOTS) {
-          eq->bfull++;
-          continue;
+          const u32 slot = getslot(eq, 0, bucketid);
+          if (slot >= NSLOTS) {
+            eq->bfull++;
+            continue;
+          }
+          slot0 *s = &eq->hta.trees0[0][bucketid][slot];
+          s->attr = tree_from_idx((block + offset) * HASHESPERBLAKE + i);
+          memcpy(s->hash->bytes+htl.nextbo, ph+WN/8-hashbytes, hashbytes);
         }
-        slot0 *s = &eq->hta.trees0[0][bucketid][slot];
-        s->attr = tree_from_idx(block * HASHESPERBLAKE + i);
-        memcpy(s->hash->bytes+htl.nextbo, ph+WN/8-hashbytes, hashbytes);
       }
+      block += count;
     }
   }
 

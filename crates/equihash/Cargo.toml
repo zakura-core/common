@@ -38,3 +38,8 @@ hex = "0.4"
 [lib]
 name = "equihash"
 bench = false
+
+[[bench]]
+name = "solver"
+harness = false
+required-features = ["solver"]

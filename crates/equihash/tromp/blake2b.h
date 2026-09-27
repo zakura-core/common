@@ -6,6 +6,7 @@
 #define ZCASH_RUST_INCLUDE_RUST_BLAKE2B_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 struct BLAKE2bState;
 typedef struct BLAKE2bState BLAKE2bState;
@@ -29,23 +30,17 @@ typedef BLAKE2bState* (*blake2b_clone)(const BLAKE2bState* state);
 /// Frees a BLAKE2b state returned by `blake2b_init`.
 typedef void (*blake2b_free)(BLAKE2bState* state);
 
-/// Adds input to the hash. You can call this any number of times.
-typedef void (*blake2b_update)(
-    BLAKE2bState* state,
-    const unsigned char* input,
-    size_t input_len);
-
-/// Finalizes the `state` and stores the result in `output`.
+/// Generates consecutive block-index hashes from a prehashed header and nonce.
 ///
-/// `output_len` MUST be less than or equal to the value that was passed as the
-/// first parameter to `blake2b_init`.
-///
-/// This method is idempotent, and calling it multiple times will give the same
-/// result. It's also possible to call `blake2b_update` with more input in
-/// between.
-typedef void (*blake2b_finalize)(
-    BLAKE2bState* state,
+/// `state` is borrowed and must remain live throughout the call. `output`
+/// must have room for `count * hash_len` bytes and must not overlap `state`.
+/// `hash_len` must match the state's digest length and the last index must
+/// fit in uint32_t.
+typedef void (*blake2b_generate_hashes)(
+    const BLAKE2bState* state,
+    uint32_t first_index,
+    uint32_t count,
     unsigned char* output,
-    size_t output_len);
+    size_t hash_len);
 
 #endif // ZCASH_RUST_INCLUDE_RUST_BLAKE2B_H

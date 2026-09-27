@@ -23,8 +23,13 @@ unsafe extern "C" {
     fn equi_new(
         blake2b_clone: extern "C" fn(state: *const State) -> *mut State,
         blake2b_free: extern "C" fn(state: *mut State),
-        blake2b_update: extern "C" fn(state: *mut State, input: *const u8, input_len: usize),
-        blake2b_finalize: extern "C" fn(state: *mut State, output: *mut u8, output_len: usize),
+        blake2b_generate_hashes: unsafe extern "C" fn(
+            state: *const State,
+            first_index: u32,
+            count: u32,
+            output: *mut u8,
+            hash_len: usize,
+        ),
     ) -> *mut CEqui;
     fn equi_free(eq: *mut CEqui);
     #[allow(improper_ctypes)]
@@ -162,8 +167,7 @@ fn solve_200_9_uncompressed<const N: usize>(
         equi_new(
             blake2b::blake2b_clone,
             blake2b::blake2b_free,
-            blake2b::blake2b_update,
-            blake2b::blake2b_finalize,
+            blake2b::blake2b_generate_hashes,
         )
     };
 
