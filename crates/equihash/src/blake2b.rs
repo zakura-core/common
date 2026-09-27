@@ -45,7 +45,8 @@ pub(super) extern "C" fn blake2b_free(state: *mut State) {
 ///
 /// # Safety
 ///
-/// `state` must point to a live [`State`] for the duration of this call.
+/// `state` must point to a valid, aligned [`State`] and remain unmodified
+/// for the duration of this call.
 /// `output` must point to a writable allocation of `count * hash_len` bytes
 /// that does not overlap `state`. This length must fit in [`isize`],
 /// `hash_len` must match the state's digest length, and the last block index
