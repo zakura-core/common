@@ -3,9 +3,10 @@
 //! memory-hard: memory bandwidth is the bottleneck for parallel solvers.
 //!
 //! This crate implements Equihash as specified for the Zcash consensus rules.
-//! It can verify solutions for any valid `(n, k)` parameters, as long as the
-//! row indices are no larger than 32 bits (that is,
-//! `ceiling(((n / (k + 1)) + 1) / 8) <= 4`).
+//! It verifies solutions for `(n, k)` parameters where `n` is a multiple of 8
+//! and of `k + 1`, `3 <= k < n`, `n <= 512`, and the collision length
+//! `n / (k + 1)` is between 8 and 24 bits. The inputs must be a Zcash block
+//! header and nonce.
 //!
 #![cfg_attr(feature = "std", doc = "## Feature flags")]
 #![cfg_attr(feature = "std", doc = document_features::document_features!())]

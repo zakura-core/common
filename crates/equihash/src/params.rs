@@ -13,11 +13,34 @@ impl Params {
         // - k < n, so the collision bit length is at least 1.
         // - n is a multiple of k + 1, so we have an integer collision bit
         //   length.
-        if n.is_multiple_of(8) && (k >= 3) && (k < n) && n.is_multiple_of(k + 1) {
+        // - n <= 512, so each BLAKE2b output holds at least one index's hash.
+        // - The collision bit length is between 8 and 24 bits, the widths
+        //   `expand_array` supports for both hashes and encoded indices.
+        if n.is_multiple_of(8)
+            && (k >= 3)
+            && (k < n)
+            && n.is_multiple_of(k + 1)
+            && n <= 512
+            && (8..=24).contains(&(n / (k + 1)))
+        {
             Some(Params { n, k })
         } else {
             None
         }
+    }
+    /// The number of indices in a solution, `2^k`, or `None` if it overflows.
+    pub(super) fn solution_indices(&self) -> Option<usize> {
+        1usize.checked_shl(self.k)
+    }
+    /// The length of a minimally encoded solution, or `None` if it
+    /// overflows.
+    pub(super) fn solution_bytes(&self) -> Option<usize> {
+        // Division is exact because k >= 3.
+        Some(
+            self.solution_indices()?
+                .checked_mul(self.collision_bit_length() + 1)?
+                / 8,
+        )
     }
     pub(super) fn indices_per_hash_output(&self) -> u32 {
         512 / self.n

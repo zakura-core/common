@@ -290,6 +290,18 @@ pub(crate) enum Kernel {
 }
 
 impl Kernel {
+    /// Every kernel compiled for this target, supported or not.
+    #[cfg(test)]
+    const ALL: &[Kernel] = &[
+        Kernel::Portable,
+        #[cfg(target_arch = "x86_64")]
+        Kernel::Avx2,
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        Kernel::Neon,
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        Kernel::NeonSha3,
+    ];
+
     /// Every kernel the running CPU supports, fastest first.
     pub(crate) fn supported() -> impl Iterator<Item = Kernel> {
         [
@@ -333,13 +345,18 @@ impl LeafHasher {
         Self::with_kernel(p, input, nonce, Kernel::detect())
     }
 
-    /// Uses `kernel`, which must be one of [`Kernel::supported`].
+    /// Uses `kernel`. Returns `None` if the CPU does not support `kernel`,
+    /// since hashing then runs its target-feature code without further
+    /// checks.
     pub(crate) fn with_kernel(
         p: &Params,
         input: &[u8],
         nonce: &[u8],
         kernel: Kernel,
     ) -> Option<Self> {
+        if !Kernel::supported().any(|supported| supported == kernel) {
+            return None;
+        }
         Some(Self {
             midstate: Midstate::new(p, input, nonce)?,
             kernel,
@@ -462,6 +479,20 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_kernels() {
+        let p = Params::new(200, 9).unwrap();
+        let (input, nonce) = ([0; HEADER_BYTES], [0; NONCE_BYTES]);
+        for kernel in Kernel::ALL {
+            let supported = Kernel::supported().any(|s| s == *kernel);
+            assert_eq!(
+                LeafHasher::with_kernel(&p, &input, &nonce, *kernel).is_some(),
+                supported,
+                "{kernel:?}",
+            );
         }
     }
 

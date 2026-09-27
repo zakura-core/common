@@ -291,8 +291,11 @@ fn validate_tree(
     indices: &[u32],
     hash: impl FnOnce(&[u32], &mut [Digest]),
 ) -> Result<(), Kind> {
+    // Anything else would leave the tree, or its root, partly unvisited.
     let leaves = indices.len();
-    debug_assert_eq!(leaves, 1 << p.k);
+    if p.solution_indices() != Some(leaves) {
+        return Err(Kind::InvalidParams);
+    }
     let per_hash = p.indices_per_hash_output();
     let leaf_bytes = p.n as usize / 8;
     let collision_bytes = p.collision_byte_length();
@@ -506,6 +509,52 @@ mod tests {
         }
         // Mainnet parameters reject the Regtest solution.
         is_valid_solution(200, 9, &header, &nonce, &soln).unwrap_err();
+    }
+
+    #[test]
+    fn rejects_unsupported_parameters() {
+        let (header, nonce, _) = mainnet_415000();
+        // With a wrapping `1 << 64`, (520, 64) expected a one-byte solution
+        // that decoded to no indices, leaving an unvisited all-zero root.
+        for byte in 0..=u8::MAX {
+            assert_eq!(
+                is_valid_solution(520, 64, &header, &nonce, &[byte])
+                    .unwrap_err()
+                    .0,
+                Kind::InvalidParams
+            );
+        }
+        // Too wide for one BLAKE2b output, and collision lengths outside
+        // 8..=24 bits.
+        for (n, k) in [(520, 64), (1024, 3), (48, 7), (200, 7), (104, 3)] {
+            assert!(Params::new(n, k).is_none(), "({n}, {k})");
+        }
+        for (n, k) in [(200, 9), (48, 5), (96, 5), (144, 5), (96, 3), (512, 63)] {
+            assert!(Params::new(n, k).is_some(), "({n}, {k})");
+        }
+        // (512, 63) is accepted, but no solution length fits in `usize`
+        // arithmetic on 64-bit targets without overflow.
+        let p = Params::new(512, 63).unwrap();
+        assert_eq!(p.solution_bytes(), None);
+        assert_eq!(
+            is_valid_solution(512, 63, &header, &nonce, &[0; 9])
+                .unwrap_err()
+                .0,
+            Kind::InvalidParams
+        );
+    }
+
+    #[test]
+    fn validate_tree_rejects_wrong_leaf_counts() {
+        let p = Params::new(200, 9).unwrap();
+        for leaves in [0, 1, 511, 513] {
+            let indices: Vec<u32> = (0..leaves).collect();
+            assert_eq!(
+                validate_tree(&p, &indices, |_, digests| digests.fill([0; 64])),
+                Err(Kind::InvalidParams),
+                "{leaves} leaves",
+            );
+        }
     }
 
     #[test]
