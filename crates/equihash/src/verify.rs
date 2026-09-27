@@ -2,6 +2,7 @@
 //!
 //! [Equihash]: https://zips.z.cash/protocol/protocol.pdf#equihash
 
+#[cfg(any(feature = "solver", test))]
 use alloc::vec::Vec;
 #[cfg(test)]
 use blake2b_simd::Hash as Blake2bHash;
@@ -281,15 +282,19 @@ pub fn is_valid_solution(
 // The Zcash prefix length the leaf hasher accepts.
 const _: () = assert!(HEADER_BYTES + NONCE_BYTES == 140);
 
+/// Leaves hashed per call to `validate_tree`'s `hash`; a multiple of every
+/// kernel's lane count.
+const HASH_BATCH: usize = 64;
+
 /// Validates the solution tree for `indices`, where `hash` writes the digest
-/// of each block index.
+/// of each block index in a batch.
 ///
 /// Subtrees are merged in the same post-order, with the same checks in the
 /// same order, as the recursive validator, so both report the same error.
 fn validate_tree(
     p: &Params,
     indices: &[u32],
-    hash: impl FnOnce(&[u32], &mut [Digest]),
+    mut hash: impl FnMut(&[u32], &mut [Digest]),
 ) -> Result<(), Kind> {
     // Anything else would leave the tree, or its root, partly unvisited.
     let leaves = indices.len();
@@ -301,58 +306,68 @@ fn validate_tree(
     let collision_bytes = p.collision_byte_length();
     let row_len = p.hash_length();
 
-    let mut blocks: Vec<u32> = indices.iter().map(|i| i / per_hash).collect();
-    let mut digests = vec![[0u8; 64]; leaves];
-    hash(&blocks, &mut digests);
-
     // With every index distinct, each subtree pair's duplicate check passes.
-    let sorted = &mut blocks;
-    sorted.copy_from_slice(indices);
+    let mut sorted = indices.to_vec();
     sorted.sort_unstable();
     let all_distinct = sorted.windows(2).all(|w| w[0] != w[1]);
+    drop(sorted);
 
     // `pending[h]` holds the unmerged left subtree of height `h`, which has
     // `row_len - h * collision_bytes` hash bytes after trimming.
     let mut pending = vec![0u8; (p.k as usize + 1) * row_len];
     let mut row = vec![0u8; row_len];
-    for (leaf, (index, digest)) in indices.iter().zip(&digests).enumerate() {
-        let start = (index % per_hash) as usize * leaf_bytes;
-        expand_array_into(
-            &digest[start..start + leaf_bytes],
-            p.collision_bit_length(),
-            0,
-            &mut row,
-        );
-
-        // Each set low bit of `leaf` marks a pending left sibling.
-        let mut height = 0;
-        while leaf >> height & 1 == 1 {
-            let len = row_len - height * collision_bytes;
-            let left = &pending[height * row_len..][..len];
-            let right_start = leaf + 1 - (1 << height);
-            let left_start = right_start - (1 << height);
-            let left_indices = &indices[left_start..right_start];
-            let right_indices = &indices[right_start..=leaf];
-
-            if left[..collision_bytes] != row[..collision_bytes] {
-                return Err(Kind::Collision);
-            }
-            if right_indices[0] < left_indices[0] {
-                return Err(Kind::OutOfOrder);
-            }
-            if !all_distinct && left_indices.iter().any(|i| right_indices.contains(i)) {
-                return Err(Kind::DuplicateIdxs);
-            }
-
-            // On success the merged subtree's indices are `left || right`,
-            // which is their order in `indices`.
-            for (i, left) in left[collision_bytes..].iter().enumerate() {
-                row[i] = left ^ row[collision_bytes + i];
-            }
-            height += 1;
+    // Hash leaves in small batches as the walk reaches them, so memory does
+    // not grow with `2^k` and an invalid solution stops within one batch of
+    // its first failing check.
+    let mut blocks = [0u32; HASH_BATCH];
+    let mut digests = [[0u8; 64]; HASH_BATCH];
+    for (batch, chunk) in indices.chunks(HASH_BATCH).enumerate() {
+        let blocks = &mut blocks[..chunk.len()];
+        let digests = &mut digests[..chunk.len()];
+        for (block, index) in blocks.iter_mut().zip(chunk) {
+            *block = index / per_hash;
         }
-        let len = row_len - height * collision_bytes;
-        pending[height * row_len..][..len].copy_from_slice(&row[..len]);
+        hash(blocks, digests);
+        for (offset, (index, digest)) in chunk.iter().zip(digests.iter()).enumerate() {
+            let leaf = batch * HASH_BATCH + offset;
+            let start = (index % per_hash) as usize * leaf_bytes;
+            expand_array_into(
+                &digest[start..start + leaf_bytes],
+                p.collision_bit_length(),
+                0,
+                &mut row,
+            );
+
+            // Each set low bit of `leaf` marks a pending left sibling.
+            let mut height = 0;
+            while leaf >> height & 1 == 1 {
+                let len = row_len - height * collision_bytes;
+                let left = &pending[height * row_len..][..len];
+                let right_start = leaf + 1 - (1 << height);
+                let left_start = right_start - (1 << height);
+                let left_indices = &indices[left_start..right_start];
+                let right_indices = &indices[right_start..=leaf];
+
+                if left[..collision_bytes] != row[..collision_bytes] {
+                    return Err(Kind::Collision);
+                }
+                if right_indices[0] < left_indices[0] {
+                    return Err(Kind::OutOfOrder);
+                }
+                if !all_distinct && left_indices.iter().any(|i| right_indices.contains(i)) {
+                    return Err(Kind::DuplicateIdxs);
+                }
+
+                // On success the merged subtree's indices are `left || right`,
+                // which is their order in `indices`.
+                for (i, left) in left[collision_bytes..].iter().enumerate() {
+                    row[i] = left ^ row[collision_bytes + i];
+                }
+                height += 1;
+            }
+            let len = row_len - height * collision_bytes;
+            pending[height * row_len..][..len].copy_from_slice(&row[..len]);
+        }
     }
 
     // Hashes were trimmed, so the root holds one collision's worth of bytes.
@@ -525,13 +540,47 @@ mod tests {
             );
         }
         // Too wide for one BLAKE2b output, and collision lengths outside
-        // 8..=24 bits.
-        for (n, k) in [(520, 64), (1024, 3), (48, 7), (200, 7), (104, 3)] {
+        // 8..=24 bits. (448, 63) wrapped its solution length to zero on
+        // 64-bit targets, and (134_217_736, 16_777_216) derived a 256 TiB
+        // buffer from `k`.
+        for (n, k) in [
+            (520, 64),
+            (1024, 3),
+            (48, 7),
+            (200, 7),
+            (104, 3),
+            (448, 63),
+            (134_217_736, 16_777_216),
+        ] {
             assert!(Params::new(n, k).is_none(), "({n}, {k})");
         }
         for (n, k) in [(200, 9), (48, 5), (96, 5), (144, 5), (96, 3), (512, 63)] {
             assert!(Params::new(n, k).is_some(), "({n}, {k})");
         }
+        for (n, k) in [(448, 63), (134_217_736, 16_777_216)] {
+            for soln in [&[][..], &[0]] {
+                assert_eq!(
+                    is_valid_solution(n, k, &header, &nonce, soln)
+                        .unwrap_err()
+                        .0,
+                    Kind::InvalidParams
+                );
+            }
+        }
+        // `2^32` leaves overflow `usize` on 32-bit targets, where (264, 32)
+        // wrapped to a one-byte solution with no indices.
+        let p = Params::new(264, 32).unwrap();
+        assert_eq!(
+            p.solution_indices(),
+            1usize.checked_shl(32),
+            "the leaf count is checked, never wrapped",
+        );
+        assert_eq!(
+            is_valid_solution(264, 32, &header, &nonce, &[0])
+                .unwrap_err()
+                .0,
+            Kind::InvalidParams
+        );
         // (512, 63) is accepted, but no solution length fits in `usize`
         // arithmetic on 64-bit targets without overflow.
         let p = Params::new(512, 63).unwrap();
@@ -555,6 +604,23 @@ mod tests {
                 "{leaves} leaves",
             );
         }
+    }
+
+    #[test]
+    fn invalid_solutions_stop_within_one_hash_batch() {
+        // An all-zero (168, 20) solution decodes to 2^20 zero indices, so its
+        // first merge fails as a duplicate. Only the first batch is hashed.
+        let p = Params::new(168, 20).unwrap();
+        let soln = vec![0; p.solution_bytes().unwrap()];
+        let indices = indices_from_minimal(p, &soln).unwrap();
+        assert_eq!(indices.len(), 1 << 20);
+        let mut hashed = 0;
+        let result = validate_tree(&p, &indices, |blocks, digests| {
+            hashed += blocks.len();
+            digests.fill([0; 64]);
+        });
+        assert_eq!(result, Err(Kind::DuplicateIdxs));
+        assert_eq!(hashed, super::HASH_BATCH);
     }
 
     #[test]
