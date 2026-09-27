@@ -3798,10 +3798,10 @@ name = "zakura-equihash"
 version = "2.0.0"
 dependencies = [
  "blake2b_simd",
- "cc",
  "corez",
  "document-features",
  "hex",
+ "libc",
 ]
 
 [[package]]
