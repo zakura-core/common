@@ -1,7 +1,6 @@
 //! Logic for building Orchard components of transactions.
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::fmt;
 use core::iter;
 
@@ -14,6 +13,7 @@ use crate::{
     Proof,
     address::Address,
     bundle::{Authorization, Authorized, Bundle, BundleVersion, Flags, TxVersion},
+    constants::MERKLE_DEPTH_ORCHARD,
     keys::{
         FullViewingKey, OutgoingViewingKey, Scope, SpendAuthorizingKey, SpendValidatingKey,
         SpendingKey,
@@ -22,7 +22,7 @@ use crate::{
     note_encryption::OrchardNoteEncryption,
     primitives::redpallas::{self, Binding, SpendAuth},
     rng_compat::RngCore06,
-    tree::{Anchor, MerklePath},
+    tree::{Anchor, MerkleHashOrchard, MerklePath},
     value::{self, BalanceError, NoteValue, ValueCommitTrapdoor, ValueCommitment, ValueSum},
 };
 
@@ -353,6 +353,7 @@ pub struct SpendInfo {
     pub(crate) scope: Scope,
     pub(crate) note: Note,
     pub(crate) merkle_path: Option<MerklePath>,
+    pub(crate) merkle_path_parent_nodes: Option<Arc<[MerkleHashOrchard; MERKLE_DEPTH_ORCHARD]>>,
 }
 
 impl SpendInfo {
@@ -367,12 +368,16 @@ impl SpendInfo {
     /// [`Builder::add_spend`]: Builder::add_spend
     pub fn new(fvk: FullViewingKey, note: Note, merkle_path: MerklePath) -> Option<Self> {
         let scope = fvk.scope_for_address(&note.recipient())?;
+        let merkle_path_parent_nodes = Some(Arc::new(
+            merkle_path.parent_nodes(ExtractedNoteCommitment::from(note.commitment())),
+        ));
         Some(SpendInfo {
             dummy_sk: None,
             fvk,
             scope,
             note,
             merkle_path: Some(merkle_path),
+            merkle_path_parent_nodes,
         })
     }
 
@@ -393,6 +398,7 @@ impl SpendInfo {
             scope,
             note,
             merkle_path: None,
+            merkle_path_parent_nodes: None,
         })
     }
 
@@ -401,7 +407,9 @@ impl SpendInfo {
     /// [orcharddummynotes]: https://zips.z.cash/protocol/nu5.pdf#orcharddummynotes
     fn dummy(note_version: NoteVersion, rng: &mut impl Rng) -> Self {
         let (sk, fvk, note) = Note::dummy(rng, None, note_version);
-        let merkle_path = Some(MerklePath::dummy(rng));
+        let merkle_path = MerklePath::dummy(rng);
+        let merkle_path_parent_nodes =
+            merkle_path.parent_nodes(ExtractedNoteCommitment::from(note.commitment()));
 
         SpendInfo {
             dummy_sk: Some(sk),
@@ -410,7 +418,8 @@ impl SpendInfo {
             // note's spending key is random and thus scoping is irrelevant.
             scope: Scope::External,
             note,
-            merkle_path,
+            merkle_path: Some(merkle_path),
+            merkle_path_parent_nodes: Some(Arc::new(merkle_path_parent_nodes)),
         }
     }
 
@@ -418,16 +427,13 @@ impl SpendInfo {
         if self.note.value() == NoteValue::ZERO {
             true
         } else {
-            match &self.merkle_path {
+            match &self.merkle_path_parent_nodes {
                 // An unwitnessed spend (deferred anchor, ZIP 374) defers this check to
                 // the PCZT Prover role, which performs it once the real anchor and
                 // witness are installed; within this crate such a spend only ever
                 // coexists with the placeholder anchor of a deferred-anchor builder.
                 None => true,
-                Some(path) => {
-                    let cm = self.note.commitment();
-                    &path.root(cm.into()) == anchor
-                }
+                Some(nodes) => nodes.last().copied().map(Anchor::from).as_ref() == Some(anchor),
             }
         }
     }
@@ -1431,6 +1437,9 @@ fn build_bundle<B, R: Rng>(
                 note_version,
                 &mut rng,
             );
+            let merkle_path = MerklePath::dummy(&mut rng);
+            let merkle_path_parent_nodes =
+                merkle_path.parent_nodes(ExtractedNoteCommitment::from(note.commitment()));
             let spend = SpendInfo {
                 // The wallet controls this spend: it is signed through the normal
                 // signing flow, by the spend authorizing key matching `fvk`.
@@ -1438,7 +1447,8 @@ fn build_bundle<B, R: Rng>(
                 fvk,
                 scope,
                 note,
-                merkle_path: Some(MerklePath::dummy(&mut rng)),
+                merkle_path: Some(merkle_path),
+                merkle_path_parent_nodes: Some(Arc::new(merkle_path_parent_nodes)),
             };
             pairs.push((None, Some(chg_idx), spend, output));
         }
