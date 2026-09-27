@@ -14,6 +14,7 @@ use blake2b_simd::{BLOCKBYTES, OUTBYTES};
 
 const INDEX_BYTES: usize = core::mem::size_of::<u32>();
 const GENERAL_INDEX_WORD: usize = BLOCKBYTES / core::mem::size_of::<u64>();
+const GENERAL_INDEX_SHIFT: u32 = u64::BITS;
 // The common (200, 9) solver layout uses fifty-byte BLAKE2b digests.
 const TRANSPOSE_HASH_BYTES: usize = 50;
 const TRANSPOSE_WORD_BYTES: usize =
@@ -146,32 +147,55 @@ impl Context {
             // Fixed index-word positions avoid spilling the entire message
             // array when inserting each lane's index.
             if std::is_x86_feature_detected!("avx512f") {
-                match self.index_word {
-                    1 => self.generate_avx512::<1>(first, output),
-                    13 => self.generate_avx512::<13>(first, output),
-                    _ => self.generate_avx512::<GENERAL_INDEX_WORD>(first, output),
+                match (self.index_word, self.index_shift) {
+                    (1, 32) => self.generate_avx512::<1, 32>(first, output),
+                    (13, 0) => self.generate_avx512::<13, 0>(first, output),
+                    (1, _) => self.generate_avx512::<1, GENERAL_INDEX_SHIFT>(first, output),
+                    (13, _) => self.generate_avx512::<13, GENERAL_INDEX_SHIFT>(first, output),
+                    _ => self
+                        .generate_avx512::<GENERAL_INDEX_WORD, GENERAL_INDEX_SHIFT>(first, output),
                 }
             } else {
-                match self.index_word {
-                    1 => self.generate_avx2::<1>(first, output),
-                    13 => self.generate_avx2::<13>(first, output),
-                    _ => self.generate_avx2::<GENERAL_INDEX_WORD>(first, output),
+                match (self.index_word, self.index_shift) {
+                    (1, 32) => self.generate_avx2::<1, 32>(first, output),
+                    (13, 0) => self.generate_avx2::<13, 0>(first, output),
+                    (1, _) => self.generate_avx2::<1, GENERAL_INDEX_SHIFT>(first, output),
+                    (13, _) => self.generate_avx2::<13, GENERAL_INDEX_SHIFT>(first, output),
+                    _ => {
+                        self.generate_avx2::<GENERAL_INDEX_WORD, GENERAL_INDEX_SHIFT>(first, output)
+                    }
                 }
             }
         }
     }
 
     #[target_feature(enable = "avx2")]
-    unsafe fn generate_avx2<const INDEX_WORD: usize>(&self, first: u32, output: &mut [u8]) {
+    unsafe fn generate_avx2<const INDEX_WORD: usize, const INDEX_SHIFT: u32>(
+        &self,
+        first: u32,
+        output: &mut [u8],
+    ) {
         // GENERAL_INDEX_WORD selects arbitrary index placement at runtime.
         let index_word = if INDEX_WORD == GENERAL_INDEX_WORD {
             self.index_word
         } else {
             INDEX_WORD
         };
+        let index_shift = if INDEX_SHIFT == GENERAL_INDEX_SHIFT {
+            self.index_shift
+        } else {
+            INDEX_SHIFT
+        };
         unsafe {
-            let base_m: [__m256i; 16] =
-                std::array::from_fn(|i| _mm256_set1_epi64x(self.message[i] as i64));
+            let base_m: [__m256i; 16] = std::array::from_fn(|i| {
+                // A twelve-byte final prefix and its four-byte index leave
+                // every later message word zero, regardless of the header.
+                if INDEX_WORD == 1 && INDEX_SHIFT == 32 && i > INDEX_WORD {
+                    _mm256_setzero_si256()
+                } else {
+                    _mm256_set1_epi64x(self.message[i] as i64)
+                }
+            });
             let h: [__m256i; 8] = std::array::from_fn(|i| _mm256_set1_epi64x(self.words[i] as i64));
             for (batch, output) in output.chunks_mut(4 * self.hash_len).enumerate() {
                 let start = first.wrapping_add((batch * 4) as u32);
@@ -184,12 +208,12 @@ impl Context {
                 let mut m = base_m;
                 m[index_word] = _mm256_or_si256(
                     m[index_word],
-                    _mm256_sll_epi64(index, _mm_cvtsi64_si128(self.index_shift as i64)),
+                    _mm256_sll_epi64(index, _mm_cvtsi64_si128(index_shift as i64)),
                 );
-                if self.index_shift > 32 {
+                if index_shift > 32 {
                     m[index_word + 1] = _mm256_or_si256(
                         m[index_word + 1],
-                        _mm256_srl_epi64(index, _mm_cvtsi64_si128((64 - self.index_shift) as i64)),
+                        _mm256_srl_epi64(index, _mm_cvtsi64_si128((64 - index_shift) as i64)),
                     );
                 }
                 let mut v = [_mm256_setzero_si256(); 16];
@@ -228,16 +252,32 @@ impl Context {
         }
     }
     #[target_feature(enable = "avx512f")]
-    unsafe fn generate_avx512<const INDEX_WORD: usize>(&self, first: u32, output: &mut [u8]) {
+    unsafe fn generate_avx512<const INDEX_WORD: usize, const INDEX_SHIFT: u32>(
+        &self,
+        first: u32,
+        output: &mut [u8],
+    ) {
         // GENERAL_INDEX_WORD selects arbitrary index placement at runtime.
         let index_word = if INDEX_WORD == GENERAL_INDEX_WORD {
             self.index_word
         } else {
             INDEX_WORD
         };
+        let index_shift = if INDEX_SHIFT == GENERAL_INDEX_SHIFT {
+            self.index_shift
+        } else {
+            INDEX_SHIFT
+        };
         unsafe {
-            let base_m: [__m512i; 16] =
-                std::array::from_fn(|i| _mm512_set1_epi64(self.message[i] as i64));
+            let base_m: [__m512i; 16] = std::array::from_fn(|i| {
+                // A twelve-byte final prefix and its four-byte index leave
+                // every later message word zero, regardless of the header.
+                if INDEX_WORD == 1 && INDEX_SHIFT == 32 && i > INDEX_WORD {
+                    _mm512_setzero_si512()
+                } else {
+                    _mm512_set1_epi64(self.message[i] as i64)
+                }
+            });
             let h: [__m512i; 8] = std::array::from_fn(|i| _mm512_set1_epi64(self.words[i] as i64));
             for (batch, output) in output.chunks_mut(8 * self.hash_len).enumerate() {
                 let start = first.wrapping_add((batch * 8) as u32);
@@ -254,12 +294,12 @@ impl Context {
                 let mut m = base_m;
                 m[index_word] = _mm512_or_si512(
                     m[index_word],
-                    _mm512_sll_epi64(index, _mm_cvtsi64_si128(self.index_shift as i64)),
+                    _mm512_sll_epi64(index, _mm_cvtsi64_si128(index_shift as i64)),
                 );
-                if self.index_shift > 32 {
+                if index_shift > 32 {
                     m[index_word + 1] = _mm512_or_si512(
                         m[index_word + 1],
-                        _mm512_srl_epi64(index, _mm_cvtsi64_si128((64 - self.index_shift) as i64)),
+                        _mm512_srl_epi64(index, _mm_cvtsi64_si128((64 - index_shift) as i64)),
                     );
                 }
                 let mut v = [_mm512_setzero_si512(); 16];
@@ -500,7 +540,9 @@ mod tests {
                     ctx.generate(first, &mut out);
                     let mut avx2 = std::vec![0u8;count*hash_len];
                     unsafe {
-                        ctx.generate_avx2::<GENERAL_INDEX_WORD>(first, &mut avx2);
+                        ctx.generate_avx2::<GENERAL_INDEX_WORD, GENERAL_INDEX_SHIFT>(
+                            first, &mut avx2,
+                        );
                     }
                     assert_eq!(out, avx2);
                     // Exercise the specialized AVX2 layouts even when the
@@ -509,10 +551,18 @@ mod tests {
                     // SAFETY: the test's feature check establishes AVX2 support;
                     // each selected index word matches the constructed context.
                     unsafe {
-                        match ctx.index_word {
-                            1 => ctx.generate_avx2::<1>(first, &mut specialized),
-                            13 => ctx.generate_avx2::<13>(first, &mut specialized),
-                            _ => ctx.generate_avx2::<GENERAL_INDEX_WORD>(first, &mut specialized),
+                        match (ctx.index_word, ctx.index_shift) {
+                            (1, 32) => ctx.generate_avx2::<1, 32>(first, &mut specialized),
+                            (13, 0) => ctx.generate_avx2::<13, 0>(first, &mut specialized),
+                            (1, _) => {
+                                ctx.generate_avx2::<1, GENERAL_INDEX_SHIFT>(first, &mut specialized)
+                            }
+                            (13, _) => ctx
+                                .generate_avx2::<13, GENERAL_INDEX_SHIFT>(first, &mut specialized),
+                            _ => ctx.generate_avx2::<GENERAL_INDEX_WORD, GENERAL_INDEX_SHIFT>(
+                                first,
+                                &mut specialized,
+                            ),
                         }
                     }
                     assert_eq!(out, specialized);
