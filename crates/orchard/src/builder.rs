@@ -1591,6 +1591,12 @@ impl<S: InProgressSignatures> InProgress<Unproven, S> {
     ///
     /// Also returns an error if `pk` does not match the circuit version this
     /// bundle's actions were built for, or if proof creation fails.
+    ///
+    /// # Security
+    ///
+    /// With a [`ProvingKey`] armed by [`ProvingKey::prepare_proving`], relative
+    /// sparsity and similarity between Actions can affect proving latency; see
+    /// [`Proof::create`].
     pub fn create_proof(
         &self,
         pk: &ProvingKey,
@@ -1620,6 +1626,12 @@ impl<S: InProgressSignatures, V> Bundle<InProgress<Unproven, S>, V> {
     ///
     /// Also returns an error if `pk` does not match this bundle's
     /// [`circuit_version`](Self::circuit_version), or if proof creation fails.
+    ///
+    /// # Security
+    ///
+    /// With a [`ProvingKey`] armed by [`ProvingKey::prepare_proving`], relative
+    /// sparsity and similarity between Actions can affect proving latency; see
+    /// [`Proof::create`].
     pub fn create_proof(
         self,
         pk: &ProvingKey,

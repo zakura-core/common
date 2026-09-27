@@ -34,6 +34,12 @@ impl super::Bundle {
     /// Also returns an error if required Prover-role fields are missing or invalid,
     /// or if proof creation fails.
     ///
+    /// # Security
+    ///
+    /// With a [`ProvingKey`] armed by [`ProvingKey::prepare_proving`], relative
+    /// sparsity and similarity between Actions can affect proving latency; see
+    /// [`Proof::create`].
+    ///
     /// [`OrchardCircuitVersion::PostNu6_3`]: crate::circuit::OrchardCircuitVersion::PostNu6_3
     pub fn create_proof<R: Rng + CryptoRng>(
         &mut self,
