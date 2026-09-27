@@ -4,7 +4,7 @@ use std::marker::{PhantomData, PhantomPinned};
 use std::slice;
 use std::vec::Vec;
 
-use blake2b_simd::State;
+use crate::blake2b::SolverHashState;
 
 use crate::{blake2b, minimal::minimal_from_indices, params::Params, verify};
 
@@ -21,10 +21,10 @@ struct CEqui {
 unsafe extern "C" {
     #[allow(improper_ctypes)]
     fn equi_new(
-        blake2b_clone: extern "C" fn(state: *const State) -> *mut State,
-        blake2b_free: extern "C" fn(state: *mut State),
+        blake2b_clone: extern "C" fn(state: *const SolverHashState) -> *mut SolverHashState,
+        blake2b_free: extern "C" fn(state: *mut SolverHashState),
         blake2b_generate_hashes: unsafe extern "C" fn(
-            state: *const State,
+            state: *const SolverHashState,
             first_index: u32,
             count: u32,
             output: *mut u8,
@@ -33,7 +33,7 @@ unsafe extern "C" {
     ) -> *mut CEqui;
     fn equi_free(eq: *mut CEqui);
     #[allow(improper_ctypes)]
-    fn equi_setstate(eq: *mut CEqui, ctx: *const State);
+    fn equi_setstate(eq: *mut CEqui, ctx: *const SolverHashState);
     fn equi_clearslots(eq: *mut CEqui);
     fn equi_digit0(eq: *mut CEqui, id: u32);
     fn equi_digitodd(eq: *mut CEqui, r: u32, id: u32);
@@ -57,7 +57,7 @@ unsafe extern "C" {
 /// This function uses unsafe code for FFI into the Tromp solver.
 #[allow(unsafe_code)]
 #[allow(clippy::print_stdout)]
-unsafe fn worker(eq: *mut CEqui, p: Params, curr_state: &State) -> Vec<Vec<u32>> {
+unsafe fn worker(eq: *mut CEqui, p: Params, curr_state: &SolverHashState) -> Vec<Vec<u32>> {
     // SAFETY: caller must supply a valid `eq` instance.
     //
     // Review Note: nsols is set to zero in C here
@@ -180,6 +180,7 @@ fn solve_200_9_uncompressed<const N: usize>(
         let mut curr_state = state.clone();
         // Review Note: these hashes are changing when the nonce changes
         curr_state.update(&nonce);
+        let curr_state = SolverHashState::new(curr_state, input, &nonce, p);
 
         // SAFETY:
         // - [`SOLVER_PARAMS`] matches the hard-coded parameters in the C code.

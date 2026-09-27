@@ -34,6 +34,8 @@ extern crate std;
 #[macro_use]
 extern crate alloc;
 
+const BLAKE2B_PERSONALIZATION_PREFIX: [u8; 8] = *b"ZcashPoW";
+
 mod minimal;
 mod params;
 mod verify;

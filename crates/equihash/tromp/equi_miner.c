@@ -140,21 +140,12 @@ typedef union hashunit hashunit;
 #define HASHWORDS0 WORDS(WN - DIGITBITS + RESTBITS)
 #define HASHWORDS1 WORDS(WN - 2*DIGITBITS + RESTBITS)
 
-struct slot0 {
-  tree attr;
-  hashunit hash[HASHWORDS0];
-};
-typedef struct slot0 slot0;
-
-struct slot1 {
-  tree attr;
-  hashunit hash[HASHWORDS1];
-};
-typedef struct slot1 slot1;
-
-// a bucket is NSLOTS treenodes
-typedef slot0 bucket0[NSLOTS];
-typedef slot1 bucket1[NSLOTS];
+// Buckets reserve enough words for the first round on each parity. Within a
+// bucket, completed tree columns are retained and current hashes are packed:
+// [tree round 0][tree round 2]...[current hashes at their current width].
+// Each tree column holds NSLOTS attributes; hash rows have no fixed stride.
+typedef hashunit bucket0[NSLOTS * (1 + HASHWORDS0)];
+typedef hashunit bucket1[NSLOTS * (1 + HASHWORDS1)];
 // the N-bit hash consists of K+1 n-bit "digits"
 // each of which corresponds to a layer of NBUCKETS buckets
 typedef bucket0 digit0[NBUCKETS];
@@ -210,26 +201,19 @@ typedef struct htalloc htalloc;
 #endif
   }
   void alloctrees(htalloc *hta) {
-// optimize xenoncat's fixed memory layout, avoiding any waste
-// digit  trees  hashes  trees hashes
-// 0      0 A A A A A A   . . . . . .
-// 1      0 A A A A A A   1 B B B B B
-// 2      0 2 C C C C C   1 B B B B B
-// 3      0 2 C C C C C   1 3 D D D D
-// 4      0 2 4 E E E E   1 3 D D D D
-// 5      0 2 4 E E E E   1 3 5 F F F
-// 6      0 2 4 6 . G G   1 3 5 F F F
-// 7      0 2 4 6 . G G   1 3 5 7 H H
-// 8      0 2 4 6 8 . I   1 3 5 7 H H
+    // Preserve earlier tree columns while reusing the shrinking hash area.
     assert(DIGITBITS >= 16); // ensures hashes shorten by 1 unit every 2 digits
     hta->alloced = 0;
     hta->heap0 = (u32 *)htalloc_alloctable(hta, sizeof(digit0));
     hta->heap1 = (u32 *)htalloc_alloctable(hta, sizeof(digit1));
-    for (int r=0; r<WK; r++)
+    for (int r=0; r<WK; r++) {
+      const u32 reserved = 1 + ((r&1) ? HASHWORDS1 : HASHWORDS0);
+      assert((u32)r/2 + 1 + hashwords(hashsize(r)) <= reserved);
       if ((r&1) == 0)
-        hta->trees0[r/2]  = (bucket0 *)(hta->heap0 + r/2);
+        hta->trees0[r/2]  = (bucket0 *)(hta->heap0 + (r/2) * NSLOTS);
       else
-        hta->trees1[r/2]  = (bucket1 *)(hta->heap1 + r/2);
+        hta->trees1[r/2]  = (bucket1 *)(hta->heap1 + (r/2) * NSLOTS);
+    }
   }
   void dealloctrees(htalloc *hta) {
     if (hta == NULL) {
@@ -269,6 +253,11 @@ struct equi {
   blake2b_generate_hashes blake2b_generate_hashes;
   htalloc hta;
   bsizes *nslots; // PUT IN BUCKET STRUCT
+  // A half-full hash set detects repeated leaves without sorting a proof.
+  // Epoch tags avoid clearing the set for every rejected candidate.
+  u32 index_keys[2 * PROOFSIZE];
+  u32 index_tags[2 * PROOFSIZE];
+  u32 index_epoch;
   proof *sols;
   au32 nsols;
   u32 xfull;
@@ -295,6 +284,8 @@ typedef struct equi equi;
     // C malloc() does not guarantee zero-initialized memory (but calloc() does)
     eq->blake_ctx = NULL;
     eq->nsols = 0;
+    memset(eq->index_tags, 0, sizeof(eq->index_tags));
+    eq->index_epoch = 0;
     equi_clearslots(eq);
 
     return eq;
@@ -325,6 +316,8 @@ typedef struct equi equi;
     memset(eq->nslots, 0, NBUCKETS * sizeof(au32)); // only nslots[0] needs zeroing
     equi_clearslots(eq);
     eq->nsols = 0;
+    memset(eq->index_tags, 0, sizeof(eq->index_tags));
+    eq->index_epoch = 0;
   }
   void equi_clearslots(equi *eq) {
     eq->xfull = eq->bfull = eq->hfull = 0;
@@ -357,35 +350,49 @@ typedef struct equi equi;
       *indices = getindex(&t);
       return;
     }
-    const bucket1 *buck = &eq->hta.trees1[--r/2][bucketid(&t)];
+    const tree *buck = (const tree *)&eq->hta.trees1[--r/2][bucketid(&t)];
     const u32 size = 1 << r;
     u32 *indices1 = indices + size;
-    listindices1(eq, r, (*buck)[slotid0(&t)].attr, indices);
-    listindices1(eq, r, (*buck)[slotid1(&t)].attr, indices1);
+    listindices1(eq, r, buck[slotid0(&t)], indices);
+    listindices1(eq, r, buck[slotid1(&t)], indices1);
     orderindices(indices, size);
   }
   void listindices1(equi *eq, u32 r, const tree t, u32 *indices) {
-    const bucket0 *buck = &eq->hta.trees0[--r/2][bucketid(&t)];
+    const tree *buck = (const tree *)&eq->hta.trees0[--r/2][bucketid(&t)];
     const u32 size = 1 << r;
     u32 *indices1 = indices + size;
-    listindices0(eq, r, (*buck)[slotid0(&t)].attr, indices);
-    listindices0(eq, r, (*buck)[slotid1(&t)].attr, indices1);
+    listindices0(eq, r, buck[slotid0(&t)], indices);
+    listindices0(eq, r, buck[slotid1(&t)], indices1);
     orderindices(indices, size);
   }
-  void candidate(equi *eq, const tree t) {
-    proof prf;
-    listindices1(eq, WK, t, prf); // assume WK odd
-    qsort(prf, PROOFSIZE, sizeof(u32), &compu32);
-    for (u32 i=1; i<PROOFSIZE; i++)
-      if (prf[i] <= prf[i-1]) {
-        /*
-        printf(
-          "failed dup indexes check: wanted: proof[%d] > proof[%d], actual: %d <= %d\n",
-          i, i-1, prf[i], prf[i-1]
-        );
-        */
-        return;
+  static bool unique_indices1(equi *eq, u32 r, tree t);
+  static bool unique_indices0(equi *eq, u32 r, tree t) {
+    if (r == 0) {
+      const u32 key = getindex(&t);
+      u32 slot = (key * 0x9e3779b1U) >> (32 - (WK + 1));
+      while (eq->index_tags[slot] == eq->index_epoch) {
+        if (eq->index_keys[slot] == key) return false;
+        slot = (slot + 1) & (2 * PROOFSIZE - 1);
       }
+      eq->index_tags[slot] = eq->index_epoch;
+      eq->index_keys[slot] = key;
+      return true;
+    }
+    const tree *buck = (const tree *)&eq->hta.trees1[--r/2][bucketid(&t)];
+    return unique_indices1(eq, r, buck[slotid0(&t)]) &&
+           unique_indices1(eq, r, buck[slotid1(&t)]);
+  }
+  static bool unique_indices1(equi *eq, u32 r, tree t) {
+    const tree *buck = (const tree *)&eq->hta.trees0[--r/2][bucketid(&t)];
+    return unique_indices0(eq, r, buck[slotid0(&t)]) &&
+           unique_indices0(eq, r, buck[slotid1(&t)]);
+  }
+  void candidate(equi *eq, const tree t) {
+    if (++eq->index_epoch == 0) {
+      memset(eq->index_tags, 0, sizeof(eq->index_tags));
+      eq->index_epoch = 1;
+    }
+    if (!unique_indices1(eq, WK, t)) return;
 #ifdef EQUIHASH_TROMP_ATOMIC
     u32 soli = std::atomic_fetch_add_explicit(&eq->nsols, 1U, std::memory_order_relaxed);
 #else
@@ -449,28 +456,28 @@ typedef struct equi equi;
       }
       return htl;
     }
-    u32 getxhash0(const htlayout *htl, const slot0* pslot) {
+    u32 getxhash0(const htlayout *htl, const hashunit* hash) {
 #if WN == 200 && RESTBITS == 4
-      return pslot->hash->bytes[htl->prevbo] >> 4;
+      return hash->bytes[htl->prevbo] >> 4;
 #elif WN == 200 && RESTBITS == 8
-      return (pslot->hash->bytes[htl->prevbo] & 0xf) << 4 | pslot->hash->bytes[htl->prevbo+1] >> 4;
+      return (hash->bytes[htl->prevbo] & 0xf) << 4 | hash->bytes[htl->prevbo+1] >> 4;
 #elif WN == 200 && RESTBITS == 9
-      return (pslot->hash->bytes[htl->prevbo] & 0x1f) << 4 | pslot->hash->bytes[htl->prevbo+1] >> 4;
+      return (hash->bytes[htl->prevbo] & 0x1f) << 4 | hash->bytes[htl->prevbo+1] >> 4;
 #elif WN == 144 && RESTBITS == 4
-      return pslot->hash->bytes[htl->prevbo] & 0xf;
+      return hash->bytes[htl->prevbo] & 0xf;
 #else
 #error non implemented
 #endif
     }
-    u32 getxhash1(const htlayout *htl, const slot1* pslot) {
+    u32 getxhash1(const htlayout *htl, const hashunit* hash) {
 #if WN == 200 && RESTBITS == 4
-      return pslot->hash->bytes[htl->prevbo] & 0xf;
+      return hash->bytes[htl->prevbo] & 0xf;
 #elif WN == 200 && RESTBITS == 8
-      return pslot->hash->bytes[htl->prevbo];
+      return hash->bytes[htl->prevbo];
 #elif WN == 200 && RESTBITS == 9
-      return (pslot->hash->bytes[htl->prevbo]&1) << 8 | pslot->hash->bytes[htl->prevbo+1];
+      return (hash->bytes[htl->prevbo]&1) << 8 | hash->bytes[htl->prevbo+1];
 #elif WN == 144 && RESTBITS == 4
-      return pslot->hash->bytes[htl->prevbo] & 0xf;
+      return hash->bytes[htl->prevbo] & 0xf;
 #else
 #error non implemented
 #endif
@@ -493,8 +500,9 @@ typedef struct equi equi;
     u64 xmap;
 #else
     xslot nxhashslots[NRESTS];
-    xslot xhashslots[NRESTS][XFULL];
-    xslot *xx;
+    xslot head[NRESTS];
+    xslot next[NSLOTS];
+    xslot tail[NRESTS];
     u32 n0;
     u32 n1;
 #endif
@@ -507,6 +515,7 @@ typedef struct equi equi;
       memset(cd->xhashmap, 0, NRESTS * sizeof(u64));
 #else
       memset(cd->nxhashslots, 0, NRESTS * sizeof(xslot));
+      memset(cd->head, 0, NRESTS * sizeof(xslot));
 #endif
     }
     bool addslot(collisiondata *cd, u32 s1, u32 xh) {
@@ -519,8 +528,14 @@ typedef struct equi equi;
       cd->n1 = (u32)cd->nxhashslots[xh]++;
       if (cd->n1 >= XFULL)
         return false;
-      cd->xx = cd->xhashslots[xh];
-      cd->xx[cd->n1] = s1;
+      if (cd->n1) {
+        cd->s0 = cd->head[xh];
+        cd->next[cd->tail[xh]] = s1;
+      } else {
+        cd->head[xh] = s1;
+        cd->s0 = s1;
+      }
+      cd->tail[xh] = s1;
       cd->n0 = 0;
       return true;
 #endif
@@ -538,14 +553,34 @@ typedef struct equi equi;
       s0 += ffs; cd->xmap >>= ffs;
       return s0;
 #else
-      return (u32)cd->xx[cd->n0++];
+      const u32 slot = cd->s0;
+      cd->s0 = cd->next[slot];
+      cd->n0++;
+      return slot;
 #endif
     }
 
+  // Prefetch scattered destinations before copying the hash batch. Sources
+  // remain live in the batch buffer until every pending output is flushed.
+  struct pending_initial {
+    tree *attr;
+    hashunit *hash;
+    const uchar *source;
+    u32 index;
+  };
+  static void flush_initial(struct pending_initial *pending, u32 count,
+                            u32 hashbytes, u32 nextbo) {
+    for (u32 i = 0; i < count; i++) {
+      *pending[i].attr = tree_from_idx(pending[i].index);
+      memcpy(pending[i].hash->bytes + nextbo, pending[i].source, hashbytes);
+    }
+  }
   void equi_digit0(equi *eq, const u32 id) {
     // Keep hash-state clones in Rust and amortize the callback over a batch.
     enum { HASH_BATCH_SIZE = 64 };
     uchar hashes[HASH_BATCH_SIZE * HASHOUT];
+    struct pending_initial pending[HASH_BATCH_SIZE];
+    u32 npending = 0;
     htlayout htl = htlayout_new(eq, 0);
     const u32 hashbytes = hashsize(0);
     for (u32 block = id; block < NBLOCKS;) {
@@ -574,37 +609,79 @@ typedef struct equi equi;
             eq->bfull++;
             continue;
           }
-          slot0 *s = &eq->hta.trees0[0][bucketid][slot];
-          s->attr = tree_from_idx((block + offset) * HASHESPERBLAKE + i);
-          memcpy(s->hash->bytes+htl.nextbo, ph+WN/8-hashbytes, hashbytes);
+          tree *attrs = (tree *)&eq->hta.trees0[0][bucketid];
+          hashunit *hash = (hashunit *)(attrs + NSLOTS) + slot * htl.nexthashunits;
+#if defined(__GNUC__) || defined(__clang__)
+          __builtin_prefetch(attrs + slot, 1, 3);
+          __builtin_prefetch(hash, 1, 3);
+          __builtin_prefetch((uchar *)hash + (htl.nexthashunits - 1) * sizeof(hashunit), 1, 3);
+#endif
+          struct pending_initial *out = &pending[npending++];
+          out->attr = attrs + slot;
+          out->hash = hash;
+          out->source = ph + WN/8 - hashbytes;
+          out->index = (block + offset) * HASHESPERBLAKE + i;
+          if (npending == HASH_BATCH_SIZE) {
+            flush_initial(pending, npending, hashbytes, htl.nextbo);
+            npending = 0;
+          }
         }
       }
+      flush_initial(pending, npending, hashbytes, htl.nextbo);
+      npending = 0;
       block += count;
+    }
+  }
+
+  enum { OUTPUT_BATCH_SIZE = 64 };
+  // Hash inputs belong to the previous parity and stay live throughout this
+  // round. Delaying the XOR lets the destination prefetch finish first.
+  struct pending_output {
+    tree *attr_destination;
+    hashunit *hash_destination;
+    tree attr;
+    const hashunit *left;
+    const hashunit *right;
+  };
+  static void flush_output(struct pending_output *pending, u32 count,
+                           u32 hashunits, u32 dunits) {
+    for (u32 i = 0; i < count; i++) {
+      *pending[i].attr_destination = pending[i].attr;
+#ifdef _MSC_VER
+      hashunit *__restrict destination = pending[i].hash_destination;
+#else
+      hashunit *restrict destination = pending[i].hash_destination;
+#endif
+      for (u32 j = 0; j < hashunits; j++)
+        destination[j].word = pending[i].left[j + dunits].word ^
+                              pending[i].right[j + dunits].word;
     }
   }
 
   void equi_digitodd(equi *eq, const u32 r, const u32 id) {
     htlayout htl = htlayout_new(eq, r);
     collisiondata cd;
+    struct pending_output pending[OUTPUT_BATCH_SIZE];
+    u32 npending = 0;
     for (u32 bucketid=id; bucketid < NBUCKETS; bucketid++) {
       collisiondata_clear(&cd);
-      slot0 *buck = htl.hta.trees0[(r-1)/2][bucketid]; // optimize by updating previous buck?!
-      u32 bsize = getnslots(eq, r-1, bucketid);       // optimize by putting bucketsize with block?!
+      hashunit *buck = (hashunit *)&htl.hta.trees0[(r-1)/2][bucketid] + NSLOTS;
+      u32 bsize = getnslots(eq, r-1, bucketid);
       for (u32 s1 = 0; s1 < bsize; s1++) {
-        const slot0 *pslot1 = buck + s1;          // optimize by updating previous pslot1?!
+        const hashunit *pslot1 = buck + s1 * htl.prevhashunits;
         if (!addslot(&cd, s1, getxhash0(&htl, pslot1))) {
           eq->xfull++;
           continue;
         }
         for (; nextcollision(&cd); ) {
           const u32 s0 = slot(&cd);
-          const slot0 *pslot0 = buck + s0;
-          if (htlayout_equal(&htl, pslot0->hash, pslot1->hash)) {
+          const hashunit *pslot0 = buck + s0 * htl.prevhashunits;
+          if (htlayout_equal(&htl, pslot0, pslot1)) {
             eq->hfull++;
             continue;
           }
           u32 xorbucketid;
-          const uchar *bytes0 = pslot0->hash->bytes, *bytes1 = pslot1->hash->bytes;
+          const uchar *bytes0 = pslot0->bytes, *bytes1 = pslot1->bytes;
 #if WN == 200 && BUCKBITS == 12 && RESTBITS == 8
           xorbucketid = (((u32)(bytes0[htl.prevbo+1] ^ bytes1[htl.prevbo+1]) & 0xf) << 8)
                              | (bytes0[htl.prevbo+2] ^ bytes1[htl.prevbo+2]);
@@ -626,37 +703,53 @@ typedef struct equi equi;
             eq->bfull++;
             continue;
           }
-          slot1 *xs = &htl.hta.trees1[r/2][xorbucketid][xorslot];
-          xs->attr = tree_from_bid(bucketid, s0, s1);
-          for (u32 i=htl.dunits; i < htl.prevhashunits; i++)
-            xs->hash[i-htl.dunits].word = pslot0->hash[i].word ^ pslot1->hash[i].word;
+          tree *attrs = (tree *)&htl.hta.trees1[r/2][xorbucketid];
+          hashunit *xs = (hashunit *)(attrs + NSLOTS) + xorslot * htl.nexthashunits;
+#if defined(__GNUC__) || defined(__clang__)
+          __builtin_prefetch(attrs + xorslot, 1, 3);
+          __builtin_prefetch(xs, 1, 3);
+          __builtin_prefetch((uchar *)xs + (htl.nexthashunits - 1) * sizeof(hashunit), 1, 3);
+#endif
+          struct pending_output *out = &pending[npending++];
+          out->attr_destination = attrs + xorslot;
+          out->hash_destination = xs;
+          out->attr = tree_from_bid(bucketid, s0, s1);
+          out->left = pslot0;
+          out->right = pslot1;
+          if (npending == OUTPUT_BATCH_SIZE) {
+            flush_output(pending, npending, htl.nexthashunits, htl.dunits);
+            npending = 0;
+          }
         }
       }
     }
+    flush_output(pending, npending, htl.nexthashunits, htl.dunits);
   }
 
   void equi_digiteven(equi *eq, const u32 r, const u32 id) {
     htlayout htl = htlayout_new(eq, r);
     collisiondata cd;
+    struct pending_output pending[OUTPUT_BATCH_SIZE];
+    u32 npending = 0;
     for (u32 bucketid=id; bucketid < NBUCKETS; bucketid++) {
       collisiondata_clear(&cd);
-      slot1 *buck = htl.hta.trees1[(r-1)/2][bucketid]; // OPTIMIZE BY UPDATING PREVIOUS
+      hashunit *buck = (hashunit *)&htl.hta.trees1[(r-1)/2][bucketid] + NSLOTS;
       u32 bsize = getnslots(eq, r-1, bucketid);
       for (u32 s1 = 0; s1 < bsize; s1++) {
-        const slot1 *pslot1 = buck + s1;          // OPTIMIZE BY UPDATING PREVIOUS
+        const hashunit *pslot1 = buck + s1 * htl.prevhashunits;
         if (!addslot(&cd, s1, getxhash1(&htl, pslot1))) {
           eq->xfull++;
           continue;
         }
         for (; nextcollision(&cd); ) {
           const u32 s0 = slot(&cd);
-          const slot1 *pslot0 = buck + s0;
-          if (htlayout_equal(&htl, pslot0->hash, pslot1->hash)) {
+          const hashunit *pslot0 = buck + s0 * htl.prevhashunits;
+          if (htlayout_equal(&htl, pslot0, pslot1)) {
             eq->hfull++;
             continue;
           }
           u32 xorbucketid;
-          const uchar *bytes0 = pslot0->hash->bytes, *bytes1 = pslot1->hash->bytes;
+          const uchar *bytes0 = pslot0->bytes, *bytes1 = pslot1->bytes;
 #if WN == 200 && BUCKBITS == 12 && RESTBITS == 8
           xorbucketid = ((u32)(bytes0[htl.prevbo+1] ^ bytes1[htl.prevbo+1]) << 4)
                             | (bytes0[htl.prevbo+2] ^ bytes1[htl.prevbo+2]) >> 4;
@@ -678,13 +771,27 @@ typedef struct equi equi;
             eq->bfull++;
             continue;
           }
-          slot0 *xs = &htl.hta.trees0[r/2][xorbucketid][xorslot];
-          xs->attr = tree_from_bid(bucketid, s0, s1);
-          for (u32 i=htl.dunits; i < htl.prevhashunits; i++)
-            xs->hash[i-htl.dunits].word = pslot0->hash[i].word ^ pslot1->hash[i].word;
+          tree *attrs = (tree *)&htl.hta.trees0[r/2][xorbucketid];
+          hashunit *xs = (hashunit *)(attrs + NSLOTS) + xorslot * htl.nexthashunits;
+#if defined(__GNUC__) || defined(__clang__)
+          __builtin_prefetch(attrs + xorslot, 1, 3);
+          __builtin_prefetch(xs, 1, 3);
+          __builtin_prefetch((uchar *)xs + (htl.nexthashunits - 1) * sizeof(hashunit), 1, 3);
+#endif
+          struct pending_output *out = &pending[npending++];
+          out->attr_destination = attrs + xorslot;
+          out->hash_destination = xs;
+          out->attr = tree_from_bid(bucketid, s0, s1);
+          out->left = pslot0;
+          out->right = pslot1;
+          if (npending == OUTPUT_BATCH_SIZE) {
+            flush_output(pending, npending, htl.nexthashunits, htl.dunits);
+            npending = 0;
+          }
         }
       }
     }
+    flush_output(pending, npending, htl.nexthashunits, htl.dunits);
   }
 
   void equi_digitK(equi *eq, const u32 id) {
@@ -692,15 +799,15 @@ typedef struct equi equi;
     htlayout htl = htlayout_new(eq, WK);
     for (u32 bucketid = id; bucketid < NBUCKETS; bucketid++) {
       collisiondata_clear(&cd);
-      slot0 *buck = htl.hta.trees0[(WK-1)/2][bucketid];
+      hashunit *buck = (hashunit *)&htl.hta.trees0[(WK-1)/2][bucketid] + NSLOTS;
       u32 bsize = getnslots(eq, WK-1, bucketid);
       for (u32 s1 = 0; s1 < bsize; s1++) {
-        const slot0 *pslot1 = buck + s1;
+        const hashunit *pslot1 = buck + s1 * htl.prevhashunits;
         if (!addslot(&cd, s1, getxhash0(&htl, pslot1))) // assume WK odd
           continue;
         for (; nextcollision(&cd); ) {
           const u32 s0 = slot(&cd);
-          if (htlayout_equal(&htl, buck[s0].hash, pslot1->hash))
+          if (htlayout_equal(&htl, buck + s0 * htl.prevhashunits, pslot1))
             candidate(eq, tree_from_bid(bucketid, s0, s1));
         }
       }

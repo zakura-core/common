@@ -11,48 +11,82 @@ use std::boxed::Box;
 use std::ptr;
 use std::slice;
 
+use crate::params::Params;
+
+#[cfg(target_arch = "x86_64")]
+mod native;
+
+/// Owns the reference state and an optional cache for solver hash batches.
+#[derive(Clone)]
+pub(super) struct SolverHashState {
+    reference: State,
+    #[cfg(target_arch = "x86_64")]
+    native: Option<native::Context>,
+}
+
+impl SolverHashState {
+    /// The owned state must already include `input` and `nonce` with `params`.
+    pub(super) fn new(reference: State, input: &[u8], nonce: &[u8], params: Params) -> Self {
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = (input, nonce, params);
+        Self {
+            reference,
+            #[cfg(target_arch = "x86_64")]
+            native: native::Context::new(
+                input,
+                nonce,
+                params.n,
+                params.k,
+                params.hash_output() as usize,
+            ),
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn blake2b_init(
     output_len: usize,
     personalization: *const [u8; PERSONALBYTES],
-) -> *mut State {
+) -> *mut SolverHashState {
     let personalization = unsafe { personalization.as_ref().unwrap() };
 
-    Box::into_raw(Box::new(
-        blake2b_simd::Params::new()
+    Box::into_raw(Box::new(SolverHashState {
+        reference: blake2b_simd::Params::new()
             .hash_length(output_len)
             .personal(personalization)
             .to_state(),
-    ))
+        #[cfg(target_arch = "x86_64")]
+        native: None,
+    }))
 }
 
 #[unsafe(no_mangle)]
-pub(super) extern "C" fn blake2b_clone(state: *const State) -> *mut State {
+pub(super) extern "C" fn blake2b_clone(state: *const SolverHashState) -> *mut SolverHashState {
     unsafe { state.as_ref() }
         .map(|state| Box::into_raw(Box::new(state.clone())))
         .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
-pub(super) extern "C" fn blake2b_free(state: *mut State) {
+pub(super) extern "C" fn blake2b_free(state: *mut SolverHashState) {
     if !state.is_null() {
         drop(unsafe { Box::from_raw(state) });
     }
 }
 
-/// Generates hashes for consecutive Equihash block indices using [`State`].
-/// Each hash starts from a stack clone of the same prehashed header and nonce.
+/// Generates hashes for consecutive Equihash block indices.
+/// Uses cached SIMD compression where available, or stack clones of [`State`].
 ///
 /// # Safety
 ///
-/// `state` must point to a valid, aligned [`State`] and remain unmodified
+/// `state` must point to a valid, aligned [`SolverHashState`] and remain unmodified
 /// for the duration of this call.
 /// `output` must point to a writable allocation of `count * hash_len` bytes
 /// that does not overlap `state`. This length must fit in [`isize`],
 /// `hash_len` must match the state's digest length, and the last block index
 /// must fit in [`u32`].
 pub(super) unsafe extern "C" fn blake2b_generate_hashes(
-    state: *const State,
+    state: *const SolverHashState,
     first_index: u32,
     count: u32,
     output: *mut u8,
@@ -62,8 +96,13 @@ pub(super) unsafe extern "C" fn blake2b_generate_hashes(
     // with enough space for every digest in this batch.
     let state = unsafe { &*state };
     let output = unsafe { slice::from_raw_parts_mut(output, count as usize * hash_len) };
+    #[cfg(target_arch = "x86_64")]
+    if let Some(native) = &state.native {
+        native.generate(first_index, output);
+        return;
+    }
     for (offset, output) in output.chunks_exact_mut(hash_len).enumerate() {
-        let mut hash_state = state.clone();
+        let mut hash_state = state.reference.clone();
         hash_state.update(&(first_index + offset as u32).to_le_bytes());
         output.copy_from_slice(hash_state.finalize().as_bytes());
     }
@@ -73,7 +112,8 @@ pub(super) unsafe extern "C" fn blake2b_generate_hashes(
 mod tests {
     use alloc::vec::Vec;
 
-    use super::blake2b_generate_hashes;
+    use super::{SolverHashState, blake2b_generate_hashes};
+    use crate::params::Params;
     use crate::verify::initialise_state;
 
     #[test]
@@ -84,29 +124,76 @@ mod tests {
         state.update(&header);
         state.update(&[0x5a; 32]);
         let original_digest = state.finalize();
+        let states = [
+            SolverHashState {
+                reference: state.clone(),
+                #[cfg(target_arch = "x86_64")]
+                native: None,
+            },
+            SolverHashState::new(state, &header, &[0x5a; 32], Params { n: 200, k: 9 }),
+        ];
 
         // Include a batch spanning more than one C-side buffer and an empty
         // batch. Guard bytes check that the callback respects the buffer size.
-        for (first_index, count, expected) in REFERENCE_BATCHES {
-            let mut output = vec![0xa5; count as usize * hash_len as usize + 2];
-            // SAFETY: the state is live, the output has exactly enough space
-            // between its guards, and all reference indices fit in u32.
+        for state in states {
+            for (first_index, count, expected) in REFERENCE_BATCHES {
+                let mut output = vec![0xa5; count as usize * hash_len as usize + 2];
+                // SAFETY: the state is live, the output has exactly enough space
+                // between its guards, and all reference indices fit in u32.
+                unsafe {
+                    blake2b_generate_hashes(
+                        &state,
+                        first_index,
+                        count,
+                        output[1..].as_mut_ptr(),
+                        hash_len as usize,
+                    );
+                }
+                assert_eq!(output[0], 0xa5);
+                assert_eq!(*output.last().unwrap(), 0xa5);
+                assert_eq!(state.reference.finalize(), original_digest);
+                assert_eq!(
+                    hex::encode(blake2b_simd::blake2b(&output[1..output.len() - 1]).as_bytes()),
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_prefixes_match_reference() {
+        let params = Params { n: 200, k: 9 };
+        for prefix_len in [124, 125, 126, 127, 128, 2048, 2049] {
+            let prefix: Vec<_> = (0..prefix_len).map(|i| (i * 197) as u8).collect();
+            let split = prefix_len / 2;
+            let mut reference = initialise_state(params.n, params.k, params.hash_output());
+            reference.update(&prefix);
+            let state = SolverHashState::new(
+                reference.clone(),
+                &prefix[..split],
+                &prefix[split..],
+                params,
+            );
+            let mut output = vec![0; 7 * params.hash_output() as usize];
+            // SAFETY: both objects are live, the output is disjoint and sized
+            // for seven digests, and these consecutive indices fit in u32.
             unsafe {
                 blake2b_generate_hashes(
                     &state,
-                    first_index,
-                    count,
-                    output[1..].as_mut_ptr(),
-                    hash_len as usize,
+                    65534,
+                    7,
+                    output.as_mut_ptr(),
+                    params.hash_output() as usize,
                 );
             }
-            assert_eq!(output[0], 0xa5);
-            assert_eq!(*output.last().unwrap(), 0xa5);
-            assert_eq!(state.finalize(), original_digest);
-            assert_eq!(
-                hex::encode(blake2b_simd::blake2b(&output[1..output.len() - 1]).as_bytes()),
-                expected,
-            );
+            for (offset, digest) in output
+                .chunks_exact(params.hash_output() as usize)
+                .enumerate()
+            {
+                let mut expected = reference.clone();
+                expected.update(&(65534 + offset as u32).to_le_bytes());
+                assert_eq!(digest, expected.finalize().as_bytes());
+            }
         }
     }
 

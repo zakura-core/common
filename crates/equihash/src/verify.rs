@@ -117,7 +117,7 @@ impl fmt::Display for Kind {
 }
 
 pub(super) fn initialise_state(n: u32, k: u32, digest_len: u8) -> Blake2bState {
-    let mut personalization: Vec<u8> = Vec::from("ZcashPoW");
+    let mut personalization: Vec<u8> = Vec::from(crate::BLAKE2B_PERSONALIZATION_PREFIX.as_slice());
     personalization.write_all(&n.to_le_bytes()).unwrap();
     personalization.write_all(&k.to_le_bytes()).unwrap();
 

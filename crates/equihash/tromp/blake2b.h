@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Opaque Rust-owned solver context, including an optional hash-batch cache.
 struct BLAKE2bState;
 typedef struct BLAKE2bState BLAKE2bState;
 #define BLAKE2bPersonalBytes 16U
