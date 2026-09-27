@@ -23,6 +23,7 @@ const SLOT_MASK: u32 = (1 << SLOT_BITS) - 1;
 const SLOTS: usize = (1 << SLOT_BITS) * 9 / 14;
 const RESTS: usize = 1 << REST_BITS;
 const COLLISION_CAPACITY: usize = 16;
+const _: () = assert!(COLLISION_CAPACITY <= u8::MAX as usize);
 const PROOF_SIZE: usize = 1 << ROUNDS;
 const MAX_SOLUTIONS: usize = 8;
 const HASH_TABLE_MULTIPLIER: u32 = 0x9e37_79b1;
@@ -32,6 +33,8 @@ const HASH_BYTES: usize = SOLVER_PARAMS.n as usize / 8;
 const HASH_OUTPUT: usize = HASHES_PER_BLAKE * HASH_BYTES;
 const HASH_BLOCKS: usize = HASHES / HASHES_PER_BLAKE;
 const HASH_BATCH: usize = 64;
+const HASH_LANES: usize = 8;
+const HASH_OUTPUT_WORDS: usize = HASH_OUTPUT.div_ceil(core::mem::size_of::<u64>());
 const OUTPUT_BATCH: usize = 64;
 const INITIAL_WORDS: usize = TABLE_WORDS[0] - 1;
 const FINAL_WORDS: usize = HASH_WORDS[ROUNDS - 1];
@@ -118,7 +121,7 @@ fn prefetch(table: &[u32], index: usize) {
 }
 
 struct Collisions {
-    counts: [u16; RESTS],
+    counts: [u8; RESTS],
     slots: [[u16; COLLISION_CAPACITY]; RESTS],
 }
 
@@ -136,10 +139,10 @@ impl Collisions {
 
     fn add(&mut self, slot: usize, key: usize) -> Option<&[u16]> {
         let count = self.counts[key] as usize;
-        self.counts[key] += 1;
         if count >= COLLISION_CAPACITY {
             return None;
         }
+        self.counts[key] += 1;
         let slots = &mut self.slots[key];
         slots[count] = slot as u16;
         Some(&slots[..count])
@@ -157,11 +160,51 @@ struct ActiveRow {
 struct InitialOutput<'a> {
     attribute: usize,
     hash: usize,
+    source: &'a [[u64; HASH_LANES]; HASH_OUTPUT_WORDS],
+    lane: u8,
+    part: u8,
+    index: u32,
+}
+
+fn initial_words<const PART: usize>(
+    source: &[[u64; HASH_LANES]; HASH_OUTPUT_WORDS],
+    lane: usize,
+) -> [u32; INITIAL_WORDS] {
+    const WORD_BYTES: usize = core::mem::size_of::<u64>();
+    core::array::from_fn(|i| {
+        let offset =
+            PART * HASH_BYTES + HASH_BYTES - INITIAL_BYTES + i * core::mem::size_of::<u32>();
+        let word = offset / WORD_BYTES;
+        let shift = offset % WORD_BYTES * u8::BITS as usize;
+        let mut value = source[word][lane] >> shift;
+        if shift > u32::BITS as usize {
+            value |= source[word + 1][lane] << (u64::BITS as usize - shift);
+        }
+        u32::from_ne_bytes((value as u32).to_le_bytes())
+    })
+}
+
+fn flush_initial(table: &mut [u32], pending: &[InitialOutput<'_>]) {
+    for output in pending {
+        table[output.attribute] = output.index;
+        let words = if output.part == 0 {
+            initial_words::<0>(output.source, output.lane as usize)
+        } else {
+            initial_words::<1>(output.source, output.lane as usize)
+        };
+        table[output.hash..output.hash + INITIAL_WORDS].copy_from_slice(&words);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CompactInitialOutput<'a> {
+    attribute: usize,
+    hash: usize,
     source: &'a [u8; INITIAL_BYTES],
     index: u32,
 }
 
-fn flush_initial(table: &mut [u32], pending: &[InitialOutput<'_>]) {
+fn flush_compact_initial(table: &mut [u32], pending: &[CompactInitialOutput<'_>]) {
     for output in pending {
         table[output.attribute] = output.index;
         let (source, remainder) = output.source.as_chunks::<4>();
@@ -294,15 +337,15 @@ fn collect_final_candidates(
     candidates: &mut Vec<u32>,
 ) {
     groups.advance_epoch();
-    let mut rest_counts = [0_u16; RESTS];
+    let mut rest_counts = [0_u8; RESTS];
     let layout = Layout::new(ROUNDS);
     for (right, right_row) in rows.iter().enumerate() {
         let key = row_extra_hash(right_row, layout.previous_padding, true);
         let previous = rest_counts[key] as usize;
-        rest_counts[key] += 1;
         if previous >= COLLISION_CAPACITY {
             continue;
         }
+        rest_counts[key] += 1;
         let Some((mut left, tail)) = groups.insert(right, right_row[0]) else {
             continue;
         };
@@ -368,6 +411,77 @@ impl Solver {
     fn initial(&mut self, state: &SolverHashState) {
         let layout = Layout::new(0);
         debug_assert_eq!(layout.next_padding, 0);
+        assert_eq!(HASHES_PER_BLAKE, 2);
+        assert!(HASH_BATCH.is_multiple_of(HASH_LANES));
+        assert!(HASH_BLOCKS.is_multiple_of(HASH_BATCH));
+        let mut hashes = [[[0; HASH_LANES]; HASH_OUTPUT_WORDS]; HASH_BATCH / HASH_LANES];
+        if !state.try_generate_words(0, &mut hashes) {
+            self.initial_compact(state);
+            return;
+        }
+        let table = &mut self.tables[0];
+        let counts = &mut self.counts[0];
+        for block in (0..HASH_BLOCKS).step_by(HASH_BATCH) {
+            if block != 0 {
+                // The immutable state and output width retain the backend
+                // chosen by the first probe for all later word batches.
+                assert!(state.try_generate_words(block as u32, &mut hashes));
+            }
+            let mut pending = [InitialOutput {
+                attribute: 0,
+                hash: 0,
+                source: &hashes[0],
+                lane: 0,
+                part: 0,
+                index: 0,
+            }; HASH_BATCH];
+            let mut buffered = 0;
+            for (batch, source) in hashes.iter().enumerate() {
+                for lane in 0..HASH_LANES {
+                    for part in 0..HASHES_PER_BLAKE {
+                        let offset = part * HASH_BYTES;
+                        let prefix = source[offset / core::mem::size_of::<u64>()][lane]
+                            >> (offset % core::mem::size_of::<u64>() * u8::BITS as usize);
+                        let extra = BUCKET_BITS - u8::BITS as usize;
+                        let bucket = (((prefix & u8::MAX as u64) as usize) << extra)
+                            | ((prefix >> (2 * u8::BITS as usize - extra)) as usize
+                                & ((1 << extra) - 1));
+                        let slot = counts[bucket] as usize;
+                        counts[bucket] += 1;
+                        if slot >= SLOTS {
+                            continue;
+                        }
+                        let attr = attributes(0, bucket) + slot;
+                        let hash = attributes(0, bucket) + SLOTS + slot * layout.next_words;
+                        prefetch(table, attr);
+                        prefetch(table, hash);
+                        prefetch(table, hash + layout.next_words - 1);
+                        pending[buffered] = InitialOutput {
+                            attribute: attr,
+                            hash,
+                            source,
+                            lane: lane as u8,
+                            part: part as u8,
+                            index: ((block + batch * HASH_LANES + lane) * HASHES_PER_BLAKE + part)
+                                as u32,
+                        };
+                        buffered += 1;
+                        if buffered == HASH_BATCH {
+                            flush_initial(table, &pending);
+                            buffered = 0;
+                        }
+                    }
+                }
+            }
+            flush_initial(table, &pending[..buffered]);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn initial_compact(&mut self, state: &SolverHashState) {
+        let layout = Layout::new(0);
+        debug_assert_eq!(layout.next_padding, 0);
         let mut hashes = [0; HASH_BATCH * HASH_OUTPUT];
         let table = &mut self.tables[0];
         let counts = &mut self.counts[0];
@@ -375,7 +489,7 @@ impl Solver {
             let count = HASH_BATCH.min(HASH_BLOCKS - block);
             state.generate(block as u32, &mut hashes[..count * HASH_OUTPUT]);
             let dummy = hashes[..INITIAL_BYTES].try_into().unwrap();
-            let mut pending = [InitialOutput {
+            let mut pending = [CompactInitialOutput {
                 attribute: 0,
                 hash: 0,
                 source: dummy,
@@ -399,7 +513,7 @@ impl Solver {
                     prefetch(table, attr);
                     prefetch(table, hash);
                     prefetch(table, hash + layout.next_words - 1);
-                    pending[buffered] = InitialOutput {
+                    pending[buffered] = CompactInitialOutput {
                         attribute: attr,
                         hash,
                         source: source[HASH_BYTES - INITIAL_BYTES..].try_into().unwrap(),
@@ -407,12 +521,12 @@ impl Solver {
                     };
                     buffered += 1;
                     if buffered == HASH_BATCH {
-                        flush_initial(table, &pending);
+                        flush_compact_initial(table, &pending);
                         buffered = 0;
                     }
                 }
             }
-            flush_initial(table, &pending[..buffered]);
+            flush_compact_initial(table, &pending[..buffered]);
         }
     }
 
@@ -463,7 +577,7 @@ impl Solver {
                 active[active_count] = ActiveRow {
                     right: right as u16,
                     key: key as u8,
-                    previous: previous.min(COLLISION_CAPACITY) as u8,
+                    previous: previous as u8,
                 };
                 active_count += usize::from(previous != 0 && previous < COLLISION_CAPACITY);
             }
@@ -538,28 +652,35 @@ impl Solver {
         }
     }
 
+    #[inline]
+    fn unique_leaf(&mut self, node: u32) -> bool {
+        let mut slot = (node.wrapping_mul(HASH_TABLE_MULTIPLIER) >> (32 - (ROUNDS + 1))) as usize;
+        while self.index_tags[slot] == self.index_epoch {
+            if self.index_keys[slot] == node {
+                return false;
+            }
+            slot = (slot + 1) & (2 * PROOF_SIZE - 1);
+        }
+        self.index_tags[slot] = self.index_epoch;
+        self.index_keys[slot] = node;
+        true
+    }
+
     fn unique(&mut self, round: usize, node: u32) -> bool {
         if round == 0 {
-            let mut slot =
-                (node.wrapping_mul(HASH_TABLE_MULTIPLIER) >> (32 - (ROUNDS + 1))) as usize;
-            while self.index_tags[slot] == self.index_epoch {
-                if self.index_keys[slot] == node {
-                    return false;
-                }
-                slot = (slot + 1) & (2 * PROOF_SIZE - 1);
-            }
-            self.index_tags[slot] = self.index_epoch;
-            self.index_keys[slot] = node;
-            return true;
+            return self.unique_leaf(node);
         }
         let (bucket, left, right) = children(node);
         let previous = round - 1;
         let attr = attributes(previous, bucket);
         let left = self.tables[previous & 1][attr + left];
         let right = self.tables[previous & 1][attr + right];
-        self.unique(previous, left) && self.unique(previous, right)
+        if round == 1 {
+            self.unique_leaf(left) && self.unique_leaf(right)
+        } else {
+            self.unique(previous, left) && self.unique(previous, right)
+        }
     }
-
     fn list(&self, round: usize, node: u32, proof: &mut [u32]) {
         if round == 0 {
             proof[0] = node;
@@ -586,6 +707,52 @@ mod tests {
         COLLISION_CAPACITY, Collisions, MAX_SOLUTIONS, PROOF_SIZE, RESTS, ROUNDS, SLOTS, Solver,
         attributes, tree,
     };
+
+    #[test]
+    fn initial_word_windows_match_digest_bytes() {
+        let mut random = 0x0200_0009_u64;
+        for _ in 0..512 {
+            let mut digests = [[0u8; super::HASH_OUTPUT]; super::HASH_LANES];
+            for byte in digests.iter_mut().flatten() {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                *byte = random as u8;
+            }
+            let source = core::array::from_fn(|word| {
+                core::array::from_fn(|lane| {
+                    let start = word * core::mem::size_of::<u64>();
+                    let end = (start + core::mem::size_of::<u64>()).min(super::HASH_OUTPUT);
+                    let mut bytes = [0u8; core::mem::size_of::<u64>()];
+                    bytes[..end - start].copy_from_slice(&digests[lane][start..end]);
+                    u64::from_le_bytes(bytes)
+                })
+            });
+            for (lane, digest) in digests.iter().enumerate() {
+                for part in 0..super::HASHES_PER_BLAKE {
+                    let row = if part == 0 {
+                        super::initial_words::<0>(&source, lane)
+                    } else {
+                        super::initial_words::<1>(&source, lane)
+                    };
+                    let mut bytes = [0u8; super::INITIAL_BYTES];
+                    for (word, value) in row.iter().enumerate() {
+                        bytes[4 * word..4 * word + 4].copy_from_slice(&value.to_ne_bytes());
+                    }
+                    let end = (part + 1) * super::HASH_BYTES;
+                    assert_eq!(bytes, digest[end - super::INITIAL_BYTES..end]);
+                    let offset = part * super::HASH_BYTES;
+                    let prefix = source[offset / 8][lane] >> (offset % 8 * 8);
+                    let bucket =
+                        (((prefix & 0xff) as usize) << 4) | ((prefix >> 12) as usize & 0xf);
+                    assert_eq!(
+                        bucket,
+                        (digest[offset] as usize) << 4 | (digest[offset + 1] >> 4) as usize
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn final_scan_preserves_candidate_order_capacity_and_reset() {
@@ -654,12 +821,58 @@ mod tests {
                 let result = collisions.add(slot, key);
                 if previous.len() == COLLISION_CAPACITY {
                     assert!(result.is_none());
+                    assert_eq!(collisions.counts[key] as usize, COLLISION_CAPACITY);
                     continue;
                 }
                 let expected: Vec<_> = previous.iter().map(|&slot| slot as u16).collect();
                 assert_eq!(result.unwrap(), expected);
                 previous.push(slot);
+                assert_eq!(collisions.counts[key] as usize, previous.len());
             }
+        }
+        collisions.clear();
+        assert_eq!(collisions.counts, [0; RESTS]);
+    }
+
+    #[test]
+    fn uniqueness_stops_at_first_repeated_leaf_across_subtrees() {
+        let mut solver = Solver::new();
+        for index in 0..PROOF_SIZE {
+            solver.tables[0][attributes(0, 0) + index] = index as u32;
+        }
+        for round in 1..ROUNDS {
+            for index in 0..PROOF_SIZE >> round {
+                solver.tables[round & 1][attributes(round, 0) + index] =
+                    tree(0, 2 * index, 2 * index + 1);
+            }
+        }
+        let root = tree(0, 0, 1);
+        let positions = [
+            1,
+            2,
+            3,
+            15,
+            PROOF_SIZE / 2 - 1,
+            PROOF_SIZE / 2,
+            PROOF_SIZE - 1,
+        ];
+        for position in positions {
+            solver.index_tags.fill(0);
+            solver.index_epoch = 1;
+            solver.tables[0][attributes(0, 0) + position] = 0;
+            assert!(!solver.unique(ROUNDS, root));
+            let inserted = solver.index_tags.iter().filter(|&&tag| tag == 1).count();
+            assert_eq!(inserted, position);
+            for leaf in 0..position as u32 {
+                assert!(
+                    solver
+                        .index_keys
+                        .iter()
+                        .zip(&solver.index_tags)
+                        .any(|(&key, &tag)| tag == 1 && key == leaf)
+                );
+            }
+            solver.tables[0][attributes(0, 0) + position] = position as u32;
         }
     }
 

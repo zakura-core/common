@@ -38,6 +38,35 @@ impl SolverHashState {
         }
     }
 
+    /// Tries to generate complete eight-lane batches of digest words.
+    ///
+    /// The cached AVX-512 backend writes little-endian [`u64`] words. If that
+    /// backend is unavailable, this returns `false` without modifying `output`.
+    /// `WORDS` must match the configured digest length rounded to whole words;
+    /// only digest-length bytes in the final word are defined. The last block
+    /// index must fit in [`u32`].
+    pub(super) fn try_generate_words<const WORDS: usize>(
+        &self,
+        first_index: u32,
+        output: &mut [[[u64; 8]; WORDS]],
+    ) -> bool {
+        const LANES: usize = 8;
+        const WORD_BYTES: usize = core::mem::size_of::<u64>();
+        assert_eq!(WORDS, self.hash_len.div_ceil(WORD_BYTES));
+        let count = output.len().checked_mul(LANES).unwrap();
+        assert!(
+            count == 0
+                || first_index
+                    .checked_add(u32::try_from(count - 1).unwrap())
+                    .is_some()
+        );
+        #[cfg(target_arch = "x86_64")]
+        if let Some(native) = &self.native {
+            return native.generate_words(first_index, output);
+        }
+        false
+    }
+
     /// Generates consecutive block hashes without modifying the cached state.
     ///
     /// `output` must hold a whole number of digests. The last block index must
@@ -133,6 +162,82 @@ mod tests {
                 let mut expected = reference.clone();
                 expected.update(&(65534 + offset as u32).to_le_bytes());
                 assert_eq!(digest, expected.finalize().as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn word_batches_match_reference_and_preserve_guards() {
+        const LANES: usize = 8;
+        const WORD_BYTES: usize = core::mem::size_of::<u64>();
+        const HASH_BITS: usize = blake2b_simd::OUTBYTES * u8::BITS as usize;
+        const WORDS: usize = (HASH_BITS / PARAMS.n as usize * PARAMS.n as usize
+            / u8::BITS as usize)
+            .div_ceil(WORD_BYTES);
+        for prefix_len in [0, 104, 124, 125, 128, 140, 2048, 2049] {
+            let prefix: Vec<_> = (0..prefix_len).map(|i| (i * 197) as u8).collect();
+            let mut reference = initialise_state(PARAMS.n, PARAMS.k, PARAMS.hash_output());
+            reference.update(&prefix);
+            let split = prefix_len / 2;
+            let cached = SolverHashState::new(
+                reference.clone(),
+                &prefix[..split],
+                &prefix[split..],
+                PARAMS,
+            );
+            let fallback = SolverHashState {
+                reference: reference.clone(),
+                hash_len: PARAMS.hash_output() as usize,
+                #[cfg(target_arch = "x86_64")]
+                native: None,
+            };
+            for state in [cached, fallback] {
+                for blocks in [0, 1, 2, 8] {
+                    for first in [0, 65530, u32::MAX - 63] {
+                        let guard = [[0xfeed_face_cafe_beef; LANES]; WORDS];
+                        let mut output = vec![guard; blocks + 2];
+                        let generated = state.try_generate_words(first, &mut output[1..blocks + 1]);
+                        #[cfg(target_arch = "x86_64")]
+                        assert_eq!(
+                            generated,
+                            state.native.is_some() && std::is_x86_feature_detected!("avx512f")
+                        );
+                        #[cfg(not(target_arch = "x86_64"))]
+                        assert!(!generated);
+                        if !generated {
+                            assert!(output.iter().all(|&batch| batch == guard));
+                            let mut compact = vec![0; blocks * LANES * state.hash_len];
+                            state.generate(first, &mut compact);
+                            for (offset, digest) in compact.chunks_exact(state.hash_len).enumerate()
+                            {
+                                let mut expected = reference.clone();
+                                expected.update(&(first + offset as u32).to_le_bytes());
+                                assert_eq!(digest, expected.finalize().as_bytes());
+                            }
+                            assert_eq!(state.reference.finalize(), reference.finalize());
+                            continue;
+                        }
+                        assert_eq!(output[0], guard);
+                        assert_eq!(output[blocks + 1], guard);
+                        assert_eq!(state.reference.finalize(), reference.finalize());
+                        for (batch, words) in output[1..blocks + 1].iter().enumerate() {
+                            for lane in 0..LANES {
+                                let mut bytes = [0; WORDS * WORD_BYTES];
+                                for (word, values) in words.iter().enumerate() {
+                                    bytes[word * WORD_BYTES..(word + 1) * WORD_BYTES]
+                                        .copy_from_slice(&values[lane].to_le_bytes());
+                                }
+                                let mut expected = reference.clone();
+                                expected
+                                    .update(&(first + (batch * LANES + lane) as u32).to_le_bytes());
+                                assert_eq!(
+                                    &bytes[..PARAMS.hash_output() as usize],
+                                    expected.finalize().as_bytes()
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -169,6 +169,40 @@ impl Context {
         }
     }
 
+    /// Generates complete eight-lane batches of little-endian digest words.
+    ///
+    /// Returns `false` when the word width or AVX-512 support is unsuitable.
+    /// Only the configured digest-length bytes in the final word are defined.
+    pub(super) fn generate_words<const WORDS: usize>(
+        &self,
+        first: u32,
+        output: &mut [[[u64; 8]; WORDS]],
+    ) -> bool {
+        if WORDS != self.hash_len.div_ceil(core::mem::size_of::<u64>())
+            || !std::is_x86_feature_detected!("avx512f")
+        {
+            return false;
+        }
+        // SAFETY: AVX-512 is detected above and construction validates the
+        // final block. Every output word holds exactly eight live u64 lanes.
+        unsafe {
+            match (self.index_word, self.index_shift) {
+                (1, 32) => self.generate_avx512_words::<1, 32, WORDS>(first, output),
+                (13, 0) => self.generate_avx512_words::<13, 0, WORDS>(first, output),
+                (1, _) => {
+                    self.generate_avx512_words::<1, GENERAL_INDEX_SHIFT, WORDS>(first, output)
+                }
+                (13, _) => {
+                    self.generate_avx512_words::<13, GENERAL_INDEX_SHIFT, WORDS>(first, output)
+                }
+                _ => self.generate_avx512_words::<GENERAL_INDEX_WORD, GENERAL_INDEX_SHIFT, WORDS>(
+                    first, output,
+                ),
+            }
+        }
+        true
+    }
+
     #[target_feature(enable = "avx2")]
     unsafe fn generate_avx2<const INDEX_WORD: usize, const INDEX_SHIFT: u32>(
         &self,
@@ -360,6 +394,97 @@ impl Context {
             }
         }
     }
+    #[target_feature(enable = "avx512f")]
+    unsafe fn generate_avx512_words<
+        const INDEX_WORD: usize,
+        const INDEX_SHIFT: u32,
+        const WORDS: usize,
+    >(
+        &self,
+        first: u32,
+        output: &mut [[[u64; 8]; WORDS]],
+    ) {
+        // GENERAL_INDEX_WORD selects arbitrary index placement at runtime.
+        let index_word = if INDEX_WORD == GENERAL_INDEX_WORD {
+            self.index_word
+        } else {
+            INDEX_WORD
+        };
+        let index_shift = if INDEX_SHIFT == GENERAL_INDEX_SHIFT {
+            self.index_shift
+        } else {
+            INDEX_SHIFT
+        };
+        unsafe {
+            let base_m: [__m512i; 16] = std::array::from_fn(|i| {
+                // A twelve-byte final prefix and its four-byte index leave
+                // every later message word zero, regardless of the header.
+                if INDEX_WORD == 1 && INDEX_SHIFT == 32 && i > INDEX_WORD {
+                    _mm512_setzero_si512()
+                } else {
+                    _mm512_set1_epi64(self.message[i] as i64)
+                }
+            });
+            for (batch, output) in output.iter_mut().enumerate() {
+                let start = first.wrapping_add((batch * 8) as u32);
+                let index = _mm512_setr_epi64(
+                    start as i64,
+                    start.wrapping_add(1) as i64,
+                    start.wrapping_add(2) as i64,
+                    start.wrapping_add(3) as i64,
+                    start.wrapping_add(4) as i64,
+                    start.wrapping_add(5) as i64,
+                    start.wrapping_add(6) as i64,
+                    start.wrapping_add(7) as i64,
+                );
+                let mut m = base_m;
+                m[index_word] = _mm512_or_si512(
+                    m[index_word],
+                    _mm512_sll_epi64(index, _mm_cvtsi64_si128(index_shift as i64)),
+                );
+                if index_shift > 32 {
+                    m[index_word + 1] = _mm512_or_si512(
+                        m[index_word + 1],
+                        _mm512_srl_epi64(index, _mm_cvtsi64_si128((64 - index_shift) as i64)),
+                    );
+                }
+                let mut v = [_mm512_setzero_si512(); 16];
+                for (i, word) in self.words.iter().enumerate() {
+                    v[i] = _mm512_set1_epi64(*word as i64);
+                }
+                for i in 0..8 {
+                    v[8 + i] = _mm512_set1_epi64(IV[i] as i64);
+                }
+                v[12] = _mm512_xor_si512(v[12], _mm512_set1_epi64(self.count as i64));
+                v[13] = _mm512_xor_si512(v[13], _mm512_set1_epi64((self.count >> 64) as i64));
+                v[14] = _mm512_xor_si512(v[14], _mm512_set1_epi64(-1));
+                round8(&mut v, &m, &SIGMA[0]);
+                round8(&mut v, &m, &SIGMA[1]);
+                round8(&mut v, &m, &SIGMA[2]);
+                round8(&mut v, &m, &SIGMA[3]);
+                round8(&mut v, &m, &SIGMA[4]);
+                round8(&mut v, &m, &SIGMA[5]);
+                round8(&mut v, &m, &SIGMA[6]);
+                round8(&mut v, &m, &SIGMA[7]);
+                round8(&mut v, &m, &SIGMA[8]);
+                round8(&mut v, &m, &SIGMA[9]);
+                round8(&mut v, &m, &SIGMA[10]);
+                round8(&mut v, &m, &SIGMA[11]);
+                // Re-read the chaining words after the rounds so their vector
+                // broadcasts do not occupy registers throughout compression.
+                let words = core::hint::black_box(&self.words);
+                let hashes: [__m512i; WORDS] = std::array::from_fn(|i| {
+                    _mm512_xor_si512(
+                        _mm512_set1_epi64(words[i] as i64),
+                        _mm512_xor_si512(v[i], v[i + 8]),
+                    )
+                });
+                for (word, hash) in output.iter_mut().zip(hashes) {
+                    _mm512_storeu_si512(word.as_mut_ptr().cast(), hash);
+                }
+            }
+        }
+    }
 }
 
 /// Changes independent-hash lanes into contiguous digest words.
@@ -453,33 +578,49 @@ unsafe fn round4(v: &mut [__m256i; 16], m: &[__m256i; 16], s: &[u8; 16]) {
     }
 }
 
+/// Advances four independent mixing groups one operation at a time.
 #[inline(always)]
-unsafe fn vg8(
+unsafe fn parallel_g8(
     v: &mut [__m512i; 16],
-    a: usize,
-    b: usize,
-    c: usize,
-    d: usize,
-    x: __m512i,
-    y: __m512i,
+    groups: [[usize; 4]; 4],
+    x: [__m512i; 4],
+    y: [__m512i; 4],
 ) {
     unsafe {
-        let mut va = v[a];
-        let mut vb = v[b];
-        let mut vc = v[c];
-        let mut vd = v[d];
-        va = _mm512_add_epi64(_mm512_add_epi64(va, vb), x);
-        vd = _mm512_ror_epi64::<32>(_mm512_xor_si512(vd, va));
-        vc = _mm512_add_epi64(vc, vd);
-        vb = _mm512_ror_epi64::<24>(_mm512_xor_si512(vb, vc));
-        va = _mm512_add_epi64(_mm512_add_epi64(va, vb), y);
-        vd = _mm512_ror_epi64::<16>(_mm512_xor_si512(vd, va));
-        vc = _mm512_add_epi64(vc, vd);
-        vb = _mm512_ror_epi64::<63>(_mm512_xor_si512(vb, vc));
-        v[a] = va;
-        v[b] = vb;
-        v[c] = vc;
-        v[d] = vd;
+        let mut a = groups.map(|g| v[g[0]]);
+        let mut b = groups.map(|g| v[g[1]]);
+        let mut c = groups.map(|g| v[g[2]]);
+        let mut d = groups.map(|g| v[g[3]]);
+        for i in 0..4 {
+            a[i] = _mm512_add_epi64(_mm512_add_epi64(a[i], b[i]), x[i]);
+        }
+        for i in 0..4 {
+            d[i] = _mm512_ror_epi64::<32>(_mm512_xor_si512(d[i], a[i]));
+        }
+        for i in 0..4 {
+            c[i] = _mm512_add_epi64(c[i], d[i]);
+        }
+        for i in 0..4 {
+            b[i] = _mm512_ror_epi64::<24>(_mm512_xor_si512(b[i], c[i]));
+        }
+        for i in 0..4 {
+            a[i] = _mm512_add_epi64(_mm512_add_epi64(a[i], b[i]), y[i]);
+        }
+        for i in 0..4 {
+            d[i] = _mm512_ror_epi64::<16>(_mm512_xor_si512(d[i], a[i]));
+        }
+        for i in 0..4 {
+            c[i] = _mm512_add_epi64(c[i], d[i]);
+        }
+        for i in 0..4 {
+            b[i] = _mm512_ror_epi64::<63>(_mm512_xor_si512(b[i], c[i]));
+        }
+        for (i, g) in groups.into_iter().enumerate() {
+            v[g[0]] = a[i];
+            v[g[1]] = b[i];
+            v[g[2]] = c[i];
+            v[g[3]] = d[i];
+        }
     }
 }
 
@@ -487,20 +628,51 @@ unsafe fn vg8(
 unsafe fn round8(v: &mut [__m512i; 16], m: &[__m512i; 16], s: &[u8; 16]) {
     unsafe {
         let s = s.map(usize::from);
-        vg8(v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
-        vg8(v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
-        vg8(v, 2, 6, 10, 14, m[s[4]], m[s[5]]);
-        vg8(v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
-        vg8(v, 0, 5, 10, 15, m[s[8]], m[s[9]]);
-        vg8(v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
-        vg8(v, 2, 7, 8, 13, m[s[12]], m[s[13]]);
-        vg8(v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+        parallel_g8(
+            v,
+            [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]],
+            [m[s[0]], m[s[2]], m[s[4]], m[s[6]]],
+            [m[s[1]], m[s[3]], m[s[5]], m[s[7]]],
+        );
+        parallel_g8(
+            v,
+            [[0, 5, 10, 15], [1, 6, 11, 12], [2, 7, 8, 13], [3, 4, 9, 14]],
+            [m[s[8]], m[s[10]], m[s[12]], m[s[14]]],
+            [m[s[9]], m[s[11]], m[s[13]], m[s[15]]],
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn check_word_sink<const WORDS: usize>(ctx: &Context, first: u32, compact: &[u8]) {
+        const LANES: usize = 8;
+        const WORD_BYTES: usize = core::mem::size_of::<u64>();
+        let count = compact.len() / ctx.hash_len;
+        if !count.is_multiple_of(LANES) {
+            return;
+        }
+        let guard = [[0xfeed_face_cafe_beef; LANES]; WORDS];
+        let mut words = std::vec![guard; count / LANES + 2];
+        let end = words.len() - 1;
+        let generated = ctx.generate_words(first, &mut words[1..end]);
+        assert_eq!(generated, std::is_x86_feature_detected!("avx512f"));
+        assert_eq!(words[0], guard);
+        assert_eq!(words[end], guard);
+        if !generated {
+            return;
+        }
+        for (index, expected) in compact.chunks_exact(ctx.hash_len).enumerate() {
+            let mut bytes = [0u8; OUTBYTES];
+            for (word, values) in words[1 + index / LANES].iter().enumerate() {
+                bytes[word * WORD_BYTES..(word + 1) * WORD_BYTES]
+                    .copy_from_slice(&values[index % LANES].to_le_bytes());
+            }
+            assert_eq!(&bytes[..ctx.hash_len], expected);
+        }
+    }
+
     #[test]
     fn native_batches_match_reference() {
         if !std::is_x86_feature_detected!("avx2") {
@@ -566,6 +738,13 @@ mod tests {
                         }
                     }
                     assert_eq!(out, specialized);
+                    match hash_len {
+                        1 => check_word_sink::<1>(&ctx, first, &out),
+                        32 => check_word_sink::<4>(&ctx, first, &out),
+                        50 => check_word_sink::<7>(&ctx, first, &out),
+                        64 => check_word_sink::<8>(&ctx, first, &out),
+                        _ => unreachable!(),
+                    }
                     for (offset, chunk) in out.chunks_exact(hash_len).enumerate() {
                         let mut expected = state.clone();
                         expected.update(&(first + offset as u32).to_le_bytes());
