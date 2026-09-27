@@ -51,7 +51,13 @@ use super::isogeny::alpha_affine_batch;
 /// One prepared point in unit-action-ready form. The identity (and every
 /// never-fetched dead slot) is the all-zero value; `y = 0` cannot occur for
 /// a valid point on an odd-order curve.
+///
+/// For the 32-byte Pasta base fields, 32-byte alignment keeps this 96-byte
+/// record within two 64-byte cache lines without changing its size. Smaller
+/// generic field representations can gain padding; footprint accounting uses
+/// [`core::mem::size_of`] rather than assuming the Pasta record size.
 #[derive(Clone, Copy, Debug)]
+#[repr(align(32))]
 pub(crate) struct PreparedPoint<F> {
     pub(crate) x: F,
     pub(crate) zeta_x: F,
@@ -308,6 +314,40 @@ mod tests {
     use super::*;
     use crate::{pallas, vesta};
 
+    fn prepared_record_layout<C: GlvParams>() {
+        const CACHE_LINE_BYTES: usize = 64;
+        let alignment = core::mem::align_of::<PreparedPoint<C::Base>>();
+        let record_bytes = core::mem::size_of::<PreparedPoint<C::Base>>();
+        assert_eq!(core::mem::size_of::<C::Base>(), 32);
+        assert_eq!(alignment, 32);
+        assert_eq!(record_bytes, 3 * core::mem::size_of::<C::Base>());
+
+        let zero = PreparedPoint {
+            x: C::Base::ZERO,
+            zeta_x: C::Base::ZERO,
+            y: C::Base::ZERO,
+        };
+        for count in [0, 1, 2, 3, 31, 32, 33, 64, 129] {
+            let records = alloc::vec![zero; count];
+            let start = records.as_ptr() as usize;
+            assert_eq!(start % alignment, 0);
+            for (index, record) in records.iter().enumerate() {
+                let address = core::ptr::from_ref(record) as usize;
+                assert_eq!(address, start + index * record_bytes);
+                assert_eq!(address % alignment, 0);
+                assert!(address % CACHE_LINE_BYTES + record_bytes <= 2 * CACHE_LINE_BYTES);
+                assert_eq!(
+                    (record.x, record.zeta_x, record.y),
+                    (zero.x, zero.zeta_x, zero.y)
+                );
+            }
+        }
+
+        // The private generic type can acquire padding; its accounted size
+        // must reflect that rather than hard-coding the Pasta record size.
+        assert_eq!(core::mem::size_of::<PreparedPoint<u8>>(), alignment);
+    }
+
     /// Bases with identity, duplicate, and negated entries.
     fn test_bases<C: GlvParams>(count: usize) -> Vec<C::AffineExt> {
         let generator = C::generator();
@@ -337,6 +377,16 @@ mod tests {
             let bases = test_bases::<C>(40);
             let live: Vec<bool> = bases.iter().map(|p| !bool::from(p.is_identity())).collect();
             let table = VariantTable::<C>::build(&bases, &live, codebook.variants(), 1);
+            let record_bytes = core::mem::size_of::<PreparedPoint<C::Base>>();
+            let alignment = core::mem::align_of::<PreparedPoint<C::Base>>();
+            assert_eq!(table.layers.as_ptr() as usize % alignment, 0);
+            assert_eq!(table.bytes(), table.layers.len() * record_bytes);
+            for (index, record) in table.layers.iter().enumerate() {
+                assert_eq!(
+                    core::ptr::from_ref(record) as usize,
+                    table.layers.as_ptr() as usize + index * record_bytes,
+                );
+            }
             let lambda = <C::ScalarExt as WithSmallOrderMulGroup<3>>::ZETA;
             let zeta = <C::Base as WithSmallOrderMulGroup<3>>::ZETA;
             let signed = |v: i64| {
@@ -380,6 +430,11 @@ mod tests {
                 #[test]
                 fn matches_native() {
                     table_matches_native::<$curve>();
+                }
+
+                #[test]
+                fn record_layout() {
+                    prepared_record_layout::<$curve>();
                 }
             }
         };

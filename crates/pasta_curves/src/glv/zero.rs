@@ -120,7 +120,117 @@ pub(crate) mod subset;
 
 pub use codebook::CodebookMode;
 use codebook::{Codebook, CoeffAdd, Recoded, unpack_code};
-use prepared::{VariantTable, unit_coords};
+use prepared::{PreparedPoint, VariantTable, unit_coords};
+
+const PREPARED_PREFETCH_DISTANCE: usize = 16;
+const PREPARED_PREFETCH_RECORD_BYTES: usize = 96;
+const PREPARED_PREFETCH_SECOND_LINE: usize = 64;
+const PREFETCH_XSAVE_OSXSAVE_AVX: u32 = (1 << 26) | (1 << 27) | (1 << 28);
+const PREFETCH_REQUIRED_XCR0: u64 = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 7);
+const PREFETCH_AVX512_F_IFMA_VL: u32 = (1 << 16) | (1 << 21) | (1 << 31);
+
+fn prepared_prefetch_field_supported<F: 'static>() -> bool {
+    use core::any::TypeId;
+
+    TypeId::of::<F>() == TypeId::of::<crate::Fp>() || TypeId::of::<F>() == TypeId::of::<crate::Fq>()
+}
+
+fn prepared_prefetch_flags_supported(leaf1_ecx: u32, leaf7_ebx: u32, xcr0: u64) -> bool {
+    leaf1_ecx & PREFETCH_XSAVE_OSXSAVE_AVX == PREFETCH_XSAVE_OSXSAVE_AVX
+        && leaf7_ebx & PREFETCH_AVX512_F_IFMA_VL == PREFETCH_AVX512_F_IFMA_VL
+        && xcr0 & PREFETCH_REQUIRED_XCR0 == PREFETCH_REQUIRED_XCR0
+}
+
+/// Keeps prefetching within the measured CPU and operating-system policy.
+///
+/// The hint itself only requires baseline x86-64 SSE support. This stricter
+/// gate is a performance policy, not an instruction-safety requirement: the
+/// prepared-table measurements cover AVX-512F/IFMA/VL hosts with OS support
+/// for the corresponding register state. Detection also works without `std`.
+#[allow(unsafe_code)]
+fn prepared_prefetch_cpu_available() -> bool {
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    {
+        use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+        use core::sync::atomic::{AtomicU8, Ordering};
+
+        static AVAILABLE: AtomicU8 = AtomicU8::new(0);
+        let cached = AVAILABLE.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached == 2;
+        }
+
+        // SAFETY: CPUID is available on x86-64. XGETBV is executed only
+        // after CPUID confirms that the OS has enabled XSAVE support.
+        let available = unsafe {
+            let max_leaf = __cpuid(0).eax;
+            let leaf1 = __cpuid(1);
+            if max_leaf < 7 || leaf1.ecx & PREFETCH_XSAVE_OSXSAVE_AVX != PREFETCH_XSAVE_OSXSAVE_AVX
+            {
+                false
+            } else {
+                let leaf7 = __cpuid_count(7, 0);
+                prepared_prefetch_flags_supported(leaf1.ecx, leaf7.ebx, _xgetbv(0))
+            }
+        };
+        AVAILABLE.store(if available { 2 } else { 1 }, Ordering::Relaxed);
+        available
+    }
+    #[cfg(not(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )))]
+    {
+        // Other targets have none of the measured x86 feature state.
+        prepared_prefetch_flags_supported(0, 0, 0)
+    }
+}
+
+fn prepared_prefetch_enabled<F: Field>() -> bool {
+    core::mem::size_of::<PreparedPoint<F>>() == PREPARED_PREFETCH_RECORD_BYTES
+        && prepared_prefetch_field_supported::<F>()
+        && prepared_prefetch_cpu_available()
+}
+
+/// Hints the cache lines at the start and offset 64 of a borrowed record.
+#[allow(unsafe_code)]
+fn prefetch_prepared_point<F>(point: &PreparedPoint<F>) {
+    if core::mem::size_of::<PreparedPoint<F>>() != PREPARED_PREFETCH_RECORD_BYTES
+        || PREPARED_PREFETCH_SECOND_LINE >= PREPARED_PREFETCH_RECORD_BYTES
+    {
+        return;
+    }
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    {
+        let address = core::ptr::from_ref(point).cast::<u8>();
+        // SAFETY: the checked record size is 96 bytes, so both addresses
+        // remain inside the live borrowed record. Prefetch does not read a
+        // field representation or mutate memory. SSE prefetch is available
+        // on every x86-64 target; callers gate its use for performance.
+        unsafe {
+            core::arch::x86_64::_mm_prefetch(address.cast(), core::arch::x86_64::_MM_HINT_T0);
+            core::arch::x86_64::_mm_prefetch(
+                address.add(PREPARED_PREFETCH_SECOND_LINE).cast(),
+                core::arch::x86_64::_MM_HINT_T0,
+            );
+        }
+    }
+    #[cfg(not(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )))]
+    let _ = point;
+}
 
 /// Widths the tail MSM chooses between. Only the residuals ride the tail
 /// (extra terms run as their own MSM), and residuals are tiny, so the
@@ -862,6 +972,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let bucket_count = self.codebook.bucket_count();
         let counts = &recoded.counts[window * bucket_count..][..bucket_count];
         let codes = &recoded.codes[window * terms..][..terms];
+        let prefetch_enabled = prepared_prefetch_enabled::<C::Base>();
 
         let mut offsets = Vec::with_capacity(bucket_count + 1);
         offsets.push(0usize);
@@ -878,6 +989,18 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             *offsets.last().unwrap()
         ];
         for (base, &code) in codes.iter().enumerate() {
+            if prefetch_enabled
+                && let Some(future) = base.checked_add(PREPARED_PREFETCH_DISTANCE)
+                && let Some(&future_code) = codes.get(future)
+                && future_code != 0
+            {
+                let (_, variant, _) = unpack_code(future_code);
+                let prepared_base = recoded
+                    .base_indices
+                    .as_ref()
+                    .map_or(future, |indices| indices[future]);
+                prefetch_prepared_point(self.table.get(variant, prepared_base));
+            }
             if code == 0 {
                 continue;
             }
@@ -989,6 +1112,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let bucket_count = self.codebook.bucket_count();
         let counts = &recoded.counts[window * bucket_count..][..bucket_count];
         let codes = &recoded.codes[window * terms..][..terms];
+        let prefetch_enabled = prepared_prefetch_enabled::<C::Base>();
 
         let mut offsets = Vec::with_capacity(bucket_count + 1);
         offsets.push(0usize);
@@ -1005,6 +1129,15 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             *offsets.last().unwrap()
         ];
         for (base, &code) in codes.iter().enumerate() {
+            if prefetch_enabled
+                && let Some(future) = base.checked_add(PREPARED_PREFETCH_DISTANCE)
+                && let Some(&future_code) = codes.get(future)
+                && future_code != 0
+            {
+                let (_, variant, _) = unpack_code(future_code);
+                let prepared_base = base_offset + future;
+                prefetch_prepared_point(self.table.get(variant, prepared_base));
+            }
             if code == 0 {
                 continue;
             }
@@ -1727,6 +1860,258 @@ pub(crate) mod testutil {
 mod tests {
     use super::*;
     use crate::{pallas, vesta};
+
+    fn reference_staging<C: GlvParams>(
+        prepared: &PreparedZeroMsm<C>,
+        recoded: &Recoded,
+        base_offset: Option<usize>,
+        window: usize,
+    ) -> (Vec<AffinePoint<C::Base>>, Vec<usize>, u32) {
+        let mut buckets = vec![Vec::new(); prepared.codebook.bucket_count()];
+        let mut units = 0;
+        for (row, &code) in recoded.codes[window * recoded.terms..][..recoded.terms]
+            .iter()
+            .enumerate()
+        {
+            if code == 0 {
+                continue;
+            }
+            let (bucket, variant, unit) = unpack_code(code);
+            let base = base_offset.map_or_else(
+                || {
+                    recoded
+                        .base_indices
+                        .as_ref()
+                        .map_or(row, |indices| indices[row])
+                },
+                |offset| offset + row,
+            );
+            let (x, y) = unit_coords(prepared.table.get(variant, base), unit);
+            buckets[bucket].push(AffinePoint { x, y });
+            units |= 1 << unit;
+        }
+        let mut offsets = vec![0];
+        for bucket in &buckets {
+            offsets.push(offsets.last().unwrap() + bucket.len());
+        }
+        (buckets.into_iter().flatten().collect(), offsets, units)
+    }
+
+    fn assert_staging_matches<C: GlvParams>(
+        prepared: &PreparedZeroMsm<C>,
+        recoded: &Recoded,
+        base_offset: Option<usize>,
+    ) -> u32 {
+        let mut units = 0;
+        for window in 0..prepared.codebook.main_windows() {
+            let (expected, offsets, window_units) =
+                reference_staging(prepared, recoded, base_offset, window);
+            let (actual, actual_offsets) = base_offset.map_or_else(
+                || prepared.stage_window(recoded, window),
+                |offset| prepared.stage_window_range(recoded, offset, window),
+            );
+            assert_eq!(actual_offsets, offsets);
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert_eq!(actual.x, expected.x);
+                assert_eq!(actual.y, expected.y);
+            }
+            units |= window_units;
+        }
+        units
+    }
+
+    fn prefetch_staging_matches_unhinted_reference<C: GlvParams>() {
+        const TERMS: usize = 256;
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut bases = vec![C::AffineExt::identity(); TERMS];
+        C::batch_normalize(&projective, &mut bases);
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(5));
+        assert!(prepared.merges.is_empty());
+        let mut scalars =
+            super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64).collect::<Vec<_>>();
+        for index in (0..TERMS).step_by(7) {
+            scalars[index] = C::ScalarExt::ZERO;
+        }
+        let recode = |prepared: &PreparedZeroMsm<C>, indices: &[usize], all_zero: bool| {
+            codebook::try_recode_with(&prepared.codebook, indices.len(), 1, |row| {
+                let base = indices[row];
+                let scalar = if all_zero || !prepared.live[base] {
+                    C::ScalarExt::ZERO
+                } else {
+                    scalars[base]
+                };
+                checked_signed_magnitudes(decompose::<C>(&scalar))
+            })
+            .expect("valid public scalars recode")
+        };
+
+        let mut units = 0;
+        for terms in [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, TERMS] {
+            let indices = (0..terms).collect::<Vec<_>>();
+            let recoded = recode(&prepared, &indices, false);
+            units |= assert_staging_matches(&prepared, &recoded, None);
+            let zeros = recode(&prepared, &indices, true);
+            assert_eq!(assert_staging_matches(&prepared, &zeros, None), 0);
+        }
+        assert_eq!(units, 0b11_1111, "all rotations and negations are staged");
+
+        let indices = (0..TERMS)
+            .filter(|index| index % 3 == 1)
+            .rev()
+            .collect::<Vec<_>>();
+        assert!(indices.len() > PREPARED_PREFETCH_DISTANCE);
+        let mut sparse = recode(&prepared, &indices, false);
+        sparse.base_indices = Some(indices);
+        assert_eq!(assert_staging_matches(&prepared, &sparse, None), 0b11_1111);
+
+        let base_offset = 13;
+        let range_len = 75;
+        let indices = (base_offset..base_offset + range_len).collect::<Vec<_>>();
+        let range = recode(&prepared, &indices, false);
+        assert_eq!(
+            assert_staging_matches(&prepared, &range, Some(base_offset)),
+            0b11_1111,
+        );
+        let expected = scalars[base_offset..base_offset + range_len]
+            .iter()
+            .zip(&bases[base_offset..base_offset + range_len])
+            .fold(C::identity(), |sum, (&scalar, &base)| {
+                sum + C::from(base) * scalar
+            });
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                &prepared,
+                base_offset,
+                &scalars[base_offset..base_offset + range_len],
+                &[],
+            ),
+            expected,
+        );
+
+        // Dead rows never request prepared records. Related bases also retain
+        // the existing scalar-folding behavior in complete MSM evaluation.
+        bases[0] = C::AffineExt::identity();
+        bases[1] = generator.to_affine();
+        bases[2] = bases[1];
+        bases[3] = (-generator).to_affine();
+        let related = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(5));
+        assert!(!related.merges.is_empty());
+        let indices = (0..TERMS).collect::<Vec<_>>();
+        let recoded = recode(&related, &indices, false);
+        assert_eq!(assert_staging_matches(&related, &recoded, None), 0b11_1111);
+        let expected = scalars
+            .iter()
+            .zip(&bases)
+            .fold(C::identity(), |sum, (&scalar, &base)| {
+                sum + C::from(base) * scalar
+            });
+        assert_eq!(related.multiexp_with_terms_vartime(&scalars, &[]), expected);
+    }
+
+    #[test]
+    fn pallas_prefetch_staging_matches_unhinted_reference() {
+        prefetch_staging_matches_unhinted_reference::<pallas::Point>();
+    }
+
+    #[test]
+    fn vesta_prefetch_staging_matches_unhinted_reference() {
+        prefetch_staging_matches_unhinted_reference::<vesta::Point>();
+    }
+
+    #[test]
+    fn prefetch_record_guard_and_unsupported_fallback() {
+        assert_eq!(
+            core::mem::size_of::<PreparedPoint<crate::Fp>>(),
+            PREPARED_PREFETCH_RECORD_BYTES,
+        );
+        assert_eq!(
+            core::mem::size_of::<PreparedPoint<crate::Fq>>(),
+            PREPARED_PREFETCH_RECORD_BYTES,
+        );
+        assert!(PREPARED_PREFETCH_SECOND_LINE < PREPARED_PREFETCH_RECORD_BYTES);
+        let small = PreparedPoint {
+            x: 1_u8,
+            zeta_x: 2_u8,
+            y: 3_u8,
+        };
+        // This record is too short for offset 64; the helper must return
+        // before it forms any interior pointer at that offset.
+        prefetch_prepared_point(&small);
+        assert_eq!((small.x, small.zeta_x, small.y), (1, 2, 3));
+        assert_eq!(
+            prepared_prefetch_enabled::<crate::Fp>(),
+            prepared_prefetch_cpu_available(),
+        );
+        assert_eq!(
+            prepared_prefetch_enabled::<crate::Fq>(),
+            prepared_prefetch_cpu_available(),
+        );
+        assert!(prepared_prefetch_field_supported::<crate::Fp>());
+        assert!(prepared_prefetch_field_supported::<crate::Fq>());
+        assert!(!prepared_prefetch_field_supported::<u8>());
+        #[cfg(not(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )))]
+        {
+            assert!(!prepared_prefetch_enabled::<crate::Fp>());
+            assert!(!prepared_prefetch_enabled::<crate::Fq>());
+        }
+    }
+
+    #[test]
+    fn prefetch_detection_requires_every_cpu_and_os_feature() {
+        assert!(prepared_prefetch_flags_supported(
+            PREFETCH_XSAVE_OSXSAVE_AVX,
+            PREFETCH_AVX512_F_IFMA_VL,
+            PREFETCH_REQUIRED_XCR0,
+        ));
+        for bit in [26, 27, 28] {
+            assert!(!prepared_prefetch_flags_supported(
+                PREFETCH_XSAVE_OSXSAVE_AVX & !(1 << bit),
+                PREFETCH_AVX512_F_IFMA_VL,
+                PREFETCH_REQUIRED_XCR0,
+            ));
+        }
+        for bit in [16, 21, 31] {
+            assert!(!prepared_prefetch_flags_supported(
+                PREFETCH_XSAVE_OSXSAVE_AVX,
+                PREFETCH_AVX512_F_IFMA_VL & !(1 << bit),
+                PREFETCH_REQUIRED_XCR0,
+            ));
+        }
+        for bit in [1, 2, 5, 6, 7] {
+            assert!(!prepared_prefetch_flags_supported(
+                PREFETCH_XSAVE_OSXSAVE_AVX,
+                PREFETCH_AVX512_F_IFMA_VL,
+                PREFETCH_REQUIRED_XCR0 & !(1 << bit),
+            ));
+        }
+    }
+
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    #[test]
+    fn prefetch_detection_matches_standard_library() {
+        std::println!(
+            "prepared prefetch enabled={}",
+            prepared_prefetch_enabled::<crate::Fp>(),
+        );
+        assert_eq!(
+            prepared_prefetch_cpu_available(),
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512ifma")
+                && std::arch::is_x86_feature_detected!("avx512vl"),
+        );
+    }
 
     #[test]
     fn alpha_seven_tail_stride_is_exactly_three() {
