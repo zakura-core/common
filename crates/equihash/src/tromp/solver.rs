@@ -34,6 +34,7 @@ const HASH_BLOCKS: usize = HASHES / HASHES_PER_BLAKE;
 const HASH_BATCH: usize = 64;
 const OUTPUT_BATCH: usize = 64;
 const INITIAL_WORDS: usize = TABLE_WORDS[0] - 1;
+const FINAL_WORDS: usize = HASH_WORDS[ROUNDS - 1];
 const INITIAL_BYTES: usize = INITIAL_WORDS * core::mem::size_of::<u32>();
 const HASH_WORDS: [usize; ROUNDS] = {
     let mut words = [0; ROUNDS];
@@ -90,19 +91,6 @@ fn children(node: u32) -> (usize, usize, usize) {
 
 fn attributes(round: usize, bucket: usize) -> usize {
     bucket * SLOTS * TABLE_WORDS[round & 1] + (round / 2) * SLOTS
-}
-
-fn byte(table: &[u32], row: usize, offset: usize) -> u8 {
-    table[row + offset / 4].to_ne_bytes()[offset % 4]
-}
-
-fn extra_hash(table: &[u32], row: usize, padding: usize, odd: bool) -> usize {
-    if odd {
-        (((byte(table, row, padding) & 0xf) as usize) << 4)
-            | (byte(table, row, padding + 1) >> 4) as usize
-    } else {
-        byte(table, row, padding) as usize
-    }
 }
 
 // Prefetch only addresses inside a live table. On other architectures the
@@ -231,6 +219,42 @@ fn row_bucket<const WORDS: usize>(
         (((first & 0xf) as usize) << 8) | second as usize
     } else {
         ((first as usize) << 4) | (second >> 4) as usize
+    }
+}
+
+// Candidate nodes retain right-slot and prior-prefix order. Processing
+// starts after the immutable hash-table borrow ends, and the buffer is reused.
+fn collect_final_candidates(
+    bucket: usize,
+    rows: &[[u32; FINAL_WORDS]],
+    collisions: &mut Collisions,
+    active: &mut [ActiveRow; SLOTS],
+    candidates: &mut Vec<u32>,
+) {
+    collisions.clear();
+    let layout = Layout::new(ROUNDS);
+    let mut active_count = 0;
+    for (right, right_row) in rows.iter().enumerate() {
+        let key = row_extra_hash(right_row, layout.previous_padding, true);
+        let previous = collisions.counts[key] as usize;
+        let _ = collisions.add(right, key);
+        active[active_count] = ActiveRow {
+            right: right as u16,
+            key: key as u8,
+            previous: previous.min(COLLISION_CAPACITY) as u8,
+        };
+        active_count += usize::from(previous != 0 && previous < COLLISION_CAPACITY);
+    }
+    for descriptor in &active[..active_count] {
+        let right = descriptor.right as usize;
+        let right_row = &rows[right];
+        let colliding = &collisions.slots[descriptor.key as usize][..descriptor.previous as usize];
+        for &left in colliding {
+            let left = left as usize;
+            if rows[left][FINAL_WORDS - 1] == right_row[FINAL_WORDS - 1] {
+                candidates.push(tree(bucket, left, right));
+            }
+        }
     }
 }
 
@@ -426,28 +450,20 @@ impl Solver {
     }
 
     fn final_round(&mut self) {
-        let layout = Layout::new(ROUNDS);
         let mut collisions = Collisions::new();
+        let mut active = [ActiveRow::default(); SLOTS];
+        let mut candidates = Vec::with_capacity(COLLISION_CAPACITY);
         for bucket in 0..BUCKETS {
-            collisions.clear();
-            let rows = attributes(ROUNDS - 1, bucket) + SLOTS;
             let count = (self.counts[0][bucket] as usize).min(SLOTS);
             self.counts[0][bucket] = 0;
-            for right in 0..count {
-                let right_row = rows + right * layout.previous_words;
-                let key = extra_hash(&self.tables[0], right_row, layout.previous_padding, true);
-                let Some(colliding) = collisions.add(right, key) else {
-                    continue;
-                };
-                for &current_left in colliding {
-                    let current_left = current_left as usize;
-                    let left_row = rows + current_left * layout.previous_words;
-                    if self.tables[0][left_row + layout.previous_words - 1]
-                        == self.tables[0][right_row + layout.previous_words - 1]
-                    {
-                        self.candidate(tree(bucket, current_left, right));
-                    }
-                }
+            let start = attributes(ROUNDS - 1, bucket) + SLOTS;
+            let input = &self.tables[0][start..start + count * FINAL_WORDS];
+            let (rows, remainder) = input.as_chunks::<FINAL_WORDS>();
+            debug_assert!(remainder.is_empty());
+            candidates.clear();
+            collect_final_candidates(bucket, rows, &mut collisions, &mut active, &mut candidates);
+            for &node in &candidates {
+                self.candidate(node);
             }
         }
     }
@@ -513,6 +529,57 @@ mod tests {
         COLLISION_CAPACITY, Collisions, MAX_SOLUTIONS, PROOF_SIZE, RESTS, ROUNDS, SLOTS, Solver,
         attributes, tree,
     };
+
+    #[test]
+    fn final_scan_preserves_candidate_order_capacity_and_reset() {
+        let mut collisions = Collisions::new();
+        let mut active = [super::ActiveRow::default(); SLOTS];
+        let mut candidates = Vec::new();
+        for pattern in 0..5 {
+            let mut rows = Vec::new();
+            let mut reference = vec![Vec::new(); RESTS];
+            let mut expected = Vec::new();
+            for right in 0..SLOTS {
+                let key = match pattern {
+                    0 | 2 => 7,
+                    1 => right % 3,
+                    4 => right / COLLISION_CAPACITY,
+                    _ => (right * 97 + right / 5) % RESTS,
+                };
+                let payload = match pattern {
+                    0 | 1 | 4 => 0,
+                    2 => right % 2,
+                    _ => right % 4,
+                };
+                let word = u32::from_ne_bytes([
+                    (key >> 4) as u8,
+                    ((key & 0xf) << 4) as u8,
+                    payload as u8,
+                    0,
+                ]);
+                rows.push([word]);
+                let previous = &mut reference[key];
+                if previous.len() == COLLISION_CAPACITY {
+                    continue;
+                }
+                for &(left, left_word) in previous.iter() {
+                    if left_word == word {
+                        expected.push(tree(pattern, left, right));
+                    }
+                }
+                previous.push((right, word));
+            }
+            candidates.clear();
+            super::collect_final_candidates(
+                pattern,
+                &rows,
+                &mut collisions,
+                &mut active,
+                &mut candidates,
+            );
+            assert_eq!(candidates, expected);
+        }
+    }
 
     #[test]
     fn collision_groups_preserve_insertion_order_capacity_and_reset() {
