@@ -1,0 +1,26 @@
+[package]
+name = "orchard-ios-benchmark"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "orchard-ios-benchmark-host"
+path = "src/main.rs"
+
+[features]
+default = []
+historical-root = []
+orbits-prover = ["orchard/orbits"]
+prepared-prover = ["orbits-prover"]
+
+[dependencies]
+orchard = { package = "zakura-orchard", path = "../../crates/orchard", default-features = false, features = ["circuit", "multicore", "std"] }
+rand = { version = "0.10", features = ["std_rng"] }
+rayon = "1.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
