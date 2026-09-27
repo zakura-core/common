@@ -1,11 +1,71 @@
-#[cfg(feature = "aarch64-asm")]
 use std::env;
 
+const X86_64_ASM_CFG: &str = "pasta_curves_x86_64_asm";
+const REQUIRED_X86_64_FEATURES: [&str; 2] = ["adx", "bmi2"];
+
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg({X86_64_ASM_CFG})");
     println!("cargo:rerun-if-changed=src/asm/pasta_mul-armv8.S");
+
+    if use_x86_64_asm() {
+        println!("cargo:rustc-cfg={X86_64_ASM_CFG}");
+    }
 
     #[cfg(feature = "aarch64-asm")]
     build_aarch64_asm();
+}
+
+fn use_x86_64_asm() -> bool {
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64")
+        || env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() != Ok("64")
+    {
+        return false;
+    }
+
+    // `portable` is a safety override, including under `--all-features`.
+    if cfg!(feature = "portable") {
+        return false;
+    }
+
+    if cfg!(feature = "x86_64-asm") {
+        return true;
+    }
+
+    let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+    if has_required_x86_64_features(&target_features) {
+        return true;
+    }
+
+    // Respect an explicit target contract instead of silently replacing it
+    // with the build host's capabilities.
+    if has_explicit_target_configuration() {
+        return false;
+    }
+
+    env::var("HOST") == env::var("TARGET") && build_host_has_required_x86_64_features()
+}
+
+fn has_required_x86_64_features(target_features: &str) -> bool {
+    REQUIRED_X86_64_FEATURES.iter().all(|required| {
+        target_features
+            .split(',')
+            .any(|feature| feature == *required)
+    })
+}
+
+fn has_explicit_target_configuration() -> bool {
+    env::var("CARGO_ENCODED_RUSTFLAGS")
+        .is_ok_and(|flags| flags.contains("target-cpu") || flags.contains("target-feature"))
+}
+
+#[cfg(target_arch = "x86_64")]
+fn build_host_has_required_x86_64_features() -> bool {
+    std::is_x86_feature_detected!("adx") && std::is_x86_feature_detected!("bmi2")
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn build_host_has_required_x86_64_features() -> bool {
+    false
 }
 
 #[cfg(feature = "aarch64-asm")]

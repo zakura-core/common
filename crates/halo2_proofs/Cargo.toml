@@ -63,6 +63,8 @@ nightly = ["beta", "unstable-verifier-fingerprint"]
 # (default-off); without it halo2 keeps the Signed-Booth-only planner and
 # the plain final identity test.
 orbits = ["pasta_curves/orbits"]
+# Disable automatic x86-64 assembly selection in `pasta_curves`.
+portable = ["pasta_curves/portable"]
 sanity-checks = []
 test-dev-graph = [
     "dev-graph",

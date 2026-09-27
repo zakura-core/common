@@ -78,6 +78,8 @@ default = ["circuit", "multicore", "std"]
 dev-graph = ["halo2_proofs?/dev-graph", "image", "plotters"]
 multicore = ["halo2_proofs?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
 orbits = ["halo2_proofs?/orbits"]
+# Disable automatic x86-64 assembly selection in the proving dependencies.
+portable = ["pasta_curves/portable", "halo2_proofs?/portable"]
 std = ["corez/std", "group/wnaf-memuse", "reddsa/std"]
 test-dependencies = ["proptest", "rand/std", "rand/std_rng"]
 unstable-frost = []

@@ -160,7 +160,7 @@ impl<'a, 'b> Sub<&'b Fq> for &'a Fq {
             Fq(super::aarch64_asm::sub(&self.0, &rhs.0, &MODULUS.0))
         }
         #[cfg(all(
-            feature = "x86_64-asm",
+            pasta_curves_x86_64_asm,
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
@@ -176,7 +176,7 @@ impl<'a, 'b> Sub<&'b Fq> for &'a Fq {
                 target_endian = "little",
             ),
             all(
-                feature = "x86_64-asm",
+                pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -203,7 +203,7 @@ impl<'a, 'b> Add<&'b Fq> for &'a Fq {
             Fq(super::aarch64_asm::add(&self.0, &rhs.0, &MODULUS.0))
         }
         #[cfg(all(
-            feature = "x86_64-asm",
+            pasta_curves_x86_64_asm,
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
@@ -219,7 +219,7 @@ impl<'a, 'b> Add<&'b Fq> for &'a Fq {
                 target_endian = "little",
             ),
             all(
-                feature = "x86_64-asm",
+                pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -258,7 +258,7 @@ impl<T: ::core::borrow::Borrow<Fq>> ::core::iter::Product<T> for Fq {
 const INV: u64 = 0x8c46eb20ffffffff;
 
 #[cfg(all(
-    feature = "x86_64-asm",
+    pasta_curves_x86_64_asm,
     target_arch = "x86_64",
     target_pointer_width = "64"
 ))]
@@ -485,7 +485,7 @@ impl Fq {
         }
 
         #[cfg(all(
-            feature = "x86_64-asm",
+            pasta_curves_x86_64_asm,
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
@@ -502,7 +502,7 @@ impl Fq {
                 target_endian = "little"
             ),
             all(
-                feature = "x86_64-asm",
+                pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -526,7 +526,7 @@ impl Fq {
         }
 
         #[cfg(all(
-            feature = "x86_64-asm",
+            pasta_curves_x86_64_asm,
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
@@ -543,7 +543,7 @@ impl Fq {
                 target_endian = "little"
             ),
             all(
-                feature = "x86_64-asm",
+                pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -810,7 +810,7 @@ impl ff::Field for Fq {
             Self(super::aarch64_asm::add(&self.0, &self.0, &MODULUS.0))
         }
         #[cfg(all(
-            feature = "x86_64-asm",
+            pasta_curves_x86_64_asm,
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
@@ -826,7 +826,7 @@ impl ff::Field for Fq {
                 target_endian = "little",
             ),
             all(
-                feature = "x86_64-asm",
+                pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -1874,7 +1874,7 @@ fn constants_are_canonical() {
             target_endian = "little"
         ),
         all(
-            feature = "x86_64-asm",
+            pasta_curves_x86_64_asm,
             target_arch = "x86_64",
             target_pointer_width = "64"
         )
@@ -1921,7 +1921,7 @@ fn asm_arithmetic_canonical_sweep_matches_portable() {
             target_endian = "little"
         ),
         all(
-            feature = "x86_64-asm",
+            pasta_curves_x86_64_asm,
             target_arch = "x86_64",
             target_pointer_width = "64"
         )
@@ -1979,7 +1979,7 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
             target_endian = "little"
         ),
         all(
-            feature = "x86_64-asm",
+            pasta_curves_x86_64_asm,
             target_arch = "x86_64",
             target_pointer_width = "64"
         )

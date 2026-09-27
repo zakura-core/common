@@ -45,8 +45,12 @@ serde_json = "1.0"
 
 [features]
 aarch64-asm = ["dep:cc"]
+# Disable automatic x86-64 assembly selection, even if `x86_64-asm` is also
+# enabled. Use this for binaries that may run on older x86-64 CPUs.
+portable = []
 # MULX/ADCX/ADOX Montgomery arithmetic for the Pasta fields on x86-64.
-# Requires BMI2 and ADX; enabling it on an unsupported CPU will fault.
+# This forces the backend on; unsupported CPUs will fault unless `portable`
+# is also enabled.
 x86_64-asm = []
 alloc = ["group/alloc", "blake2b_simd"]
 bits = ["ff/bits"]

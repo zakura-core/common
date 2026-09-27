@@ -60,10 +60,11 @@ fn mul_by_inverse_power_of_two(
 ))]
 mod aarch64_asm;
 
-// Keep the x86-64 inline-assembly exception behind the same private boundary.
+// Keep the build-selected x86-64 inline-assembly exception behind the same
+// private boundary.
 #[allow(unsafe_code)]
 #[cfg(all(
-    feature = "x86_64-asm",
+    pasta_curves_x86_64_asm,
     target_arch = "x86_64",
     target_pointer_width = "64"
 ))]

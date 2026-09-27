@@ -52,9 +52,11 @@
 //! constant-time.
 //!
 //! ISA requirement: MULX needs BMI2 and ADCX/ADOX need ADX (Intel Broadwell
-//! / AMD Zen or newer). The feature is opt-in precisely because this is not
-//! checked at runtime; enabling it on an older CPU faults with an illegal
-//! instruction.
+//! / AMD Zen or newer). Native builds select this backend at build time when
+//! the build host has both extensions; explicit target features and the
+//! `x86_64-asm` and `portable` Cargo features can override that selection.
+//! There is no runtime dispatch, so moving a native binary to an older CPU can
+//! cause an illegal-instruction fault.
 
 use core::arch::asm;
 
