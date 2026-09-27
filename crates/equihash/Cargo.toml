@@ -18,7 +18,8 @@ default = ["std"]
 std = ["dep:document-features"]
 
 ## Experimental Tromp solver support, builds the C solver and Rust FFI layer.
-solver = ["dep:cc", "std"]
+## Enables runtime CPU detection in the Rust BLAKE2b backend.
+solver = ["dep:cc", "std", "blake2b_simd/std"]
 
 [dependencies]
 corez = { version = "0.1.1", default-features = false, features = ["alloc"] }

@@ -26,6 +26,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 
 typedef uint16_t u16;
 typedef uint64_t u64;
@@ -182,6 +185,30 @@ typedef struct htalloc htalloc;
     return hta;
   }
   void *htalloc_alloc(htalloc *hta, const u32 n, const u32 sz);
+  static void *htalloc_alloctable(htalloc *hta, const u32 sz) {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+    // Anonymous mappings supply zero-filled pages without eagerly touching
+    // the tables. Huge pages are an optional hint; ordinary pages also work.
+    void *mem = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED)
+      abort();
+    (void)madvise(mem, sz, MADV_HUGEPAGE);
+    hta->alloced += sz;
+    return mem;
+#else
+    return htalloc_alloc(hta, 1, sz);
+#endif
+  }
+  static void htalloc_freetable(void *mem, const u32 sz) {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+    if (mem != NULL)
+      (void)munmap(mem, sz);
+#else
+    (void)sz;
+    free(mem);
+#endif
+  }
   void alloctrees(htalloc *hta) {
 // optimize xenoncat's fixed memory layout, avoiding any waste
 // digit  trees  hashes  trees hashes
@@ -195,8 +222,9 @@ typedef struct htalloc htalloc;
 // 7      0 2 4 6 . G G   1 3 5 7 H H
 // 8      0 2 4 6 8 . I   1 3 5 7 H H
     assert(DIGITBITS >= 16); // ensures hashes shorten by 1 unit every 2 digits
-    hta->heap0 = (u32 *)htalloc_alloc(hta, 1, sizeof(digit0));
-    hta->heap1 = (u32 *)htalloc_alloc(hta, 1, sizeof(digit1));
+    hta->alloced = 0;
+    hta->heap0 = (u32 *)htalloc_alloctable(hta, sizeof(digit0));
+    hta->heap1 = (u32 *)htalloc_alloctable(hta, sizeof(digit1));
     for (int r=0; r<WK; r++)
       if ((r&1) == 0)
         hta->trees0[r/2]  = (bucket0 *)(hta->heap0 + r/2);
@@ -208,8 +236,8 @@ typedef struct htalloc htalloc;
       return;
     }
 
-    free(hta->heap0);
-    free(hta->heap1);
+    htalloc_freetable(hta->heap0, sizeof(digit0));
+    htalloc_freetable(hta->heap1, sizeof(digit1));
     // Avoid use-after-free and double-free
     hta->heap0 = NULL;
     hta->heap1 = NULL;
