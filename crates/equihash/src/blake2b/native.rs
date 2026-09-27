@@ -290,7 +290,7 @@ impl Context {
                     let hashes = transpose8(hashes);
                     for (hash, out) in hashes
                         .iter()
-                        .zip(output.chunks_exact_mut(TRANSPOSE_HASH_BYTES))
+                        .zip(output.as_chunks_mut::<TRANSPOSE_HASH_BYTES>().0)
                     {
                         // The masked store writes only the six complete words;
                         // the final two bytes stay inside this digest's bounds.
