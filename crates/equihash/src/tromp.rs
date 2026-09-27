@@ -35,6 +35,11 @@ fn solve_200_9_uncompressed<const N: usize>(
 /// generates a new nonce of length `N` using `next_nonce`.
 ///
 /// Returns zero or more unique compressed solutions.
+///
+/// The solver accepts any `input` and nonce length, but
+/// [`is_valid_solution`](crate::is_valid_solution) only verifies a Zcash block
+/// header: its solutions verify only when `input` is the 108-byte header
+/// prefix and `N` is 32.
 pub fn solve_200_9<const N: usize>(
     input: &[u8],
     next_nonce: impl FnMut() -> Option<[u8; N]>,
