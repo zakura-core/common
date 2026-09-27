@@ -31,7 +31,6 @@ impl Params {
     pub(super) fn collision_byte_length(&self) -> usize {
         self.collision_bit_length().div_ceil(8)
     }
-    #[cfg(test)]
     pub(super) fn hash_length(&self) -> usize {
         ((self.k as usize) + 1) * self.collision_byte_length()
     }

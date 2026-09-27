@@ -36,6 +36,7 @@ extern crate alloc;
 
 const BLAKE2B_PERSONALIZATION_PREFIX: [u8; 8] = *b"ZcashPoW";
 
+mod leaf_hash;
 mod minimal;
 mod params;
 mod verify;

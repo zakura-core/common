@@ -48,18 +48,34 @@ fn compress_array(array: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u8> {
 }
 
 pub(super) fn expand_array(vin: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u8> {
+    let mut vout = vec![0; expanded_len(vin.len(), bit_len, byte_pad)];
+    expand_array_into(vin, bit_len, byte_pad, &mut vout);
+    vout
+}
+
+/// The length of `expand_array(vin, bit_len, byte_pad)` for `vin_len` input
+/// bytes.
+pub(super) fn expanded_len(vin_len: usize, bit_len: usize, byte_pad: usize) -> usize {
+    8 * (bit_len.div_ceil(8) + byte_pad) * vin_len / bit_len
+}
+
+/// Writes `expand_array(vin, bit_len, byte_pad)` to `vout`, which must have
+/// the length [`expanded_len`] returns.
+pub(super) fn expand_array_into(vin: &[u8], bit_len: usize, byte_pad: usize, vout: &mut [u8]) {
     assert!(bit_len >= 8);
     assert!(u32::BITS as usize >= 7 + bit_len);
 
     let out_width = bit_len.div_ceil(8) + byte_pad;
-    let out_len = 8 * out_width * vin.len() / bit_len;
+    assert_eq!(vout.len(), expanded_len(vin.len(), bit_len, byte_pad));
 
     // Shortcut for parameters where expansion is a no-op
-    if out_len == vin.len() {
-        return vin.to_vec();
+    if vout.len() == vin.len() {
+        vout.copy_from_slice(vin);
+        return;
     }
 
-    let mut vout: Vec<u8> = vec![0; out_len];
+    // The padding bytes of each output element are never written below.
+    vout.fill(0);
     let bit_len_mask: u32 = (1 << bit_len) - 1;
 
     // The acc_bits least-significant bits of acc_value represent a bit sequence
@@ -88,8 +104,6 @@ pub(super) fn expand_array(vin: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u
             j += out_width;
         }
     }
-
-    vout
 }
 
 // Rough translation of GetMinimalFromIndices() from:

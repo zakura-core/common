@@ -87,7 +87,7 @@ mod tests {
             assert_eq!(solutions.len(), count);
             let mut hash = blake2b_simd::State::new();
             for solution in solutions {
-                crate::is_valid_solution(
+                crate::verify::is_valid_solution_any_input(
                     SOLVER_PARAMS.n,
                     SOLVER_PARAMS.k,
                     input,
@@ -133,16 +133,22 @@ mod tests {
             println!("Found {} solutions:", solutions.len());
             for (sol_num, solution) in solutions.iter().enumerate() {
                 println!("Validating solution {sol_num}:-\n{}", hex::encode(solution));
-                crate::is_valid_solution(SOLVER_PARAMS.n, SOLVER_PARAMS.k, input, &nonce, solution)
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "unexpected invalid equihash 200, 9 solution:\n\
+                crate::verify::is_valid_solution_any_input(
+                    SOLVER_PARAMS.n,
+                    SOLVER_PARAMS.k,
+                    input,
+                    &nonce,
+                    solution,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "unexpected invalid equihash 200, 9 solution:\n\
                              error: {error:?}\n\
                              input: {input:?}\n\
                              nonce: {nonce:?}\n\
                              solution: {solution:?}"
-                        )
-                    });
+                    )
+                });
                 println!("Solution {sol_num} is valid!\n");
             }
         }

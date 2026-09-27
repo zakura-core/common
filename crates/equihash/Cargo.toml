@@ -45,3 +45,7 @@ bench = false
 name = "solver"
 harness = false
 required-features = ["solver"]
+
+[[bench]]
+name = "verify"
+harness = false
