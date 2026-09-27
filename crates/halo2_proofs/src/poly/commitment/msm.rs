@@ -250,6 +250,19 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         }
     }
 
+    /// Adds owned generator coefficients, retaining their allocation when
+    /// this [`MSM`] has no existing generator terms.
+    pub(super) fn add_owned_g_scalars(&mut self, scalars: Vec<C::Scalar>) {
+        assert_eq!(scalars.len(), self.params.n as usize);
+        if let Some(g_scalars) = &mut self.g_scalars {
+            for (g_scalar, scalar) in g_scalars.iter_mut().zip(scalars) {
+                *g_scalar += scalar;
+            }
+        } else {
+            self.g_scalars = Some(scalars);
+        }
+    }
+
     /// Add to `w_scalar`
     pub fn add_to_w_scalar(&mut self, scalar: C::Scalar) {
         self.w_scalar = self.w_scalar.map_or(Some(scalar), |a| Some(a + &scalar));
@@ -401,11 +414,11 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
                         .collect()
                 };
                 if extra.len() <= n {
-                    let mut fixed =
-                        vec![C::Scalar::ZERO; n + super::PREPARED_COMMITMENT_EXTRA_BASES];
-                    if let Some(g_scalars) = &self.g_scalars {
-                        fixed[..n].copy_from_slice(g_scalars);
-                    }
+                    let mut fixed = self
+                        .g_scalars
+                        .take()
+                        .unwrap_or_else(|| vec![C::Scalar::ZERO; n]);
+                    fixed.resize(n + super::PREPARED_COMMITMENT_EXTRA_BASES, C::Scalar::ZERO);
                     if let Some(w_scalar) = self.w_scalar {
                         fixed[n] = w_scalar;
                     }
