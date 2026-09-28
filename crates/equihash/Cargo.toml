@@ -35,7 +35,9 @@ document-features = { version = "0.2", optional = true }
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+equihash_reference = { package = "equihash", version = "=0.3.0" }
 hex = "0.4"
+rand = "0.8"
 
 [lib]
 name = "equihash"
@@ -49,3 +51,7 @@ required-features = ["solver"]
 [[bench]]
 name = "verify"
 harness = false
+
+[[example]]
+name = "generate-equihash-compatibility"
+required-features = ["solver"]

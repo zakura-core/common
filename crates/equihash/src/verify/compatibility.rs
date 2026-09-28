@@ -1,0 +1,326 @@
+//! Differential coverage for common's verifier against upstream Equihash.
+//!
+//! The fixed random inputs contain valid proofs and real proofs whose final
+//! root is nonzero. Regenerate them with the
+//! `generate-equihash-compatibility` example. It uses common's Mainnet solver
+//! and an independent Wagner solver for Regtest, and checks every fixture
+//! against the published upstream verifier before emitting it.
+
+use alloc::{
+    borrow::ToOwned,
+    string::{String, ToString},
+    vec::Vec,
+};
+use std::collections::BTreeSet;
+
+use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
+
+use crate::{
+    leaf_hash::{HEADER_BYTES, Kernel, LeafHasher, NONCE_BYTES},
+    minimal::indices_from_minimal,
+    params::Params,
+};
+
+use super::{Error, validate_tree};
+const MUTATION_SEED: u64 = 0x514_c0de;
+const RANDOM_CASES_PER_INPUT: usize = 128;
+const INVALID_PARAMS: &str = "Invalid solution: invalid parameters";
+const UNSUPPORTED_INPUT: &str =
+    "Invalid solution: input and nonce are not a Zcash block header and nonce";
+
+struct TestVector {
+    n: u32,
+    k: u32,
+    valid: bool,
+    input: Vec<u8>,
+    nonce: Vec<u8>,
+    solution: Vec<u8>,
+}
+
+fn test_vectors() -> Vec<TestVector> {
+    include_str!("../test_vectors/random.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let fields: Vec<_> = line.split_ascii_whitespace().collect();
+            assert_eq!(fields.len(), 6);
+            assert!(matches!(fields[2], "valid" | "nonzero-root"));
+            let vector = TestVector {
+                n: fields[0].parse().unwrap(),
+                k: fields[1].parse().unwrap(),
+                valid: fields[2] == "valid",
+                input: hex::decode(fields[3]).unwrap(),
+                nonce: hex::decode(fields[4]).unwrap(),
+                solution: hex::decode(fields[5]).unwrap(),
+            };
+            assert_eq!(vector.input.len(), HEADER_BYTES);
+            assert_eq!(vector.nonce.len(), NONCE_BYTES);
+            vector
+        })
+        .collect()
+}
+
+impl TestVector {
+    fn compare(&self, input: &[u8], nonce: &[u8], solution: &[u8]) -> Result<(), String> {
+        let expected =
+            equihash_reference::is_valid_solution(self.n, self.k, input, nonce, solution)
+                .map_err(|error| error.to_string());
+        let actual = super::is_valid_solution(self.n, self.k, input, nonce, solution)
+            .map_err(|error| error.to_string());
+        assert_eq!(
+            actual,
+            expected,
+            "({}, {}) input={} nonce={} solution={}",
+            self.n,
+            self.k,
+            hex::encode(input),
+            hex::encode(nonce),
+            hex::encode(solution),
+        );
+        let params = Params::new(self.n, self.k).unwrap();
+        if let Some(indices) = indices_from_minimal(params, solution) {
+            for kernel in Kernel::supported() {
+                if let Some(hasher) = LeafHasher::with_kernel(&params, input, nonce, kernel) {
+                    let actual = validate_tree(&params, &indices, |blocks, digests| {
+                        hasher.hash(blocks, digests);
+                    })
+                    .map_err(Error)
+                    .map_err(|error| error.to_string());
+                    assert_eq!(actual, expected, "{kernel:?} ({}, {})", self.n, self.k);
+                }
+            }
+        }
+        expected
+    }
+
+    fn index_bits(&self) -> usize {
+        usize::try_from(self.n / (self.k + 1) + 1).unwrap()
+    }
+
+    // Read and write individual bits instead of copying either verifier's
+    // accumulator-based minimal-encoding implementation.
+    fn indices(&self) -> Vec<u32> {
+        self.solution
+            .iter()
+            .flat_map(|byte| (0..8).rev().map(move |bit| u32::from((byte >> bit) & 1)))
+            .collect::<Vec<_>>()
+            .chunks_exact(self.index_bits())
+            .map(|bits| bits.iter().fold(0, |index, bit| (index << 1) | bit))
+            .collect()
+    }
+
+    fn encode(&self, indices: &[u32]) -> Vec<u8> {
+        let bits = self.index_bits();
+        let mut encoded = vec![0; indices.len() * bits / 8];
+        for (i, index) in indices.iter().enumerate() {
+            for bit in 0..bits {
+                let offset = i * bits + bit;
+                let value = u8::try_from((index >> (bits - bit - 1)) & 1).unwrap();
+                encoded[offset / 8] |= value << (7 - offset % 8);
+            }
+        }
+        encoded
+    }
+}
+
+#[test]
+fn random_solved_headers_match_upstream() {
+    let vectors = test_vectors();
+    assert_eq!(vectors.iter().filter(|vector| vector.valid).count(), 40);
+    assert_eq!(vectors.iter().filter(|vector| !vector.valid).count(), 32);
+    for vector in vectors {
+        let result = vector.compare(&vector.input, &vector.nonce, &vector.solution);
+        if vector.valid {
+            result.expect("the generator verified this proof with upstream");
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                "Invalid solution: root hash of tree is non-zero"
+            );
+        }
+        assert_eq!(vector.encode(&vector.indices()), vector.solution);
+    }
+}
+
+#[test]
+fn random_proof_mutations_match_upstream() {
+    let mut rng = StdRng::seed_from_u64(MUTATION_SEED);
+    let mut verdicts = BTreeSet::new();
+    for vector in test_vectors().into_iter().filter(|vector| vector.valid) {
+        let indices = vector.indices();
+
+        // Reach every tree height and every aligned sibling pair, including
+        // merges across the verifier's leaf-hashing batch boundaries.
+        for height in 0..vector.k {
+            let width = 1usize << height;
+            for start in (0..indices.len()).step_by(2 * width) {
+                let mut swapped = indices.clone();
+                let (left, right) = swapped[start..start + 2 * width].split_at_mut(width);
+                left.swap_with_slice(right);
+                verdicts.insert(vector.compare(
+                    &vector.input,
+                    &vector.nonce,
+                    &vector.encode(&swapped),
+                ));
+
+                let mut duplicated = indices.clone();
+                duplicated.copy_within(start..start + width, start + width);
+                verdicts.insert(vector.compare(
+                    &vector.input,
+                    &vector.nonce,
+                    &vector.encode(&duplicated),
+                ));
+            }
+        }
+
+        // Mutate every encoded byte, rotating through all eight bit positions.
+        for byte in 0..vector.solution.len() {
+            let mut solution = vector.solution.clone();
+            solution[byte] ^= 1 << (byte % 8);
+            verdicts.insert(vector.compare(&vector.input, &vector.nonce, &solution));
+        }
+        for _ in 0..RANDOM_CASES_PER_INPUT {
+            let mut input = vector.input.clone();
+            let mut nonce = vector.nonce.clone();
+            let mut solution = vector.solution.clone();
+            let mut mutated = indices.clone();
+            let (a, b) = (
+                rng.gen_range(0..indices.len()),
+                rng.gen_range(0..indices.len()),
+            );
+            match rng.gen_range(0..7) {
+                0 => mutated.swap(a, b),
+                1 => mutated[b] = mutated[a],
+                2 => mutated[a] = rng.gen_range(0..1u32 << vector.index_bits()),
+                3 => mutated[a] = (1u32 << vector.index_bits()) - 1,
+                4 => rng.fill_bytes(&mut solution),
+                5 => rng.fill_bytes(&mut input),
+                _ => rng.fill_bytes(&mut nonce),
+            }
+            if mutated != indices {
+                solution = vector.encode(&mutated);
+            }
+            verdicts.insert(vector.compare(&input, &nonce, &solution));
+        }
+    }
+    // The cases must exercise the duplicate fallback and ordering check as
+    // well as the all-distinct fast path, rather than only early collisions.
+    for message in [
+        "Invalid solution: invalid collision length between StepRows",
+        "Invalid solution: Index tree incorrectly ordered",
+        "Invalid solution: duplicate indices",
+    ] {
+        assert!(verdicts.contains(&Err(message.to_owned())), "{message}");
+    }
+}
+
+#[test]
+fn random_prefix_mutations_and_splits_match_upstream() {
+    for vector in test_vectors().into_iter().filter(|vector| vector.valid) {
+        let prefix = [&vector.input[..], &vector.nonce[..]].concat();
+        // All splits retain the 140-byte prefix, including both sides of
+        // BLAKE2b's block boundary and empty input/nonce slices.
+        for split in 0..=prefix.len() {
+            vector
+                .compare(&prefix[..split], &prefix[split..], &vector.solution)
+                .expect("changing only the split preserves the hashed bytes");
+        }
+        for byte in 0..prefix.len() {
+            let mut mutated = prefix.clone();
+            mutated[byte] ^= 1 << (byte % 8);
+            vector
+                .compare(
+                    &mutated[..HEADER_BYTES],
+                    &mutated[HEADER_BYTES..],
+                    &vector.solution,
+                )
+                .expect_err("changing a prefix byte invalidates its proof");
+        }
+    }
+}
+
+#[test]
+fn bounded_parameter_matrix_matches_upstream() {
+    let mut rng = StdRng::seed_from_u64(MUTATION_SEED);
+    for n in (8..=512).step_by(8) {
+        // Bound proof sizes to 4096 leaves so the sweep is safe to run in CI.
+        for k in 3..=12 {
+            let Some(params) = Params::new(n, k) else {
+                continue;
+            };
+            for _ in 0..16 {
+                let mut vector = TestVector {
+                    n,
+                    k,
+                    valid: false,
+                    input: vec![0; HEADER_BYTES],
+                    nonce: vec![0; NONCE_BYTES],
+                    solution: vec![0; params.solution_bytes().unwrap()],
+                };
+                rng.fill_bytes(&mut vector.input);
+                rng.fill_bytes(&mut vector.nonce);
+                rng.fill_bytes(&mut vector.solution);
+                vector
+                    .compare(&vector.input, &vector.nonce, &vector.solution)
+                    .expect_err("fully random proofs do not solve the collision tree");
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_encodings_and_unsupported_domains_are_rejected() {
+    for vector in test_vectors().into_iter().filter(|vector| vector.valid) {
+        for len in [0, 1, vector.solution.len() - 1, vector.solution.len() + 1] {
+            let mut solution = vector.solution.clone();
+            solution.resize(len, 0);
+            assert_eq!(
+                vector.compare(&vector.input, &vector.nonce, &solution),
+                Err(INVALID_PARAMS.to_owned())
+            );
+            // Encoding errors still take precedence over the new length rule.
+            assert_eq!(
+                vector.compare(&[], &[], &solution),
+                Err(INVALID_PARAMS.to_owned())
+            );
+        }
+        for len in [0, HEADER_BYTES - 1, HEADER_BYTES + 1] {
+            let mut input = vector.input.clone();
+            input.resize(len, 0);
+            assert_eq!(
+                super::is_valid_solution(
+                    vector.n,
+                    vector.k,
+                    &input,
+                    &vector.nonce,
+                    &vector.solution,
+                )
+                .unwrap_err()
+                .to_string(),
+                UNSUPPORTED_INPUT
+            );
+        }
+    }
+    // These previously panicked or overflowed upstream, so equality with its
+    // behavior is deliberately not required outside the supported domain.
+    for (n, k) in [
+        (520, 64),
+        (1024, 3),
+        (48, 7),
+        (200, 7),
+        (104, 3),
+        (448, 63),
+        (512, 63),
+        (134_217_736, 16_777_216),
+        (u32::MAX, u32::MAX),
+    ] {
+        for solution in [&[][..], &[0]] {
+            assert_eq!(
+                super::is_valid_solution(n, k, &[], &[], solution)
+                    .unwrap_err()
+                    .to_string(),
+                INVALID_PARAMS
+            );
+        }
+    }
+}

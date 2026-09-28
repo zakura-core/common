@@ -809,3 +809,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "std"))]
+mod compatibility;
