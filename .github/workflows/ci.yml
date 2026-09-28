@@ -907,6 +907,10 @@ jobs:
           --release
           --all-features
           test_inv
+      # This is the only CI runner that executes the aarch64-asm backend; the
+      # AArch64 Linux and bare-metal jobs only build, and the Linux test jobs
+      # run the portable path. Run the whole suite so every assembly-backed
+      # path, including deferred accumulation, meets its portable oracles.
       - name: Test Apple AArch64 assembly
         if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: >-
@@ -914,7 +918,6 @@ jobs:
           --verbose
           --release
           --all-features
-          aarch64_asm_matches_portable_arithmetic
       - name: Verify working directory is clean
         run: git diff --exit-code
 
