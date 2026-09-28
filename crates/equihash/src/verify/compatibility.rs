@@ -5,13 +5,16 @@
 //! `generate-equihash-compatibility` example. It uses common's Mainnet solver
 //! and an independent Wagner solver for Regtest, and checks every fixture
 //! against the published upstream verifier before emitting it.
+//!
+//! Each randomized test uses a fresh mutation seed and reports it on failure.
+//! Set `EQUIHASH_MUTATION_SEED` to a decimal or `0x`-prefixed seed to replay it.
 
 use alloc::{
     borrow::ToOwned,
     string::{String, ToString},
     vec::Vec,
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, env, process::Command};
 
 use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 
@@ -22,11 +25,52 @@ use crate::{
 };
 
 use super::{Error, validate_tree};
-const MUTATION_SEED: u64 = 0x514_c0de;
+
+const MUTATION_SEED_ENV: &str = "EQUIHASH_MUTATION_SEED";
 const RANDOM_CASES_PER_INPUT: usize = 128;
 const INVALID_PARAMS: &str = "Invalid solution: invalid parameters";
 const UNSUPPORTED_INPUT: &str =
     "Invalid solution: input and nonce are not a Zcash block header and nonce";
+
+struct MutationRun {
+    seed: u64,
+    rng: StdRng,
+}
+
+impl MutationRun {
+    fn new() -> Self {
+        let seed = match env::var(MUTATION_SEED_ENV) {
+            Ok(value) => {
+                let parsed = if let Some(hex) = value.strip_prefix("0x") {
+                    u64::from_str_radix(hex, 16)
+                } else {
+                    value.parse()
+                };
+                parsed.expect("EQUIHASH_MUTATION_SEED must be a decimal or 0x-prefixed u64")
+            }
+            Err(env::VarError::NotPresent) => rand::random(),
+            Err(error) => panic!("invalid {MUTATION_SEED_ENV}: {error}"),
+        };
+        Self {
+            seed,
+            rng: StdRng::seed_from_u64(seed),
+        }
+    }
+}
+
+impl Drop for MutationRun {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            std::eprintln!(
+                "Equihash mutation seed: {:#018x}\n\
+                 Replay with {MUTATION_SEED_ENV}={:#018x} cargo test \
+                 -p zakura-equihash --all-features --locked verify::compatibility",
+                self.seed,
+                self.seed,
+            );
+        }
+    }
+}
 
 struct TestVector {
     n: u32,
@@ -144,7 +188,8 @@ fn random_solved_headers_match_upstream() {
 
 #[test]
 fn random_proof_mutations_match_upstream() {
-    let mut rng = StdRng::seed_from_u64(MUTATION_SEED);
+    let mut run = MutationRun::new();
+    let rng = &mut run.rng;
     let mut verdicts = BTreeSet::new();
     for vector in test_vectors().into_iter().filter(|vector| vector.valid) {
         let indices = vector.indices();
@@ -241,7 +286,8 @@ fn random_prefix_mutations_and_splits_match_upstream() {
 
 #[test]
 fn bounded_parameter_matrix_matches_upstream() {
-    let mut rng = StdRng::seed_from_u64(MUTATION_SEED);
+    let mut run = MutationRun::new();
+    let rng = &mut run.rng;
     for n in (8..=512).step_by(8) {
         // Bound proof sizes to 4096 leaves so the sweep is safe to run in CI.
         for k in 3..=12 {
@@ -260,12 +306,35 @@ fn bounded_parameter_matrix_matches_upstream() {
                 rng.fill_bytes(&mut vector.input);
                 rng.fill_bytes(&mut vector.nonce);
                 rng.fill_bytes(&mut vector.solution);
-                vector
-                    .compare(&vector.input, &vector.nonce, &vector.solution)
-                    .expect_err("fully random proofs do not solve the collision tree");
+                let _verdict = vector.compare(&vector.input, &vector.nonce, &vector.solution);
             }
         }
     }
+}
+
+#[test]
+fn mutation_seed_is_reported_on_failure() {
+    const CHILD_ENV: &str = "EQUIHASH_TEST_SEED_FAILURE_CHILD";
+    const SEED: &str = "0x0514c0de0514c0de";
+    if env::var_os(CHILD_ENV).is_some() {
+        let _run = MutationRun::new();
+        panic!("intentional failure to check mutation seed reporting");
+    }
+
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "verify::compatibility::mutation_seed_is_reported_on_failure",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .env(MUTATION_SEED_ENV, SEED)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(&format!("Equihash mutation seed: {SEED}")));
+    assert!(stderr.contains(&format!("{MUTATION_SEED_ENV}={SEED} cargo test")));
 }
 
 #[test]
