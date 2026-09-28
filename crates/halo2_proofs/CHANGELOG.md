@@ -10,6 +10,19 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.1.0-rc.0] - 2026-09-27
+
+### Added
+
+- Added the `portable` feature to forward portable Pasta field arithmetic
+  selection ([#505](https://github.com/zakura-core/common/pull/505)).
+
+### Changed
+
+- Sped up cached public-instance commitments in proof batches, improving
+  large-batch Orchard verification on x86-64
+  ([#503](https://github.com/zakura-core/common/pull/503)).
+
 ## [2.0.0] - 2026-09-23
 
 ### Added

@@ -10,6 +10,25 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.1.0-rc.0] - 2026-09-27
+
+### Changed
+
+- Sped up final exponentiation, and therefore pairings, using variable-time
+  field inversion. Pairing, final exponentiation, and random target-group
+  generation now have documented input-dependent timing and are intended for
+  public inputs such as Groth16 proofs
+  ([#485](https://github.com/zakura-core/common/pull/485),
+  [#494](https://github.com/zakura-core/common/pull/494),
+  [#501](https://github.com/zakura-core/common/pull/501)).
+- Sped up prepared multi-pairing Miller loops
+  ([#489](https://github.com/zakura-core/common/pull/489)).
+- Implemented the new affine-conversion hooks with variable-time inversion for
+  G1 and G2 projective points. Timing can depend on projective coordinates
+  ([#494](https://github.com/zakura-core/common/pull/494)).
+- Sped up Miller loops with reusable prepared G2 points
+  ([#495](https://github.com/zakura-core/common/pull/495)).
+
 ## [2.0.0] - 2026-09-23
 
 ### Changed

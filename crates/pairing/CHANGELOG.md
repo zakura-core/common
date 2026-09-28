@@ -10,6 +10,18 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.1.0-rc.0] - 2026-09-27
+
+### Added
+
+- Added defaulted `Engine::g1_to_affine_vartime` and
+  `Engine::g2_to_affine_vartime` hooks for explicit affine conversion with
+  possible input-dependent timing
+  ([#494](https://github.com/zakura-core/common/pull/494)).
+- Added `MultiMillerLoop::prepare_reusable_g2` for engines that can spend more
+  preparation time to speed up repeated Miller loops
+  ([#495](https://github.com/zakura-core/common/pull/495)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

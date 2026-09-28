@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.1.0-rc.0] - 2026-09-27
+
+### Changed
+
+- Sped up empty and single-item batch RedJubjub verification through the
+  updated RedDSA verifier
+  ([#498](https://github.com/zakura-core/common/pull/498)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

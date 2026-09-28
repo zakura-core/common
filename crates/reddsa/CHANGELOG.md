@@ -10,6 +10,16 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.1.0-rc.0] - 2026-09-27
+
+### Changed
+
+- Sped up Sapling single signature verification by about 36% when the `alloc`
+  feature is enabled ([#480](https://github.com/zakura-core/common/pull/480)).
+- Sped up empty and single-item signature batch verification. These batches
+  no longer consume random bytes
+  ([#498](https://github.com/zakura-core/common/pull/498)).
+
 ## [2.0.0] - 2026-09-23
 
 ### Changed

@@ -10,6 +10,37 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.1.0-rc.0] - 2026-09-27
+
+### Added
+
+- Added a prepared Groth16 batch verifying key that reuses fixed pairing
+  terms across repeated batches
+  ([#487](https://github.com/zakura-core/common/pull/487)).
+- Added joint verification of two Groth16 batches with prepared keys,
+  sharing one Miller loop and final exponentiation
+  ([#496](https://github.com/zakura-core/common/pull/496)).
+- Added reusable fixed G2 terms that a Groth16 batch verifying key can borrow
+  ([#499](https://github.com/zakura-core/common/pull/499)).
+
+### Changed
+
+- Sped up single Groth16 proof verification when a prepared verifying key is
+  reused, especially for proofs with several public inputs
+  ([#482](https://github.com/zakura-core/common/pull/482)).
+- Sped up multicore Groth16 batch verification, especially for batches
+  smaller than the Rayon thread count
+  ([#483](https://github.com/zakura-core/common/pull/483)).
+- Switched Groth16 proof finalization and ordinary verification to the
+  explicit variable-time affine conversion hooks. Prover timing can now
+  depend on witness-derived projective coordinates; batch verification
+  continues to use its existing conversion for points involving private batch
+  randomizers
+  ([#494](https://github.com/zakura-core/common/pull/494)).
+- Sped up repeated Groth16 verification with a prepared verifying key,
+  including prepared batch verifying keys
+  ([#495](https://github.com/zakura-core/common/pull/495)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

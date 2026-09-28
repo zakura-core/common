@@ -10,6 +10,24 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.1.0-rc.0] - 2026-09-27
+
+### Added
+
+- Added reusable prepared keys for Sapling batch validation, avoiding
+  repeated fixed G2 preparation across validators
+  ([#491](https://github.com/zakura-core/common/pull/491)).
+
+### Changed
+
+- Sped up small mixed Spend and Output proof batches using joint prepared
+  verification ([#496](https://github.com/zakura-core/common/pull/496)).
+- Sped up Sapling Spend nullifier public-input packing
+  ([#497](https://github.com/zakura-core/common/pull/497)).
+- Sped up repeated Sapling batch validation by retaining prepared G2 terms
+  inside Spend and Output verifying keys
+  ([#499](https://github.com/zakura-core/common/pull/499)).
+
 ## [1.0.1] - 2026-08-29
 
 ### Changed

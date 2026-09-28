@@ -10,6 +10,24 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [2.1.0-rc.0] - 2026-09-27
+
+### Added
+
+- Added the `portable` feature to disable automatic x86-64 assembly selection
+  for binaries that may run on older CPUs
+  ([#505](https://github.com/zakura-core/common/pull/505)).
+
+### Changed
+
+- Native x86-64 builds now select the BMI2+ADX Pasta field backend at build
+  time when the build CPU supports both extensions. Explicit target settings
+  and cross-compilation remain conservative, and there is no runtime dispatch
+  ([#505](https://github.com/zakura-core/common/pull/505)).
+- Reduced the scratch memory used by batched affine additions in
+  multi-scalar multiplications
+  ([#518](https://github.com/zakura-core/common/pull/518)).
+
 ## [2.0.0] - 2026-09-23
 
 ### Added
