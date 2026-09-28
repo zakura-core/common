@@ -1,7 +1,7 @@
 //! Regenerate the random Equihash compatibility fixtures.
 //!
-//! Run with `cargo run -p zakura-equihash --example
-//! generate-equihash-compatibility --features solver` and store stdout
+//! Run with `cargo run --release -p zakura-equihash --example
+//! generate-equihash-compatibility --features solver --locked` and store stdout
 //! in `src/test_vectors/random.txt`.
 
 use rand::{RngCore, SeedableRng, rngs::StdRng};

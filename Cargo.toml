@@ -4,8 +4,9 @@
 # workspace members (no submodules). Members reference each other through the
 # [workspace.dependencies] table below (path + version), and Zakura consumes
 # them from crates.io under their `zakura-*` names — no `[patch]` indirection,
-# so every edge into these crates is an explicit declaration and the upstream
-# crates.io originals never enter the graph.
+# so every production edge into these crates is an explicit declaration and the
+# upstream crates.io originals never enter the production graph. Test-only
+# differential oracles can explicitly depend on published upstream packages.
 #
 # Each member is named after its zakura-branded crates.io reservation (e.g.
 # halo2_proofs → zakura-halo2-proofs, zcash_primitives → zakura-primitives;
@@ -133,3 +134,11 @@ base64 = "0.22"
 nom = "7"
 percent-encoding = "2.1.0"
 proptest = ">=1,<1.7"
+
+# The differential matrix hashes many valid subtrees with both implementations.
+# Optimize those test targets while retaining test-profile assertions/checks.
+[profile.test.package.zakura-equihash]
+opt-level = 3
+
+[profile.test.package.equihash]
+opt-level = 3
