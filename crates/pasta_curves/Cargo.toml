@@ -45,10 +45,12 @@ serde_json = "1.0"
 
 [features]
 aarch64-asm = ["dep:cc"]
-# Disable automatic x86-64 assembly selection, even if `x86_64-asm` is also
-# enabled. Use this for binaries that may run on older x86-64 CPUs.
+# Disable the x86-64 assembly backend, even if `x86_64-asm` is also enabled.
+# This does not undo CPU instructions enabled by Rust's target flags.
 portable = []
 # MULX/ADCX/ADOX Montgomery arithmetic for the Pasta fields on x86-64.
+# The backend is automatically selected when Rust's target enables both
+# BMI2 and ADX, e.g. with `-C target-cpu=native` on a supporting CPU.
 # This forces the backend on; unsupported CPUs will fault unless `portable`
 # is also enabled.
 x86_64-asm = []

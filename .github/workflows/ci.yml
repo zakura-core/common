@@ -904,6 +904,21 @@ jobs:
           --verbose
           --release
           ${{ matrix.features }}
+      - name: Test explicit x86-64 target features
+        if: matrix.features == '--features=multicore'
+        env:
+          RUSTFLAGS: -C target-feature=+adx,+bmi2
+        run: |
+          if grep -qw adx /proc/cpuinfo && grep -qw bmi2 /proc/cpuinfo; then
+            cargo +stable test -p zakura-pasta-curves \
+              --verbose --release --features=multicore \
+              --target x86_64-unknown-linux-gnu
+          else
+            echo "Runner lacks ADX/BMI2; compile assembly tests without running."
+            cargo +stable test -p zakura-pasta-curves \
+              --verbose --release --features=multicore --no-run \
+              --target x86_64-unknown-linux-gnu
+          fi
       - name: Verify working directory is clean
         run: git diff --exit-code
 

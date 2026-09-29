@@ -31,18 +31,10 @@ fn use_x86_64_asm() -> bool {
         return true;
     }
 
+    // Use the compiler's resolved target features, not the build CPU. Equal
+    // HOST and TARGET triples do not imply an implicit native target.
     let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
-    if has_required_x86_64_features(&target_features) {
-        return true;
-    }
-
-    // Respect an explicit target contract instead of silently replacing it
-    // with the build host's capabilities.
-    if has_explicit_target_configuration() {
-        return false;
-    }
-
-    env::var("HOST") == env::var("TARGET") && build_host_has_required_x86_64_features()
+    has_required_x86_64_features(&target_features)
 }
 
 fn has_required_x86_64_features(target_features: &str) -> bool {
@@ -51,21 +43,6 @@ fn has_required_x86_64_features(target_features: &str) -> bool {
             .split(',')
             .any(|feature| feature == *required)
     })
-}
-
-fn has_explicit_target_configuration() -> bool {
-    env::var("CARGO_ENCODED_RUSTFLAGS")
-        .is_ok_and(|flags| flags.contains("target-cpu") || flags.contains("target-feature"))
-}
-
-#[cfg(target_arch = "x86_64")]
-fn build_host_has_required_x86_64_features() -> bool {
-    std::is_x86_feature_detected!("adx") && std::is_x86_feature_detected!("bmi2")
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn build_host_has_required_x86_64_features() -> bool {
-    false
 }
 
 #[cfg(feature = "aarch64-asm")]
