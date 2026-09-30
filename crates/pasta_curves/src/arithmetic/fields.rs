@@ -261,6 +261,30 @@ impl<F: SqrtTableHelpers> SqrtTables<F> {
         (is_square, res)
     }
 
+    /// Finishes a square root given the exact power `u^((T-1)/2)`.
+    ///
+    /// Both inputs must be canonical field values, with `p-1 = T * 2^S`.
+    /// Only the checked internal backend supplies powers; public callers do
+    /// not provide them. Keep the scalar [`Self::sqrt_alt`] path unchanged.
+    #[cfg(all(
+        feature = "glv",
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    pub(crate) fn sqrt_alt_with_power(&self, u: &F, v: &F) -> (Choice, F) {
+        let uv = *u * v;
+
+        let res = self.sqrt_common(&uv, v);
+
+        let sq = res.square();
+        let is_square = (sq - u).is_zero();
+        let is_nonsquare = (sq - F::ROOT_OF_UNITY * u).is_zero();
+        assert!(bool::from(u.is_zero() | (is_square ^ is_nonsquare)));
+
+        (is_square, res)
+    }
+
     /// Common part of sqrt_ratio and sqrt_alt: return their result given v = u^((T-1)/2) and uv = u * v.
     fn sqrt_common(&self, uv: &F, v: &F) -> F {
         let inv = |x: F| self.inv[self.hasher.hash(&x)] as usize;

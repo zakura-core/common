@@ -4,7 +4,10 @@ use group::{
 };
 use pasta_curves::arithmetic::CurveAffine;
 use rand::rngs::SysRng;
-use std::sync::Arc;
+use std::{
+    io::{self, Read},
+    sync::Arc,
+};
 
 use super::{VerificationStrategy, validate_instances, verify_proof_with_instance_commitments};
 use crate::{
@@ -13,7 +16,9 @@ use crate::{
     multicore::{IntoParallelIterator, TryFoldAndReduce},
     plonk::{Error, VerifyingKey, commit_instance},
     poly::commitment::{Guard, MSM, Params},
-    transcript::{Blake2bRead, EncodedChallenge},
+    transcript::{
+        Blake2bRead, Challenge255, ChallengeScalar, EncodedChallenge, Transcript, TranscriptRead,
+    },
 };
 
 const SERIAL_INSTANCE_WINDOW_BITS: usize = 8;
@@ -22,6 +27,179 @@ const MIN_LOCKSTEP_INSTANCE_COLUMNS: usize = 3;
 
 #[cfg(feature = "multicore")]
 use crate::multicore::{IndexedParallelIterator, ParallelIterator};
+
+const POINT_DECODE_LANES: usize = 8;
+
+fn point_decode_enabled<C: CurveAffine>() -> bool {
+    #[cfg(all(feature = "x86_64-asm", target_arch = "x86_64"))]
+    {
+        let curve = core::any::TypeId::of::<C>();
+        (curve == core::any::TypeId::of::<pasta_curves::pallas::Affine>()
+            || curve == core::any::TypeId::of::<pasta_curves::vesta::Affine>())
+            && std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512ifma")
+            && std::is_x86_feature_detected!("avx512vl")
+    }
+    #[cfg(not(all(feature = "x86_64-asm", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// A sequential transcript with bounded immutable point-decoding lookahead.
+///
+/// Cached results are keyed by their exact proof-byte offset. Peeking does
+/// not consume bytes, absorb points, squeeze challenges, or report errors.
+/// Every actual read still consumes the original slice before using a hint;
+/// invalid encodings and identity points fail at the same read as before.
+struct BatchSliceRead<'a, C: CurveAffine>
+where
+    C::Scalar: FromUniformBytes<64>,
+{
+    remaining: &'a [u8],
+    proof_len: usize,
+    hash: Blake2bRead<&'a [u8], C, Challenge255<C>>,
+    cache: [Option<C>; POINT_DECODE_LANES],
+    cache_start: usize,
+    cache_active: bool,
+    decode_enabled: bool,
+    #[cfg(test)]
+    force_scalar_decode: bool,
+}
+
+impl<'a, C: CurveAffine> BatchSliceRead<'a, C>
+where
+    C::Scalar: FromUniformBytes<64>,
+{
+    fn init(proof: &'a [u8]) -> Self {
+        Self {
+            remaining: proof,
+            proof_len: proof.len(),
+            hash: Blake2bRead::init(&[]),
+            cache: [None; POINT_DECODE_LANES],
+            cache_start: 0,
+            cache_active: false,
+            decode_enabled: point_decode_enabled::<C>(),
+            #[cfg(test)]
+            force_scalar_decode: false,
+        }
+    }
+
+    fn refill_points(&mut self, offset: usize, first: &C::Repr, repr_bytes: usize) {
+        #[cfg(test)]
+        let enabled = self.decode_enabled || self.force_scalar_decode;
+        #[cfg(not(test))]
+        let enabled = self.decode_enabled;
+        if !enabled {
+            return;
+        }
+        let Some(lookahead_bytes) = repr_bytes.checked_mul(POINT_DECODE_LANES - 1) else {
+            return;
+        };
+        if repr_bytes == 0
+            || first.as_ref().len() != repr_bytes
+            || self.remaining.len() < lookahead_bytes
+        {
+            return;
+        }
+        let mut reprs: [C::Repr; POINT_DECODE_LANES] = core::array::from_fn(|_| C::Repr::default());
+        for (lane, repr) in reprs.iter_mut().enumerate() {
+            if repr.as_mut().len() != repr_bytes {
+                return;
+            }
+            if lane == 0 {
+                repr.as_mut().copy_from_slice(first.as_ref());
+            } else {
+                let start = (lane - 1) * repr_bytes;
+                repr.as_mut()
+                    .copy_from_slice(&self.remaining[start..start + repr_bytes]);
+            }
+        }
+        #[cfg(test)]
+        if self.force_scalar_decode {
+            self.cache = reprs.map(|repr| Option::from(C::from_bytes(&repr)));
+            self.cache_start = offset;
+            self.cache_active = true;
+            return;
+        }
+
+        let Some(decoded) = pasta_curves::arithmetic::try_batch_from_bytes8::<C>(&reprs) else {
+            // Unsupported configurations use the original scalar decoder.
+            // Do not allocate future representations or repeat this attempt.
+            self.decode_enabled = false;
+            return;
+        };
+        self.cache = decoded.map(Option::from);
+        self.cache_start = offset;
+        self.cache_active = true;
+    }
+}
+
+impl<C: CurveAffine> Transcript<C, Challenge255<C>> for BatchSliceRead<'_, C>
+where
+    C::Scalar: FromUniformBytes<64>,
+{
+    fn squeeze_challenge(&mut self) -> Challenge255<C> {
+        self.hash.squeeze_challenge()
+    }
+
+    fn squeeze_challenge_scalar<T>(&mut self) -> ChallengeScalar<C, T> {
+        self.hash.squeeze_challenge_scalar()
+    }
+
+    fn common_point(&mut self, point: C) -> io::Result<()> {
+        self.hash.common_point(point)
+    }
+
+    fn common_scalar(&mut self, scalar: C::Scalar) -> io::Result<()> {
+        self.hash.common_scalar(scalar)
+    }
+}
+
+impl<C: CurveAffine> TranscriptRead<C, Challenge255<C>> for BatchSliceRead<'_, C>
+where
+    C::Scalar: FromUniformBytes<64>,
+{
+    fn read_point(&mut self) -> io::Result<C> {
+        let mut repr = C::Repr::default();
+        let repr_bytes = repr.as_mut().len();
+        let offset = self.proof_len - self.remaining.len();
+        let cache_index = |start: usize| {
+            offset
+                .checked_sub(start)
+                .filter(|delta| repr_bytes != 0 && delta % repr_bytes == 0)
+                .map(|delta| delta / repr_bytes)
+                .filter(|index| *index < POINT_DECODE_LANES)
+        };
+        self.remaining.read_exact(repr.as_mut())?;
+        if !self.cache_active || cache_index(self.cache_start).is_none() {
+            self.cache_active = false;
+            self.refill_points(offset, &repr, repr_bytes);
+        }
+        let point: C = if self.cache_active {
+            cache_index(self.cache_start).and_then(|index| self.cache[index])
+        } else {
+            Option::from(C::from_bytes(&repr))
+        }
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid point encoding in proof"))?;
+        self.common_point(point)?;
+        Ok(point)
+    }
+
+    fn read_scalar(&mut self) -> io::Result<C::Scalar> {
+        let mut repr = <C::Scalar as PrimeField>::Repr::default();
+        self.remaining.read_exact(repr.as_mut())?;
+        self.cache_active = false;
+        let scalar: C::Scalar = Option::from(C::Scalar::from_repr(repr)).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "invalid field element encoding in proof",
+            )
+        })?;
+        self.common_scalar(scalar)?;
+        Ok(scalar)
+    }
+}
 
 /// A proof verification strategy that returns the proof's MSM.
 ///
@@ -387,7 +565,7 @@ where
                     C::Scalar::try_random(&mut SysRng).expect("system randomness must be available")
                 };
                 let strategy = BatchStrategy::new(params, rho_i);
-                let mut transcript = Blake2bRead::init(&item.proof[..]);
+                let mut transcript = BatchSliceRead::init(&item.proof[..]);
                 verify_proof_with_instance_commitments(
                     params,
                     vk,
@@ -416,15 +594,23 @@ where
 #[cfg(test)]
 mod tests {
     use ff::{Field, FromUniformBytes};
+    use group::{Curve, Group};
     use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
+    use std::{
+        cell::Cell,
+        io::{self, Read},
+        rc::Rc,
+    };
 
     use super::{
-        InstanceFixedWindowTable, commit_instance_with_table, signed_fixed_window_digit,
-        signed_instance_window_count,
+        BatchSliceRead, CurveAffine, InstanceFixedWindowTable, POINT_DECODE_LANES, PrimeField,
+        commit_instance_with_table, signed_fixed_window_digit, signed_instance_window_count,
     };
     use crate::{
         INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE, MAX_CACHED_INSTANCE_ROWS,
-        plonk::commit_instance, poly::commitment::Params,
+        plonk::commit_instance,
+        poly::commitment::Params,
+        transcript::{Blake2bRead, Challenge255, Transcript, TranscriptRead},
     };
 
     #[test]
@@ -448,6 +634,222 @@ mod tests {
                 assert_eq!(reconstructed, value as i128, "{bits}-bit value {value}");
             }
         }
+    }
+
+    struct ObservedSlice<'a> {
+        remaining: &'a [u8],
+        consumed: Rc<Cell<usize>>,
+    }
+
+    impl Read for ObservedSlice<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            let result = self.remaining.read(output);
+            if let Ok(count) = result {
+                self.consumed.set(self.consumed.get() + count);
+            }
+            result
+        }
+
+        fn read_exact(&mut self, output: &mut [u8]) -> io::Result<()> {
+            let before = self.remaining.len();
+            let result = self.remaining.read_exact(output);
+            self.consumed
+                .set(self.consumed.get() + before - self.remaining.len());
+            result
+        }
+    }
+
+    fn same_result<T: core::fmt::Debug + PartialEq>(
+        actual: io::Result<T>,
+        expected: io::Result<T>,
+    ) {
+        match (actual, expected) {
+            (Ok(actual), Ok(expected)) => assert_eq!(actual, expected),
+            (Err(actual), Err(expected)) => {
+                assert_eq!(actual.kind(), expected.kind());
+                assert_eq!(actual.to_string(), expected.to_string());
+            }
+            (actual, expected) => panic!("transcript results differ: {actual:?}/{expected:?}"),
+        }
+    }
+
+    fn check_slice_transcript<C: CurveAffine>()
+    where
+        C::Scalar: FromUniformBytes<64>,
+    {
+        let generator = C::Curve::generator().to_affine();
+        let points: Vec<_> = (1..=3 * POINT_DECODE_LANES + 1)
+            .map(|index| {
+                (C::Curve::from(generator) * C::Scalar::from(index as u64))
+                    .to_affine()
+                    .to_bytes()
+            })
+            .collect();
+        let scalar = C::Scalar::from(19);
+        let mut proof = Vec::new();
+        // The first lookahead crosses a challenge, and the second reaches
+        // into scalar bytes. Scalar reads must invalidate unused hints.
+        for point in &points[..POINT_DECODE_LANES + 3] {
+            proof.extend_from_slice(point.as_ref());
+        }
+        proof.extend_from_slice(scalar.to_repr().as_ref());
+        for point in &points[POINT_DECODE_LANES + 3..] {
+            proof.extend_from_slice(point.as_ref());
+        }
+        let consumed = Rc::new(Cell::new(0));
+        let mut expected = Blake2bRead::<_, C, Challenge255<C>>::init(ObservedSlice {
+            remaining: &proof,
+            consumed: consumed.clone(),
+        });
+        let mut actual = BatchSliceRead::<C>::init(&proof);
+        actual.force_scalar_decode = true;
+        same_result(actual.common_scalar(scalar), expected.common_scalar(scalar));
+        same_result(
+            actual.common_point(generator),
+            expected.common_point(generator),
+        );
+        for index in 0..points.len() {
+            if index == POINT_DECODE_LANES + 3 {
+                same_result(actual.read_scalar(), expected.read_scalar());
+                assert!(!actual.cache_active);
+            }
+            same_result(actual.read_point(), expected.read_point());
+            assert_eq!(actual.proof_len - actual.remaining.len(), consumed.get());
+            if index % 2 == 1 {
+                let left = actual.squeeze_challenge();
+                let right = expected.squeeze_challenge();
+                assert_eq!(&left[..], &right[..]);
+            }
+            if index % 3 == 2 {
+                let left = actual.squeeze_challenge_scalar::<()>();
+                let right = expected.squeeze_challenge_scalar::<()>();
+                assert_eq!(*left, *right);
+            }
+        }
+        same_result(actual.read_point(), expected.read_point());
+        assert_eq!(actual.proof_len - actual.remaining.len(), consumed.get());
+
+        // Every speculative lane is checked for error timing and state:
+        // invalid encodings must not absorb a point; identity still absorbs
+        // the existing point prefix before common_point rejects it.
+        for bad_lane in 0..POINT_DECODE_LANES {
+            for identity in [false, true] {
+                let mut proof = Vec::new();
+                for (lane, repr) in points[..2 * POINT_DECODE_LANES].iter().enumerate() {
+                    if lane == bad_lane {
+                        let mut bad = C::Repr::default();
+                        if !identity {
+                            bad.as_mut().fill(u8::MAX);
+                        }
+                        proof.extend_from_slice(bad.as_ref());
+                    } else {
+                        proof.extend_from_slice(repr.as_ref());
+                    }
+                }
+                let consumed = Rc::new(Cell::new(0));
+                let mut expected = Blake2bRead::<_, C, Challenge255<C>>::init(ObservedSlice {
+                    remaining: &proof,
+                    consumed: consumed.clone(),
+                });
+                let mut actual = BatchSliceRead::<C>::init(&proof);
+                actual.force_scalar_decode = true;
+                for _ in 0..=bad_lane {
+                    same_result(actual.read_point(), expected.read_point());
+                    assert_eq!(actual.proof_len - actual.remaining.len(), consumed.get());
+                    let left = actual.squeeze_challenge();
+                    let right = expected.squeeze_challenge();
+                    assert_eq!(&left[..], &right[..]);
+                }
+                // Also compare continuation after the error; no future
+                // cached lane may have changed the earlier transcript state.
+                same_result(actual.read_point(), expected.read_point());
+                assert_eq!(
+                    &actual.squeeze_challenge()[..],
+                    &expected.squeeze_challenge()[..]
+                );
+            }
+        }
+
+        let repr_bytes = points[0].as_ref().len();
+        for available in 0..2 * POINT_DECODE_LANES * repr_bytes {
+            let proof: Vec<_> = points[..2 * POINT_DECODE_LANES]
+                .iter()
+                .flat_map(|point| point.as_ref().iter().copied())
+                .collect();
+            let consumed = Rc::new(Cell::new(0));
+            let mut expected = Blake2bRead::<_, C, Challenge255<C>>::init(ObservedSlice {
+                remaining: &proof[..available],
+                consumed: consumed.clone(),
+            });
+            let mut actual = BatchSliceRead::<C>::init(&proof[..available]);
+            actual.force_scalar_decode = true;
+            for _ in 0..=available / repr_bytes {
+                same_result(actual.read_point(), expected.read_point());
+                assert_eq!(actual.proof_len - actual.remaining.len(), consumed.get());
+            }
+            assert_eq!(
+                &actual.squeeze_challenge()[..],
+                &expected.squeeze_challenge()[..]
+            );
+        }
+
+        let mut invalid_scalar = <C::Scalar as PrimeField>::Repr::default();
+        invalid_scalar.as_mut().fill(u8::MAX);
+        let mut expected = Blake2bRead::<_, C, Challenge255<C>>::init(invalid_scalar.as_ref());
+        let mut actual = BatchSliceRead::<C>::init(invalid_scalar.as_ref());
+        same_result(actual.read_scalar(), expected.read_scalar());
+        assert_eq!(
+            &actual.squeeze_challenge()[..],
+            &expected.squeeze_challenge()[..]
+        );
+    }
+
+    #[test]
+    fn batch_slice_transcript_pallas() {
+        check_slice_transcript::<EpAffine>();
+    }
+
+    #[test]
+    fn batch_slice_transcript_vesta() {
+        check_slice_transcript::<EqAffine>();
+    }
+
+    fn check_native_cache_when_available<C: CurveAffine>()
+    where
+        C::Scalar: FromUniformBytes<64>,
+    {
+        let generator = C::Curve::generator();
+        let reprs = core::array::from_fn(|lane| {
+            (generator * C::Scalar::from(lane as u64 + 1))
+                .to_affine()
+                .to_bytes()
+        });
+        let supported = pasta_curves::arithmetic::try_batch_from_bytes8::<C>(&reprs).is_some()
+            && super::point_decode_enabled::<C>();
+        let proof: Vec<u8> = reprs
+            .iter()
+            .flat_map(|repr| repr.as_ref().iter().copied())
+            .collect();
+        let mut transcript = BatchSliceRead::<C>::init(&proof);
+        for (lane, repr) in reprs.iter().enumerate() {
+            let expected: C = Option::from(C::from_bytes(repr)).unwrap();
+            assert_eq!(transcript.read_point().unwrap(), expected);
+            assert_eq!(transcript.cache_active, supported);
+            assert_eq!(
+                transcript.proof_len - transcript.remaining.len(),
+                (lane + 1) * repr.as_ref().len()
+            );
+        }
+    }
+
+    #[test]
+    fn batch_slice_native_cache_pallas() {
+        check_native_cache_when_available::<EpAffine>();
+    }
+
+    #[test]
+    fn batch_slice_native_cache_vesta() {
+        check_native_cache_when_available::<EqAffine>();
     }
 
     #[test]

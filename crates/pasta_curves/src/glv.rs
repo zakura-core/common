@@ -1623,6 +1623,10 @@ struct PendingAffineAddition<F> {
 
 /// Independent multiplication lanes used by batch inversion.
 const BATCH_INVERSION_LANES: usize = 2;
+const IFMA_BATCH_INVERSION_LANES: usize = 8;
+/// Small inputs do not amortize the packed reducer's boundary conversion.
+#[cfg(any(test, feature = "multicore", feature = "orbits"))]
+const PACKED_AFFINE_REDUCTION_MIN_POINTS: usize = 128;
 
 /// Batch-inverts affine denominators and immediately finishes the additions.
 ///
@@ -1634,6 +1638,17 @@ const BATCH_INVERSION_LANES: usize = 2;
 /// [`reduce_affine_buckets`] combines this failure-atomic behavior with
 /// separate level staging before it retries an exceptional level.
 fn batch_invert_and_add<F: Field>(
+    additions: &mut [PendingAffineAddition<F>],
+    points: &mut [AffinePoint<F>],
+) -> Option<()> {
+    if additions.len() >= IFMA_BATCH_INVERSION_LANES && crate::fields::ifma_available_for::<F>() {
+        batch_invert_and_add_eight_lanes(additions, points)
+    } else {
+        batch_invert_and_add_scalar(additions, points)
+    }
+}
+
+fn batch_invert_and_add_scalar<F: Field>(
     additions: &mut [PendingAffineAddition<F>],
     points: &mut [AffinePoint<F>],
 ) -> Option<()> {
@@ -1744,6 +1759,116 @@ fn batch_invert_and_add<F: Field>(
     Some(())
 }
 
+/// Multiplies independent IFMA lanes, preserving exact scalar arithmetic on
+/// unsupported fields and targets.
+fn mul_assign_eight_lanes<F: Field>(
+    values: &mut [F; IFMA_BATCH_INVERSION_LANES],
+    factors: &[F; IFMA_BATCH_INVERSION_LANES],
+) {
+    if !crate::fields::try_mul_assign8(values, factors) {
+        for (value, factor) in values.iter_mut().zip(factors) {
+            *value *= factor;
+        }
+    }
+}
+
+fn square_eight_lanes<F: Field>(values: &mut [F; IFMA_BATCH_INVERSION_LANES]) {
+    if !crate::fields::try_square8(values) {
+        for value in values {
+            *value = value.square();
+        }
+    }
+}
+
+/// Finishes one group of independent chords using their recovered slopes.
+fn finish_affine_eight_lanes<F: Field>(
+    additions: &[PendingAffineAddition<F>],
+    slopes: &[F; IFMA_BATCH_INVERSION_LANES],
+    points: &mut [AffinePoint<F>],
+) {
+    let mut x = *slopes;
+    square_eight_lanes(&mut x);
+    for (x, addition) in x.iter_mut().zip(additions) {
+        *x -= addition.x_sum;
+    }
+    let mut y = core::array::from_fn(|lane| {
+        additions
+            .get(lane)
+            .map_or(F::ZERO, |addition| points[addition.output].x - x[lane])
+    });
+    mul_assign_eight_lanes(&mut y, slopes);
+    for (lane, addition) in additions.iter().enumerate() {
+        let left = points[addition.output];
+        points[addition.output] = AffinePoint {
+            x: x[lane],
+            y: y[lane] - left.y,
+        };
+    }
+}
+
+/// Uses eight numerator-prefix lanes with one shared denominator inversion.
+/// Padding an incomplete final group with denominator one keeps the lane
+/// products unchanged. Only pending numerators are written before inversion.
+fn batch_invert_and_add_eight_lanes<F: Field>(
+    additions: &mut [PendingAffineAddition<F>],
+    points: &mut [AffinePoint<F>],
+) -> Option<()> {
+    debug_assert!(additions.len() >= IFMA_BATCH_INVERSION_LANES);
+    let (first, rest) = additions.split_at_mut(IFMA_BATCH_INVERSION_LANES);
+    let mut lane_products = core::array::from_fn(|lane| first[lane].denominator);
+    for group in rest.chunks_mut(IFMA_BATCH_INVERSION_LANES) {
+        let mut numerators = core::array::from_fn(|lane| {
+            group
+                .get(lane)
+                .map_or(F::ZERO, |addition| addition.numerator)
+        });
+        let denominators = core::array::from_fn(|lane| {
+            group
+                .get(lane)
+                .map_or(F::ONE, |addition| addition.denominator)
+        });
+        mul_assign_eight_lanes(&mut numerators, &lane_products);
+        mul_assign_eight_lanes(&mut lane_products, &denominators);
+        for (addition, numerator) in group.iter_mut().zip(numerators) {
+            addition.numerator = numerator;
+        }
+    }
+
+    let mut prefixes = [F::ONE; IFMA_BATCH_INVERSION_LANES];
+    let mut product = lane_products[0];
+    for lane in 1..IFMA_BATCH_INVERSION_LANES {
+        prefixes[lane] = product;
+        product *= lane_products[lane];
+    }
+    let mut inverse = Option::<F>::from(product.invert())?;
+    let mut lane_inverses = [F::ZERO; IFMA_BATCH_INVERSION_LANES];
+    for lane in (1..IFMA_BATCH_INVERSION_LANES).rev() {
+        lane_inverses[lane] = prefixes[lane] * inverse;
+        inverse *= lane_products[lane];
+    }
+    lane_inverses[0] = inverse;
+
+    for group in rest.chunks(IFMA_BATCH_INVERSION_LANES).rev() {
+        let mut slopes = core::array::from_fn(|lane| {
+            group
+                .get(lane)
+                .map_or(F::ZERO, |addition| addition.numerator)
+        });
+        let denominators = core::array::from_fn(|lane| {
+            group
+                .get(lane)
+                .map_or(F::ONE, |addition| addition.denominator)
+        });
+        mul_assign_eight_lanes(&mut slopes, &lane_inverses);
+        mul_assign_eight_lanes(&mut lane_inverses, &denominators);
+        finish_affine_eight_lanes(group, &slopes, points);
+    }
+    let mut slopes = core::array::from_fn(|lane| first[lane].numerator);
+    mul_assign_eight_lanes(&mut slopes, &lane_inverses);
+    finish_affine_eight_lanes(first, &slopes, points);
+    Some(())
+}
+
 /// Collects the nonzero signed points assigned to one Booth window.
 fn window_assignments<C>(
     components: &[(SignedMagnitude, SignedMagnitude)],
@@ -1834,6 +1959,19 @@ fn reduce_affine_buckets_in_place<F: Field>(
     mut offsets: Vec<usize>,
 ) -> Option<Vec<Option<AffinePoint<F>>>> {
     debug_assert!(!offsets.is_empty());
+    if points.len() >= PACKED_AFFINE_REDUCTION_MIN_POINTS
+        && let Some(buckets) =
+            crate::fields::try_reduce_affine_buckets_packed(points.len(), &offsets, |index| {
+                (points[index].x, points[index].y)
+            })
+    {
+        return Some(
+            buckets
+                .into_iter()
+                .map(|point| point.map(|(x, y)| AffinePoint { x, y }))
+                .collect(),
+        );
+    }
     let bucket_count = offsets.len() - 1;
     let mut next_offsets = Vec::with_capacity(offsets.len());
     let mut pending = Vec::with_capacity(points.len() / 2);
@@ -4714,13 +4852,13 @@ mod tests {
         batch_invert_nonzero_matches_individual::<crate::Fq>();
     }
 
-    fn batch_invert_and_add_two_lanes_matches_individual<F>()
-    where
+    fn batch_invert_and_add_matches_individual<F>(
+        lengths: &[usize],
+        invert_and_add: fn(&mut [PendingAffineAddition<F>], &mut [AffinePoint<F>]) -> Option<()>,
+    ) where
         F: Field + From<u64>,
     {
-        const LENGTHS: [usize; 13] = [0, 1, 2, 3, 31, 32, 33, 63, 64, 65, 255, 256, 257];
-
-        for length in LENGTHS {
+        for &length in lengths {
             let mut additions = (0..length)
                 .map(|index| PendingAffineAddition {
                     output: index,
@@ -4746,16 +4884,16 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
-            batch_invert_and_add(&mut additions, &mut points)
+            invert_and_add(&mut additions, &mut points)
                 .expect("nonzero denominators must be invertible");
             for (index, (actual, expected)) in points.iter().zip(expected).enumerate() {
                 assert_eq!(
                     actual.x, expected.x,
-                    "two-lane affine x mismatch at length {length}, index {index}"
+                    "affine x mismatch at length {length}, index {index}"
                 );
                 assert_eq!(
                     actual.y, expected.y,
-                    "two-lane affine y mismatch at length {length}, index {index}"
+                    "affine y mismatch at length {length}, index {index}"
                 );
             }
         }
@@ -4763,8 +4901,65 @@ mod tests {
 
     #[test]
     fn batch_invert_and_add_two_lanes() {
-        batch_invert_and_add_two_lanes_matches_individual::<crate::Fp>();
-        batch_invert_and_add_two_lanes_matches_individual::<crate::Fq>();
+        const LENGTHS: [usize; 13] = [0, 1, 2, 3, 31, 32, 33, 63, 64, 65, 255, 256, 257];
+        batch_invert_and_add_matches_individual::<crate::Fp>(&LENGTHS, batch_invert_and_add_scalar);
+        batch_invert_and_add_matches_individual::<crate::Fq>(&LENGTHS, batch_invert_and_add_scalar);
+        batch_invert_and_add_matches_individual::<crate::Fp>(&LENGTHS, batch_invert_and_add);
+        batch_invert_and_add_matches_individual::<crate::Fq>(&LENGTHS, batch_invert_and_add);
+    }
+
+    #[test]
+    fn batch_invert_and_add_eight_lanes_boundaries() {
+        const LENGTHS: [usize; 17] = [
+            8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 63, 64, 65, 255, 256, 257,
+        ];
+        batch_invert_and_add_matches_individual::<crate::Fp>(
+            &LENGTHS,
+            batch_invert_and_add_eight_lanes,
+        );
+        batch_invert_and_add_matches_individual::<crate::Fq>(
+            &LENGTHS,
+            batch_invert_and_add_eight_lanes,
+        );
+    }
+
+    #[test]
+    fn batch_invert_and_add_eight_lanes_is_failure_atomic() {
+        fn check<F: Field + From<u64>>() {
+            for length in [8, 9, 15, 16, 17, 31, 32, 33] {
+                for zero in 0..length {
+                    let mut additions = (0..length)
+                        .map(|output| PendingAffineAddition {
+                            output,
+                            x_sum: F::from(output as u64 + 3),
+                            numerator: F::from(output as u64 + 2),
+                            denominator: if output == zero {
+                                F::ZERO
+                            } else {
+                                F::from(output as u64 + 1)
+                            },
+                        })
+                        .collect::<Vec<_>>();
+                    let mut points = (0..length)
+                        .map(|index| AffinePoint {
+                            x: F::from(index as u64 + 5),
+                            y: F::from(index as u64 + 7),
+                        })
+                        .collect::<Vec<_>>();
+                    let original = points.clone();
+                    assert!(
+                        batch_invert_and_add_eight_lanes(&mut additions, &mut points).is_none()
+                    );
+                    for (actual, expected) in points.iter().zip(original) {
+                        assert_eq!(actual.x, expected.x, "length {length}, zero {zero}");
+                        assert_eq!(actual.y, expected.y, "length {length}, zero {zero}");
+                    }
+                }
+            }
+        }
+
+        check::<crate::Fp>();
+        check::<crate::Fq>();
     }
 
     fn optimized_multiexp_matches_expected<C: GlvParams>() {
@@ -6665,6 +6860,113 @@ mod tests {
     fn batch_inversion_zero_denominator_is_failure_atomic() {
         batch_inversion_zero_denominator_is_failure_atomic_for::<crate::Fp>();
         batch_inversion_zero_denominator_is_failure_atomic_for::<crate::Fq>();
+    }
+
+    fn packed_affine_reducer_matches_reference<C: GlvParams>() {
+        const MAX_POINTS: usize = 2050;
+        let mut point = C::generator();
+        let projective: Vec<C> = (0..MAX_POINTS)
+            .map(|_| {
+                let current = point;
+                point = point.double();
+                current
+            })
+            .collect();
+        let mut affine = alloc::vec![C::AffineExt::identity(); MAX_POINTS];
+        C::batch_normalize(&projective, &mut affine);
+        let points: Vec<_> = affine
+            .iter()
+            .map(|point| {
+                let (x, y) = C::affine_xy(point);
+                AffinePoint { x, y }
+            })
+            .collect();
+        let available = crate::fields::ifma_available_for::<C::Base>();
+
+        let mut cases: Vec<Vec<usize>> = [
+            0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257,
+            1024, 2048, MAX_POINTS,
+        ]
+        .into_iter()
+        .map(|length| alloc::vec![0, length])
+        .collect();
+        cases.push(alloc::vec![0]);
+        let mut irregular = alloc::vec![0];
+        for length in [0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65] {
+            irregular.push(irregular.last().copied().unwrap() + length);
+        }
+        cases.push(irregular);
+
+        for offsets in cases {
+            let length = *offsets.last().unwrap();
+            let expected = reduce_affine_buckets(points[..length].to_vec(), offsets.clone())
+                .expect("complete reference reducer accepts valid points")
+                .into_iter()
+                .map(|point| point.map(|point| (point.x, point.y)))
+                .collect::<Vec<_>>();
+            let actual =
+                crate::fields::try_reduce_affine_buckets_packed(length, &offsets, |index| {
+                    (points[index].x, points[index].y)
+                });
+            assert_eq!(actual, available.then_some(expected));
+        }
+
+        let generator = C::generator();
+        let two = generator.double();
+        let three = generator + two;
+        for exceptional in [
+            alloc::vec![generator, generator],
+            alloc::vec![generator, -generator],
+            alloc::vec![generator, two, three],
+            alloc::vec![generator, two, -three],
+        ] {
+            // The clean first bucket keeps this above the production
+            // threshold. The second bucket fails immediately or after one
+            // successful level, testing scratch-only failure atomicity.
+            let source = [projective[..128].to_vec(), exceptional];
+            let mut inputs = Vec::new();
+            let mut offsets = alloc::vec![0];
+            for bucket in &source {
+                for point in bucket {
+                    let affine = C::AffineExt::from(*point);
+                    let (x, y) = C::affine_xy(&affine);
+                    inputs.push(AffinePoint { x, y });
+                }
+                offsets.push(inputs.len());
+            }
+            let snapshot: Vec<_> = inputs.iter().map(|point| (point.x, point.y)).collect();
+            let actual =
+                crate::fields::try_reduce_affine_buckets_packed(inputs.len(), &offsets, |index| {
+                    (inputs[index].x, inputs[index].y)
+                });
+            assert!(actual.is_none(), "exceptional packed chords must decline");
+            assert_eq!(
+                inputs
+                    .iter()
+                    .map(|point| (point.x, point.y))
+                    .collect::<Vec<_>>(),
+                snapshot,
+                "a late packed failure must preserve the borrowed source",
+            );
+            let actual = reduce_affine_buckets_in_place(inputs.clone(), offsets.clone())
+                .or_else(|| reduce_affine_buckets(inputs, offsets))
+                .expect("complete restage fallback accepts exceptional points");
+            assert_affine_bucket_results_match_native::<C>(
+                "packed decline and complete fallback",
+                actual,
+                &source,
+            );
+        }
+    }
+
+    #[test]
+    fn packed_affine_reducer_pallas() {
+        packed_affine_reducer_matches_reference::<pallas::Point>();
+    }
+
+    #[test]
+    fn packed_affine_reducer_vesta() {
+        packed_affine_reducer_matches_reference::<vesta::Point>();
     }
 
     macro_rules! glv_tests {

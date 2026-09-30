@@ -43,6 +43,9 @@ type Halo2Instances = Vec<Vec<Vec<vesta::Scalar>>>;
 type EncodedIronwoodFixture = (Halo2Instances, Vec<u8>);
 
 const IRONWOOD_BATCH_BENCH_SIZES: [usize; 4] = [1, 2, 16, 64];
+/// Validate rejection for the single-proof and smallest multi-proof batches.
+const IRONWOOD_BATCH_REJECTION_SIZES: [usize; 2] =
+    [IRONWOOD_BATCH_BENCH_SIZES[0], IRONWOOD_BATCH_BENCH_SIZES[1]];
 const IRONWOOD_BATCH_SCREEN_SIZES: [usize; 2] = [1, 64];
 const IRONWOOD_BATCH_BENCH_WARMUPS: usize = 3;
 const IRONWOOD_BATCH_BENCH_SAMPLES: usize = 15;
@@ -995,6 +998,35 @@ fn validate_ironwood_batch_fixtures(
         batch.add_proof(instances, proof);
     }
     assert!(batch.finalize(&vk.params, &vk.vk));
+
+    // Exercise the same prepared equation with validly encoded but incorrect
+    // claims. These rejection checks are outside every timed sample too.
+    for batch_size in IRONWOOD_BATCH_REJECTION_SIZES {
+        for change_opening in [false, true] {
+            let mut altered = encoded[..batch_size].to_vec();
+            if change_opening {
+                // The last proof scalar is the IPA blinding coefficient.
+                // Re-encode a field addition so the altered proof stays
+                // canonical and reaches the final equation check.
+                let proof = &mut altered[0].1;
+                let mut repr = <vesta::Scalar as PrimeField>::Repr::default();
+                let start = proof.len().checked_sub(repr.as_ref().len()).unwrap();
+                repr.as_mut().copy_from_slice(&proof[start..]);
+                let scalar = vesta::Scalar::from_repr(repr).unwrap();
+                proof[start..].copy_from_slice((scalar + vesta::Scalar::ONE).to_repr().as_ref());
+            } else {
+                altered[0].0[0][0][0] += vesta::Scalar::ONE;
+            }
+            let mut batch = BatchVerifier::new();
+            for (instances, proof) in altered {
+                batch.add_proof(instances, proof);
+            }
+            assert!(
+                !batch.finalize(&vk.params, &vk.vk),
+                "altered B1/B2 claims must be rejected",
+            );
+        }
+    }
 }
 
 #[test]
@@ -1051,12 +1083,26 @@ fn benchmark_ironwood_batch_verifier() {
         read_ironwood_batch_fixtures(&fixture_path)
     };
 
+    if std::env::var_os("IRONWOOD_BATCH_PREPARE").is_some() {
+        let start = Instant::now();
+        assert!(
+            vk.prepare_batch_validation(),
+            "prepared backend must engage"
+        );
+        println!("IRONWOOD_BATCH_PREPARE ns={}", start.elapsed().as_nanos());
+    }
+
     // Corpus loading and full proof validation are deliberately outside every
     // timed sample. Each benchmark binary independently performs this check.
     validate_ironwood_batch_fixtures(&encoded, &vk, proof_count);
 
     let screen = std::env::var_os("IRONWOOD_BATCH_SCREEN").is_some();
-    let batch_sizes: &[usize] = if screen {
+    let selected = std::env::var("IRONWOOD_BATCH_ONLY")
+        .ok()
+        .map(|value| [value.parse::<usize>().expect("batch size is an integer")]);
+    let batch_sizes: &[usize] = if let Some(selected) = &selected {
+        selected
+    } else if screen {
         &IRONWOOD_BATCH_SCREEN_SIZES
     } else {
         &IRONWOOD_BATCH_BENCH_SIZES
@@ -1068,6 +1114,10 @@ fn benchmark_ironwood_batch_verifier() {
     };
 
     for &batch_size in batch_sizes {
+        assert!(
+            (1..=proof_count).contains(&batch_size),
+            "batch size must fit the validated corpus",
+        );
         let mut samples = Vec::with_capacity(sample_count);
         for sample in 0..warmups + sample_count {
             let entries = encoded.iter().take(batch_size).cloned().collect::<Vec<_>>();

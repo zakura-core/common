@@ -1076,6 +1076,22 @@ fn fp_tables() -> &'static SqrtTables<Fp> {
     FP_TABLES.get_or_init(|| SqrtTables::new(0x54C11DB5))
 }
 
+/// Finishes eight roots using powers supplied by the checked SIMD backend.
+#[cfg(all(
+    feature = "glv",
+    feature = "sqrt-table",
+    feature = "x86_64-asm",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+pub(super) fn sqrt_with_t_power8(values: &[Fp; 8], powers: &[Fp; 8]) -> [CtOption<Fp>; 8] {
+    let tables = fp_tables();
+    core::array::from_fn(|lane| {
+        let (valid, root) = tables.sqrt_alt_with_power(&values[lane], &powers[lane]);
+        CtOption::new(root, valid)
+    })
+}
+
 impl SqrtTableHelpers for Fp {
     fn pow_by_t_minus1_over2(&self) -> Self {
         let r10 = self.square_runtime();
