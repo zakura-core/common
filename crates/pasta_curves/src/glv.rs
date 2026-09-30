@@ -142,8 +142,12 @@ mod private {
 
         /// Returns the four little-endian limbs of the reduced integer
         /// $Rk \bmod q$, where `k` is `scalar` and $R$ is this scalar field's
-        /// Montgomery factor.
-        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, token: CrateToken) -> [u64; 4];
+        /// Montgomery factor, or `None` if the internal representation is
+        /// not reduced. The GLV split is only guaranteed exact for inputs
+        /// below $q$, so the full-width identity test declines rather than
+        /// relying on every field operation keeping its output canonical.
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, token: CrateToken)
+        -> Option<[u64; 4]>;
     }
 
     impl Sealed for crate::pallas::Point {
@@ -165,8 +169,8 @@ mod private {
             Self::new_jacobian_unchecked(x, y, z)
         }
 
-        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> [u64; 4] {
-            scalar.0
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> Option<[u64; 4]> {
+            scalar.is_canonical().then_some(scalar.0)
         }
     }
 
@@ -189,8 +193,8 @@ mod private {
             Self::new_jacobian_unchecked(x, y, z)
         }
 
-        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> [u64; 4] {
-            scalar.0
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> Option<[u64; 4]> {
+            scalar.is_canonical().then_some(scalar.0)
         }
     }
 }
@@ -406,11 +410,9 @@ fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
     decompose_limbs::<C>(scalar_limbs(k))
 }
 
-fn decompose_montgomery<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
-    decompose_limbs::<C>(<C as private::Sealed>::scalar_montgomery_limbs(
-        k,
-        private::CrateToken(()),
-    ))
+fn decompose_montgomery<C: GlvParams>(k: &C::ScalarExt) -> Option<((bool, u128), (bool, u128))> {
+    <C as private::Sealed>::scalar_montgomery_limbs(k, private::CrateToken(()))
+        .map(decompose_limbs::<C>)
 }
 
 /// The eight Eisenstein digit-orbit representatives $\Delta$, as coefficient
@@ -2291,7 +2293,9 @@ pub(crate) fn try_multiexp<C: GlvParams>(
         return Some(result);
     }
 
-    try_large_multiexp::<C, _>(scalars, bases, num_threads, decompose::<C>)
+    try_large_multiexp::<C, _>(scalars, bases, num_threads, |scalar| {
+        Some(decompose::<C>(scalar))
+    })
 }
 
 fn try_large_multiexp<C, D>(
@@ -2302,7 +2306,7 @@ fn try_large_multiexp<C, D>(
 ) -> Option<C>
 where
     C: GlvParams,
-    D: Fn(&C::ScalarExt) -> ((bool, u128), (bool, u128)),
+    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))>,
 {
     if scalars.len() < MIN_GLV_MULTIEXP_TERMS {
         return None;
@@ -2315,8 +2319,7 @@ where
     // also prices these exact component magnitudes.
     let components = scalars
         .iter()
-        .map(decompose_scalar)
-        .map(checked_signed_magnitudes)
+        .map(|scalar| decompose_scalar(scalar).and_then(checked_signed_magnitudes))
         .collect::<Option<Vec<_>>>()?;
 
     #[cfg(feature = "orbits")]
@@ -4924,6 +4927,57 @@ mod tests {
     #[test]
     fn full_width_identity_multiexp_at_boundary_vesta() {
         full_width_identity_multiexp_at_boundary::<vesta::Point>();
+    }
+
+    /// A scalar whose internal limbs are congruent but not reduced declines
+    /// the Montgomery-limb path, so the caller falls back to the canonical
+    /// MSM rather than trusting a GLV split outside its input range.
+    fn full_width_identity_declines_noncanonical_scalar<C: GlvParams>(
+        from_limbs: fn([u64; 4]) -> C::ScalarExt,
+    ) {
+        let modulus = <C::ScalarExt as PrimeField>::MODULUS;
+        let modulus: [u64; 4] = core::array::from_fn(|i| {
+            let end = modulus.len() - 16 * i;
+            u64::from_str_radix(&modulus[end - 16..end], 16).unwrap()
+        });
+        let (mut scalars, mut bases, expected) =
+            verifier_multiexp_inputs::<C>(MIN_GLV_MULTIEXP_TERMS - 1);
+        scalars.push(-C::ScalarExt::ONE);
+        bases.push(expected.to_affine());
+        assert_eq!(
+            try_multiexp_full_width_is_identity::<C>(&scalars, &bases),
+            Some(true)
+        );
+
+        // Re-encode the first scalar as its reduced limbs plus the modulus:
+        // the same field element, but no longer below the modulus.
+        let limbs =
+            <C as private::Sealed>::scalar_montgomery_limbs(&scalars[0], private::CrateToken(()))
+                .unwrap();
+        let (l0, carry) = adc(limbs[0], modulus[0], 0);
+        let (l1, carry) = adc(limbs[1], modulus[1], carry);
+        let (l2, carry) = adc(limbs[2], modulus[2], carry);
+        let (l3, carry) = adc(limbs[3], modulus[3], carry);
+        assert_eq!(carry, 0);
+        scalars[0] = from_limbs([l0, l1, l2, l3]);
+
+        assert!(decompose_montgomery::<C>(&scalars[0]).is_none());
+        assert_eq!(
+            try_multiexp_full_width_is_identity::<C>(&scalars, &bases),
+            None
+        );
+        // The modulus itself encodes zero but is likewise rejected.
+        assert!(decompose_montgomery::<C>(&from_limbs(modulus)).is_none());
+    }
+
+    #[test]
+    fn full_width_identity_declines_noncanonical_scalar_pallas() {
+        full_width_identity_declines_noncanonical_scalar::<pallas::Point>(crate::Fq);
+    }
+
+    #[test]
+    fn full_width_identity_declines_noncanonical_scalar_vesta() {
+        full_width_identity_declines_noncanonical_scalar::<vesta::Point>(crate::Fp);
     }
 
     fn duplicate_base_multiexp_matches_expected<C: GlvParams>() {
