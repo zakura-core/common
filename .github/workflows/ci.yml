@@ -129,6 +129,7 @@ jobs:
             crates/sinsemilla
             crates/udon
             crates/zcash_address
+            crates/zcash_history
             crates/zcash_keys
             crates/zcash_primitives
             crates/zcash_protocol
@@ -187,7 +188,7 @@ jobs:
               crates/sinsemilla/*)
                 sinsemilla=true
                 ;;
-              crates/zcash_address/*|crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_protocol/*|crates/zcash_proofs/*|crates/zcash_transparent/*|crates/zip321/*)
+              crates/zcash_address/*|crates/zcash_history/*|crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_protocol/*|crates/zcash_proofs/*|crates/zcash_transparent/*|crates/zip321/*)
                 librustzcash=true
                 ;;
               Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|.github/scripts/check_rust_group.sh|.github/scripts/workspace_packages.py|.github/workflows/ci.yml|.github/workflows/maintenance.yml)
@@ -343,7 +344,7 @@ jobs:
         if: ${{ !cancelled() && needs.changes.outputs.librustzcash == 'true' }}
         run: >-
           bash .github/scripts/check_rust_group.sh
-          "zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321" true false
+          "zakura-history zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321" true false
 
       - name: Udon and Bento / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.udon == 'true' }}
@@ -1316,11 +1317,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- action commit is pinned
+        with:
+          toolchain: 1.97.1
       - name: Run tests
         run: >-
-          cargo +1.91.0 test
+          cargo +1.97.1 test
           -p zakura-address
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
@@ -1329,6 +1333,10 @@ jobs:
           -p zakura-zip321
           --all-features
           -- --test-threads=2
+      - name: Test NuTachyon history nodes
+        env:
+          RUSTFLAGS: '--cfg zcash_unstable="nutachyon"'
+        run: cargo +1.97.1 test -p zakura-history --all-features
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -1342,13 +1350,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- action commit is pinned
         with:
           components: clippy
+          toolchain: 1.97.1
       - name: Check no-default-features
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
@@ -1360,8 +1370,9 @@ jobs:
       - name: Check transparent-inputs-only
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
@@ -1374,8 +1385,9 @@ jobs:
       - name: Check transparent-key-encoding-only
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
@@ -1388,8 +1400,9 @@ jobs:
       - name: Check Sapling-only
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
@@ -1402,8 +1415,9 @@ jobs:
       - name: Check Orchard
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
@@ -1416,8 +1430,9 @@ jobs:
       - name: Check all-features
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
@@ -1429,12 +1444,12 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          for package in zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321; do
-            cargo +1.91.0 metadata --no-deps --format-version 1 |
+          for package in zakura-history zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321; do
+            cargo +1.97.1 metadata --no-deps --format-version 1 |
               jq -r --arg package "$package" \
                 '.packages[] | select(.name == $package) | .features | keys[]' |
               while IFS= read -r feature; do
-                cargo +1.91.0 clippy -p "$package" \
+                cargo +1.97.1 clippy -p "$package" \
                   --no-deps \
                   --no-default-features \
                   --features "$feature"
@@ -1452,6 +1467,7 @@ jobs:
         run: >-
           cargo +beta clippy
           -p zakura-address
+          -p zakura-history
           -p zakura-keys
           -p zakura-primitives
           -p zakura-protocol
@@ -1477,7 +1493,7 @@ jobs:
             packages: -p zakura-proofs
             build-deps: gcc-multilib
           - target: thumbv7em-none-eabihf
-            packages: -p zakura-address -p zakura-keys -p zakura-primitives -p zakura-protocol -p zakura-transparent
+            packages: -p zakura-address -p zakura-history -p zakura-keys -p zakura-primitives -p zakura-protocol -p zakura-transparent
             build-deps: gcc-arm-none-eabi
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
