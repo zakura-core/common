@@ -58,7 +58,10 @@ impl<'params, C: CurveAffine> VerificationStrategy<'params, C> for SingleVerifie
     ) -> Result<Self::Output, Error> {
         let guard = f(self.msm)?;
         let msm = guard.use_challenges();
-        if msm.eval() {
+        // The IPA challenge expansion normally produces random-like,
+        // full-width generator coefficients. Correctness does not depend on
+        // their density.
+        if msm.eval_full_width() {
             Ok(())
         } else {
             Err(Error::ConstraintSystemFailure)
