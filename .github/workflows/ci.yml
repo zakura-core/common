@@ -1598,7 +1598,7 @@ jobs:
           cargo test --locked -p zakura-udon --lib "${features[@]}"
       - name: Preserve property regressions
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: udon-regressions-${{ matrix.platform.arch }}-${{ matrix.tables }}
           path: crates/udon/src/**/*.regressions
