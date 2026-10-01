@@ -10,6 +10,10 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated to `bip32 0.6`, `secp256k1 0.33`.
+
 ## [2.0.0] - 2026-09-23
 
 ### Changed

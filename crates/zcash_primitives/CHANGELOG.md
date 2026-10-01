@@ -10,6 +10,10 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated to `secp256k1 0.33`, `zcash_script 0.6`.
+
 ## [2.1.0] - 2026-09-29
 
 ### Changed
