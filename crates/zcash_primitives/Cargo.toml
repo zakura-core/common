@@ -21,14 +21,7 @@ bench = false
 
 [dependencies]
 blake2b_simd = { version = "1", default-features = false }
-# Not used directly: pins the pre-release RustCrypto stack pulled in by bip32
-# 0.6.0-pre.1 (via zcash_transparent/zcash_script) to versions known to
-# resolve together, since pre-release semver ranges do not unify reliably.
-# Remove once bip32 moves off pre-release digest/sha2.
-block-buffer = "=0.11.0-rc.3"
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
-# Not used directly: version pin, see block-buffer above.
-crypto-common = "=0.2.0-rc.1"
 equihash.workspace = true
 ff = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
@@ -41,12 +34,12 @@ proptest = { version = ">=1,<1.7", optional = true }
 rand_core = { version = "0.10", default-features = false }
 redjubjub = { workspace = true }
 sapling = { workspace = true }
-secp256k1 = { version = "0.29", features = ["alloc"], optional = true, default-features = false }
+secp256k1 = { version = "0.33", features = ["alloc"], optional = true, default-features = false }
 sha2 = { version = "0.10", default-features = false }
 transparent.workspace = true
 zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] }
 zcash_protocol.workspace = true
-zcash_script = { version = "0.4.3", default-features = false }
+zcash_script = { version = "0.6", default-features = false }
 
 [dev-dependencies]
 assert_matches = "1.5"
