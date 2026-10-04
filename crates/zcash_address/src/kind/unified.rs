@@ -14,6 +14,8 @@ use bech32::{Bech32m, Checksum, Hrp, primitives::decode::CheckedHrpstring};
 
 use zcash_protocol::consensus::NetworkType;
 
+mod f4jumble;
+
 pub(crate) mod address;
 pub(crate) mod fvk;
 pub(crate) mod ivk;
@@ -170,7 +172,7 @@ pub(crate) mod private {
     use core::convert::{TryFrom, TryInto};
     use corez::io::Write;
 
-    use super::{PADDING_LEN, ParseError, Typecode};
+    use super::{PADDING_LEN, ParseError, Typecode, f4jumble};
     use zcash_encoding::CompactSize;
     use zcash_protocol::consensus::NetworkType;
 

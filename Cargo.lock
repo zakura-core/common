@@ -1059,15 +1059,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "f4jumble"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d42773cb15447644d170be20231a3268600e0c4cea8987d013b93ac973d3cf7"
-dependencies = [
- "blake2b_simd",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3479,9 +3470,9 @@ version = "2.2.0"
 dependencies = [
  "assert_matches",
  "bech32",
+ "blake2b_simd",
  "bs58",
  "corez",
- "f4jumble",
  "proptest",
  "zakura-protocol",
  "zcash_encoding",
