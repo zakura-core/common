@@ -16,6 +16,7 @@ Forked from [`zcash_note_encryption 0.4.2`](https://crates.io/crates/zcash_note_
 from [upstream commit a8c90d1](https://github.com/zcash/zcash_note_encryption/commit/a8c90d1ce3737cc5898e0bf232ea325a5a61ec9f).
 The published artifact's SHA-256 is
 `e1cb1b9170c94370e3d66c5cc0877661db743337588b64de7711239eed462198`.
+Imported in Common commit [a00286a0](https://github.com/zakura-core/common/commit/a00286a0).
 The ownership migration imports the complete implementation without changing
 cryptographic behavior, using Common's coordinated package version, edition,
 and MSRV. Upstream authors and the MIT and Apache-2.0 licenses are retained.

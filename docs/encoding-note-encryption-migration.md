@@ -239,3 +239,75 @@ benchmark claim is made.
 4. Publish the wallet's PCZT, backend, SQLite, and facade as required by its
    public dependency change; finalize node library version review before
    releasing the node. This task publishes or merges none of these artifacts.
+
+## Validation evidence
+
+All production-code checks below use the imported baseline implementations.
+Consumer runs use local Common sources, not the old published staging version.
+
+| Common package | `check --no-default-features` | `check --all-features --all-targets` |
+| --- | --- | --- |
+| `zakura-protocol` | Pass | Pass |
+| `zakura-address` | Pass | Pass |
+| `zakura-keys` | Pass | Pass |
+| `zakura-primitives` | Pass | Pass |
+| `zakura-transparent` | Pass | Pass |
+| `zakura-note-encryption` | Pass | Pass |
+| `zakura-orchard` | Pass | Pass |
+| `zakura-sapling-crypto` | Pass | Pass |
+
+Additional successful checks:
+
+- Note encryption with no defaults and each of `alloc`, `pre-zip-212`, and
+  `alloc,pre-zip-212`; Rust 1.91 no-default protocol/note checks.
+- Protocol tests: 40 unit + 7 compatibility tests without defaults;
+  44 unit + 7 compatibility tests with all features. All four upstream
+  encoding tests are retained. Address: 32 unit + 9 doctests; transparent:
+  9 unit tests.
+- Orchard/Sapling `note_encryption` tests: 9 + 26 passed with defaults;
+  9 + 26 passed with defaults disabled and only each crate's `std` enabled.
+  Both runs exercise recovery vectors and authentication/commitment failures;
+  Orchard exercises Ironwood encryption, compact decryption, and batching.
+- Formatting and protocol/note all-feature all-target Clippy with warnings
+  denied. Two narrow Clippy allowances retain the original nested check and
+  `repeat().take()` expression instead of modifying cryptographic code.
+- Both foundation crates passed `cargo package --allow-dirty --locked
+  --offline`, including compilation of their packaged source. Package lists
+  include the upstream licenses and provenance; protocol also includes
+  encoding's original license files and the compatibility tests.
+- `cargo semver-checks -p zakura-protocol --baseline-root <fetched-main>
+  --default-features`: 223 checks passed. This verifies existing protocol API
+  compatibility; release review still treats the module as an additive API.
+- Source token comparison preserves encoding implementation and upstream
+  tests after module scaffolding/import formatting/comments, and preserves
+  both note-encryption source files after import formatting/comments and the
+  two lint attributes. All-feature rustdoc inventory comparison preserves
+  all 64 named note-encryption API shapes and signatures.
+- Node: two chain domain/routing tests, three `coinbase_outputs` tests,
+  one nonzero-key recovery rejection vector, and chain Clippy passed.
+- Wallet: Orchard/default-PCZT/SQLite-without-Orchard/transparent feature
+  checks passed; backend scanning passed 23 tests; SQLite Ironwood passed
+  67 tests; PCZT `internal-tests` passed three selected V2 anchor round trips
+  covering Sapling, Orchard, and Ironwood.
+- Wallet's repository graph verifier passed with 599 reachable packages,
+  including 27 Zakura packages and no forbidden upstream package. Generator
+  reproduction from the pristine upstream manifest passed twice. The existing
+  wallet Python tooling tests passed (11 tests).
+
+Resolved production graphs for the node binary and selected wallet consumers
+contain no standalone `zcash_encoding` or upstream `zcash_note_encryption`,
+and exactly one `zakura-note-encryption`. Common metadata likewise contains
+only the fork. Temporary overrides and consumer lockfiles are excluded from
+PRs; published registry-only resolution remains a delivery prerequisite.
+
+An extra Orchard test run with `std` fully disabled could not compile the
+existing test-only `std::println!` in `tree.rs`; the crate-level `extern crate
+std` is feature gated in fetched main too. Its no-std library check passed,
+and the test suite passed with circuits/multicore disabled and `std` enabled.
+This migration does not change that unrelated test harness.
+
+The literal/terminology audit found only the retained upstream CompactSize
+reader/writer discriminants and boundary literals, including the intentionally
+unbounded 0.4 writer. New compatibility tests use `MAX_COMPACT_SIZE`. No new
+protocol label, domain separator, duplicated cryptographic constant, or
+terminology change is introduced.

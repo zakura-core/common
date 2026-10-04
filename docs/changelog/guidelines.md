@@ -37,8 +37,9 @@ Each `crates/<name>/CHANGELOG.md` contains, in order:
    stacks at import time, the record says so.
 
 A forked crate's version lineage restarts at `1.0.0`; it does not continue
-the original numbering, and these files intentionally do not reproduce
-pre-fork release history (the repository the code was forked from remains the
+the original numbering. A fork added after Common's initial release joins
+the next coordinated Common version rather than publishing independently.
+These files intentionally do not reproduce pre-fork release history (the repository the code was forked from remains the
 record for that).
 
 ## The 1.0.0 baseline ("Initial release")
