@@ -22,6 +22,11 @@ releases; the node binary's major version is not automatically bumped.
 Common uses inherited workspace package metadata, upstream library targets,
 explicit renamed workspace edges with defaults disabled, and one coordinated
 version for all published crates. The new member follows those conventions.
+All 23 published Common members are staged at 3.0.0; independently
+versioned unpublished members retain their versions. This coordinated major
+also changes the crate identity of existing Common types in consumer APIs;
+callers must rebuild the family together. No other public definitions or
+visibility are changed by the version staging.
 Its upstream authors and both licenses are retained. The new package inherits
 Common edition 2024 and MSRV 1.91 (upstream used edition 2021 and MSRV
 1.56.1). Encoding carries its
@@ -285,12 +290,18 @@ Additional successful checks:
   both note-encryption source files after import formatting/comments and the
   two lint attributes. All-feature rustdoc inventory comparison preserves
   all 64 named note-encryption API shapes and signatures.
+- Final Common 3.0.0 reruns passed all 24 feature-matrix commands, both
+  protocol feature test sets, both domain-vector configurations, MSRV 1.91,
+  foundation Clippy, and both packaged-source verifications.
 - Node: two chain domain/routing tests, three `coinbase_outputs` tests,
   one nonzero-key recovery rejection vector, and chain Clippy passed.
 - Wallet: Orchard/default-PCZT/SQLite-without-Orchard/transparent feature
   checks passed; backend scanning passed 23 tests; SQLite Ironwood passed
   67 tests; PCZT `internal-tests` passed three selected V2 anchor round trips
-  covering Sapling, Orchard, and Ironwood.
+  covering Sapling, Orchard, and Ironwood. Final 3.0.0 Orchard, transparent,
+  SQLite, scoped Clippy, scanning/Ironwood/PCZT, facade, and graph runs passed.
+  Clippy reports existing unused code/import warnings in the wallet stack;
+  no blanket suppression is introduced.
 - Wallet's repository graph verifier passed with 599 reachable packages,
   including 27 Zakura packages and no forbidden upstream package. Generator
   reproduction from the pristine upstream manifest passed twice. The wallet Python tooling tests passed (12 tests), including a new
