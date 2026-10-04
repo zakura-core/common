@@ -81,7 +81,7 @@ orbits = ["halo2_proofs?/orbits"]
 portable = ["pasta_curves/portable", "halo2_proofs?/portable"]
 std = ["corez/std", "group/wnaf-memuse", "reddsa/std"]
 test-dependencies = ["proptest", "rand/std", "rand/std_rng"]
-unstable-frost = []
+unstable-frost = ["dep:visibility"]
 unstable-voting-circuits = ["dep:visibility"]
 verifier-fingerprint = ["circuit", "halo2_proofs/unstable-verifier-fingerprint"]
 # Capture the prover's private tape and complete transcript for formal-model fixtures.
