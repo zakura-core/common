@@ -2,7 +2,7 @@ name: Workflow security
 
 on:
   pull_request:
-    branches: [main, "feat/**", "release/**", "agent/**"]
+    branches: [main, "feat/**", "release/**", "agent/**", "ownership/encoding-note-encryption"]
     paths:
       - .github/**
   push:

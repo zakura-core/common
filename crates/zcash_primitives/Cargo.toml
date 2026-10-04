@@ -21,14 +21,7 @@ bench = false
 
 [dependencies]
 blake2b_simd = { version = "1", default-features = false }
-# Not used directly: pins the pre-release RustCrypto stack pulled in by bip32
-# 0.6.0-pre.1 (via zcash_transparent/zcash_script) to versions known to
-# resolve together, since pre-release semver ranges do not unify reliably.
-# Remove once bip32 moves off pre-release digest/sha2.
-block-buffer = "=0.11.0-rc.3"
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
-# Not used directly: version pin, see block-buffer above.
-crypto-common = "=0.2.0-rc.1"
 document-features = { version = "0.2", optional = true }
 equihash.workspace = true
 ff = { version = "0.14", default-features = false }
@@ -42,17 +35,16 @@ proptest = { version = ">=1,<1.7", optional = true }
 rand_core = { version = "0.10", default-features = false }
 redjubjub = { workspace = true }
 sapling = { workspace = true }
-secp256k1 = { version = "0.29", features = ["alloc"], optional = true, default-features = false }
+secp256k1 = { version = "0.33", features = ["alloc"], optional = true, default-features = false }
 sha2 = { version = "0.10", default-features = false }
 transparent.workspace = true
 zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] }
 zcash_protocol.workspace = true
-zcash_script = { version = "0.4.3", default-features = false }
+zcash_script = { version = "0.6", default-features = false }
 
 [dev-dependencies]
 assert_matches = "1.5"
 bls12_381 = { workspace = true, features = ["default"] }
-chacha20poly1305 = "0.10"
 criterion = "0.5"
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api", "test-dependencies"], default-features = false }
 orchard = { workspace = true, features = ["test-dependencies"] }

@@ -35,16 +35,18 @@ skip = [
     # Existing version splits inherited from the imported upstream crates.
     # Keep each exception exact so a new duplicate version still fails CI.
     { name = "bitflags", version = "=1.3.2" },
-    { name = "block-buffer", version = "=0.11.0-rc.3" },
+    { name = "block-buffer", version = "=0.12.1" },
     # The ff/group 0.14 stack uses rand 0.10, while external Zcash and FROST
     # dependencies still expose rand_core 0.6 and rand 0.8 APIs.
-    { name = "chacha20", version = "=0.9.1" },
+    # Note encryption uses cipher 0.5; AES/FF1 still require cipher 0.4.
+    { name = "cipher", version = "=0.4.4" },
     { name = "cpufeatures", version = "=0.2.17" },
-    { name = "crypto-common", version = "=0.2.0-rc.1" },
-    { name = "digest", version = "=0.11.0-pre.9" },
+    { name = "crypto-common", version = "=0.2.2" },
+    { name = "digest", version = "=0.11.3" },
     { name = "getrandom", version = "=0.2.17" },
     { name = "gif", version = "=0.11.4" },
     { name = "hmac", version = "=0.12.1" },
+    { name = "inout", version = "=0.1.4" },
     { name = "itertools", version = "=0.10.5" },
     { name = "itertools", version = "=0.13.0" },
     { name = "rand", version = "=0.8.7" },

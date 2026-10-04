@@ -34,10 +34,9 @@ use alloc::vec::Vec;
 
 use chacha20::{
     ChaCha20,
-    cipher::{StreamCipher, StreamCipherSeek},
+    cipher::{KeyIvInit, StreamCipher, StreamCipherSeek},
 };
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInPlace};
-use cipher::KeyIvInit;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInOut};
 
 use rand_core::RngCore;
 use subtle::{Choice, ConstantTimeEq};
@@ -57,6 +56,7 @@ pub const NOTE_PLAINTEXT_SIZE: usize = COMPACT_NOTE_SIZE + 512;
 pub const OUT_PLAINTEXT_SIZE: usize = 32 + // pk_d
     32; // esk
 const AEAD_TAG_SIZE: usize = 16;
+const NOTE_ENCRYPTION_NONCE: [u8; 12] = [0; 12];
 /// The size of an encrypted note plaintext.
 pub const ENC_CIPHERTEXT_SIZE: usize = NOTE_PLAINTEXT_SIZE + AEAD_TAG_SIZE;
 /// The size of an encrypted outgoing plaintext.
@@ -480,11 +480,12 @@ impl<D: Domain> NoteEncryption<D> {
 
         let mut output = [0u8; ENC_CIPHERTEXT_SIZE];
         output[..NOTE_PLAINTEXT_SIZE].copy_from_slice(&input.0);
-        let tag = ChaCha20Poly1305::new(key.as_ref().into())
-            .encrypt_in_place_detached(
-                [0u8; 12][..].into(),
+        let tag = ChaCha20Poly1305::new_from_slice(key.as_ref())
+            .expect("note encryption keys are 32 bytes")
+            .encrypt_inout_detached(
+                (&NOTE_ENCRYPTION_NONCE).into(),
                 &[],
-                &mut output[..NOTE_PLAINTEXT_SIZE],
+                (&mut output[..NOTE_PLAINTEXT_SIZE]).into(),
             )
             .unwrap();
         output[NOTE_PLAINTEXT_SIZE..].copy_from_slice(&tag);
@@ -517,8 +518,13 @@ impl<D: Domain> NoteEncryption<D> {
 
         let mut output = [0u8; OUT_CIPHERTEXT_SIZE];
         output[..OUT_PLAINTEXT_SIZE].copy_from_slice(&input.0);
-        let tag = ChaCha20Poly1305::new(ock.as_ref().into())
-            .encrypt_in_place_detached([0u8; 12][..].into(), &[], &mut output[..OUT_PLAINTEXT_SIZE])
+        let tag = ChaCha20Poly1305::new_from_slice(ock.as_ref())
+            .expect("note encryption keys are 32 bytes")
+            .encrypt_inout_detached(
+                (&NOTE_ENCRYPTION_NONCE).into(),
+                &[],
+                (&mut output[..OUT_PLAINTEXT_SIZE]).into(),
+            )
             .unwrap();
         output[OUT_PLAINTEXT_SIZE..].copy_from_slice(&tag);
 
@@ -563,12 +569,15 @@ fn try_note_decryption_inner<D: Domain, Output: ShieldedOutput<D, ENC_CIPHERTEXT
     let mut plaintext =
         NotePlaintextBytes(enc_ciphertext[..NOTE_PLAINTEXT_SIZE].try_into().unwrap());
 
-    ChaCha20Poly1305::new(key.as_ref().into())
-        .decrypt_in_place_detached(
-            [0u8; 12][..].into(),
+    ChaCha20Poly1305::new_from_slice(key.as_ref())
+        .expect("note encryption keys are 32 bytes")
+        .decrypt_inout_detached(
+            (&NOTE_ENCRYPTION_NONCE).into(),
             &[],
-            &mut plaintext.0,
-            enc_ciphertext[NOTE_PLAINTEXT_SIZE..].into(),
+            (&mut plaintext.0[..]).into(),
+            enc_ciphertext[NOTE_PLAINTEXT_SIZE..]
+                .try_into()
+                .expect("fixed-size ciphertext includes a 16-byte AEAD tag"),
         )
         .ok()?;
 
@@ -662,7 +671,8 @@ fn try_compact_note_decryption_inner<D: Domain, Output: ShieldedOutput<D, COMPAC
     // Start from block 1 to skip over Poly1305 keying output
     let mut plaintext = [0; COMPACT_NOTE_SIZE];
     plaintext.copy_from_slice(output.enc_ciphertext());
-    let mut keystream = ChaCha20::new(key.as_ref().into(), [0u8; 12][..].into());
+    let mut keystream = ChaCha20::new_from_slices(key.as_ref(), &NOTE_ENCRYPTION_NONCE)
+        .expect("note encryption keys are 32 bytes and nonces are 12 bytes");
     keystream.seek(64);
     keystream.apply_keystream(&mut plaintext);
 
@@ -719,12 +729,15 @@ pub fn try_output_recovery_with_ock<D: Domain, Output: ShieldedOutput<D, ENC_CIP
     let mut op = OutPlaintextBytes([0; OUT_PLAINTEXT_SIZE]);
     op.0.copy_from_slice(&out_ciphertext[..OUT_PLAINTEXT_SIZE]);
 
-    ChaCha20Poly1305::new(ock.as_ref().into())
-        .decrypt_in_place_detached(
-            [0u8; 12][..].into(),
+    ChaCha20Poly1305::new_from_slice(ock.as_ref())
+        .expect("note encryption keys are 32 bytes")
+        .decrypt_inout_detached(
+            (&NOTE_ENCRYPTION_NONCE).into(),
             &[],
-            &mut op.0,
-            out_ciphertext[OUT_PLAINTEXT_SIZE..].into(),
+            (&mut op.0[..]).into(),
+            out_ciphertext[OUT_PLAINTEXT_SIZE..]
+                .try_into()
+                .expect("fixed-size ciphertext includes a 16-byte AEAD tag"),
         )
         .ok()?;
 
@@ -769,12 +782,15 @@ pub fn try_output_recovery_with_pkd_esk<
         .0
         .copy_from_slice(&enc_ciphertext[..NOTE_PLAINTEXT_SIZE]);
 
-    ChaCha20Poly1305::new(key.as_ref().into())
-        .decrypt_in_place_detached(
-            [0u8; 12][..].into(),
+    ChaCha20Poly1305::new_from_slice(key.as_ref())
+        .expect("note encryption keys are 32 bytes")
+        .decrypt_inout_detached(
+            (&NOTE_ENCRYPTION_NONCE).into(),
             &[],
-            &mut plaintext.0,
-            enc_ciphertext[NOTE_PLAINTEXT_SIZE..].into(),
+            (&mut plaintext.0[..]).into(),
+            enc_ciphertext[NOTE_PLAINTEXT_SIZE..]
+                .try_into()
+                .expect("fixed-size ciphertext includes a 16-byte AEAD tag"),
         )
         .ok()?;
 

@@ -133,6 +133,9 @@ zcash_proofs = { package = "zakura-proofs", version = "3.0.0", path = "crates/zc
 transparent = { package = "zakura-transparent", version = "3.0.0", path = "crates/zcash_transparent", default-features = false }
 zip321 = { package = "zakura-zip321", version = "3.0.0", path = "crates/zip321", default-features = false }
 
+# Note encryption backend shared by the implementation and domain tests.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
+
 # Parsing and encoding dependencies used by ZIP 321 payment requests.
 base64 = "0.22"
 nom = "7"

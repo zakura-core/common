@@ -115,7 +115,7 @@ version = "0.25.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.aead]]
-version = "0.5.2"
+version = "0.6.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.aes]]
@@ -188,7 +188,7 @@ version = "0.12.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.bip32]]
-version = "0.6.0-pre.1"
+version = "0.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.bit_field]]
@@ -212,7 +212,7 @@ version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.block-buffer]]
-version = "0.11.0-rc.3"
+version = "0.12.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.bs58]]
@@ -240,15 +240,11 @@ version = "1.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20]]
-version = "0.9.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.chacha20]]
 version = "0.10.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20poly1305]]
-version = "0.10.1"
+version = "0.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.chrono]]
@@ -258,6 +254,11 @@ criteria = "safe-to-deploy"
 [[exemptions.ciborium]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.cipher]]
+version = "0.5.2"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."
 
 [[exemptions.clap]]
 version = "4.6.6"
@@ -269,6 +270,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.clap_lex]]
 version = "1.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.cmov]]
+version = "0.5.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.const-crc32-nostd]]
@@ -340,7 +345,7 @@ version = "0.1.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.crypto-common]]
-version = "0.2.0-rc.1"
+version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.csv]]
@@ -354,6 +359,10 @@ criteria = "safe-to-run"
 [[exemptions.csv-core]]
 version = "0.1.13"
 criteria = "safe-to-run"
+
+[[exemptions.ctutils]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
 
 [[exemptions.darling]]
 version = "0.10.2"
@@ -388,7 +397,7 @@ version = "0.10.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.digest]]
-version = "0.11.0-pre.9"
+version = "0.11.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.dirs]]
@@ -512,6 +521,10 @@ version = "0.2.17"
 criteria = "safe-to-deploy"
 
 [[exemptions.getrandom]]
+version = "0.3.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.getrandom]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
 
@@ -569,7 +582,7 @@ version = "0.3.4"
 criteria = "safe-to-run"
 
 [[exemptions.hmac]]
-version = "0.13.0-pre.4"
+version = "0.13.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.home]]
@@ -577,7 +590,7 @@ version = "0.5.12"
 criteria = "safe-to-deploy"
 
 [[exemptions.hybrid-array]]
-version = "0.2.3"
+version = "0.4.15"
 criteria = "safe-to-deploy"
 
 [[exemptions.iana-time-zone]]
@@ -605,6 +618,11 @@ notes = "Benchmark/profiling dependency alignment; pending review."
 version = "0.11.21"
 criteria = "safe-to-run"
 notes = "Benchmark/profiling dependency alignment; pending review."
+
+[[exemptions.inout]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."
 
 [[exemptions.is-terminal]]
 version = "0.4.17"
@@ -771,7 +789,7 @@ version = "0.3.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.poly1305]]
-version = "0.8.0"
+version = "0.9.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.pprof]]
@@ -818,6 +836,10 @@ notes = "Benchmark/profiling dependency alignment; pending review."
 
 [[exemptions.r-efi]]
 version = "5.3.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.r-efi]]
+version = "5.3.0"
 criteria = "safe-to-run"
 notes = "Benchmark/profiling dependency alignment; pending review."
 
@@ -834,12 +856,24 @@ version = "0.8.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
+version = "0.9.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.rand]]
 version = "0.10.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.rand_chacha]]
+version = "0.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand_chacha]]
 version = "0.10.0"
 criteria = "safe-to-run"
+
+[[exemptions.rand_core]]
+version = "0.9.5"
+criteria = "safe-to-deploy"
 
 [[exemptions.rand_core]]
 version = "0.10.1"
@@ -894,7 +928,7 @@ version = "0.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.ripemd]]
-version = "0.2.0-pre.4"
+version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustc-demangle]]
@@ -942,11 +976,11 @@ version = "0.7.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.secp256k1]]
-version = "0.29.1"
+version = "0.33.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.secp256k1-sys]]
-version = "0.10.1"
+version = "0.14.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.secrecy]]
@@ -978,7 +1012,7 @@ version = "0.10.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.sha2]]
-version = "0.11.0-pre.4"
+version = "0.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sha3]]
@@ -1111,6 +1145,11 @@ criteria = "safe-to-deploy"
 version = "1.0.24"
 criteria = "safe-to-deploy"
 
+[[exemptions.universal-hash]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."
+
 [[exemptions.untrusted]]
 version = "0.9.0"
 criteria = "safe-to-deploy"
@@ -1133,6 +1172,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.wasi]]
 version = "0.11.1+wasi-snapshot-preview1"
+criteria = "safe-to-deploy"
+
+[[exemptions.wasip2]]
+version = "1.0.4+wasi-0.2.12"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasm-bindgen]]
@@ -1248,6 +1291,10 @@ notes = "Introduced with the unpublished Udon/Bento import; pending review."
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.wit-bindgen]]
+version = "0.57.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.wyz]]
 version = "0.5.1"
 criteria = "safe-to-deploy"
@@ -1277,7 +1324,7 @@ version = "0.10.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_script]]
-version = "0.4.5"
+version = "0.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_spec]]
