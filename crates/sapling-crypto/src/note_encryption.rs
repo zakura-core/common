@@ -464,7 +464,7 @@ mod tests {
     use alloc::vec::Vec;
     use chacha20poly1305::{
         ChaCha20Poly1305,
-        aead::{AeadInPlace, KeyInit},
+        aead::{AeadInOut, KeyInit},
     };
     use ff::{Field, PrimeField};
     use group::Group;
@@ -583,10 +583,10 @@ mod tests {
         op.copy_from_slice(&out_ciphertext[..OUT_PLAINTEXT_SIZE]);
 
         ChaCha20Poly1305::new(ock.as_ref().into())
-            .decrypt_in_place_detached(
+            .decrypt_inout_detached(
                 [0u8; 12][..].into(),
                 &[],
-                &mut op,
+                (&mut op[..]).into(),
                 out_ciphertext[OUT_PLAINTEXT_SIZE..].into(),
             )
             .unwrap();
@@ -594,7 +594,7 @@ mod tests {
         modify_plaintext(&mut op);
 
         let tag = ChaCha20Poly1305::new(ock.as_ref().into())
-            .encrypt_in_place_detached([0u8; 12][..].into(), &[], &mut op)
+            .encrypt_inout_detached([0u8; 12][..].into(), &[], (&mut op[..]).into())
             .unwrap();
 
         let mut out_ciphertext = [0u8; OUT_CIPHERTEXT_SIZE];
@@ -618,10 +618,10 @@ mod tests {
         op.copy_from_slice(&out_ciphertext[..OUT_PLAINTEXT_SIZE]);
 
         ChaCha20Poly1305::new(ock.as_ref().into())
-            .decrypt_in_place_detached(
+            .decrypt_inout_detached(
                 [0u8; 12][..].into(),
                 &[],
-                &mut op,
+                (&mut op[..]).into(),
                 out_ciphertext[OUT_PLAINTEXT_SIZE..].into(),
             )
             .unwrap();
@@ -637,10 +637,10 @@ mod tests {
         plaintext.copy_from_slice(&enc_ciphertext[..NOTE_PLAINTEXT_SIZE]);
 
         ChaCha20Poly1305::new(key.as_bytes().into())
-            .decrypt_in_place_detached(
+            .decrypt_inout_detached(
                 [0u8; 12][..].into(),
                 &[],
-                &mut plaintext,
+                (&mut plaintext[..]).into(),
                 enc_ciphertext[NOTE_PLAINTEXT_SIZE..].into(),
             )
             .unwrap();
@@ -648,7 +648,7 @@ mod tests {
         modify_plaintext(&mut plaintext);
 
         let tag = ChaCha20Poly1305::new(key.as_ref().into())
-            .encrypt_in_place_detached([0u8; 12][..].into(), &[], &mut plaintext)
+            .encrypt_inout_detached([0u8; 12][..].into(), &[], (&mut plaintext[..]).into())
             .unwrap();
 
         let mut enc_ciphertext = [0u8; ENC_CIPHERTEXT_SIZE];

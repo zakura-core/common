@@ -2,7 +2,7 @@ name: Documentation
 
 on:
   pull_request:
-    branches: [main, "feat/**", "release/**", "agent/**"]
+    branches: [main, "feat/**", "release/**", "agent/**", "ownership/encoding-note-encryption"]
     paths:
       - "**/*.md"
       - .github/codespellrc

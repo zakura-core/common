@@ -118,7 +118,7 @@ version = "0.25.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.aead]]
-version = "0.5.2"
+version = "0.6.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.aes]]
@@ -243,15 +243,11 @@ version = "1.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20]]
-version = "0.9.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.chacha20]]
 version = "0.10.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20poly1305]]
-version = "0.10.1"
+version = "0.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.chrono]]
@@ -786,7 +782,7 @@ version = "0.3.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.poly1305]]
-version = "0.8.0"
+version = "0.9.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.pprof]]
@@ -1354,3 +1350,18 @@ criteria = "safe-to-deploy"
 [[exemptions.zune-inflate]]
 version = "0.2.54"
 criteria = "safe-to-deploy"
+
+[[exemptions.cipher]]
+version = "0.5.2"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."
+
+[[exemptions.inout]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."
+
+[[exemptions.universal-hash]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."

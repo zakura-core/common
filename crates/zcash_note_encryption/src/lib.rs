@@ -34,10 +34,9 @@ use alloc::vec::Vec;
 
 use chacha20::{
     ChaCha20,
-    cipher::{StreamCipher, StreamCipherSeek},
+    cipher::{KeyIvInit, StreamCipher, StreamCipherSeek},
 };
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInPlace};
-use cipher::KeyIvInit;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInOut};
 
 use rand_core::RngCore;
 use subtle::{Choice, ConstantTimeEq};
@@ -481,10 +480,10 @@ impl<D: Domain> NoteEncryption<D> {
         let mut output = [0u8; ENC_CIPHERTEXT_SIZE];
         output[..NOTE_PLAINTEXT_SIZE].copy_from_slice(&input.0);
         let tag = ChaCha20Poly1305::new(key.as_ref().into())
-            .encrypt_in_place_detached(
+            .encrypt_inout_detached(
                 [0u8; 12][..].into(),
                 &[],
-                &mut output[..NOTE_PLAINTEXT_SIZE],
+                (&mut output[..NOTE_PLAINTEXT_SIZE]).into(),
             )
             .unwrap();
         output[NOTE_PLAINTEXT_SIZE..].copy_from_slice(&tag);
@@ -518,7 +517,11 @@ impl<D: Domain> NoteEncryption<D> {
         let mut output = [0u8; OUT_CIPHERTEXT_SIZE];
         output[..OUT_PLAINTEXT_SIZE].copy_from_slice(&input.0);
         let tag = ChaCha20Poly1305::new(ock.as_ref().into())
-            .encrypt_in_place_detached([0u8; 12][..].into(), &[], &mut output[..OUT_PLAINTEXT_SIZE])
+            .encrypt_inout_detached(
+                [0u8; 12][..].into(),
+                &[],
+                (&mut output[..OUT_PLAINTEXT_SIZE]).into(),
+            )
             .unwrap();
         output[OUT_PLAINTEXT_SIZE..].copy_from_slice(&tag);
 
@@ -564,10 +567,10 @@ fn try_note_decryption_inner<D: Domain, Output: ShieldedOutput<D, ENC_CIPHERTEXT
         NotePlaintextBytes(enc_ciphertext[..NOTE_PLAINTEXT_SIZE].try_into().unwrap());
 
     ChaCha20Poly1305::new(key.as_ref().into())
-        .decrypt_in_place_detached(
+        .decrypt_inout_detached(
             [0u8; 12][..].into(),
             &[],
-            &mut plaintext.0,
+            (&mut plaintext.0[..]).into(),
             enc_ciphertext[NOTE_PLAINTEXT_SIZE..].into(),
         )
         .ok()?;
@@ -720,10 +723,10 @@ pub fn try_output_recovery_with_ock<D: Domain, Output: ShieldedOutput<D, ENC_CIP
     op.0.copy_from_slice(&out_ciphertext[..OUT_PLAINTEXT_SIZE]);
 
     ChaCha20Poly1305::new(ock.as_ref().into())
-        .decrypt_in_place_detached(
+        .decrypt_inout_detached(
             [0u8; 12][..].into(),
             &[],
-            &mut op.0,
+            (&mut op.0[..]).into(),
             out_ciphertext[OUT_PLAINTEXT_SIZE..].into(),
         )
         .ok()?;
@@ -770,10 +773,10 @@ pub fn try_output_recovery_with_pkd_esk<
         .copy_from_slice(&enc_ciphertext[..NOTE_PLAINTEXT_SIZE]);
 
     ChaCha20Poly1305::new(key.as_ref().into())
-        .decrypt_in_place_detached(
+        .decrypt_inout_detached(
             [0u8; 12][..].into(),
             &[],
-            &mut plaintext.0,
+            (&mut plaintext.0[..]).into(),
             enc_ciphertext[NOTE_PLAINTEXT_SIZE..].into(),
         )
         .ok()?;
