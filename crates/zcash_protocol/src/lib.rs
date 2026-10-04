@@ -28,6 +28,7 @@ use core::fmt;
 
 pub mod consensus;
 pub mod constants;
+pub mod encoding;
 #[cfg(feature = "local-consensus")]
 pub mod local_consensus;
 pub mod memo;

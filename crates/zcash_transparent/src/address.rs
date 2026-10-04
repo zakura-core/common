@@ -6,7 +6,7 @@ use corez::io::{self, Read, Write};
 use zcash_address::{ToAddress, TryFromAddress, ZcashAddress};
 use zcash_protocol::consensus::NetworkType;
 
-use zcash_encoding::Vector;
+use zcash_protocol::encoding::Vector;
 use zcash_script::{
     op,
     script::{self, Evaluable},

@@ -33,8 +33,8 @@ use {
     byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt},
     core::convert::TryFrom,
     corez::io::{Read, Write},
-    zcash_encoding::CompactSize,
     zcash_protocol::consensus::BranchId,
+    zcash_protocol::encoding::CompactSize,
 };
 
 #[cfg(feature = "orchard")]

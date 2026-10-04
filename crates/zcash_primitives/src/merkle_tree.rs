@@ -10,7 +10,7 @@ use incrementalmerkletree::{
     witness::IncrementalWitness,
 };
 use orchard::tree::MerkleHashOrchard;
-use zcash_encoding::{Optional, Vector};
+use zcash_protocol::encoding::{Optional, Vector};
 
 /// A hashable node within a Merkle tree.
 pub trait HashSer {
@@ -303,7 +303,7 @@ pub mod testing {
     use alloc::string::String;
     use corez::io::{self, Read, Write};
     use incrementalmerkletree::frontier::testing::TestNode;
-    use zcash_encoding::Vector;
+    use zcash_protocol::encoding::Vector;
 
     use super::HashSer;
 

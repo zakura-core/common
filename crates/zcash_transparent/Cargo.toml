@@ -20,7 +20,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 zcash_address.workspace = true
-zcash_encoding = { version = "0.4", default-features = false }
 zcash_protocol.workspace = true
 zip32 = { version = "0.2", default-features = false }
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }

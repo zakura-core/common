@@ -17,8 +17,8 @@ use memuse::DynamicUsage;
 use nonempty::NonEmpty;
 use sha2::{Digest, Sha256};
 
-use zcash_encoding::{Array, CompactSize, Vector};
 use zcash_protocol::consensus::{self, BlockHeight};
+use zcash_protocol::encoding::{Array, CompactSize, Vector};
 
 use crate::{
     encoding::{ReadBytesExt, WriteBytesExt},

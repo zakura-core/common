@@ -8,7 +8,7 @@ use ::transparent::{
         TransparentAuthorizingContext,
     },
 };
-use zcash_encoding::Array;
+use zcash_protocol::encoding::Array;
 
 use crate::{
     encoding::StateWrite,

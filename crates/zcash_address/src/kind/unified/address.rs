@@ -180,7 +180,7 @@ pub mod testing {
         sample::select,
         strategy::Strategy,
     };
-    use zcash_encoding::MAX_COMPACT_SIZE;
+    use zcash_protocol::encoding::MAX_COMPACT_SIZE;
 
     use super::{Address, Receiver};
     use crate::unified::Typecode;

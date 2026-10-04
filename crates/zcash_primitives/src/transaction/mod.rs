@@ -20,7 +20,7 @@ use core::ops::Deref;
 use corez::io::{self, Read, Write};
 
 use ::transparent::bundle::{self as transparent, OutPoint, TxIn, TxOut};
-use zcash_encoding::{CompactSize, Vector};
+use zcash_protocol::encoding::{CompactSize, Vector};
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
     value::{BalanceError, ZatBalance, Zatoshis},
