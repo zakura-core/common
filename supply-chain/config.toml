@@ -258,6 +258,11 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.cipher]]
+version = "0.5.2"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."
+
 [[exemptions.clap]]
 version = "4.6.6"
 criteria = "safe-to-deploy"
@@ -617,6 +622,11 @@ version = "0.11.21"
 criteria = "safe-to-run"
 notes = "Benchmark/profiling dependency alignment; pending review."
 
+[[exemptions.inout]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."
+
 [[exemptions.is-terminal]]
 version = "0.4.17"
 criteria = "safe-to-run"
@@ -829,12 +839,12 @@ notes = "Benchmark/profiling dependency alignment; pending review."
 
 [[exemptions.r-efi]]
 version = "5.3.0"
-criteria = "safe-to-run"
-notes = "Benchmark/profiling dependency alignment; pending review."
+criteria = "safe-to-deploy"
 
 [[exemptions.r-efi]]
 version = "5.3.0"
-criteria = "safe-to-deploy"
+criteria = "safe-to-run"
+notes = "Benchmark/profiling dependency alignment; pending review."
 
 [[exemptions.r-efi]]
 version = "6.0.0"
@@ -1138,6 +1148,11 @@ criteria = "safe-to-deploy"
 version = "1.0.24"
 criteria = "safe-to-deploy"
 
+[[exemptions.universal-hash]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+notes = "ChaCha20 backend migration; pending dependency review."
+
 [[exemptions.untrusted]]
 version = "0.9.0"
 criteria = "safe-to-deploy"
@@ -1350,18 +1365,3 @@ criteria = "safe-to-deploy"
 [[exemptions.zune-inflate]]
 version = "0.2.54"
 criteria = "safe-to-deploy"
-
-[[exemptions.cipher]]
-version = "0.5.2"
-criteria = "safe-to-deploy"
-notes = "ChaCha20 backend migration; pending dependency review."
-
-[[exemptions.inout]]
-version = "0.2.2"
-criteria = "safe-to-deploy"
-notes = "ChaCha20 backend migration; pending dependency review."
-
-[[exemptions.universal-hash]]
-version = "0.6.1"
-criteria = "safe-to-deploy"
-notes = "ChaCha20 backend migration; pending dependency review."
