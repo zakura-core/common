@@ -15,8 +15,8 @@ use orchard::{
     primitives::redpallas::{self, SigType, Signature, SpendAuth, VerificationKey},
     value::ValueCommitment,
 };
-use zcash_encoding::{Array, CompactSize, Vector};
 use zcash_note_encryption::{ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes, OUT_CIPHERTEXT_SIZE};
+use zcash_protocol::encoding::{Array, CompactSize, Vector};
 use zcash_protocol::{
     consensus::{BranchId, OrchardProtocolRevision},
     value::ZatBalance,

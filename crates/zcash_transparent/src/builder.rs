@@ -29,7 +29,7 @@ use {
         sighash::{SIGHASH_ALL, SighashType},
     },
     core::iter,
-    zcash_encoding::CompactSize,
+    zcash_protocol::encoding::CompactSize,
     zcash_script::{pattern::push_script, pv, solver},
 };
 

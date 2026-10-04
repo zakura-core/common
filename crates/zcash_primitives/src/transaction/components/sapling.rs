@@ -13,8 +13,8 @@ use ::sapling::{
     value::ValueCommitment,
 };
 use redjubjub::SpendAuth;
-use zcash_encoding::{Array, CompactSize, Vector};
 use zcash_note_encryption::{ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes, OUT_CIPHERTEXT_SIZE};
+use zcash_protocol::encoding::{Array, CompactSize, Vector};
 use zcash_protocol::{
     consensus::{BlockHeight, NetworkUpgrade, Parameters, ZIP212_GRACE_PERIOD},
     value::ZatBalance,

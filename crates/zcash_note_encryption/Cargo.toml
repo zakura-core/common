@@ -1,0 +1,35 @@
+[package]
+name = "zakura-note-encryption"
+description = "Note encryption for Zcash transactions"
+version.workspace = true
+authors = [
+    "Jack Grigg <jack@electriccoin.co>",
+    "Kris Nuttycombe <kris@electriccoin.co>"
+]
+homepage = "https://github.com/zcash/librustzcash"
+repository.workspace = true
+readme.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+categories = ["cryptography::cryptocurrencies"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+cipher = { version = "0.4", default-features = false }
+chacha20 = { version = "0.9", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+subtle = { version = "2.3", default-features = false }
+
+[features]
+default = ["alloc"]
+alloc = []
+pre-zip-212 = []
+
+[lib]
+name = "zcash_note_encryption"
+bench = false

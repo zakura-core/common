@@ -39,7 +39,6 @@ secrecy = "0.8"
 subtle = { version = "2.2.3", default-features = false }
 transparent.workspace = true
 zcash_address.workspace = true
-zcash_encoding = { version = "0.4", default-features = false }
 zcash_protocol.workspace = true
 zeroize = { version = "1.7", optional = true, default-features = false }
 zip32 = { version = "0.2", default-features = false }

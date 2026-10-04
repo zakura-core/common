@@ -130,6 +130,7 @@ jobs:
             crates/udon
             crates/zcash_address
             crates/zcash_keys
+            crates/zcash_note_encryption
             crates/zcash_primitives
             crates/zcash_protocol
             crates/zcash_proofs
@@ -180,6 +181,13 @@ jobs:
                 # for changes to any member of this tightly-coupled group.
                 reddsa=true
                 sapling_crypto=true
+                ;;
+              crates/zcash_note_encryption/*)
+                # Shared cryptographic implementation: exercise both domains
+                # and their transaction/key consumers.
+                orchard=true
+                sapling_crypto=true
+                librustzcash=true
                 ;;
               crates/sapling-crypto/*)
                 sapling_crypto=true
@@ -339,11 +347,17 @@ jobs:
       - name: sinsemilla / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.sinsemilla == 'true' }}
         run: bash .github/scripts/check_rust_group.sh zakura-sinsemilla false true
+      - name: Note encryption / Feature-off checks
+        if: ${{ !cancelled() && needs.changes.outputs.librustzcash == 'true' }}
+        run: |
+          cargo +1.91.0 check --locked -p zakura-note-encryption --no-default-features
+          cargo +1.91.0 check --locked -p zakura-note-encryption --no-default-features --features alloc
+          cargo +1.91.0 check --locked -p zakura-note-encryption --no-default-features --features pre-zip-212
       - name: librustzcash / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.librustzcash == 'true' }}
         run: >-
           bash .github/scripts/check_rust_group.sh
-          "zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321" true false
+          "zakura-keys zakura-note-encryption zakura-primitives zakura-protocol zakura-proofs zakura-zip321" true false
 
       - name: Udon and Bento / Stable and MSRV checks
         if: ${{ !cancelled() && needs.changes.outputs.udon == 'true' }}

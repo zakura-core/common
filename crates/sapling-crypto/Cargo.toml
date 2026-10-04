@@ -43,7 +43,7 @@ rand_core_06 = { version = "0.6", default-features = false, package = "rand_core
 redjubjub = { workspace = true }
 subtle = { version = "2.6", default-features = false }
 tracing = { version = "0.1", default-features = false }
-zcash_note_encryption = { version = "0.4", features = ["pre-zip-212"] }
+zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] }
 zcash_spec = "0.2"
 zip32 = { version = "0.2", default-features = false }
 

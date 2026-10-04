@@ -171,8 +171,8 @@ pub(crate) mod private {
     use corez::io::Write;
 
     use super::{PADDING_LEN, ParseError, Typecode};
-    use zcash_encoding::CompactSize;
     use zcash_protocol::consensus::NetworkType;
+    use zcash_protocol::encoding::CompactSize;
 
     /// A raw address or viewing key.
     pub trait SealedItem: for<'a> TryFrom<(u32, &'a [u8]), Error = ParseError> + Clone {

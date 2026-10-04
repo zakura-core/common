@@ -22,7 +22,6 @@ bs58 = { version = "0.5", features = ["alloc", "check"], default-features = fals
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
 f4jumble = { version = "0.1.1", features = ["alloc"], default-features = false }
 zcash_protocol.workspace = true
-zcash_encoding = { version = "0.4", default-features = false }
 proptest = { version = ">=1,<1.7", optional = true }
 
 [dev-dependencies]
@@ -34,7 +33,6 @@ default = ["std"]
 std = [
     "corez/std",
     "f4jumble/std",
-    "zcash_encoding/std",
     "zcash_protocol/std",
 ]
 test-dependencies = ["dep:proptest"]

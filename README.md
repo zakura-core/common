@@ -4,7 +4,7 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 
 ## Protocol types
 
-- [`zakura-protocol`](crates/zcash_protocol) (forked from [`zcash_protocol 0.10.5`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/components/zcash_protocol))
+- [`zakura-protocol`](crates/zcash_protocol), including `zcash_protocol::encoding` from `zcash_encoding 0.4.0` (forked from [`zcash_protocol 0.10.5`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/components/zcash_protocol))
 - [`zakura-address`](crates/zcash_address) (forked from [`zcash_address 0.13.0`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/components/zcash_address))
 - [`zakura-transparent`](crates/zcash_transparent) (forked from [`zcash_transparent 0.10.0`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/zcash_transparent))
 - [`zakura-zip321`](crates/zip321) (forked from [`zip321 0.9.0`](https://github.com/zcash/librustzcash/tree/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/components/zip321))
@@ -19,6 +19,8 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 - [`zakura-keys`](crates/zcash_keys) (forked from [`zcash_keys 0.16.1`](https://github.com/zcash/librustzcash/tree/cb356a7def26d0bd8e1f21709951aeea137f58fa/zcash_keys))
 
 ## Shielded protocols
+
+- [`zakura-note-encryption`](crates/zcash_note_encryption) (forked from `zcash_note_encryption 0.4.2`): shared note encryption, trial decryption, and output recovery.
 
 - [`zakura-orchard`](crates/orchard) (forked from [`orchard 0.15.5`](https://github.com/zcash/orchard/tree/29d1d55db62153dcaeef8ef631c8991c53ed1248))
 - [`zakura-sapling-crypto`](crates/sapling-crypto) (forked from [`sapling-crypto 0.7.0`](https://github.com/zcash/sapling-crypto/tree/8186b407b47b595a2ea4f04c73d59fdd83bd401f))

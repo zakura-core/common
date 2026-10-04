@@ -2,7 +2,7 @@ use alloc::string::{String, ToString};
 use core::fmt;
 use corez::io::{self, Read, Write};
 
-use zcash_encoding::ReverseHex;
+use crate::encoding::ReverseHex;
 
 #[cfg(feature = "std")]
 use memuse::DynamicUsage;
