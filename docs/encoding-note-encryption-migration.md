@@ -13,13 +13,11 @@ Both upstream archives were verified against the node's fetched main lockfile:
 | `zcash_encoding 0.4.0` | `1440921903cdb86133fb9e2fe800be488015db2939a30bedb413078a1acb0306` | `661e0383e829c894fa0691543a379891a304ad0e` |
 | `zcash_note_encryption 0.4.2` | `e1cb1b9170c94370e3d66c5cc0877661db743337588b64de7711239eed462198` | `a8c90d1ce3737cc5898e0bf232ea325a5a61ec9f` |
 
-The release number is deliberately deferred at the user's request. All
-`2.2.0` requirements in the coordinated migration are staging values, **not a
-proposal to republish or modify already-published 2.2.0 artifacts**. This is a
-breaking public dependency migration. Choose a coordinated Common version
-that covers the break, review consumer library release levels, and rewrite
-all staging requirements before merging or publishing. The node binary's
-major version is not automatically bumped by this ownership change.
+Common **3.0.0** is staged at the user's request. All published Common
+members and both consumer requirement sets use that coordinated major
+release. This covers the breaking public dependency identity changes.
+Node libraries are reviewed independently against their latest stable
+releases; the node binary's major version is not automatically bumped.
 
 Common uses inherited workspace package metadata, upstream library targets,
 explicit renamed workspace edges with defaults disabled, and one coordinated
@@ -185,9 +183,11 @@ Common, node, and selected Zakura wallet edges move together. In particular:
   dependency changes need consumer release review even without new methods.
 - Node: recovery imports now select the fork. The direct note-encryption
   recovery adapters are private. `decrypts_successfully` retains its
-  signature and behavior. The eventual Common release-number change must be
-  reviewed for every node library exposing Common types or re-exports;
-  library versions and the binary release version are separate decisions.
+  signature and behavior. Common 3.0 public dependencies and
+  re-exports were reviewed independently: existing chain/network/state/RPC/
+  node-services major bumps suffice; consensus is staged at 11.0.0 and
+  script/header-chain at 5.0.0. Utils retains its pending patch. The binary
+  remains 1.6.1.
 
 Existing `pub(crate)` surfaces are also affected by the wrapper/trait
 identity change: Orchard/Sapling PCZT `Output::ock`, Sapling PCZT
@@ -223,12 +223,14 @@ Folding encoding removes one compilation unit. Forking note encryption
 changes ownership; it does not itself reduce compilation work. No timing or
 benchmark claim is made.
 
+Draft PRs: [Common #540](https://github.com/zakura-core/common/pull/540),
+[node #1292](https://github.com/zakura-core/zakura/pull/1292), and
+[wallet #84](https://github.com/zakura-core/wallet-libraries/pull/84).
+
 ## Release order and remaining dependencies
 
-1. Select the breaking coordinated Common release number and update all
-   Common workspace versions plus both consumer requirement sets. Review
-   affected wallet prerelease and node library versions; do not automatically
-   bump the node binary's major version.
+1. Review the staged Common 3.0.0 major release and affected wallet
+   prerelease and node library versions. The node binary release is separate.
 2. Merge and publish Common in dependency order. `zakura-note-encryption`
    and `zakura-protocol` are foundation packages; publish them before
    Orchard/Sapling, addresses/transparent, keys, primitives, and proofs.
@@ -237,13 +239,13 @@ benchmark claim is made.
    drafts retain their original registry lockfiles until this is possible;
    a staging dependency on the unpublished new package cannot resolve there.
 4. Publish the wallet's PCZT, backend, SQLite, and facade as required by its
-   public dependency change; finalize node library version review before
-   releasing the node. This task publishes or merges none of these artifacts.
+   public dependency change; the reviewed node library majors are staged. This task publishes or merges none of these artifacts.
 
 ## Validation evidence
 
 All production-code checks below use the imported baseline implementations.
-Consumer runs use local Common sources, not the old published staging version.
+Consumer runs use local Common 3.0.0 sources. Registry validation must follow
+publication.
 
 | Common package | `check --no-default-features` | `check --all-features --all-targets` |
 | --- | --- | --- |
@@ -291,8 +293,9 @@ Additional successful checks:
   covering Sapling, Orchard, and Ironwood.
 - Wallet's repository graph verifier passed with 599 reachable packages,
   including 27 Zakura packages and no forbidden upstream package. Generator
-  reproduction from the pristine upstream manifest passed twice. The existing
-  wallet Python tooling tests passed (11 tests).
+  reproduction from the pristine upstream manifest passed twice. The wallet Python tooling tests passed (12 tests), including a new
+  source-generation regression covering encoding removal, feature defaults,
+  and deterministic regeneration.
 
 Resolved production graphs for the node binary and selected wallet consumers
 contain no standalone `zcash_encoding` or upstream `zcash_note_encryption`,
