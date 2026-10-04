@@ -33,7 +33,6 @@ zcash_script = { version = "0.4.3", features = ["descriptor"], default-features 
 getset = "0.1"
 nonempty = { version = "0.11", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-document-features = { version = "0.2", optional = true }
 bs58 = { version = "0.5", features = ["alloc", "check"], default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 ripemd = { version = "0.1", default-features = false }
@@ -45,7 +44,6 @@ zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 [features]
 default = ["std"]
 std = [
-    "dep:document-features",
     "secp256k1?/std",
     "zcash_address/std",
     "zcash_script/std",

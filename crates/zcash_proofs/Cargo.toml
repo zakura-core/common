@@ -23,7 +23,6 @@ bench = false
 bellman = { workspace = true, features = ["groth16"] }
 blake2b_simd = { version = "1", default-features = false }
 bls12_381 = { workspace = true, features = ["default"] }
-document-features = "0.2"
 group = "0.14"
 home = { version = "0.5", optional = true }
 jubjub = { workspace = true, features = ["default"] }

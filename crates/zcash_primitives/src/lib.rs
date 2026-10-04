@@ -4,7 +4,8 @@
 //! for working with Zcash.
 //!
 //! ## Feature flags
-#![cfg_attr(feature = "std", doc = document_features::document_features!())]
+//!
+//! *No documented features in Cargo.toml*
 //!
 
 #![cfg_attr(docsrs, feature(doc_cfg))]

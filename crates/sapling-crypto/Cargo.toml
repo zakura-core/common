@@ -26,7 +26,6 @@ blake2b_simd = { version = "1", default-features = false }
 blake2s_simd = { version = "1", default-features = false }
 bls12_381 = { workspace = true, features = ["alloc"] }
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
-document-features = { version = "0.2", optional = true }
 ff = { version = "0.14", default-features = false }
 fpe = { version = "0.6", features = ["alloc"], default-features = false }
 getset = "0.1"
@@ -71,7 +70,6 @@ default = ["multicore", "circuit"]
 multicore = ["bellman?/multicore"]
 std = [
     "corez/std",
-    "dep:document-features",
     "group/wnaf-memuse",
     "redjubjub/std",
 ]

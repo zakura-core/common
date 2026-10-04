@@ -26,7 +26,6 @@ blake2b_simd = { version = "1", default-features = false }
 bs58 = { version = "0.5", features = ["alloc", "check"], default-features = false }
 byteorder = { version = "1", optional = true }
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
-document-features = { version = "0.2", optional = true }
 memuse = { version = "0.2.2", default-features = false }
 nonempty = { version = "0.11", default-features = false }
 orchard = { workspace = true, optional = true }
@@ -64,7 +63,6 @@ default = ["std"]
 orchard = ["dep:orchard"]
 sapling = ["dep:sapling"]
 std = [
-    "dep:document-features",
     "orchard?/std",
     "sapling?/std",
     "transparent/std",

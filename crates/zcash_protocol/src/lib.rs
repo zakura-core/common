@@ -4,8 +4,12 @@
 //! for the Zcash main and test networks, as well types for representing ZEC amounts and value
 //! balances.
 //!
-#![cfg_attr(feature = "std", doc = "## Feature flags")]
-#![cfg_attr(feature = "std", doc = document_features::document_features!())]
+//! ## Feature flags
+//!
+//! - **`test-dependencies`** — Exposes APIs that are useful for testing, such as
+//!   `proptest` strategies.
+//! - **`local-consensus`** — Exposes support for working with a local consensus
+//!   (e.g. regtest).
 //!
 
 #![no_std]

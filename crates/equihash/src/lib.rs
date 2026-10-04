@@ -8,8 +8,10 @@
 //! `n / (k + 1)` is between 8 and 24 bits. The inputs must be a Zcash block
 //! header and nonce.
 //!
-#![cfg_attr(feature = "std", doc = "## Feature flags")]
-#![cfg_attr(feature = "std", doc = document_features::document_features!())]
+//! ## Feature flags
+//!
+//! - **`solver`** — Experimental pure Rust Tromp solver support.
+//!   Enables runtime CPU detection in the Rust BLAKE2b backend.
 //!
 //! References
 //! ==========

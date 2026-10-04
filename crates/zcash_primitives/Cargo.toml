@@ -29,7 +29,6 @@ block-buffer = "=0.11.0-rc.3"
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
 # Not used directly: version pin, see block-buffer above.
 crypto-common = "=0.2.0-rc.1"
-document-features = { version = "0.2", optional = true }
 equihash.workspace = true
 ff = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
@@ -71,6 +70,8 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 [features]
 circuits = ["orchard/circuit", "sapling/circuit"]
 default = ["multicore", "std", "circuits"]
+# Retained for compatibility with the former optional documentation dependency.
+document-features = []
 expensive-tests = []
 multicore = ["orchard/multicore", "sapling/multicore"]
 no-expensive-tests = []

@@ -3563,7 +3563,6 @@ version = "2.2.0"
 dependencies = [
  "blake2b_simd",
  "corez",
- "document-features",
  "equihash",
  "hex",
  "libc",
@@ -3657,7 +3656,6 @@ dependencies = [
  "bs58",
  "byteorder",
  "corez",
- "document-features",
  "group",
  "hex",
  "memuse",
@@ -3767,7 +3765,6 @@ dependencies = [
  "corez",
  "criterion 0.5.1",
  "crypto-common 0.2.0-rc.1",
- "document-features",
  "ff",
  "hex",
  "incrementalmerkletree",
@@ -3800,7 +3797,6 @@ version = "2.2.0"
 dependencies = [
  "blake2b_simd",
  "byteorder",
- "document-features",
  "group",
  "home",
  "known-folders",
@@ -3822,7 +3818,6 @@ name = "zakura-protocol"
 version = "2.2.0"
 dependencies = [
  "corez",
- "document-features",
  "hex",
  "incrementalmerkletree",
  "incrementalmerkletree-testing",
@@ -3885,7 +3880,6 @@ dependencies = [
  "chacha20poly1305",
  "corez",
  "criterion 0.5.1",
- "document-features",
  "ff",
  "fpe",
  "getset",
@@ -3929,7 +3923,6 @@ dependencies = [
  "bip32",
  "bs58",
  "corez",
- "document-features",
  "getset",
  "hex",
  "nonempty",

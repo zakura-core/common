@@ -4,7 +4,8 @@
 //! and verifying proofs.
 //!
 //! ## Feature flags
-#![doc = document_features::document_features!()]
+//!
+//! *No documented features in Cargo.toml*
 //!
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
