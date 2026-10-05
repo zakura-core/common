@@ -167,9 +167,9 @@ impl Note {
         // Retry because not every Sapling diversifier is valid.
         let ivk = fvk.vk.ivk();
         let recipient = loop {
-            let mut diversifier_bytes = Default::default();
-            rng.fill_bytes(&mut diversifier_bytes);
-            if let Some(recipient) = ivk.to_payment_address(Diversifier(diversifier_bytes)) {
+            let mut diversifier = Diversifier(Default::default());
+            rng.fill_bytes(&mut diversifier.0);
+            if let Some(recipient) = ivk.to_payment_address(diversifier) {
                 break recipient;
             }
         };

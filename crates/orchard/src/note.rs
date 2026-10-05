@@ -334,7 +334,7 @@ impl Note {
         let sk = SpendingKey::random(rng);
         let fvk: FullViewingKey = (&sk).into();
         // Dummy notes do not need a reproducible ZIP 32 address index.
-        let mut diversifier_bytes = Default::default();
+        let mut diversifier_bytes: [u8; 11] = Default::default();
         rng.fill_bytes(&mut diversifier_bytes);
         let recipient = fvk.address(Diversifier::from_bytes(diversifier_bytes), Scope::External);
 
