@@ -15,8 +15,8 @@ use crate::{
     address::Address,
     bundle::{Authorization, Authorized, Bundle, BundleVersion, Flags, TxVersion},
     keys::{
-        FullViewingKey, OutgoingViewingKey, Scope, SpendAuthorizingKey, SpendValidatingKey,
-        SpendingKey,
+        Diversifier, FullViewingKey, OutgoingViewingKey, Scope, SpendAuthorizingKey,
+        SpendValidatingKey, SpendingKey,
     },
     note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, Rho, TransmittedNoteCiphertext},
     note_encryption::OrchardNoteEncryption,
@@ -548,7 +548,10 @@ impl OutputInfo {
     /// [orcharddummynotes]: https://zips.z.cash/protocol/nu5.pdf#orcharddummynotes
     pub fn dummy(note_version: NoteVersion, rng: &mut impl Rng) -> Self {
         let fvk: FullViewingKey = (&SpendingKey::random(rng)).into();
-        let recipient = fvk.address_at(0u32, Scope::External);
+        // Dummy outputs do not need a reproducible ZIP 32 address index.
+        let mut diversifier_bytes = Default::default();
+        rng.fill_bytes(&mut diversifier_bytes);
+        let recipient = fvk.address(Diversifier::from_bytes(diversifier_bytes), Scope::External);
 
         Self::new(None, recipient, NoteValue::ZERO, note_version, [0u8; 512])
     }

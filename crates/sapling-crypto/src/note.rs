@@ -8,7 +8,8 @@ use crate::{
 };
 
 use super::{
-    Nullifier, NullifierDerivingKey, PaymentAddress, keys::EphemeralSecretKey, value::NoteValue,
+    Diversifier, Nullifier, NullifierDerivingKey, PaymentAddress, keys::EphemeralSecretKey,
+    value::NoteValue,
 };
 
 mod commitment;
@@ -162,13 +163,22 @@ impl Note {
 
         let extsk = ExtendedSpendingKey::master(&sk_bytes[..]);
         let fvk = extsk.to_diversifiable_full_viewing_key().fvk().clone();
-        let recipient = extsk.default_address();
+        // Dummy notes do not need a reproducible ZIP 32 address index.
+        // Retry because not every Sapling diversifier is valid.
+        let ivk = fvk.vk.ivk();
+        let recipient = loop {
+            let mut diversifier_bytes = Default::default();
+            rng.fill_bytes(&mut diversifier_bytes);
+            if let Some(recipient) = ivk.to_payment_address(Diversifier(diversifier_bytes)) {
+                break recipient;
+            }
+        };
 
         let mut rseed_bytes = [0; 32];
         rng.fill_bytes(&mut rseed_bytes);
         let rseed = Rseed::AfterZip212(rseed_bytes);
 
-        let note = Note::from_parts(recipient.1, NoteValue::ZERO, rseed);
+        let note = Note::from_parts(recipient, NoteValue::ZERO, rseed);
 
         (extsk.expsk, fvk, note)
     }
@@ -182,6 +192,19 @@ pub(super) mod testing {
         super::{testing::arb_payment_address, value::NoteValue},
         ExtractedNoteCommitment, Note, Rseed,
     };
+
+    #[cfg(test)]
+    pub(super) fn arb_dummy_note() -> impl Strategy<
+        Value = (
+            crate::keys::ExpandedSpendingKey,
+            crate::keys::FullViewingKey,
+            Note,
+        ),
+    > {
+        use rand::{SeedableRng, rngs::StdRng};
+
+        prop::array::uniform32(any::<u8>()).prop_map(|seed| Note::dummy(StdRng::from_seed(seed)))
+    }
 
     prop_compose! {
         pub fn arb_note(value: NoteValue)(
@@ -203,6 +226,25 @@ pub(super) mod testing {
                 .prop_map(|v| bls12_381::Scalar::from_bytes_wide(&v)),
         ) -> ExtractedNoteCommitment {
             ExtractedNoteCommitment(cmu)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn dummy_note_preserves_spend_inputs((expsk, fvk, note) in testing::arb_dummy_note()) {
+            prop_assert_eq!(fvk.to_bytes(), FullViewingKey::from_expanded_spending_key(&expsk).to_bytes());
+            prop_assert_eq!(note.value(), NoteValue::ZERO);
+            prop_assert!(matches!(note.rseed(), Rseed::AfterZip212(_)));
+            prop_assert_eq!(
+                Some(note.recipient()),
+                fvk.vk.ivk().to_payment_address(*note.recipient().diversifier())
+            );
         }
     }
 }
