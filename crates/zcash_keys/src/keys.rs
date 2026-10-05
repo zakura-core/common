@@ -91,7 +91,7 @@ pub mod transparent;
 #[cfg(feature = "zcashd-compat")]
 pub mod zcashd;
 
-#[cfg(feature = "transparent-inputs")]
+#[cfg(all(feature = "transparent-inputs", feature = "zip32-addresses"))]
 fn to_transparent_child_index(j: DiversifierIndex) -> Option<NonHardenedChildIndex> {
     let (low_4_bytes, rest) = j.as_bytes().split_at(4);
     let transparent_j = u32::from_le_bytes(low_4_bytes.try_into().unwrap());
