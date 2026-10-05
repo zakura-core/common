@@ -516,12 +516,7 @@ pub mod testing {
 
     use crate::keys::{UnifiedAddressRequest, testing::arb_unified_spending_key};
 
-    use super::Address;
-    #[cfg(any(
-        feature = "zip32-addresses",
-        not(any(feature = "orchard", feature = "sapling"))
-    ))]
-    use super::UnifiedAddress;
+    use super::{Address, UnifiedAddress};
 
     #[cfg(feature = "sapling")]
     use sapling::testing::arb_payment_address;
