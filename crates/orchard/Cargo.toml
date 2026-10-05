@@ -99,7 +99,7 @@ required-features = ["circuit", "unstable-voting-circuits"]
 
 [[test]]
 name = "ironwood_batch_timings"
-required-features = ["circuit"]
+required-features = ["circuit", "zip32-addresses"]
 
 [[bench]]
 name = "circuit"
