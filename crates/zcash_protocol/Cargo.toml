@@ -27,14 +27,13 @@ memuse = { version = "0.2.2", optional = true, default-features = false }
 # - Encodings
 zcash_encoding = { version = "0.4", default-features = false }
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
-hex = { version = "0.4", features = ["alloc"], default-features = false }
 
 # - Test dependencies
 proptest = { version = ">=1,<1.7", optional = true }
-incrementalmerkletree = { version = "0.8.2", optional = true, default-features = false }
 incrementalmerkletree-testing = { version = "0.3", optional = true }
 
 [dev-dependencies]
+hex = { version = "0.4", features = ["alloc"], default-features = false }
 proptest = ">=1,<1.7"
 
 [features]
@@ -45,10 +44,8 @@ std = ["document-features", "dep:memuse"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [
-    "dep:incrementalmerkletree",
     "dep:incrementalmerkletree-testing",
     "dep:proptest",
-    "incrementalmerkletree?/test-dependencies",
 ]
 
 ## Exposes support for working with a local consensus (e.g. regtest).

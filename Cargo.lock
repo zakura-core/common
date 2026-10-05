@@ -2175,17 +2175,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "proptest-derive"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ee1c9ac207483d5e7db4940700de86a9aae46ef90c48b57f99fe7edb8345e49"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3533,7 +3522,6 @@ name = "zakura-bls12-381"
 version = "2.2.0"
 dependencies = [
  "criterion 0.3.6",
- "csv",
  "digest 0.10.7",
  "ff",
  "group",
@@ -3626,7 +3614,6 @@ version = "2.2.0"
 dependencies = [
  "bitvec",
  "criterion 0.3.6",
- "csv",
  "ff",
  "group",
  "rand_core 0.10.1",
@@ -3643,31 +3630,26 @@ dependencies = [
  "bech32",
  "bip0039",
  "bip32",
- "blake2b_simd",
  "bs58",
  "byteorder",
  "corez",
  "group",
  "hex",
- "memuse",
  "nonempty",
  "proptest",
  "rand 0.8.7",
  "rand_chacha 0.3.1",
- "rand_core 0.6.4",
  "regex",
  "secp256k1",
  "secrecy",
  "subtle",
  "zakura-address",
- "zakura-jubjub",
  "zakura-orchard",
  "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zcash_encoding",
  "zcash_script",
- "zeroize",
  "zip32",
 ]
 
@@ -3685,7 +3667,6 @@ dependencies = [
  "getset",
  "group",
  "hex",
- "image",
  "incrementalmerkletree",
  "maybe-rayon",
  "memuse",
@@ -3696,7 +3677,6 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
- "rand_core 0.10.1",
  "rand_core 0.6.4",
  "rayon",
  "serde",
@@ -3752,7 +3732,6 @@ dependencies = [
  "assert_matches",
  "blake2b_simd",
  "block-buffer 0.11.0-rc.3",
- "chacha20poly1305",
  "corez",
  "criterion 0.5.1",
  "crypto-common 0.2.0-rc.1",
@@ -3765,7 +3744,6 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "rand_xorshift 0.5.0",
  "secp256k1",
  "sha2 0.10.9",
  "zakura-bls12-381",
@@ -3800,7 +3778,6 @@ dependencies = [
  "zakura-bls12-381",
  "zakura-jubjub",
  "zakura-primitives",
- "zakura-redjubjub",
  "zakura-sapling-crypto",
 ]
 
@@ -3810,7 +3787,6 @@ version = "2.2.0"
 dependencies = [
  "corez",
  "hex",
- "incrementalmerkletree",
  "incrementalmerkletree-testing",
  "memuse",
  "proptest",
@@ -3830,17 +3806,13 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "proptest",
- "proptest-derive",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "rand_core 0.6.4",
  "serde",
- "serde_json",
- "thiserror",
  "zakura-jubjub",
  "zakura-pasta-curves",
- "zeroize",
 ]
 
 [[package]]
@@ -3854,10 +3826,8 @@ dependencies = [
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "serde",
- "serde_json",
  "thiserror",
  "zakura-reddsa",
- "zeroize",
 ]
 
 [[package]]

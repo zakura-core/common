@@ -30,7 +30,6 @@ known-folders = { version = "1", optional = true }
 minreq = { version = "2", features = ["https"], optional = true }
 rand = { version = "0.10", features = ["sys_rng"], default-features = false }
 rand_core = { version = "0.10", default-features = false }
-redjubjub = { workspace = true }
 sapling = { workspace = true }
 wagyu-zcash-parameters = { version = "0.2", optional = true }
 xdg = { version = "3", optional = true }

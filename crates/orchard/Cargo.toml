@@ -32,7 +32,6 @@ group = "0.14"
 halo2_gadgets = { workspace = true, optional = true }
 halo2_proofs = { workspace = true, features = ["batch", "floor-planner-v1-legacy-pdqsort"], optional = true }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
-image = { version = "0.24", optional = true }
 incrementalmerkletree = "0.8.1"
 memuse = { version = "0.2.2", default-features = false }
 maybe-rayon = { version = "0.1.0", default-features = false, optional = true }
@@ -43,7 +42,6 @@ plotters = { version = "0.3.0", optional = true }
 poseidon = { workspace = true }
 proptest = { version = ">=1.0.0, <1.7.0", optional = true }
 rand = { version = "0.10", default-features = false }
-rand_core = { version = "0.10", default-features = false }
 rand_core_06 = { version = "0.6", default-features = false, package = "rand_core" }
 reddsa = { workspace = true }
 serde = { version = "1.0", features = ["derive"], default-features = false }
@@ -75,6 +73,8 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 circuit = ["dep:halo2_gadgets", "dep:halo2_proofs", "std"]
 default = ["circuit", "multicore", "std"]
 dev-graph = ["halo2_proofs?/dev-graph", "image", "plotters"]
+# Retained for compatibility with the former unused optional dependency.
+image = []
 multicore = ["halo2_proofs?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
 orbits = ["halo2_proofs?/orbits"]
 # Disable automatic x86-64 assembly selection in the proving dependencies.

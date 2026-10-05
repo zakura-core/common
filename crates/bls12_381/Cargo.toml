@@ -29,7 +29,6 @@ zeroize = { version = "1.4", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = "0.3"
-csv = ">= 1.0, < 1.2"
 hex = "0.4"
 hex-literal = "0.3"
 rand_xorshift = "0.5"

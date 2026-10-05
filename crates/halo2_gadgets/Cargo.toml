@@ -27,9 +27,7 @@ halo2_poseidon = { workspace = true }
 halo2_proofs = { workspace = true }
 pasta_curves = { workspace = true, features = ["default"] }
 plotters = { version = "0.3.0", optional = true, default-features = false }
-proptest = { version = "1.0.0", optional = true }
 sinsemilla = { workspace = true }
-subtle = "2.3"
 
 [dev-dependencies]
 criterion = "0.5"
@@ -38,6 +36,7 @@ halo2_poseidon = { workspace = true, features = ["test-dependencies"] }
 proptest = "1.0.0"
 rand = "0.10"
 sinsemilla = { workspace = true, features = ["test-dependencies"] }
+subtle = "2.3"
 
 [target."cfg(unix)".dev-dependencies]
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
@@ -45,6 +44,8 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 [features]
 beta = ["halo2_proofs/beta"]
 nightly = ["beta", "halo2_proofs/nightly"]
+# Retained for compatibility with the former unused optional dependency.
+proptest = []
 test-dependencies = ["proptest", "sinsemilla/test-dependencies"]
 test-dev-graph = [
     "halo2_proofs/dev-graph",
