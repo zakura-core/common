@@ -5,21 +5,21 @@
 
 use alloc::vec::Vec;
 use core::hash::Hash;
+#[cfg(feature = "zip32-addresses")]
 use core::ops::Range;
 
-use crate::{
-    address::Address,
-    keys::{
-        AddressGenerationError, UnifiedAddressRequest, UnifiedFullViewingKey,
-        UnifiedIncomingViewingKey,
-    },
-};
+use crate::{address::Address, keys::AddressGenerationError};
 use transparent::{
     address::TransparentAddress,
-    keys::{IncomingViewingKey, NonHardenedChildIndex, NonHardenedChildRange, TransparentKeyScope},
+    keys::{NonHardenedChildIndex, TransparentKeyScope},
 };
-use zcash_address::unified::Typecode;
-use zip32::DiversifierIndex;
+#[cfg(feature = "zip32-addresses")]
+use {
+    crate::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey},
+    transparent::keys::{IncomingViewingKey, NonHardenedChildRange},
+    zcash_address::unified::Typecode,
+    zip32::DiversifierIndex,
+};
 
 /// Configuration for gap limits used in transparent address management.
 ///
@@ -123,9 +123,8 @@ impl Default for GapLimits {
 /// A trait providing wallet storage operations required for transparent address gap limit
 /// management.
 ///
-/// Implementations of this trait allow the gap limit logic in [`generate_gap_addresses`] to query
-/// and update the wallet's transparent address state without being coupled to a specific storage
-/// backend.
+/// Implementations let gap-limit address generation query and update the
+/// wallet's transparent address state independently of a storage backend.
 pub trait AddressStore {
     /// The type of errors produced by the wallet storage backend.
     type Error;
@@ -157,6 +156,7 @@ pub trait AddressStore {
     ) -> Result<(), Self::Error>;
 }
 
+#[cfg(feature = "zip32-addresses")]
 fn generate_external_address(
     uivk: &UnifiedIncomingViewingKey,
     ua_request: UnifiedAddressRequest,
@@ -196,6 +196,8 @@ fn generate_external_address(
 ///
 /// Returns an empty list if the account lacks a transparent key and `require_key` is `false`.
 /// Returns an error if the key is required but unavailable, or if the key scope is unsupported.
+#[cfg(feature = "zip32-addresses")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
 pub fn generate_address_list(
     account_uivk: &UnifiedIncomingViewingKey,
     account_ufvk: Option<&UnifiedFullViewingKey>,
@@ -263,6 +265,8 @@ pub enum GapAddressesError<SE> {
 /// configured gap limit. If no gap exists (i.e., the address space is exhausted), this is a
 /// no-op.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "zip32-addresses")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
 pub fn generate_gap_addresses<DbT, SE>(
     wallet_db: &mut DbT,
     gap_limits: &GapLimits,

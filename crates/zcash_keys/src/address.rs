@@ -516,7 +516,12 @@ pub mod testing {
 
     use crate::keys::{UnifiedAddressRequest, testing::arb_unified_spending_key};
 
-    use super::{Address, UnifiedAddress};
+    use super::Address;
+    #[cfg(any(
+        feature = "zip32-addresses",
+        not(any(feature = "orchard", feature = "sapling"))
+    ))]
+    use super::UnifiedAddress;
 
     #[cfg(feature = "sapling")]
     use sapling::testing::arb_payment_address;
@@ -554,12 +559,20 @@ mod tests {
     use zcash_address::test_vectors;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
-    use super::{Address, UnifiedAddress};
+    use super::Address;
+    #[cfg(any(
+        feature = "zip32-addresses",
+        not(any(feature = "orchard", feature = "sapling"))
+    ))]
+    use super::UnifiedAddress;
 
-    #[cfg(feature = "sapling")]
+    #[cfg(all(feature = "sapling", feature = "zip32-addresses"))]
     use crate::keys::sapling;
 
-    #[cfg(any(feature = "orchard", feature = "sapling"))]
+    #[cfg(all(
+        feature = "zip32-addresses",
+        any(feature = "orchard", feature = "sapling")
+    ))]
     use zip32::AccountId;
 
     #[test]

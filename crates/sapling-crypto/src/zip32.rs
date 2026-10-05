@@ -1187,9 +1187,13 @@ mod tests {
             xsk: Option<[u8; 169]>,
             xfvk: [u8; 169],
             fp: [u8; 32],
+            #[cfg_attr(not(feature = "zip32-addresses"), allow(dead_code))]
             d0: Option<[u8; 11]>,
+            #[cfg_attr(not(feature = "zip32-addresses"), allow(dead_code))]
             d1: Option<[u8; 11]>,
+            #[cfg_attr(not(feature = "zip32-addresses"), allow(dead_code))]
             d2: Option<[u8; 11]>,
+            #[cfg_attr(not(feature = "zip32-addresses"), allow(dead_code))]
             dmax: Option<[u8; 11]>,
             internal_nsk: Option<[u8; 32]>,
             internal_ovk: [u8; 32],

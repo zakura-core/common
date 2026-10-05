@@ -631,7 +631,7 @@ impl Display for ReceiverRequirementError {
 }
 
 /// An enumeration of the ways in which a receiver may be requested to be present in a generated
-/// [`UnifiedAddress`].
+/// [`crate::address::UnifiedAddress`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiverRequirement {
     /// A receiver of the associated type is required to be present in the generated
@@ -643,7 +643,7 @@ pub enum ReceiverRequirement {
     /// which the address is being derived and derivation of the receiver succeeds at the given
     /// diversifier index.
     Allow,
-    /// No receiver of the associated type may be included in the generated [`UnifiedAddress`]
+    /// No receiver of the associated type may be included in the generated [`crate::address::UnifiedAddress`]
     /// under any circumstances. When calling [`Self::intersect`], this variant will be preferred
     /// over [`ReceiverRequirement::Allow`].
     Omit,
@@ -1765,7 +1765,7 @@ impl UnifiedIncomingViewingKey {
     }
 
     /// Attempts to recover a diversifier index for each of the receivers of the given
-    /// [`UnifiedAddress`].
+    /// [`crate::address::UnifiedAddress`].
     ///
     /// Returns the empty set if no shielded receiver of `ua` can be attributed to this key.
     /// Transparent receivers are not considered here, as recovering a diversifier index from a
@@ -1930,6 +1930,7 @@ mod tests {
     };
 
     #[cfg(all(
+        feature = "zip32-addresses",
         feature = "transparent-inputs",
         any(feature = "orchard", feature = "sapling")
     ))]
