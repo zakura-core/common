@@ -1907,6 +1907,64 @@ pub mod testing {
 
     use super::{Builder, BundleType};
 
+    /// Reconstructs the historical dummy inputs pinned by the Lean captures.
+    ///
+    /// Keep this fixture independent of production dummy-address sampling so
+    /// changes to the builder do not replace the independently pinned proofs.
+    #[cfg(all(
+        test,
+        any(feature = "verifier-fingerprint", feature = "prover-fingerprint")
+    ))]
+    pub(crate) fn build_pinned_fixture_bundle(
+        rng: &mut rand_chacha::ChaCha20Rng,
+        num_actions: u8,
+    ) -> super::UnauthorizedBundle<i64> {
+        use super::{
+            ActionInfo, BundleMetadata, OutputInfo, SpendInfo, finish_unauthorized_bundle,
+        };
+        use crate::value::ValueSum;
+        use rand::prelude::SliceRandom;
+
+        let bundle_version = BundleVersion::orchard_v3();
+        let note_version = bundle_version.note_version();
+        let mut pairs = (0..num_actions)
+            .map(|_| {
+                let sk = SpendingKey::random(rng);
+                let fvk = FullViewingKey::from(&sk);
+                let recipient = fvk.address_at(0u32, Scope::External);
+                let rho = Rho::from_nf_old(Nullifier::dummy(rng));
+                let note = Note::new(recipient, NoteValue::ZERO, rho, note_version, &mut *rng);
+                let spend = SpendInfo {
+                    dummy_sk: Some(sk),
+                    fvk,
+                    scope: Scope::External,
+                    note,
+                    merkle_path: Some(MerklePath::dummy(rng)),
+                };
+                let output =
+                    OutputInfo::new(None, recipient, NoteValue::ZERO, note_version, [0; 512]);
+                (spend, output)
+            })
+            .collect::<Vec<_>>();
+        pairs.shuffle(rng);
+        let pre_actions = pairs
+            .into_iter()
+            .map(|(spend, output)| ActionInfo::new(spend, output, &mut *rng))
+            .collect();
+        finish_unauthorized_bundle(
+            pre_actions,
+            bundle_version.default_flags(),
+            ValueSum::zero(),
+            BundleMetadata::new(0, 0),
+            rng,
+            Anchor::empty_tree(),
+            bundle_version,
+        )
+        .expect("pinned zero-valued fixture inputs satisfy the bundle invariants")
+        .expect("pinned fixtures contain at least one action")
+        .0
+    }
+
     /// An intermediate type used for construction of arbitrary
     /// bundle values. This type is required because of a limitation
     /// of the proptest prop_compose! macro which does not correctly
