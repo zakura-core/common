@@ -830,11 +830,6 @@ notes = "Benchmark/profiling dependency alignment; pending review."
 
 [[exemptions.r-efi]]
 version = "5.3.0"
-criteria = "safe-to-run"
-notes = "Benchmark/profiling dependency alignment; pending review."
-
-[[exemptions.r-efi]]
-version = "5.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.r-efi]]
