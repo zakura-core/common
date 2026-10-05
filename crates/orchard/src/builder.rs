@@ -7,10 +7,11 @@ use core::iter;
 
 use ff::Field;
 use pasta_curves::pallas;
-use rand::{prelude::SliceRandom, CryptoRng, Rng};
+use rand::{CryptoRng, Rng, prelude::SliceRandom};
 use zcash_note_encryption::ENC_CIPHERTEXT_SIZE;
 
 use crate::{
+    Proof, ProtocolVersion,
     address::Address,
     bundle::{Authorization, Authorized, Bundle, BundleVersion, Flags, TxVersion},
     keys::{
@@ -23,7 +24,6 @@ use crate::{
     rng_compat::RngCore06,
     tree::{Anchor, MerklePath},
     value::{self, BalanceError, NoteValue, ValueCommitTrapdoor, ValueCommitment, ValueSum},
-    Proof, ProtocolVersion,
 };
 
 #[cfg(feature = "circuit")]
@@ -1895,21 +1895,21 @@ pub mod testing {
     use core::fmt::Debug;
 
     use incrementalmerkletree::{Hashable, Level};
-    use rand::{rngs::StdRng, CryptoRng, Rng as RandRng, SeedableRng};
+    use rand::{CryptoRng, Rng as RandRng, SeedableRng, rngs::StdRng};
 
     use proptest::collection::vec;
     use proptest::prelude::*;
 
     use crate::{
+        Address, NOTE_COMMITMENT_TREE_DEPTH, Note, NoteVersion,
         bundle::{Authorized, Bundle, BundleVersion, TxVersion},
         circuit::{OrchardCircuitVersion, ProvingKey},
         keys::{
-            testing::arb_spending_key, FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey,
+            FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey, testing::arb_spending_key,
         },
         note::{Nullifier, Rho},
         tree::{Anchor, MerkleHashOrchard, MerklePath},
-        value::{testing::arb_positive_note_value, NoteValue, MAX_NOTE_VALUE},
-        Address, Note, NoteVersion, NOTE_COMMITMENT_TREE_DEPTH,
+        value::{MAX_NOTE_VALUE, NoteValue, testing::arb_positive_note_value},
     };
 
     use super::{Builder, BundleType};
@@ -1927,7 +1927,7 @@ pub mod testing {
         num_actions: u8,
     ) -> super::UnauthorizedBundle<i64> {
         use super::{
-            finish_unauthorized_bundle, ActionInfo, BundleMetadata, OutputInfo, SpendInfo,
+            ActionInfo, BundleMetadata, OutputInfo, SpendInfo, finish_unauthorized_bundle,
         };
         use crate::value::ValueSum;
         use rand::prelude::SliceRandom;
@@ -2263,10 +2263,11 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     use super::{
-        bundle, testing, BuildError, Builder, ChangeInfo, MaybeSigned, OutputError, OutputInfo,
-        SpendInfo, DEFAULT_MIN_ACTIONS,
+        BuildError, Builder, ChangeInfo, DEFAULT_MIN_ACTIONS, MaybeSigned, OutputError, OutputInfo,
+        SpendInfo, bundle, testing,
     };
     use crate::{
+        Address, Anchor, Note,
         builder::{BundleType, SpendError},
         bundle::{Authorized, Bundle, BundleVersion, Flags, TxVersion},
         circuit::OrchardCircuitVersion,
@@ -2278,9 +2279,8 @@ mod tests {
         note_encryption::OrchardDomain,
         pczt::{ProverError, VerifyError},
         rng_compat::OsRng,
-        tree::{empty_roots, MerklePath},
+        tree::{MerklePath, empty_roots},
         value::NoteValue,
-        Address, Anchor, Note,
     };
     use zcash_note_encryption::try_note_decryption;
 
@@ -2757,17 +2757,19 @@ mod tests {
         ));
 
         // Spends-disabled flags are accepted.
-        assert!(Builder::new(
-            BundleType::Coinbase,
-            bundle_version,
-            Flags::from_parts(
-                false,
-                true,
-                bundle_version.permits_cross_address_transfers()
-            ),
-            anchor,
-        )
-        .is_ok());
+        assert!(
+            Builder::new(
+                BundleType::Coinbase,
+                bundle_version,
+                Flags::from_parts(
+                    false,
+                    true,
+                    bundle_version.permits_cross_address_transfers()
+                ),
+                anchor,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2899,10 +2901,12 @@ mod tests {
         // be present (so the commitment verifies), no `user_address`, and a zero value.
         assert!(spend_action.output.user_address.is_none());
         assert!(spend_action.output.rseed.is_some());
-        assert!(spend_action
-            .output
-            .verify_note_commitment(&spend_action.spend)
-            .is_ok());
+        assert!(
+            spend_action
+                .output
+                .verify_note_commitment(&spend_action.spend)
+                .is_ok()
+        );
 
         let change_action = &pczt_bundle.actions()[change_action_index];
         assert_eq!(change_action.spend.recipient, Some(change_recipient));
@@ -2913,12 +2917,14 @@ mod tests {
         assert_eq!(change_action.output.value, Some(NoteValue::from_raw(5_000)));
 
         for action in pczt_bundle.actions() {
-            assert!(action
-                .spend
-                .recipient
-                .as_ref()
-                .unwrap()
-                .same_expanded_receiver(action.output.recipient.as_ref().unwrap()));
+            assert!(
+                action
+                    .spend
+                    .recipient
+                    .as_ref()
+                    .unwrap()
+                    .same_expanded_receiver(action.output.recipient.as_ref().unwrap())
+            );
         }
     }
 
@@ -2998,12 +3004,14 @@ mod tests {
 
         assert_eq!(padding_action.spend.value, Some(NoteValue::ZERO));
         assert_eq!(padding_action.output.value, Some(NoteValue::ZERO));
-        assert!(padding_action
-            .spend
-            .recipient
-            .as_ref()
-            .unwrap()
-            .same_expanded_receiver(padding_action.output.recipient.as_ref().unwrap()));
+        assert!(
+            padding_action
+                .spend
+                .recipient
+                .as_ref()
+                .unwrap()
+                .same_expanded_receiver(padding_action.output.recipient.as_ref().unwrap())
+        );
     }
 
     #[test]
@@ -3143,17 +3151,19 @@ mod tests {
             mismatched_note_version,
         );
         let spend = SpendInfo::new(fvk.clone(), note, merkle_path).unwrap();
-        assert!(bundle::<i64>(
-            &mut rng,
-            BundleType::DEFAULT,
-            bundle_version,
-            bundle_version.default_flags(),
-            anchor,
-            vec![spend],
-            vec![],
-            vec![],
-        )
-        .is_ok());
+        assert!(
+            bundle::<i64>(
+                &mut rng,
+                BundleType::DEFAULT,
+                bundle_version,
+                bundle_version.default_flags(),
+                anchor,
+                vec![spend],
+                vec![],
+                vec![],
+            )
+            .is_ok()
+        );
 
         let output = OutputInfo::new(
             None,

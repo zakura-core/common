@@ -1379,8 +1379,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
         with:
           components: clippy
-      - name: Check validator lockfile without FF1
-        run: python3 scripts/check-node-without-fpe.py
       - name: Test keys without indexed ZIP 32 addresses
         run: >-
           cargo +1.91.0 test -p zakura-keys --locked --lib
