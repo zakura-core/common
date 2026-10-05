@@ -92,22 +92,8 @@ impl NonZeroPallasBase {
         pallas::Base::from_repr(*bytes).and_then(NonZeroPallasBase::from_base)
     }
 
-    pub(crate) fn to_bytes(self) -> [u8; 32] {
-        self.0.to_repr()
-    }
-
     pub(crate) fn from_base(b: pallas::Base) -> CtOption<Self> {
         CtOption::new(NonZeroPallasBase(b), !b.is_zero())
-    }
-
-    /// Constructs a wrapper for a base field element that is guaranteed to be non-zero.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `s.is_zero()`.
-    fn guaranteed(s: pallas::Base) -> Self {
-        assert!(!bool::from(s.is_zero()));
-        NonZeroPallasBase(s)
     }
 }
 

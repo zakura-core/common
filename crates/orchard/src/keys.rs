@@ -289,11 +289,6 @@ impl CommitIvkRandomness {
         self.0
     }
 
-    /// Converts this nullifier deriving key to its serialized form.
-    pub(crate) fn to_bytes(self) -> [u8; 32] {
-        <[u8; 32]>::from(self.0)
-    }
-
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let rivk_bytes = <[u8; 32]>::try_from(bytes).ok()?;
         let rivk = pallas::Scalar::from_repr(rivk_bytes).map(CommitIvkRandomness);

@@ -9,9 +9,6 @@ const STATE: usize = 80;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FieldType {
-    /// GF(2^n)
-    #[allow(dead_code)]
-    Binary,
     /// GF(p)
     PrimeOrder,
 }
@@ -19,7 +16,6 @@ pub(super) enum FieldType {
 impl FieldType {
     fn tag(&self) -> u8 {
         match self {
-            FieldType::Binary => 0,
             FieldType::PrimeOrder => 1,
         }
     }
@@ -29,16 +25,12 @@ impl FieldType {
 pub(super) enum SboxType {
     /// x^alpha
     Pow,
-    /// x^(-1)
-    #[allow(dead_code)]
-    Inv,
 }
 
 impl SboxType {
     fn tag(&self) -> u8 {
         match self {
             SboxType::Pow => 0,
-            SboxType::Inv => 1,
         }
     }
 }

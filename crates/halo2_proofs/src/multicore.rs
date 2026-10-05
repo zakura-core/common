@@ -24,9 +24,6 @@ pub fn current_num_threads() -> usize {
     1
 }
 
-#[cfg(not(feature = "multicore"))]
-pub trait IndexedParallelIterator: std::iter::Iterator {}
-
 pub trait TryFoldAndReduce<T, E> {
     /// Implements `iter.try_fold().try_reduce()` for `rayon::iter::ParallelIterator`,
     /// falling back on `Iterator::try_fold` when the `multicore` feature flag is

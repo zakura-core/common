@@ -69,12 +69,6 @@ impl FvkFingerprint {
     }
 }
 
-impl FvkTag {
-    fn master() -> Self {
-        FvkTag([0u8; 4])
-    }
-}
-
 /// The derivation index associated with a key.
 ///
 /// Master keys are never derived via the ZIP 32 child derivation process, but they have
@@ -105,14 +99,6 @@ impl KeyIndex {
 
     fn child(i: ChildIndex) -> Self {
         Self(CtOption::new(i, 1.into()))
-    }
-
-    fn new(depth: u8, i: u32) -> Option<Self> {
-        match (depth == 0, i) {
-            (true, 0) => Some(KeyIndex::master()),
-            (false, _) => ChildIndex::from_index(i).map(KeyIndex::child),
-            _ => None,
-        }
     }
 
     fn index(&self) -> u32 {
