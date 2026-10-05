@@ -44,7 +44,7 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
 beta = ["halo2_proofs/beta"]
-nightly = ["beta", "halo2_proofs/nightly", "unstable-sha256-gadget"]
+nightly = ["beta", "halo2_proofs/nightly"]
 test-dependencies = ["proptest", "sinsemilla/test-dependencies"]
 test-dev-graph = [
     "halo2_proofs/dev-graph",
@@ -53,7 +53,6 @@ test-dev-graph = [
     "plotters/bitmap_encoder",
     "plotters/ttf",
 ]
-unstable-sha256-gadget = []
 
 [[bench]]
 name = "poseidon"
@@ -62,8 +61,3 @@ harness = false
 [[bench]]
 name = "primitives"
 harness = false
-
-[[bench]]
-name = "sha256"
-harness = false
-required-features = ["unstable-sha256-gadget"]
