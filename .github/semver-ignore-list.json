@@ -1,6 +1,6 @@
 {
   "zakura-halo2-gadgets": {
-    "unstable-sha256-gadget": "Removed together with the unstable SHA-256 gadget and its opt-in public API."
+    "unstable-sha256-gadget": "Ignored for minor releases in #548 because it removes the unstable SHA-256 gadget and its opt-in public API."
   },
   "zakura-primitives": {
     "zip-233": "Ignored for minor releases in #465 because #458 removed the unused ZIP 233 feature and obsolete transaction field."
