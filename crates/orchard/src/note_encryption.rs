@@ -619,7 +619,10 @@ mod tests {
         let fvk = crate::keys::FullViewingKey::from(&sk);
         let incoming_viewing_key = fvk.to_ivk(Scope::External);
         let prepared_ivk = PreparedIncomingViewingKey::new(&incoming_viewing_key);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let nf_old = Nullifier::dummy(&mut rng);
         let rho = Rho::from_nf_old(nf_old);
         let note = Note::new(
@@ -771,7 +774,10 @@ mod tests {
         let mut rng = OsRng;
         let sk = crate::keys::SpendingKey::random(&mut rng);
         let fvk = crate::keys::FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, crate::keys::Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            crate::keys::Scope::External,
+        );
         let rho = Rho::from_nf_old(Nullifier::dummy(&mut rng));
         let memo = [0u8; 512];
 
@@ -901,14 +907,37 @@ mod tests {
         .collect();
 
         let mut actions = vec![
-            encrypted_compact_action::<V>(&mut rng, our_fvk.address_at(0u32, Scope::External)),
-            encrypted_compact_action::<V>(&mut rng, our_fvk.address_at(0u32, Scope::Internal)),
-            encrypted_compact_action::<V>(&mut rng, other_fvk.address_at(0u32, Scope::External)),
+            encrypted_compact_action::<V>(
+                &mut rng,
+                our_fvk.address(
+                    crate::keys::Diversifier::from_bytes(Default::default()),
+                    Scope::External,
+                ),
+            ),
+            encrypted_compact_action::<V>(
+                &mut rng,
+                our_fvk.address(
+                    crate::keys::Diversifier::from_bytes(Default::default()),
+                    Scope::Internal,
+                ),
+            ),
+            encrypted_compact_action::<V>(
+                &mut rng,
+                other_fvk.address(
+                    crate::keys::Diversifier::from_bytes(Default::default()),
+                    Scope::External,
+                ),
+            ),
         ];
         for i in 0..5u32 {
             actions.push(encrypted_compact_action::<V>(
                 &mut rng,
-                foreign_fvk.address_at(i, Scope::External),
+                foreign_fvk.address(
+                    crate::keys::Diversifier::from_bytes(
+                        *crate::keys::DiversifierIndex::from(i).as_bytes(),
+                    ),
+                    Scope::External,
+                ),
             ));
         }
         // An ephemeral key that decodes to the identity is rejected during
@@ -980,7 +1009,12 @@ mod tests {
             .map(|i| {
                 encrypted_compact_action::<OrchardVersion>(
                     &mut rng,
-                    our_fvk.address_at(i, Scope::External),
+                    our_fvk.address(
+                        crate::keys::Diversifier::from_bytes(
+                            *crate::keys::DiversifierIndex::from(i).as_bytes(),
+                        ),
+                        Scope::External,
+                    ),
                 )
                 .ephemeral_key
             })

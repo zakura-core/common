@@ -423,10 +423,16 @@ mod tests {
     ) {
         let spend_sk = SpendingKey::random(&mut rng);
         let spend_fvk = FullViewingKey::from(&spend_sk);
-        let spend_recipient = spend_fvk.address_at(0u32, Scope::External);
+        let spend_recipient = spend_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let change_sk = SpendingKey::random(&mut rng);
         let change_fvk = FullViewingKey::from(&change_sk);
-        let change_recipient = change_fvk.address_at(0u32, Scope::Internal);
+        let change_recipient = change_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::Internal,
+        );
         let bundle_version = BundleVersion::orchard_v3();
         let note_version = bundle_version.note_version();
 
@@ -473,7 +479,10 @@ mod tests {
     fn minimal_finalized_pczt_bundle(mut rng: OsRng) -> super::Bundle {
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let mut builder = Builder::new(
             BundleType::DEFAULT,
             BundleVersion::orchard_v2(),
@@ -494,7 +503,10 @@ mod tests {
     fn ironwood_output_pczt_bundle(mut rng: OsRng) -> super::Bundle {
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let mut builder = Builder::new(
             BundleType::DEFAULT,
             BundleVersion::ironwood_v3(),
@@ -521,7 +533,10 @@ mod tests {
 
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
 
         // Run the Creator and Constructor roles.
         let mut builder = Builder::new(
@@ -585,7 +600,10 @@ mod tests {
 
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
 
         let mut builder = Builder::new(
             BundleType::DEFAULT,
@@ -638,7 +656,10 @@ mod tests {
 
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
 
         let value = NoteValue::from_raw(15_000);
         let note = {
@@ -735,7 +756,10 @@ mod tests {
         let sk = SpendingKey::random(&mut rng);
         let ask = SpendAuthorizingKey::from(&sk);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
 
         // Pretend we already received a note.
         let value = NoteValue::from_raw(15_000);
@@ -798,7 +822,10 @@ mod tests {
         builder
             .add_output(
                 Some(fvk.to_ovk(Scope::Internal)),
-                fvk.address_at(0u32, Scope::Internal),
+                fvk.address(
+                    crate::keys::Diversifier::from_bytes(Default::default()),
+                    Scope::Internal,
+                ),
                 NoteValue::from_raw(5_000),
                 [0u8; 512],
             )
@@ -866,7 +893,10 @@ mod tests {
         let sk = SpendingKey::random(&mut rng);
         let ask = SpendAuthorizingKey::from(&sk);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
 
         // Pretend we already received a note.
         let value = NoteValue::from_raw(15_000);
@@ -928,7 +958,10 @@ mod tests {
         builder
             .add_output(
                 Some(fvk.to_ovk(Scope::Internal)),
-                fvk.address_at(0u32, Scope::Internal),
+                fvk.address(
+                    crate::keys::Diversifier::from_bytes(Default::default()),
+                    Scope::Internal,
+                ),
                 NoteValue::from_raw(5_000),
                 [0u8; 512],
             )
@@ -1407,7 +1440,10 @@ mod tests {
         let mut rng = OsRng;
         let spend_sk = SpendingKey::random(&mut rng);
         let spend_fvk = FullViewingKey::from(&spend_sk);
-        let spend_recipient = spend_fvk.address_at(0u32, Scope::External);
+        let spend_recipient = spend_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let note_version = NoteVersion::V2;
 
         let rho = Rho::from_nf_old(Nullifier::dummy(&mut rng));
@@ -1471,7 +1507,10 @@ mod tests {
         let spend_recipient = pczt_bundle.actions()[0].spend.recipient.unwrap();
         let other_recipient = loop {
             let fvk = FullViewingKey::from(&SpendingKey::random(&mut rng));
-            let recipient = fvk.address_at(0u32, Scope::External);
+            let recipient = fvk.address(
+                crate::keys::Diversifier::from_bytes(Default::default()),
+                Scope::External,
+            );
             if !spend_recipient.same_expanded_receiver(&recipient) {
                 break recipient;
             }

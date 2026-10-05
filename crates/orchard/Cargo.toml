@@ -21,12 +21,12 @@ name = "orchard"
 bench = false
 
 [dependencies]
-aes = "0.8"
+aes = { version = "0.8", optional = true }
 bitvec = { version = "1", default-features = false }
 blake2b_simd = { version = "1", default-features = false }
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
 ff = { version = "0.14", default-features = false }
-fpe = { version = "0.6", features = ["alloc"], default-features = false }
+fpe = { version = "0.6", features = ["alloc"], default-features = false, optional = true }
 getset = "0.1"
 group = "0.14"
 halo2_gadgets = { workspace = true, optional = true }
@@ -70,8 +70,10 @@ zcash_note_encryption = { version = "0.4.2", features = ["pre-zip-212"] }
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
+# Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
+zip32-addresses = ["dep:aes", "dep:fpe"]
 circuit = ["dep:halo2_gadgets", "dep:halo2_proofs", "std"]
-default = ["circuit", "multicore", "std"]
+default = ["zip32-addresses", "circuit", "multicore", "std"]
 dev-graph = ["halo2_proofs?/dev-graph", "image", "plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
@@ -83,9 +85,10 @@ std = ["corez/std", "group/wnaf-memuse", "reddsa/std"]
 test-dependencies = ["proptest", "rand/std", "rand/std_rng"]
 unstable-frost = ["dep:visibility"]
 unstable-voting-circuits = ["dep:visibility"]
-verifier-fingerprint = ["circuit", "halo2_proofs/unstable-verifier-fingerprint"]
+# Historical fingerprint fixtures use ZIP 32 indexed addresses.
+verifier-fingerprint = ["zip32-addresses", "circuit", "halo2_proofs/unstable-verifier-fingerprint"]
 # Capture the prover's private tape and complete transcript for formal-model fixtures.
-prover-fingerprint = ["circuit", "halo2_proofs/unstable-prover-fingerprint"]
+prover-fingerprint = ["zip32-addresses", "circuit", "halo2_proofs/unstable-prover-fingerprint"]
 circuit-fixtures = ["circuit", "halo2_proofs/unstable-circuit-fixtures"]
 weighted-merkle = []
 x86_64-asm = ["pasta_curves/x86_64-asm", "halo2_proofs?/x86_64-asm"]
@@ -96,21 +99,22 @@ required-features = ["circuit", "unstable-voting-circuits"]
 
 [[test]]
 name = "ironwood_batch_timings"
-required-features = ["circuit"]
+required-features = ["circuit", "zip32-addresses"]
 
 [[bench]]
 name = "circuit"
 harness = false
-required-features = ["circuit"]
+required-features = ["circuit", "zip32-addresses"]
 
 [[bench]]
 name = "note_decryption"
 harness = false
-required-features = ["circuit"]
+required-features = ["circuit", "zip32-addresses"]
 
 [[bench]]
 name = "small"
 harness = false
+required-features = ["zip32-addresses"]
 
 [[bench]]
 name = "merkle"
@@ -119,9 +123,9 @@ harness = false
 [[bench]]
 name = "ironwood_k11_prover"
 harness = false
-required-features = ["circuit"]
+required-features = ["circuit", "zip32-addresses"]
 
 [[bench]]
 name = "post_nu6_3_k11_keygen"
 harness = false
-required-features = ["circuit"]
+required-features = ["circuit", "zip32-addresses"]

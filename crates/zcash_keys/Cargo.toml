@@ -53,7 +53,9 @@ zcash_address = { workspace = true, features = ["test-dependencies"] }
 zcash_script = { version = "0.4.3", default-features = false }
 
 [features]
-default = ["std"]
+# Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
+zip32-addresses = ["orchard?/zip32-addresses", "sapling?/zip32-addresses"]
+default = ["std", "zip32-addresses"]
 orchard = ["dep:orchard"]
 sapling = ["dep:sapling"]
 std = [

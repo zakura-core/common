@@ -508,6 +508,8 @@ impl Address {
     ),
     any(test, feature = "test-dependencies")
 ))]
+#[cfg(feature = "zip32-addresses")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
 pub mod testing {
     use proptest::prelude::*;
     use zcash_protocol::consensus::Network;
@@ -552,16 +554,25 @@ mod tests {
     use zcash_address::test_vectors;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
-    use super::{Address, UnifiedAddress};
+    use super::Address;
+    #[cfg(any(
+        feature = "zip32-addresses",
+        not(any(feature = "orchard", feature = "sapling"))
+    ))]
+    use super::UnifiedAddress;
 
-    #[cfg(feature = "sapling")]
+    #[cfg(all(feature = "sapling", feature = "zip32-addresses"))]
     use crate::keys::sapling;
 
-    #[cfg(any(feature = "orchard", feature = "sapling"))]
+    #[cfg(all(
+        feature = "zip32-addresses",
+        any(feature = "orchard", feature = "sapling")
+    ))]
     use zip32::AccountId;
 
     #[test]
     #[cfg(any(feature = "orchard", feature = "sapling"))]
+    #[cfg(feature = "zip32-addresses")]
     fn ua_round_trip() {
         #[cfg(feature = "orchard")]
         let orchard = {

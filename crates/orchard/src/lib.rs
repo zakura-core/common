@@ -6,6 +6,15 @@
 //! types. For example, [`Address`] is documented as being a shielded payment address; we
 //! implicitly mean it is an Orchard payment address (as opposed to e.g. a Sapling payment
 //! address, which is also shielded).
+//!
+//! ## ZIP 32 addresses
+//!
+//! The default-enabled `zip32-addresses` feature provides indexed address
+//! generation and diversifier-index recovery using FF1. Consumers that disable
+//! default features must enable it explicitly to use these wallet APIs. Direct
+//! address construction from diversifiers, key derivation, and note decryption
+//! remain available without it.
+//!
 
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
