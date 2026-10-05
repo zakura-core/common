@@ -2,7 +2,6 @@
 
 use incrementalmerkletree::{Hashable, Marking, Retention};
 use orchard::{
-    Address, Bundle,
     builder::{Builder, BundleType},
     bundle::{Authorized, BatchValidator, BundleVersion, Flags, TxVersion},
     circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey},
@@ -11,9 +10,10 @@ use orchard::{
     note_encryption::{IronwoodDomain, OrchardDomain},
     tree::{MerkleHashOrchard, MerklePath},
     value::NoteValue,
+    Address, Bundle,
 };
 use rand::rng;
-use shardtree::{ShardTree, store::memory::MemoryShardStore};
+use shardtree::{store::memory::MemoryShardStore, ShardTree};
 use std::sync::OnceLock;
 use zcash_note_encryption::try_note_decryption;
 
@@ -134,7 +134,10 @@ fn bundle_chain() {
 
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
+    let recipient = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
 
     // Create a shielding bundle.
     let shielding_bundle: Bundle<_, i64> = {
@@ -225,7 +228,10 @@ fn ironwood_builder_outputs_decrypt_with_ironwood_domain() {
     let mut rng = rng();
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
+    let recipient = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
     let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
 
     let builder = output_only_builder(BundleVersion::ironwood_v3(), BundleType::DEFAULT, recipient);
@@ -252,7 +258,10 @@ fn ironwood_bundle_helpers_decrypt_and_recover_outputs() {
     let mut rng = rng();
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
+    let recipient = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
     let ivk = fvk.to_ivk(Scope::External);
     let ovk = fvk.to_ovk(Scope::External);
     let bundle_version = BundleVersion::ironwood_v3();
@@ -321,7 +330,10 @@ fn post_nu6_3_coinbase_bundle_proves_and_verifies() {
 
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
+    let recipient = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
 
     let builder = output_only_builder(
         BundleVersion::ironwood_v3(),
@@ -353,7 +365,10 @@ fn unpadded_ironwood_bundle_builds_single_action() {
 
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
+    let recipient = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
 
     let builder = output_only_builder(
         BundleVersion::ironwood_v3(),
@@ -380,7 +395,10 @@ fn post_nu6_3_restricted_bundle_chain() {
 
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
+    let recipient = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
 
     // A historical V2 note remains spendable under the current Orchard rules.
     // Construct its note data directly; this test must not create a historical proof.
@@ -400,7 +418,10 @@ fn post_nu6_3_restricted_bundle_chain() {
         NoteVersion::V2,
     )
     .unwrap();
-    let change_addr = fvk.address_at(0u32, Scope::Internal);
+    let change_addr = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::Internal,
+    );
     let restricted_bundle: Bundle<_, i64> = {
         let cmx: ExtractedNoteCommitment = note.commitment().into();
         let (root, merkle_path) = single_leaf_witness(&cmx);
@@ -446,16 +467,14 @@ fn post_nu6_3_restricted_bundle_chain() {
         // note's own (external) receiver, but its ciphertext is randomized, so even the owning
         // wallet's external ivk cannot trial-decrypt it -- which is what keeps the spend hidden
         // from anyone (including a quantum adversary) who recovers that ivk from the address.
-        assert!(
-            unauthorized
-                .decrypt_output_with_key(
-                    bundle_meta
-                        .spend_action_index(0)
-                        .expect("Spend 0 can be found"),
-                    &fvk.to_ivk(Scope::External),
-                )
-                .is_none()
-        );
+        assert!(unauthorized
+            .decrypt_output_with_key(
+                bundle_meta
+                    .spend_action_index(0)
+                    .expect("Spend 0 can be found"),
+                &fvk.to_ivk(Scope::External),
+            )
+            .is_none());
 
         let sighash = unauthorized
             .commitment(TxVersion::V5)
@@ -486,17 +505,15 @@ fn post_nu6_3_restricted_bundle_chain() {
     // A validator backed by a key that cannot constrain the cross-address restriction
     // rejects the restricted bundle at insertion, rather than deferring the failure.
     let mut validator = BatchValidator::new(fixed_vk);
-    assert!(
-        validator
-            .add_bundle(
-                &restricted_bundle,
-                restricted_bundle
-                    .commitment(TxVersion::V5)
-                    .expect("bundle flags are representable in this format")
-                    .into(),
-            )
-            .is_err()
-    );
+    assert!(validator
+        .add_bundle(
+            &restricted_bundle,
+            restricted_bundle
+                .commitment(TxVersion::V5)
+                .expect("bundle flags are representable in this format")
+                .into(),
+        )
+        .is_err());
 }
 
 // `BundleVersion::ironwood_v3()` is the post-NU6.3 Ironwood bundle version, which allows
@@ -513,7 +530,10 @@ fn ironwood_post_nu6_3_unrestricted_bundle_proves_and_verifies() {
 
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
+    let recipient = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
 
     // Shield a note to spend (an unrestricted, output-only post-NU6.3 bundle).
     let shielding_bundle: Bundle<_, i64> = {
@@ -539,7 +559,10 @@ fn ironwood_post_nu6_3_unrestricted_bundle_proves_and_verifies() {
 
     // Spend the external-address note and send to a different (internal) address: a
     // cross-address transfer, which Ironwood permits but post-NU6.3 Orchard would forbid.
-    let change_addr = fvk.address_at(0u32, Scope::Internal);
+    let change_addr = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::Internal,
+    );
     let mut builder = Builder::new(
         BundleType::DEFAULT,
         BundleVersion::ironwood_v3(),

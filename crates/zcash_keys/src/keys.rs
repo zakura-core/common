@@ -1,6 +1,7 @@
 //! Helper functions for managing light client key material.
 #[cfg(feature = "transparent-inputs")]
 use ::transparent::keys::TransparentKeyScope;
+#[cfg(feature = "zip32-addresses")]
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -11,6 +12,7 @@ use zcash_address::unified::{self, Container, Encoding, Typecode, Ufvk, Uivk};
 use zcash_protocol::{PoolType, consensus};
 use zip32::{AccountId, DiversifierIndex};
 
+#[cfg(feature = "zip32-addresses")]
 use crate::address::UnifiedAddress;
 
 #[cfg(any(feature = "sapling", feature = "orchard"))]
@@ -481,6 +483,8 @@ impl UnifiedSpendingKey {
     ///
     /// See [`UnifiedFullViewingKey::default_address`] for additional details.
     #[cfg(any(test, feature = "test-dependencies"))]
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn default_address(
         &self,
         request: UnifiedAddressRequest,
@@ -1188,6 +1192,8 @@ impl UnifiedFullViewingKey {
     /// Attempts to derive the Unified Address for the given diversifier index and receiver types.
     ///
     /// Returns `None` if the specified index does not produce a valid diversifier.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn address(
         &self,
         j: DiversifierIndex,
@@ -1202,6 +1208,8 @@ impl UnifiedFullViewingKey {
     ///
     /// Returns an `Err(AddressGenerationError)` if no valid diversifier exists or if the features
     /// required to satisfy the unified address request are not properly enabled.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn find_address(
         &self,
         j: DiversifierIndex,
@@ -1216,6 +1224,8 @@ impl UnifiedFullViewingKey {
     ///
     /// Returns an `Err(AddressGenerationError)` if no valid diversifier exists or if the features
     /// required to satisfy the unified address request are not properly enabled.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn default_address(
         &self,
         request: UnifiedAddressRequest,
@@ -1588,6 +1598,8 @@ impl UnifiedIncomingViewingKey {
     ///
     /// Returns an error if the this key does not produce a valid receiver for a required receiver
     /// type at the given diversifier index.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn address(
         &self,
         _j: DiversifierIndex,
@@ -1711,6 +1723,8 @@ impl UnifiedIncomingViewingKey {
     /// [`Require`]: ReceiverRequirement::Require
     #[allow(unused_mut)]
     #[cfg_attr(not(feature = "sapling"), allow(clippy::never_loop))]
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn find_address(
         &self,
         mut j: DiversifierIndex,
@@ -1741,6 +1755,8 @@ impl UnifiedIncomingViewingKey {
     ///
     /// Returns an error if the this key does not produce a valid receiver for a required receiver
     /// type at any diversifier index.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn default_address(
         &self,
         request: UnifiedAddressRequest,
@@ -1754,6 +1770,8 @@ impl UnifiedIncomingViewingKey {
     /// Returns the empty set if no shielded receiver of `ua` can be attributed to this key.
     /// Transparent receivers are not considered here, as recovering a diversifier index from a
     /// transparent receiver alone is not possible without additional context.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn decrypt_diversifiers(&self, ua: &UnifiedAddress) -> BTreeSet<DiversifierIndex> {
         #[cfg(not(feature = "sapling"))]
         let sapling_di: Option<DiversifierIndex> = None;
@@ -2078,6 +2096,7 @@ mod tests {
         feature = "transparent-inputs",
         any(feature = "orchard", feature = "sapling")
     ))]
+    #[cfg(feature = "zip32-addresses")]
     fn ufvk_derivation() {
         use crate::keys::UnifiedAddressRequest;
 
@@ -2263,6 +2282,7 @@ mod tests {
         feature = "transparent-inputs",
         any(feature = "orchard", feature = "sapling")
     ))]
+    #[cfg(feature = "zip32-addresses")]
     fn uivk_derivation() {
         use crate::keys::UnifiedAddressRequest;
 
@@ -2366,6 +2386,7 @@ mod tests {
         feature = "orchard",
         feature = "transparent-inputs"
     ))]
+    #[cfg(feature = "zip32-addresses")]
     fn uivk_decrypt_diversifier_matches_own_ua_and_rejects_foreign() {
         use crate::address::UnifiedAddress;
         use crate::keys::{UnifiedAddressRequest, UnifiedSpendingKey};

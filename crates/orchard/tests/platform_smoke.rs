@@ -24,7 +24,10 @@ fn creates_and_verifies_proof_individually_and_in_batch() {
     let verifying_key = proving_key.verifying_key();
 
     let spending_key = SpendingKey::from_bytes(TEST_SPENDING_KEY).unwrap();
-    let recipient = FullViewingKey::from(&spending_key).address_at(0u32, Scope::External);
+    let recipient = FullViewingKey::from(&spending_key).address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
     let anchor = MerkleHashOrchard::empty_root(32.into()).into();
     let mut builder = Builder::new(
         BundleType::DEFAULT,

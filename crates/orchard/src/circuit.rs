@@ -1874,7 +1874,7 @@ mod fixtures;
 #[cfg(all(test, feature = "circuit-fixtures"))]
 mod layout_dump;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "zip32-addresses"))]
 mod benchmark;
 
 #[cfg(test)]

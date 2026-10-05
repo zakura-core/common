@@ -5,8 +5,10 @@ use alloc::vec::Vec;
 use corez::io::{self, Read, Write};
 
 use ::zip32::{AccountId, ChildIndex};
+#[cfg(feature = "zip32-addresses")]
 use aes::Aes256;
 use blake2b_simd::{Hash as Blake2bHash, Params};
+#[cfg(feature = "zip32-addresses")]
 use fpe::ff1::{BinaryNumeralString, FF1};
 use group::{
     Curve, CurveAffine as _, GroupEncoding,
@@ -374,6 +376,8 @@ impl FullViewingKey {
     }
 
     /// Returns the payment address for this key at the given index.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn address_at(&self, j: impl Into<DiversifierIndex>, scope: Scope) -> Address {
         self.to_ivk(scope).address_at(j)
     }
@@ -393,7 +397,7 @@ impl FullViewingKey {
     pub fn scope_for_address(&self, address: &Address) -> Option<Scope> {
         [Scope::External, Scope::Internal]
             .into_iter()
-            .find(|scope| self.to_ivk(*scope).diversifier_index(address).is_some())
+            .find(|scope| self.address(address.diversifier(), *scope) == *address)
     }
 
     /// Serializes the full viewing key as specified in [Zcash Protocol Spec § 5.6.4.4: Orchard Raw Full Viewing Keys][orchardrawfullviewingkeys]
@@ -486,6 +490,8 @@ pub(crate) struct DiversifierKey([u8; 32]);
 
 impl DiversifierKey {
     /// Returns the diversifier at the given index.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn get(&self, j: impl Into<DiversifierIndex>) -> Diversifier {
         let ff = FF1::<Aes256>::new(&self.0, 2).expect("valid radix");
         let enc = ff
@@ -498,6 +504,8 @@ impl DiversifierKey {
     }
 
     /// Returns the diversifier index obtained by decrypting the diversifier.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn diversifier_index(&self, d: &Diversifier) -> DiversifierIndex {
         let ff = FF1::<Aes256>::new(&self.0, 2).expect("valid radix");
         let dec = ff
@@ -660,6 +668,8 @@ impl IncomingViewingKey {
     /// Checks whether the given address was derived from this incoming viewing
     /// key, and returns the diversifier index used to derive the address if
     /// so. Returns `None` if the address was not derived from this key.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn diversifier_index(&self, addr: &Address) -> Option<DiversifierIndex> {
         let j = self.dk.diversifier_index(&addr.diversifier());
         if &self.address_at(j) == addr {
@@ -670,6 +680,8 @@ impl IncomingViewingKey {
     }
 
     /// Returns the payment address for this key at the given index.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn address_at(&self, j: impl Into<DiversifierIndex>) -> Address {
         self.address(self.dk.get(j))
     }
@@ -1081,8 +1093,10 @@ mod tests {
     use ff::PrimeField;
     use proptest::prelude::*;
 
+    #[cfg(feature = "zip32-addresses")]
+    use super::testing::arb_diversifier_key;
     use super::{
-        testing::{arb_diversifier_index, arb_diversifier_key, arb_esk, arb_spending_key},
+        testing::{arb_diversifier_index, arb_esk, arb_spending_key},
         *,
     };
     use crate::{
@@ -1115,7 +1129,7 @@ mod tests {
             j in arb_diversifier_index(),
         ) {
             let ivk = IncomingViewingKey::from_fvk(&(&sk).into());
-            let addr = ivk.address_at(j);
+            let addr = ivk.address(Diversifier::from_bytes(*j.as_bytes()));
 
             let epk = esk.derive_public(addr.g_d());
 
@@ -1125,6 +1139,38 @@ mod tests {
         }
     }
 
+    proptest! {
+        #[test]
+        fn scope_for_direct_address(
+            sk in arb_spending_key(),
+            other_sk in arb_spending_key(),
+            j in arb_diversifier_index(),
+        ) {
+            let fvk = FullViewingKey::from(&sk);
+            let other_fvk = FullViewingKey::from(&other_sk);
+            let d = Diversifier::from_bytes(*j.as_bytes());
+            for scope in [Scope::External, Scope::Internal] {
+                let address = fvk.address(d, scope);
+                prop_assert_eq!(fvk.scope_for_address(&address), Some(scope));
+                if other_fvk != fvk {
+                    prop_assert_eq!(other_fvk.scope_for_address(&address), None);
+                }
+                #[cfg(feature = "zip32-addresses")]
+                {
+                    let indexed_scope = [Scope::External, Scope::Internal]
+                        .into_iter()
+                        .find(|s| fvk.to_ivk(*s).diversifier_index(&address).is_some());
+                    prop_assert_eq!(fvk.scope_for_address(&address), indexed_scope);
+                    let foreign_indexed_scope = [Scope::External, Scope::Internal]
+                        .into_iter()
+                        .find(|s| other_fvk.to_ivk(*s).diversifier_index(&address).is_some());
+                    prop_assert_eq!(other_fvk.scope_for_address(&address), foreign_indexed_scope);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "zip32-addresses")]
     proptest! {
         #[test]
         fn diversifier_index(

@@ -7,11 +7,10 @@ use core::iter;
 
 use ff::Field;
 use pasta_curves::pallas;
-use rand::{CryptoRng, Rng, prelude::SliceRandom};
+use rand::{prelude::SliceRandom, CryptoRng, Rng};
 use zcash_note_encryption::ENC_CIPHERTEXT_SIZE;
 
 use crate::{
-    Proof, ProtocolVersion,
     address::Address,
     bundle::{Authorization, Authorized, Bundle, BundleVersion, Flags, TxVersion},
     keys::{
@@ -24,6 +23,7 @@ use crate::{
     rng_compat::RngCore06,
     tree::{Anchor, MerklePath},
     value::{self, BalanceError, NoteValue, ValueCommitTrapdoor, ValueCommitment, ValueSum},
+    Proof, ProtocolVersion,
 };
 
 #[cfg(feature = "circuit")]
@@ -1895,21 +1895,21 @@ pub mod testing {
     use core::fmt::Debug;
 
     use incrementalmerkletree::{Hashable, Level};
-    use rand::{CryptoRng, Rng as RandRng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, CryptoRng, Rng as RandRng, SeedableRng};
 
     use proptest::collection::vec;
     use proptest::prelude::*;
 
     use crate::{
-        Address, NOTE_COMMITMENT_TREE_DEPTH, Note, NoteVersion,
         bundle::{Authorized, Bundle, BundleVersion, TxVersion},
         circuit::{OrchardCircuitVersion, ProvingKey},
         keys::{
-            FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey, testing::arb_spending_key,
+            testing::arb_spending_key, FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey,
         },
         note::{Nullifier, Rho},
         tree::{Anchor, MerkleHashOrchard, MerklePath},
-        value::{MAX_NOTE_VALUE, NoteValue, testing::arb_positive_note_value},
+        value::{testing::arb_positive_note_value, NoteValue, MAX_NOTE_VALUE},
+        Address, Note, NoteVersion, NOTE_COMMITMENT_TREE_DEPTH,
     };
 
     use super::{Builder, BundleType};
@@ -1927,7 +1927,7 @@ pub mod testing {
         num_actions: u8,
     ) -> super::UnauthorizedBundle<i64> {
         use super::{
-            ActionInfo, BundleMetadata, OutputInfo, SpendInfo, finish_unauthorized_bundle,
+            finish_unauthorized_bundle, ActionInfo, BundleMetadata, OutputInfo, SpendInfo,
         };
         use crate::value::ValueSum;
         use rand::prelude::SliceRandom;
@@ -1938,7 +1938,10 @@ pub mod testing {
             .map(|_| {
                 let sk = SpendingKey::random(rng);
                 let fvk = FullViewingKey::from(&sk);
-                let recipient = fvk.address_at(0u32, Scope::External);
+                let recipient = fvk.address(
+                    crate::keys::Diversifier::from_bytes(Default::default()),
+                    Scope::External,
+                );
                 let rho = Rho::from_nf_old(Nullifier::dummy(rng));
                 let note = Note::new(recipient, NoteValue::ZERO, rho, note_version, &mut *rng);
                 let spend = SpendInfo {
@@ -2063,7 +2066,7 @@ pub mod testing {
             changes in vec(arb_positive_note_value(MAX_NOTE_VALUE / note_limit as u64), 1..note_limit),
             seed in any::<[u8; 32]>(),
         ) -> ArbitraryBundleInputs<StdRng> {
-            let recipient = FullViewingKey::from(&sk).address_at(0u32, Scope::Internal);
+            let recipient = FullViewingKey::from(&sk).address(crate::keys::Diversifier::from_bytes(Default::default()), Scope::Internal);
             let (sk, notes, anchor) = shared_anchor_notes(sk, &values, NoteVersion::V2, seed);
             ArbitraryBundleInputs {
                 rng: StdRng::from_seed(seed), sk, anchor, notes,
@@ -2119,7 +2122,7 @@ pub mod testing {
         ) -> (SpendingKey, Note, MerklePath, Anchor) {
             let mut rng = StdRng::from_seed(seed);
             let fvk = FullViewingKey::from(&sk);
-            let recipient = fvk.address_at(0u32, Scope::External);
+            let recipient = fvk.address(crate::keys::Diversifier::from_bytes(Default::default()), Scope::External);
             let rho = Rho::from_nf_old(Nullifier::dummy(&mut rng));
             let note = Note::new(recipient, value, rho, note_version, &mut rng);
             let merkle_path = MerklePath::dummy(&mut rng);
@@ -2136,7 +2139,10 @@ pub mod testing {
     ) -> (SpendingKey, Vec<(Note, MerklePath)>, Anchor) {
         let mut rng = StdRng::from_seed(seed);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
 
         // One note per value, in order.
         let notes: Vec<Note> = values
@@ -2257,11 +2263,10 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     use super::{
-        BuildError, Builder, ChangeInfo, DEFAULT_MIN_ACTIONS, MaybeSigned, OutputError, OutputInfo,
-        SpendInfo, bundle, testing,
+        bundle, testing, BuildError, Builder, ChangeInfo, MaybeSigned, OutputError, OutputInfo,
+        SpendInfo, DEFAULT_MIN_ACTIONS,
     };
     use crate::{
-        Address, Anchor, Note,
         builder::{BundleType, SpendError},
         bundle::{Authorized, Bundle, BundleVersion, Flags, TxVersion},
         circuit::OrchardCircuitVersion,
@@ -2273,8 +2278,9 @@ mod tests {
         note_encryption::OrchardDomain,
         pczt::{ProverError, VerifyError},
         rng_compat::OsRng,
-        tree::{MerklePath, empty_roots},
+        tree::{empty_roots, MerklePath},
         value::NoteValue,
+        Address, Anchor, Note,
     };
     use zcash_note_encryption::try_note_decryption;
 
@@ -2350,7 +2356,7 @@ mod tests {
             build_seed in any::<[u8; 32]>(),
         ) {
             let fvk = FullViewingKey::from(&sk);
-            let recipient = fvk.address_at(0u32, Scope::External);
+            let recipient = fvk.address(crate::keys::Diversifier::from_bytes(Default::default()), Scope::External);
             let foreign_fvk = FullViewingKey::from(&foreign_sk);
             let bundle_version = BundleVersion::orchard_v3();
 
@@ -2427,7 +2433,10 @@ mod tests {
         let mut rng = OsRng;
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let bundle_version = BundleVersion::orchard_v3();
 
         let mut builder = Builder::new_with_anchor_deferred(
@@ -2472,7 +2481,7 @@ mod tests {
             build_seed in any::<[u8; 32]>(),
         ) {
             let fvk = FullViewingKey::from(&sk);
-            let recipient = fvk.address_at(0u32, Scope::External);
+            let recipient = fvk.address(crate::keys::Diversifier::from_bytes(Default::default()), Scope::External);
 
             builder.add_spend_unwitnessed(fvk.clone(), note).unwrap();
             builder
@@ -2530,7 +2539,7 @@ mod tests {
             build_seed in any::<[u8; 32]>(),
         )| {
             let fvk = FullViewingKey::from(&sk);
-            let recipient = fvk.address_at(0u32, Scope::External);
+            let recipient = fvk.address(crate::keys::Diversifier::from_bytes(Default::default()), Scope::External);
 
             builder.add_spend_unwitnessed(fvk.clone(), note).unwrap();
             builder
@@ -2655,7 +2664,10 @@ mod tests {
     ) -> Builder {
         let sk = SpendingKey::random(rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
 
         // Coinbase bundles must disable spends; transactional bundles use the version's defaults.
         let flags = if matches!(bundle_type, BundleType::Coinbase) {
@@ -2745,19 +2757,17 @@ mod tests {
         ));
 
         // Spends-disabled flags are accepted.
-        assert!(
-            Builder::new(
-                BundleType::Coinbase,
-                bundle_version,
-                Flags::from_parts(
-                    false,
-                    true,
-                    bundle_version.permits_cross_address_transfers()
-                ),
-                anchor,
-            )
-            .is_ok()
-        );
+        assert!(Builder::new(
+            BundleType::Coinbase,
+            bundle_version,
+            Flags::from_parts(
+                false,
+                true,
+                bundle_version.permits_cross_address_transfers()
+            ),
+            anchor,
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2802,10 +2812,16 @@ mod tests {
         let mut rng = OsRng;
         let spend_sk = SpendingKey::random(&mut rng);
         let spend_fvk = FullViewingKey::from(&spend_sk);
-        let spend_recipient = spend_fvk.address_at(0u32, Scope::External);
+        let spend_recipient = spend_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let change_sk = SpendingKey::random(&mut rng);
         let change_fvk = FullViewingKey::from(&change_sk);
-        let change_recipient = change_fvk.address_at(0u32, Scope::Internal);
+        let change_recipient = change_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::Internal,
+        );
         let bundle_version = BundleVersion::orchard_v3();
         let (note, merkle_path, anchor) = note_with_path(
             &mut rng,
@@ -2883,12 +2899,10 @@ mod tests {
         // be present (so the commitment verifies), no `user_address`, and a zero value.
         assert!(spend_action.output.user_address.is_none());
         assert!(spend_action.output.rseed.is_some());
-        assert!(
-            spend_action
-                .output
-                .verify_note_commitment(&spend_action.spend)
-                .is_ok()
-        );
+        assert!(spend_action
+            .output
+            .verify_note_commitment(&spend_action.spend)
+            .is_ok());
 
         let change_action = &pczt_bundle.actions()[change_action_index];
         assert_eq!(change_action.spend.recipient, Some(change_recipient));
@@ -2899,14 +2913,12 @@ mod tests {
         assert_eq!(change_action.output.value, Some(NoteValue::from_raw(5_000)));
 
         for action in pczt_bundle.actions() {
-            assert!(
-                action
-                    .spend
-                    .recipient
-                    .as_ref()
-                    .unwrap()
-                    .same_expanded_receiver(action.output.recipient.as_ref().unwrap())
-            );
+            assert!(action
+                .spend
+                .recipient
+                .as_ref()
+                .unwrap()
+                .same_expanded_receiver(action.output.recipient.as_ref().unwrap()));
         }
     }
 
@@ -2916,7 +2928,10 @@ mod tests {
             let mut rng = OsRng;
             let spend_sk = SpendingKey::random(&mut rng);
             let spend_fvk = FullViewingKey::from(&spend_sk);
-            let spend_recipient = spend_fvk.address_at(0u32, spend_scope);
+            let spend_recipient = spend_fvk.address(
+                crate::keys::Diversifier::from_bytes(Default::default()),
+                spend_scope,
+            );
             let bundle_version = BundleVersion::orchard_v3();
             let (note, merkle_path, anchor) = note_with_path(
                 &mut rng,
@@ -2953,7 +2968,10 @@ mod tests {
         let mut rng = OsRng;
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::Internal);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::Internal,
+        );
         let mut builder = Builder::new(
             transactional(true),
             BundleVersion::orchard_v3(),
@@ -2980,14 +2998,12 @@ mod tests {
 
         assert_eq!(padding_action.spend.value, Some(NoteValue::ZERO));
         assert_eq!(padding_action.output.value, Some(NoteValue::ZERO));
-        assert!(
-            padding_action
-                .spend
-                .recipient
-                .as_ref()
-                .unwrap()
-                .same_expanded_receiver(padding_action.output.recipient.as_ref().unwrap())
-        );
+        assert!(padding_action
+            .spend
+            .recipient
+            .as_ref()
+            .unwrap()
+            .same_expanded_receiver(padding_action.output.recipient.as_ref().unwrap()));
     }
 
     #[test]
@@ -2995,7 +3011,10 @@ mod tests {
         let mut rng = OsRng;
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let bundle_version = BundleVersion::orchard_v3();
 
         assert!(matches!(
@@ -3049,7 +3068,10 @@ mod tests {
         let mut rng = OsRng;
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::Internal);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::Internal,
+        );
         let bundle_type = transactional(false);
         let bundle_version = BundleVersion::orchard_v3();
         // Under Orchard from NU6.3 onward this is spends-disabled and cross-address-disabled.
@@ -3092,7 +3114,10 @@ mod tests {
         let mut rng = OsRng;
         let sk = SpendingKey::random(&mut rng);
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let bundle_version = BundleVersion::ironwood_v3();
         let mismatched_note_version = NoteVersion::V2;
 
@@ -3118,19 +3143,17 @@ mod tests {
             mismatched_note_version,
         );
         let spend = SpendInfo::new(fvk.clone(), note, merkle_path).unwrap();
-        assert!(
-            bundle::<i64>(
-                &mut rng,
-                BundleType::DEFAULT,
-                bundle_version,
-                bundle_version.default_flags(),
-                anchor,
-                vec![spend],
-                vec![],
-                vec![],
-            )
-            .is_ok()
-        );
+        assert!(bundle::<i64>(
+            &mut rng,
+            BundleType::DEFAULT,
+            bundle_version,
+            bundle_version.default_flags(),
+            anchor,
+            vec![spend],
+            vec![],
+            vec![],
+        )
+        .is_ok());
 
         let output = OutputInfo::new(
             None,
@@ -3181,9 +3204,14 @@ mod tests {
     fn add_change_output_validates_ownership_when_unrestricted() {
         let mut rng = OsRng;
         let fvk = FullViewingKey::from(&SpendingKey::random(&mut rng));
-        let owned = fvk.address_at(0u32, Scope::Internal);
-        let foreign =
-            FullViewingKey::from(&SpendingKey::random(&mut rng)).address_at(0u32, Scope::External);
+        let owned = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::Internal,
+        );
+        let foreign = FullViewingKey::from(&SpendingKey::random(&mut rng)).address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let bundle_version = BundleVersion::ironwood_v3();
         let mut builder = Builder::new(
             BundleType::DEFAULT,
@@ -3216,7 +3244,10 @@ mod tests {
     fn add_change_output_rejects_spends_disabled_eagerly() {
         let mut rng = OsRng;
         let fvk = FullViewingKey::from(&SpendingKey::random(&mut rng));
-        let recipient = fvk.address_at(0u32, Scope::Internal);
+        let recipient = fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::Internal,
+        );
 
         // For a cross-address-disabled bundle with spends disabled and outputs enabled,
         // the change output is rejected eagerly.
@@ -3251,10 +3282,16 @@ mod tests {
         let mut rng = OsRng;
         let spend_sk = SpendingKey::random(&mut rng);
         let spend_fvk = FullViewingKey::from(&spend_sk);
-        let spend_recipient = spend_fvk.address_at(0u32, Scope::External);
+        let spend_recipient = spend_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let change_sk = SpendingKey::random(&mut rng);
         let change_fvk = FullViewingKey::from(&change_sk);
-        let change_recipient = change_fvk.address_at(0u32, Scope::Internal);
+        let change_recipient = change_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::Internal,
+        );
         let bundle_version = BundleVersion::orchard_v3();
         let (note, merkle_path, anchor) = note_with_path(
             &mut rng,
@@ -3341,10 +3378,16 @@ mod tests {
         let mut rng = OsRng;
         let spend_sk = SpendingKey::random(&mut rng);
         let spend_fvk = FullViewingKey::from(&spend_sk);
-        let spend_recipient = spend_fvk.address_at(0u32, Scope::External);
+        let spend_recipient = spend_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::External,
+        );
         let change_sk = SpendingKey::random(&mut rng);
         let change_fvk = FullViewingKey::from(&change_sk);
-        let change_recipient = change_fvk.address_at(0u32, Scope::Internal);
+        let change_recipient = change_fvk.address(
+            crate::keys::Diversifier::from_bytes(Default::default()),
+            Scope::Internal,
+        );
         let bundle_version = BundleVersion::orchard_v3();
         let (note, merkle_path, anchor) = note_with_path(
             &mut rng,
@@ -3378,7 +3421,10 @@ mod tests {
         let spend_recipient = pczt_bundle.actions()[0].spend.recipient.unwrap();
         let other_recipient = loop {
             let fvk = FullViewingKey::from(&SpendingKey::random(&mut rng));
-            let recipient = fvk.address_at(0u32, Scope::External);
+            let recipient = fvk.address(
+                crate::keys::Diversifier::from_bytes(Default::default()),
+                Scope::External,
+            );
             if !spend_recipient.same_expanded_receiver(&recipient) {
                 break recipient;
             }

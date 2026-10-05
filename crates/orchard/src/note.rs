@@ -566,7 +566,10 @@ mod tests {
     fn qr_rcm_from_key_test_vector(tv: &TestVector) -> QrRcmDerivation {
         let sk = SpendingKey::from_bytes(tv.sk).unwrap();
         let fvk = FullViewingKey::from(&sk);
-        let addr = fvk.address_at(0u32, Scope::External);
+        let addr = fvk.address(
+            crate::keys::Diversifier::from_bytes(tv.default_d),
+            Scope::External,
+        );
         let rho = Rho::from_bytes(&tv.note_rho).unwrap();
         let rseed = RandomSeed::from_bytes(tv.note_rseed, &rho).unwrap();
 

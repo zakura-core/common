@@ -508,6 +508,8 @@ impl Address {
     ),
     any(test, feature = "test-dependencies")
 ))]
+#[cfg(feature = "zip32-addresses")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
 pub mod testing {
     use proptest::prelude::*;
     use zcash_protocol::consensus::Network;
@@ -562,6 +564,7 @@ mod tests {
 
     #[test]
     #[cfg(any(feature = "orchard", feature = "sapling"))]
+    #[cfg(feature = "zip32-addresses")]
     fn ua_round_trip() {
         #[cfg(feature = "orchard")]
         let orchard = {

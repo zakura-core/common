@@ -4,12 +4,16 @@
 //!
 //! [section 4.2.2]: https://zips.z.cash/protocol/protocol.pdf#saplingkeycomponents
 
+#[cfg(feature = "zip32-addresses")]
 use aes::Aes256;
 use blake2b_simd::Params as Blake2bParams;
+#[cfg(feature = "zip32-addresses")]
 use fpe::ff1::{BinaryNumeralString, FF1};
 use subtle::CtOption;
 use zcash_spec::PrfExpand;
-use zip32::{ChainCode, ChildIndex, DiversifierIndex, Scope};
+#[cfg(feature = "zip32-addresses")]
+use zip32::DiversifierIndex;
+use zip32::{ChainCode, ChildIndex, Scope};
 
 use core::ops::AddAssign;
 use corez::io::{self, Read, Write};
@@ -31,6 +35,8 @@ pub const ZIP32_SAPLING_INT_PERSONALIZATION: &[u8; 16] = b"Zcash_SaplingInt";
 /// Attempt to produce a payment address given the specified diversifier
 /// index, and return None if the specified index does not produce a valid
 /// diversifier.
+#[cfg(feature = "zip32-addresses")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
 pub fn sapling_address(
     fvk: &FullViewingKey,
     dk: &DiversifierKey,
@@ -44,6 +50,8 @@ pub fn sapling_address(
 /// one which will produce a valid diversifier, and return the payment address
 /// constructed using that diversifier along with the index at which the
 /// valid diversifier was found.
+#[cfg(feature = "zip32-addresses")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
 pub fn sapling_find_address(
     fvk: &FullViewingKey,
     dk: &DiversifierKey,
@@ -55,6 +63,8 @@ pub fn sapling_find_address(
 
 /// Returns the payment address corresponding to the smallest valid diversifier
 /// index, along with that index.
+#[cfg(feature = "zip32-addresses")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
 pub fn sapling_default_address(
     fvk: &FullViewingKey,
     dk: &DiversifierKey,
@@ -174,6 +184,7 @@ impl DiversifierKey {
         DiversifierKey(dk)
     }
 
+    #[cfg(feature = "zip32-addresses")]
     fn try_diversifier_internal(ff: &FF1<Aes256>, j: DiversifierIndex) -> Option<Diversifier> {
         // Generate d_j
         let enc = ff
@@ -189,6 +200,8 @@ impl DiversifierKey {
 
     /// Attempts to produce a diversifier at the given index. Returns None
     /// if the index does not produce a valid diversifier.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn diversifier(&self, j: DiversifierIndex) -> Option<Diversifier> {
         let ff = FF1::<Aes256>::new(&self.0, 2).unwrap();
         Self::try_diversifier_internal(&ff, j)
@@ -199,6 +212,8 @@ impl DiversifierKey {
     /// This method cannot be used to verify whether the diversifier was originally
     /// generated with this diversifier key, because all valid diversifiers can be
     /// produced by all diversifier keys.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn diversifier_index(&self, d: &Diversifier) -> DiversifierIndex {
         let ff = FF1::<Aes256>::new(&self.0, 2).unwrap();
         let dec = ff
@@ -211,6 +226,8 @@ impl DiversifierKey {
     /// diversifier, along with the corresponding diversifier. Returns
     /// `None` if the diversifier space contains no valid diversifiers
     /// at or above the specified diversifier index.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn find_diversifier(
         &self,
         mut j: DiversifierIndex,
@@ -459,6 +476,8 @@ impl ExtendedSpendingKey {
 
     /// Returns the address with the lowest valid diversifier index, along with
     /// the diversifier index that generated that address.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn default_address(&self) -> (DiversifierIndex, PaymentAddress) {
         self.to_diversifiable_full_viewing_key().default_address()
     }
@@ -599,6 +618,8 @@ impl ExtendedFullViewingKey {
     /// Attempt to produce a payment address given the specified diversifier
     /// index, and return None if the specified index does not produce a valid
     /// diversifier.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn address(&self, j: DiversifierIndex) -> Option<PaymentAddress> {
         sapling_address(&self.fvk, &self.dk, j)
     }
@@ -607,12 +628,16 @@ impl ExtendedFullViewingKey {
     /// one which will produce a valid diversifier, and return the payment address
     /// constructed using that diversifier along with the index at which the
     /// valid diversifier was found.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn find_address(&self, j: DiversifierIndex) -> Option<(DiversifierIndex, PaymentAddress)> {
         sapling_find_address(&self.fvk, &self.dk, j)
     }
 
     /// Returns the payment address corresponding to the smallest valid diversifier
     /// index, along with that index.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn default_address(&self) -> (DiversifierIndex, PaymentAddress) {
         sapling_default_address(&self.fvk, &self.dk)
     }
@@ -753,6 +778,8 @@ impl DiversifiableFullViewingKey {
     ///
     /// Returns `None` if the diversifier index does not produce a valid diversifier for
     /// this `DiversifiableFullViewingKey`.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn address(&self, j: DiversifierIndex) -> Option<PaymentAddress> {
         self.to_external_ivk().address_at(j)
     }
@@ -765,12 +792,16 @@ impl DiversifiableFullViewingKey {
     /// Returns the index at which the valid diversifier was found along with the payment
     /// address constructed using that diversifier, or `None` if the maximum index was
     /// reached and no valid diversifier was found.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn find_address(&self, j: DiversifierIndex) -> Option<(DiversifierIndex, PaymentAddress)> {
         self.to_external_ivk().find_address(j)
     }
 
     /// Returns the payment address corresponding to the smallest valid diversifier index,
     /// along with that index.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn default_address(&self) -> (DiversifierIndex, PaymentAddress) {
         self.to_external_ivk().find_address(0u32).unwrap()
     }
@@ -788,6 +819,8 @@ impl DiversifiableFullViewingKey {
     ///
     /// This address **MUST NOT** be encoded and exposed to end users. User interfaces
     /// should instead mark these notes as "change notes" or "internal wallet operations".
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn change_address(&self) -> (DiversifierIndex, PaymentAddress) {
         let internal_dfvk = self.derive_internal();
         sapling_default_address(&internal_dfvk.fvk, &internal_dfvk.dk)
@@ -813,6 +846,8 @@ impl DiversifiableFullViewingKey {
     ///
     /// Returns the decrypted diversifier index and its scope, or `None` if the address
     /// was not generated from this key.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn decrypt_diversifier(&self, addr: &PaymentAddress) -> Option<(DiversifierIndex, Scope)> {
         let j_external = self.dk.diversifier_index(addr.diversifier());
         if self.address(j_external).as_ref() == Some(addr) {
@@ -876,6 +911,8 @@ impl IncomingViewingKey {
     ///
     /// Returns `None` if the diversifier index does not produce a valid diversifier for
     /// this `IncomingViewingKey`.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn address_at(&self, j: impl Into<DiversifierIndex>) -> Option<PaymentAddress> {
         self.dk
             .diversifier(j.into())
@@ -898,6 +935,8 @@ impl IncomingViewingKey {
     /// Returns the index at which the valid diversifier was found along with the payment
     /// address constructed using that diversifier, or `None` if the maximum index was
     /// reached and no valid diversifier was found.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn find_address(
         &self,
         j: impl Into<DiversifierIndex>,
@@ -915,6 +954,8 @@ impl IncomingViewingKey {
     ///
     /// Returns the decrypted diversifier index and its scope, or `None` if the address
     /// was not generated from this key.
+    #[cfg(feature = "zip32-addresses")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "zip32-addresses")))]
     pub fn decrypt_diversifier(&self, addr: &PaymentAddress) -> Option<DiversifierIndex> {
         let j = self.dk.diversifier_index(addr.diversifier());
         if self.address_at(j).as_ref() == Some(addr) {
@@ -928,6 +969,7 @@ impl IncomingViewingKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zip32::DiversifierIndex;
 
     use super::{DiversifiableFullViewingKey, ExtendedSpendingKey};
     use ff::PrimeField;
@@ -965,6 +1007,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zip32-addresses")]
     fn diversifier() {
         let dk = DiversifierKey([0; 32]);
         let j_0 = DiversifierIndex::new();
@@ -1007,6 +1050,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zip32-addresses")]
     fn find_diversifier() {
         let dk = DiversifierKey([0; 32]);
         let j_0 = DiversifierIndex::new();
@@ -1079,6 +1123,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zip32-addresses")]
     fn address() {
         let seed = [0; 32];
         let xsk_m = ExtendedSpendingKey::master(&seed);
@@ -1096,6 +1141,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zip32-addresses")]
     fn default_address() {
         let seed = [0; 32];
         let xsk_m = ExtendedSpendingKey::master(&seed);
@@ -1800,33 +1846,36 @@ mod tests {
             assert_eq!(&ser[..], &tv.xfvk[..]);
             assert_eq!(FvkFingerprint::from(&xfvk.fvk).0, tv.fp);
 
-            // d0
-            let mut di = DiversifierIndex::new();
-            match xfvk.dk.find_diversifier(di).unwrap() {
-                (l, d) if l == di => assert_eq!(d.0, tv.d0.unwrap()),
-                (_, _) => assert!(tv.d0.is_none()),
-            }
+            #[cfg(feature = "zip32-addresses")]
+            {
+                // d0
+                let mut di = DiversifierIndex::new();
+                match xfvk.dk.find_diversifier(di).unwrap() {
+                    (l, d) if l == di => assert_eq!(d.0, tv.d0.unwrap()),
+                    (_, _) => assert!(tv.d0.is_none()),
+                }
 
-            // d1
-            di.increment().unwrap();
-            match xfvk.dk.find_diversifier(di).unwrap() {
-                (l, d) if l == di => assert_eq!(d.0, tv.d1.unwrap()),
-                (_, _) => assert!(tv.d1.is_none()),
-            }
+                // d1
+                di.increment().unwrap();
+                match xfvk.dk.find_diversifier(di).unwrap() {
+                    (l, d) if l == di => assert_eq!(d.0, tv.d1.unwrap()),
+                    (_, _) => assert!(tv.d1.is_none()),
+                }
 
-            // d2
-            di.increment().unwrap();
-            match xfvk.dk.find_diversifier(di).unwrap() {
-                (l, d) if l == di => assert_eq!(d.0, tv.d2.unwrap()),
-                (_, _) => assert!(tv.d2.is_none()),
-            }
+                // d2
+                di.increment().unwrap();
+                match xfvk.dk.find_diversifier(di).unwrap() {
+                    (l, d) if l == di => assert_eq!(d.0, tv.d2.unwrap()),
+                    (_, _) => assert!(tv.d2.is_none()),
+                }
 
-            // dmax
-            let dmax = DiversifierIndex::from([0xff; 11]);
-            match xfvk.dk.find_diversifier(dmax) {
-                Some((l, d)) if l == dmax => assert_eq!(d.0, tv.dmax.unwrap()),
-                Some((_, _)) => panic!(),
-                None => assert!(tv.dmax.is_none()),
+                // dmax
+                let dmax = DiversifierIndex::from([0xff; 11]);
+                match xfvk.dk.find_diversifier(dmax) {
+                    Some((l, d)) if l == dmax => assert_eq!(d.0, tv.dmax.unwrap()),
+                    Some((_, _)) => panic!(),
+                    None => assert!(tv.dmax.is_none()),
+                }
             }
 
             let internal_xfvk = xfvk.derive_internal();

@@ -13,7 +13,8 @@ use crate::{
 /// use orchard::keys::{SpendingKey, FullViewingKey, Scope};
 ///
 /// let sk = SpendingKey::from_bytes([7; 32]).unwrap();
-/// let address = FullViewingKey::from(&sk).address_at(0u32, Scope::External);
+/// let address = FullViewingKey::from(&sk).address(
+///     orchard::keys::Diversifier::from_bytes(Default::default()), Scope::External);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Address {
@@ -85,7 +86,7 @@ pub mod testing {
     use proptest::prelude::*;
 
     use crate::keys::{
-        FullViewingKey, Scope,
+        Diversifier, FullViewingKey, Scope,
         testing::{arb_diversifier_index, arb_spending_key},
     };
 
@@ -95,7 +96,7 @@ pub mod testing {
         /// Generates an arbitrary payment address.
         pub(crate) fn arb_address()(sk in arb_spending_key(), j in arb_diversifier_index()) -> Address {
             let fvk = FullViewingKey::from(&sk);
-            fvk.address_at(j, Scope::External)
+            fvk.address(Diversifier::from_bytes(*j.as_bytes()), Scope::External)
         }
     }
 }
