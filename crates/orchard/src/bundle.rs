@@ -122,13 +122,14 @@ impl BundleVersion {
         self.protocol_version
     }
 
-    /// The circuit version whose proving and verifying keys prove and verify actions consistent
-    /// with this bundle version.
+    /// The circuit version for actions consistent with this bundle version.
     ///
     /// This is many-to-one: both the [`ValuePool::Orchard`] and [`ValuePool::Ironwood`] pools
     /// under [`ProtocolVersion::V3`] share the post-NU6.3 circuit, so build a key with
     /// `ProvingKey::build(bundle_version.circuit_version())` /
     /// `VerifyingKey::build(bundle_version.circuit_version())`.
+    /// Historical versions support verifying key construction only; proving key
+    /// construction returns an error.
     #[cfg(feature = "circuit")]
     pub fn circuit_version(&self) -> OrchardCircuitVersion {
         match self.protocol_version {

@@ -6,30 +6,26 @@ use halo2_proofs::plonk;
 use rand::{CryptoRng, Rng};
 
 use crate::{
-    Note, Proof,
+    Note, Proof, ProtocolVersion,
     builder::SpendInfo,
-    circuit::{Circuit, Instance, ProvingKey},
+    circuit::{Circuit, CircuitError, Instance, ProvingKey},
     note::Rho,
 };
 
 impl super::Bundle {
     /// Adds a proof to this PCZT bundle.
     ///
-    /// The Action circuits are built for `pk`'s circuit version; the caller selects the
-    /// proving key matching the transaction format the PCZT targets. If the PCZT
-    /// bundle disables cross-address transfers, the key must be an
+    /// Only current Orchard and Ironwood bundle versions can be proven, using the
     /// [`OrchardCircuitVersion::PostNu6_3`] proving key.
     ///
     /// # Errors
     ///
+    /// Returns [`ProverError::UnsupportedProtocolVersion`] for historical bundle
+    /// versions, including empty bundles. Rejection leaves the PCZT unchanged.
+    ///
     /// Returns [`ProverError::DisallowedCrossAddressTransfer`] if the bundle
     /// disables cross-address transfers, and any action's output
     /// is addressed differently than its spent note.
-    ///
-    /// Returns [`ProverError::ProofFailed`] containing
-    /// [`plonk::Error::InvalidInstances`] if the bundle disables
-    /// cross-address transfers, and `pk` is not an
-    /// [`OrchardCircuitVersion::PostNu6_3`] proving key.
     ///
     /// Also returns an error if required Prover-role fields are missing or invalid,
     /// or if proof creation fails.
@@ -40,6 +36,11 @@ impl super::Bundle {
         pk: &ProvingKey,
         rng: R,
     ) -> Result<(), ProverError> {
+        if !self.bundle_version.protocol_version().supports_proving() {
+            return Err(ProverError::UnsupportedProtocolVersion(
+                self.bundle_version.protocol_version(),
+            ));
+        }
         // If we have no actions, we don't need a proof (and if we still have no actions
         // by the time we come to transaction extraction, we will end up with a `None`
         // bundle that doesn't even hold a proof field).
@@ -122,7 +123,12 @@ impl super::Bundle {
                     .ok_or(ProverError::MissingValueCommitTrapdoor)?;
 
                 Circuit::from_action_context(spend, output_note, alpha, rcv, pk.circuit_version())
-                    .ok_or(ProverError::RhoMismatch)
+                    .map_err(|e| match e {
+                        CircuitError::RhoMismatch => ProverError::RhoMismatch,
+                        CircuitError::UnsupportedVersion(_) => {
+                            ProverError::ProofFailed(plonk::Error::Synthesis)
+                        }
+                    })
             })
             .collect::<Result<Vec<_>, ProverError>>()?;
 
@@ -155,6 +161,8 @@ impl super::Bundle {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProverError {
+    /// Proof creation is not supported for this historical bundle version.
+    UnsupportedProtocolVersion(ProtocolVersion),
     /// The bundle's anchor is still deferred (ZIP 374): the real anchor and witnesses must
     /// be installed through the Updater role before proving.
     AnchorDeferred,
@@ -195,6 +203,9 @@ pub enum ProverError {
 impl fmt::Display for ProverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ProverError::UnsupportedProtocolVersion(version) => {
+                write!(f, "Orchard proving is not supported for {version:?}")
+            }
             ProverError::AnchorDeferred => write!(
                 f,
                 "the bundle's anchor is still deferred; install it via the Updater role before \
@@ -233,9 +244,7 @@ impl fmt::Display for ProverError {
             ProverError::ProofFailed(halo2_proofs::plonk::Error::InvalidInstances) => {
                 write!(
                     f,
-                    "Failed to create proof: provided instances do not match the circuit, or \
-                     the cross-address restriction is not supported by the proving key's \
-                     circuit version",
+                    "Failed to create proof: provided instances do not match the circuits",
                 )
             }
             ProverError::ProofFailed(e) => write!(f, "Failed to create proof: {e}"),

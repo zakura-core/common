@@ -16,7 +16,7 @@ use support::payment_fixture;
 fn criterion_benchmark(c: &mut Criterion) {
     let version = OrchardCircuitVersion::PostNu6_3;
     let vk = VerifyingKey::build(version);
-    let pk = ProvingKey::build(version);
+    let pk = ProvingKey::build(version).expect("current circuit supports proving");
     let action_counts = 1..=4;
 
     {
