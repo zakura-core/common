@@ -9,8 +9,9 @@
 //!
 //! ## Feature flags
 //!
-//! - `bundled-verifying-keys`: embeds the canonical Sapling verifying keys
-//!   without proving parameters, and enables `circuit`.
+//! - `pinned-vk-only`: embeds the canonical Sapling verifying keys
+//!   without proving parameters, and enables `circuit`. It adds no Wagyu
+//!   dependency; separately enabled proving dependencies are unaffected.
 //!
 
 #![no_std]

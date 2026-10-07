@@ -59,7 +59,7 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
 # Embed only the canonical Sapling verifying keys, without proving parameters.
-bundled-verifying-keys = ["circuit"]
+pinned-vk-only = ["circuit"]
 circuit = [
     "dep:bellman",
     "bls12_381/bits",

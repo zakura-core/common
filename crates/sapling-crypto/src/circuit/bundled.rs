@@ -17,10 +17,14 @@ static VERIFYING_KEYS: LazyLock<(SpendVerifyingKey, OutputVerifyingKey)> = LazyL
 
 /// Returns the canonical Sapling spend and output verifying keys.
 ///
-/// Requires the `bundled-verifying-keys` feature. Only the verifying keys are
+/// Requires the `pinned-vk-only` feature. Only the verifying keys are
 /// embedded; no proving parameters are bundled or loaded. The keys are shared
 /// process-wide, including their lazy batch-verification precomputations.
-pub fn bundled_verifying_keys() -> &'static (SpendVerifyingKey, OutputVerifyingKey) {
+///
+/// This feature adds no dependency on `zakura-proofs` or the Wagyu parameter
+/// packages. It does not disable proving dependencies independently selected
+/// by another crate.
+pub fn pinned_verifying_keys() -> &'static (SpendVerifyingKey, OutputVerifyingKey) {
     &VERIFYING_KEYS
 }
 
@@ -32,8 +36,8 @@ mod tests {
 
     #[test]
     fn bundled_keys_roundtrip_and_are_reused() {
-        let keys = bundled_verifying_keys();
-        assert!(std::ptr::eq(keys, bundled_verifying_keys()));
+        let keys = pinned_verifying_keys();
+        assert!(std::ptr::eq(keys, pinned_verifying_keys()));
         let mut spend = Vec::new();
         keys.0.0.write(&mut spend).unwrap();
         assert_eq!(spend, SPEND_KEY);

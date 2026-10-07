@@ -554,11 +554,11 @@ impl Circuit<bls12_381::Scalar> for Output {
     }
 }
 
-#[cfg(feature = "bundled-verifying-keys")]
+#[cfg(feature = "pinned-vk-only")]
 mod bundled;
 
-#[cfg(feature = "bundled-verifying-keys")]
-pub use bundled::bundled_verifying_keys;
+#[cfg(feature = "pinned-vk-only")]
+pub use bundled::pinned_verifying_keys;
 
 // Three uncompressed G1 points, three G2 points, and the input-vector length.
 const VERIFYING_KEY_FIXED_BYTES: u64 = 3 * 96 + 3 * 192 + 4;
