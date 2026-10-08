@@ -11,7 +11,7 @@ use subtle::CtOption;
 
 use crate::{
     Address,
-    keys::{EphemeralSecretKey, FullViewingKey, Scope, SpendingKey},
+    keys::{Diversifier, EphemeralSecretKey, FullViewingKey, Scope, SpendingKey},
     spec::{NonIdentityPallasPoint, NonZeroPallasScalar, PrfExpand, to_base, to_scalar},
     value::NoteValue,
 };
@@ -333,7 +333,10 @@ impl Note {
     ) -> (SpendingKey, FullViewingKey, Self) {
         let sk = SpendingKey::random(rng);
         let fvk: FullViewingKey = (&sk).into();
-        let recipient = fvk.address_at(0u32, Scope::External);
+        // Dummy notes do not need a reproducible ZIP 32 address index.
+        let mut diversifier_bytes: [u8; 11] = Default::default();
+        rng.fill_bytes(&mut diversifier_bytes);
+        let recipient = fvk.address(Diversifier::from_bytes(diversifier_bytes), Scope::External);
 
         let note = Note::new(
             recipient,
@@ -474,6 +477,34 @@ pub mod testing {
 
     use super::{Note, NoteVersion, RandomSeed, Rho};
 
+    #[cfg(test)]
+    pub(super) fn arb_dummy_note() -> impl Strategy<
+        Value = (
+            crate::keys::SpendingKey,
+            crate::keys::FullViewingKey,
+            Note,
+            Option<Rho>,
+            NoteVersion,
+        ),
+    > {
+        use rand::{SeedableRng, rngs::StdRng};
+
+        (
+            prop::array::uniform32(any::<u8>()),
+            any::<bool>(),
+            prop::option::of(arb_nullifier().prop_map(Rho::from_nf_old)),
+        )
+            .prop_map(|(seed, ironwood, rho)| {
+                let version = if ironwood {
+                    NoteVersion::V3
+                } else {
+                    NoteVersion::V2
+                };
+                let (sk, fvk, note) = Note::dummy(&mut StdRng::from_seed(seed), rho, version);
+                (sk, fvk, note, rho, version)
+            })
+    }
+
     prop_compose! {
         /// Generate an arbitrary random seed
         pub(crate) fn arb_rseed()(elems in prop::array::uniform32(prop::num::u8::ANY)) -> RandomSeed {
@@ -508,6 +539,22 @@ mod tests {
     };
     use ff::PrimeField;
     use group::GroupEncoding;
+
+    proptest::proptest! {
+        #[test]
+        fn dummy_note_preserves_spend_inputs((sk, fvk, note, rho, version) in testing::arb_dummy_note()) {
+            proptest::prop_assert_eq!(fvk.to_bytes(), FullViewingKey::from(&sk).to_bytes());
+            proptest::prop_assert_eq!(note.value(), NoteValue::ZERO);
+            proptest::prop_assert_eq!(note.version(), version);
+            if let Some(rho) = rho {
+                proptest::prop_assert_eq!(note.rho(), rho);
+            }
+            proptest::prop_assert_eq!(
+                note.recipient(),
+                fvk.address(note.recipient().diversifier(), Scope::External)
+            );
+        }
+    }
 
     struct QrRcmDerivation {
         rcm_old_repr: [u8; 32],

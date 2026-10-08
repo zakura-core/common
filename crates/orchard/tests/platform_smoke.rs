@@ -20,7 +20,7 @@ fn creates_and_verifies_proof_individually_and_in_batch() {
     let mut rng = rng();
     let bundle_version = BundleVersion::ironwood_v3();
     let circuit_version = bundle_version.circuit_version();
-    let proving_key = ProvingKey::build(circuit_version);
+    let proving_key = ProvingKey::build(circuit_version).expect("current circuit supports proving");
     let verifying_key = proving_key.verifying_key();
 
     let spending_key = SpendingKey::from_bytes(TEST_SPENDING_KEY).unwrap();

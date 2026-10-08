@@ -73,10 +73,11 @@
 //!
 //! `aarch64-asm` enables assembly for loose field multiplication, squaring,
 //! addition, subtraction, negation, doubling, FFT butterflies, wide Montgomery
-//! reduction, repeated-square chains, and canonical integer conversion. The
-//! kernels adapt Supranational's Semolina routines to preserve Udon's exact
-//! loose results. Arbitrary full-width integer conversion retains its portable
-//! multiplication kernel because it requires wider intermediate bounds.
+//! reduction, repeated-square chains, canonical integer conversion, and
+//! product-sum accumulation. The kernels adapt Supranational's Semolina
+//! routines to preserve Udon's exact loose results. Arbitrary full-width
+//! integer conversion retains its portable multiplication kernel because it
+//! requires wider intermediate bounds.
 //! Assembly is selected on little-endian, 64-bit AArch64 Unix and bare-metal
 //! targets; unsupported targets and Miri use portable Rust. Supported builds
 //! require a C assembler for the square-chain and conversion routines.
@@ -85,8 +86,23 @@
 //! Field arithmetic keeps its `no_std`, allocation-free, and variable-time
 //! contracts. Tests compare exact results against integer and Rust oracles.
 //!
-//! Cargo features are additive: any consumer enabling `sqrt-table-large` or
-//! `aarch64-asm` selects it for that Udon build.
+//! `x86_64-asm` enables the same kernels on 64-bit x86-64 targets as
+//! MULX/ADCX/ADOX inline assembly transcribed from the zakura-pasta-curves
+//! backend; no C assembler is needed. The backend is also selected without
+//! the feature when the compiler's resolved target features include both
+//! BMI2 and ADX, for example with `-C target-cpu=native` on a supporting CPU
+//! or `-C target-feature=+adx,+bmi2`. There is no runtime dispatch: the
+//! feature forces the backend on, and an assembly-enabled binary faults with
+//! an illegal instruction on a CPU without those extensions. `portable`
+//! disables the x86-64 backend in either case, including under
+//! `--all-features`; it does not undo instructions enabled by Rust's target
+//! flags and does not affect `aarch64-asm`. Miri uses portable Rust. Unsafe
+//! arithmetic is again confined to the assembly module, whose blocks read
+//! only their declared fixed-size operands; negation and doubling keep their
+//! portable forms, which x86-64 compiles at least as well.
+//!
+//! Cargo features are additive: any consumer enabling `sqrt-table-large`,
+//! `aarch64-asm`, `x86_64-asm`, or `portable` selects it for that Udon build.
 
 #![no_std]
 #![deny(unsafe_code)]

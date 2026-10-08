@@ -99,7 +99,7 @@ fn ironwood_batch_validation_timings() {
 
     let start = Instant::now();
     let vk = VerifyingKey::build(version);
-    let pk = ProvingKey::build(version);
+    let pk = ProvingKey::build(version).expect("current circuit supports proving");
     println!(
         "ironwood keys built in {:.1}s",
         start.elapsed().as_secs_f64()

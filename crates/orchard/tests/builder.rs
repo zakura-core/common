@@ -21,7 +21,6 @@ use zcash_note_encryption::try_note_decryption;
 // need their own cache of immutable circuit keys.
 struct CachedTestKeys {
     circuit_version: OrchardCircuitVersion,
-    proving_key: OnceLock<ProvingKey>,
     verifying_key: OnceLock<VerifyingKey>,
 }
 
@@ -29,14 +28,20 @@ impl CachedTestKeys {
     const fn new(circuit_version: OrchardCircuitVersion) -> Self {
         Self {
             circuit_version,
-            proving_key: OnceLock::new(),
             verifying_key: OnceLock::new(),
         }
     }
 
     fn proving_key(&self) -> &ProvingKey {
-        self.proving_key
-            .get_or_init(|| ProvingKey::build(self.circuit_version))
+        assert!(
+            self.circuit_version.supports_proving(),
+            "historical tests must use frozen proofs"
+        );
+        static CURRENT: std::sync::OnceLock<ProvingKey> = std::sync::OnceLock::new();
+        CURRENT.get_or_init(|| {
+            ProvingKey::build(OrchardCircuitVersion::PostNu6_3)
+                .expect("current circuit supports proving")
+        })
     }
 
     fn verifying_key(&self) -> &VerifyingKey {
@@ -99,7 +104,7 @@ fn verify_bundle(bundle: &Bundle<Authorized, i64>, vk: &VerifyingKey, tx_version
 
 /// The flags used by the output-only (shielding and coinbase) steps of these tests: spends
 /// disabled, outputs enabled, cross-address transfers enabled. Every output-only bundle here
-/// targets a pool that permits cross-address transfers (Orchard pre-NU6.3 and Ironwood).
+/// targets Ironwood, which permits cross-address transfers.
 const SHIELDING_FLAGS: Flags = Flags::SPENDS_DISABLED;
 
 /// Creates a builder of the given `bundle_version` and `bundle_type` over the
@@ -123,7 +128,7 @@ fn output_only_builder(
 #[test]
 fn bundle_chain() {
     let mut rng = rng();
-    let keys = cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2);
+    let keys = cached_test_keys(OrchardCircuitVersion::PostNu6_3);
     let pk = keys.proving_key();
     let vk = keys.verifying_key();
 
@@ -134,7 +139,7 @@ fn bundle_chain() {
     // Create a shielding bundle.
     let shielding_bundle: Bundle<_, i64> = {
         let builder =
-            output_only_builder(BundleVersion::orchard_v2(), BundleType::DEFAULT, recipient);
+            output_only_builder(BundleVersion::ironwood_v3(), BundleType::DEFAULT, recipient);
         let (unauthorized, bundle_meta) = builder.build(&mut rng).unwrap().unwrap();
 
         assert_eq!(
@@ -150,7 +155,7 @@ fn bundle_chain() {
         );
 
         let sighash = unauthorized
-            .commitment(TxVersion::V5)
+            .commitment(TxVersion::V6)
             .expect("bundle flags are representable in this format")
             .into();
         let proven = unauthorized.create_proof(pk, &mut rng).unwrap();
@@ -158,7 +163,7 @@ fn bundle_chain() {
     };
 
     // Verify the shielding bundle.
-    verify_bundle(&shielding_bundle, vk, TxVersion::V5);
+    verify_bundle(&shielding_bundle, vk, TxVersion::V6);
 
     // Create a shielded bundle spending the previous output.
     let shielded_bundle: Bundle<_, i64> = {
@@ -167,7 +172,7 @@ fn bundle_chain() {
             .actions()
             .iter()
             .find_map(|action| {
-                let domain = OrchardDomain::for_action(action);
+                let domain = IronwoodDomain::for_action(action);
                 try_note_decryption(&domain, &ivk, action)
             })
             .unwrap();
@@ -178,8 +183,8 @@ fn bundle_chain() {
 
         let mut builder = Builder::new(
             BundleType::DEFAULT,
-            BundleVersion::orchard_v2(),
-            BundleVersion::orchard_v2().default_flags(),
+            BundleVersion::ironwood_v3(),
+            BundleVersion::ironwood_v3().default_flags(),
             root.into(),
         )
         .unwrap();
@@ -190,7 +195,7 @@ fn bundle_chain() {
         );
         let (unauthorized, _) = builder.build(&mut rng).unwrap().unwrap();
         let sighash = unauthorized
-            .commitment(TxVersion::V5)
+            .commitment(TxVersion::V6)
             .expect("bundle flags are representable in this format")
             .into();
         let proven = unauthorized.create_proof(pk, &mut rng).unwrap();
@@ -200,40 +205,19 @@ fn bundle_chain() {
     };
 
     // Verify the shielded bundle.
-    verify_bundle(&shielded_bundle, vk, TxVersion::V5);
+    verify_bundle(&shielded_bundle, vk, TxVersion::V6);
 }
 
-// A bundle built with the circuit version set to `InsecurePreNu6_2` produces a proof against
-// the historical (insecure) circuit, which verifies under the insecure verifying key but not
-// the fixed one. This is the path that lets tests reproduce pre-NU6.2 proofs.
 #[test]
-fn builder_builds_for_insecure_circuit_version() {
-    let mut rng = rng();
-    let insecure_keys = cached_test_keys(OrchardCircuitVersion::InsecurePreNu6_2);
-    let insecure_pk = insecure_keys.proving_key();
-    let insecure_vk = insecure_keys.verifying_key();
-    let fixed_vk = cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).verifying_key();
-
-    let sk = SpendingKey::from_bytes([0; 32]).unwrap();
-    let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
-
-    let builder = output_only_builder(
+fn builder_rejects_historical_versions() {
+    for version in [
         BundleVersion::orchard_insecure_v1(),
-        BundleType::DEFAULT,
-        recipient,
-    );
-
-    let (unauthorized, _) = builder.build::<i64>(&mut rng).unwrap().unwrap();
-    let sighash: [u8; 32] = unauthorized
-        .commitment(TxVersion::V5)
-        .expect("bundle flags are representable in this format")
-        .into();
-    let proven = unauthorized.create_proof(insecure_pk, &mut rng).unwrap();
-    let bundle = proven.apply_signatures(&mut rng, sighash, &[]).unwrap();
-
-    assert!(matches!(bundle.verify_proof(insecure_vk), Ok(())));
-    assert!(bundle.verify_proof(fixed_vk).is_err());
+        BundleVersion::orchard_v2(),
+    ] {
+        assert!(
+            matches!(Builder::new(BundleType::DEFAULT, version, version.default_flags(), orchard::Anchor::empty_tree()), Err(orchard::builder::BuildError::UnsupportedProtocolVersion(v)) if v == version.protocol_version())
+        );
+    }
 }
 
 #[test]
@@ -398,25 +382,26 @@ fn post_nu6_3_restricted_bundle_chain() {
     let fvk = FullViewingKey::from(&sk);
     let recipient = fvk.address_at(0u32, Scope::External);
 
-    let shielding_bundle: Bundle<_, i64> = {
-        let builder =
-            output_only_builder(BundleVersion::orchard_v2(), BundleType::DEFAULT, recipient);
-
-        builder.build(&mut rng).unwrap().unwrap().0
-    };
-
+    // A historical V2 note remains spendable under the current Orchard rules.
+    // Construct its note data directly; this test must not create a historical proof.
+    /// Deterministic note randomness for the historical spend fixture.
+    const HISTORICAL_RHO: [u8; 32] = [0; 32];
+    /// A valid seed for the fixed rho above.
+    const HISTORICAL_SEED: [u8; 32] = [1; 32];
+    /// Enough value for the change output and the bundle's positive value balance.
+    const HISTORICAL_VALUE: u64 = 5000;
+    let rho = orchard::note::Rho::from_bytes(&HISTORICAL_RHO).unwrap();
+    let seed = orchard::note::RandomSeed::from_bytes(HISTORICAL_SEED, &rho).unwrap();
+    let note = orchard::Note::from_parts(
+        recipient,
+        NoteValue::from_raw(HISTORICAL_VALUE),
+        rho,
+        seed,
+        NoteVersion::V2,
+    )
+    .unwrap();
     let change_addr = fvk.address_at(0u32, Scope::Internal);
     let restricted_bundle: Bundle<_, i64> = {
-        let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
-        let (note, _, _) = shielding_bundle
-            .actions()
-            .iter()
-            .find_map(|action| {
-                let domain = OrchardDomain::for_action(action);
-                try_note_decryption(&domain, &ivk, action)
-            })
-            .unwrap();
-
         let cmx: ExtractedNoteCommitment = note.commitment().into();
         let (root, merkle_path) = single_leaf_witness(&cmx);
 

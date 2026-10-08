@@ -60,12 +60,11 @@ trait BenchmarkCircuitWitnesses {
     fn benchmark_circuits(&self) -> &[circuit::Circuit];
 }
 
-// Proving and verifying keys are immutable and depend only on the circuit
-// version, so tests in this process can share one of each per version.
+// Tests share the current proving key and one verifying key per circuit version.
+// Historical proofs are frozen fixtures and cannot be regenerated.
 #[cfg(all(test, feature = "circuit"))]
 struct CachedTestKeys {
     circuit_version: circuit::OrchardCircuitVersion,
-    proving_key: std::sync::OnceLock<circuit::ProvingKey>,
     verifying_key: std::sync::OnceLock<circuit::VerifyingKey>,
 }
 
@@ -74,14 +73,20 @@ impl CachedTestKeys {
     const fn new(circuit_version: circuit::OrchardCircuitVersion) -> Self {
         Self {
             circuit_version,
-            proving_key: std::sync::OnceLock::new(),
             verifying_key: std::sync::OnceLock::new(),
         }
     }
 
     fn proving_key(&self) -> &circuit::ProvingKey {
-        self.proving_key
-            .get_or_init(|| circuit::ProvingKey::build(self.circuit_version))
+        assert!(
+            self.circuit_version.supports_proving(),
+            "historical tests must use frozen proofs"
+        );
+        static CURRENT: std::sync::OnceLock<circuit::ProvingKey> = std::sync::OnceLock::new();
+        CURRENT.get_or_init(|| {
+            circuit::ProvingKey::build(circuit::OrchardCircuitVersion::PostNu6_3)
+                .expect("current circuit supports proving")
+        })
     }
 
     fn verifying_key(&self) -> &circuit::VerifyingKey {
@@ -209,4 +214,11 @@ pub enum ProtocolVersion {
     /// For transactional bundles affecting the [`ValuePool::Ironwood`] value pool, cross-address
     /// transfers are permitted and notes use V3 plaintexts.
     V3,
+}
+
+impl ProtocolVersion {
+    /// Whether new bundles can be constructed under this protocol version.
+    pub fn supports_proving(self) -> bool {
+        matches!(self, Self::V3)
+    }
 }

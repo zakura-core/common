@@ -11,12 +11,12 @@ use rand::{CryptoRng, Rng, prelude::SliceRandom};
 use zcash_note_encryption::ENC_CIPHERTEXT_SIZE;
 
 use crate::{
-    Proof,
+    Proof, ProtocolVersion,
     address::Address,
     bundle::{Authorization, Authorized, Bundle, BundleVersion, Flags, TxVersion},
     keys::{
-        FullViewingKey, OutgoingViewingKey, Scope, SpendAuthorizingKey, SpendValidatingKey,
-        SpendingKey,
+        Diversifier, FullViewingKey, OutgoingViewingKey, Scope, SpendAuthorizingKey,
+        SpendValidatingKey, SpendingKey,
     },
     note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, Rho, TransmittedNoteCiphertext},
     note_encryption::OrchardNoteEncryption,
@@ -36,6 +36,16 @@ use {
 };
 
 const DEFAULT_MIN_ACTIONS: u8 = 2;
+
+fn require_proving(version: BundleVersion) -> Result<(), BuildError> {
+    if version.protocol_version().supports_proving() {
+        Ok(())
+    } else {
+        Err(BuildError::UnsupportedProtocolVersion(
+            version.protocol_version(),
+        ))
+    }
+}
 
 /// An enumeration of rules for Orchard bundle construction.
 ///
@@ -164,6 +174,8 @@ impl BundleType {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BuildError {
+    /// New bundles cannot be constructed under this historical protocol version.
+    UnsupportedProtocolVersion(ProtocolVersion),
     /// Spends are disabled for the provided bundle type.
     SpendsDisabled,
     /// Outputs are disabled for the provided bundle type.
@@ -210,13 +222,15 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use BuildError::*;
         match self {
+            UnsupportedProtocolVersion(version) => write!(
+                f,
+                "Orchard bundle construction is not supported for {version:?}"
+            ),
             MissingSignatures => f.write_str("Required signatures were missing during build"),
             #[cfg(feature = "circuit")]
-            Proof(halo2_proofs::plonk::Error::InvalidInstances) => f.write_str(
-                "Could not create proof: provided instances do not match the circuit, or \
-                     the cross-address restriction is not supported by the proving key's \
-                     circuit version",
-            ),
+            Proof(halo2_proofs::plonk::Error::InvalidInstances) => {
+                f.write_str("Could not create proof: provided instances do not match the circuits")
+            }
             #[cfg(feature = "circuit")]
             Proof(e) => write!(f, "Could not create proof: {e}"),
             ValueSum(_) => f.write_str("Overflow occurred during value construction"),
@@ -548,7 +562,10 @@ impl OutputInfo {
     /// [orcharddummynotes]: https://zips.z.cash/protocol/nu5.pdf#orcharddummynotes
     pub fn dummy(note_version: NoteVersion, rng: &mut impl Rng) -> Self {
         let fvk: FullViewingKey = (&SpendingKey::random(rng)).into();
-        let recipient = fvk.address_at(0u32, Scope::External);
+        // Dummy outputs do not need a reproducible ZIP 32 address index.
+        let mut diversifier_bytes: [u8; 11] = Default::default();
+        rng.fill_bytes(&mut diversifier_bytes);
+        let recipient = fvk.address(Diversifier::from_bytes(diversifier_bytes), Scope::External);
 
         Self::new(None, recipient, NoteValue::ZERO, note_version, [0u8; 512])
     }
@@ -701,15 +718,11 @@ impl ActionInfo {
     ///
     /// Defined in [Zcash Protocol Spec § 4.7.3: Sending Notes (Orchard)][orchardsend].
     ///
-    /// The circuit version must be consistent between actions in a bundle.
+    /// All actions use the current proving circuit.
     ///
     /// [orchardsend]: https://zips.z.cash/protocol/nu5.pdf#orchardsend
     #[cfg(feature = "circuit")]
-    fn build(
-        self,
-        mut rng: impl Rng,
-        circuit_version: OrchardCircuitVersion,
-    ) -> (Action<SigningMetadata>, Circuit) {
+    fn build(self, mut rng: impl Rng) -> (Action<SigningMetadata>, Circuit) {
         let v_net = self.value_sum();
         let cv_net = ValueCommitment::derive(v_net, self.rcv.clone());
 
@@ -732,13 +745,7 @@ impl ActionInfo {
                 "rk is non-identity (α was generated randomly) and epk is a \
                  valid non-identity point by construction",
             ),
-            Circuit::from_action_context_unchecked(
-                self.spend,
-                note,
-                alpha,
-                self.rcv,
-                circuit_version,
-            ),
+            Circuit::from_action_context_unchecked(self.spend, note, alpha, self.rcv),
         )
     }
 
@@ -866,6 +873,8 @@ impl Builder {
     ///
     /// # Errors
     ///
+    /// Returns [`BuildError::UnsupportedProtocolVersion`] for historical bundle versions.
+    ///
     /// Returns [`BuildError::UnrepresentableFlags`] if `flags` cannot be encoded under
     /// `bundle_version`, or [`BuildError::CoinbaseSpendsEnabled`] if `bundle_type` is
     /// [`BundleType::Coinbase`] but `flags` enable spends.
@@ -875,6 +884,7 @@ impl Builder {
         flags: Flags,
         anchor: Anchor,
     ) -> Result<Self, BuildError> {
+        require_proving(bundle_version)?;
         if flags.to_byte(bundle_version).is_none() {
             return Err(BuildError::UnrepresentableFlags);
         }
@@ -923,6 +933,7 @@ impl Builder {
         flags: Flags,
         tx_version: TxVersion,
     ) -> Result<Self, BuildError> {
+        require_proving(bundle_version)?;
         if bundle_version
             .value_pool()
             .commitment_format(tx_version)
@@ -1234,6 +1245,9 @@ impl Builder {
 ///
 /// # Errors
 ///
+/// Returns [`BuildError::UnsupportedProtocolVersion`] for historical bundle versions,
+/// including when no spends or outputs are supplied.
+///
 /// Returns [`BuildError::UnrepresentableFlags`] if `flags` cannot be encoded under
 /// `bundle_version`, or [`BuildError::CoinbaseSpendsEnabled`] if `bundle_type` is
 /// [`BundleType::Coinbase`] but `flags` enable spends.
@@ -1282,6 +1296,7 @@ fn finish_unauthorized_bundle<V: TryFrom<i64>, R: Rng>(
     anchor: Anchor,
     bundle_version: BundleVersion,
 ) -> Result<Option<(UnauthorizedBundle<V>, BundleMetadata)>, BuildError> {
+    require_proving(bundle_version)?;
     let circuit_version = bundle_version.circuit_version();
     let result_value_balance: V = i64::try_from(value_balance)
         .map_err(BuildError::ValueSum)
@@ -1297,10 +1312,8 @@ fn finish_unauthorized_bundle<V: TryFrom<i64>, R: Rng>(
         .into_bsk();
 
     // Create the actions.
-    let (actions, circuits): (Vec<_>, Vec<_>) = pre_actions
-        .into_iter()
-        .map(|a| a.build(&mut rng, circuit_version))
-        .unzip();
+    let (actions, circuits): (Vec<_>, Vec<_>) =
+        pre_actions.into_iter().map(|a| a.build(&mut rng)).unzip();
 
     // Verify that bsk and bvk are consistent.
     let bvk = (actions.iter().map(|a| a.cv_net()).sum::<ValueCommitment>()
@@ -1341,11 +1354,12 @@ fn build_bundle<B, R: Rng>(
     changes: Vec<ChangeInfo>,
     finisher: impl FnOnce(Vec<ActionInfo>, Flags, ValueSum, BundleMetadata, R) -> Result<B, BuildError>,
 ) -> Result<B, BuildError> {
+    require_proving(bundle_version)?;
     // Every build path funnels through here (the free `bundle` function, `Builder::build`, and
     // `Builder::build_for_pczt`), so validate the version-dependent invariants here rather than
-    // trusting each caller: the flags must be encodable under the bundle version, and a coinbase
-    // bundle must not enable spends. `Builder::new` also enforces both up front, for fail-fast
-    // construction.
+    // trusting each caller: proving must be supported, flags must be encodable under the
+    // bundle version, and a coinbase bundle must not enable spends. `Builder::new` also
+    // enforces these up front.
     if flags.to_byte(bundle_version).is_none() {
         return Err(BuildError::UnrepresentableFlags);
     }
@@ -1613,13 +1627,10 @@ impl<S: InProgressSignatures, V> Bundle<InProgress<Unproven, S>, V> {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::Proof`] containing
-    /// [`halo2_proofs::plonk::Error::InvalidInstances`] if this bundle disables
-    /// cross-address transfers and `pk` is not an
-    /// [`OrchardCircuitVersion::PostNu6_3`] proving key.
-    ///
-    /// Also returns an error if `pk` does not match this bundle's
-    /// [`circuit_version`](Self::circuit_version), or if proof creation fails.
+    /// Returns [`BuildError::Proof`] if proof creation fails. Historical circuits or
+    /// proving keys, and keys that do not match this bundle's
+    /// [`circuit_version`](Self::circuit_version), are rejected with
+    /// [`halo2_proofs::plonk::Error::Synthesis`].
     pub fn create_proof(
         self,
         pk: &ProvingKey,
@@ -1883,7 +1894,7 @@ pub mod testing {
     use alloc::vec::Vec;
     use core::fmt::Debug;
 
-    use incrementalmerkletree::{Hashable, Level, frontier::Frontier};
+    use incrementalmerkletree::{Hashable, Level};
     use rand::{CryptoRng, Rng as RandRng, SeedableRng, rngs::StdRng};
 
     use proptest::collection::vec;
@@ -1891,18 +1902,75 @@ pub mod testing {
 
     use crate::{
         Address, NOTE_COMMITMENT_TREE_DEPTH, Note, NoteVersion,
-        address::testing::arb_address,
         bundle::{Authorized, Bundle, BundleVersion, TxVersion},
         circuit::{OrchardCircuitVersion, ProvingKey},
         keys::{
             FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey, testing::arb_spending_key,
         },
-        note::{Nullifier, Rho, testing::arb_note},
+        note::{Nullifier, Rho},
         tree::{Anchor, MerkleHashOrchard, MerklePath},
         value::{MAX_NOTE_VALUE, NoteValue, testing::arb_positive_note_value},
     };
 
     use super::{Builder, BundleType};
+
+    /// Reconstructs the historical dummy inputs pinned by the Lean captures.
+    ///
+    /// Keep this fixture independent of production dummy-address sampling so
+    /// changes to the builder do not replace the independently pinned proofs.
+    #[cfg(all(
+        test,
+        any(feature = "verifier-fingerprint", feature = "prover-fingerprint")
+    ))]
+    pub(crate) fn build_pinned_fixture_bundle(
+        rng: &mut rand_chacha::ChaCha20Rng,
+        num_actions: u8,
+    ) -> super::UnauthorizedBundle<i64> {
+        use super::{
+            ActionInfo, BundleMetadata, OutputInfo, SpendInfo, finish_unauthorized_bundle,
+        };
+        use crate::value::ValueSum;
+        use rand::prelude::SliceRandom;
+
+        let bundle_version = BundleVersion::orchard_v3();
+        let note_version = bundle_version.note_version();
+        let mut pairs = (0..num_actions)
+            .map(|_| {
+                let sk = SpendingKey::random(rng);
+                let fvk = FullViewingKey::from(&sk);
+                let recipient = fvk.address_at(0u32, Scope::External);
+                let rho = Rho::from_nf_old(Nullifier::dummy(rng));
+                let note = Note::new(recipient, NoteValue::ZERO, rho, note_version, &mut *rng);
+                let spend = SpendInfo {
+                    dummy_sk: Some(sk),
+                    fvk,
+                    scope: Scope::External,
+                    note,
+                    merkle_path: Some(MerklePath::dummy(rng)),
+                };
+                let output =
+                    OutputInfo::new(None, recipient, NoteValue::ZERO, note_version, [0; 512]);
+                (spend, output)
+            })
+            .collect::<Vec<_>>();
+        pairs.shuffle(rng);
+        let pre_actions = pairs
+            .into_iter()
+            .map(|(spend, output)| ActionInfo::new(spend, output, &mut *rng))
+            .collect();
+        finish_unauthorized_bundle(
+            pre_actions,
+            bundle_version.default_flags(),
+            ValueSum::zero(),
+            BundleMetadata::new(0, 0),
+            rng,
+            Anchor::empty_tree(),
+            bundle_version,
+        )
+        .expect("pinned zero-valued fixture inputs satisfy the bundle invariants")
+        .expect("pinned fixtures contain at least one action")
+        .0
+    }
 
     /// An intermediate type used for construction of arbitrary
     /// bundle values. This type is required because of a limitation
@@ -1921,52 +1989,52 @@ pub mod testing {
         output_amounts: Vec<(Address, NoteValue)>,
     }
 
-    fn fixed_proving_key() -> &'static ProvingKey {
+    fn current_proving_key() -> &'static ProvingKey {
         #[cfg(test)]
         {
-            crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key()
+            crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key()
         }
-
         #[cfg(not(test))]
         {
             static PROVING_KEY: std::sync::OnceLock<ProvingKey> = std::sync::OnceLock::new();
-            PROVING_KEY.get_or_init(|| ProvingKey::build(OrchardCircuitVersion::FixedPostNu6_2))
+            PROVING_KEY.get_or_init(|| {
+                ProvingKey::build(OrchardCircuitVersion::PostNu6_3)
+                    .expect("current circuit supports proving")
+            })
         }
     }
 
     impl<R: RandRng + CryptoRng> ArbitraryBundleInputs<R> {
-        /// Create a bundle from the set of arbitrary bundle inputs.
         fn into_bundle<V: TryFrom<i64>>(mut self) -> Bundle<Authorized, V> {
             let fvk = FullViewingKey::from(&self.sk);
-            let bundle_version = BundleVersion::orchard_v2();
+            let version = BundleVersion::orchard_v3();
             let mut builder = Builder::new(
                 BundleType::DEFAULT,
-                bundle_version,
-                bundle_version.default_flags(),
+                version,
+                version.default_flags(),
                 self.anchor,
             )
             .unwrap();
-
-            for (note, path) in self.notes.into_iter() {
+            for (note, path) in self.notes {
                 builder.add_spend(fvk.clone(), note, path).unwrap();
             }
-
-            for (addr, value) in self.output_amounts.into_iter() {
-                let scope = fvk.scope_for_address(&addr).unwrap();
-                let ovk = fvk.to_ovk(scope);
-
+            for (addr, value) in self.output_amounts {
                 builder
-                    .add_output(Some(ovk.clone()), addr, value, [0u8; 512])
+                    .add_change_output(
+                        fvk.clone(),
+                        Some(fvk.to_ovk(Scope::Internal)),
+                        addr,
+                        value,
+                        GENERATED_MEMO,
+                    )
                     .unwrap();
             }
-
-            let pk = fixed_proving_key();
             builder
                 .build(&mut self.rng)
                 .unwrap()
                 .unwrap()
                 .0
-                .create_proof(pk, &mut self.rng)
+                .create_proof(current_proving_key(), &mut self.rng)
                 .unwrap()
                 .prepare(&mut self.rng, [0; 32])
                 .sign(&mut self.rng, &SpendAuthorizingKey::from(&self.sk))
@@ -1975,60 +2043,55 @@ pub mod testing {
         }
     }
 
+    /// Upper bound keeps generated bundles and their proofs practical for property tests.
+    const GENERATED_NOTE_LIMIT: usize = 30;
+
+    /// Zero-filled memo used for generated test bundles.
+    const GENERATED_MEMO: [u8; 512] = [0; 512];
+
+    /// Keep this regression small because every generated bundle requires a real proof.
+    #[cfg(test)]
+    const PROVING_TEST_CASES: u32 = 2;
+
+    /// Generate up to two spends and changes to exercise shared witnesses and padding.
+    #[cfg(test)]
+    const SMALL_GENERATED_NOTE_LIMIT: usize = 3;
+
     prop_compose! {
-        /// Produce a random valid Orchard bundle.
-        fn arb_bundle_inputs(sk: SpendingKey)
-        (
-            n_notes in 1usize..30,
-            n_outputs in 1..30,
-
-        )
-        (
-            // generate note values that we're certain won't exceed MAX_NOTE_VALUE in total
-            notes in vec(
-                arb_positive_note_value(MAX_NOTE_VALUE / n_notes as u64)
-                    .prop_flat_map(|value| arb_note(value, NoteVersion::V2)),
-                n_notes
-            ),
-            output_amounts in vec(
-                arb_address().prop_flat_map(move |a| {
-                    arb_positive_note_value(MAX_NOTE_VALUE / n_outputs as u64)
-                        .prop_map(move |v| (a, v))
-                }),
-                n_outputs as usize
-            ),
-            rng_seed in prop::array::uniform32(prop::num::u8::ANY)
+        fn arb_bundle_inputs(sk: SpendingKey, note_limit: usize)(
+            values in vec(arb_positive_note_value(MAX_NOTE_VALUE / note_limit as u64), 1..note_limit),
+            changes in vec(arb_positive_note_value(MAX_NOTE_VALUE / note_limit as u64), 1..note_limit),
+            seed in any::<[u8; 32]>(),
         ) -> ArbitraryBundleInputs<StdRng> {
-            use crate::constants::MERKLE_DEPTH_ORCHARD;
-            let mut frontier = Frontier::<MerkleHashOrchard, { MERKLE_DEPTH_ORCHARD as u8 }>::empty();
-            let mut notes_and_auth_paths: Vec<(Note, MerklePath)> = Vec::new();
-
-            for note in notes.iter() {
-                let leaf = MerkleHashOrchard::from_cmx(&note.commitment().into());
-                frontier.append(leaf);
-
-                let path = frontier
-                    .witness(|addr| Some(<MerkleHashOrchard as Hashable>::empty_root(addr.level())))
-                    .ok()
-                    .flatten()
-                    .expect("we can always construct a correct Merkle path");
-                notes_and_auth_paths.push((*note, path.into()));
-            }
-
+            let recipient = FullViewingKey::from(&sk).address_at(0u32, Scope::Internal);
+            let (sk, notes, anchor) = shared_anchor_notes(sk, &values, NoteVersion::V2, seed);
             ArbitraryBundleInputs {
-                rng: StdRng::from_seed(rng_seed),
-                sk,
-                anchor: frontier.root().into(),
-                notes: notes_and_auth_paths,
-                output_amounts
+                rng: StdRng::from_seed(seed), sk, anchor, notes,
+                output_amounts: changes.into_iter().map(|value| (recipient, value)).collect(),
             }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(PROVING_TEST_CASES))]
+        #[test]
+        fn generated_restricted_bundle_proves_and_verifies(
+            inputs in arb_spending_key().prop_flat_map(|sk| arb_bundle_inputs(sk, SMALL_GENERATED_NOTE_LIMIT)),
+            batch_seed in any::<[u8; 32]>(),
+        ) {
+            let bundle = inputs.into_bundle::<i64>();
+            prop_assert_eq!(bundle.bundle_version(), BundleVersion::orchard_v3());
+            prop_assert!(bundle.verify_proof(&current_proving_key().verifying_key()).is_ok());
+            let mut batch = crate::bundle::BatchValidator::new(crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).verifying_key());
+            prop_assert!(batch.add_bundle(&bundle, [0; 32]).is_ok());
+            prop_assert!(batch.validate(StdRng::from_seed(batch_seed)));
         }
     }
 
     /// Produce an arbitrary valid Orchard bundle using a random spending key.
     pub fn arb_bundle<V: TryFrom<i64> + Debug>() -> impl Strategy<Value = Bundle<Authorized, V>> {
         arb_spending_key()
-            .prop_flat_map(arb_bundle_inputs)
+            .prop_flat_map(|sk| arb_bundle_inputs(sk, GENERATED_NOTE_LIMIT))
             .prop_map(|inputs| inputs.into_bundle::<V>())
     }
 
@@ -2036,7 +2099,7 @@ pub mod testing {
     pub fn arb_bundle_with_key<V: TryFrom<i64> + Debug>(
         k: SpendingKey,
     ) -> impl Strategy<Value = Bundle<Authorized, V>> {
-        arb_bundle_inputs(k).prop_map(|inputs| inputs.into_bundle::<V>())
+        arb_bundle_inputs(k, GENERATED_NOTE_LIMIT).prop_map(|inputs| inputs.into_bundle::<V>())
     }
 
     prop_compose! {
@@ -2065,6 +2128,84 @@ pub mod testing {
         }
     }
 
+    fn shared_anchor_notes(
+        sk: SpendingKey,
+        values: &[NoteValue],
+        note_version: NoteVersion,
+        seed: [u8; 32],
+    ) -> (SpendingKey, Vec<(Note, MerklePath)>, Anchor) {
+        let mut rng = StdRng::from_seed(seed);
+        let fvk = FullViewingKey::from(&sk);
+        let recipient = fvk.address_at(0u32, Scope::External);
+
+        // One note per value, in order.
+        let notes: Vec<Note> = values
+            .iter()
+            .map(|&value| {
+                let rho = Rho::from_nf_old(Nullifier::dummy(&mut rng));
+                Note::new(recipient, value, rho, note_version, &mut rng)
+            })
+            .collect();
+
+        // Filled subtree roots per level: `levels[l][p]` is the root of the
+        // subtree at level `l`, position `p`. Level 0 is the leaves; each higher
+        // level combines pairs, using the empty-subtree root for a missing right
+        // sibling. Positions past `levels[l].len()` are empty.
+        let leaves: Vec<MerkleHashOrchard> = notes
+            .iter()
+            .map(|n| MerkleHashOrchard::from_cmx(&n.commitment().into()))
+            .collect();
+        let mut levels: Vec<Vec<MerkleHashOrchard>> =
+            Vec::with_capacity(NOTE_COMMITMENT_TREE_DEPTH + 1);
+        levels.push(leaves);
+        for l in 0..NOTE_COMMITMENT_TREE_DEPTH {
+            let level = Level::from(l as u8);
+            let cur = &levels[l];
+            let mut next = Vec::with_capacity(cur.len().div_ceil(2));
+            let mut p = 0;
+            while p < cur.len() {
+                let left = cur[p];
+                let right = cur
+                    .get(p + 1)
+                    .copied()
+                    .unwrap_or_else(|| MerkleHashOrchard::empty_root(level));
+                next.push(MerkleHashOrchard::combine(level, &left, &right));
+                p += 2;
+            }
+            levels.push(next);
+        }
+
+        // Each leaf's authentication path: the sibling subtree root at every
+        // level (its computed value when filled, else the empty-subtree root).
+        let witnesses: Vec<(Note, MerklePath)> = notes
+            .into_iter()
+            .enumerate()
+            .map(|(i, note)| {
+                let auth_path = core::array::from_fn(|l| {
+                    let level = Level::from(l as u8);
+                    let sibling = (i >> l) ^ 1;
+                    levels[l]
+                        .get(sibling)
+                        .copied()
+                        .unwrap_or_else(|| MerkleHashOrchard::empty_root(level))
+                });
+                (note, MerklePath::from_parts(i as u32, auth_path))
+            })
+            .collect();
+
+        // Every leaf's path yields the same root; assert it so a broken helper
+        // fails loudly rather than silently producing mismatched anchors.
+        let anchor = witnesses[0].1.root(witnesses[0].0.commitment().into());
+        for (note, path) in &witnesses {
+            assert_eq!(
+                path.root(note.commitment().into()),
+                anchor,
+                "shared-anchor witnesses inconsistent",
+            );
+        }
+        (sk, witnesses, anchor)
+    }
+
     prop_compose! {
         /// Multiple spendable Orchard notes witnessed to a single shared anchor,
         /// all owned by the returned spending key.
@@ -2085,76 +2226,7 @@ pub mod testing {
                 !values.is_empty(),
                 "arb_shared_anchor_notes requires at least one value",
             );
-            let mut rng = StdRng::from_seed(seed);
-            let fvk = FullViewingKey::from(&sk);
-            let recipient = fvk.address_at(0u32, Scope::External);
-
-            // One note per value, in order.
-            let notes: Vec<Note> = values
-                .iter()
-                .map(|&value| {
-                    let rho = Rho::from_nf_old(Nullifier::dummy(&mut rng));
-                    Note::new(recipient, value, rho, note_version, &mut rng)
-                })
-                .collect();
-
-            // Filled subtree roots per level: `levels[l][p]` is the root of the
-            // subtree at level `l`, position `p`. Level 0 is the leaves; each higher
-            // level combines pairs, using the empty-subtree root for a missing right
-            // sibling. Positions past `levels[l].len()` are empty.
-            let leaves: Vec<MerkleHashOrchard> = notes
-                .iter()
-                .map(|n| MerkleHashOrchard::from_cmx(&n.commitment().into()))
-                .collect();
-            let mut levels: Vec<Vec<MerkleHashOrchard>> =
-                Vec::with_capacity(NOTE_COMMITMENT_TREE_DEPTH + 1);
-            levels.push(leaves);
-            for l in 0..NOTE_COMMITMENT_TREE_DEPTH {
-                let level = Level::from(l as u8);
-                let cur = &levels[l];
-                let mut next = Vec::with_capacity(cur.len().div_ceil(2));
-                let mut p = 0;
-                while p < cur.len() {
-                    let left = cur[p];
-                    let right = cur
-                        .get(p + 1)
-                        .copied()
-                        .unwrap_or_else(|| MerkleHashOrchard::empty_root(level));
-                    next.push(MerkleHashOrchard::combine(level, &left, &right));
-                    p += 2;
-                }
-                levels.push(next);
-            }
-
-            // Each leaf's authentication path: the sibling subtree root at every
-            // level (its computed value when filled, else the empty-subtree root).
-            let witnesses: Vec<(Note, MerklePath)> = notes
-                .into_iter()
-                .enumerate()
-                .map(|(i, note)| {
-                    let auth_path = core::array::from_fn(|l| {
-                        let level = Level::from(l as u8);
-                        let sibling = (i >> l) ^ 1;
-                        levels[l]
-                            .get(sibling)
-                            .copied()
-                            .unwrap_or_else(|| MerkleHashOrchard::empty_root(level))
-                    });
-                    (note, MerklePath::from_parts(i as u32, auth_path))
-                })
-                .collect();
-
-            // Every leaf's path yields the same root; assert it so a broken helper
-            // fails loudly rather than silently producing mismatched anchors.
-            let anchor = witnesses[0].1.root(witnesses[0].0.commitment().into());
-            for (note, path) in &witnesses {
-                assert_eq!(
-                    path.root(note.commitment().into()),
-                    anchor,
-                    "shared-anchor witnesses inconsistent",
-                );
-            }
-            (sk, witnesses, anchor)
+            shared_anchor_notes(sk, &values, note_version, seed)
         }
     }
 
@@ -2205,6 +2277,29 @@ mod tests {
         value::NoteValue,
     };
     use zcash_note_encryption::try_note_decryption;
+
+    proptest! {
+        #[test]
+        fn historical_bundle_construction_is_rejected(seed in any::<[u8; 32]>()) {
+            for version in [BundleVersion::orchard_insecure_v1(), BundleVersion::orchard_v2()] {
+                let flags = version.default_flags();
+                let anchor = Anchor::empty_tree();
+                let unsupported = |e| matches!(e, BuildError::UnsupportedProtocolVersion(v) if v == version.protocol_version());
+                prop_assert!(unsupported(Builder::new(BundleType::DEFAULT, version, flags, anchor).unwrap_err()));
+                prop_assert!(unsupported(Builder::new_with_anchor_deferred(BundleType::DEFAULT, version, flags, TxVersion::V6).unwrap_err()));
+                prop_assert!(unsupported(bundle::<i64>(StdRng::from_seed(seed), BundleType::DEFAULT, version, flags, anchor, vec![], vec![], vec![]).unwrap_err()));
+
+                // Even an internally assembled builder must not bypass the shared guard.
+                let make_builder = || {
+                    let mut builder = Builder::new(BundleType::DEFAULT, BundleVersion::ironwood_v3(), flags, anchor).unwrap();
+                    builder.bundle_version = version;
+                    builder
+                };
+                prop_assert!(unsupported(make_builder().build::<i64>(StdRng::from_seed(seed)).unwrap_err()));
+                prop_assert!(unsupported(make_builder().build_for_pczt(StdRng::from_seed(seed)).unwrap_err()));
+            }
+        }
+    }
 
     fn note_with_path(
         rng: &mut impl Rng,
@@ -2263,8 +2358,8 @@ mod tests {
             prop_assert!(matches!(
                 Builder::new_with_anchor_deferred(
                     BundleType::DEFAULT,
-                    BundleVersion::orchard_v2(),
-                    BundleVersion::orchard_v2().default_flags(),
+                    BundleVersion::orchard_v3(),
+                    BundleVersion::orchard_v3().default_flags(),
                     TxVersion::V5,
                 ),
                 Err(BuildError::AnchorDeferralUnsupported)
@@ -2425,7 +2520,7 @@ mod tests {
     /// must first be installed via the Updater (`set_anchor`).
     #[test]
     fn deferred_anchor_prover_rejects_uninstalled_anchor() {
-        let pk = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key();
+        let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         proptest!(|(
             (sk, note, _merkle_path, _anchor) in testing::arb_spendable_note(
                 NoteValue::from_raw(10_000),
@@ -2588,11 +2683,11 @@ mod tests {
 
     #[test]
     fn shielding_bundle() {
-        let pk = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key();
+        let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         let mut rng = OsRng;
 
         let builder =
-            output_only_builder(&mut rng, BundleVersion::orchard_v2(), BundleType::DEFAULT);
+            output_only_builder(&mut rng, BundleVersion::ironwood_v3(), BundleType::DEFAULT);
         let balance: i64 = builder.value_balance().unwrap();
         assert_eq!(balance, -5000);
 
@@ -3089,7 +3184,7 @@ mod tests {
         let owned = fvk.address_at(0u32, Scope::Internal);
         let foreign =
             FullViewingKey::from(&SpendingKey::random(&mut rng)).address_at(0u32, Scope::External);
-        let bundle_version = BundleVersion::orchard_v2();
+        let bundle_version = BundleVersion::ironwood_v3();
         let mut builder = Builder::new(
             BundleType::DEFAULT,
             bundle_version,
@@ -3301,13 +3396,7 @@ mod tests {
     }
 
     #[test]
-    fn create_proof_supports_cross_address_disabled_only_for_post_nu6_3() {
-        // A cross-address-disabled bundle can only be built under `BundleVersion::orchard_v3()`
-        // (`BundleVersion` owns the cross-address policy), which builds post-NU6.3
-        // circuits. Proving therefore requires a matching post-NU6.3 key; a pre-NU6.3 key
-        // is rejected as a circuit-version mismatch. The lower-level interlock that rejects
-        // a restricted *instance* under an unsupporting key is covered by
-        // `circuit::tests::restricted_statement_requires_supporting_key`.
+    fn create_proof_supports_restricted_current_bundle() {
         let build_restricted = |rng: &mut OsRng| {
             Builder::new(
                 transactional(true),
@@ -3323,13 +3412,6 @@ mod tests {
         };
 
         let mut rng = OsRng;
-        let pk = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key();
-        let bundle = build_restricted(&mut rng);
-        assert!(matches!(
-            bundle.create_proof(pk, &mut rng),
-            Err(BuildError::Proof(halo2_proofs::plonk::Error::Synthesis)),
-        ));
-
         let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         let bundle = build_restricted(&mut rng);
         bundle.create_proof(pk, &mut rng).unwrap();

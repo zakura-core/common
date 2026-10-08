@@ -103,7 +103,7 @@ pub enum Error<FE> {
     /// The builder was constructed without support for the Sapling pool, but a Sapling
     /// spend or output was added.
     SaplingBuilderNotAvailable,
-    /// The builder was constructed with a target height before NU5 activation, but an Orchard
+    /// The builder was constructed with a target height before NU6.3 activation, but an Orchard
     /// spend or output was added.
     OrchardBuilderNotAvailable,
     /// The builder was constructed with a target height before NU6.3 activation,
@@ -160,7 +160,7 @@ impl<FE: fmt::Display> fmt::Display for Error<FE> {
             ),
             Error::OrchardBuilderNotAvailable => write!(
                 f,
-                "Cannot create Orchard transactions without an Orchard anchor, or before NU5 activation"
+                "Cannot create Orchard transactions without an Orchard anchor, or before NU6.3 activation"
             ),
             Error::IronwoodBuilderNotAvailable => write!(
                 f,
@@ -344,6 +344,9 @@ impl BuildConfig {
         &self,
         bundle_version: orchard::bundle::BundleVersion,
     ) -> Option<orchard::builder::Builder> {
+        if !bundle_version.protocol_version().supports_proving() {
+            return None;
+        }
         match self {
             BuildConfig::Standard {
                 orchard_anchor,
@@ -358,23 +361,8 @@ impl BuildConfig {
                 )
                 .expect("a transactional bundle type with default flags is always representable")
             }),
-            BuildConfig::Coinbase { .. }
-                if bundle_version == orchard::bundle::BundleVersion::orchard_v3() =>
-            {
-                None
-            }
-            BuildConfig::Coinbase { .. } => Some(
-                orchard::builder::Builder::new(
-                    orchard::builder::BundleType::Coinbase,
-                    bundle_version,
-                    // Coinbase transactions have `enableSpends = 0`. Every protocol version
-                    // for which a coinbase Orchard-pool bundle can be built (pre-NU6.3) permits
-                    // cross-address transfers, so the spends-disabled flag set is representable.
-                    orchard::bundle::Flags::SPENDS_DISABLED,
-                    orchard::Anchor::empty_tree(),
-                )
-                .expect("spends-disabled flags are valid for a non-Orchard coinbase bundle"),
-            ),
+            // Current Orchard requires spends; coinbase outputs can use Ironwood.
+            BuildConfig::Coinbase { .. } => None,
         }
     }
 
@@ -946,9 +934,8 @@ impl<P: consensus::Parameters> Builder<P, ()> {
     /// expiry delta (20 blocks).
     pub fn new(params: P, target_height: BlockHeight, build_config: BuildConfig) -> Self {
         let consensus_branch_id = BranchId::for_height(&params, target_height);
-        // `bundle_version_for_branch` returns `Some` exactly for the branches in
-        // which the Orchard pool is supported (NU5 onward), so this also gates
-        // Orchard builder construction on NU5 activation.
+        // Historical bundle versions remain available to readers; construction
+        // is enabled only for the current proving protocol (NU6.3 onward).
         let bundle_version =
             bundle_version_for_branch(consensus_branch_id, orchard::ValuePool::Orchard);
         // Default transaction version for the branch (V6 from NU6.3 onward).
@@ -1641,14 +1628,19 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         // Reuse a process-wide cached proving key rather than reconstructing it on
         // every `build` call. See `cached_orchard_proving_key`.
         #[cfg(feature = "std")]
-        let orchard_proving_key: Option<&orchard::circuit::ProvingKey> =
-            orchard_circuit_version.map(cached_orchard_proving_key);
+        let orchard_proving_key: Option<&orchard::circuit::ProvingKey> = orchard_circuit_version
+            .map(|version| {
+                cached_orchard_proving_key(version)
+                    .expect("bundle construction requires the current proving circuit")
+            });
         // Without `std` there is no thread-safe cache; build the key once for this
         // transaction. (Proving requires `std` in practice, so this path does not
         // run when actually creating proofs.)
         #[cfg(not(feature = "std"))]
-        let orchard_proving_key_storage =
-            orchard_circuit_version.map(orchard::circuit::ProvingKey::build);
+        let orchard_proving_key_storage = orchard_circuit_version.map(|version| {
+            orchard::circuit::ProvingKey::build(version)
+                .expect("bundle construction requires the current proving circuit")
+        });
         #[cfg(not(feature = "std"))]
         let orchard_proving_key: Option<&orchard::circuit::ProvingKey> =
             orchard_proving_key_storage.as_ref();
@@ -1814,36 +1806,22 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
     }
 }
 
-/// Returns a process-wide cached Orchard proving key for the given circuit version.
+/// Returns the shared proving key for the current Orchard and Ironwood circuit.
 ///
-/// Building an Orchard proving key is expensive, and the transaction builder would
-/// otherwise reconstruct it on every call to [`Builder::build`]. Callers that build
-/// many transactions in a process therefore share a single key per circuit version.
-///
-/// The cache is keyed by [`orchard::circuit::OrchardCircuitVersion`] because the
-/// verifying (and hence proving) keys differ between circuit versions; mixing them
-/// would produce proofs against the wrong key.
-///
-/// This is only available when the `std` feature is enabled, as it relies on
-/// [`std::sync::OnceLock`] for thread-safe lazy initialization. Proving requires
-/// `std` in practice, so this covers the paths that actually create proofs.
+/// Historical versions return an error before any key is built or cached.
 #[cfg(all(feature = "circuits", feature = "std"))]
 pub fn cached_orchard_proving_key(
     circuit_version: orchard::circuit::OrchardCircuitVersion,
-) -> &'static orchard::circuit::ProvingKey {
+) -> Result<&'static orchard::circuit::ProvingKey, orchard::circuit::UnsupportedCircuitVersion> {
     use orchard::circuit::{OrchardCircuitVersion, ProvingKey};
     use std::sync::OnceLock;
 
-    static INSECURE_PRE_NU6_2: OnceLock<ProvingKey> = OnceLock::new();
-    static FIXED_POST_NU6_2: OnceLock<ProvingKey> = OnceLock::new();
-    static POST_NU6_3: OnceLock<ProvingKey> = OnceLock::new();
-
-    let cell = match circuit_version {
-        OrchardCircuitVersion::InsecurePreNu6_2 => &INSECURE_PRE_NU6_2,
-        OrchardCircuitVersion::FixedPostNu6_2 => &FIXED_POST_NU6_2,
-        OrchardCircuitVersion::PostNu6_3 => &POST_NU6_3,
-    };
-    cell.get_or_init(|| ProvingKey::build(circuit_version))
+    circuit_version.check_proving_support()?;
+    static CURRENT: OnceLock<ProvingKey> = OnceLock::new();
+    Ok(CURRENT.get_or_init(|| {
+        ProvingKey::build(OrchardCircuitVersion::PostNu6_3)
+            .expect("current circuit supports proving")
+    }))
 }
 
 #[cfg(feature = "circuits")]
@@ -2010,6 +1988,40 @@ mod tests {
             nu6_3: Some(BlockHeight::from_u32(10)),
             nu7: None,
             nu_tachyon: Some(BlockHeight::from_u32(11)),
+        }
+    }
+
+    #[cfg(feature = "circuits")]
+    proptest::proptest! {
+        #[test]
+        fn historical_transaction_builders_disable_orchard(
+            (sk, note, path, anchor) in orchard::builder::testing::arb_spendable_note(
+                orchard::value::NoteValue::ZERO,
+                orchard::note::NoteVersion::V2,
+            ),
+        ) {
+            let params = nu6_3_test_network();
+            let fvk = orchard::keys::FullViewingKey::from(&sk);
+            for upgrade in [NetworkUpgrade::Nu5, NetworkUpgrade::Nu6_2] {
+                for config in [
+                    BuildConfig::Standard {
+                        sapling_anchor: Some(sapling::Anchor::empty_tree()),
+                        orchard_anchor: Some(anchor),
+                        ironwood_anchor: None,
+                        orchard_padding: BundlePadding::DEFAULT,
+                        ironwood_padding: BundlePadding::DEFAULT,
+                    },
+                    BuildConfig::Coinbase { miner_data: None },
+                ] {
+                    let mut builder = Builder::new(params, params.activation_height(upgrade).unwrap(), config);
+                    proptest::prop_assert!(builder.orchard_builder.is_none());
+                    proptest::prop_assert!(builder.orchard_bundle_version.is_none());
+                    proptest::prop_assert!(builder.sapling_builder.is_some());
+                    proptest::prop_assert!(matches!(builder.add_orchard_spend::<Infallible>(fvk.clone(), note, path.clone()), Err(Error::OrchardBuilderNotAvailable)));
+                    proptest::prop_assert!(matches!(builder.add_orchard_output::<Infallible>(None, note.recipient(), Zatoshis::ZERO, MemoBytes::empty()), Err(Error::OrchardBuilderNotAvailable)));
+                    proptest::prop_assert!(matches!(builder.add_orchard_change_output::<Infallible>(fvk.clone(), None, note.recipient(), Zatoshis::ZERO, MemoBytes::empty()), Err(Error::OrchardBuilderNotAvailable)));
+                }
+            }
         }
     }
 
@@ -2441,15 +2453,16 @@ mod tests {
             ironwood_padding: BundlePadding::DEFAULT,
         };
 
-        // `orchard_v2` here: the NU6.3 `orchard_v3` version disables cross-address
-        // transfers, so a bare output cannot be added.
         let count_for = |padding| {
             let config = config_with(padding);
             let mut builder = config
-                .orchard_builder(orchard::bundle::BundleVersion::orchard_v2())
+                .orchard_builder(orchard::bundle::BundleVersion::orchard_v3())
                 .unwrap();
             builder
-                .add_output(
+                .add_change_output(
+                    orchard::keys::FullViewingKey::from(
+                        &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+                    ),
                     None,
                     recipient,
                     orchard::value::NoteValue::from_raw(10_000),
@@ -2459,7 +2472,7 @@ mod tests {
             super::orchard_action_count(
                 &builder,
                 false,
-                orchard::bundle::BundleVersion::orchard_v2(),
+                orchard::bundle::BundleVersion::orchard_v3(),
             )
             .unwrap()
         };
@@ -2579,7 +2592,9 @@ mod tests {
     #[test]
     #[cfg(feature = "circuits")]
     fn add_orchard_change_output_records_change() {
-        let target_height = TEST_NETWORK.activation_height(NetworkUpgrade::Nu5).unwrap();
+        let target_height = TEST_NETWORK
+            .activation_height(NetworkUpgrade::Nu6_3)
+            .unwrap();
         let mut builder = Builder::new(
             TEST_NETWORK,
             target_height,
@@ -3131,20 +3146,27 @@ mod tests {
 
     #[cfg(all(feature = "circuits", feature = "std"))]
     #[test]
-    fn cached_orchard_proving_key_reuses_one_instance_per_version() {
+    fn cached_orchard_proving_key_reuses_current_and_rejects_historical() {
         use core::ptr;
         use orchard::circuit::OrchardCircuitVersion;
 
         use super::cached_orchard_proving_key;
 
-        // Repeated calls for the same circuit version return the very same cached
-        // key, so building many transactions does not reconstruct it each time.
-        let first = cached_orchard_proving_key(OrchardCircuitVersion::FixedPostNu6_2);
-        let second = cached_orchard_proving_key(OrchardCircuitVersion::FixedPostNu6_2);
-        assert!(ptr::eq(first, second));
-
-        // Distinct circuit versions are cached independently.
-        let other = cached_orchard_proving_key(OrchardCircuitVersion::PostNu6_3);
-        assert!(!ptr::eq(first, other));
+        let version = OrchardCircuitVersion::PostNu6_3;
+        assert!(ptr::eq(
+            cached_orchard_proving_key(version).unwrap(),
+            cached_orchard_proving_key(version).unwrap()
+        ));
+        for version in [
+            OrchardCircuitVersion::InsecurePreNu6_2,
+            OrchardCircuitVersion::FixedPostNu6_2,
+        ] {
+            assert_eq!(
+                cached_orchard_proving_key(version)
+                    .unwrap_err()
+                    .circuit_version(),
+                version
+            );
+        }
     }
 }

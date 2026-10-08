@@ -36,7 +36,7 @@ fn proof_rng(domain: u8, action_count: usize, proof_index: u64) -> StdRng {
 }
 
 fn build_prepared_key(version: OrchardCircuitVersion) -> ProvingKey {
-    let pk = ProvingKey::build(version);
+    let pk = ProvingKey::build(version).expect("current circuit supports proving");
     assert!(
         pk.prepare_proving(),
         "first-after-prepare benchmarks require prepared commitment tables",
@@ -57,7 +57,7 @@ fn ironwood_k11_prover(c: &mut Criterion) {
     // is deliberately prepared and warmed before the steady-state routines.
     let version = OrchardCircuitVersion::PostNu6_3;
     let vk = VerifyingKey::build(version);
-    let pk = ProvingKey::build(version);
+    let pk = ProvingKey::build(version).expect("current circuit supports proving");
     // Keep the one-time table build outside the timed proving routine.
     #[cfg(any(feature = "multicore", feature = "orbits"))]
     assert!(pk.prepare_proving(), "Pasta commitment tables must prepare",);

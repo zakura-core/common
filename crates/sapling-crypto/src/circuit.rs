@@ -554,6 +554,16 @@ impl Circuit<bls12_381::Scalar> for Output {
     }
 }
 
+#[cfg(feature = "pinned-vk-only")]
+mod bundled;
+
+#[cfg(feature = "pinned-vk-only")]
+pub use bundled::pinned_verifying_keys;
+
+// Three uncompressed G1 points, three G2 points, and the input-vector length.
+const VERIFYING_KEY_FIXED_BYTES: u64 = 3 * 96 + 3 * 192 + 4;
+const VERIFYING_KEY_INPUT_BYTES: u64 = 96;
+
 /// The parameters for the Sapling Spend circuit.
 pub struct SpendParameters(pub(crate) groth16::Parameters<Bls12>);
 
@@ -588,6 +598,16 @@ pub struct SpendVerifyingKey(
 );
 
 impl SpendVerifyingKey {
+    /// Reads a verifying key, checking the encoded curve points.
+    ///
+    /// The encoding is the prefix written by
+    /// [`groth16::VerifyingKey::write`], without proving-query vectors.
+    /// Reading is bounded to the encoded size of a Sapling spend key.
+    pub fn read<R: io::Read>(reader: R) -> io::Result<Self> {
+        let limit = VERIFYING_KEY_FIXED_BYTES + 8 * VERIFYING_KEY_INPUT_BYTES;
+        groth16::VerifyingKey::<Bls12>::read(io::Read::take(reader, limit)).map(Self::new)
+    }
+
     pub(crate) fn new(vk: groth16::VerifyingKey<Bls12>) -> Self {
         Self(vk, OnceLock::new())
     }
@@ -643,6 +663,16 @@ pub struct OutputVerifyingKey(
 );
 
 impl OutputVerifyingKey {
+    /// Reads a verifying key, checking the encoded curve points.
+    ///
+    /// The encoding is the prefix written by
+    /// [`groth16::VerifyingKey::write`], without proving-query vectors.
+    /// Reading is bounded to the encoded size of a Sapling output key.
+    pub fn read<R: io::Read>(reader: R) -> io::Result<Self> {
+        let limit = VERIFYING_KEY_FIXED_BYTES + 6 * VERIFYING_KEY_INPUT_BYTES;
+        groth16::VerifyingKey::<Bls12>::read(io::Read::take(reader, limit)).map(Self::new)
+    }
+
     pub(crate) fn new(vk: groth16::VerifyingKey<Bls12>) -> Self {
         Self(vk, OnceLock::new())
     }

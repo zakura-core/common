@@ -7,7 +7,7 @@ use super::{
     word::{adc, mac},
 };
 
-#[cfg(any(test, not(all(udon_aarch64_asm, not(miri)))))]
+#[cfg(any(test, not(all(udon_asm, not(miri)))))]
 use super::word::subtract_limbs;
 
 #[cfg(test)]
@@ -70,11 +70,11 @@ pub(crate) fn scale<M: PrimeModulus>(
 // Assembly shares the field kernel to keep its coverage in sync.
 #[inline]
 fn multiply<M: PrimeModulus>(lhs: &[u64; 4], rhs: &[u64; 4]) -> [u64; 4] {
-    #[cfg(all(udon_aarch64_asm, not(miri)))]
+    #[cfg(all(udon_asm, not(miri)))]
     {
         super::montgomery::montgomery_multiply_loose::<M>(lhs, rhs)
     }
-    #[cfg(not(all(udon_aarch64_asm, not(miri))))]
+    #[cfg(not(all(udon_asm, not(miri))))]
     {
         let mut accumulator = [0; 5];
         for rhs_limb in rhs {
@@ -110,14 +110,14 @@ pub(crate) fn butterfly<M: PrimeModulus>(
         Some(twiddle) => multiply::<M>(&right.limbs, &twiddle.limbs),
         None => right.limbs,
     };
-    #[cfg(all(udon_aarch64_asm, not(miri)))]
+    #[cfg(all(udon_asm, not(miri)))]
     {
         let sum = super::montgomery::add_twice_modulus::<M>(&left.limbs, &product);
         let difference = super::montgomery::sub_twice_modulus::<M>(&left.limbs, &product);
         left.limbs = sum;
         right.limbs = difference;
     }
-    #[cfg(not(all(udon_aarch64_asm, not(miri))))]
+    #[cfg(not(all(udon_asm, not(miri))))]
     {
         let modulus = M::TWICE_MODULUS;
         debug_assert!(super::word::compare_limbs(&left.limbs, &modulus).is_lt());

@@ -78,7 +78,8 @@ for enforcement details and local checks.
 ## Acknowledgements
 
 The AArch64 and x86-64 assembly field arithmetic in
-[`zakura-pasta-curves`](crates/pasta_curves) is derived from
+[`zakura-pasta-curves`](crates/pasta_curves) and [`zakura-udon`](crates/udon)
+is derived from
 [Semolina](https://github.com/supranational/semolina) by
 [Supranational](https://supranational.net/). Thank you to Supranational for
 publishing this work.

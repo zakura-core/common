@@ -940,7 +940,7 @@ fn create_ironwood_batch_fixtures(
     vk: &VerifyingKey,
     proof_count: usize,
 ) -> Vec<EncodedIronwoodFixture> {
-    let pk = ProvingKey::build(version);
+    let pk = ProvingKey::build(version).expect("current circuit supports proving");
 
     (0..proof_count)
         .map(|index| {

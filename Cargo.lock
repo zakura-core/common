@@ -2575,7 +2575,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4174,7 +4174,7 @@ dependencies = [
 [[package]]
 name = "zcash_tachyon"
 version = "0.0.0"
-source = "git+https://github.com/tachyon-zcash/tachyon?rev=57027c830b388ad8379e0672b65c1bc08bcc06cc#57027c830b388ad8379e0672b65c1bc08bcc06cc"
+source = "git+https://github.com/tachyon-zcash/tachyon?rev=a4abfbddb7dd4ac1db67df7cc19d57d0d965d3e7#a4abfbddb7dd4ac1db67df7cc19d57d0d965d3e7"
 dependencies = [
  "blake2b_simd",
  "corez",

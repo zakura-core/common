@@ -255,6 +255,9 @@ impl<M: PrimeModulus, S: ReductionState> PastaField<M, S> {
     /// Returns the additive inverse.
     #[inline]
     pub fn neg(&self) -> PastaField<M> {
+        // Only the AArch64 backend's flag-carried subtraction beats the
+        // portable masked form; x86-64 compiles that form into fewer
+        // instructions than a call through the backend's memory operands.
         #[cfg(all(udon_aarch64_asm, not(miri)))]
         {
             PastaField::from_montgomery(montgomery::sub_twice_modulus::<M>(&[0; 4], &self.limbs))
@@ -291,6 +294,7 @@ impl<M: PrimeModulus, S: ReductionState> PastaField<M, S> {
     /// Returns `2 * self`.
     #[inline(always)]
     pub fn double(&self) -> PastaField<M> {
+        // As for `neg`, only AArch64 routes doubling through the backend.
         #[cfg(all(udon_aarch64_asm, not(miri)))]
         {
             PastaField::from_montgomery(montgomery::add_twice_modulus::<M>(
@@ -401,9 +405,9 @@ impl<M: PrimeModulus> PastaField<M, Reduced> {
     /// Subtracts canonical residues without passing through the loose range.
     #[inline(always)]
     pub(crate) fn sub_reduced(&self, rhs: &Self) -> Self {
-        #[cfg(all(udon_aarch64_asm, not(miri)))]
-        let limbs = crate::field::aarch64_asm::sub_loose(&self.limbs, &rhs.limbs, &M::MODULUS);
-        #[cfg(not(all(udon_aarch64_asm, not(miri))))]
+        #[cfg(all(udon_asm, not(miri)))]
+        let limbs = crate::field::asm::sub_loose(&self.limbs, &rhs.limbs, &M::MODULUS);
+        #[cfg(not(all(udon_asm, not(miri))))]
         let limbs = {
             let (difference, borrow) = word::borrow_sub_limbs(&self.limbs, &rhs.limbs);
             let mask = (borrow as u64).wrapping_neg();
@@ -423,9 +427,9 @@ impl<M: PrimeModulus> PastaField<M, Reduced> {
     #[inline]
     pub(crate) fn negate_nonzero(&self) -> Self {
         debug_assert!(!self.is_zero());
-        #[cfg(all(udon_aarch64_asm, not(miri)))]
-        let limbs = crate::field::aarch64_asm::subtract_wrapping(&M::MODULUS, &self.limbs);
-        #[cfg(not(all(udon_aarch64_asm, not(miri))))]
+        #[cfg(all(udon_asm, not(miri)))]
+        let limbs = crate::field::asm::subtract_wrapping(&M::MODULUS, &self.limbs);
+        #[cfg(not(all(udon_asm, not(miri))))]
         let limbs = word::subtract_limbs(&M::MODULUS, &self.limbs).0;
         PastaField::from_montgomery(limbs)
     }

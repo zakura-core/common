@@ -50,7 +50,7 @@ zcash_protocol.workspace = true
 zcash_script = { version = "0.4.3", default-features = false }
 
 [target.'cfg(zcash_unstable = "nutachyon")'.dependencies]
-zcash_tachyon = { git = "https://github.com/tachyon-zcash/tachyon", rev = "57027c830b388ad8379e0672b65c1bc08bcc06cc", version = "0.0.0", default-features = false }
+zcash_tachyon = { git = "https://github.com/tachyon-zcash/tachyon", rev = "a4abfbddb7dd4ac1db67df7cc19d57d0d965d3e7", version = "0.0.0", default-features = false }
 
 [dev-dependencies]
 assert_matches = "1.5"

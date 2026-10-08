@@ -354,9 +354,11 @@ jobs:
           bash .github/scripts/check_rust_group.sh zakura-udon true false
       - name: Udon and Bento / MSRV feature check
         if: ${{ !cancelled() && needs.changes.outputs.udon == 'true' }}
-        run: >-
-          cargo +1.91.0 check --locked --all-features --all-targets
-          -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon
+        run: |
+          cargo +1.91.0 check --locked --all-features --all-targets \
+            -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon
+          # `--all-features` enables `portable`, which hides the x86-64 assembly.
+          cargo +1.91.0 check --locked --features x86_64-asm --all-targets -p zakura-udon
 
   formatting:
     name: Formatting
@@ -1526,6 +1528,9 @@ jobs:
         run: cargo clippy -p zakura-udon --all-targets --no-default-features --locked -- -D warnings
       - name: Clippy with traits but without Poseidon
         run: cargo clippy -p zakura-udon --all-targets --no-default-features --features traits --locked -- -D warnings
+      # `--all-features` enables `portable`, which hides the x86-64 assembly.
+      - name: Clippy with x86-64 assembly
+        run: cargo clippy -p zakura-udon --all-targets --no-default-features --features x86_64-asm,traits,poseidon --locked -- -D warnings
       - name: Check documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -1533,6 +1538,7 @@ jobs:
           cargo doc --locked -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon --no-default-features --no-deps
           cargo doc --locked -p zakura-udon --no-default-features --features traits --no-deps
           cargo doc --locked -p zakura-udon --no-default-features --features poseidon --no-deps
+          cargo doc --locked -p zakura-udon --no-default-features --features x86_64-asm --no-deps
           cargo doc --locked -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon --all-features --no-deps
 
   udon-test:
@@ -1599,6 +1605,38 @@ jobs:
         run: |
           read -r -a features <<< "$FEATURES"
           cargo test --locked -p zakura-udon --lib "${features[@]}"
+      # `--all-features` enables `portable`, so the x86-64 assembly needs its
+      # own runs: forced by the feature, then selected from target features.
+      # A runner without ADX/BMI2 only compiles the assembly tests.
+      - name: Test forced x86-64 assembly
+        if: matrix.platform.arch == 'x86_64'
+        env:
+          FEATURES: ${{ matrix.native_features }}
+        run: |
+          read -r -a features <<< "$FEATURES"
+          if grep -qw adx /proc/cpuinfo && grep -qw bmi2 /proc/cpuinfo; then
+            cargo test --release --locked -p zakura-udon "${features[@]}" --features x86_64-asm
+            cargo test --locked -p zakura-udon --lib "${features[@]}" --features x86_64-asm,traits,poseidon
+          else
+            echo "Runner lacks ADX/BMI2; compile assembly tests without running."
+            cargo test --release --locked -p zakura-udon "${features[@]}" --features x86_64-asm --no-run
+            cargo test --locked -p zakura-udon --lib "${features[@]}" --features x86_64-asm,traits,poseidon --no-run
+          fi
+      - name: Test x86-64 assembly selected by target features
+        if: matrix.platform.arch == 'x86_64'
+        env:
+          FEATURES: ${{ matrix.native_features }}
+          RUSTFLAGS: -C target-feature=+adx,+bmi2
+        run: |
+          read -r -a features <<< "$FEATURES"
+          if grep -qw adx /proc/cpuinfo && grep -qw bmi2 /proc/cpuinfo; then
+            cargo test --release --locked -p zakura-udon "${features[@]}" \
+              --target x86_64-unknown-linux-gnu
+          else
+            echo "Runner lacks ADX/BMI2; compile assembly tests without running."
+            cargo test --release --locked -p zakura-udon "${features[@]}" \
+              --target x86_64-unknown-linux-gnu --no-run
+          fi
       - name: Preserve property regressions
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

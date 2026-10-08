@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use super::harness::Consumer;
+use super::harness::{Consumer, arithmetic_feature_sets};
 
 #[test]
 #[ignore = "slow nested Cargo builds; run explicitly with --ignored"]
@@ -16,12 +16,7 @@ fn generated_fields_embed_in_a_downstream_consumer() {
     // Arithmetic and square-root features must preserve stored representations,
     // including when the generator itself uses assembly.
     let mut stored = None;
-    for features in [
-        "",
-        "sqrt-table-large",
-        "aarch64-asm",
-        "aarch64-asm,sqrt-table-large",
-    ] {
+    for features in arithmetic_feature_sets() {
         consumer.check("run", features, &[], None, &[]);
         let artifacts = generated_artifacts(&consumer.target);
         assert_eq!(

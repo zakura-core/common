@@ -19,7 +19,8 @@ fn post_nu6_3_k11_keygen(criterion: &mut Criterion) {
             let mut measured = Duration::ZERO;
             for _ in 0..iterations {
                 let start = Instant::now();
-                let proving_key = ProvingKey::build(version);
+                let proving_key =
+                    ProvingKey::build(version).expect("current circuit supports proving");
                 measured += start.elapsed();
                 black_box(&proving_key);
                 drop(proving_key);

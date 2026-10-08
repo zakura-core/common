@@ -22,6 +22,16 @@ sqrt-table-large = []
 # Assembly field arithmetic and FFT butterflies on supported AArch64 targets;
 # see the crate-level feature documentation and arithmetic safety contracts.
 aarch64-asm = ["dep:cc"]
+# MULX/ADCX/ADOX assembly for the same kernels on x86-64. The backend is
+# selected automatically when Rust's resolved target features include both
+# BMI2 and ADX, for example with `-C target-cpu=native` on a supporting CPU;
+# this forces it on, and unsupported CPUs fault unless `portable` is also
+# enabled. See the crate-level feature documentation.
+x86_64-asm = []
+# Disable the x86-64 assembly backend, even if `x86_64-asm` is also enabled or
+# the target features would select it. This does not undo CPU instructions
+# enabled by Rust's target flags and does not affect `aarch64-asm`.
+portable = []
 
 [dependencies]
 bento.workspace = true

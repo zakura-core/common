@@ -1,11 +1,11 @@
 use super::*;
 use crate::field::pasta::{montgomery, word};
 
-#[cfg(all(udon_aarch64_asm, not(miri)))]
+#[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_mul_accumulate_matches_full_width_integer_arithmetic() {
     fn check(accumulator: [u64; 8], lhs: [u64; 4], rhs: [u64; 4]) {
-        let (wide, overflow) = crate::field::aarch64_asm::mul_accumulate(accumulator, &lhs, &rhs);
+        let (wide, overflow) = crate::field::asm::mul_accumulate(accumulator, &lhs, &rhs);
         assert!(overflow <= 1);
         assert_eq!(
             integer(&wide) + (BigUint::from(overflow) << 512usize),
@@ -46,11 +46,11 @@ fn assembly_mul_accumulate_matches_full_width_integer_arithmetic() {
     }
 }
 
-#[cfg(all(udon_aarch64_asm, not(miri)))]
+#[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_partial_reduce_matches_full_width_integer_arithmetic() {
     fn check(wide: [u64; 8], carry: u64, b448: [u64; 4], r2: [u64; 4]) {
-        let folded = crate::field::aarch64_asm::partial_reduce(wide, carry, &b448, &r2);
+        let folded = crate::field::asm::partial_reduce(wide, carry, &b448, &r2);
         assert!(folded[7] <= 1);
         assert_eq!(
             integer(&folded),
@@ -206,7 +206,7 @@ fn check_montgomery<M: PrimeModulus>() {
 
 /// The assembly multiply must agree limb for limb with the portable kernel on
 /// loose inputs, including values in `[p, 2p)`.
-#[cfg(all(udon_aarch64_asm, not(miri)))]
+#[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_multiply_matches_portable_kernel_on_loose_inputs() {
     fn check<M: PrimeModulus>() {
@@ -282,7 +282,7 @@ fn loose_add_and_sub_kernels_reduce_modulo_twice_modulus() {
 
 /// The assembly addition and subtraction compute the same limbs as the
 /// portable kernels on loose inputs, including values in `[p, 2p)`.
-#[cfg(all(udon_aarch64_asm, not(miri)))]
+#[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_add_and_sub_match_portable_kernels_on_loose_inputs() {
     fn check<M: PrimeModulus>() {
@@ -290,11 +290,11 @@ fn assembly_add_and_sub_match_portable_kernels_on_loose_inputs() {
         for a in &values {
             for b in values.iter().step_by(5) {
                 assert_eq!(
-                    crate::field::aarch64_asm::add_loose(a, b, &M::TWICE_MODULUS),
+                    crate::field::asm::add_loose(a, b, &M::TWICE_MODULUS),
                     montgomery::add_twice_modulus_rust::<M>(a, b)
                 );
                 assert_eq!(
-                    crate::field::aarch64_asm::sub_loose(a, b, &M::TWICE_MODULUS),
+                    crate::field::asm::sub_loose(a, b, &M::TWICE_MODULUS),
                     montgomery::sub_twice_modulus_rust::<M>(a, b)
                 );
             }
@@ -362,7 +362,7 @@ fn lazy_squares_preserve_exact_redc_bounds_for_every_run_length() {
     check_lazy_squares::<PallasScalar>();
 }
 
-// Check feature selection independently of the build script's custom cfg so a
+// Check feature selection independently of the build script's custom cfgs so a
 // missing backend cannot silently turn the native assembly run into a fallback.
 #[test]
 fn assembly_feature_selects_the_supported_native_backend() {
@@ -376,6 +376,21 @@ fn assembly_feature_selects_the_supported_native_backend() {
             any(target_family = "unix", target_os = "none"),
         )),
     );
+    // The x86-64 backend is forced by its feature or selected from the
+    // compiler's resolved target features, and `portable` overrides both.
+    assert_eq!(
+        cfg!(udon_x86_64_asm),
+        cfg!(all(
+            target_arch = "x86_64",
+            target_pointer_width = "64",
+            not(feature = "portable"),
+            any(
+                feature = "x86_64-asm",
+                all(target_feature = "bmi2", target_feature = "adx"),
+            ),
+        )),
+    );
+    assert_eq!(cfg!(udon_asm), cfg!(any(udon_aarch64_asm, udon_x86_64_asm)));
 }
 
 fn check_loose_arithmetic<M: PrimeModulus>() {
@@ -456,12 +471,12 @@ fn loose_arithmetic_preserves_exact_integer_results() {
     check_loose_arithmetic::<PallasScalar>();
 }
 
-#[cfg(all(udon_aarch64_asm, not(miri)))]
+#[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_wrapping_subtraction_matches_integer_arithmetic() {
     let modulus = BigUint::from(1u8) << 256usize;
     let check = |a: [u64; 4], b: [u64; 4]| {
-        let actual = crate::field::aarch64_asm::subtract_wrapping(&a, &b);
+        let actual = crate::field::asm::subtract_wrapping(&a, &b);
         assert_eq!(
             integer(&actual),
             (integer(&a) + &modulus - integer(&b)) % &modulus

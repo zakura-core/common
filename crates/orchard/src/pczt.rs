@@ -476,8 +476,8 @@ mod tests {
         let recipient = fvk.address_at(0u32, Scope::External);
         let mut builder = Builder::new(
             BundleType::DEFAULT,
-            BundleVersion::orchard_v2(),
-            BundleVersion::orchard_v2().default_flags(),
+            BundleVersion::ironwood_v3(),
+            BundleVersion::ironwood_v3().default_flags(),
             empty_roots()[MERKLE_DEPTH_ORCHARD].into(),
         )
         .unwrap();
@@ -489,6 +489,43 @@ mod tests {
         let sighash = [0; 32];
         pczt_bundle.finalize_io(sighash, rng).unwrap();
         pczt_bundle
+    }
+
+    #[test]
+    fn parsed_historical_pczt_cannot_be_proven_with_a_current_key() {
+        let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
+        for version in [
+            BundleVersion::orchard_insecure_v1(),
+            BundleVersion::orchard_v2(),
+        ] {
+            for populated in [false, true] {
+                let mut source = minimal_finalized_pczt_bundle(OsRng);
+                if populated {
+                    // Parsing historical data must remain supported. Witness validity is
+                    // irrelevant: version rejection must precede all witness processing.
+                    for action in &mut source.actions {
+                        action.output.note_version = NoteVersion::V2;
+                    }
+                } else {
+                    source.actions.clear();
+                }
+                let mut parsed = super::Bundle::parse(
+                    source.actions,
+                    version.default_flags().to_byte(version).unwrap(),
+                    version,
+                    (0, false),
+                    source.anchor.to_bytes(),
+                    None,
+                    None,
+                )
+                .unwrap();
+                let before = alloc::format!("{parsed:?}");
+                assert!(
+                    matches!(parsed.create_proof(pk, OsRng), Err(ProverError::UnsupportedProtocolVersion(v)) if v == version.protocol_version())
+                );
+                assert_eq!(alloc::format!("{parsed:?}"), before);
+            }
+        }
     }
 
     fn ironwood_output_pczt_bundle(mut rng: OsRng) -> super::Bundle {
@@ -515,7 +552,7 @@ mod tests {
 
     #[test]
     fn shielding_bundle() {
-        let bundle_version = BundleVersion::orchard_v2();
+        let bundle_version = BundleVersion::ironwood_v3();
         let pk = crate::cached_test_keys(bundle_version.circuit_version()).proving_key();
         let mut rng = OsRng;
 
@@ -554,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn create_proof_uses_proving_key_circuit_version() {
+    fn create_proof_uses_current_circuit_version() {
         let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
         let pk = keys.proving_key();
         let vk = keys.verifying_key();
@@ -562,8 +599,6 @@ mod tests {
 
         let mut pczt_bundle = minimal_finalized_pczt_bundle(rng);
         let sighash = [0; 32];
-        // This is the load-bearing assertion: if PCZT proving still built FixedPostNu6_2
-        // circuits unconditionally, `Proof::create` would reject them for this post-NU 6.3 key.
         pczt_bundle.create_proof(pk, rng).unwrap();
 
         let bundle = pczt_bundle
@@ -726,7 +761,7 @@ mod tests {
 
     #[test]
     fn shielded_bundle() {
-        let bundle_version = BundleVersion::orchard_v2();
+        let bundle_version = BundleVersion::ironwood_v3();
         let pk = crate::cached_test_keys(bundle_version.circuit_version()).proving_key();
         let mut rng = OsRng;
 
@@ -781,7 +816,7 @@ mod tests {
         };
 
         // Run the Creator and Constructor roles.
-        let bundle_version = BundleVersion::orchard_v2();
+        let bundle_version = BundleVersion::ironwood_v3();
         let mut builder = Builder::new(
             BundleType::DEFAULT,
             bundle_version,
@@ -859,7 +894,7 @@ mod tests {
         use super::{Action, Spend};
         use rand::{SeedableRng, rngs::StdRng};
 
-        let bundle_version = BundleVersion::orchard_v2();
+        let bundle_version = BundleVersion::ironwood_v3();
         let mut rng = OsRng;
 
         // Derive the spending key material (the seed-derived `ask` the signer uses).
@@ -1143,7 +1178,7 @@ mod tests {
 
     #[test]
     fn create_proof_rejects_identity_rk() {
-        let pk = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key();
+        let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         let rng = OsRng;
 
         let mut pczt_bundle = minimal_finalized_pczt_bundle(rng);
@@ -1157,7 +1192,7 @@ mod tests {
 
     #[test]
     fn extract_rejects_identity_rk() {
-        let pk = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key();
+        let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         let rng = OsRng;
 
         let mut pczt_bundle = minimal_finalized_pczt_bundle(rng);
@@ -1176,7 +1211,7 @@ mod tests {
 
     #[test]
     fn extract_rejects_non_canonical_proof() {
-        let pk = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key();
+        let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         let rng = OsRng;
 
         let mut pczt_bundle = minimal_finalized_pczt_bundle(rng);
@@ -1314,60 +1349,34 @@ mod tests {
     }
 
     #[test]
-    fn create_proof_supports_cross_address_disabled_only_for_post_nu6_3() {
+    fn create_proof_enforces_cross_address_restriction() {
         let rng = OsRng;
         let sighash = [0; 32];
-
-        // Structural same-expanded-receiver violations are rejected before any key-capability
-        // check, for every circuit version.
-        for circuit_version in [
-            OrchardCircuitVersion::FixedPostNu6_2,
-            OrchardCircuitVersion::PostNu6_3,
-        ] {
-            let pk = crate::cached_test_keys(circuit_version).proving_key();
-
-            let mut mismatched_pczt_bundle = minimal_finalized_pczt_bundle(rng);
-            mismatched_pczt_bundle.flags = Flags::CROSS_ADDRESS_DISABLED;
-            assert!(matches!(
-                mismatched_pczt_bundle.create_proof(pk, rng),
-                Err(ProverError::DisallowedCrossAddressTransfer(_)),
-            ));
-        }
-
-        let (mut pczt_bundle, bundle_meta, spend_ask, change_ask) = restricted_pczt_bundle(rng);
-        pczt_bundle.finalize_io(sighash, rng).unwrap();
-
-        // A pre-NU 6.3 proving key rejects the structurally-conforming restricted
-        // statement at the instance check, leaving the bundle unmodified.
-        let pk = crate::cached_test_keys(OrchardCircuitVersion::FixedPostNu6_2).proving_key();
-        assert!(matches!(
-            pczt_bundle.create_proof(pk, rng),
-            Err(ProverError::ProofFailed(
-                halo2_proofs::plonk::Error::InvalidInstances
-            )),
-        ));
-        assert!(pczt_bundle.zkproof.is_none());
-
-        // A post-NU 6.3 proving key proves the same statement, and the proof verifies
-        // in the extracted bundle under the post-NU 6.3 verifying key.
         let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
         let pk = keys.proving_key();
-        pczt_bundle.create_proof(pk, rng).unwrap();
-
-        pczt_bundle.actions_mut()[bundle_meta.spend_action_index(0).unwrap()]
+        let mut mismatched = minimal_finalized_pczt_bundle(rng);
+        mismatched.flags = Flags::CROSS_ADDRESS_DISABLED;
+        assert!(matches!(
+            mismatched.create_proof(pk, rng),
+            Err(ProverError::DisallowedCrossAddressTransfer(_))
+        ));
+        let (mut bundle, meta, spend_ask, change_ask) = restricted_pczt_bundle(rng);
+        bundle.finalize_io(sighash, rng).unwrap();
+        bundle.create_proof(pk, rng).unwrap();
+        bundle.actions_mut()[meta.spend_action_index(0).unwrap()]
             .sign(sighash, &spend_ask, rng)
             .unwrap();
-        pczt_bundle.actions_mut()[bundle_meta.output_action_index(0).unwrap()]
+        bundle.actions_mut()[meta.output_action_index(0).unwrap()]
             .sign(sighash, &change_ask, rng)
             .unwrap();
-
-        let bundle = pczt_bundle
+        bundle
             .extract::<i64>()
             .unwrap()
             .unwrap()
             .apply_binding_signature(sighash, rng)
+            .unwrap()
+            .verify_proof(keys.verifying_key())
             .unwrap();
-        bundle.verify_proof(keys.verifying_key()).unwrap();
     }
 
     #[test]

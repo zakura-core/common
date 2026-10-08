@@ -62,6 +62,8 @@ publish = false
 [features]
 sqrt-table-large = ["{alias}/sqrt-table-large"]
 aarch64-asm = ["{alias}/aarch64-asm"]
+x86_64-asm = ["{alias}/x86_64-asm"]
+portable = ["{alias}/portable"]
 traits = ["{alias}/traits"]
 poseidon = ["{alias}/poseidon"]
 {extra_features}
@@ -140,5 +142,37 @@ fn copy_fixture(source: &Path, destination: &Path) {
         } else {
             fs::copy(entry.path(), target).unwrap();
         }
+    }
+}
+
+/// Feature sets that must not change stored representations: each arithmetic
+/// backend, with and without the large square-root tables.
+///
+/// `x86_64-asm` forces the BMI2/ADX backend on x86-64 targets, so it is
+/// exercised only where the host can execute it; elsewhere the feature is
+/// inert, as `aarch64-asm` is on x86-64.
+#[allow(dead_code)] // The API consumers never run generators.
+pub fn arithmetic_feature_sets() -> Vec<&'static str> {
+    let mut sets = vec![
+        "",
+        "sqrt-table-large",
+        "aarch64-asm",
+        "aarch64-asm,sqrt-table-large",
+    ];
+    if x86_64_asm_runs_on_host() {
+        sets.extend(["x86_64-asm", "x86_64-asm,sqrt-table-large"]);
+    }
+    sets
+}
+
+#[allow(dead_code)]
+fn x86_64_asm_runs_on_host() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("adx") && std::arch::is_x86_feature_detected!("bmi2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        true
     }
 }

@@ -5,7 +5,9 @@ Ironwood Lean prover replay. The `.proof` files contain the complete serialized
 proof bytes. Each `.rng-u64s-le` file contains the ordered `next_u64` outputs,
 encoded as little-endian words, supplied during that proof call. Witness inputs
 are constructed by `build_unproven_fixture_bundle` using the existing public
-single-Action and two-Action seeds.
+single-Action and two-Action seeds. Its test-only helper reconstructs the
+historical indexed dummy addresses so changes to production dummy generation
+preserve the independently pinned witness inputs, RNG tapes, and proof bytes.
 
 The bytes were extracted without regeneration from `capturedProof` and the
 `.rng64` entries of `capturedEvents` in these pinned fixtures:

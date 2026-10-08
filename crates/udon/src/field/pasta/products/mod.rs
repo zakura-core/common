@@ -6,7 +6,7 @@
 use core::marker::PhantomData;
 
 use super::montgomery::{montgomery_reduce_unreduced, reduce_once, reduce_twice_modulus};
-#[cfg(not(all(udon_aarch64_asm, not(miri))))]
+#[cfg(not(all(udon_asm, not(miri))))]
 use super::word::mac;
 use super::word::{adc, multiply_wide, sbb, square_wide};
 use super::{PastaField, PrimeModulus, ReductionState};
@@ -138,10 +138,9 @@ impl<M: PrimeModulus> ProductSum<M> {
         lhs: &PastaField<M, impl ReductionState>,
         rhs: &PastaField<M, impl ReductionState>,
     ) {
-        #[cfg(all(udon_aarch64_asm, not(miri)))]
-        let (wide, overflow) =
-            crate::field::aarch64_asm::mul_accumulate(self.wide, &lhs.limbs, &rhs.limbs);
-        #[cfg(not(all(udon_aarch64_asm, not(miri))))]
+        #[cfg(all(udon_asm, not(miri)))]
+        let (wide, overflow) = crate::field::asm::mul_accumulate(self.wide, &lhs.limbs, &rhs.limbs);
+        #[cfg(not(all(udon_asm, not(miri))))]
         let (wide, overflow) = {
             let (d0, carry) = mac(self.wide[0], lhs.limbs[0], rhs.limbs[0], 0);
             let (d1, carry) = mac(self.wide[1], lhs.limbs[0], rhs.limbs[1], carry);
@@ -341,11 +340,11 @@ impl<M: PrimeModulus> ProductSum<M> {
     // bound for Montgomery reduction returning a loose value below 2p.
     #[inline(always)]
     fn partial_reduce(&self) -> [u64; 8] {
-        #[cfg(all(udon_aarch64_asm, not(miri)))]
+        #[cfg(all(udon_asm, not(miri)))]
         {
-            crate::field::aarch64_asm::partial_reduce(self.wide, self.carry, &M::B448, &M::R2)
+            crate::field::asm::partial_reduce(self.wide, self.carry, &M::B448, &M::R2)
         }
-        #[cfg(not(all(udon_aarch64_asm, not(miri))))]
+        #[cfg(not(all(udon_asm, not(miri))))]
         {
             let upper = self.wide[7];
             let (t0, carry) = mac(0, upper, M::B448[0], 0);

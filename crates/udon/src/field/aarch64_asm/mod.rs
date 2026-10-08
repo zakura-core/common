@@ -47,16 +47,16 @@ pub(crate) use products::{mul_accumulate, partial_reduce};
 
 /// Computes `lhs * rhs * R^-1 mod p` in `[0, 2p)` for inputs below `2p`.
 ///
-/// `p0` and `p1` are the two low modulus limbs and `inv` is
-/// `-p^-1 mod 2^64`; the upper limbs are the fixed Pasta shape.
+/// The two low modulus limbs and `-p^-1 mod 2^64` come from `M`; the upper
+/// limbs are the fixed Pasta shape.
 #[inline(always)]
-pub(crate) fn montgomery_multiply_loose(
+pub(crate) fn montgomery_multiply_loose<M: PrimeModulus>(
     lhs: &[u64; 4],
     rhs: &[u64; 4],
-    p0: u64,
-    p1: u64,
-    inv: u64,
 ) -> [u64; 4] {
+    let p0 = M::MODULUS[0];
+    let p1 = M::MODULUS[1];
+    let inv = M::MONTGOMERY_INV;
     let (o0, o1, o2, o3): (u64, u64, u64, u64);
     // SAFETY: straight-line register-only arithmetic with no memory access
     // and no stack use; the outputs depend only on the declared inputs.
