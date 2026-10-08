@@ -1,12 +1,8 @@
-#![cfg(feature = "frost")]
-
 use frost_rerandomized::frost_core::{Ciphersuite, Group, GroupError};
 use group::GroupEncoding;
 
-use reddsa::{
-    frost::redjubjub::{JubjubBlake2b512, rand_core::OsRng},
-    sapling,
-};
+use reddsa::sapling;
+use reddsa_frost::redjubjub::{JubjubBlake2b512, rand_core::OsRng};
 
 #[test]
 fn check_sign_with_dealer() {

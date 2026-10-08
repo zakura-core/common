@@ -40,9 +40,18 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 - [`zakura-pasta-curves`](crates/pasta_curves) (forked from [`pasta_curves 0.5.2`](https://github.com/zcash/pasta_curves/tree/c41c5149d8e6deebada48afa5ed8fadce3ff875c))
 - [`zakura-sinsemilla`](crates/sinsemilla) (forked from [`sinsemilla 0.1.0`](https://github.com/zcash/sinsemilla/tree/206f7a960c55222a138a85447f1ddc666822cac0))
 - [`zakura-reddsa`](crates/reddsa) (forked from [`reddsa 0.5.2`](https://github.com/ZcashFoundation/reddsa/tree/3792daa95e588c1af6bd4805105bfb6ea7e9ad49))
+- [`zakura-reddsa-frost`](crates/reddsa-frost): threshold signing for RedJubjub and
+  RedPallas, extracted from `zakura-reddsa`.
 - [`zakura-redjubjub`](crates/redjubjub) (forked from [`redjubjub 0.8.0`](https://github.com/ZcashFoundation/redjubjub/tree/2f618e9b47617ae9d4112913391a5c3fbb8106f0))
 
 `zakura-redjubjub` is a thin wrapper over `zakura-reddsa`, so the two are maintained together.
+
+Threshold signing is a separate dependency. Consumers migrating from the
+`zakura-reddsa/frost` feature should depend on `zakura-reddsa-frost` and replace
+`reddsa::frost::redjubjub` and `reddsa::frost::redpallas` imports with
+`reddsa_frost::redjubjub` and `reddsa_frost::redpallas`. Plain RedDSA consumers
+do not resolve or compile the FROST stack. The Common workspace lockfile still
+includes it for the dedicated FROST crate.
 
 ## Experimental arithmetic
 

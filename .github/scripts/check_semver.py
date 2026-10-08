@@ -7,9 +7,30 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 
 IGNORE_LIST = Path(".github/semver-ignore-list.json")
+
+
+def has_registry_baseline(package):
+    """Only an explicit crates.io 404 identifies a crate's first release."""
+    request = Request(
+        f"https://crates.io/api/v1/crates/{quote(package, safe='')}",
+        headers={"User-Agent": "zakura-common-semver-ci (github.com/zakura-core/common)"},
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            crate = json.load(response)
+    except HTTPError as error:
+        if error.code == 404:
+            return False
+        raise
+    if crate.get("crate", {}).get("id") != package:
+        raise ValueError(f"unexpected crates.io response for {package}")
+    return True
 
 
 def load_ignore_list(path):
@@ -114,6 +135,9 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     policy = load_ignore_list(root / IGNORE_LIST)
+    if not args.baseline_version and not has_registry_baseline(args.package):
+        print(f"Initial release: {args.package} has no crates.io baseline to compare.")
+        return 0
     subprocess.run(["cargo", "semver-checks", "--version"], cwd=root, check=True)
     command = ["cargo", "semver-checks", "--package", args.package, "--color", "never"]
     if args.baseline_version:

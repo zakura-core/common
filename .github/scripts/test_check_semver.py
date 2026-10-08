@@ -6,6 +6,8 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 
 import check_semver
 
@@ -25,6 +27,79 @@ IGNORED = {"zip-233": "Ignored unused feature removal."}
 
 
 class SemverPolicyTest(unittest.TestCase):
+    def test_initial_release_and_explicit_baseline_selection(self):
+        for exists, baseline, expected in [
+            (False, [], 0),
+            (True, [], 100),
+            (False, ["--baseline-version", "2.1.0"], 100),
+        ]:
+            with self.subTest(exists=exists, baseline=baseline):
+                process = MagicMock()
+                process.__enter__.return_value.stdout = iter([REPORT])
+                process.__enter__.return_value.wait.return_value = 100
+                with (
+                    patch.object(check_semver.sys, "argv", [
+                        "check_semver.py", "--package", "zakura-reddsa", *baseline,
+                    ]),
+                    patch.object(
+                        check_semver, "has_registry_baseline", return_value=exists,
+                    ) as lookup,
+                    patch.object(check_semver.subprocess, "run"),
+                    patch.object(
+                        check_semver.subprocess, "Popen", return_value=process,
+                    ) as checker,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(check_semver.main(), expected)
+                if baseline:
+                    lookup.assert_not_called()
+                    self.assertIn("--baseline-version", checker.call_args.args[0])
+                elif not exists:
+                    checker.assert_not_called()
+                else:
+                    checker.assert_called_once()
+
+    def test_registry_baseline_exists(self):
+        response = contextlib.nullcontext(
+            io.StringIO('{"crate": {"id": "zakura-reddsa"}}')
+        )
+        with patch.object(check_semver, "urlopen", return_value=response) as fetch:
+            self.assertTrue(check_semver.has_registry_baseline("zakura-reddsa"))
+        request = fetch.call_args.args[0]
+        self.assertEqual(request.full_url, "https://crates.io/api/v1/crates/zakura-reddsa")
+        self.assertEqual(fetch.call_args.kwargs["timeout"], 30)
+
+    def test_only_registry_not_found_skips_initial_release(self):
+        error = HTTPError("https://crates.io", 404, "Not Found", {}, None)
+        with patch.object(check_semver, "urlopen", side_effect=error):
+            self.assertFalse(check_semver.has_registry_baseline("zakura-reddsa-frost"))
+        for code in [403, 429, 500, 503]:
+            with self.subTest(code=code):
+                error = HTTPError("https://crates.io", code, "Unavailable", {}, None)
+                with (
+                    patch.object(check_semver, "urlopen", side_effect=error),
+                    self.assertRaises(HTTPError),
+                ):
+                    check_semver.has_registry_baseline("zakura-reddsa")
+        for error in [URLError("offline"), TimeoutError("timeout")]:
+            with (
+                patch.object(check_semver, "urlopen", side_effect=error),
+                self.assertRaises(type(error)),
+            ):
+                check_semver.has_registry_baseline("zakura-reddsa")
+
+    def test_malformed_registry_response_fails(self):
+        for contents in ["broken JSON", "{}", '{"crate": {"id": "another-crate"}}']:
+            with (
+                self.subTest(contents=contents),
+                patch.object(
+                    check_semver, "urlopen",
+                    return_value=contextlib.nullcontext(io.StringIO(contents)),
+                ),
+                self.assertRaises(ValueError),
+            ):
+                check_semver.has_registry_baseline("zakura-reddsa")
+
     def check(self, report=REPORT, status=100, ignored=IGNORED):
         with (
             contextlib.redirect_stdout(io.StringIO()),

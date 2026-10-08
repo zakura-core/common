@@ -1,14 +1,10 @@
-#![cfg(feature = "frost")]
-
 use std::collections::BTreeMap;
 
 use frost_rerandomized::frost_core::{self as frost, Ciphersuite, Group, GroupError};
 use group::GroupEncoding;
 
-use reddsa::{
-    frost::redpallas::{PallasBlake2b512, keys::EvenY, rand_core::OsRng},
-    orchard,
-};
+use reddsa::orchard;
+use reddsa_frost::redpallas::{PallasBlake2b512, keys::EvenY, rand_core::OsRng};
 
 #[test]
 fn check_sign_with_dealer() {
@@ -111,7 +107,7 @@ fn check_even_y_frost_core() {
         frost::tests::ciphersuite_generic::check_sign(
             min_signers,
             key_packages,
-            &mut rng,
+            rng,
             public_key_package,
         )
         .unwrap();
@@ -130,7 +126,7 @@ fn check_even_y_reddsa() {
         let min_signers = 3;
         // Generate keys with reexposed reddsa function, which ensures even Y
         let (shares, public_key_package) =
-            reddsa::frost::redpallas::keys::generate_with_dealer::<_>(
+            reddsa_frost::redpallas::keys::generate_with_dealer::<_>(
                 max_signers,
                 min_signers,
                 frost::keys::IdentifierList::Default,

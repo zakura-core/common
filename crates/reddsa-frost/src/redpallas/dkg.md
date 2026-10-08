@@ -21,14 +21,13 @@ long-term secret share that must be kept secret, and a [`PublicKeyPackage`]
 that is public (and will be the same between all participants). With those
 they can proceed to sign messages with FROST.
 
-
 ## Example
 
 ```rust
 # // ANCHOR: dkg_import
 use std::collections::BTreeMap;
 
-use reddsa::frost::redpallas as frost;
+use reddsa_frost::redpallas as frost;
 
 let mut rng = frost::rand_core::OsRng;
 

@@ -14,9 +14,8 @@ Creating a key with a trusted dealer and splitting into shares; then signing a m
 and aggregating the signature. Note that the example just simulates a distributed
 scenario in a single thread and it abstracts away any communication between peers.
 
-
 ```rust
-use reddsa::frost::redjubjub as frost;
+use reddsa_frost::redjubjub as frost;
 use std::collections::BTreeMap;
 
 let mut rng = frost::rand_core::OsRng;
@@ -116,7 +115,6 @@ for participant_identifier in nonces_map.keys() {
 # // ANCHOR: aggregate
 let group_signature = frost::rerandomized::aggregate(&signing_package, &signature_shares, &pubkey_package, &randomizer_params)?;
 # // ANCHOR_END: aggregate
-
 
 // Check that the threshold signature can be verified by the rerandomized group
 // public key (the verification key).

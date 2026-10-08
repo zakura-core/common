@@ -1,9 +1,9 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use reddsa::frost::redpallas::{PallasBlake2b512, rand_core::OsRng};
+use reddsa_frost::redpallas::{PallasBlake2b512, rand_core::OsRng};
 
 use std::collections::BTreeMap;
 
-use reddsa::frost::redpallas::rand_core::{CryptoRng, RngCore};
+use reddsa_frost::redpallas::rand_core::{CryptoRng, RngCore};
 
 use frost_rerandomized::frost_core::Ciphersuite;
 use frost_rerandomized::{RandomizedParams, frost_core as frost};
@@ -20,7 +20,7 @@ fn bench_rerandomized_sign<
     let mut group = c.benchmark_group(format!("Rerandomized FROST Signing {name}"));
     for &n in [3u16, 10, 100, 1000].iter() {
         let max_signers = n;
-        let min_signers = (n * 2 + 2) / 3;
+        let min_signers = (n * 2).div_ceil(3);
 
         group.bench_with_input(
             BenchmarkId::new("Key Generation with Dealer", max_signers),

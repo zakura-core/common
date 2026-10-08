@@ -5,6 +5,11 @@ feature removals explicitly recorded in the permanent
 [SemVer ignore list](../.github/semver-ignore-list.json). All other API
 compatibility failures block CI.
 
+Crates without a previous crates.io release have no baseline to compare. The
+wrapper skips those initial releases only after an explicit crates.io API 404;
+other registry errors fail the check. An explicit `--baseline-version` always
+runs the requested comparison. Once the crate is published, normal checks apply.
+
 CI enforces this guarantee by running `cargo-semver-checks` against the latest
 stable crates.io baseline. To ignore a Cargo feature removal in a minor
 release, add the exact package, feature name, and reason to the ignore list.

@@ -24,8 +24,6 @@ extern crate std;
 pub mod batch;
 mod constants;
 mod error;
-#[cfg(feature = "frost")]
-pub mod frost;
 mod hash;
 pub mod orchard;
 pub mod sapling;

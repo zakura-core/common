@@ -34,19 +34,6 @@ impl<T: SigType> Default for HStar<T> {
 }
 
 impl<T: SigType> HStar<T> {
-    // Only used by FROST code
-    #[allow(unused)]
-    pub(crate) fn new(personalization_string: &[u8]) -> Self {
-        let state = Params::new()
-            .hash_length(64)
-            .personal(personalization_string)
-            .to_state();
-        Self {
-            state,
-            _marker: PhantomData,
-        }
-    }
-
     /// Add `data` to the hash, and return `Self` for chaining.
     pub fn update(&mut self, data: impl AsRef<[u8]>) -> &mut Self {
         self.state.update(data.as_ref());

@@ -6,16 +6,16 @@
 
 use alloc::collections::BTreeMap;
 
-use crate::frost::redjubjub::{
-    Ciphersuite, CryptoRng, Error, Identifier, JubjubBlake2b512, RngCore, frost,
+use crate::redpallas::{
+    Ciphersuite, CryptoRng, Error, Identifier, PallasBlake2b512, RngCore, frost,
     keys::{KeyPackage, PublicKeyPackage},
 };
 
 /// A delta value which is the output of step 1 of RTS.
-pub type Delta = frost::keys::repairable::Delta<JubjubBlake2b512>;
+pub type Delta = frost::keys::repairable::Delta<PallasBlake2b512>;
 
 /// A sigma value which is the output of step 2 of RTS.
-pub type Sigma = frost::keys::repairable::Sigma<JubjubBlake2b512>;
+pub type Sigma = frost::keys::repairable::Sigma<PallasBlake2b512>;
 
 /// Step 1 of RTS.
 ///
@@ -38,7 +38,7 @@ pub fn repair_share_part1<C: Ciphersuite, R: RngCore + CryptoRng>(
 /// Generates the "sigma" value from all `deltas` received from all helpers.
 /// The "sigma" value must be sent to the participant repairing their share.
 pub fn repair_share_part2(deltas: &[Delta]) -> Sigma {
-    frost::keys::repairable::repair_share_part2::<JubjubBlake2b512>(deltas)
+    frost::keys::repairable::repair_share_part2::<PallasBlake2b512>(deltas)
 }
 
 /// Step 3 of RTS.

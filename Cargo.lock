@@ -3795,12 +3795,11 @@ dependencies = [
 
 [[package]]
 name = "zakura-reddsa"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "bincode",
  "blake2b_simd",
  "criterion 0.6.0",
- "frost-rerandomized",
  "group",
  "hex",
  "num-bigint",
@@ -3809,10 +3808,25 @@ dependencies = [
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
- "rand_core 0.6.4",
  "serde",
  "zakura-jubjub",
  "zakura-pasta-curves",
+]
+
+[[package]]
+name = "zakura-reddsa-frost"
+version = "1.0.0"
+dependencies = [
+ "blake2b_simd",
+ "criterion 0.6.0",
+ "frost-rerandomized",
+ "group",
+ "hex",
+ "rand_core 0.10.1",
+ "rand_core 0.6.4",
+ "zakura-jubjub",
+ "zakura-pasta-curves",
+ "zakura-reddsa",
 ]
 
 [[package]]

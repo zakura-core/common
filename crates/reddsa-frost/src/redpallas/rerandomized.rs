@@ -1,13 +1,14 @@
 //! FROST implementation supporting re-randomizable keys.
 
-use crate::frost::redpallas as frost;
+use crate::redpallas as frost;
 
 use alloc::collections::btree_map::BTreeMap;
 
 /// Re-randomized FROST signing using the given `randomizer_seed`, which should
 /// be sent from the Coordinator using a confidential channel.
 ///
-/// See [`crate::round2::sign`] for documentation on the other parameters.
+/// See [`crate::redpallas::round2::sign`] for documentation on the other
+/// parameters.
 pub fn sign_with_randomizer_seed(
     signing_package: &frost::SigningPackage,
     signer_nonces: &frost::round1::SigningNonces,
@@ -25,7 +26,7 @@ pub fn sign_with_randomizer_seed(
 /// Re-randomized FROST signature share aggregation with the given
 /// [`RandomizedParams`].
 ///
-/// See [`frost_core::aggregate`] for documentation on the other parameters.
+/// See [`frost::frost::aggregate`] for documentation on the other parameters.
 pub fn aggregate(
     signing_package: &frost::SigningPackage,
     signature_shares: &BTreeMap<frost::Identifier, frost::round2::SignatureShare>,
@@ -43,7 +44,7 @@ pub fn aggregate(
 /// Re-randomized FROST signature share aggregation with the given
 /// [`RandomizedParams`] using the given cheater detection strategy.
 ///
-/// See [`frost_core::aggregate_custom`] for documentation on the other parameters.
+/// See [`frost::frost::aggregate_custom`] for documentation on the other parameters.
 pub fn aggregate_custom(
     signing_package: &frost::SigningPackage,
     signature_shares: &BTreeMap<frost::Identifier, frost::round2::SignatureShare>,

@@ -112,7 +112,7 @@ jobs:
       - name: Update dependencies
         run: cargo +nightly update --verbose
       - name: Run tests
-        run: cargo +nightly test -p zakura-reddsa --all-features
+        run: cargo +nightly test -p zakura-reddsa -p zakura-reddsa-frost --all-features
 
   redjubjub-nightly:
     name: redjubjub / Test on nightly
