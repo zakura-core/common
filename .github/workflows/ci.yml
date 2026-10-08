@@ -1318,10 +1318,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- action commit is pinned
+        with:
+          toolchain: 1.97.1
       - name: Run tests
         run: >-
-          cargo +1.91.0 test
+          cargo +1.97.1 test
           -p zakura-address
           -p zakura-keys
           -p zakura-primitives
@@ -1344,12 +1346,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.91.0; action uses orphan commits
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- action commit is pinned
         with:
           components: clippy
+          toolchain: 1.97.1
       - name: Check no-default-features
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
           -p zakura-keys
           -p zakura-primitives
@@ -1362,7 +1365,7 @@ jobs:
       - name: Check transparent-inputs-only
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
           -p zakura-keys
           -p zakura-primitives
@@ -1376,7 +1379,7 @@ jobs:
       - name: Check transparent-key-encoding-only
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
           -p zakura-keys
           -p zakura-primitives
@@ -1390,7 +1393,7 @@ jobs:
       - name: Check Sapling-only
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
           -p zakura-keys
           -p zakura-primitives
@@ -1404,7 +1407,7 @@ jobs:
       - name: Check Orchard
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
           -p zakura-keys
           -p zakura-primitives
@@ -1418,7 +1421,7 @@ jobs:
       - name: Check all-features
         if: ${{ !cancelled() }}
         run: >-
-          cargo +1.91.0 check
+          cargo +1.97.1 check
           -p zakura-address
           -p zakura-keys
           -p zakura-primitives
@@ -1432,11 +1435,11 @@ jobs:
         shell: bash
         run: |
           for package in zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-zip321; do
-            cargo +1.91.0 metadata --no-deps --format-version 1 |
+            cargo +1.97.1 metadata --no-deps --format-version 1 |
               jq -r --arg package "$package" \
                 '.packages[] | select(.name == $package) | .features | keys[]' |
               while IFS= read -r feature; do
-                cargo +1.91.0 clippy -p "$package" \
+                cargo +1.97.1 clippy -p "$package" \
                   --no-deps \
                   --no-default-features \
                   --features "$feature"
