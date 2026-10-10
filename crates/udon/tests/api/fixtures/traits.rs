@@ -224,10 +224,11 @@ fn cycle<C: udon::cycle::Cycle>() {}
 #[cfg(feature = "poseidon-interface")]
 fn poseidon<
     M: udon::field::PrimeModulus,
-    P: udon::poseidon::PoseidonPermutation<udon::field::FieldAdapter<M>>
-        + Default,
+    P: udon::poseidon::PoseidonPermutation<udon::field::FieldAdapter<M>> + Default,
     const T: usize,
->(native: udon::poseidon::PoseidonParameters<udon::field::PastaField<M>, T>) {
+>(
+    native: udon::poseidon::PoseidonParameters<udon::field::PastaField<M>, T>,
+) {
     let instance = P::default();
     assert_eq!(P::T, T);
     assert_eq!(P::RATE, native.rate());
