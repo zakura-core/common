@@ -1395,6 +1395,58 @@ impl VerifyingKey {
         format!("{:#?}\n", self.vk.pinned())
     }
 
+    /// Captures the verifier equation for differential testing and fingerprint tooling.
+    ///
+    /// `Ok(msm)` means proof parsing and equation assembly succeeded; it does **not**
+    /// mean the proof is valid. Use [`Proof::verify`] for proof acceptance. The returned
+    /// MSM can be compared with an independent verifier's equation, including when
+    /// the proof is invalid or this key belongs to a historical circuit version.
+    /// A [`halo2_proofs::plonk::fingerprint::ChallengeRecorder`] can capture the
+    /// transcript events and challenges alongside the equation.
+    ///
+    /// The instances have the same typed invariants and circuit-version requirements
+    /// as [`Proof::verify`]. In particular, a historical key cannot capture an
+    /// instance that disables cross-address transfers. Such a mismatch returns
+    /// [`plonk::Error::InvalidInstances`] before reading the transcript.
+    #[cfg(feature = "verifier-fingerprint")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "verifier-fingerprint")))]
+    pub fn capture_verifier_fingerprint<T>(
+        &self,
+        instances: &[Instance],
+        transcript: &mut T,
+    ) -> Result<halo2_proofs::poly::commitment::MSM<'_, vesta::Affine>, plonk::Error>
+    where
+        T: halo2_proofs::transcript::TranscriptRead<
+                vesta::Affine,
+                halo2_proofs::transcript::Challenge255<vesta::Affine>,
+            >,
+    {
+        self.check_instance_compatibility(instances)?;
+        let instances: Vec<_> = instances.iter().map(Instance::to_halo2_instance).collect();
+        let columns: Vec<_> = instances
+            .iter()
+            .map(|instance| instance.each_ref().map(|column| column.as_slice()))
+            .collect();
+        let instances: Vec<_> = columns.iter().map(|columns| columns.as_slice()).collect();
+
+        plonk::fingerprint::capture_proof_fingerprint(
+            &self.params,
+            &self.vk,
+            &instances,
+            transcript,
+        )
+    }
+
+    fn check_instance_compatibility(&self, instances: &[Instance]) -> Result<(), plonk::Error> {
+        if instances.iter().any(Instance::cross_address_disabled)
+            && !self.supports_cross_address_restriction()
+        {
+            Err(plonk::Error::InvalidInstances)
+        } else {
+            Ok(())
+        }
+    }
+
     /// A 32-byte fingerprint of this verifying key: BLAKE2b-256 over
     /// [`Self::pinned_description`], personalized with `Orchard-VkFprint`.
     ///
@@ -1761,11 +1813,7 @@ impl Proof {
     ///
     /// Also returns an error if proof verification fails.
     pub fn verify(&self, vk: &VerifyingKey, instances: &[Instance]) -> Result<(), plonk::Error> {
-        if instances.iter().any(Instance::cross_address_disabled)
-            && !vk.supports_cross_address_restriction()
-        {
-            return Err(plonk::Error::InvalidInstances);
-        }
+        vk.check_instance_compatibility(instances)?;
 
         let instances: Vec<_> = instances.iter().map(|i| i.to_halo2_instance()).collect();
         let instances: Vec<Vec<_>> = instances
@@ -2157,7 +2205,41 @@ mod tests {
             let (mut instance, proof) = historical_proof(version);
             let vk = crate::cached_test_keys(version).verifying_key();
             assert!(proof.verify(vk, core::slice::from_ref(&instance)).is_ok());
+            #[cfg(feature = "verifier-fingerprint")]
+            {
+                use halo2_proofs::{
+                    plonk::fingerprint::ChallengeRecorder, transcript::Challenge255,
+                };
+
+                let mut transcript =
+                    ChallengeRecorder::<_, _, Challenge255<_>>::init(proof.as_ref());
+                assert!(
+                    vk.capture_verifier_fingerprint(
+                        core::slice::from_ref(&instance),
+                        &mut transcript,
+                    )
+                    .unwrap()
+                    .eval()
+                );
+            }
             instance.cross_address_disabled = true;
+            #[cfg(feature = "verifier-fingerprint")]
+            {
+                use halo2_proofs::{
+                    plonk::fingerprint::ChallengeRecorder, transcript::Challenge255,
+                };
+
+                let mut transcript =
+                    ChallengeRecorder::<_, _, Challenge255<_>>::init(proof.as_ref());
+                assert!(matches!(
+                    vk.capture_verifier_fingerprint(
+                        core::slice::from_ref(&instance),
+                        &mut transcript,
+                    ),
+                    Err(super::plonk::Error::InvalidInstances)
+                ));
+                assert!(transcript.events.is_empty());
+            }
             assert!(matches!(
                 proof.verify(vk, &[instance]),
                 Err(super::plonk::Error::InvalidInstances)
