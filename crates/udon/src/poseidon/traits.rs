@@ -1,6 +1,6 @@
 //! Consumer views of the fixed Poseidon parameter sets.
 
-use super::{PALLAS_BASE, PALLAS_SCALAR};
+use super::{PALLAS_BASE, PALLAS_BASE_T3, PALLAS_SCALAR, PALLAS_SCALAR_T3};
 use crate::field::{Field, FieldAdapter, PallasBase, PallasScalar, PastaField, PrimeModulus};
 
 pub(super) fn parameter_rows<M: PrimeModulus, const N: usize>(
@@ -17,8 +17,8 @@ pub(super) fn parameter_rows<M: PrimeModulus, const N: usize>(
 /// instance.
 ///
 /// The shape constants size states and sponges at compile time; the tables
-/// are borrowed from the instance. [`PoseidonFp`] and [`PoseidonFq`] present
-/// [`PALLAS_BASE`] and [`PALLAS_SCALAR`] this way.
+/// are borrowed from the instance. [`PoseidonFp`] and [`PoseidonFq`] expose the
+/// width-five instances; [`PoseidonFpT3`] and [`PoseidonFqT3`] expose width three.
 pub trait PoseidonPermutation<F: Field>: Send + Sync + 'static {
     /// The representation shared by round-constant and MDS rows.
     ///
@@ -62,6 +62,16 @@ pub struct PoseidonFp;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PoseidonFq;
 
+/// The width-three [`PALLAS_BASE_T3`] instance as a [`PoseidonPermutation`]
+/// over [`FieldAdapter<PallasBase>`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PoseidonFpT3;
+
+/// The width-three [`PALLAS_SCALAR_T3`] instance as a [`PoseidonPermutation`]
+/// over [`FieldAdapter<PallasScalar>`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PoseidonFqT3;
+
 macro_rules! poseidon_permutation {
     ($name:ident, $field:ty, $parameters:expr) => {
         impl PoseidonPermutation<$field> for $name {
@@ -86,3 +96,5 @@ macro_rules! poseidon_permutation {
 
 poseidon_permutation!(PoseidonFp, FieldAdapter<PallasBase>, PALLAS_BASE);
 poseidon_permutation!(PoseidonFq, FieldAdapter<PallasScalar>, PALLAS_SCALAR);
+poseidon_permutation!(PoseidonFpT3, FieldAdapter<PallasBase>, PALLAS_BASE_T3);
+poseidon_permutation!(PoseidonFqT3, FieldAdapter<PallasScalar>, PALLAS_SCALAR_T3);

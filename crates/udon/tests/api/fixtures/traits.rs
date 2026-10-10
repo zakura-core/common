@@ -145,11 +145,18 @@ fn main() {
         let scalar: udon::poseidon::PoseidonParameters<Fq, 5> = udon::poseidon::PALLAS_SCALAR;
         assert_eq!(base.rounds(), 64);
         assert_eq!(scalar.rounds(), 64);
+        let base3: udon::poseidon::PoseidonParameters<Fp, 3> = udon::poseidon::PALLAS_BASE_T3;
+        let scalar3: udon::poseidon::PoseidonParameters<Fq, 3> = udon::poseidon::PALLAS_SCALAR_T3;
+        assert_eq!(base3.rate(), 2);
+        assert_eq!(scalar3.rate(), 2);
     }
     #[cfg(feature = "poseidon-interface")]
     {
-        poseidon::<udon::poseidon::PoseidonFp>();
-        let _: udon::poseidon::PoseidonFq = Default::default();
+        use udon::poseidon::*;
+        poseidon::<_, PoseidonFp, 5>(PALLAS_BASE);
+        poseidon::<_, PoseidonFq, 5>(PALLAS_SCALAR);
+        poseidon::<_, PoseidonFpT3, 3>(PALLAS_BASE_T3);
+        poseidon::<_, PoseidonFqT3, 3>(PALLAS_SCALAR_T3);
     }
 }
 
@@ -216,12 +223,14 @@ fn cycle<C: udon::cycle::Cycle>() {}
 
 #[cfg(feature = "poseidon-interface")]
 fn poseidon<
-    P: udon::poseidon::PoseidonPermutation<udon::field::FieldAdapter<udon::field::PallasBase>>
+    M: udon::field::PrimeModulus,
+    P: udon::poseidon::PoseidonPermutation<udon::field::FieldAdapter<M>>
         + Default,
->() {
+    const T: usize,
+>(native: udon::poseidon::PoseidonParameters<udon::field::PastaField<M>, T>) {
     let instance = P::default();
-    let native = udon::poseidon::PALLAS_BASE;
-    assert_eq!(P::T, 5);
+    assert_eq!(P::T, T);
+    assert_eq!(P::RATE, native.rate());
     assert_eq!(P::ALPHA, native.alpha);
     assert_eq!(instance.round_constants().len(), native.rounds());
     assert_eq!(instance.mds_matrix().len(), native.width());
