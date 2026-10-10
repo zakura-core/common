@@ -16,13 +16,42 @@ use crate::{
 const TABLE_AFFINE_MIN: usize = 8;
 const LADDER_AFFINE_MIN: usize = 64;
 
+// Either layout borrows entries without copying or rebuilding retained tables.
+#[derive(Clone, Copy)]
+enum Tables<'a, C: PastaCurve, E: CurveTableEntry<C>> {
+    Flat(&'a [E]),
+    Borrowed(&'a [&'a EisensteinTable<'a, C, E>]),
+}
+impl<'a, C: PastaCurve, E: CurveTableEntry<C>> Tables<'a, C, E> {
+    fn len(self) -> usize {
+        match self {
+            Self::Flat(entries) => entries.len() / 8,
+            Self::Borrowed(tables) => tables.len(),
+        }
+    }
+    fn group(self, index: usize) -> &'a [E] {
+        match self {
+            Self::Flat(entries) => &entries[8 * index..8 * (index + 1)],
+            Self::Borrowed(tables) => tables[index].as_slice(),
+        }
+    }
+    fn range(self, range: core::ops::Range<usize>) -> Self {
+        match self {
+            Self::Flat(entries) => Self::Flat(&entries[range.start * 8..range.end * 8]),
+            Self::Borrowed(tables) => Self::Borrowed(&tables[range]),
+        }
+    }
+}
+
 /// Borrowed compact tables, stored as consecutive groups of eight entries.
 ///
 /// Each group has [`EisensteinTable`]'s order, with its base in entry zero.
 /// Batch preparation and same-scalar multiplication can share inversions across
-/// bases. Callers supply storage and scoped execution; all operations are
-/// variable-time and require no allocation. Both [`CurveTableEntry`]
-/// representations are supported, and empty batches are accepted.
+/// bases. Callers supply storage and scoped execution; the table operations
+/// allocate no storage of their own. All [`CurveTableEntry`] representations
+/// are supported, and empty batches are accepted. Timing and memory access
+/// patterns can depend on the bases and scalar; these operations assume those
+/// patterns need not be secret.
 ///
 /// ```
 /// use zakura_udon::{
@@ -203,7 +232,8 @@ impl<'a, C: PastaCurve, E: CurveTableEntry<C>> EisensteinTableBatch<'a, C, E> {
     /// Returns the field capacity for a single batch multiplication pass.
     ///
     /// Pass the number of tables as `bases`. Counts are independent of the scalar
-    /// and task budget and apply to both [`Self::mul`] and [`Self::mul_prepared`].
+    /// and task budget and apply to all multiplication methods, including
+    /// [`Self::mul_borrowed_prepared`].
     /// This is a preferred capacity, not a minimum: smaller or empty scratch is
     /// accepted, as described by [`Self::mul_prepared`].
     /// Returns [`CurveError::SizeOverflow`] if the buffer exceeds slice limits.
@@ -256,35 +286,139 @@ impl<'a, C: PastaCurve, E: CurveTableEntry<C>> EisensteinTableBatch<'a, C, E> {
         budget: TaskBudget,
         executor: &X,
     ) {
-        let n = self.len();
-        assert_length("output", n, output.len());
-        let digits = scalar.digits();
-        let batch = n.min(field.len() / 5);
-        let affine = batch >= LADDER_AFFINE_MIN && !digits.is_empty();
-        if affine {
-            for (entries, output) in self.entries.chunks(batch * 8).zip(output.chunks_mut(batch)) {
-                let fields = output.len() * 5;
-                multiply_inner(
-                    entries,
-                    digits,
-                    output,
-                    &mut field[..fields],
-                    true,
-                    budget.get(),
-                    executor,
-                );
-            }
-        } else {
+        multiply_batch(
+            Tables::Flat(self.entries),
+            scalar,
+            output,
+            field,
+            budget,
+            executor,
+        );
+    }
+
+    /// Multiplies independently retained, borrowed tables by one scalar.
+    ///
+    /// Prepares the scalar once per call. See [`Self::mul_borrowed_prepared`]
+    /// for the input, scratch, timing, and panic contracts and for reuse of a
+    /// prepared scalar across calls.
+    pub fn mul_borrowed<X: Executor>(
+        tables: &[&EisensteinTable<'_, C, E>],
+        scalar: &PastaField<C::Scalar>,
+        output: &mut [ProjectivePoint<C>],
+        field: &mut [PastaField<C::Base>],
+        budget: TaskBudget,
+        executor: &X,
+    ) {
+        Self::mul_borrowed_prepared(
+            tables,
+            &EisensteinScalar::new(scalar),
+            output,
+            field,
+            budget,
+            executor,
+        );
+    }
+
+    /// Multiplies independently retained tables with a reusable scalar schedule.
+    ///
+    /// Writes one product per table in slice order. Repeated references and an
+    /// empty slice are accepted; a zero scalar writes identities. Tables may
+    /// borrow disjoint storage. Their entries are neither copied nor rebuilt,
+    /// and must satisfy [`EisensteinTable::mul`]'s mathematical contract, which
+    /// is assumed without revalidation.
+    ///
+    /// Size `field` with [`Self::multiplication_scratch`] for `tables.len()`.
+    /// Smaller or empty scratch is accepted; initial contents do not matter,
+    /// and scratch beyond the reported capacity is untouched. This method
+    /// allocates no storage of its own and retains no borrows after return.
+    /// Timing and memory access patterns can depend on the tables and scalar.
+    ///
+    /// # Panics
+    ///
+    /// Panics before any output or scratch writes unless
+    /// `output.len() == tables.len()`. An executor panic can leave output and
+    /// scratch partially written. All jobs finish or unwind before propagation,
+    /// as required by [`Executor`]; the buffers can then be reused without
+    /// clearing them.
+    ///
+    /// ```
+    /// use zakura_udon::{
+    ///     curve::{EisensteinScalar, EisensteinTable, EisensteinTableBatch,
+    ///             PallasAffine, PallasProjective, RotatedAffinePoint},
+    ///     exec::{SerialExecutor, TaskBudget},
+    ///     field::{Fp, Fq},
+    /// };
+    ///
+    /// let base = PallasAffine::GENERATOR;
+    /// let mut first = [RotatedAffinePoint::from_affine(&base); 8];
+    /// let mut second = first;
+    /// let mut projective = [PallasProjective::IDENTITY; 8];
+    /// let mut field = [Fp::ZERO; 8];
+    /// let a = EisensteinTable::prepare(&base, &mut first, &mut projective, &mut field);
+    /// let b = EisensteinTable::prepare(&base.neg(), &mut second, &mut projective, &mut field);
+    /// let scalar = EisensteinScalar::new(&Fq::from_u64(7));
+    /// let mut output = [PallasProjective::IDENTITY; 3];
+    /// EisensteinTableBatch::mul_borrowed_prepared(
+    ///     &[&b, &a, &b], &scalar, &mut output, &mut [],
+    ///     TaskBudget::SERIAL, &SerialExecutor,
+    /// );
+    /// let product = a.mul_prepared(&scalar);
+    /// assert_eq!(output, [product.neg(), product, product.neg()]);
+    /// ```
+    pub fn mul_borrowed_prepared<X: Executor>(
+        tables: &[&EisensteinTable<'_, C, E>],
+        scalar: &EisensteinScalar<C>,
+        output: &mut [ProjectivePoint<C>],
+        field: &mut [PastaField<C::Base>],
+        budget: TaskBudget,
+        executor: &X,
+    ) {
+        multiply_batch(
+            Tables::Borrowed(tables),
+            scalar,
+            output,
+            field,
+            budget,
+            executor,
+        );
+    }
+}
+
+fn multiply_batch<C: PastaCurve, E: CurveTableEntry<C>, X: Executor>(
+    tables: Tables<'_, C, E>,
+    scalar: &EisensteinScalar<C>,
+    output: &mut [ProjectivePoint<C>],
+    field: &mut [PastaField<C::Base>],
+    budget: TaskBudget,
+    executor: &X,
+) {
+    let n = tables.len();
+    assert_length("output", n, output.len());
+    let digits = scalar.digits();
+    let batch = n.min(field.len() / 5);
+    if batch >= LADDER_AFFINE_MIN && !digits.is_empty() {
+        for (index, output) in output.chunks_mut(batch).enumerate() {
+            let start = index * batch;
             multiply_inner(
-                self.entries,
+                tables.range(start..start + output.len()),
                 digits,
                 output,
-                &mut [],
-                false,
+                &mut field[..output.len() * 5],
+                true,
                 budget.get(),
                 executor,
             );
         }
+    } else {
+        multiply_inner(
+            tables,
+            digits,
+            output,
+            &mut [],
+            false,
+            budget.get(),
+            executor,
+        );
     }
 }
 
@@ -391,8 +525,8 @@ fn prepare_affine<C: PastaCurve, B: CurveTableEntry<C>, E: CurveTableEntry<C>>(
 }
 
 fn multiply_inner<C: PastaCurve, E: CurveTableEntry<C>, X: Executor>(
-    entries: &[E],
-    digits: &[u8],
+    entries: Tables<'_, C, E>,
+    digits: &[eisenstein::Digit],
     output: &mut [ProjectivePoint<C>],
     field: &mut [PastaField<C::Base>],
     affine: bool,
@@ -409,7 +543,7 @@ fn multiply_inner<C: PastaCurve, E: CurveTableEntry<C>, X: Executor>(
         executor.join(
             || {
                 multiply_inner(
-                    &entries[..mid * 8],
+                    entries.range(0..mid),
                     digits,
                     a,
                     fa,
@@ -420,7 +554,7 @@ fn multiply_inner<C: PastaCurve, E: CurveTableEntry<C>, X: Executor>(
             },
             || {
                 multiply_inner(
-                    &entries[mid * 8..],
+                    entries.range(mid..n),
                     digits,
                     b,
                     fb,
@@ -433,7 +567,8 @@ fn multiply_inner<C: PastaCurve, E: CurveTableEntry<C>, X: Executor>(
     } else if affine {
         affine_ladder(entries, digits, output, field);
     } else {
-        for (group, result) in entries.chunks_exact(8).zip(output) {
+        for (index, result) in output.iter_mut().enumerate() {
+            let group = entries.group(index);
             *result = eisenstein::multiply(group, digits);
         }
     }
@@ -471,8 +606,8 @@ fn multiply_inner<C: PastaCurve, E: CurveTableEntry<C>, X: Executor>(
 // These arguments require the GLV bounds, selector congruences, and canonical
 // treatment of zero. Arbitrary injected digit strings need not satisfy them.
 fn affine_ladder<C: PastaCurve, E: CurveTableEntry<C>>(
-    entries: &[E],
-    digits: &[u8],
+    entries: Tables<'_, C, E>,
+    digits: &[eisenstein::Digit],
     output: &mut [ProjectivePoint<C>],
     field: &mut [PastaField<C::Base>],
 ) {
@@ -482,11 +617,12 @@ fn affine_ladder<C: PastaCurve, E: CurveTableEntry<C>>(
     let (hs, rest) = rest.split_at_mut(n);
     let (rs, h2s) = rest.split_at_mut(n);
     let (&top, digits) = digits.split_last().unwrap();
-    for (group, result) in entries.chunks_exact(8).zip(output.iter_mut()) {
-        *result = eisenstein::digit_point(group, top).to_projective();
+    for (index, result) in output.iter_mut().enumerate() {
+        let group = entries.group(index);
+        *result = eisenstein::decoded_point(group, top).to_projective();
     }
     for &code in digits.iter().rev() {
-        if code == 0 {
+        if code.is_zero() {
             for (d, p) in denom.iter_mut().zip(output.iter()) {
                 *d = p.y.double();
             }
@@ -507,8 +643,9 @@ fn affine_ladder<C: PastaCurve, E: CurveTableEntry<C>>(
             // Only den needs inversion; h=0 is allowed when D=-P.
             // The curve equations give den=2yr-3x²h, which vanishes when D
             // lies on P's tangent: D=P or D=-2P. The proof above excludes both.
-            for (i, (group, p)) in entries.chunks_exact(8).zip(output.iter_mut()).enumerate() {
-                let d = eisenstein::digit_point(group, code);
+            for (i, p) in output.iter_mut().enumerate() {
+                let group = entries.group(i);
+                let d = eisenstein::decoded_point(group, code);
                 hs[i] = d.x.sub(&p.x);
                 rs[i] = d.y.sub(&p.y);
                 h2s[i] = hs[i].square();

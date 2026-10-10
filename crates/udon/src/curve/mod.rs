@@ -11,6 +11,9 @@
 //! available to callers implementing their own scalar algorithms.
 //! [`EisensteinScalar`] retains joint digits for compact tables, and
 //! [`EisensteinTableBatch`] prepares or multiplies several bases together.
+//! [`batch_mul_same_scalar`] multiplies projective inputs in place when no
+//! retained tables are needed, accepting identity points and caller-owned
+//! scratch sized by [`same_scalar_scratch`].
 //! [`msm`](crate::msm) sums dense or indexed scalar/base terms with caller-owned
 //! scratch and execution. Native point arithmetic uses explicit methods. The
 //! unstable `traits` feature adds the `AffineAdapter` and `ProjectiveAdapter`
@@ -47,6 +50,7 @@ pub use pasta::{
     AffinePoint, CurveError, CurveTableEntry, CurveTableRequirements, EisensteinScalar,
     EisensteinTable, EisensteinTableBatch, FixedBaseDescription, FixedBaseTable,
     IncompleteDoubleAndAdd, Pallas, PallasAffine, PallasPoint, PallasProjective, PastaCurve, Point,
-    PreparedAffinePoint, ProjectivePoint, Vesta, VestaAffine, VestaPoint, VestaProjective,
-    batch_normalize, glv_decompose,
+    PreparedAffinePoint, ProjectivePoint, RotatedAffinePoint, Vesta, VestaAffine, VestaPoint,
+    VestaProjective, batch_mul_same_scalar, batch_mul_same_scalar_prepared, batch_normalize,
+    glv_decompose, same_scalar_scratch,
 };

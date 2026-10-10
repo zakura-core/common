@@ -19,3 +19,26 @@ field representations:
 
 Review fixture changes against the pinned reference implementation; generating
 expected bytes from the candidate would hide a shared regression.
+
+## Paired arithmetic measurements
+
+Build once, then run timing separately from builds and tests:
+
+```sh
+python3 tools/orchard-preparation/bench.py /tmp/orchard-arithmetic --build-only
+python3 tools/orchard-preparation/bench.py /tmp/orchard-arithmetic --measure-only --control-control
+python3 tools/orchard-preparation/bench.py /tmp/orchard-arithmetic --measure-only
+```
+
+The arithmetic consumer uses identical canonical inputs and 16 scalar schedules,
+one worker, and matched default field backends. It measures borrowed retained
+tables, table preparation, preparation plus consumption, and projective
+multiplication through affine output. Required API allocations remain inside
+timing; reusable caller scratch and retained tables are prepared outside it.
+Each block runs ABBA. Control/control runs establish noise before judging
+candidate/control ratios.
+
+The [ARM64 arithmetic samples](results/2026-10-11-arm64/arithmetic) retain raw
+CSV runs, summaries, and binary, fixture, and source hashes. Those hashes identify
+the captured build, including its documentation; they are not checksums of the
+current working tree. Raw samples remain immutable evidence of the recorded run.

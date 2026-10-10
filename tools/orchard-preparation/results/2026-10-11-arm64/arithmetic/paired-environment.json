@@ -1,0 +1,242 @@
+[
+  {
+    "block": 0,
+    "position": 0,
+    "variant": "A",
+    "before": {
+      "time": "2026-10-10T20:28:22.953917+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t50%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:28:29.198132+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t50%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 0,
+    "position": 1,
+    "variant": "B",
+    "before": {
+      "time": "2026-10-10T20:28:29.209374+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t50%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:28:34.225137+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 0,
+    "position": 2,
+    "variant": "B",
+    "before": {
+      "time": "2026-10-10T20:28:34.236474+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:28:39.253273+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 0,
+    "position": 3,
+    "variant": "A",
+    "before": {
+      "time": "2026-10-10T20:28:39.264976+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:28:45.435713+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 1,
+    "position": 0,
+    "variant": "A",
+    "before": {
+      "time": "2026-10-10T20:28:45.447437+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:28:51.577318+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 1,
+    "position": 1,
+    "variant": "B",
+    "before": {
+      "time": "2026-10-10T20:28:51.588202+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:28:56.609013+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 1,
+    "position": 2,
+    "variant": "B",
+    "before": {
+      "time": "2026-10-10T20:28:56.620385+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:01.638331+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 1,
+    "position": 3,
+    "variant": "A",
+    "before": {
+      "time": "2026-10-10T20:29:01.649368+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:07.846962+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 2,
+    "position": 0,
+    "variant": "A",
+    "before": {
+      "time": "2026-10-10T20:29:07.858262+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t51%; charging; 1:19 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:14.049463+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 2,
+    "position": 1,
+    "variant": "B",
+    "before": {
+      "time": "2026-10-10T20:29:14.060540+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:19.093160+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 2,
+    "position": 2,
+    "variant": "B",
+    "before": {
+      "time": "2026-10-10T20:29:19.104658+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:24.138677+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 2,
+    "position": 3,
+    "variant": "A",
+    "before": {
+      "time": "2026-10-10T20:29:24.149760+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:30.325884+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 3,
+    "position": 0,
+    "variant": "A",
+    "before": {
+      "time": "2026-10-10T20:29:30.336988+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:36.456062+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 3,
+    "position": 1,
+    "variant": "B",
+    "before": {
+      "time": "2026-10-10T20:29:36.466984+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:41.477577+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 3,
+    "position": 2,
+    "variant": "B",
+    "before": {
+      "time": "2026-10-10T20:29:41.488687+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:46.500157+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  },
+  {
+    "block": 3,
+    "position": 3,
+    "variant": "A",
+    "before": {
+      "time": "2026-10-10T20:29:46.510961+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    },
+    "after": {
+      "time": "2026-10-10T20:29:52.614266+00:00",
+      "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22478947)\t52%; charging; 1:15 remaining present: true\n",
+      "thermal": "Error:Failed to get thermal warning level with error code 0xe00002bc\nError: Failed to get performance warning level with error code 0xe00002bc\nError: No CPU power status with error code 0xe00002bc\n"
+    }
+  }
+]

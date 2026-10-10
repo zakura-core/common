@@ -1,0 +1,9 @@
+{
+  "revision": "80d39d9b1c41ce6c21c87f53c42deb317ce06e84",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "workers": 1,
+  "backend": "default portable ARM64; neither crate enables aarch64-asm",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: aarch64-apple-darwin\nrelease: 1.97.1\nLLVM version: 22.1.6\n",
+  "binary_sha256": "fdbd526f55e8f79b4ba84dd5326984c1b58a26c905945dd4bcd194f15a72167b",
+  "fixture_sha256": "6b0644aeda39c225d58e865f403f229ecbad564887d4b94905d07f4564c2a37b"
+}

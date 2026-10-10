@@ -1,0 +1,6210 @@
+{
+  "rows": [
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 1,
+      "ns": 21856.013808139534
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 1,
+      "ns": 3397.501075634058
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 25134.270833333332
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 27623.334099264706
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 8,
+      "ns": 169273.89130434784
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 8,
+      "ns": 13235.44784330986
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 182955.23214285713
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 181968.00595238095
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 16,
+      "ns": 330213.7604166667
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 16,
+      "ns": 21546.354285714286
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 353842.32954545453
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 367410.51136363635
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 32,
+      "ns": 631993.4895833334
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 32,
+      "ns": 39935.17287234042
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 666244.7916666666
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 699986.5416666666
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 50,
+      "ns": 917134.375
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 50,
+      "ns": 59345.3779296875
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 970255.859375
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 1013525.390625
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 64,
+      "ns": 1126216.796875
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 64,
+      "ns": 74754.5955882353
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 1239531.25
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 1315941.8333333333
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 100,
+      "ns": 1729461.7916666667
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 100,
+      "ns": 114227.58712121213
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1837795.125
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1990300.78125
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 128,
+      "ns": 2233873.71875
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 128,
+      "ns": 146675.68028846153
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 2353036.46875
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 2544042.96875
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 256,
+      "ns": 4375710.9375
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 256,
+      "ns": 294149.03846153844
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 4551815.125
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 4883692.6875
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 512,
+      "ns": 8760385.375
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 512,
+      "ns": 580075.1428571428
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 9387312.5
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 9989281.25
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 2048,
+      "ns": 34099518.25
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 2344019.53125
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 37165929.6875
+    },
+    {
+      "block": 0,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 40386322.875
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 1,
+      "ns": 13018.535683391003
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 1,
+      "ns": 2128.051722915485
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 15569.372406639004
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 14975.846613545817
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 8,
+      "ns": 103597.83108108108
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 8,
+      "ns": 8082.633333333333
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 112178.1544117647
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 113832.07007575757
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 16,
+      "ns": 210534.86805555556
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 16,
+      "ns": 13246.405589788732
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 224152.26838235295
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 232029.25735294117
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 32,
+      "ns": 422719.3263888889
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 32,
+      "ns": 24031.46576433121
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 447824.0763888889
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 525571.6171875
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 50,
+      "ns": 650052.9479166666
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 50,
+      "ns": 34404.93635321101
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 677749.125
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 756770.825
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 64,
+      "ns": 880230.2
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 64,
+      "ns": 43969.476744186046
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 918771.875
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 956451.171875
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 100,
+      "ns": 1328905.375
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 100,
+      "ns": 67538.64397321429
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1386033.8541666667
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1404483.5
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 128,
+      "ns": 1634060.75
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 128,
+      "ns": 83636.16944444444
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 1736959.2083333333
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 1768998.2708333333
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 256,
+      "ns": 3076458.3125
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 256,
+      "ns": 165558.08423913043
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 3216759.125
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 3418414.0625
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 512,
+      "ns": 5876593.75
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 512,
+      "ns": 327872.1822916667
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 6192596.375
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 6654401.0
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 2048,
+      "ns": 22677440.125
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 1323092.0208333333
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 24017984.375
+    },
+    {
+      "block": 0,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 26076953.125
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 1,
+      "ns": 12987.582828719724
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 1,
+      "ns": 2101.7113095238096
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 15163.484879032258
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 14501.297055984556
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 8,
+      "ns": 100402.48190789473
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 8,
+      "ns": 7854.264775104602
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 110634.34375
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 110914.0625
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 16,
+      "ns": 204616.9144736842
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 16,
+      "ns": 12795.94494047619
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 221767.3088235294
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 227235.7536764706
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 32,
+      "ns": 409092.70625
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 32,
+      "ns": 22879.985899390245
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 435337.6736111111
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 511492.1875
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 50,
+      "ns": 648148.875
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 50,
+      "ns": 34268.06363636364
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 679081.59375
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 750887.5
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 64,
+      "ns": 856718.75
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 64,
+      "ns": 43048.88707386364
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 908472.9125
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 939888.015625
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 100,
+      "ns": 1286810.75
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 100,
+      "ns": 65821.68311403508
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1358068.5833333333
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1407223.9583333333
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 128,
+      "ns": 1621601.5625
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 128,
+      "ns": 83785.64861111112
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 1711288.1875
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 1774012.1458333333
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 256,
+      "ns": 3080617.1875
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 256,
+      "ns": 165106.9972826087
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 3230936.1875
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 3422766.9375
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 512,
+      "ns": 6004197.875
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 512,
+      "ns": 328445.53125
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 6198567.6875
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 6634343.75
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 2048,
+      "ns": 22674630.25
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 1298312.5
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 24372984.375
+    },
+    {
+      "block": 0,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 26376161.4375
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 1,
+      "ns": 21830.12354651163
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 1,
+      "ns": 3302.789392605634
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 24757.3671875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 27282.382246376812
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 8,
+      "ns": 167175.4972826087
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 8,
+      "ns": 12986.69982698962
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 180921.875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 183385.53869047618
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 16,
+      "ns": 331951.171875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 16,
+      "ns": 21761.45520231214
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 355815.3409090909
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 358894.4147727273
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 32,
+      "ns": 616506.6964285715
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 32,
+      "ns": 38937.01675257732
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 651916.6666666666
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 690647.1354166666
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 50,
+      "ns": 915818.225
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 50,
+      "ns": 58728.9638671875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 967476.5625
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 1023714.1875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 64,
+      "ns": 1134399.734375
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 64,
+      "ns": 74374.89828431372
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 1210951.171875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 1280787.3333333333
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 100,
+      "ns": 1734605.8958333333
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 100,
+      "ns": 114630.36553030302
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1829679.6875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1967225.28125
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 128,
+      "ns": 2195109.375
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 128,
+      "ns": 144978.46634615384
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 2322135.40625
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 2465923.1875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 256,
+      "ns": 4266497.375
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 256,
+      "ns": 292039.66346153844
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 4566015.625
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 4855742.1875
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 512,
+      "ns": 8476851.5625
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 512,
+      "ns": 571816.9642857143
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 9094723.9375
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 9673286.4375
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 2048,
+      "ns": 33785112.0
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 2281329.4375
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 36663802.0625
+    },
+    {
+      "block": 0,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 39719661.5
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 1,
+      "ns": 21688.388367052023
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 1,
+      "ns": 3324.929798315603
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 25159.166666666668
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 27749.73161764706
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 8,
+      "ns": 168200.18206521738
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 8,
+      "ns": 12748.702330508475
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 178876.7380952381
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 183641.61607142858
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 16,
+      "ns": 337349.171875
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 16,
+      "ns": 21758.128612716762
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 352132.8125
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 358183.23863636365
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 32,
+      "ns": 613680.4285714285
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 32,
+      "ns": 39227.186197916664
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 655666.2291666666
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 690473.09375
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 50,
+      "ns": 907415.1
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 50,
+      "ns": 59141.560546875
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 979709.625
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 1046842.4375
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 64,
+      "ns": 1147196.609375
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 64,
+      "ns": 77029.01785714286
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 1222285.15625
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 1294452.25
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 100,
+      "ns": 1724178.8125
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 100,
+      "ns": 113945.54924242424
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1843880.2083333333
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1953923.15625
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 128,
+      "ns": 2177102.875
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 128,
+      "ns": 145898.83653846153
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 2328625.0
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 2464330.75
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 256,
+      "ns": 4310546.875
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 256,
+      "ns": 291259.01442307694
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 4531802.0625
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 4825861.9375
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 512,
+      "ns": 8488354.1875
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 512,
+      "ns": 575907.3660714285
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 9040427.0625
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 9657807.3125
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 2048,
+      "ns": 33740406.25
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 2270490.875
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 36170109.375
+    },
+    {
+      "block": 1,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 38514625.0
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 1,
+      "ns": 13006.397707612457
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 1,
+      "ns": 2095.2775837988825
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 15109.437751004016
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 14484.937982625483
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 8,
+      "ns": 100423.38157894737
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 8,
+      "ns": 7840.265135699374
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 107506.02678571429
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 110665.13602941176
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 16,
+      "ns": 202658.44407894736
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 16,
+      "ns": 12816.659556313993
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 213288.48263888888
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 222590.6875
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 32,
+      "ns": 410164.58125
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 32,
+      "ns": 22853.219696969696
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 429689.2361111111
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 510973.3046875
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 50,
+      "ns": 642218.3125
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 50,
+      "ns": 34235.74829545455
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 679955.2916666666
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 747303.3854166666
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 64,
+      "ns": 856849.4875
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 64,
+      "ns": 42961.470170454544
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 902260.9375
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 931825.525
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 100,
+      "ns": 1290026.0416666667
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 100,
+      "ns": 65789.61074561403
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1357714.3958333333
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1401068.5833333333
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 128,
+      "ns": 1642421.875
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 128,
+      "ns": 85044.84861111111
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 1721459.2083333333
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 1790185.75
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 256,
+      "ns": 3085996.09375
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 256,
+      "ns": 168160.66576086957
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 3228561.1875
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 3407153.65625
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 512,
+      "ns": 5843984.375
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 512,
+      "ns": 324838.9739583333
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 6162325.5
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 6629924.5
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 2048,
+      "ns": 22579359.375
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 1289296.0
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 24027304.6875
+    },
+    {
+      "block": 1,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 25949653.6875
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 1,
+      "ns": 12951.598275862068
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 1,
+      "ns": 2095.5394553072624
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 15030.1145
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 14542.675872093023
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 8,
+      "ns": 101214.15789473684
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 8,
+      "ns": 7836.176670146137
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 106804.97743055556
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 109038.61607142857
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 16,
+      "ns": 203546.6019736842
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 16,
+      "ns": 12736.34343220339
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 214966.14583333334
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 223730.08823529413
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 32,
+      "ns": 408545.3125
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 32,
+      "ns": 22687.327560240963
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 432262.44444444444
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 512373.3671875
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 50,
+      "ns": 640838.1041666666
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 50,
+      "ns": 34258.806818181816
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 673070.7395833334
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 748148.8645833334
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 64,
+      "ns": 856924.475
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 64,
+      "ns": 42692.056818181816
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 894910.9375
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 928743.225
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 100,
+      "ns": 1288575.5208333333
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 100,
+      "ns": 65810.2149122807
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1350993.9166666667
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1394433.1666666667
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 128,
+      "ns": 1620103.3125
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 128,
+      "ns": 83748.49583333333
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 1704968.75
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 1769941.8541666667
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 256,
+      "ns": 3061054.6875
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 256,
+      "ns": 164943.16032608695
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 3224688.8125
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 3403945.3125
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 512,
+      "ns": 5870000.0
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 512,
+      "ns": 331255.640625
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 6184640.625
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 6632609.375
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 2048,
+      "ns": 22629721.375
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 1297813.375
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 23940971.375
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 25941346.375
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 1,
+      "ns": 21418.575639204544
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 1,
+      "ns": 3272.7557809773125
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 24699.23560855263
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 27246.376811594204
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 8,
+      "ns": 170595.28977272726
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 8,
+      "ns": 13075.684233449478
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 181441.46726190476
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 183532.7380952381
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 16,
+      "ns": 330732.421875
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 16,
+      "ns": 21484.0475
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 353355.82386363635
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 368140.38636363635
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 32,
+      "ns": 619340.0267857143
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 32,
+      "ns": 38918.97551546392
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 646798.6041666666
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 696802.0833333334
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 50,
+      "ns": 906730.725
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 50,
+      "ns": 59142.333984375
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 996144.53125
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 1050776.046875
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 64,
+      "ns": 1132193.359375
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 64,
+      "ns": 74053.20710784313
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 1210035.15625
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 1281118.0416666667
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 100,
+      "ns": 1718177.0833333333
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 100,
+      "ns": 113681.74053030302
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1842013.8958333333
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1984700.53125
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 128,
+      "ns": 2229662.75
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 128,
+      "ns": 147491.78846153847
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 2339994.78125
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 2455725.28125
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 256,
+      "ns": 4255354.1875
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 256,
+      "ns": 296025.04326923075
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 4707072.9375
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 4880296.875
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 512,
+      "ns": 8698447.9375
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 512,
+      "ns": 574680.0535714285
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 9233083.3125
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 9719250.0
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 2048,
+      "ns": 34358359.375
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 2346726.5625
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 37481950.5
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 38465166.6875
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 1,
+      "ns": 21468.02107142857
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 1,
+      "ns": 3302.026023327465
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 24777.583470394737
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 27291.515398550724
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 8,
+      "ns": 170204.02989130435
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 8,
+      "ns": 13274.035556537103
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 183985.11904761905
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 188449.609375
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 16,
+      "ns": 343051.13636363635
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 16,
+      "ns": 24278.947983870967
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 371944.36363636365
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 363987.92613636365
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 32,
+      "ns": 612131.3303571428
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 32,
+      "ns": 39055.41237113402
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 656752.1770833334
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 703066.84375
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 50,
+      "ns": 921388.0125
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 50,
+      "ns": 58494.43076923077
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 961158.203125
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 1023327.46875
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 64,
+      "ns": 1143332.6875
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 64,
+      "ns": 74985.39705882352
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 1229867.1875
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 1306026.9166666667
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 100,
+      "ns": 1769190.1041666667
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 100,
+      "ns": 116418.32386363637
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1905052.0625
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1981080.75
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 128,
+      "ns": 2232777.34375
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 128,
+      "ns": 148334.5360576923
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 2377191.40625
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 2507375.0
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 256,
+      "ns": 4392098.9375
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 256,
+      "ns": 296221.5576923077
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 4617895.8125
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 4973476.5625
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 512,
+      "ns": 8569945.3125
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 512,
+      "ns": 570362.3482142857
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 9084570.3125
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 9825552.0625
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 2048,
+      "ns": 35040080.75
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 2310367.1875
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 36624463.5
+    },
+    {
+      "block": 2,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 39284070.3125
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 1,
+      "ns": 12971.390086206897
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 1,
+      "ns": 2117.3844173250563
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 15177.734375
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 14543.786337209302
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 8,
+      "ns": 100408.23684210527
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 8,
+      "ns": 7838.509003131524
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 108186.16071428571
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 110993.49080882352
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 16,
+      "ns": 208697.62847222222
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 16,
+      "ns": 12896.092783505155
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 214552.51736111112
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 226175.39705882352
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 32,
+      "ns": 408674.21875
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 32,
+      "ns": 23178.899691358023
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 440786.74305555556
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 519914.7109375
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 50,
+      "ns": 647506.9375
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 50,
+      "ns": 34235.843181818185
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 670534.71875
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 747871.53125
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 64,
+      "ns": 855748.4375
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 64,
+      "ns": 43171.036637931036
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 897327.0875
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 939565.109375
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 100,
+      "ns": 1298974.8333333333
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 100,
+      "ns": 65786.9073275862
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1347107.6458333333
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1396750.0
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 128,
+      "ns": 1629821.1666666667
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 128,
+      "ns": 85640.74431818182
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 1711847.2291666667
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 1768481.7708333333
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 256,
+      "ns": 3087462.21875
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 256,
+      "ns": 165690.44293478262
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 3228722.65625
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 3497773.4375
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 512,
+      "ns": 5857078.125
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 512,
+      "ns": 327452.6927083333
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 6254955.75
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 6851929.6875
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 2048,
+      "ns": 23133622.4375
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 1336213.5416666667
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 24035682.25
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 26194614.5625
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 1,
+      "ns": 12950.422198275863
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 1,
+      "ns": 2111.8296030405404
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 15071.149096385541
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 14635.39640077821
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 8,
+      "ns": 99686.74671052632
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 8,
+      "ns": 8042.486349036402
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 108809.59821428571
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 109203.4232142857
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 16,
+      "ns": 202558.9375
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 16,
+      "ns": 12857.511130136987
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 219402.05555555556
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 224826.13602941178
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 32,
+      "ns": 417703.7083333333
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 32,
+      "ns": 23199.45987654321
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 432581.8888888889
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 510656.8984375
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 50,
+      "ns": 644101.125
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 50,
+      "ns": 34209.25681818182
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 678660.59375
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 751744.2625
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 64,
+      "ns": 860860.9375
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 64,
+      "ns": 43486.47054597701
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 905741.15
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 923505.2
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 100,
+      "ns": 1291468.75
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 100,
+      "ns": 65640.5797413793
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1362256.9375
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1454968.75
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 128,
+      "ns": 1647879.3333333333
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 128,
+      "ns": 83881.59722222222
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 1716256.0625
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 1771164.0625
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 256,
+      "ns": 3298343.75
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 256,
+      "ns": 168057.97010869565
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 3229730.46875
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 3440544.28125
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 512,
+      "ns": 5893695.3125
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 512,
+      "ns": 330626.734375
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 6316526.0625
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 6649002.625
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 2048,
+      "ns": 22717299.5
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 1298598.9583333333
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 23989835.9375
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 25954973.9375
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 1,
+      "ns": 21345.688210227272
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 1,
+      "ns": 3274.9986365619548
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 24764.63157894737
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 27227.638134057972
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 8,
+      "ns": 166617.86684782608
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 8,
+      "ns": 12856.449700342466
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 179449.65476190476
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 182175.84226190476
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 16,
+      "ns": 330550.1302083333
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 16,
+      "ns": 21712.759031791906
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 359199.0965909091
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 365639.6818181818
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 32,
+      "ns": 626492.1875
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 32,
+      "ns": 39202.853515625
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 658301.65625
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 713089.84375
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 50,
+      "ns": 943364.59375
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 50,
+      "ns": 59966.145833333336
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 988144.53125
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 1042367.1875
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 64,
+      "ns": 1158700.515625
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 64,
+      "ns": 75966.145
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 1225459.625
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 1284026.9166666667
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 100,
+      "ns": 1741493.9166666667
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 100,
+      "ns": 114581.83333333333
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1841118.0625
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1964169.25
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 128,
+      "ns": 2195813.8125
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 128,
+      "ns": 152734.6875
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 2350847.65625
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 2481639.34375
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 256,
+      "ns": 4264867.1875
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 256,
+      "ns": 287160.34375
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 4577802.0625
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 4858000.0
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 512,
+      "ns": 8505104.1875
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 512,
+      "ns": 577040.9196428572
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 9234638.0
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 9897591.125
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 2048,
+      "ns": 33844437.5
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 2351436.1875
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 36322265.625
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 39038755.25
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 1,
+      "ns": 21402.610085227272
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 1,
+      "ns": 3288.1723816827343
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 24745.768092105263
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 27198.633605072464
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 8,
+      "ns": 165391.41576086957
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 8,
+      "ns": 12828.97824232082
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 180175.84226190476
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 182472.22023809524
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 16,
+      "ns": 331770.6145833333
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 16,
+      "ns": 21548.79464285714
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 354080.9659090909
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 356838.0681818182
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 32,
+      "ns": 614377.5982142857
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 32,
+      "ns": 38851.615979381444
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 652865.8854166666
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 689362.40625
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 50,
+      "ns": 905801.5625
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 50,
+      "ns": 59337.5654296875
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 966774.078125
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 1023053.390625
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 64,
+      "ns": 1144536.453125
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 64,
+      "ns": 74913.5012254902
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 1210527.34375
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 1278062.5
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 100,
+      "ns": 1723503.4791666667
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 100,
+      "ns": 115575.125
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1839395.8333333333
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1956569.03125
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 128,
+      "ns": 2180365.90625
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 128,
+      "ns": 146271.63461538462
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 2345980.46875
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 2500092.46875
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 256,
+      "ns": 4365088.5625
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 256,
+      "ns": 294112.98076923075
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 4567559.875
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 4876026.0625
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 512,
+      "ns": 8497195.3125
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 512,
+      "ns": 569700.1517857143
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 9139348.9375
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 9661145.875
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "retained",
+      "n": 2048,
+      "ns": 33731226.5625
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 2272302.09375
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 36016104.1875
+    },
+    {
+      "block": 3,
+      "position": 0,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 38259328.125
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 1,
+      "ns": 12937.203663793103
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 1,
+      "ns": 2087.4142320534224
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 15064.968373493975
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 14478.814913127413
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 8,
+      "ns": 99760.48519736843
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 8,
+      "ns": 7800.193737006237
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 106525.02951388889
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 107807.5142857143
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 16,
+      "ns": 201258.63486842104
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 16,
+      "ns": 12773.269132653062
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 217277.63541666666
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 220644.14705882352
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 32,
+      "ns": 409685.9375
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 32,
+      "ns": 22778.298863636363
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 429000.0
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 510915.6953125
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 50,
+      "ns": 641916.6666666666
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 50,
+      "ns": 34119.507386363635
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 672244.3645833334
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 744827.2604166666
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 64,
+      "ns": 854076.0375
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 64,
+      "ns": 42782.84801136364
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 892223.4375
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 927588.55
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 100,
+      "ns": 1279619.7916666667
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 100,
+      "ns": 65336.97090517241
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1345434.0208333333
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1393528.6458333333
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 128,
+      "ns": 1614859.375
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 128,
+      "ns": 83854.86111111111
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 1704519.0833333333
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 1764506.9375
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 256,
+      "ns": 3058016.90625
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 256,
+      "ns": 164834.91847826086
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 3218084.65625
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 3406644.53125
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 512,
+      "ns": 5868171.875
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 512,
+      "ns": 326966.796875
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 6204429.6875
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 6625559.9375
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "retained",
+      "n": 2048,
+      "ns": 22607005.1875
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 1302347.2291666667
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 23933377.625
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 25953648.4375
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 1,
+      "ns": 12947.162284482758
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 1,
+      "ns": 2091.975146402677
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 15069.5281124498
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 14448.607932692308
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 8,
+      "ns": 98842.4490131579
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 8,
+      "ns": 7836.464900835073
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 106281.90104166667
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 107521.13214285714
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 16,
+      "ns": 200300.1644736842
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 16,
+      "ns": 12739.94533898305
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 211830.29513888888
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 220824.44852941178
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 32,
+      "ns": 409114.58125
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 32,
+      "ns": 22787.626136363637
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 431134.5486111111
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 510477.859375
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 50,
+      "ns": 649047.3020833334
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 50,
+      "ns": 34454.821100917434
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 675553.8229166666
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 744871.09375
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 64,
+      "ns": 853408.85
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 64,
+      "ns": 42697.05894886364
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 896617.7125
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 926257.3
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 100,
+      "ns": 1285721.3541666667
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 100,
+      "ns": 65467.941810344826
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1352598.0833333333
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1392687.5
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 128,
+      "ns": 1623790.8125
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 128,
+      "ns": 84423.78472222222
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 1703123.2708333333
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 1765993.0625
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 256,
+      "ns": 3059946.625
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 256,
+      "ns": 164819.85869565216
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 3221632.8125
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 3408367.1875
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 512,
+      "ns": 5869880.1875
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 512,
+      "ns": 326472.21875
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 6197513.0625
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 6625721.375
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "retained",
+      "n": 2048,
+      "ns": 22712317.6875
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 1295780.3958333333
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 23931963.5625
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "variant": "B",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 25915252.625
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 1,
+      "ns": 21279.44032485876
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 1,
+      "ns": 3261.329239130435
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 1,
+      "ns": 24652.28431372549
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 1,
+      "ns": 27128.297661870503
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 8,
+      "ns": 166240.03532608695
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 8,
+      "ns": 12792.588010204081
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 8,
+      "ns": 179311.75595238095
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 8,
+      "ns": 181673.98214285713
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 16,
+      "ns": 331626.0885416667
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 16,
+      "ns": 21386.245383522728
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 16,
+      "ns": 352949.8125
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 16,
+      "ns": 355818.6534090909
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 32,
+      "ns": 611613.0892857143
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 32,
+      "ns": 38725.7300257732
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 32,
+      "ns": 651906.6770833334
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 32,
+      "ns": 686373.2604166666
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 50,
+      "ns": 905742.1875
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 50,
+      "ns": 58692.056640625
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 50,
+      "ns": 962442.046875
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 50,
+      "ns": 1017875.65625
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 64,
+      "ns": 1129969.40625
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 64,
+      "ns": 73994.23039215687
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 64,
+      "ns": 1208690.765625
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 64,
+      "ns": 1276513.0208333333
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 100,
+      "ns": 1713390.625
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 100,
+      "ns": 113713.9375
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 100,
+      "ns": 1833314.25
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 100,
+      "ns": 1949028.625
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 128,
+      "ns": 2170264.3125
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 128,
+      "ns": 144349.15865384616
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 128,
+      "ns": 2317346.34375
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 128,
+      "ns": 2454029.9375
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 256,
+      "ns": 4259455.75
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 256,
+      "ns": 286684.52678571426
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 256,
+      "ns": 4552682.25
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 256,
+      "ns": 4821151.0625
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 512,
+      "ns": 8473005.25
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 512,
+      "ns": 574287.1964285715
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 512,
+      "ns": 9016721.3125
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 512,
+      "ns": 9671513.0
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "retained",
+      "n": 2048,
+      "ns": 33611156.25
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare",
+      "n": 2048,
+      "ns": 2273500.0
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "prepare_use",
+      "n": 2048,
+      "ns": 36000760.4375
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "variant": "A",
+      "case": "projective_affine",
+      "n": 2048,
+      "ns": 38255619.8125
+    }
+  ],
+  "summary": [
+    {
+      "case": "prepare",
+      "n": 1,
+      "A": 3295.0992025050996,
+      "B": 2098.625382415536,
+      "paired_ratios": [
+        0.6312805470880641,
+        0.6351950223665072,
+        0.6430284572532989,
+        0.6381232680628297
+      ],
+      "ratio": 0.6366591452146684
+    },
+    {
+      "case": "prepare",
+      "n": 8,
+      "A": 12921.574763666042,
+      "B": 7839.387069415448,
+      "paired_ratios": [
+        0.6077647913823957,
+        0.6070402395433657,
+        0.6077573836095072,
+        0.6102928479753021
+      ],
+      "ratio": 0.6077610874959514
+    },
+    {
+      "case": "prepare",
+      "n": 16,
+      "A": 21630.776837324524,
+      "B": 12806.302248395092,
+      "paired_ratios": [
+        0.601331511293939,
+        0.5909277766666949,
+        0.5599619058468851,
+        0.5942282680058165
+      ],
+      "ratio": 0.5925780223362558
+    },
+    {
+      "case": "prepare",
+      "n": 32,
+      "A": 38996.21456185567,
+      "B": 22866.60279817997,
+      "paired_ratios": [
+        0.5947781073000783,
+        0.5827611524189931,
+        0.5926320886666653,
+        0.5873612252341343
+      ],
+      "ratio": 0.5899966569503998
+    },
+    {
+      "case": "prepare",
+      "n": 50,
+      "A": 59141.947265625,
+      "B": 34247.325,
+      "paired_ratios": [
+        0.5816081541891108,
+        0.5790691571754129,
+        0.5777880030892784,
+        0.5809925278455101
+      ],
+      "ratio": 0.5800308425104614
+    },
+    {
+      "case": "prepare",
+      "n": 64,
+      "A": 74834.04840686274,
+      "B": 43005.17862215909,
+      "paired_ratios": [
+        0.5835087450401893,
+        0.5669331849493676,
+        0.5740750044814974,
+        0.5740461293152697
+      ],
+      "ratio": 0.5740605668983836
+    },
+    {
+      "case": "prepare",
+      "n": 100,
+      "A": 114404.71022727274,
+      "B": 65788.25903660012,
+      "paired_ratios": [
+        0.5827209653068898,
+        0.5781372953536879,
+        0.5689497732977716,
+        0.5704803852801188
+      ],
+      "ratio": 0.5743088403169033
+    },
+    {
+      "case": "prepare",
+      "n": 128,
+      "A": 146473.65745192306,
+      "B": 83868.22916666666,
+      "paired_ratios": [
+        0.5740423031437362,
+        0.5753194889729161,
+        0.5630676544655829,
+        0.5790316788428836
+      ],
+      "ratio": 0.5746808960583261
+    },
+    {
+      "case": "prepare",
+      "n": 256,
+      "A": 293076.3221153846,
+      "B": 165332.54076086957,
+      "paired_ratios": [
+        0.5640932355689294,
+        0.5671937143941299,
+        0.5720925044440782,
+        0.5675898620186947
+      ],
+      "ratio": 0.5673917882064123
+    },
+    {
+      "case": "prepare",
+      "n": 512,
+      "A": 574483.625,
+      "B": 327662.4375,
+      "paired_ratios": [
+        0.5697736007320957,
+        0.5702257850055282,
+        0.5735380450086598,
+        0.5711942677032134
+      ],
+      "ratio": 0.5707100263543707
+    },
+    {
+      "case": "prepare",
+      "n": 2048,
+      "A": 2295848.3125,
+      "B": 1298455.7291666665,
+      "paired_ratios": [
+        0.5667474040432818,
+        0.5603178559424298,
+        0.5651916840014729,
+        0.57154437685973
+      ],
+      "ratio": 0.5659695440223773
+    },
+    {
+      "case": "prepare_use",
+      "n": 1,
+      "A": 24760.999383223687,
+      "B": 15090.293423694779,
+      "paired_ratios": [
+        0.6159921482802008,
+        0.6045029699233668,
+        0.6105678448421984,
+        0.6100341009069179
+      ],
+      "ratio": 0.6103009728745581
+    },
+    {
+      "case": "prepare_use",
+      "n": 8,
+      "A": 180548.85863095237,
+      "B": 107846.09375,
+      "paired_ratios": [
+        0.6123289808234326,
+        0.5947826144500457,
+        0.5970693355894968,
+        0.5919729404092106
+      ],
+      "ratio": 0.5959259750197712
+    },
+    {
+      "case": "prepare_use",
+      "n": 16,
+      "A": 353961.6477272727,
+      "B": 216121.890625,
+      "paired_ratios": [
+        0.6283587083900112,
+        0.6070326386539884,
+        0.5935286253969554,
+        0.6069154889142209
+      ],
+      "ratio": 0.6069740637841046
+    },
+    {
+      "case": "prepare_use",
+      "n": 32,
+      "A": 654266.0572916666,
+      "B": 432422.1666666666,
+      "paired_ratios": [
+        0.6699951242063006,
+        0.66178499295801,
+        0.6641314673260735,
+        0.6592218240419285
+      ],
+      "ratio": 0.6629582301420418
+    },
+    {
+      "case": "prepare_use",
+      "n": 50,
+      "A": 968866.2109375,
+      "B": 676651.4739583333,
+      "paired_ratios": [
+        0.7002157281535784,
+        0.6847803148679386,
+        0.6921425229173492,
+        0.6986247782373268
+      ],
+      "ratio": 0.6953836505773381
+    },
+    {
+      "case": "prepare_use",
+      "n": 64,
+      "A": 1216618.1640625,
+      "B": 899794.0125,
+      "paired_ratios": [
+        0.745667371938083,
+        0.7388713837417332,
+        0.7343495897656598,
+        0.7394294640354454
+      ],
+      "ratio": 0.7391504238885893
+    },
+    {
+      "case": "prepare_use",
+      "n": 100,
+      "A": 1840256.9479166665,
+      "B": 1355156.2395833333,
+      "paired_ratios": [
+        0.7482266621565243,
+        0.7348850064460558,
+        0.7232358630091134,
+        0.7346161398391529
+      ],
+      "ratio": 0.7347505731426043
+    },
+    {
+      "case": "prepare_use",
+      "n": 128,
+      "A": 2342987.625,
+      "B": 1711567.7083333335,
+      "paired_ratios": [
+        0.7375659094529724,
+        0.733927395864292,
+        0.7250581575893371,
+        0.7307320484235666
+      ],
+      "ratio": 0.7323297221439293
+    },
+    {
+      "case": "prepare_use",
+      "n": 256,
+      "A": 4566787.75,
+      "B": 3226625.0,
+      "paired_ratios": [
+        0.7071523358228601,
+        0.6984887229235162,
+        0.7023342015790183,
+        0.7060906257189965
+      ],
+      "ratio": 0.7042124136490073
+    },
+    {
+      "case": "prepare_use",
+      "n": 512,
+      "A": 9117036.4375,
+      "B": 6198040.375,
+      "paired_ratios": [
+        0.6704436550811231,
+        0.6756756568180732,
+        0.6862459118346248,
+        0.6830741773539899
+      ],
+      "ratio": 0.6793749170860315
+    },
+    {
+      "case": "prepare_use",
+      "n": 2048,
+      "A": 36473364.5625,
+      "B": 24003910.15625,
+      "paired_ratios": [
+        0.6554401269377496,
+        0.6512822064163619,
+        0.6583642442035265,
+        0.6646407259846742
+      ],
+      "ratio": 0.6569021855706381
+    },
+    {
+      "case": "projective_affine",
+      "n": 1,
+      "A": 27264.379528985508,
+      "B": 14521.98646403879,
+      "paired_ratios": [
+        0.5368683924268717,
+        0.5278121431458341,
+        0.5352097537709388,
+        0.5324692960049738
+      ],
+      "ratio": 0.5338395248879564
+    },
+    {
+      "case": "projective_affine",
+      "n": 8,
+      "A": 182928.8794642857,
+      "B": 109934.27962184873,
+      "paired_ratios": [
+        0.6151469880919123,
+        0.5983635556450466,
+        0.5941224841699008,
+        0.5913247070013513
+      ],
+      "ratio": 0.5962430199074737
+    },
+    {
+      "case": "projective_affine",
+      "n": 16,
+      "A": 361441.17045454547,
+      "B": 224278.11213235295,
+      "paired_ratios": [
+        0.6323308496233232,
+        0.6144929895888959,
+        0.6181256413152776,
+        0.6194687880059796
+      ],
+      "ratio": 0.6187972146606286
+    },
+    {
+      "case": "projective_affine",
+      "n": 32,
+      "A": 693724.609375,
+      "B": 511232.74609375,
+      "paired_ratios": [
+        0.7457490939401105,
+        0.7376666783777734,
+        0.7277242825398866,
+        0.7424344512069543
+      ],
+      "ratio": 0.7400505647923639
+    },
+    {
+      "case": "projective_affine",
+      "n": 50,
+      "A": 1023520.828125,
+      "B": 748010.1979166667,
+      "paired_ratios": [
+        0.7400495951426552,
+        0.7129286193554785,
+        0.7259619853363795,
+        0.7299118783416999
+      ],
+      "ratio": 0.7279369318390396
+    },
+    {
+      "case": "projective_affine",
+      "n": 64,
+      "A": 1282572.4791666667,
+      "B": 930284.375,
+      "paired_ratios": [
+        0.7302799274728625,
+        0.7223909811430597,
+        0.7193172147226283,
+        0.7256962398963462
+      ],
+      "ratio": 0.724043610519703
+    },
+    {
+      "case": "projective_affine",
+      "n": 100,
+      "A": 1965697.265625,
+      "B": 1398909.2916666665,
+      "paired_ratios": [
+        0.710470989686207,
+        0.7097661446743635,
+        0.7228233318547621,
+        0.7133904695417467
+      ],
+      "ratio": 0.7119307296139769
+    },
+    {
+      "case": "projective_affine",
+      "n": 128,
+      "A": 2473781.265625,
+      "B": 1769470.0625,
+      "paired_ratios": [
+        0.7071924851721231,
+        0.7235949309427221,
+        0.7094880049338068,
+        0.7126388309554095
+      ],
+      "ratio": 0.7110634179446081
+    },
+    {
+      "case": "projective_affine",
+      "n": 256,
+      "A": 4867013.03125,
+      "B": 3413390.625,
+      "paired_ratios": [
+        0.7024207346527382,
+        0.7017296028557023,
+        0.7057248903195968,
+        0.7027830502528848
+      ],
+      "ratio": 0.7026018924528115
+    },
+    {
+      "case": "projective_affine",
+      "n": 512,
+      "A": 9696268.21875,
+      "B": 6633476.5625,
+      "paired_ratios": [
+        0.6758397459172129,
+        0.6844452003785133,
+        0.6845223494121632,
+        0.6854350143029666
+      ],
+      "ratio": 0.6844837748953383
+    },
+    {
+      "case": "projective_affine",
+      "n": 2048,
+      "A": 38776690.125,
+      "B": 25954311.1875,
+      "paired_ratios": [
+        0.6547964546188126,
+        0.6740860026375737,
+        0.6658287430959153,
+        0.6778923917568143
+      ],
+      "ratio": 0.6699573728667445
+    },
+    {
+      "case": "retained",
+      "n": 1,
+      "A": 21443.298355316558,
+      "B": 12961.494181034483,
+      "paired_ratios": [
+        0.5952945278954015,
+        0.6021763903323595,
+        0.605455885962895,
+        0.6064461688129028
+      ],
+      "ratio": 0.6038161381476272
+    },
+    {
+      "case": "retained",
+      "n": 8,
+      "A": 167687.83967391303,
+      "B": 100405.359375,
+      "paired_ratios": [
+        0.6063328390809402,
+        0.5951600780843171,
+        0.5940676229479396,
+        0.5988664029288675
+      ],
+      "ratio": 0.5970132405065923
+    },
+    {
+      "case": "retained",
+      "n": 16,
+      "A": 331698.3515625,
+      "B": 203102.5230263158,
+      "paired_ratios": [
+        0.6269612936046816,
+        0.6080171192452218,
+        0.6105341340362256,
+        0.6053071977152137
+      ],
+      "ratio": 0.6092756266407238
+    },
+    {
+      "case": "retained",
+      "n": 32,
+      "A": 615442.1473214286,
+      "B": 409400.259375,
+      "paired_ratios": [
+        0.6662490257978682,
+        0.6639872762799072,
+        0.6671744199666035,
+        0.6678684651509639
+      ],
+      "ratio": 0.6667117228822359
+    },
+    {
+      "case": "retained",
+      "n": 50,
+      "A": 911616.6625,
+      "B": 645804.03125,
+      "paired_ratios": [
+        0.7082571709255692,
+        0.7072509822448626,
+        0.6926431196132831,
+        0.7126319575500177
+      ],
+      "ratio": 0.7077540765852159
+    },
+    {
+      "case": "retained",
+      "n": 64,
+      "A": 1138866.2109375,
+      "B": 856784.11875,
+      "paired_ratios": [
+        0.7683518748045075,
+        0.7518564115818324,
+        0.745692708806159,
+        0.7507058645121236
+      ],
+      "ratio": 0.7512811380469779
+    },
+    {
+      "case": "retained",
+      "n": 100,
+      "A": 1726820.3020833335,
+      "B": 1289300.78125,
+      "paired_ratios": [
+        0.7550995999410591,
+        0.7490804671362333,
+        0.737874319637128,
+        0.7464126237474936
+      ],
+      "ratio": 0.7477465454418635
+    },
+    {
+      "case": "retained",
+      "n": 128,
+      "A": 2195461.59375,
+      "B": 1626805.9895833335,
+      "paired_ratios": [
+        0.7350812237450755,
+        0.7403446121553151,
+        0.7401226223771489,
+        0.7444094360266067
+      ],
+      "ratio": 0.740233617266232
+    },
+    {
+      "case": "retained",
+      "n": 256,
+      "A": 4288522.125,
+      "B": 3078537.75,
+      "paired_ratios": [
+        0.7124423847889052,
+        0.7176186995855814,
+        0.737649411646508,
+        0.7093665832736133
+      ],
+      "ratio": 0.7150305421872434
+    },
+    {
+      "case": "retained",
+      "n": 512,
+      "A": 8501149.75,
+      "B": 5869940.09375,
+      "paired_ratios": [
+        0.6892515121813444,
+        0.6815685832538204,
+        0.6881838578271764,
+        0.6916861129171467
+      ],
+      "ratio": 0.6887176850042604
+    },
+    {
+      "case": "retained",
+      "n": 2048,
+      "A": 33814774.75,
+      "B": 22676035.1875,
+      "paired_ratios": [
+        0.6680756779256377,
+        0.6638751867978517,
+        0.6656201292008019,
+        0.6729688048191234
+      ],
+      "ratio": 0.6668479035632198
+    }
+  ]
+}

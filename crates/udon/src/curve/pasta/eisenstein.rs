@@ -18,12 +18,14 @@ pub(crate) const MAX_DIGITS: usize = 132;
 ///
 /// Prepare once for [`EisensteinTable::mul_prepared`] or
 /// [`EisensteinTableBatch::mul_prepared`](super::EisensteinTableBatch::mul_prepared)
+/// or [`batch_mul_same_scalar_prepared`](super::batch_mul_same_scalar_prepared)
 /// when the same scalar acts on several bases. This fixed-size, allocation-free
 /// value is specific to its curve and borrows neither the scalar nor a table.
-/// Preparation and multiplication are variable-time.
+/// Preparation and multiplication expose scalar-dependent timing and memory
+/// access patterns; the representation does not provide constant-time lookup.
 #[derive(Clone, Copy, Debug)]
 pub struct EisensteinScalar<C: PastaCurve> {
-    digits: [u8; MAX_DIGITS],
+    digits: [Digit; MAX_DIGITS],
     len: usize,
     marker: PhantomData<C>,
 }
@@ -45,14 +47,48 @@ impl<C: PastaCurve> EisensteinScalar<C> {
         let (a, b) = super::glv::decompose_canonical::<C>(scalar);
         let (digits, len) = recode(a, b);
         Self {
-            digits,
+            digits: digits.map(Digit::from_code),
             len,
             marker: PhantomData,
         }
     }
 
-    pub(crate) fn digits(&self) -> &[u8] {
+    pub(crate) fn digits(&self) -> &[Digit] {
         &self.digits[..self.len]
+    }
+}
+
+/// A signed table index and endomorphism rotation, or the zero-digit sentinel.
+///
+/// Decoding when preparing the scalar avoids division and remainder in every
+/// base's ladder. Entry 8 denotes zero and must never reach table lookup;
+/// nonzero entries are in `0..8`, with rotations in `0..3`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Digit {
+    pub(super) entry: u8,
+    pub(super) rotation: u8,
+    pub(super) negative: bool,
+}
+
+impl Digit {
+    pub(super) fn from_code(code: u8) -> Self {
+        if code == 0 {
+            Self {
+                entry: 8,
+                rotation: 0,
+                negative: false,
+            }
+        } else {
+            let value = code - 1;
+            Self {
+                entry: value / 6,
+                rotation: (value % 6) / 2,
+                negative: value & 1 != 0,
+            }
+        }
+    }
+    pub(super) fn is_zero(self) -> bool {
+        self.entry == 8
     }
 }
 
@@ -290,25 +326,31 @@ pub(super) fn normalize<C: PastaCurve, E: CurveTableEntry<C>>(
     });
 }
 
-pub(crate) fn digit_point<C: PastaCurve, E: CurveTableEntry<C>>(
+pub(crate) fn decoded_point<C: PastaCurve, E: CurveTableEntry<C>>(
     entries: &[E],
-    code: u8,
+    code: Digit,
 ) -> AffinePoint<C> {
-    let value = usize::from(code - 1);
-    let entry = entries[value / 6].rotated((value % 6) >> 1);
-    if value & 1 == 1 { entry.neg() } else { entry }
+    let entry = entries[usize::from(code.entry)].rotated(usize::from(code.rotation));
+    if code.negative { entry.neg() } else { entry }
 }
 
 pub(super) fn multiply<C: PastaCurve, E: CurveTableEntry<C>>(
     entries: &[E],
-    digits: &[u8],
+    digits: &[Digit],
 ) -> ProjectivePoint<C> {
     let mut result = ProjectivePoint::IDENTITY;
     for &code in digits.iter().rev() {
         result = result.double();
-        if code != 0 {
-            result = result.add_mixed(&digit_point(entries, code));
+        if !code.is_zero() {
+            result = result.add_mixed(&decoded_point(entries, code));
         }
     }
     result
+}
+
+pub(crate) fn digit_point<C: PastaCurve, E: CurveTableEntry<C>>(
+    entries: &[E],
+    code: u8,
+) -> AffinePoint<C> {
+    decoded_point(entries, Digit::from_code(code))
 }
