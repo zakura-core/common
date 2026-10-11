@@ -1,7 +1,7 @@
 //! Width-three `P128Pow5T3` parameters over the Pallas scalar field.
 //
 // Exported from halo2_poseidon at 80d39d9b1c41ce6c21c87f53c42deb317ce06e84.
-// tools/orchard-preparation/README.md describes the independent fixture source.
+// tests/fixtures/manifest.json records the independent fixture source.
 
 use crate::{field::Fq, fq_hex};
 

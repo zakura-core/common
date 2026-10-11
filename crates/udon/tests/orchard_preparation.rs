@@ -19,17 +19,16 @@ impl Executor for Pool {
 
 #[test]
 fn independent_legacy_key_agreement_and_effective_batches() {
-    let cases: Vec<_> =
-        include_bytes!("../../../tools/orchard-preparation/fixtures/key-agreement.bin")
-            .chunks_exact(96)
-            .map(|c| {
-                (
-                    <Fq>::from_bytes(c[..32].try_into().unwrap()).unwrap(),
-                    PallasPoint::from_bytes(c[32..64].try_into().unwrap()).unwrap(),
-                    PallasPoint::from_bytes(c[64..].try_into().unwrap()).unwrap(),
-                )
-            })
-            .collect();
+    let cases: Vec<_> = include_bytes!("fixtures/key-agreement.bin")
+        .chunks_exact(96)
+        .map(|c| {
+            (
+                <Fq>::from_bytes(c[..32].try_into().unwrap()).unwrap(),
+                PallasPoint::from_bytes(c[32..64].try_into().unwrap()).unwrap(),
+                PallasPoint::from_bytes(c[64..].try_into().unwrap()).unwrap(),
+            )
+        })
+        .collect();
     for (scalar, base, expected) in &cases {
         assert_eq!(base.mul_projective(scalar).to_point(), *expected);
         // Exercise the shared-inversion path directly against frozen legacy

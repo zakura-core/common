@@ -161,11 +161,11 @@ fn orchard_parameters_and_hashes_match_legacy_export() {
     }
     check(
         &super::PALLAS_BASE_T3,
-        include_bytes!("../../../../tools/orchard-preparation/fixtures/poseidon-fp.bin"),
+        include_bytes!("../../tests/fixtures/poseidon-fp.bin"),
     );
     check(
         &super::PALLAS_SCALAR_T3,
-        include_bytes!("../../../../tools/orchard-preparation/fixtures/poseidon-fq.bin"),
+        include_bytes!("../../tests/fixtures/poseidon-fq.bin"),
     );
 }
 
