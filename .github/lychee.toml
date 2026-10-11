@@ -12,6 +12,7 @@ exclude = [
     "^https://github.com/organizations/.*/settings",
     "^https://github.com/.*/runs/",
     "^https://eprint\\.iacr\\.org/",
+    "^https?://opensource\\.org/",
     "^https://zips\\.z\\.cash/",
     "^https://electriccoin\\.co/",
 ]

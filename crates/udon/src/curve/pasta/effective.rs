@@ -1,8 +1,246 @@
 //! Temporary Eisenstein tables and Jacobian ladders on isomorphic curves.
 
-use super::{PastaCurve, ProjectivePoint, eisenstein::EisensteinScalar};
+use super::CurveError;
+use super::{
+    PastaCurve, ProjectivePoint,
+    eisenstein::{Digit, EisensteinScalar},
+};
+use crate::exec::{Executor, TaskBudget};
 use crate::field::{CanonicalUint, PastaField};
 use core::marker::PhantomData;
+
+// 25 table fields (24 coordinates and their omitted denominator), two
+// accumulator coordinates, and five shared-inversion ladder fields per base.
+const BATCH_FIELDS: usize = 32;
+const AFFINE_MIN: usize = 32;
+
+/// Preferred field scratch for [`batch_mul_same_scalar`], in elements.
+///
+/// Also applies to [`batch_mul_same_scalar_prepared`]. The count depends only
+/// on `points`, not the scalar or task budget. It may be zero. Smaller scratch
+/// is accepted and can require additional passes or more projective work;
+/// supplying this capacity does not guarantee a particular execution strategy.
+/// Returns [`CurveError::SizeOverflow`] if the preferred field buffer exceeds
+/// Rust's slice size limits.
+pub const fn same_scalar_scratch<C: PastaCurve>(points: usize) -> Result<usize, CurveError> {
+    super::checked_count::<PastaField<C::Base>>(
+        points,
+        if points < AFFINE_MIN { 0 } else { BATCH_FIELDS },
+    )
+}
+
+/// Multiplies projective points in place by the same scalar, including identities.
+///
+/// Each output replaces the input at the same index. Empty batches are accepted;
+/// a zero scalar sets every output to identity. Inputs must satisfy
+/// [`ProjectivePoint`]'s mathematical invariants. Outputs represent the products
+/// without promising a particular Jacobian scaling. Use
+/// [`super::batch_normalize`] when affine outputs are required.
+///
+/// The operation allocates no storage of its own and does not normalize inputs.
+/// Caller-owned `field` scratch can be sized with [`same_scalar_scratch`];
+/// shorter or empty scratch is accepted. Initial scratch contents do not
+/// matter, and scratch beyond the reported capacity is untouched. Execution
+/// is variable-time with respect to both points and the scalar; use only where
+/// their timing and memory access patterns need not be secret.
+///
+/// # Panics
+///
+/// An executor panic can leave some points multiplied and others unchanged,
+/// and scratch partially written. [`Executor`] requires all scoped jobs to
+/// finish or unwind before the panic propagates. Scratch can be reused without
+/// clearing it; restore the original points before retrying the multiplication.
+///
+/// ```
+/// use zakura_udon::{
+///     curve::{batch_mul_same_scalar, same_scalar_scratch, Pallas, PallasProjective},
+///     exec::{SerialExecutor, TaskBudget},
+///     field::{Fp, Fq},
+/// };
+///
+/// let base = PallasProjective::GENERATOR;
+/// let mut points = [base, PallasProjective::IDENTITY];
+/// let mut scratch = vec![Fp::ZERO; same_scalar_scratch::<Pallas>(points.len())?];
+/// batch_mul_same_scalar(
+///     &mut points, &Fq::from_u64(2), &mut scratch,
+///     TaskBudget::SERIAL, &SerialExecutor,
+/// );
+/// assert_eq!(points, [base.double(), PallasProjective::IDENTITY]);
+/// # Ok::<(), zakura_udon::curve::CurveError>(())
+/// ```
+pub fn batch_mul_same_scalar<C: PastaCurve, X: Executor>(
+    points: &mut [ProjectivePoint<C>],
+    scalar: &PastaField<C::Scalar>,
+    field: &mut [PastaField<C::Base>],
+    budget: TaskBudget,
+    executor: &X,
+) {
+    batch_mul_same_scalar_prepared(
+        points,
+        &EisensteinScalar::new(scalar),
+        field,
+        budget,
+        executor,
+    );
+}
+
+/// Multiplies projective points in place using a prepared [`EisensteinScalar`].
+///
+/// Reuses scalar preparation across calls. Has the input, scratch, timing, and
+/// panic contracts of [`batch_mul_same_scalar`]; borrows no inputs after return.
+pub fn batch_mul_same_scalar_prepared<C: PastaCurve, X: Executor>(
+    points: &mut [ProjectivePoint<C>],
+    scalar: &EisensteinScalar<C>,
+    field: &mut [PastaField<C::Base>],
+    budget: TaskBudget,
+    executor: &X,
+) {
+    if scalar.digits().is_empty() {
+        points.fill(ProjectivePoint::IDENTITY);
+        return;
+    }
+    let batch = points.len().min(field.len() / BATCH_FIELDS);
+    if batch < AFFINE_MIN {
+        complete_batch(points, scalar, budget.get(), executor);
+    } else {
+        for points in points.chunks_mut(batch) {
+            effective_batch(
+                points,
+                scalar,
+                &mut field[..points.len() * BATCH_FIELDS],
+                budget.get(),
+                executor,
+            );
+        }
+    }
+}
+
+fn complete_batch<C: PastaCurve, X: Executor>(
+    points: &mut [ProjectivePoint<C>],
+    scalar: &EisensteinScalar<C>,
+    tasks: usize,
+    executor: &X,
+) {
+    let tasks = tasks.min(points.len().div_ceil(AFFINE_MIN).max(1));
+    if tasks > 1 {
+        let (left, right) = points.split_at_mut(points.len() / 2);
+        executor.join(
+            || complete_batch(left, scalar, tasks / 2, executor),
+            || complete_batch(right, scalar, tasks - tasks / 2, executor),
+        );
+    } else {
+        for point in points {
+            *point = multiply_prepared(point, scalar);
+        }
+    }
+}
+
+fn effective_batch<C: PastaCurve, X: Executor>(
+    points: &mut [ProjectivePoint<C>],
+    scalar: &EisensteinScalar<C>,
+    field: &mut [PastaField<C::Base>],
+    tasks: usize,
+    executor: &X,
+) {
+    let n = points.len();
+    let tasks = tasks.min((n / AFFINE_MIN).max(1));
+    if tasks > 1 {
+        let left_tasks = tasks / 2;
+        let mid = n / tasks * left_tasks;
+        let (left, right) = points.split_at_mut(mid);
+        let (a, b) = field.split_at_mut(mid * BATCH_FIELDS);
+        executor.join(
+            || effective_batch(left, scalar, a, left_tasks, executor),
+            || effective_batch(right, scalar, b, tasks - left_tasks, executor),
+        );
+        return;
+    }
+    let (tables, rest) = field.split_at_mut(n * 25);
+    for (point, table) in points.iter().zip(tables.chunks_exact_mut(25)) {
+        // Identity lanes use a valid temporary curve for the shared inversion;
+        // their zero restoration denominator reinstates identity at the end.
+        let identity = point.is_identity();
+        let base = if identity {
+            &ProjectivePoint::GENERATOR
+        } else {
+            point
+        };
+        let denominator = EffectiveTable::prepare(base, &mut table[..24]).denominator;
+        table[24] = if identity {
+            PastaField::ZERO
+        } else {
+            denominator
+        };
+    }
+    let table = |index: usize| {
+        let fields = &tables[index * 25..(index + 1) * 25];
+        EffectiveTable::<C> {
+            coordinates: &fields[..16],
+            endomorphism_x: &fields[16..24],
+            denominator: fields[24],
+        }
+    };
+    let (xs, rest) = rest.split_at_mut(n);
+    let (ys, rest) = rest.split_at_mut(n);
+    let (denom, rest) = rest.split_at_mut(n);
+    let (prefix, rest) = rest.split_at_mut(n);
+    let (hs, rest) = rest.split_at_mut(n);
+    let (rs, h2s) = rest.split_at_mut(n);
+    let (&top, digits) = scalar.digits().split_last().unwrap();
+    for i in 0..n {
+        let xy = table(i).digit(top);
+        xs[i] = xy.x;
+        ys[i] = xy.y;
+    }
+    // A lane's private coordinates lie on E_d: y² = x³ + 5*d⁶, where d is
+    // its omitted denominator. They are not AffinePoint or POD entries.
+    // The nonexceptional ladder argument at eisenstein_batch::multiply_inner
+    // survives the isomorphism; each lane may have a different nonzero d.
+    for &digit in digits.iter().rev() {
+        if digit.is_zero() {
+            for i in 0..n {
+                denom[i] = ys[i].double();
+            }
+            crate::field::invert_nonzero(denom, prefix);
+            for i in 0..n {
+                let slope = xs[i].square().triple().mul(&denom[i]);
+                let x = slope.square().sub(&xs[i].double());
+                ys[i] = slope.mul(&xs[i].sub(&x)).sub(&ys[i]);
+                xs[i] = x;
+            }
+        } else {
+            for i in 0..n {
+                let d = table(i).digit(digit);
+                hs[i] = d.x.sub(&xs[i]);
+                rs[i] = d.y.sub(&ys[i]);
+                h2s[i] = hs[i].square();
+                denom[i] = h2s[i].mul(&xs[i].double().add(&d.x)).sub(&rs[i].square());
+                xs[i] = d.x;
+            }
+            crate::field::invert_nonzero(denom, prefix);
+            for i in 0..n {
+                let a = ys[i].mul(&denom[i]);
+                let b = a.mul(&hs[i]);
+                let c = b.mul(&h2s[i]);
+                let lambda = c.sub(&rs[i]);
+                xs[i] = xs[i].add(&b.mul(&lambda).double().double());
+                ys[i] = ys[i].neg().sub(
+                    &PastaField::<C::Base>::ONE
+                        .add(&a.mul(&lambda).double().double())
+                        .mul(&lambda.add(&c)),
+                );
+            }
+        }
+    }
+    for (i, point) in points.iter_mut().enumerate() {
+        *point = ProjectivePoint {
+            x: xs[i],
+            y: ys[i],
+            z: table(i).denominator,
+            marker: PhantomData,
+        };
+    }
+}
 
 /// Multiplies a nonidentity base by a canonical scalar without inversion.
 ///
@@ -13,7 +251,16 @@ pub(super) fn multiply<C: PastaCurve>(
     base: &ProjectivePoint<C>,
     scalar: CanonicalUint,
 ) -> ProjectivePoint<C> {
-    let prepared = EisensteinScalar::<C>::from_canonical(scalar);
+    multiply_prepared(base, &EisensteinScalar::<C>::from_canonical(scalar))
+}
+
+fn multiply_prepared<C: PastaCurve>(
+    base: &ProjectivePoint<C>,
+    prepared: &EisensteinScalar<C>,
+) -> ProjectivePoint<C> {
+    if base.is_identity() {
+        return ProjectivePoint::IDENTITY;
+    }
     let Some((&top, digits)) = prepared.digits().split_last() else {
         return ProjectivePoint::IDENTITY;
     };
@@ -25,7 +272,7 @@ pub(super) fn multiply<C: PastaCurve>(
     };
     for &code in digits.iter().rev() {
         result = result.double();
-        if code != 0 {
+        if !code.is_zero() {
             result = result.add(table.digit(code));
         }
     }
@@ -224,19 +471,18 @@ impl<'a, C: PastaCurve> EffectiveTable<'a, C> {
         }
     }
 
-    fn digit(&self, code: u8) -> Coordinates<C> {
-        let value = usize::from(code - 1);
-        let index = value / 6;
+    fn digit(&self, code: Digit) -> Coordinates<C> {
+        let index = usize::from(code.entry);
         let x = self.coordinates[2 * index];
         let rotated = self.endomorphism_x[index];
         let y = self.coordinates[2 * index + 1];
         Coordinates {
-            x: match (value % 6) / 2 {
+            x: match code.rotation {
                 0 => x,
                 1 => rotated,
                 _ => x.add(&rotated).neg(),
             },
-            y: if value & 1 == 0 { y } else { y.neg() },
+            y: if code.negative { y.neg() } else { y },
         }
     }
 }

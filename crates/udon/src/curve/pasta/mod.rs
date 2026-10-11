@@ -23,12 +23,15 @@ pub(crate) mod reduce;
 mod table_entry;
 
 pub use batch::batch_normalize;
+pub use effective::{batch_mul_same_scalar, batch_mul_same_scalar_prepared, same_scalar_scratch};
 pub use eisenstein::{EisensteinScalar, EisensteinTable};
 pub use eisenstein_batch::EisensteinTableBatch;
 pub use fixed_base::{FixedBaseDescription, FixedBaseTable};
 pub use glv::glv_decompose;
 pub use parameters::{Pallas, PastaCurve, Vesta};
-pub use table_entry::{CurveTableEntry, CurveTableRequirements, PreparedAffinePoint};
+pub use table_entry::{
+    CurveTableEntry, CurveTableRequirements, PreparedAffinePoint, RotatedAffinePoint,
+};
 
 #[cfg(test)]
 pub(crate) mod test_reference;

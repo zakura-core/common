@@ -117,6 +117,58 @@ fn pallas_scalar_tables_match_the_pinned_digest() {
     assert_eq!(digest(&PALLAS_SCALAR), PALLAS_SCALAR_DIGEST);
 }
 
+#[test]
+fn orchard_parameters_and_hashes_match_legacy_export() {
+    fn check<M: PrimeModulus>(parameters: &PoseidonParameters<PastaField<M>, 3>, bytes: &[u8]) {
+        assert_eq!(
+            (parameters.width(), parameters.rate(), parameters.rounds()),
+            (3, 2, 64)
+        );
+        let (tables, hashes) = bytes.split_at(201 * 32);
+        let actual: Vec<_> = parameters
+            .round_constants
+            .iter()
+            .flatten()
+            .chain(parameters.mds.iter().flatten())
+            .flat_map(|f| f.to_bytes())
+            .collect();
+        assert_eq!(actual, tables);
+        for case in hashes.chunks_exact(96) {
+            let decode =
+                |bytes: &[u8]| PastaField::<M>::from_bytes(bytes.try_into().unwrap()).unwrap();
+            let mut state = [
+                decode(&case[..32]),
+                decode(&case[32..64]),
+                PastaField::<M>::from_u64(2).pow_u64(65),
+            ];
+            for (round, constants) in parameters.round_constants.iter().enumerate() {
+                for (value, constant) in state.iter_mut().zip(constants) {
+                    *value = value.add(constant);
+                }
+                for (column, value) in state.iter_mut().enumerate() {
+                    if !(4..60).contains(&round) || column == 0 {
+                        *value = value.square().square().mul(value);
+                    }
+                }
+                state = parameters.mds.map(|row| {
+                    row.iter()
+                        .zip(&state)
+                        .fold(PastaField::ZERO, |sum, (a, b)| sum.add(&a.mul(b)))
+                });
+            }
+            assert_eq!(state[0].to_bytes(), case[64..96]);
+        }
+    }
+    check(
+        &super::PALLAS_BASE_T3,
+        include_bytes!("../../tests/fixtures/poseidon-fp.bin"),
+    );
+    check(
+        &super::PALLAS_SCALAR_T3,
+        include_bytes!("../../tests/fixtures/poseidon-fq.bin"),
+    );
+}
+
 const PALLAS_BASE_DIGEST: u128 = 0x38e9_acb9_6cdd_7395_996b_f0e8_a8f2_cacf;
 const PALLAS_SCALAR_DIGEST: u128 = 0x2cba_8835_0552_681a_0f83_ea33_ccb4_049a;
 

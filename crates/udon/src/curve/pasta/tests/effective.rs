@@ -9,6 +9,7 @@ use crate::{
     },
     field::PrimeModulus,
 };
+use std::{vec, vec::Vec};
 
 fn ladder<C: PastaCurve>(
     base: &ProjectivePoint<C>,
@@ -37,7 +38,7 @@ fn representatives<C: PastaCurve>() {
                 };
                 let expected = signed(a).add(&signed(b).endomorphism());
                 for unit in 0..6 {
-                    let entry = table.digit((6 * index + unit + 1) as u8);
+                    let entry = table.digit(super::Digit::from_code((6 * index + unit + 1) as u8));
                     let result = ProjectivePoint {
                         x: entry.x,
                         y: entry.y,
@@ -122,7 +123,7 @@ fn exceptions<C: PastaCurve>() {
     let base = ProjectivePoint::<C>::GENERATOR.double();
     let mut storage = [PastaField::ZERO; 24];
     let table = EffectiveTable::prepare(&base, &mut storage);
-    let xy = table.digit(1);
+    let xy = table.digit(super::Digit::from_code(1));
     let p = Jacobian {
         xy,
         z: PastaField::ONE,
@@ -145,4 +146,54 @@ fn exceptions<C: PastaCurve>() {
 fn private_ladder_handles_equal_inverse_and_identity_additions() {
     exceptions::<Pallas>();
     exceptions::<Vesta>();
+}
+
+fn batches<C: PastaCurve>() {
+    use crate::exec::SerialExecutor;
+    let g = ProjectivePoint::<C>::GENERATOR;
+    for n in [32, 33, 65] {
+        let inputs: Vec<_> = (0..n)
+            .map(|i| {
+                let p = ladder(&g, &PastaField::from_u64(i as u64)).to_point();
+                scaled(&p, i as u64 + 17)
+            })
+            .collect();
+        for scalar in scalar_corpus::<C>().iter().step_by(7) {
+            let expected: Vec<_> = inputs.iter().map(|p| ladder(p, scalar)).collect();
+            let prepared = EisensteinScalar::new(scalar);
+            let mut fields = vec![PastaField::ONE; same_scalar_scratch::<C>(n).unwrap()];
+            let mut result = inputs.clone();
+            let inversions = crate::field::count_inversions(|| {
+                batch_mul_same_scalar_prepared(
+                    &mut result,
+                    &prepared,
+                    &mut fields,
+                    TaskBudget::SERIAL,
+                    &SerialExecutor,
+                );
+            });
+            assert_eq!(result, expected);
+            assert_eq!(inversions, prepared.digits().len().saturating_sub(1));
+            result.copy_from_slice(&inputs);
+            assert_eq!(
+                crate::field::count_inversions(|| {
+                    batch_mul_same_scalar_prepared(
+                        &mut result,
+                        &prepared,
+                        &mut [],
+                        TaskBudget::SERIAL,
+                        &SerialExecutor,
+                    );
+                }),
+                0
+            );
+            assert_eq!(result, expected);
+        }
+    }
+}
+
+#[test]
+fn batches_restore_scaled_inputs_and_share_only_ladder_inversions() {
+    batches::<Pallas>();
+    batches::<Vesta>();
 }

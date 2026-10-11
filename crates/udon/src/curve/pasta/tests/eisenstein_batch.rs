@@ -161,6 +161,7 @@ fn pallas() {
         .install(|| {
             batches::<Pallas, AffinePoint<Pallas>>();
             batches::<Pallas, PreparedAffinePoint<Pallas>>();
+            batches::<Pallas, crate::curve::RotatedAffinePoint<Pallas>>();
         });
 }
 #[test]
@@ -173,6 +174,7 @@ fn vesta() {
         .install(|| {
             batches::<Vesta, AffinePoint<Vesta>>();
             batches::<Vesta, PreparedAffinePoint<Vesta>>();
+            batches::<Vesta, crate::curve::RotatedAffinePoint<Vesta>>();
         });
 }
 

@@ -1,0 +1,9 @@
+{
+  "revision": "80d39d9b1c41ce6c21c87f53c42deb317ce06e84",
+  "rng": "ChaCha20Rng; seed [42; 32]",
+  "files": {
+    "key-agreement.bin": "6b0644aeda39c225d58e865f403f229ecbad564887d4b94905d07f4564c2a37b",
+    "poseidon-fp.bin": "d7f78d9f00cd447c572fe8fc9892474dc645a4ed040fb0b42bda096718480dbd",
+    "poseidon-fq.bin": "cae420c4f246ab7842e299c188b6ec5f3d473f6d7a25b89686859857543f6744"
+  }
+}
