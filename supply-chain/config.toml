@@ -301,6 +301,11 @@ criteria = "safe-to-deploy"
 version = "0.4.5"
 criteria = "safe-to-run"
 
+[[exemptions.cpubits]]
+version = "0.1.1"
+criteria = "safe-to-deploy"
+notes = "AES/FF1 backend migration; pending dependency review."
+
 [[exemptions.cpufeatures]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
@@ -725,6 +730,11 @@ criteria = "safe-to-deploy"
 [[exemptions.num-bigint]]
 version = "0.4.8"
 criteria = "safe-to-deploy"
+
+[[exemptions.num-bigint]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+notes = "AES/FF1 backend migration; pending dependency review."
 
 [[exemptions.num-complex]]
 version = "0.4.6"
@@ -1368,13 +1378,3 @@ criteria = "safe-to-deploy"
 [[exemptions.zune-inflate]]
 version = "0.2.54"
 criteria = "safe-to-deploy"
-
-[[exemptions.cpubits]]
-version = "0.1.1"
-criteria = "safe-to-deploy"
-notes = "AES/FF1 backend migration; pending dependency review."
-
-[[exemptions.num-bigint]]
-version = "0.5.1"
-criteria = "safe-to-deploy"
-notes = "AES/FF1 backend migration; pending dependency review."
