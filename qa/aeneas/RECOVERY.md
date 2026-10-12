@@ -12,9 +12,11 @@ wrapper functions. Production Rust is unchanged.
 
 The old Git hashes and per-milestone timing records are not reconstructed.
 New commits preserve the five-layer organization plus additional field paths.
-Fresh extraction, all model/proof compilations and the complete census pass. No previous successful evidence record is
-substituted for a new run. Common full inversion and the complete slice/iterator
-product-sum dispatch remain outside this proof package.
+The recovery-baseline extraction, model/proof compilations and complete census
+pass. No previous successful evidence record is substituted for that run.
+Full inversion and complete slice/iterator product-sum dispatch were outside
+the recovery baseline; the later milestones now prove those paths. See
+[CHECKLIST.md](CHECKLIST.md) for current coverage and final validation status.
 
 The recovery also restored the original 35 generated square-proof steps and its
 bit-join facts, corrected the recorded list-slice lemma arguments, and restored

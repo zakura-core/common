@@ -1,0 +1,37 @@
+[
+  {
+    "declarations": 13,
+    "exit_code": 0,
+    "formatter_dependencies": 0,
+    "census_sha256": "f1a5c63e225901c5dacfd9534962db300bf4e43137238b9555016269df564b84",
+    "log": "/private/tmp/aeneas-common-recovery-notes-20261011/LayerCensus13.log"
+  },
+  {
+    "declarations": 40,
+    "exit_code": 0,
+    "formatter_dependencies": 0,
+    "census_sha256": "188a9543e3ee7a521dc3a559bbd1912c17e8db19916ea479053f9aa737b4a30f",
+    "log": "/private/tmp/aeneas-common-recovery-notes-20261011/LayerCensus40.log"
+  },
+  {
+    "declarations": 124,
+    "exit_code": 0,
+    "formatter_dependencies": 2,
+    "census_sha256": "b47c795d398938121aa4fd70113890632bf71ffd483cc234fc8e0bb2cf6ab07a",
+    "log": "/private/tmp/aeneas-common-recovery-notes-20261011/LayerCensus124.log"
+  },
+  {
+    "declarations": 256,
+    "exit_code": 0,
+    "formatter_dependencies": 2,
+    "census_sha256": "b6b2abc99fe54c1bd78ea741e083013529dd1cbe6b45f165da6295b6761085ad",
+    "log": "/private/tmp/aeneas-common-recovery-notes-20261011/LayerCensus256.log"
+  },
+  {
+    "declarations": 529,
+    "exit_code": 0,
+    "formatter_dependencies": 26,
+    "census_sha256": "f7631e4feb783373da8b71e30054da4e3ee345c9b64886b921eced6c866fec14",
+    "log": "/private/tmp/aeneas-common-recovery-notes-20261011/LayerCensus529.log"
+  }
+]

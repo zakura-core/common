@@ -250,3 +250,99 @@ pub fn fp_is_odd(value: &Fp) -> bool {
 pub fn fq_is_odd(value: &Fq) -> bool {
     value.is_odd()
 }
+
+pub fn fp_from_wide_bytes_reduced(bytes: &[u8; 64]) -> Fp {
+    Fp::from_wide_bytes_reduced(bytes)
+}
+
+pub fn fq_from_wide_bytes_reduced(bytes: &[u8; 64]) -> Fq {
+    Fq::from_wide_bytes_reduced(bytes)
+}
+
+pub fn fp_from_bytes_reduced(bytes: &[u8]) -> Fp {
+    Fp::from_bytes_reduced(bytes)
+}
+
+pub fn fq_from_bytes_reduced(bytes: &[u8]) -> Fq {
+    Fq::from_bytes_reduced(bytes)
+}
+
+pub fn fp_sum_new() -> ProductSum<PallasBase> {
+    ProductSum::new()
+}
+
+pub fn fp_sum_add_product(sum: &mut ProductSum<PallasBase>, lhs: &Fp, rhs: &Fp) {
+    sum.add_product(lhs, rhs)
+}
+
+pub fn fp_sum_add_square(sum: &mut ProductSum<PallasBase>, value: &Fp) {
+    sum.add_square(value)
+}
+
+pub fn fp_sum_add_term(sum: &mut ProductSum<PallasBase>, term: &Fp) {
+    sum.add_term(term)
+}
+
+pub fn fp_sum_merge(sum: &mut ProductSum<PallasBase>, other: &ProductSum<PallasBase>) {
+    sum.merge(other)
+}
+
+pub fn fp_sum_finish(sum: ProductSum<PallasBase>) -> Fp {
+    sum.finish()
+}
+
+pub fn fq_sum_new() -> ProductSum<PallasScalar> {
+    ProductSum::new()
+}
+
+pub fn fq_sum_add_product(sum: &mut ProductSum<PallasScalar>, lhs: &Fq, rhs: &Fq) {
+    sum.add_product(lhs, rhs)
+}
+
+pub fn fq_sum_add_square(sum: &mut ProductSum<PallasScalar>, value: &Fq) {
+    sum.add_square(value)
+}
+
+pub fn fq_sum_add_term(sum: &mut ProductSum<PallasScalar>, term: &Fq) {
+    sum.add_term(term)
+}
+
+pub fn fq_sum_merge(sum: &mut ProductSum<PallasScalar>, other: &ProductSum<PallasScalar>) {
+    sum.merge(other)
+}
+
+pub fn fq_sum_finish(sum: ProductSum<PallasScalar>) -> Fq {
+    sum.finish()
+}
+
+pub fn fp_root_of_unity(log_size: u32) -> Option<Fp> {
+    Fp::root_of_unity(log_size)
+}
+
+pub fn fp_root_of_unity_inverse(log_size: u32) -> Option<Fp> {
+    Fp::root_of_unity_inverse(log_size)
+}
+
+pub fn fq_root_of_unity(log_size: u32) -> Option<Fq> {
+    Fq::root_of_unity(log_size)
+}
+
+pub fn fq_root_of_unity_inverse(log_size: u32) -> Option<Fq> {
+    Fq::root_of_unity_inverse(log_size)
+}
+
+pub fn fp_mul_sub_product(a: &Fp, b: &Fp, c: &Fp, d: &Fp) -> Fp {
+    a.mul_sub_product(b, c, d)
+}
+
+pub fn fp_mul_sub_double_product(a: &Fp, b: &Fp, c: &Fp, d: &Fp) -> Fp {
+    a.mul_sub_double_product(b, c, d)
+}
+
+pub fn fq_mul_sub_product(a: &Fq, b: &Fq, c: &Fq, d: &Fq) -> Fq {
+    a.mul_sub_product(b, c, d)
+}
+
+pub fn fq_mul_sub_double_product(a: &Fq, b: &Fq, c: &Fq, d: &Fq) -> Fq {
+    a.mul_sub_double_product(b, c, d)
+}

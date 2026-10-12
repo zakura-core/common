@@ -2,6 +2,7 @@
 """Extract pinned Common field arithmetic and check every catalogued Lean proof."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -9,6 +10,8 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+import threading
 import time
 import tomllib
 
@@ -185,6 +188,7 @@ def main():
     environment["CARGO_TARGET_DIR"] = str(output / "cargo-target")
     environment["RUST_MIN_STACK"] = "67108864"
     stages = []
+    result_lock = threading.RLock()
     result = {
         "status": "preparing", "proofs_checked": False,
         "common_revision": head, "production_revision": PIN["common_revision"],
@@ -195,9 +199,10 @@ def main():
     }
 
     def save():
-        temporary = output / "results.tmp"
-        temporary.write_text(json.dumps(result, indent=2) + "\n")
-        temporary.replace(output / "results.json")
+        with result_lock:
+            temporary = output / "results.tmp"
+            temporary.write_text(json.dumps(result, indent=2) + "\n")
+            temporary.replace(output / "results.json")
 
     def run(name, arguments, cwd):
         log = output / "logs" / (name + ".log")
@@ -206,9 +211,10 @@ def main():
             process = subprocess.run(arguments, cwd=cwd, env=environment,
                                      stdout=stream, stderr=subprocess.STDOUT)
         elapsed = round(time.monotonic() - started, 3)
-        stages.append({"name": name, "arguments": arguments, "cwd": str(cwd),
-                       "exit_code": process.returncode, "seconds": elapsed, "log": str(log)})
-        save()
+        with result_lock:
+            stages.append({"name": name, "arguments": arguments, "cwd": str(cwd),
+                           "exit_code": process.returncode, "seconds": elapsed, "log": str(log)})
+            save()
         print(f"{name}: exit {process.returncode} ({elapsed}s)", flush=True)
         if process.returncode:
             print("\n".join(log.read_text().splitlines()[-35:]))
@@ -566,6 +572,578 @@ def main():
             if files != {"Types.lean", "Funs.lean"}:
                 raise RuntimeError("Unexpected signed-62 external models: " + repr(files))
             model_modules.extend(["Signed62Native.Types", "Signed62Native.Funs"])
+        if CATALOG.get("fg62_roots"):
+            if CATALOG["fg62_roots"] != ["update_fg_62_var"]:
+                raise RuntimeError("Unexpected signed-62 f/g extraction scope")
+            raw = output / "llbc/fg62-raw.llbc"
+            expanded = output / "llbc/fg62-unrolled.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--start-from", "zakura_udon::field::pasta::safegcd::update_fg_62_var",
+                "--no-dedup-serialized-ast", "--rustc-arg=-Coverflow-checks=on",
+                "--rustc-arg=-Cdebug-assertions=on", "--dest-file", str(raw), "--", "--package",
+                "zakura-udon", "--lib", "--locked", *(["--offline"] if args.offline else [])]
+            run("fg62-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"]:
+                raise RuntimeError("Charon exported a partial signed-62 f/g model")
+            targets = [item["key"] for item in data["translated"]["target_information"]]
+            if targets != ["aarch64-apple-darwin"]:
+                raise RuntimeError("The f/g model requires the pinned target")
+            run("fg62-unroll", [sys.executable, str(HERE / "adapters/unroll_fg62.py"),
+                str(raw), str(expanded), "--self-test"], output)
+            run("fg62-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace", "CommonFG62",
+                "-subdir", "CommonFG62", "-split-files", "-no-progress-bar", "-abort-on-error",
+                "-dest", str(lean), str(expanded)], output)
+            model = lean / "CommonFG62"
+            if {item.name for item in model.iterdir()} != {
+                    "Types.lean", "Funs.lean", "FunsExternal_Template.lean"}:
+                raise RuntimeError("Unexpected signed-62 f/g model files")
+            template = model / "FunsExternal_Template.lean"
+            external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+            if external != {"core.ops.range.RangeInclusive.contains"}:
+                raise RuntimeError("Unexpected signed-62 f/g external models")
+            shutil.copyfile(HERE / "fg62_support/FunsExternal.lean", model / "FunsExternal.lean")
+            template.unlink()
+            model_modules.extend(["CommonFG62.Types", "CommonFG62.FunsExternal", "CommonFG62.Funs"])
+        if CATALOG.get("fg62_first_roots"):
+            if CATALOG["fg62_first_roots"] != ["update_fg_62_first"]:
+                raise RuntimeError("Unexpected first-batch f/g extraction scope")
+            raw = output / "llbc/fg62-first.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--start-from", "zakura_udon::field::pasta::safegcd::update_fg_62_first",
+                "--no-dedup-serialized-ast", "--rustc-arg=-Coverflow-checks=on",
+                "--rustc-arg=-Cdebug-assertions=on", "--dest-file", str(raw), "--", "--package",
+                "zakura-udon", "--lib", "--locked", *(["--offline"] if args.offline else [])]
+            run("fg62-first-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"]:
+                raise RuntimeError("Charon exported a partial first-batch f/g model")
+            targets = [item["key"] for item in data["translated"]["target_information"]]
+            if targets != ["aarch64-apple-darwin"]:
+                raise RuntimeError("The first-batch model requires the pinned target")
+            run("fg62-first-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace", "CommonFG62First",
+                "-subdir", "CommonFG62First", "-split-files", "-no-progress-bar", "-abort-on-error",
+                "-dest", str(lean), str(raw)], output)
+            if {item.name for item in (lean / "CommonFG62First").iterdir()} != {"Types.lean", "Funs.lean"}:
+                raise RuntimeError("Unexpected first-batch f/g external models")
+            model_modules.extend(["CommonFG62First.Types", "CommonFG62First.Funs"])
+        if CATALOG.get("divsteps_roots"):
+            if CATALOG["divsteps_roots"] != ["divsteps_62_var"]:
+                raise RuntimeError("Unexpected signed-62 divsteps extraction scope")
+            raw = output / "llbc/divsteps.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--start-from", "zakura_udon::field::pasta::safegcd::divsteps_62_var",
+                "--no-dedup-serialized-ast", "--rustc-arg=-Coverflow-checks=on",
+                "--rustc-arg=-Cdebug-assertions=on", "--dest-file", str(raw), "--", "--package",
+                "zakura-udon", "--lib", "--locked", *(["--offline"] if args.offline else [])]
+            run("divsteps-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"]:
+                raise RuntimeError("Charon exported a partial signed-62 divsteps model")
+            targets = [item["key"] for item in data["translated"]["target_information"]]
+            if targets != ["aarch64-apple-darwin"]:
+                raise RuntimeError("The signed-62 divsteps model requires the pinned target")
+            run("divsteps-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace", "CommonDivsteps",
+                "-subdir", "CommonDivsteps", "-split-files", "-no-progress-bar", "-abort-on-error",
+                "-dest", str(lean), str(raw)], output)
+            model = lean / "CommonDivsteps"
+            if {item.name for item in model.iterdir()} != {
+                    "Types.lean", "Funs.lean", "FunsExternal_Template.lean"}:
+                raise RuntimeError("Unexpected signed-62 divsteps model files")
+            template = model / "FunsExternal_Template.lean"
+            external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+            if external != {"I64.Insts.CoreConvertFromU32.from", "core.num.I64.unsigned_abs",
+                    "core.num.U64.trailing_zeros", "core.num.U64.wrapping_neg",
+                    "core.ops.range.RangeInclusive.contains"}:
+                raise RuntimeError("Unexpected signed-62 divsteps external models")
+            shutil.copyfile(HERE / "divsteps_support/FunsExternal.lean", model / "FunsExternal.lean")
+            template.unlink()
+            model_modules.extend(["CommonDivsteps.Types", "CommonDivsteps.FunsExternal", "CommonDivsteps.Funs"])
+        if CATALOG.get("inv_helper_roots"):
+            roots = CATALOG["inv_helper_roots"]
+            if roots != ["update_de_62", "update_de_62_first", "update_d_only_62", "normalize_62",
+                    "is_zero", "shrink_len", "checks::mul_cmp_62", "checks::assert_coeff_range",
+                    "checks::assert_fg_range"]:
+                raise RuntimeError("Unexpected signed-62 inversion-helper extraction scope")
+            raw = output / "llbc/inv-helpers.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*"]
+            for root in roots:
+                command.extend(["--start-from", "zakura_udon::field::pasta::safegcd::" + root])
+            command.extend(["--no-dedup-serialized-ast", "--rustc-arg=-Coverflow-checks=on",
+                "--rustc-arg=-Cdebug-assertions=on", "--dest-file", str(raw), "--", "--package",
+                "zakura-udon", "--lib", "--locked", *(["--offline"] if args.offline else [])])
+            run("inv-helpers-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"]:
+                raise RuntimeError("Charon exported a partial signed-62 inversion-helper model")
+            targets = [item["key"] for item in data["translated"]["target_information"]]
+            if targets != ["aarch64-apple-darwin"]:
+                raise RuntimeError("The signed-62 inversion helpers require the pinned target")
+            run("inv-helpers-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace", "CommonInvHelpers",
+                "-subdir", "CommonInvHelpers", "-split-files", "-no-progress-bar", "-abort-on-error",
+                "-dest", str(lean), str(raw)], output)
+            model = lean / "CommonInvHelpers"
+            if {item.name for item in model.iterdir()} != {
+                    "Types.lean", "Funs.lean", "FunsExternal_Template.lean"}:
+                raise RuntimeError("Unexpected signed-62 inversion-helper model files")
+            template = model / "FunsExternal_Template.lean"
+            external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+            if external != {"core.cmp.Ordering.Insts.CoreCmpPartialEqOrdering.eq",
+                    "Shared0T.Insts.CoreFmtDisplay.fmt", "Str.Insts.CoreFmtDisplay.fmt",
+                    "I64.Insts.CoreOpsBitBitOrAssignShared0I64.bitor_assign", "core.num.I64.wrapping_neg"}:
+                raise RuntimeError("Unexpected signed-62 inversion-helper external models")
+            shutil.copyfile(HERE / "inv_helpers_support/FunsExternal.lean", model / "FunsExternal.lean")
+            template.unlink()
+            model_modules.extend(["CommonInvHelpers.Types", "CommonInvHelpers.FunsExternal", "CommonInvHelpers.Funs"])
+        if CATALOG.get("inversion_roots"):
+            roots = CATALOG["inversion_roots"]
+            if roots != ["invert_counted"]:
+                raise RuntimeError("Unexpected signed-62 inversion-helper extraction scope")
+            raw = output / "llbc/inversion-raw.llbc"
+            expanded = output / "llbc/inversion-unrolled.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*"]
+            for root in roots:
+                command.extend(["--start-from", "zakura_udon::field::pasta::safegcd::" + root])
+            command.extend(["--no-dedup-serialized-ast", "--rustc-arg=-Coverflow-checks=on",
+                "--rustc-arg=-Cdebug-assertions=on", "--dest-file", str(raw), "--", "--package",
+                "zakura-udon", "--lib", "--locked", *(["--offline"] if args.offline else [])])
+            run("inversion-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"]:
+                raise RuntimeError("Charon exported a partial signed-62 inversion-helper model")
+            targets = [item["key"] for item in data["translated"]["target_information"]]
+            if targets != ["aarch64-apple-darwin"]:
+                raise RuntimeError("The signed-62 inversion helpers require the pinned target")
+            run("inversion-unroll", [sys.executable, str(HERE / "adapters/unroll_fg62.py"),
+                str(raw), str(expanded), "--self-test"], output)
+            run("inversion-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace", "CommonInversion",
+                "-subdir", "CommonInversion", "-split-files", "-no-progress-bar", "-abort-on-error",
+                "-dest", str(lean), str(expanded)], output)
+            model = lean / "CommonInversion"
+            if {item.name for item in model.iterdir()} != {
+                    "Types.lean", "Funs.lean", "FunsExternal_Template.lean"}:
+                raise RuntimeError("Unexpected signed-62 inversion-helper model files")
+            template = model / "FunsExternal_Template.lean"
+            external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+            if external != {"core.cmp.Ordering.Insts.CoreCmpPartialEqOrdering.eq",
+                    "Shared0T.Insts.CoreFmtDisplay.fmt", "Str.Insts.CoreFmtDisplay.fmt",
+                    "I64.Insts.CoreOpsBitBitOrAssignShared0I64.bitor_assign", "core.num.I64.wrapping_neg",
+                    "I64.Insts.CoreConvertFromU32.from", "core.num.I64.unsigned_abs",
+                    "core.num.U64.trailing_zeros", "core.num.U64.wrapping_neg",
+                    "core.ops.range.RangeInclusive.contains"}:
+                raise RuntimeError("Unexpected signed-62 inversion-helper external models")
+            shutil.copyfile(HERE / "inversion_support/FunsExternal.lean", model / "FunsExternal.lean")
+            template.unlink()
+            model_modules.extend(["CommonInversion.Types", "CommonInversion.FunsExternal", "CommonInversion.Funs"])
+
+        if CATALOG.get("public_inversion_roots"):
+            roots = CATALOG["public_inversion_roots"]
+            if roots != ["zakura_udon::field::pasta::PastaField::invert"]:
+                raise RuntimeError("Unexpected public inversion extraction scope")
+            raw = output / "llbc/public-inversion-raw.llbc"
+            expanded = output / "llbc/public-inversion-unrolled.llbc"
+            projected = output / "llbc/public-inversion-projected.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*"]
+            for root in roots:
+                command.extend(["--start-from", root])
+            command.extend(["--no-dedup-serialized-ast", "--rustc-arg=-Coverflow-checks=on",
+                "--rustc-arg=-Cdebug-assertions=on", "--dest-file", str(raw), "--", "--package",
+                "zakura-udon", "--lib", "--locked", *(["--offline"] if args.offline else [])])
+            run("public-inversion-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"]:
+                raise RuntimeError("Charon exported a partial public inversion model")
+            if [item["key"] for item in data["translated"]["target_information"]] != ["aarch64-apple-darwin"]:
+                raise RuntimeError("Public inversion requires the pinned extraction target")
+            run("public-inversion-unroll", [sys.executable, str(HERE / "adapters/unroll_fg62.py"),
+                str(raw), str(expanded), "--self-test"], output)
+            run("public-inversion-project", [sys.executable, str(HERE / "adapters/project_parameters.py"),
+                str(expanded), str(projected), "--generic-dictionary"], output)
+            run("public-inversion-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace",
+                "CommonPublicInversion", "-subdir", "CommonPublicInversion", "-split-files", "-no-progress-bar",
+                "-abort-on-error", "-dest", str(lean), str(projected)], output)
+            model = lean / "CommonPublicInversion"
+            if {item.name for item in model.iterdir()} != {
+                    "Types.lean", "Funs.lean", "FunsExternal_Template.lean"}:
+                raise RuntimeError("Unexpected public inversion model files")
+            template = model / "FunsExternal_Template.lean"
+            external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+            if external != {"core.cmp.Ordering.Insts.CoreCmpPartialEqOrdering.eq", "core.cmp.Ordering.is_lt",
+                    "Shared0T.Insts.CoreFmtDisplay.fmt", "Str.Insts.CoreFmtDisplay.fmt",
+                    "I64.Insts.CoreOpsBitBitOrAssignShared0I64.bitor_assign", "core.num.I64.wrapping_neg",
+                    "I64.Insts.CoreConvertFromU32.from", "core.num.I64.unsigned_abs",
+                    "core.num.U64.trailing_zeros", "core.num.U64.wrapping_neg",
+                    "core.ops.range.RangeInclusive.contains", "core.option.Option.map",
+                    "core.option.Option.Insts.CoreOpsTry_traitTry.branch",
+                    "core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionNever.from_residual"}:
+                raise RuntimeError("Unexpected public inversion external models")
+            shutil.copyfile(HERE / "public_inversion_support/FunsExternal.lean", model / "FunsExternal.lean")
+            template.unlink()
+            model_modules.extend(["CommonPublicInversion.Types", "CommonPublicInversion.FunsExternal",
+                                  "CommonPublicInversion.Funs"])
+
+        if CATALOG.get("product_short_roots"):
+            roots = CATALOG["product_short_roots"]
+            if roots != ["zakura_udon::field::pasta::PastaField::sum_of_products_slice"]:
+                raise RuntimeError("Unexpected short product-sum extraction scope")
+            raw = output / "llbc/product-short-raw.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--remove-unused-clauses", "--start-from", roots[0], "--no-dedup-serialized-ast",
+                "--rustc-arg=-Coverflow-checks=on", "--rustc-arg=-Cdebug-assertions=on",
+                "--dest-file", str(raw), "--", "--package", "zakura-udon", "--lib", "--locked",
+                *(["--offline"] if args.offline else [])]
+            run("product-short-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"] or [item["key"] for item in
+                    data["translated"]["target_information"]] != ["aarch64-apple-darwin"]:
+                raise RuntimeError("Partial or wrong-target short product model")
+            previous = raw
+            for name, flags in [("project_parameters", ["--generic-dictionary"]),
+                                ("project_product_short", ["--self-test"]),
+                                ("unroll_products", ["--self-test", "--short-only"])]:
+                adapted = output / "llbc" / ("product-short-" + name + ".llbc")
+                run("product-short-" + name, [sys.executable, str(HERE / "adapters" / (name + ".py")),
+                    str(previous), str(adapted), *flags], output)
+                previous = adapted
+            run("product-short-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace",
+                "CommonProductShort", "-subdir", "CommonProductShort", "-split-files",
+                "-filter-trait-methods", "-no-progress-bar", "-abort-on-error", "-sequential",
+                "-dest", str(lean), str(previous)], output)
+            expected = {
+                "TypesExternal_Template.lean": {"core.array.iter.IntoIter", "core.slice.iter.Chunks"},
+                "FunsExternal_Template.lean": {
+                    "Array.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter",
+                    "MutASlice.Insts.CoreIterTraitsCollectIntoIteratorMutATIterMut.into_iter",
+                    "core.array.iter.IntoIter.Insts.CoreIterTraitsIteratorIterator.next",
+                    "core.cmp.Ordering.is_lt", "core.iter.traits.iterator.Iterator.by_ref.default",
+                    "core.num.U64.carrying_add", "core.slice.Slice.as_chunks"},
+            }
+            model = lean / "CommonProductShort"
+            if {item.name for item in model.iterdir()} != {"Types.lean", "Funs.lean", *expected}:
+                raise RuntimeError("Unexpected short product model files")
+            for name, declarations in expected.items():
+                template = model / name
+                external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+                if external != declarations:
+                    raise RuntimeError("Unexpected short product external models: " + name)
+                destination = name.replace("_Template", "")
+                shutil.copyfile(HERE / "product_short_support" / destination, model / destination)
+                template.unlink()
+            run("product-short-iterator-model", [sys.executable,
+                str(HERE / "adapters/model_mutable_iterators.py"), str(model / "Funs.lean"),
+                "--expected", "2", "--expected-next", "10"], output)
+            model_modules.extend(["CommonProductShort.TypesExternal", "CommonProductShort.Types",
+                                  "CommonProductShort.FunsExternal", "CommonProductShort.Funs"])
+
+        if CATALOG.get("product_serial_roots"):
+            roots = CATALOG["product_serial_roots"]
+            if roots != ["zakura_udon::field::pasta::PastaField::sum_of_products_slice"]:
+                raise RuntimeError("Unexpected serial product-sum extraction scope")
+            raw = output / "llbc/product-serial-raw.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--remove-unused-clauses", "--start-from", roots[0], "--no-dedup-serialized-ast",
+                "--rustc-arg=-Coverflow-checks=on", "--rustc-arg=-Cdebug-assertions=on",
+                "--dest-file", str(raw), "--", "--package", "zakura-udon", "--lib", "--locked",
+                "--target", "x86_64-apple-darwin", *(["--offline"] if args.offline else [])]
+            run("product-serial-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"] or [item["key"] for item in
+                    data["translated"]["target_information"]] != ["x86_64-apple-darwin"]:
+                raise RuntimeError("Partial or wrong-target serial product model")
+            previous = raw
+            for name, flags in [("project_parameters", ["--generic-dictionary"]),
+                                ("project_product_serial", ["--self-test"])]:
+                adapted = output / "llbc" / ("product-serial-" + name + ".llbc")
+                run("product-serial-" + name, [sys.executable, str(HERE / "adapters" / (name + ".py")),
+                    str(previous), str(adapted), *flags], output)
+                previous = adapted
+            run("product-serial-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace",
+                "CommonProductSerial", "-subdir", "CommonProductSerial", "-split-files",
+                "-filter-trait-methods", "-no-progress-bar", "-abort-on-error", "-sequential",
+                "-dest", str(lean), str(previous)], output)
+            expected = {
+                "TypesExternal_Template.lean": {"core.array.iter.IntoIter"},
+                "FunsExternal_Template.lean": {
+                    "Array.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter",
+                    "MutASlice.Insts.CoreIterTraitsCollectIntoIteratorMutATIterMut.into_iter",
+                    "core.array.iter.IntoIter.Insts.CoreIterTraitsIteratorIterator.next",
+                    "core.cmp.Ordering.is_lt", "core.iter.traits.iterator.Iterator.by_ref.default",
+                    "core.num.U64.carrying_add"},
+            }
+            model = lean / "CommonProductSerial"
+            if {item.name for item in model.iterdir()} != {"Types.lean", "Funs.lean", *expected}:
+                raise RuntimeError("Unexpected serial product model files")
+            for name, declarations in expected.items():
+                template = model / name
+                external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+                if external != declarations:
+                    raise RuntimeError("Unexpected serial product external models: " + name)
+                destination = name.replace("_Template", "")
+                shutil.copyfile(HERE / "product_serial_support" / destination, model / destination)
+                template.unlink()
+            run("product-serial-iterator-model", [sys.executable,
+                str(HERE / "adapters/model_mutable_iterators.py"), str(model / "Funs.lean"),
+                "--expected", "1", "--expected-next", "1"], output)
+            model_modules.extend(["CommonProductSerial.TypesExternal", "CommonProductSerial.Types",
+                                  "CommonProductSerial.FunsExternal", "CommonProductSerial.Funs"])
+
+        if CATALOG.get("product_portable_roots"):
+            roots = CATALOG["product_portable_roots"]
+            if roots != ["zakura_udon::field::pasta::PastaField::sum_of_products_slice"]:
+                raise RuntimeError("Unexpected portable product-sum extraction scope")
+            raw = output / "llbc/product-portable-raw.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--remove-unused-clauses", "--start-from", roots[0], "--no-dedup-serialized-ast",
+                "--rustc-arg=-Coverflow-checks=on", "--rustc-arg=-Cdebug-assertions=on",
+                "--dest-file", str(raw), "--", "--package", "zakura-udon", "--lib", "--locked",
+                "--target", "x86_64-apple-darwin", *(["--offline"] if args.offline else [])]
+            run("product-portable-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"] or [item["key"] for item in
+                    data["translated"]["target_information"]] != ["x86_64-apple-darwin"]:
+                raise RuntimeError("Partial or wrong-target portable product model")
+            previous = raw
+            for name, flags in [("project_parameters", ["--generic-dictionary"]),
+                                ("unroll_products", ["--self-test"]),
+                                ("model_product_chunk_borrows", ["--self-test"])]:
+                adapted = output / "llbc" / ("product-portable-" + name + ".llbc")
+                run("product-portable-" + name, [sys.executable, str(HERE / "adapters" / (name + ".py")),
+                    str(previous), str(adapted), *flags], output)
+                previous = adapted
+            run("product-portable-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace",
+                "CommonProductsPortable", "-subdir", "CommonProductsPortable", "-split-files",
+                "-filter-trait-methods", "-no-progress-bar", "-abort-on-error", "-sequential",
+                "-dest", str(lean), str(previous)], output)
+            expected = {
+                "TypesExternal_Template.lean": {"core.array.iter.IntoIter"},
+                "FunsExternal_Template.lean": {
+                    "Array.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter",
+                    "MutASlice.Insts.CoreIterTraitsCollectIntoIteratorMutATIterMut.into_iter",
+                    "core.array.iter.IntoIter.Insts.CoreIterTraitsIteratorIterator.next",
+                    "core.cmp.Ordering.is_lt", "core.iter.traits.iterator.Iterator.by_ref.default",
+                    "core.num.U64.carrying_add", "core.array.from_fn"},
+            }
+            model = lean / "CommonProductsPortable"
+            if {item.name for item in model.iterdir()} != {"Types.lean", "Funs.lean", *expected}:
+                raise RuntimeError("Unexpected portable product model files")
+            for name, declarations in expected.items():
+                template = model / name
+                external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+                if external != declarations:
+                    raise RuntimeError("Unexpected portable product external models: " + name)
+                destination = name.replace("_Template", "")
+                shutil.copyfile(HERE / "product_portable_support" / destination, model / destination)
+                template.unlink()
+            run("product-portable-iterator-model", [sys.executable,
+                str(HERE / "adapters/model_mutable_iterators.py"), str(model / "Funs.lean"),
+                "--expected", "4", "--expected-next", "24"], output)
+            model_modules.extend(["CommonProductsPortable.TypesExternal", "CommonProductsPortable.Types",
+                                  "CommonProductsPortable.FunsExternal", "CommonProductsPortable.Funs"])
+
+        if CATALOG.get("product_pairs_roots"):
+            roots = CATALOG["product_pairs_roots"]
+            if roots != ["zakura_udon::field::pasta::PastaField::sum_of_product_pairs",
+                         "zakura_udon::field::pasta::PastaField::sum_of_products",
+                         "zakura_udon::field::pasta::products::dot"]:
+                raise RuntimeError("Unexpected portable product-sum extraction scope")
+            raw = output / "llbc/product-pairs-raw.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--remove-unused-clauses",
+                *[arg for root in roots for arg in ("--start-from", root)], "--no-dedup-serialized-ast",
+                "--rustc-arg=-Coverflow-checks=on", "--rustc-arg=-Cdebug-assertions=on",
+                "--dest-file", str(raw), "--", "--package", "zakura-udon", "--lib", "--locked",
+                "--target", "x86_64-apple-darwin", *(["--offline"] if args.offline else [])]
+            run("product-pairs-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"] or [item["key"] for item in
+                    data["translated"]["target_information"]] != ["x86_64-apple-darwin"]:
+                raise RuntimeError("Partial or wrong-target portable product model")
+            previous = raw
+            for name, flags in [("project_parameters", ["--generic-dictionary"]),
+                                ("unroll_products", ["--self-test"]),
+                                ("model_product_chunk_borrows", ["--self-test"]),
+                                ("project_pair_iterator", ["--self-test"])]:
+                adapted = output / "llbc" / ("product-pairs-" + name + ".llbc")
+                run("product-pairs-" + name, [sys.executable, str(HERE / "adapters" / (name + ".py")),
+                    str(previous), str(adapted), *flags], output)
+                previous = adapted
+            run("product-pairs-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace",
+                "CommonProductPairs", "-subdir", "CommonProductPairs", "-split-files",
+                "-filter-trait-methods", "-no-progress-bar", "-abort-on-error", "-sequential",
+                "-dest", str(lean), str(previous)], output)
+            expected = {
+                "TypesExternal_Template.lean": {"core.array.iter.IntoIter"},
+                "FunsExternal_Template.lean": {
+                    "Array.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter",
+                    "MutASlice.Insts.CoreIterTraitsCollectIntoIteratorMutATIterMut.into_iter",
+                    "core.array.iter.IntoIter.Insts.CoreIterTraitsIteratorIterator.next",
+                    "core.cmp.Ordering.is_lt", "core.iter.traits.iterator.Iterator.by_ref.default",
+                    "core.num.U64.carrying_add", "core.array.from_fn"},
+            }
+            model = lean / "CommonProductPairs"
+            if {item.name for item in model.iterdir()} != {"Types.lean", "Funs.lean", *expected}:
+                raise RuntimeError("Unexpected portable product model files")
+            for name, declarations in expected.items():
+                template = model / name
+                external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+                if external != declarations:
+                    raise RuntimeError("Unexpected portable product external models: " + name)
+                destination = name.replace("_Template", "")
+                shutil.copyfile(HERE / "product_pairs_support" / destination, model / destination)
+                template.unlink()
+            run("product-pairs-type-identity", [sys.executable,
+                str(HERE / "adapters/share_product_types.py"), str(model / "Types.lean"),
+                str(lean / "CommonProductsPortable/Types.lean"), "--self-test"], output)
+            run("product-pairs-iterator-model", [sys.executable,
+                str(HERE / "adapters/model_mutable_iterators.py"), str(model / "Funs.lean"),
+                "--expected", "4", "--expected-next", "24"], output)
+            model_modules.extend(["CommonProductPairs.TypesExternal", "CommonProductPairs.Types",
+                                  "CommonProductPairs.FunsExternal", "CommonProductPairs.Funs"])
+
+        if CATALOG.get("product_dot_iter_roots"):
+            roots = CATALOG["product_dot_iter_roots"]
+            if roots != ["zakura_udon::field::pasta::products::dot_iter"]:
+                raise RuntimeError("Unexpected portable product-sum extraction scope")
+            raw = output / "llbc/product-dot-iter-raw.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--remove-unused-clauses",
+                *[arg for root in roots for arg in ("--start-from", root)], "--no-dedup-serialized-ast",
+                "--rustc-arg=-Coverflow-checks=on", "--rustc-arg=-Cdebug-assertions=on",
+                "--dest-file", str(raw), "--", "--package", "zakura-udon", "--lib", "--locked",
+                "--target", "x86_64-apple-darwin", *(["--offline"] if args.offline else [])]
+            run("product-dot-iter-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"] or [item["key"] for item in
+                    data["translated"]["target_information"]] != ["x86_64-apple-darwin"]:
+                raise RuntimeError("Partial or wrong-target portable product model")
+            previous = raw
+            for name, flags in [("project_parameters", ["--generic-dictionary"]),
+                                ("unroll_products", ["--self-test"]),
+                                ("model_product_chunk_borrows", ["--self-test"]),
+                                ("project_pair_iterator", ["--self-test"]),
+                                ("project_dot_iterator_items", ["--self-test"])]:
+                adapted = output / "llbc" / ("product-dot-iter-" + name + ".llbc")
+                run("product-dot-iter-" + name, [sys.executable, str(HERE / "adapters" / (name + ".py")),
+                    str(previous), str(adapted), *flags], output)
+                previous = adapted
+            run("product-dot-iter-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace",
+                "CommonProductDotIter", "-subdir", "CommonProductDotIter", "-split-files",
+                "-filter-trait-methods", "-no-progress-bar", "-abort-on-error", "-sequential",
+                "-dest", str(lean), str(previous)], output)
+            expected = {
+                "TypesExternal_Template.lean": {"core.array.iter.IntoIter"},
+                "FunsExternal_Template.lean": {
+                    "Array.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter",
+                    "MutASlice.Insts.CoreIterTraitsCollectIntoIteratorMutATIterMut.into_iter",
+                    "core.array.iter.IntoIter.Insts.CoreIterTraitsIteratorIterator.next",
+                    "core.cmp.Ordering.is_lt", "core.iter.traits.iterator.Iterator.by_ref.default",
+                    "core.num.U64.carrying_add", "core.array.from_fn",
+                    "core.iter.traits.exact_size.ExactSizeIterator.len.default"},
+            }
+            model = lean / "CommonProductDotIter"
+            if {item.name for item in model.iterdir()} != {"Types.lean", "Funs.lean", *expected}:
+                raise RuntimeError("Unexpected portable product model files")
+            for name, declarations in expected.items():
+                template = model / name
+                external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+                if external != declarations:
+                    raise RuntimeError("Unexpected portable product external models: " + name)
+                destination = name.replace("_Template", "")
+                shutil.copyfile(HERE / "product_dot_iter_support" / destination, model / destination)
+                template.unlink()
+            run("product-dot-iter-type-identity", [sys.executable,
+                str(HERE / "adapters/share_product_types.py"), str(model / "Types.lean"),
+                str(lean / "CommonProductsPortable/Types.lean"),
+                "--namespace", "CommonProductDotIter", "--self-test"], output)
+            run("product-dot-iter-operations", [sys.executable,
+                str(HERE / "adapters/project_dot_iterator_operations.py"), str(model / "Funs.lean"),
+                "--self-test"], output)
+            run("product-dot-iter-iterator-model", [sys.executable,
+                str(HERE / "adapters/model_mutable_iterators.py"), str(model / "Funs.lean"),
+                "--expected", "4", "--expected-next", "24"], output)
+            model_modules.extend(["CommonProductDotIter.TypesExternal", "CommonProductDotIter.Types",
+                                  "CommonProductDotIter.FunsExternal", "CommonProductDotIter.Funs"])
+
+        if CATALOG.get("product_aarch64_roots"):
+            roots = CATALOG["product_aarch64_roots"]
+            if roots != ["zakura_udon::field::pasta::PastaField::sum_of_products_slice"]:
+                raise RuntimeError("Unexpected aarch64 product-sum extraction scope")
+            raw = output / "llbc/product-aarch64-raw.llbc"
+            command = [str(tools / "charon"), "cargo", "--preset=aeneas", "--sysroot=default",
+                "--include", "zakura_udon", "--remove-adt-clauses", "--lift-associated-types=*",
+                "--remove-unused-clauses", "--start-from", roots[0], "--no-dedup-serialized-ast",
+                "--rustc-arg=-Coverflow-checks=on", "--rustc-arg=-Cdebug-assertions=on",
+                "--dest-file", str(raw), "--", "--package", "zakura-udon", "--lib", "--locked",
+                "--target", "aarch64-apple-darwin", *(["--offline"] if args.offline else [])]
+            run("product-aarch64-charon", ["/bin/zsh", "-c", 'ulimit -s 65520\nexec "$@"',
+                "charon-main-stack", *command], repo)
+            data = json.loads(raw.read_text())
+            if data["has_errors"] or [item["key"] for item in
+                    data["translated"]["target_information"]] != ["aarch64-apple-darwin"]:
+                raise RuntimeError("Partial or wrong-target aarch64 product model")
+            previous = raw
+            for name, flags in [("project_parameters", ["--generic-dictionary"]),
+                                ("unroll_products", ["--self-test"]),
+                                ("prune_aarch64_product_lanes", ["--self-test"]),
+                                ("outline_product_blocks", ["--self-test"])]:
+                adapted = output / "llbc" / ("product-aarch64-" + name + ".llbc")
+                run("product-aarch64-" + name, [sys.executable, str(HERE / "adapters" / (name + ".py")),
+                    str(previous), str(adapted), *flags], output)
+                previous = adapted
+            run("product-aarch64-aeneas", [str(tools / "aeneas"), "-backend", "lean", "-namespace",
+                "CommonProductsAarch64", "-subdir", "CommonProductsAarch64", "-split-files",
+                "-filter-trait-methods", "-no-progress-bar", "-abort-on-error", "-sequential",
+                "-dest", str(lean), str(previous)], output)
+            expected = {
+                "TypesExternal_Template.lean": {"core.array.iter.IntoIter", "core.slice.iter.Chunks"},
+                "FunsExternal_Template.lean": {
+                    "Array.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter",
+                    "MutASlice.Insts.CoreIterTraitsCollectIntoIteratorMutATIterMut.into_iter",
+                    "core.array.iter.IntoIter.Insts.CoreIterTraitsIteratorIterator.next",
+                    "core.cmp.Ordering.is_lt", "core.iter.traits.iterator.Iterator.by_ref.default",
+                    "core.num.U64.carrying_add", "core.slice.Slice.as_chunks", "core.slice.Slice.chunks",
+                    "core.slice.iter.Chunks.Insts.CoreIterTraitsIteratorIteratorSharedASlice.next"},
+            }
+            model = lean / "CommonProductsAarch64"
+            if {item.name for item in model.iterdir()} != {"Types.lean", "Funs.lean", *expected}:
+                raise RuntimeError("Unexpected aarch64 product model files")
+            for name, declarations in expected.items():
+                template = model / name
+                external = set(re.findall(r"\baxiom\s+([A-Za-z0-9_.]+)", template.read_text()))
+                if external != declarations:
+                    raise RuntimeError("Unexpected aarch64 product external models: " + name)
+                destination = name.replace("_Template", "")
+                shutil.copyfile(HERE / "product_aarch64_support" / destination, model / destination)
+                template.unlink()
+            run("product-aarch64-iterator-model", [sys.executable,
+                str(HERE / "adapters/model_mutable_iterators.py"), str(model / "Funs.lean"),
+                "--expected", "3", "--expected-next", "19"], output)
+            model_modules.extend(["CommonProductsAarch64.TypesExternal", "CommonProductsAarch64.Types",
+                                  "CommonProductsAarch64.FunsExternal", "CommonProductsAarch64.Funs"])
+
+
         if CATALOG.get("comba_helper_roots"):
             roots = CATALOG["comba_helper_roots"]
             if roots != ["add_product", "start_column", "start_columns", "merge_columns"]:
@@ -609,6 +1187,30 @@ def main():
                 template.unlink()
             model_modules.extend(["CommonComba.TypesExternal", "CommonComba.Types",
                                   "CommonComba.FunsExternal", "CommonComba.Funs"])
+        certificate_modules = []
+        if CATALOG.get("safegcd_certificate"):
+            configuration = CATALOG["safegcd_certificate"]
+            if configuration != {"bound_bits": 255, "precision": 6, "last_step": 732,
+                                  "compile_before": "Divsteps255Convergence"}:
+                raise RuntimeError("Unexpected safegcd certificate configuration")
+            if configuration["compile_before"] not in CATALOG["modules"]:
+                raise RuntimeError("Missing certificate convergence proof")
+            run("safegcd-certificate", [sys.executable, str(HERE / "safegcd_certificate.py"),
+                "--output", str(lean)], output)
+            certificate = json.loads((lean / "safegcd-certificate.json").read_text())
+            if (certificate["kind"], certificate["bound"], certificate["precision"], certificate["last_step"]) != (
+                    "untrusted-generated-hulls", str(2 ** 255), 6, 732):
+                raise RuntimeError("Unexpected generated safegcd certificate")
+            certificate_modules = ["Divsteps255Data.Stage" + str(n).zfill(3) for n in range(733)] + \
+                ["Divsteps255Checks.Stage" + str(n).zfill(3) for n in range(1, 733)] + \
+                ["Divsteps255Data", "Divsteps255Checks"]
+            expected_sources = {m.replace(".", "/") + ".lean" for m in certificate_modules}
+            if set(certificate["modules"]) != expected_sources:
+                raise RuntimeError("Incomplete safegcd certificate module inventory")
+            for relative, expected in certificate["modules"].items():
+                if digest(lean / relative) != expected:
+                    raise RuntimeError("Changed generated certificate source: " + relative)
+            result["safegcd_certificate"] = certificate
         for module in CATALOG["modules"]:
             shutil.copyfile(HERE / "proofs" / (module + ".lean"), lean / (module + ".lean"))
         for source in lean.rglob("*.lean"):
@@ -618,22 +1220,43 @@ def main():
         (lean / "lakefile.lean").write_text(
             "import Lake\nopen Lake DSL\nrequire aeneas from " + json.dumps(str(backend)) +
             "\npackage commonArithmetic\n" + "".join(
-                "@[default_target] lean_lib " + module + "\n" for module in CATALOG["modules"]))
+                "@[default_target] lean_lib " + module + "\n" for module in
+                [*(["Divsteps255Data", "Divsteps255Checks"] if certificate_modules else []), *CATALOG["modules"]]))
         (lean / ".lake").mkdir()
         (lean / ".lake/packages").symlink_to(backend / ".lake/packages", target_is_directory=True)
         result["model_hashes"] = {str(p.relative_to(lean)): digest(p)
-                                  for p in sorted(lean.rglob("*.lean")) if p.parent != lean}
+                                  for p in sorted(lean.rglob("*.lean")) if p.parent != lean
+                                  and p.relative_to(lean).parts[0] not in {"Divsteps255Data", "Divsteps255Checks"}}
         result["proof_source_hashes"] = {m: digest(lean / (m + ".lean")) for m in CATALOG["modules"]}
         if args.prepare_only:
             result["status"] = "prepared"
             save()
             return
-        for module in [*model_modules, *CATALOG["modules"]]:
+        def compile_module(module):
             relative = module.replace(".", "/")
             olean = lean / ".lake/build/lib/lean" / (relative + ".olean")
             olean.parent.mkdir(parents=True, exist_ok=True)
             run("lean-" + module, ["lake", "env", "lean", "-j2", relative + ".lean",
                                    "-o", str(olean)], lean)
+        for module in [*model_modules, *CATALOG["modules"]]:
+            if certificate_modules and module == CATALOG["safegcd_certificate"]["compile_before"]:
+                # Each data module is independent. Each check imports only its
+                # two data modules and the already compiled soundness lemmas.
+                # Finish each family before proceeding to the aggregation roots.
+                for family in ["Divsteps255Data.", "Divsteps255Checks."]:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        futures = [pool.submit(compile_module, m) for m in certificate_modules
+                                   if m.startswith(family)]
+                        try:
+                            for future in as_completed(futures):
+                                future.result()
+                        except BaseException:
+                            for future in futures:
+                                future.cancel()
+                            raise
+                for root in ["Divsteps255Data", "Divsteps255Checks"]:
+                    compile_module(root)
+            compile_module(module)
         census_modules = [CATALOG["census_module"]] if "census_module" in CATALOG \
             else CATALOG["modules"]
         census = "\n".join((output / "logs" / ("lean-" + m + ".log")).read_text()

@@ -1,0 +1,13 @@
+'adc_spec' depends on axioms: [propext, Classical.choice, Quot.sound]
+'mac_spec' depends on axioms: [propext, Classical.choice, Quot.sound]
+'sbb_spec' depends on axioms: [propext, Classical.choice, Quot.sound]
+'CommonVerify.overflowing_add_identity' depends on axioms: [propext, Classical.choice, Quot.sound]
+'CommonVerify.overflowing_sub_identity' depends on axioms: [propext, Classical.choice, Quot.sound]
+'CommonVerify.bool_or_disjoint' depends on axioms: [propext]
+'CommonVerify.bool_bound' does not depend on any axioms
+'CommonVerify.carrying_add_flags_disjoint' depends on axioms: [propext, Classical.choice, Quot.sound]
+'CommonVerify.borrowing_sub_flags_disjoint' depends on axioms: [propext, Classical.choice, Quot.sound]
+'CommonVerify.carrying_add_spec' depends on axioms: [propext, Classical.choice, Quot.sound]
+'CommonVerify.borrowing_sub_spec' depends on axioms: [propext, Classical.choice, Quot.sound]
+'CommonVerify.carry_add_spec' depends on axioms: [propext, Classical.choice, Quot.sound]
+'CommonVerify.wide_mul_spec' depends on axioms: [propext, Classical.choice, Quot.sound]

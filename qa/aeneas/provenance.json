@@ -311,6 +311,13 @@
     "lib/rustlib/src/rust/library/core/src/ops/range.rs": "5d791bd2ee8997e93ac72c35db831815d9acbb7aed05cd1539799b7677a13d20",
     "lib/rustlib/src/rust/library/core/src/marker.rs": "2b685a18539201c046d3ffddaf525cd4aaec64ee58539a4ca3023878fce2b1ad",
     "lib/rustlib/src/rust/library/core/src/iter/adapters/rev.rs": "2c733c153c7ca12c09f3d7639709ab005843e25fb80fd348480db349b80004ff",
-    "lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs": "6a6468cade532beaba7c8b3f0db2b3fa768a069c56b636c68fbf1b27bc7d81a0"
+    "lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs": "6a6468cade532beaba7c8b3f0db2b3fa768a069c56b636c68fbf1b27bc7d81a0",
+    "lib/rustlib/src/rust/library/core/src/convert/num.rs": "8dbf6c64681e2dee556e0844eef3e53d62a40df0280d25f469352870a401e034",
+    "lib/rustlib/src/rust/library/core/src/num/int_macros.rs": "c6809ba25662238982cbd7572b43ac44d3137e106213bf1e2db7b1371ce53cb6",
+    "lib/rustlib/src/rust/library/core/src/cmp.rs": "aa1d810f0c36798492e3b17b10a85ac91c047c0020b9be5db86f1111b34e94be",
+    "lib/rustlib/src/rust/library/core/src/fmt/mod.rs": "ab918e40543739be20757973f0d4abefcd9624d3759a64fc4147f1d8fc4bc035",
+    "lib/rustlib/src/rust/library/core/src/ops/bit.rs": "4f0dab1c9c85c900d231e29d3f0c5e55c7b1fe87a762e48c4988d64bd1955d57",
+    "lib/rustlib/src/rust/library/core/src/internal_macros.rs": "053e5ce6e9f5ac2eb8fb1ed26264589b0e3e14c4f2afdccb1cd7c9b392b4ae58",
+    "lib/rustlib/src/rust/library/core/src/array/equality.rs": "8765b16c3149dcfcf531e2f5724bfc1d2e518a05742d1333d53ed7eee4f0ae78"
   }
 }

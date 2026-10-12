@@ -17,7 +17,8 @@ if not __debug__:
     raise RuntimeError("This translation adapter requires Python assertions")
 
 
-def project(document, retain_callback_functions=False, large_sqrt=False):
+def project(document, retain_callback_functions=False, large_sqrt=False,
+            generic_dictionary=False):
     t = document["translated"]
     original = copy.deepcopy(t)
     name = [{"Ident": [x, 0]} for x in
@@ -40,6 +41,13 @@ def project(document, retain_callback_functions=False, large_sqrt=False):
     assert len(parameters["methods"]) == len(expected_methods)
     implementations = {i for i, d in enumerate(t["trait_impls"])
                        if d and d["impl_trait"]["id"] == pid}
+    # A direct generic method root retains the dictionary declaration but no
+    # concrete implementations. Require that shape explicitly; the native
+    # wrapper extraction continues to require both Pasta implementations.
+    expected_implementations = 0 if generic_dictionary else 2
+    assert len(implementations) == expected_implementations
+    if generic_dictionary:
+        assert not retain_callback_functions and not large_sqrt
     callbacks = set()
     retained = set()
     for i in implementations:
@@ -57,8 +65,8 @@ def project(document, retain_callback_functions=False, large_sqrt=False):
             callbacks.add(method["skip_binder"]["id"])
             if method_names[method["skip_binder"]["id"]] in retained_names:
                 retained.add(method["skip_binder"]["id"])
-    assert len(callbacks) == 2 * len(expected_methods)
-    assert len(retained) == 2 * len(retained_names)
+    assert len(callbacks) == expected_implementations * len(expected_methods)
+    assert len(retained) == expected_implementations * len(retained_names)
     for i in callbacks:
         if i in retained:
             assert set(t["fun_decls"][i]["body"]) == {"Structured"}
@@ -155,8 +163,10 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path)
     parser.add_argument("--retain-callback-functions", action="store_true")
     parser.add_argument("--large-sqrt", action="store_true")
+    parser.add_argument("--generic-dictionary", action="store_true")
     args = parser.parse_args()
     data = json.loads(args.source.read_text())
-    report = project(data, args.retain_callback_functions, args.large_sqrt)
+    report = project(data, args.retain_callback_functions, args.large_sqrt,
+                     args.generic_dictionary)
     args.output.write_text(json.dumps(data, separators=(",", ":")) + "\n")
     print(json.dumps(report, indent=2))
