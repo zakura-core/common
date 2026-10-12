@@ -1,7 +1,15 @@
 {
   "modules": [
     "Proofs",
-    "WordPrimitives"
+    "WordPrimitives",
+    "Common",
+    "LimbProofs",
+    "SubtractProofs",
+    "CompareProofs",
+    "WideMultiply",
+    "SquareProofs",
+    "FlagLimbProofs",
+    "Census"
   ],
   "proved": [
     "adc_spec",
@@ -16,7 +24,35 @@
     "CommonVerify.carrying_add_spec",
     "CommonVerify.borrowing_sub_spec",
     "CommonVerify.carry_add_spec",
-    "CommonVerify.wide_mul_spec"
+    "CommonVerify.wide_mul_spec",
+    "UdonVerify.val4_lt",
+    "UdonVerify.val8_lt",
+    "UdonVerify.adc_identity",
+    "UdonVerify.mac_identity",
+    "UdonVerify.kernel_adc_identity",
+    "UdonVerify.kernel_mac_identity",
+    "UdonVerify.kernel_sbb_identity",
+    "UdonVerify.add_loop_unfold",
+    "UdonVerify.add_limbs_spec",
+    "UdonVerify.subtract_loop_unfold",
+    "UdonVerify.subtract_limbs_spec",
+    "UdonVerify.compare_loop_unfold",
+    "UdonVerify.compare_loop_zero",
+    "UdonVerify.compare_loop_1",
+    "UdonVerify.compare_loop_2",
+    "UdonVerify.compare_loop_3",
+    "UdonVerify.compare_loop_4",
+    "UdonVerify.compare_limbs_spec",
+    "UdonVerify.multiply_outer_unfold",
+    "UdonVerify.multiply_inner_unfold",
+    "UdonVerify.multiply_wide_spec",
+    "UdonVerify.double_low",
+    "UdonVerify.double_split",
+    "UdonVerify.double_join",
+    "UdonVerify.square_wide_spec",
+    "UdonVerify.carry_add_limbs_spec",
+    "UdonVerify.borrow_sub_limbs_spec"
   ],
-  "type_only_axioms": {}
+  "type_only_axioms": {},
+  "census_module": "Census"
 }
