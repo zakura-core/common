@@ -1,0 +1,188 @@
+#![no_std]
+#![forbid(unsafe_code)]
+
+use udon::field::{CanonicalUint, Fp, Fq, PallasBase, PallasScalar, ProductSum, Reduced};
+
+pub fn fp_mul(lhs: &Fp, rhs: &Fp) -> Fp {
+    lhs.mul(rhs)
+}
+
+pub fn fp_add(lhs: &Fp, rhs: &Fp) -> Fp {
+    lhs.add(rhs)
+}
+
+pub fn fp_sub(lhs: &Fp, rhs: &Fp) -> Fp {
+    lhs.sub(rhs)
+}
+
+pub fn fp_neg(value: &Fp) -> Fp {
+    value.neg()
+}
+
+pub fn fp_square(value: &Fp) -> Fp {
+    value.square()
+}
+
+pub fn fp_double(value: &Fp) -> Fp {
+    value.double()
+}
+
+pub fn fp_mul_add(value: &Fp, multiplier: &Fp, extra: &Fp) -> Fp {
+    value.mul_add(multiplier, extra)
+}
+
+pub fn fp_mul_sub(value: &Fp, multiplier: &Fp, extra: &Fp) -> Fp {
+    value.mul_sub(multiplier, extra)
+}
+
+pub fn fp_is_zero(value: &Fp) -> bool {
+    value.is_zero()
+}
+
+pub fn fp_from_u64(value: u64) -> Fp {
+    Fp::from_u64(value)
+}
+
+pub fn fp_from_u128(value: u128) -> Fp {
+    Fp::from_u128(value)
+}
+
+pub fn fp_from_i64(value: i64) -> Fp {
+    Fp::from_i64(value)
+}
+
+pub fn fp_reduce(value: Fp) -> Fp<Reduced> {
+    value.reduce()
+}
+
+pub fn fp_widen(value: Fp<Reduced>) -> Fp {
+    value.into_loose()
+}
+
+pub fn fp_pow_u64(value: &Fp, exponent: u64) -> Fp {
+    value.pow_u64(exponent)
+}
+
+pub fn fp_reduce_reduced(value: Fp<Reduced>) -> Fp<Reduced> {
+    value.reduce()
+}
+
+pub fn fp_from_u64_reduced(value: u64) -> Fp<Reduced> {
+    Fp::from_u64(value)
+}
+
+pub fn fp_zero() -> Fp {
+    Fp::ZERO
+}
+
+pub fn fp_one() -> Fp {
+    Fp::ONE
+}
+
+pub fn fp_montgomery(value: &Fp) -> [u64; 4] {
+    value.montgomery_limbs()
+}
+
+pub fn fp_import_montgomery(limbs: [u64; 4]) -> Fp {
+    Fp::from_montgomery_limbs(limbs)
+}
+
+pub fn fq_mul(lhs: &Fq, rhs: &Fq) -> Fq {
+    lhs.mul(rhs)
+}
+
+pub fn fq_add(lhs: &Fq, rhs: &Fq) -> Fq {
+    lhs.add(rhs)
+}
+
+pub fn fq_sub(lhs: &Fq, rhs: &Fq) -> Fq {
+    lhs.sub(rhs)
+}
+
+pub fn fq_neg(value: &Fq) -> Fq {
+    value.neg()
+}
+
+pub fn fq_square(value: &Fq) -> Fq {
+    value.square()
+}
+
+pub fn fq_double(value: &Fq) -> Fq {
+    value.double()
+}
+
+pub fn fq_mul_add(value: &Fq, multiplier: &Fq, extra: &Fq) -> Fq {
+    value.mul_add(multiplier, extra)
+}
+
+pub fn fq_mul_sub(value: &Fq, multiplier: &Fq, extra: &Fq) -> Fq {
+    value.mul_sub(multiplier, extra)
+}
+
+pub fn fq_is_zero(value: &Fq) -> bool {
+    value.is_zero()
+}
+
+pub fn fq_from_u64(value: u64) -> Fq {
+    Fq::from_u64(value)
+}
+
+pub fn fq_from_u128(value: u128) -> Fq {
+    Fq::from_u128(value)
+}
+
+pub fn fq_from_i64(value: i64) -> Fq {
+    Fq::from_i64(value)
+}
+
+pub fn fq_reduce(value: Fq) -> Fq<Reduced> {
+    value.reduce()
+}
+
+pub fn fq_widen(value: Fq<Reduced>) -> Fq {
+    value.into_loose()
+}
+
+pub fn fq_pow_u64(value: &Fq, exponent: u64) -> Fq {
+    value.pow_u64(exponent)
+}
+
+pub fn fq_reduce_reduced(value: Fq<Reduced>) -> Fq<Reduced> {
+    value.reduce()
+}
+
+pub fn fq_from_u64_reduced(value: u64) -> Fq<Reduced> {
+    Fq::from_u64(value)
+}
+
+pub fn fq_zero() -> Fq {
+    Fq::ZERO
+}
+
+pub fn fq_one() -> Fq {
+    Fq::ONE
+}
+
+pub fn fq_montgomery(value: &Fq) -> [u64; 4] {
+    value.montgomery_limbs()
+}
+
+pub fn fq_import_montgomery(limbs: [u64; 4]) -> Fq {
+    Fq::from_montgomery_limbs(limbs)
+}
+
+pub fn fp_from_canonical(value: CanonicalUint) -> Option<Fp> {
+    Fp::from_canonical_uint(value)
+}
+
+pub fn fq_from_canonical(value: CanonicalUint) -> Option<Fq> {
+    Fq::from_canonical_uint(value)
+}
+
+pub fn fp_is_one(value: &Fp) -> bool {
+    value.is_one()
+}
+
+pub fn fq_is_one(value: &Fq) -> bool {
+    value.is_one()
+}

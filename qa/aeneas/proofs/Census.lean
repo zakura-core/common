@@ -26,6 +26,23 @@ import LooseRound
 import LooseMultiply
 import LooseMultiplyPublic
 import SquareRun
+import NativeBridge
+import NativeArithmetic
+import NativeBasics
+import NativeBits
+import NativeSubtract
+import NativeNegate
+import NativeDouble
+import NativeConstants
+import NativeConvert
+import NativeRepresentation
+import NativeSigned
+import NativePredicates
+import NativeSquareRun
+import NativePowerHelpers
+import NativePower
+import NativeComposed
+import NativeOne
 
 #print axioms adc_spec
 #print axioms mac_spec
@@ -151,3 +168,135 @@ import SquareRun
 #print axioms UdonVerify.square_run_spec
 #print axioms UdonVerify.fpParameters
 #print axioms UdonVerify.fqParameters
+#print axioms UdonVerify.Native.compare_eq
+#print axioms UdonVerify.Native.multiply_loose_eq
+#print axioms UdonVerify.Native.square_eq
+#print axioms UdonVerify.Native.reduce_once_eq
+#print axioms UdonVerify.Native.reduce_twice_eq
+#print axioms UdonVerify.Native.subtract_limbs_eq
+#print axioms UdonVerify.Native.mac_eq
+#print axioms UdonVerify.Native.sbb_eq
+#print axioms UdonVerify.Native.add_twice_eq
+#print axioms UdonVerify.Native.sub_twice_eq
+#print axioms UdonVerify.Native.loose_bound_eq
+#print axioms UdonVerify.Native.ordering_is_lt
+#print axioms UdonVerify.Native.from_montgomery_loose_spec
+#print axioms UdonVerify.Native.multiply_spec
+#print axioms UdonVerify.Native.square_spec
+#print axioms UdonVerify.Native.fp_radix_inverse
+#print axioms UdonVerify.Native.fq_radix_inverse
+#print axioms UdonVerify.Native.decoded_product
+#print axioms UdonVerify.Native.fp_multiply_spec
+#print axioms UdonVerify.Native.fq_multiply_spec
+#print axioms UdonVerify.Native.fp_square_spec
+#print axioms UdonVerify.Native.fq_square_spec
+#print axioms UdonVerify.Native.decoded_sum
+#print axioms UdonVerify.Native.decoded_reduce
+#print axioms UdonVerify.Native.add_spec
+#print axioms UdonVerify.Native.reduce_loose_spec
+#print axioms UdonVerify.Native.reduce_reduced_spec
+#print axioms UdonVerify.Native.widen_spec
+#print axioms UdonVerify.Native.fp_add_spec
+#print axioms UdonVerify.Native.fq_add_spec
+#print axioms UdonVerify.Native.fp_reduce_spec
+#print axioms UdonVerify.Native.fq_reduce_spec
+#print axioms UdonVerify.Native.fp_widen_spec
+#print axioms UdonVerify.Native.fq_widen_spec
+#print axioms UdonVerify.Native.and_zero
+#print axioms UdonVerify.Native.and_full
+#print axioms UdonVerify.Native.wrapping_neg_zero
+#print axioms UdonVerify.Native.wrapping_neg_one
+#print axioms UdonVerify.Native.wrapping_neg_bit_spec
+#print axioms UdonVerify.Native.val4_zero_iff
+#print axioms UdonVerify.Native.or4_zero_iff
+#print axioms UdonVerify.Native.decoded_difference
+#print axioms UdonVerify.Native.subtract_spec
+#print axioms UdonVerify.Native.fp_subtract_spec
+#print axioms UdonVerify.Native.fq_subtract_spec
+#print axioms UdonVerify.Native.negate_spec
+#print axioms UdonVerify.Native.fp_negate_spec
+#print axioms UdonVerify.Native.fq_negate_spec
+#print axioms UdonVerify.Native.double_spec
+#print axioms UdonVerify.Native.decoded_scale
+#print axioms UdonVerify.Native.fp_double_spec
+#print axioms UdonVerify.Native.fq_double_spec
+#print axioms UdonVerify.Native.decoded_conversion
+#print axioms UdonVerify.Native.from_loose_loose_spec
+#print axioms UdonVerify.Native.from_canonical_loose_spec
+#print axioms UdonVerify.Native.from_u64_loose_spec
+#print axioms UdonVerify.Native.fp_from_u64_spec
+#print axioms UdonVerify.Native.fq_from_u64_spec
+#print axioms UdonVerify.Native.from_u128_loose_spec
+#print axioms UdonVerify.Native.fp_from_u128_spec
+#print axioms UdonVerify.Native.fq_from_u128_spec
+#print axioms UdonVerify.Native.reduced_bound_eq
+#print axioms UdonVerify.Native.from_montgomery_reduced_spec
+#print axioms UdonVerify.Native.from_loose_reduced_spec
+#print axioms UdonVerify.Native.from_canonical_reduced_spec
+#print axioms UdonVerify.Native.from_u64_reduced_spec
+#print axioms UdonVerify.Native.zero_spec
+#print axioms UdonVerify.Native.one_spec
+#print axioms UdonVerify.Native.import_montgomery_loose_spec
+#print axioms UdonVerify.Native.montgomery_limbs_spec
+#print axioms UdonVerify.Native.fp_from_u64_reduced_spec
+#print axioms UdonVerify.Native.fq_from_u64_reduced_spec
+#print axioms UdonVerify.Native.fp_reduce_reduced_spec
+#print axioms UdonVerify.Native.fq_reduce_reduced_spec
+#print axioms UdonVerify.Native.fp_zero_spec
+#print axioms UdonVerify.Native.fq_zero_spec
+#print axioms UdonVerify.Native.fp_one_spec
+#print axioms UdonVerify.Native.fq_one_spec
+#print axioms UdonVerify.Native.fp_import_montgomery_spec
+#print axioms UdonVerify.Native.fq_import_montgomery_spec
+#print axioms UdonVerify.Native.fp_montgomery_spec
+#print axioms UdonVerify.Native.fq_montgomery_spec
+#print axioms UdonVerify.Native.unsigned_abs_spec
+#print axioms UdonVerify.Native.from_i64_loose_spec
+#print axioms UdonVerify.Native.fp_from_i64_spec
+#print axioms UdonVerify.Native.fq_from_i64_spec
+#print axioms UdonVerify.Native.val4_eq_iff
+#print axioms UdonVerify.Native.index0_eq
+#print axioms UdonVerify.Native.index1_eq
+#print axioms UdonVerify.Native.index2_eq
+#print axioms UdonVerify.Native.index3_eq
+#print axioms UdonVerify.Native.u64_eq_iff
+#print axioms UdonVerify.Native.is_zero_loose_spec
+#print axioms UdonVerify.Native.decoded_zero_iff
+#print axioms UdonVerify.Native.loose_mod_zero_iff
+#print axioms UdonVerify.Native.fp_is_zero_spec
+#print axioms UdonVerify.Native.fq_is_zero_spec
+#print axioms UdonVerify.Native.decoded_square_run
+#print axioms UdonVerify.Native.decoded_square_run_factor
+#print axioms UdonVerify.Native.native_square_run_eq
+#print axioms UdonVerify.Native.native_square_run_spec
+#print axioms UdonVerify.Native.and_power_bit
+#print axioms UdonVerify.Native.prefix_step
+#print axioms UdonVerify.Native.leading_zeros_nonzero
+#print axioms UdonVerify.Native.highest_bit_spec
+#print axioms UdonVerify.Native.reverse32_some_spec
+#print axioms UdonVerify.Native.reverse32_none_spec
+#print axioms UdonVerify.Native.arithmetic_square_spec
+#print axioms UdonVerify.Native.arithmetic_multiply_spec
+#print axioms UdonVerify.Native.arithmetic_one_spec
+#print axioms UdonVerify.Native.power_loop_unfold
+#print axioms UdonVerify.Native.power_loop_spec
+#print axioms UdonVerify.Native.pow_u64_spec
+#print axioms UdonVerify.Native.fp_pow_u64_spec
+#print axioms UdonVerify.Native.fq_pow_u64_spec
+#print axioms UdonVerify.Native.mul_add_spec
+#print axioms UdonVerify.Native.mul_sub_spec
+#print axioms UdonVerify.Native.fp_mul_add_spec
+#print axioms UdonVerify.Native.fq_mul_add_spec
+#print axioms UdonVerify.Native.fp_mul_sub_spec
+#print axioms UdonVerify.Native.fq_mul_sub_spec
+#print axioms UdonVerify.Native.transferParameters
+#print axioms UdonVerify.Native.fpNativeParameters
+#print axioms UdonVerify.Native.fqNativeParameters
+#print axioms UdonVerify.Native.fpConversionParameters
+#print axioms UdonVerify.Native.fqConversionParameters
+#print axioms UdonVerify.Native.add_limbs_eq
+#print axioms UdonVerify.Native.is_one_loose_spec
+#print axioms UdonVerify.Native.decoded_one_iff
+#print axioms UdonVerify.Native.loose_mod_representative_iff
+#print axioms UdonVerify.Native.fp_is_one_spec
+#print axioms UdonVerify.Native.fq_is_one_spec
