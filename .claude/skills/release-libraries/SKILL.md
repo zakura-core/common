@@ -8,10 +8,13 @@ description: >-
 
 # Release the Zakura Common libraries
 
-The published crates version in lockstep from `[workspace.package]` in the
-root `Cargo.toml`. Unpublished members (`publish = false`), including Udon
-and Bento, keep independent versions and are excluded from coordinated
-version bumps, changelog assembly, and publishing. Changelog policy is
+Most published crates version in lockstep from `[workspace.package]` in the
+root `Cargo.toml`. `zakura-reddsa` and `zakura-reddsa-frost` are published but
+set their own `version` in their manifests: they are bumped by hand, by the
+change that needs it, and are released at that version rather than the tag's.
+Unpublished members (`publish = false`), including Udon and Bento, keep
+independent versions and are excluded from coordinated version bumps,
+changelog assembly, and publishing. Changelog policy is
 canonical in `docs/changelog/guidelines.md`; this skill adds the mechanics
 that are easy to miss.
 
@@ -23,7 +26,10 @@ that are easy to miss.
 
 ## Version bump
 
-1. `version` in `[workspace.package]` — the published crates inherit it.
+1. `version` in `[workspace.package]` — the lockstep crates inherit it.
+   Leave the independently versioned published crates as they are; if one of
+   them has pending changelog entries but still carries the version it was
+   last published at, bump it in its own manifest first.
 2. The intra-workspace `version = "..."` requirements in
    `[workspace.dependencies]` for those published crates (same file, one
    place). Leave requirements for independently versioned members unchanged.
@@ -39,7 +45,9 @@ After the version bump, on the release branch:
 ```
 
 This folds every pending `docs/changelog/unreleased/<PR>.md` fragment into the
-matching crates' `CHANGELOG.md` version sections and deletes the fragments;
+matching crates' `CHANGELOG.md` version sections and deletes the fragments.
+Lockstep crates get an `X.Y.Z` section; independently versioned crates get a
+section for their own manifest version;
 when assembling a stable `X.Y.Z` it also collapses any pre-release sections
 (`X.Y.Z-alpha.N`, `X.Y.Z-beta.N`, `X.Y.Z-rc.N`) into the stable section.
 Review and commit the result. The gate form is:
@@ -78,7 +86,8 @@ workspace dependencies are published at the new version. Publish bottom-up:
 3. `zakura-bellman`, `zakura-reddsa`, `zakura-sinsemilla`,
    `zakura-halo2-poseidon`, then `zakura-halo2-proofs`,
    `zakura-halo2-gadgets`; `zakura-transparent`, `zakura-zip321`
-4. `zakura-redjubjub`, `zakura-sapling-crypto`, `zakura-orchard`
+4. `zakura-reddsa-frost`, `zakura-redjubjub`, `zakura-sapling-crypto`,
+   `zakura-orchard`
 5. `zakura-keys`, `zakura-primitives`, `zakura-proofs`
 
 Verify each publish is visible on crates.io before publishing its dependents.

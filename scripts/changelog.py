@@ -87,6 +87,21 @@ def workspace_changelogs(repo_root: Path) -> dict[str, Path]:
     return changelogs
 
 
+def independent_versions(repo_root: Path) -> dict[str, str]:
+    """Map published members that set their own version to that version.
+
+    Members that inherit `[workspace.package]` are released at the tag's
+    version and are left out.
+    """
+    versions: dict[str, str] = {}
+    for crate, changelog_path in workspace_changelogs(repo_root).items():
+        with (changelog_path.parent / "Cargo.toml").open("rb") as handle:
+            version = tomllib.load(handle).get("package", {}).get("version")
+        if isinstance(version, str):
+            versions[crate] = version
+    return versions
+
+
 def fragment_paths(repo_root: Path) -> list[Path]:
     directory = repo_root / FRAGMENT_DIRECTORY
     if not directory.is_dir():
@@ -378,11 +393,11 @@ def release_plan(
             f"invalid changelog date {release_date!r}; expected YYYY-MM-DD"
         )
     version = tag_match.group(1)
-    stable = "-" not in version
 
     check_seeds(repo_root)
     fragments = load_fragments(repo_root)
     changelogs = workspace_changelogs(repo_root)
+    own_versions = independent_versions(repo_root)
 
     # crate -> category -> ordered fragment bodies
     fragment_entries: dict[str, dict[str, list[str]]] = defaultdict(
@@ -398,13 +413,14 @@ def release_plan(
     already_released = False
 
     for crate, path in sorted(changelogs.items()):
+        crate_version = own_versions.get(crate, version)
         original = path.read_text()
         prefix, unreleased, suffix = split_unreleased(original, path)
         current = parse_category_body(unreleased, path, "Unreleased")
 
         promoted: dict[str, str] = {}
-        if stable:
-            promoted, suffix = promote_prereleases(suffix, version, path)
+        if "-" not in crate_version:
+            promoted, suffix = promote_prereleases(suffix, crate_version, path)
 
         additions: dict[str, list[str]] = defaultdict(list)
         for category, body in current.items():
@@ -418,10 +434,10 @@ def release_plan(
         existing_versions = {
             match.group(1) for match in VERSION_HEADING.finditer(suffix)
         }
-        if version in existing_versions:
+        if crate_version in existing_versions:
             if body:
                 raise ChangelogError(
-                    f"{path}: release {version} already exists but new entries "
+                    f"{path}: release {crate_version} already exists but new entries "
                     "remain; bump the release version first"
                 )
             already_released = True
@@ -431,7 +447,7 @@ def release_plan(
             continue
 
         assembled_any = True
-        rendered = render_release(prefix, body, suffix, version, release_date)
+        rendered = render_release(prefix, body, suffix, crate_version, release_date)
         if rendered != original:
             writes[path] = rendered
 

@@ -455,6 +455,41 @@ class ChangelogTests(unittest.TestCase):
         with self.assertRaisesRegex(changelog.ChangelogError, "already exists"):
             changelog.release_plan(self.root, "v1.1.0", "2026-08-28")
 
+    def test_release_uses_independent_crate_versions(self):
+        (self.root / "crates/alpha/Cargo.toml").write_text(
+            MEMBER_MANIFEST.format(name="zakura-alpha") + "version.workspace = true\n"
+        )
+        (self.root / "crates/beta/Cargo.toml").write_text(
+            MEMBER_MANIFEST.format(name="zakura-beta") + 'version = "3.0.0"\n'
+        )
+        self.write_fragment(
+            "123.md",
+            "## zakura-alpha\n\n### Fixed\n\n- Fixed alpha.\n\n"
+            "## zakura-beta\n\n### Removed\n\n- Removed a feature.\n",
+        )
+
+        writes, _ = changelog.release_plan(self.root, "v1.1.0", "2026-08-28")
+
+        self.assertIn("## [1.1.0] - 2026-08-28", writes[self.member_changelog("alpha")])
+        beta = writes[self.member_changelog("beta")]
+        self.assertIn("## [3.0.0] - 2026-08-28", beta)
+        self.assertNotIn("## [1.1.0]", beta)
+
+    def test_release_rejects_unbumped_independent_version_with_new_entries(self):
+        (self.root / "crates/beta/Cargo.toml").write_text(
+            MEMBER_MANIFEST.format(name="zakura-beta") + 'version = "3.0.0"\n'
+        )
+        self.member_changelog("beta").write_text(
+            seeded_changelog(
+                "zakura-beta",
+                versions="\n## [3.0.0] - 2026-08-01\n\n### Removed\n\n- Old removal.\n",
+            )
+        )
+        self.write_fragment("123.md", "## zakura-beta\n\n### Fixed\n\n- New fix.\n")
+
+        with self.assertRaisesRegex(changelog.ChangelogError, "3.0.0 already exists"):
+            changelog.release_plan(self.root, "v1.2.0", "2026-08-28")
+
     def test_release_rejects_empty_release(self):
         with self.assertRaisesRegex(changelog.ChangelogError, "no pending fragments"):
             changelog.release_plan(self.root, "v1.1.0", "2026-08-28")

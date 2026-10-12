@@ -88,6 +88,9 @@ audit-as-crates-io = false
 [policy.zakura-reddsa]
 audit-as-crates-io = false
 
+[policy.zakura-reddsa-frost]
+audit-as-crates-io = false
+
 [policy.zakura-redjubjub]
 audit-as-crates-io = false
 
