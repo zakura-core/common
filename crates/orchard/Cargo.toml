@@ -21,12 +21,12 @@ name = "orchard"
 bench = false
 
 [dependencies]
-aes = { version = "0.8", optional = true }
+aes = { version = "0.9", optional = true }
 bitvec = { version = "1", default-features = false }
 blake2b_simd = { version = "1", default-features = false }
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
 ff = { version = "0.14", default-features = false }
-fpe = { version = "0.6", features = ["alloc"], default-features = false, optional = true }
+fpe = { version = "0.7", features = ["alloc"], default-features = false, optional = true }
 getset = "0.1"
 group = "0.14"
 halo2_gadgets = { workspace = true, optional = true }
