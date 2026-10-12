@@ -1,5 +1,10 @@
 {
   "zakura-primitives": {
     "zip-233": "Ignored for minor releases in #465 because #458 removed the unused ZIP 233 feature and obsolete transaction field."
+  },
+  "zakura-reddsa": {
+    "frost": "Ignored for minor releases in #544, which moved FROST into zakura-reddsa-frost; no published crate enables this feature.",
+    "frost-rerandomized": "Ignored for minor releases in #544, which moved FROST into zakura-reddsa-frost; no published crate enables this feature.",
+    "rand_core_06": "Ignored for minor releases in #544, which moved FROST into zakura-reddsa-frost; no published crate enables this feature."
   }
 }

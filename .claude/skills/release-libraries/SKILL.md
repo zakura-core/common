@@ -9,12 +9,9 @@ description: >-
 # Release the Zakura Common libraries
 
 The published crates version in lockstep from `[workspace.package]` in the
-root `Cargo.toml`. The one exception is `zakura-reddsa`, temporarily pinned at
-3.0.0 in its own manifest because removing its `frost` feature was a breaking
-change; it returns to the workspace version once the workspace reaches 3.0.0.
-Unpublished members (`publish = false`), including Udon and Bento, keep
-independent versions and are excluded from coordinated version bumps,
-changelog assembly, and publishing. Changelog policy is
+root `Cargo.toml`. Unpublished members (`publish = false`), including Udon
+and Bento, keep independent versions and are excluded from coordinated
+version bumps, changelog assembly, and publishing. Changelog policy is
 canonical in `docs/changelog/guidelines.md`; this skill adds the mechanics
 that are easy to miss.
 
@@ -26,11 +23,7 @@ that are easy to miss.
 
 ## Version bump
 
-1. `version` in `[workspace.package]` — the lockstep crates inherit it.
-   While `zakura-reddsa` is pinned, leave its version alone unless it has
-   pending changelog entries and still carries its last published version;
-   then bump it in its own manifest first. When the workspace reaches its
-   pinned version, switch it back to `version.workspace = true`.
+1. `version` in `[workspace.package]` — the published crates inherit it.
 2. The intra-workspace `version = "..."` requirements in
    `[workspace.dependencies]` for those published crates (same file, one
    place). Leave requirements for independently versioned members unchanged.
@@ -46,9 +39,7 @@ After the version bump, on the release branch:
 ```
 
 This folds every pending `docs/changelog/unreleased/<PR>.md` fragment into the
-matching crates' `CHANGELOG.md` version sections and deletes the fragments.
-Lockstep crates get an `X.Y.Z` section; a crate that sets its own version,
-such as the pinned `zakura-reddsa`, gets a section for that version;
+matching crates' `CHANGELOG.md` version sections and deletes the fragments;
 when assembling a stable `X.Y.Z` it also collapses any pre-release sections
 (`X.Y.Z-alpha.N`, `X.Y.Z-beta.N`, `X.Y.Z-rc.N`) into the stable section.
 Review and commit the result. The gate form is:
