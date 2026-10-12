@@ -816,3 +816,14 @@ pub fn try_output_recovery_with_pkd_esk<
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn encryption_state_is_cleared_on_drop() {
+        fn assert_cleanup<T: cipher::zeroize::ZeroizeOnDrop>() {}
+
+        assert_cleanup::<chacha20::ChaCha20>();
+        assert_cleanup::<chacha20poly1305::ChaCha20Poly1305>();
+    }
+}
