@@ -1,0 +1,13 @@
+--- a/charon/src/transform/simplify_output/remove_adt_clauses.rs
++++ b/charon/src/transform/simplify_output/remove_adt_clauses.rs
+@@ -34,7 +34,9 @@
+     }
+     match &cache[id] {
+         CycleDetector::Processed(b) => *b,
+-        CycleDetector::Cyclic | CycleDetector::Processing => false,
++        // Cyclic supertraits cannot be expanded into a finite removed-clause
++        // placeholder. Retain the ADT's original clauses in that case.
++        CycleDetector::Cyclic | CycleDetector::Processing => true,
+         CycleDetector::Unprocessed => unreachable!(),
+     }
+ }

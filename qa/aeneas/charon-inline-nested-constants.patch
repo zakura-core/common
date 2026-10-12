@@ -1,0 +1,16 @@
+--- a/charon/src/transform/simplify_output/inline_selected_functions.rs
++++ b/charon/src/transform/simplify_output/inline_selected_functions.rs
+@@ -83,7 +83,12 @@
+         }
+     }
+     fn transform_body(&self, _ctx: &mut TransformCtx, outer_body: &mut ullbc_ast::ExprBody) {
+-        for block_id in outer_body.body.indices() {
++        // Nested anonymous constants can introduce further initializer calls.
++        // Process newly inserted blocks before discarding the initializer bodies.
++        let mut block_index = 0;
++        while block_index < outer_body.body.len() {
++            let block_id = BlockId::from_usize(block_index);
++            block_index += 1;
+             let Some(block) = outer_body.body.get_mut(block_id) else {
+                 continue;
+             };

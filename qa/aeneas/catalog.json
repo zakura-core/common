@@ -1,0 +1,22 @@
+{
+  "modules": [
+    "Proofs",
+    "WordPrimitives"
+  ],
+  "proved": [
+    "adc_spec",
+    "mac_spec",
+    "sbb_spec",
+    "CommonVerify.overflowing_add_identity",
+    "CommonVerify.overflowing_sub_identity",
+    "CommonVerify.bool_or_disjoint",
+    "CommonVerify.bool_bound",
+    "CommonVerify.carrying_add_flags_disjoint",
+    "CommonVerify.borrowing_sub_flags_disjoint",
+    "CommonVerify.carrying_add_spec",
+    "CommonVerify.borrowing_sub_spec",
+    "CommonVerify.carry_add_spec",
+    "CommonVerify.wide_mul_spec"
+  ],
+  "type_only_axioms": {}
+}
