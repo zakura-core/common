@@ -1938,10 +1938,8 @@ pub mod testing {
             .map(|_| {
                 let sk = SpendingKey::random(rng);
                 let fvk = FullViewingKey::from(&sk);
-                let recipient = fvk.address(
-                    crate::keys::Diversifier::from_bytes(Default::default()),
-                    Scope::External,
-                );
+                // Preserve the indexed recipient used by the committed historical proofs.
+                let recipient = fvk.address_at(0u32, Scope::External);
                 let rho = Rho::from_nf_old(Nullifier::dummy(rng));
                 let note = Note::new(recipient, NoteValue::ZERO, rho, note_version, &mut *rng);
                 let spend = SpendInfo {
