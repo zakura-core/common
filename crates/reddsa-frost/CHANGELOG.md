@@ -13,8 +13,8 @@ internal implementation details are not tracked here.
 ## Record of Fork
 
 `zakura-reddsa-frost` contains the FROST implementations extracted from
-`zakura-reddsa`, retaining the source's licensing and provenance. It starts
-its own version lineage at `1.0.0`.
+`zakura-reddsa`, retaining the source's licensing and provenance. It shares the
+workspace version with the other published crates.
 
 - Original source: `reddsa 0.5.2`, published from
   [ZcashFoundation/reddsa](https://github.com/ZcashFoundation/reddsa) at commit

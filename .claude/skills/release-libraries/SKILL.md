@@ -8,10 +8,10 @@ description: >-
 
 # Release the Zakura Common libraries
 
-Most published crates version in lockstep from `[workspace.package]` in the
-root `Cargo.toml`. `zakura-reddsa` and `zakura-reddsa-frost` are published but
-set their own `version` in their manifests: they are bumped by hand, by the
-change that needs it, and are released at that version rather than the tag's.
+The published crates version in lockstep from `[workspace.package]` in the
+root `Cargo.toml`. The one exception is `zakura-reddsa`, temporarily pinned at
+3.0.0 in its own manifest because removing its `frost` feature was a breaking
+change; it returns to the workspace version once the workspace reaches 3.0.0.
 Unpublished members (`publish = false`), including Udon and Bento, keep
 independent versions and are excluded from coordinated version bumps,
 changelog assembly, and publishing. Changelog policy is
@@ -27,9 +27,10 @@ that are easy to miss.
 ## Version bump
 
 1. `version` in `[workspace.package]` — the lockstep crates inherit it.
-   Leave the independently versioned published crates as they are; if one of
-   them has pending changelog entries but still carries the version it was
-   last published at, bump it in its own manifest first.
+   While `zakura-reddsa` is pinned, leave its version alone unless it has
+   pending changelog entries and still carries its last published version;
+   then bump it in its own manifest first. When the workspace reaches its
+   pinned version, switch it back to `version.workspace = true`.
 2. The intra-workspace `version = "..."` requirements in
    `[workspace.dependencies]` for those published crates (same file, one
    place). Leave requirements for independently versioned members unchanged.
@@ -46,8 +47,8 @@ After the version bump, on the release branch:
 
 This folds every pending `docs/changelog/unreleased/<PR>.md` fragment into the
 matching crates' `CHANGELOG.md` version sections and deletes the fragments.
-Lockstep crates get an `X.Y.Z` section; independently versioned crates get a
-section for their own manifest version;
+Lockstep crates get an `X.Y.Z` section; a crate that sets its own version,
+such as the pinned `zakura-reddsa`, gets a section for that version;
 when assembling a stable `X.Y.Z` it also collapses any pre-release sections
 (`X.Y.Z-alpha.N`, `X.Y.Z-beta.N`, `X.Y.Z-rc.N`) into the stable section.
 Review and commit the result. The gate form is:
