@@ -8,26 +8,110 @@ mod solver;
 
 const SOLVER_PARAMS: Params = Params { n: 200, k: 9 };
 
-/// Runs the solver until the nonce source ends or a nonce produces solutions.
-fn solve_200_9_uncompressed<const N: usize>(
+/// A boundary at which the solver can cancel work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancellationPoint {
+    /// No work has started on the next nonce.
+    NonceBoundary,
+    /// The solver has finished a digit round.
+    DigitBoundary,
+}
+
+/// The outcome of a cancellable solve operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CancellableSolveOutcome<T> {
+    /// The solver found solutions or exhausted its nonce source.
+    Completed(T),
+    /// The callback cancelled the solve operation.
+    Cancelled,
+}
+
+/// The solve outcome and the number of completed and abandoned nonce passes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use]
+pub struct CancellableSolveResult<T> {
+    outcome: CancellableSolveOutcome<T>,
+    passes_completed: u64,
+    passes_abandoned: u64,
+}
+
+impl<T> CancellableSolveResult<T> {
+    /// Returns the solve outcome.
+    pub fn outcome(&self) -> &CancellableSolveOutcome<T> {
+        &self.outcome
+    }
+
+    /// Consumes the result and returns the solve outcome.
+    pub fn into_outcome(self) -> CancellableSolveOutcome<T> {
+        self.outcome
+    }
+
+    /// Returns the number of nonce passes that completed.
+    pub fn passes_completed(&self) -> u64 {
+        self.passes_completed
+    }
+
+    /// Returns the number of nonce passes that cancellation discarded.
+    pub fn passes_abandoned(&self) -> u64 {
+        self.passes_abandoned
+    }
+}
+
+/// Solves Equihash with cancellation checks before each nonce and after each digit.
+///
+/// The result preserves the experiment miner's fallible solver interface. This
+/// Rust implementation uses the same allocation behavior as [`solve_200_9`].
+pub fn solve_200_9_cancellable<const N: usize>(
     input: &[u8],
     mut next_nonce: impl FnMut() -> Option<[u8; N]>,
-) -> Vec<Vec<u32>> {
+    mut should_cancel: impl FnMut(CancellationPoint) -> bool,
+) -> Result<CancellableSolveResult<Vec<Vec<u8>>>, core::convert::Infallible> {
+    let mut result = CancellableSolveResult {
+        outcome: CancellableSolveOutcome::Cancelled,
+        passes_completed: 0,
+        passes_abandoned: 0,
+    };
+    if should_cancel(CancellationPoint::NonceBoundary) {
+        return Ok(result);
+    }
+    let Some(mut nonce) = next_nonce() else {
+        result.outcome = CancellableSolveOutcome::Completed(Vec::new());
+        return Ok(result);
+    };
     let p = SOLVER_PARAMS;
     let mut state = verify::initialise_state(p.n, p.k, p.hash_output());
     state.update(input);
     let mut solver = solver::Solver::new();
-
-    while let Some(nonce) = next_nonce() {
+    loop {
         let mut curr_state = state.clone();
         curr_state.update(&nonce);
         let curr_state = SolverHashState::new(curr_state, input, &nonce, p);
-        let solutions = solver.run(&curr_state);
+        let Some(solutions) = solver.run_cancellable(&curr_state, &mut || {
+            should_cancel(CancellationPoint::DigitBoundary)
+        }) else {
+            result.passes_abandoned += 1;
+            return Ok(result);
+        };
+        result.passes_completed += 1;
         if !solutions.is_empty() {
-            return solutions;
+            let mut solutions: Vec<_> = solutions
+                .iter()
+                .map(|solution| minimal_from_indices(p, solution))
+                .collect();
+            solutions.sort();
+            solutions.dedup();
+            result.outcome = CancellableSolveOutcome::Completed(solutions);
+            return Ok(result);
         }
+        if should_cancel(CancellationPoint::NonceBoundary) {
+            return Ok(result);
+        }
+        let Some(next) = next_nonce() else {
+            result.outcome = CancellableSolveOutcome::Completed(Vec::new());
+            return Ok(result);
+        };
+        nonce = next;
     }
-    Vec::new()
 }
 
 /// Performs multiple Equihash solver runs with parameters `200, 9`,
@@ -44,14 +128,12 @@ pub fn solve_200_9<const N: usize>(
     input: &[u8],
     next_nonce: impl FnMut() -> Option<[u8; N]>,
 ) -> Vec<Vec<u8>> {
-    let solutions = solve_200_9_uncompressed(input, next_nonce);
-    let mut solutions: Vec<Vec<u8>> = solutions
-        .iter()
-        .map(|solution| minimal_from_indices(SOLVER_PARAMS, solution))
-        .collect();
-    solutions.sort();
-    solutions.dedup();
-    solutions
+    let result = solve_200_9_cancellable(input, next_nonce, |_| false)
+        .expect("the Rust solver interface has no recoverable error");
+    match result.into_outcome() {
+        CancellableSolveOutcome::Completed(solutions) => solutions,
+        CancellableSolveOutcome::Cancelled => unreachable!("the callback never cancels"),
+    }
 }
 
 #[cfg(test)]
@@ -59,6 +141,70 @@ mod tests {
     use std::println;
 
     use super::{SOLVER_PARAMS, solve_200_9};
+
+    #[test]
+    fn cancellation_stops_before_nonce_and_at_every_digit() {
+        use super::{CancellableSolveOutcome, CancellationPoint, solve_200_9_cancellable};
+        let before = solve_200_9_cancellable::<32>(
+            &[0; 108],
+            || panic!("cancelled work must not request a nonce"),
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(before.passes_completed(), 0);
+        assert_eq!(before.passes_abandoned(), 0);
+        assert_eq!(before.outcome(), &CancellableSolveOutcome::Cancelled);
+        for stop_at in 1..=10 {
+            let mut digits = 0;
+            let mut nonce = Some([0; 32]);
+            let result = solve_200_9_cancellable(
+                &[0; 108],
+                || nonce.take(),
+                |point| {
+                    if point == CancellationPoint::DigitBoundary {
+                        digits += 1;
+                    }
+                    digits == stop_at
+                },
+            )
+            .unwrap();
+            assert_eq!(digits, stop_at);
+            assert_eq!(result.passes_completed(), 0);
+            assert_eq!(result.passes_abandoned(), 1);
+            assert_eq!(result.outcome(), &CancellableSolveOutcome::Cancelled);
+        }
+    }
+
+    #[test]
+    fn nonce_boundary_cancellation_preserves_completed_solutions() {
+        use super::{CancellableSolveOutcome, CancellationPoint, solve_200_9_cancellable};
+        let input = b"Equihash is an asymmetric PoW based on the Generalised Birthday problem.";
+        let mut nonce = [0; 32];
+        nonce[0] = 1;
+        let mut source = Some(nonce);
+        let expected = solve_200_9(input, || source.take());
+        assert!(!expected.is_empty());
+        source = Some(nonce);
+        let mut stop_requested = false;
+        let result = solve_200_9_cancellable(
+            input,
+            || source.take(),
+            |point| match point {
+                CancellationPoint::NonceBoundary => stop_requested,
+                CancellationPoint::DigitBoundary => {
+                    stop_requested = true;
+                    false
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(result.passes_completed(), 1);
+        assert_eq!(result.passes_abandoned(), 0);
+        assert_eq!(
+            result.into_outcome(),
+            CancellableSolveOutcome::Completed(expected)
+        );
+    }
 
     #[test]
     fn fixed_nonce_solutions_match_c_solver() {

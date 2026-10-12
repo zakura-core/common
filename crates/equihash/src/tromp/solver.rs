@@ -387,25 +387,59 @@ impl Solver {
         }
     }
 
-    pub(super) fn run(&mut self, state: &SolverHashState) -> Vec<Vec<u32>> {
+    pub(super) fn run_cancellable(
+        &mut self,
+        state: &SolverHashState,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Option<Vec<Vec<u32>>> {
         self.counts[0].fill(0);
         self.index_tags.fill(0);
         self.index_epoch = 0;
         self.solutions.clear();
         self.initial(state);
+        if should_cancel() {
+            return None;
+        }
         self.round::<1, { HASH_WORDS[0] }, { HASH_WORDS[1] }>();
+        if should_cancel() {
+            return None;
+        }
         self.round::<2, { HASH_WORDS[1] }, { HASH_WORDS[2] }>();
+        if should_cancel() {
+            return None;
+        }
         self.round::<3, { HASH_WORDS[2] }, { HASH_WORDS[3] }>();
+        if should_cancel() {
+            return None;
+        }
         self.round::<4, { HASH_WORDS[3] }, { HASH_WORDS[4] }>();
+        if should_cancel() {
+            return None;
+        }
         self.round::<5, { HASH_WORDS[4] }, { HASH_WORDS[5] }>();
+        if should_cancel() {
+            return None;
+        }
         self.round::<6, { HASH_WORDS[5] }, { HASH_WORDS[6] }>();
+        if should_cancel() {
+            return None;
+        }
         self.round::<7, { HASH_WORDS[6] }, { HASH_WORDS[7] }>();
+        if should_cancel() {
+            return None;
+        }
         self.round::<8, { HASH_WORDS[7] }, { HASH_WORDS[8] }>();
+        if should_cancel() {
+            return None;
+        }
         self.final_round();
+        if should_cancel() {
+            return None;
+        }
         let mut solutions = core::mem::take(&mut self.solutions);
         solutions.sort();
         solutions.dedup();
-        solutions
+        Some(solutions)
     }
 
     fn initial(&mut self, state: &SolverHashState) {
