@@ -186,3 +186,67 @@ pub fn fp_is_one(value: &Fp) -> bool {
 pub fn fq_is_one(value: &Fq) -> bool {
     value.is_one()
 }
+
+pub fn fp_triple(value: &Fp) -> Fp {
+    value.triple()
+}
+
+pub fn fp_mul_by_4(value: &Fp) -> Fp {
+    value.mul_by_4()
+}
+
+pub fn fp_mul_by_8(value: &Fp) -> Fp {
+    value.mul_by_8()
+}
+
+pub fn fq_triple(value: &Fq) -> Fq {
+    value.triple()
+}
+
+pub fn fq_mul_by_4(value: &Fq) -> Fq {
+    value.mul_by_4()
+}
+
+pub fn fq_mul_by_8(value: &Fq) -> Fq {
+    value.mul_by_8()
+}
+
+pub fn fp_from_uint_reduced(value: CanonicalUint) -> Fp {
+    Fp::from_uint_reduced(value)
+}
+
+pub fn fq_from_uint_reduced(value: CanonicalUint) -> Fq {
+    Fq::from_uint_reduced(value)
+}
+
+pub fn fp_to_canonical(value: Fp) -> CanonicalUint {
+    value.to_canonical_uint()
+}
+
+pub fn fq_to_canonical(value: Fq) -> CanonicalUint {
+    value.to_canonical_uint()
+}
+
+pub fn fp_from_bytes(bytes: [u8; 32]) -> Option<Fp> {
+    Fp::from_bytes(bytes)
+}
+
+pub fn fq_from_bytes(bytes: [u8; 32]) -> Option<Fq> {
+    Fq::from_bytes(bytes)
+}
+
+pub fn fp_to_bytes(value: Fp) -> [u8; 32] {
+    value.to_bytes()
+}
+
+pub fn fq_to_bytes(value: Fq) -> [u8; 32] {
+    value.to_bytes()
+}
+
+pub fn fp_is_odd(value: &Fp) -> bool {
+    value.is_odd()
+}
+
+pub fn fq_is_odd(value: &Fq) -> bool {
+    value.is_odd()
+}
