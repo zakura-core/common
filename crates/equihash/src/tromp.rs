@@ -59,8 +59,8 @@ impl<T> CancellableSolveResult<T> {
 
 /// Solves Equihash with cancellation checks before each nonce and after each digit.
 ///
-/// The result preserves the experiment miner's fallible solver interface. This
-/// Rust implementation uses the same allocation behavior as [`solve_200_9`].
+/// The result preserves compatibility with callers of the fallible solver API.
+/// This implementation uses the same allocation behavior as [`solve_200_9`].
 pub fn solve_200_9_cancellable<const N: usize>(
     input: &[u8],
     mut next_nonce: impl FnMut() -> Option<[u8; N]>,
