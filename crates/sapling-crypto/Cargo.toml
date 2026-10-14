@@ -38,7 +38,6 @@ once_cell = { version = "1", features = ["race", "alloc"], default-features = fa
 proptest = { version = ">=1.0.0, <1.7.0", optional = true }
 rand = { version = "0.10", default-features = false }
 rand_core = { version = "0.10", default-features = false }
-rand_core_06 = { version = "0.6", default-features = false, package = "rand_core" }
 redjubjub = { workspace = true }
 subtle = { version = "2.6", default-features = false }
 tracing = { version = "0.1", default-features = false }

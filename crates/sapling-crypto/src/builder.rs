@@ -21,7 +21,6 @@ use crate::{
     },
     note::ExtractedNoteCommitment,
     note_encryption::{Zip212Enforcement, sapling_note_encryption},
-    rng_compat::RngCore06,
     util::generate_random_rseed_internal,
     value::{NoteValue, ValueCommitTrapdoor, ValueCommitment, ValueSum},
 };
@@ -454,8 +453,7 @@ impl PreparedOutputInfo {
         let cmu = self.note.cmu();
 
         let enc_ciphertext = encryptor.encrypt_note_plaintext();
-        let out_ciphertext =
-            encryptor.encrypt_outgoing_plaintext(&cv, &cmu, &mut RngCore06::new(rng));
+        let out_ciphertext = encryptor.encrypt_outgoing_plaintext(&cv, &cmu, rng);
 
         let epk = encryptor.epk();
 
