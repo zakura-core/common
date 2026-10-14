@@ -50,7 +50,6 @@ skip = [
     { name = "rand_core", version = "=0.6.4" },
     { name = "ripemd", version = "=0.1.3" },
     { name = "sha2", version = "=0.10.9" },
-    { name = "syn", version = "=1.0.109" },
     { name = "syn", version = "=2.0.119" },
     { name = "windows-sys", version = "=0.52.0" },
 ]

@@ -30,7 +30,6 @@ pasta_curves = { workspace = true, features = ["default", "deferred", "glv"] }
 plotters = { version = "0.3.0", optional = true, default-features = false }
 rand = { version = "0.10", features = ["sys_rng"], optional = true, default-features = false }
 rand_core = { version = "0.10", default-features = false }
-tabbycat = { version = "0.1", features = ["attributes"], optional = true }
 tracing = "0.1"
 
 [target.'cfg(all(target_arch = "aarch64", target_family = "unix"))'.dependencies]
@@ -49,7 +48,7 @@ rand_core = { version = "0.10", default-features = false }
 batch = ["dep:rand"]
 beta = []
 default = ["batch", "multicore"]
-dev-graph = ["plotters", "tabbycat"]
+dev-graph = ["plotters"]
 floor-planner-v1-legacy-pdqsort = ["halo2_legacy_pdqsort"]
 gadget-traces = ["backtrace"]
 multicore = ["maybe-rayon/threads", "pasta_curves/multicore"]
