@@ -1902,7 +1902,11 @@ mod tests {
 
     // The Ironwood tests below reference `TxVersion`/`BranchId` directly; without the
     // `transparent-inputs` feature these are not otherwise in scope.
-    #[cfg(all(feature = "circuits", not(feature = "transparent-inputs")))]
+    #[cfg(all(
+        feature = "circuits",
+        feature = "pczt",
+        not(feature = "transparent-inputs")
+    ))]
     use {crate::transaction::TxVersion, zcash_protocol::consensus::BranchId};
 
     #[cfg(feature = "circuits")]
@@ -2174,7 +2178,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "circuits")]
+    #[cfg(all(feature = "circuits", feature = "pczt"))]
     fn build_for_pczt_accepts_v6_when_ironwood_is_used() {
         let mut builder = Builder::new(
             nu6_3_test_network(),
@@ -2210,7 +2214,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "circuits")]
+    #[cfg(all(feature = "circuits", feature = "pczt"))]
     fn build_for_pczt_rejects_explicit_v5_when_ironwood_is_used() {
         let mut builder = Builder::new(
             nu6_3_test_network(),
@@ -2476,7 +2480,7 @@ mod tests {
     /// one transaction: one real Orchard spend pads to 2 actions while the single
     /// Ironwood output stays at 1.
     #[test]
-    #[cfg(feature = "circuits")]
+    #[cfg(all(feature = "circuits", feature = "pczt"))]
     fn per_pool_bundle_types_build_two_plus_one_pczt() {
         let spend_fvk = orchard::keys::FullViewingKey::from(
             &orchard::keys::SpendingKey::from_bytes([7; 32]).unwrap(),
