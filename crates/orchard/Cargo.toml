@@ -42,7 +42,6 @@ plotters = { version = "0.3.0", optional = true }
 poseidon = { workspace = true }
 proptest = { version = ">=1.0.0, <1.7.0", optional = true }
 rand = { version = "0.10", default-features = false }
-rand_core_06 = { version = "0.6", default-features = false, package = "rand_core" }
 reddsa = { workspace = true }
 serde = { version = "1.0", features = ["derive"], default-features = false }
 sinsemilla = { workspace = true }

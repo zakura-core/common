@@ -38,7 +38,7 @@ use chacha20::{
 };
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInOut};
 
-use rand_core::RngCore;
+use rand_core::Rng;
 use subtle::{Choice, ConstantTimeEq};
 
 #[cfg(feature = "alloc")]
@@ -494,7 +494,7 @@ impl<D: Domain> NoteEncryption<D> {
     }
 
     /// Generates `outCiphertext` for this note.
-    pub fn encrypt_outgoing_plaintext<R: RngCore>(
+    pub fn encrypt_outgoing_plaintext<R: Rng>(
         &self,
         cv: &D::ValueCommitment,
         cmstar: &D::ExtractedCommitment,

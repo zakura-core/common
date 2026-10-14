@@ -201,7 +201,6 @@ pub(crate) mod testing {
         },
         note_encryption::{OrchardDomain, OrchardNoteEncryption},
         primitives::redpallas::{self, testing::arb_valid_spendauth_keypair},
-        rng_compat::RngCore06,
         value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
     };
 
@@ -223,11 +222,7 @@ pub(crate) mod testing {
         TransmittedNoteCiphertext {
             epk_bytes: OrchardDomain::epk_bytes(encryptor.epk()).0,
             enc_ciphertext: encryptor.encrypt_note_plaintext(),
-            out_ciphertext: encryptor.encrypt_outgoing_plaintext(
-                cv_net,
-                cmx,
-                &mut RngCore06::new(&mut rng),
-            ),
+            out_ciphertext: encryptor.encrypt_outgoing_plaintext(cv_net, cmx, &mut rng),
         }
     }
 

@@ -21,7 +21,6 @@ use crate::{
     note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, Rho, TransmittedNoteCiphertext},
     note_encryption::OrchardNoteEncryption,
     primitives::redpallas::{self, Binding, SpendAuth},
-    rng_compat::RngCore06,
     tree::{Anchor, MerklePath},
     value::{self, BalanceError, NoteValue, ValueCommitTrapdoor, ValueCommitment, ValueSum},
 };
@@ -608,11 +607,7 @@ impl OutputInfo {
         let encrypted_note = TransmittedNoteCiphertext {
             epk_bytes: encryptor.epk().to_bytes().0,
             enc_ciphertext,
-            out_ciphertext: encryptor.encrypt_outgoing_plaintext(
-                cv_net,
-                &cmx,
-                &mut RngCore06::new(&mut rng),
-            ),
+            out_ciphertext: encryptor.encrypt_outgoing_plaintext(cv_net, &cmx, &mut rng),
         };
 
         (note, cmx, encrypted_note)

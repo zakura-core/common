@@ -581,7 +581,7 @@ pub mod testing {
 mod tests {
     use alloc::vec::Vec;
 
-    use crate::rng_compat::{OsRng, RngCore06};
+    use crate::rng_compat::OsRng;
     use zcash_note_encryption::{
         BatchDomain, Domain, EphemeralKeyBytes, NoteEncryption, batch, try_compact_note_decryption,
         try_note_decryption, try_output_recovery_with_ovk,
@@ -639,11 +639,7 @@ mod tests {
         let encrypted_note = TransmittedNoteCiphertext {
             epk_bytes: IronwoodDomain::epk_bytes(encryptor.epk()).0,
             enc_ciphertext: encryptor.encrypt_note_plaintext(),
-            out_ciphertext: encryptor.encrypt_outgoing_plaintext(
-                &cv_net,
-                &cmx,
-                &mut RngCore06::new(&mut rng),
-            ),
+            out_ciphertext: encryptor.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut rng),
         };
         let action = Action::from_parts(
             nf_old,
@@ -763,7 +759,7 @@ mod tests {
 
             assert_eq!(ne.encrypt_note_plaintext().as_ref(), &tv.c_enc[..]);
             assert_eq!(
-                &ne.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut RngCore06::new(&mut OsRng),)[..],
+                &ne.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut OsRng)[..],
                 &tv.c_out[..]
             );
         }

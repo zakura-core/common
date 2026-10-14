@@ -3700,7 +3700,7 @@ dependencies = [
  "chacha20",
  "chacha20poly1305",
  "cipher",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "subtle",
 ]
 
@@ -3728,7 +3728,6 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
- "rand_core 0.6.4",
  "rayon",
  "serde",
  "shardtree",
@@ -3915,7 +3914,6 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "rand_core 0.6.4",
  "rand_xorshift 0.5.0",
  "subtle",
  "tracing",

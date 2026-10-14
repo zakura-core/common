@@ -364,7 +364,6 @@ impl ShieldedOutput<SaplingDomain, COMPACT_NOTE_SIZE> for CompactOutputDescripti
 /// };
 ///
 /// let mut rng = rng();
-/// # let mut outgoing_rng = rand_core_06::OsRng;
 ///
 /// let ivk = SaplingIvk(jubjub::Scalar::random(&mut rng));
 /// let diversifier = Diversifier([0; 11]);
@@ -383,7 +382,7 @@ impl ShieldedOutput<SaplingDomain, COMPACT_NOTE_SIZE> for CompactOutputDescripti
 ///
 /// let mut enc = sapling_note_encryption(ovk, note, [0x37; 512], &mut rng);
 /// let encCiphertext = enc.encrypt_note_plaintext();
-/// let outCiphertext = enc.encrypt_outgoing_plaintext(&cv, &cmu, &mut outgoing_rng);
+/// let outCiphertext = enc.encrypt_outgoing_plaintext(&cv, &cmu, &mut rng);
 /// ```
 pub fn sapling_note_encryption<R: Rng>(
     ovk: Option<OutgoingViewingKey>,
@@ -469,6 +468,7 @@ mod tests {
     use ff::{Field, PrimeField};
     use group::Group;
     use group::GroupEncoding;
+    use rand::{SeedableRng, rngs::StdRng};
     use rand_core::{CryptoRng, Rng};
 
     use zcash_note_encryption::{
@@ -489,7 +489,7 @@ mod tests {
         keys::{DiversifiedTransmissionKey, EphemeralSecretKey, OutgoingViewingKey},
         note::ExtractedNoteCommitment,
         note_encryption::PreparedIncomingViewingKey,
-        rng_compat::{OsRng, RngCore06},
+        rng_compat::OsRng,
         util::generate_random_rseed,
         value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
     };
@@ -556,7 +556,7 @@ mod tests {
         let epk = ne.epk();
         let ock = prf_ock(&ovk, &cv, &cmu.to_bytes(), &epk.to_bytes());
 
-        let out_ciphertext = ne.encrypt_outgoing_plaintext(&cv, &cmu, &mut RngCore06::new(rng));
+        let out_ciphertext = ne.encrypt_outgoing_plaintext(&cv, &cmu, rng);
         let output = OutputDescription::from_parts(
             cv,
             cmu,
@@ -1472,10 +1472,54 @@ mod tests {
 
             assert_eq!(ne.encrypt_note_plaintext().as_ref(), &tv.c_enc[..]);
             assert_eq!(
-                &ne.encrypt_outgoing_plaintext(&cv, &cmu, &mut RngCore06::new(&mut OsRng),)[..],
+                &ne.encrypt_outgoing_plaintext(&cv, &cmu, &mut OsRng)[..],
                 &tv.c_out[..]
             );
         }
+    }
+
+    /// Without an outgoing viewing key, `outCiphertext` encrypts random bytes
+    /// under a random key. The caller's RNG supplies the key first and then the
+    /// outgoing plaintext, and nothing else is drawn from it.
+    #[test]
+    fn outgoing_ciphertext_without_ovk_draws_key_then_plaintext_from_rng() {
+        /// Any fixed seed works; the test compares two generators seeded alike.
+        const OUTGOING_RNG_SEED: u64 = 0x0a1c_e5ee_d000_0001;
+
+        let mut rng = OsRng;
+        let zip212_enforcement = Zip212Enforcement::On;
+        let ivk = SaplingIvk(jubjub::Fr::random(&mut rng));
+        let pa = ivk.to_payment_address(Diversifier([0; 11])).unwrap();
+        let value = NoteValue::from_raw(100);
+        let cv = ValueCommitment::derive(value, ValueCommitTrapdoor::random(&mut rng));
+        let note = pa.create_note(value, generate_random_rseed(zip212_enforcement, &mut rng));
+        let cmu = note.cmu();
+        let ne = sapling_note_encryption(None, note, [0x37; 512], &mut rng);
+
+        let mut outgoing_rng = StdRng::seed_from_u64(OUTGOING_RNG_SEED);
+        let out_ciphertext = ne.encrypt_outgoing_plaintext(&cv, &cmu, &mut outgoing_rng);
+
+        let mut expected_rng = StdRng::seed_from_u64(OUTGOING_RNG_SEED);
+        let mut ock = OutgoingCipherKey([0; 32]);
+        expected_rng.fill_bytes(&mut ock.0);
+        let mut expected = [0u8; OUT_CIPHERTEXT_SIZE];
+        expected_rng.fill_bytes(&mut expected[..OUT_PLAINTEXT_SIZE]);
+        let tag = ChaCha20Poly1305::new_from_slice(ock.as_ref())
+            .unwrap()
+            .encrypt_inout_detached(
+                (&[0u8; 12]).into(),
+                &[],
+                (&mut expected[..OUT_PLAINTEXT_SIZE]).into(),
+            )
+            .unwrap();
+        expected[OUT_PLAINTEXT_SIZE..].copy_from_slice(&tag);
+
+        assert_eq!(out_ciphertext, expected);
+        assert_eq!(
+            outgoing_rng.next_u64(),
+            expected_rng.next_u64(),
+            "encryption must draw exactly the key and the outgoing plaintext"
+        );
     }
 
     #[test]
