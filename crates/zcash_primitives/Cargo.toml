@@ -59,13 +59,16 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
 circuits = ["orchard/circuit", "sapling/circuit"]
-default = ["multicore", "std", "circuits"]
+default = ["multicore", "std", "circuits", "pczt"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
 expensive-tests = []
 multicore = ["orchard/multicore", "sapling/multicore"]
 no-expensive-tests = []
 non-standard-fees = []
+# PCZT construction (`DeferredPcztBuilder`, `Builder::build_for_pczt`, and their
+# result types). Enabled by default; also enabled by `transparent-inputs`.
+pczt = ["transparent/pczt"]
 std = [
     "document-features",
     "equihash/std",
@@ -83,7 +86,7 @@ test-dependencies = [
     "transparent/test-dependencies",
     "zcash_protocol/test-dependencies",
 ]
-transparent-inputs = ["transparent/transparent-inputs", "dep:secp256k1"]
+transparent-inputs = ["pczt", "transparent/transparent-inputs", "dep:secp256k1"]
 
 [lints.rust.unexpected_cfgs]
 level = "warn"

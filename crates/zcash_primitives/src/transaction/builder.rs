@@ -1,9 +1,6 @@
 //! Structs for building transactions.
 
-use core::cmp::Ordering;
 use core::fmt;
-
-use rand_core::{CryptoRng, Rng};
 
 use ::sapling::{Note, PaymentAddress, builder::SaplingMetadata};
 use ::transparent::{
@@ -11,7 +8,7 @@ use ::transparent::{
 };
 use zcash_protocol::{
     PoolType,
-    consensus::{self, BlockHeight, BranchId, Parameters},
+    consensus::{self, BlockHeight, BranchId},
     memo::MemoBytes,
     value::{BalanceError, ZatBalance, Zatoshis},
 };
@@ -28,6 +25,12 @@ use crate::transaction::{
 
 #[cfg(feature = "std")]
 use std::sync::mpsc::Sender;
+
+#[cfg(any(feature = "circuits", feature = "pczt"))]
+use {
+    core::cmp::Ordering,
+    rand_core::{CryptoRng, Rng},
+};
 
 #[cfg(feature = "circuits")]
 use {
@@ -454,6 +457,7 @@ fn orchard_action_count(
 /// scope for the pre-signing flows this builder serves; use [`Builder`] for those.
 ///
 /// [ZIP 374]: https://zips.z.cash/zip-0374
+#[cfg(feature = "pczt")]
 pub struct DeferredPcztBuilder<P> {
     params: P,
     tx_version: TxVersion,
@@ -465,6 +469,7 @@ pub struct DeferredPcztBuilder<P> {
     ironwood_builder: orchard::builder::Builder,
 }
 
+#[cfg(feature = "pczt")]
 impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
     /// Creates a builder targeting the block at `target_height`, with the given
     /// transactional bundle padding for each Orchard-family pool.
@@ -759,8 +764,9 @@ impl BuildResult {
 ///
 /// It includes the PCZT components along with metadata describing how spends and outputs
 /// were shuffled in creating the transaction's shielded bundles.
+#[cfg(feature = "pczt")]
 #[derive(Debug)]
-pub struct PcztResult<P: Parameters> {
+pub struct PcztResult<P: consensus::Parameters> {
     pub pczt_parts: PcztParts<P>,
     pub sapling_meta: SaplingMetadata,
     pub orchard_meta: orchard::builder::BundleMetadata,
@@ -768,8 +774,9 @@ pub struct PcztResult<P: Parameters> {
 }
 
 /// The components of a PCZT.
+#[cfg(feature = "pczt")]
 #[derive(Debug)]
-pub struct PcztParts<P: Parameters> {
+pub struct PcztParts<P: consensus::Parameters> {
     pub params: P,
     pub version: TxVersion,
     pub consensus_branch_id: BranchId,
@@ -1032,6 +1039,7 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
 
     /// Verifies that a coinbase transaction's expiry height matches its target
     /// block height, as required for coinbase transactions.
+    #[cfg(any(feature = "circuits", feature = "pczt"))]
     fn check_coinbase_expiry_height<FE>(&self) -> Result<(), Error<FE>> {
         if self.build_config.is_coinbase() && self.expiry_height != self.target_height {
             Err(Error::CoinbaseExpiryHeightMismatch {
@@ -1244,6 +1252,7 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
     }
 
     /// Returns the sum of the transparent, Sapling, Orchard, and Ironwood value balances.
+    #[cfg(any(feature = "circuits", feature = "pczt"))]
     fn value_balance(&self) -> Result<ZatBalance, BalanceError> {
         let value_balances = [
             self.transparent_builder.value_balance()?,
@@ -1673,6 +1682,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
     }
 }
 
+#[cfg(feature = "pczt")]
 impl<P: consensus::Parameters, U> Builder<P, U> {
     /// Builds a PCZT from the configured spends and outputs.
     ///

@@ -2,7 +2,17 @@
 //!
 //! ## Feature flags
 //!
-//! *No documented features in Cargo.toml*
+//! - `std` (default): Enables `std` support in dependencies.
+//! - `pczt` (default): The [`pczt`] module and [`builder::TransparentBuilder::build_for_pczt`].
+//!   Implies `bip32`.
+//! - `bip32`: Conversions between [`keys::TransparentKeyScope`] /
+//!   [`keys::NonHardenedChildIndex`] and `bip32::ChildNumber`.
+//! - `transparent-inputs`: Transparent key derivation and spending. Implies `pczt`.
+//! - `test-dependencies`: Exposes APIs useful for testing.
+//!
+//! Disabling `pczt` (by turning off default features) removes the `bip32` dependency,
+//! which a consumer that only parses, validates, or builds coinbase transparent bundles
+//! does not need.
 //!
 
 #![no_std]
@@ -15,6 +25,7 @@ pub mod builder;
 pub mod bundle;
 pub mod coinbase;
 pub mod keys;
+#[cfg(feature = "pczt")]
 pub mod pczt;
 pub mod sighash;
 pub mod util;

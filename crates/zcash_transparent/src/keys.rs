@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+#[cfg(feature = "bip32")]
 use bip32::ChildNumber;
 use subtle::{Choice, ConstantTimeEq};
 use zip32::DiversifierIndex;
@@ -71,6 +72,7 @@ impl From<zip32::Scope> for TransparentKeyScope {
     }
 }
 
+#[cfg(feature = "bip32")]
 impl From<TransparentKeyScope> for ChildNumber {
     fn from(value: TransparentKeyScope) -> Self {
         ChildNumber::new(value.0, false).expect("TransparentKeyScope is correct by construction")
@@ -150,6 +152,7 @@ impl NonHardenedChildIndex {
     }
 }
 
+#[cfg(feature = "bip32")]
 impl TryFrom<ChildNumber> for NonHardenedChildIndex {
     type Error = ();
 
@@ -162,6 +165,7 @@ impl TryFrom<ChildNumber> for NonHardenedChildIndex {
     }
 }
 
+#[cfg(feature = "bip32")]
 impl From<NonHardenedChildIndex> for ChildNumber {
     fn from(value: NonHardenedChildIndex) -> Self {
         Self::new(value.index(), false).expect("NonHardenedChildIndex is correct by construction")
@@ -690,6 +694,7 @@ impl ExternalOvk {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "bip32")]
     use bip32::ChildNumber;
     use subtle::ConstantTimeEq;
 
@@ -868,6 +873,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bip32")]
     fn nonhardened_index_tryfrom_keyindex() {
         let nh: NonHardenedChildIndex = ChildNumber::new(0, false).unwrap().try_into().unwrap();
         assert_eq!(nh.index(), 0);

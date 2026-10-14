@@ -1,6 +1,5 @@
 //! Types and functions for building transparent transaction components.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -18,9 +17,12 @@ use zcash_script::{
 use crate::{
     address::{Script, TransparentAddress},
     bundle::{Authorization, Authorized, Bundle, MapAuth, TxIn, TxOut},
-    coinbase, pczt,
+    coinbase,
     sighash::{SignableInput, TransparentAuthorizingContext},
 };
+
+#[cfg(feature = "pczt")]
+use {crate::pczt, alloc::collections::BTreeMap};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -489,6 +491,7 @@ impl TransparentBuilder {
     }
 
     /// Builds a bundle containing the given inputs and outputs, for inclusion in a PCZT.
+    #[cfg(feature = "pczt")]
     pub fn build_for_pczt(self) -> Option<pczt::Bundle> {
         #[cfg(feature = "transparent-inputs")]
         let inputs = self

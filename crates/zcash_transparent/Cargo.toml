@@ -26,9 +26,9 @@ corez = { version = "0.1.1", features = ["alloc"], default-features = false }
 subtle = { version = "2.2.3", default-features = false }
 zcash_spec = "0.2"
 proptest = { version = ">=1,<1.7", optional = true }
-bip32 = { version = "0.6", features = ["alloc"], default-features = false }
+bip32 = { version = "0.6", features = ["alloc"], optional = true, default-features = false }
 secp256k1 = { version = "0.33", features = ["alloc"], optional = true, default-features = false }
-zcash_script = { version = "0.6", features = ["descriptor"], default-features = false }
+zcash_script = { version = "0.6", default-features = false }
 getset = "0.1"
 nonempty = { version = "0.11", default-features = false }
 sha2 = { version = "0.10", default-features = false }
@@ -41,13 +41,26 @@ proptest = ">=1,<1.7"
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
-default = ["std"]
+default = ["std", "pczt"]
 std = [
     "secp256k1?/std",
     "zcash_address/std",
     "zcash_script/std",
 ]
-transparent-inputs = ["bip32/secp256k1-ffi", "dep:secp256k1"]
+# BIP 32 interoperability: conversions between this crate's key scopes and child
+# indices and `bip32::ChildNumber`.
+bip32 = ["dep:bip32"]
+# Partially created transparent bundles (`pczt` module and
+# `builder::TransparentBuilder::build_for_pczt`), whose key derivation paths are BIP 32 paths.
+pczt = ["bip32"]
+# Spending transparent inputs: HD key derivation, signing, and ZIP 48 multisig
+# descriptors. Also enables `pczt`, which carries the PCZT Signer role.
+transparent-inputs = [
+    "pczt",
+    "bip32?/secp256k1-ffi",
+    "dep:secp256k1",
+    "zcash_script/descriptor",
+]
 test-dependencies = [
     "dep:proptest",
     "zcash_protocol/test-dependencies",
