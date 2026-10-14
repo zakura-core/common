@@ -1,7 +1,4 @@
 {
-  "zakura-halo2-proofs": {
-    "tabbycat": "Ignored for minor releases in #578, which replaced the optional tabbycat dependency with a direct DOT renderer; the implicit feature only enabled that dependency, and dev-graph still provides the renderer."
-  },
   "zakura-primitives": {
     "zip-233": "Ignored for minor releases in #465 because #458 removed the unused ZIP 233 feature and obsolete transaction field."
   },

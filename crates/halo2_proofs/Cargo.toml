@@ -48,7 +48,7 @@ rand_core = { version = "0.10", default-features = false }
 batch = ["dep:rand"]
 beta = []
 default = ["batch", "multicore"]
-dev-graph = ["plotters"]
+dev-graph = ["plotters", "tabbycat"]
 floor-planner-v1-legacy-pdqsort = ["halo2_legacy_pdqsort"]
 gadget-traces = ["backtrace"]
 multicore = ["maybe-rayon/threads", "pasta_curves/multicore"]
@@ -61,6 +61,9 @@ orbits = ["pasta_curves/orbits"]
 # Disable automatic x86-64 assembly selection in `pasta_curves`.
 portable = ["pasta_curves/portable"]
 sanity-checks = []
+# Preserve the former optional-dependency feature for existing consumers.
+# DOT rendering no longer needs the tabbycat crate.
+tabbycat = []
 test-dev-graph = [
     "dev-graph",
     "plotters/bitmap_backend",
