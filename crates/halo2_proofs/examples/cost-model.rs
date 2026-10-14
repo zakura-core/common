@@ -1,13 +1,15 @@
 use std::{
-    cmp, fmt, iter,
+    cmp,
+    ffi::OsString,
+    fmt, iter,
     num::ParseIntError,
     str::FromStr,
     time::{Duration, Instant},
 };
 
+use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use ff::Field;
 use group::{Curve, Group};
-use gumdrop::Options;
 use halo2_proofs::{arithmetic::best_multiexp, pasta::pallas};
 
 struct Estimator {
@@ -45,43 +47,119 @@ impl Estimator {
     }
 }
 
-#[derive(Debug, Options)]
+#[derive(Debug)]
 struct CostOptions {
-    #[options(help = "Print this message.")]
-    help: bool,
-
-    #[options(
-        help = "An advice column with the given rotations. May be repeated.",
-        meta = "R[,R..]"
-    )]
     advice: Vec<Poly>,
-
-    #[options(
-        help = "An instance column with the given rotations. May be repeated.",
-        meta = "R[,R..]"
-    )]
     instance: Vec<Poly>,
-
-    #[options(
-        help = "A fixed column with the given rotations. May be repeated.",
-        meta = "R[,R..]"
-    )]
     fixed: Vec<Poly>,
-
-    #[options(help = "Maximum degree of the custom gates.", meta = "D")]
     gate_degree: usize,
-
-    #[options(
-        help = "A lookup over N columns with max input degree I and max table degree T. May be repeated.",
-        meta = "N,I,T"
-    )]
     lookup: Vec<Lookup>,
-
-    #[options(help = "A permutation over N columns. May be repeated.", meta = "N")]
     permutation: Vec<Permutation>,
-
-    #[options(free, required, help = "2^K bound on the number of rows.")]
     k: usize,
+}
+
+impl CostOptions {
+    fn command() -> Command {
+        // Option values are taken verbatim, so rotation lists such as `-1,0`
+        // are not mistaken for flags. Repeating a single-value option keeps
+        // the last value.
+        let repeated = |name: &'static str, short: char, meta: &'static str, help: &'static str| {
+            Arg::new(name)
+                .short(short)
+                .long(name)
+                .value_name(meta)
+                .help(help)
+                .allow_hyphen_values(true)
+                .action(ArgAction::Append)
+        };
+
+        Command::new("cost-model")
+            .args_override_self(true)
+            .arg(
+                Arg::new("k")
+                    .help("2^K bound on the number of rows.")
+                    .required(true)
+                    .value_parser(value_parser!(usize)),
+            )
+            .arg(
+                repeated(
+                    "advice",
+                    'a',
+                    "R[,R..]",
+                    "An advice column with the given rotations. May be repeated.",
+                )
+                .value_parser(value_parser!(Poly)),
+            )
+            .arg(
+                repeated(
+                    "instance",
+                    'i',
+                    "R[,R..]",
+                    "An instance column with the given rotations. May be repeated.",
+                )
+                .value_parser(value_parser!(Poly)),
+            )
+            .arg(
+                repeated(
+                    "fixed",
+                    'f',
+                    "R[,R..]",
+                    "A fixed column with the given rotations. May be repeated.",
+                )
+                .value_parser(value_parser!(Poly)),
+            )
+            .arg(
+                Arg::new("gate-degree")
+                    .short('g')
+                    .long("gate-degree")
+                    .value_name("D")
+                    .help("Maximum degree of the custom gates.")
+                    .allow_hyphen_values(true)
+                    .default_value("0")
+                    .value_parser(value_parser!(usize)),
+            )
+            .arg(
+                repeated(
+                    "lookup",
+                    'l',
+                    "N,I,T",
+                    "A lookup over N columns with max input degree I and max table degree T. May be repeated.",
+                )
+                .value_parser(value_parser!(Lookup)),
+            )
+            .arg(
+                repeated(
+                    "permutation",
+                    'p',
+                    "N",
+                    "A permutation over N columns. May be repeated.",
+                )
+                .value_parser(value_parser!(Permutation)),
+            )
+    }
+
+    fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let mut matches = Self::command().try_get_matches_from(args)?;
+        fn all<T: Clone + Send + Sync + 'static>(matches: &mut ArgMatches, id: &str) -> Vec<T> {
+            matches
+                .remove_many(id)
+                .map(Iterator::collect)
+                .unwrap_or_default()
+        }
+        Ok(CostOptions {
+            advice: all(&mut matches, "advice"),
+            instance: all(&mut matches, "instance"),
+            fixed: all(&mut matches, "fixed"),
+            gate_degree: matches.remove_one("gate-degree").expect("has a default"),
+            lookup: all(&mut matches, "lookup"),
+            permutation: all(&mut matches, "permutation"),
+            k: matches.remove_one("k").expect("is required"),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,7 +178,7 @@ impl FromStr for Poly {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Lookup {
     _columns: usize,
     input_deg: usize,
@@ -143,7 +221,7 @@ impl Lookup {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Permutation {
     columns: usize,
 }
@@ -292,7 +370,7 @@ impl Circuit {
 }
 
 fn main() {
-    let opts = CostOptions::parse_args_default_or_exit();
+    let opts = CostOptions::try_parse_from(std::env::args_os()).unwrap_or_else(|e| e.exit());
     let c = Circuit::from(opts);
     println!("{:#?}", c);
     println!("Proof size: {} bytes", c.proof_size());
@@ -300,4 +378,135 @@ fn main() {
         "Verification: at least {}ms",
         c.verification_time().as_micros() as f64 / 1_000f64
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::error::ErrorKind;
+
+    use super::{CostOptions, Poly};
+
+    fn parse(args: &str) -> Result<CostOptions, clap::Error> {
+        CostOptions::try_parse_from(iter_args(args))
+    }
+
+    fn iter_args(args: &str) -> impl Iterator<Item = &str> {
+        std::iter::once("cost-model").chain(args.split_whitespace())
+    }
+
+    fn rotations(polys: &[Poly]) -> Vec<Vec<isize>> {
+        polys.iter().map(|p| p.rotations.clone()).collect()
+    }
+
+    #[test]
+    fn short_options_with_negative_rotations() {
+        let opts = parse("-a 0,1 -a 0 -a 0,-1,1 -f 0 -g 4 11").unwrap();
+        assert_eq!(opts.k, 11);
+        assert_eq!(
+            rotations(&opts.advice),
+            [vec![0, 1], vec![0], vec![-1, 0, 1]]
+        );
+        assert_eq!(rotations(&opts.fixed), [vec![0]]);
+        assert!(opts.instance.is_empty());
+        assert_eq!(opts.gate_degree, 4);
+    }
+
+    #[test]
+    fn long_options_with_every_column_and_argument_kind() {
+        let opts = parse(
+            "--advice 0,1 --advice=-1 --instance 0 --fixed=0 --gate-degree=3 \
+             --lookup 2,1,3 --lookup 1,1,1 --permutation 3 --permutation=5 12",
+        )
+        .unwrap();
+        assert_eq!(opts.k, 12);
+        assert_eq!(rotations(&opts.advice), [vec![0, 1], vec![-1]]);
+        assert_eq!(rotations(&opts.instance), [vec![0]]);
+        assert_eq!(rotations(&opts.fixed), [vec![0]]);
+        assert_eq!(opts.gate_degree, 3);
+        let lookups: Vec<_> = opts
+            .lookup
+            .iter()
+            .map(|l| (l._columns, l.input_deg, l.table_deg))
+            .collect();
+        assert_eq!(lookups, [(2, 1, 3), (1, 1, 1)]);
+        let permutations: Vec<_> = opts.permutation.iter().map(|p| p.columns).collect();
+        assert_eq!(permutations, [3, 5]);
+    }
+
+    #[test]
+    fn negative_first_rotation_is_a_value_not_a_flag() {
+        let opts = parse("-a -1,0 -i -2 --fixed -1 7").unwrap();
+        assert_eq!(rotations(&opts.advice), [vec![-1, 0]]);
+        assert_eq!(rotations(&opts.instance), [vec![-2]]);
+        assert_eq!(rotations(&opts.fixed), [vec![-1]]);
+    }
+
+    #[test]
+    fn attached_short_values_and_positional_anywhere() {
+        let opts = parse("11 -a0,1 -g4").unwrap();
+        assert_eq!(opts.k, 11);
+        assert_eq!(rotations(&opts.advice), [vec![0, 1]]);
+        assert_eq!(opts.gate_degree, 4);
+
+        let opts = parse("-g 4 -- 9").unwrap();
+        assert_eq!(opts.k, 9);
+    }
+
+    #[test]
+    fn only_k_uses_empty_columns_and_zero_gate_degree() {
+        let opts = parse("11").unwrap();
+        assert_eq!(opts.k, 11);
+        assert_eq!(opts.gate_degree, 0);
+        assert!(opts.advice.is_empty());
+        assert!(opts.instance.is_empty());
+        assert!(opts.fixed.is_empty());
+        assert!(opts.lookup.is_empty());
+        assert!(opts.permutation.is_empty());
+    }
+
+    #[test]
+    fn repeated_gate_degree_keeps_the_last_value() {
+        assert_eq!(parse("-g 2 --gate-degree 5 11").unwrap().gate_degree, 5);
+    }
+
+    #[test]
+    fn help_is_reported_with_or_without_k() {
+        for args in ["--help", "-h", "--help 11", "11 -h"] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::DisplayHelp, "{args}");
+            assert_eq!(err.exit_code(), 0, "{args}");
+            let help = err.to_string();
+            for flag in [
+                "--advice",
+                "--instance",
+                "--fixed",
+                "--gate-degree",
+                "--lookup",
+                "--permutation",
+            ] {
+                assert!(help.contains(flag), "{args}: help lists {flag}");
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_invocations_are_usage_errors() {
+        for (args, kind) in [
+            ("", ErrorKind::MissingRequiredArgument),
+            // The option consumes `11` as its value, so `k` is missing.
+            ("--advice 11", ErrorKind::MissingRequiredArgument),
+            ("11 12", ErrorKind::UnknownArgument),
+            ("-1", ErrorKind::UnknownArgument),
+            ("--bogus 11", ErrorKind::UnknownArgument),
+            ("-z 11", ErrorKind::UnknownArgument),
+            ("abc", ErrorKind::ValueValidation),
+            ("--gate-degree x 11", ErrorKind::ValueValidation),
+            ("--advice 0,x 11", ErrorKind::ValueValidation),
+            ("--permutation -1 11", ErrorKind::ValueValidation),
+        ] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(err.kind(), kind, "{args:?}");
+            assert_eq!(err.exit_code(), 2, "{args:?}");
+        }
+    }
 }

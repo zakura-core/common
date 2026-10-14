@@ -38,8 +38,8 @@ pasta_curves = { workspace = true, features = ["default", "aarch64-asm"] }
 
 [dev-dependencies]
 assert_matches = "1.5"
+clap = { version = "4", default-features = false, features = ["error-context", "help", "std", "usage"] }
 criterion = "0.5"
-gumdrop = "0.8"
 image = ">=0.24, <0.24.5"
 proptest = "1"
 rand = { version = "0.10", features = ["sys_rng", "thread_rng"], default-features = false }
@@ -80,6 +80,11 @@ unstable-circuit-fixtures = []
 [[example]]
 name = "circuit-layout"
 required-features = ["test-dev-graph"]
+
+# Run the cost model's argument parsing tests as part of the crate's tests.
+[[example]]
+name = "cost-model"
+test = true
 
 [[bench]]
 name = "arithmetic"

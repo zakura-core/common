@@ -543,14 +543,6 @@ criteria = "safe-to-deploy"
 version = "0.14.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.gumdrop]]
-version = "0.8.1"
-criteria = "safe-to-run"
-
-[[exemptions.gumdrop_derive]]
-version = "0.8.1"
-criteria = "safe-to-run"
-
 [[exemptions.half]]
 version = "2.7.1"
 criteria = "safe-to-deploy"
