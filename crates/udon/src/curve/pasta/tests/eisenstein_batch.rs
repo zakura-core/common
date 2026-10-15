@@ -100,7 +100,9 @@ fn batches<C: PastaCurve, E: CurveTableEntry<C> + Eq>() {
         })
         .collect();
     let cached: Vec<_> = bases.iter().map(PreparedAffinePoint::from_affine).collect();
-    for n in [0, 1, 7, 8, 15, 31, 32, 33, 63, 64, 65, 99, 128, 129] {
+    for n in [
+        0, 1, 7, 8, 9, 15, 31, 32, 33, 47, 48, 49, 63, 64, 65, 99, 128, 129,
+    ] {
         let r = EisensteinTableBatch::<C, E>::requirements(n).unwrap();
         let mut entries = vec![E::from_affine(&g); r.table_entries];
         let mut projective = vec![ProjectivePoint::GENERATOR; r.projective_scratch + 1];
@@ -182,7 +184,7 @@ fn vesta() {
 fn errors_preserve_preparation_and_multiplication_buffers() {
     type C = Pallas;
     let g = AffinePoint::<C>::GENERATOR;
-    for n in [7, 8, 63, 64, 65] {
+    for n in [7, 8, 9, 47, 48, 49, 63, 64, 65] {
         let r = EisensteinTableBatch::<C>::requirements(n).unwrap();
         for failure in 0..3 {
             let bases = vec![g; n];

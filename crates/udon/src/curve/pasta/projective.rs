@@ -71,6 +71,50 @@ impl<C: PastaCurve> ProjectivePoint<C> {
         self.z.is_zero()
     }
 
+    /// Selects `other` when `choice` is true, preserving the complete projective
+    /// representation without normalization or encoding. All coordinates use
+    /// the same mask, so the result inherits the selected point's invariants.
+    pub fn select(&self, other: &Self, choice: bool) -> Self {
+        let mask = u64::from(choice).wrapping_neg();
+        let select = |a: &PastaField<C::Base>, b: &PastaField<C::Base>| {
+            let a = a.montgomery_limbs();
+            let b = b.montgomery_limbs();
+            PastaField::from_montgomery_limbs(core::array::from_fn(|i| {
+                a[i] ^ ((a[i] ^ b[i]) & mask)
+            }))
+        };
+        Self {
+            x: select(&self.x, &other.x),
+            y: select(&self.y, &other.y),
+            z: select(&self.z, &other.z),
+            marker: PhantomData,
+        }
+    }
+
+    /// Checks a Jacobian representation without normalizing it.
+    ///
+    /// Nonidentity inputs must satisfy `y² = x³ + 5z⁶`. A zero `z` denotes
+    /// identity and is canonicalized to [`Self::IDENTITY`]. This permits
+    /// protocol maps to hand off projective results without an inversion.
+    pub fn from_jacobian(
+        x: PastaField<C::Base>,
+        y: PastaField<C::Base>,
+        z: PastaField<C::Base>,
+    ) -> Option<Self> {
+        if z.is_zero() {
+            return Some(Self::IDENTITY);
+        }
+        let z2 = z.square();
+        let z6 = z2.square().mul(&z2);
+        let rhs = x.square().mul(&x).add(&z6.mul_by_4().add(&z6));
+        (y.square().reduce() == rhs.reduce()).then_some(Self {
+            x,
+            y,
+            z,
+            marker: PhantomData,
+        })
+    }
+
     /// Borrows the Jacobian coordinates `(x, y, z)`.
     #[expect(
         clippy::type_complexity,
@@ -316,6 +360,62 @@ impl<C: PastaCurve> ProjectivePoint<C> {
             z,
             marker: PhantomData,
         }
+    }
+
+    /// Adds two independent affine operands with interleaved multiplication chains.
+    ///
+    /// This is useful for paired commitment accumulators. Each lane has the same
+    /// complete semantics as [`Self::add_mixed`], including exceptional inputs.
+    #[inline(never)]
+    pub fn add_mixed_pair(
+        lhs_0: &Self,
+        rhs_0: &AffinePoint<C>,
+        lhs_1: &Self,
+        rhs_1: &AffinePoint<C>,
+    ) -> [Self; 2] {
+        let z2_0 = lhs_0.z.square();
+        let z2_1 = lhs_1.z.square();
+        let u_0 = rhs_0.x.mul(&z2_0);
+        let u_1 = rhs_1.x.mul(&z2_1);
+        let s_0 = rhs_0.y.mul(&z2_0).mul(&lhs_0.z);
+        let s_1 = rhs_1.y.mul(&z2_1).mul(&lhs_1.z);
+        if lhs_0.is_identity()
+            || lhs_1.is_identity()
+            || lhs_0.x.reduce() == u_0.reduce()
+            || lhs_1.x.reduce() == u_1.reduce()
+        {
+            return [lhs_0.add_mixed(rhs_0), lhs_1.add_mixed(rhs_1)];
+        }
+        let h_0 = u_0.sub(&lhs_0.x);
+        let h_1 = u_1.sub(&lhs_1.x);
+        let i_0 = h_0.square();
+        let i_1 = h_1.square();
+        let j_0 = h_0.mul(&i_0);
+        let j_1 = h_1.mul(&i_1);
+        let r_0 = s_0.sub(&lhs_0.y);
+        let r_1 = s_1.sub(&lhs_1.y);
+        let v_0 = lhs_0.x.mul(&i_0);
+        let v_1 = lhs_1.x.mul(&i_1);
+        let x_0 = r_0.square().sub(&j_0).sub(&v_0.double());
+        let x_1 = r_1.square().sub(&j_1).sub(&v_1.double());
+        let y_0 = r_0.mul_sub_product(&v_0.sub(&x_0), &lhs_0.y, &j_0);
+        let y_1 = r_1.mul_sub_product(&v_1.sub(&x_1), &lhs_1.y, &j_1);
+        let z_0 = lhs_0.z.mul(&h_0);
+        let z_1 = lhs_1.z.mul(&h_1);
+        [
+            Self {
+                x: x_0,
+                y: y_0,
+                z: z_0,
+                marker: PhantomData,
+            },
+            Self {
+                x: x_1,
+                y: y_1,
+                z: z_1,
+                marker: PhantomData,
+            },
+        ]
     }
 
     /// Returns `self - rhs`, without inversion.
