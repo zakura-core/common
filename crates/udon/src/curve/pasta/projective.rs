@@ -362,6 +362,62 @@ impl<C: PastaCurve> ProjectivePoint<C> {
         }
     }
 
+    /// Adds two independent affine operands with interleaved multiplication chains.
+    ///
+    /// This is useful for paired commitment accumulators. Each lane has the same
+    /// complete semantics as [`Self::add_mixed`], including exceptional inputs.
+    #[inline(never)]
+    pub fn add_mixed_pair(
+        lhs_0: &Self,
+        rhs_0: &AffinePoint<C>,
+        lhs_1: &Self,
+        rhs_1: &AffinePoint<C>,
+    ) -> [Self; 2] {
+        let z2_0 = lhs_0.z.square();
+        let z2_1 = lhs_1.z.square();
+        let u_0 = rhs_0.x.mul(&z2_0);
+        let u_1 = rhs_1.x.mul(&z2_1);
+        let s_0 = rhs_0.y.mul(&z2_0).mul(&lhs_0.z);
+        let s_1 = rhs_1.y.mul(&z2_1).mul(&lhs_1.z);
+        if lhs_0.is_identity()
+            || lhs_1.is_identity()
+            || lhs_0.x.reduce() == u_0.reduce()
+            || lhs_1.x.reduce() == u_1.reduce()
+        {
+            return [lhs_0.add_mixed(rhs_0), lhs_1.add_mixed(rhs_1)];
+        }
+        let h_0 = u_0.sub(&lhs_0.x);
+        let h_1 = u_1.sub(&lhs_1.x);
+        let i_0 = h_0.square();
+        let i_1 = h_1.square();
+        let j_0 = h_0.mul(&i_0);
+        let j_1 = h_1.mul(&i_1);
+        let r_0 = s_0.sub(&lhs_0.y);
+        let r_1 = s_1.sub(&lhs_1.y);
+        let v_0 = lhs_0.x.mul(&i_0);
+        let v_1 = lhs_1.x.mul(&i_1);
+        let x_0 = r_0.square().sub(&j_0).sub(&v_0.double());
+        let x_1 = r_1.square().sub(&j_1).sub(&v_1.double());
+        let y_0 = r_0.mul_sub_product(&v_0.sub(&x_0), &lhs_0.y, &j_0);
+        let y_1 = r_1.mul_sub_product(&v_1.sub(&x_1), &lhs_1.y, &j_1);
+        let z_0 = lhs_0.z.mul(&h_0);
+        let z_1 = lhs_1.z.mul(&h_1);
+        [
+            Self {
+                x: x_0,
+                y: y_0,
+                z: z_0,
+                marker: PhantomData,
+            },
+            Self {
+                x: x_1,
+                y: y_1,
+                z: z_1,
+                marker: PhantomData,
+            },
+        ]
+    }
+
     /// Returns `self - rhs`, without inversion.
     pub fn sub(&self, rhs: &Self) -> Self {
         self.add(&rhs.neg())

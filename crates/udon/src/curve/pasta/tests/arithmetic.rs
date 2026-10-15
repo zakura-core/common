@@ -72,7 +72,8 @@ fn group_laws<C: PastaCurve>() {
     assert_eq!(scaled(&identity, 3), ProjectivePoint::IDENTITY);
     assert!(std::format!("{affine:?} {generator:?} {projective:?}").contains("x"));
 
-    // Protocol map handoff and selection retain projective scaling.
+    // Protocol map handoff and selection retain projective scaling. The paired
+    // kernel must also preserve equal/inverse and identity lane semantics.
     let coordinates = |p: &ProjectivePoint<C>| {
         let (x, y, z) = p.coordinates();
         [
@@ -100,6 +101,18 @@ fn group_laws<C: PastaCurve>() {
             coordinates(&lhs.select(&projective, true)),
             coordinates(&projective)
         );
+        for rhs in [
+            affine,
+            affine.neg(),
+            *projective.double().to_point().as_affine().unwrap(),
+        ] {
+            for other in [ProjectivePoint::IDENTITY, lhs.neg(), projective] {
+                assert_eq!(
+                    ProjectivePoint::add_mixed_pair(&lhs, &rhs, &other, &affine),
+                    [lhs.add(&rhs.to_projective()), other.add(&projective)]
+                );
+            }
+        }
     }
     assert_eq!(
         ProjectivePoint::<C>::from_jacobian(PastaField::ONE, PastaField::ONE, PastaField::ONE),
