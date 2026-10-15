@@ -71,6 +71,50 @@ impl<C: PastaCurve> ProjectivePoint<C> {
         self.z.is_zero()
     }
 
+    /// Selects `other` when `choice` is true, preserving the complete projective
+    /// representation without normalization or encoding. All coordinates use
+    /// the same mask, so the result inherits the selected point's invariants.
+    pub fn select(&self, other: &Self, choice: bool) -> Self {
+        let mask = u64::from(choice).wrapping_neg();
+        let select = |a: &PastaField<C::Base>, b: &PastaField<C::Base>| {
+            let a = a.montgomery_limbs();
+            let b = b.montgomery_limbs();
+            PastaField::from_montgomery_limbs(core::array::from_fn(|i| {
+                a[i] ^ ((a[i] ^ b[i]) & mask)
+            }))
+        };
+        Self {
+            x: select(&self.x, &other.x),
+            y: select(&self.y, &other.y),
+            z: select(&self.z, &other.z),
+            marker: PhantomData,
+        }
+    }
+
+    /// Checks a Jacobian representation without normalizing it.
+    ///
+    /// Nonidentity inputs must satisfy `y² = x³ + 5z⁶`. A zero `z` denotes
+    /// identity and is canonicalized to [`Self::IDENTITY`]. This permits
+    /// protocol maps to hand off projective results without an inversion.
+    pub fn from_jacobian(
+        x: PastaField<C::Base>,
+        y: PastaField<C::Base>,
+        z: PastaField<C::Base>,
+    ) -> Option<Self> {
+        if z.is_zero() {
+            return Some(Self::IDENTITY);
+        }
+        let z2 = z.square();
+        let z6 = z2.square().mul(&z2);
+        let rhs = x.square().mul(&x).add(&z6.mul_by_4().add(&z6));
+        (y.square().reduce() == rhs.reduce()).then_some(Self {
+            x,
+            y,
+            z,
+            marker: PhantomData,
+        })
+    }
+
     /// Borrows the Jacobian coordinates `(x, y, z)`.
     #[expect(
         clippy::type_complexity,
