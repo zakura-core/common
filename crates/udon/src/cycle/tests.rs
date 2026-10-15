@@ -31,8 +31,8 @@ fn params() -> PastaParams {
 #[test]
 fn pasta_generators_are_reached_through_the_cycle() {
     let params = params();
-    let pallas = Pasta::nested_generators(&params);
-    let vesta = Pasta::host_generators(&params);
+    let pallas = <Pasta as Cycle>::nested_generators(&params);
+    let vesta = <Pasta as Cycle>::host_generators(&params);
     assert_eq!(pallas.g().len(), 3);
     assert_eq!(vesta.g().len(), 2);
     assert_eq!(pallas.g(), params.pallas().g());
@@ -68,8 +68,8 @@ fn check_poseidon<M: PrimeModulus, P: PoseidonPermutation<FieldAdapter<M>>, cons
 #[test]
 fn pasta_poseidon_instances_are_the_parameter_constants() {
     let params = params();
-    check_poseidon(Pasta::circuit_poseidon(&params), &PALLAS_BASE);
-    check_poseidon(Pasta::scalar_poseidon(&params), &PALLAS_SCALAR);
+    check_poseidon(<Pasta as Cycle>::circuit_poseidon(&params), &PALLAS_BASE);
+    check_poseidon(<Pasta as Cycle>::scalar_poseidon(&params), &PALLAS_SCALAR);
     assert_eq!(<Pasta as Cycle>::CircuitPoseidon::default(), PoseidonFp);
 }
 

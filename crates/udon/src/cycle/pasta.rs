@@ -1,6 +1,8 @@
 //! Pasta cycle binding and its runtime generator parameters.
 
-use super::{Cycle, PallasGenerators, VestaGenerators};
+use core::marker::PhantomData;
+
+use super::{Cycle, PallasGenerators, Profile, Standard, VestaGenerators};
 use crate::{
     curve::{AffineAdapter, Pallas, Vesta},
     field::{FieldAdapter, PallasBase, PallasScalar},
@@ -34,11 +36,12 @@ impl PastaParams {
 }
 
 /// The Pasta cycle: Pallas over [`crate::field::Fp`] with scalars in [`crate::field::Fq`] as the nested
-/// curve, and Vesta over [`crate::field::Fq`] with scalars in [`crate::field::Fp`] as the host curve.
+/// curve, and Vesta over [`crate::field::Fq`] with scalars in [`crate::field::Fp`] as the host curve,
+/// in the recursion profile `P`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Pasta;
+pub struct Pasta<P: Profile = Standard>(PhantomData<P>);
 
-impl Cycle for Pasta {
+impl<P: Profile> Cycle for Pasta<P> {
     type CircuitField = FieldAdapter<PallasBase>;
     type ScalarField = FieldAdapter<PallasScalar>;
     type NestedCurve = AffineAdapter<Pallas>;
@@ -48,6 +51,7 @@ impl Cycle for Pasta {
     type CircuitPoseidon = PoseidonFp;
     type ScalarPoseidon = PoseidonFq;
     type Params = PastaParams;
+    type Profile = P;
 
     fn nested_generators(params: &PastaParams) -> &PallasGenerators {
         &params.pallas

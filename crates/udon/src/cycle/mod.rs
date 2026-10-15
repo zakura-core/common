@@ -4,7 +4,10 @@
 //! names both fields and both curves through the field and curve traits,
 //! together with the fixed generators and Poseidon instances a protocol uses
 //! over them, so a proof system holds one type parameter and reaches every
-//! parameter it needs. [`Pasta`] is the cycle of Pallas and Vesta.
+//! parameter it needs. A cycle also names its recursion [`Profile`], what a
+//! proof carries beyond the base recursion, so one type parameter fixes the
+//! proof's shape too. [`Pasta`] is the cycle of Pallas and Vesta, in the
+//! [`Standard`] profile unless another is named.
 //! This module requires the `poseidon` feature, which also enables `traits`.
 //!
 //! Generator derivation is not part of this crate. Generators are public
@@ -23,7 +26,7 @@
 //! ```
 //! use zakura_udon::{
 //!     curve::{PallasPoint, VestaPoint, Projective},
-//!     cycle::{Cycle, FixedGenerators, Generators, Pasta, PastaParams},
+//!     cycle::{Cycle, FixedGenerators, Generators, Pasta, PastaParams, Standard},
 //!     field::{Fp, Fq, FieldAdapter, PallasScalar},
 //! };
 //!
@@ -36,7 +39,7 @@
 //!     Generators::new(pallas, multiple(3)),
 //!     Generators::new(&VESTA, VestaPoint::GENERATOR.mul_projective(&Fp::from_u64(2)).to_point()),
 //! );
-//! let generators = Pasta::nested_generators(&params);
+//! let generators = Pasta::<Standard>::nested_generators(&params);
 //! assert!(generators.are_distinct());
 //! // g[0] * 2 + h * 3 = 2G + 9G
 //! type Scalar = FieldAdapter<PallasScalar>;
@@ -49,9 +52,11 @@ use crate::{curve::EndomorphismAffine, field::Field, poseidon::PoseidonPermutati
 
 mod generators;
 mod pasta;
+mod profile;
 
 pub use generators::{FixedGenerators, Generators, PallasGenerators, VestaGenerators};
 pub use pasta::{Pasta, PastaParams};
+pub use profile::{Profile, Standard};
 
 #[cfg(test)]
 mod tests;
@@ -98,6 +103,10 @@ pub trait Cycle: Copy + Default + Send + Sync + 'static {
 
     /// Runtime parameters: the generators, and whatever else the cycle needs.
     type Params: Send + Sync + 'static;
+
+    /// The recursion profile: what a proof over this cycle carries beyond
+    /// the base recursion.
+    type Profile: Profile;
 
     /// Returns the fixed generators of the [`NestedCurve`](Self::NestedCurve).
     fn nested_generators(params: &Self::Params) -> &Self::NestedGenerators;
