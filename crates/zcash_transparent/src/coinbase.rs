@@ -36,6 +36,8 @@ pub enum Error {
     GenesisInputNotSupported,
     /// Coinbase transactions must contain only a dummy input.
     UnexpectedInputs,
+    /// Coinbase construction requires a builder configured for coinbase transactions.
+    InvalidBuilderConfiguration,
 }
 
 impl fmt::Display for Error {
@@ -53,6 +55,12 @@ impl fmt::Display for Error {
                 f,
                 "creating a coinbase input for the genesis block is not supported",
             ),
+            Error::InvalidBuilderConfiguration => {
+                write!(
+                    f,
+                    "coinbase construction requires a coinbase builder configuration"
+                )
+            }
             Error::UnexpectedInputs => {
                 write!(f, "coinbase transactions must contain only a dummy input",)
             }

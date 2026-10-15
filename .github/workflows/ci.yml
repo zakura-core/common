@@ -1415,6 +1415,11 @@ jobs:
         run: >-
           cargo +1.97.0 check -p zakura-primitives --locked --lib
           --no-default-features --features std,circuits,multicore
+      - name: Test coinbase construction without wallet derivation
+        run: >-
+          cargo +1.97.0 test -p zakura-primitives --locked --lib
+          --no-default-features --features std,circuits,multicore
+          transaction::builder::coinbase_tests
       - name: Check Sapling dummy notes without wallet derivation
         run: >-
           cargo +1.97.0 test -p zakura-sapling-crypto --locked --lib
