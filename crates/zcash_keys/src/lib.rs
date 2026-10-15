@@ -40,4 +40,13 @@ pub mod encoding;
 ))]
 pub mod keys;
 
-mod io;
+#[cfg(all(not(feature = "std"), not(feature = "no-std-io")))]
+compile_error!("enable either `std` or `no-std-io` for I/O support");
+
+#[allow(unused_imports)]
+#[cfg(feature = "std")]
+pub(crate) use std::io;
+
+#[allow(unused_imports)]
+#[cfg(all(not(feature = "std"), feature = "no-std-io"))]
+pub(crate) use corez::io;
