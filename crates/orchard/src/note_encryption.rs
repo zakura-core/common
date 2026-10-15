@@ -174,6 +174,7 @@ impl<V: DomainVersion> NoteEncryptionDomain<V> {
     }
 
     /// Constructs a domain that can be used to trial-decrypt a PCZT action's output note.
+    #[cfg(feature = "zip32")]
     pub fn for_pczt_action(act: &crate::pczt::Action) -> Self {
         Self::from_rho(Rho::from_nf_old(act.spend().nullifier))
     }
@@ -409,6 +410,7 @@ impl<P: DomainPolicy, T> ShieldedOutput<NoteEncryptionDomain<P>, ENC_CIPHERTEXT_
     }
 }
 
+#[cfg(feature = "zip32")]
 impl<P: DomainPolicy> ShieldedOutput<NoteEncryptionDomain<P>, ENC_CIPHERTEXT_SIZE>
     for crate::pczt::Action
 {
@@ -930,9 +932,11 @@ mod tests {
             actions.push(encrypted_compact_action::<V>(
                 &mut rng,
                 foreign_fvk.address(
-                    crate::keys::Diversifier::from_bytes(
-                        *crate::keys::DiversifierIndex::from(i).as_bytes(),
-                    ),
+                    crate::keys::Diversifier::from_bytes({
+                        let mut d = [0; 11];
+                        d[..4].copy_from_slice(&i.to_le_bytes());
+                        d
+                    }),
                     Scope::External,
                 ),
             ));
@@ -1007,9 +1011,11 @@ mod tests {
                 encrypted_compact_action::<OrchardVersion>(
                     &mut rng,
                     our_fvk.address(
-                        crate::keys::Diversifier::from_bytes(
-                            *crate::keys::DiversifierIndex::from(i).as_bytes(),
-                        ),
+                        crate::keys::Diversifier::from_bytes({
+                            let mut d = [0; 11];
+                            d[..4].copy_from_slice(&i.to_le_bytes());
+                            d
+                        }),
                         Scope::External,
                     ),
                 )

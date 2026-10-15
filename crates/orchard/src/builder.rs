@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::backend::prelude::*;
+#[cfg(feature = "zip32")]
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
@@ -210,7 +211,7 @@ pub enum BuildError {
     /// The bundle's anchor is deferred to proving time, but the requested operation
     /// needs it now: an in-memory build (`Builder::build`) proves immediately, which
     /// requires the real anchor and witnesses; a deferred-anchor bundle can only be
-    /// built for a PCZT ([`Builder::build_for_pczt`]).
+    /// built for a PCZT (`Builder::build_for_pczt`).
     AnchorRequired,
     /// Anchors can be deferred only for bundles of transaction formats whose txid
     /// digest — and hence every signature — excludes the bundle anchor (the V6 formats;
@@ -468,6 +469,7 @@ impl SpendInfo {
         (nf_old, ak, alpha, rk)
     }
 
+    #[cfg(feature = "zip32")]
     fn into_pczt(self, rng: impl Rng) -> crate::pczt::Spend {
         let (nf_old, _, alpha, rk) = self.build(rng);
 
@@ -614,6 +616,7 @@ impl OutputInfo {
         (note, cmx, encrypted_note)
     }
 
+    #[cfg(feature = "zip32")]
     fn into_pczt(
         self,
         cv_net: &ValueCommitment,
@@ -745,6 +748,7 @@ impl ActionInfo {
         )
     }
 
+    #[cfg(feature = "zip32")]
     fn build_for_pczt(self, mut rng: impl Rng) -> crate::pczt::Action {
         let v_net = self.value_sum();
         let cv_net = ValueCommitment::derive(v_net, self.rcv.clone());
@@ -895,12 +899,12 @@ impl Builder {
     /// spend's Merkle witness — is DEFERRED to proving time, per [ZIP 374].
     ///
     /// The bundle's `anchor` field carries the empty-tree root purely as a placeholder
-    /// ([`crate::pczt::Bundle::anchor_deferred`] reports the deferral, so a PCZT
+    /// (`crate::pczt::Bundle::anchor_deferred` reports the deferral, so a PCZT
     /// serializer emits the anchor as ABSENT), and spends are added WITHOUT witnesses via
     /// [`Self::add_spend_unwitnessed`]; the real anchor and witnesses are installed
     /// through the PCZT Updater role after signing and before proving, where the
     /// witness-to-anchor consistency check that an anchored builder performs per spend is
-    /// instead performed by the PCZT Prover role. Only [`Self::build_for_pczt`] can build
+    /// instead performed by the PCZT Prover role. Only `Self::build_for_pczt` can build
     /// the bundle: an in-memory build proves immediately, which needs the real anchor.
     ///
     /// `tx_version` is the version of the transaction the bundle will be carried by. It
@@ -1179,6 +1183,7 @@ impl Builder {
 
     /// Builds a bundle containing the given spent notes and outputs along with their
     /// metadata, for inclusion in a PCZT.
+    #[cfg(feature = "zip32")]
     pub fn build_for_pczt(
         self,
         rng: impl Rng,
@@ -2282,20 +2287,24 @@ mod tests {
     };
     use crate::{
         Address, Anchor, Note,
-        builder::{BundleType, SpendError},
+        builder::BundleType,
         bundle::{Authorized, Bundle, BundleVersion, Flags, TxVersion},
         circuit::OrchardCircuitVersion,
         constants::MERKLE_DEPTH_ORCHARD,
-        keys::{
-            FullViewingKey, PreparedIncomingViewingKey, Scope, SpendAuthorizingKey, SpendingKey,
-        },
+        keys::{FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey},
         note::{NoteVersion, Nullifier, Rho},
-        note_encryption::OrchardDomain,
-        pczt::{ProverError, VerifyError},
         rng_compat::OsRng,
         tree::{MerklePath, empty_roots},
         value::NoteValue,
     };
+    #[cfg(feature = "zip32")]
+    use crate::{
+        builder::SpendError,
+        keys::PreparedIncomingViewingKey,
+        note_encryption::OrchardDomain,
+        pczt::{ProverError, VerifyError},
+    };
+    #[cfg(feature = "zip32")]
     use zcash_note_encryption::try_note_decryption;
 
     proptest! {
@@ -2316,6 +2325,7 @@ mod tests {
                     builder
                 };
                 prop_assert!(unsupported(make_builder().build::<i64>(StdRng::from_seed(seed)).unwrap_err()));
+                #[cfg(feature = "zip32")]
                 prop_assert!(unsupported(make_builder().build_for_pczt(StdRng::from_seed(seed)).unwrap_err()));
             }
         }
@@ -2356,6 +2366,7 @@ mod tests {
 
     proptest! {
         #[test]
+        #[cfg(feature = "zip32")]
         fn deferred_anchor_builds_for_pczt_without_witnesses(
             (sk, note, merkle_path, _anchor) in testing::arb_spendable_note(
                 NoteValue::from_raw(10_000),
@@ -2486,6 +2497,7 @@ mod tests {
         /// The PCZT Updater installs the real anchor and the spend witness that a
         /// deferred-anchor bundle is built without, closing the loop the Prover needs.
         #[test]
+        #[cfg(feature = "zip32")]
         fn deferred_anchor_updater_installs_anchor_and_witness(
             (sk, note, merkle_path, real_anchor) in testing::arb_spendable_note(
                 NoteValue::from_raw(10_000),
@@ -2542,6 +2554,7 @@ mod tests {
     /// The Prover refuses to prove a bundle whose anchor is still deferred: the real anchor
     /// must first be installed via the Updater (`set_anchor`).
     #[test]
+    #[cfg(feature = "zip32")]
     fn deferred_anchor_prover_rejects_uninstalled_anchor() {
         let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         proptest!(|(
@@ -2824,6 +2837,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zip32")]
     fn cross_address_disabled_builder_pairs_actions() {
         let mut rng = OsRng;
         let spend_sk = SpendingKey::random(&mut rng);
@@ -2943,6 +2957,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zip32")]
     fn cross_address_disabled_spend_output_randomization_depends_on_scope() {
         fn spend_paired_output_decrypts(spend_scope: Scope) -> bool {
             let mut rng = OsRng;
@@ -2984,6 +2999,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zip32")]
     fn cross_address_disabled_padding_pairs_dummy_addresses() {
         let mut rng = OsRng;
         let sk = SpendingKey::random(&mut rng);
@@ -3397,6 +3413,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zip32")]
     fn restricted_pczt_structural_checks_reject_tampering() {
         let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         let mut rng = OsRng;

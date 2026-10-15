@@ -660,7 +660,7 @@ jobs:
       - name: Test without indexed ZIP 32 addresses
         run: >-
           cargo +stable test -p zakura-orchard --locked
-          --no-default-features --features backend-halo2 --features circuit,multicore
+          --no-default-features --features backend-halo2 --features circuit,multicore,zip32
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -1271,7 +1271,7 @@ jobs:
       - name: Test Sapling without indexed ZIP 32 addresses
         run: >-
           cargo +stable test -p zakura-sapling-crypto --locked
-          --no-default-features --features circuit,multicore --release
+          --no-default-features --features circuit,multicore,zip32 --release
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -1414,6 +1414,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@ca36e3307eb02aaffd8a9268ae90e586fd4f461e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.97.0; action uses orphan commits
         with:
           components: clippy
+      - name: Check node construction without wallet derivation
+        run: >-
+          cargo +1.97.0 check -p zakura-primitives --locked --lib
+          --no-default-features --features std,circuits,multicore
+      - name: Check Sapling dummy notes without wallet derivation
+        run: >-
+          cargo +1.97.0 test -p zakura-sapling-crypto --locked --lib
+          --no-default-features --features std,circuit,multicore
+          dummy_note_derivation_and_randomness_are_unchanged
       - name: Test keys without indexed ZIP 32 addresses
         run: >-
           cargo +1.97.0 test -p zakura-keys --locked --lib

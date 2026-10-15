@@ -43,7 +43,7 @@ tracing = { version = "0.1", default-features = false }
 visibility = { version = "0.1.1", optional = true }
 zcash_note_encryption = { workspace = true, features = ["alloc"] }
 zcash_spec = "0.2.1"
-zip32 = { version = "0.2.0", default-features = false }
+zip32 = { version = "0.2.0", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -62,12 +62,14 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
 backend-halo2 = ["dep:orchard-legacy"]
+# Wallet key derivation and ZIP 32 interoperability, enabled by default.
+zip32 = ["dep:zip32"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
-zip32-addresses = ["dep:aes", "dep:fpe"]
+zip32-addresses = ["zip32", "dep:aes", "dep:fpe"]
 circuit = ["prover", "verifier"]
 prover = ["std", "orchard-legacy?/circuit"]
 verifier = ["std", "orchard-legacy?/circuit"]
-default = ["backend-halo2", "zip32-addresses", "circuit", "multicore", "std"]
+default = ["backend-halo2", "zip32", "zip32-addresses", "circuit", "multicore", "std"]
 dev-graph = ["orchard-legacy?/dev-graph", "image", "plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
@@ -76,7 +78,7 @@ orbits = ["orchard-legacy?/orbits"]
 # Disable automatic x86-64 assembly selection in the proving dependencies.
 portable = ["orchard-legacy?/portable"]
 std = ["corez/std", "orchard-legacy?/std"]
-test-dependencies = ["orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
+test-dependencies = ["zip32", "orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
 unstable-frost = ["dep:visibility"]
 # Historical fingerprint fixtures use ZIP 32 indexed addresses.
 verifier-fingerprint = ["orchard-legacy?/verifier-fingerprint", "zip32-addresses", "circuit"]

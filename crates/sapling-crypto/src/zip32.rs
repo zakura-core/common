@@ -28,7 +28,8 @@ use crate::{
     },
 };
 
-pub const ZIP32_SAPLING_MASTER_PERSONALIZATION: &[u8; 16] = b"ZcashIP32Sapling";
+pub const ZIP32_SAPLING_MASTER_PERSONALIZATION: &[u8; 16] =
+    crate::keys::SAPLING_MASTER_PERSONALIZATION;
 pub const ZIP32_SAPLING_FVFP_PERSONALIZATION: &[u8; 16] = b"ZcashSaplingFVFP";
 pub const ZIP32_SAPLING_INT_PERSONALIZATION: &[u8; 16] = b"Zcash_SaplingInt";
 
@@ -310,10 +311,7 @@ impl core::fmt::Debug for ExtendedSpendingKey {
 
 impl ExtendedSpendingKey {
     pub fn master(seed: &[u8]) -> Self {
-        let i = Blake2bParams::new()
-            .hash_length(64)
-            .personal(ZIP32_SAPLING_MASTER_PERSONALIZATION)
-            .hash(seed);
+        let i = crate::keys::master_key_expansion(seed);
 
         let sk_m = &i.as_bytes()[..32];
         let mut c_m = [0u8; 32];

@@ -59,8 +59,10 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
 backend-halo2 = ["orchard/backend-halo2"]
+# Wallet transaction construction with ZIP 32 spending keys.
+zip32 = ["sapling/zip32", "orchard/zip32", "transparent/zip32"]
 circuits = ["orchard/circuit", "sapling/circuit"]
-default = ["backend-halo2", "multicore", "std", "circuits", "pczt"]
+default = ["backend-halo2", "zip32", "multicore", "std", "circuits", "pczt"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
 expensive-tests = []
@@ -69,7 +71,7 @@ no-expensive-tests = []
 non-standard-fees = []
 # PCZT construction (`DeferredPcztBuilder`, `Builder::build_for_pczt`, and their
 # result types). Enabled by default; also enabled by `transparent-inputs`.
-pczt = ["transparent/pczt"]
+pczt = ["zip32", "transparent/pczt"]
 std = [
     "document-features",
     "equihash/std",
@@ -80,6 +82,7 @@ std = [
 ]
 temporary-zcashd = []
 test-dependencies = [
+    "zip32",
     "dep:proptest",
     "incrementalmerkletree/test-dependencies",
     "orchard/test-dependencies",
@@ -101,3 +104,4 @@ check-cfg = [
 [[bench]]
 name = "note_decryption"
 harness = false
+required-features = ["circuits", "zip32"]
