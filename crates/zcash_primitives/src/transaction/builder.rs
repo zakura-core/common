@@ -1417,7 +1417,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
     /// Builds a coinbase transaction without wallet spending keys or fee calculation.
     ///
     /// The builder must have been constructed with [`BuildConfig::Coinbase`].
-    /// Other configurations return [`coinbase::Error::UnexpectedInputs`]. All
+    /// Other configurations return [`coinbase::Error::InvalidBuilderConfiguration`]. All
     /// version, expiry-height, proof, and signature checks are shared with the wallet transaction builder.
     #[cfg(feature = "circuits")]
     pub fn build_coinbase<R: Rng + CryptoRng, SP: SpendProver, OP: OutputProver>(
@@ -1427,7 +1427,9 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         output_prover: &OP,
     ) -> Result<BuildResult, Error<Infallible>> {
         let BuildConfig::Coinbase { miner_data } = &self.build_config else {
-            return Err(Error::Coinbase(coinbase::Error::UnexpectedInputs));
+            return Err(Error::Coinbase(
+                coinbase::Error::InvalidBuilderConfiguration,
+            ));
         };
         let target_height = self.target_height;
         let miner_data = miner_data.clone();
@@ -3047,10 +3049,8 @@ mod coinbase_tests {
     use super::{BuildConfig, Builder, Error};
     #[cfg(feature = "zip32")]
     use crate::transaction::fees::zip317;
-    #[cfg(feature = "zip32")]
-    use alloc::vec::Vec;
+    use alloc::{string::ToString, vec::Vec};
     use rand::{SeedableRng, rngs::StdRng};
-    #[cfg(feature = "zip32")]
     use rand_core::Rng;
     use sapling::prover::mock::{MockOutputProver, MockSpendProver};
     use transparent::address::TransparentAddress;
@@ -3120,16 +3120,80 @@ mod coinbase_tests {
                 ironwood_padding: super::BundlePadding::DEFAULT,
             },
         );
-        assert!(matches!(
-            builder.build_coinbase(
+        let error = builder
+            .build_coinbase(
                 StdRng::from_seed([3; 32]),
                 &MockSpendProver,
-                &MockOutputProver
-            ),
-            Err(Error::Coinbase(
-                transparent::coinbase::Error::UnexpectedInputs
-            ))
+                &MockOutputProver,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Coinbase(transparent::coinbase::Error::InvalidBuilderConfiguration)
         ));
+        assert_eq!(
+            error.to_string(),
+            "An error occurred in constructing a coinbase transaction: coinbase construction requires a coinbase builder configuration"
+        );
+    }
+
+    /// These expectations were captured from the existing wallet-enabled `build` path.
+    /// The raw address keeps this test available when wallet derivation is disabled.
+    #[test]
+    fn coinbase_without_wallet_keys_matches_recorded_bytes_and_randomness() {
+        let recipient = sapling::PaymentAddress::from_bytes(&[
+            35, 152, 134, 175, 171, 126, 51, 179, 80, 154, 204, 131, 202, 59, 161, 197, 12, 169,
+            63, 15, 58, 75, 252, 230, 41, 105, 97, 167, 49, 154, 155, 252, 87, 82, 97, 248, 234,
+            112, 79, 62, 139, 181, 7,
+        ])
+        .unwrap();
+        for (sapling_output, expected_digest, expected_length, expected_next) in [
+            (
+                false,
+                [
+                    254, 152, 165, 92, 10, 7, 35, 29, 182, 189, 204, 232, 80, 16, 237, 32, 67, 91,
+                    198, 194, 143, 194, 177, 44, 113, 24, 99, 27, 114, 14, 209, 32,
+                ],
+                108,
+                18405794169770496134,
+            ),
+            (
+                true,
+                [
+                    138, 135, 142, 91, 56, 234, 215, 61, 209, 11, 63, 177, 25, 253, 77, 29, 83, 65,
+                    183, 35, 251, 144, 239, 247, 143, 136, 171, 54, 40, 54, 151, 237,
+                ],
+                1120,
+                1125747333697870160,
+            ),
+        ] {
+            let mut builder = builder();
+            if sapling_output {
+                builder
+                    .add_sapling_output::<core::convert::Infallible>(
+                        None,
+                        recipient,
+                        Zatoshis::const_from_u64(10_000),
+                        zcash_protocol::memo::MemoBytes::empty(),
+                    )
+                    .unwrap();
+            }
+            let mut rng = StdRng::from_seed([3; 32]);
+            let result = builder
+                .build_coinbase(&mut rng, &MockSpendProver, &MockOutputProver)
+                .unwrap();
+            let mut bytes = Vec::new();
+            result.transaction().write(&mut bytes).unwrap();
+            assert_eq!(bytes.len(), expected_length);
+            assert_eq!(
+                blake2b_simd::Params::new()
+                    .hash_length(32)
+                    .hash(&bytes)
+                    .as_bytes(),
+                expected_digest
+            );
+            assert_eq!(rng.next_u64(), expected_next);
+        }
     }
 
     #[cfg(feature = "zip32")]
