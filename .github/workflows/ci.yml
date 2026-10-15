@@ -1587,17 +1587,32 @@ jobs:
     defaults:
       run:
         shell: bash
-    name: Udon / Arithmetic (${{ matrix.platform.arch }}, ${{ matrix.tables }})
+    name: Udon / Arithmetic (${{ matrix.arch }}, ${{ matrix.tables }}, ${{ matrix.suite }})
     timeout-minutes: 60
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { runner: ubuntu-24.04, arch: x86_64 }
-          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+        arch: [x86_64, aarch64]
         tables: [default, large]
+        # x86_64 runs each suite as its own job so that no single Udon job
+        # sets the CI critical path. aarch64 has no assembly suite and runs
+        # the other two in one job.
+        suite: [release, debug-assertions, x86-64-asm, all]
+        exclude:
+          - arch: x86_64
+            suite: all
+          - arch: aarch64
+            suite: release
+          - arch: aarch64
+            suite: debug-assertions
+          - arch: aarch64
+            suite: x86-64-asm
         include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
           - tables: default
             native_features: "--no-default-features"
             trait_features: "--no-default-features --features traits,poseidon"
@@ -1613,7 +1628,7 @@ jobs:
           persist-credentials: false
       - name: Verify native architecture
         env:
-          EXPECTED_ARCH: ${{ matrix.platform.arch }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
         run: test "$(uname -m)" = "$EXPECTED_ARCH"
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
@@ -1622,24 +1637,28 @@ jobs:
           # the ambient Cargo environment and assume default warning behavior.
           build-warnings: ""
       - name: Run release tests without traits
+        if: matrix.suite == 'release' || matrix.suite == 'all'
         env:
           FEATURES: ${{ matrix.native_features }}
         run: |
           read -r -a features <<< "$FEATURES"
           cargo test --release --locked -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon "${features[@]}"
       - name: Run release tests with traits
+        if: matrix.suite == 'release' || matrix.suite == 'all'
         env:
           FEATURES: ${{ matrix.trait_features }}
         run: |
           read -r -a features <<< "$FEATURES"
           cargo test --release --locked -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon "${features[@]}"
       - name: Check Udon with debug assertions without traits
+        if: matrix.suite == 'debug-assertions' || matrix.suite == 'all'
         env:
           FEATURES: ${{ matrix.native_features }}
         run: |
           read -r -a features <<< "$FEATURES"
           cargo test --locked -p zakura-udon --lib "${features[@]}"
       - name: Check Udon with debug assertions with traits
+        if: matrix.suite == 'debug-assertions' || matrix.suite == 'all'
         env:
           FEATURES: ${{ matrix.trait_features }}
         run: |
@@ -1649,7 +1668,7 @@ jobs:
       # own runs: forced by the feature, then selected from target features.
       # A runner without ADX/BMI2 only compiles the assembly tests.
       - name: Test forced x86-64 assembly
-        if: matrix.platform.arch == 'x86_64'
+        if: matrix.suite == 'x86-64-asm'
         env:
           FEATURES: ${{ matrix.native_features }}
         run: |
@@ -1663,7 +1682,7 @@ jobs:
             cargo test --locked -p zakura-udon --lib "${features[@]}" --features x86_64-asm,traits,poseidon --no-run
           fi
       - name: Test x86-64 assembly selected by target features
-        if: matrix.platform.arch == 'x86_64'
+        if: matrix.suite == 'x86-64-asm'
         env:
           FEATURES: ${{ matrix.native_features }}
           RUSTFLAGS: -C target-feature=+adx,+bmi2
@@ -1681,7 +1700,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: udon-regressions-${{ matrix.platform.arch }}-${{ matrix.tables }}
+          name: udon-regressions-${{ matrix.arch }}-${{ matrix.tables }}-${{ matrix.suite }}
           path: crates/udon/src/**/*.regressions
           if-no-files-found: ignore
 
