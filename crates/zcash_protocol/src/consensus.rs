@@ -7,6 +7,7 @@ use core::num::TryFromIntError;
 use core::ops::{Add, Bound, RangeBounds, Sub};
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 use memuse::DynamicUsage;
 
 use crate::constants::{mainnet, regtest, testnet};
@@ -20,6 +21,7 @@ use crate::constants::{mainnet, regtest, testnet};
 pub struct BlockHeight(u32);
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(BlockHeight);
 
 /// The height of the genesis block on a network.
@@ -189,6 +191,7 @@ impl TryFrom<usize> for TxIndex {
 }
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(TxIndex);
 
 /// The enumeration of known Zcash network types.
@@ -206,6 +209,7 @@ pub enum NetworkType {
 }
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(NetworkType);
 
 pub(crate) mod private {
@@ -478,6 +482,7 @@ impl<P: Parameters> NetworkConstants for P {
 pub struct MainNetwork;
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(MainNetwork);
 
 /// The production network.
@@ -510,6 +515,7 @@ impl Parameters for MainNetwork {
 pub struct TestNetwork;
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(TestNetwork);
 
 /// The test network.
@@ -547,6 +553,7 @@ pub enum Network {
 }
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(Network);
 
 impl Parameters for Network {
@@ -616,6 +623,7 @@ pub enum NetworkUpgrade {
 }
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(NetworkUpgrade);
 
 impl fmt::Display for NetworkUpgrade {
@@ -731,6 +739,7 @@ pub enum BranchId {
 }
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(BranchId);
 
 const NU7_BRANCH_ID: u32 = 0x7719_0ad9;

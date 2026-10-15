@@ -52,13 +52,15 @@ zcash_address = { workspace = true, features = ["test-dependencies"] }
 zcash_script = { version = "0.6", default-features = false }
 
 [features]
+# Dynamic memory accounting, enabled by default for existing clients.
+memory-usage = ["orchard?/memory-usage", "sapling?/memory-usage", "transparent/memory-usage", "zcash_address/memory-usage", "zcash_protocol/memory-usage"]
 # Wallet key derivation and ZIP 32 interoperability, enabled by default.
 zip32 = ["dep:zip32", "orchard?/zip32", "sapling?/zip32", "transparent/zip32"]
 # I/O traits for builds without the standard library. Standard builds use std::io.
 no-std-io = ["dep:corez", "orchard?/no-std-io", "sapling?/no-std-io", "transparent/no-std-io", "zcash_address/no-std-io", "zcash_protocol/no-std-io"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["zip32", "orchard?/zip32-addresses", "sapling?/zip32-addresses"]
-default = ["zip32", "std", "zip32-addresses"]
+default = ["memory-usage", "zip32", "std", "zip32-addresses"]
 orchard = ["dep:orchard", "zip32"]
 sapling = ["dep:sapling", "zip32"]
 std = [

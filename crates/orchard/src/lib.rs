@@ -20,6 +20,10 @@
 //! enable `no-std-io` to select the compatible `corez` I/O traits.
 //!
 
+//! The default-enabled `memory-usage` feature supplies dynamic memory-accounting
+//! trait implementations. Clients that do not use them may omit the feature.
+//!
+
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Temporary until we have more of the crate implemented.
@@ -159,6 +163,7 @@ impl AsRef<[u8]> for Proof {
     }
 }
 
+#[cfg(feature = "memory-usage")]
 impl memuse::DynamicUsage for Proof {
     fn dynamic_usage(&self) -> usize {
         self.0.dynamic_usage()

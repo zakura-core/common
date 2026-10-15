@@ -13,6 +13,7 @@ use core::ops::Deref;
 use transparent::bundle::OutPoint;
 use zcash_script::{Opcode, opcode::PossiblyBad};
 
+#[cfg(feature = "memory-usage")]
 use memuse::DynamicUsage;
 use nonempty::NonEmpty;
 use sha2::{Digest, Sha256};
@@ -33,6 +34,7 @@ pub use equihash;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockHash(pub [u8; 32]);
 
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(BlockHash);
 
 impl fmt::Debug for BlockHash {

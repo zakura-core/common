@@ -33,7 +33,7 @@ halo2_gadgets = { workspace = true, optional = true }
 halo2_proofs = { workspace = true, features = ["batch", "floor-planner-v1-legacy-pdqsort"], optional = true }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 incrementalmerkletree = "0.8.1"
-memuse = { version = "0.2.2", default-features = false }
+memuse = { version = "0.2.2", default-features = false, optional = true }
 maybe-rayon = { version = "0.1.0", default-features = false, optional = true }
 nonempty = { version = "0.11", default-features = false }
 once_cell = { version = "1", features = ["race", "alloc"], default-features = false }
@@ -69,6 +69,8 @@ zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] 
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
+# Dynamic memory accounting, enabled by default for existing clients.
+memory-usage = ["dep:memuse", "group/wnaf-memuse"]
 # Wallet key derivation and ZIP 32 interoperability, enabled by default.
 zip32 = ["dep:zip32"]
 # I/O traits for builds without the standard library. Standard builds use std::io.
@@ -76,7 +78,7 @@ no-std-io = ["dep:corez"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["zip32", "dep:aes", "dep:fpe"]
 circuit = ["dep:halo2_gadgets", "dep:halo2_proofs", "std"]
-default = ["zip32", "zip32-addresses", "circuit", "multicore", "std"]
+default = ["memory-usage", "zip32", "zip32-addresses", "circuit", "multicore", "std"]
 dev-graph = ["halo2_proofs?/dev-graph", "image", "plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
@@ -84,7 +86,7 @@ multicore = ["halo2_proofs?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"
 orbits = ["halo2_proofs?/orbits"]
 # Disable automatic x86-64 assembly selection in the proving dependencies.
 portable = ["pasta_curves/portable", "halo2_proofs?/portable"]
-std = ["corez?/std", "group/wnaf-memuse", "reddsa/std"]
+std = ["corez?/std", "reddsa/std"]
 test-dependencies = ["zip32", "proptest", "rand/std", "rand/std_rng"]
 unstable-frost = ["dep:visibility"]
 unstable-voting-circuits = ["dep:visibility"]

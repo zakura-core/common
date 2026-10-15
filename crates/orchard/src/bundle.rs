@@ -16,6 +16,7 @@ use nonempty::NonEmpty;
 use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 use memuse::DynamicUsage;
 
 use crate::{
@@ -1000,6 +1001,7 @@ impl<V> Bundle<Authorized, V> {
 }
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 impl<V: DynamicUsage> DynamicUsage for Bundle<Authorized, V> {
     fn dynamic_usage(&self) -> usize {
         self.actions.tail.dynamic_usage()

@@ -38,12 +38,14 @@ hex = { version = "0.4", features = ["alloc"], default-features = false }
 proptest = ">=1,<1.7"
 
 [features]
+# Dynamic memory accounting, enabled by default for existing clients.
+memory-usage = ["dep:memuse"]
 # I/O traits for builds without the standard library. Standard builds use std::io.
 no-std-io = ["dep:corez"]
-default = ["std"]
+default = ["memory-usage", "std"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
-std = ["document-features", "dep:memuse", "corez?/std"]
+std = ["document-features", "corez?/std"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [

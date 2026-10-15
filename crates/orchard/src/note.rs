@@ -1,5 +1,6 @@
 //! Data structures used for note construction.
 use core::fmt;
+#[cfg(feature = "memory-usage")]
 use memuse::DynamicUsage;
 
 use blake2b_simd::Params as Blake2bParams;
@@ -73,6 +74,7 @@ pub use self::nullifier::Nullifier;
 pub struct Rho(pallas::Base);
 
 // We know that `pallas::Base` doesn't allocate internally.
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(Rho);
 
 impl Rho {

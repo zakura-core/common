@@ -1,6 +1,7 @@
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
+#[cfg(feature = "memory-usage")]
 use memuse::DynamicUsage;
 
 use redjubjub::{Binding, SpendAuth};
@@ -185,6 +186,7 @@ impl<A: Authorization, V> Bundle<A, V> {
     }
 }
 
+#[cfg(feature = "memory-usage")]
 impl<V: DynamicUsage> DynamicUsage for Bundle<Authorized, V> {
     fn dynamic_usage(&self) -> usize {
         self.shielded_spends.dynamic_usage()
@@ -282,6 +284,7 @@ impl<A: Authorization> SpendDescription<A> {
     }
 }
 
+#[cfg(feature = "memory-usage")]
 impl DynamicUsage for SpendDescription<Authorized> {
     fn dynamic_usage(&self) -> usize {
         self.zkproof.dynamic_usage()
@@ -408,6 +411,7 @@ impl<Proof> OutputDescription<Proof> {
     }
 }
 
+#[cfg(feature = "memory-usage")]
 impl<Proof: DynamicUsage> DynamicUsage for OutputDescription<Proof> {
     fn dynamic_usage(&self) -> usize {
         self.zkproof.dynamic_usage()
@@ -451,6 +455,7 @@ pub struct OutputDescriptionV5 {
     out_ciphertext: [u8; OUT_CIPHERTEXT_SIZE],
 }
 
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(OutputDescriptionV5);
 
 impl OutputDescriptionV5 {

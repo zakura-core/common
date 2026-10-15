@@ -42,3 +42,16 @@ signature, and serialization code with the default wallet builder.
 With `zip32` enabled, Orchard's `keys::Scope` remains the re-exported ZIP 32
 type. Without it, the same receiving/change variants use an Orchard-owned
 scope type and carry no dependency on wallet derivation.
+
+## Optional memory accounting
+
+The default-enabled `memory-usage` feature provides the `memuse::DynamicUsage`
+implementations and forwards the necessary accounting support through Common.
+Clients that disable defaults and use those traits must select it explicitly.
+`std` alone does not select memory accounting or `group/wnaf-memuse`.
+
+To exclude the external `memuse` package, node clients must omit both memory
+accounting and wallet derivation throughout the graph. The external ZIP 32
+crate itself depends on `memuse`, so omitting accounting alone does not prove a
+package reduction when wallet derivation is still enabled. Default wallet
+builds retain both capabilities.
