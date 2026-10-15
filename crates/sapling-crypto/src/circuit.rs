@@ -1,8 +1,8 @@
 //! The Sapling circuits.
 
+use crate::io;
 use alloc::vec::Vec;
 use core::fmt;
-use corez::io;
 use std::sync::OnceLock;
 
 use group::{Curve, ff::PrimeField};

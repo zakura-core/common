@@ -3,14 +3,14 @@
 //! [Equihash]: https://zips.z.cash/protocol/protocol.pdf#equihash
 
 #[cfg(any(feature = "solver", test))]
+use crate::io::Write;
+#[cfg(any(feature = "solver", test))]
 use alloc::vec::Vec;
 #[cfg(test)]
 use blake2b_simd::Hash as Blake2bHash;
 #[cfg(any(feature = "solver", test))]
 use blake2b_simd::{Params as Blake2bParams, State as Blake2bState};
 use core::fmt;
-#[cfg(any(feature = "solver", test))]
-use corez::io::Write;
 
 #[cfg(test)]
 use crate::minimal::expand_array;

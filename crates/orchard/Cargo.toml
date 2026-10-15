@@ -24,7 +24,7 @@ bench = false
 aes = { version = "0.9", optional = true }
 bitvec = { version = "1", default-features = false }
 blake2b_simd = { version = "1", default-features = false }
-corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false, optional = true }
 ff = { version = "0.14", default-features = false }
 fpe = { version = "0.7", features = ["alloc"], default-features = false, optional = true }
 getset = "0.1"
@@ -69,6 +69,8 @@ zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] 
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
+# I/O traits for builds without the standard library. Standard builds use std::io.
+no-std-io = ["dep:corez"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["dep:aes", "dep:fpe"]
 circuit = ["dep:halo2_gadgets", "dep:halo2_proofs", "std"]
@@ -80,7 +82,7 @@ multicore = ["halo2_proofs?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"
 orbits = ["halo2_proofs?/orbits"]
 # Disable automatic x86-64 assembly selection in the proving dependencies.
 portable = ["pasta_curves/portable", "halo2_proofs?/portable"]
-std = ["corez/std", "group/wnaf-memuse", "reddsa/std"]
+std = ["corez?/std", "group/wnaf-memuse", "reddsa/std"]
 test-dependencies = ["proptest", "rand/std", "rand/std_rng"]
 unstable-frost = ["dep:visibility"]
 unstable-voting-circuits = ["dep:visibility"]

@@ -25,7 +25,7 @@ memuse = { version = "0.2.2", optional = true, default-features = false }
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
 # - Encodings
-corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false, optional = true }
 nonempty = { version = "0.11", default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 
@@ -38,10 +38,12 @@ hex = { version = "0.4", features = ["alloc"], default-features = false }
 proptest = ">=1,<1.7"
 
 [features]
+# I/O traits for builds without the standard library. Standard builds use std::io.
+no-std-io = ["dep:corez"]
 default = ["std"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
-std = ["document-features", "dep:memuse", "corez/std"]
+std = ["document-features", "dep:memuse", "corez?/std"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [

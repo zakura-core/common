@@ -2,14 +2,14 @@
 
 // MSRV lints do not recognize the `clippy::io_other_error` lint
 #![allow(unknown_lints)]
-// beta lints attempt to rewrite `corez::io::Error::new` calls to `std::io::Error::other`
+// beta lints attempt to rewrite `crate::io::Error::new` calls to `std::io::Error::other`
 #![allow(clippy::io_other_error)]
 
+use crate::io::{self, ErrorKind, Read, Write};
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ops::Deref;
-use corez::io::{self, ErrorKind, Read, Write};
 use transparent::bundle::OutPoint;
 use zcash_script::{Opcode, opcode::PossiblyBad};
 
@@ -195,7 +195,7 @@ impl Block {
         // individually read the coinbase transaction before the rest.
         let n_tx: usize = CompactSize::read_t(&mut reader)?;
         if n_tx == 0 {
-            return Err(corez::io::Error::new(
+            return Err(crate::io::Error::new(
                 ErrorKind::Other,
                 "block has no coinbase tx",
             ));
@@ -210,12 +210,12 @@ impl Block {
                 .transparent_bundle()
                 .filter(|b| b.is_coinbase())
                 .ok_or_else(|| {
-                    corez::io::Error::new(ErrorKind::Other, "first tx of block is not coinbase")
+                    crate::io::Error::new(ErrorKind::Other, "first tx of block is not coinbase")
                 })?;
 
             // Verify some simple structural consensus rules on the coinbase transaction.
             if coinbase.sprout_bundle().is_some() {
-                return Err(corez::io::Error::new(
+                return Err(crate::io::Error::new(
                     ErrorKind::Other,
                     "coinbase tx has sprout data",
                 ));
@@ -227,14 +227,14 @@ impl Block {
                 Some(Ok(PossiblyBad::Good(Opcode::PushValue(height)))) => height
                     .to_num()
                     .map_err(|_| {
-                        corez::io::Error::new(
+                        crate::io::Error::new(
                             ErrorKind::Other,
                             "coinbase input specifies an invalid block height",
                         )
                     })
                     .and_then(|h| {
                         BlockHeight::try_from(h).map_err(|_| {
-                            corez::io::Error::new(
+                            crate::io::Error::new(
                                 ErrorKind::Other,
                                 "coinbase input specifies an invalid block height",
                             )
@@ -242,7 +242,7 @@ impl Block {
                     }),
                 // TODO: Permit missing height in genesis blocks by matching their block
                 // hash against the provided params.
-                _ => Err(corez::io::Error::new(
+                _ => Err(crate::io::Error::new(
                     ErrorKind::Other,
                     "coinbase scriptSig missing height",
                 )),
@@ -260,7 +260,7 @@ impl Block {
             // All later tx versions directly commit to the consensus branch ID.
             _ => {
                 if coinbase.consensus_branch_id() != consensus_branch_id {
-                    return Err(corez::io::Error::new(
+                    return Err(crate::io::Error::new(
                         ErrorKind::Other,
                         "coinbase tx's claimed height doesn't match its consensus branch ID for given network parameters",
                     ));
@@ -281,7 +281,7 @@ impl Block {
             .flat_map(|b| &b.vin)
             .any(|txin| txin.prevout() == &OutPoint::NULL)
         {
-            return Err(corez::io::Error::new(
+            return Err(crate::io::Error::new(
                 ErrorKind::Other,
                 "non-coinbase tx has null transparent input",
             ));

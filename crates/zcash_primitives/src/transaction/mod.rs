@@ -13,11 +13,11 @@ pub mod txid;
 pub mod tests;
 
 use crate::encoding::{ReadBytesExt, WriteBytesExt};
+use crate::io::{self, Read, Write};
 use blake2b_simd::Hash as Blake2bHash;
 use core::convert::TryFrom;
 use core::fmt::Debug;
 use core::ops::Deref;
-use corez::io::{self, Read, Write};
 
 use ::transparent::bundle::{self as transparent, OutPoint, TxIn, TxOut};
 use zcash_protocol::encoding::{CompactSize, Vector};

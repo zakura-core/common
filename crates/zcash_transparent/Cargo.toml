@@ -22,7 +22,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 zcash_address.workspace = true
 zcash_protocol.workspace = true
 zip32 = { version = "0.2", default-features = false }
-corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false, optional = true }
 subtle = { version = "2.2.3", default-features = false }
 zcash_spec = "0.2"
 proptest = { version = ">=1,<1.7", optional = true }
@@ -41,6 +41,8 @@ proptest = ">=1,<1.7"
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
+# I/O traits for builds without the standard library. Standard builds use std::io.
+no-std-io = ["dep:corez", "zcash_address/no-std-io", "zcash_protocol/no-std-io"]
 default = ["std", "pczt"]
 std = [
     "secp256k1?/std",

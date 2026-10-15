@@ -1,6 +1,6 @@
+use crate::io::{self, Read, Write};
 use alloc::string::{String, ToString};
 use core::fmt;
-use corez::io::{self, Read, Write};
 
 use crate::encoding::ReverseHex;
 

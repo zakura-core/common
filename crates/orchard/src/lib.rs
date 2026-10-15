@@ -16,6 +16,10 @@
 //! remain available without it.
 //!
 
+//! Standard builds use `std::io`. Builds without the standard library must
+//! enable `no-std-io` to select the compatible `corez` I/O traits.
+//!
+
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Temporary until we have more of the crate implemented.
@@ -232,3 +236,5 @@ impl ProtocolVersion {
         matches!(self, Self::V3)
     }
 }
+
+mod io;

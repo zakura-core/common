@@ -15,12 +15,12 @@ use zcash_protocol::consensus::{self, NetworkConstants};
 
 #[cfg(feature = "sapling")]
 use {
+    crate::io::{self, Write},
     alloc::vec::Vec,
     bech32::{
         Bech32, Hrp,
         primitives::decode::{CheckedHrpstring, CheckedHrpstringError},
     },
-    corez::io::{self, Write},
     sapling::zip32::{ExtendedFullViewingKey, ExtendedSpendingKey},
     zcash_protocol::consensus::NetworkType,
 };

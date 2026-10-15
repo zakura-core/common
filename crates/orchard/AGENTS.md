@@ -33,7 +33,7 @@ and is a payment-protocol crate, so some librustzcash conventions about database
 - **Canonical binary serialization lives with the type.** A type's on-wire byte
   format is a property of the type, not of any one consumer: define it next to
   the definition (`read<R: Read>(r) -> io::Result<Self>` and
-  `write<W: Write>(&self, w) -> io::Result<()>`) over `corez::io::{Read, Write}`,
+  `write<W: Write>(&self, w) -> io::Result<()>`) over the crate I/O adapter (`std::io` or `corez::io`),
   so it stays `no_std`. Do NOT hand-roll a bespoke byte codec for an orchard type
   inside a downstream crate, and do NOT use `serde` for the canonical consensus
   binary format (reserve `serde` for JSON / structured metadata such as PCZT

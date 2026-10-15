@@ -21,6 +21,10 @@
 //! remain available without it.
 //!
 
+//! Standard builds use `std::io`. Builds without the standard library must
+//! enable `no-std-io` to select the compatible `corez` I/O traits.
+//!
+
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Catch documentation errors caused by code changes.
@@ -82,3 +86,5 @@ pub mod testing {
 
 #[cfg(test)]
 mod test_vectors;
+
+mod io;

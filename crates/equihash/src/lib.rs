@@ -26,6 +26,10 @@
 //! [BK16]: https://www.internetsociety.org/sites/default/files/blogs-media/equihash-asymmetric-proof-of-work-based-generalized-birthday-problem.pdf
 
 // Catch documentation errors caused by code changes.
+//! Standard builds use `std::io`. Builds without the standard library must
+//! enable `no-std-io` to select the compatible `corez` I/O traits.
+//!
+
 #![deny(rustdoc::broken_intra_doc_links)]
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -53,3 +57,5 @@ pub use verify::{Error, is_valid_solution};
 mod blake2b;
 #[cfg(feature = "solver")]
 pub mod tromp;
+
+mod io;

@@ -1,9 +1,9 @@
 //! Functions for parsing & serialization of Orchard transaction components.
 use crate::encoding::ReadBytesExt;
 
+use crate::io::{self, Read, Write};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use corez::io::{self, Read, Write};
 
 use nonempty::NonEmpty;
 

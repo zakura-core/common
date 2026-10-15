@@ -15,6 +15,10 @@
 //! does not need.
 //!
 
+//! Standard builds use `std::io`. Builds without the standard library must
+//! enable `no-std-io` to select the compatible `corez` I/O traits.
+//!
+
 #![no_std]
 
 #[cfg(feature = "std")]
@@ -37,3 +41,5 @@ mod test_vectors;
 
 #[macro_use]
 extern crate alloc;
+
+mod io;

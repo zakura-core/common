@@ -16,8 +16,8 @@
 
 use alloc::vec::Vec;
 
+use crate::io::{self, Read, Write};
 use core::iter::FromIterator;
-use corez::io::{self, Read, Write};
 
 use nonempty::NonEmpty;
 

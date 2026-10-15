@@ -1,5 +1,5 @@
+use crate::io::Write;
 use blake2b_simd::{Hash as Blake2bHash, Params};
-use corez::io::Write;
 
 use ::transparent::{
     bundle::{self as transparent, TxOut},

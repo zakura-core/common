@@ -1,5 +1,5 @@
+use crate::io::{self, Read, Write};
 use alloc::vec::Vec;
-use corez::io::{self, Read, Write};
 use ff::PrimeField;
 
 use ::sapling::{

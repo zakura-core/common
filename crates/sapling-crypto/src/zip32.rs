@@ -15,8 +15,8 @@ use zcash_spec::PrfExpand;
 use zip32::DiversifierIndex;
 use zip32::{ChainCode, ChildIndex, Scope};
 
+use crate::io::{self, Read, Write};
 use core::ops::AddAssign;
-use corez::io::{self, Read, Write};
 
 use super::{Diversifier, NullifierDerivingKey, PaymentAddress, ViewingKey};
 use crate::note_encryption::PreparedIncomingViewingKey;
@@ -379,8 +379,8 @@ impl ExtendedSpendingKey {
         reader.read_exact(&mut child_index_bytes)?;
         let child_index =
             KeyIndex::new(depth, u32::from_le_bytes(child_index_bytes)).ok_or_else(|| {
-                corez::io::Error::new(
-                    corez::io::ErrorKind::InvalidData,
+                crate::io::Error::new(
+                    crate::io::ErrorKind::InvalidData,
                     "Unsupported child index in encoding",
                 )
             })?;
@@ -583,8 +583,8 @@ impl ExtendedFullViewingKey {
         reader.read_exact(&mut child_index_bytes)?;
         let child_index =
             KeyIndex::new(depth, u32::from_le_bytes(child_index_bytes)).ok_or_else(|| {
-                corez::io::Error::new(
-                    corez::io::ErrorKind::InvalidData,
+                crate::io::Error::new(
+                    crate::io::ErrorKind::InvalidData,
                     "Unsupported child index in encoding",
                 )
             })?;

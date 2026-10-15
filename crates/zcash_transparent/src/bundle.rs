@@ -1,8 +1,8 @@
 //! Structs representing the components within Zcash transactions.
 
+use crate::io::{self, Read, Write};
 use alloc::vec::Vec;
 use core::fmt::Debug;
-use corez::io::{self, Read, Write};
 use zcash_script::{
     opcode::{Evaluable as _, PushValue},
     pattern::push_num,

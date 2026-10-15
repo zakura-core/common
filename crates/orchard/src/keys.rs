@@ -1,8 +1,8 @@
 //! Key structures for Orchard.
 
+use crate::io::{self, Read, Write};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use corez::io::{self, Read, Write};
 
 use ::zip32::{AccountId, ChildIndex};
 #[cfg(feature = "zip32-addresses")]

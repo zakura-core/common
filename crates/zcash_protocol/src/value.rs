@@ -4,7 +4,7 @@ use core::iter::Sum;
 use core::num::NonZeroU64;
 use core::ops::{Add, Div, Mul, Neg, Sub};
 
-use corez::io;
+use crate::io;
 
 #[cfg(feature = "std")]
 use std::error;

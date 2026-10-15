@@ -32,9 +32,9 @@ use ::transparent::address::TransparentAddress;
 
 #[cfg(feature = "unstable")]
 use {
+    crate::io::{Read, Write},
     byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt},
     core::convert::TryFrom,
-    corez::io::{Read, Write},
     zcash_protocol::consensus::BranchId,
     zcash_protocol::encoding::CompactSize,
 };
@@ -363,7 +363,7 @@ impl UnifiedSpendingKey {
     #[allow(clippy::unnecessary_unwrap)]
     #[cfg(feature = "unstable")]
     pub fn from_bytes(era: Era, encoded: &[u8]) -> Result<Self, DecodingError> {
-        let mut source = corez::io::Cursor::new(encoded);
+        let mut source = crate::io::Cursor::new(encoded);
         let decoded_era = source
             .read_u32::<LittleEndian>()
             .map_err(|_| DecodingError::ReadError("era"))

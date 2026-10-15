@@ -2,8 +2,8 @@
 //!
 //! This module is used in lieu of the `byteorder` crate, which uses `std::io::{Read, Write}`
 //! and therefore does not support `no_std` usage.
+use crate::io::{self, Read, Write};
 use blake2b_simd::{Hash, State};
-use corez::io::{self, Read, Write};
 
 pub(crate) trait ReadBytesExt {
     fn read_u8(self) -> io::Result<u8>;

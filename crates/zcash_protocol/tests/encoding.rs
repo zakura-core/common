@@ -1,6 +1,6 @@
 //! Compatibility with the `zcash_encoding` 0.4.0 wire format.
 
-use corez::io::{self, Read, Write};
+use std::io::{self, Read, Write};
 use zcash_protocol::encoding::{Array, CompactSize, MAX_COMPACT_SIZE, Optional, Vector};
 
 #[test]

@@ -4,9 +4,9 @@
 //!
 //! [section 4.2.2]: https://zips.z.cash/protocol/protocol.pdf#saplingkeycomponents
 
+use crate::io::{self, Read, Write};
 use alloc::vec::Vec;
 use core::fmt;
-use corez::io::{self, Read, Write};
 
 use super::{
     address::PaymentAddress,

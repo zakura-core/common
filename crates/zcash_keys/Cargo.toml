@@ -24,7 +24,7 @@ bip0039 = { version = "0.12", features = ["std"], optional = true, default-featu
 bip32 = { version = "0.6", features = ["alloc"], optional = true, default-features = false }
 bs58 = { version = "0.5", features = ["alloc", "check"], default-features = false }
 byteorder = { version = "1", optional = true }
-corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false, optional = true }
 nonempty = { version = "0.11", default-features = false }
 orchard = { workspace = true, optional = true }
 proptest = { version = ">=1,<1.7", optional = true }
@@ -52,6 +52,8 @@ zcash_address = { workspace = true, features = ["test-dependencies"] }
 zcash_script = { version = "0.6", default-features = false }
 
 [features]
+# I/O traits for builds without the standard library. Standard builds use std::io.
+no-std-io = ["dep:corez", "orchard?/no-std-io", "sapling?/no-std-io", "transparent/no-std-io", "zcash_address/no-std-io", "zcash_protocol/no-std-io"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["orchard?/zip32-addresses", "sapling?/zip32-addresses"]
 default = ["std", "zip32-addresses"]

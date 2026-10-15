@@ -8,6 +8,10 @@
 //! *No documented features in Cargo.toml*
 //!
 
+//! Standard builds use `std::io`. Builds without the standard library must
+//! enable `no-std-io` to select the compatible `corez` I/O traits.
+//!
+
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, doc(auto_cfg))]
 // Catch documentation errors caused by code changes.
@@ -27,3 +31,5 @@ pub mod block;
 pub(crate) mod encoding;
 pub mod merkle_tree;
 pub mod transaction;
+
+mod io;

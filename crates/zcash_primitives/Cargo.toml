@@ -21,7 +21,7 @@ bench = false
 
 [dependencies]
 blake2b_simd = { version = "1", default-features = false }
-corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false, optional = true }
 equihash.workspace = true
 ff = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
@@ -58,7 +58,9 @@ zip32 = { version = "0.2", default-features = false }
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
-circuits = ["orchard/circuit", "sapling/circuit"]
+# I/O traits for builds without the standard library. Standard builds use std::io.
+no-std-io = ["dep:corez", "equihash/no-std-io", "orchard/no-std-io", "sapling/no-std-io", "transparent/no-std-io", "zcash_protocol/no-std-io"]
+circuits = ["std", "orchard/circuit", "sapling/circuit"]
 default = ["multicore", "std", "circuits", "pczt"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []

@@ -20,7 +20,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 bech32 = { version = "0.11", features = ["alloc"], default-features = false }
 blake2b_simd = { version = "1", default-features = false }
 bs58 = { version = "0.5", features = ["alloc", "check"], default-features = false }
-corez = { version = "0.1.1", features = ["alloc"], default-features = false }
+corez = { version = "0.1.1", features = ["alloc"], default-features = false, optional = true }
 zcash_protocol.workspace = true
 proptest = { version = ">=1,<1.7", optional = true }
 
@@ -29,9 +29,11 @@ assert_matches = "1.5"
 proptest = ">=1,<1.7"
 
 [features]
+# I/O traits for builds without the standard library. Standard builds use std::io.
+no-std-io = ["dep:corez", "zcash_protocol/no-std-io"]
 default = ["std"]
 std = [
-    "corez/std",
+    "corez?/std",
     "blake2b_simd/std",
     "zcash_protocol/std",
 ]

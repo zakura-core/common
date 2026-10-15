@@ -33,7 +33,7 @@ rand_core = { version = "0.10", default-features = false }
 sapling = { workspace = true }
 wagyu-zcash-parameters = { version = "0.2", optional = true }
 xdg = { version = "3", optional = true }
-zcash_primitives = { workspace = true, features = ["circuits"] }
+zcash_primitives = { workspace = true, features = ["circuits", "std"] }
 
 [dev-dependencies]
 byteorder = "1"

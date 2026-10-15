@@ -14,6 +14,8 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
+# I/O traits for builds without the standard library. Standard builds use std::io.
+no-std-io = ["dep:corez"]
 default = ["std"]
 std = []
 
@@ -22,7 +24,7 @@ std = []
 solver = ["dep:libc", "std", "blake2b_simd/std"]
 
 [dependencies]
-corez = { version = "0.1.1", default-features = false, features = ["alloc"] }
+corez = { version = "0.1.1", default-features = false, features = ["alloc"], optional = true }
 blake2b_simd = { version = "1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]

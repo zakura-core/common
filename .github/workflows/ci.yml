@@ -930,7 +930,7 @@ jobs:
       - name: Build no_std target
         run: >-
           cargo +1.97.0 build -p zakura-orchard
-          --no-default-features
+          --no-default-features --features zakura-orchard/no-std-io
           --target ${{ matrix.target }}
           --verbose
 
@@ -1336,7 +1336,7 @@ jobs:
           -p zakura-jubjub
           -p zakura-bellman
           -p zakura-sapling-crypto
-          --no-default-features
+          --no-default-features --features zakura-sapling-crypto/no-std-io
           --target ${{ matrix.target }}
           --verbose
 
@@ -1356,7 +1356,7 @@ jobs:
       - name: Run tests
         run: cargo +1.97.0 test -p zakura-equihash --all-features --locked
       - name: Check no-default-features
-        run: cargo +1.97.0 check -p zakura-equihash --no-default-features --locked
+        run: cargo +1.97.0 check -p zakura-equihash --no-default-features --features zakura-equihash/no-std-io --locked
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -1427,7 +1427,7 @@ jobs:
           -p zakura-transparent
           -p zakura-zip321
           --all-targets
-          --no-default-features
+          --no-default-features --features zakura-address/no-std-io,zakura-keys/no-std-io,zakura-primitives/no-std-io,zakura-protocol/no-std-io,zakura-transparent/no-std-io
       - name: Check transparent-inputs-only
         if: ${{ !cancelled() }}
         run: >-
@@ -1441,7 +1441,7 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
-          --features zakura-keys/transparent-inputs,zakura-primitives/transparent-inputs
+          --features zakura-keys/transparent-inputs,zakura-primitives/transparent-inputs,zakura-address/no-std-io,zakura-keys/no-std-io,zakura-primitives/no-std-io,zakura-protocol/no-std-io,zakura-transparent/no-std-io
       - name: Check transparent-key-encoding-only
         if: ${{ !cancelled() }}
         run: >-
@@ -1455,7 +1455,7 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
-          --features zakura-keys/transparent-key-encoding
+          --features zakura-keys/transparent-key-encoding,zakura-address/no-std-io,zakura-keys/no-std-io,zakura-primitives/no-std-io,zakura-protocol/no-std-io,zakura-transparent/no-std-io
       - name: Check Sapling-only
         if: ${{ !cancelled() }}
         run: >-
@@ -1469,7 +1469,7 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
-          --features zakura-keys/sapling,zakura-primitives/circuits
+          --features zakura-keys/sapling,zakura-primitives/circuits,zakura-address/no-std-io,zakura-keys/no-std-io,zakura-primitives/no-std-io,zakura-protocol/no-std-io,zakura-transparent/no-std-io
       - name: Check Orchard
         if: ${{ !cancelled() }}
         run: >-
@@ -1483,7 +1483,7 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
-          --features zakura-keys/orchard,zakura-primitives/circuits
+          --features zakura-keys/orchard,zakura-primitives/circuits,zakura-address/no-std-io,zakura-keys/no-std-io,zakura-primitives/no-std-io,zakura-protocol/no-std-io,zakura-transparent/no-std-io
       - name: Check all-features
         if: ${{ !cancelled() }}
         run: >-
@@ -1505,10 +1505,14 @@ jobs:
               jq -r --arg package "$package" \
                 '.packages[] | select(.name == $package) | .features | keys[]' |
               while IFS= read -r feature; do
+                io_feature=""
+                case "$package" in
+                  zakura-keys|zakura-primitives|zakura-protocol) io_feature=",no-std-io" ;;
+                esac
                 cargo +1.97.0 clippy -p "$package" \
                   --no-deps \
                   --no-default-features \
-                  --features "$feature"
+                  --features "$feature$io_feature"
               done
           done
       - name: Install beta Clippy
@@ -1567,7 +1571,11 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           read -r -a packages <<< "$PACKAGES"
-          cargo +1.97.0 build "${packages[@]}" --no-default-features --target "$TARGET" --verbose
+          features=()
+          if [[ "$TARGET" == thumbv7em-none-eabihf ]]; then
+            features=(--features zakura-address/no-std-io,zakura-keys/no-std-io,zakura-primitives/no-std-io,zakura-protocol/no-std-io,zakura-transparent/no-std-io)
+          fi
+          cargo +1.97.0 build "${packages[@]}" --no-default-features "${features[@]}" --target "$TARGET" --verbose
 
   # tachyon-zcash/udon .github/workflows/ci.yml @
   # 586329a8c94fe042e7ec264b61bfd632888828cb
