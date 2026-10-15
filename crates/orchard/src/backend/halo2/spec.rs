@@ -10,7 +10,7 @@ use crate::backend::pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
     pallas,
 };
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "memory-usage"))]
 use memuse::DynamicUsage;
 use subtle::{ConditionallySelectable, CtOption};
 
@@ -163,6 +163,7 @@ pub(crate) struct PreparedNonZeroScalar(
 );
 
 #[cfg(feature = "std")]
+#[cfg(feature = "memory-usage")]
 impl DynamicUsage for PreparedNonZeroScalar {
     fn dynamic_usage(&self) -> usize {
         self.0.dynamic_usage()

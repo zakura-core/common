@@ -29,7 +29,9 @@ assert_matches = "1.5"
 proptest = ">=1,<1.7"
 
 [features]
-default = ["std"]
+# Dynamic memory accounting, enabled by default for existing clients.
+memory-usage = ["zcash_protocol/memory-usage"]
+default = ["memory-usage", "std"]
 std = [
     "corez/std",
     "blake2b_simd/std",

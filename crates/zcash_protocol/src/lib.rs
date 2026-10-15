@@ -12,6 +12,10 @@
 //!   (e.g. regtest).
 //!
 
+//! The default-enabled `memory-usage` feature supplies dynamic memory-accounting
+//! trait implementations. Clients that do not use them may omit the feature.
+//!
+
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, doc(auto_cfg))]

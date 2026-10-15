@@ -9,6 +9,7 @@
 use crate::backend::pallas;
 #[allow(unused_imports)]
 use crate::backend::prelude::*;
+#[cfg(feature = "memory-usage")]
 use memuse::DynamicUsage;
 use rand::Rng;
 use subtle::{ConstantTimeEq, CtOption};
@@ -21,6 +22,7 @@ use crate::{keys::NullifierDerivingKey, spec::extract_p};
 pub struct Nullifier(pallas::Base);
 
 // We know that `pallas::Base` doesn't allocate internally.
+#[cfg(feature = "memory-usage")]
 memuse::impl_no_dynamic_usage!(Nullifier);
 
 impl Nullifier {

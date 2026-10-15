@@ -41,9 +41,11 @@ proptest = ">=1,<1.7"
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
+# Dynamic memory accounting, enabled by default for existing clients.
+memory-usage = ["zcash_protocol/memory-usage"]
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32"]
-default = ["wallet", "std", "pczt"]
+default = ["memory-usage", "wallet", "std", "pczt"]
 std = [
     "secp256k1?/std",
     "zcash_address/std",
