@@ -478,8 +478,7 @@ impl SaplingIvk {
 #[derive(Clone, Debug)]
 pub struct PreparedIncomingViewingKey(PreparedScalar);
 
-#[cfg(feature = "std")]
-#[cfg(feature = "memory-usage")]
+#[cfg(all(feature = "std", feature = "memory-usage"))]
 impl memuse::DynamicUsage for PreparedIncomingViewingKey {
     fn dynamic_usage(&self) -> usize {
         self.0.dynamic_usage()

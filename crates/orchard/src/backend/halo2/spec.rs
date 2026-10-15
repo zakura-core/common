@@ -162,8 +162,7 @@ pub(crate) struct PreparedNonZeroScalar(
     pallas::Scalar,
 );
 
-#[cfg(feature = "std")]
-#[cfg(feature = "memory-usage")]
+#[cfg(all(feature = "std", feature = "memory-usage"))]
 impl DynamicUsage for PreparedNonZeroScalar {
     fn dynamic_usage(&self) -> usize {
         self.0.dynamic_usage()
