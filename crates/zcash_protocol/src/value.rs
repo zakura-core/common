@@ -9,8 +9,7 @@ use crate::io;
 #[cfg(feature = "std")]
 use std::error;
 
-#[cfg(feature = "std")]
-#[cfg(feature = "memory-usage")]
+#[cfg(all(feature = "std", feature = "memory-usage"))]
 use memuse::DynamicUsage;
 
 pub const COIN: u64 = 1_0000_0000;
@@ -28,8 +27,7 @@ pub const MAX_BALANCE: i64 = MAX_MONEY as i64;
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct ZatBalance(i64);
 
-#[cfg(feature = "std")]
-#[cfg(feature = "memory-usage")]
+#[cfg(all(feature = "std", feature = "memory-usage"))]
 memuse::impl_no_dynamic_usage!(ZatBalance);
 
 impl ZatBalance {
