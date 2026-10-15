@@ -1,5 +1,8 @@
 //! Compatibility with the `zcash_encoding` 0.4.0 wire format.
 
+#[cfg(not(feature = "std"))]
+use corez::io::{self, Read, Write};
+#[cfg(feature = "std")]
 use std::io::{self, Read, Write};
 use zcash_protocol::encoding::{Array, CompactSize, MAX_COMPACT_SIZE, Optional, Vector};
 

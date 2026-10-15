@@ -1416,6 +1416,10 @@ jobs:
           cargo +1.97.0 test -p zakura-keys --locked --lib
           --no-default-features
           --features std,orchard,sapling,transparent-inputs,unstable,test-dependencies
+      - name: Test protocol encodings without standard-library I/O
+        run: >-
+          cargo +1.97.0 test -p zakura-protocol --locked --test encoding
+          --no-default-features --features no-std-io
       - name: Check no-default-features
         run: >-
           cargo +1.97.0 check
