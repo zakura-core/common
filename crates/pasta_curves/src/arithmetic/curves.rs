@@ -385,6 +385,100 @@ pub trait CurveAffine:
     fn b() -> Self::Base;
 }
 
+/// Attempts to decode eight affine encodings with a shared SIMD backend.
+///
+/// Each result has the same validity and point value as
+/// [`group::GroupEncoding::from_bytes`], including the encoded identity. The
+/// outer `None` means the curve, enabled features, or CPU are unsupported;
+/// in that case no encodings are decoded and callers can use scalar decoding.
+/// An invalid encoding instead produces a per-lane empty [`CtOption`].
+///
+/// This currently accelerates only the concrete Pallas and Vesta affine types
+/// with `glv`, `sqrt-table`, and `x86_64-asm` on an IFMA-capable x86-64 CPU.
+/// Like the other arithmetic in this crate, it may run in variable time.
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub fn try_batch_from_bytes8<C: CurveAffine>(bytes: &[C::Repr; 8]) -> Option<[CtOption<C>; 8]> {
+    #[cfg(all(
+        feature = "glv",
+        feature = "sqrt-table",
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    {
+        use core::any::TypeId;
+
+        // A matching base field is insufficient: a downstream curve could
+        // use a different equation or encoding with that same field.
+        if (TypeId::of::<C>() != TypeId::of::<crate::pallas::Affine>()
+            && TypeId::of::<C>() != TypeId::of::<crate::vesta::Affine>())
+            || !crate::fields::ifma_available_for::<C::Base>()
+        {
+            return None;
+        }
+        return batch_from_bytes8_with(bytes, crate::fields::try_sqrt8);
+    }
+    #[cfg(not(all(
+        feature = "glv",
+        feature = "sqrt-table",
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )))]
+    {
+        let _ = bytes;
+        None
+    }
+}
+
+// The production caller has established the exact curve and encoding. A
+// scalar-root callback tests point construction and flags on non-SIMD targets.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        test,
+        all(
+            feature = "glv",
+            feature = "sqrt-table",
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )
+    )
+))]
+fn batch_from_bytes8_with<C: CurveAffine>(
+    bytes: &[C::Repr; 8],
+    sqrt: impl FnOnce(&[C::Base; 8]) -> Option<[CtOption<C::Base>; 8]>,
+) -> Option<[CtOption<C>; 8]> {
+    use group::ff::{Field, PrimeField};
+
+    let signs = bytes
+        .each_ref()
+        .map(|repr| Choice::from(repr.as_ref()[31] >> 7));
+    let parsed = bytes.each_ref().map(|repr| {
+        let mut x_repr = <C::Base as PrimeField>::Repr::default();
+        x_repr.as_mut().copy_from_slice(repr.as_ref());
+        x_repr.as_mut()[31] &= 0x7f;
+        C::Base::from_repr(x_repr)
+    });
+    // Noncanonical input flags survive even when their private scratch
+    // value is zero; in particular, raw p must not become an identity.
+    let xs = parsed.map(|x| x.unwrap_or(C::Base::ZERO));
+    let rhs = xs.map(|x| x.square() * x + C::b());
+    let roots = sqrt(&rhs)?;
+    Some(core::array::from_fn(|lane| {
+        let y = roots[lane].unwrap_or(C::Base::ZERO);
+        let y = C::Base::conditional_select(&y, &-y, signs[lane] ^ y.is_odd());
+        let point = C::from_xy(xs[lane], y);
+        let identity = xs[lane].is_zero() & !signs[lane];
+        CtOption::new(
+            C::conditional_select(&point.unwrap_or(C::identity()), &C::identity(), identity),
+            parsed[lane].is_some() & (identity | (roots[lane].is_some() & point.is_some())),
+        )
+    }))
+}
+
 /// The affine coordinates of a point on an elliptic curve.
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
@@ -446,6 +540,201 @@ mod tests {
     use crate::{pallas, vesta};
     use ff::{Field, PrimeField, WithSmallOrderMulGroup};
     use group::{CurveAffine as _, Group as _};
+
+    fn assert_batch_decode<C: CurveAffine>(bytes: &[C::Repr; 8]) {
+        let expected = bytes
+            .each_ref()
+            .map(|repr| Option::<C>::from(C::from_bytes(repr)));
+        let model =
+            batch_from_bytes8_with::<C>(bytes, |values| Some(values.map(|value| value.sqrt())))
+                .unwrap();
+        assert_eq!(
+            model.map(Option::<C>::from),
+            expected,
+            "scalar-root assembly"
+        );
+        let actual = try_batch_from_bytes8::<C>(bytes);
+        #[cfg(all(
+            feature = "glv",
+            feature = "sqrt-table",
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ))]
+        if crate::fields::ifma_available_for::<C::Base>() {
+            assert!(
+                actual.is_some(),
+                "supported Pasta decoding must engage SIMD"
+            );
+        }
+        if let Some(actual) = actual {
+            assert_eq!(actual.map(Option::<C>::from), expected, "SIMD decoding");
+        }
+    }
+
+    fn point_repr<C: CurveAffine>(value: &<C::Base as PrimeField>::Repr) -> C::Repr {
+        let mut encoded = C::Repr::default();
+        encoded.as_mut().copy_from_slice(value.as_ref());
+        encoded
+    }
+
+    fn batch_decode_cases<C: CurveAffine>() -> alloc::vec::Vec<C::Repr> {
+        let generator = C::from(C::CurveExt::generator());
+        let mut cases = alloc::vec![
+            C::identity().to_bytes(),
+            generator.to_bytes(),
+            (-generator).to_bytes(),
+            point_repr::<C>(&(-C::Base::ONE).to_repr()),
+        ];
+        let mut signed_zero = C::Repr::default();
+        signed_zero.as_mut()[31] = 0x80;
+        cases.push(signed_zero);
+        // Derive raw p from canonical p-1, without accepting a reduced repr.
+        let mut raw_p = point_repr::<C>(&(-C::Base::ONE).to_repr());
+        for byte in raw_p.as_mut() {
+            let (next, carry) = byte.overflowing_add(1);
+            *byte = next;
+            if !carry {
+                break;
+            }
+        }
+        cases.push(raw_p.clone());
+        raw_p.as_mut()[31] |= 0x80;
+        cases.push(raw_p);
+        let mut maximal = C::Repr::default();
+        maximal.as_mut().fill(u8::MAX);
+        cases.push(maximal);
+        let nonsquare = (1_u64..)
+            .map(C::Base::from)
+            .find(|x| !bool::from((x.square() * x + C::b()).sqrt().is_some()))
+            .unwrap();
+        cases.push(point_repr::<C>(&nonsquare.to_repr()));
+        let mut signed = point_repr::<C>(&nonsquare.to_repr());
+        signed.as_mut()[31] |= 0x80;
+        cases.push(signed);
+        cases
+    }
+
+    fn batch_decode_matches_scalar<C: CurveAffine>() {
+        use rand::{Rng, SeedableRng};
+
+        let cases = batch_decode_cases::<C>();
+        for shift in 0..cases.len() {
+            let bytes = core::array::from_fn(|lane| cases[(shift + lane) % cases.len()].clone());
+            assert_batch_decode::<C>(&bytes);
+            for sign_mask in 0_u16..=u8::MAX.into() {
+                let mut signed = bytes.clone();
+                for (lane, repr) in signed.iter_mut().enumerate() {
+                    repr.as_mut()[31] ^= ((sign_mask >> lane) as u8 & 1) << 7;
+                }
+                assert_batch_decode::<C>(&signed);
+            }
+        }
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([0xD3; 16]);
+        for iteration in 0..256 {
+            let bytes = core::array::from_fn(|_| {
+                if iteration % 3 == 0 {
+                    C::from(C::CurveExt::generator() * C::ScalarExt::random(&mut rng)).to_bytes()
+                } else if iteration % 3 == 1 {
+                    // Proof lookahead can contain scalar encodings. They
+                    // are simply arbitrary candidate compressed points.
+                    let mut repr = C::Repr::default();
+                    repr.as_mut()
+                        .copy_from_slice(C::ScalarExt::random(&mut rng).to_repr().as_ref());
+                    repr
+                } else {
+                    let mut repr = C::Repr::default();
+                    rng.fill_bytes(repr.as_mut());
+                    repr
+                }
+            });
+            assert_batch_decode::<C>(&bytes);
+        }
+        assert!(
+            batch_from_bytes8_with::<C>(&core::array::from_fn(|_| C::Repr::default()), |_| None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn batch_decode_pallas_matches_scalar() {
+        batch_decode_matches_scalar::<pallas::Affine>();
+    }
+
+    #[test]
+    fn batch_decode_vesta_matches_scalar() {
+        batch_decode_matches_scalar::<vesta::Affine>();
+    }
+
+    #[test]
+    fn batch_decode_unsupported_curve_and_configuration() {
+        // The isogenous curves use the same base fields, but a different
+        // equation. Dispatch must not be based on the base field alone.
+        let invalid = [[u8::MAX; 32]; 8];
+        assert!(try_batch_from_bytes8::<crate::curves::IsoEpAffine>(&invalid).is_none());
+        assert!(try_batch_from_bytes8::<crate::curves::IsoEqAffine>(&invalid).is_none());
+        #[cfg(not(all(
+            feature = "glv",
+            feature = "sqrt-table",
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )))]
+        {
+            assert!(try_batch_from_bytes8::<pallas::Affine>(&invalid).is_none());
+            assert!(try_batch_from_bytes8::<vesta::Affine>(&invalid).is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "manual scalar-versus-SIMD point decoding diagnostic"]
+    fn batch_decode_timings() {
+        fn check<C: CurveAffine>() {
+            let bytes = core::array::from_fn(|lane| {
+                C::from(C::CurveExt::generator() * C::ScalarExt::from(lane as u64 + 1)).to_bytes()
+            });
+            let cold = std::time::Instant::now();
+            let Some(decoded) = try_batch_from_bytes8::<C>(&bytes) else {
+                std::eprintln!(
+                    "batch_decode curve={} unsupported",
+                    core::any::type_name::<C>()
+                );
+                return;
+            };
+            let cold_ns = cold.elapsed().as_nanos();
+            let expected = bytes
+                .each_ref()
+                .map(|repr| Option::<C>::from(C::from_bytes(repr)));
+            assert_eq!(decoded.map(Option::<C>::from), expected);
+            let iterations = std::env::var("IRONWOOD_DECODE_BENCH_ITERS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|iterations| *iterations != 0)
+                .unwrap_or(4_000);
+            for round in 0..4 {
+                let start = std::time::Instant::now();
+                for _ in 0..iterations {
+                    for repr in core::hint::black_box(&bytes) {
+                        core::hint::black_box(C::from_bytes(repr));
+                    }
+                }
+                let scalar_ns = start.elapsed().as_nanos() / u128::from(iterations);
+                let start = std::time::Instant::now();
+                for _ in 0..iterations {
+                    core::hint::black_box(try_batch_from_bytes8::<C>(core::hint::black_box(
+                        &bytes,
+                    )));
+                }
+                let batch_ns = start.elapsed().as_nanos() / u128::from(iterations);
+                std::eprintln!(
+                    "batch_decode curve={} round={round} cold_batch_ns={cold_ns} scalar8_ns={scalar_ns} batch8_ns={batch_ns}",
+                    core::any::type_name::<C>(),
+                );
+            }
+        }
+        check::<pallas::Affine>();
+        check::<vesta::Affine>();
+    }
 
     // Sizes 33 and up cross the GLV batch-affine threshold of 32 live points
     // (the identity injected at size/2 keeps one lane inert, so size 32 stays

@@ -6,6 +6,131 @@ mod fq;
 mod modinv62;
 mod portable;
 
+// The private IFMA backend serves variable-time GLV reduction and batched
+// decoding. Safe wrappers reject unsupported CPUs before any mutation.
+#[allow(unsafe_code)]
+#[cfg(all(
+    feature = "glv",
+    feature = "x86_64-asm",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+mod ifma;
+
+/// Whether eight-lane IFMA arithmetic is available for this concrete field.
+#[cfg(feature = "glv")]
+pub(crate) fn ifma_available_for<F: ff::Field>() -> bool {
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    {
+        ifma::available_for::<F>()
+    }
+    #[cfg(not(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )))]
+    {
+        false
+    }
+}
+
+/// Multiplies eight lanes, or returns `false` without changing `lhs`.
+#[cfg(feature = "glv")]
+pub(crate) fn try_mul_assign8<F: ff::Field>(lhs: &mut [F; 8], rhs: &[F; 8]) -> bool {
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    if ifma_available_for::<F>() {
+        ifma::mul8(lhs, rhs);
+        return true;
+    }
+    let _ = (lhs, rhs);
+    false
+}
+
+/// Squares eight lanes, or returns `false` without changing `values`.
+#[cfg(feature = "glv")]
+pub(crate) fn try_square8<F: ff::Field>(values: &mut [F; 8]) -> bool {
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    if ifma_available_for::<F>() {
+        ifma::square8(values);
+        return true;
+    }
+    let _ = values;
+    false
+}
+
+/// Computes eight square roots, or declines before any field arithmetic.
+#[cfg(all(
+    feature = "glv",
+    feature = "sqrt-table",
+    feature = "x86_64-asm",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+pub(crate) fn try_sqrt8<F: ff::PrimeField>(values: &[F; 8]) -> Option<[subtle::CtOption<F>; 8]> {
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    {
+        use core::any::Any;
+
+        if !ifma_available_for::<F>() {
+            return None;
+        }
+        if let Some(values) = (values as &dyn Any).downcast_ref::<[Fp; 8]>() {
+            let powers = ifma::pow_t8(values);
+            let roots = fp::sqrt_with_t_power8(values, &powers);
+            return (&roots as &dyn Any)
+                .downcast_ref::<[subtle::CtOption<F>; 8]>()
+                .copied();
+        }
+        if let Some(values) = (values as &dyn Any).downcast_ref::<[Fq; 8]>() {
+            let powers = ifma::pow_t8(values);
+            let roots = fq::sqrt_with_t_power8(values, &powers);
+            return (&roots as &dyn Any)
+                .downcast_ref::<[subtle::CtOption<F>; 8]>()
+                .copied();
+        }
+    }
+    let _ = values;
+    None
+}
+
+/// Reduces affine buckets in packed scratch, leaving the source unchanged.
+///
+/// Returns `None` on unsupported targets or a zero chord denominator. The
+/// caller can then retry its unchanged inputs with complete formulas.
+#[cfg(all(feature = "glv", any(test, feature = "multicore", feature = "orbits")))]
+pub(crate) fn try_reduce_affine_buckets_packed<F: ff::Field>(
+    point_count: usize,
+    offsets: &[usize],
+    point_at: impl Fn(usize) -> (F, F),
+) -> Option<alloc::vec::Vec<Option<(F, F)>>> {
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    if ifma_available_for::<F>() {
+        return ifma::reduce_affine_buckets(point_count, offsets, point_at);
+    }
+    let _ = (point_count, offsets, point_at);
+    None
+}
+
 use crate::arithmetic::mac;
 
 const MAX_INVERSE_POWER_OF_TWO_EXPONENT: u32 = u64::BITS - 1;
@@ -72,6 +197,56 @@ mod x86_64_asm;
 
 pub use fp::*;
 pub use fq::*;
+
+#[cfg(all(test, feature = "glv"))]
+mod ifma_tests {
+    use super::*;
+    use ff::Field;
+    use rand::SeedableRng;
+    use rand_xorshift::XorShiftRng;
+
+    fn check_batches<F: Field + From<u64>>() {
+        let mut rng = XorShiftRng::from_seed([0xA5; 16]);
+        let boundaries = [F::ZERO, F::ONE, -F::ONE, F::from(2), -F::from(2)];
+        for iteration in 0..1024 {
+            let lhs = core::array::from_fn(|lane| {
+                if iteration < boundaries.len() {
+                    boundaries[(iteration + lane) % boundaries.len()]
+                } else {
+                    F::random(&mut rng)
+                }
+            });
+            let rhs = core::array::from_fn(|lane| {
+                if iteration < boundaries.len() {
+                    boundaries[(iteration * 2 + lane) % boundaries.len()]
+                } else {
+                    F::random(&mut rng)
+                }
+            });
+            let expected = core::array::from_fn(|lane| lhs[lane] * rhs[lane]);
+            let mut actual = lhs;
+            let available = try_mul_assign8(&mut actual, &rhs);
+            assert_eq!(available, ifma_available_for::<F>());
+            assert_eq!(actual, if available { expected } else { lhs });
+
+            let expected = lhs.map(|value| value.square());
+            let mut actual = lhs;
+            let available = try_square8(&mut actual);
+            assert_eq!(available, ifma_available_for::<F>());
+            assert_eq!(actual, if available { expected } else { lhs });
+        }
+    }
+
+    #[test]
+    fn ifma_fp_batches_match_scalar_or_leave_inputs_unchanged() {
+        check_batches::<Fp>();
+    }
+
+    #[test]
+    fn ifma_fq_batches_match_scalar_or_leave_inputs_unchanged() {
+        check_batches::<Fq>();
+    }
+}
 
 #[cfg(test)]
 fn check_equality<F: core::fmt::Debug + PartialEq + subtle::ConstantTimeEq>(values: &[F]) {
