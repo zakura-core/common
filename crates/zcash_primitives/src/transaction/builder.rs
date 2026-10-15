@@ -1376,24 +1376,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         fee_rule: &FR,
     ) -> Result<BuildResult, Error<FR::Error>> {
         match &self.build_config {
-            BuildConfig::Coinbase { miner_data } => {
-                let target_height = self.target_height;
-                let miner_data = miner_data.clone();
-
-                self.build_internal::<Coinbase, _, _, _, _>(
-                    |b| {
-                        b.build_coinbase(target_height, miner_data)
-                            .map(Some)
-                            .map_err(Error::Coinbase)
-                    },
-                    |b, _, _| Ok(b.clone().map_authorization(transparent::builder::Coinbase)),
-                    &[],
-                    &[],
-                    rng,
-                    spend_prover,
-                    output_prover,
-                    None,
-                )
+            BuildConfig::Coinbase { .. } => {
+                self.build_coinbase_internal(rng, spend_prover, output_prover)
             }
             BuildConfig::Standard { .. } => {
                 let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
@@ -1426,6 +1410,16 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         spend_prover: &SP,
         output_prover: &OP,
     ) -> Result<BuildResult, Error<Infallible>> {
+        self.build_coinbase_internal(rng, spend_prover, output_prover)
+    }
+
+    #[cfg(feature = "circuits")]
+    fn build_coinbase_internal<R: Rng + CryptoRng, SP: SpendProver, OP: OutputProver, FE>(
+        self,
+        rng: R,
+        spend_prover: &SP,
+        output_prover: &OP,
+    ) -> Result<BuildResult, Error<FE>> {
         let BuildConfig::Coinbase { miner_data } = &self.build_config else {
             return Err(Error::Coinbase(
                 coinbase::Error::InvalidBuilderConfiguration,
