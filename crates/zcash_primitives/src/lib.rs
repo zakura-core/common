@@ -12,6 +12,11 @@
 //! enable `no-std-io` to select the compatible `corez` I/O traits.
 //!
 
+//! The default-enabled `zip32` feature supplies wallet derivation APIs.
+//! Clients selecting features explicitly may omit it for verification and
+//! coinbase construction; wallet input and PCZT features imply it.
+//!
+
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, doc(auto_cfg))]
 // Catch documentation errors caused by code changes.

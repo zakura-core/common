@@ -2,10 +2,7 @@ use group::{GroupEncoding, ff::Field};
 use rand_core::{CryptoRng, Rng};
 use zcash_spec::PrfExpand;
 
-use crate::{
-    keys::{ExpandedSpendingKey, FullViewingKey},
-    zip32::ExtendedSpendingKey,
-};
+use crate::keys::{ExpandedSpendingKey, FullViewingKey};
 
 use super::{
     Diversifier, Nullifier, NullifierDerivingKey, PaymentAddress, keys::EphemeralSecretKey,
@@ -161,8 +158,9 @@ impl Note {
         let mut sk_bytes = [0; 32];
         rng.fill_bytes(&mut sk_bytes);
 
-        let extsk = ExtendedSpendingKey::master(&sk_bytes[..]);
-        let fvk = extsk.to_diversifiable_full_viewing_key().fvk().clone();
+        let expanded = crate::keys::master_key_expansion(&sk_bytes);
+        let expsk = ExpandedSpendingKey::from_spending_key(&expanded.as_bytes()[..32]);
+        let fvk = FullViewingKey::from_expanded_spending_key(&expsk);
         // Dummy notes do not need a reproducible ZIP 32 address index.
         // Retry because not every Sapling diversifier is valid.
         let ivk = fvk.vk.ivk();
@@ -180,7 +178,7 @@ impl Note {
 
         let note = Note::from_parts(recipient, NoteValue::ZERO, rseed);
 
-        (extsk.expsk, fvk, note)
+        (expsk, fvk, note)
     }
 }
 
@@ -234,6 +232,7 @@ pub(super) mod testing {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use rand_core::Rng;
 
     struct CountingRng {
         inner: rand::rngs::StdRng,

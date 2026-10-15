@@ -1,5 +1,6 @@
 //! Types and functions for building Sapling transaction components.
 
+#[cfg(feature = "zip32")]
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::{fmt, iter, marker::PhantomData};
@@ -32,8 +33,10 @@ use crate::{
     circuit,
     prover::{OutputProver, SpendProver},
     value::{CommitmentSum, TrapdoorSum},
-    zip32::ExtendedSpendingKey,
 };
+
+#[cfg(all(feature = "circuit", feature = "zip32"))]
+use crate::zip32::ExtendedSpendingKey;
 
 /// If there are any shielded inputs, always have at least two shielded outputs, padding
 /// with dummy outputs if necessary. See <https://github.com/zcash/zcash/issues/3615>.
@@ -133,7 +136,7 @@ pub enum Error {
     MissingSignatures,
     /// A required spending key was not provided.
     MissingSpendingKey,
-    /// [`Builder::build_for_pczt`] requires [`Zip212Enforcement::On`].
+    /// `Builder::build_for_pczt` requires [`Zip212Enforcement::On`].
     PcztRequiresZip212,
     SpendProof,
     /// The bundle being constructed violated the construction rules for the requested bundle type.
@@ -324,6 +327,7 @@ impl PreparedSpendInfo {
         ))
     }
 
+    #[cfg(feature = "zip32")]
     fn into_pczt<R: Rng>(self, rng: R) -> crate::pczt::Spend {
         let (cv, nullifier, rk, alpha) = self.build_inner(rng);
 
@@ -492,6 +496,7 @@ impl PreparedOutputInfo {
         )
     }
 
+    #[cfg(feature = "zip32")]
     fn into_pczt<R: Rng>(self, rng: &mut R) -> crate::pczt::Output {
         let (cv, cmu, ephemeral_key, enc_ciphertext, out_ciphertext, _) =
             self.build_inner(|_| (), rng);
@@ -665,7 +670,7 @@ impl Builder {
     }
 
     /// Constructs the Sapling bundle from the builder's accumulated state.
-    #[cfg(feature = "circuit")]
+    #[cfg(all(feature = "circuit", feature = "zip32"))]
     pub fn build<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
         self,
         extsks: &[ExtendedSpendingKey],
@@ -682,8 +687,32 @@ impl Builder {
         )
     }
 
+    /// Constructs an output-only coinbase bundle without wallet derivation keys.
+    ///
+    /// Returns [`Error::BundleTypeNotSatisfiable`] if the builder was not created
+    /// with [`BundleType::Coinbase`].
+    #[cfg(feature = "circuit")]
+    pub fn build_coinbase<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
+        self,
+        rng: R,
+    ) -> Result<Option<(UnauthorizedBundle<V>, SaplingMetadata)>, Error> {
+        if self.bundle_type != BundleType::Coinbase {
+            return Err(Error::BundleTypeNotSatisfiable);
+        }
+        bundle_with_key_lookup::<SP, OP, _, _>(
+            rng,
+            self.bundle_type,
+            self.zip212_enforcement,
+            self.anchor,
+            self.spends,
+            self.outputs,
+            |_| None,
+        )
+    }
+
     /// Builds a bundle containing the given spent notes and outputs along with their
     /// metadata, for inclusion in a PCZT.
+    #[cfg(feature = "zip32")]
     pub fn build_for_pczt(
         self,
         rng: impl Rng,
@@ -728,7 +757,7 @@ impl Builder {
 
 /// Constructs a new Sapling transaction bundle of the given type from the specified set of spends
 /// and outputs.
-#[cfg(feature = "circuit")]
+#[cfg(all(feature = "circuit", feature = "zip32"))]
 pub fn bundle<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
     rng: R,
     bundle_type: BundleType,
@@ -737,6 +766,34 @@ pub fn bundle<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
     spends: Vec<SpendInfo>,
     outputs: Vec<OutputInfo>,
     extsks: &[ExtendedSpendingKey],
+) -> Result<Option<(UnauthorizedBundle<V>, SaplingMetadata)>, Error> {
+    bundle_with_key_lookup::<SP, OP, _, _>(
+        rng,
+        bundle_type,
+        zip212_enforcement,
+        anchor,
+        spends,
+        outputs,
+        |fvk| {
+            extsks.iter().find_map(|extsk| {
+                let dfvk = extsk.to_diversifiable_full_viewing_key();
+                (dfvk.fvk().to_bytes() == fvk.to_bytes())
+                    .then(|| extsk.expsk.proof_generation_key())
+            })
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "circuit")]
+fn bundle_with_key_lookup<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
+    rng: R,
+    bundle_type: BundleType,
+    zip212_enforcement: Zip212Enforcement,
+    anchor: Anchor,
+    spends: Vec<SpendInfo>,
+    outputs: Vec<OutputInfo>,
+    key_for: impl Fn(&FullViewingKey) -> Option<ProofGenerationKey>,
 ) -> Result<Option<(UnauthorizedBundle<V>, SaplingMetadata)>, Error> {
     build_bundle(
         rng,
@@ -761,17 +818,8 @@ pub fn bundle<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
                 .into_iter()
                 .map(|a| {
                     // Look up the proof generation key for non-dummy spends.
-                    let proof_generation_key = a
-                        .dummy_expsk
-                        .is_none()
-                        .then(|| {
-                            extsks.iter().find_map(|extsk| {
-                                let dfvk = extsk.to_diversifiable_full_viewing_key();
-                                (dfvk.fvk().to_bytes() == a.fvk.to_bytes())
-                                    .then(|| extsk.expsk.proof_generation_key())
-                            })
-                        })
-                        .flatten();
+                    let proof_generation_key =
+                        a.dummy_expsk.is_none().then(|| key_for(&a.fvk)).flatten();
                     a.build::<SP, _>(proof_generation_key, &mut rng)
                 })
                 .collect::<Result<Vec<_>, _>>()?;

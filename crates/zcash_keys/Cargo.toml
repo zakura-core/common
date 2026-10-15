@@ -35,7 +35,7 @@ secrecy = "0.8"
 transparent.workspace = true
 zcash_address.workspace = true
 zcash_protocol.workspace = true
-zip32 = { version = "0.2", default-features = false }
+zip32 = { version = "0.2", default-features = false, optional = true }
 
 [dev-dependencies]
 assert_matches = "1.5"
@@ -52,13 +52,15 @@ zcash_address = { workspace = true, features = ["test-dependencies"] }
 zcash_script = { version = "0.6", default-features = false }
 
 [features]
+# Wallet key derivation and ZIP 32 interoperability, enabled by default.
+zip32 = ["dep:zip32", "orchard?/zip32", "sapling?/zip32", "transparent/zip32"]
 # I/O traits for builds without the standard library. Standard builds use std::io.
 no-std-io = ["dep:corez", "orchard?/no-std-io", "sapling?/no-std-io", "transparent/no-std-io", "zcash_address/no-std-io", "zcash_protocol/no-std-io"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
-zip32-addresses = ["orchard?/zip32-addresses", "sapling?/zip32-addresses"]
-default = ["std", "zip32-addresses"]
-orchard = ["dep:orchard"]
-sapling = ["dep:sapling"]
+zip32-addresses = ["zip32", "orchard?/zip32-addresses", "sapling?/zip32-addresses"]
+default = ["zip32", "std", "zip32-addresses"]
+orchard = ["dep:orchard", "zip32"]
+sapling = ["dep:sapling", "zip32"]
 std = [
     "orchard?/std",
     "sapling?/std",
@@ -66,12 +68,13 @@ std = [
     "zcash_address/std",
 ]
 test-dependencies = [
+    "zip32",
     "dep:proptest",
     "orchard?/test-dependencies",
     "sapling?/test-dependencies",
     "transparent/test-dependencies",
 ]
-transparent-inputs = ["dep:bip32", "transparent/transparent-inputs"]
+transparent-inputs = ["zip32", "dep:bip32", "transparent/transparent-inputs"]
 transparent-key-encoding = ["dep:bip32", "dep:secp256k1"]
 unstable = ["dep:byteorder"]
 unstable-frost = ["orchard"]

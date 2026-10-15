@@ -58,10 +58,12 @@ zip32 = { version = "0.2", default-features = false }
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
+# Wallet transaction construction with ZIP 32 spending keys.
+zip32 = ["sapling/zip32", "orchard/zip32", "transparent/zip32"]
 # I/O traits for builds without the standard library. Standard builds use std::io.
 no-std-io = ["dep:corez", "equihash/no-std-io", "orchard/no-std-io", "sapling/no-std-io", "transparent/no-std-io", "zcash_protocol/no-std-io"]
 circuits = ["std", "orchard/circuit", "sapling/circuit"]
-default = ["multicore", "std", "circuits", "pczt"]
+default = ["zip32", "multicore", "std", "circuits", "pczt"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
 expensive-tests = []
@@ -70,7 +72,7 @@ no-expensive-tests = []
 non-standard-fees = []
 # PCZT construction (`DeferredPcztBuilder`, `Builder::build_for_pczt`, and their
 # result types). Enabled by default; also enabled by `transparent-inputs`.
-pczt = ["transparent/pczt"]
+pczt = ["zip32", "transparent/pczt"]
 std = [
     "document-features",
     "equihash/std",
@@ -81,6 +83,7 @@ std = [
 ]
 temporary-zcashd = []
 test-dependencies = [
+    "zip32",
     "dep:proptest",
     "incrementalmerkletree/test-dependencies",
     "orchard/test-dependencies",
@@ -102,3 +105,4 @@ check-cfg = [
 [[bench]]
 name = "note_decryption"
 harness = false
+required-features = ["circuits", "zip32"]

@@ -30,6 +30,17 @@ use zcash_spec::PrfExpand;
 #[cfg(all(feature = "circuit", test))]
 use rand_core::Rng;
 
+/// Domain separation for the existing Sapling ZIP 32 master expansion.
+pub(crate) const SAPLING_MASTER_PERSONALIZATION: &[u8; 16] = b"ZcashIP32Sapling";
+
+/// Expands the seed using the existing Sapling master-key derivation.
+pub(crate) fn master_key_expansion(seed: &[u8]) -> Blake2bHash {
+    Blake2bParams::new()
+        .hash_length(64)
+        .personal(SAPLING_MASTER_PERSONALIZATION)
+        .hash(seed)
+}
+
 /// Errors that can occur in the decoding of Sapling spending keys.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -137,6 +148,7 @@ impl SpendAuthorizingKey {
     /// Converts this spend authorizing key to a raw scalar.
     ///
     /// Only used for ZIP 32 child derivation.
+    #[cfg(feature = "zip32")]
     pub(crate) fn to_scalar(&self) -> jubjub::Scalar {
         jubjub::Scalar::from_repr(self.0.into()).unwrap()
     }

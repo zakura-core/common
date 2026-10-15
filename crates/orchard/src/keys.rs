@@ -4,6 +4,7 @@ use crate::io::{self, Read, Write};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+#[cfg(feature = "zip32")]
 use ::zip32::{AccountId, ChildIndex};
 #[cfg(feature = "zip32-addresses")]
 use aes::Aes256;
@@ -28,12 +29,16 @@ use crate::{
         PreparedNonZeroScalar, PrfExpand, commit_ivk, diversify_hash, extract_p, ka_orchard,
         ka_orchard_prepared, prf_nf, to_base, to_scalar,
     },
-    zip32::{self, ExtendedSpendingKey},
 };
 
-pub use ::zip32::{DiversifierIndex, Scope};
+pub use crate::scope::Scope;
+#[cfg(feature = "zip32")]
+use crate::zip32::{self, ExtendedSpendingKey};
+#[cfg(feature = "zip32")]
+pub use ::zip32::DiversifierIndex;
 
 const KDF_ORCHARD_PERSONALIZATION: &[u8; 16] = b"Zcash_OrchardKDF";
+#[cfg(feature = "zip32")]
 const ZIP32_PURPOSE: u32 = 32;
 
 /// A spending key, from which all key material is derived.
@@ -95,6 +100,7 @@ impl SpendingKey {
     }
 
     /// Derives the Orchard spending key for the given seed, coin type, and account.
+    #[cfg(feature = "zip32")]
     pub fn from_zip32_seed(
         seed: &[u8],
         coin_type: u32,
@@ -327,6 +333,7 @@ impl From<&SpendingKey> for FullViewingKey {
     }
 }
 
+#[cfg(feature = "zip32")]
 impl From<&ExtendedSpendingKey> for FullViewingKey {
     fn from(extsk: &ExtendedSpendingKey) -> Self {
         (&extsk.sk()).into()
@@ -1039,7 +1046,9 @@ impl SharedSecret {
 pub mod testing {
     use proptest::prelude::*;
 
-    use super::{DiversifierIndex, DiversifierKey, EphemeralSecretKey, SpendingKey};
+    #[cfg(feature = "zip32")]
+    use super::DiversifierIndex;
+    use super::{DiversifierKey, EphemeralSecretKey, SpendingKey};
 
     prop_compose! {
         /// Generate a uniformly distributed Orchard spending key.
@@ -1078,6 +1087,7 @@ pub mod testing {
         }
     }
 
+    #[cfg(feature = "zip32")]
     prop_compose! {
         /// Generate a uniformly distributed diversifier index.
         pub fn arb_diversifier_index()(
@@ -1094,9 +1104,9 @@ mod tests {
     use proptest::prelude::*;
 
     #[cfg(feature = "zip32-addresses")]
-    use super::testing::arb_diversifier_key;
+    use super::testing::{arb_diversifier_index, arb_diversifier_key};
     use super::{
-        testing::{arb_diversifier_index, arb_esk, arb_spending_key},
+        testing::{arb_esk, arb_spending_key},
         *,
     };
     use crate::{
@@ -1126,10 +1136,10 @@ mod tests {
         fn key_agreement(
             sk in arb_spending_key(),
             esk in arb_esk(),
-            j in arb_diversifier_index(),
+            d in prop::array::uniform11(any::<u8>()),
         ) {
             let ivk = IncomingViewingKey::from_fvk(&(&sk).into());
-            let addr = ivk.address(Diversifier::from_bytes(*j.as_bytes()));
+            let addr = ivk.address(Diversifier::from_bytes(d));
 
             let epk = esk.derive_public(addr.g_d());
 
@@ -1144,11 +1154,11 @@ mod tests {
         fn scope_for_direct_address(
             sk in arb_spending_key(),
             other_sk in arb_spending_key(),
-            j in arb_diversifier_index(),
+            d_bytes in prop::array::uniform11(prop::num::u8::ANY),
         ) {
             let fvk = FullViewingKey::from(&sk);
             let other_fvk = FullViewingKey::from(&other_sk);
-            let d = Diversifier::from_bytes(*j.as_bytes());
+            let d = Diversifier::from_bytes(d_bytes);
             for scope in [Scope::External, Scope::Internal] {
                 let address = fvk.address(d, scope);
                 prop_assert_eq!(fvk.scope_for_address(&address), Some(scope));

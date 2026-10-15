@@ -12,7 +12,7 @@
 //! The default-enabled `zip32-addresses` feature provides indexed address
 //! generation and diversifier-index recovery using FF1. Consumers that disable
 //! default features must enable it explicitly to use these wallet APIs. Direct
-//! address construction from diversifiers, key derivation, and note decryption
+//! address construction from diversifiers and note decryption
 //! remain available without it.
 //!
 
@@ -52,6 +52,7 @@ pub mod keys;
 pub mod note;
 pub mod note_encryption;
 mod once;
+#[cfg(feature = "zip32")]
 pub mod pczt;
 pub mod primitives;
 #[cfg(test)]
@@ -62,6 +63,7 @@ mod spec;
 pub mod spec;
 pub mod tree;
 pub mod value;
+#[cfg(feature = "zip32")]
 pub mod zip32;
 
 #[cfg(test)]
@@ -245,3 +247,5 @@ pub(crate) use std::io;
 
 #[cfg(all(not(feature = "std"), feature = "no-std-io"))]
 pub(crate) use corez::io;
+
+mod scope;

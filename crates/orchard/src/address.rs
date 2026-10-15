@@ -85,18 +85,15 @@ impl Address {
 pub mod testing {
     use proptest::prelude::*;
 
-    use crate::keys::{
-        Diversifier, FullViewingKey, Scope,
-        testing::{arb_diversifier_index, arb_spending_key},
-    };
+    use crate::keys::{Diversifier, FullViewingKey, Scope, testing::arb_spending_key};
 
     use super::Address;
 
     prop_compose! {
         /// Generates an arbitrary payment address.
-        pub(crate) fn arb_address()(sk in arb_spending_key(), j in arb_diversifier_index()) -> Address {
+        pub(crate) fn arb_address()(sk in arb_spending_key(), d in prop::array::uniform11(any::<u8>())) -> Address {
             let fvk = FullViewingKey::from(&sk);
-            fvk.address(Diversifier::from_bytes(*j.as_bytes()), Scope::External)
+            fvk.address(Diversifier::from_bytes(d), Scope::External)
         }
     }
 }

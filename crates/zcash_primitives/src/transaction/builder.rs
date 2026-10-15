@@ -35,19 +35,20 @@ use {
 #[cfg(feature = "circuits")]
 use {
     crate::transaction::{
-        Authorization, Coinbase, TransactionData, TxDigests, Unauthorized,
+        Authorization, Coinbase, TransactionData, TxDigests,
         sighash::{SignableInput, signature_hash},
         txid::TxIdDigester,
     },
     ::sapling::prover::{OutputProver, SpendProver},
-    ::transparent::builder::TransparentSigningSet,
     alloc::vec::Vec,
 };
+
+#[cfg(all(feature = "circuits", feature = "zip32"))]
+use {crate::transaction::Unauthorized, ::transparent::builder::TransparentSigningSet};
 
 #[cfg(feature = "transparent-inputs")]
 use {::transparent::builder::TransparentInputInfo, zcash_script::script};
 
-#[cfg(not(feature = "transparent-inputs"))]
 use core::convert::Infallible;
 
 use super::components::sapling::zip212_enforcement;
@@ -1363,7 +1364,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
     /// [Orchard metadata]: ::orchard::builder::BundleMetadata
     /// [final transaction]: Transaction
     #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "circuits")]
+    #[cfg(all(feature = "circuits", feature = "zip32"))]
     pub fn build<R: Rng + CryptoRng, SP: SpendProver, OP: OutputProver, FR: FeeRule>(
         self,
         transparent_signing_set: &TransparentSigningSet,
@@ -1413,6 +1414,40 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         }
     }
 
+    /// Builds a coinbase transaction without wallet spending keys or fee calculation.
+    ///
+    /// The builder must have been constructed with [`BuildConfig::Coinbase`].
+    /// Other configurations return [`coinbase::Error::UnexpectedInputs`]. All
+    /// version, expiry-height, proof, and signature checks are shared with the wallet transaction builder.
+    #[cfg(feature = "circuits")]
+    pub fn build_coinbase<R: Rng + CryptoRng, SP: SpendProver, OP: OutputProver>(
+        self,
+        rng: R,
+        spend_prover: &SP,
+        output_prover: &OP,
+    ) -> Result<BuildResult, Error<Infallible>> {
+        let BuildConfig::Coinbase { miner_data } = &self.build_config else {
+            return Err(Error::Coinbase(coinbase::Error::UnexpectedInputs));
+        };
+        let target_height = self.target_height;
+        let miner_data = miner_data.clone();
+        self.build_internal::<Coinbase, _, _, _, _>(
+            |b| {
+                b.build_coinbase(target_height, miner_data)
+                    .map(Some)
+                    .map_err(Error::Coinbase)
+            },
+            |b, _, _| Ok(b.clone().map_authorization(transparent::builder::Coinbase)),
+            #[cfg(feature = "zip32")]
+            &[],
+            &[],
+            rng,
+            spend_prover,
+            output_prover,
+            None,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "circuits")]
     fn build_internal<A, R, SP, OP, FE>(
@@ -1431,7 +1466,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             transparent::bundle::Bundle<transparent::bundle::Authorized>,
             transparent::builder::Error,
         >,
-        sapling_extsks: &[sapling::zip32::ExtendedSpendingKey],
+        #[cfg(feature = "zip32")] sapling_extsks: &[sapling::zip32::ExtendedSpendingKey],
         orchard_saks: &[orchard::keys::SpendAuthorizingKey],
         mut rng: R,
         spend_prover: &SP,
@@ -1483,26 +1518,26 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         let (sapling_bundle, sapling_meta) = match self
             .sapling_builder
             .and_then(|builder| {
-                builder
-                    .build::<SP, OP, _, _>(sapling_extsks, &mut rng)
-                    .map_err(Error::SaplingBuild)
-                    .transpose()
-                    .map(|res| {
-                        res.map(|(bundle, sapling_meta)| {
-                            // We need to create proofs before signatures, because we still support
-                            // creating V4 transactions, which commit to the Sapling proofs in the
-                            // transaction digest.
-                            (
-                                bundle.create_proofs(
-                                    spend_prover,
-                                    output_prover,
-                                    &mut rng,
-                                    self._progress_notifier,
-                                ),
-                                sapling_meta,
-                            )
-                        })
+                #[cfg(feature = "zip32")]
+                let bundle = builder.build::<SP, OP, _, _>(sapling_extsks, &mut rng);
+                #[cfg(not(feature = "zip32"))]
+                let bundle = builder.build_coinbase::<SP, OP, _, _>(&mut rng);
+                bundle.map_err(Error::SaplingBuild).transpose().map(|res| {
+                    res.map(|(bundle, sapling_meta)| {
+                        // We need to create proofs before signatures, because we still support
+                        // creating V4 transactions, which commit to the Sapling proofs in the
+                        // transaction digest.
+                        (
+                            bundle.create_proofs(
+                                spend_prover,
+                                output_prover,
+                                &mut rng,
+                                self._progress_notifier,
+                            ),
+                            sapling_meta,
+                        )
                     })
+                })
             })
             .transpose()?
         {
@@ -1577,10 +1612,13 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         let shielded_sig_commitment =
             signature_hash(&unauthed_tx, &SignableInput::Shielded, &txid_parts);
 
+        #[cfg(feature = "zip32")]
         let sapling_asks = sapling_extsks
             .iter()
             .map(|extsk| extsk.expsk.ask.clone())
             .collect::<Vec<_>>();
+        #[cfg(not(feature = "zip32"))]
+        let sapling_asks = Vec::new();
         let sapling_bundle = unauthed_tx
             .sapling_bundle
             .map(|b| b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), &sapling_asks))
@@ -1800,7 +1838,7 @@ pub fn cached_orchard_proving_key(
     }))
 }
 
-#[cfg(feature = "circuits")]
+#[cfg(all(feature = "circuits", feature = "zip32"))]
 fn authorize_transparent(
     b: &transparent::bundle::Bundle<transparent::builder::Unauthorized>,
     unauthed_tx: &TransactionData<Unauthorized>,
@@ -1816,7 +1854,11 @@ fn authorize_transparent(
     )
 }
 
-#[cfg(all(any(test, feature = "test-dependencies"), feature = "circuits"))]
+#[cfg(all(
+    any(test, feature = "test-dependencies"),
+    feature = "circuits",
+    feature = "zip32"
+))]
 mod testing {
     use core::convert::Infallible;
 
@@ -1872,7 +1914,7 @@ mod testing {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "zip32"))]
 mod tests {
     #[cfg(feature = "circuits")]
     use {
@@ -2996,6 +3038,142 @@ mod tests {
                     .circuit_version(),
                 version
             );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "circuits"))]
+mod coinbase_tests {
+    use super::{BuildConfig, Builder, Error};
+    #[cfg(feature = "zip32")]
+    use crate::transaction::fees::zip317;
+    #[cfg(feature = "zip32")]
+    use alloc::vec::Vec;
+    use rand::{SeedableRng, rngs::StdRng};
+    #[cfg(feature = "zip32")]
+    use rand_core::Rng;
+    use sapling::prover::mock::{MockOutputProver, MockSpendProver};
+    use transparent::address::TransparentAddress;
+    use zcash_protocol::{
+        consensus::{NetworkUpgrade, Parameters, TEST_NETWORK},
+        value::Zatoshis,
+    };
+
+    fn builder() -> Builder<zcash_protocol::consensus::TestNetwork, ()> {
+        let height = TEST_NETWORK
+            .activation_height(NetworkUpgrade::Sapling)
+            .unwrap();
+        let mut builder = Builder::new(
+            TEST_NETWORK,
+            height,
+            BuildConfig::Coinbase { miner_data: None },
+        );
+        builder
+            .add_transparent_output(
+                &TransparentAddress::PublicKeyHash([7; 20]),
+                Zatoshis::const_from_u64(50_000),
+            )
+            .unwrap();
+        builder
+    }
+
+    #[test]
+    fn coinbase_entry_point_builds_without_wallet_keys() {
+        let result = builder()
+            .build_coinbase(
+                StdRng::from_seed([3; 32]),
+                &MockSpendProver,
+                &MockOutputProver,
+            )
+            .unwrap();
+        assert_eq!(
+            result.transaction().transparent_bundle().unwrap().vin.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn coinbase_entry_point_checks_expiry_height() {
+        assert!(matches!(
+            builder().with_expiry_height(0u32.into()).build_coinbase(
+                StdRng::from_seed([3; 32]),
+                &MockSpendProver,
+                &MockOutputProver
+            ),
+            Err(Error::CoinbaseExpiryHeightMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn coinbase_entry_point_rejects_standard_configuration() {
+        let height = TEST_NETWORK
+            .activation_height(NetworkUpgrade::Sapling)
+            .unwrap();
+        let builder = Builder::new(
+            TEST_NETWORK,
+            height,
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: None,
+                orchard_padding: super::BundlePadding::DEFAULT,
+                ironwood_padding: super::BundlePadding::DEFAULT,
+            },
+        );
+        assert!(matches!(
+            builder.build_coinbase(
+                StdRng::from_seed([3; 32]),
+                &MockSpendProver,
+                &MockOutputProver
+            ),
+            Err(Error::Coinbase(
+                transparent::coinbase::Error::UnexpectedInputs
+            ))
+        ));
+    }
+
+    #[cfg(feature = "zip32")]
+    #[test]
+    fn coinbase_entry_points_preserve_bytes_and_randomness() {
+        for sapling_output in [false, true] {
+            let make_builder = || {
+                let mut b = builder();
+                if sapling_output {
+                    let to = sapling::zip32::ExtendedSpendingKey::master(&[4; 32])
+                        .default_address()
+                        .1;
+                    b.add_sapling_output::<core::convert::Infallible>(
+                        None,
+                        to,
+                        Zatoshis::const_from_u64(10_000),
+                        zcash_protocol::memo::MemoBytes::empty(),
+                    )
+                    .unwrap();
+                }
+                b
+            };
+            let mut old_rng = StdRng::from_seed([3; 32]);
+            let mut new_rng = StdRng::from_seed([3; 32]);
+            let old = make_builder()
+                .build(
+                    &transparent::builder::TransparentSigningSet::new(),
+                    &[],
+                    &[],
+                    &mut old_rng,
+                    &MockSpendProver,
+                    &MockOutputProver,
+                    &zip317::FeeRule::standard(),
+                )
+                .unwrap();
+            let new = make_builder()
+                .build_coinbase(&mut new_rng, &MockSpendProver, &MockOutputProver)
+                .unwrap();
+            let mut old_bytes = Vec::new();
+            let mut new_bytes = Vec::new();
+            old.transaction().write(&mut old_bytes).unwrap();
+            new.transaction().write(&mut new_bytes).unwrap();
+            assert_eq!(old_bytes, new_bytes);
+            assert_eq!(old_rng.next_u64(), new_rng.next_u64());
         }
     }
 }
