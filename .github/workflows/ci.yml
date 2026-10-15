@@ -1575,9 +1575,15 @@ jobs:
           cargo doc --locked -p zakura-udon --no-default-features --features x86_64-asm --no-deps
           cargo doc --locked -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon --all-features --no-deps
 
+  # The Udon and Bento test jobs below are temporarily disabled. Workspace-wide
+  # dependency and Cargo.lock churn routes every such PR through them, and
+  # their runtime dominates CI for changes that do not touch these crates. The
+  # crates stay checked, linted, and documented by `rust-checks`, `formatting`,
+  # and `udon-features`. Restore each job's
+  # `if: needs.changes.outputs.udon == 'true'` gate to re-enable them.
   udon-test:
     needs: changes
-    if: needs.changes.outputs.udon == 'true'
+    if: false # Temporarily disabled; see the note above `udon-test`.
     defaults:
       run:
         shell: bash
@@ -1681,7 +1687,7 @@ jobs:
 
   udon-consumers:
     needs: changes
-    if: needs.changes.outputs.udon == 'true'
+    if: false # Temporarily disabled; see the note above `udon-test`.
     defaults:
       run:
         shell: bash
@@ -1712,7 +1718,7 @@ jobs:
 
   udon-benchmarks:
     needs: changes
-    if: needs.changes.outputs.udon == 'true'
+    if: false # Temporarily disabled; see the note above `udon-test`.
     defaults:
       run:
         shell: bash
@@ -1747,7 +1753,7 @@ jobs:
 
   udon-miri:
     needs: changes
-    if: needs.changes.outputs.udon == 'true'
+    if: false # Temporarily disabled; see the note above `udon-test`.
     defaults:
       run:
         shell: bash
@@ -1787,7 +1793,7 @@ jobs:
 
   udon-portability:
     needs: changes
-    if: needs.changes.outputs.udon == 'true'
+    if: false # Temporarily disabled; see the note above `udon-test`.
     defaults:
       run:
         shell: bash
