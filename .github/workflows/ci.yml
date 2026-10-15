@@ -287,11 +287,17 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   rust-checks:
-    name: Rust checks
+    name: Rust checks (${{ matrix.group }})
     needs: changes
     if: needs.changes.outputs.rust_checks == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Groups run as parallel jobs, balanced by their check time. Each
+        # step below names its group.
+        group: [Udon and equihash, halo2 and Orchard, Sapling and librustzcash]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -306,69 +312,69 @@ jobs:
       # features across the group, masking a package that cannot build
       # against its own manifest alone.
       - name: zakura-equihash / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.equihash == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Udon and equihash' && needs.changes.outputs.equihash == 'true' }}
         run: bash .github/scripts/check_rust_group.sh zakura-equihash true false
       - name: halo2 / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.halo2 == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'halo2 and Orchard' && needs.changes.outputs.halo2 == 'true' }}
         run: |
           bash .github/scripts/check_rust_group.sh zakura-halo2-gadgets false false
           bash .github/scripts/check_rust_group.sh zakura-halo2-poseidon false false
           bash .github/scripts/check_rust_group.sh zakura-halo2-proofs false false
       - name: halo2_legacy_pdqsort / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.halo2_legacy_pdqsort == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'halo2 and Orchard' && needs.changes.outputs.halo2_legacy_pdqsort == 'true' }}
         run: >-
           bash .github/scripts/check_rust_group.sh
           zakura-halo2-legacy-pdqsort false true
       - name: orchard / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.orchard == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'halo2 and Orchard' && needs.changes.outputs.orchard == 'true' }}
         run: bash .github/scripts/check_rust_group.sh zakura-orchard true false
       - name: pasta_curves / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.pasta_curves == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'halo2 and Orchard' && needs.changes.outputs.pasta_curves == 'true' }}
         run: bash .github/scripts/check_rust_group.sh zakura-pasta-curves false false
       - name: reddsa / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.reddsa == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Sapling and librustzcash' && needs.changes.outputs.reddsa == 'true' }}
         run: bash .github/scripts/check_rust_group.sh 'zakura-reddsa zakura-reddsa-frost' false false
       - name: redjubjub / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.redjubjub == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Sapling and librustzcash' && needs.changes.outputs.redjubjub == 'true' }}
         run: bash .github/scripts/check_rust_group.sh zakura-redjubjub false false
       - name: Sapling foundation / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.sapling_crypto == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Sapling and librustzcash' && needs.changes.outputs.sapling_crypto == 'true' }}
         run: >-
           bash .github/scripts/check_rust_group.sh
           "zakura-pairing zakura-bls12-381 zakura-jubjub zakura-bellman"
           false true
       - name: BLS12-381 / Experimental feature check
-        if: ${{ !cancelled() && needs.changes.outputs.sapling_crypto == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Sapling and librustzcash' && needs.changes.outputs.sapling_crypto == 'true' }}
         run: >-
           cargo +1.97.0 check --locked -p zakura-bls12-381
           --no-default-features --features experimental
       - name: sapling-crypto / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.sapling_crypto == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Sapling and librustzcash' && needs.changes.outputs.sapling_crypto == 'true' }}
         run: bash .github/scripts/check_rust_group.sh zakura-sapling-crypto true false
       - name: sinsemilla / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.sinsemilla == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'halo2 and Orchard' && needs.changes.outputs.sinsemilla == 'true' }}
         run: bash .github/scripts/check_rust_group.sh zakura-sinsemilla false true
       - name: Note encryption / Feature-off checks
-        if: ${{ !cancelled() && needs.changes.outputs.librustzcash == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Sapling and librustzcash' && needs.changes.outputs.librustzcash == 'true' }}
         run: |
           cargo +1.97.0 check --locked -p zakura-note-encryption --no-default-features
           cargo +1.97.0 check --locked -p zakura-note-encryption --no-default-features --features alloc
           cargo +1.97.0 check --locked -p zakura-note-encryption --no-default-features --features pre-zip-212
       - name: librustzcash / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.librustzcash == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Sapling and librustzcash' && needs.changes.outputs.librustzcash == 'true' }}
         run: >-
           bash .github/scripts/check_rust_group.sh
           "zakura-keys zakura-note-encryption zakura-primitives zakura-protocol zakura-proofs zakura-zip321" true false
 
       - name: Udon and Bento / Stable and MSRV checks
-        if: ${{ !cancelled() && needs.changes.outputs.udon == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Udon and equihash' && needs.changes.outputs.udon == 'true' }}
         run: |
           bash .github/scripts/check_rust_group.sh zakura-bento-core true false
           bash .github/scripts/check_rust_group.sh zakura-bento-macros true false
           bash .github/scripts/check_rust_group.sh zakura-bento true false
           bash .github/scripts/check_rust_group.sh zakura-udon true false
       - name: Udon and Bento / MSRV feature check
-        if: ${{ !cancelled() && needs.changes.outputs.udon == 'true' }}
+        if: ${{ !cancelled() && matrix.group == 'Udon and equihash' && needs.changes.outputs.udon == 'true' }}
         run: |
           cargo +1.97.0 check --locked --all-features --all-targets \
             -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon
@@ -489,12 +495,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stage: [stable, nightly]
         include:
           - stage: stable
             name_suffix: ""
           - stage: nightly
             name_suffix: " with nightly features"
+          # The legacy sort needs its own build, so it runs as a parallel leg.
+          - stage: legacy-pdqsort
+            name_suffix: " floor planner with legacy pdqsort"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -505,6 +513,7 @@ jobs:
       - name: Install cross-platform support dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc-multilib
       - name: Run tests
+        if: matrix.stage != 'legacy-pdqsort'
         shell: bash
         env:
           STAGE: ${{ matrix.stage }}
@@ -543,8 +552,7 @@ jobs:
       - name: Run floor-planner tests with the legacy pdqsort sort
         # The legacy sort exists precisely so 32-bit targets order regions the
         # same way 64-bit targets do; exercise the swapped path on i686 too.
-        # One matrix leg is enough: the feature set does not vary by stage.
-        if: matrix.stage == 'stable'
+        if: matrix.stage == 'legacy-pdqsort'
         run: >-
           cargo +1.97.0 test --verbose --release
           -p zakura-halo2-proofs
@@ -680,34 +688,45 @@ jobs:
         run: git diff --exit-code
 
   ironwood-fixtures:
-    name: halo2 / Test Ironwood fixture exporters
+    name: halo2 / Test Ironwood fixture exporters (${{ matrix.part }})
     needs: changes
     if: needs.changes.outputs.halo2 == 'true' || needs.changes.outputs.orchard == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       RAYON_NUM_THREADS: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        # The parts need separate release builds, so they run in parallel.
+        # Every step that writes a pinned output stays in `circuit fixtures`,
+        # whose final comparison needs all ten outputs.
+        part: [proof bytes, circuit fixtures]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Test proof-byte verifier fixture exports
+        if: matrix.part == 'proof bytes'
         run: >-
           cargo +stable test --locked --release -p zakura-halo2-proofs
           --features unstable-verifier-fingerprint
           --test fingerprint_export
       - name: Test transcript-read serialization
+        if: matrix.part == 'proof bytes'
         run: >-
           cargo +stable test --locked --release -p zakura-halo2-proofs
           --features unstable-verifier-fingerprint
           --lib plonk::fingerprint::vesta_lean::
       - name: Test Orchard captures and malformed proof encodings
+        if: matrix.part == 'circuit fixtures'
         run: >-
           cargo +stable test --locked --release -p zakura-orchard
           --features verifier-fingerprint,circuit-fixtures
           --lib circuit::fingerprint::
       - name: Regenerate the Add and Mul circuit fixtures
+        if: matrix.part == 'circuit fixtures'
         env:
           IRONWOOD_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
         run: >-
@@ -715,6 +734,7 @@ jobs:
           --lib ecc::chip::layout_dump::dump_ironwood_fixtures
           -- --exact --ignored
       - name: Regenerate the Orchard Action circuit fixtures
+        if: matrix.part == 'circuit fixtures'
         env:
           IRONWOOD_ACTION_FIXTURE_OUT: ${{ runner.temp }}/ironwood-circuit-fixtures
         run: >-
@@ -723,6 +743,7 @@ jobs:
           --lib circuit::layout_dump::dump_ironwood_action_fixtures
           -- --exact --ignored
       - name: Compare all ten outputs with the pinned Ironwood fixtures
+        if: matrix.part == 'circuit fixtures'
         working-directory: ${{ runner.temp }}/ironwood-circuit-fixtures
         run: sha256sum --check "$GITHUB_WORKSPACE/.github/fixtures/ironwood-circuits.sha256"
       - name: Verify working directory is clean
@@ -749,26 +770,35 @@ jobs:
         run: git diff --exit-code
 
   orchard-prover-fingerprint:
-    name: orchard / Test prover fingerprint
+    name: orchard / Test prover fingerprint (${{ matrix.part }})
     needs: changes
     if: needs.changes.outputs.orchard == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each part needs its own release build of the feature set it tests,
+        # so the parts run as parallel jobs instead of back to back.
+        part: [halo2 recorder, pinned proofs, serial prover]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
       - name: Test the observational recorder
+        if: matrix.part == 'halo2 recorder'
         run: >-
           cargo +stable test --locked --release --lib
           -p zakura-halo2-proofs --features unstable-prover-fingerprint
           plonk::prover_fingerprint::
       - name: Test the public recorder API
+        if: matrix.part == 'halo2 recorder'
         run: >-
           cargo +stable test --locked --release --test prover_fingerprint
           -p zakura-halo2-proofs --features unstable-prover-fingerprint
       - name: Check pinned prover proofs and RNG tapes without the verifier feature
+        if: matrix.part == 'pinned proofs'
         env:
           RAYON_NUM_THREADS: '1'
         run: >-
@@ -776,6 +806,7 @@ jobs:
           -p zakura-orchard --features prover-fingerprint
           circuit::prover_fingerprint::
       - name: Test both fingerprint features together
+        if: matrix.part == 'pinned proofs'
         env:
           RAYON_NUM_THREADS: '1'
         run: >-
@@ -783,6 +814,7 @@ jobs:
           -p zakura-orchard --features prover-fingerprint,verifier-fingerprint
           circuit::prover_fingerprint::
       - name: Test captures through the serial prover
+        if: matrix.part == 'serial prover'
         run: >-
           cargo +stable test --locked --release --lib
           -p zakura-orchard --no-default-features --features std,prover-fingerprint
@@ -1587,17 +1619,25 @@ jobs:
     defaults:
       run:
         shell: bash
-    name: Udon / Arithmetic (${{ matrix.platform.arch }}, ${{ matrix.tables }})
+    name: Udon / Arithmetic (${{ matrix.arch }}, ${{ matrix.tables }}, ${{ matrix.suite }})
     timeout-minutes: 60
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { runner: ubuntu-24.04, arch: x86_64 }
-          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+        arch: [x86_64, aarch64]
         tables: [default, large]
+        # Each suite runs as its own job so that no single Udon job sets the
+        # CI critical path. The assembly suite is x86_64 only.
+        suite: [release, debug-assertions, x86-64-asm]
+        exclude:
+          - arch: aarch64
+            suite: x86-64-asm
         include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
           - tables: default
             native_features: "--no-default-features"
             trait_features: "--no-default-features --features traits,poseidon"
@@ -1613,7 +1653,7 @@ jobs:
           persist-credentials: false
       - name: Verify native architecture
         env:
-          EXPECTED_ARCH: ${{ matrix.platform.arch }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
         run: test "$(uname -m)" = "$EXPECTED_ARCH"
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
@@ -1622,24 +1662,28 @@ jobs:
           # the ambient Cargo environment and assume default warning behavior.
           build-warnings: ""
       - name: Run release tests without traits
+        if: matrix.suite == 'release'
         env:
           FEATURES: ${{ matrix.native_features }}
         run: |
           read -r -a features <<< "$FEATURES"
           cargo test --release --locked -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon "${features[@]}"
       - name: Run release tests with traits
+        if: matrix.suite == 'release'
         env:
           FEATURES: ${{ matrix.trait_features }}
         run: |
           read -r -a features <<< "$FEATURES"
           cargo test --release --locked -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon "${features[@]}"
       - name: Check Udon with debug assertions without traits
+        if: matrix.suite == 'debug-assertions'
         env:
           FEATURES: ${{ matrix.native_features }}
         run: |
           read -r -a features <<< "$FEATURES"
           cargo test --locked -p zakura-udon --lib "${features[@]}"
       - name: Check Udon with debug assertions with traits
+        if: matrix.suite == 'debug-assertions'
         env:
           FEATURES: ${{ matrix.trait_features }}
         run: |
@@ -1649,7 +1693,7 @@ jobs:
       # own runs: forced by the feature, then selected from target features.
       # A runner without ADX/BMI2 only compiles the assembly tests.
       - name: Test forced x86-64 assembly
-        if: matrix.platform.arch == 'x86_64'
+        if: matrix.suite == 'x86-64-asm'
         env:
           FEATURES: ${{ matrix.native_features }}
         run: |
@@ -1663,7 +1707,7 @@ jobs:
             cargo test --locked -p zakura-udon --lib "${features[@]}" --features x86_64-asm,traits,poseidon --no-run
           fi
       - name: Test x86-64 assembly selected by target features
-        if: matrix.platform.arch == 'x86_64'
+        if: matrix.suite == 'x86-64-asm'
         env:
           FEATURES: ${{ matrix.native_features }}
           RUSTFLAGS: -C target-feature=+adx,+bmi2
@@ -1681,7 +1725,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: udon-regressions-${{ matrix.platform.arch }}-${{ matrix.tables }}
+          name: udon-regressions-${{ matrix.arch }}-${{ matrix.tables }}-${{ matrix.suite }}
           path: crates/udon/src/**/*.regressions
           if-no-files-found: ignore
 

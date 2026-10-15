@@ -150,3 +150,37 @@ opt-level = 3
 
 [profile.test.package.equihash]
 opt-level = 3
+
+# Field, curve, and proof-system arithmetic dominates unoptimized test runs
+# of these crates and of everything built on them. Optimizing only these
+# packages keeps the test profile's assertions and overflow checks, as above,
+# and makes those runs several times faster.
+[profile.test.package.zakura-udon]
+opt-level = 3
+
+[profile.test.package.zakura-pasta-curves]
+opt-level = 3
+
+[profile.test.package.zakura-halo2-proofs]
+opt-level = 3
+
+[profile.test.package.zakura-halo2-gadgets]
+opt-level = 3
+
+[profile.test.package.zakura-halo2-poseidon]
+opt-level = 3
+
+[profile.test.package.zakura-sinsemilla]
+opt-level = 3
+
+[profile.test.package.zakura-pairing]
+opt-level = 3
+
+[profile.test.package.zakura-bls12-381]
+opt-level = 3
+
+[profile.test.package.zakura-jubjub]
+opt-level = 3
+
+[profile.test.package.zakura-bellman]
+opt-level = 3
