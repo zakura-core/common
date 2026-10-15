@@ -14,7 +14,11 @@ use crate::{
 };
 
 const TABLE_AFFINE_MIN: usize = 8;
-const LADDER_AFFINE_MIN: usize = 64;
+// Sweeps over live widths 32..=64 compare shared-inversion ladders with
+// projective work. With cached rotations, the ladder overtakes projective work
+// around 48 lanes on AArch64; retaining 64 regressed widths 56..63. Portable
+// arithmetic was measured separately at this crossover.
+const LADDER_AFFINE_MIN: usize = 48;
 
 // Either layout borrows entries without copying or rebuilding retained tables.
 #[derive(Clone, Copy)]
