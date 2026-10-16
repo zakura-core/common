@@ -10,8 +10,6 @@ use crate::backend::pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
     pallas,
 };
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-use memuse::DynamicUsage;
 use subtle::{ConditionallySelectable, CtOption};
 
 use crate::constants::{
@@ -161,17 +159,6 @@ pub(crate) struct PreparedNonZeroScalar(
     // decomposes the scalar rather than consuming the wNAF form.
     pallas::Scalar,
 );
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-impl DynamicUsage for PreparedNonZeroScalar {
-    fn dynamic_usage(&self) -> usize {
-        self.0.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        self.0.dynamic_usage_bounds()
-    }
-}
 
 impl PreparedNonZeroScalar {
     pub(crate) fn new(scalar: &NonZeroPallasScalar) -> Self {

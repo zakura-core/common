@@ -44,10 +44,6 @@
 //! remain available without it.
 //!
 
-//! The default-enabled `memory-usage` feature supplies dynamic memory-accounting
-//! trait implementations. Clients that do not use them may omit the feature.
-//!
-
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Temporary until we have more of the crate implemented.
@@ -181,17 +177,6 @@ impl core::fmt::Debug for Proof {
 impl AsRef<[u8]> for Proof {
     fn as_ref(&self) -> &[u8] {
         &self.0
-    }
-}
-
-#[cfg(feature = "memory-usage")]
-impl memuse::DynamicUsage for Proof {
-    fn dynamic_usage(&self) -> usize {
-        self.0.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        self.0.dynamic_usage_bounds()
     }
 }
 

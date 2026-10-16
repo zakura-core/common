@@ -27,7 +27,6 @@ ff = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"], default-features = false }
 jubjub = { workspace = true, features = ["default"] }
-memuse = { version = "0.2.2", default-features = false, optional = true }
 nonempty = { version = "0.11", default-features = false }
 orchard = { workspace = true }
 proptest = { version = ">=1,<1.7", optional = true }
@@ -59,12 +58,10 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
 backend-halo2 = ["orchard/backend-halo2"]
-# Dynamic memory accounting, enabled by default for existing clients.
-memory-usage = ["dep:memuse", "orchard/memory-usage", "sapling/memory-usage", "zcash_protocol/memory-usage"]
 # Wallet key derivation and spending transaction construction.
 wallet = ["sapling/wallet", "orchard/wallet", "transparent/wallet"]
 circuits = ["orchard/circuit", "sapling/circuit"]
-default = ["backend-halo2", "memory-usage", "wallet", "multicore", "std", "circuits", "pczt"]
+default = ["backend-halo2", "wallet", "multicore", "std", "circuits", "pczt"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
 expensive-tests = []

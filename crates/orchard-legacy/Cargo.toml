@@ -23,7 +23,6 @@ halo2_proofs = { workspace = true, optional = true, features = ["batch", "floor-
 halo2_gadgets = { workspace = true, optional = true }
 
 [features]
-memory-usage = ["group/wnaf-memuse"]
 std = ["reddsa/std"]
 circuit = ["std", "dep:halo2_proofs", "dep:halo2_gadgets"]
 multicore = ["halo2_proofs?/multicore"]

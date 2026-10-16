@@ -4,9 +4,6 @@ use corez::io::{self, Read, Write};
 
 use crate::encoding::ReverseHex;
 
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-use memuse::DynamicUsage;
-
 /// The identifier for a Zcash transaction.
 ///
 /// - For v1-4 transactions, this is a double-SHA-256 hash of the encoded transaction.
@@ -16,9 +13,6 @@ use memuse::DynamicUsage;
 ///   and is non-malleable in all contexts.
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct TxId([u8; 32]);
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(TxId);
 
 impl fmt::Debug for TxId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

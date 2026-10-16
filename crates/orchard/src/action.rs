@@ -4,8 +4,6 @@ use core::fmt;
 use core::ops::Not as _;
 
 use crate::backend::pallas;
-#[cfg(feature = "memory-usage")]
-use memuse::DynamicUsage;
 use subtle::CtOption;
 
 use crate::{
@@ -172,19 +170,6 @@ impl fmt::Display for ActionFromPartsError {
 }
 
 impl core::error::Error for ActionFromPartsError {}
-
-#[cfg(feature = "memory-usage")]
-impl DynamicUsage for Action<redpallas::Signature<SpendAuth>> {
-    #[inline(always)]
-    fn dynamic_usage(&self) -> usize {
-        0
-    }
-
-    #[inline(always)]
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        (0, Some(0))
-    }
-}
 
 /// Generators for property testing.
 #[cfg(any(test, feature = "test-dependencies"))]

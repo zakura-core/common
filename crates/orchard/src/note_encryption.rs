@@ -150,17 +150,6 @@ pub struct NoteEncryptionDomain<P> {
     policy: P,
 }
 
-#[cfg(feature = "memory-usage")]
-impl<P> memuse::DynamicUsage for NoteEncryptionDomain<P> {
-    fn dynamic_usage(&self) -> usize {
-        self.rho.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        self.rho.dynamic_usage_bounds()
-    }
-}
-
 impl<V: DomainVersion> NoteEncryptionDomain<V> {
     pub(crate) fn from_rho(rho: Rho) -> Self {
         Self {

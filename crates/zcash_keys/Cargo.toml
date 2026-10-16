@@ -53,13 +53,11 @@ zcash_script = { version = "0.6", default-features = false }
 
 [features]
 backend-halo2 = ["orchard?/backend-halo2"]
-# Dynamic memory accounting, enabled by default for existing clients.
-memory-usage = ["orchard?/memory-usage", "sapling?/memory-usage", "transparent/memory-usage", "zcash_address/memory-usage", "zcash_protocol/memory-usage"]
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32", "orchard?/wallet", "sapling?/wallet", "transparent/wallet"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["wallet", "orchard?/zip32-addresses", "sapling?/zip32-addresses"]
-default = ["backend-halo2", "memory-usage", "wallet", "std", "zip32-addresses"]
+default = ["backend-halo2", "wallet", "std", "zip32-addresses"]
 orchard = ["dep:orchard", "wallet"]
 sapling = ["dep:sapling", "wallet"]
 std = [

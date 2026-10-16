@@ -32,7 +32,6 @@ fpe = { version = "0.7", features = ["alloc"], default-features = false, optiona
 getset = "0.1"
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 incrementalmerkletree = "0.8.1"
-memuse = { version = "0.2.2", default-features = false, optional = true }
 nonempty = { version = "0.11", default-features = false }
 once_cell = { version = "1", features = ["race", "alloc"], default-features = false }
 proptest = { version = ">=1.0.0, <1.7.0", optional = true }
@@ -62,8 +61,6 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
 backend-halo2 = ["dep:orchard-legacy"]
-# Dynamic memory accounting, enabled by default for existing clients.
-memory-usage = ["dep:memuse", "orchard-legacy?/memory-usage"]
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
@@ -71,7 +68,7 @@ zip32-addresses = ["wallet", "dep:aes", "dep:fpe"]
 circuit = ["prover", "verifier"]
 prover = ["std", "orchard-legacy?/circuit"]
 verifier = ["std", "orchard-legacy?/circuit"]
-default = ["backend-halo2", "memory-usage", "wallet", "zip32-addresses", "circuit", "multicore", "std"]
+default = ["backend-halo2", "wallet", "zip32-addresses", "circuit", "multicore", "std"]
 dev-graph = ["orchard-legacy?/dev-graph", "image", "plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
