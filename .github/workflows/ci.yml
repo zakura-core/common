@@ -1516,7 +1516,7 @@ jobs:
               while IFS= read -r feature; do
                 selector=""
                 case "$package" in
-                  zakura-keys|zakura-primitives)
+                  zakura-keys|zakura-primitives|zakura-proofs)
                     selector=backend-halo2
                     if [[ "$feature" == backend-* ]]; then selector="$feature"; fi
                     ;;
