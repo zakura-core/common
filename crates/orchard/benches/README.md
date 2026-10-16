@@ -120,7 +120,7 @@ one-, two-, and four-Action synthesis with 50 warmups and 1,000 samples:
 ```console
 RAYON_NUM_THREADS=10 cargo +1.97.1 test --locked --release \
     -p zakura-orchard --features circuit,test-dependencies --lib \
-    circuit::benchmark::benchmark_witness_assignment \
+    circuit::halo2::benchmark::benchmark_witness_assignment \
     -- --ignored --exact --nocapture
 ```
 
@@ -150,7 +150,7 @@ RAYON_NUM_THREADS=1 \
 IRONWOOD_BATCH_FIXTURE_CORPUS=/absolute/path/ironwood-batch-v2.bin \
 IRONWOOD_BATCH_FIXTURE_GENERATE=1 \
 ./orchard-test-control --ignored --exact \
-    circuit::benchmark::benchmark_ironwood_batch_verifier \
+    circuit::halo2::benchmark::benchmark_ironwood_batch_verifier \
     --test-threads=1 --nocapture
 ```
 
@@ -163,7 +163,7 @@ bytes for every binary:
 RAYON_NUM_THREADS=1 \
 IRONWOOD_BATCH_FIXTURE_CORPUS=/absolute/path/ironwood-batch-v2.bin \
 ./orchard-test-candidate --ignored --exact \
-    circuit::benchmark::benchmark_ironwood_batch_verifier \
+    circuit::halo2::benchmark::benchmark_ironwood_batch_verifier \
     --test-threads=1 --nocapture
 ```
 

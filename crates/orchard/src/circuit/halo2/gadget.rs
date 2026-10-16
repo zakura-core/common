@@ -24,7 +24,6 @@ use crate::constants::{
     ValueCommitV,
 };
 
-#[path = "gadget/add_chip.rs"]
 pub(in crate::circuit) mod add_chip;
 impl super::Config {
     pub(super) fn add_chip(&self) -> add_chip::AddChip {
@@ -198,5 +197,5 @@ pub(in crate::circuit) fn derive_nullifier<
         .map(|res| res.extract_p())
 }
 
-pub(in crate::circuit) use crate::circuit::commit_ivk::gadgets::commit_ivk;
-pub(in crate::circuit) use crate::circuit::note_commit::gadgets::note_commit;
+pub(in crate::circuit) use crate::circuit::halo2::commit_ivk::gadgets::commit_ivk;
+pub(in crate::circuit) use crate::circuit::halo2::note_commit::gadgets::note_commit;

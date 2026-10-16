@@ -2040,7 +2040,7 @@ mod tests {
         utilities::lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
     };
     use crate::{
-        circuit::{
+        circuit::halo2::{
             gadget::assign_free_advice,
             note_commit::{NoteCommitChip, gadgets},
         },

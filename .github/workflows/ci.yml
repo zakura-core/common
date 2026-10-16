@@ -725,7 +725,7 @@ jobs:
         run: >-
           cargo +stable test --locked --release -p zakura-orchard
           --features verifier-fingerprint,circuit-fixtures
-          --lib circuit::fingerprint::
+          --lib circuit::halo2::fingerprint::
       - name: Regenerate the Add and Mul circuit fixtures
         if: matrix.part == 'circuit fixtures'
         env:
@@ -741,7 +741,7 @@ jobs:
         run: >-
           cargo +stable test --locked --release -p zakura-orchard
           --features verifier-fingerprint,circuit-fixtures
-          --lib circuit::layout_dump::dump_ironwood_action_fixtures
+          --lib circuit::halo2::layout_dump::dump_ironwood_action_fixtures
           -- --exact --ignored
       - name: Compare all ten outputs with the pinned Ironwood fixtures
         if: matrix.part == 'circuit fixtures'
@@ -805,7 +805,7 @@ jobs:
         run: >-
           cargo +stable test --locked --release --lib
           -p zakura-orchard --features prover-fingerprint
-          circuit::prover_fingerprint::
+          circuit::halo2::prover_fingerprint::
       - name: Test both fingerprint features together
         if: matrix.part == 'pinned proofs'
         env:
@@ -813,13 +813,13 @@ jobs:
         run: >-
           cargo +stable test --locked --release --lib
           -p zakura-orchard --features prover-fingerprint,verifier-fingerprint
-          circuit::prover_fingerprint::
+          circuit::halo2::prover_fingerprint::
       - name: Test captures through the serial prover
         if: matrix.part == 'serial prover'
         run: >-
           cargo +stable test --locked --release --lib
           -p zakura-orchard --no-default-features --features std,prover-fingerprint
-          circuit::prover_fingerprint::
+          circuit::halo2::prover_fingerprint::
       - name: Verify working directory is clean
         run: git diff --exit-code
 
