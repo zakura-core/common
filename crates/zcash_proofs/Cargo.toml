@@ -40,6 +40,7 @@ byteorder = "1"
 
 [features]
 backend-halo2 = ["zcash_primitives/backend-halo2"]
+backend-sensei = ["zcash_primitives/backend-sensei"]
 bundled-prover = ["dep:wagyu-zcash-parameters"]
 default = ["backend-halo2", "multicore"]
 directories = ["dep:home", "dep:known-folders", "dep:xdg"]
