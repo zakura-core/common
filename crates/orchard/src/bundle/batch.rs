@@ -7,7 +7,8 @@ use rand::{CryptoRng, Rng};
 use tracing::debug;
 
 use super::{Authorized, Bundle};
-
+#[cfg(feature = "backend-sensei")]
+use crate::{Proof, circuit::Instance};
 use crate::{circuit::VerifyingKey, primitives::redpallas};
 
 /// A signature within an authorized Orchard bundle.
@@ -52,6 +53,9 @@ impl core::error::Error for BatchError {}
 /// cannot enforce.
 #[derive(Debug)]
 pub struct BatchValidator<'a> {
+    #[cfg(feature = "backend-sensei")]
+    proofs: Vec<(Proof, Vec<Instance>)>,
+    #[cfg(feature = "backend-halo2")]
     proofs: crate::backend::halo2_proofs::plonk::BatchVerifier<
         crate::backend::pasta_curves::vesta::Affine,
     >,
@@ -65,6 +69,9 @@ impl<'a> BatchValidator<'a> {
     /// Constructs a new batch validation context that validates against `vk`.
     pub fn new(vk: &'a VerifyingKey) -> Self {
         BatchValidator {
+            #[cfg(feature = "backend-sensei")]
+            proofs: Vec::new(),
+            #[cfg(feature = "backend-halo2")]
             proofs: crate::backend::halo2_proofs::plonk::BatchVerifier::new(),
             signatures: vec![],
             vk,
@@ -100,6 +107,13 @@ impl<'a> BatchValidator<'a> {
                 .create_batch_item(bundle.authorization().binding_signature().clone(), &sighash),
         });
 
+        #[cfg(feature = "backend-sensei")]
+        self.proofs.push((
+            bundle.authorization().proof().clone(),
+            bundle.to_instances(),
+        ));
+
+        #[cfg(feature = "backend-halo2")]
         bundle
             .authorization()
             .proof()
@@ -136,8 +150,38 @@ impl<'a> BatchValidator<'a> {
             debug!("RedPallas batch validation failed: {}", e);
             return false;
         }
-
-        self.proofs.finalize(&self.vk.params, &self.vk.vk)
+        #[cfg(feature = "backend-halo2")]
+        {
+            self.proofs.finalize(&self.vk.params, &self.vk.vk)
+        }
+        #[cfg(feature = "backend-sensei")]
+        {
+            let statements: Vec<Vec<_>> = self
+                .proofs
+                .iter()
+                .map(|(_, instances)| instances.iter().map(Instance::native).collect())
+                .collect();
+            let requests = self
+                .proofs
+                .iter()
+                .zip(&statements)
+                .map(|((proof, _), statements)| {
+                    sensei::VerificationRequest::new(
+                        self.vk.circuit_version().native(),
+                        statements,
+                        proof
+                            .verification_bytes(statements.len())
+                            .map_err(|_| sensei::Error::InvalidProof)?,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match requests {
+                Ok(requests) => {
+                    sensei::verify_proofs(&requests, &mut || Ok(rng.next_u64())).is_ok()
+                }
+                Err(_) => false,
+            }
+        }
     }
 }
 

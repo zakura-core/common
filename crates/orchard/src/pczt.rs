@@ -669,6 +669,8 @@ mod tests {
         pczt_bundle
             .create_proof(pk, rng)
             .expect("V3 output version reconstructs the QR note for proving");
+        #[cfg(feature = "backend-sensei")]
+        let original_proof = pczt_bundle.zkproof.as_ref().unwrap().as_ref().to_vec();
 
         pczt_bundle.actions_mut()[output_action_index]
             .output
@@ -678,7 +680,32 @@ mod tests {
             action.output.verify_note_commitment(&action.spend),
             Err(VerifyError::InvalidExtractedNoteCommitment)
         ));
-
+        #[cfg(feature = "backend-sensei")]
+        {
+            // Sensei rejects this mismatch before producing a proof, preserving
+            // the previously proven bundle rather than replacing its proof bytes.
+            assert!(matches!(
+                pczt_bundle.create_proof(pk, rng),
+                Err(ProverError::ProofFailed(
+                    crate::circuit::ProofError::InvalidInput
+                ))
+            ));
+            assert_eq!(
+                pczt_bundle.zkproof.as_ref().unwrap().as_ref(),
+                original_proof
+            );
+            pczt_bundle.actions_mut()[output_action_index]
+                .output
+                .note_version = NoteVersion::V3;
+            let bundle = pczt_bundle
+                .extract::<i64>()
+                .unwrap()
+                .unwrap()
+                .apply_binding_signature(sighash, rng)
+                .unwrap();
+            assert!(bundle.verify_proof(vk).is_ok());
+        }
+        #[cfg(feature = "backend-halo2")]
         {
             pczt_bundle.create_proof(pk, rng).unwrap();
             let bundle = pczt_bundle

@@ -3505,7 +3505,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "prover"))]
+#[cfg(all(test, feature = "backend-halo2", feature = "prover"))]
 impl crate::BenchmarkCircuitWitnesses for UnauthorizedBundle<i64> {
     fn benchmark_circuits(&self) -> &[Circuit] {
         &self.authorization().proof.circuits

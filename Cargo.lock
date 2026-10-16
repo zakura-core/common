@@ -3452,6 +3452,7 @@ dependencies = [
  "visibility",
  "zakura-note-encryption",
  "zakura-orchard-legacy",
+ "zakura-sensei",
  "zcash_spec",
  "zip32",
 ]
