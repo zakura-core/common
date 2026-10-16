@@ -97,6 +97,19 @@ pub(crate) fn warm_up_prover() {
     let _ = runtime();
 }
 
+#[cfg(feature = "benchmark-internals")]
+pub(crate) fn benchmark_initialize(
+    workers: Option<core::num::NonZeroUsize>,
+) -> Result<core::num::NonZeroUsize, Error> {
+    let executor = PoolExecutor::with_workers(workers);
+    if workers.is_some_and(|requested| requested.get() != executor.budget().get()) {
+        // A benchmark override must never silently measure a fallback or a
+        // pool initialized earlier with a different worker count.
+        return Err(Error::InvalidInput);
+    }
+    runtime().map(|runtime| core::num::NonZeroUsize::new(runtime.executor.budget().get()).unwrap())
+}
+
 #[cfg(all(test, feature = "verifier"))]
 pub(super) fn prepared_srs_for_test() -> Option<&'static std::sync::Arc<PreparedSrs>> {
     RUNTIME.get().map(|result| {

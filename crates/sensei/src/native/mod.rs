@@ -120,6 +120,8 @@ pub(crate) mod transcript;
 pub(crate) mod witness;
 pub(crate) mod worker;
 
+#[cfg(all(feature = "prover", feature = "benchmark-internals"))]
+pub(crate) use runtime::benchmark_initialize;
 #[cfg(all(test, feature = "prover", feature = "verifier"))]
 pub(crate) use runtime::benchmark_resources;
 #[cfg(feature = "prover")]

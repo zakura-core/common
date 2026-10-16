@@ -48,6 +48,8 @@ portable = ["udon/portable"]
 x86_64-asm = ["udon/x86_64-asm"]
 aarch64-asm = ["udon/aarch64-asm"]
 test-dependencies = []
+# Unstable controls for external benchmark drivers, absent from normal builds.
+benchmark-internals = []
 
 [[test]]
 name = "api"
