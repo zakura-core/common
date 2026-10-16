@@ -1,9 +1,10 @@
 //! In-band secret distribution for Orchard bundles.
 
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::backend::group::ff::PrimeField;
 use blake2b_simd::{Hash, Params};
 use zcash_note_encryption::{
     BatchDomain, COMPACT_NOTE_SIZE, Domain, ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes,
@@ -373,14 +374,9 @@ impl<P: DomainPolicy> BatchDomain for NoteEncryptionDomain<P> {
     where
         Self::PreparedEphemeralPublicKey: 'a,
     {
-        // One GLV decomposition and digit recoding of the viewing key for
-        // the whole batch, then one synchronized ladder over every prepared
-        // ephemeral key (see `PreparedEphemeralPublicKey::batch_agree`).
-        let decomposed = crate::backend::pasta_curves::glv::Decomposed::<
-            crate::backend::pasta_curves::pallas::Point,
-        >::new(&ivk.raw_scalar());
+        // Apply the selected backend's prepared agreement path to the complete batch.
         let epks: Vec<_> = epks.collect();
-        PreparedEphemeralPublicKey::batch_agree(ivk, &decomposed, &epks)
+        PreparedEphemeralPublicKey::batch_agree(ivk, &epks)
     }
 }
 
@@ -527,6 +523,8 @@ impl CompactAction {
 /// Utilities for constructing test data.
 #[cfg(feature = "test-dependencies")]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use rand::Rng;
     use zcash_note_encryption::Domain;
 
@@ -580,6 +578,8 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use alloc::vec::Vec;
 
     use crate::rng_compat::OsRng;
@@ -1023,7 +1023,7 @@ mod tests {
         assert!(batch_prepared.last().unwrap().0.is_none());
         assert!(batch_prepared[..12].iter().all(|(p, _)| p.is_some()));
 
-        let wnaf_prepared: Vec<Option<crate::keys::PreparedEphemeralPublicKey>> = keys
+        let individually_prepared: Vec<Option<crate::keys::PreparedEphemeralPublicKey>> = keys
             .iter()
             .map(|key| OrchardDomain::epk(key).map(OrchardDomain::prepare_epk))
             .collect();
@@ -1048,12 +1048,11 @@ mod tests {
                 .collect();
             assert_eq!(batched, expected);
 
-            // The batched agreement's fallback arm (individually-prepared
-            // inputs) must also match.
+            // Independently owned, individually prepared tables must also match.
             let batched_wnaf: Vec<Option<[u8; 32]>> =
                 <OrchardDomain as BatchDomain>::batch_ka_agree_dec(
                     ivk,
-                    wnaf_prepared.iter().map(|p| p.as_ref()),
+                    individually_prepared.iter().map(|p| p.as_ref()),
                 )
                 .into_iter()
                 .map(|s| s.map(|s| s.to_bytes()))
@@ -1064,14 +1063,13 @@ mod tests {
 
     #[test]
     fn batched_agreement_matches_per_item_large_batch() {
-        // Enough ephemeral keys to cross the GLV batch-affine threshold in
-        // `pasta_curves` (32 live points) with wide margin, so the
+        // Enough ephemeral keys to cross both backends' GLV batch-affine
+        // thresholds with wide margin, so the
         // synchronized batched-inversion ladder — not just its small-batch
         // fallback — stays exercised through the public batch API even if
         // the threshold is retuned upward. The ephemeral keys are
         // synthesized as arbitrary non-identity Pallas points; only their
         // group structure matters to key agreement.
-        use crate::backend::group::{Group, GroupEncoding};
 
         let mut rng = OsRng;
         let fvk = FullViewingKey::from(&SpendingKey::random(&mut rng));
@@ -1080,8 +1078,8 @@ mod tests {
         let mut keys: Vec<EphemeralKeyBytes> = (1..=520u64)
             .map(|i| {
                 EphemeralKeyBytes(
-                    (crate::backend::pasta_curves::pallas::Point::generator()
-                        * crate::backend::pasta_curves::pallas::Scalar::from(i))
+                    (crate::backend::pallas::Point::generator()
+                        * crate::backend::pallas::Scalar::from(i))
                     .to_bytes(),
                 )
             })
