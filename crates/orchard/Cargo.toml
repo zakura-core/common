@@ -68,7 +68,7 @@ circuit = ["prover", "verifier"]
 prover = ["std", "orchard-legacy?/circuit"]
 verifier = ["std", "orchard-legacy?/circuit"]
 default = ["backend-halo2", "zip32-addresses", "circuit", "multicore", "std"]
-dev-graph = ["orchard-legacy?/dev-graph", "dep:plotters"]
+dev-graph = ["orchard-legacy?/dev-graph", "image", "plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
 multicore = ["orchard-legacy?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
