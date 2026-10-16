@@ -456,12 +456,12 @@ impl SpendInfo {
     ) -> (
         Nullifier,
         SpendValidatingKey,
-        pallas::Scalar,
+        redpallas::SpendAuthRandomizer,
         redpallas::VerificationKey<SpendAuth>,
     ) {
         let nf_old = self.note.nullifier(&self.fvk);
         let ak: SpendValidatingKey = self.fvk.clone().into();
-        let alpha = pallas::Scalar::random(&mut rng);
+        let alpha = redpallas::SpendAuthRandomizer::from_scalar(pallas::Scalar::random(&mut rng));
         let rk = ak.randomize(&alpha);
 
         (nf_old, ak, alpha, rk)
@@ -1656,7 +1656,7 @@ pub struct SigningParts {
     /// actions they can create signatures for.
     ak: SpendValidatingKey,
     /// The randomization needed to derive the actual signing key for this note.
-    alpha: pallas::Scalar,
+    alpha: crate::primitives::redpallas::SpendAuthRandomizer,
 }
 
 /// Marker for an unauthorized bundle with no signatures.

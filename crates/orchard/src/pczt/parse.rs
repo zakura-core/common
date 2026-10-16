@@ -1,11 +1,11 @@
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use core::fmt;
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::backend::ff::PrimeField;
-use crate::backend::pasta_curves::pallas;
 use incrementalmerkletree::Hashable;
 use zcash_note_encryption::OutgoingCipherKey;
 use zip32::ChildIndex;
@@ -319,7 +319,7 @@ impl Spend {
 
         let alpha = alpha
             .map(|alpha| {
-                pallas::Scalar::from_repr(alpha)
+                redpallas::SpendAuthRandomizer::from_bytes(alpha)
                     .into_option()
                     .ok_or(ParseError::InvalidSpendAuthRandomizer)
             })

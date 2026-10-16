@@ -129,7 +129,10 @@ impl SpendAuthorizingKey {
     /// Randomizes this spend authorizing key with the given `randomizer`.
     ///
     /// The resulting key can be used to actually sign a spend.
-    pub fn randomize(&self, randomizer: &pallas::Scalar) -> redpallas::SigningKey<SpendAuth> {
+    pub fn randomize(
+        &self,
+        randomizer: &crate::primitives::redpallas::SpendAuthRandomizer,
+    ) -> redpallas::SigningKey<SpendAuth> {
         self.0.randomize(randomizer)
     }
 }
@@ -182,7 +185,10 @@ impl Eq for SpendValidatingKey {}
 
 impl SpendValidatingKey {
     /// Randomizes this spend validating key with the given `randomizer`.
-    pub fn randomize(&self, randomizer: &pallas::Scalar) -> redpallas::VerificationKey<SpendAuth> {
+    pub fn randomize(
+        &self,
+        randomizer: &crate::primitives::redpallas::SpendAuthRandomizer,
+    ) -> redpallas::VerificationKey<SpendAuth> {
         self.0.randomize(randomizer)
     }
 

@@ -1054,7 +1054,7 @@ pub mod testing {
 
     use crate::backend::group::ff::FromUniformBytes;
     use crate::backend::pasta_curves::pallas;
-    use crate::backend::reddsa::orchard::SpendAuth;
+    use crate::primitives::redpallas::SpendAuth;
     use nonempty::NonEmpty;
     use rand::{SeedableRng, rngs::StdRng};
 

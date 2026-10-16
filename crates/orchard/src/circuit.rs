@@ -404,7 +404,7 @@ impl Circuit {
     pub fn from_action_context(
         spend: SpendInfo,
         output_note: Note,
-        alpha: pallas::Scalar,
+        alpha: crate::primitives::redpallas::SpendAuthRandomizer,
         rcv: ValueCommitTrapdoor,
         circuit_version: OrchardCircuitVersion,
     ) -> Result<Circuit, CircuitError> {
@@ -425,7 +425,7 @@ impl Circuit {
     pub(crate) fn from_action_context_unchecked(
         spend: SpendInfo,
         output_note: Note,
-        alpha: pallas::Scalar,
+        alpha: crate::primitives::redpallas::SpendAuthRandomizer,
         rcv: ValueCommitTrapdoor,
     ) -> Circuit {
         let sender_address = spend.note.recipient();
@@ -452,7 +452,7 @@ impl Circuit {
             psi_old: Value::known(psi_old),
             rcm_old: Value::known(rcm_old),
             cm_old: Value::known(spend.note.commitment()),
-            alpha: Value::known(alpha),
+            alpha: Value::known(alpha.scalar()),
             ak: Value::known(spend.fvk.clone().into()),
             nk: Value::known(*spend.fvk.nk()),
             rivk: Value::known(spend.fvk.rivk(spend.scope)),
@@ -1947,7 +1947,8 @@ mod tests {
         let rho = Rho::from_nf_old(nf_old);
         let ak: SpendValidatingKey = fvk.into();
         let alpha = pallas::Scalar::random(&mut rng);
-        let rk = ak.randomize(&alpha);
+        let rk =
+            ak.randomize(&crate::primitives::redpallas::SpendAuthRandomizer::from_scalar(alpha));
 
         let output_note = if output_matches_spend {
             Note::new(
@@ -2436,7 +2437,7 @@ mod tests {
             let alpha = pallas::Scalar::random(&mut rng);
             let rcv = ValueCommitTrapdoor::random(&mut rng);
             for version in CIRCUIT_VERSIONS {
-                let result = Circuit::from_action_context(spend(), output, alpha, rcv.clone(), version);
+                let result = Circuit::from_action_context(spend(), output, crate::primitives::redpallas::SpendAuthRandomizer::from_scalar(alpha), rcv.clone(), version);
                 if version.supports_proving() {
                     proptest::prop_assert!(result.is_ok());
                 } else {
@@ -2444,7 +2445,7 @@ mod tests {
                 }
             }
             let bad_output = Note::dummy(&mut rng, None, NoteVersion::V2).2;
-            proptest::prop_assert!(matches!(Circuit::from_action_context(spend(), bad_output, alpha, rcv, OrchardCircuitVersion::PostNu6_3), Err(CircuitError::RhoMismatch)));
+            proptest::prop_assert!(matches!(Circuit::from_action_context(spend(), bad_output, crate::primitives::redpallas::SpendAuthRandomizer::from_scalar(alpha), rcv, OrchardCircuitVersion::PostNu6_3), Err(CircuitError::RhoMismatch)));
         }
     }
 

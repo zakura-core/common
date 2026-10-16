@@ -187,7 +187,7 @@ impl DynamicUsage for Action<redpallas::Signature<SpendAuth>> {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub(crate) mod testing {
-    use crate::backend::reddsa::orchard::SpendAuth;
+    use crate::primitives::redpallas::SpendAuth;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use zcash_note_encryption::Domain as _;
 

@@ -5,7 +5,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::backend::pasta_curves::pallas;
 use getset::Getters;
 use zcash_note_encryption::OutgoingCipherKey;
 use zip32::ChildIndex;
@@ -233,7 +232,7 @@ pub struct Spend {
     /// - This is required by the Signer for creating `spend_auth_sig`, and may be used to
     ///   validate `rk`.
     /// - After`zkproof` / `spend_auth_sig` has been set, this can be redacted.
-    pub(crate) alpha: Option<pallas::Scalar>,
+    pub(crate) alpha: Option<crate::primitives::redpallas::SpendAuthRandomizer>,
 
     /// The ZIP 32 derivation path at which the spending key can be found for the note
     /// being spent.
@@ -1051,7 +1050,7 @@ mod tests {
                     .expect("path is length 32"),
             )
         });
-        let alpha_bytes = spend.alpha().map(|alpha| alpha.to_repr());
+        let alpha_bytes = spend.alpha().map(|alpha| alpha.to_bytes());
         let note_version = *spend.note_version();
 
         // Build the spend's component bytes once, and a helper to parse with either path.
