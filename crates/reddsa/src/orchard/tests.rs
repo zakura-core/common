@@ -11,6 +11,8 @@ use group::{
 };
 #[cfg(feature = "pallas-pasta")]
 use pasta_curves::{arithmetic::CurveExt as _, pallas};
+#[cfg(feature = "pallas-sensei")]
+use sensei::primitives::pallas;
 
 #[test]
 fn orchard_spendauth_basepoint() {
