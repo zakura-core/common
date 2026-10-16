@@ -165,7 +165,7 @@ jobs:
               crates/halo2_gadgets/*|crates/halo2_poseidon/*|crates/halo2_proofs/*|.github/fixtures/ironwood-circuits.sha256)
                 halo2=true
                 ;;
-              crates/orchard/*|crates/orchard-legacy/*)
+              crates/orchard/*|crates/orchard-legacy/*|scripts/sensei-bench|scripts/tests/test_sensei_bench.py)
                 orchard=true
                 ;;
               crates/pasta_curves/*)
@@ -2066,6 +2066,7 @@ jobs:
       - run: cargo fetch --locked
       - run: python3 .github/scripts/test_supported_features.py
       - run: python3 .github/scripts/check_native_backend.py
+      - run: python3 -m unittest discover -s scripts/tests -p test_sensei_bench.py
       - run: python3 .github/scripts/check_orchard_backends.py
       - run: cargo test --release --locked -p zakura-orchard --features test-dependencies
       - run: cargo test --release --locked -p zakura-orchard --no-default-features --features backend-sensei,circuit,multicore,zip32-addresses,test-dependencies,weighted-merkle
