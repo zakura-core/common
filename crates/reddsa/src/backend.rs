@@ -53,6 +53,35 @@ impl Point<jubjub::Scalar> for jubjub::ExtendedPoint {
     }
 }
 
+#[cfg(feature = "pallas-sensei")]
+impl Scalar for sensei::Fq {
+    const ZERO: Self = Self::ZERO;
+    fn from_repr(bytes: [u8; 32]) -> Option<Self> {
+        Self::from_bytes(bytes).ok()
+    }
+    fn to_repr(&self) -> [u8; 32] {
+        self.to_bytes()
+    }
+    fn from_bytes_wide(bytes: &[u8; 64]) -> Self {
+        Self::from_uniform_bytes(bytes)
+    }
+    fn from_raw(value: [u64; 4]) -> Self {
+        Self::from_raw(value)
+    }
+}
+#[cfg(feature = "pallas-sensei")]
+impl Point<sensei::Fq> for sensei::primitives::pallas::Point {
+    fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        Self::from_bytes(bytes).into()
+    }
+    fn to_bytes(&self) -> [u8; 32] {
+        Self::to_bytes(self)
+    }
+    fn is_small_order(&self) -> bool {
+        self.is_identity().into()
+    }
+}
+
 #[cfg(feature = "pallas-pasta")]
 impl Scalar for pasta_curves::pallas::Scalar {
     const ZERO: Self = <Self as group::ff::Field>::ZERO;

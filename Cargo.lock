@@ -3581,6 +3581,7 @@ dependencies = [
  "serde",
  "zakura-jubjub",
  "zakura-pasta-curves",
+ "zakura-sensei",
 ]
 
 [[package]]
@@ -3597,6 +3598,7 @@ dependencies = [
  "zakura-jubjub",
  "zakura-pasta-curves",
  "zakura-reddsa",
+ "zakura-sensei",
 ]
 
 [[package]]
