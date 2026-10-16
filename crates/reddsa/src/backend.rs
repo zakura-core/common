@@ -53,6 +53,8 @@ impl Point<jubjub::Scalar> for jubjub::ExtendedPoint {
     }
 }
 
+
+#[cfg(feature = "pallas-pasta")]
 impl Scalar for pasta_curves::pallas::Scalar {
     const ZERO: Self = <Self as group::ff::Field>::ZERO;
     fn from_repr(bytes: [u8; 32]) -> Option<Self> {
@@ -68,6 +70,7 @@ impl Scalar for pasta_curves::pallas::Scalar {
         Self::from_raw(value)
     }
 }
+#[cfg(feature = "pallas-pasta")]
 impl Point<pasta_curves::pallas::Scalar> for pasta_curves::pallas::Point {
     fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
         <Self as group::GroupEncoding>::from_bytes(bytes).into()

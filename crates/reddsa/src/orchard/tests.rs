@@ -2,12 +2,15 @@ use std::println;
 
 use crate::scalar_mul::{self, VartimeMultiscalarMul};
 use alloc::vec::Vec;
-use group::ff::Field;
-use group::{GroupEncoding, ff::PrimeField};
 use rand::rng as thread_rng;
 
-use pasta_curves::arithmetic::CurveExt;
-use pasta_curves::pallas;
+#[cfg(feature = "pallas-pasta")]
+use group::{
+    Group as _, GroupEncoding as _,
+    ff::{Field as _, PrimeField as _},
+};
+#[cfg(feature = "pallas-pasta")]
+use pasta_curves::{arithmetic::CurveExt as _, pallas};
 
 #[test]
 fn orchard_spendauth_basepoint() {
@@ -31,8 +34,6 @@ fn orchard_binding_basepoint() {
 // #[test]
 #[allow(dead_code)]
 fn gen_pallas_test_vectors() {
-    use group::Group;
-
     let mut rng = thread_rng();
 
     let scalars = [
@@ -91,9 +92,7 @@ fn test_pallas_vartime_multiscalar_mul() {
 
     let scalars: Vec<pallas::Scalar> = scalars
         .into_iter()
-        .map(|s| {
-            pallas::Scalar::from_repr_vartime(s).expect("Could not deserialize a `pallas::Scalar`.")
-        })
+        .map(|s| pallas::Scalar::from_repr(s).expect("Could not deserialize a `pallas::Scalar`."))
         .collect();
 
     let points: Vec<pallas::Point> = points

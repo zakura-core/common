@@ -12,7 +12,7 @@ repository.workspace = true
 readme.workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["pallas-pasta"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -23,7 +23,7 @@ blake2b_simd = { version = "1", default-features = false }
 frost-rerandomized = { version = "3.0.0", features = ["serialization"], default-features = false }
 group = { version = "0.14", default-features = false }
 jubjub = { workspace = true }
-pasta_curves = { workspace = true }
+pasta_curves = { workspace = true, optional = true, features = ["alloc"] }
 rand_core = { version = "0.10", default-features = false }
 rand_core_06 = { version = "0.6", features = ["getrandom"], default-features = false, package = "rand_core" }
 reddsa = { workspace = true, features = ["alloc"] }
@@ -35,7 +35,8 @@ hex = "0.4.3"
 rand_core_06 = { version = "0.6", features = ["getrandom"], package = "rand_core" }
 
 [features]
-default = ["std"]
+pallas-pasta = ["dep:pasta_curves", "reddsa/pallas-pasta"]
+default = ["std", "pallas-pasta"]
 serde = ["frost-rerandomized/serde"]
 std = ["blake2b_simd/std", "reddsa/std", "serde"]
 

@@ -183,6 +183,7 @@ fn empty_batch_is_valid() {
 }
 
 #[test]
+#[cfg(feature = "pallas-pasta")]
 fn orchard_single_signature_batches_verify() {
     let mut rng = thread_rng();
     let msg = b"BatchVerifyTest";

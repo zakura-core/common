@@ -1,14 +1,21 @@
+#[cfg(feature = "pallas-pasta")]
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+#[cfg(feature = "pallas-pasta")]
 use reddsa_frost::redpallas::{PallasBlake2b512, rand_core::OsRng};
 
+#[cfg(feature = "pallas-pasta")]
 use std::collections::BTreeMap;
 
+#[cfg(feature = "pallas-pasta")]
 use reddsa_frost::redpallas::rand_core::{CryptoRng, RngCore};
 
+#[cfg(feature = "pallas-pasta")]
 use frost_rerandomized::frost_core::Ciphersuite;
+#[cfg(feature = "pallas-pasta")]
 use frost_rerandomized::{RandomizedParams, frost_core as frost};
 
 /// Benchmark FROST signing with the specified ciphersuite.
+#[cfg(feature = "pallas-pasta")]
 fn bench_rerandomized_sign<
     C: Ciphersuite + frost_rerandomized::RandomizedCiphersuite,
     R: RngCore + CryptoRng + Clone,
@@ -162,6 +169,7 @@ fn bench_rerandomized_sign<
     group.finish();
 }
 
+#[cfg(feature = "pallas-pasta")]
 fn bench_sign_redpallas(c: &mut Criterion) {
     let mut rng = OsRng;
 
@@ -172,15 +180,21 @@ fn bench_sign_redpallas(c: &mut Criterion) {
     );
 }
 
+#[cfg(feature = "pallas-pasta")]
 fn bench_rerandomized_sign_redpallas(c: &mut Criterion) {
     let mut rng = OsRng;
 
     bench_rerandomized_sign::<PallasBlake2b512, _>(c, "redpallas", &mut rng);
 }
 
+#[cfg(feature = "pallas-pasta")]
 criterion_group!(
     benches,
     bench_sign_redpallas,
     bench_rerandomized_sign_redpallas
 );
+#[cfg(feature = "pallas-pasta")]
 criterion_main!(benches);
+
+#[cfg(not(feature = "pallas-pasta"))]
+fn main() {}

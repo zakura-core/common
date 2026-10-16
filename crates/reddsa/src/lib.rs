@@ -26,6 +26,7 @@ pub mod batch;
 mod constants;
 mod error;
 mod hash;
+#[cfg(feature = "pallas-pasta")]
 pub mod orchard;
 pub mod sapling;
 #[cfg(feature = "alloc")]

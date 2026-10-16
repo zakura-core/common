@@ -3,7 +3,7 @@
 
 //! FROST threshold signatures compatible with RedJubjub and RedPallas.
 //!
-//! The ciphersuites live in [`redjubjub`] and [`redpallas`]. This crate owns
+//! The ciphersuites live in [`redjubjub`] and the optional `redpallas` module. This crate owns
 //! threshold signing independently of the ordinary RedDSA implementation.
 
 extern crate alloc;
@@ -14,6 +14,7 @@ extern crate std;
 mod rng_compat;
 
 pub mod redjubjub;
+#[cfg(feature = "pallas-pasta")]
 pub mod redpallas;
 
 // Obtain the protocol generator through RedDSA's existing public key API.

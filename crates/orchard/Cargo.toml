@@ -42,7 +42,7 @@ plotters = { version = "0.3.0", optional = true }
 poseidon = { workspace = true }
 proptest = { version = ">=1.0.0, <1.7.0", optional = true }
 rand = { version = "0.10", default-features = false }
-reddsa = { workspace = true }
+reddsa = { workspace = true, features = ["pallas-pasta"] }
 serde = { version = "1.0", features = ["derive"], default-features = false }
 sinsemilla = { workspace = true }
 subtle = { version = "2.6", default-features = false }

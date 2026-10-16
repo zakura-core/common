@@ -5,9 +5,11 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use core::borrow::Borrow;
 
-use group::GroupEncoding;
-#[cfg(feature = "alloc")]
-use group::{Group, ff::PrimeField};
+#[cfg(feature = "pallas-pasta")]
+use group::GroupEncoding as _;
+#[cfg(all(feature = "pallas-pasta", feature = "alloc"))]
+use group::{Group as _, ff::PrimeField as _};
+#[cfg(feature = "pallas-pasta")]
 use pasta_curves::pallas;
 
 use crate::{SigType, private};
