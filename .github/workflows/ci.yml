@@ -631,14 +631,15 @@ jobs:
         # system fontconfig (same as the rust-checks all-feature check).
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - name: Build API documentation
-        # Mirrors the docs.rs configuration (all-features plus --cfg docsrs,
-        # which several crates use for doc_cfg feature badges) so that a
+        # Use supported default backend features and --cfg docsrs, which
+        # several crates use for doc_cfg feature badges, so that a
         # docs.rs build failure surfaces here instead of after publishing.
         # The katex-header.html injection is static HTML and needs no check.
         env:
           RUSTDOCFLAGS: --cfg docsrs
         run: >-
-          cargo +nightly doc --workspace --no-deps --all-features
+          cargo +nightly doc --workspace --no-deps
+          --features "$(python3 .github/scripts/supported_features.py --workspace)"
           --locked --verbose
 
   # zcash/orchard .github/workflows/ci.yml @
@@ -659,7 +660,7 @@ jobs:
       - name: Test without indexed ZIP 32 addresses
         run: >-
           cargo +stable test -p zakura-orchard --locked
-          --no-default-features --features circuit,multicore
+          --no-default-features --features backend-halo2 --features circuit,multicore
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -818,7 +819,7 @@ jobs:
         if: matrix.part == 'serial prover'
         run: >-
           cargo +stable test --locked --release --lib
-          -p zakura-orchard --no-default-features --features std,prover-fingerprint
+          -p zakura-orchard --no-default-features --features backend-halo2 --features std,prover-fingerprint
           circuit::halo2::prover_fingerprint::
       - name: Verify working directory is clean
         run: git diff --exit-code
@@ -910,7 +911,7 @@ jobs:
         run: git diff --exit-code
 
   orchard-no-std:
-    name: orchard / Build no_std for ${{ matrix.target }}
+    name: orchard / ${{ matrix.backend }} no_std for ${{ matrix.target }}
     needs: changes
     if: needs.changes.outputs.orchard == 'true'
     runs-on: ubuntu-latest
@@ -921,6 +922,7 @@ jobs:
         target:
           - wasm32-wasip1
           - thumbv7em-none-eabihf
+        backend: [halo2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -931,7 +933,7 @@ jobs:
       - name: Build no_std target
         run: >-
           cargo +1.97.0 build -p zakura-orchard
-          --no-default-features
+          --no-default-features --features backend-${{ matrix.backend }}
           --target ${{ matrix.target }}
           --verbose
 
@@ -1173,11 +1175,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
-      - run: cargo +stable test -p zakura-reddsa -p zakura-reddsa-frost --all-features --locked
+      - run: cargo +stable test -p zakura-reddsa -p zakura-reddsa-frost --features nightly,serde,thiserror,zeroize --locked
       - name: Check the plain RedDSA dependency graph
         shell: bash
         run: |
-          cargo tree -p zakura-reddsa --all-features --locked > /tmp/reddsa-tree.txt
+          cargo tree -p zakura-reddsa --features nightly,serde,thiserror,zeroize --locked > /tmp/reddsa-tree.txt
           if grep -E 'frost-(core|rerandomized)|zakura-reddsa-frost' /tmp/reddsa-tree.txt; then
             echo 'Plain RedDSA must not depend on FROST, including for tests' >&2
             exit 1
@@ -1394,7 +1396,7 @@ jobs:
           -p zakura-proofs
           -p zakura-transparent
           -p zakura-zip321
-          --all-features
+          --features "$(python3 .github/scripts/supported_features.py zakura-address zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-transparent zakura-zip321)"
           -- --test-threads=2
       - name: Verify working directory is clean
         run: git diff --exit-code
@@ -1416,7 +1418,7 @@ jobs:
         run: >-
           cargo +1.97.0 test -p zakura-keys --locked --lib
           --no-default-features
-          --features std,orchard,sapling,transparent-inputs,unstable,test-dependencies
+          --features backend-halo2,std,orchard,sapling,transparent-inputs,unstable,test-dependencies
       - name: Check no-default-features
         run: >-
           cargo +1.97.0 check
@@ -1429,6 +1431,7 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
+          --features zakura-keys/backend-halo2,zakura-primitives/backend-halo2
       - name: Check transparent-inputs-only
         if: ${{ !cancelled() }}
         run: >-
@@ -1442,6 +1445,7 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
+          --features zakura-keys/backend-halo2,zakura-primitives/backend-halo2
           --features zakura-keys/transparent-inputs,zakura-primitives/transparent-inputs
       - name: Check transparent-key-encoding-only
         if: ${{ !cancelled() }}
@@ -1456,6 +1460,7 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
+          --features zakura-keys/backend-halo2,zakura-primitives/backend-halo2
           --features zakura-keys/transparent-key-encoding
       - name: Check Sapling-only
         if: ${{ !cancelled() }}
@@ -1470,6 +1475,7 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
+          --features zakura-keys/backend-halo2,zakura-primitives/backend-halo2
           --features zakura-keys/sapling,zakura-primitives/circuits
       - name: Check Orchard
         if: ${{ !cancelled() }}
@@ -1484,8 +1490,9 @@ jobs:
           -p zakura-zip321
           --all-targets
           --no-default-features
+          --features zakura-keys/backend-halo2,zakura-primitives/backend-halo2
           --features zakura-keys/orchard,zakura-primitives/circuits
-      - name: Check all-features
+      - name: Check all supported backend features
         if: ${{ !cancelled() }}
         run: >-
           cargo +1.97.0 check
@@ -1495,8 +1502,9 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zip321
           --all-targets
-          --all-features
+          --features "$(python3 .github/scripts/supported_features.py zakura-address zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-transparent zakura-zip321)"
       - name: Clippy each feature of each imported crate
         if: ${{ !cancelled() }}
         shell: bash
@@ -1506,10 +1514,17 @@ jobs:
               jq -r --arg package "$package" \
                 '.packages[] | select(.name == $package) | .features | keys[]' |
               while IFS= read -r feature; do
+                selector=""
+                case "$package" in
+                  zakura-keys|zakura-primitives)
+                    selector=backend-halo2
+                    if [[ "$feature" == backend-* ]]; then selector="$feature"; fi
+                    ;;
+                esac
                 cargo +1.97.0 clippy -p "$package" \
                   --no-deps \
                   --no-default-features \
-                  --features "$feature"
+                  --features "${selector:+$selector,}$feature"
               done
           done
       - name: Install beta Clippy
@@ -1531,7 +1546,7 @@ jobs:
           -p zakura-transparent
           -p zakura-zip321
           --no-deps
-          --all-features
+          --features "$(python3 .github/scripts/supported_features.py zakura-address zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-transparent zakura-zip321)"
           --all-targets
           -- -W clippy::all
 
@@ -1568,7 +1583,11 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           read -r -a packages <<< "$PACKAGES"
-          cargo +1.97.0 build "${packages[@]}" --no-default-features --target "$TARGET" --verbose
+          backend_args=()
+          if [[ "$PACKAGES" == *zakura-primitives* ]]; then
+            backend_args=(--features "zakura-keys/backend-halo2,zakura-primitives/backend-halo2")
+          fi
+          cargo +1.97.0 build "${packages[@]}" "${backend_args[@]}" --no-default-features --target "$TARGET" --verbose
 
   # tachyon-zcash/udon .github/workflows/ci.yml @
   # 586329a8c94fe042e7ec264b61bfd632888828cb
@@ -1887,6 +1906,7 @@ jobs:
       - ironwood-fixtures
       - orchard-platform-smoke
       - orchard-no-std
+      - orchard-backends
       - pasta-test
       - pasta-platform-smoke
       - pasta-aarch64-linux-build
@@ -1937,6 +1957,7 @@ jobs:
             ironwood-fixtures,
             orchard-platform-smoke,
             orchard-no-std,
+            orchard-backends,
             pasta-test,
             pasta-platform-smoke,
             pasta-aarch64-linux-build,
@@ -1961,3 +1982,22 @@ jobs:
             udon-benchmarks,
             udon-miri,
             udon-portability
+
+  orchard-backends:
+    name: Orchard / Capabilities and proof compatibility
+    needs: changes
+    if: needs.changes.outputs.orchard == 'true' || needs.changes.outputs.reddsa == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PROPTEST_CASES: "16"
+      RAYON_NUM_THREADS: "2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - run: cargo fetch --locked
+      - run: python3 .github/scripts/test_supported_features.py
+      - run: python3 .github/scripts/check_orchard_backends.py
+      - run: cargo test --release --locked -p zakura-orchard --features test-dependencies

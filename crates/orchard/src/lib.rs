@@ -7,6 +7,11 @@
 //! implicitly mean it is an Orchard payment address (as opposed to e.g. a Sapling payment
 //! address, which is also shielded).
 //!
+//! ## Backend selection
+//!
+//! `backend-halo2` selects the cryptographic implementation and is enabled
+//! by default. Builds with defaults disabled must select it explicitly.
+//!
 //! ## Proof capabilities
 //!
 //! `prover` and `verifier` independently enable proof creation and
@@ -40,6 +45,9 @@ extern crate alloc;
 extern crate std;
 
 use alloc::vec::Vec;
+
+#[cfg(not(feature = "backend-halo2"))]
+compile_error!("select an Orchard backend: backend-halo2");
 
 mod action;
 mod address;

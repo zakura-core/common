@@ -287,3 +287,14 @@ impl Instance {
         self.cross_address_disabled
     }
 }
+
+#[cfg(all(
+    test,
+    feature = "prover",
+    feature = "verifier",
+    feature = "zip32-addresses"
+))]
+mod interop;
+
+#[cfg(all(test, feature = "verifier"))]
+mod compatibility;

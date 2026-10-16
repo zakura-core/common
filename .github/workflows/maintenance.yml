@@ -37,10 +37,18 @@ jobs:
       - name: Install build dependencies
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - name: Enumerate supported features
+        # --all-features cannot represent the mutually exclusive backend
+        # selectors; enumerate the supported set before dropping the lockfile.
+        shell: bash
+        run: >-
+          echo "ORCHARD_FEATURES=$(python3 .github/scripts/supported_features.py zakura-orchard)"
+          >> "$GITHUB_ENV"
       - name: Remove lockfile
         run: rm Cargo.lock
       - name: Build with latest dependencies
-        run: cargo +stable build -p zakura-orchard --all-features --verbose
+        shell: bash
+        run: cargo +stable build -p zakura-orchard --features "$ORCHARD_FEATURES" --verbose
       - name: Verify working directory is clean except for the lockfile
         run: git diff --exit-code ':!Cargo.lock'
 
@@ -81,9 +89,19 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned stable; action uses orphan commits
+      - name: Enumerate supported features
+        # --all-features would activate both Orchard backend selectors through
+        # the zakura-keys and zakura-primitives forwards.
+        shell: bash
+        run: >-
+          echo "LIBRUSTZCASH_FEATURES=$(python3 .github/scripts/supported_features.py
+          zakura-equihash zakura-address zakura-keys zakura-primitives
+          zakura-protocol zakura-proofs zakura-transparent zakura-zip321)"
+          >> "$GITHUB_ENV"
       - name: Remove lockfile
         run: rm Cargo.lock
       - name: Build with latest dependencies
+        shell: bash
         run: >-
           cargo +stable build
           -p zakura-equihash
@@ -95,7 +113,7 @@ jobs:
           -p zakura-transparent
           -p zakura-zip321
           --all-targets
-          --all-features
+          --features "$LIBRUSTZCASH_FEATURES"
           --verbose
       - name: Verify working directory is clean except for the lockfile
         run: git diff --exit-code ':!Cargo.lock'
@@ -109,10 +127,16 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned nightly; action uses orphan commits
+      - name: Enumerate supported features
+        # --all-features would select both mutually exclusive Pallas backends.
+        run: >-
+          echo "REDDSA_FEATURES=$(python3 .github/scripts/supported_features.py
+          zakura-reddsa zakura-reddsa-frost)"
+          >> "$GITHUB_ENV"
       - name: Update dependencies
         run: cargo +nightly update --verbose
       - name: Run tests
-        run: cargo +nightly test -p zakura-reddsa -p zakura-reddsa-frost --all-features
+        run: cargo +nightly test -p zakura-reddsa -p zakura-reddsa-frost --features "$REDDSA_FEATURES"
 
   redjubjub-nightly:
     name: redjubjub / Test on nightly

@@ -53,7 +53,6 @@ impl Point<jubjub::Scalar> for jubjub::ExtendedPoint {
     }
 }
 
-
 #[cfg(feature = "pallas-pasta")]
 impl Scalar for pasta_curves::pallas::Scalar {
     const ZERO: Self = <Self as group::ff::Field>::ZERO;

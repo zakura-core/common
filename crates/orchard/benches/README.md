@@ -107,7 +107,7 @@ cargo +1.97.1 bench --locked -p zakura-orchard --features circuit,test-dependenc
 
 [`IronwoodDomain`]: ../src/note_encryption.rs
 
-## Witness assignment
+## Witness assignment (Halo2)
 
 The ignored witness-assignment benchmark uses the production post-NU6.3
 circuit with deterministic Ironwood payments. Every Action has a real V3 spend
@@ -129,7 +129,7 @@ a `BTreeMap` to identify advice columns because column indices are intentionally
 not public API; compare revisions with the same harness instead of treating its
 absolute timings as complete-prover phase measurements.
 
-## Batch verifier fixture corpus
+## Batch verifier fixture corpus (Halo2)
 
 The batch-verifier harness is an ignored library test because it needs access
 to Orchard's internal Halo 2 instance representation. Build the test binary
@@ -215,3 +215,8 @@ Read `required-features` from each revision's benchmark target in `Cargo.toml`.
 Current targets need `test-dependencies`; payment/proof targets also need
 `circuit` and `zip32-addresses`. Record the resolved features alongside each
 binary and result when crossing this API boundary.
+
+With defaults disabled, select `backend-halo2` explicitly. Older revisions
+may not recognize this selector. Private test harnesses moved from
+`circuit::benchmark::...` to `circuit::halo2::benchmark::...`; confirm an
+exact filter runs a test rather than succeeding with zero tests.

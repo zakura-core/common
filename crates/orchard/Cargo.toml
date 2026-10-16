@@ -21,7 +21,7 @@ name = "orchard"
 bench = false
 
 [dependencies]
-orchard-legacy.workspace = true
+orchard-legacy = { workspace = true, optional = true }
 maybe-rayon = { version = "0.1.0", default-features = false, optional = true }
 plotters = { version = "0.3.0", optional = true }
 aes = { version = "0.9", optional = true }
@@ -61,34 +61,35 @@ zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] 
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
+backend-halo2 = ["dep:orchard-legacy"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["dep:aes", "dep:fpe"]
 circuit = ["prover", "verifier"]
-prover = ["std", "orchard-legacy/circuit"]
-verifier = ["std", "orchard-legacy/circuit"]
-default = ["zip32-addresses", "circuit", "multicore", "std"]
-dev-graph = ["orchard-legacy/dev-graph", "dep:plotters"]
+prover = ["std", "orchard-legacy?/circuit"]
+verifier = ["std", "orchard-legacy?/circuit"]
+default = ["backend-halo2", "zip32-addresses", "circuit", "multicore", "std"]
+dev-graph = ["orchard-legacy?/dev-graph", "dep:plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
-multicore = ["orchard-legacy/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
-orbits = ["orchard-legacy/orbits"]
+multicore = ["orchard-legacy?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
+orbits = ["orchard-legacy?/orbits"]
 # Disable automatic x86-64 assembly selection in the proving dependencies.
-portable = ["orchard-legacy/portable"]
-std = ["corez/std", "orchard-legacy/std"]
-test-dependencies = ["orchard-legacy/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
+portable = ["orchard-legacy?/portable"]
+std = ["corez/std", "orchard-legacy?/std"]
+test-dependencies = ["orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
 unstable-frost = ["dep:visibility"]
 # Historical fingerprint fixtures use ZIP 32 indexed addresses.
-verifier-fingerprint = ["orchard-legacy/verifier-fingerprint", "zip32-addresses", "circuit"]
+verifier-fingerprint = ["orchard-legacy?/verifier-fingerprint", "zip32-addresses", "circuit"]
 # Retained feature alias; historical formal-model tapes are replayed in tests.
-prover-fingerprint = ["orchard-legacy/prover-fingerprint", "zip32-addresses", "circuit"]
-circuit-fixtures = ["orchard-legacy/circuit-fixtures", "circuit"]
+prover-fingerprint = ["orchard-legacy?/prover-fingerprint", "zip32-addresses", "circuit"]
+circuit-fixtures = ["orchard-legacy?/circuit-fixtures", "circuit"]
 weighted-merkle = []
-x86_64-asm = ["orchard-legacy/x86_64-asm"]
-aarch64-asm = ["orchard-legacy/aarch64-asm"]
+x86_64-asm = ["orchard-legacy?/x86_64-asm"]
+aarch64-asm = ["orchard-legacy?/aarch64-asm"]
 
 [[test]]
 name = "ironwood_batch_timings"
-required-features = ["circuit", "zip32-addresses"]
+required-features = ["test-dependencies", "circuit", "zip32-addresses"]
 
 [[bench]]
 name = "circuit"
