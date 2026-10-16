@@ -81,8 +81,11 @@ dev-graph = ["orchard-legacy?/dev-graph", "image", "plotters"]
 image = []
 multicore = ["sensei?/multicore", "orchard-legacy?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
 orbits = ["orchard-legacy?/orbits"]
-# Disable automatic x86-64 assembly selection in the proving dependencies.
+# Disable all handwritten assembly in the proving dependencies, on every
+# platform, including assembly enabled by default or by another feature.
 portable = ["sensei?/portable", "orchard-legacy?/portable"]
+# Benchmark-only controls; does not enable the optional backend by itself.
+sensei-bench = ["sensei?/benchmark-internals"]
 std = ["corez/std", "sensei?/std", "orchard-legacy?/std"]
 test-dependencies = ["wallet", "sensei?/test-dependencies", "orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
 # Backend-specific components and typed witnesses for external circuit composition.

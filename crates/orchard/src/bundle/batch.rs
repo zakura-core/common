@@ -156,31 +156,7 @@ impl<'a> BatchValidator<'a> {
         }
         #[cfg(feature = "backend-sensei")]
         {
-            let statements: Vec<Vec<_>> = self
-                .proofs
-                .iter()
-                .map(|(_, instances)| instances.iter().map(Instance::native).collect())
-                .collect();
-            let requests = self
-                .proofs
-                .iter()
-                .zip(&statements)
-                .map(|((proof, _), statements)| {
-                    sensei::VerificationRequest::new(
-                        self.vk.circuit_version().native(),
-                        statements,
-                        proof
-                            .verification_bytes(statements.len())
-                            .map_err(|_| sensei::Error::InvalidProof)?,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>();
-            match requests {
-                Ok(requests) => {
-                    sensei::verify_proofs(&requests, &mut || Ok(rng.next_u64())).is_ok()
-                }
-                Err(_) => false,
-            }
+            crate::circuit::verify_batch(self.vk.circuit_version(), &self.proofs, &mut rng)
         }
     }
 }

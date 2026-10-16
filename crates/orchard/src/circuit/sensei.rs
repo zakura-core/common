@@ -450,3 +450,36 @@ mod classification_tests {
         }
     }
 }
+
+/// Batch-verifies proofs against one circuit version, with batch weights from `rng`.
+///
+/// Returns `false` on any verification failure, including a proof too short for
+/// its statement count. An empty batch succeeds without consuming randomness.
+#[cfg(feature = "verifier")]
+pub(crate) fn verify_batch(
+    circuit_version: OrchardCircuitVersion,
+    proofs: &[(Proof, Vec<Instance>)],
+    mut rng: impl rand::Rng,
+) -> bool {
+    let statements: Vec<Vec<_>> = proofs
+        .iter()
+        .map(|(_, instances)| instances.iter().map(Instance::native).collect())
+        .collect();
+    let requests = proofs
+        .iter()
+        .zip(&statements)
+        .map(|((proof, _), statements)| {
+            sensei::VerificationRequest::new(
+                circuit_version.native(),
+                statements,
+                proof
+                    .verification_bytes(statements.len())
+                    .map_err(|_| sensei::Error::InvalidProof)?,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>();
+    match requests {
+        Ok(requests) => sensei::verify_proofs(&requests, &mut || Ok(rng.next_u64())).is_ok(),
+        Err(_) => false,
+    }
+}
