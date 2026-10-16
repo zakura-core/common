@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+"""Compare warm Orchard proving or verification. Requires Python 3.10+ and Cargo."""
+
+import argparse
+import csv
+from datetime import datetime, timezone
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import random
+import shutil
+import signal
+import statistics
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+BACKENDS = ("native", "sensei")
+# Pasta and Udon name their assembly features and build cfgs by architecture.
+ASSEMBLY_ARCHITECTURES = {"aarch64": "AArch64", "x86_64": "x86-64"}
+MACHINES = {"aarch64": "aarch64", "arm64": "aarch64", "x86_64": "x86_64", "amd64": "x86_64"}
+# The x86-64 assembly is MULX/ADCX/ADOX code; it faults without these.
+X86_64_EXTENSIONS = ("adx", "bmi2")
+# Each leg is a whole-binary backend selection; a build must not even link the
+# other backend's cryptographic stack.
+FOREIGN_LIBRARIES = {
+    "native": {"zakura_sensei", "zakura_udon", "zakura_sensei_shared",
+               "zakura_sensei_macros", "zakura_sensei_artifacts", "bento"},
+    "sensei": {"pasta_curves", "halo2_proofs", "halo2_gadgets", "orchard_legacy",
+               "sinsemilla"},
+}
+PROTOCOL_VERSION = 4
+CORPUS_VERSION = 1
+DEFAULT_ROUNDS = 2
+DEFAULT_SAMPLES = 5
+DEFAULT_WARMUP_SECONDS = 1.0
+THOROUGH_ROUNDS = 10
+THOROUGH_SAMPLES = 20
+THOROUGH_WARMUP_SECONDS = 5.0
+DEFAULT_BATCH_SIZES = (2, 16, 64)
+BOOTSTRAP_RESAMPLES = 10_000
+BOOTSTRAP_SEED = 0x53454E534549
+TOLERANCE = 0.05
+DRIFT_ROUNDS = 3
+WARMUP_WINDOW = 5  # Must agree with the Rust worker's protocol.
+NS_PER_MS = 1_000_000
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def write_json(path, value):
+    """Keep the last complete checkpoint if interrupted during a write."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+    temporary.replace(path)
+
+
+def probe(command):
+    try:
+        result = subprocess.run(
+            command, cwd=ROOT, capture_output=True, text=True, timeout=5, check=False
+        )
+        return {"command": command, "status": result.returncode,
+                "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"command": command, "unavailable": str(error)}
+
+
+def telemetry():
+    result = {"time": now()}
+    if hasattr(os, "getloadavg"):
+        result["load_average"] = os.getloadavg()
+    if sys.platform == "darwin":
+        result["power"] = probe(["pmset", "-g", "batt"])
+        result["thermal"] = probe(["pmset", "-g", "therm"])
+    elif sys.platform.startswith("linux"):
+        result["thermal"] = {}
+        for path in Path("/sys/class/thermal").glob("thermal_zone*/temp"):
+            try:
+                result["thermal"][str(path)] = path.read_text().strip()
+            except OSError:
+                pass
+    return result
+
+
+def assembly_architecture(machine):
+    """The Pasta/Udon assembly backend for a host machine name, or None."""
+    return MACHINES.get(machine.lower())
+
+
+def x86_64_extensions_available():
+    """Whether the CPU executes BMI2/ADX assembly; None when undetectable."""
+    if sys.platform.startswith("linux"):
+        try:
+            flags = {flag for line in Path("/proc/cpuinfo").read_text().splitlines()
+                     if line.startswith("flags") for flag in line.split(":", 1)[1].split()}
+        except OSError:
+            return None
+        return set(X86_64_EXTENSIONS) <= flags if flags else None
+    if sys.platform == "darwin":
+        result = probe(["sysctl", "-n", "machdep.cpu.leaf7_features"])
+        if result.get("status") == 0:
+            return {extension.upper() for extension in X86_64_EXTENSIONS} <= set(result["stdout"].split())
+    return None
+
+
+def run_process(command, stdout, stderr):
+    """One process at a time; never leave a worker running after interruption."""
+    process = subprocess.Popen(
+        command, cwd=ROOT, stdout=stdout, stderr=stderr,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        status = process.wait()
+        if status:
+            raise RuntimeError(f"command exited with status {status}: {command}")
+    except BaseException:
+        if process.poll() is None:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait()
+        raise
+
+
+def target_name(event):
+    """Cargo may report default library target names with hyphens."""
+    return event["target"]["name"].replace("-", "_")
+
+
+def script_cfgs(events, libraries, backend, crate):
+    """The cfgs emitted by each build-script run for the crate's package."""
+    packages = {event["package_id"] for event in libraries}
+    scripts = [event for event in events
+               if event.get("reason") == "build-script-executed"
+               and event["package_id"] in packages]
+    if not scripts:
+        raise ValueError(f"{backend}: missing {crate} build configuration")
+    return [sorted(event["cfgs"]) for event in scripts]
+
+
+def assembly_cfgs(cfgs, prefix):
+    return {cfg for cfg in cfgs if cfg.startswith(prefix) and cfg.endswith("_asm")}
+
+
+def check_arithmetic(events, backend, architecture=None):
+    """Check Cargo's resolved builds, including features enabled transitively.
+
+    `architecture` names the assembly backend every build must select; None
+    requires portable Rust arithmetic. Build scripts report the backend they
+    selected, so the cfgs also cover assembly chosen from the compiler's target
+    features rather than Cargo features. Backend selection is per binary, so a
+    build must not contain the other backend's arithmetic crates at all.
+    """
+    asm = architecture is not None
+    libraries = [event for event in events
+                 if event.get("reason") == "compiler-artifact"
+                 and "lib" in event["target"]["kind"]]
+    foreign = FOREIGN_LIBRARIES[backend] & {target_name(event) for event in libraries}
+    if foreign:
+        raise ValueError(f"{backend}: build links the other backend's crates: {sorted(foreign)}")
+    pasta = [event for event in libraries if target_name(event) == "pasta_curves"]
+    udon = [event for event in libraries if target_name(event) == "zakura_udon"]
+    pasta_cfgs = []
+    if backend == "native":
+        # Target-specific dependencies may force an assembly feature on; the
+        # `portable` override and the build scripts' cfgs decide what runs.
+        if not pasta or any(("portable" in event["features"]) == asm for event in pasta):
+            requirement = "disable" if asm else "enable"
+            raise ValueError(f"{backend}: every Pasta build must {requirement} portable arithmetic")
+        pasta_scripts = script_cfgs(events, pasta, backend, "Pasta")
+        pasta_cfgs = sorted(set().union(*pasta_scripts))
+        if asm:
+            expected = f"pasta_curves_{architecture}_asm"
+            if (assembly_cfgs(pasta_cfgs, "pasta_curves_") != {expected}
+                    or any(expected not in cfgs for cfgs in pasta_scripts)):
+                raise ValueError(f"{backend}: --asm requires active {ASSEMBLY_ARCHITECTURES[architecture]} "
+                                 f"Pasta assembly in every build, got cfgs {pasta_cfgs}")
+        elif assembly_cfgs(pasta_cfgs, "pasta_curves_"):
+            raise ValueError(f"{backend}: Pasta assembly is enabled: {pasta_cfgs}")
+    udon_cfgs = []
+    if backend == "sensei":
+        if not udon:
+            raise ValueError("sensei: missing Udon build configuration")
+        udon_cfgs = sorted(set().union(*script_cfgs(events, udon, backend, "Udon")))
+        selected = assembly_cfgs(udon_cfgs, "udon_")
+        # Sensei always enables sqrt-table-large in its runtime dependency.
+        # Host build units may have different features; those alone cannot
+        # establish the measured backend's arithmetic.
+        runtime = [event for event in udon if "sqrt-table-large" in event["features"]]
+        if asm:
+            feature = f"{architecture}-asm"
+            if (not runtime or f"udon_{architecture}_asm" not in selected
+                    or any(feature not in event["features"] or "portable" in event["features"]
+                           for event in runtime)):
+                raise ValueError(f"{backend}: --asm requires Udon {feature} without portable "
+                                 f"in the runtime build, got cfgs {udon_cfgs}")
+        elif not runtime or any("portable" not in event["features"] for event in runtime):
+            raise ValueError(f"{backend}: every runtime Udon build must enable portable arithmetic")
+        elif selected:
+            raise ValueError(f"{backend}: Udon assembly is enabled: {udon_cfgs}; "
+                             "this comparison requires Rust arithmetic")
+    return {"pasta_features": [event["features"] for event in pasta], "pasta_cfgs": pasta_cfgs,
+            "udon_features": [event["features"] for event in udon], "udon_cfgs": udon_cfgs}
+
+
+def build(backend, directory, architecture=None):
+    # Each backend is a whole binary. Orchard's own arch features forward
+    # weakly: to Pasta through the legacy facade, to Udon through Sensei.
+    arch_feature = f"{architecture}-asm" if architecture else "portable"
+    command = ["cargo", "bench", "--locked", "--no-run", "-p", "zakura-orchard",
+               "--bench", "sensei_compare"]
+    if backend == "sensei":
+        features = ["backend-sensei", "circuit", "multicore", "std", "zip32-addresses",
+                    "test-dependencies", "sensei-bench", arch_feature]
+        command.append("--no-default-features")
+    else:
+        features = ["sensei-bench", "test-dependencies", arch_feature]
+    # Separate Cargo graphs prevent feature unification between the two builds.
+    command += [
+        "--features", ",".join(features),
+        "--target-dir", str(ROOT / "target" / "sensei-bench" / "build" / backend),
+        "--message-format=json-render-diagnostics",
+    ]
+    output = directory / f"build-{backend}.jsonl"
+    errors = directory / f"build-{backend}.log"
+    print(f"Building {backend} (compiler log: {errors})", flush=True)
+    with output.open("w") as out, errors.open("w") as err:
+        run_process(command, out, err)
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    arithmetic = check_arithmetic(events, backend, architecture)
+    check_backend(events, backend)
+    executables = set()
+    for event in events:
+        if (event.get("reason") == "compiler-artifact"
+                and event["target"]["name"] == "sensei_compare"
+                and event.get("executable")):
+            executables.add(event["executable"])
+    if len(executables) != 1:
+        raise RuntimeError(f"expected one benchmark executable in {output}")
+    source = Path(executables.pop())
+    binary = directory / (backend + source.suffix)
+    shutil.copy2(source, binary)
+    return {"command": command, "binary": str(binary), "arithmetic": arithmetic,
+            "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+
+
+def check_backend(events, backend):
+    """Reject a build whose Orchard library selects the wrong backend."""
+    orchard = [event for event in events
+               if event.get("reason") == "compiler-artifact"
+               and target_name(event) == "orchard"
+               and "lib" in event["target"]["kind"]]
+    expected = "backend-sensei" if backend == "sensei" else "backend-halo2"
+    other = "backend-halo2" if backend == "sensei" else "backend-sensei"
+    if not orchard or any(expected not in event["features"] or other in event["features"]
+                          for event in orchard):
+        raise ValueError(f"{backend}: unexpected Orchard backend features")
+
+
+def generate_corpus(binary, directory, args):
+    """Generate and record native proofs once, before any measurement process."""
+    count = max(args.samples_per_leg, 2 * WARMUP_WINDOW, max(args.batch_sizes))
+    command = [binary, "--generate-verifier-fixtures", str(directory), str(count),
+               str(args.workers) if args.workers is not None else "default"]
+    print(f"Generating shared native verifier corpus ({count} proofs/Action count)", flush=True)
+    with (directory / "corpus.log").open("w") as out, (directory / "corpus.stderr").open("w") as err:
+        run_process(command, out, err)
+    corpora = {}
+    for actions in (1, 2):
+        path = directory / f"verifier-{actions}.json"
+        encoded = path.read_bytes()
+        corpus = json.loads(encoded)
+        proofs = corpus["proofs"]
+        if (corpus["version"] != CORPUS_VERSION or corpus["actions"] != actions
+                or len(proofs) != count or any(not proof for proof in proofs)
+                or len({bytes(proof) for proof in proofs}) != count):
+            raise ValueError(f"malformed verifier corpus: {path}")
+        corpora[str(actions)] = {"path": str(path), "proofs": count,
+                                 "blake2b": hashlib.blake2b(encoded, digest_size=32).hexdigest()}
+    return {"command": command, "corpora": corpora}
+
+
+def schedule(rounds, batch_sizes=(1,)):
+    """Round zero settles both cases; measured rounds alternate ABBA/BAAB."""
+    for round_index in range(rounds + 1):
+        cases = [(actions, batch_size) for actions in (1, 2) for batch_size in batch_sizes]
+        if round_index % 2:
+            cases.reverse()
+        order = ("native", "sensei", "sensei", "native")
+        if round_index % 2:
+            order = ("sensei", "native", "native", "sensei")
+        for actions, batch_size in cases:
+            occurrences = dict.fromkeys(BACKENDS, 0)
+            for position, backend in enumerate(order):
+                occurrence = occurrences[backend]
+                occurrences[backend] += 1
+                yield {"round": round_index, "settling": round_index == 0,
+                       "actions": actions, "batch_size": batch_size,
+                       "position": position, "backend": backend,
+                       "occurrence": occurrence,
+                       "sequence": round_index * 2 + occurrence}
+
+
+def positive_integer(value):
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"expected positive integer, got {value!r}")
+    return value
+
+
+def parse_leg(path, leg, args):
+    """Reject partial, misidentified, or corrupted output before using timings."""
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    expected_types = ["metadata", "warmup"] + ["sample"] * args.samples_per_leg + ["complete"]
+    if [event.get("type") for event in events] != expected_types:
+        raise ValueError(f"incomplete or malformed worker output: {path}")
+    metadata, warmup, *samples, complete = events
+    expected = {"protocol": PROTOCOL_VERSION, "backend": leg["backend"],
+                "mode": "verifier" if args.verifier else "prover",
+                "portable": not args.asm, "actions": leg["actions"],
+                "batch_size": leg["batch_size"],
+                "sequence": leg["sequence"], "samples": args.samples_per_leg,
+                "warmup_seconds": args.warmup_seconds,
+                "corpus_blake2b": leg.get("corpus_blake2b"),
+                "corpus_proofs": leg.get("corpus_proofs", 0)}
+    for key, value in expected.items():
+        if metadata.get(key) != value or type(metadata.get(key)) is not type(value):
+            raise ValueError(f"worker {key} mismatch: {metadata.get(key)!r} != {value!r}")
+    workers = positive_integer(metadata["workers"])
+    if args.workers is not None and workers != args.workers:
+        raise ValueError(f"requested {args.workers} workers, got {workers}")
+    if positive_integer(complete.get("samples")) != len(samples):
+        raise ValueError("sample collection was not completed")
+    values = []
+    for index, sample in enumerate(samples):
+        if type(sample.get("index")) is not int or sample["index"] != index:
+            raise ValueError("sample sequence mismatch")
+        values.append(positive_integer(sample["ns"]))
+    warmup_ns = [positive_integer(ns) for ns in warmup["ns"]]
+    if len(warmup_ns) < 2 * WARMUP_WINDOW or sum(warmup_ns) / 1e9 < args.warmup_seconds:
+        raise ValueError("worker did not complete the required warmup")
+    earlier = statistics.median(warmup_ns[-2 * WARMUP_WINDOW:-WARMUP_WINDOW])
+    later = statistics.median(warmup_ns[-WARMUP_WINDOW:])
+    stable = abs(later / earlier - 1) <= TOLERANCE
+    if type(warmup.get("stable")) is not bool or warmup["stable"] != stable:
+        raise ValueError("warmup stability flag mismatch")
+    return {"workers": workers, "ns": values, "warmup": warmup}
+
+
+def savings(native, sensei):
+    """Latency reduction relative to native; negative means Sensei takes longer."""
+    return 100 * (native - sensei) / native
+
+
+def percentile(sorted_values, fraction):
+    index = (len(sorted_values) - 1) * fraction
+    lower = math.floor(index)
+    upper = math.ceil(index)
+    return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * (index - lower)
+
+
+def interval(values):
+    values = sorted(values)
+    return [percentile(values, 0.025), percentile(values, 0.975)]
+
+
+def bootstrap(rounds, resamples=BOOTSTRAP_RESAMPLES):
+    """Resample whole paired rounds, never pretend individual proofs are IID."""
+    rng = random.Random(BOOTSTRAP_SEED)
+    times = {backend: [] for backend in BACKENDS}
+    paired = []
+    per_round = [savings(statistics.median(row["native"]),
+                         statistics.median(row["sensei"])) for row in rounds]
+    for _ in range(resamples):
+        indices = rng.choices(range(len(rounds)), k=len(rounds))
+        paired.append(statistics.median(per_round[i] for i in indices))
+        for backend in BACKENDS:
+            times[backend].append(statistics.median(
+                value for i in indices for value in rounds[i][backend]
+            ))
+    return {"paired_savings_pct": interval(paired),
+            "median_ns": {backend: interval(values) for backend, values in times.items()}}
+
+
+def summarize(legs, args, resamples=BOOTSTRAP_RESAMPLES):
+    results = []
+    for actions, batch_size in ((a, b) for a in (1, 2) for b in args.batch_sizes):
+        selected = [leg for leg in legs if not leg["settling"] and leg["actions"] == actions
+                    and leg["batch_size"] == batch_size]
+        rounds = []
+        for round_index in range(1, args.rounds + 1):
+            row = {}
+            for backend in BACKENDS:
+                matches = [leg for leg in selected
+                           if leg["round"] == round_index and leg["backend"] == backend]
+                if (len(matches) != 2 or {leg["occurrence"] for leg in matches} != {0, 1}
+                        or any(len(leg["ns"]) != args.samples_per_leg for leg in matches)):
+                    raise ValueError("incomplete paired round")
+                row[backend] = [value for leg in matches for value in leg["ns"]]
+            rounds.append(row)
+        uncertainty = bootstrap(rounds, resamples)
+        warnings = []
+        if (args.rounds < THOROUGH_ROUNDS or args.samples_per_leg < THOROUGH_SAMPLES
+                or args.warmup_seconds < THOROUGH_WARMUP_SECONDS or args.rounds % 2):
+            warnings.append("quick/custom budget: use --thorough for 10 even rounds, 20 samples/leg, 5s warmup")
+        if any(not leg["warmup"]["stable"] for leg in selected):
+            warnings.append("one or more legs did not reach stable warmup")
+        stats = {}
+        for backend in BACKENDS:
+            values = [value for row in rounds for value in row[backend]]
+            center = statistics.median(values)
+            bounds = uncertainty["median_ns"][backend]
+            per_round_min = [min(row[backend]) for row in rounds]
+            workers = sorted({leg["workers"] for leg in selected if leg["backend"] == backend})
+            if len(workers) != 1:
+                warnings.append(f"{backend} worker count changed during the run")
+            drift = None
+            if len(rounds) >= 2 * DRIFT_ROUNDS:
+                first = statistics.median(value for row in rounds[:DRIFT_ROUNDS] for value in row[backend])
+                last = statistics.median(value for row in rounds[-DRIFT_ROUNDS:] for value in row[backend])
+                drift = 100 * (last / first - 1)
+                if abs(drift) > 100 * TOLERANCE:
+                    warnings.append(f"{backend} first/last three-round drift is {drift:+.1f}%")
+            if max(abs(bound / center - 1) for bound in bounds) > TOLERANCE:
+                warnings.append(f"{backend} median confidence interval exceeds ±5%")
+            stats[backend] = {"samples": len(values), "workers": workers,
+                              "minimum_ns": min(values), "median_ns": center,
+                              "median_ci95_ns": bounds,
+                              "round_minimum_range_ns": [min(per_round_min), max(per_round_min)],
+                              "first_last_drift_pct": drift}
+        paired_pct = statistics.median(savings(statistics.median(row["native"]),
+                                                statistics.median(row["sensei"])) for row in rounds)
+        ci = uncertainty["paired_savings_pct"]
+        results.append({"actions": actions, "batch_size": batch_size, "backends": stats,
+                        "minimum_savings_pct": savings(stats["native"]["minimum_ns"], stats["sensei"]["minimum_ns"]),
+                        "median_savings_pct": savings(stats["native"]["median_ns"], stats["sensei"]["median_ns"]),
+                        "paired_savings_pct": paired_pct, "paired_ci95_pct": ci,
+                        "inconclusive": ci[0] <= 0 <= ci[1],
+                        "provisional": bool(warnings), "warnings": warnings})
+    return {"results": results, "mode": "verifier" if args.verifier else "prover",
+            "arithmetic_mode": "asm" if args.asm else "portable",
+            "assembly_architecture": args.architecture,
+            "bootstrap_resamples": resamples,
+            "bootstrap_seed": BOOTSTRAP_SEED,
+            "percentage_formula": "100 * (native - sensei) / native"}
+
+
+def comparison(percent):
+    return f"{abs(percent):.2f}% {'less' if percent >= 0 else 'more'} time"
+
+
+def format_summary(summary):
+    if summary["arithmetic_mode"] == "asm":
+        assembly = f"{ASSEMBLY_ARCHITECTURES[summary['assembly_architecture']]} assembly enabled"
+    else:
+        assembly = "assembly disabled"
+    operation = "verification" if summary["mode"] == "verifier" else "proving"
+    lines = [f"Warm {operation} times (handwritten Pasta/Udon {assembly} in both builds).",
+             "Percentages measure Sensei's time savings relative to native.", ""]
+    for result in summary["results"]:
+        name = "1 Action" if result["actions"] == 1 else "2 Actions / two real spends"
+        if summary["mode"] == "verifier":
+            name += " per proof; " + ("individual proof" if result["batch_size"] == 1
+                                     else f"batch of {result['batch_size']} distinct proofs (total batch time)")
+        status = "PROVISIONAL" if result["provisional"] else "precision checks passed"
+        lines.extend([f"{name} — {status}",
+                      "  Backend   Workers   Samples   Observed minimum   Median (95% CI)"])
+        for backend, stat in result["backends"].items():
+            lo, hi = (value / NS_PER_MS for value in stat["median_ci95_ns"])
+            workers = "/".join(map(str, stat["workers"]))
+            lines.append(f"  {backend:<9} {workers:>7} {stat['samples']:>9}"
+                         f" {stat['minimum_ns'] / NS_PER_MS:>14.3f} ms"
+                         f" {stat['median_ns'] / NS_PER_MS:>10.3f} ms [{lo:.3f}, {hi:.3f}]")
+        lines.append(f"  Sensei: minimum {comparison(result['minimum_savings_pct'])}; "
+                     f"median {comparison(result['median_savings_pct'])}.")
+        lo, hi = result["paired_ci95_pct"]
+        inconclusive = " — inconclusive" if result["inconclusive"] else ""
+        lines.append(f"  Paired rounds: {comparison(result['paired_savings_pct'])}; "
+                     f"95% savings CI [{lo:+.2f}%, {hi:+.2f}%]{inconclusive}.")
+        for backend, stat in result["backends"].items():
+            lo, hi = (value / NS_PER_MS for value in stat["round_minimum_range_ns"])
+            lines.append(f"  {backend} per-round minima: {lo:.3f}–{hi:.3f} ms.")
+        lines.extend(f"  Warning: {warning}" for warning in result["warnings"])
+        lines.append("")
+    return "\n".join(lines)
+
+
+def arguments(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prover", dest="verifier", action="store_false", help="compare proof construction")
+    mode.add_argument("--verifier", action="store_true", help="compare individual and batch verification on shared native proofs")
+    parser.add_argument("--batch-sizes", type=int, nargs="*", help="batch sizes >=2 for --verifier (default: 2 16 64); an empty list measures only individual proofs")
+    parser.add_argument("--asm", action="store_true", help="enable the host's handwritten Pasta and Udon assembly in both backends (AArch64, or x86-64 with BMI2 and ADX; default: portable)")
+    parser.add_argument("--thorough", action="store_true", help="use 10 rounds, 20 samples/leg, and 5s warmup; individual flags override this preset")
+    parser.add_argument("--workers", type=int, help="use exactly N workers in both backends (default: each backend's own policy)")
+    parser.add_argument("--rounds", type=int, help="measured rounds, excluding settling (default: 2; --thorough: 10)")
+    parser.add_argument("--samples-per-leg", type=int, help="timed calls per leg; four legs per case/round (default: 5; --thorough: 20)")
+    parser.add_argument("--warmup-seconds", type=float, help="minimum measured work spent warming each process (default: 1; --thorough: 5)")
+    parser.add_argument("--output", type=Path, help="parent for a unique result directory (default: target/sensei-bench)")
+    args = parser.parse_args(argv)
+    if args.batch_sizes is not None and not args.verifier:
+        parser.error("--batch-sizes requires --verifier")
+    batches = (DEFAULT_BATCH_SIZES if args.batch_sizes is None else args.batch_sizes) if args.verifier else ()
+    if any(size < 2 for size in batches) or len(set(batches)) != len(batches):
+        parser.error("batch sizes must be distinct integers >=2")
+    args.batch_sizes = [1, *batches]
+    if args.rounds is None:
+        args.rounds = THOROUGH_ROUNDS if args.thorough else DEFAULT_ROUNDS
+    if args.samples_per_leg is None:
+        args.samples_per_leg = THOROUGH_SAMPLES if args.thorough else DEFAULT_SAMPLES
+    if args.warmup_seconds is None:
+        args.warmup_seconds = THOROUGH_WARMUP_SECONDS if args.thorough else DEFAULT_WARMUP_SECONDS
+    if args.rounds <= 0 or args.samples_per_leg <= 0 or (args.workers is not None and args.workers <= 0):
+        parser.error("rounds, samples, and workers must be positive")
+    if not math.isfinite(args.warmup_seconds) or args.warmup_seconds < 0:
+        parser.error("warmup seconds must be finite and nonnegative")
+    args.architecture = assembly_architecture(platform.machine()) if args.asm else None
+    if args.asm and args.architecture is None:
+        parser.error(f"--asm has no Pasta/Udon assembly backend for {platform.machine()} hosts")
+    return args
+
+
+def main(argv=None):
+    args = arguments(argv)
+    if args.architecture == "x86_64" and x86_64_extensions_available() is False:
+        print("error: --asm requires a CPU with BMI2 and ADX; the x86-64 assembly would fault",
+              file=sys.stderr)
+        return 2
+    mode = "verifier" if args.verifier else "prover"
+    parent = (args.output or ROOT / "target" / "sensei-bench").resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-"), dir=parent))
+    options = vars(args).copy()
+    options["output"] = str(directory)
+    metadata = {
+        "status": "building", "started": now(), "options": options, "mode": mode,
+        "platform": platform.platform(), "machine": platform.machine(),
+        "logical_cpus": os.cpu_count(), "python": sys.version,
+        "revision": probe(["git", "rev-parse", "HEAD"]),
+        "dirty_state": probe(["git", "status", "--porcelain"]),
+        "rustc": probe(["rustc", "-Vv"]), "cargo": probe(["cargo", "-V"]),
+        "environment": {key: value for key, value in os.environ.items()
+                        if key.startswith(("RAYON_", "CARGO_PROFILE_", "CARGO_TARGET_"))
+                        or key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET",
+                                   "CARGO_BUILD_RUSTFLAGS", "RUSTUP_TOOLCHAIN")},
+        "seed_encoding": "StdRng: four little-endian u64s [domain, actions, sequence, index]; legs use sequence=2*round+occurrence, corpus uses sequence=0",
+        "seed_domains": {"warmup": 0x73656E7365690002, "sample": 0x73656E7365690003,
+                         "corpus": 0x73656E7365690004},
+        "builds": {}, "legs": [],
+    }
+    write_json(directory / "run.json", metadata)
+    print(f"Results: {directory}", flush=True)
+    print(f"Mode: {mode}", flush=True)
+    print("Arithmetic: " + (f"{ASSEMBLY_ARCHITECTURES[args.architecture]} assembly in both backends"
+                            if args.asm else "portable in both backends"), flush=True)
+    print("Workers: " + (str(args.workers) if args.workers else "backend defaults (inherited thread settings preserved)"), flush=True)
+    print(f"Budget: {args.rounds} rounds, {args.samples_per_leg} samples/leg, "
+          f"{args.warmup_seconds:g}s minimum warmup/leg "
+          f"({2 * args.rounds * args.samples_per_leg} measured samples/backend/case).", flush=True)
+    legs = metadata["legs"]
+    try:
+        for backend in BACKENDS:
+            metadata["builds"][backend] = build(backend, directory, args.architecture)
+            write_json(directory / "run.json", metadata)
+        if args.verifier:
+            metadata["status"] = "generating-corpus"
+            write_json(directory / "run.json", metadata)
+            metadata["verifier_fixtures"] = generate_corpus(
+                metadata["builds"]["native"]["binary"], directory, args)
+            metadata["corpus_selection"] = "start at (sequence + index) % corpus_proofs; batch entries are consecutive and wrap; index restarts after warmup"
+            write_json(directory / "run.json", metadata)
+        metadata["status"] = "measuring"
+        metadata["before"] = telemetry()
+        for leg in schedule(args.rounds, args.batch_sizes):
+            stem = f"r{leg['round']:03}-a{leg['actions']}-b{leg['batch_size']}-{leg['position']}-{leg['backend']}"
+            label = "settling" if leg["settling"] else f"round {leg['round']}/{args.rounds}"
+            print(f"{label}: {leg['actions']} Action(s), {leg['batch_size']} proof(s), "
+                  f"{leg['backend']}, leg {leg['position'] + 1}/4", flush=True)
+            leg["started"] = now()
+            leg["telemetry_before"] = telemetry()
+            command = [metadata["builds"][leg["backend"]]["binary"], mode, str(leg["actions"]),
+                       str(leg["batch_size"]),
+                       str(args.samples_per_leg), str(args.warmup_seconds), str(leg["sequence"]),
+                       str(args.workers) if args.workers is not None else "default"]
+            if args.verifier:
+                corpus = metadata["verifier_fixtures"]["corpora"][str(leg["actions"])]
+                command.append(corpus["path"])
+                leg.update(corpus_blake2b=corpus["blake2b"], corpus_proofs=corpus["proofs"])
+            leg["command"] = command
+            metadata["active_leg"] = leg
+            write_json(directory / "run.json", metadata)
+            output = directory / (stem + ".jsonl")
+            with output.open("w") as out, (directory / (stem + ".stderr")).open("w") as err:
+                run_process(command, out, err)
+            leg.update(parse_leg(output, leg, args))
+            leg["finished"] = now()
+            leg["telemetry_after"] = telemetry()
+            legs.append(leg)
+            metadata.pop("active_leg")
+            write_json(directory / "run.json", metadata)
+        summary = summarize(legs, args)
+        write_json(directory / "summary.json", summary)
+        rendered = format_summary(summary)
+        (directory / "summary.txt").write_text(rendered + "\n")
+        with (directory / "samples.csv").open("w", newline="") as output:
+            writer = csv.writer(output)
+            writer.writerow(["mode", "round", "settling", "actions", "batch_size", "position", "backend", "workers", "sequence", "sample", "ns"])
+            for leg in legs:
+                for index, ns in enumerate(leg["ns"]):
+                    writer.writerow([mode] + [leg[key] for key in ("round", "settling", "actions", "batch_size", "position", "backend", "workers", "sequence")] + [index, ns])
+        metadata["status"] = "complete"
+        print("\n" + rendered, flush=True)
+        return 0
+    except KeyboardInterrupt:
+        metadata["status"] = "interrupted"
+        print("\nInterrupted; completed legs and partial worker logs are preserved.", file=sys.stderr)
+        return 130
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+        metadata["status"] = "failed"
+        metadata["error"] = str(error)
+        print(f"Benchmark failed: {error}\nInspect logs in {directory}", file=sys.stderr)
+        return 1
+    finally:
+        metadata["finished"] = now()
+        write_json(directory / "run.json", metadata)
+        print(f"Saved results: {directory}", flush=True)
+
+
+if __name__ == "__main__":
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupted)
+    sys.exit(main())

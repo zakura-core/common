@@ -3446,6 +3446,7 @@ dependencies = [
  "rand_chacha 0.10.0",
  "rayon",
  "serde",
+ "serde_json",
  "shardtree",
  "subtle",
  "tracing",

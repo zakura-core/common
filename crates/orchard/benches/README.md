@@ -88,6 +88,190 @@ RAYON_NUM_THREADS=10 IRONWOOD_K11_PROVER_THREADS=10 \
     --bench ironwood_k11_prover
 ```
 
+## Native versus Sensei comparison
+
+The `sensei_compare` harness compares the two compiled Orchard backends:
+`backend-halo2` (reported as **native**) and `backend-sensei`. Choose exactly
+one of `--prover` or `--verifier`. From the workspace root, run:
+
+```console
+./scripts/sensei-bench --prover
+./scripts/sensei-bench --prover --asm
+./scripts/sensei-bench --prover --thorough
+./scripts/sensei-bench --prover --asm --thorough
+./scripts/sensei-bench --prover --workers 4
+./scripts/sensei-bench --verifier
+./scripts/sensei-bench --verifier --batch-sizes 2 16
+```
+
+The default is a quick comparison: two measured rounds, five samples per leg,
+and at least one second of warmup per process. In prover mode this collects
+twenty proofs per backend per Action count and typically takes about 30–45
+seconds after compilation on a fast multicore machine. Slower machines and
+unstable warmup take longer. Quick results are marked provisional; use
+`--thorough` for the longer sampling and drift checks described below.
+Explicit `--rounds`, `--samples-per-leg`, and `--warmup-seconds` values
+override either preset.
+
+### Builds and arithmetic parity
+
+The Python 3.10+ driver builds the same `sensei_compare` Rust benchmark twice
+in separate target directories: the native build uses Cargo defaults
+(`backend-halo2`) plus `sensei-bench`, `test-dependencies`, and `portable`;
+the Sensei build disables defaults and selects
+`backend-sensei,circuit,multicore,std,zip32-addresses,test-dependencies,sensei-bench`
+plus `portable`. Compilation finishes before any timing. Each binary links
+only its own backend's cryptographic stack — the native build contains no
+Sensei or Udon code, and the Sensei build contains no Pasta, Halo2, legacy
+facade, or Sinsemilla code — and the driver rejects a build plan containing
+the other backend's crates.
+
+By default, both builds disable **all handwritten Pasta and Udon assembly on
+every platform**, including AArch64 field arithmetic that target-specific
+dependencies otherwise force on, and the x86-64 assembly both crates select
+from the compiler's target features. Orchard's `portable` feature reaches
+Pasta through the legacy facade and Udon through Sensei. The driver checks
+Cargo's resolved features and the Pasta and Udon build-script configuration,
+which records the backend each build actually selected, and rejects any
+assembly-enabled build.
+
+`--asm` enables the host architecture's handwritten assembly in **both**
+backends: Orchard's `aarch64-asm` or `x86_64-asm` feature forwards to Pasta
+for the native Halo2 prover and to Udon for Sensei's arithmetic. The host
+must be AArch64, or x86-64 with the BMI2 and ADX extensions the assembly
+requires; the driver refuses other hosts before building. It rejects a build
+unless the selected Pasta assembly is active in every Pasta build (native) and
+Sensei's runtime Udon dependency both enables its assembly feature and reports
+the matching backend (Sensei). It also rejects an unexpected `portable`
+override. Build metadata and the summary identify the selected mode and
+architecture. `--asm` works with the quick default, `--thorough`, and all
+budget/worker overrides.
+
+Compiler optimizations remain enabled in both modes; Sensei retains its
+default `sqrt-table-large` arithmetic feature. The benchmark-only
+`sensei-bench` feature exposes the proof-only `circuit::ProofBatch` adapter
+and Sensei's unstable worker controls; it does not select a backend.
+
+Without `--workers`, each backend chooses its usual worker count, preserving
+inherited settings such as `RAYON_NUM_THREADS`. Sensei normally chooses its
+own private pool size and does not use that environment variable.
+`--workers N` configures both backends to exactly N workers; unavailable or
+mismatched counts fail the run. The report shows actual counts. Native
+proving runs on the calling thread, preserving its usual
+preprocessing/scheduling behavior. In verifier mode the worker initializes
+only Sensei's verifier runtime, never its prover state.
+
+### Prover mode
+
+The workloads are an unpadded one-Action payment and a two-Action payment with
+**two real spends**, recipient and change outputs. Each sample times
+`bundle.authorization().create_proof(...)` with precomputed instances. Bundle,
+witness, instance, key, and RNG preparation are outside the timer; Sensei's
+Orchard-to-Sensei translation, request validation, and interface overhead are
+inside it. Backend work derived from those inputs remains timed. Logging and
+proof destruction are excluded. This harness performs no proof verification or
+correctness preflight; correctness is covered by the test suites.
+
+Each leg starts a fresh process, builds and prepares the key
+(`ProvingKey::build` plus `prepare_proving()`, both untimed), and warms the
+exact workload for at least ten proofs and one second of proving (five seconds
+with `--thorough`). The last two five-proof windows must have medians within
+5%. Warming continues for up to 30 seconds (or the requested minimum, if
+longer); unresolved instability makes the result provisional. Both backends
+receive matched deterministic seed sequences, with distinct domains for warmup
+and measurement. Because every leg is a fresh process, Sensei's process-global
+warm state and Halo2's per-key caches are both rebuilt inside the untimed
+preparation and warmup, never inside a measured sample.
+
+One settling round covering both workloads is discarded. Measured rounds
+alternate ABBA and BAAB, where A is native and B is Sensei, and reverse
+workload order each round. With `--thorough`, ten measured rounds each collect
+twenty individually timed proofs in each of the four legs: **400 proofs per
+backend per Action count**, 1,600 measured proofs total. This mode takes
+several minutes after compilation, including at least 440 seconds of
+per-process warmup; the quick default requires at least 24 seconds of warmup.
+The driver performs no concurrent builds or proving legs. Keep other machine
+activity representative of the environment you want to measure.
+
+### Verifier mode
+
+`--verifier` compares individual proofs and batches of **2, 16, and 64
+distinct proofs**, each with either one Action or two real spends.
+`--batch-sizes` replaces the batch sizes; passing it with no sizes measures
+only individual proofs. Reported batch times are for the **whole batch**, not
+per proof.
+
+Before measurement, the native binary creates and verifies a shared corpus for
+each Action count. Its size is the maximum of ten, the samples per leg, and
+the largest batch. These proofs use the same deterministic payment instances
+with distinct proving randomness, and the two backends produce byte-identical
+proofs for identical inputs, so the Sensei legs verify the identical native
+bytes. Corpus files and their BLAKE2b-256 hashes are retained in the run
+directory; every worker reports the corpus hash and count, which the driver
+checks. Paired legs use the same corpus entries in the same order, cycling
+through them across samples. Every proof in a batch is distinct.
+
+Each worker loads the corpus, reconstructs the public instances, builds its
+verifying key, calls `prepare_batch_validation()` (a no-op for Halo2 without
+`orbits`, matching production defaults), and verifies every corpus proof
+before warming the workload. Individual samples time `Proof::verify`,
+including instance translation, request validation, and backend verification.
+Batch samples time `ProofBatch` construction, proof/instance copies and
+queueing, translation, random weights, verification, and destruction of the
+consumed batch. Corpus generation/loading, key preparation, and benchmark RNG
+initialization are outside both timers. Sensei batch RNG seeds are
+deterministic and independent of the corpus seeds; native Halo2 continues to
+obtain its batch randomness internally. This measures proof verification
+only; RedPallas signature checks are excluded, because the two backends ship
+different RedPallas implementations.
+
+Each Action count and batch size gets the full sampling budget. Defaults
+therefore run eight cases and 96 fresh processes, with at least 96 seconds of
+warmup plus setup. `--thorough` runs 352 processes and at least 1,760 seconds
+of warmup, plus setup and samples. A quick verifier smoke run with smaller
+batches is:
+
+```console
+./scripts/sensei-bench --verifier --batch-sizes 2 --rounds 2 \
+    --samples-per-leg 2 --warmup-seconds 0 --workers 1
+```
+
+### Interpreting the report
+
+The table reports observed warm minimum and pooled median milliseconds, with
+round-bootstrap 95% confidence intervals for medians. Percentage time savings
+are `100 × (native − Sensei) / native`: a drop from 100 ms to 75 ms is **25%
+less time**, while 125 ms is **25% more time**. These are latency percentages,
+not throughput multipliers. A separate paired comparison takes the median of
+each round's percentage savings, with 10,000 deterministic bootstrap resamples
+of complete paired rounds. This preserves within-round correlation. An
+interval spanning zero is inconclusive. Intervals reflect this run's sampled
+rounds; they cannot rule out systematic workload bias or all forms of machine
+noise.
+
+No outliers are trimmed. The minimum is the **observed** minimum, not a proven
+lower bound; its range across rounds shows repeatability. A run is provisional
+if warmup remains unstable, the first versus last three rounds drift by over
+5%, a median confidence bound is over 5% from its estimate, or worker counts
+change. Quick results, budgets below the thorough preset, and odd round counts
+are provisional.
+
+`--warmup-seconds 0` still requires ten calls and the stability check. Use
+`--help` for all options. Each run creates a unique directory under
+`target/sensei-bench/` (or the `--output` parent) containing preserved
+binaries and SHA-256 hashes, compiler logs, JSONL leg output, `samples.csv`,
+`summary.txt`, `summary.json`, and checkpointed `run.json`. Metadata records
+the revision and dirty state, compiler, build commands, resolved arithmetic
+features and cfgs, relevant environment, seeds, workers, timestamps, and
+available load/power/thermal observations. Telemetry is best effort and does
+not require privileges. Interruptions preserve completed legs and partial
+worker logs; proving errors or incomplete output fail the run.
+
+The seed domains, workloads, timed boundaries, and statistics are fixed
+properties of the harness, so pooled per-backend medians from runs of the two
+revisions on the same host are directly comparable under the
+[comparison protocol](#comparison-protocol).
+
 ## Proving-key generation
 
 The proving-key benchmark uses the post-NU6.3 circuit shared by the Orchard
