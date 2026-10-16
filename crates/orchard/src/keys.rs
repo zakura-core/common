@@ -1,13 +1,11 @@
 //! Key structures for Orchard.
 
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use alloc::vec::Vec;
 use corez::io::{self, Read, Write};
 
-use crate::backend::group::{
-    Curve, CurveAffine as _, GroupEncoding,
-    ff::{Field, PrimeField},
-};
-use crate::backend::pasta_curves::pallas;
+use crate::backend::pallas;
 use ::zip32::{AccountId, ChildIndex};
 #[cfg(feature = "zip32-addresses")]
 use aes::Aes256;
@@ -82,7 +80,9 @@ impl SpendingKey {
         let internal_ivk = KeyAgreementPrivateKey::derive_inner(&fvk.derive_internal());
         CtOption::new(
             sk,
-            !(ask.is_zero() | external_ivk.is_none() | internal_ivk.is_none()),
+            !(subtle::Choice::from(crate::backend::scalar_is_zero(&ask) as u8)
+                | external_ivk.is_none()
+                | internal_ivk.is_none()),
         )
     }
 
@@ -141,7 +141,7 @@ impl From<&SpendingKey> for SpendAuthorizingKey {
     fn from(sk: &SpendingKey) -> Self {
         let ask = Self::derive_inner(sk);
         // SpendingKey cannot be constructed such that this assertion would fail.
-        assert!(!bool::from(ask.is_zero()));
+        assert!(!crate::backend::scalar_is_zero(&ask));
         // TODO: Add TryFrom<S::Scalar> for SpendAuthorizingKey.
         let ret = SpendAuthorizingKey(ask.to_repr().try_into().unwrap());
         // If the last bit of repr_P(ak) is 1, negate ask.
@@ -169,12 +169,6 @@ impl From<&SpendAuthorizingKey> for SpendValidatingKey {
     }
 }
 
-impl From<&SpendValidatingKey> for pallas::Point {
-    fn from(spend_validating_key: &SpendValidatingKey) -> pallas::Point {
-        pallas::Point::from_bytes(&(&spend_validating_key.0).into()).unwrap()
-    }
-}
-
 impl PartialEq for SpendValidatingKey {
     fn eq(&self, other: &Self) -> bool {
         <[u8; 32]>::from(&self.0).eq(&<[u8; 32]>::from(&other.0))
@@ -184,6 +178,10 @@ impl PartialEq for SpendValidatingKey {
 impl Eq for SpendValidatingKey {}
 
 impl SpendValidatingKey {
+    pub(crate) fn to_point(&self) -> pallas::Point {
+        pallas::Point::from_bytes(&(&self.0).into()).unwrap()
+    }
+
     /// Randomizes this spend validating key with the given `randomizer`.
     pub fn randomize(
         &self,
@@ -255,7 +253,7 @@ impl NullifierDerivingKey {
 
     /// Converts this nullifier deriving key to its serialized form.
     pub(crate) fn to_bytes(self) -> [u8; 32] {
-        <[u8; 32]>::from(self.0)
+        self.0.to_repr()
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -583,7 +581,7 @@ impl KeyAgreementPrivateKey {
     ///
     /// [orchardkeycomponents]: https://zips.z.cash/protocol/protocol.pdf#orchardkeycomponents
     fn derive_inner(fvk: &FullViewingKey) -> CtOption<NonZeroPallasBase> {
-        let ak = extract_p(&pallas::Point::from_bytes(&(&fvk.ak.0).into()).unwrap());
+        let ak = extract_p(&fvk.ak.to_point());
         commit_ivk(&ak, &fvk.nk.0, &fvk.rivk.0)
             // sinsemilla::CommitDomain::short_commit returns a value in range
             // [0..q_P] ∪ {⊥}:
@@ -719,8 +717,7 @@ impl PreparedIncomingViewingKey {
         Self(PreparedNonZeroScalar::new(&ivk.0))
     }
 
-    /// The raw ivk scalar, for the GLV ladder in `pasta_curves::glv` (which
-    /// decomposes the scalar rather than consuming the prepared wNAF form).
+    /// The underlying IVK scalar for internal protocol checks.
     pub(crate) fn raw_scalar(&self) -> pallas::Scalar {
         self.0.raw_scalar()
     }
@@ -926,6 +923,8 @@ impl SharedSecret {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     use super::{DiversifierIndex, DiversifierKey, EphemeralSecretKey, SpendingKey};
@@ -979,7 +978,8 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::ff::PrimeField;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     #[cfg(feature = "zip32-addresses")]

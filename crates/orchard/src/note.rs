@@ -1,10 +1,10 @@
 //! Data structures used for note construction.
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use core::fmt;
 use memuse::DynamicUsage;
 
-use crate::backend::ff::PrimeField;
-use crate::backend::group::GroupEncoding;
-use crate::backend::pasta_curves::pallas;
+use crate::backend::pallas;
 use blake2b_simd::Params as Blake2bParams;
 use rand::Rng;
 use subtle::CtOption;
@@ -407,19 +407,10 @@ impl Note {
     /// [notes]: https://zips.z.cash/protocol/nu5.pdf#notes
     fn commitment_inner(&self) -> CtOption<NoteCommitment> {
         let g_d = self.recipient.g_d();
-        let g_d_bytes = g_d.to_bytes();
         let pk_d = self.recipient.pk_d().inner();
-        let pk_d_bytes = pk_d.to_bytes();
         let psi = self.psi();
 
-        NoteCommitment::derive(
-            g_d_bytes,
-            pk_d_bytes,
-            self.value,
-            self.rho.0,
-            psi,
-            self.rcm(),
-        )
+        NoteCommitment::derive(g_d, pk_d, self.value, self.rho.0, psi, self.rcm())
     }
 
     /// Derives the nullifier for this note.
@@ -454,6 +445,8 @@ impl fmt::Debug for TransmittedNoteCiphertext {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     use crate::{
@@ -518,8 +511,8 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::ff::PrimeField;
-    use crate::backend::group::GroupEncoding;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use crate::{
         keys::{FullViewingKey, Scope, SpendingKey},
         test_vectors::keys::TestVector,
@@ -560,8 +553,6 @@ mod tests {
 
         let g_d = addr.g_d();
         let pk_d = addr.pk_d().inner();
-        let g_d_bytes = g_d.to_bytes();
-        let pk_d_bytes = pk_d.to_bytes();
 
         let rcm_old = rseed.rcm_v2(&rho);
         let psi = rseed.psi(&rho);
@@ -572,12 +563,10 @@ mod tests {
         let rho_inner = rho.into_inner();
         let value = NoteValue::from_raw(tv.note_v);
 
-        let cmx_old =
-            NoteCommitment::derive(g_d_bytes, pk_d_bytes, value, rho_inner, psi, rcm_old).unwrap();
+        let cmx_old = NoteCommitment::derive(g_d, pk_d, value, rho_inner, psi, rcm_old).unwrap();
         let cmx_old_bytes = ExtractedNoteCommitment::from(cmx_old).to_bytes();
 
-        let cmx_qr =
-            NoteCommitment::derive(g_d_bytes, pk_d_bytes, value, rho_inner, psi, rcm_new).unwrap();
+        let cmx_qr = NoteCommitment::derive(g_d, pk_d, value, rho_inner, psi, rcm_new).unwrap();
         let cmx_qr_bytes = ExtractedNoteCommitment::from(cmx_qr).to_bytes();
 
         QrRcmDerivation {

@@ -1,8 +1,10 @@
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use core::fmt;
 
 use alloc::vec::Vec;
 
-use crate::backend::halo2_proofs::plonk;
+use crate::circuit::ProofError;
 use rand::{CryptoRng, Rng};
 
 use crate::{
@@ -126,7 +128,7 @@ impl super::Bundle {
                     .map_err(|e| match e {
                         CircuitError::RhoMismatch => ProverError::RhoMismatch,
                         CircuitError::UnsupportedVersion(_) => {
-                            ProverError::ProofFailed(plonk::Error::Synthesis)
+                            ProverError::ProofFailed(ProofError::InvalidInput)
                         }
                     })
             })
@@ -190,7 +192,7 @@ pub enum ProverError {
     /// The Prover role requires `witness` to be set.
     MissingWitness,
     /// An error occurred while creating the proof.
-    ProofFailed(plonk::Error),
+    ProofFailed(ProofError),
     /// The `rho` of the `output_note` is not equal to the nullifier of the spent note.
     RhoMismatch,
     /// An action has an identity `rk`, which is forbidden by the consensus
@@ -241,9 +243,7 @@ impl fmt::Display for ProverError {
                 write!(f, "`rcv` must be set for the Prover role")
             }
             ProverError::MissingWitness => write!(f, "`witness` must be set for the Prover role"),
-            ProverError::ProofFailed(
-                crate::backend::halo2_proofs::plonk::Error::InvalidInstances,
-            ) => {
+            ProverError::ProofFailed(crate::circuit::ProofError::InvalidInput) => {
                 write!(
                     f,
                     "Failed to create proof: provided instances do not match the circuits",

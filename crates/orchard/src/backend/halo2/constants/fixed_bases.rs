@@ -1,23 +1,23 @@
 //! Orchard fixed bases.
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 use alloc::vec::Vec;
 
 use super::{L_ORCHARD_SCALAR, L_VALUE};
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 use crate::backend::halo2_gadgets::ecc::{
     FixedPoints,
     chip::{BaseFieldElem, FixedPoint, FullScalar, ShortScalar},
 };
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 use crate::backend::pasta_curves::pallas;
 
 /// Precomputed table for the `CommitIvk` commitment randomness base.
 #[path = "fixed_bases/commit_ivk_r.rs"]
 pub mod commit_ivk_r;
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 #[path = "fixed_bases/lagrange_coeffs.rs"]
 mod lagrange_coeffs;
 /// Precomputed table for the `NoteCommit` commitment randomness base.
@@ -146,14 +146,14 @@ pub struct NullifierK;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ValueCommitV;
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 impl FixedPoints<pallas::Affine> for OrchardFixedBases {
     type FullScalar = OrchardFixedBasesFull;
     type Base = OrchardBaseFieldBases;
     type ShortScalar = OrchardShortScalarBases;
 }
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 impl FixedPoint<pallas::Affine> for OrchardFixedBasesFull {
     type FixedScalarKind = FullScalar;
 
@@ -194,7 +194,7 @@ impl FixedPoint<pallas::Affine> for OrchardFixedBasesFull {
     }
 }
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 impl FixedPoint<pallas::Affine> for OrchardBaseFieldBases {
     type FixedScalarKind = BaseFieldElem;
 
@@ -231,7 +231,7 @@ impl FixedPoint<pallas::Affine> for OrchardBaseFieldBases {
     }
 }
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 impl FixedPoint<pallas::Affine> for OrchardShortScalarBases {
     type FixedScalarKind = ShortScalar;
 
@@ -264,7 +264,11 @@ impl FixedPoint<pallas::Affine> for OrchardShortScalarBases {
     }
 }
 
-#[cfg(all(test, feature = "circuit"))]
+#[cfg(all(
+    test,
+    feature = "test-dependencies",
+    any(feature = "prover", feature = "verifier")
+))]
 mod tests {
     use super::*;
     use crate::backend::halo2_gadgets::ecc::chip::{

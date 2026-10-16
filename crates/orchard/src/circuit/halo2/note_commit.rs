@@ -30,10 +30,7 @@ use crate::backend::halo2_gadgets::{
         lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
     },
 };
-use crate::{
-    constants::{OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains, T_P},
-    value::NoteValue,
-};
+use crate::constants::{OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains, T_P};
 
 type NoteCommitPiece = MessagePiece<
     pallas::Affine,
@@ -278,7 +275,7 @@ impl DecomposeD {
         chip: SinsemillaChip<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases>,
         layouter: &mut impl Layouter<pallas::Base>,
         pk_d: &NonIdentityEccPoint,
-        value: &AssignedCell<NoteValue, pallas::Base>,
+        value: &AssignedCell<pallas::Base, pallas::Base>,
     ) -> Result<
         (
             NoteCommitPiece,
@@ -288,7 +285,7 @@ impl DecomposeD {
         ),
         Error,
     > {
-        let value_val = value.value().map(|v| pallas::Base::from(v.inner()));
+        let value_val = value.value().copied();
 
         // d_0, d_1 will be boolean-constrained in the gate.
         let d_0 = RangeConstrained::bitrange_of(pk_d.x().value(), 254..255);
@@ -399,7 +396,7 @@ impl DecomposeE {
         lookup_config: &LookupRangeCheckConfig<pallas::Base, 10>,
         chip: SinsemillaChip<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases>,
         layouter: &mut impl Layouter<pallas::Base>,
-        value: &AssignedCell<NoteValue, pallas::Base>,
+        value: &AssignedCell<pallas::Base, pallas::Base>,
         rho: &AssignedCell<pallas::Base, pallas::Base>,
     ) -> Result<
         (
@@ -409,7 +406,7 @@ impl DecomposeE {
         ),
         Error,
     > {
-        let value_val = value.value().map(|v| pallas::Base::from(v.inner()));
+        let value_val = value.value().copied();
 
         // Constrain e_0 to be 6 bits.
         let e_0 = RangeConstrained::witness_short(
@@ -994,7 +991,7 @@ impl ValueCanonicity {
     fn assign(
         &self,
         layouter: &mut impl Layouter<pallas::Base>,
-        value: AssignedCell<NoteValue, pallas::Base>,
+        value: AssignedCell<pallas::Base, pallas::Base>,
         d_2: RangeConstrained<pallas::Base, AssignedCell<pallas::Base, pallas::Base>>,
         z1_d: AssignedCell<pallas::Base, pallas::Base>,
         e_0: RangeConstrained<pallas::Base, AssignedCell<pallas::Base, pallas::Base>>,
@@ -1593,7 +1590,7 @@ pub(in crate::circuit) mod gadgets {
         note_commit_chip: NoteCommitChip,
         g_d: &NonIdentityEccPoint,
         pk_d: &NonIdentityEccPoint,
-        value: AssignedCell<NoteValue, pallas::Base>,
+        value: AssignedCell<pallas::Base, pallas::Base>,
         rho: AssignedCell<pallas::Base, pallas::Base>,
         psi: AssignedCell<pallas::Base, pallas::Base>,
         rcm: ScalarFixed<pallas::Affine, EccChip<OrchardFixedBases>>,
@@ -2223,7 +2220,7 @@ mod tests {
                     assign_free_advice(
                         layouter.namespace(|| "witness value"),
                         note_commit_config.advices[0],
-                        Value::known(value),
+                        Value::known(pallas::Base::from(value.inner())),
                     )?
                 };
 

@@ -26,8 +26,6 @@ use crate::constants::{
 
 #[path = "gadget/add_chip.rs"]
 pub(in crate::circuit) mod add_chip;
-/// Addition chip for constraining `a + b = c` in-circuit.
-
 impl super::Config {
     pub(super) fn add_chip(&self) -> add_chip::AddChip {
         add_chip::AddChip::construct(self.add_config.clone())

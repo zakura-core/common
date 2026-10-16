@@ -1,5 +1,7 @@
 //! PCZT support for Orchard.
 
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -31,9 +33,9 @@ pub use io_finalizer::IoFinalizerError;
 mod updater;
 pub use updater::{ActionUpdater, Updater, UpdaterError};
 
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 mod prover;
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 pub use prover::ProverError;
 
 mod signer;
@@ -381,10 +383,11 @@ impl Zip32Derivation {
     }
 }
 
-#[cfg(all(test, feature = "circuit"))]
+#[cfg(all(test, feature = "prover"))]
 mod tests {
-    use crate::backend::ff::{Field, PrimeField};
-    use crate::backend::pasta_curves::pallas;
+    use crate::backend::pallas;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use crate::rng_compat::OsRng;
     use incrementalmerkletree::{Marking, Retention};
     use shardtree::{ShardTree, store::memory::MemoryShardStore};
@@ -604,6 +607,7 @@ mod tests {
         bundle.apply_binding_signature(sighash, rng).unwrap();
     }
 
+    #[cfg(feature = "verifier")]
     #[test]
     fn create_proof_uses_current_circuit_version() {
         let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
@@ -625,6 +629,7 @@ mod tests {
         assert!(bundle.verify_proof(vk).is_ok());
     }
 
+    #[cfg(feature = "verifier")]
     #[test]
     fn qr_output_version_checks_note_commitment() {
         let mut rng = OsRng;
@@ -673,14 +678,17 @@ mod tests {
             action.output.verify_note_commitment(&action.spend),
             Err(VerifyError::InvalidExtractedNoteCommitment)
         ));
-        pczt_bundle.create_proof(pk, rng).unwrap();
-        let bundle = pczt_bundle
-            .extract::<i64>()
-            .unwrap()
-            .unwrap()
-            .apply_binding_signature(sighash, rng)
-            .unwrap();
-        assert!(bundle.verify_proof(vk).is_err());
+
+        {
+            pczt_bundle.create_proof(pk, rng).unwrap();
+            let bundle = pczt_bundle
+                .extract::<i64>()
+                .unwrap()
+                .unwrap()
+                .apply_binding_signature(sighash, rng)
+                .unwrap();
+            assert!(bundle.verify_proof(vk).is_err());
+        }
     }
 
     #[test]
@@ -1380,6 +1388,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "verifier")]
     #[test]
     fn create_proof_enforces_cross_address_restriction() {
         let rng = OsRng;

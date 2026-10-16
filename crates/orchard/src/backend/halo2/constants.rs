@@ -6,9 +6,9 @@ pub mod sinsemilla;
 #[path = "constants/util.rs"]
 pub mod util;
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 pub use self::sinsemilla::{OrchardCommitDomains, OrchardHashDomains};
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 pub use fixed_bases::{NullifierK, OrchardFixedBases, OrchardFixedBasesFull, ValueCommitV};
 
 /// $\mathsf{MerkleDepth^{Orchard}}$
@@ -66,6 +66,6 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "circuit"))]
+#[cfg(all(test, feature = "prover", feature = "test-dependencies"))]
 #[path = "constants/generate_lagrange_coeffs.rs"]
 mod generate_lagrange_coeffs;

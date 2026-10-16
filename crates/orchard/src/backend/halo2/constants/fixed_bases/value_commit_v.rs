@@ -783,7 +783,7 @@ pub fn generator() -> pallas::Affine {
     .unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-dependencies"))]
 mod tests {
     use super::super::{NUM_WINDOWS_SHORT, VALUE_COMMITMENT_PERSONALIZATION};
     use super::*;

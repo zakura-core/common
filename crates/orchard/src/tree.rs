@@ -49,12 +49,6 @@ pub(crate) fn empty_roots() -> &'static [MerkleHashOrchard] {
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
 pub struct Anchor(pallas::Base);
 
-impl From<pallas::Base> for Anchor {
-    fn from(anchor_field: pallas::Base) -> Anchor {
-        Anchor(anchor_field)
-    }
-}
-
 impl From<MerkleHashOrchard> for Anchor {
     fn from(anchor: MerkleHashOrchard) -> Anchor {
         Anchor(anchor.0)
@@ -62,6 +56,9 @@ impl From<MerkleHashOrchard> for Anchor {
 }
 
 impl Anchor {
+    pub(crate) fn from_field(field: pallas::Base) -> Self {
+        Self(field)
+    }
     /// The anchor of the empty Orchard note commitment tree.
     ///
     /// This anchor does not correspond to any valid anchor for a spend, so it

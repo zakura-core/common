@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use subtle::CtOption;
 
 use crate::{
@@ -81,6 +83,8 @@ impl Address {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     use crate::keys::{

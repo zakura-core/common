@@ -6,16 +6,20 @@ use alloc::vec::Vec;
 use std::sync::{Arc, Mutex, mpsc};
 
 use crate::backend::group::{Curve, GroupEncoding};
+#[cfg(feature = "prover")]
+use crate::backend::halo2_proofs::transcript::Blake2bWrite;
 use crate::backend::halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value, floor_planner},
     plonk::{
         self, Advice, BatchVerifier, Column, Constraints, Expression, Fixed,
-        Instance as InstanceColumn, Selector, SingleVerifier,
+        Instance as InstanceColumn, Selector,
     },
     poly::{Rotation, commitment::Params},
-    transcript::{Blake2bRead, Blake2bWrite},
 };
+#[cfg(any(feature = "verifier", feature = "verifier-fingerprint"))]
+use crate::backend::halo2_proofs::{plonk::SingleVerifier, transcript::Blake2bRead};
 use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas, vesta};
+#[cfg(feature = "prover")]
 use rand::Rng;
 
 use self::{
@@ -46,7 +50,6 @@ use crate::backend::halo2_gadgets::{
 };
 use crate::{
     builder::SpendInfo,
-    bundle::Flags,
     constants::{
         MERKLE_DEPTH_ORCHARD, OrchardCommitDomains, OrchardFixedBases, OrchardFixedBasesFull,
         OrchardHashDomains,
@@ -55,20 +58,18 @@ use crate::{
         CommitIvkRandomness, DiversifiedTransmissionKey, NullifierDerivingKey, SpendValidatingKey,
     },
     note::{
-        ExtractedNoteCommitment, Note, Rho,
+        Note, Rho,
         commitment::{NoteCommitTrapdoor, NoteCommitment},
-        nullifier::Nullifier,
     },
-    primitives::redpallas::{SpendAuth, VerificationKey},
     spec::NonIdentityPallasPoint,
-    tree::{Anchor, MerkleHashOrchard},
-    value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
+    tree::MerkleHashOrchard,
+    value::{NoteValue, ValueCommitTrapdoor},
 };
 
 #[path = "circuit/halo2/commit_ivk.rs"]
 mod commit_ivk;
 #[path = "circuit/halo2/gadget.rs"]
-pub mod gadget;
+mod gadget;
 #[path = "circuit/halo2/note_commit.rs"]
 mod note_commit;
 
@@ -110,7 +111,7 @@ const DISABLE_CROSS_ADDRESS: usize = 9;
 
 /// Configuration needed to use the Orchard Action circuit.
 #[derive(Clone, Debug)]
-pub struct Config {
+pub(crate) struct Config {
     primary: Column<InstanceColumn>,
     constant: Column<Fixed>,
     q_orchard: Selector,
@@ -132,13 +133,13 @@ pub struct Config {
 /// Selects which version of the Orchard Action circuit to build.
 ///
 /// [`FixedPostNu6_2`] and [`InsecurePreNu6_2`] produce different verifying keys: the fixed
-/// circuit anchors the variable-base scalar-multiplication base (see `halo2_gadgets`), while
+/// circuit anchors the variable-base scalar-multiplication base, while
 /// the pre-NU6.2 one does not. [`PostNu6_3`] extends the fixed circuit by enforcing the
 /// same-address check, i.e. `(g_d^old, pk_d^old) = (g_d^new, pk_d^new)`, when the
 /// boolean `disableCrossAddress` public input is set.
 ///
-/// This is a runtime value rather than a type parameter: it is carried in [`Circuit`] and
-/// chosen when building a [`ProvingKey`] or [`VerifyingKey`], so the circuit version can be
+/// This is a runtime value rather than a type parameter, chosen when building a
+/// `ProvingKey` or [`VerifyingKey`], so the circuit version can be
 /// threaded dynamically (e.g. across an FFI boundary).
 ///
 /// Historical versions are retained for verifying the block chain from NU5 activation.
@@ -191,16 +192,6 @@ impl OrchardCircuitVersion {
             OrchardCircuitVersion::PostNu6_3 => true,
         }
     }
-
-    /// The corresponding `halo2_gadgets` variable-base scalar-mul circuit version.
-    fn halo2_version(self) -> CircuitVersion {
-        match self {
-            OrchardCircuitVersion::InsecurePreNu6_2 => CircuitVersion::InsecureUnanchoredBase,
-            OrchardCircuitVersion::FixedPostNu6_2 | OrchardCircuitVersion::PostNu6_3 => {
-                CircuitVersion::AnchoredBase
-            }
-        }
-    }
 }
 
 /// A historical circuit version for which proving is no longer supported.
@@ -220,7 +211,7 @@ impl core::fmt::Display for UnsupportedCircuitVersion {
     }
 }
 
-impl std::error::Error for UnsupportedCircuitVersion {}
+impl core::error::Error for UnsupportedCircuitVersion {}
 
 /// An error constructing an Orchard Action witness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,11 +234,71 @@ impl core::fmt::Display for CircuitError {
     }
 }
 
-impl std::error::Error for CircuitError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for CircuitError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::UnsupportedVersion(e) => Some(e),
             Self::RhoMismatch => None,
+        }
+    }
+}
+
+use core::fmt;
+
+/// An error returned while preparing, creating, or verifying an Orchard proof.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ProofError {
+    /// The request has an unsupported shape or contains an invalid encoding.
+    InvalidInput,
+    /// The public statement does not agree with the private witness.
+    InvalidStatement,
+    /// The private witness does not satisfy the Ironwood Action circuit.
+    UnsatisfiedWitness,
+    /// The proof does not verify for the supplied statements.
+    InvalidProof,
+    /// The caller-supplied randomness source failed.
+    RngFailure,
+    /// A negligible random event requires retrying with fresh randomness.
+    RetryRandomness,
+    /// The selected backend encountered an unexpected internal failure.
+    InternalInvariant,
+}
+
+impl fmt::Display for ProofError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidInput => "invalid proof input",
+            Self::InvalidStatement => "public statement does not match the witness",
+            Self::UnsatisfiedWitness => "witness does not satisfy the fixed circuit",
+            Self::InvalidProof => "invalid proof",
+            Self::RngFailure => "randomness source failed",
+            Self::RetryRandomness => "fresh randomness is required",
+            Self::InternalInvariant => "internal proof invariant failed",
+        })
+    }
+}
+
+impl core::error::Error for ProofError {}
+
+impl ProofError {
+    fn from_backend(error: crate::backend::halo2_proofs::plonk::Error) -> Self {
+        use crate::backend::halo2_proofs::plonk::Error;
+        match error {
+            Error::InvalidInstances => Self::InvalidInput,
+            Error::Synthesis => Self::UnsatisfiedWitness,
+            _ => Self::InvalidProof,
+        }
+    }
+}
+
+impl OrchardCircuitVersion {
+    fn halo2_version(self) -> CircuitVersion {
+        match self {
+            OrchardCircuitVersion::InsecurePreNu6_2 => CircuitVersion::InsecureUnanchoredBase,
+            OrchardCircuitVersion::FixedPostNu6_2 | OrchardCircuitVersion::PostNu6_3 => {
+                CircuitVersion::AnchoredBase
+            }
         }
     }
 }
@@ -257,7 +308,7 @@ impl std::error::Error for CircuitError {
 /// Witness construction supports only the current circuit version. Empty historical
 /// circuits remain available for verifying key construction and layout inspection.
 #[derive(Clone, Debug)]
-pub struct Circuit {
+pub(crate) struct Circuit {
     pub(crate) path: Value<[MerkleHashOrchard; MERKLE_DEPTH_ORCHARD]>,
     pub(crate) pos: Value<u32>,
     pub(crate) g_d_old: Value<NonIdentityPallasPoint>,
@@ -401,7 +452,7 @@ impl Circuit {
     ///
     /// [`SpendInfo`]: crate::builder::SpendInfo
     /// [`Builder`]: crate::builder::Builder
-    pub fn from_action_context(
+    pub(crate) fn from_action_context(
         spend: SpendInfo,
         output_note: Note,
         alpha: crate::primitives::redpallas::SpendAuthRandomizer,
@@ -740,7 +791,7 @@ impl Circuit {
             )?;
 
             // Witness ak_P.
-            let ak_P: Value<pallas::Point> = self.ak.as_ref().map(|ak| ak.into());
+            let ak_P: Value<pallas::Point> = self.ak.as_ref().map(|ak| ak.to_point());
             let ak_P = NonIdentityPoint::new(
                 ecc_chip.clone(),
                 layouter.namespace(|| "witness ak_P"),
@@ -758,14 +809,14 @@ impl Circuit {
             let v_old = assign_free_advice(
                 layouter.namespace(|| "witness v_old"),
                 config.advices[0],
-                self.v_old,
+                self.v_old.map(|v| pallas::Base::from(v.inner())),
             )?;
 
             // Witness v_new.
             let v_new = assign_free_advice(
                 layouter.namespace(|| "witness v_new"),
                 config.advices[0],
-                self.v_new,
+                self.v_new.map(|v| pallas::Base::from(v.inner())),
             )?;
 
             (psi_old, rho_old, cm_old, g_d_old, ak_P, nk, v_old, v_new)
@@ -1386,9 +1437,9 @@ impl VerifyingKey {
     }
 
     /// The pinned circuit description of this verifying key: the exact text the
-    /// `round_trip_*` tests compare against `src/circuit_data/circuit_description_*`.
+    /// `round_trip_*` tests compare against `src/../circuit_data/circuit_description_*`.
     /// Stable across platforms and releases for a given circuit version.
-    pub fn pinned_description(&self) -> alloc::string::String {
+    pub(crate) fn pinned_description(&self) -> alloc::string::String {
         format!("{:#?}\n", self.vk.pinned())
     }
 
@@ -1407,7 +1458,7 @@ impl VerifyingKey {
     /// [`plonk::Error::InvalidInstances`] before reading the transcript.
     #[cfg(feature = "verifier-fingerprint")]
     #[cfg_attr(docsrs, doc(cfg(feature = "verifier-fingerprint")))]
-    pub fn capture_verifier_fingerprint<T>(
+    pub(crate) fn capture_verifier_fingerprint<T>(
         &self,
         instances: &[Instance],
         transcript: &mut T,
@@ -1445,7 +1496,7 @@ impl VerifyingKey {
     }
 
     /// A 32-byte fingerprint of this verifying key: BLAKE2b-256 over
-    /// [`Self::pinned_description`], personalized with `Orchard-VkFprint`.
+    /// the canonical pinned key description, personalized with `Orchard-VkFprint`.
     ///
     /// Downstream consensus code can pin this constant and refuse to start (or to
     /// verify) if the key it built does not match, so that a circuit change is a
@@ -1484,6 +1535,7 @@ impl VerifyingKey {
     /// slows verification down, but the speedup materializes on narrow
     /// pools (single-proof verification, constrained validators), not on
     /// wide desktop pools.
+    #[cfg(feature = "verifier")]
     pub fn prepare_batch_validation(&self) -> bool {
         self.params.prepare_zero_checks()
     }
@@ -1577,6 +1629,13 @@ impl ProvingKey {
     }
 }
 
+use crate::{
+    Anchor,
+    bundle::Flags,
+    note::{ExtractedNoteCommitment, Nullifier},
+    primitives::redpallas::{SpendAuth, VerificationKey},
+    value::ValueCommitment,
+};
 /// Public inputs to the Orchard Action circuit.
 ///
 /// # Invariants
@@ -1597,18 +1656,18 @@ pub struct Instance {
 impl Instance {
     /// Constructs an [`Instance`] from its constituent parts.
     ///
-    /// This API can be used in combination with [`Proof::verify`] to build verification
+    /// This API can be used in combination with `Proof::verify` to build verification
     /// pipelines for many proofs, where you don't want to pass around the full bundle.
-    /// Use [`Bundle::verify_proof`] instead if you have the full bundle.
+    /// Use `Bundle::verify_proof` instead if you have the full bundle.
     ///
     /// The provided [`Flags`] are encoded into the spend/output enable public inputs and
     /// the `disableCrossAddress` public input, which is set to the negation of
     /// [`Flags::cross_address_enabled`]. If cross-address transfers are disabled,
     /// callers must use a proving or verifying key whose circuit version supports the
-    /// cross-address restriction; [`Proof::create`], [`Proof::verify`], and
-    /// [`crate::bundle::BatchValidator`] enforce this.
+    /// cross-address restriction. Bundle and PCZT proving, `Proof::verify`, and
+    /// `crate::bundle::BatchValidator` enforce this.
     ///
-    /// Returns `None` if `rk` is the identity [`crate::backend::pasta_curves::pallas::Point`].
+    /// Returns `None` if `rk` is the identity Pallas point.
     /// zcashd v6.12.1 and Zebra 4.3.1 both added a consensus rule rejecting
     /// transactions whose Orchard actions have an identity `rk`; the Zcash
     /// protocol specification will be updated to match, and this crate
@@ -1618,7 +1677,6 @@ impl Instance {
     /// - <https://zodl.com/zcashd-zebra-april-2026-disclosure/>
     /// - <https://zfnd.org/zebra-4-3-1-critical-security-fixes-dockerized-mining-and-ci-hardening/>
     ///
-    /// [`Bundle::verify_proof`]: crate::Bundle::verify_proof
     pub fn from_parts(
         anchor: Anchor,
         cv_net: ValueCommitment,
@@ -1678,7 +1736,9 @@ impl Instance {
     pub(crate) fn cross_address_disabled(&self) -> bool {
         self.cross_address_disabled
     }
+}
 
+impl Instance {
     fn to_halo2_instance(&self) -> [[vesta::Scalar; INSTANCE_ROWS]; INSTANCE_COLUMNS] {
         let mut instance = [vesta::Scalar::zero(); INSTANCE_ROWS];
 
@@ -1723,7 +1783,8 @@ impl Proof {
     ///
     /// All instances of a bundle carry the same `disableCrossAddress` value; that uniformity
     /// is the bundle layer's invariant, and is not checked here.
-    pub fn create(
+    #[cfg(feature = "prover")]
+    pub(crate) fn create_halo2(
         pk: &ProvingKey,
         circuits: &[Circuit],
         instances: &[Instance],
@@ -1758,7 +1819,8 @@ impl Proof {
         #[cfg(feature = "multicore")]
         {
             // Prefer Action-level synthesis parallelism for batches that fill
-            // the worker pool. A single Action has no higher-level work to use // instead, while smaller batches leave workers for Merkle
+            // the worker pool. A single Action has no higher-level work to use
+            // instead, while smaller batches leave workers for Merkle
             // preparation. Do not block on preparation from within the same
             // Rayon pool, where callers may already occupy its workers.
             let prepare_merkle = maybe_rayon::current_thread_index().is_none()
@@ -1808,7 +1870,8 @@ impl Proof {
     /// [`OrchardCircuitVersion::PostNu6_3`] verifying key.
     ///
     /// Also returns an error if proof verification fails.
-    pub fn verify(&self, vk: &VerifyingKey, instances: &[Instance]) -> Result<(), plonk::Error> {
+    #[cfg(feature = "verifier")]
+    fn verify_halo2(&self, vk: &VerifyingKey, instances: &[Instance]) -> Result<(), plonk::Error> {
         vk.check_instance_compatibility(instances)?;
 
         let instances: Vec<_> = instances.iter().map(|i| i.to_halo2_instance()).collect();
@@ -1874,11 +1937,16 @@ mod fixtures;
 #[path = "circuit/halo2/layout_dump.rs"]
 mod layout_dump;
 
-#[cfg(all(test, feature = "zip32-addresses"))]
+#[cfg(all(
+    test,
+    feature = "prover",
+    feature = "verifier",
+    feature = "zip32-addresses"
+))]
 #[path = "circuit/halo2/benchmark.rs"]
 mod benchmark;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prover", feature = "verifier"))]
 mod tests {
     use alloc::vec::Vec;
     use core::iter;
@@ -1886,6 +1954,7 @@ mod tests {
     use crate::backend::ff::Field;
     use crate::backend::halo2_proofs::{circuit::Value, dev::MockProver, poly::commitment::Params};
     use crate::backend::pasta_curves::{pallas, vesta};
+    #[cfg(feature = "prover")]
     use rand::Rng;
 
     use crate::rng_compat::OsRng;
@@ -2244,7 +2313,7 @@ mod tests {
             }
             assert!(matches!(
                 proof.verify(vk, &[instance]),
-                Err(super::plonk::Error::InvalidInstances)
+                Err(super::ProofError::InvalidInput)
             ));
         }
     }
@@ -2345,7 +2414,7 @@ mod tests {
     fn fixed_circuit_description_is_pinned() {
         pinned_circuit_description(
             OrchardCircuitVersion::FixedPostNu6_2,
-            "src/circuit_data/circuit_description_fixed",
+            "src/../circuit_data/circuit_description_fixed",
             include_str!("circuit_data/circuit_description_fixed"),
         );
     }
@@ -2385,7 +2454,7 @@ mod tests {
     fn round_trip_post_nu6_3() {
         let vk = pinned_circuit_description(
             OrchardCircuitVersion::PostNu6_3,
-            "src/circuit_data/circuit_description_post_nu6_3",
+            "src/../circuit_data/circuit_description_post_nu6_3",
             include_str!("circuit_data/circuit_description_post_nu6_3"),
         );
         round_trip_for_version(OrchardCircuitVersion::PostNu6_3, vk, 1);
@@ -2522,12 +2591,12 @@ mod tests {
             let instances = core::slice::from_ref(&instance);
             assert!(matches!(
                 Proof::create(&pk, core::slice::from_ref(&circuit), instances, OsRng),
-                Err(super::plonk::Error::Synthesis)
+                Err(super::ProofError::InvalidInput)
             ));
             let current = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
             assert!(matches!(
                 Proof::create(current, core::slice::from_ref(&circuit), instances, OsRng),
-                Err(super::plonk::Error::Synthesis)
+                Err(super::ProofError::InvalidInput)
             ));
             // These bypass the Orchard constructors and Proof::create on purpose.
             let raw = instance.to_halo2_instance();
@@ -2575,7 +2644,7 @@ mod tests {
         let pk = crate::cached_test_keys(version).proving_key();
         assert!(matches!(
             Proof::create(pk, &[circuit], &[], &mut rng),
-            Err(super::plonk::Error::InvalidInstances)
+            Err(super::ProofError::InvalidInput)
         ));
     }
 
@@ -2630,7 +2699,7 @@ mod tests {
     fn serialized_fixed_proof_test_case() {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::FixedPostNu6_2,
-            "src/circuit_data/circuit_proof_test_case_fixed.bin",
+            "src/../circuit_data/circuit_proof_test_case_fixed.bin",
             include_bytes!("circuit_data/circuit_proof_test_case_fixed.bin"),
             ProofFixtureEncoding::LegacyTwoFlags,
             4992,
@@ -2642,7 +2711,7 @@ mod tests {
     fn serialized_post_nu6_3_proof_test_case() {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::PostNu6_3,
-            "src/circuit_data/circuit_proof_test_case_post_nu6_3.bin",
+            "src/../circuit_data/circuit_proof_test_case_post_nu6_3.bin",
             include_bytes!("circuit_data/circuit_proof_test_case_post_nu6_3.bin"),
             ProofFixtureEncoding::PostNu6_3ThreeFlags,
             4992,
@@ -2654,7 +2723,7 @@ mod tests {
     fn serialized_post_nu6_3_restricted_proof_test_case() {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::PostNu6_3,
-            "src/circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin",
+            "src/../circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin",
             include_bytes!("circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin"),
             ProofFixtureEncoding::PostNu6_3ThreeFlags,
             4992,
@@ -2710,7 +2779,6 @@ mod tests {
 
         use super::super::Instance;
         use crate::{
-            bundle::Flags,
             note::{ExtractedNoteCommitment, Nullifier},
             primitives::redpallas::{self, SpendAuth},
             tree::Anchor,
@@ -2745,8 +2813,14 @@ mod tests {
         #[test]
         fn rejects_identity_rk() {
             let (anchor, cv_net, nf_old, cmx) = dummy_other_fields();
-            let result =
-                Instance::from_parts(anchor, cv_net, nf_old, identity_rk(), cmx, Flags::ENABLED);
+            let result = Instance::from_parts(
+                anchor,
+                cv_net,
+                nf_old,
+                identity_rk(),
+                cmx,
+                crate::bundle::Flags::ENABLED,
+            );
             assert!(result.is_none());
         }
 
@@ -2754,10 +2828,46 @@ mod tests {
         fn accepts_non_identity_rk() {
             let (anchor, cv_net, nf_old, cmx) = dummy_other_fields();
             let rk = non_identity_rk();
-            let instance =
-                Instance::from_parts(anchor, cv_net, nf_old, rk.clone(), cmx, Flags::ENABLED)
-                    .expect("non-identity rk must be accepted");
+            let instance = Instance::from_parts(
+                anchor,
+                cv_net,
+                nf_old,
+                rk.clone(),
+                cmx,
+                crate::bundle::Flags::ENABLED,
+            )
+            .expect("non-identity rk must be accepted");
             assert_eq!(instance.rk(), &rk);
         }
+    }
+}
+
+impl Proof {
+    #[cfg(feature = "prover")]
+    pub(crate) fn create(
+        pk: &ProvingKey,
+        circuits: &[Circuit],
+        instances: &[Instance],
+        rng: impl Rng,
+    ) -> Result<Self, ProofError> {
+        if !pk.circuit_version.supports_proving()
+            || circuits.is_empty()
+            || circuits.len() != instances.len()
+            || circuits
+                .iter()
+                .any(|c| c.circuit_version != pk.circuit_version)
+        {
+            return Err(ProofError::InvalidInput);
+        }
+        Self::create_halo2(pk, circuits, instances, rng).map_err(ProofError::from_backend)
+    }
+    /// Verifies a proof for the selected protocol version and ordered statements.
+    #[cfg(feature = "verifier")]
+    pub fn verify(&self, vk: &VerifyingKey, instances: &[Instance]) -> Result<(), ProofError> {
+        if instances.is_empty() {
+            return Err(ProofError::InvalidInput);
+        }
+        self.verify_halo2(vk, instances)
+            .map_err(ProofError::from_backend)
     }
 }

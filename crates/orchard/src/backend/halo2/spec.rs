@@ -10,7 +10,6 @@ use crate::backend::pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
     pallas,
 };
-use crate::backend::{poseidon, sinsemilla};
 #[cfg(feature = "std")]
 use memuse::DynamicUsage;
 use subtle::{ConditionallySelectable, CtOption};
@@ -221,7 +220,7 @@ pub(crate) fn commit_ivk(
 ) -> CtOption<pallas::Base> {
     // We rely on the API contract that to_le_bits() returns at least PrimeField::NUM_BITS
     // bits, which is equal to L_ORCHARD_BASE.
-    let domain = sinsemilla::CommitDomain::new(COMMIT_IVK_PERSONALIZATION);
+    let domain = crate::backend::sinsemilla::CommitDomain::new(COMMIT_IVK_PERSONALIZATION);
     domain.short_commit(
         iter::empty()
             .chain(ak.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE))
@@ -247,8 +246,14 @@ pub(crate) fn diversify_hash(d: &[u8; 11]) -> NonIdentityPallasPoint {
 ///
 /// [concreteprfs]: https://zips.z.cash/protocol/nu5.pdf#concreteprfs
 pub(crate) fn prf_nf(nk: pallas::Base, rho: pallas::Base) -> pallas::Base {
-    poseidon::Hash::<_, poseidon::P128Pow5T3, poseidon::ConstantLength<2>, 3, 2>::init()
-        .hash([nk, rho])
+    crate::backend::poseidon::Hash::<
+        _,
+        crate::backend::poseidon::P128Pow5T3,
+        crate::backend::poseidon::ConstantLength<2>,
+        3,
+        2,
+    >::init()
+    .hash([nk, rho])
 }
 
 /// Defined in [Zcash Protocol Spec § 5.4.5.5: Orchard Key Agreement][concreteorchardkeyagreement].
@@ -356,18 +361,24 @@ pub fn i2lebsp<const NUM_BITS: usize>(int: u64) -> [bool; NUM_BITS] {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_p_bottom, extract_p_bottom_batch, i2lebsp, lebs2ip};
+    #[cfg(feature = "test-dependencies")]
+    use super::{extract_p_bottom, extract_p_bottom_batch};
+    use super::{i2lebsp, lebs2ip};
 
+    #[cfg(feature = "test-dependencies")]
     use crate::backend::group::{CurveAffine as _, Group};
+    #[cfg(feature = "test-dependencies")]
     use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas};
     use rand::Rng;
 
-    use crate::backend::sinsemilla::{self, HashDomain};
+    #[cfg(feature = "test-dependencies")]
+    use crate::backend::sinsemilla::HashDomain;
     use crate::rng_compat::OsRng;
 
     #[test]
+    #[cfg(feature = "test-dependencies")]
     fn extract_p_bottom_batch_preserves_order_and_validity() {
-        let (x, y) = *sinsemilla::SINSEMILLA_S
+        let (x, y) = *crate::backend::sinsemilla::SINSEMILLA_S
             .first()
             .expect("Sinsemilla S table is nonempty");
         let exceptional_domain =
@@ -375,7 +386,7 @@ mod tests {
         let identity_domain = HashDomain::from_Q(pallas::Point::identity());
         let inputs = [
             exceptional_domain.hash_to_point(core::iter::empty()),
-            exceptional_domain.hash_to_point([false; sinsemilla::K].into_iter()),
+            exceptional_domain.hash_to_point([false; crate::backend::sinsemilla::K].into_iter()),
             identity_domain.hash_to_point(core::iter::empty()),
         ];
         assert!(bool::from(inputs[0].is_some()));
@@ -395,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "test-dependencies")]
     fn extract_p_bottom_batch_maps_valid_identity_to_zero() {
         let domain = HashDomain::from_Q(pallas::Point::identity());
         let actual: alloc::vec::Vec<_> =
@@ -406,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "circuit")]
+    #[cfg(any(feature = "prover", feature = "verifier"))]
     fn diversify_hash_substitution() {
         use crate::backend::group::Group;
         use crate::backend::halo2_proofs::arithmetic::CurveExt;

@@ -6,17 +6,15 @@
 //! commitment, in a way that keeps them unlinkable without the viewing key
 //! but uniquely tied to the note.
 
-use crate::backend::group::{Group, ff::PrimeField};
-use crate::backend::pasta_curves::{arithmetic::CurveExt, pallas};
+use crate::backend::pallas;
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use memuse::DynamicUsage;
 use rand::Rng;
 use subtle::{ConstantTimeEq, CtOption};
 
 use super::NoteCommitment;
-use crate::{
-    keys::NullifierDerivingKey,
-    spec::{extract_p, mod_r_p},
-};
+use crate::{keys::NullifierDerivingKey, spec::extract_p};
 
 /// A unique nullifier for a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,7 +73,9 @@ impl Nullifier {
     ) -> Self {
         let k = pallas::Point::hash_to_curve("z.cash:Orchard")(b"K");
 
-        Nullifier(extract_p(&(k * mod_r_p(nk.prf_nf(rho) + psi) + cm.0)))
+        Nullifier(extract_p(
+            &(k * crate::spec::mod_r_p(nk.prf_nf(rho) + psi) + cm.0),
+        ))
     }
 }
 
@@ -89,8 +89,9 @@ impl ConstantTimeEq for Nullifier {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
-    use crate::backend::group::{Group, ff::FromUniformBytes};
-    use crate::backend::pasta_curves::pallas;
+    use crate::backend::pallas;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::collection::vec;
     use proptest::prelude::*;
 

@@ -3689,7 +3689,7 @@ pub const U_SHORT: [[[u8; 32]; super::H]; super::NUM_WINDOWS_SHORT] = [
     ],
 ];
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-dependencies"))]
 mod tests {
     use super::super::{NUM_WINDOWS, NUM_WINDOWS_SHORT, ORCHARD_PERSONALIZATION};
     use super::*;

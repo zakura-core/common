@@ -2929,7 +2929,7 @@ pub fn generator() -> pallas::Affine {
     .unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-dependencies"))]
 mod tests {
     use super::super::{NOTE_COMMITMENT_PERSONALIZATION, NUM_WINDOWS};
     use super::*;

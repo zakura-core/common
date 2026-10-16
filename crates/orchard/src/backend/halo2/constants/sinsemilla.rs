@@ -1,7 +1,7 @@
 //! Sinsemilla generators
 use crate::spec::i2lebsp;
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 use {
     super::{OrchardFixedBases, OrchardFixedBasesFull},
     crate::backend::group::ff::PrimeField,
@@ -89,7 +89,7 @@ pub enum OrchardHashDomains {
     MerkleCrh,
 }
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 #[allow(non_snake_case)]
 impl HashDomains<pallas::Affine> for OrchardHashDomains {
     fn Q(&self) -> pallas::Affine {
@@ -122,7 +122,7 @@ pub enum OrchardCommitDomains {
     CommitIvk,
 }
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 impl CommitDomains<pallas::Affine, OrchardFixedBases, OrchardHashDomains> for OrchardCommitDomains {
     fn r(&self) -> OrchardFixedBasesFull {
         match self {
@@ -139,110 +139,6 @@ impl CommitDomains<pallas::Affine, OrchardFixedBases, OrchardHashDomains> for Or
     }
 }
 
-#[cfg(all(test, feature = "circuit"))]
-mod tests {
-    use super::*;
-    use crate::backend::group::{Curve, ff::PrimeField};
-    use crate::backend::halo2_gadgets::sinsemilla::primitives::{CommitDomain, HashDomain};
-    use crate::backend::halo2_proofs::arithmetic::CurveAffine;
-    use crate::backend::halo2_proofs::pasta::pallas;
-    use crate::constants::{
-        fixed_bases::{COMMIT_IVK_PERSONALIZATION, NOTE_COMMITMENT_PERSONALIZATION},
-        sinsemilla::MERKLE_CRH_PERSONALIZATION,
-    };
-    use rand::{self, RngExt};
-
-    use crate::rng_compat::OsRng;
-
-    #[test]
-    // Nodes in the Merkle tree are Pallas base field elements.
-    fn l_orchard_merkle() {
-        assert_eq!(super::L_ORCHARD_MERKLE, pallas::Base::NUM_BITS as usize);
-    }
-
-    #[test]
-    fn lebs2ip_k_round_trip() {
-        let mut rng = OsRng;
-        {
-            let int = rng.random_range(0..(1 << K));
-            assert_eq!(lebs2ip_k(&i2lebsp_k(int)) as usize, int);
-        }
-
-        assert_eq!(lebs2ip_k(&i2lebsp_k(0)) as usize, 0);
-        assert_eq!(lebs2ip_k(&i2lebsp_k((1 << K) - 1)) as usize, (1 << K) - 1);
-    }
-
-    #[test]
-    fn i2lebsp_k_round_trip() {
-        {
-            let bitstring = [0; K].map(|_| rand::random());
-            assert_eq!(i2lebsp_k(lebs2ip_k(&bitstring) as usize), bitstring);
-        }
-
-        {
-            let bitstring = [false; K];
-            assert_eq!(i2lebsp_k(lebs2ip_k(&bitstring) as usize), bitstring);
-        }
-
-        {
-            let bitstring = [true; K];
-            assert_eq!(i2lebsp_k(lebs2ip_k(&bitstring) as usize), bitstring);
-        }
-    }
-
-    #[test]
-    fn q_note_commitment_m() {
-        let domain = CommitDomain::new(NOTE_COMMITMENT_PERSONALIZATION);
-        let point = domain.Q();
-        let coords = point.to_affine().coordinates().unwrap();
-
-        assert_eq!(
-            *coords.x(),
-            pallas::Base::from_repr(Q_NOTE_COMMITMENT_M_GENERATOR.0).unwrap()
-        );
-        assert_eq!(
-            *coords.y(),
-            pallas::Base::from_repr(Q_NOTE_COMMITMENT_M_GENERATOR.1).unwrap()
-        );
-    }
-
-    #[test]
-    fn q_commit_ivk_m() {
-        let domain = CommitDomain::new(COMMIT_IVK_PERSONALIZATION);
-        let point = domain.Q();
-        let coords = point.to_affine().coordinates().unwrap();
-
-        assert_eq!(
-            *coords.x(),
-            pallas::Base::from_repr(Q_COMMIT_IVK_M_GENERATOR.0).unwrap()
-        );
-        assert_eq!(
-            *coords.y(),
-            pallas::Base::from_repr(Q_COMMIT_IVK_M_GENERATOR.1).unwrap()
-        );
-    }
-
-    #[test]
-    fn q_merkle_crh() {
-        let domain = HashDomain::new(MERKLE_CRH_PERSONALIZATION);
-        let point = domain.Q();
-        let coords = point.to_affine().coordinates().unwrap();
-
-        assert_eq!(
-            *coords.x(),
-            pallas::Base::from_repr(Q_MERKLE_CRH.0).unwrap()
-        );
-        assert_eq!(
-            *coords.y(),
-            pallas::Base::from_repr(Q_MERKLE_CRH.1).unwrap()
-        );
-    }
-
-    #[test]
-    fn inv_two_pow_k() {
-        let two_pow_k = pallas::Base::from(1u64 << K);
-        let inv_two_pow_k = pallas::Base::from_repr(INV_TWO_POW_K).unwrap();
-
-        assert_eq!(two_pow_k * inv_two_pow_k, pallas::Base::one());
-    }
-}
+#[cfg(all(test, feature = "test-dependencies"))]
+#[path = "../../sinsemilla_tests.rs"]
+mod tests;
