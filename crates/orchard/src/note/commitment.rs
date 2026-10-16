@@ -30,12 +30,10 @@ fn note_commitment_domain() -> &'static sinsemilla::CommitDomain {
 
 /// The trapdoor for a note commitment.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(crate) struct NoteCommitTrapdoor(pub(super) pallas::Scalar);
 
 impl NoteCommitTrapdoor {
     /// Returns the inner scalar value.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Scalar {
         self.0
     }
@@ -47,7 +45,6 @@ pub struct NoteCommitment(pub(super) pallas::Point);
 
 impl NoteCommitment {
     /// Returns the inner Pallas curve point.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Point {
         self.0
     }
@@ -111,7 +108,6 @@ impl From<NoteCommitment> for ExtractedNoteCommitment {
 
 impl ExtractedNoteCommitment {
     /// Returns the inner field element.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
     }

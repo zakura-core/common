@@ -65,20 +65,12 @@ use crate::{
     value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
 };
 
-#[cfg(not(feature = "unstable-voting-circuits"))]
 #[path = "circuit/halo2/commit_ivk.rs"]
 mod commit_ivk;
-#[cfg(feature = "unstable-voting-circuits")]
-#[path = "circuit/halo2/commit_ivk.rs"]
-pub mod commit_ivk;
 #[path = "circuit/halo2/gadget.rs"]
 pub mod gadget;
-#[cfg(not(feature = "unstable-voting-circuits"))]
 #[path = "circuit/halo2/note_commit.rs"]
 mod note_commit;
-#[cfg(feature = "unstable-voting-circuits")]
-#[path = "circuit/halo2/note_commit.rs"]
-pub mod note_commit;
 
 pub use crate::Proof;
 

@@ -27,13 +27,11 @@ memuse::impl_no_dynamic_usage!(Nullifier);
 
 impl Nullifier {
     /// Constructs a `Nullifier` from the given Pallas base field element.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn from_inner(inner: pallas::Base) -> Self {
         Self(inner)
     }
 
     /// Returns the inner Pallas base field element.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
     }

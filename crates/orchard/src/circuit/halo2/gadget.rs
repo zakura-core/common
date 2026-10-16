@@ -24,13 +24,9 @@ use crate::constants::{
     ValueCommitV,
 };
 
-#[cfg(not(feature = "unstable-voting-circuits"))]
 #[path = "gadget/add_chip.rs"]
 pub(in crate::circuit) mod add_chip;
 /// Addition chip for constraining `a + b = c` in-circuit.
-#[cfg(feature = "unstable-voting-circuits")]
-#[path = "gadget/add_chip.rs"]
-pub mod add_chip;
 
 impl super::Config {
     pub(super) fn add_chip(&self) -> add_chip::AddChip {
@@ -83,7 +79,6 @@ impl super::Config {
 }
 
 /// An instruction set for adding two circuit words (field elements).
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) trait AddInstruction<F: Field>: Chip<F> {
     /// Constraints `a + b` and returns the sum.
     fn add(
@@ -99,7 +94,6 @@ pub(in crate::circuit) trait AddInstruction<F: Field>: Chip<F> {
 /// Usages of this helper are technically superfluous, as the single-cell region is only
 /// ever used in equality constraints. We could eliminate them with a
 /// [write-on-copy abstraction](https://github.com/zcash/halo2/issues/334).
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) fn assign_free_advice<F: Field, V: Copy>(
     mut layouter: impl Layouter<F>,
     column: Column<Advice>,
@@ -152,7 +146,6 @@ pub(in crate::circuit) fn value_commit_orchard<
 ///
 /// [Section 4.16: Note Commitments and Nullifiers]: https://zips.z.cash/protocol/protocol.pdf#commitmentsandnullifiers
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) fn derive_nullifier<
     PoseidonChip: PoseidonSpongeInstructions<pallas::Base, poseidon::P128Pow5T3, ConstantLength<2>, 3, 2>,
     AddChip: AddInstruction<pallas::Base>,
@@ -207,7 +200,5 @@ pub(in crate::circuit) fn derive_nullifier<
         .map(|res| res.extract_p())
 }
 
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) use crate::circuit::commit_ivk::gadgets::commit_ivk;
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) use crate::circuit::note_commit::gadgets::note_commit;
