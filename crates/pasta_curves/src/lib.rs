@@ -1,5 +1,11 @@
 //! Implementation of the Pallas / Vesta curve cycle.
 //!
+//! # Assembly selection
+//!
+//! The `portable` feature disables all handwritten assembly on every platform,
+//! overriding both `aarch64-asm` and `x86_64-asm` and automatic x86 selection.
+//! It also prevents compilation and linking of the AArch64 assembly archive.
+//!
 //! # Timing
 //!
 //! This crate does not guarantee constant-time field or curve arithmetic.
@@ -17,6 +23,12 @@
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
+
+#[cfg(all(
+    feature = "portable",
+    any(pasta_curves_x86_64_asm, pasta_curves_aarch64_asm)
+))]
+compile_error!("portable must disable every Pasta assembly backend");
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

@@ -248,16 +248,7 @@ const fn reduce_square_lazy(t: &[u64; 8], modulus: &[u64; 4], inv: u64) -> [u64;
 /// Subtracts `modulus` from a value below `2 * modulus` if that does not
 /// underflow, which makes the value canonical.
 #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
-#[cfg_attr(
-    all(
-        feature = "aarch64-asm",
-        target_arch = "aarch64",
-        any(target_family = "unix", target_os = "none"),
-        target_pointer_width = "64",
-        target_endian = "little"
-    ),
-    allow(dead_code)
-)]
+#[cfg_attr(pasta_curves_aarch64_asm, allow(dead_code))]
 pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
     let (d0, borrow) = sbb(value[0], modulus[0], 0);
     let (d1, borrow) = sbb(value[1], modulus[1], borrow);
@@ -290,16 +281,7 @@ pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 
     all(not(target_arch = "x86_64"), not(feature = "uninline-portable")),
     inline
 )]
-#[cfg_attr(
-    all(
-        feature = "aarch64-asm",
-        target_arch = "aarch64",
-        any(target_family = "unix", target_os = "none"),
-        target_pointer_width = "64",
-        target_endian = "little"
-    ),
-    allow(dead_code)
-)]
+#[cfg_attr(pasta_curves_aarch64_asm, allow(dead_code))]
 pub(super) fn sqr_n_lazy(value: &[u64; 4], n: u32, modulus: &[u64; 4], inv: u64) -> [u64; 4] {
     let mut acc = *value;
     for _ in 0..n {
