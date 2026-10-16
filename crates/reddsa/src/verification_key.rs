@@ -15,7 +15,7 @@ use core::{
     marker::PhantomData,
 };
 
-use group::{GroupEncoding, cofactor::CofactorGroup, ff::PrimeField};
+use crate::backend::{Point as _, Scalar as _};
 
 use crate::{Error, Randomizer, SigType, Signature, SpendAuth, hex_if_possible};
 
@@ -94,14 +94,12 @@ impl<T: SigType> TryFrom<VerificationKeyBytes<T>> for VerificationKey<T> {
     type Error = Error;
 
     fn try_from(bytes: VerificationKeyBytes<T>) -> Result<Self, Self::Error> {
-        // XXX-jubjub: this should not use CtOption
         // XXX-jubjub: this takes ownership of bytes, while Fr doesn't.
         // This checks that the encoding is canonical...
-        let mut repr = <T::Point as GroupEncoding>::Repr::default();
+        let mut repr = [0u8; 32];
         repr.as_mut().copy_from_slice(&bytes.bytes);
         let maybe_point = T::Point::from_bytes(&repr);
-        if maybe_point.is_some().into() {
-            let point = maybe_point.unwrap();
+        if let Some(point) = maybe_point {
             // Note that small-order verification keys (including the identity) are not
             // rejected here. Previously they were rejected, but this was a bug as the
             // RedDSA specification allows them. Zcash Sapling rejects small-order points
@@ -128,7 +126,7 @@ impl<T: SpendAuth> VerificationKey<T> {
     ///
     /// Randomization is only supported for `SpendAuth` keys.
     pub fn randomize(&self, randomizer: &Randomizer<T>) -> VerificationKey<T> {
-        let point = self.point + (T::basepoint() * randomizer);
+        let point = self.point + (T::basepoint() * *randomizer);
         let bytes = VerificationKeyBytes {
             bytes: point.to_bytes().as_ref().try_into().unwrap(),
             _marker: PhantomData,
@@ -139,7 +137,7 @@ impl<T: SpendAuth> VerificationKey<T> {
 
 impl<T: SigType> VerificationKey<T> {
     pub(crate) fn from(s: &T::Scalar) -> VerificationKey<T> {
-        let point = T::basepoint() * s;
+        let point = T::basepoint() * *s;
         let bytes = VerificationKeyBytes {
             bytes: point.to_bytes().as_ref().try_into().unwrap(),
             _marker: PhantomData,
@@ -167,28 +165,18 @@ impl<T: SigType> VerificationKey<T> {
         c: T::Scalar,
     ) -> Result<(), Error> {
         let r = {
-            // XXX-jubjub: should not use CtOption here
             // XXX-jubjub: inconsistent ownership in from_bytes
-            let mut repr = <T::Point as GroupEncoding>::Repr::default();
+            let mut repr = [0u8; 32];
             repr.as_mut().copy_from_slice(&signature.r_bytes);
             let maybe_point = T::Point::from_bytes(&repr);
-            if maybe_point.is_some().into() {
-                maybe_point.unwrap()
-            } else {
-                return Err(Error::InvalidSignature);
-            }
+            maybe_point.ok_or(Error::InvalidSignature)?
         };
 
         let s = {
-            // XXX-jubjub: should not use CtOption here
-            let mut repr = <T::Scalar as PrimeField>::Repr::default();
+            let mut repr = [0u8; 32];
             repr.as_mut().copy_from_slice(&signature.s_bytes);
             let maybe_scalar = T::Scalar::from_repr(repr);
-            if maybe_scalar.is_some().into() {
-                maybe_scalar.unwrap()
-            } else {
-                return Err(Error::InvalidSignature);
-            }
+            maybe_scalar.ok_or(Error::InvalidSignature)?
         };
 
         // Verify check is h * ( - s * B + R  + c * A) == 0
@@ -209,7 +197,7 @@ impl<T: SigType> VerificationKey<T> {
             sB - cA - r
         };
 
-        if check.is_small_order().into() {
+        if check.is_small_order() {
             Ok(())
         } else {
             Err(Error::InvalidSignature)

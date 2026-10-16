@@ -58,14 +58,6 @@ impl Default for Binding {
 impl SigType for Binding {}
 impl super::Binding for Binding {}
 
-impl private::SealedScalar for pallas::Scalar {
-    fn from_bytes_wide(bytes: &[u8; 64]) -> Self {
-        <pallas::Scalar as group::ff::FromUniformBytes<64>>::from_uniform_bytes(bytes)
-    }
-    fn from_raw(val: [u64; 4]) -> Self {
-        pallas::Scalar::from_raw(val)
-    }
-}
 impl private::Sealed<SpendAuth> for SpendAuth {
     const H_STAR_PERSONALIZATION: &'static [u8; 16] = b"Zcash_RedPallasH";
     type Point = pallas::Point;
