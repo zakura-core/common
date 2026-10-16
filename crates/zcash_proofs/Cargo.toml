@@ -39,8 +39,9 @@ zcash_primitives = { workspace = true, features = ["circuits"] }
 byteorder = "1"
 
 [features]
+backend-halo2 = ["zcash_primitives/backend-halo2"]
 bundled-prover = ["dep:wagyu-zcash-parameters"]
-default = ["multicore"]
+default = ["backend-halo2", "multicore"]
 directories = ["dep:home", "dep:known-folders", "dep:xdg"]
 download-params = ["dep:minreq", "directories"]
 expensive-tests = []

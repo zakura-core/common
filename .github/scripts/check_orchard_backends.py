@@ -40,6 +40,7 @@ if not args.interop_only:
         cargo("check", backend, "circuit,multicore,zip32-addresses,std", "--all-targets")
         cargo("check", backend, "std,circuits,pczt,multicore", package="zakura-primitives")
         cargo("check", backend, "orchard,sapling,std,zip32-addresses", package="zakura-keys")
+        cargo("check", backend, "multicore", package="zakura-proofs")
     invalid = [("", "select an Orchard backend:")]
     if len(backends) > 1:
         invalid.append((",".join(f"backend-{backend}" for backend in backends),
