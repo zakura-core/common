@@ -66,13 +66,18 @@ use crate::{
 };
 
 #[cfg(not(feature = "unstable-voting-circuits"))]
+#[path = "circuit/halo2/commit_ivk.rs"]
 mod commit_ivk;
 #[cfg(feature = "unstable-voting-circuits")]
+#[path = "circuit/halo2/commit_ivk.rs"]
 pub mod commit_ivk;
+#[path = "circuit/halo2/gadget.rs"]
 pub mod gadget;
 #[cfg(not(feature = "unstable-voting-circuits"))]
+#[path = "circuit/halo2/note_commit.rs"]
 mod note_commit;
 #[cfg(feature = "unstable-voting-circuits")]
+#[path = "circuit/halo2/note_commit.rs"]
 pub mod note_commit;
 
 pub use crate::Proof;
@@ -1859,21 +1864,26 @@ impl Proof {
 }
 
 #[cfg(all(test, feature = "verifier-fingerprint"))]
+#[path = "circuit/halo2/fingerprint/mod.rs"]
 mod fingerprint;
 
 #[cfg(all(test, feature = "prover-fingerprint"))]
+#[path = "circuit/halo2/prover_fingerprint.rs"]
 mod prover_fingerprint;
 
 #[cfg(all(
     test,
     any(feature = "verifier-fingerprint", feature = "prover-fingerprint")
 ))]
+#[path = "circuit/halo2/fixtures.rs"]
 mod fixtures;
 
 #[cfg(all(test, feature = "circuit-fixtures"))]
+#[path = "circuit/halo2/layout_dump.rs"]
 mod layout_dump;
 
 #[cfg(all(test, feature = "zip32-addresses"))]
+#[path = "circuit/halo2/benchmark.rs"]
 mod benchmark;
 
 #[cfg(test)]

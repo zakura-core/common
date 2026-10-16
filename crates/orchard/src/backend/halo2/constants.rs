@@ -1,6 +1,9 @@
 //! Constants used in the Orchard protocol.
+#[path = "constants/fixed_bases.rs"]
 pub mod fixed_bases;
+#[path = "constants/sinsemilla.rs"]
 pub mod sinsemilla;
+#[path = "constants/util.rs"]
 pub mod util;
 
 #[cfg(feature = "circuit")]
@@ -64,3 +67,7 @@ mod tests {
         assert_eq!(t_p + two_pow_254, pallas::Base::zero());
     }
 }
+
+#[cfg(all(test, feature = "circuit"))]
+#[path = "constants/generate_lagrange_coeffs.rs"]
+mod generate_lagrange_coeffs;

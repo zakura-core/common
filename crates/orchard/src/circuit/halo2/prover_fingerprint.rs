@@ -182,8 +182,8 @@ fn prover_capture() {
     capture_fixture(
         SINGLE_SEED,
         1,
-        include_bytes!("prover_fingerprint/single-action.rng-u64s-le"),
-        include_bytes!("prover_fingerprint/single-action.proof"),
+        include_bytes!("../prover_fingerprint/single-action.rng-u64s-le"),
+        include_bytes!("../prover_fingerprint/single-action.proof"),
         "ORCHARD_LEAN_SINGLE_PROVER_OUT",
         "Zcash.Snark.Fixtures.Prover.SingleAction",
     );
@@ -195,8 +195,8 @@ fn prover_capture_two_actions() {
     capture_fixture(
         MULTI_SEED,
         2,
-        include_bytes!("prover_fingerprint/multi-action.rng-u64s-le"),
-        include_bytes!("prover_fingerprint/multi-action.proof"),
+        include_bytes!("../prover_fingerprint/multi-action.rng-u64s-le"),
+        include_bytes!("../prover_fingerprint/multi-action.proof"),
         "ORCHARD_LEAN_MULTI_PROVER_OUT",
         "Zcash.Snark.Fixtures.Prover.MultiAction",
     );

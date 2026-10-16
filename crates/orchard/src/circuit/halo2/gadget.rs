@@ -25,9 +25,11 @@ use crate::constants::{
 };
 
 #[cfg(not(feature = "unstable-voting-circuits"))]
+#[path = "gadget/add_chip.rs"]
 pub(in crate::circuit) mod add_chip;
 /// Addition chip for constraining `a + b = c` in-circuit.
 #[cfg(feature = "unstable-voting-circuits")]
+#[path = "gadget/add_chip.rs"]
 pub mod add_chip;
 
 impl super::Config {

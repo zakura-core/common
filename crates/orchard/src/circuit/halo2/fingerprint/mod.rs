@@ -65,7 +65,7 @@ fn raw_instance_refs(raw_instances: &[Vec<Vec<vesta::Scalar>>]) -> Vec<Vec<&[ves
 fn assert_pinned_verifying_key(vk: &VerifyingKey) {
     assert_eq!(
         format!("{:#?}\n", vk.vk.pinned()),
-        include_str!("../../circuit_data/circuit_description_post_nu6_3").replace("\r\n", "\n")
+        include_str!("../../../circuit_data/circuit_description_post_nu6_3").replace("\r\n", "\n")
     );
 }
 

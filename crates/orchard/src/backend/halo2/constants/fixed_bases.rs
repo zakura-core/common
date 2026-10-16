@@ -15,18 +15,25 @@ use crate::backend::halo2_gadgets::ecc::{
 use crate::backend::pasta_curves::pallas;
 
 /// Precomputed table for the `CommitIvk` commitment randomness base.
+#[path = "fixed_bases/commit_ivk_r.rs"]
 pub mod commit_ivk_r;
 #[cfg(feature = "circuit")]
+#[path = "fixed_bases/lagrange_coeffs.rs"]
 mod lagrange_coeffs;
 /// Precomputed table for the `NoteCommit` commitment randomness base.
+#[path = "fixed_bases/note_commit_r.rs"]
 pub mod note_commit_r;
 /// Precomputed table for the nullifier base `K^Orchard`.
+#[path = "fixed_bases/nullifier_k.rs"]
 pub mod nullifier_k;
 /// Precomputed table for the spend authorization base `G^Orchard`.
+#[path = "fixed_bases/spend_auth_g.rs"]
 pub mod spend_auth_g;
 /// Precomputed table for the value commitment randomness base.
+#[path = "fixed_bases/value_commit_r.rs"]
 pub mod value_commit_r;
 /// Precomputed table for the value commitment value base.
+#[path = "fixed_bases/value_commit_v.rs"]
 pub mod value_commit_v;
 
 /// SWU hash-to-curve personalization for the spending key base point and
