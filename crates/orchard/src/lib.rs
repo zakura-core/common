@@ -47,6 +47,7 @@ mod backend;
 pub mod builder;
 pub mod bundle;
 #[cfg(any(feature = "prover", feature = "verifier"))]
+#[path = "circuit/halo2.rs"]
 pub mod circuit;
 #[path = "backend/halo2/constants.rs"]
 mod constants;

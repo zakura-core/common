@@ -66,11 +66,11 @@ use crate::{
     value::{NoteValue, ValueCommitTrapdoor},
 };
 
-#[path = "circuit/halo2/commit_ivk.rs"]
+#[path = "halo2/commit_ivk.rs"]
 mod commit_ivk;
-#[path = "circuit/halo2/gadget.rs"]
+#[path = "halo2/gadget.rs"]
 mod gadget;
-#[path = "circuit/halo2/note_commit.rs"]
+#[path = "halo2/note_commit.rs"]
 mod note_commit;
 
 pub use crate::Proof;
@@ -79,7 +79,7 @@ pub use crate::Proof;
 const K: u32 = 11;
 
 /// Canonical encoding of [`Params::new`] for [`vesta::Affine`] at [`K`].
-const ORCHARD_K11_PARAMS: &[u8] = include_bytes!("circuit_data/orchard_k11_params.bin");
+const ORCHARD_K11_PARAMS: &[u8] = include_bytes!("../circuit_data/orchard_k11_params.bin");
 
 fn orchard_k11_params() -> Params<vesta::Affine> {
     let mut encoded = ORCHARD_K11_PARAMS;
@@ -1919,22 +1919,22 @@ impl Proof {
 }
 
 #[cfg(all(test, feature = "verifier-fingerprint"))]
-#[path = "circuit/halo2/fingerprint/mod.rs"]
+#[path = "halo2/fingerprint/mod.rs"]
 mod fingerprint;
 
 #[cfg(all(test, feature = "prover-fingerprint"))]
-#[path = "circuit/halo2/prover_fingerprint.rs"]
+#[path = "halo2/prover_fingerprint.rs"]
 mod prover_fingerprint;
 
 #[cfg(all(
     test,
     any(feature = "verifier-fingerprint", feature = "prover-fingerprint")
 ))]
-#[path = "circuit/halo2/fixtures.rs"]
+#[path = "halo2/fixtures.rs"]
 mod fixtures;
 
 #[cfg(all(test, feature = "circuit-fixtures"))]
-#[path = "circuit/halo2/layout_dump.rs"]
+#[path = "halo2/layout_dump.rs"]
 mod layout_dump;
 
 #[cfg(all(
@@ -1943,7 +1943,7 @@ mod layout_dump;
     feature = "verifier",
     feature = "zip32-addresses"
 ))]
-#[path = "circuit/halo2/benchmark.rs"]
+#[path = "halo2/benchmark.rs"]
 mod benchmark;
 
 #[cfg(all(test, feature = "prover", feature = "verifier"))]
@@ -2321,10 +2321,10 @@ mod tests {
     fn historical_proof(version: OrchardCircuitVersion) -> (Instance, Proof) {
         let bytes: &[u8] = match version {
             OrchardCircuitVersion::InsecurePreNu6_2 => {
-                include_bytes!("circuit_data/circuit_proof_test_case_insecure.bin")
+                include_bytes!("../circuit_data/circuit_proof_test_case_insecure.bin")
             }
             OrchardCircuitVersion::FixedPostNu6_2 => {
-                include_bytes!("circuit_data/circuit_proof_test_case_fixed.bin")
+                include_bytes!("../circuit_data/circuit_proof_test_case_fixed.bin")
             }
             OrchardCircuitVersion::PostNu6_3 => panic!("only historical proofs are frozen here"),
         };
@@ -2415,7 +2415,7 @@ mod tests {
         pinned_circuit_description(
             OrchardCircuitVersion::FixedPostNu6_2,
             "src/../circuit_data/circuit_description_fixed",
-            include_str!("circuit_data/circuit_description_fixed"),
+            include_str!("../circuit_data/circuit_description_fixed"),
         );
     }
 
@@ -2455,7 +2455,7 @@ mod tests {
         let vk = pinned_circuit_description(
             OrchardCircuitVersion::PostNu6_3,
             "src/../circuit_data/circuit_description_post_nu6_3",
-            include_str!("circuit_data/circuit_description_post_nu6_3"),
+            include_str!("../circuit_data/circuit_description_post_nu6_3"),
         );
         round_trip_for_version(OrchardCircuitVersion::PostNu6_3, vk, 1);
     }
@@ -2700,7 +2700,7 @@ mod tests {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::FixedPostNu6_2,
             "src/../circuit_data/circuit_proof_test_case_fixed.bin",
-            include_bytes!("circuit_data/circuit_proof_test_case_fixed.bin"),
+            include_bytes!("../circuit_data/circuit_proof_test_case_fixed.bin"),
             ProofFixtureEncoding::LegacyTwoFlags,
             4992,
             false,
@@ -2712,7 +2712,7 @@ mod tests {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::PostNu6_3,
             "src/../circuit_data/circuit_proof_test_case_post_nu6_3.bin",
-            include_bytes!("circuit_data/circuit_proof_test_case_post_nu6_3.bin"),
+            include_bytes!("../circuit_data/circuit_proof_test_case_post_nu6_3.bin"),
             ProofFixtureEncoding::PostNu6_3ThreeFlags,
             4992,
             false,
@@ -2724,7 +2724,7 @@ mod tests {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::PostNu6_3,
             "src/../circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin",
-            include_bytes!("circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin"),
+            include_bytes!("../circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin"),
             ProofFixtureEncoding::PostNu6_3ThreeFlags,
             4992,
             true,
@@ -2741,12 +2741,12 @@ mod tests {
         let vk = crate::cached_test_keys(OrchardCircuitVersion::InsecurePreNu6_2).verifying_key();
         assert_eq!(
             format!("{:#?}\n", vk.vk.pinned()),
-            include_str!("circuit_data/circuit_description_insecure").replace("\r\n", "\n")
+            include_str!("../circuit_data/circuit_description_insecure").replace("\r\n", "\n")
         );
 
         let (instance, proof) = {
             let test_case_bytes =
-                include_bytes!("circuit_data/circuit_proof_test_case_insecure.bin");
+                include_bytes!("../circuit_data/circuit_proof_test_case_insecure.bin");
             read_test_case(&test_case_bytes[..], ProofFixtureEncoding::LegacyTwoFlags)
                 .expect("proof must be valid")
         };
