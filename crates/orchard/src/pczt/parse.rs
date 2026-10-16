@@ -4,9 +4,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use ff::PrimeField;
+use crate::backend::ff::PrimeField;
+use crate::backend::pasta_curves::pallas;
 use incrementalmerkletree::Hashable;
-use pasta_curves::pallas;
 use zcash_note_encryption::OutgoingCipherKey;
 use zip32::ChildIndex;
 

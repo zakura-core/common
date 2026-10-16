@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 
 mod action;
 mod address;
+mod backend;
 pub mod builder;
 pub mod bundle;
 #[cfg(feature = "circuit")]
@@ -172,7 +173,7 @@ impl Proof {
     /// The canonical byte length of a proof authorizing a bundle of `num_actions` actions.
     ///
     /// A valid Orchard proof always has exactly this length. The constants are fixed by the
-    /// halo2 action circuit; they are cross-checked against [`halo2_proofs::dev::CircuitCost`]
+    /// halo2 action circuit; they are cross-checked against [`crate::backend::halo2_proofs::dev::CircuitCost`]
     /// in the circuit tests. Use this to reject non-canonical (e.g. padded) proofs when
     /// constructing a bundle from untrusted bytes; see [`Bundle::try_from_parts`].
     ///

@@ -7,20 +7,20 @@
 
 use core::iter;
 
-use group::ff::PrimeField;
-use halo2_proofs::{
+use crate::backend::group::ff::PrimeField;
+use crate::backend::halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
     plonk::{Advice, Column, ConstraintSystem, Constraints, Error, Expression, Selector},
     poly::Rotation,
 };
-use pasta_curves::pallas;
+use crate::backend::pasta_curves::pallas;
 
-use crate::constants::{OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains, T_P};
-use halo2_gadgets::{
+use crate::backend::halo2_gadgets::{
     ecc::{ScalarFixed, X, chip::EccChip},
     sinsemilla::{CommitDomain, Message, MessagePiece, chip::SinsemillaChip},
     utilities::{RangeConstrained, bool_check},
 };
+use crate::constants::{OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains, T_P};
 
 /// Configuration for the [`CommitIvkChip`], including its selector and advice columns.
 #[derive(Clone, Debug)]
@@ -132,7 +132,8 @@ impl CommitIvkChip {
             let nk_decomposition_check = {
                 let two_pow_49 = pallas::Base::from(1 << 49);
                 let two_pow_245 =
-                    pasta_curves::arithmetic::square_fp_n(&two_pow_49, 2) * two_pow_49;
+                    crate::backend::pasta_curves::arithmetic::square_fp_n(&two_pow_49, 2)
+                        * two_pow_49;
 
                 b_2.clone()
                     + c.clone() * two_pow_5
@@ -245,11 +246,11 @@ impl CommitIvkChip {
 /// Gadget functions for `CommitIvk` operations.
 #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) mod gadgets {
-    use halo2_gadgets::utilities::{
+    use crate::backend::halo2_gadgets::utilities::{
         RangeConstrained,
         lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
     };
-    use halo2_proofs::circuit::Chip;
+    use crate::backend::halo2_proofs::circuit::Chip;
 
     use super::*;
 
@@ -685,13 +686,8 @@ mod tests {
     use core::iter;
 
     use super::{CommitIvkChip, CommitIvkConfig, gadgets};
-    use crate::constants::{
-        L_ORCHARD_BASE, OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains, T_Q,
-        fixed_bases::COMMIT_IVK_PERSONALIZATION,
-    };
-    use crate::rng_compat::OsRng;
-    use group::ff::{Field, PrimeField, PrimeFieldBits};
-    use halo2_gadgets::{
+    use crate::backend::group::ff::{Field, PrimeField, PrimeFieldBits};
+    use crate::backend::halo2_gadgets::{
         ecc::{
             ScalarFixed,
             chip::{CircuitVersion, EccChip, EccConfig},
@@ -705,12 +701,17 @@ mod tests {
             lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
         },
     };
-    use halo2_proofs::{
+    use crate::backend::halo2_proofs::{
         circuit::{AssignedCell, Layouter, SimpleFloorPlanner, Value},
         dev::MockProver,
         plonk::{Circuit, ConstraintSystem, Error},
     };
-    use pasta_curves::pallas;
+    use crate::backend::pasta_curves::pallas;
+    use crate::constants::{
+        L_ORCHARD_BASE, OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains, T_Q,
+        fixed_bases::COMMIT_IVK_PERSONALIZATION,
+    };
+    use crate::rng_compat::OsRng;
 
     #[test]
     fn commit_ivk() {

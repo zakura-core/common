@@ -16,14 +16,14 @@ use crate::{
 #[cfg(not(feature = "weighted-merkle"))]
 use crate::spec::extract_p_bottom_batch;
 
-use incrementalmerkletree::{Hashable, Level};
-use pasta_curves::pallas;
-use sinsemilla::HashDomain;
+use crate::backend::pasta_curves::pallas;
+use crate::backend::sinsemilla::HashDomain;
 #[cfg(feature = "weighted-merkle")]
-use sinsemilla::weighted::{BatchHashWorkspace, UncheckedFixedLengthHashDomain};
+use crate::backend::sinsemilla::weighted::{BatchHashWorkspace, UncheckedFixedLengthHashDomain};
+use incrementalmerkletree::{Hashable, Level};
 
+use crate::backend::ff::{Field, PrimeField, PrimeFieldBits};
 use crate::once::OnceTable;
-use ff::{Field, PrimeField, PrimeFieldBits};
 use rand::Rng;
 use serde::de::{Deserializer, Error};
 use serde::ser::Serializer;
@@ -451,7 +451,7 @@ impl<'de> Deserialize<'de> for MerkleHashOrchard {
 /// Test utilities available under the `test-dependencies` feature flag.
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing {
-    use ff::{Field, FromUniformBytes};
+    use crate::backend::ff::{Field, FromUniformBytes};
     use proptest::{arbitrary::any, strategy::Strategy};
     use rand::{
         Rng,
@@ -473,13 +473,15 @@ pub mod testing {
     /// Generate an arbitrary Orchard note-commitment tree node.
     pub fn arb_merkle_hash() -> impl Strategy<Value = MerkleHashOrchard> {
         any::<[u8; UNIFORM_BYTES]>().prop_map(|bytes| {
-            MerkleHashOrchard(pasta_curves::pallas::Base::from_uniform_bytes(&bytes))
+            MerkleHashOrchard(
+                crate::backend::pasta_curves::pallas::Base::from_uniform_bytes(&bytes),
+            )
         })
     }
 
     impl Distribution<MerkleHashOrchard> for StandardUniform {
         fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> MerkleHashOrchard {
-            MerkleHashOrchard(pasta_curves::Fp::random(rng))
+            MerkleHashOrchard(crate::backend::pasta_curves::Fp::random(rng))
         }
     }
 }
@@ -492,21 +494,21 @@ mod tests {
     use crate::{constants::sinsemilla::K, tree::merkle_crh_words};
 
     use {
+        crate::backend::group::ff::{Field, PrimeField},
+        crate::backend::pasta_curves::pallas,
+        crate::backend::sinsemilla::HashDomain,
         crate::{
             constants::{MERKLE_DEPTH_ORCHARD, sinsemilla::MERKLE_CRH_PERSONALIZATION},
             tree::{MerkleHashOrchard, empty_roots, merkle_crh_message, testing::arb_merkle_hash},
         },
         alloc::vec::Vec,
-        group::ff::{Field, PrimeField},
         incrementalmerkletree::{
             Hashable, Level, Marking, MerklePath, Retention, frontier::Frontier,
         },
-        pasta_curves::pallas,
         proptest::prelude::*,
         rand::SeedableRng,
         rand_chacha::ChaCha20Rng,
         shardtree::{ShardTree, store::memory::MemoryShardStore},
-        sinsemilla::HashDomain,
     };
 
     /// Batch sizes exercise empty, singleton, odd, and tree-level workloads.
@@ -583,11 +585,11 @@ mod tests {
     /// patterns, the largest canonical values above `2^254`, and the empty
     /// root of every tree level.
     fn edge_case_leaves() -> alloc::vec::Vec<MerkleHashOrchard> {
+        use crate::backend::ff::PrimeField;
+        use crate::backend::pasta_curves::pallas;
         use alloc::collections::BTreeSet;
         use alloc::vec::Vec;
-        use ff::PrimeField;
         use incrementalmerkletree::{Hashable, Level};
-        use pasta_curves::pallas;
 
         use crate::constants::{MERKLE_DEPTH_ORCHARD, sinsemilla::K};
 
@@ -697,8 +699,8 @@ mod tests {
     /// function, so the vectors pinned in `test_vectors/merkle_fixture.rs`
     /// are reproducible; [`print_merkle_fixture_vectors`] regenerates them.
     fn fixture_leaves() -> alloc::vec::Vec<MerkleHashOrchard> {
+        use crate::backend::ff::{FromUniformBytes, PrimeField};
         use alloc::collections::BTreeSet;
-        use ff::{FromUniformBytes, PrimeField};
 
         let edges = edge_case_leaves();
         assert!(edges.len() > FIXTURE_CONTIGUOUS_EDGES);
@@ -732,7 +734,8 @@ mod tests {
                 counter += 1;
                 let mut uniform = [0u8; UNIFORM_BYTES];
                 uniform.copy_from_slice(hash.as_bytes());
-                let value = pasta_curves::pallas::Base::from_uniform_bytes(&uniform);
+                let value =
+                    crate::backend::pasta_curves::pallas::Base::from_uniform_bytes(&uniform);
                 if seen.insert(value.to_repr()) {
                     *slot = Some(MerkleHashOrchard(value));
                     break;

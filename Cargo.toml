@@ -62,6 +62,7 @@ members = [
     "crates/halo2_proofs",
     "crates/jubjub",
     "crates/orchard",
+    "crates/orchard-legacy",
     "crates/pairing",
     "crates/pasta_curves",
     "crates/reddsa",
@@ -116,6 +117,7 @@ halo2_legacy_pdqsort = { package = "zakura-halo2-legacy-pdqsort", version = "3.0
 halo2_poseidon = { package = "zakura-halo2-poseidon", version = "3.0.0", path = "crates/halo2_poseidon", default-features = false }
 halo2_proofs = { package = "zakura-halo2-proofs", version = "3.0.0", path = "crates/halo2_proofs", default-features = false }
 jubjub = { package = "zakura-jubjub", version = "3.0.0", path = "crates/jubjub", default-features = false }
+orchard-legacy = { package = "zakura-orchard-legacy", version = "3.0.0", path = "crates/orchard-legacy", default-features = false }
 orchard = { package = "zakura-orchard", version = "3.0.0", path = "crates/orchard", default-features = false }
 pairing = { package = "zakura-pairing", version = "3.0.0", path = "crates/pairing", default-features = false }
 pasta_curves = { package = "zakura-pasta-curves", version = "3.0.0", path = "crates/pasta_curves", default-features = false }

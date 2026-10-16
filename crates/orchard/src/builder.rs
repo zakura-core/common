@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::iter;
 
-use ff::Field;
-use pasta_curves::pallas;
+use crate::backend::ff::Field;
+use crate::backend::pasta_curves::pallas;
 use rand::{CryptoRng, Rng, prelude::SliceRandom};
 use zcash_note_encryption::ENC_CIPHERTEXT_SIZE;
 
@@ -185,7 +185,7 @@ pub enum BuildError {
     MissingSignatures,
     /// An error occurred in the process of producing a proof for a bundle.
     #[cfg(feature = "circuit")]
-    Proof(halo2_proofs::plonk::Error),
+    Proof(crate::backend::halo2_proofs::plonk::Error),
     /// An overflow error occurred while attempting to construct the value
     /// for a bundle.
     ValueSum(value::BalanceError),
@@ -227,7 +227,7 @@ impl fmt::Display for BuildError {
             ),
             MissingSignatures => f.write_str("Required signatures were missing during build"),
             #[cfg(feature = "circuit")]
-            Proof(halo2_proofs::plonk::Error::InvalidInstances) => {
+            Proof(crate::backend::halo2_proofs::plonk::Error::InvalidInstances) => {
                 f.write_str("Could not create proof: provided instances do not match the circuits")
             }
             #[cfg(feature = "circuit")]
@@ -275,8 +275,8 @@ impl fmt::Display for BuildError {
 impl std::error::Error for BuildError {}
 
 #[cfg(feature = "circuit")]
-impl From<halo2_proofs::plonk::Error> for BuildError {
-    fn from(e: halo2_proofs::plonk::Error) -> Self {
+impl From<crate::backend::halo2_proofs::plonk::Error> for BuildError {
+    fn from(e: crate::backend::halo2_proofs::plonk::Error) -> Self {
         BuildError::Proof(e)
     }
 }
@@ -589,8 +589,7 @@ impl OutputInfo {
         // `Note::version()` selects the note plaintext lead byte.
         let encryptor = OrchardNoteEncryption::new(self.ovk.clone(), note, self.memo);
 
-        // `encryptor` still supplies a valid non-identity `epk` and, because these outputs use
-        // `ovk = None`, a random `out_ciphertext`. Only `enc_ciphertext` is replaced.
+        // `encryptor` still supplies a valid non-identity `epk` and, because these outputs use // `ovk = None`, a random `out_ciphertext`. Only `enc_ciphertext` is replaced.
         let enc_ciphertext = if self.randomized_ciphertext {
             assert_eq!(
                 self.value,
@@ -1594,7 +1593,7 @@ impl<S: InProgressSignatures> InProgress<Unproven, S> {
     ///
     /// # Errors
     ///
-    /// Returns [`halo2_proofs::plonk::Error::InvalidInstances`] if any provided
+    /// Returns [`crate::backend::halo2_proofs::plonk::Error::InvalidInstances`] if any provided
     /// instance has `disableCrossAddress = 1` and `pk` is not an
     /// [`OrchardCircuitVersion::PostNu6_3`] proving key.
     ///
@@ -1605,7 +1604,7 @@ impl<S: InProgressSignatures> InProgress<Unproven, S> {
         pk: &ProvingKey,
         instances: &[Instance],
         rng: impl Rng,
-    ) -> Result<Proof, halo2_proofs::plonk::Error> {
+    ) -> Result<Proof, crate::backend::halo2_proofs::plonk::Error> {
         Proof::create(pk, &self.proof.circuits, instances, rng)
     }
 }
@@ -1625,7 +1624,7 @@ impl<S: InProgressSignatures, V> Bundle<InProgress<Unproven, S>, V> {
     /// Returns [`BuildError::Proof`] if proof creation fails. Historical circuits or
     /// proving keys, and keys that do not match this bundle's
     /// [`circuit_version`](Self::circuit_version), are rejected with
-    /// [`halo2_proofs::plonk::Error::Synthesis`].
+    /// [`crate::backend::halo2_proofs::plonk::Error::Synthesis`].
     pub fn create_proof(
         self,
         pk: &ProvingKey,

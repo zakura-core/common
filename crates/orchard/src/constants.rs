@@ -35,8 +35,8 @@ pub const KEY_DIVERSIFICATION_PERSONALIZATION: &str = "z.cash:Orchard-gd";
 
 #[cfg(test)]
 mod tests {
-    use ff::PrimeField;
-    use pasta_curves::pallas;
+    use crate::backend::ff::PrimeField;
+    use crate::backend::pasta_curves::pallas;
 
     #[test]
     // Orchard uses the Pallas base field as its base field.

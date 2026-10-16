@@ -1,9 +1,9 @@
-use halo2_proofs::{
+use crate::backend::halo2_proofs::{
     circuit::{AssignedCell, Chip, Layouter},
     plonk::{self, Advice, Column, ConstraintSystem, Constraints, Selector},
     poly::Rotation,
 };
-use pasta_curves::pallas;
+use crate::backend::pasta_curves::pallas;
 
 use super::AddInstruction;
 

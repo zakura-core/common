@@ -2,10 +2,10 @@
 use core::fmt;
 use memuse::DynamicUsage;
 
+use crate::backend::ff::PrimeField;
+use crate::backend::group::GroupEncoding;
+use crate::backend::pasta_curves::pallas;
 use blake2b_simd::Params as Blake2bParams;
-use ff::PrimeField;
-use group::GroupEncoding;
-use pasta_curves::pallas;
 use rand::Rng;
 use subtle::CtOption;
 
@@ -533,12 +533,12 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::ff::PrimeField;
+    use crate::backend::group::GroupEncoding;
     use crate::{
         keys::{FullViewingKey, Scope, SpendingKey},
         test_vectors::keys::TestVector,
     };
-    use ff::PrimeField;
-    use group::GroupEncoding;
 
     proptest::proptest! {
         #[test]

@@ -1,10 +1,10 @@
 //! Exact exporter for Ironwood's Orchard Action circuit fixtures.
 
-use halo2_proofs::{
+use crate::backend::halo2_proofs::{
     dev::circuit_fixture::{CircuitFixtureRecorder, LeanEnvironment},
     plonk::{Circuit as Halo2Circuit, ConstraintSystem, FloorPlanner},
 };
-use pasta_curves::pallas;
+use crate::backend::pasta_curves::pallas;
 
 use super::K;
 

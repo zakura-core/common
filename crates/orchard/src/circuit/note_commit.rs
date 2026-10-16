@@ -8,19 +8,15 @@
 
 use core::iter;
 
-use group::ff::PrimeField;
-use halo2_proofs::{
+use crate::backend::group::ff::PrimeField;
+use crate::backend::halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
     plonk::{Advice, Column, ConstraintSystem, Constraints, Error, Expression, Selector},
     poly::Rotation,
 };
-use pasta_curves::pallas;
+use crate::backend::pasta_curves::pallas;
 
-use crate::{
-    constants::{OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains, T_P},
-    value::NoteValue,
-};
-use halo2_gadgets::{
+use crate::backend::halo2_gadgets::{
     ecc::{
         Point, ScalarFixed,
         chip::{EccChip, NonIdentityEccPoint},
@@ -33,6 +29,10 @@ use halo2_gadgets::{
         FieldValue, RangeConstrained, bool_check,
         lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
     },
+};
+use crate::{
+    constants::{OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains, T_P},
+    value::NoteValue,
 };
 
 type NoteCommitPiece = MessagePiece<
@@ -1581,7 +1581,7 @@ impl NoteCommitChip {
 /// Gadget functions for `NoteCommit` operations.
 #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) mod gadgets {
-    use halo2_proofs::circuit::{Chip, Value};
+    use crate::backend::halo2_proofs::circuit::{Chip, Value};
 
     use super::*;
 
@@ -2037,6 +2037,15 @@ mod tests {
     use core::iter;
 
     use super::NoteCommitConfig;
+    use crate::backend::halo2_gadgets::{
+        ecc::{
+            NonIdentityPoint, ScalarFixed,
+            chip::{CircuitVersion, EccChip, EccConfig},
+        },
+        sinsemilla::chip::SinsemillaChip,
+        sinsemilla::primitives::CommitDomain,
+        utilities::lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
+    };
     use crate::{
         circuit::{
             gadget::assign_free_advice,
@@ -2048,24 +2057,15 @@ mod tests {
         },
         value::NoteValue,
     };
-    use halo2_gadgets::{
-        ecc::{
-            NonIdentityPoint, ScalarFixed,
-            chip::{CircuitVersion, EccChip, EccConfig},
-        },
-        sinsemilla::chip::SinsemillaChip,
-        sinsemilla::primitives::CommitDomain,
-        utilities::lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
-    };
 
-    use ff::{Field, PrimeField, PrimeFieldBits};
-    use group::Curve;
-    use halo2_proofs::{
+    use crate::backend::ff::{Field, PrimeField, PrimeFieldBits};
+    use crate::backend::group::Curve;
+    use crate::backend::halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
         dev::MockProver,
         plonk::{Circuit, ConstraintSystem, Error},
     };
-    use pasta_curves::{arithmetic::CurveAffine, pallas};
+    use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas};
 
     use rand::Rng;
 

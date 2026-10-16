@@ -2,13 +2,11 @@ use std::collections::HashSet;
 use std::hint::black_box;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
-use group::ff::{FromUniformBytes, PrimeField};
 use incrementalmerkletree::{Hashable, Level};
 #[cfg(feature = "weighted-merkle")]
 use orchard::tree::MerkleHashBatchWorkspace;
 use orchard::tree::MerkleHashOrchard;
-use pasta_curves::pallas;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 /// A 1,024-leaf subtree is large enough to amortize fixed hash setup.
@@ -16,8 +14,6 @@ const TREE_HEIGHT: usize = 10;
 const TREE_LEAVES: usize = 1 << TREE_HEIGHT;
 /// A full binary tree has one fewer parent than leaves.
 const TREE_INTERNAL_NODES: usize = TREE_LEAVES - 1;
-/// Width required by the field's uniform-byte reduction.
-const UNIFORM_BYTES: usize = 64;
 /// Orchard's note-commitment tree is binary.
 const CHILDREN_PER_PARENT: usize = 2;
 /// Position of the left child in each binary chunk.
@@ -42,12 +38,7 @@ fn fixture_leaves() -> Vec<MerkleHashOrchard> {
     let mut rng = ChaCha20Rng::from_seed(FIXTURE_SEED);
 
     (0..TREE_LEAVES)
-        .map(|_| {
-            let mut uniform = [0; UNIFORM_BYTES];
-            rng.fill_bytes(&mut uniform);
-            let value = pallas::Base::from_uniform_bytes(&uniform);
-            MerkleHashOrchard::from_bytes(&value.to_repr()).unwrap()
-        })
+        .map(|_| MerkleHashOrchard::random(&mut rng))
         .collect()
 }
 
@@ -58,11 +49,9 @@ fn distinct_leaves(rng: &mut ChaCha20Rng, count: usize) -> Vec<MerkleHashOrchard
     let mut seen = HashSet::with_capacity(count);
     let mut leaves = Vec::with_capacity(count);
     while leaves.len() < count {
-        let mut uniform = [0; UNIFORM_BYTES];
-        rng.fill_bytes(&mut uniform);
-        let value = pallas::Base::from_uniform_bytes(&uniform);
-        if seen.insert(value.to_repr()) {
-            leaves.push(MerkleHashOrchard::from_bytes(&value.to_repr()).unwrap());
+        let value = MerkleHashOrchard::random(rng);
+        if seen.insert(value.to_bytes()) {
+            leaves.push(value);
         }
     }
     leaves

@@ -6,13 +6,13 @@ use alloc::vec::Vec;
 use super::{L_ORCHARD_SCALAR, L_VALUE};
 
 #[cfg(feature = "circuit")]
-use halo2_gadgets::ecc::{
+use crate::backend::halo2_gadgets::ecc::{
     FixedPoints,
     chip::{BaseFieldElem, FixedPoint, FullScalar, ShortScalar},
 };
 
 #[cfg(feature = "circuit")]
-use pasta_curves::pallas;
+use crate::backend::pasta_curves::pallas;
 
 /// Precomputed table for the `CommitIvk` commitment randomness base.
 pub mod commit_ivk_r;
@@ -260,7 +260,9 @@ impl FixedPoint<pallas::Affine> for OrchardShortScalarBases {
 #[cfg(all(test, feature = "circuit"))]
 mod tests {
     use super::*;
-    use halo2_gadgets::ecc::chip::{FixedScalarKind, constants::compute_lagrange_coeffs};
+    use crate::backend::halo2_gadgets::ecc::chip::{
+        FixedScalarKind, constants::compute_lagrange_coeffs,
+    };
 
     /// The precomputed table must equal what the `FixedPoint::lagrange_coeffs`
     /// default would compute, with the window count taken from the base's
@@ -462,8 +464,8 @@ mod tests {
     /// the MockProver wiring common between the per-base tests below. Only the
     /// case-specific `mul` invocation and native-arithmetic cross-check differ.
     fn run_spend_auth_g_fixed_base_mul_e2e(case: SpendAuthGCase) {
-        use group::{Curve, ff::PrimeField};
-        use halo2_gadgets::{
+        use crate::backend::group::{Curve, ff::PrimeField};
+        use crate::backend::halo2_gadgets::{
             ecc::{
                 FixedPointBaseField, FixedPointShort, NonIdentityPoint, ScalarFixedShort,
                 chip::{CircuitVersion, EccChip, EccConfig},
@@ -473,7 +475,7 @@ mod tests {
                 lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
             },
         };
-        use halo2_proofs::{
+        use crate::backend::halo2_proofs::{
             circuit::{AssignedCell, Layouter, SimpleFloorPlanner, Value},
             dev::MockProver,
             plonk::{Circuit, ConstraintSystem, Error, TableColumn},

@@ -121,6 +121,7 @@ jobs:
             crates/halo2_proofs
             crates/jubjub
             crates/orchard
+            crates/orchard-legacy
             crates/pairing
             crates/pasta_curves
             crates/reddsa
@@ -164,7 +165,7 @@ jobs:
               crates/halo2_legacy_pdqsort/*)
                 halo2_legacy_pdqsort=true
                 ;;
-              crates/orchard/*)
+              crates/orchard/*|crates/orchard-legacy/*)
                 orchard=true
                 ;;
               crates/pasta_curves/*)
@@ -901,7 +902,7 @@ jobs:
         if: matrix.os == 'macOS-latest'
         run: >-
           cargo +stable test -p zakura-orchard
-          --features weighted-merkle,pasta_curves/aarch64-asm
+          --features weighted-merkle,aarch64-asm
           --lib
           --verbose
           -- tree::tests

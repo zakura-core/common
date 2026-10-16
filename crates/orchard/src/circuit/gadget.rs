@@ -1,14 +1,10 @@
 //! Gadgets used in the Orchard circuit.
 
-use ff::Field;
-use pasta_curves::pallas;
+use crate::backend::ff::Field;
+use crate::backend::pasta_curves::pallas;
 
 use super::{commit_ivk::CommitIvkChip, note_commit::NoteCommitChip};
-use crate::constants::{
-    NullifierK, OrchardCommitDomains, OrchardFixedBases, OrchardFixedBasesFull, OrchardHashDomains,
-    ValueCommitV,
-};
-use halo2_gadgets::{
+use crate::backend::halo2_gadgets::{
     ecc::{
         CircuitVersion, EccInstructions, FixedPoint, FixedPointBaseField, FixedPointShort, Point,
         ScalarFixed, ScalarFixedShort, X, chip::EccChip,
@@ -19,9 +15,13 @@ use halo2_gadgets::{
     },
     sinsemilla::{chip::SinsemillaChip, merkle::chip::MerkleChip},
 };
-use halo2_proofs::{
+use crate::backend::halo2_proofs::{
     circuit::{AssignedCell, Chip, Layouter, Value},
     plonk::{self, Advice, Assigned, Column},
+};
+use crate::constants::{
+    NullifierK, OrchardCommitDomains, OrchardFixedBases, OrchardFixedBasesFull, OrchardHashDomains,
+    ValueCommitV,
 };
 
 #[cfg(not(feature = "unstable-voting-circuits"))]

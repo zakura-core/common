@@ -3441,10 +3441,8 @@ dependencies = [
  "blake2b_simd",
  "corez",
  "criterion 0.5.1",
- "ff",
  "fpe",
  "getset",
- "group",
  "hex",
  "incrementalmerkletree",
  "maybe-rayon",
@@ -3462,15 +3460,24 @@ dependencies = [
  "subtle",
  "tracing",
  "visibility",
+ "zakura-note-encryption",
+ "zakura-orchard-legacy",
+ "zcash_spec",
+ "zip32",
+]
+
+[[package]]
+name = "zakura-orchard-legacy"
+version = "3.0.0"
+dependencies = [
+ "ff",
+ "group",
  "zakura-halo2-gadgets",
  "zakura-halo2-poseidon",
  "zakura-halo2-proofs",
- "zakura-note-encryption",
  "zakura-pasta-curves",
  "zakura-reddsa",
  "zakura-sinsemilla",
- "zcash_spec",
- "zip32",
 ]
 
 [[package]]

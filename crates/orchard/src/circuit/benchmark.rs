@@ -1,16 +1,16 @@
 //! Manual benchmarks for complete Ironwood proving and verification paths.
 
-use alloc::vec::Vec;
-use ff::{Field, PrimeField};
-use halo2_proofs::{
+use crate::backend::ff::{Field, PrimeField};
+use crate::backend::halo2_proofs::{
     circuit::{Value, floor_planner},
     plonk::{
         Advice, Any, Assigned, Assignment, BatchVerifier, Circuit as PlonkCircuit, Column,
         ConstraintSystem, Error, Fixed, FloorPlanner, Instance as InstanceColumn, Selector,
     },
 };
+use crate::backend::pasta_curves::{pallas, vesta};
+use alloc::vec::Vec;
 use incrementalmerkletree::{Hashable, Level};
-use pasta_curves::{pallas, vesta};
 use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::{
     collections::{BTreeMap, BTreeSet},

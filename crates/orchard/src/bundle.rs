@@ -984,7 +984,7 @@ impl<V> Bundle<Authorized, V> {
     ///
     /// # Errors
     ///
-    /// Returns `Err(`[`halo2_proofs::plonk::Error::InvalidInstances`]`)` if this
+    /// Returns `Err(`[`crate::backend::halo2_proofs::plonk::Error::InvalidInstances`]`)` if this
     /// bundle disables cross-address transfers and `vk` is not an
     /// [`OrchardCircuitVersion::PostNu6_3`] verifying key.
     ///
@@ -992,7 +992,10 @@ impl<V> Bundle<Authorized, V> {
     ///
     /// [`OrchardCircuitVersion::PostNu6_3`]: crate::circuit::OrchardCircuitVersion::PostNu6_3
     #[cfg(feature = "circuit")]
-    pub fn verify_proof(&self, vk: &VerifyingKey) -> Result<(), halo2_proofs::plonk::Error> {
+    pub fn verify_proof(
+        &self,
+        vk: &VerifyingKey,
+    ) -> Result<(), crate::backend::halo2_proofs::plonk::Error> {
         self.authorization()
             .proof()
             .verify(vk, &self.to_instances())
@@ -1049,11 +1052,11 @@ pub struct BundleAuthorizingCommitment(pub Blake2bHash);
 pub mod testing {
     use alloc::vec::Vec;
 
-    use group::ff::FromUniformBytes;
+    use crate::backend::group::ff::FromUniformBytes;
+    use crate::backend::pasta_curves::pallas;
+    use crate::backend::reddsa::orchard::SpendAuth;
     use nonempty::NonEmpty;
-    use pasta_curves::pallas;
     use rand::{SeedableRng, rngs::StdRng};
-    use reddsa::orchard::SpendAuth;
 
     use proptest::collection::vec;
     use proptest::prelude::*;
@@ -1184,8 +1187,7 @@ pub mod testing {
 
     prop_compose! {
         /// Generate an arbitrary unauthorized bundle. This bundle does not
-        /// necessarily respect consensus rules; for that use
-        /// [`crate::builder::testing::arb_bundle`]
+        /// necessarily respect consensus rules; for that use /// [`crate::builder::testing::arb_bundle`]
         pub fn arb_unauthorized_bundle(n_actions: usize)
         (
             bundle_version in arb_bundle_version(),
@@ -1214,8 +1216,7 @@ pub mod testing {
 
     prop_compose! {
         /// Generate an arbitrary bundle with fake authorization data. This bundle does not
-        /// necessarily respect consensus rules; for that use
-        /// [`crate::builder::testing::arb_bundle`]
+        /// necessarily respect consensus rules; for that use /// [`crate::builder::testing::arb_bundle`]
         pub fn arb_bundle(n_actions: usize)
         (
             bundle_version in arb_bundle_version(),
@@ -1777,7 +1778,7 @@ pub(crate) mod tests {
 
             assert!(matches!(
                 bundle.verify_proof(vk),
-                Err(halo2_proofs::plonk::Error::InvalidInstances)
+                Err(crate::backend::halo2_proofs::plonk::Error::InvalidInstances)
             ));
         }
     }

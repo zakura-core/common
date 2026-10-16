@@ -4,18 +4,18 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use corez::io::{self, Read, Write};
 
+use crate::backend::group::{
+    Curve, CurveAffine as _, GroupEncoding,
+    ff::{Field, PrimeField},
+};
+use crate::backend::pasta_curves::glv::{Decomposed, Table};
+use crate::backend::pasta_curves::pallas;
 use ::zip32::{AccountId, ChildIndex};
 #[cfg(feature = "zip32-addresses")]
 use aes::Aes256;
 use blake2b_simd::{Hash as Blake2bHash, Params};
 #[cfg(feature = "zip32-addresses")]
 use fpe::ff1::{BinaryNumeralString, FF1};
-use group::{
-    Curve, CurveAffine as _, GroupEncoding,
-    ff::{Field, PrimeField},
-};
-use pasta_curves::glv::{Decomposed, Table};
-use pasta_curves::pallas;
 use rand::Rng;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zcash_note_encryption::EphemeralKeyBytes;
@@ -868,15 +868,15 @@ impl EphemeralPublicKey {
 
 /// What a prepared ephemeral key carries.
 ///
-/// Individually-prepared keys carry a `group::Wnaf` window table, consumed by
+/// Individually-prepared keys carry a `crate::backend::group::Wnaf` window table, consumed by
 /// the per-item multiplication. Batch-prepared keys carry a GLV odd-multiples
-/// window instead (see `pasta_curves::glv`), which is cheaper to build across a
+/// window instead (see `crate::backend::pasta_curves::glv`), which is cheaper to build across a
 /// batch (one shared normalization) and cheaper to multiply against (a
 /// shared-doubling ladder over the endomorphism split). Both produce
 /// identical shared secrets.
 #[derive(Clone, Debug)]
 enum PreparedEpkInner {
-    /// A `group::Wnaf` window table.
+    /// A `crate::backend::group::Wnaf` window table.
     Wnaf(PreparedNonIdentityBase),
     /// A GLV Eisenstein digit-orbit window, boxed to keep the enum small
     /// (1 KiB on the heap: eight orbit points with the x-coordinates stored
@@ -1002,7 +1002,7 @@ impl SharedSecret {
 
         // Batch-normalize the shared secrets.
         let mut secrets_affine = vec![pallas::Affine::identity(); secrets.len()];
-        group::Curve::batch_normalize(&secrets, &mut secrets_affine);
+        crate::backend::group::Curve::batch_normalize(&secrets, &mut secrets_affine);
 
         // Re-insert the invalid ephemeral_key positions.
         let mut secrets_affine = secrets_affine.into_iter();
@@ -1090,7 +1090,7 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use ff::PrimeField;
+    use crate::backend::ff::PrimeField;
     use proptest::prelude::*;
 
     #[cfg(feature = "zip32-addresses")]

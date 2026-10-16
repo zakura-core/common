@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 #[cfg(feature = "multicore")]
 use std::sync::{Arc, Mutex, mpsc};
 
-use group::{Curve, GroupEncoding};
-use halo2_proofs::{
+use crate::backend::group::{Curve, GroupEncoding};
+use crate::backend::halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value, floor_planner},
     plonk::{
         self, Advice, BatchVerifier, Column, Constraints, Expression, Fixed,
@@ -15,7 +15,7 @@ use halo2_proofs::{
     poly::{Rotation, commitment::Params},
     transcript::{Blake2bRead, Blake2bWrite},
 };
-use pasta_curves::{arithmetic::CurveAffine, pallas, vesta};
+use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas, vesta};
 use rand::Rng;
 
 use self::{
@@ -25,6 +25,24 @@ use self::{
         assign_free_advice,
     },
     note_commit::{NoteCommitChip, NoteCommitConfig},
+};
+use crate::backend::halo2_gadgets::{
+    ecc::{
+        CircuitVersion, FixedPoint, NonIdentityPoint, Point, ScalarFixed, ScalarFixedShort,
+        ScalarVar,
+        chip::{EccChip, EccConfig},
+    },
+    poseidon::{Pow5Chip as PoseidonChip, Pow5Config as PoseidonConfig, primitives as poseidon},
+    sinsemilla::{
+        HashDomains,
+        chip::{SinsemillaChip, SinsemillaConfig},
+        merkle::{
+            MerklePath, PreparedMerklePathWitness,
+            chip::{MerkleChip, MerkleConfig},
+            prepare_merkle_path_witness,
+        },
+    },
+    utilities::lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
 };
 use crate::{
     builder::SpendInfo,
@@ -45,24 +63,6 @@ use crate::{
     spec::NonIdentityPallasPoint,
     tree::{Anchor, MerkleHashOrchard},
     value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
-};
-use halo2_gadgets::{
-    ecc::{
-        CircuitVersion, FixedPoint, NonIdentityPoint, Point, ScalarFixed, ScalarFixedShort,
-        ScalarVar,
-        chip::{EccChip, EccConfig},
-    },
-    poseidon::{Pow5Chip as PoseidonChip, Pow5Config as PoseidonConfig, primitives as poseidon},
-    sinsemilla::{
-        HashDomains,
-        chip::{SinsemillaChip, SinsemillaConfig},
-        merkle::{
-            MerklePath, PreparedMerklePathWitness,
-            chip::{MerkleChip, MerkleConfig},
-            prepare_merkle_path_witness,
-        },
-    },
-    utilities::lookup_range_check::{LookupRangeCheck, LookupRangeCheckConfig},
 };
 
 #[cfg(not(feature = "unstable-voting-circuits"))]
@@ -1356,7 +1356,7 @@ impl plonk::Circuit<pallas::Base> for Circuit {
 /// Build with [`VerifyingKey::build`] for an explicit circuit version.
 #[derive(Debug)]
 pub struct VerifyingKey {
-    pub(crate) params: halo2_proofs::poly::commitment::Params<vesta::Affine>,
+    pub(crate) params: crate::backend::halo2_proofs::poly::commitment::Params<vesta::Affine>,
     pub(crate) vk: plonk::VerifyingKey<vesta::Affine>,
     circuit_version: OrchardCircuitVersion,
 }
@@ -1401,7 +1401,7 @@ impl VerifyingKey {
     /// mean the proof is valid. Use [`Proof::verify`] for proof acceptance. The returned
     /// MSM can be compared with an independent verifier's equation, including when
     /// the proof is invalid or this key belongs to a historical circuit version.
-    /// A [`halo2_proofs::plonk::fingerprint::ChallengeRecorder`] can capture the
+    /// A [`crate::backend::halo2_proofs::plonk::fingerprint::ChallengeRecorder`] can capture the
     /// transcript events and challenges alongside the equation.
     ///
     /// The instances have the same typed invariants and circuit-version requirements
@@ -1414,11 +1414,11 @@ impl VerifyingKey {
         &self,
         instances: &[Instance],
         transcript: &mut T,
-    ) -> Result<halo2_proofs::poly::commitment::MSM<'_, vesta::Affine>, plonk::Error>
+    ) -> Result<crate::backend::halo2_proofs::poly::commitment::MSM<'_, vesta::Affine>, plonk::Error>
     where
-        T: halo2_proofs::transcript::TranscriptRead<
+        T: crate::backend::halo2_proofs::transcript::TranscriptRead<
                 vesta::Affine,
-                halo2_proofs::transcript::Challenge255<vesta::Affine>,
+                crate::backend::halo2_proofs::transcript::Challenge255<vesta::Affine>,
             >,
     {
         self.check_instance_compatibility(instances)?;
@@ -1466,7 +1466,7 @@ impl VerifyingKey {
     /// Prepares this key for repeated proof verification: builds and caches
     /// a prepared fixed-base zero-check over the key's SRS, which the halo2
     /// verifier's final identity test then routes through (see
-    /// `halo2_proofs::poly::commitment::Params::prepare_zero_checks`).
+    /// `crate::backend::halo2_proofs::poly::commitment::Params::prepare_zero_checks`).
     ///
     /// Preparation costs on the order of a hundred milliseconds and tens of
     /// mebibytes, amortized across every subsequent verification with this
@@ -1498,14 +1498,14 @@ impl VerifyingKey {
 /// The resulting proofs verify only under a compatible [`VerifyingKey`].
 #[derive(Debug)]
 pub struct ProvingKey {
-    params: halo2_proofs::poly::commitment::Params<vesta::Affine>,
+    params: crate::backend::halo2_proofs::poly::commitment::Params<vesta::Affine>,
     pk: plonk::ProvingKey<vesta::Affine>,
     circuit_version: OrchardCircuitVersion,
 }
 
 impl ProvingKey {
     /// Builds and caches prepared commitment tables over this key's SRS (see
-    /// [`halo2_proofs::poly::commitment::Params::prepare_commitments`]).
+    /// [`crate::backend::halo2_proofs::poly::commitment::Params::prepare_commitments`]).
     /// Long-lived provers (wallet backends, proving services) should call this
     /// once after constructing the key: the prover's polynomial commitments
     /// then evaluate through the preparations. With the default multicore,
@@ -1611,7 +1611,7 @@ impl Instance {
     /// cross-address restriction; [`Proof::create`], [`Proof::verify`], and
     /// [`crate::bundle::BatchValidator`] enforce this.
     ///
-    /// Returns `None` if `rk` is the identity [`pasta_curves::pallas::Point`].
+    /// Returns `None` if `rk` is the identity [`crate::backend::pasta_curves::pallas::Point`].
     /// zcashd v6.12.1 and Zebra 4.3.1 both added a consensus rule rejecting
     /// transactions whose Orchard actions have an identity `rk`; the Zcash
     /// protocol specification will be updated to match, and this crate
@@ -1761,8 +1761,7 @@ impl Proof {
         #[cfg(feature = "multicore")]
         {
             // Prefer Action-level synthesis parallelism for batches that fill
-            // the worker pool. A single Action has no higher-level work to use
-            // instead, while smaller batches leave workers for Merkle
+            // the worker pool. A single Action has no higher-level work to use // instead, while smaller batches leave workers for Merkle
             // preparation. Do not block on preparation from within the same
             // Rayon pool, where callers may already occupy its workers.
             let prepare_merkle = maybe_rayon::current_thread_index().is_none()
@@ -1882,9 +1881,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::iter;
 
-    use ff::Field;
-    use halo2_proofs::{circuit::Value, dev::MockProver, poly::commitment::Params};
-    use pasta_curves::{pallas, vesta};
+    use crate::backend::ff::Field;
+    use crate::backend::halo2_proofs::{circuit::Value, dev::MockProver, poly::commitment::Params};
+    use crate::backend::pasta_curves::{pallas, vesta};
     use rand::Rng;
 
     use crate::rng_compat::OsRng;
@@ -2207,7 +2206,7 @@ mod tests {
             assert!(proof.verify(vk, core::slice::from_ref(&instance)).is_ok());
             #[cfg(feature = "verifier-fingerprint")]
             {
-                use halo2_proofs::{
+                use crate::backend::halo2_proofs::{
                     plonk::fingerprint::ChallengeRecorder, transcript::Challenge255,
                 };
 
@@ -2225,7 +2224,7 @@ mod tests {
             instance.cross_address_disabled = true;
             #[cfg(feature = "verifier-fingerprint")]
             {
-                use halo2_proofs::{
+                use crate::backend::halo2_proofs::{
                     plonk::fingerprint::ChallengeRecorder, transcript::Challenge255,
                 };
 
@@ -2296,11 +2295,10 @@ mod tests {
 
         // Test that the proof size is as expected.
         let expected_proof_size = {
-            let circuit_cost =
-                halo2_proofs::dev::CircuitCost::<pasta_curves::vesta::Point, _>::measure(
-                    K,
-                    &circuits[0],
-                );
+            let circuit_cost = crate::backend::halo2_proofs::dev::CircuitCost::<
+                crate::backend::pasta_curves::vesta::Point,
+                _,
+            >::measure(K, &circuits[0]);
             // These sizes are identical for every circuit version: the post-NU 6.3 circuit reuses the
             // existing Orchard checks gate on spare rows and adds no columns or
             // commitments, leaving the proof shape unchanged.
@@ -2696,7 +2694,7 @@ mod tests {
             .unwrap();
 
         let circuit = Circuit::empty(OrchardCircuitVersion::PostNu6_3);
-        halo2_proofs::dev::CircuitLayout::default()
+        crate::backend::halo2_proofs::dev::CircuitLayout::default()
             .show_labels(false)
             .view_height(0..(1 << 11))
             .render(K, &circuit, &root)
@@ -2704,8 +2702,8 @@ mod tests {
     }
 
     mod from_parts_rk_identity {
-        use ff::{Field as _, PrimeField as _};
-        use pasta_curves::pallas;
+        use crate::backend::ff::{Field as _, PrimeField as _};
+        use crate::backend::pasta_curves::pallas;
 
         use super::super::Instance;
         use crate::{

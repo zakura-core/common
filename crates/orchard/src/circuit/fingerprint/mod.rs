@@ -29,9 +29,11 @@
 
 use alloc::vec::Vec;
 
-use halo2_proofs::plonk::fingerprint::{ChallengeRecorder, capture_proof_fingerprint};
-use halo2_proofs::transcript::Challenge255;
-use pasta_curves::vesta;
+use crate::backend::halo2_proofs::plonk::fingerprint::{
+    ChallengeRecorder, capture_proof_fingerprint,
+};
+use crate::backend::halo2_proofs::transcript::Challenge255;
+use crate::backend::pasta_curves::vesta;
 
 use super::{K, OrchardCircuitVersion, VerifyingKey};
 

@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use ff::{Field, PrimeField};
 use incrementalmerkletree::{Hashable, Level};
 use orchard::{
     Anchor, Bundle, NOTE_COMMITMENT_TREE_DEPTH,
@@ -12,7 +11,6 @@ use orchard::{
     tree::{MerkleHashOrchard, MerklePath},
     value::NoteValue,
 };
-use pasta_curves::pallas;
 use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 
 const MEMO_SIZE: usize = 512;
@@ -305,10 +303,9 @@ fn shared_anchor_witnesses(
                 // A spend reveals sibling subtree roots but not their
                 // preimages, so independent canonical nodes accurately model
                 // a populated tree.
-                current.entry(child).or_insert_with(|| {
-                    let value = pallas::Base::random(&mut *rng).to_repr();
-                    MerkleHashOrchard::from_bytes(&value).unwrap()
-                });
+                current
+                    .entry(child)
+                    .or_insert_with(|| MerkleHashOrchard::random(rng));
             }
         }
         levels[level_index] = current;

@@ -1,5 +1,5 @@
-use group::ff::PrimeField;
-use pasta_curves::{arithmetic::CurveAffine, pallas};
+use crate::backend::group::ff::PrimeField;
+use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas};
 
 /// Generator used as $\mathcal{G}^{\mathsf{Orchard}}$ in Spend authorization signatures.
 pub const GENERATOR: ([u8; 32], [u8; 32]) = (
@@ -14,7 +14,7 @@ pub const GENERATOR: ([u8; 32], [u8; 32]) = (
 );
 
 /// Full-width z-values for GENERATOR.
-/// These can be reproduced by [`halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
+/// These can be reproduced by [`crate::backend::halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
 pub const Z: [u64; super::NUM_WINDOWS] = [
     49707, 15701, 45931, 163127, 41654, 212130, 34473, 25205, 4118, 10240, 12264, 22866, 203610,
     18808, 13851, 62448, 62380, 94497, 39496, 73216, 32037, 32774, 61690, 39173, 74580, 84678,
@@ -26,7 +26,7 @@ pub const Z: [u64; super::NUM_WINDOWS] = [
 ];
 
 /// Full-width u-values for GENERATOR.
-/// These can be reproduced by [`halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
+/// These can be reproduced by [`crate::backend::halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
 pub static U: [[[u8; 32]; super::H]; super::NUM_WINDOWS] = [
     [
         [
@@ -2930,14 +2930,14 @@ pub fn generator() -> pallas::Affine {
 }
 
 /// Short signed z-values for GENERATOR (22 windows, for SpendAuthGShort).
-/// These can be reproduced by [`halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
+/// These can be reproduced by [`crate::backend::halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
 pub const Z_SHORT: [u64; super::NUM_WINDOWS_SHORT] = [
     49707, 15701, 45931, 163127, 41654, 212130, 34473, 25205, 4118, 10240, 12264, 22866, 203610,
     18808, 13851, 62448, 62380, 94497, 39496, 73216, 32037, 65411,
 ];
 
 /// Short signed u-values for GENERATOR (22 windows, for SpendAuthGShort).
-/// These can be reproduced by [`halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
+/// These can be reproduced by [`crate::backend::halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
 pub const U_SHORT: [[[u8; 32]; super::H]; super::NUM_WINDOWS_SHORT] = [
     [
         [
@@ -3693,9 +3693,11 @@ pub const U_SHORT: [[[u8; 32]; super::H]; super::NUM_WINDOWS_SHORT] = [
 mod tests {
     use super::super::{NUM_WINDOWS, NUM_WINDOWS_SHORT, ORCHARD_PERSONALIZATION};
     use super::*;
-    use group::Curve;
-    use halo2_gadgets::ecc::chip::constants::{test_lagrange_coeffs, test_zs_and_us};
-    use pasta_curves::{
+    use crate::backend::group::Curve;
+    use crate::backend::halo2_gadgets::ecc::chip::constants::{
+        test_lagrange_coeffs, test_zs_and_us,
+    };
+    use crate::backend::pasta_curves::{
         arithmetic::{CurveAffine, CurveExt},
         pallas,
     };

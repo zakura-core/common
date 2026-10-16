@@ -6,12 +6,13 @@
 //! appearing in the commitment tree), and its randomness is
 //! [`NoteCommitTrapdoor`].
 
+use crate::backend::sinsemilla;
 use core::iter;
 
+use crate::backend::group::ff::{PrimeField, PrimeFieldBits};
+use crate::backend::pasta_curves::pallas;
 use crate::once::OnceTable;
 use bitvec::{array::BitArray, order::Lsb0};
-use group::ff::{PrimeField, PrimeFieldBits};
-use pasta_curves::pallas;
 use subtle::{ConstantTimeEq, CtOption};
 
 use crate::{

@@ -1,0 +1,37 @@
+[package]
+name = "zakura-orchard-legacy"
+description = "Private dependency support for Orchard's legacy backend"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lib]
+name = "orchard_legacy"
+
+[dependencies]
+ff = { version = "0.14", default-features = false }
+group = { version = "0.14", default-features = false }
+pasta_curves = { workspace = true, features = ["default", "glv"] }
+poseidon.workspace = true
+sinsemilla.workspace = true
+reddsa = { workspace = true, features = ["pallas-pasta"] }
+halo2_proofs = { workspace = true, optional = true, features = ["batch", "floor-planner-v1-legacy-pdqsort"] }
+halo2_gadgets = { workspace = true, optional = true }
+
+[features]
+std = ["reddsa/std", "group/wnaf-memuse"]
+circuit = ["std", "dep:halo2_proofs", "dep:halo2_gadgets"]
+multicore = ["halo2_proofs?/multicore"]
+aarch64-asm = ["pasta_curves/aarch64-asm"]
+portable = ["pasta_curves/portable", "halo2_proofs?/portable"]
+x86_64-asm = ["pasta_curves/x86_64-asm", "halo2_proofs?/x86_64-asm"]
+dev-graph = ["halo2_proofs?/dev-graph"]
+orbits = ["halo2_proofs?/orbits"]
+verifier-fingerprint = ["halo2_proofs?/unstable-verifier-fingerprint"]
+prover-fingerprint = ["halo2_proofs?/unstable-prover-fingerprint"]
+circuit-fixtures = ["halo2_proofs?/unstable-circuit-fixtures"]
+test-dependencies = ["sinsemilla/test-dependencies", "halo2_gadgets?/test-dependencies"]

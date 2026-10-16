@@ -1,5 +1,5 @@
-use group::ff::PrimeField;
-use pasta_curves::{arithmetic::CurveAffine, pallas};
+use crate::backend::group::ff::PrimeField;
+use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas};
 
 /// Generator used in SinsemillaCommit randomness for IVK commitment.
 pub const GENERATOR: ([u8; 32], [u8; 32]) = (
@@ -14,7 +14,7 @@ pub const GENERATOR: ([u8; 32], [u8; 32]) = (
 );
 
 /// Full-width z-values for GENERATOR.
-/// These can be reproduced by [`halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
+/// These can be reproduced by [`crate::backend::halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
 pub const Z: [u64; super::NUM_WINDOWS] = [
     18172, 17390, 61749, 65182, 33835, 155942, 26189, 52444, 40096, 139582, 99218, 20669, 291337,
     12465, 132211, 75527, 68003, 95835, 237325, 21348, 35494, 215451, 49456, 6332, 99036, 224845,
@@ -26,7 +26,7 @@ pub const Z: [u64; super::NUM_WINDOWS] = [
 ];
 
 /// Full-width u-values for GENERATOR.
-/// These can be reproduced by [`halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
+/// These can be reproduced by [`crate::backend::halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
 pub static U: [[[u8; 32]; super::H]; super::NUM_WINDOWS] = [
     [
         [
@@ -2933,12 +2933,12 @@ pub fn generator() -> pallas::Affine {
 mod tests {
     use super::super::{COMMIT_IVK_PERSONALIZATION, NUM_WINDOWS};
     use super::*;
-    use group::Curve;
-    use halo2_gadgets::{
+    use crate::backend::group::Curve;
+    use crate::backend::halo2_gadgets::{
         ecc::chip::constants::{test_lagrange_coeffs, test_zs_and_us},
         sinsemilla::primitives::CommitDomain,
     };
-    use pasta_curves::{arithmetic::CurveAffine, pallas};
+    use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas};
 
     #[test]
     fn generator() {

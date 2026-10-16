@@ -1,8 +1,8 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use halo2_proofs::plonk;
-use pasta_curves::vesta;
+use crate::backend::halo2_proofs::plonk;
+use crate::backend::pasta_curves::vesta;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 

@@ -21,30 +21,23 @@ name = "orchard"
 bench = false
 
 [dependencies]
+orchard-legacy.workspace = true
 aes = { version = "0.9", optional = true }
 bitvec = { version = "1", default-features = false }
 blake2b_simd = { version = "1", default-features = false }
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
-ff = { version = "0.14", default-features = false }
 fpe = { version = "0.7", features = ["alloc"], default-features = false, optional = true }
 getset = "0.1"
-group = "0.14"
-halo2_gadgets = { workspace = true, optional = true }
-halo2_proofs = { workspace = true, features = ["batch", "floor-planner-v1-legacy-pdqsort"], optional = true }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 incrementalmerkletree = "0.8.1"
 memuse = { version = "0.2.2", default-features = false }
 maybe-rayon = { version = "0.1.0", default-features = false, optional = true }
 nonempty = { version = "0.11", default-features = false }
 once_cell = { version = "1", features = ["race", "alloc"], default-features = false }
-pasta_curves = { workspace = true, features = ["default", "glv"] }
 plotters = { version = "0.3.0", optional = true }
-poseidon = { workspace = true }
 proptest = { version = ">=1.0.0, <1.7.0", optional = true }
 rand = { version = "0.10", default-features = false }
-reddsa = { workspace = true, features = ["pallas-pasta"] }
 serde = { version = "1.0", features = ["derive"], default-features = false }
-sinsemilla = { workspace = true }
 subtle = { version = "2.6", default-features = false }
 tracing = { version = "0.1", default-features = false }
 visibility = { version = "0.1.1", optional = true }
@@ -53,8 +46,8 @@ zcash_spec = "0.2.1"
 zip32 = { version = "0.2.0", default-features = false }
 
 [dev-dependencies]
+orchard-legacy = { workspace = true, features = ["test-dependencies"] }
 criterion = "0.5"
-halo2_gadgets = { workspace = true, features = ["test-dependencies"] }
 hex = "0.4"
 incrementalmerkletree = { version = "0.8.1", features = ["test-dependencies"] }
 proptest = ">=1.0.0, <1.7.0"
@@ -62,7 +55,6 @@ rand = { version = "0.10", features = ["thread_rng"], default-features = false }
 rand_chacha = "0.10"
 rayon = "1"
 shardtree = "0.6"
-sinsemilla = { workspace = true, features = ["test-dependencies"] }
 zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] }
 
 [target."cfg(unix)".dev-dependencies]
@@ -71,26 +63,28 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 [features]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["dep:aes", "dep:fpe"]
-circuit = ["dep:halo2_gadgets", "dep:halo2_proofs", "std"]
+circuit = ["std", "orchard-legacy/circuit"]
 default = ["zip32-addresses", "circuit", "multicore", "std"]
-dev-graph = ["halo2_proofs?/dev-graph", "image", "plotters"]
+dev-graph = ["orchard-legacy/dev-graph", "dep:plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
-multicore = ["halo2_proofs?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
-orbits = ["halo2_proofs?/orbits"]
+multicore = ["orchard-legacy/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
+orbits = ["orchard-legacy/orbits"]
 # Disable automatic x86-64 assembly selection in the proving dependencies.
-portable = ["pasta_curves/portable", "halo2_proofs?/portable"]
-std = ["corez/std", "group/wnaf-memuse", "reddsa/std"]
-test-dependencies = ["proptest", "rand/std", "rand/std_rng"]
+portable = ["orchard-legacy/portable"]
+std = ["corez/std", "orchard-legacy/std"]
+test-dependencies = ["orchard-legacy/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
 unstable-frost = ["dep:visibility"]
 unstable-voting-circuits = ["dep:visibility"]
 # Historical fingerprint fixtures use ZIP 32 indexed addresses.
-verifier-fingerprint = ["zip32-addresses", "circuit", "halo2_proofs/unstable-verifier-fingerprint"]
+verifier-fingerprint = ["orchard-legacy/verifier-fingerprint", "zip32-addresses", "circuit"]
 # Capture the prover's private tape and complete transcript for formal-model fixtures.
-prover-fingerprint = ["zip32-addresses", "circuit", "halo2_proofs/unstable-prover-fingerprint"]
-circuit-fixtures = ["circuit", "halo2_proofs/unstable-circuit-fixtures"]
+prover-fingerprint = ["orchard-legacy/prover-fingerprint", "zip32-addresses", "circuit"]
+circuit-fixtures = ["orchard-legacy/circuit-fixtures", "circuit"]
 weighted-merkle = []
-x86_64-asm = ["pasta_curves/x86_64-asm", "halo2_proofs?/x86_64-asm"]
+x86_64-asm = ["orchard-legacy/x86_64-asm"]
+
+aarch64-asm = ["orchard-legacy/aarch64-asm"]
 
 [[example]]
 name = "generate_lagrange_coeffs"
@@ -103,28 +97,29 @@ required-features = ["circuit", "zip32-addresses"]
 [[bench]]
 name = "circuit"
 harness = false
-required-features = ["circuit", "zip32-addresses"]
+required-features = ["test-dependencies", "circuit", "zip32-addresses"]
 
 [[bench]]
 name = "note_decryption"
 harness = false
-required-features = ["circuit", "zip32-addresses"]
+required-features = ["test-dependencies", "circuit", "zip32-addresses"]
 
 [[bench]]
 name = "small"
 harness = false
-required-features = ["zip32-addresses"]
+required-features = ["test-dependencies", "zip32-addresses"]
 
 [[bench]]
 name = "merkle"
 harness = false
+required-features = ["test-dependencies"]
 
 [[bench]]
 name = "ironwood_k11_prover"
 harness = false
-required-features = ["circuit", "zip32-addresses"]
+required-features = ["test-dependencies", "circuit", "zip32-addresses"]
 
 [[bench]]
 name = "post_nu6_3_k11_keygen"
 harness = false
-required-features = ["circuit", "zip32-addresses"]
+required-features = ["test-dependencies", "circuit", "zip32-addresses"]

@@ -47,16 +47,16 @@
 use alloc::vec::Vec;
 use std::io;
 
-use ff::{Field, PrimeField};
-use group::{Curve, Group, GroupEncoding};
-use halo2_proofs::plonk::fingerprint::{
+use crate::backend::ff::{Field, PrimeField};
+use crate::backend::group::{Curve, Group, GroupEncoding};
+use crate::backend::halo2_proofs::plonk::fingerprint::{
     ChallengeRecorder, TranscriptEvent, capture_proof_fingerprint,
 };
-use halo2_proofs::transcript::{
+use crate::backend::halo2_proofs::transcript::{
     Blake2bRead, Blake2bWrite, Challenge255, EncodedChallenge, Transcript, TranscriptRead,
     TranscriptWrite,
 };
-use pasta_curves::vesta;
+use crate::backend::pasta_curves::vesta;
 use rand_chacha::ChaCha20Rng;
 
 use super::super::{K, OrchardCircuitVersion};

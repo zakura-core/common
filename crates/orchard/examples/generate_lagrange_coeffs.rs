@@ -1,12 +1,14 @@
 use std::{fmt::Write, path::PathBuf};
 
-use ff::PrimeField;
-use halo2_gadgets::ecc::chip::{FixedPoint, FixedScalarKind, constants::compute_lagrange_coeffs};
 use orchard::constants::{
     OrchardBaseFieldBases, OrchardFixedBasesFull, OrchardShortScalarBases,
     fixed_bases::{NUM_WINDOWS, NUM_WINDOWS_SHORT},
 };
-use pasta_curves::pallas;
+use orchard_legacy::ff::PrimeField;
+use orchard_legacy::halo2_gadgets::ecc::chip::{
+    FixedPoint, FixedScalarKind, constants::compute_lagrange_coeffs,
+};
+use orchard_legacy::pasta_curves::pallas;
 
 /// Emits one table. The window count comes from the base's
 /// `FixedScalarKind`, exactly as the `FixedPoint::lagrange_coeffs` default
@@ -61,7 +63,7 @@ fn main() {
          //\n\
          // `precomputed_lagrange_coeffs_match_generators` in `fixed_bases.rs`\n\
          // checks the committed tables against fresh interpolation.\n\n\
-         use pasta_curves::pallas;\n\n\
+         use orchard_legacy::pasta_curves::pallas;\n\n\
          use super::{H, NUM_WINDOWS, NUM_WINDOWS_SHORT};\n\n",
     );
 

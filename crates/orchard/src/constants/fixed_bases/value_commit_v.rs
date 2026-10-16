@@ -1,5 +1,5 @@
-use group::ff::PrimeField;
-use pasta_curves::{arithmetic::CurveAffine, pallas};
+use crate::backend::group::ff::PrimeField;
+use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas};
 
 /// The value commitment is a homomorphic Pedersen commitment used to check balance between inputs
 /// and outputs. This is its value base, $\mathcal{V}^{\mathsf{Orchard}}$.
@@ -15,14 +15,14 @@ pub const GENERATOR: ([u8; 32], [u8; 32]) = (
 );
 
 /// Short signed z-values for GENERATOR.
-/// These can be reproduced by [`halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
+/// These can be reproduced by [`crate::backend::halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
 pub const Z_SHORT: [u64; super::NUM_WINDOWS_SHORT] = [
     163547, 76040, 88852, 128479, 54088, 89871, 39598, 144309, 43471, 102492, 741, 55288, 33756,
     77312, 12095, 48253, 45718, 202901, 33132, 71081, 152108, 169712,
 ];
 
 /// Short signed u-values for GENERATOR.
-/// These can be reproduced by [`halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
+/// These can be reproduced by [`crate::backend::halo2_gadgets::ecc::chip::constants::find_zs_and_us`].
 pub const U_SHORT: [[[u8; 32]; super::H]; super::NUM_WINDOWS_SHORT] = [
     [
         [
@@ -787,9 +787,11 @@ pub fn generator() -> pallas::Affine {
 mod tests {
     use super::super::{NUM_WINDOWS_SHORT, VALUE_COMMITMENT_PERSONALIZATION};
     use super::*;
-    use group::Curve;
-    use halo2_gadgets::ecc::chip::constants::{test_lagrange_coeffs, test_zs_and_us};
-    use pasta_curves::{
+    use crate::backend::group::Curve;
+    use crate::backend::halo2_gadgets::ecc::chip::constants::{
+        test_lagrange_coeffs, test_zs_and_us,
+    };
+    use crate::backend::pasta_curves::{
         arithmetic::{CurveAffine, CurveExt},
         pallas,
     };

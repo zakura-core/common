@@ -16,7 +16,7 @@
 use alloc::vec::Vec;
 use core::{convert::Infallible, mem::size_of};
 
-use halo2_proofs::{
+use crate::backend::halo2_proofs::{
     plonk::{
         self,
         prover_fingerprint::{
@@ -26,7 +26,7 @@ use halo2_proofs::{
     },
     transcript::{Blake2bWrite, Challenge255},
 };
-use pasta_curves::vesta;
+use crate::backend::pasta_curves::vesta;
 use rand::{Rng, TryRng};
 
 #[cfg(feature = "multicore")]

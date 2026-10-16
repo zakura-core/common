@@ -23,7 +23,6 @@ fn post_nu6_3_k11_keygen(criterion: &mut Criterion) {
                     ProvingKey::build(version).expect("current circuit supports proving");
                 measured += start.elapsed();
                 black_box(&proving_key);
-                drop(proving_key);
             }
             measured
         });

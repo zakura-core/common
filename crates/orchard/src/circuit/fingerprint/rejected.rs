@@ -2,13 +2,13 @@
 
 use alloc::vec::Vec;
 
-use ff::Field;
-use halo2_proofs::plonk::fingerprint::{
+use crate::backend::ff::Field;
+use crate::backend::halo2_proofs::plonk::fingerprint::{
     ChallengeRecorder, TranscriptEvent, capture_proof_fingerprint,
 };
-use halo2_proofs::plonk::{SingleVerifier, verify_proof};
-use halo2_proofs::transcript::{Blake2bWrite, Challenge255, TranscriptWrite};
-use pasta_curves::vesta;
+use crate::backend::halo2_proofs::plonk::{SingleVerifier, verify_proof};
+use crate::backend::halo2_proofs::transcript::{Blake2bWrite, Challenge255, TranscriptWrite};
+use crate::backend::pasta_curves::vesta;
 
 use super::{
     assert_pinned_verifying_key, build_fixture_bundle, fixture_rng, raw_instance_refs,
@@ -127,7 +127,7 @@ fn fingerprint_rejected_capture_two_actions() {
             &raw_instance_refs,
             &mut tampered_reject_transcript,
         ),
-        Err(halo2_proofs::plonk::Error::ConstraintSystemFailure)
+        Err(crate::backend::halo2_proofs::plonk::Error::ConstraintSystemFailure)
     ));
 
     // The multiopen u-evaluations are exactly the ReadScalars between the x3 and x4 squeezes, so
@@ -184,7 +184,7 @@ fn fingerprint_rejected_capture_two_actions() {
             &raw_instance_refs,
             &mut truncated_u_transcript,
         ),
-        Err(halo2_proofs::plonk::Error::Opening)
+        Err(crate::backend::halo2_proofs::plonk::Error::Opening)
     ));
     assert!(
         truncated_u_transcript.challenges.len() >= 8,

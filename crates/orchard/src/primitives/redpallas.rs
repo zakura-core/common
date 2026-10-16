@@ -2,29 +2,29 @@
 
 use core::cmp::{Ord, Ordering, PartialOrd};
 
-use pasta_curves::pallas;
+use crate::backend::pasta_curves::pallas;
 use rand::{CryptoRng, Rng};
 
 #[cfg(feature = "std")]
-pub use reddsa::batch;
+pub use crate::backend::reddsa::batch;
 
 #[cfg(test)]
 use crate::rng_compat::OsRng;
 
 /// A RedPallas signature type.
-pub trait SigType: reddsa::SigType + private::Sealed {}
+pub trait SigType: crate::backend::reddsa::SigType + private::Sealed {}
 
 /// A type variable corresponding to an Orchard spend authorization signature.
-pub type SpendAuth = reddsa::orchard::SpendAuth;
+pub type SpendAuth = crate::backend::reddsa::orchard::SpendAuth;
 impl SigType for SpendAuth {}
 
 /// A type variable corresponding to an Orchard binding signature.
-pub type Binding = reddsa::orchard::Binding;
+pub type Binding = crate::backend::reddsa::orchard::Binding;
 impl SigType for Binding {}
 
 /// A RedPallas signing key.
 #[derive(Clone, Debug)]
-pub struct SigningKey<T: SigType>(reddsa::SigningKey<T>);
+pub struct SigningKey<T: SigType>(crate::backend::reddsa::SigningKey<T>);
 
 impl<T: SigType> From<SigningKey<T>> for [u8; 32] {
     fn from(sk: SigningKey<T>) -> [u8; 32] {
@@ -39,7 +39,7 @@ impl<T: SigType> From<&SigningKey<T>> for [u8; 32] {
 }
 
 impl<T: SigType> TryFrom<[u8; 32]> for SigningKey<T> {
-    type Error = reddsa::Error;
+    type Error = crate::backend::reddsa::Error;
 
     fn try_from(bytes: [u8; 32]) -> Result<Self, Self::Error> {
         bytes.try_into().map(SigningKey)
@@ -64,7 +64,7 @@ impl<T: SigType> SigningKey<T> {
 
 /// A RedPallas verification key.
 #[derive(Clone, Debug)]
-pub struct VerificationKey<T: SigType>(reddsa::VerificationKey<T>);
+pub struct VerificationKey<T: SigType>(crate::backend::reddsa::VerificationKey<T>);
 
 impl<T: SigType> From<VerificationKey<T>> for [u8; 32] {
     fn from(vk: VerificationKey<T>) -> [u8; 32] {
@@ -79,7 +79,7 @@ impl<T: SigType> From<&VerificationKey<T>> for [u8; 32] {
 }
 
 impl<T: SigType> TryFrom<[u8; 32]> for VerificationKey<T> {
-    type Error = reddsa::Error;
+    type Error = crate::backend::reddsa::Error;
 
     fn try_from(bytes: [u8; 32]) -> Result<Self, Self::Error> {
         bytes.try_into().map(VerificationKey)
@@ -116,7 +116,7 @@ impl VerificationKey<SpendAuth> {
     /// Used in the note encryption tests.
     #[cfg(test)]
     pub(crate) fn dummy() -> Self {
-        VerificationKey((&reddsa::SigningKey::new(OsRng)).into())
+        VerificationKey((&crate::backend::reddsa::SigningKey::new(OsRng)).into())
     }
 
     /// Randomizes this verification key with the given `randomizer`.
@@ -151,22 +151,26 @@ impl VerificationKey<Binding> {
 
 impl<T: SigType> VerificationKey<T> {
     /// Verifies a purported `signature` over `msg` made by this verification key.
-    pub fn verify(&self, msg: &[u8], signature: &Signature<T>) -> Result<(), reddsa::Error> {
+    pub fn verify(
+        &self,
+        msg: &[u8],
+        signature: &Signature<T>,
+    ) -> Result<(), crate::backend::reddsa::Error> {
         self.0.verify(msg, &signature.0)
     }
 
     /// Returns `true` if this verification key is the identity
-    /// [`pasta_curves::pallas::Point`], which is invalid as `rk`.
+    /// [`crate::backend::pasta_curves::pallas::Point`], which is invalid as `rk`.
     pub fn is_identity(&self) -> bool {
         // The only encoding of the identity is `[0u8; 32]`, and
-        // `reddsa::VerificationKey<T>` caches the byte encoding.
+        // `crate::backend::reddsa::VerificationKey<T>` caches the byte encoding.
         <[u8; 32]>::from(self) == [0u8; 32]
     }
 }
 
 /// A RedPallas signature.
 #[derive(Debug, Clone)]
-pub struct Signature<T: SigType>(reddsa::Signature<T>);
+pub struct Signature<T: SigType>(crate::backend::reddsa::Signature<T>);
 
 impl<T: SigType> From<[u8; 64]> for Signature<T> {
     fn from(bytes: [u8; 64]) -> Self {
@@ -202,7 +206,7 @@ pub mod testing {
         /// Generate a uniformly distributed RedDSA spend authorization signing key.
         pub fn arb_spendauth_signing_key()(
             sk in prop::array::uniform32(prop::num::u8::ANY)
-                .prop_map(reddsa::SigningKey::try_from)
+                .prop_map(crate::backend::reddsa::SigningKey::try_from)
                 .prop_filter("Values must be parseable as valid signing keys", |r| r.is_ok())
         ) -> SigningKey<SpendAuth> {
             SigningKey(sk.unwrap())
@@ -213,7 +217,7 @@ pub mod testing {
         /// Generate a uniformly distributed RedDSA binding signing key.
         pub fn arb_binding_signing_key()(
             sk in prop::array::uniform32(prop::num::u8::ANY)
-                .prop_map(reddsa::SigningKey::try_from)
+                .prop_map(crate::backend::reddsa::SigningKey::try_from)
                 .prop_filter("Values must be parseable as valid signing keys", |r| r.is_ok())
         ) -> SigningKey<Binding> {
             SigningKey(sk.unwrap())

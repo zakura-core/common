@@ -41,15 +41,15 @@ use core::fmt::{self, Debug};
 use core::iter::Sum;
 use core::ops::{Add, RangeInclusive, Sub};
 
-use bitvec::{array::BitArray, order::Lsb0};
-use ff::{Field, PrimeField};
-use group::{Curve, Group, GroupEncoding};
+use crate::backend::ff::{Field, PrimeField};
+use crate::backend::group::{Curve, Group, GroupEncoding};
 #[cfg(feature = "circuit")]
-use halo2_proofs::plonk::Assigned;
-use pasta_curves::{
+use crate::backend::halo2_proofs::plonk::Assigned;
+use crate::backend::pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
     pallas,
 };
+use bitvec::{array::BitArray, order::Lsb0};
 use rand::Rng;
 use subtle::CtOption;
 
@@ -408,8 +408,8 @@ impl ValueCommitment {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
-    use group::ff::FromUniformBytes;
-    use pasta_curves::pallas;
+    use crate::backend::group::ff::FromUniformBytes;
+    use crate::backend::pasta_curves::pallas;
     use proptest::prelude::*;
 
     use super::{MAX_NOTE_VALUE, NoteValue, VALUE_SUM_RANGE, ValueCommitTrapdoor, ValueSum};

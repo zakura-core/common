@@ -2,7 +2,7 @@ use core::fmt;
 
 use alloc::vec::Vec;
 
-use halo2_proofs::plonk;
+use crate::backend::halo2_proofs::plonk;
 use rand::{CryptoRng, Rng};
 
 use crate::{
@@ -241,7 +241,9 @@ impl fmt::Display for ProverError {
                 write!(f, "`rcv` must be set for the Prover role")
             }
             ProverError::MissingWitness => write!(f, "`witness` must be set for the Prover role"),
-            ProverError::ProofFailed(halo2_proofs::plonk::Error::InvalidInstances) => {
+            ProverError::ProofFailed(
+                crate::backend::halo2_proofs::plonk::Error::InvalidInstances,
+            ) => {
                 write!(
                     f,
                     "Failed to create proof: provided instances do not match the circuits",

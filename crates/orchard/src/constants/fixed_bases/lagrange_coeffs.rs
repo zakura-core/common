@@ -11,7 +11,7 @@
 // `precomputed_lagrange_coeffs_match_generators` in `fixed_bases.rs`
 // checks the committed tables against fresh interpolation.
 
-use pasta_curves::pallas;
+use crate::backend::pasta_curves::pallas;
 
 use super::{H, NUM_WINDOWS, NUM_WINDOWS_SHORT};
 

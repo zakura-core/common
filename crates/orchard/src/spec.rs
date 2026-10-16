@@ -4,16 +4,15 @@ use alloc::vec::Vec;
 use core::iter;
 use core::ops::Deref;
 
-use ff::{Field, FromUniformBytes, PrimeField, PrimeFieldBits};
-use group::{Curve, CurveAffine as _, Group, GroupEncoding, WnafBase, WnafScalar};
-#[cfg(feature = "circuit")]
-use halo2_gadgets::{poseidon::primitives as poseidon, sinsemilla::primitives as sinsemilla};
-#[cfg(feature = "std")]
-use memuse::DynamicUsage;
-use pasta_curves::{
+use crate::backend::ff::{Field, FromUniformBytes, PrimeField, PrimeFieldBits};
+use crate::backend::group::{Curve, CurveAffine as _, Group, GroupEncoding, WnafBase, WnafScalar};
+use crate::backend::pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
     pallas,
 };
+use crate::backend::{poseidon, sinsemilla};
+#[cfg(feature = "std")]
+use memuse::DynamicUsage;
 use subtle::{ConditionallySelectable, CtOption};
 
 use crate::constants::{
@@ -161,7 +160,7 @@ impl PreparedNonIdentityBase {
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedNonZeroScalar(
     WnafScalar<pallas::Scalar, PREPARED_WINDOW_SIZE>,
-    // The scalar itself, retained for the GLV ladder in `pasta_curves::glv`, which
+    // The scalar itself, retained for the GLV ladder in `crate::backend::pasta_curves::glv`, which
     // decomposes the scalar rather than consuming the wNAF form.
     pallas::Scalar,
 );
@@ -182,7 +181,7 @@ impl PreparedNonZeroScalar {
         PreparedNonZeroScalar(WnafScalar::new(scalar), **scalar)
     }
 
-    /// The raw scalar, for the GLV ladder in `pasta_curves::glv`.
+    /// The raw scalar, for the GLV ladder in `crate::backend::pasta_curves::glv`.
     pub(crate) fn raw_scalar(&self) -> pallas::Scalar {
         self.1
     }
@@ -361,12 +360,12 @@ pub fn i2lebsp<const NUM_BITS: usize>(int: u64) -> [bool; NUM_BITS] {
 mod tests {
     use super::{extract_p_bottom, extract_p_bottom_batch, i2lebsp, lebs2ip};
 
-    use group::{CurveAffine as _, Group};
-    use pasta_curves::{arithmetic::CurveAffine, pallas};
+    use crate::backend::group::{CurveAffine as _, Group};
+    use crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas};
     use rand::Rng;
 
+    use crate::backend::sinsemilla::{self, HashDomain};
     use crate::rng_compat::OsRng;
-    use sinsemilla::HashDomain;
 
     #[test]
     fn extract_p_bottom_batch_preserves_order_and_validity() {
@@ -411,9 +410,9 @@ mod tests {
     #[test]
     #[cfg(feature = "circuit")]
     fn diversify_hash_substitution() {
-        use group::Group;
-        use halo2_proofs::arithmetic::CurveExt;
-        use pasta_curves::pallas;
+        use crate::backend::group::Group;
+        use crate::backend::halo2_proofs::arithmetic::CurveExt;
+        use crate::backend::pasta_curves::pallas;
 
         assert!(!bool::from(
             pallas::Point::hash_to_curve("z.cash:Orchard-gd")(&[]).is_identity()

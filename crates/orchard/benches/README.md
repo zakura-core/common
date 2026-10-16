@@ -10,13 +10,16 @@ The commands below pin Rust 1.97.1 for comparable performance measurements.
 This does not change the workspace's minimum supported Rust version of 1.97,
 which is tested separately.
 
+Every Criterion target requires `test-dependencies` for its fixture generators.
+
 ## Merkle hashing
 
 The Merkle harness measures one parent hash and construction of complete
 subtrees, scalar and batched:
 
 ```console
-cargo +1.97.1 bench --locked -p zakura-orchard --bench merkle
+cargo +1.97.1 bench --locked -p zakura-orchard --bench merkle \
+    --features test-dependencies
 ```
 
 - `1024-leaves[-batch]`: one fixed vector of seeded pseudorandom leaves,
@@ -35,7 +38,7 @@ Build or run the Criterion target with one Rayon worker:
 
 ```console
 RAYON_NUM_THREADS=1 cargo +1.97.1 bench --locked \
-    -p zakura-orchard --features circuit \
+    -p zakura-orchard --features circuit,test-dependencies \
     --bench ironwood_k11_prover
 ```
 
@@ -76,7 +79,7 @@ For a multicore run, set both thread-count variables to the same value:
 ```console
 RAYON_NUM_THREADS=10 IRONWOOD_K11_PROVER_THREADS=10 \
     cargo +1.97.1 bench --locked \
-    -p zakura-orchard --features circuit \
+    -p zakura-orchard --features circuit,test-dependencies \
     --bench ironwood_k11_prover
 ```
 
@@ -87,7 +90,7 @@ and Ironwood V3 pools, and the same Criterion timing configuration:
 
 ```console
 RAYON_NUM_THREADS=10 cargo +1.97.1 bench --locked \
-    -p zakura-orchard --features circuit \
+    -p zakura-orchard --features circuit,test-dependencies \
     --bench post_nu6_3_k11_keygen
 ```
 
@@ -98,7 +101,7 @@ batch rows contain 100 distinct Actions from 50 two-Action payments, rather
 than cloning one ciphertext:
 
 ```console
-cargo +1.97.1 bench --locked -p zakura-orchard --features circuit \
+cargo +1.97.1 bench --locked -p zakura-orchard --features circuit,test-dependencies \
     --bench note_decryption
 ```
 
@@ -116,7 +119,7 @@ one-, two-, and four-Action synthesis with 50 warmups and 1,000 samples:
 
 ```console
 RAYON_NUM_THREADS=10 cargo +1.97.1 test --locked --release \
-    -p zakura-orchard --features circuit --lib \
+    -p zakura-orchard --features circuit,test-dependencies --lib \
     circuit::benchmark::benchmark_witness_assignment \
     -- --ignored --exact --nocapture
 ```
@@ -134,7 +137,7 @@ without running it:
 
 ```console
 cargo +1.97.1 test --locked --release \
-    -p zakura-orchard --features circuit --lib --no-run
+    -p zakura-orchard --features circuit,test-dependencies --lib --no-run
 ```
 
 Cargo prints the test executable path. Copy that executable to a stable path
@@ -180,7 +183,7 @@ at several proof-batch and worker counts:
 
 ```console
 cargo +1.97.1 test --locked --release -p zakura-orchard \
-    --features circuit --test ironwood_batch_timings -- --ignored --nocapture
+    --features circuit,test-dependencies --test ironwood_batch_timings -- --ignored --nocapture
 ```
 
 Set `IRONWOOD_ARM=1` to prepare the verifying key before validation. Fixture
@@ -205,3 +208,10 @@ For final comparisons:
 
 Do not generate proofs, compile code, or load the fixture file inside a timed
 sample.
+
+## Historical sweeps
+
+Read `required-features` from each revision's benchmark target in `Cargo.toml`.
+Current targets need `test-dependencies`; payment/proof targets also need
+`circuit` and `zip32-addresses`. Record the resolved features alongside each
+binary and result when crossing this API boundary.

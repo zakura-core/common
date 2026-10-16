@@ -3,8 +3,8 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::backend::group::ff::PrimeField;
 use blake2b_simd::{Hash, Params};
-use group::ff::PrimeField;
 use zcash_note_encryption::{
     BatchDomain, COMPACT_NOTE_SIZE, Domain, ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes,
     NOTE_PLAINTEXT_SIZE, NotePlaintextBytes, OUT_PLAINTEXT_SIZE, OutPlaintextBytes,
@@ -376,8 +376,9 @@ impl<P: DomainPolicy> BatchDomain for NoteEncryptionDomain<P> {
         // One GLV decomposition and digit recoding of the viewing key for
         // the whole batch, then one synchronized ladder over every prepared
         // ephemeral key (see `PreparedEphemeralPublicKey::batch_agree`).
-        let decomposed =
-            pasta_curves::glv::Decomposed::<pasta_curves::pallas::Point>::new(&ivk.raw_scalar());
+        let decomposed = crate::backend::pasta_curves::glv::Decomposed::<
+            crate::backend::pasta_curves::pallas::Point,
+        >::new(&ivk.raw_scalar());
         let epks: Vec<_> = epks.collect();
         PreparedEphemeralPublicKey::batch_agree(ivk, &decomposed, &epks)
     }
@@ -1070,7 +1071,7 @@ mod tests {
         // the threshold is retuned upward. The ephemeral keys are
         // synthesized as arbitrary non-identity Pallas points; only their
         // group structure matters to key agreement.
-        use group::{Group, GroupEncoding};
+        use crate::backend::group::{Group, GroupEncoding};
 
         let mut rng = OsRng;
         let fvk = FullViewingKey::from(&SpendingKey::random(&mut rng));
@@ -1079,8 +1080,8 @@ mod tests {
         let mut keys: Vec<EphemeralKeyBytes> = (1..=520u64)
             .map(|i| {
                 EphemeralKeyBytes(
-                    (pasta_curves::pallas::Point::generator()
-                        * pasta_curves::pallas::Scalar::from(i))
+                    (crate::backend::pasta_curves::pallas::Point::generator()
+                        * crate::backend::pasta_curves::pallas::Scalar::from(i))
                     .to_bytes(),
                 )
             })

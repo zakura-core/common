@@ -5,8 +5,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::backend::pasta_curves::pallas;
 use getset::Getters;
-use pasta_curves::pallas;
 use zcash_note_encryption::OutgoingCipherKey;
 use zip32::ChildIndex;
 
@@ -384,10 +384,10 @@ impl Zip32Derivation {
 
 #[cfg(all(test, feature = "circuit"))]
 mod tests {
+    use crate::backend::ff::{Field, PrimeField};
+    use crate::backend::pasta_curves::pallas;
     use crate::rng_compat::OsRng;
-    use ff::{Field, PrimeField};
     use incrementalmerkletree::{Marking, Retention};
-    use pasta_curves::pallas;
     use shardtree::{ShardTree, store::memory::MemoryShardStore};
 
     use crate::{

@@ -4,9 +4,9 @@ use crate::spec::i2lebsp;
 #[cfg(feature = "circuit")]
 use {
     super::{OrchardFixedBases, OrchardFixedBasesFull},
-    group::ff::PrimeField,
-    halo2_gadgets::sinsemilla::{CommitDomains, HashDomains},
-    pasta_curves::{arithmetic::CurveAffine, pallas},
+    crate::backend::group::ff::PrimeField,
+    crate::backend::halo2_gadgets::sinsemilla::{CommitDomains, HashDomains},
+    crate::backend::pasta_curves::{arithmetic::CurveAffine, pallas},
 };
 
 /// Number of bits of each message piece in $\mathsf{SinsemillaHashToPoint}$
@@ -142,14 +142,14 @@ impl CommitDomains<pallas::Affine, OrchardFixedBases, OrchardHashDomains> for Or
 #[cfg(all(test, feature = "circuit"))]
 mod tests {
     use super::*;
+    use crate::backend::group::{Curve, ff::PrimeField};
+    use crate::backend::halo2_gadgets::sinsemilla::primitives::{CommitDomain, HashDomain};
+    use crate::backend::halo2_proofs::arithmetic::CurveAffine;
+    use crate::backend::halo2_proofs::pasta::pallas;
     use crate::constants::{
         fixed_bases::{COMMIT_IVK_PERSONALIZATION, NOTE_COMMITMENT_PERSONALIZATION},
         sinsemilla::MERKLE_CRH_PERSONALIZATION,
     };
-    use group::{Curve, ff::PrimeField};
-    use halo2_gadgets::sinsemilla::primitives::{CommitDomain, HashDomain};
-    use halo2_proofs::arithmetic::CurveAffine;
-    use halo2_proofs::pasta::pallas;
     use rand::{self, RngExt};
 
     use crate::rng_compat::OsRng;
