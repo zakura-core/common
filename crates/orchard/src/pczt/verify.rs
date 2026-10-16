@@ -19,7 +19,8 @@ impl super::Bundle {
     ///
     /// The post-NU6.3 circuit supports enforcing the restriction; older circuit versions
     /// do not. The prover and verifier APIs reject restricted bundles for those keys.
-    /// (That is not a security restriction; for security, the consensus verifier must use /// the correct key for the epoch and pool.)
+    /// (That is not a security restriction; for security, the consensus verifier must use
+    /// the correct key for the epoch and pool.)
     ///
     /// [`Bundle::finalize_io`]: super::Bundle::finalize_io
     pub fn verify_cross_address_restriction(&self) -> Result<(), VerifyError> {

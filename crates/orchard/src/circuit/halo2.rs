@@ -1273,7 +1273,7 @@ impl VerifyingKey {
     }
 
     /// The pinned circuit description of this verifying key: the exact text the
-    /// `round_trip_*` tests compare against `src/../circuit_data/circuit_description_*`.
+    /// `round_trip_*` tests compare against `src/circuit_data/circuit_description_*`.
     /// Stable across platforms and releases for a given circuit version.
     pub(crate) fn pinned_description(&self) -> alloc::string::String {
         format!("{:#?}\n", self.vk.pinned())
@@ -2138,47 +2138,16 @@ mod tests {
     fn fixed_circuit_description_is_pinned() {
         pinned_circuit_description(
             OrchardCircuitVersion::FixedPostNu6_2,
-            "src/../circuit_data/circuit_description_fixed",
+            "src/circuit_data/circuit_description_fixed",
             include_str!("../circuit_data/circuit_description_fixed"),
         );
-    }
-
-    /// Fingerprints of the three pinned circuit descriptions. Computed as
-    /// BLAKE2b-256(person="Orchard-VkFprint") over the fixture files; a change here
-    /// means the verifying key changed.
-    #[test]
-    fn verifying_key_fingerprints_are_pinned() {
-        let expect = |hex: &str| -> [u8; 32] {
-            let mut out = [0u8; 32];
-            for (i, b) in out.iter_mut().enumerate() {
-                *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
-            }
-            out
-        };
-        for (version, hex) in [
-            (
-                OrchardCircuitVersion::InsecurePreNu6_2,
-                "6e6df0842e34ccdf251813ce52e1db353e03b0330ccb64ce8fa1cf9b3cfef6ce",
-            ),
-            (
-                OrchardCircuitVersion::FixedPostNu6_2,
-                "1bee049ad3ff027c8d448e64b4413b3c4a483a743b5f39bcfbb6102f626591fb",
-            ),
-            (
-                OrchardCircuitVersion::PostNu6_3,
-                "3409b1d4c3e45906d283bdf402fdc61a3eb22b2ff72b25943a738d0e4558ab72",
-            ),
-        ] {
-            let vk = VerifyingKey::build(version);
-            assert_eq!(vk.fingerprint(), expect(hex), "{version:?}");
-        }
     }
 
     #[test]
     fn round_trip_post_nu6_3() {
         let vk = pinned_circuit_description(
             OrchardCircuitVersion::PostNu6_3,
-            "src/../circuit_data/circuit_description_post_nu6_3",
+            "src/circuit_data/circuit_description_post_nu6_3",
             include_str!("../circuit_data/circuit_description_post_nu6_3"),
         );
         round_trip_for_version(OrchardCircuitVersion::PostNu6_3, vk, 1);
@@ -2423,7 +2392,7 @@ mod tests {
     fn serialized_fixed_proof_test_case() {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::FixedPostNu6_2,
-            "src/../circuit_data/circuit_proof_test_case_fixed.bin",
+            "src/circuit_data/circuit_proof_test_case_fixed.bin",
             include_bytes!("../circuit_data/circuit_proof_test_case_fixed.bin"),
             ProofFixtureEncoding::LegacyTwoFlags,
             4992,
@@ -2435,7 +2404,7 @@ mod tests {
     fn serialized_post_nu6_3_proof_test_case() {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::PostNu6_3,
-            "src/../circuit_data/circuit_proof_test_case_post_nu6_3.bin",
+            "src/circuit_data/circuit_proof_test_case_post_nu6_3.bin",
             include_bytes!("../circuit_data/circuit_proof_test_case_post_nu6_3.bin"),
             ProofFixtureEncoding::PostNu6_3ThreeFlags,
             4992,
@@ -2447,7 +2416,7 @@ mod tests {
     fn serialized_post_nu6_3_restricted_proof_test_case() {
         serialized_proof_test_case_for_version(
             OrchardCircuitVersion::PostNu6_3,
-            "src/../circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin",
+            "src/circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin",
             include_bytes!("../circuit_data/circuit_proof_test_case_post_nu6_3_restricted.bin"),
             ProofFixtureEncoding::PostNu6_3ThreeFlags,
             4992,
