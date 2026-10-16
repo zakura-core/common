@@ -29,11 +29,9 @@ assert_matches = "1.5"
 proptest = ">=1,<1.7"
 
 [features]
-# Dynamic memory accounting, enabled by default for existing clients.
-memory-usage = ["zcash_protocol/memory-usage"]
 # I/O traits for builds without the standard library. Standard builds use std::io.
 no-std-io = ["dep:corez", "zcash_protocol/no-std-io"]
-default = ["memory-usage", "std"]
+default = ["std"]
 std = [
     "corez?/std",
     "blake2b_simd/std",

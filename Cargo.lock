@@ -1229,7 +1229,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fd1a1c7a5206c5b7a3f5a0d7ccd3ff85d0c8f5133d62a02680255b0004af5f4"
 dependencies = [
  "ff",
- "memuse",
  "rand_core 0.10.1",
  "subtle",
 ]
@@ -3448,7 +3447,6 @@ dependencies = [
  "hex",
  "incrementalmerkletree",
  "maybe-rayon",
- "memuse",
  "nonempty",
  "once_cell",
  "plotters",
@@ -3514,7 +3512,6 @@ dependencies = [
  "ff",
  "hex",
  "incrementalmerkletree",
- "memuse",
  "nonempty",
  "pprof",
  "proptest",
@@ -3563,7 +3560,6 @@ dependencies = [
  "corez",
  "hex",
  "incrementalmerkletree-testing",
- "memuse",
  "nonempty",
  "proptest",
 ]
@@ -3636,7 +3632,6 @@ dependencies = [
  "group",
  "hex",
  "incrementalmerkletree",
- "memuse",
  "once_cell",
  "pprof",
  "proptest",

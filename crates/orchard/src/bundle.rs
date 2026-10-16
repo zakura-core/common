@@ -15,9 +15,6 @@ use blake2b_simd::Hash as Blake2bHash;
 use nonempty::NonEmpty;
 use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
 
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-use memuse::DynamicUsage;
-
 use crate::{
     Proof, ProtocolVersion, ValuePool,
     action::Action,
@@ -996,32 +993,6 @@ impl<V> Bundle<Authorized, V> {
         self.authorization()
             .proof()
             .verify(vk, &self.to_instances())
-    }
-}
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-impl<V: DynamicUsage> DynamicUsage for Bundle<Authorized, V> {
-    fn dynamic_usage(&self) -> usize {
-        self.actions.tail.dynamic_usage()
-            + self.value_balance.dynamic_usage()
-            + self.authorization.proof.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        let bounds = (
-            self.actions.tail.dynamic_usage_bounds(),
-            self.value_balance.dynamic_usage_bounds(),
-            self.authorization.proof.dynamic_usage_bounds(),
-        );
-        (
-            bounds.0.0 + bounds.1.0 + bounds.2.0,
-            bounds
-                .0
-                .1
-                .zip(bounds.1.1)
-                .zip(bounds.2.1)
-                .map(|((a, b), c)| a + b + c),
-        )
     }
 }
 

@@ -7,8 +7,6 @@
 //! but uniquely tied to the note.
 
 use group::{Group, ff::PrimeField};
-#[cfg(feature = "memory-usage")]
-use memuse::DynamicUsage;
 use pasta_curves::{arithmetic::CurveExt, pallas};
 use rand::Rng;
 use subtle::{ConstantTimeEq, CtOption};
@@ -22,10 +20,6 @@ use crate::{
 /// A unique nullifier for a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Nullifier(pallas::Base);
-
-// We know that `pallas::Base` doesn't allocate internally.
-#[cfg(feature = "memory-usage")]
-memuse::impl_no_dynamic_usage!(Nullifier);
 
 impl Nullifier {
     /// Constructs a `Nullifier` from the given Pallas base field element.

@@ -31,10 +31,6 @@
 //! enable `no-std-io` to select the compatible `corez` I/O traits.
 //!
 
-//! The default-enabled `memory-usage` feature supplies dynamic memory-accounting
-//! trait implementations. Clients that do not use them may omit the feature.
-//!
-
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Catch documentation errors caused by code changes.

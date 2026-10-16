@@ -6,9 +6,6 @@ use core::fmt;
 use core::num::TryFromIntError;
 use core::ops::{Add, Bound, RangeBounds, Sub};
 
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-use memuse::DynamicUsage;
-
 use crate::constants::{mainnet, regtest, testnet};
 
 /// A wrapper type representing blockchain heights.
@@ -18,9 +15,6 @@ use crate::constants::{mainnet, regtest, testnet};
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockHeight(u32);
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(BlockHeight);
 
 /// The height of the genesis block on a network.
 pub const H0: BlockHeight = BlockHeight(0);
@@ -188,9 +182,6 @@ impl TryFrom<usize> for TxIndex {
     }
 }
 
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(TxIndex);
-
 /// The enumeration of known Zcash network types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NetworkType {
@@ -204,9 +195,6 @@ pub enum NetworkType {
     /// those will always be parsed as `Network::Test`.
     Regtest,
 }
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(NetworkType);
 
 pub(crate) mod private {
     pub trait Sealed {}
@@ -477,9 +465,6 @@ impl<P: Parameters> NetworkConstants for P {
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub struct MainNetwork;
 
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(MainNetwork);
-
 /// The production network.
 pub const MAIN_NETWORK: MainNetwork = MainNetwork;
 
@@ -508,9 +493,6 @@ impl Parameters for MainNetwork {
 /// Marker struct for the test network.
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub struct TestNetwork;
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(TestNetwork);
 
 /// The test network.
 pub const TEST_NETWORK: TestNetwork = TestNetwork;
@@ -545,9 +527,6 @@ pub enum Network {
     /// Zcash Testnet.
     TestNetwork,
 }
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(Network);
 
 impl Parameters for Network {
     fn network_type(&self) -> NetworkType {
@@ -614,9 +593,6 @@ pub enum NetworkUpgrade {
     /// [Nu7 (proposed)]: https://z.cash/upgrade/nu7/
     Nu7,
 }
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(NetworkUpgrade);
 
 impl fmt::Display for NetworkUpgrade {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -729,9 +705,6 @@ pub enum BranchId {
     /// The consensus rules to be deployed by [`NetworkUpgrade::Nu7`].
     Nu7,
 }
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-memuse::impl_no_dynamic_usage!(BranchId);
 
 const NU7_BRANCH_ID: u32 = 0x7719_0ad9;
 

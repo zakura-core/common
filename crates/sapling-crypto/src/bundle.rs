@@ -1,9 +1,6 @@
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-#[cfg(feature = "memory-usage")]
-use memuse::DynamicUsage;
-
 use redjubjub::{Binding, SpendAuth};
 
 use zcash_note_encryption::{
@@ -186,33 +183,6 @@ impl<A: Authorization, V> Bundle<A, V> {
     }
 }
 
-#[cfg(feature = "memory-usage")]
-impl<V: DynamicUsage> DynamicUsage for Bundle<Authorized, V> {
-    fn dynamic_usage(&self) -> usize {
-        self.shielded_spends.dynamic_usage()
-            + self.shielded_outputs.dynamic_usage()
-            + self.value_balance.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        let bounds = (
-            self.shielded_spends.dynamic_usage_bounds(),
-            self.shielded_outputs.dynamic_usage_bounds(),
-            self.value_balance.dynamic_usage_bounds(),
-        );
-
-        (
-            bounds.0.0 + bounds.1.0 + bounds.2.0,
-            bounds
-                .0
-                .1
-                .zip(bounds.1.1)
-                .zip(bounds.2.1)
-                .map(|((a, b), c)| a + b + c),
-        )
-    }
-}
-
 #[derive(Clone)]
 pub struct SpendDescription<A: Authorization> {
     cv: ValueCommitment,
@@ -281,17 +251,6 @@ impl<A: Authorization> SpendDescription<A> {
     /// Returns the authorization signature for this spend.
     pub fn spend_auth_sig(&self) -> &A::AuthSig {
         &self.spend_auth_sig
-    }
-}
-
-#[cfg(feature = "memory-usage")]
-impl DynamicUsage for SpendDescription<Authorized> {
-    fn dynamic_usage(&self) -> usize {
-        self.zkproof.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        self.zkproof.dynamic_usage_bounds()
     }
 }
 
@@ -411,17 +370,6 @@ impl<Proof> OutputDescription<Proof> {
     }
 }
 
-#[cfg(feature = "memory-usage")]
-impl<Proof: DynamicUsage> DynamicUsage for OutputDescription<Proof> {
-    fn dynamic_usage(&self) -> usize {
-        self.zkproof.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        self.zkproof.dynamic_usage_bounds()
-    }
-}
-
 impl<A> ShieldedOutput<SaplingDomain, ENC_CIPHERTEXT_SIZE> for OutputDescription<A> {
     fn ephemeral_key(&self) -> EphemeralKeyBytes {
         self.ephemeral_key.clone()
@@ -454,9 +402,6 @@ pub struct OutputDescriptionV5 {
     enc_ciphertext: [u8; ENC_CIPHERTEXT_SIZE],
     out_ciphertext: [u8; OUT_CIPHERTEXT_SIZE],
 }
-
-#[cfg(feature = "memory-usage")]
-memuse::impl_no_dynamic_usage!(OutputDescriptionV5);
 
 impl OutputDescriptionV5 {
     /// Constructs a v5 `OutputDescription` from its constituent parts.

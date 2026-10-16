@@ -1,7 +1,5 @@
 //! Data structures used for note construction.
 use core::fmt;
-#[cfg(feature = "memory-usage")]
-use memuse::DynamicUsage;
 
 use blake2b_simd::Params as Blake2bParams;
 use ff::PrimeField;
@@ -72,10 +70,6 @@ pub use self::nullifier::Nullifier;
 /// The randomness used to construct a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rho(pallas::Base);
-
-// We know that `pallas::Base` doesn't allocate internally.
-#[cfg(feature = "memory-usage")]
-memuse::impl_no_dynamic_usage!(Rho);
 
 impl Rho {
     /// Deserialize the rho value from a byte array.

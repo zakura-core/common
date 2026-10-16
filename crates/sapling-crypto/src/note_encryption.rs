@@ -5,8 +5,6 @@
 use alloc::vec::Vec;
 use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
 use ff::PrimeField;
-#[cfg(feature = "memory-usage")]
-use memuse::DynamicUsage;
 use rand_core::Rng;
 
 use zcash_note_encryption::{
@@ -117,9 +115,6 @@ where
 pub struct SaplingDomain {
     zip212_enforcement: Zip212Enforcement,
 }
-
-#[cfg(feature = "memory-usage")]
-memuse::impl_no_dynamic_usage!(SaplingDomain);
 
 impl SaplingDomain {
     pub fn new(zip212_enforcement: Zip212Enforcement) -> Self {
@@ -328,9 +323,6 @@ pub struct CompactOutputDescription {
     pub cmu: ExtractedNoteCommitment,
     pub enc_ciphertext: [u8; COMPACT_NOTE_SIZE],
 }
-
-#[cfg(feature = "memory-usage")]
-memuse::impl_no_dynamic_usage!(CompactOutputDescription);
 
 impl ShieldedOutput<SaplingDomain, COMPACT_NOTE_SIZE> for CompactOutputDescription {
     fn ephemeral_key(&self) -> EphemeralKeyBytes {

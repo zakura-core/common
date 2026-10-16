@@ -27,7 +27,6 @@ ff = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"], default-features = false }
 jubjub = { workspace = true, features = ["default"] }
-memuse = { version = "0.2.2", default-features = false, optional = true }
 nonempty = { version = "0.11", default-features = false }
 orchard = { workspace = true }
 proptest = { version = ">=1,<1.7", optional = true }
@@ -58,14 +57,12 @@ zip32 = { version = "0.2", default-features = false }
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
-# Dynamic memory accounting, enabled by default for existing clients.
-memory-usage = ["dep:memuse", "orchard/memory-usage", "sapling/memory-usage", "zcash_protocol/memory-usage"]
 # Wallet transaction construction with ZIP 32 spending keys.
 zip32 = ["sapling/zip32", "orchard/zip32", "transparent/zip32"]
 # I/O traits for builds without the standard library. Standard builds use std::io.
 no-std-io = ["dep:corez", "equihash/no-std-io", "orchard/no-std-io", "sapling/no-std-io", "transparent/no-std-io", "zcash_protocol/no-std-io"]
 circuits = ["std", "orchard/circuit", "sapling/circuit"]
-default = ["memory-usage", "zip32", "multicore", "std", "circuits", "pczt"]
+default = ["zip32", "multicore", "std", "circuits", "pczt"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
 expensive-tests = []

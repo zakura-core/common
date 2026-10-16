@@ -8,8 +8,6 @@ use ff::{Field, FromUniformBytes, PrimeField, PrimeFieldBits};
 use group::{Curve, CurveAffine as _, Group, GroupEncoding, WnafBase, WnafScalar};
 #[cfg(feature = "circuit")]
 use halo2_gadgets::{poseidon::primitives as poseidon, sinsemilla::primitives as sinsemilla};
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-use memuse::DynamicUsage;
 use pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
     pallas,
@@ -165,17 +163,6 @@ pub(crate) struct PreparedNonZeroScalar(
     // decomposes the scalar rather than consuming the wNAF form.
     pallas::Scalar,
 );
-
-#[cfg(all(feature = "std", feature = "memory-usage"))]
-impl DynamicUsage for PreparedNonZeroScalar {
-    fn dynamic_usage(&self) -> usize {
-        self.0.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        self.0.dynamic_usage_bounds()
-    }
-}
 
 impl PreparedNonZeroScalar {
     pub(crate) fn new(scalar: &NonZeroPallasScalar) -> Self {

@@ -41,13 +41,11 @@ proptest = ">=1,<1.7"
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
-# Dynamic memory accounting, enabled by default for existing clients.
-memory-usage = ["zcash_protocol/memory-usage"]
 # Wallet key derivation and ZIP 32 interoperability, enabled by default.
 zip32 = ["dep:zip32"]
 # I/O traits for builds without the standard library. Standard builds use std::io.
 no-std-io = ["dep:corez", "zcash_address/no-std-io", "zcash_protocol/no-std-io"]
-default = ["memory-usage", "zip32", "std", "pczt"]
+default = ["zip32", "std", "pczt"]
 std = [
     "secp256k1?/std",
     "zcash_address/std",
