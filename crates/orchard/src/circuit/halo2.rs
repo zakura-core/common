@@ -1517,7 +1517,7 @@ impl Proof {
         pk: &ProvingKey,
         circuits: &[Circuit],
         instances: &[Instance],
-        mut rng: impl Rng,
+        rng: &mut dyn Rng,
     ) -> Result<Self, plonk::Error> {
         if !pk.circuit_version.supports_proving()
             || circuits
@@ -1564,7 +1564,7 @@ impl Proof {
                     &pk.pk,
                     &circuits,
                     &instances,
-                    &mut rng,
+                    &mut *rng,
                     &mut transcript,
                 )?;
             } else {
@@ -1573,7 +1573,7 @@ impl Proof {
                     &pk.pk,
                     circuits,
                     &instances,
-                    &mut rng,
+                    &mut *rng,
                     &mut transcript,
                 )?;
             }
@@ -1584,7 +1584,7 @@ impl Proof {
             &pk.pk,
             circuits,
             &instances,
-            &mut rng,
+            &mut *rng,
             &mut transcript,
         )?;
         Ok(Proof(transcript.finalize()))
@@ -2615,7 +2615,7 @@ impl Proof {
         pk: &ProvingKey,
         circuits: &[Circuit],
         instances: &[Instance],
-        rng: impl Rng,
+        mut rng: impl Rng,
     ) -> Result<Self, ProofError> {
         if !pk.circuit_version.supports_proving()
             || circuits.is_empty()
@@ -2626,7 +2626,9 @@ impl Proof {
         {
             return Err(ProofError::InvalidInput);
         }
-        Self::create_halo2(pk, circuits, instances, rng).map_err(prover_error)
+        // Erase the RNG type so the halo2 prover is monomorphized once, in this
+        // crate, rather than in every caller for every RNG type it uses.
+        Self::create_halo2(pk, circuits, instances, &mut rng).map_err(prover_error)
     }
 
     /// Verifies a proof for the selected protocol version and ordered statements.
