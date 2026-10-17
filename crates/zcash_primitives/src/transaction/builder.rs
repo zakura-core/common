@@ -2207,8 +2207,6 @@ mod tests {
     #[test]
     #[cfg(feature = "circuits")]
     fn nu7_default_expiry_uses_target_height() {
-        use zcash_protocol::consensus::BlockHeight;
-
         // Pin the ZIP 218 value independently of the ratio used by the constant.
         assert_eq!(super::NU7_DEFAULT_TX_EXPIRY_DELTA, 120);
         let params = nu7_test_network();
@@ -2250,13 +2248,35 @@ mod tests {
             let coinbase = Builder::new(params, target, BuildConfig::Coinbase { miner_data: None });
             assert_eq!(coinbase.expiry_height, target);
         }
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_default_expiry_without_activation() {
+        use zcash_protocol::consensus::BlockHeight;
+
+        let params = nu6_3_test_network();
+        assert_eq!(params.activation_height(NetworkUpgrade::Nu7), None);
         assert_eq!(
-            super::default_tx_expiry_delta(
-                &zcash_protocol::consensus::MAIN_NETWORK,
-                BlockHeight::from_u32(10_000_000)
-            ),
+            super::default_tx_expiry_delta(&params, BlockHeight::from_u32(u32::MAX)),
             40
         );
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_default_expiry_at_testnet_boundary() {
+        let activation = TEST_NETWORK.activation_height(NetworkUpgrade::Nu7).unwrap();
+        for (target, expected_delta) in [
+            (activation - 1, 40),
+            (activation, 120),
+            (activation + 1, 120),
+        ] {
+            assert_eq!(
+                super::default_tx_expiry_delta(&TEST_NETWORK, target),
+                expected_delta
+            );
+        }
     }
 
     #[cfg(feature = "circuits")]
