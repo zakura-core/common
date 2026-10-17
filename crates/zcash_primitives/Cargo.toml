@@ -27,7 +27,6 @@ ff = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"], default-features = false }
 jubjub = { workspace = true, features = ["default"] }
-memuse = { version = "0.2.2", default-features = false }
 nonempty = { version = "0.11", default-features = false }
 orchard = { workspace = true }
 proptest = { version = ">=1,<1.7", optional = true }

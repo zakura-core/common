@@ -180,16 +180,6 @@ impl AsRef<[u8]> for Proof {
     }
 }
 
-impl memuse::DynamicUsage for Proof {
-    fn dynamic_usage(&self) -> usize {
-        self.0.dynamic_usage()
-    }
-
-    fn dynamic_usage_bounds(&self) -> (usize, Option<usize>) {
-        self.0.dynamic_usage_bounds()
-    }
-}
-
 impl Proof {
     /// Constructs a new Proof value.
     pub fn new(bytes: Vec<u8>) -> Self {

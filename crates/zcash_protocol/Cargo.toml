@@ -20,7 +20,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # - Logging and metrics
-memuse = { version = "0.2.2", optional = true, default-features = false }
 
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
@@ -41,7 +40,7 @@ proptest = ">=1,<1.7"
 default = ["std"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
-std = ["document-features", "dep:memuse", "corez/std"]
+std = ["document-features", "corez/std"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [

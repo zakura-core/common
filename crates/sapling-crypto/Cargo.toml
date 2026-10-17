@@ -33,7 +33,6 @@ group = "0.14"
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 incrementalmerkletree = { version = "0.8.1", features = ["legacy-api"], default-features = false }
 jubjub = { workspace = true, features = ["alloc"] }
-memuse = { version = "0.2.2", default-features = false }
 once_cell = { version = "1", features = ["race", "alloc"], default-features = false }
 proptest = { version = ">=1.0.0, <1.7.0", optional = true }
 rand = { version = "0.10", default-features = false }
@@ -75,7 +74,6 @@ default = ["wallet", "zip32-addresses", "multicore", "circuit"]
 multicore = ["bellman?/multicore"]
 std = [
     "corez/std",
-    "group/wnaf-memuse",
     "redjubjub/std",
 ]
 temporary-zcashd = []

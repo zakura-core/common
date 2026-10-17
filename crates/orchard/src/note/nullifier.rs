@@ -9,7 +9,6 @@
 use crate::backend::pallas;
 #[allow(unused_imports)]
 use crate::backend::prelude::*;
-use memuse::DynamicUsage;
 use rand::Rng;
 use subtle::{ConstantTimeEq, CtOption};
 
@@ -19,9 +18,6 @@ use crate::{keys::NullifierDerivingKey, spec::extract_p};
 /// A unique nullifier for a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Nullifier(pallas::Base);
-
-// We know that `pallas::Base` doesn't allocate internally.
-memuse::impl_no_dynamic_usage!(Nullifier);
 
 impl Nullifier {
     /// Constructs a `Nullifier` from the given Pallas base field element.

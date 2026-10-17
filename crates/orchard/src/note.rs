@@ -2,7 +2,6 @@
 #[allow(unused_imports)]
 use crate::backend::prelude::*;
 use core::fmt;
-use memuse::DynamicUsage;
 
 use crate::backend::pallas;
 use blake2b_simd::Params as Blake2bParams;
@@ -63,9 +62,6 @@ pub use self::nullifier::Nullifier;
 /// The randomness used to construct a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rho(pallas::Base);
-
-// We know that `pallas::Base` doesn't allocate internally.
-memuse::impl_no_dynamic_usage!(Rho);
 
 impl Rho {
     /// Deserialize the rho value from a byte array.

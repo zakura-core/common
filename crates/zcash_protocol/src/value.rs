@@ -9,9 +9,6 @@ use corez::io;
 #[cfg(feature = "std")]
 use std::error;
 
-#[cfg(feature = "std")]
-use memuse::DynamicUsage;
-
 pub const COIN: u64 = 1_0000_0000;
 pub const MAX_MONEY: u64 = 21_000_000 * COIN;
 pub const MAX_BALANCE: i64 = MAX_MONEY as i64;
@@ -26,9 +23,6 @@ pub const MAX_BALANCE: i64 = MAX_MONEY as i64;
 /// [`Transaction`]: https://docs.rs/zcash_primitives/latest/zcash_primitives/transaction/struct.Transaction.html
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct ZatBalance(i64);
-
-#[cfg(feature = "std")]
-memuse::impl_no_dynamic_usage!(ZatBalance);
 
 impl ZatBalance {
     /// Returns a zero-valued ZatBalance.
