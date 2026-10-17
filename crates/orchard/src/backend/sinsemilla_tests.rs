@@ -1,6 +1,6 @@
 //! Pin both backends' copies against their independent domain derivation and arithmetic.
 use super::*;
-#[cfg(feature = "backend-halo2")]
+
 use crate::backend::prelude::*;
 use crate::backend::{
     pallas,

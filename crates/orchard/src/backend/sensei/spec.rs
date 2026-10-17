@@ -1,6 +1,5 @@
 //! Helper functions defined in the Zcash Protocol Specification.
 
-use alloc::vec::Vec;
 use core::ops::Deref;
 
 use sensei::primitives::pallas;
@@ -288,41 +287,6 @@ pub(crate) fn extract_p_bottom(point: CtOption<pallas::Point>) -> CtOption<palla
     point.map(|p| extract_p(&p))
 }
 
-/// Batched coordinate extractor for Pallas.
-///
-/// This has the same per-point semantics as [`extract_p_bottom`], while
-/// normalizing the projective points together to amortize the field inversion.
-pub(crate) fn extract_p_bottom_batch(
-    points: impl IntoIterator<Item = CtOption<pallas::Point>>,
-) -> impl Iterator<Item = CtOption<pallas::Base>> {
-    let (points, valid): (Vec<_>, Vec<_>) = points
-        .into_iter()
-        .map(|point| {
-            let valid = point.is_some();
-            (point.unwrap_or(pallas::Point::identity()), valid)
-        })
-        .unzip();
-
-    let mut affine = vec![pallas::Affine::identity(); points.len()];
-    if !points.is_empty() {
-        pallas::Point::batch_normalize(&points, &mut affine);
-    }
-
-    affine.into_iter().zip(valid).map(|(point, valid)| {
-        let x = point
-            .coordinates()
-            .map(|coordinates| *coordinates.x())
-            .unwrap_or_else(pallas::Base::zero);
-        CtOption::new(x, valid)
-    })
-}
-
-/// The field element representation of a u64 integer represented by
-/// an L-bit little-endian bitstring.
-pub fn lebs2ip_field<F: From<u64>, const L: usize>(bits: &[bool; L]) -> F {
-    F::from(lebs2ip::<L>(bits))
-}
-
 /// The u64 integer represented by an L-bit little-endian bitstring.
 ///
 /// # Panics
@@ -348,57 +312,11 @@ pub fn i2lebsp<const NUM_BITS: usize>(int: u64) -> [bool; NUM_BITS] {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "test-dependencies")]
-    use super::{extract_p_bottom, extract_p_bottom_batch};
     use super::{i2lebsp, lebs2ip};
 
     use rand::Rng;
-    #[cfg(feature = "test-dependencies")]
-    use sensei::primitives::pallas;
 
     use crate::rng_compat::OsRng;
-    #[cfg(feature = "test-dependencies")]
-    use sensei::primitives::sinsemilla::{self, HashDomain};
-
-    #[test]
-    #[cfg(feature = "test-dependencies")]
-    fn extract_p_bottom_batch_preserves_order_and_validity() {
-        let first_generator =
-            pallas::Point::hash_to_curve("z.cash:SinsemillaS")(&0u32.to_le_bytes());
-        let exceptional_domain = HashDomain::from_Q(first_generator);
-        let identity_domain = HashDomain::from_Q(pallas::Point::identity());
-        let inputs = [
-            exceptional_domain.hash_to_point(core::iter::empty()),
-            exceptional_domain.hash_to_point([false; sinsemilla::K].into_iter()),
-            identity_domain.hash_to_point(core::iter::empty()),
-        ];
-        assert!(bool::from(inputs[0].is_some()));
-        assert!(!bool::from(inputs[1].is_some()));
-        assert!(bool::from(inputs[2].is_some()));
-
-        let expected: alloc::vec::Vec<_> = inputs.iter().copied().map(extract_p_bottom).collect();
-        let actual: alloc::vec::Vec<_> = extract_p_bottom_batch(inputs).collect();
-
-        for (expected, actual) in expected.into_iter().zip(actual) {
-            let expected_is_some = bool::from(expected.is_some());
-            assert_eq!(bool::from(actual.is_some()), expected_is_some);
-            if expected_is_some {
-                assert_eq!(actual.unwrap(), expected.unwrap());
-            }
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "test-dependencies")]
-    fn extract_p_bottom_batch_maps_valid_identity_to_zero() {
-        let domain = HashDomain::from_Q(pallas::Point::identity());
-        let actual: alloc::vec::Vec<_> =
-            extract_p_bottom_batch([domain.hash_to_point(core::iter::empty())]).collect();
-
-        assert_eq!(actual.len(), 1);
-        assert!(bool::from(actual[0].is_some()));
-        assert_eq!(actual[0].unwrap(), pallas::Base::zero());
-    }
 
     #[test]
     #[cfg(feature = "circuit")]
