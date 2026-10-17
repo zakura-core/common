@@ -10,6 +10,11 @@ cancelled by a later dispatch. No versions are bumped and no tags are created.
 
 ## One-time setup
 
+Sean can give his agents the separate prompts for
+[the GitHub Environment](release-setup-prompts/github-crates-io-environment.md)
+and [crates.io Trusted Publishers](release-setup-prompts/crates-io-trusted-publishers.md).
+They cover setup and readback only; publication needs separate authorization.
+
 A repository administrator must configure the `crates-io` GitHub Environment:
 
 - Required reviewer: `ebfull` (Sean).
