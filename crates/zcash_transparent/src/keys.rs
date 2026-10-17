@@ -5,6 +5,7 @@ use core::fmt;
 #[cfg(feature = "bip32")]
 use bip32::ChildNumber;
 use subtle::{Choice, ConstantTimeEq};
+#[cfg(feature = "wallet")]
 use zip32::DiversifierIndex;
 
 #[cfg(feature = "transparent-inputs")]
@@ -21,7 +22,7 @@ use {
 
 /// The scope of a transparent key.
 ///
-/// This type can represent [`zip32`] internal and external scopes, as well as custom scopes that
+/// This type can represent ZIP 32 internal and external scopes, as well as custom scopes that
 /// may be used in non-hardened derivation at the `change` level of the BIP 44 key path.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransparentKeyScope(u32);
@@ -63,6 +64,7 @@ impl fmt::Debug for TransparentKeyScope {
     }
 }
 
+#[cfg(feature = "wallet")]
 impl From<zip32::Scope> for TransparentKeyScope {
     fn from(value: zip32::Scope) -> Self {
         match value {
@@ -172,6 +174,7 @@ impl From<NonHardenedChildIndex> for ChildNumber {
     }
 }
 
+#[cfg(feature = "wallet")]
 impl TryFrom<DiversifierIndex> for NonHardenedChildIndex {
     type Error = ();
 
@@ -181,6 +184,7 @@ impl TryFrom<DiversifierIndex> for NonHardenedChildIndex {
     }
 }
 
+#[cfg(feature = "wallet")]
 impl From<NonHardenedChildIndex> for DiversifierIndex {
     fn from(value: NonHardenedChildIndex) -> Self {
         DiversifierIndex::from(value.0)

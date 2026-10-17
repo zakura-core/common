@@ -99,6 +99,7 @@ impl Anchor {
         Anchor(Node::empty_root(NOTE_COMMITMENT_TREE_DEPTH.into()).0)
     }
 
+    #[cfg(feature = "wallet")]
     pub(crate) fn inner(&self) -> jubjub::Base {
         self.0
     }

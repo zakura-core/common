@@ -5,12 +5,18 @@
 //!
 //! ## Feature flags
 //!
+//! ### Wallet derivation
+//!
+//! The default-enabled `wallet` feature exposes wallet derivation and PCZT APIs.
+//! Node clients may omit it while retaining verification and coinbase construction.
+//! `zip32-addresses` implies `wallet`.
+//!
 //! ### ZIP 32 addresses
 //!
 //! The default-enabled `zip32-addresses` feature provides indexed address
 //! generation and diversifier-index recovery using FF1. Consumers that disable
 //! default features must enable it explicitly to use these wallet APIs. Direct
-//! address construction from diversifiers, key derivation, and note decryption
+//! address construction from diversifiers and note decryption
 //! remain available without it.
 //!
 

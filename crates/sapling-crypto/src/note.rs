@@ -2,10 +2,7 @@ use group::{GroupEncoding, ff::Field};
 use rand_core::{CryptoRng, Rng};
 use zcash_spec::PrfExpand;
 
-use crate::{
-    keys::{ExpandedSpendingKey, FullViewingKey},
-    zip32::ExtendedSpendingKey,
-};
+use crate::keys::{ExpandedSpendingKey, FullViewingKey};
 
 use super::{
     Diversifier, Nullifier, NullifierDerivingKey, PaymentAddress, keys::EphemeralSecretKey,
@@ -161,8 +158,9 @@ impl Note {
         let mut sk_bytes = [0; 32];
         rng.fill_bytes(&mut sk_bytes);
 
-        let extsk = ExtendedSpendingKey::master(&sk_bytes[..]);
-        let fvk = extsk.to_diversifiable_full_viewing_key().fvk().clone();
+        let expanded = crate::keys::master_key_expansion(&sk_bytes);
+        let expsk = ExpandedSpendingKey::from_spending_key(&expanded.as_bytes()[..32]);
+        let fvk = FullViewingKey::from_expanded_spending_key(&expsk);
         // Dummy notes do not need a reproducible ZIP 32 address index.
         // Retry because not every Sapling diversifier is valid.
         let ivk = fvk.vk.ivk();
@@ -180,7 +178,7 @@ impl Note {
 
         let note = Note::from_parts(recipient, NoteValue::ZERO, rseed);
 
-        (extsk.expsk, fvk, note)
+        (expsk, fvk, note)
     }
 }
 
@@ -234,6 +232,104 @@ pub(super) mod testing {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use rand_core::Rng;
+
+    struct CountingRng {
+        inner: rand::rngs::StdRng,
+        consumed: usize,
+    }
+
+    impl CountingRng {
+        fn new(seed: [u8; 32]) -> Self {
+            use rand::SeedableRng;
+            Self {
+                inner: rand::rngs::StdRng::from_seed(seed),
+                consumed: 0,
+            }
+        }
+    }
+
+    impl rand_core::TryRng for CountingRng {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.consumed += 4;
+            Ok(self.inner.next_u32())
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.consumed += 8;
+            Ok(self.inner.next_u64())
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+            self.consumed += dest.len();
+            self.inner.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dummy_note_derivation_and_randomness_are_unchanged() {
+        // Pin the key components, note contents, byte consumption, and following RNG word.
+        for (seed, expected_digest, expected_consumed, expected_next) in [
+            (
+                0,
+                [
+                    41, 218, 228, 136, 208, 212, 88, 195, 115, 92, 245, 135, 95, 110, 148, 169,
+                    158, 88, 190, 39, 10, 7, 195, 164, 90, 163, 1, 153, 243, 52, 195, 120,
+                ],
+                75,
+                13252731160361427084,
+            ),
+            (
+                1,
+                [
+                    80, 222, 41, 137, 135, 161, 238, 87, 159, 97, 83, 44, 55, 26, 90, 235, 73, 242,
+                    19, 253, 241, 193, 97, 107, 128, 181, 30, 4, 36, 54, 219, 95,
+                ],
+                97,
+                5790603339235468134,
+            ),
+            (
+                90,
+                [
+                    37, 56, 194, 138, 186, 67, 253, 3, 44, 106, 220, 35, 50, 167, 23, 229, 103,
+                    254, 35, 78, 246, 202, 154, 49, 81, 75, 110, 47, 145, 89, 215, 103,
+                ],
+                86,
+                1661224483263062408,
+            ),
+            (
+                255,
+                [
+                    129, 220, 116, 71, 84, 161, 163, 78, 90, 212, 167, 228, 217, 73, 167, 88, 28,
+                    140, 94, 132, 29, 33, 79, 149, 187, 226, 153, 216, 31, 70, 156, 85,
+                ],
+                97,
+                4758269131877494279,
+            ),
+        ] {
+            let mut rng = CountingRng::new([seed; 32]);
+            let (expsk, fvk, note) = Note::dummy(&mut rng);
+            let mut hash = blake2b_simd::Params::new().hash_length(32).to_state();
+            hash.update(&expsk.to_bytes());
+            hash.update(&fvk.to_bytes());
+            hash.update(&note.recipient().to_bytes());
+            hash.update(&note.cmu().to_bytes());
+            match note.rseed() {
+                Rseed::AfterZip212(seed) => {
+                    hash.update(seed);
+                }
+                _ => panic!("dummy notes use ZIP 212 randomness"),
+            }
+            let consumed = rng.consumed;
+            let next = rng.next_u64();
+            assert_eq!(hash.finalize().as_bytes(), expected_digest);
+            assert_eq!(consumed, expected_consumed);
+            assert_eq!(next, expected_next);
+        }
+    }
 
     proptest! {
         #[test]

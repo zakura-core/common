@@ -176,7 +176,7 @@ impl ValueSum {
     ///
     /// This is a low-level API, requiring a detailed understanding of the
     /// [use of value balancing][orchardbalance] in the Zcash protocol to use correctly
-    /// and securely. It is intended to be used in combination with the [`crate::pczt`]
+    /// and securely. It is intended to be used in combination with the `crate::pczt`
     /// module.
     ///
     /// [orchardbalance]: https://zips.z.cash/protocol/protocol.pdf#orchardbalance
@@ -256,7 +256,7 @@ impl ValueCommitTrapdoor {
     /// This is a low-level API, requiring a detailed understanding of the
     /// [use of value commitment trapdoors][orchardbalance] in the Zcash protocol
     /// to use correctly and securely. It is intended to be used in combination
-    /// with the [`crate::pczt`] module.
+    /// with the `crate::pczt` module.
     ///
     /// [orchardbalance]: https://zips.z.cash/protocol/protocol.pdf#orchardbalance
     pub fn to_bytes(&self) -> [u8; 32] {

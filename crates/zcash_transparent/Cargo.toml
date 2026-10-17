@@ -21,7 +21,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 zcash_address.workspace = true
 zcash_protocol.workspace = true
-zip32 = { version = "0.2", default-features = false }
+zip32 = { version = "0.2", default-features = false, optional = true }
 corez = { version = "0.1.1", features = ["alloc"], default-features = false }
 subtle = { version = "2.2.3", default-features = false }
 zcash_spec = "0.2"
@@ -41,7 +41,9 @@ proptest = ">=1,<1.7"
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
-default = ["std", "pczt"]
+# Wallet key derivation and spending transaction construction, enabled by default.
+wallet = ["dep:zip32"]
+default = ["wallet", "std", "pczt"]
 std = [
     "secp256k1?/std",
     "zcash_address/std",
@@ -49,7 +51,7 @@ std = [
 ]
 # BIP 32 interoperability: conversions between this crate's key scopes and child
 # indices and `bip32::ChildNumber`.
-bip32 = ["dep:bip32"]
+bip32 = ["dep:bip32", "wallet"]
 # Partially created transparent bundles (`pczt` module and
 # `builder::TransparentBuilder::build_for_pczt`), whose key derivation paths are BIP 32 paths.
 pczt = ["bip32"]
@@ -62,6 +64,7 @@ transparent-inputs = [
     "zcash_script/descriptor",
 ]
 test-dependencies = [
+    "wallet",
     "dep:proptest",
     "zcash_protocol/test-dependencies",
 ]
