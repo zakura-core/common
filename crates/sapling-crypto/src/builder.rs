@@ -967,7 +967,7 @@ fn build_bundle<B, R: Rng>(
 
 /// Type alias for an in-progress bundle that has no proofs or signatures.
 ///
-/// This is returned by [`Builder::build`].
+/// This is returned by `Builder::build` or [`Builder::build_coinbase`].
 #[cfg(feature = "circuit")]
 pub type UnauthorizedBundle<V> = Bundle<InProgress<Unproven, Unsigned>, V>;
 
