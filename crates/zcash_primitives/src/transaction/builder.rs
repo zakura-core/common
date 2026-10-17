@@ -57,8 +57,10 @@ use super::components::sapling::zip212_enforcement;
 /// <https://zips.z.cash/zip-0203#changes-for-blossom>
 pub const PRE_NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
 
-/// The default expiry delta from NU7, preserving approximately 50 minutes.
-pub const NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 120;
+/// The default expiry delta from NU7, scaled by the block-spacing ratio to preserve
+/// approximately 50 minutes.
+pub const NU7_DEFAULT_TX_EXPIRY_DELTA: u32 =
+    consensus::NU7_POW_TARGET_SPACING_RATIO * PRE_NU7_DEFAULT_TX_EXPIRY_DELTA;
 
 /// Returns the ordinary transaction expiry delta at the candidate inclusion height.
 /// Explicit expiry overrides and coinbase expiry are independent of this default.
@@ -2168,6 +2170,9 @@ mod tests {
     #[cfg(feature = "circuits")]
     fn nu7_default_expiry_uses_target_height() {
         use zcash_protocol::consensus::BlockHeight;
+
+        // Pin the ZIP 218 value independently of the ratio used by the constant.
+        assert_eq!(super::NU7_DEFAULT_TX_EXPIRY_DELTA, 120);
         let params = nu7_test_network();
         let activation = params.activation_height(NetworkUpgrade::Nu7).unwrap();
         for (target, delta) in [
