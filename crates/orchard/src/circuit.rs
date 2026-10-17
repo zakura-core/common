@@ -281,9 +281,10 @@ impl Instance {
 
 #[cfg(all(
     test,
-    feature = "prover",
-    feature = "verifier",
-    feature = "zip32-addresses"
+    any(
+        all(feature = "prover", feature = "zip32-addresses"),
+        feature = "verifier"
+    )
 ))]
 mod interop;
 

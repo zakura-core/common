@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Compile the supported backend matrix and exchange proofs across isolated builds."""
+"""Compile the supported backend matrix and run the proof roles in isolated builds.
+
+Proofs are exchanged between a prover-only producer and a verifier-only consumer, and
+the immutable pre-migration fixtures are verified in a verifier-only build.
+"""
 import argparse
 import json
 import os
@@ -55,14 +59,26 @@ if not args.interop_only:
         # backend-dependent items in an invalid configuration.
         assert result.returncode and any(error.startswith(expected) for error in errors), f"missing backend selection diagnostic: {errors}\n{result.stderr}"
 
-# Each proof exchange runs in separately selected producer and consumer builds.
+def test(backend, capabilities, selection, *extra, **kwargs):
+    """Run one lib test selection and require that it ran: a filter matching nothing passes vacuously."""
+    result = cargo("test", backend, capabilities, "--release", "--lib", selection, "--", *extra,
+                   stdout=subprocess.PIPE, text=True, **kwargs)
+    print(result.stdout, flush=True)
+    if "test result: ok." not in result.stdout or "running 0 tests" in result.stdout:
+        raise SystemExit(f"test selection did not run as expected: {selection}")
+
+# Each proof exchange runs in separately selected producer and consumer builds, and each
+# build links only the proof role it exercises.
 with tempfile.TemporaryDirectory(prefix="orchard-interop-") as temporary:
     for producer, consumer in (list(permutations(backends, 2)) if len(backends) > 1
                                else [(backends[0], backends[0])]):
         directory = Path(temporary) / producer
         env = dict(os.environ, ORCHARD_INTEROP_DIR=str(directory))
-        for backend, test in [(producer, "export_backend_proofs"), (consumer, "verify_backend_proofs")]:
-            result = cargo("test", backend, "circuit,multicore,zip32-addresses,test-dependencies", "--release", "--lib", f"circuit::interop::{test}", "--", "--ignored", "--exact", env=env, stdout=subprocess.PIPE, text=True)
-            print(result.stdout, flush=True)
-            if "test result: ok. 1 passed;" not in result.stdout:
-                raise SystemExit(f"proof exchange did not run its expected test: {test}")
+        for backend, role, name in [(producer, "prover", "export_backend_proofs"),
+                                    (consumer, "verifier", "verify_backend_proofs")]:
+            test(backend, f"{role},multicore,zip32-addresses,test-dependencies",
+                 f"circuit::interop::{name}", "--ignored", "--exact", env=env)
+
+# The immutable pre-migration fixtures must verify in a build that links only the verifier.
+for backend in backends:
+    test(backend, "verifier", "circuit::compatibility::")

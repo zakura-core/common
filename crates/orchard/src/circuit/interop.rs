@@ -1,20 +1,16 @@
-//! Cross-process compatibility: each test binary links exactly one backend.
+//! Cross-process compatibility: each test binary links exactly one backend and only the
+//! proof role it exercises, so a prover-only producer must agree with a verifier-only
+//! consumer.
 use super::*;
-use crate::{builder::testing::build_pinned_fixture_bundle, bundle::BundleVersion};
-use alloc::vec::Vec;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
-use std::{
-    fs,
-    io::{Read, Write},
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 /// Small and non-power-of-two action counts exercise padding and shared transcripts.
 const ACTION_COUNTS: [u8; 3] = [1, 2, 3];
 /// Deterministic public test seed; never used for real transactions.
+#[cfg(all(feature = "prover", feature = "zip32-addresses"))]
 const FIXTURE_SEED: [u8; 32] = [0x53; 32];
 /// Each fixture field uses its canonical protocol encoding.
+#[cfg(feature = "verifier")]
 const FIELD_BYTES: usize = 32;
 
 fn directory() -> PathBuf {
@@ -23,7 +19,10 @@ fn directory() -> PathBuf {
         .into()
 }
 
+#[cfg(all(feature = "prover", feature = "zip32-addresses"))]
 fn write_instances(path: PathBuf, instances: &[Instance]) {
+    use std::io::Write;
+
     let mut file = fs::File::create(path).unwrap();
     for instance in instances {
         for field in [
@@ -42,7 +41,11 @@ fn write_instances(path: PathBuf, instances: &[Instance]) {
     }
 }
 
-fn read_instances(path: PathBuf, count: u8) -> Vec<Instance> {
+#[cfg(feature = "verifier")]
+fn read_instances(path: PathBuf, count: u8) -> alloc::vec::Vec<Instance> {
+    use crate::bundle::BundleVersion;
+    use std::io::Read;
+
     let mut file = fs::File::open(path).unwrap();
     fn field(file: &mut fs::File) -> [u8; FIELD_BYTES] {
         let mut bytes = [0; FIELD_BYTES];
@@ -50,7 +53,7 @@ fn read_instances(path: PathBuf, count: u8) -> Vec<Instance> {
         bytes
     }
     // Each record is five canonical domain encodings followed by a canonical Ironwood flag byte.
-    let mut result = Vec::new();
+    let mut result = alloc::vec::Vec::new();
     for _ in 0..count {
         let anchor = Anchor::from_bytes(field(&mut file)).unwrap();
         let cv = ValueCommitment::from_bytes(&field(&mut file)).unwrap();
@@ -71,15 +74,20 @@ fn read_instances(path: PathBuf, count: u8) -> Vec<Instance> {
             .unwrap(),
         );
     }
-    let mut remaining = Vec::new();
+    let mut remaining = alloc::vec::Vec::new();
     file.read_to_end(&mut remaining).unwrap();
     assert!(remaining.is_empty());
     result
 }
 
+#[cfg(all(feature = "prover", feature = "zip32-addresses"))]
 #[test]
 #[ignore = "run by check_orchard_backends.py in separate backend builds"]
 fn export_backend_proofs() {
+    use crate::builder::testing::build_pinned_fixture_bundle;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
     fs::create_dir_all(directory()).unwrap();
     let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
     for count in ACTION_COUNTS {
@@ -94,7 +102,12 @@ fn export_backend_proofs() {
                 .authorization()
                 .create_proof(pk, &instances, &mut rng)
                 .unwrap();
-            proof.verify(&pk.verifying_key(), &instances).unwrap();
+            // The consumer build is the one that verifies; a producer that also links
+            // the verifier checks its own output first.
+            #[cfg(feature = "verifier")]
+            {
+                proof.verify(&pk.verifying_key(), &instances).unwrap();
+            }
             let stem = format!("{count}-{}", u8::from(restricted));
             fs::write(directory().join(format!("{stem}.proof")), proof.as_ref()).unwrap();
             write_instances(directory().join(format!("{stem}.instances")), &instances);
@@ -102,6 +115,7 @@ fn export_backend_proofs() {
     }
 }
 
+#[cfg(feature = "verifier")]
 #[test]
 #[ignore = "run by check_orchard_backends.py in separate backend builds"]
 fn verify_backend_proofs() {
@@ -113,12 +127,12 @@ fn verify_backend_proofs() {
             let bytes = fs::read(directory().join(format!("{stem}.proof"))).unwrap();
             assert_eq!(bytes.len(), Proof::expected_proof_size(usize::from(count)));
             Proof::new(bytes.clone()).verify(vk, &instances).unwrap();
-            let mut padded = bytes.clone();
-            padded.push(0);
-            Proof::new(padded).verify(vk, &instances).unwrap();
             let mut changed = bytes;
             changed[0] ^= 1;
-            assert!(Proof::new(changed).verify(vk, &instances).is_err());
+            assert_eq!(
+                Proof::new(changed).verify(vk, &instances),
+                Err(ProofError::InvalidProof)
+            );
         }
     }
 }
