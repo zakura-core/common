@@ -33,6 +33,29 @@ pub const BLOCKS_PER_HOUR: u32 = 3600 / SECONDS_PER_BLOCK;
 /// [ZIP 218]: https://zips.z.cash/zip-0218
 pub const NU7_POW_TARGET_SPACING_RATIO: u32 = 3;
 
+/// The maximum combined number of Sapling spends and outputs in a block from NU7.
+///
+/// Specified by [ZIP 218] as `SaplingBlockIOLimit`.
+///
+/// [ZIP 218]: https://zips.z.cash/zip-0218#shielded-pool-action-limits
+pub const NU7_SAPLING_BLOCK_IO_LIMIT: usize = 300;
+
+/// The maximum number of actions in each of the Orchard and Ironwood pools in a
+/// block from NU7.
+///
+/// Specified by [ZIP 218] as `OrchardProtocolBlockActionLimit`.
+///
+/// [ZIP 218]: https://zips.z.cash/zip-0218#shielded-pool-action-limits
+pub const NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT: usize = 330;
+
+/// The maximum combined shielded cost in a block from NU7: one unit for each
+/// Sapling spend or output and each Orchard or Ironwood action.
+///
+/// Specified by [ZIP 218] as `GlobalShieldedBudget`.
+///
+/// [ZIP 218]: https://zips.z.cash/zip-0218#shielded-pool-action-limits
+pub const NU7_GLOBAL_SHIELDED_BUDGET: usize = 330;
+
 impl BlockHeight {
     pub const fn from_u32(v: u32) -> BlockHeight {
         BlockHeight(v)

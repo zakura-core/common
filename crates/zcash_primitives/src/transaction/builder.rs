@@ -93,18 +93,20 @@ pub fn check_shielded_budget<P: consensus::Parameters>(
     let sapling = sapling_spends
         .checked_add(sapling_outputs)
         .ok_or("Sapling count overflow")?;
-    if sapling > 300 {
-        return Err("NU7 Sapling spends plus outputs exceed 300");
+    if sapling > consensus::NU7_SAPLING_BLOCK_IO_LIMIT {
+        return Err("NU7 Sapling spends plus outputs exceed the per-pool limit");
     }
-    if orchard_actions > 330 || ironwood_actions > 330 {
-        return Err("NU7 Orchard or Ironwood actions exceed 330");
+    if orchard_actions > consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT
+        || ironwood_actions > consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT
+    {
+        return Err("NU7 Orchard or Ironwood actions exceed the per-pool limit");
     }
     if sapling
         .checked_add(orchard_actions)
         .and_then(|n| n.checked_add(ironwood_actions))
-        .is_none_or(|n| n > 330)
+        .is_none_or(|n| n > consensus::NU7_GLOBAL_SHIELDED_BUDGET)
     {
-        return Err("NU7 combined shielded budget exceeds 330");
+        return Err("NU7 combined shielded budget exceeds the block limit");
     }
     Ok(())
 }
@@ -2054,6 +2056,13 @@ mod tests {
     #[test]
     #[cfg(feature = "circuits")]
     fn nu7_shielded_budget_boundaries() {
+        // Pin the ZIP 218 limits independently of the constants used by the checker.
+        assert_eq!(zcash_protocol::consensus::NU7_SAPLING_BLOCK_IO_LIMIT, 300);
+        assert_eq!(
+            zcash_protocol::consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT,
+            330
+        );
+        assert_eq!(zcash_protocol::consensus::NU7_GLOBAL_SHIELDED_BUDGET, 330);
         let params = nu7_test_network();
         let activation = params.activation_height(NetworkUpgrade::Nu7).unwrap();
         for counts in [
