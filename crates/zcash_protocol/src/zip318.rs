@@ -1314,7 +1314,7 @@ mod tests {
                 expiry_height(&BlockSpacing::UNIFORM, h)
             );
             assert!(Zip318Params.is_canonical_expiry(expiry_height(&BlockSpacing::UNIFORM, h), h));
-            // The `DEFAULT_TX_EXPIRY_DELTA` of an ordinary transaction is 40 blocks.
+            // The `PRE_NU7_DEFAULT_TX_EXPIRY_DELTA` of an ordinary transaction is 40 blocks.
             assert!(!Zip318Params.is_canonical_expiry(h + 40, h));
         }
     }
