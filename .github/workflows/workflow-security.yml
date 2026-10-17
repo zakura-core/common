@@ -2,7 +2,7 @@ name: Workflow security
 
 on:
   pull_request:
-    branches: [main, "codex/port-lrz-3144-nu7", "feat/**", "release/**", "agent/**"]
+    branches: [main, "feat/**", "release/**", "agent/**"]
     paths:
       - .github/**
   push:
