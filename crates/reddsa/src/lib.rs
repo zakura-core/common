@@ -36,6 +36,11 @@ mod signing_key;
 mod verification_key;
 
 /// An element of the protocol's scalar field used for randomization of public and secret keys.
+///
+/// This alias resolves to the concrete scalar type of the curve the signature domain is
+/// instantiated over (`jubjub::Scalar` for Sapling, `pasta_curves::pallas::Scalar` for
+/// Orchard). It is a compatibility bridge to those types rather than an opaque randomizer;
+/// higher-level protocol crates wrap it in their own types.
 pub type Randomizer<S> = <S as private::Sealed<S>>::Scalar;
 
 use hash::HStar;

@@ -10,7 +10,18 @@
 //! ## Backend selection
 //!
 //! `backend-halo2` selects the cryptographic implementation and is enabled
-//! by default. Builds with defaults disabled must select it explicitly.
+//! by default. Builds with defaults disabled must select it explicitly, and
+//! a build that selects no backend fails to compile with a diagnostic naming
+//! the available selection.
+//!
+//! Backend features are mutually exclusive, and the selection is resolved
+//! once for the final artifact. Cargo unifies features across every
+//! dependant, so a library that hard-enabled a backend would force it on the
+//! whole build; the workspace crates that depend on this one (`zakura-keys`,
+//! `zakura-primitives`, `zakura-proofs`) instead forward the selection
+//! through their own default-enabled `backend-halo2` feature. An application
+//! selecting a different backend disables default features along that chain
+//! and selects the backend at each crate.
 //!
 //! ## Proof capabilities
 //!
@@ -18,6 +29,11 @@
 //! verification; `circuit` enables both. Protocol primitives also work
 //! without `std`. Circuit synthesis and arithmetic representations are
 //! private implementation details.
+//!
+//! The two features split the API, not the dependency footprint: both enable
+//! `std` and the selected backend's circuit dependencies, and a verifier-only
+//! build still synthesizes the circuit shape to derive its verifying key.
+//! Choose them to limit what a crate can do, not to shrink its build.
 //!
 //! ## ZIP 32 addresses
 //!
