@@ -132,23 +132,26 @@ impl core::error::Error for CircuitError {
 
 use core::fmt;
 
-/// An error returned while preparing, creating, or verifying an Orchard proof.
+/// An error returned while creating or verifying an Orchard proof.
+///
+/// Each variant is assigned by the selected backend's adapter for the operation that
+/// failed, so every variant is one the current backend produces. The enum is
+/// non-exhaustive so that a backend able to detect further failure classes can add
+/// variants without a breaking change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ProofError {
-    /// The request has an unsupported shape or contains an invalid encoding.
+    /// The request is malformed: it is empty, its circuits and statements disagree in
+    /// number or circuit version, it selects a circuit version that does not support the
+    /// operation, or a statement disables cross-address transfers under a key whose
+    /// circuit version cannot enforce that restriction.
     InvalidInput,
-    /// The public statement does not agree with the private witness.
-    InvalidStatement,
-    /// The private witness does not satisfy the Ironwood Action circuit.
-    UnsatisfiedWitness,
-    /// The proof does not verify for the supplied statements.
+    /// The proof does not verify for the supplied statements. This includes truncated
+    /// and corrupted proof encodings. Only verification returns it.
     InvalidProof,
-    /// The caller-supplied randomness source failed.
-    RngFailure,
-    /// A negligible random event requires retrying with fresh randomness.
-    RetryRandomness,
-    /// The selected backend encountered an unexpected internal failure.
+    /// The selected backend failed one of its own internal checks. This is not a property
+    /// of the caller's input or proof; it indicates a bug in the backend or its
+    /// configuration and should be reported rather than retried.
     InternalInvariant,
 }
 
@@ -156,28 +159,13 @@ impl fmt::Display for ProofError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidInput => "invalid proof input",
-            Self::InvalidStatement => "public statement does not match the witness",
-            Self::UnsatisfiedWitness => "witness does not satisfy the fixed circuit",
             Self::InvalidProof => "invalid proof",
-            Self::RngFailure => "randomness source failed",
-            Self::RetryRandomness => "fresh randomness is required",
             Self::InternalInvariant => "internal proof invariant failed",
         })
     }
 }
 
 impl core::error::Error for ProofError {}
-
-impl ProofError {
-    fn from_backend(error: crate::backend::halo2_proofs::plonk::Error) -> Self {
-        use crate::backend::halo2_proofs::plonk::Error;
-        match error {
-            Error::InvalidInstances => Self::InvalidInput,
-            Error::Synthesis => Self::UnsatisfiedWitness,
-            _ => Self::InvalidProof,
-        }
-    }
-}
 
 use crate::{
     Anchor,
@@ -208,7 +196,10 @@ impl Instance {
     ///
     /// This API can be used in combination with `Proof::verify` to build verification
     /// pipelines for many proofs, where you don't want to pass around the full bundle.
-    /// Use `Bundle::verify_proof` instead if you have the full bundle.
+    /// Such a pipeline must check each proof's length against
+    /// [`Proof::expected_proof_size`] before verifying it, because `Proof::verify`
+    /// ignores trailing bytes. Use `Bundle::verify_proof` instead if you have the full
+    /// bundle; its constructor already enforces the canonical length.
     ///
     /// The provided [`Flags`] are encoded into the spend/output enable public inputs and
     /// the `disableCrossAddress` public input, which is set to the negation of

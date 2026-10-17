@@ -3,7 +3,10 @@ use super::*;
 use crate::backend::pallas;
 #[cfg(feature = "backend-halo2")]
 use crate::backend::prelude::*;
-use crate::bundle::BundleVersion;
+use crate::bundle::{BundleError, BundleVersion, validate_proof_size};
+
+/// Each stored fixture authorizes exactly one action.
+const FIXTURE_ACTIONS: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProofFixtureEncoding {
@@ -139,13 +142,21 @@ fn stored_proofs_verify_only_for_their_version() {
             );
         }
         let key = VerifyingKey::build(version);
+        // The pre-migration proofs pin the canonical length, and the bundle constructors'
+        // length check is what rejects padding: `Proof::verify` reads the canonical proof
+        // and ignores trailing bytes.
+        let expected = Proof::expected_proof_size(FIXTURE_ACTIONS);
+        assert_eq!(proof.0.len(), expected);
+        assert_eq!(validate_proof_size(&proof, FIXTURE_ACTIONS), Ok(()));
         let mut malformed = proof.clone();
         malformed.0.push(0);
         assert_eq!(
-            malformed.verify(&key, core::slice::from_ref(&instance)),
-            Ok(())
+            validate_proof_size(&malformed, FIXTURE_ACTIONS),
+            Err(BundleError::NonCanonicalProofSize {
+                expected,
+                actual: expected + 1,
+            })
         );
-        assert_eq!(malformed.0.len(), proof.0.len() + 1);
         malformed = proof.clone();
         malformed.0.pop();
         assert_eq!(
@@ -154,17 +165,19 @@ fn stored_proofs_verify_only_for_their_version() {
         );
         malformed = proof.clone();
         malformed.0[0] ^= 1;
-        assert!(
-            malformed
-                .verify(&key, core::slice::from_ref(&instance))
-                .is_err()
+        assert_eq!(
+            malformed.verify(&key, core::slice::from_ref(&instance)),
+            Err(ProofError::InvalidProof)
         );
         let mut different = instance.clone();
         different.cmx = ExtractedNoteCommitment::from_bytes(
             &(instance.cmx.inner() + pallas::Base::from(1)).to_repr(),
         )
         .unwrap();
-        assert!(proof.verify(&key, &[different]).is_err());
+        assert_eq!(
+            proof.verify(&key, &[different]),
+            Err(ProofError::InvalidProof)
+        );
         if !version.supports_cross_address_restriction() {
             let mut restricted = instance;
             restricted.cross_address_disabled = true;

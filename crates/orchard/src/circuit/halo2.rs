@@ -2533,6 +2533,80 @@ mod tests {
             assert_eq!(instance.rk(), &rk);
         }
     }
+
+    /// Every backend error the adapters classify, with the class the verifier must
+    /// report. The prover reports each of them as a broken internal invariant, because
+    /// `Proof::create` rejects every caller-controllable condition before reaching the
+    /// backend.
+    #[test]
+    fn backend_errors_map_to_operation_specific_classes() {
+        use super::{ProofError, plonk::Error, prover_error, verifier_error};
+
+        /// A fresh backend error (the type is neither `Clone` nor `PartialEq`) and the
+        /// class the verifier adapter must assign it.
+        type Case = (fn() -> Error, ProofError);
+        let table: &[Case] = &[
+            (|| Error::Synthesis, ProofError::InternalInvariant),
+            (|| Error::InvalidInstances, ProofError::InvalidInput),
+            (|| Error::InvalidParameters, ProofError::InternalInvariant),
+            (|| Error::ConstraintSystemFailure, ProofError::InvalidProof),
+            (|| Error::BoundsFailure, ProofError::InternalInvariant),
+            (|| Error::Opening, ProofError::InvalidProof),
+            (
+                || Error::Transcript(std::io::ErrorKind::UnexpectedEof.into()),
+                ProofError::InvalidProof,
+            ),
+            (
+                || Error::NotEnoughRowsAvailable { current_k: K },
+                ProofError::InternalInvariant,
+            ),
+            (|| Error::InstanceTooLarge, ProofError::InternalInvariant),
+            (
+                || Error::NotEnoughColumnsForConstants,
+                ProofError::InternalInvariant,
+            ),
+            (
+                || Error::IllegalHashFromPrivatePoint,
+                ProofError::InternalInvariant,
+            ),
+        ];
+        for &(error, expected) in table {
+            assert_eq!(verifier_error(error()), expected, "{:?}", error());
+            assert_eq!(
+                prover_error(error()),
+                ProofError::InternalInvariant,
+                "{:?}",
+                error()
+            );
+        }
+    }
+}
+
+/// Classifies a failure of the Halo2 prover.
+///
+/// [`Proof::create`] rejects every caller-controllable condition before reaching the
+/// backend, and the Halo2 prover does not check that a witness satisfies the circuit, so
+/// any error the backend returns is a broken internal invariant rather than a property of
+/// the request.
+#[cfg(feature = "prover")]
+fn prover_error(_error: plonk::Error) -> ProofError {
+    ProofError::InternalInvariant
+}
+
+/// Classifies a failure of the Halo2 verifier.
+///
+/// Transcript, opening, and constraint-system failures are the three ways a proof fails
+/// to verify. An instance mismatch is the caller's. Everything else concerns the key or
+/// parameters, which Orchard builds itself.
+#[cfg(feature = "verifier")]
+fn verifier_error(error: plonk::Error) -> ProofError {
+    match error {
+        plonk::Error::InvalidInstances => ProofError::InvalidInput,
+        plonk::Error::Transcript(_)
+        | plonk::Error::Opening
+        | plonk::Error::ConstraintSystemFailure => ProofError::InvalidProof,
+        _ => ProofError::InternalInvariant,
+    }
 }
 
 impl Proof {
@@ -2552,15 +2626,34 @@ impl Proof {
         {
             return Err(ProofError::InvalidInput);
         }
-        Self::create_halo2(pk, circuits, instances, rng).map_err(ProofError::from_backend)
+        Self::create_halo2(pk, circuits, instances, rng).map_err(prover_error)
     }
+
     /// Verifies a proof for the selected protocol version and ordered statements.
+    ///
+    /// Verification reads the canonical proof from the front of the bytes and ignores
+    /// anything after it. Callers verifying proofs obtained as raw bytes must first check
+    /// the length against [`Proof::expected_proof_size`]. [`Bundle::try_from_parts`] does
+    /// so for every bundle version except the historical pre-NU6.2 pool, so proofs taken
+    /// from an authorized bundle need no separate check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofError::InvalidInput`] if `instances` is empty, or if any instance
+    /// disables cross-address transfers and `vk` is not an
+    /// [`OrchardCircuitVersion::PostNu6_3`] verifying key.
+    ///
+    /// Returns [`ProofError::InvalidProof`] if the proof does not verify for `instances`,
+    /// including when its encoding is truncated or corrupted.
+    ///
+    /// Returns [`ProofError::InternalInvariant`] if the backend fails an internal check.
+    ///
+    /// [`Bundle::try_from_parts`]: crate::Bundle::try_from_parts
     #[cfg(feature = "verifier")]
     pub fn verify(&self, vk: &VerifyingKey, instances: &[Instance]) -> Result<(), ProofError> {
         if instances.is_empty() {
             return Err(ProofError::InvalidInput);
         }
-        self.verify_halo2(vk, instances)
-            .map_err(ProofError::from_backend)
+        self.verify_halo2(vk, instances).map_err(verifier_error)
     }
 }
