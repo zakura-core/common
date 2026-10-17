@@ -11,7 +11,7 @@ on:
   # Allow maintainers to toggle the ci-backfill label when an unchanged PR
   # needs a fresh required test success check.
   pull_request:
-    branches: [main, "codex/port-lrz-3144-nu7", "feat/**", "perf/**", "release/**", "agent/**"]
+    branches: [main, "feat/**", "perf/**", "release/**", "agent/**"]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
