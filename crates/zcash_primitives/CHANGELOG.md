@@ -10,6 +10,29 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Added
+
+- Added the default `pczt` feature, which gates
+  `transaction::builder::DeferredPcztBuilder`, `Builder::build_for_pczt`,
+  `PcztResult` and `PcztParts`, and is implied by `transparent-inputs`. Builds
+  without default features that use these APIs must enable it
+  ([#580](https://github.com/zakura-core/common/pull/580)).
+- Add a coinbase transaction builder entry point without wallet spending keys or a fee rule, sharing the existing validation and construction path. Requests made with a standard transaction configuration return `coinbase::Error::InvalidBuilderConfiguration`.
+- Added the default-enabled `backend-halo2` feature forwarding the Orchard
+  backend selection; builds with `--no-default-features` must enable it
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+
+### Changed
+
+- Make wallet derivation and PCZT construction opt-out through the default-enabled `wallet` feature. Indexed-address and wallet-input features select it automatically.
+
+### Removed
+
+- Removed the `memuse::DynamicUsage` implementation for `BlockHash`, together with the `memuse` dependency. Code that measured it with `dynamic_usage()` no longer compiles
+  ([#589](https://github.com/zakura-core/common/pull/589)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed

@@ -10,6 +10,28 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Added
+
+- Added the default `pczt` feature, which gates the `pczt` module and
+  `builder::TransparentBuilder::build_for_pczt`, and the `bip32` feature, which
+  gates the conversions between `keys::TransparentKeyScope` /
+  `keys::NonHardenedChildIndex` and `bip32::ChildNumber`
+  ([#580](https://github.com/zakura-core/common/pull/580)).
+
+### Changed
+
+- The `bip32` dependency is now optional and the `zcash_script` descriptor
+  feature is requested only by `transparent-inputs`, so builds without default
+  features and without `transparent-inputs` no longer compile BIP 32. Such
+  builds that use the PCZT types or the `ChildNumber` conversions must enable
+  `pczt` or `bip32`; `transparent-inputs` now implies `pczt`
+  ([#580](https://github.com/zakura-core/common/pull/580)).
+- Distinguish an invalid coinbase builder configuration from unexpected transaction inputs.
+
+- Keep wallet derivation APIs enabled by default behind `wallet`; allow verification and direct-address APIs without the external derivation dependency.
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed

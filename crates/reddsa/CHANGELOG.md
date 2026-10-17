@@ -10,6 +10,15 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Added
+
+- Added the default-enabled `pallas-pasta` feature gating the Pallas
+  signature implementation; builds without it retain Jubjub support and drop
+  the `pasta_curves` dependency
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed
