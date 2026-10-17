@@ -9,7 +9,7 @@ imply it. Clients selecting features explicitly must enable `zip32` for those
 APIs.
 
 Nodes that verify transactions and build coinbase rewards can use primitives
-with `default-features = false` and `std,circuits,multicore`, and the other
+with `default-features = false` and `backend-halo2,std,circuits,multicore`, and the other
 Common crates with their required standard and verification features. The
 `Builder::build_coinbase` entry point accepts no wallet spending keys or fee
 rule. It enforces coinbase configuration and shares version, expiry, proof,
