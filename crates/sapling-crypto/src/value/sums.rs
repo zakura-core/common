@@ -51,7 +51,7 @@ impl ValueSum {
     /// Instantiates a value sum from a raw encoding.
     ///
     /// Only intended for use with PCZTs.
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     pub(crate) fn from_raw(value_sum: i128) -> Self {
         Self(value_sum)
     }

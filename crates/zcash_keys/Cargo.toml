@@ -53,13 +53,13 @@ zcash_script = { version = "0.6", default-features = false }
 
 [features]
 backend-halo2 = ["orchard?/backend-halo2"]
-# Wallet key derivation and ZIP 32 interoperability, enabled by default.
-zip32 = ["dep:zip32", "orchard?/zip32", "sapling?/zip32", "transparent/zip32"]
+# Wallet key derivation and spending transaction construction, enabled by default.
+wallet = ["dep:zip32", "orchard?/wallet", "sapling?/wallet", "transparent/wallet"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
-zip32-addresses = ["zip32", "orchard?/zip32-addresses", "sapling?/zip32-addresses"]
-default = ["backend-halo2", "zip32", "std", "zip32-addresses"]
-orchard = ["dep:orchard", "zip32"]
-sapling = ["dep:sapling", "zip32"]
+zip32-addresses = ["wallet", "orchard?/zip32-addresses", "sapling?/zip32-addresses"]
+default = ["backend-halo2", "wallet", "std", "zip32-addresses"]
+orchard = ["dep:orchard", "wallet"]
+sapling = ["dep:sapling", "wallet"]
 std = [
     "orchard?/std",
     "sapling?/std",
@@ -67,13 +67,13 @@ std = [
     "zcash_address/std",
 ]
 test-dependencies = [
-    "zip32",
+    "wallet",
     "dep:proptest",
     "orchard?/test-dependencies",
     "sapling?/test-dependencies",
     "transparent/test-dependencies",
 ]
-transparent-inputs = ["zip32", "dep:bip32", "transparent/transparent-inputs"]
+transparent-inputs = ["wallet", "dep:bip32", "transparent/transparent-inputs"]
 transparent-key-encoding = ["dep:bip32", "dep:secp256k1"]
 unstable = ["dep:byteorder"]
 unstable-frost = ["orchard"]

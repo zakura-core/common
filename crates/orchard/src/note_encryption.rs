@@ -174,7 +174,7 @@ impl<V: DomainVersion> NoteEncryptionDomain<V> {
     }
 
     /// Constructs a domain that can be used to trial-decrypt a PCZT action's output note.
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     pub fn for_pczt_action(act: &crate::pczt::Action) -> Self {
         Self::from_rho(Rho::from_nf_old(act.spend().nullifier))
     }
@@ -410,7 +410,7 @@ impl<P: DomainPolicy, T> ShieldedOutput<NoteEncryptionDomain<P>, ENC_CIPHERTEXT_
     }
 }
 
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 impl<P: DomainPolicy> ShieldedOutput<NoteEncryptionDomain<P>, ENC_CIPHERTEXT_SIZE>
     for crate::pczt::Action
 {

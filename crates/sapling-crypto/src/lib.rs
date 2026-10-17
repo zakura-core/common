@@ -14,9 +14,9 @@
 //!   dependency; separately enabled proving dependencies are unaffected.
 //! ### Wallet derivation
 //!
-//! The default-enabled `zip32` feature exposes wallet derivation and PCZT APIs.
+//! The default-enabled `wallet` feature exposes wallet derivation and PCZT APIs.
 //! Node clients may omit it while retaining verification and coinbase construction.
-//! `zip32-addresses` implies `zip32`.
+//! `zip32-addresses` implies `wallet`.
 //!
 //! ### ZIP 32 addresses
 //!
@@ -51,7 +51,7 @@ pub mod group_hash;
 pub mod keys;
 pub mod note;
 pub mod note_encryption;
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 pub mod pczt;
 pub mod pedersen_hash;
 #[cfg(feature = "circuit")]
@@ -64,7 +64,7 @@ pub mod util;
 pub mod value;
 #[cfg(feature = "circuit")]
 mod verifier;
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 pub mod zip32;
 
 pub use address::PaymentAddress;

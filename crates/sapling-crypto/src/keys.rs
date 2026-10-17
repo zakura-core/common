@@ -148,7 +148,7 @@ impl SpendAuthorizingKey {
     /// Converts this spend authorizing key to a raw scalar.
     ///
     /// Only used for ZIP 32 child derivation.
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     pub(crate) fn to_scalar(&self) -> jubjub::Scalar {
         jubjub::Scalar::from_repr(self.0.into()).unwrap()
     }

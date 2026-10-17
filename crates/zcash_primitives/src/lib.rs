@@ -8,7 +8,7 @@
 //! *No documented features in Cargo.toml*
 //!
 
-//! The default-enabled `zip32` feature supplies wallet derivation APIs.
+//! The default-enabled `wallet` feature supplies wallet derivation APIs.
 //! Clients selecting features explicitly may omit it for verification and
 //! coinbase construction; wallet input and PCZT features imply it.
 //!

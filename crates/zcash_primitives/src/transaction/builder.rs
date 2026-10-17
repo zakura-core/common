@@ -43,7 +43,7 @@ use {
     alloc::vec::Vec,
 };
 
-#[cfg(all(feature = "circuits", feature = "zip32"))]
+#[cfg(all(feature = "circuits", feature = "wallet"))]
 use {crate::transaction::Unauthorized, ::transparent::builder::TransparentSigningSet};
 
 #[cfg(feature = "transparent-inputs")]
@@ -1364,7 +1364,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
     /// [Orchard metadata]: ::orchard::builder::BundleMetadata
     /// [final transaction]: Transaction
     #[allow(clippy::too_many_arguments)]
-    #[cfg(all(feature = "circuits", feature = "zip32"))]
+    #[cfg(all(feature = "circuits", feature = "wallet"))]
     pub fn build<R: Rng + CryptoRng, SP: SpendProver, OP: OutputProver, FR: FeeRule>(
         self,
         transparent_signing_set: &TransparentSigningSet,
@@ -1434,7 +1434,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
                     .map_err(Error::Coinbase)
             },
             |b, _, _| Ok(b.clone().map_authorization(transparent::builder::Coinbase)),
-            #[cfg(feature = "zip32")]
+            #[cfg(feature = "wallet")]
             &[],
             &[],
             rng,
@@ -1462,7 +1462,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             transparent::bundle::Bundle<transparent::bundle::Authorized>,
             transparent::builder::Error,
         >,
-        #[cfg(feature = "zip32")] sapling_extsks: &[sapling::zip32::ExtendedSpendingKey],
+        #[cfg(feature = "wallet")] sapling_extsks: &[sapling::zip32::ExtendedSpendingKey],
         orchard_saks: &[orchard::keys::SpendAuthorizingKey],
         mut rng: R,
         spend_prover: &SP,
@@ -1514,9 +1514,9 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         let (sapling_bundle, sapling_meta) = match self
             .sapling_builder
             .and_then(|builder| {
-                #[cfg(feature = "zip32")]
+                #[cfg(feature = "wallet")]
                 let bundle = builder.build::<SP, OP, _, _>(sapling_extsks, &mut rng);
-                #[cfg(not(feature = "zip32"))]
+                #[cfg(not(feature = "wallet"))]
                 let bundle = builder.build_coinbase::<SP, OP, _, _>(&mut rng);
                 bundle.map_err(Error::SaplingBuild).transpose().map(|res| {
                     res.map(|(bundle, sapling_meta)| {
@@ -1608,12 +1608,12 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         let shielded_sig_commitment =
             signature_hash(&unauthed_tx, &SignableInput::Shielded, &txid_parts);
 
-        #[cfg(feature = "zip32")]
+        #[cfg(feature = "wallet")]
         let sapling_asks = sapling_extsks
             .iter()
             .map(|extsk| extsk.expsk.ask.clone())
             .collect::<Vec<_>>();
-        #[cfg(not(feature = "zip32"))]
+        #[cfg(not(feature = "wallet"))]
         let sapling_asks = Vec::new();
         let sapling_bundle = unauthed_tx
             .sapling_bundle
@@ -1834,7 +1834,7 @@ pub fn cached_orchard_proving_key(
     }))
 }
 
-#[cfg(all(feature = "circuits", feature = "zip32"))]
+#[cfg(all(feature = "circuits", feature = "wallet"))]
 fn authorize_transparent(
     b: &transparent::bundle::Bundle<transparent::builder::Unauthorized>,
     unauthed_tx: &TransactionData<Unauthorized>,
@@ -1853,7 +1853,7 @@ fn authorize_transparent(
 #[cfg(all(
     any(test, feature = "test-dependencies"),
     feature = "circuits",
-    feature = "zip32"
+    feature = "wallet"
 ))]
 mod testing {
     use core::convert::Infallible;
@@ -1910,7 +1910,7 @@ mod testing {
     }
 }
 
-#[cfg(all(test, feature = "zip32"))]
+#[cfg(all(test, feature = "wallet"))]
 mod tests {
     #[cfg(feature = "circuits")]
     use {
@@ -3041,7 +3041,7 @@ mod tests {
 #[cfg(all(test, feature = "circuits"))]
 mod coinbase_tests {
     use super::{BuildConfig, Builder, Error};
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     use crate::transaction::fees::zip317;
     use alloc::{string::ToString, vec::Vec};
     use rand::{SeedableRng, rngs::StdRng};
@@ -3190,7 +3190,7 @@ mod coinbase_tests {
         }
     }
 
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     #[test]
     fn coinbase_entry_points_preserve_bytes_and_randomness() {
         for sapling_output in [false, true] {

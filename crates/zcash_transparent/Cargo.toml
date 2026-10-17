@@ -41,9 +41,9 @@ proptest = ">=1,<1.7"
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
-# Wallet key derivation and ZIP 32 interoperability, enabled by default.
-zip32 = ["dep:zip32"]
-default = ["zip32", "std", "pczt"]
+# Wallet key derivation and spending transaction construction, enabled by default.
+wallet = ["dep:zip32"]
+default = ["wallet", "std", "pczt"]
 std = [
     "secp256k1?/std",
     "zcash_address/std",
@@ -51,7 +51,7 @@ std = [
 ]
 # BIP 32 interoperability: conversions between this crate's key scopes and child
 # indices and `bip32::ChildNumber`.
-bip32 = ["dep:bip32", "zip32"]
+bip32 = ["dep:bip32", "wallet"]
 # Partially created transparent bundles (`pczt` module and
 # `builder::TransparentBuilder::build_for_pczt`), whose key derivation paths are BIP 32 paths.
 pczt = ["bip32"]
@@ -64,7 +64,7 @@ transparent-inputs = [
     "zcash_script/descriptor",
 ]
 test-dependencies = [
-    "zip32",
+    "wallet",
     "dep:proptest",
     "zcash_protocol/test-dependencies",
 ]

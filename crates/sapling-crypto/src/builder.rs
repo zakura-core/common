@@ -1,6 +1,6 @@
 //! Types and functions for building Sapling transaction components.
 
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::{fmt, iter, marker::PhantomData};
@@ -35,7 +35,7 @@ use crate::{
     value::{CommitmentSum, TrapdoorSum},
 };
 
-#[cfg(all(feature = "circuit", feature = "zip32"))]
+#[cfg(all(feature = "circuit", feature = "wallet"))]
 use crate::zip32::ExtendedSpendingKey;
 
 /// If there are any shielded inputs, always have at least two shielded outputs, padding
@@ -327,7 +327,7 @@ impl PreparedSpendInfo {
         ))
     }
 
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     fn into_pczt<R: Rng>(self, rng: R) -> crate::pczt::Spend {
         let (cv, nullifier, rk, alpha) = self.build_inner(rng);
 
@@ -496,7 +496,7 @@ impl PreparedOutputInfo {
         )
     }
 
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     fn into_pczt<R: Rng>(self, rng: &mut R) -> crate::pczt::Output {
         let (cv, cmu, ephemeral_key, enc_ciphertext, out_ciphertext, _) =
             self.build_inner(|_| (), rng);
@@ -670,7 +670,7 @@ impl Builder {
     }
 
     /// Constructs the Sapling bundle from the builder's accumulated state.
-    #[cfg(all(feature = "circuit", feature = "zip32"))]
+    #[cfg(all(feature = "circuit", feature = "wallet"))]
     pub fn build<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
         self,
         extsks: &[ExtendedSpendingKey],
@@ -712,7 +712,7 @@ impl Builder {
 
     /// Builds a bundle containing the given spent notes and outputs along with their
     /// metadata, for inclusion in a PCZT.
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     pub fn build_for_pczt(
         self,
         rng: impl Rng,
@@ -757,7 +757,7 @@ impl Builder {
 
 /// Constructs a new Sapling transaction bundle of the given type from the specified set of spends
 /// and outputs.
-#[cfg(all(feature = "circuit", feature = "zip32"))]
+#[cfg(all(feature = "circuit", feature = "wallet"))]
 pub fn bundle<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
     rng: R,
     bundle_type: BundleType,

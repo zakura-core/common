@@ -78,7 +78,7 @@ pub mod keys;
 pub mod note;
 pub mod note_encryption;
 mod once;
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 pub mod pczt;
 pub mod primitives;
 #[cfg(test)]
@@ -87,7 +87,7 @@ mod rng_compat;
 mod spec;
 pub mod tree;
 pub mod value;
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 pub mod zip32;
 
 #[cfg(test)]

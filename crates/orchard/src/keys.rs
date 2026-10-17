@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use corez::io::{self, Read, Write};
 
 use crate::backend::pallas;
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 use ::zip32::{AccountId, ChildIndex};
 #[cfg(feature = "zip32-addresses")]
 use aes::Aes256;
@@ -28,13 +28,13 @@ use crate::{
 };
 
 pub use crate::scope::Scope;
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 use crate::zip32::{self, ExtendedSpendingKey};
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 pub use ::zip32::DiversifierIndex;
 
 const KDF_ORCHARD_PERSONALIZATION: &[u8; 16] = b"Zcash_OrchardKDF";
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 const ZIP32_PURPOSE: u32 = 32;
 
 /// A spending key, from which all key material is derived.
@@ -97,7 +97,7 @@ impl SpendingKey {
     }
 
     /// Derives the Orchard spending key for the given seed, coin type, and account.
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     pub fn from_zip32_seed(
         seed: &[u8],
         coin_type: u32,
@@ -329,7 +329,7 @@ impl From<&SpendingKey> for FullViewingKey {
     }
 }
 
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 impl From<&ExtendedSpendingKey> for FullViewingKey {
     fn from(extsk: &ExtendedSpendingKey) -> Self {
         (&extsk.sk()).into()
@@ -934,7 +934,7 @@ pub mod testing {
     use crate::backend::prelude::*;
     use proptest::prelude::*;
 
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     use super::DiversifierIndex;
     use super::{DiversifierKey, EphemeralSecretKey, SpendingKey};
 
@@ -975,7 +975,7 @@ pub mod testing {
         }
     }
 
-    #[cfg(feature = "zip32")]
+    #[cfg(feature = "wallet")]
     prop_compose! {
         /// Generate a uniformly distributed diversifier index.
         pub fn arb_diversifier_index()(

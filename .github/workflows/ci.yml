@@ -660,7 +660,7 @@ jobs:
       - name: Test without indexed ZIP 32 addresses
         run: >-
           cargo +stable test -p zakura-orchard --locked
-          --no-default-features --features backend-halo2 --features circuit,multicore,zip32
+          --no-default-features --features backend-halo2 --features circuit,multicore,wallet
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -1271,7 +1271,7 @@ jobs:
       - name: Test Sapling without indexed ZIP 32 addresses
         run: >-
           cargo +stable test -p zakura-sapling-crypto --locked
-          --no-default-features --features circuit,multicore,zip32 --release
+          --no-default-features --features circuit,multicore,wallet --release
       - name: Verify working directory is clean
         run: git diff --exit-code
 

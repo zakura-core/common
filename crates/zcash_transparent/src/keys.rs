@@ -5,7 +5,7 @@ use core::fmt;
 #[cfg(feature = "bip32")]
 use bip32::ChildNumber;
 use subtle::{Choice, ConstantTimeEq};
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 use zip32::DiversifierIndex;
 
 #[cfg(feature = "transparent-inputs")]
@@ -64,7 +64,7 @@ impl fmt::Debug for TransparentKeyScope {
     }
 }
 
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 impl From<zip32::Scope> for TransparentKeyScope {
     fn from(value: zip32::Scope) -> Self {
         match value {
@@ -174,7 +174,7 @@ impl From<NonHardenedChildIndex> for ChildNumber {
     }
 }
 
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 impl TryFrom<DiversifierIndex> for NonHardenedChildIndex {
     type Error = ();
 
@@ -184,7 +184,7 @@ impl TryFrom<DiversifierIndex> for NonHardenedChildIndex {
     }
 }
 
-#[cfg(feature = "zip32")]
+#[cfg(feature = "wallet")]
 impl From<NonHardenedChildIndex> for DiversifierIndex {
     fn from(value: NonHardenedChildIndex) -> Self {
         DiversifierIndex::from(value.0)
