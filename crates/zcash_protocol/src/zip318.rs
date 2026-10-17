@@ -217,7 +217,9 @@ fn rolling_expiry(
 /// spacing. From NU7 activation the target spacing is 25 seconds, so the same duration spans
 /// [`NU7_POW_TARGET_SPACING_RATIO`] times as many blocks. A duration that starts before activation
 /// and ends after it keeps its exact length: its part before activation counts one block per
-/// reference block, and its part after activation counts the ratio.
+/// reference block, and its part after activation counts the ratio. A starting height denotes a
+/// block already reached: elapsed time counts the spacing of successive candidate blocks, including
+/// the 25-second interval ending at the activation block.
 ///
 /// [ZIP 318]: https://zips.z.cash/zip-0318
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,20 +263,23 @@ impl BlockSpacing {
     }
 
     /// Returns the height that is `reference_blocks` reference blocks after `from`. Saturates at
-    /// `u32::MAX`.
+    /// `u32::MAX`. Counts candidate blocks strictly after `from`; the activation block already
+    /// uses the new spacing. Returns the first height whose elapsed target time reaches the duration.
     pub fn advance(&self, from: BlockHeight, reference_blocks: u32) -> BlockHeight {
         let ratio = u64::from(NU7_POW_TARGET_SPACING_RATIO);
         self.height_at(self.time_of(from) + u64::from(reference_blocks) * ratio)
     }
 
     /// Returns the height that is as long after `height` as `to` is after `from`, or `height` when
-    /// `to` is not after `from`. Saturates at `u32::MAX`.
+    /// `to` is not after `from`. Counts the candidate blocks in `(from, to]`, then rounds up to
+    /// the first height reaching that elapsed target time after `height`. Saturates at `u32::MAX`.
     pub fn shift(&self, height: BlockHeight, from: BlockHeight, to: BlockHeight) -> BlockHeight {
         let elapsed = self.time_of(to).saturating_sub(self.time_of(from));
         self.height_at(self.time_of(height) + elapsed)
     }
 
-    /// Returns whether `to` is more than `reference_blocks` reference blocks after `from`.
+    /// Returns whether the target time of candidate blocks in `(from, to]` is strictly more than
+    /// `reference_blocks` reference blocks. Returns false when `to` is not after `from`.
     pub fn exceeds(&self, from: BlockHeight, to: BlockHeight, reference_blocks: u32) -> bool {
         let ratio = u64::from(NU7_POW_TARGET_SPACING_RATIO);
         self.time_of(to).saturating_sub(self.time_of(from)) > u64::from(reference_blocks) * ratio
@@ -287,28 +292,35 @@ impl BlockSpacing {
             .map_or(u64::from(u32::MAX) + 1, |h| u64::from(u32::from(h)))
     }
 
+    /// The height after which elapsed time has the new spacing. This is the predecessor of
+    /// activation (or zero when activation is zero), because the activation block is already fast.
+    /// With no activation, it is the largest representable height.
+    fn elapsed_time_breakpoint(&self) -> u64 {
+        self.activation().saturating_sub(1)
+    }
+
     /// The time at which `height` is reached, in units of the post-NU7 target spacing, measured
-    /// from the genesis block. Each block before activation adds the spacing ratio, and each block
-    /// from activation adds one.
+    /// from the genesis block at time zero. Each subsequent candidate block before activation adds
+    /// the spacing ratio, and each candidate block from activation adds one.
     fn time_of(&self, height: BlockHeight) -> u64 {
         let ratio = u64::from(NU7_POW_TARGET_SPACING_RATIO);
-        let activation = self.activation();
+        let breakpoint = self.elapsed_time_breakpoint();
         let h = u64::from(u32::from(height));
-        if h <= activation {
+        if h <= breakpoint {
             h * ratio
         } else {
-            activation * ratio + (h - activation)
+            breakpoint * ratio + (h - breakpoint)
         }
     }
 
     /// The least height reached at or after `time`. Saturates at `u32::MAX`.
     fn height_at(&self, time: u64) -> BlockHeight {
         let ratio = u64::from(NU7_POW_TARGET_SPACING_RATIO);
-        let activation = self.activation();
-        let h = if time <= activation * ratio {
+        let breakpoint = self.elapsed_time_breakpoint();
+        let h = if time <= breakpoint * ratio {
             time.div_ceil(ratio)
         } else {
-            activation + (time - activation * ratio)
+            breakpoint + (time - breakpoint * ratio)
         };
         BlockHeight::from_u32(u32::try_from(h).unwrap_or(u32::MAX))
     }
@@ -988,15 +1000,115 @@ mod tests {
     /// The NU7 spacing ratio, as the `u32` the expected values below are computed in.
     const R: u32 = NU7_POW_TARGET_SPACING_RATIO;
 
-    /// The height reached by advancing `d` reference blocks from `h` when NU7 activates at `a`,
-    /// written as the three cases of the specification rather than through the time coordinate.
-    fn specified_advance(a: u32, h: u32, d: u32) -> u32 {
-        if h >= a {
-            h + R * d
-        } else if h + d <= a {
-            h + d
-        } else {
-            a + R * (h + d - a)
+    /// Independently sum the target spacing of each successive candidate block, in seconds.
+    /// Test callers bound the interval length so that this stays practical.
+    fn elapsed_seconds(activation: Option<u32>, from: u32, to: u32) -> u64 {
+        (u64::from(from) + 1..=u64::from(to))
+            .map(|candidate| {
+                if activation.is_some_and(|a| candidate >= u64::from(a)) {
+                    25
+                } else {
+                    75
+                }
+            })
+            .sum()
+    }
+
+    /// Walk candidate blocks until their accumulated spacing reaches the requested duration.
+    /// This deliberately uses neither the production coordinate nor a piecewise inverse.
+    fn advance_seconds(activation: Option<u32>, mut height: u32, seconds: u64) -> u32 {
+        let mut elapsed = 0;
+        while elapsed < seconds && height < u32::MAX {
+            let candidate = height + 1;
+            elapsed += elapsed_seconds(activation, height, candidate);
+            height = candidate;
+        }
+        height
+    }
+
+    fn test_spacing(activation: Option<u32>) -> BlockSpacing {
+        activation.map_or(BlockSpacing::UNIFORM, |a| {
+            BlockSpacing::with_nu7_activation(BlockHeight::from_u32(a))
+        })
+    }
+
+    #[test]
+    fn candidate_spacing_advance_regressions() {
+        let s = test_spacing(Some(100));
+        for (from, duration, expected) in [
+            (98, 1, 99),
+            (98, 2, 102),
+            (99, 1, 102),
+            (100, 1, 103),
+            (101, 1, 104),
+            (90, 66, 270),
+        ] {
+            assert_eq!(
+                u32::from(s.advance(BlockHeight::from_u32(from), duration)),
+                expected,
+                "advance({from}, {duration})"
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_spacing_shift_regressions() {
+        let s = test_spacing(Some(100));
+        for (height, from, to, expected) in [
+            (200, 99, 100, 201),
+            (98, 99, 100, 99), // 25 seconds rounds up to the next 75-second block.
+            (98, 100, 103, 99),
+            (99, 98, 99, 102),
+            (98, 100, 99, 98), // A backwards interval has zero duration.
+        ] {
+            assert_eq!(
+                u32::from(s.shift(
+                    BlockHeight::from_u32(height),
+                    BlockHeight::from_u32(from),
+                    BlockHeight::from_u32(to)
+                )),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_spacing_exceeds_regressions() {
+        let s = test_spacing(Some(100));
+        for (to, expected) in [(101, false), (102, false), (103, true)] {
+            assert_eq!(
+                s.exceeds(BlockHeight::from_u32(99), BlockHeight::from_u32(to), 1),
+                expected
+            );
+        }
+        assert!(!s.exceeds(BlockHeight::from_u32(100), BlockHeight::from_u32(99), 0));
+        assert!(s.exceeds(BlockHeight::from_u32(99), BlockHeight::from_u32(100), 0));
+    }
+
+    #[test]
+    fn candidate_spacing_edges_and_saturation() {
+        let max = BlockHeight::from_u32(u32::MAX);
+        for activation in [None, Some(0), Some(1), Some(100), Some(u32::MAX)] {
+            let s = test_spacing(activation);
+            for h in [0, 1, 98, 99, 100, 101, u32::MAX - 1, u32::MAX] {
+                let height = BlockHeight::from_u32(h);
+                assert_eq!(s.advance(height, 0), height);
+                assert_eq!(s.shift(height, height, height), height);
+                assert!(!s.exceeds(height, height, 0));
+                assert_eq!(s.advance(height, u32::MAX), max);
+                assert_eq!(s.shift(height, BlockHeight::from_u32(0), max), max);
+                assert_eq!(
+                    u32::from(s.advance(height, 1)),
+                    advance_seconds(activation, h, 75)
+                );
+            }
+        }
+        for activation in [0, 1] {
+            let s = test_spacing(Some(activation));
+            assert_eq!(
+                s.advance(BlockHeight::from_u32(0), 1),
+                BlockHeight::from_u32(3)
+            );
         }
     }
 
@@ -1032,15 +1144,45 @@ mod tests {
 
     proptest! {
         #[test]
-        fn advance_follows_the_piecewise_rule(
-            a in 0u32..1_000_000,
-            h in 0u32..1_000_000,
-            d in 0u32..10_000,
+        fn advance_follows_candidate_duration_sums(
+            activation in proptest::option::of(0u32..400),
+            h in 0u32..400,
+            d in 0u32..200,
         ) {
-            let s = BlockSpacing::with_nu7_activation(BlockHeight::from_u32(a));
+            let s = test_spacing(activation);
             prop_assert_eq!(
                 u32::from(s.advance(BlockHeight::from_u32(h), d)),
-                specified_advance(a, h, d)
+                advance_seconds(activation, h, u64::from(d) * 75)
+            );
+        }
+
+        #[test]
+        fn shift_follows_candidate_duration_sums(
+            activation in proptest::option::of(0u32..400),
+            from in 0u32..400,
+            to in 0u32..400,
+            h in 0u32..400,
+        ) {
+            let s = test_spacing(activation);
+            let seconds = elapsed_seconds(activation, from, to);
+            prop_assert_eq!(
+                u32::from(s.shift(BlockHeight::from_u32(h),
+                    BlockHeight::from_u32(from), BlockHeight::from_u32(to))),
+                advance_seconds(activation, h, seconds)
+            );
+        }
+
+        #[test]
+        fn exceeds_follows_candidate_duration_sums(
+            activation in proptest::option::of(0u32..400),
+            from in 0u32..400,
+            to in 0u32..400,
+            d in 0u32..200,
+        ) {
+            let s = test_spacing(activation);
+            prop_assert_eq!(
+                s.exceeds(BlockHeight::from_u32(from), BlockHeight::from_u32(to), d),
+                elapsed_seconds(activation, from, to) > u64::from(d) * 75
             );
         }
 
