@@ -55,7 +55,7 @@ use super::components::sapling::zip212_enforcement;
 /// The default transaction expiry delta before NU7.
 /// Use [`default_tx_expiry_delta`] for height-aware construction.
 /// <https://zips.z.cash/zip-0203#changes-for-blossom>
-pub const DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
+pub const PRE_NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
 
 /// The default expiry delta from NU7, preserving approximately 50 minutes.
 pub const NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 120;
@@ -69,7 +69,7 @@ pub fn default_tx_expiry_delta<P: consensus::Parameters>(
     if params.is_nu_active(consensus::NetworkUpgrade::Nu7, target_height) {
         NU7_DEFAULT_TX_EXPIRY_DELTA
     } else {
-        DEFAULT_TX_EXPIRY_DELTA
+        PRE_NU7_DEFAULT_TX_EXPIRY_DELTA
     }
 }
 
@@ -1994,7 +1994,9 @@ mod tests {
 
     #[cfg(feature = "transparent-inputs")]
     use {
-        crate::transaction::{OutPoint, TxOut, TxVersion, builder::DEFAULT_TX_EXPIRY_DELTA},
+        crate::transaction::{
+            OutPoint, TxOut, TxVersion, builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA,
+        },
         ::transparent::keys::{AccountPrivKey, IncomingViewingKey},
         zcash_protocol::consensus::BranchId,
         zip32::AccountId,
@@ -2915,7 +2917,7 @@ mod tests {
                 ironwood_padding: BundlePadding::DEFAULT,
             },
             target_height: sapling_activation_height,
-            expiry_height: sapling_activation_height + DEFAULT_TX_EXPIRY_DELTA,
+            expiry_height: sapling_activation_height + PRE_NU7_DEFAULT_TX_EXPIRY_DELTA,
             transparent_builder: TransparentBuilder::empty(),
             sapling_builder: None,
             orchard_builder: None,
