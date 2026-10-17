@@ -10,6 +10,17 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Changed
+
+- **Breaking:** `NoteEncryption::encrypt_outgoing_plaintext` now takes a
+  `rand_core` 0.10 `Rng` instead of a `rand_core` 0.6 `RngCore`, so callers
+  pass the same generators they use with the rest of Common. Without an
+  outgoing viewing key it still fills the random outgoing cipher key and then
+  the outgoing plaintext from that generator, and ciphertexts are unchanged
+  ([#573](https://github.com/zakura-core/common/pull/573)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Added

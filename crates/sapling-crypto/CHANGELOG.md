@@ -10,6 +10,25 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Added
+
+- Add a coinbase bundle entry point without extended spending keys. Dummy notes reuse the existing master expansion while preserving their derivation and random-number consumption.
+
+### Changed
+
+- Updated the indexed-address derivation backend to AES 0.9 and FPE 0.7,
+  sharing cipher 0.5 with note encryption while preserving address formats
+  and public interfaces
+  ([#565](https://github.com/zakura-core/common/pull/565)).
+- Keep wallet derivation APIs enabled by default behind `wallet`; allow verification and direct-address APIs without the external derivation dependency.
+
+### Removed
+
+- Removed `memuse::DynamicUsage` implementations for bundles, spend and output descriptions, compact outputs, `SaplingDomain` and prepared incoming viewing keys, together with the `memuse` dependency. Code that measured these types with `dynamic_usage()` or required `T: DynamicUsage` no longer compiles and must estimate sizes itself
+  ([#589](https://github.com/zakura-core/common/pull/589)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Added

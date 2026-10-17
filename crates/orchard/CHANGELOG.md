@@ -10,6 +10,50 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Added
+
+- Added the default-enabled `backend-halo2` feature selecting the
+  cryptographic implementation; builds with `--no-default-features` must
+  enable it explicitly
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+- Added the `prover` and `verifier` features, which independently enable
+  proof creation and proof verification; `circuit` now enables both
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+- Added `circuit::ProofError`, returned by public proof operations in place
+  of `halo2_proofs::plonk::Error`
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+- Added `primitives::redpallas::SpendAuthRandomizer` with canonical byte and
+  stream encodings, used by the builder, key, and PCZT APIs
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+- Added the `aarch64-asm` feature selecting the aarch64 assembly
+  implementation in the proving dependencies
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+
+### Changed
+
+- Updated the indexed-address derivation backend to AES 0.9 and FPE 0.7,
+  sharing cipher 0.5 with note encryption while preserving address formats
+  and public interfaces
+  ([#565](https://github.com/zakura-core/common/pull/565)).
+- Keep wallet derivation APIs enabled by default behind `wallet`; allow verification and direct-address APIs without the external derivation dependency.
+- `primitives::redpallas` now defines Orchard-owned signature domain, key,
+  signature, and error types instead of reexporting `reddsa` types
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+- `circuit::ProvingKey` and `circuit::VerifyingKey` are now opaque; circuit
+  synthesis, raw arithmetic conversions, and scalar generators are private
+  implementation details
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+
+### Removed
+
+- Removed `memuse::DynamicUsage` implementations for bundles, actions, proofs, nullifiers, rho values, note-encryption domains and prepared incoming viewing keys, together with the `memuse` dependency. Code that measured these types with `dynamic_usage()` or required `T: DynamicUsage` no longer compiles and must estimate sizes itself
+  ([#589](https://github.com/zakura-core/common/pull/589)).
+- Removed the `unstable-voting-circuits` feature and the public visibility
+  of the circuit, gadget, constant, and specification internals it exposed
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Added

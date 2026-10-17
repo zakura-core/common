@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Removed
+
+- Removed `memuse::DynamicUsage` implementations for `TxId`, `BlockHeight`, `TxIndex`, `ZatBalance` and the network and upgrade types, together with the `memuse` dependency. Code that measured these types with `dynamic_usage()` no longer compiles
+  ([#589](https://github.com/zakura-core/common/pull/589)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Added

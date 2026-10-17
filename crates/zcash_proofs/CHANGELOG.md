@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Added
+
+- Added the default-enabled `backend-halo2` feature forwarding the Orchard
+  backend selection; builds with `--no-default-features` must enable it
+  ([#591](https://github.com/zakura-core/common/pull/591)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed

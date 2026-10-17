@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc0] - 2026-10-17
+
+### Added
+
+- Added cancellation checks at nonce and digit boundaries in the optimized
+  Equihash solver, with completed and abandoned pass counts
+  ([#566](https://github.com/zakura-core/common/pull/566)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed

@@ -85,6 +85,7 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-jubjub`
 - `zakura-halo2-gadgets`
 - `zakura-reddsa`
+- `zakura-orchard-legacy`
 - `zakura-orchard`
 - `zakura-reddsa-frost`
 - `zakura-redjubjub`
@@ -93,7 +94,7 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-primitives`
 - `zakura-proofs`
 
-Cargo metadata currently selects 24 of the 28 workspace members. Bento, Bento
+Cargo metadata currently selects 25 of the 29 workspace members. Bento, Bento
 Core, Bento Macros, and Udon disable publication. New members and publishing
 policy changes are discovered automatically. Local dependencies must also allow
 crates.io publication; optional, target-specific, build, and development edges
