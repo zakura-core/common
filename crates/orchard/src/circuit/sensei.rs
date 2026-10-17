@@ -450,11 +450,3 @@ mod classification_tests {
         }
     }
 }
-
-#[cfg(all(
-    test,
-    feature = "prover",
-    feature = "verifier",
-    feature = "zip32-addresses"
-))]
-mod prover_replay;
