@@ -683,6 +683,7 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
         check_shielded_budget(
             &self.params,
             self.target_height,
+            // This builder supports only Orchard and Ironwood, so both Sapling counts are zero.
             0,
             0,
             orchard_action_count(&self.orchard_builder, false, self.orchard_bundle_version)
