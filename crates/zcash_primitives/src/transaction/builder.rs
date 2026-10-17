@@ -73,6 +73,39 @@ pub fn default_tx_expiry_delta<P: consensus::Parameters>(
     }
 }
 
+/// Checks the NU7 per-transaction shielded budget using final, padded bundle counts.
+/// Each Sapling spend/output and each Orchard/Ironwood action costs one unit.
+/// This construction policy prevents transactions that cannot fit in any NU7 block.
+pub fn check_shielded_budget<P: consensus::Parameters>(
+    params: &P,
+    target_height: BlockHeight,
+    sapling_spends: usize,
+    sapling_outputs: usize,
+    orchard_actions: usize,
+    ironwood_actions: usize,
+) -> Result<(), &'static str> {
+    if !params.is_nu_active(consensus::NetworkUpgrade::Nu7, target_height) {
+        return Ok(());
+    }
+    let sapling = sapling_spends
+        .checked_add(sapling_outputs)
+        .ok_or("Sapling count overflow")?;
+    if sapling > 300 {
+        return Err("NU7 Sapling spends plus outputs exceed 300");
+    }
+    if orchard_actions > 330 || ironwood_actions > 330 {
+        return Err("NU7 Orchard or Ironwood actions exceed 330");
+    }
+    if sapling
+        .checked_add(orchard_actions)
+        .and_then(|n| n.checked_add(ironwood_actions))
+        .is_none_or(|n| n > 330)
+    {
+        return Err("NU7 combined shielded budget exceeds 330");
+    }
+    Ok(())
+}
+
 /// Errors that can occur during fee calculation.
 #[derive(Debug)]
 pub enum FeeError<FE> {
@@ -642,6 +675,21 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
     /// spends and outputs added so far (each pool's action count includes the padding its
     /// bundle type prescribes).
     pub fn get_fee<FR: FeeRule>(&self, fee_rule: &FR) -> Result<Zatoshis, FeeError<FR::Error>> {
+        check_shielded_budget(
+            &self.params,
+            self.target_height,
+            0,
+            0,
+            orchard_action_count(&self.orchard_builder, false, self.orchard_bundle_version)
+                .map_err(FeeError::Bundle)?,
+            orchard_action_count(
+                &self.ironwood_builder,
+                false,
+                orchard::bundle::BundleVersion::ironwood_v3(),
+            )
+            .map_err(FeeError::Bundle)?,
+        )
+        .map_err(FeeError::Bundle)?;
         fee_rule
             .fee_required(
                 &self.params,
@@ -1269,6 +1317,37 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
             .map_err(Error::TransparentBuild)
     }
 
+    fn check_shielded_budget(&self) -> Result<(), &'static str> {
+        let (spends, outputs) = self
+            .sapling_builder
+            .as_ref()
+            .zip(self.build_config.sapling_builder_config())
+            .map_or(Ok::<_, &'static str>((0, 0)), |(b, (kind, _))| {
+                Ok((
+                    kind.num_spends(b.inputs().len())?,
+                    kind.num_outputs(b.inputs().len(), b.outputs().len())?,
+                ))
+            })?;
+        let count = |builder: &orchard::builder::Builder, version| {
+            orchard_action_count(builder, self.build_config.is_coinbase(), version)
+        };
+        check_shielded_budget(
+            &self.params,
+            self.target_height,
+            spends,
+            outputs,
+            self.orchard_builder.as_ref().map_or(Ok(0), |b| {
+                count(
+                    b,
+                    self.orchard_bundle_version.expect("builder has a version"),
+                )
+            })?,
+            self.ironwood_builder.as_ref().map_or(Ok(0), |b| {
+                count(b, orchard::bundle::BundleVersion::ironwood_v3())
+            })?,
+        )
+    }
+
     /// Returns the sum of the transparent, Sapling, Orchard, and Ironwood value balances.
     #[cfg(any(feature = "circuits", feature = "pczt"))]
     fn value_balance(&self) -> Result<ZatBalance, BalanceError> {
@@ -1308,6 +1387,7 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
     /// This fee is a function of the spends and outputs that have been added to the builder,
     /// pursuant to the specified [`FeeRule`].
     pub fn get_fee<FR: FeeRule>(&self, fee_rule: &FR) -> Result<Zatoshis, FeeError<FR::Error>> {
+        self.check_shielded_budget().map_err(FeeError::Bundle)?;
         #[cfg(feature = "transparent-inputs")]
         let transparent_inputs = self.transparent_builder.inputs();
 
@@ -1474,6 +1554,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
     {
         self.check_version_compatibility::<FE>(self.tx_version)?;
         self.check_coinbase_expiry_height::<FE>()?;
+        self.check_shielded_budget()
+            .map_err(|e| Error::Fee(FeeError::Bundle(e)))?;
 
         //
         // Consistency checks
@@ -1926,6 +2008,159 @@ mod tests {
         not(feature = "transparent-inputs")
     ))]
     use {crate::transaction::TxVersion, zcash_protocol::consensus::BranchId};
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_shielded_budget_boundaries() {
+        let params = nu7_test_network();
+        let activation = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        for counts in [
+            (298, 2, 30, 0),
+            (0, 0, 330, 0),
+            (0, 0, 0, 330),
+            (0, 0, 165, 165),
+        ] {
+            assert!(
+                super::check_shielded_budget(
+                    &params, activation, counts.0, counts.1, counts.2, counts.3
+                )
+                .is_ok()
+            );
+        }
+        for counts in [
+            (299, 2, 0, 0),
+            (0, 0, 331, 0),
+            (0, 0, 0, 331),
+            (0, 0, 200, 200),
+            (298, 2, 30, 1),
+            (usize::MAX, 1, 0, 0),
+        ] {
+            assert!(
+                super::check_shielded_budget(
+                    &params, activation, counts.0, counts.1, counts.2, counts.3
+                )
+                .is_err()
+            );
+            assert!(
+                super::check_shielded_budget(
+                    &params,
+                    activation - 1,
+                    counts.0,
+                    counts.1,
+                    counts.2,
+                    counts.3
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", feature = "pczt"))]
+    fn nu7_budget_rejects_real_padded_builders_before_funding_or_proofs() {
+        let params = nu7_test_network();
+        let height = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        let recipient = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        )
+        .address_at(0u32, orchard::keys::Scope::External);
+        let config = BuildConfig::Standard {
+            sapling_anchor: Some(sapling::Anchor::empty_tree()),
+            orchard_anchor: Some(orchard::Anchor::empty_tree()),
+            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+            orchard_padding: BundlePadding::DEFAULT,
+            ironwood_padding: BundlePadding::DEFAULT,
+        };
+        let mut builder = Builder::new(params, height, config);
+        let mut deferred = super::DeferredPcztBuilder::new::<Infallible>(
+            params,
+            height,
+            BundlePadding::DEFAULT,
+            BundlePadding::DEFAULT,
+        )
+        .unwrap();
+        for _ in 0..329 {
+            builder
+                .add_ironwood_output::<Infallible>(
+                    None,
+                    recipient,
+                    Zatoshis::ZERO,
+                    MemoBytes::empty(),
+                )
+                .unwrap();
+            deferred
+                .add_ironwood_output::<Infallible>(
+                    None,
+                    recipient,
+                    Zatoshis::ZERO,
+                    MemoBytes::empty(),
+                )
+                .unwrap();
+        }
+        assert!(builder.check_shielded_budget().is_ok());
+        // One real Orchard output pads to two actions: 329 + 2 exceeds 330.
+        // V3 Orchard outputs cannot create value, so use a zero-valued change output.
+        let fvk = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        );
+        builder
+            .add_orchard_change_output::<Infallible>(
+                fvk,
+                None,
+                recipient,
+                Zatoshis::ZERO,
+                MemoBytes::empty(),
+            )
+            .unwrap();
+        // A second Ironwood output takes the deferred builder past its limit.
+        for _ in 0..2 {
+            deferred
+                .add_ironwood_output::<Infallible>(
+                    None,
+                    recipient,
+                    Zatoshis::ZERO,
+                    MemoBytes::empty(),
+                )
+                .unwrap();
+        }
+        assert!(builder.check_shielded_budget().is_err());
+        let fee = crate::transaction::fees::zip317::FeeRule::standard();
+        assert!(matches!(
+            builder.build_for_pczt(thread_rng(), &fee),
+            Err(Error::Fee(super::FeeError::Bundle(_)))
+        ));
+        assert!(matches!(
+            deferred.build_for_pczt(thread_rng(), &fee),
+            Err(Error::Fee(super::FeeError::Bundle(_)))
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_sapling_budget_rejects_ordinary_coinbase_before_proving() {
+        let params = nu7_test_network();
+        let height = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        let mut builder = Builder::new(params, height, BuildConfig::Coinbase { miner_data: None });
+        let recipient = ExtendedSpendingKey::master(&[0; 32]).default_address().1;
+        for _ in 0..300 {
+            builder
+                .add_sapling_output::<Infallible>(
+                    None,
+                    recipient,
+                    Zatoshis::ZERO,
+                    MemoBytes::empty(),
+                )
+                .unwrap();
+        }
+        assert!(builder.check_shielded_budget().is_ok());
+        builder
+            .add_sapling_output::<Infallible>(None, recipient, Zatoshis::ZERO, MemoBytes::empty())
+            .unwrap();
+        assert!(matches!(
+            builder.mock_build(&TransparentSigningSet::new(), &[], &[], thread_rng()),
+            Err(Error::Fee(super::FeeError::Bundle(_)))
+        ));
+    }
 
     #[test]
     #[cfg(feature = "circuits")]
