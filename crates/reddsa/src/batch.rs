@@ -21,11 +21,7 @@
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 
-use group::{
-    GroupEncoding,
-    cofactor::CofactorGroup,
-    ff::{Field, PrimeField},
-};
+use crate::backend::Point as _;
 use rand_core::{CryptoRng, Rng};
 
 use crate::{private::SealedScalar, scalar_mul::VartimeMultiscalarMul, *};
@@ -220,28 +216,19 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
             };
 
             let s = {
-                // XXX-jubjub: should not use CtOption here
-                let mut repr = <S::Scalar as PrimeField>::Repr::default();
+                let mut repr = [0u8; 32];
                 repr.as_mut().copy_from_slice(&s_bytes);
                 let maybe_scalar = S::Scalar::from_repr(repr);
-                if maybe_scalar.is_some().into() {
-                    maybe_scalar.unwrap()
-                } else {
-                    return Err(Error::InvalidSignature);
-                }
+                maybe_scalar.ok_or(Error::InvalidSignature)?
             };
 
             let R = if let Some(points) = decoded_points.as_mut() {
                 points.next().unwrap().ok_or(Error::InvalidSignature)?
             } else {
-                let mut repr = <S::Point as GroupEncoding>::Repr::default();
+                let mut repr = [0u8; 32];
                 repr.as_mut().copy_from_slice(&r_bytes);
                 let maybe_point = S::Point::from_bytes(&repr);
-                if maybe_point.is_some().into() {
-                    maybe_point.unwrap()
-                } else {
-                    return Err(Error::InvalidSignature);
-                }
+                maybe_point.ok_or(Error::InvalidSignature)?
             };
 
             let VK = if let Some(points) = decoded_points.as_mut() {
@@ -271,7 +258,7 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
                 // Scalar negation can add torsion for a non-prime-order key;
                 // the small-order check below ignores that component.
                 let check = S::Point::vartime_multiscalar_mul([s, -c], [basepoint, VK]) - R;
-                return if check.is_small_order().into() {
+                return if check.is_small_order() {
                     Ok(())
                 } else {
                     Err(Error::InvalidSignature)
@@ -309,7 +296,7 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
 
         let check = S::Point::vartime_multiscalar_mul(scalars, points);
 
-        if check.is_small_order().into() {
+        if check.is_small_order() {
             Ok(())
         } else {
             Err(Error::InvalidSignature)

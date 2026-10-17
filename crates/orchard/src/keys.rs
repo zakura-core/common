@@ -1,21 +1,17 @@
 //! Key structures for Orchard.
 
-use alloc::boxed::Box;
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use alloc::vec::Vec;
 use corez::io::{self, Read, Write};
 
+use crate::backend::pallas;
 use ::zip32::{AccountId, ChildIndex};
 #[cfg(feature = "zip32-addresses")]
 use aes::Aes256;
 use blake2b_simd::{Hash as Blake2bHash, Params};
 #[cfg(feature = "zip32-addresses")]
 use fpe::ff1::{BinaryNumeralString, FF1};
-use group::{
-    Curve, CurveAffine as _, GroupEncoding,
-    ff::{Field, PrimeField},
-};
-use pasta_curves::glv::{Decomposed, Table};
-use pasta_curves::pallas;
 use rand::Rng;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zcash_note_encryption::EphemeralKeyBytes;
@@ -57,7 +53,6 @@ impl SpendingKey {
     /// derived according to [ZIP 32].
     ///
     /// [ZIP 32]: https://zips.z.cash/zip-0032
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn random(rng: &mut impl Rng) -> Self {
         loop {
             let mut bytes = [0; 32];
@@ -85,7 +80,9 @@ impl SpendingKey {
         let internal_ivk = KeyAgreementPrivateKey::derive_inner(&fvk.derive_internal());
         CtOption::new(
             sk,
-            !(ask.is_zero() | external_ivk.is_none() | internal_ivk.is_none()),
+            !(subtle::Choice::from(crate::backend::scalar_is_zero(&ask) as u8)
+                | external_ivk.is_none()
+                | internal_ivk.is_none()),
         )
     }
 
@@ -125,7 +122,6 @@ pub struct SpendAuthorizingKey(redpallas::SigningKey<SpendAuth>);
 
 impl SpendAuthorizingKey {
     /// Derives ask from sk. Internal use only, does not enforce all constraints.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn derive_inner(sk: &SpendingKey) -> pallas::Scalar {
         to_scalar(PrfExpand::ORCHARD_ASK.with(&sk.0))
     }
@@ -133,7 +129,10 @@ impl SpendAuthorizingKey {
     /// Randomizes this spend authorizing key with the given `randomizer`.
     ///
     /// The resulting key can be used to actually sign a spend.
-    pub fn randomize(&self, randomizer: &pallas::Scalar) -> redpallas::SigningKey<SpendAuth> {
+    pub fn randomize(
+        &self,
+        randomizer: &crate::primitives::redpallas::SpendAuthRandomizer,
+    ) -> redpallas::SigningKey<SpendAuth> {
         self.0.randomize(randomizer)
     }
 }
@@ -142,7 +141,7 @@ impl From<&SpendingKey> for SpendAuthorizingKey {
     fn from(sk: &SpendingKey) -> Self {
         let ask = Self::derive_inner(sk);
         // SpendingKey cannot be constructed such that this assertion would fail.
-        assert!(!bool::from(ask.is_zero()));
+        assert!(!crate::backend::scalar_is_zero(&ask));
         // TODO: Add TryFrom<S::Scalar> for SpendAuthorizingKey.
         let ret = SpendAuthorizingKey(ask.to_repr().try_into().unwrap());
         // If the last bit of repr_P(ak) is 1, negate ask.
@@ -170,12 +169,6 @@ impl From<&SpendAuthorizingKey> for SpendValidatingKey {
     }
 }
 
-impl From<&SpendValidatingKey> for pallas::Point {
-    fn from(spend_validating_key: &SpendValidatingKey) -> pallas::Point {
-        pallas::Point::from_bytes(&(&spend_validating_key.0).into()).unwrap()
-    }
-}
-
 impl PartialEq for SpendValidatingKey {
     fn eq(&self, other: &Self) -> bool {
         <[u8; 32]>::from(&self.0).eq(&<[u8; 32]>::from(&other.0))
@@ -185,8 +178,15 @@ impl PartialEq for SpendValidatingKey {
 impl Eq for SpendValidatingKey {}
 
 impl SpendValidatingKey {
+    pub(crate) fn to_point(&self) -> pallas::Point {
+        pallas::Point::from_bytes(&(&self.0).into()).unwrap()
+    }
+
     /// Randomizes this spend validating key with the given `randomizer`.
-    pub fn randomize(&self, randomizer: &pallas::Scalar) -> redpallas::VerificationKey<SpendAuth> {
+    pub fn randomize(
+        &self,
+        randomizer: &crate::primitives::redpallas::SpendAuthRandomizer,
+    ) -> redpallas::VerificationKey<SpendAuth> {
         self.0.randomize(randomizer)
     }
 
@@ -231,12 +231,10 @@ impl SpendValidatingKey {
 /// [`Note`]: crate::note::Note
 /// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
 #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(crate) struct NullifierDerivingKey(pallas::Base);
 
 impl NullifierDerivingKey {
     /// Returns the inner base field element.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
     }
@@ -255,7 +253,7 @@ impl NullifierDerivingKey {
 
     /// Converts this nullifier deriving key to its serialized form.
     pub(crate) fn to_bytes(self) -> [u8; 32] {
-        <[u8; 32]>::from(self.0)
+        self.0.to_repr()
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -275,7 +273,6 @@ impl NullifierDerivingKey {
 ///
 /// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
 #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(crate) struct CommitIvkRandomness(pallas::Scalar);
 
 impl From<&SpendingKey> for CommitIvkRandomness {
@@ -286,7 +283,6 @@ impl From<&SpendingKey> for CommitIvkRandomness {
 
 impl CommitIvkRandomness {
     /// Returns the inner scalar value.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Scalar {
         self.0
     }
@@ -341,13 +337,11 @@ impl From<FullViewingKey> for SpendValidatingKey {
 
 impl FullViewingKey {
     /// Returns the nullifier deriving key for this full viewing key.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn nk(&self) -> &NullifierDerivingKey {
         &self.nk
     }
 
     /// Returns either `rivk` or `rivk_internal` based on `scope`.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn rivk(&self, scope: Scope) -> CommitIvkRandomness {
         match scope {
             Scope::External => self.rivk,
@@ -587,7 +581,7 @@ impl KeyAgreementPrivateKey {
     ///
     /// [orchardkeycomponents]: https://zips.z.cash/protocol/protocol.pdf#orchardkeycomponents
     fn derive_inner(fvk: &FullViewingKey) -> CtOption<NonZeroPallasBase> {
-        let ak = extract_p(&pallas::Point::from_bytes(&(&fvk.ak.0).into()).unwrap());
+        let ak = extract_p(&fvk.ak.to_point());
         commit_ivk(&ak, &fvk.nk.0, &fvk.rivk.0)
             // sinsemilla::CommitDomain::short_commit returns a value in range
             // [0..q_P] ∪ {⊥}:
@@ -723,8 +717,7 @@ impl PreparedIncomingViewingKey {
         Self(PreparedNonZeroScalar::new(&ivk.0))
     }
 
-    /// The raw ivk scalar, for the GLV ladder in `pasta_curves::glv` (which
-    /// decomposes the scalar rather than consuming the prepared wNAF form).
+    /// The underlying IVK scalar for internal protocol checks.
     pub(crate) fn raw_scalar(&self) -> pallas::Scalar {
         self.0.raw_scalar()
     }
@@ -771,7 +764,6 @@ pub struct DiversifiedTransmissionKey(NonIdentityPallasPoint);
 
 impl DiversifiedTransmissionKey {
     /// Returns the inner `NonIdentityPallasPoint`.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> NonIdentityPallasPoint {
         self.0
     }
@@ -792,7 +784,6 @@ impl DiversifiedTransmissionKey {
     }
 
     /// $repr_P(self)$
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn to_bytes(self) -> [u8; 32] {
         self.0.to_bytes()
     }
@@ -866,114 +857,9 @@ impl EphemeralPublicKey {
     }
 }
 
-/// What a prepared ephemeral key carries.
-///
-/// Individually-prepared keys carry a `group::Wnaf` window table, consumed by
-/// the per-item multiplication. Batch-prepared keys carry a GLV odd-multiples
-/// window instead (see `pasta_curves::glv`), which is cheaper to build across a
-/// batch (one shared normalization) and cheaper to multiply against (a
-/// shared-doubling ladder over the endomorphism split). Both produce
-/// identical shared secrets.
-#[derive(Clone, Debug)]
-enum PreparedEpkInner {
-    /// A `group::Wnaf` window table.
-    Wnaf(PreparedNonIdentityBase),
-    /// A GLV Eisenstein digit-orbit window, boxed to keep the enum small
-    /// (1 KiB on the heap: eight orbit points with the x-coordinates stored
-    /// in all three endomorphism rotations).
-    Tabled(Box<Table<pallas::Point>>),
-}
-
-/// An Orchard ephemeral public key that has been precomputed for trial decryption.
-#[derive(Clone, Debug)]
-pub struct PreparedEphemeralPublicKey(PreparedEpkInner);
-
-impl PreparedEphemeralPublicKey {
-    pub(crate) fn new(epk: EphemeralPublicKey) -> Self {
-        PreparedEphemeralPublicKey(PreparedEpkInner::Wnaf(PreparedNonIdentityBase::new(epk.0)))
-    }
-
-    /// Prepares every ephemeral key in a batch by building its GLV window,
-    /// sharing one batch normalization (a single field inversion) across the
-    /// whole set, where individual preparation pays one inversion per key.
-    /// `None` lanes (ephemeral keys that failed to decode) pass through as
-    /// `None`.
-    pub(crate) fn batch_tabled(
-        epks: Vec<Option<EphemeralPublicKey>>,
-    ) -> Vec<Option<PreparedEphemeralPublicKey>> {
-        let live: Vec<pallas::Point> = epks
-            .iter()
-            .filter_map(|e| e.as_ref().map(|e| *e.0))
-            .collect();
-        let mut tables = Table::<pallas::Point>::batch(&live).into_iter();
-        epks.into_iter()
-            .map(|e| {
-                e.map(|_| {
-                    PreparedEphemeralPublicKey(PreparedEpkInner::Tabled(Box::new(
-                        tables.next().expect("one table per live epk"),
-                    )))
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) fn agree(&self, ivk: &PreparedIncomingViewingKey) -> SharedSecret {
-        match &self.0 {
-            PreparedEpkInner::Wnaf(base) => SharedSecret(ka_orchard_prepared(&ivk.0, base)),
-            // The product of a non-zero scalar and a non-identity point in the
-            // prime-order Pallas group is non-identity.
-            PreparedEpkInner::Tabled(table) => SharedSecret(
-                NonIdentityPallasPoint::expect_non_identity(table.mul(&ivk.raw_scalar())),
-            ),
-        }
-    }
-
-    /// The GLV window table, if this key was batch-prepared.
-    fn table(&self) -> Option<&Table<pallas::Point>> {
-        match &self.0 {
-            PreparedEpkInner::Wnaf(_) => None,
-            PreparedEpkInner::Tabled(table) => Some(table),
-        }
-    }
-
-    /// Key agreement between one viewing key — with its GLV decomposition
-    /// precomputed, hoisting the digit recoding out of the per-output loop —
-    /// and a whole batch of prepared ephemeral keys.
-    ///
-    /// All GLV-tabled keys in the batch are multiplied by one synchronized
-    /// ladder ([`Table::mul_decomposed_batch`]): the batch shares the
-    /// viewing key's column schedule, so for large batches every ladder
-    /// column's field inversions are batched across the whole set (and
-    /// smaller batches run the same per-point ladders as before).
-    /// Individually-prepared (wNAF) keys fall back to the per-item
-    /// multiplication; `None` lanes (undecodable ephemeral keys) pass
-    /// through as `None`.
-    pub(crate) fn batch_agree(
-        ivk: &PreparedIncomingViewingKey,
-        decomposed: &Decomposed<pallas::Point>,
-        epks: &[Option<&PreparedEphemeralPublicKey>],
-    ) -> Vec<Option<SharedSecret>> {
-        let tables: Vec<&Table<pallas::Point>> = epks
-            .iter()
-            .filter_map(|epk| epk.and_then(|epk| epk.table()))
-            .collect();
-        let mut products = Table::mul_decomposed_batch(&tables, decomposed).into_iter();
-        epks.iter()
-            .map(|epk| {
-                epk.map(|epk| match &epk.0 {
-                    PreparedEpkInner::Wnaf(base) => SharedSecret(ka_orchard_prepared(&ivk.0, base)),
-                    // The product of a non-zero scalar and a non-identity
-                    // point in the prime-order Pallas group is non-identity.
-                    PreparedEpkInner::Tabled(_) => {
-                        SharedSecret(NonIdentityPallasPoint::expect_non_identity(
-                            products.next().expect("one product per tabled epk"),
-                        ))
-                    }
-                })
-            })
-            .collect()
-    }
-}
+#[path = "keys/halo2.rs"]
+mod prepared;
+pub use prepared::PreparedEphemeralPublicKey;
 
 /// $\mathsf{KA}^\mathsf{Orchard}.\mathsf{SharedSecret} := \mathbb{P}^{\ast}$
 ///
@@ -1002,7 +888,7 @@ impl SharedSecret {
 
         // Batch-normalize the shared secrets.
         let mut secrets_affine = vec![pallas::Affine::identity(); secrets.len()];
-        group::Curve::batch_normalize(&secrets, &mut secrets_affine);
+        crate::backend::group::Curve::batch_normalize(&secrets, &mut secrets_affine);
 
         // Re-insert the invalid ephemeral_key positions.
         let mut secrets_affine = secrets_affine.into_iter();
@@ -1037,6 +923,8 @@ impl SharedSecret {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     use super::{DiversifierIndex, DiversifierKey, EphemeralSecretKey, SpendingKey};
@@ -1090,7 +978,8 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use ff::PrimeField;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     #[cfg(feature = "zip32-addresses")]

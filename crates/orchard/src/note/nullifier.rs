@@ -6,17 +6,15 @@
 //! commitment, in a way that keeps them unlinkable without the viewing key
 //! but uniquely tied to the note.
 
-use group::{Group, ff::PrimeField};
+use crate::backend::pallas;
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use memuse::DynamicUsage;
-use pasta_curves::{arithmetic::CurveExt, pallas};
 use rand::Rng;
 use subtle::{ConstantTimeEq, CtOption};
 
 use super::NoteCommitment;
-use crate::{
-    keys::NullifierDerivingKey,
-    spec::{extract_p, mod_r_p},
-};
+use crate::{keys::NullifierDerivingKey, spec::extract_p};
 
 /// A unique nullifier for a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,13 +25,11 @@ memuse::impl_no_dynamic_usage!(Nullifier);
 
 impl Nullifier {
     /// Constructs a `Nullifier` from the given Pallas base field element.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn from_inner(inner: pallas::Base) -> Self {
         Self(inner)
     }
 
     /// Returns the inner Pallas base field element.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
     }
@@ -77,7 +73,9 @@ impl Nullifier {
     ) -> Self {
         let k = pallas::Point::hash_to_curve("z.cash:Orchard")(b"K");
 
-        Nullifier(extract_p(&(k * mod_r_p(nk.prf_nf(rho) + psi) + cm.0)))
+        Nullifier(extract_p(
+            &(k * crate::spec::mod_r_p(nk.prf_nf(rho) + psi) + cm.0),
+        ))
     }
 }
 
@@ -91,8 +89,9 @@ impl ConstantTimeEq for Nullifier {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
-    use group::{Group, ff::FromUniformBytes};
-    use pasta_curves::pallas;
+    use crate::backend::pallas;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::collection::vec;
     use proptest::prelude::*;
 

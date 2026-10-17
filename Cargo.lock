@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-address"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "assert_matches",
  "bech32",
@@ -3240,7 +3240,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-bellman"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "bitvec",
  "blake2s_simd",
@@ -3290,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-bls12-381"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "criterion 0.5.1",
  "digest 0.10.7",
@@ -3309,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-equihash"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -3321,7 +3321,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-halo2-gadgets"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "arrayvec",
  "criterion 0.5.1",
@@ -3340,14 +3340,14 @@ dependencies = [
 
 [[package]]
 name = "zakura-halo2-legacy-pdqsort"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "rand 0.10.2",
 ]
 
 [[package]]
 name = "zakura-halo2-poseidon"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "bitvec",
  "ff",
@@ -3357,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-halo2-proofs"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "assert_matches",
  "backtrace",
@@ -3379,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-jubjub"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "bitvec",
  "criterion 0.5.1",
@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-keys"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "assert_matches",
  "bech32",
@@ -3423,7 +3423,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-note-encryption"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "chacha20",
  "chacha20poly1305",
@@ -3434,17 +3434,15 @@ dependencies = [
 
 [[package]]
 name = "zakura-orchard"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "aes",
  "bitvec",
  "blake2b_simd",
  "corez",
  "criterion 0.5.1",
- "ff",
  "fpe",
  "getset",
- "group",
  "hex",
  "incrementalmerkletree",
  "maybe-rayon",
@@ -3462,27 +3460,36 @@ dependencies = [
  "subtle",
  "tracing",
  "visibility",
- "zakura-halo2-gadgets",
- "zakura-halo2-poseidon",
- "zakura-halo2-proofs",
  "zakura-note-encryption",
- "zakura-pasta-curves",
- "zakura-reddsa",
- "zakura-sinsemilla",
+ "zakura-orchard-legacy",
  "zcash_spec",
  "zip32",
 ]
 
 [[package]]
+name = "zakura-orchard-legacy"
+version = "4.0.0"
+dependencies = [
+ "ff",
+ "group",
+ "zakura-halo2-gadgets",
+ "zakura-halo2-poseidon",
+ "zakura-halo2-proofs",
+ "zakura-pasta-curves",
+ "zakura-reddsa",
+ "zakura-sinsemilla",
+]
+
+[[package]]
 name = "zakura-pairing"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "group",
 ]
 
 [[package]]
 name = "zakura-pasta-curves"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "bincode",
  "blake2b_simd",
@@ -3505,7 +3512,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-primitives"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "assert_matches",
  "blake2b_simd",
@@ -3537,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-proofs"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "blake2b_simd",
  "byteorder",
@@ -3558,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-protocol"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "corez",
  "hex",
@@ -3570,7 +3577,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-reddsa"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "bincode",
  "blake2b_simd",
@@ -3590,7 +3597,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-reddsa-frost"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "blake2b_simd",
  "criterion 0.6.0",
@@ -3606,7 +3613,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-redjubjub"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "bincode",
  "criterion 0.5.1",
@@ -3621,7 +3628,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-sapling-crypto"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "aes",
  "bitvec",
@@ -3656,7 +3663,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-sinsemilla"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "criterion 0.5.1",
  "group",
@@ -3667,7 +3674,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-transparent"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "bip32",
  "bs58",
@@ -3703,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-zip321"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "base64",
  "nom",

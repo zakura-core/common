@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use subtle::CtOption;
 
 use crate::{
@@ -37,13 +39,11 @@ impl Address {
     }
 
     /// Returns the diversified base point for this address.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn g_d(&self) -> NonIdentityPallasPoint {
         diversify_hash(self.d.as_array())
     }
 
     /// Returns the diversified transmission key for this address.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn pk_d(&self) -> &DiversifiedTransmissionKey {
         &self.pk_d
     }
@@ -83,6 +83,8 @@ impl Address {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     use crate::keys::{

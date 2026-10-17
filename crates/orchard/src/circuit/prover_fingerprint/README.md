@@ -19,7 +19,7 @@ Their authenticated Common producer is
 `51a7364f3d1b86fd5a0be4653e8f412d1a90c453`. The complete tape sizes are 1,552 and
 2,736 words; the corresponding proofs contain 4,992 and 7,264 bytes.
 
-The gated `circuit::prover_fingerprint` tests replay each tape, require its exact
+The gated `circuit::halo2::prover_fingerprint` tests replay each tape, require its exact
 consumption and RNG call method, and compare the production Orchard prover's
 output with the committed proof bytes. They also retain the recorded/uncaptured
 proof and RNG-position comparison. Common CI runs these tests with one Rayon
@@ -27,7 +27,7 @@ worker and with the serial prover. Run them locally with:
 
 ```sh
 RAYON_NUM_THREADS=1 cargo test --locked --release -p zakura-orchard \
-  --features prover-fingerprint --lib circuit::prover_fingerprint::
+  --features prover-fingerprint --lib circuit::halo2::prover_fingerprint::
 ```
 
 Exporting Lean fixtures never updates these expectations. A mismatch requires

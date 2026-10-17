@@ -12,7 +12,7 @@ repository.workspace = true
 readme.workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["pallas-pasta"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -23,7 +23,7 @@ blake2b_simd = { version = "1", default-features = false }
 group = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], optional = true, default-features = false }
 jubjub = { workspace = true }
-pasta_curves = { workspace = true }
+pasta_curves = { workspace = true, optional = true, features = ["alloc"] }
 rand_core = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
 
@@ -33,14 +33,14 @@ criterion = "0.6"
 hex = "0.4.3"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
-pasta_curves = { workspace = true, features = ["alloc"] }
 proptest = "1.6"
 rand = "0.10"
 rand_chacha = "0.10"
 
 [features]
+pallas-pasta = ["dep:pasta_curves"]
 alloc = ["hex", "jubjub/alloc"]
-default = ["std"]
+default = ["std", "pallas-pasta"]
 nightly = []
 # Retained for compatibility with the former unused optional dependencies.
 thiserror = []

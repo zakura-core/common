@@ -27,6 +27,14 @@ for package in "${packages[@]}"; do
   package_args+=(--package "$package")
 done
 
+if ! features=$(python3 .github/scripts/supported_features.py "${packages[@]}"); then
+  exit 1
+fi
+feature_args=()
+if [[ -n "$features" ]]; then
+  feature_args=(--features "$features")
+fi
+
 status=0
 run_check() {
   local label=$1
@@ -39,8 +47,8 @@ run_check() {
   echo "::endgroup::"
 }
 
-run_check "Stable all-feature check" \
-  cargo +stable check --locked --all-features --all-targets \
+run_check "Stable supported-feature check" \
+  cargo +stable check --locked "${feature_args[@]}" --all-targets \
   "${package_args[@]}"
 
 lint_args=()
@@ -48,7 +56,7 @@ if [[ "$deny_warnings" == true ]]; then
   lint_args+=(-- -D warnings)
 fi
 run_check "Stable Clippy" \
-  cargo +stable clippy --locked --all-features --all-targets --no-deps \
+  cargo +stable clippy --locked "${feature_args[@]}" --all-targets --no-deps \
   "${package_args[@]}" "${lint_args[@]}"
 
 if [[ "$run_tests" == true ]]; then

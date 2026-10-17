@@ -7,6 +7,34 @@
 //! implicitly mean it is an Orchard payment address (as opposed to e.g. a Sapling payment
 //! address, which is also shielded).
 //!
+//! ## Backend selection
+//!
+//! `backend-halo2` selects the cryptographic implementation and is enabled
+//! by default. Builds with defaults disabled must select it explicitly, and
+//! a build that selects no backend fails to compile with a diagnostic naming
+//! the available selection.
+//!
+//! Backend features are mutually exclusive, and the selection is resolved
+//! once for the final artifact. Cargo unifies features across every
+//! dependant, so a library that hard-enabled a backend would force it on the
+//! whole build; the workspace crates that depend on this one (`zakura-keys`,
+//! `zakura-primitives`, `zakura-proofs`) instead forward the selection
+//! through their own default-enabled `backend-halo2` feature. An application
+//! selecting a different backend disables default features along that chain
+//! and selects the backend at each crate.
+//!
+//! ## Proof capabilities
+//!
+//! `prover` and `verifier` independently enable proof creation and
+//! verification; `circuit` enables both. Protocol primitives also work
+//! without `std`. Circuit synthesis and arithmetic representations are
+//! private implementation details.
+//!
+//! The two features split the API, not the dependency footprint: both enable
+//! `std` and the selected backend's circuit dependencies, and a verifier-only
+//! build still synthesizes the circuit shape to derive its verifying key.
+//! Choose them to limit what a crate can do, not to shrink its build.
+//!
 //! ## ZIP 32 addresses
 //!
 //! The default-enabled `zip32-addresses` feature provides indexed address
@@ -34,16 +62,18 @@ extern crate std;
 
 use alloc::vec::Vec;
 
+#[cfg(not(feature = "backend-halo2"))]
+compile_error!("select an Orchard backend: backend-halo2");
+
 mod action;
 mod address;
+mod backend;
 pub mod builder;
 pub mod bundle;
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 pub mod circuit;
-#[cfg(not(feature = "unstable-voting-circuits"))]
+#[path = "backend/halo2/constants.rs"]
 mod constants;
-#[cfg(feature = "unstable-voting-circuits")]
-pub mod constants;
 pub mod keys;
 pub mod note;
 pub mod note_encryption;
@@ -52,10 +82,8 @@ pub mod pczt;
 pub mod primitives;
 #[cfg(test)]
 mod rng_compat;
-#[cfg(not(feature = "unstable-voting-circuits"))]
+#[path = "backend/halo2/spec.rs"]
 mod spec;
-#[cfg(feature = "unstable-voting-circuits")]
-pub mod spec;
 pub mod tree;
 pub mod value;
 pub mod zip32;
@@ -63,30 +91,26 @@ pub mod zip32;
 #[cfg(test)]
 mod test_vectors;
 
-// This private trait bridges sibling-module privacy for manual circuit
-// benchmarks; it is not part of the crate's benchmark-facing API.
-#[cfg(all(test, feature = "circuit"))]
-trait BenchmarkCircuitWitnesses {
-    fn benchmark_circuits(&self) -> &[circuit::Circuit];
-}
-
 // Tests share the current proving key and one verifying key per circuit version.
 // Historical proofs are frozen fixtures and cannot be regenerated.
-#[cfg(all(test, feature = "circuit"))]
+#[cfg(all(test, any(feature = "prover", feature = "verifier")))]
 struct CachedTestKeys {
     circuit_version: circuit::OrchardCircuitVersion,
+    #[cfg(feature = "verifier")]
     verifying_key: std::sync::OnceLock<circuit::VerifyingKey>,
 }
 
-#[cfg(all(test, feature = "circuit"))]
+#[cfg(all(test, any(feature = "prover", feature = "verifier")))]
 impl CachedTestKeys {
     const fn new(circuit_version: circuit::OrchardCircuitVersion) -> Self {
         Self {
             circuit_version,
+            #[cfg(feature = "verifier")]
             verifying_key: std::sync::OnceLock::new(),
         }
     }
 
+    #[cfg(feature = "prover")]
     fn proving_key(&self) -> &circuit::ProvingKey {
         assert!(
             self.circuit_version.supports_proving(),
@@ -99,13 +123,14 @@ impl CachedTestKeys {
         })
     }
 
+    #[cfg(feature = "verifier")]
     fn verifying_key(&self) -> &circuit::VerifyingKey {
         self.verifying_key
             .get_or_init(|| circuit::VerifyingKey::build(self.circuit_version))
     }
 }
 
-#[cfg(all(test, feature = "circuit"))]
+#[cfg(all(test, any(feature = "prover", feature = "verifier")))]
 fn cached_test_keys(circuit_version: circuit::OrchardCircuitVersion) -> &'static CachedTestKeys {
     use circuit::OrchardCircuitVersion;
 
@@ -172,15 +197,15 @@ impl Proof {
     /// The canonical byte length of a proof authorizing a bundle of `num_actions` actions.
     ///
     /// A valid Orchard proof always has exactly this length. The constants are fixed by the
-    /// halo2 action circuit; they are cross-checked against [`halo2_proofs::dev::CircuitCost`]
+    /// Action protocol; they are pinned by the independently verified proof fixtures
     /// in the circuit tests. Use this to reject non-canonical (e.g. padded) proofs when
     /// constructing a bundle from untrusted bytes; see [`Bundle::try_from_parts`].
     ///
     /// [`Bundle::try_from_parts`]: crate::Bundle::try_from_parts
     pub const fn expected_proof_size(num_actions: usize) -> usize {
         // The proof is a fixed base size plus a fixed contribution per action. These constants
-        // are determined by the halo2 action circuit; see the `circuit` module's round-trip
-        // tests, which cross-check them against `CircuitCost::proof_size`.
+        // are determined by the Action protocol; see the `circuit` module's compatibility
+        // tests and the independently verified baseline proof lengths.
         const BASE: usize = 2720;
         const PER_ACTION: usize = 2272;
         BASE + PER_ACTION * num_actions
@@ -231,4 +256,9 @@ impl ProtocolVersion {
     pub fn supports_proving(self) -> bool {
         matches!(self, Self::V3)
     }
+}
+
+#[cfg(all(test, feature = "prover"))]
+trait BenchmarkCircuitWitnesses {
+    fn benchmark_circuits(&self) -> &[circuit::Circuit];
 }

@@ -37,28 +37,18 @@
 //! [`Builder::add_output`]: crate::builder::Builder::add_output
 //! [Rust documentation]: https://doc.rust-lang.org/stable/std/primitive.i64.html
 
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use core::fmt::{self, Debug};
 use core::iter::Sum;
 use core::ops::{Add, RangeInclusive, Sub};
 
+use crate::backend::pallas;
 use bitvec::{array::BitArray, order::Lsb0};
-use ff::{Field, PrimeField};
-use group::{Curve, Group, GroupEncoding};
-#[cfg(feature = "circuit")]
-use halo2_proofs::plonk::Assigned;
-use pasta_curves::{
-    arithmetic::{CurveAffine, CurveExt},
-    pallas,
-};
 use rand::Rng;
 use subtle::CtOption;
 
-use crate::{
-    constants::fixed_bases::{
-        VALUE_COMMITMENT_PERSONALIZATION, VALUE_COMMITMENT_R_BYTES, VALUE_COMMITMENT_V_BYTES,
-    },
-    primitives::redpallas::{self, Binding},
-};
+use crate::primitives::redpallas::{self, Binding};
 
 /// Maximum note value.
 pub const MAX_NOTE_VALUE: u64 = u64::MAX;
@@ -128,13 +118,6 @@ impl NoteValue {
 
     pub(crate) fn to_le_bits(self) -> BitArray<[u8; 8], Lsb0> {
         BitArray::<_, Lsb0>::new(self.0.to_le_bytes())
-    }
-}
-
-#[cfg(feature = "circuit")]
-impl From<&NoteValue> for Assigned<pallas::Base> {
-    fn from(v: &NoteValue) -> Self {
-        pallas::Base::from(v.inner()).into()
     }
 }
 
@@ -307,8 +290,7 @@ impl ValueCommitTrapdoor {
     }
 
     pub(crate) fn into_bsk(self) -> redpallas::SigningKey<Binding> {
-        // TODO: impl From<pallas::Scalar> for redpallas::SigningKey.
-        self.0.to_repr().try_into().unwrap()
+        redpallas::SigningKey::from_scalar(self.0)
     }
 }
 
@@ -356,6 +338,9 @@ impl ValueCommitment {
     /// [concretehomomorphiccommit]: https://zips.z.cash/protocol/nu5.pdf#concretehomomorphiccommit
     #[allow(non_snake_case)]
     pub fn derive(value: ValueSum, rcv: ValueCommitTrapdoor) -> Self {
+        use crate::constants::fixed_bases::{
+            VALUE_COMMITMENT_PERSONALIZATION, VALUE_COMMITMENT_R_BYTES, VALUE_COMMITMENT_V_BYTES,
+        };
         let hasher = pallas::Point::hash_to_curve(VALUE_COMMITMENT_PERSONALIZATION);
         let V = hasher(&VALUE_COMMITMENT_V_BYTES);
         let R = hasher(&VALUE_COMMITMENT_R_BYTES);
@@ -371,8 +356,7 @@ impl ValueCommitment {
     }
 
     pub(crate) fn into_bvk(self) -> redpallas::VerificationKey<Binding> {
-        // TODO: impl From<pallas::Point> for redpallas::VerificationKey.
-        self.0.to_bytes().try_into().unwrap()
+        redpallas::VerificationKey::from_point(self.0)
     }
 
     /// Deserialize a value commitment from its byte representation
@@ -408,15 +392,16 @@ impl ValueCommitment {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
-    use group::ff::FromUniformBytes;
-    use pasta_curves::pallas;
+    use crate::backend::pallas;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     use super::{MAX_NOTE_VALUE, NoteValue, VALUE_SUM_RANGE, ValueCommitTrapdoor, ValueSum};
 
     prop_compose! {
         /// Generate an arbitrary Pallas scalar.
-        pub fn arb_scalar()(bytes in prop::array::uniform32(0u8..)) -> pallas::Scalar {
+        pub(crate) fn arb_scalar()(bytes in prop::array::uniform32(0u8..)) -> pallas::Scalar {
             // Instead of rejecting out-of-range bytes, let's reduce them.
             let mut buf = [0; 64];
             buf[..32].copy_from_slice(&bytes);
@@ -471,6 +456,8 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     use super::{

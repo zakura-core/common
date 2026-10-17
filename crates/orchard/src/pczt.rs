@@ -1,12 +1,13 @@
 //! PCZT support for Orchard.
 
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
 use getset::Getters;
-use pasta_curves::pallas;
 use zcash_note_encryption::OutgoingCipherKey;
 use zip32::ChildIndex;
 
@@ -32,9 +33,9 @@ pub use io_finalizer::IoFinalizerError;
 mod updater;
 pub use updater::{ActionUpdater, Updater, UpdaterError};
 
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 mod prover;
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 pub use prover::ProverError;
 
 mod signer;
@@ -233,7 +234,7 @@ pub struct Spend {
     /// - This is required by the Signer for creating `spend_auth_sig`, and may be used to
     ///   validate `rk`.
     /// - After`zkproof` / `spend_auth_sig` has been set, this can be redacted.
-    pub(crate) alpha: Option<pallas::Scalar>,
+    pub(crate) alpha: Option<crate::primitives::redpallas::SpendAuthRandomizer>,
 
     /// The ZIP 32 derivation path at which the spending key can be found for the note
     /// being spent.
@@ -382,12 +383,13 @@ impl Zip32Derivation {
     }
 }
 
-#[cfg(all(test, feature = "circuit"))]
+#[cfg(all(test, feature = "prover"))]
 mod tests {
+    use crate::backend::pallas;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use crate::rng_compat::OsRng;
-    use ff::{Field, PrimeField};
     use incrementalmerkletree::{Marking, Retention};
-    use pasta_curves::pallas;
     use shardtree::{ShardTree, store::memory::MemoryShardStore};
 
     use crate::{
@@ -605,6 +607,7 @@ mod tests {
         bundle.apply_binding_signature(sighash, rng).unwrap();
     }
 
+    #[cfg(feature = "verifier")]
     #[test]
     fn create_proof_uses_current_circuit_version() {
         let keys = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3);
@@ -626,6 +629,7 @@ mod tests {
         assert!(bundle.verify_proof(vk).is_ok());
     }
 
+    #[cfg(feature = "verifier")]
     #[test]
     fn qr_output_version_checks_note_commitment() {
         let mut rng = OsRng;
@@ -674,14 +678,17 @@ mod tests {
             action.output.verify_note_commitment(&action.spend),
             Err(VerifyError::InvalidExtractedNoteCommitment)
         ));
-        pczt_bundle.create_proof(pk, rng).unwrap();
-        let bundle = pczt_bundle
-            .extract::<i64>()
-            .unwrap()
-            .unwrap()
-            .apply_binding_signature(sighash, rng)
-            .unwrap();
-        assert!(bundle.verify_proof(vk).is_err());
+
+        {
+            pczt_bundle.create_proof(pk, rng).unwrap();
+            let bundle = pczt_bundle
+                .extract::<i64>()
+                .unwrap()
+                .unwrap()
+                .apply_binding_signature(sighash, rng)
+                .unwrap();
+            assert!(bundle.verify_proof(vk).is_err());
+        }
     }
 
     #[test]
@@ -1051,7 +1058,7 @@ mod tests {
                     .expect("path is length 32"),
             )
         });
-        let alpha_bytes = spend.alpha().map(|alpha| alpha.to_repr());
+        let alpha_bytes = spend.alpha().map(|alpha| alpha.to_bytes());
         let note_version = *spend.note_version();
 
         // Build the spend's component bytes once, and a helper to parse with either path.
@@ -1381,6 +1388,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "verifier")]
     #[test]
     fn create_proof_enforces_cross_address_restriction() {
         let rng = OsRng;

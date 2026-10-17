@@ -12,7 +12,7 @@ repository.workspace = true
 readme.workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["backend-halo2", "non-standard-fees", "temporary-zcashd", "test-dependencies", "transparent-inputs"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -58,8 +58,9 @@ zip32 = { version = "0.2", default-features = false }
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
+backend-halo2 = ["orchard/backend-halo2"]
 circuits = ["orchard/circuit", "sapling/circuit"]
-default = ["multicore", "std", "circuits", "pczt"]
+default = ["backend-halo2", "multicore", "std", "circuits", "pczt"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
 expensive-tests = []

@@ -1,12 +1,13 @@
 //! Logic for building Orchard components of transactions.
 
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 use core::iter;
 
-use ff::Field;
-use pasta_curves::pallas;
+use crate::backend::pallas;
 use rand::{CryptoRng, Rng, prelude::SliceRandom};
 use zcash_note_encryption::ENC_CIPHERTEXT_SIZE;
 
@@ -25,7 +26,7 @@ use crate::{
     value::{self, BalanceError, NoteValue, ValueCommitTrapdoor, ValueCommitment, ValueSum},
 };
 
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 use {
     crate::{
         action::Action,
@@ -184,8 +185,8 @@ pub enum BuildError {
     /// A bundle could not be built because required signatures were missing.
     MissingSignatures,
     /// An error occurred in the process of producing a proof for a bundle.
-    #[cfg(feature = "circuit")]
-    Proof(halo2_proofs::plonk::Error),
+    #[cfg(feature = "prover")]
+    Proof(crate::circuit::ProofError),
     /// An overflow error occurred while attempting to construct the value
     /// for a bundle.
     ValueSum(value::BalanceError),
@@ -207,7 +208,7 @@ pub enum BuildError {
     /// A coinbase bundle was requested with flags that enable spends.
     CoinbaseSpendsEnabled,
     /// The bundle's anchor is deferred to proving time, but the requested operation
-    /// needs it now: an in-memory build ([`Builder::build`]) proves immediately, which
+    /// needs it now: an in-memory build (`Builder::build`) proves immediately, which
     /// requires the real anchor and witnesses; a deferred-anchor bundle can only be
     /// built for a PCZT ([`Builder::build_for_pczt`]).
     AnchorRequired,
@@ -226,11 +227,11 @@ impl fmt::Display for BuildError {
                 "Orchard bundle construction is not supported for {version:?}"
             ),
             MissingSignatures => f.write_str("Required signatures were missing during build"),
-            #[cfg(feature = "circuit")]
-            Proof(halo2_proofs::plonk::Error::InvalidInstances) => {
+            #[cfg(feature = "prover")]
+            Proof(crate::circuit::ProofError::InvalidInput) => {
                 f.write_str("Could not create proof: provided instances do not match the circuits")
             }
-            #[cfg(feature = "circuit")]
+            #[cfg(feature = "prover")]
             Proof(e) => write!(f, "Could not create proof: {e}"),
             ValueSum(_) => f.write_str("Overflow occurred during value construction"),
             InvalidExternalSignature => f.write_str("External signature was invalid"),
@@ -274,9 +275,9 @@ impl fmt::Display for BuildError {
 #[cfg(feature = "std")]
 impl std::error::Error for BuildError {}
 
-#[cfg(feature = "circuit")]
-impl From<halo2_proofs::plonk::Error> for BuildError {
-    fn from(e: halo2_proofs::plonk::Error) -> Self {
+#[cfg(feature = "prover")]
+impl From<crate::circuit::ProofError> for BuildError {
+    fn from(e: crate::circuit::ProofError) -> Self {
         BuildError::Proof(e)
     }
 }
@@ -358,7 +359,7 @@ impl fmt::Display for OutputError {
 #[cfg(feature = "std")]
 impl std::error::Error for OutputError {}
 
-/// Information about a specific note to be spent in an [`Action`].
+/// Information about a specific note to be spent in an [`Action`](crate::Action).
 #[derive(Debug)]
 pub struct SpendInfo {
     pub(crate) dummy_sk: Option<SpendingKey>,
@@ -456,12 +457,12 @@ impl SpendInfo {
     ) -> (
         Nullifier,
         SpendValidatingKey,
-        pallas::Scalar,
+        redpallas::SpendAuthRandomizer,
         redpallas::VerificationKey<SpendAuth>,
     ) {
         let nf_old = self.note.nullifier(&self.fvk);
         let ak: SpendValidatingKey = self.fvk.clone().into();
-        let alpha = pallas::Scalar::random(&mut rng);
+        let alpha = redpallas::SpendAuthRandomizer::from_scalar(pallas::Scalar::random(&mut rng));
         let rk = ak.randomize(&alpha);
 
         (nf_old, ak, alpha, rk)
@@ -489,7 +490,7 @@ impl SpendInfo {
     }
 }
 
-/// Information about a specific output to receive funds in an [`Action`].
+/// Information about a specific output to receive funds in an [`Action`](crate::Action).
 ///
 /// This carries a plain output to an arbitrary recipient. For wallet-controlled change,
 /// which additionally records the owning full viewing key, see [`ChangeInfo`].
@@ -687,7 +688,7 @@ impl ChangeInfo {
     }
 }
 
-/// Information about a specific [`Action`] we plan to build.
+/// Information about a specific [`Action`](crate::Action) we plan to build.
 #[derive(Debug)]
 struct ActionInfo {
     spend: SpendInfo,
@@ -716,7 +717,7 @@ impl ActionInfo {
     /// All actions use the current proving circuit.
     ///
     /// [orchardsend]: https://zips.z.cash/protocol/nu5.pdf#orchardsend
-    #[cfg(feature = "circuit")]
+    #[cfg(feature = "prover")]
     fn build(self, mut rng: impl Rng) -> (Action<SigningMetadata>, Circuit) {
         let v_net = self.value_sum();
         let cv_net = ValueCommitment::derive(v_net, self.rcv.clone());
@@ -762,23 +763,16 @@ impl ActionInfo {
 
 /// Type alias for an in-progress bundle that has no proofs or signatures.
 ///
-/// This is returned by [`Builder::build`].
-#[cfg(feature = "circuit")]
+/// This is returned by `Builder::build`.
+#[cfg(feature = "prover")]
 pub type UnauthorizedBundle<V> = Bundle<InProgress<Unproven, Unauthorized>, V>;
 
-#[cfg(all(test, feature = "circuit"))]
-impl crate::BenchmarkCircuitWitnesses for UnauthorizedBundle<i64> {
-    fn benchmark_circuits(&self) -> &[Circuit] {
-        &self.authorization().proof.circuits
-    }
-}
-
-/// Metadata about a bundle created by [`bundle`] or [`Builder::build`] that is not necessarily
+/// Metadata about a bundle created by `bundle` or `Builder::build` that is not necessarily
 /// recoverable from the bundle itself.
 ///
-/// This includes information about how [`Action`]s within the bundle are ordered (after
+/// This includes information about how [`Action`](crate::Action)s within the bundle are ordered (after
 /// padding and randomization) relative to the order in which spends and outputs were provided
-/// (to [`bundle`]), or the order in which [`Builder`] mutations were performed.
+/// (to `bundle`), or the order in which [`Builder`] mutations were performed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleMetadata {
     spend_indices: Vec<usize>,
@@ -798,7 +792,7 @@ impl BundleMetadata {
         Self::new(0, 0)
     }
 
-    /// Returns the index within the bundle of the [`Action`] corresponding to the `n`-th
+    /// Returns the index within the bundle of the [`Action`](crate::Action) corresponding to the `n`-th
     /// spend specified in bundle construction. If a [`Builder`] was used, this refers to
     /// the spend added by the `n`-th call to [`Builder::add_spend`].
     ///
@@ -812,12 +806,12 @@ impl BundleMetadata {
         self.spend_indices.get(n).copied()
     }
 
-    /// Returns the index within the bundle of the [`Action`] corresponding to the `n`-th
+    /// Returns the index within the bundle of the [`Action`](crate::Action) corresponding to the `n`-th
     /// requested output. Requested outputs are numbered as:
     /// * all plain outputs (in the order they were added with [`Builder::add_output`], or their
-    ///   order in the `outputs` vector passed to [`bundle`]);
+    ///   order in the `outputs` vector passed to `bundle`);
     /// * followed by all wallet-controlled change outputs (in the order they were added with
-    ///   [`Builder::add_change_output`], or their order in the `changes` vector passed to [`bundle`]).
+    ///   [`Builder::add_change_output`], or their order in the `changes` vector passed to `bundle`).
     ///
     /// For the purpose of improving indistinguishability, actions are padded and note
     /// positions are randomized when building bundles. This means that the bundle
@@ -859,7 +853,7 @@ impl Builder {
     /// given `flags`.
     ///
     /// `bundle_version` is the [`ValuePool`](crate::ValuePool) (Orchard or Ironwood) and
-    /// [`ProtocolVersion`](crate::ProtocolVersion) of the bundles created by this builder. It
+    /// [`ProtocolVersion`] of the bundles created by this builder. It
     /// influences the circuit version, the flag-byte format, and the cross-address policy, and is
     /// threaded into building, committing, and parsing. See [`BundleVersion`].
     ///
@@ -957,7 +951,7 @@ impl Builder {
 
     /// Adds a note to be spent in this transaction.
     ///
-    /// - `note` is a spendable note, obtained by trial-decrypting an [`Action`]
+    /// - `note` is a spendable note, obtained by trial-decrypting an [`Action`](crate::Action)
     ///   under the bundle's version.
     /// - `merkle_path` can be obtained using the [`incrementalmerkletree`] crate
     ///   instantiated with [`MerkleHashOrchard`].
@@ -1160,7 +1154,7 @@ impl Builder {
     /// [`Bundle::create_proof`] and [`Bundle::apply_signatures`] respectively. The proof must be
     /// created with a [`ProvingKey`] for the circuit version consistent with the builder's
     /// bundle version.
-    #[cfg(feature = "circuit")]
+    #[cfg(feature = "prover")]
     pub fn build<V: TryFrom<i64>>(
         self,
         rng: impl Rng,
@@ -1247,7 +1241,7 @@ impl Builder {
 /// `bundle_version`, or [`BuildError::CoinbaseSpendsEnabled`] if `bundle_type` is
 /// [`BundleType::Coinbase`] but `flags` enable spends.
 #[allow(clippy::too_many_arguments)]
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 pub fn bundle<V: TryFrom<i64>>(
     rng: impl Rng,
     bundle_type: BundleType,
@@ -1281,7 +1275,7 @@ pub fn bundle<V: TryFrom<i64>>(
     )
 }
 
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 fn finish_unauthorized_bundle<V: TryFrom<i64>, R: Rng>(
     pre_actions: Vec<ActionInfo>,
     flags: Flags,
@@ -1581,20 +1575,20 @@ impl<P: fmt::Debug, S: InProgressSignatures> Authorization for InProgress<P, S> 
 /// Marker for a bundle without a proof.
 ///
 /// This struct contains the private data needed to create a [`Proof`] for a [`Bundle`].
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 #[derive(Clone, Debug)]
 pub struct Unproven {
     circuits: Vec<Circuit>,
     circuit_version: OrchardCircuitVersion,
 }
 
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 impl<S: InProgressSignatures> InProgress<Unproven, S> {
     /// Creates the proof for this bundle.
     ///
     /// # Errors
     ///
-    /// Returns [`halo2_proofs::plonk::Error::InvalidInstances`] if any provided
+    /// Returns [`crate::circuit::ProofError::InvalidInput`] if any provided
     /// instance has `disableCrossAddress = 1` and `pk` is not an
     /// [`OrchardCircuitVersion::PostNu6_3`] proving key.
     ///
@@ -1605,12 +1599,12 @@ impl<S: InProgressSignatures> InProgress<Unproven, S> {
         pk: &ProvingKey,
         instances: &[Instance],
         rng: impl Rng,
-    ) -> Result<Proof, halo2_proofs::plonk::Error> {
+    ) -> Result<Proof, crate::circuit::ProofError> {
         Proof::create(pk, &self.proof.circuits, instances, rng)
     }
 }
 
-#[cfg(feature = "circuit")]
+#[cfg(feature = "prover")]
 impl<S: InProgressSignatures, V> Bundle<InProgress<Unproven, S>, V> {
     /// The circuit version this bundle's actions were built for, and that its proof must
     /// therefore be created against (with a matching [`ProvingKey`]).
@@ -1625,7 +1619,7 @@ impl<S: InProgressSignatures, V> Bundle<InProgress<Unproven, S>, V> {
     /// Returns [`BuildError::Proof`] if proof creation fails. Historical circuits or
     /// proving keys, and keys that do not match this bundle's
     /// [`circuit_version`](Self::circuit_version), are rejected with
-    /// [`halo2_proofs::plonk::Error::Synthesis`].
+    /// [`crate::circuit::ProofError::InvalidInput`].
     pub fn create_proof(
         self,
         pk: &ProvingKey,
@@ -1650,14 +1644,14 @@ impl<S: InProgressSignatures, V> Bundle<InProgress<Unproven, S>, V> {
     }
 }
 
-/// The parts needed to sign an [`Action`].
+/// The parts needed to sign an [`Action`](crate::Action).
 #[derive(Clone, Debug)]
 pub struct SigningParts {
     /// The spend validating key for this action. Used to match spend authorizing keys to
     /// actions they can create signatures for.
     ak: SpendValidatingKey,
     /// The randomization needed to derive the actual signing key for this note.
-    alpha: pallas::Scalar,
+    alpha: crate::primitives::redpallas::SpendAuthRandomizer,
 }
 
 /// Marker for an unauthorized bundle with no signatures.
@@ -1670,7 +1664,7 @@ impl InProgressSignatures for Unauthorized {
     type SpendAuth = SigningMetadata;
 }
 
-/// Container for metadata needed to sign an [`Action`].
+/// Container for metadata needed to sign an [`Action`](crate::Action).
 #[derive(Clone, Debug)]
 pub struct SigningMetadata {
     /// If this action is spending a dummy note, this field holds that note's spend
@@ -1693,14 +1687,14 @@ impl InProgressSignatures for PartiallyAuthorized {
     type SpendAuth = MaybeSigned;
 }
 
-/// A heisen[`Signature`] for a particular [`Action`].
+/// A heisen[`Signature`] for a particular [`Action`](crate::Action).
 ///
 /// [`Signature`]: redpallas::Signature
 #[derive(Debug)]
 pub enum MaybeSigned {
-    /// The information needed to sign this [`Action`].
+    /// The information needed to sign this [`Action`](crate::Action).
     SigningMetadata(SigningParts),
-    /// The signature for this [`Action`].
+    /// The signature for this [`Action`](crate::Action).
     Signature(redpallas::Signature<SpendAuth>),
 }
 
@@ -1883,9 +1877,11 @@ impl OutputView for ChangeInfo {
 }
 
 /// Generators for property testing.
-#[cfg(all(feature = "circuit", any(test, feature = "test-dependencies")))]
+#[cfg(all(feature = "prover", any(test, feature = "test-dependencies")))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use alloc::vec::Vec;
     use core::fmt::Debug;
 
@@ -1913,10 +1909,7 @@ pub mod testing {
     ///
     /// Keep this fixture independent of production dummy-address sampling so
     /// changes to the builder do not replace the independently pinned proofs.
-    #[cfg(all(
-        test,
-        any(feature = "verifier-fingerprint", feature = "prover-fingerprint")
-    ))]
+    #[cfg(all(test, feature = "zip32-addresses"))]
     pub(crate) fn build_pinned_fixture_bundle(
         rng: &mut rand_chacha::ChaCha20Rng,
         num_actions: u8,
@@ -2046,11 +2039,11 @@ pub mod testing {
     const GENERATED_MEMO: [u8; 512] = [0; 512];
 
     /// Keep this regression small because every generated bundle requires a real proof.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "verifier"))]
     const PROVING_TEST_CASES: u32 = 2;
 
     /// Generate up to two spends and changes to exercise shared witnesses and padding.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "verifier"))]
     const SMALL_GENERATED_NOTE_LIMIT: usize = 3;
 
     /// Keep each generated total within the signed balance accepted by the builder.
@@ -2093,6 +2086,7 @@ pub mod testing {
         }
     }
 
+    #[cfg(feature = "verifier")]
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(PROVING_TEST_CASES))]
         #[test]
@@ -2274,8 +2268,10 @@ pub mod testing {
     }
 }
 
-#[cfg(all(test, feature = "circuit"))]
+#[cfg(all(test, feature = "prover"))]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -2446,7 +2442,7 @@ mod tests {
     /// An in-memory build proves against its anchor immediately, so a deferred-anchor
     /// bundle refuses it.
     #[test]
-    #[cfg(feature = "circuit")]
+    #[cfg(feature = "prover")]
     fn deferred_anchor_refuses_in_memory_build() {
         let mut rng = OsRng;
         let sk = SpendingKey::random(&mut rng);
@@ -3489,5 +3485,12 @@ mod tests {
         let pk = crate::cached_test_keys(OrchardCircuitVersion::PostNu6_3).proving_key();
         let bundle = build_restricted(&mut rng);
         bundle.create_proof(pk, &mut rng).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "prover"))]
+impl crate::BenchmarkCircuitWitnesses for UnauthorizedBundle<i64> {
+    fn benchmark_circuits(&self) -> &[Circuit] {
+        &self.authorization().proof.circuits
     }
 }

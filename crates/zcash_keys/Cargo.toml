@@ -12,7 +12,7 @@ repository.workspace = true
 readme.workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["backend-halo2", "orchard", "sapling", "test-dependencies", "transparent-inputs", "transparent-key-encoding", "unstable", "unstable-frost", "zcashd-compat"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -52,9 +52,10 @@ zcash_address = { workspace = true, features = ["test-dependencies"] }
 zcash_script = { version = "0.6", default-features = false }
 
 [features]
+backend-halo2 = ["orchard?/backend-halo2"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["orchard?/zip32-addresses", "sapling?/zip32-addresses"]
-default = ["std", "zip32-addresses"]
+default = ["backend-halo2", "std", "zip32-addresses"]
 orchard = ["dep:orchard"]
 sapling = ["dep:sapling"]
 std = [

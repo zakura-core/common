@@ -1,9 +1,10 @@
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use core::fmt;
 use core::ops::Not as _;
 
-use group::{Group as _, GroupEncoding as _};
+use crate::backend::pallas;
 use memuse::DynamicUsage;
-use pasta_curves::pallas;
 use subtle::CtOption;
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
 /// # Invariants
 ///
 /// Every `Action` has a non-identity `rk`, and an `epk_bytes` that encodes a
-/// non-identity [`pasta_curves::pallas::Point`].
+/// non-identity Pallas point.
 #[derive(Debug, Clone)]
 pub struct Action<A> {
     /// The nullifier of the note being spent.
@@ -41,7 +42,7 @@ impl<T> Action<T> {
     /// Constructs an `Action` from its constituent parts.
     ///
     /// Returns an [`ActionFromPartsError`] if `rk` is the identity
-    /// [`pasta_curves::pallas::Point`], or if `encrypted_note.epk_bytes` does
+    /// Pallas point, or if `encrypted_note.epk_bytes` does
     /// not encode a non-identity point.
     ///
     /// zcashd v6.12.1 and Zebra 4.3.1 both added a consensus rule rejecting
@@ -187,8 +188,10 @@ impl DynamicUsage for Action<redpallas::Signature<SpendAuth>> {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub(crate) mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
+    use crate::primitives::redpallas::SpendAuth;
     use rand::{Rng, SeedableRng, rngs::StdRng};
-    use reddsa::orchard::SpendAuth;
     use zcash_note_encryption::Domain as _;
 
     use proptest::prelude::*;
@@ -287,9 +290,9 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use group::ff::{Field as _, PrimeField as _};
-    use group::{Group as _, GroupEncoding as _};
-    use pasta_curves::pallas;
+    use crate::backend::pallas;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
 
     use super::{Action, ActionFromPartsError};
     use crate::{

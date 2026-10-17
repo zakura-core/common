@@ -1,22 +1,20 @@
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use alloc::vec::Vec;
 use core::fmt;
 
-use halo2_proofs::plonk;
-use pasta_curves::vesta;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 
 use super::{Authorized, Bundle};
-use crate::{
-    circuit::VerifyingKey,
-    primitives::redpallas::{self, Binding, SpendAuth},
-};
+
+use crate::{circuit::VerifyingKey, primitives::redpallas};
 
 /// A signature within an authorized Orchard bundle.
 #[derive(Debug)]
 struct BundleSignature {
     /// The signature item for validation.
-    signature: redpallas::batch::Item<SpendAuth, Binding>,
+    signature: redpallas::BatchItem,
 }
 
 /// Error returned by [`BatchValidator::add_bundle`] when a bundle's flags require a circuit
@@ -54,7 +52,9 @@ impl core::error::Error for BatchError {}
 /// cannot enforce.
 #[derive(Debug)]
 pub struct BatchValidator<'a> {
-    proofs: plonk::BatchVerifier<vesta::Affine>,
+    proofs: crate::backend::halo2_proofs::plonk::BatchVerifier<
+        crate::backend::pasta_curves::vesta::Affine,
+    >,
     signatures: Vec<BundleSignature>,
     /// The verifying key every queued bundle is validated against, and which
     /// [`Self::validate`] finalizes the proof batch with.
@@ -65,7 +65,7 @@ impl<'a> BatchValidator<'a> {
     /// Constructs a new batch validation context that validates against `vk`.
     pub fn new(vk: &'a VerifyingKey) -> Self {
         BatchValidator {
-            proofs: plonk::BatchVerifier::new(),
+            proofs: crate::backend::halo2_proofs::plonk::BatchVerifier::new(),
             signatures: vec![],
             vk,
         }
@@ -104,7 +104,6 @@ impl<'a> BatchValidator<'a> {
             .authorization()
             .proof()
             .add_to_batch(&mut self.proofs, bundle.to_instances());
-
         Ok(())
     }
 
@@ -118,7 +117,7 @@ impl<'a> BatchValidator<'a> {
     ///
     /// The cross-address-restriction capability is enforced when bundles are added (see
     /// [`Self::add_bundle`]), so it is already guaranteed here.
-    pub fn validate<R: Rng + CryptoRng>(self, rng: R) -> bool {
+    pub fn validate<R: Rng + CryptoRng>(self, mut rng: R) -> bool {
         // https://p.z.cash/TCR:bad-txns-orchard-binding-signature-invalid?partial
 
         if self.signatures.is_empty() {
@@ -128,24 +127,24 @@ impl<'a> BatchValidator<'a> {
             return true;
         }
 
-        let mut validator = redpallas::batch::Verifier::new();
-        for sig in self.signatures.iter() {
-            validator.queue(sig.signature.clone());
+        let signatures: Vec<_> = self
+            .signatures
+            .into_iter()
+            .map(|sig| sig.signature)
+            .collect();
+        if let Err(e) = redpallas::verify_batch(&signatures, &mut rng) {
+            debug!("RedPallas batch validation failed: {}", e);
+            return false;
         }
 
-        match validator.verify(rng) {
-            // If signatures are valid, check the proofs.
-            Ok(()) => self.proofs.finalize(&self.vk.params, &self.vk.vk),
-            Err(e) => {
-                debug!("RedPallas batch validation failed: {}", e);
-                false
-            }
-        }
+        self.proofs.finalize(&self.vk.params, &self.vk.vk)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use crate::rng_compat::OsRng;
 
     use super::{BatchError, BatchValidator};

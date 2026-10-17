@@ -1,12 +1,14 @@
 //! Structs related to bundles of Orchard actions.
 
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use alloc::vec::Vec;
 
 pub mod commitments;
 
-#[cfg(feature = "circuit")]
+#[cfg(feature = "verifier")]
 mod batch;
-#[cfg(feature = "circuit")]
+#[cfg(feature = "verifier")]
 pub use batch::{BatchError, BatchValidator};
 
 use core::fmt;
@@ -31,10 +33,12 @@ use crate::{
     value::{ValueCommitTrapdoor, ValueCommitment, ValueSum},
 };
 
-#[cfg(feature = "circuit")]
-use crate::circuit::{Instance, OrchardCircuitVersion, VerifyingKey};
+#[cfg(feature = "verifier")]
+use crate::circuit::VerifyingKey;
+#[cfg(any(feature = "prover", feature = "verifier"))]
+use crate::circuit::{Instance, OrchardCircuitVersion};
 
-#[cfg(feature = "circuit")]
+#[cfg(any(feature = "prover", feature = "verifier"))]
 impl<T> Action<T> {
     /// Prepares the public instance for this action, for creating and verifying the
     /// bundle proof.
@@ -130,7 +134,7 @@ impl BundleVersion {
     /// `VerifyingKey::build(bundle_version.circuit_version())`.
     /// Historical versions support verifying key construction only; proving key
     /// construction returns an error.
-    #[cfg(feature = "circuit")]
+    #[cfg(any(feature = "prover", feature = "verifier"))]
     pub fn circuit_version(&self) -> OrchardCircuitVersion {
         match self.protocol_version {
             ProtocolVersion::InsecureV1 => OrchardCircuitVersion::InsecurePreNu6_2,
@@ -649,7 +653,7 @@ impl<T: Authorization, V> Bundle<T, V> {
         })
     }
 
-    #[cfg(feature = "circuit")]
+    #[cfg(any(feature = "prover", feature = "verifier"))]
     pub(crate) fn to_instances(&self) -> Vec<Instance> {
         self.actions
             .iter()
@@ -984,15 +988,15 @@ impl<V> Bundle<Authorized, V> {
     ///
     /// # Errors
     ///
-    /// Returns `Err(`[`halo2_proofs::plonk::Error::InvalidInstances`]`)` if this
+    /// Returns `Err(`[`crate::circuit::ProofError::InvalidInput`]`)` if this
     /// bundle disables cross-address transfers and `vk` is not an
     /// [`OrchardCircuitVersion::PostNu6_3`] verifying key.
     ///
     /// Also returns an error if proof verification fails.
     ///
     /// [`OrchardCircuitVersion::PostNu6_3`]: crate::circuit::OrchardCircuitVersion::PostNu6_3
-    #[cfg(feature = "circuit")]
-    pub fn verify_proof(&self, vk: &VerifyingKey) -> Result<(), halo2_proofs::plonk::Error> {
+    #[cfg(feature = "verifier")]
+    pub fn verify_proof(&self, vk: &VerifyingKey) -> Result<(), crate::circuit::ProofError> {
         self.authorization()
             .proof()
             .verify(vk, &self.to_instances())
@@ -1047,13 +1051,14 @@ pub struct BundleAuthorizingCommitment(pub Blake2bHash);
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use alloc::vec::Vec;
 
-    use group::ff::FromUniformBytes;
+    use crate::backend::pallas;
+    use crate::primitives::redpallas::SpendAuth;
     use nonempty::NonEmpty;
-    use pasta_curves::pallas;
     use rand::{SeedableRng, rngs::StdRng};
-    use reddsa::orchard::SpendAuth;
 
     use proptest::collection::vec;
     use proptest::prelude::*;
@@ -1193,7 +1198,7 @@ pub mod testing {
         )
         (
             acts in vec(arb_unauthorized_action_n(bundle_version.note_version(), n_actions, flags), n_actions),
-            anchor in arb_base().prop_map(Anchor::from),
+            anchor in arb_base().prop_map(Anchor::from_field),
             flags in Just(flags),
             bundle_version in Just(bundle_version),
         ) -> Bundle<Unauthorized, ValueSum> {
@@ -1223,7 +1228,7 @@ pub mod testing {
         )
         (
             acts in vec(arb_action_n(bundle_version.note_version(), n_actions, flags), n_actions),
-            anchor in arb_base().prop_map(Anchor::from),
+            anchor in arb_base().prop_map(Anchor::from_field),
             sk in arb_binding_signing_key(),
             rng_seed in prop::array::uniform32(prop::num::u8::ANY),
             // A fake proof of the canonical length, so the bundle passes `try_from_parts`.
@@ -1254,6 +1259,8 @@ pub mod testing {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use alloc::vec;
 
     use proptest::prelude::*;
@@ -1264,7 +1271,7 @@ pub(crate) mod tests {
     };
     use crate::Proof;
 
-    #[cfg(feature = "circuit")]
+    #[cfg(any(feature = "prover", feature = "verifier"))]
     pub(crate) fn with_cross_address_disabled(
         bundle: Bundle<Authorized, crate::value::ValueSum>,
     ) -> Bundle<Authorized, crate::value::ValueSum> {
@@ -1281,7 +1288,7 @@ pub(crate) mod tests {
         )
     }
 
-    #[cfg(feature = "circuit")]
+    #[cfg(any(feature = "prover", feature = "verifier"))]
     pub(crate) fn sample_authorized_bundle(
         n_actions: usize,
     ) -> Bundle<Authorized, crate::value::ValueSum> {
@@ -1738,7 +1745,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(feature = "circuit")]
+    #[cfg(any(feature = "prover", feature = "verifier"))]
     #[test]
     fn from_parts_rejects_unrepresentable_flags() {
         // A cross-address-disabled flag set has no pre-NU6.3 Orchard encoding, so a bundle
@@ -1764,7 +1771,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(feature = "circuit")]
+    #[cfg(feature = "verifier")]
     #[test]
     fn verify_proof_rejects_cross_address_disabled_for_unsupported_keys() {
         let bundle = with_cross_address_disabled(sample_authorized_bundle(1));
@@ -1777,7 +1784,7 @@ pub(crate) mod tests {
 
             assert!(matches!(
                 bundle.verify_proof(vk),
-                Err(halo2_proofs::plonk::Error::InvalidInstances)
+                Err(crate::circuit::ProofError::InvalidInput)
             ));
         }
     }

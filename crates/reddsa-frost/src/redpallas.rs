@@ -5,8 +5,12 @@
 use alloc::collections::BTreeMap;
 
 use frost_rerandomized::RandomizedCiphersuite;
-use group::GroupEncoding;
-use group::{Group as FFGroup, ff::Field as FFField, ff::PrimeField};
+#[cfg(feature = "pallas-pasta")]
+use group::{
+    Group as _, GroupEncoding as _,
+    ff::{Field as _, FromUniformBytes as _, PrimeField as _},
+};
+#[cfg(feature = "pallas-pasta")]
 use pasta_curves::pallas;
 
 pub mod rerandomized;
@@ -44,8 +48,6 @@ impl Field for PallasScalarField {
     }
 
     fn invert(scalar: &Self::Scalar) -> Result<Self::Scalar, FieldError> {
-        // [`pallas::Scalar`]'s Eq/PartialEq does a constant-time comparison using
-        // `ConstantTimeEq`
         if *scalar == <Self as Field>::zero() {
             Err(FieldError::InvalidZeroScalar)
         } else {
@@ -155,26 +157,17 @@ impl Ciphersuite for PallasBlake2b512 {
 
     /// H1 for FROST(Pallas, BLAKE2b-512)
     fn H1(m: &[u8]) -> <<Self::Group as Group>::Field as Field>::Scalar {
-        <pallas::Scalar as group::ff::FromUniformBytes<64>>::from_uniform_bytes(&hash_to_bytes(
-            b"FROST_RedPallasR",
-            m,
-        ))
+        pallas::Scalar::from_uniform_bytes(&hash_to_bytes(b"FROST_RedPallasR", m))
     }
 
     /// H2 for FROST(Pallas, BLAKE2b-512)
     fn H2(m: &[u8]) -> <<Self::Group as Group>::Field as Field>::Scalar {
-        <pallas::Scalar as group::ff::FromUniformBytes<64>>::from_uniform_bytes(&hash_to_bytes(
-            b"Zcash_RedPallasH",
-            m,
-        ))
+        pallas::Scalar::from_uniform_bytes(&hash_to_bytes(b"Zcash_RedPallasH", m))
     }
 
     /// H3 for FROST(Pallas, BLAKE2b-512)
     fn H3(m: &[u8]) -> <<Self::Group as Group>::Field as Field>::Scalar {
-        <pallas::Scalar as group::ff::FromUniformBytes<64>>::from_uniform_bytes(&hash_to_bytes(
-            b"FROST_RedPallasN",
-            m,
-        ))
+        pallas::Scalar::from_uniform_bytes(&hash_to_bytes(b"FROST_RedPallasN", m))
     }
 
     /// H4 for FROST(Pallas, BLAKE2b-512)
@@ -197,20 +190,18 @@ impl Ciphersuite for PallasBlake2b512 {
 
     /// HDKG for FROST(Pallas, BLAKE2b-512)
     fn HDKG(m: &[u8]) -> Option<<<Self::Group as Group>::Field as Field>::Scalar> {
-        Some(
-            <pallas::Scalar as group::ff::FromUniformBytes<64>>::from_uniform_bytes(
-                &hash_to_bytes(b"FROST_RedPallasD", m),
-            ),
-        )
+        Some(pallas::Scalar::from_uniform_bytes(&hash_to_bytes(
+            b"FROST_RedPallasD",
+            m,
+        )))
     }
 
     /// HID for FROST(Pallas, BLAKE2b-512)
     fn HID(m: &[u8]) -> Option<<<Self::Group as Group>::Field as Field>::Scalar> {
-        Some(
-            <pallas::Scalar as group::ff::FromUniformBytes<64>>::from_uniform_bytes(
-                &hash_to_bytes(b"FROST_RedPallasI", m),
-            ),
-        )
+        Some(pallas::Scalar::from_uniform_bytes(&hash_to_bytes(
+            b"FROST_RedPallasI",
+            m,
+        )))
     }
 
     fn post_generate(
@@ -246,11 +237,10 @@ impl Ciphersuite for PallasBlake2b512 {
 
 impl RandomizedCiphersuite for PallasBlake2b512 {
     fn hash_randomizer(m: &[u8]) -> Option<<<Self::Group as Group>::Field as Field>::Scalar> {
-        Some(
-            <pallas::Scalar as group::ff::FromUniformBytes<64>>::from_uniform_bytes(
-                &hash_to_bytes(b"FROST_RedPallasA", m),
-            ),
-        )
+        Some(pallas::Scalar::from_uniform_bytes(&hash_to_bytes(
+            b"FROST_RedPallasA",
+            m,
+        )))
     }
 }
 

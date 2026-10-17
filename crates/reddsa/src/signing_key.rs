@@ -18,7 +18,7 @@ use crate::{
     Error, Randomizer, SigType, Signature, SpendAuth, VerificationKey, private::SealedScalar,
 };
 
-use group::{GroupEncoding, ff::PrimeField};
+use crate::backend::Point as _;
 use rand_core::{CryptoRng, Rng};
 
 /// A RedDSA signing key.
@@ -57,12 +57,10 @@ impl<T: SigType> TryFrom<[u8; 32]> for SigningKey<T> {
     type Error = Error;
 
     fn try_from(bytes: [u8; 32]) -> Result<Self, Self::Error> {
-        // XXX-jubjub: this should not use CtOption
-        let mut repr = <T::Scalar as PrimeField>::Repr::default();
+        let mut repr = [0u8; 32];
         repr.as_mut().copy_from_slice(&bytes);
         let maybe_sk = T::Scalar::from_repr(repr);
-        if maybe_sk.is_some().into() {
-            let sk = maybe_sk.unwrap();
+        if let Some(sk) = maybe_sk {
             let pk = VerificationKey::from(&sk);
             Ok(SigningKey { sk, pk })
         } else {
@@ -91,7 +89,7 @@ impl<T: SigType> From<SigningKey<T>> for SerdeHelper {
 impl<T: SpendAuth> SigningKey<T> {
     /// Randomize this public key with the given `randomizer`.
     pub fn randomize(&self, randomizer: &Randomizer<T>) -> SigningKey<T> {
-        let sk = self.sk + randomizer;
+        let sk = self.sk + *randomizer;
         let pk = VerificationKey::from(&sk);
         SigningKey { sk, pk }
     }

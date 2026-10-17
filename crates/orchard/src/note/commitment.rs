@@ -6,35 +6,19 @@
 //! appearing in the commitment tree), and its randomness is
 //! [`NoteCommitTrapdoor`].
 
-use core::iter;
-
-use crate::once::OnceTable;
-use bitvec::{array::BitArray, order::Lsb0};
-use group::ff::{PrimeField, PrimeFieldBits};
-use pasta_curves::pallas;
+use crate::backend::pallas;
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use subtle::{ConstantTimeEq, CtOption};
 
-use crate::{
-    constants::{L_ORCHARD_BASE, fixed_bases::NOTE_COMMITMENT_PERSONALIZATION},
-    spec::extract_p,
-    value::NoteValue,
-};
-
-static NOTE_COMMITMENT_DOMAIN: OnceTable<sinsemilla::CommitDomain> = OnceTable::new();
-
-fn note_commitment_domain() -> &'static sinsemilla::CommitDomain {
-    NOTE_COMMITMENT_DOMAIN
-        .get_or_init(|| sinsemilla::CommitDomain::new(NOTE_COMMITMENT_PERSONALIZATION))
-}
+use crate::{spec::extract_p, value::NoteValue};
 
 /// The trapdoor for a note commitment.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(crate) struct NoteCommitTrapdoor(pub(super) pallas::Scalar);
 
 impl NoteCommitTrapdoor {
     /// Returns the inner scalar value.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Scalar {
         self.0
     }
@@ -46,7 +30,6 @@ pub struct NoteCommitment(pub(super) pallas::Point);
 
 impl NoteCommitment {
     /// Returns the inner Pallas curve point.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Point {
         self.0
     }
@@ -59,19 +42,23 @@ impl NoteCommitment {
     ///
     /// [concretesinsemillacommit]: https://zips.z.cash/protocol/nu5.pdf#concretesinsemillacommit
     pub(super) fn derive(
-        g_d: [u8; 32],
-        pk_d: [u8; 32],
+        g_d: crate::spec::NonIdentityPallasPoint,
+        pk_d: crate::spec::NonIdentityPallasPoint,
         v: NoteValue,
         rho: pallas::Base,
         psi: pallas::Base,
         rcm: NoteCommitTrapdoor,
     ) -> CtOption<Self> {
+        use crate::constants::L_ORCHARD_BASE;
+        use bitvec::{array::BitArray, order::Lsb0};
+        use core::iter;
+        use legacy::*;
         let domain = note_commitment_domain();
         domain
             .commit(
                 iter::empty()
-                    .chain(BitArray::<_, Lsb0>::new(g_d).iter().by_vals())
-                    .chain(BitArray::<_, Lsb0>::new(pk_d).iter().by_vals())
+                    .chain(BitArray::<_, Lsb0>::new(g_d.to_bytes()).iter().by_vals())
+                    .chain(BitArray::<_, Lsb0>::new(pk_d.to_bytes()).iter().by_vals())
                     .chain(v.to_le_bits().iter().by_vals())
                     .chain(rho.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE))
                     .chain(psi.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE)),
@@ -110,7 +97,6 @@ impl From<NoteCommitment> for ExtractedNoteCommitment {
 
 impl ExtractedNoteCommitment {
     /// Returns the inner field element.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
     }
@@ -135,3 +121,19 @@ impl PartialEq for ExtractedNoteCommitment {
 }
 
 impl Eq for ExtractedNoteCommitment {}
+
+mod legacy {
+
+    use crate::once::OnceTable;
+
+    use crate::constants::fixed_bases::NOTE_COMMITMENT_PERSONALIZATION;
+
+    static NOTE_COMMITMENT_DOMAIN: OnceTable<crate::backend::sinsemilla::CommitDomain> =
+        OnceTable::new();
+
+    pub(super) fn note_commitment_domain() -> &'static crate::backend::sinsemilla::CommitDomain {
+        NOTE_COMMITMENT_DOMAIN.get_or_init(|| {
+            crate::backend::sinsemilla::CommitDomain::new(NOTE_COMMITMENT_PERSONALIZATION)
+        })
+    }
+}

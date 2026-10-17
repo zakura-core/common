@@ -1,7 +1,9 @@
+#![cfg(feature = "pallas-pasta")]
+#[cfg(feature = "pallas-pasta")]
+use group::GroupEncoding as _;
 use std::collections::BTreeMap;
 
 use frost_rerandomized::frost_core::{self as frost, Ciphersuite, Group, GroupError};
-use group::GroupEncoding;
 
 use reddsa::orchard;
 use reddsa_frost::redpallas::{PallasBlake2b512, keys::EvenY, rand_core::OsRng};

@@ -1,11 +1,11 @@
 //! Data structures used for note construction.
+#[allow(unused_imports)]
+use crate::backend::prelude::*;
 use core::fmt;
 use memuse::DynamicUsage;
 
+use crate::backend::pallas;
 use blake2b_simd::Params as Blake2bParams;
-use ff::PrimeField;
-use group::GroupEncoding;
-use pasta_curves::pallas;
 use rand::Rng;
 use subtle::CtOption;
 
@@ -19,12 +19,7 @@ use crate::{
 const PRF_EXPAND_PERSONALIZATION: &[u8; 16] = b"Zcash_ExpandSeed";
 const ZIP2005_ORCHARD_QR_RCM_DOMAIN_SEPARATOR: u8 = 0x0B;
 
-#[cfg(not(feature = "unstable-voting-circuits"))]
 pub(crate) mod commitment;
-#[cfg(feature = "unstable-voting-circuits")]
-pub mod commitment;
-#[cfg(feature = "unstable-voting-circuits")]
-pub use self::commitment::NoteCommitTrapdoor;
 pub use self::commitment::{ExtractedNoteCommitment, NoteCommitment};
 
 /// Note plaintext version.
@@ -62,10 +57,7 @@ impl NoteVersion {
     }
 }
 
-#[cfg(not(feature = "unstable-voting-circuits"))]
 pub(crate) mod nullifier;
-#[cfg(feature = "unstable-voting-circuits")]
-pub mod nullifier;
 pub use self::nullifier::Nullifier;
 
 /// The randomness used to construct a note.
@@ -97,13 +89,11 @@ impl Rho {
     /// of the note being spent in the [`Action`] under construction.
     ///
     /// [`Action`]: crate::action::Action
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn from_nf_old(nf: Nullifier) -> Self {
         Rho(nf.inner())
     }
 
     /// Consumes `self` and returns the inner field element.
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn into_inner(self) -> pallas::Base {
         self.0
     }
@@ -142,7 +132,6 @@ impl RandomSeed {
     /// Defined in [Zcash Protocol Spec § 4.7.3: Sending Notes (Orchard)][orchardsend].
     ///
     /// [orchardsend]: https://zips.z.cash/protocol/nu5.pdf#orchardsend
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn psi(&self, rho: &Rho) -> pallas::Base {
         to_base(PrfExpand::PSI.with(&self.0, &rho.to_bytes()))
     }
@@ -169,7 +158,6 @@ impl RandomSeed {
     /// Defined in [Zcash Protocol Spec § 4.7.3: Sending Notes (Orchard)][orchardsend].
     ///
     /// [orchardsend]: https://zips.z.cash/protocol/nu5.pdf#orchardsend
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn rcm_v2(&self, rho: &Rho) -> commitment::NoteCommitTrapdoor {
         commitment::NoteCommitTrapdoor(to_scalar(
             PrfExpand::ORCHARD_RCM.with(&self.0, &rho.to_bytes()),
@@ -199,7 +187,6 @@ impl RandomSeed {
     /// $$
     ///
     /// [ZIP 2005]: https://zips.z.cash/zip-2005
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn rcm_v3(
         &self,
         rho: &Rho,
@@ -298,7 +285,6 @@ impl Note {
     /// Defined in [Zcash Protocol Spec § 4.7.3: Sending Notes (Orchard)][orchardsend].
     ///
     /// [orchardsend]: https://zips.z.cash/protocol/nu5.pdf#orchardsend
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn new(
         recipient: Address,
         value: NoteValue,
@@ -325,7 +311,6 @@ impl Note {
     /// Defined in [Zcash Protocol Spec § 4.8.3: Dummy Notes (Orchard)][orcharddummynotes].
     ///
     /// [orcharddummynotes]: https://zips.z.cash/protocol/nu5.pdf#orcharddummynotes
-    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn dummy(
         rng: &mut impl Rng,
         rho: Option<Rho>,
@@ -422,19 +407,10 @@ impl Note {
     /// [notes]: https://zips.z.cash/protocol/nu5.pdf#notes
     fn commitment_inner(&self) -> CtOption<NoteCommitment> {
         let g_d = self.recipient.g_d();
-        let g_d_bytes = g_d.to_bytes();
         let pk_d = self.recipient.pk_d().inner();
-        let pk_d_bytes = pk_d.to_bytes();
         let psi = self.psi();
 
-        NoteCommitment::derive(
-            g_d_bytes,
-            pk_d_bytes,
-            self.value,
-            self.rho.0,
-            psi,
-            self.rcm(),
-        )
+        NoteCommitment::derive(g_d, pk_d, self.value, self.rho.0, psi, self.rcm())
     }
 
     /// Derives the nullifier for this note.
@@ -469,6 +445,8 @@ impl fmt::Debug for TransmittedNoteCiphertext {
 #[cfg(any(test, feature = "test-dependencies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
 pub mod testing {
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use proptest::prelude::*;
 
     use crate::{
@@ -533,12 +511,12 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::backend::prelude::*;
     use crate::{
         keys::{FullViewingKey, Scope, SpendingKey},
         test_vectors::keys::TestVector,
     };
-    use ff::PrimeField;
-    use group::GroupEncoding;
 
     proptest::proptest! {
         #[test]
@@ -575,8 +553,6 @@ mod tests {
 
         let g_d = addr.g_d();
         let pk_d = addr.pk_d().inner();
-        let g_d_bytes = g_d.to_bytes();
-        let pk_d_bytes = pk_d.to_bytes();
 
         let rcm_old = rseed.rcm_v2(&rho);
         let psi = rseed.psi(&rho);
@@ -587,12 +563,10 @@ mod tests {
         let rho_inner = rho.into_inner();
         let value = NoteValue::from_raw(tv.note_v);
 
-        let cmx_old =
-            NoteCommitment::derive(g_d_bytes, pk_d_bytes, value, rho_inner, psi, rcm_old).unwrap();
+        let cmx_old = NoteCommitment::derive(g_d, pk_d, value, rho_inner, psi, rcm_old).unwrap();
         let cmx_old_bytes = ExtractedNoteCommitment::from(cmx_old).to_bytes();
 
-        let cmx_qr =
-            NoteCommitment::derive(g_d_bytes, pk_d_bytes, value, rho_inner, psi, rcm_new).unwrap();
+        let cmx_qr = NoteCommitment::derive(g_d, pk_d, value, rho_inner, psi, rcm_new).unwrap();
         let cmx_qr_bytes = ExtractedNoteCommitment::from(cmx_qr).to_bytes();
 
         QrRcmDerivation {

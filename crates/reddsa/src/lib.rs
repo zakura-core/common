@@ -20,11 +20,13 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+mod backend;
 #[cfg(feature = "alloc")]
 pub mod batch;
 mod constants;
 mod error;
 mod hash;
+#[cfg(feature = "pallas-pasta")]
 pub mod orchard;
 pub mod sapling;
 #[cfg(feature = "alloc")]
@@ -34,6 +36,11 @@ mod signing_key;
 mod verification_key;
 
 /// An element of the protocol's scalar field used for randomization of public and secret keys.
+///
+/// This alias resolves to the concrete scalar type of the curve the signature domain is
+/// instantiated over (`jubjub::Scalar` for Sapling, `pasta_curves::pallas::Scalar` for
+/// Orchard). It is a compatibility bridge to those types rather than an opaque randomizer;
+/// higher-level protocol crates wrap it in their own types.
 pub type Randomizer<S> = <S as private::Sealed<S>>::Scalar;
 
 use hash::HStar;
@@ -82,33 +89,21 @@ pub(crate) mod private {
             .collect()
     }
 
-    pub trait SealedScalar {
-        fn from_bytes_wide(bytes: &[u8; 64]) -> Self;
-        fn from_raw(val: [u64; 4]) -> Self;
-    }
-
-    impl SealedScalar for jubjub::Scalar {
-        fn from_bytes_wide(bytes: &[u8; 64]) -> Self {
-            jubjub::Scalar::from_bytes_wide(bytes)
-        }
-        fn from_raw(val: [u64; 4]) -> Self {
-            jubjub::Scalar::from_raw(val)
-        }
-    }
+    pub use crate::backend::Scalar as SealedScalar;
 
     pub trait Sealed<T: SigType>:
         Copy + Clone + Default + Eq + PartialEq + core::fmt::Debug
     {
         const H_STAR_PERSONALIZATION: &'static [u8; 16];
-        type Scalar: group::ff::PrimeField + SealedScalar;
+        type Scalar: SealedScalar;
 
         // `Point: VartimeMultiscalarMul` is conditioned by `alloc` feature flag
         // This is fine because `Sealed` is an internal trait.
         #[cfg(feature = "alloc")]
-        type Point: group::cofactor::CofactorCurve<Scalar = Self::Scalar>
+        type Point: crate::backend::Point<Self::Scalar>
             + scalar_mul::VartimeMultiscalarMul<Scalar = Self::Scalar, Point = Self::Point>;
         #[cfg(not(feature = "alloc"))]
-        type Point: group::cofactor::CofactorCurve<Scalar = Self::Scalar>;
+        type Point: crate::backend::Point<Self::Scalar>;
 
         fn basepoint() -> T::Point;
 
