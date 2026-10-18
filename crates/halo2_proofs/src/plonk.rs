@@ -30,6 +30,7 @@ pub(crate) mod permutation;
 mod vanishing;
 
 mod prover;
+mod synthesis_backend;
 mod verifier;
 
 #[cfg(feature = "unstable-verifier-fingerprint")]
