@@ -1,9 +1,10 @@
 //! The Orchard Action circuit implementation.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+use core::ops::Deref;
 
 #[cfg(feature = "multicore")]
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Mutex, mpsc};
 
 use crate::backend::group::{Curve, GroupEncoding};
 #[cfg(feature = "prover")]
@@ -107,8 +108,15 @@ const ENABLE_OUTPUT: usize = 8;
 const DISABLE_CROSS_ADDRESS: usize = 9;
 
 /// Configuration needed to use the Orchard Action circuit.
+///
+/// Floor planning and the proving key's configuration cache clone this for
+/// every synthesis. Sharing the chip configurations keeps each clone a
+/// reference-count increment rather than a deep copy of every chip config.
 #[derive(Clone, Debug)]
-pub(crate) struct Config {
+pub(crate) struct Config(Arc<ConfigInner>);
+
+#[derive(Debug)]
+pub(crate) struct ConfigInner {
     primary: Column<InstanceColumn>,
     constant: Column<Fixed>,
     q_orchard: Selector,
@@ -354,6 +362,14 @@ impl Circuit {
     }
 }
 
+impl Deref for Config {
+    type Target = ConfigInner;
+
+    fn deref(&self) -> &ConfigInner {
+        &self.0
+    }
+}
+
 impl Config {
     fn cache(&self) -> plonk::CircuitConfigCache {
         plonk::CircuitConfigCache::new(self.clone())
@@ -542,7 +558,7 @@ impl Config {
         let new_note_commit_config =
             NoteCommitChip::configure(meta, advices, sinsemilla_config_2.clone());
 
-        Config {
+        Config(Arc::new(ConfigInner {
             primary,
             constant: lagrange_coeffs[0],
             q_orchard,
@@ -557,7 +573,7 @@ impl Config {
             commit_ivk_config,
             old_note_commit_config,
             new_note_commit_config,
-        }
+        }))
     }
 }
 

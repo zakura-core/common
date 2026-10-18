@@ -1,7 +1,13 @@
 use super::super::{CommitDomains, HashDomains, SinsemillaInstructions};
 use super::{NonIdentityEccPoint, SinsemillaChip};
 use crate::{
-    ecc::{FixedPoints, chip::DoubleAndAdd},
+    ecc::{
+        FixedPoints,
+        chip::{
+            DoubleAndAdd,
+            projective::{DoubleAndAddWitness, ProjectivePoint},
+        },
+    },
     sinsemilla::primitives::{self as sinsemilla, INV_TWO_POW_K, SINSEMILLA_S},
     utilities::lookup_range_check::PallasLookupRangeCheck,
 };
@@ -23,13 +29,6 @@ use first_word_witnesses::{MERKLE_FIRST_WORD_WITNESSES, MERKLE_INITIAL_Q};
 const FIELD_REPR_LIMBS: usize =
     core::mem::size_of::<<pallas::Base as PrimeField>::Repr>() / core::mem::size_of::<u64>();
 const MERKLE_RETAINED_RUNNING_SUM_CELLS: [usize; 3] = [2, 2, 0];
-
-#[inline(always)]
-fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
-    // Method syntax selects `pallas::Base`'s portable inherent square.
-    // Trait dispatch selects the configured runtime backend instead.
-    Field::square(value)
-}
 
 fn decompose_words(value: pallas::Base, num_words: usize) -> Vec<u32> {
     let repr = value.to_repr();
@@ -54,20 +53,6 @@ fn decompose_words(value: pallas::Base, num_words: usize) -> Vec<u32> {
             (value & word_mask) as u32
         })
         .collect()
-}
-
-#[derive(Clone, Copy)]
-struct ProjectivePoint {
-    x: pallas::Base,
-    y: pallas::Base,
-    z: pallas::Base,
-    z_sq: pallas::Base,
-}
-
-#[derive(Clone, Copy)]
-struct DoubleAndAddWitness {
-    lambda_1_numerator: pallas::Base,
-    lambda_2_numerator: pallas::Base,
 }
 
 #[derive(Clone, Copy)]
@@ -148,63 +133,6 @@ impl DoubleAndAddWitness {
 
     fn lambda_2(&self, point: &ProjectivePoint) -> Assigned<pallas::Base> {
         Assigned::Rational(self.lambda_2_numerator, point.z)
-    }
-}
-
-impl ProjectivePoint {
-    fn from_affine(point: pallas::Affine) -> Self {
-        let coordinates = point.coordinates().unwrap();
-        Self {
-            x: *coordinates.x(),
-            y: *coordinates.y(),
-            z: pallas::Base::ONE,
-            z_sq: pallas::Base::ONE,
-        }
-    }
-
-    /// Computes witnesses for the incomplete addition `2A + P` while keeping
-    /// the accumulator in Jacobian coordinates. The returned rational values
-    /// are the same affine values assigned by the circuit's existing witness
-    /// flow.
-    fn double_and_add(&mut self, (x_p, y_p): (pallas::Base, pallas::Base)) -> DoubleAndAddWitness {
-        let z_cubed = self.z_sq * self.z;
-        let h = x_p * self.z_sq - self.x;
-        let r = y_p * z_cubed - self.y;
-
-        let h_sq = square_with_runtime_backend(&h);
-        let h_cubed = h_sq * h;
-        let x_h_sq = self.x * h_sq;
-        let x_r = square_with_runtime_backend(&r) - h_cubed - Field::double(&x_h_sq);
-        let d = x_h_sq - x_r;
-
-        let d_sq = square_with_runtime_backend(&d);
-        let d_cubed = d_sq * d;
-        let y_h_cubed = self.y * h_cubed;
-        // Scale lambda_1 by d so it shares z_new as its denominator with
-        // lambda_2. The product is also needed for lambda_2's numerator.
-        let r_d = r * d;
-        let lambda_2_numerator = Field::double(&y_h_cubed) - r_d;
-
-        let x_h_sq_d_sq = x_h_sq * d_sq;
-        // Since d = x_h_sq - x_r, this saves a field multiplication over
-        // computing (x_h_sq + x_r) * d_sq directly.
-        let x_new = square_with_runtime_backend(&lambda_2_numerator) - Field::double(&x_h_sq_d_sq)
-            + d_cubed;
-        let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
-        let z_new = self.z * h * d;
-        let z_new_sq = square_with_runtime_backend(&z_new);
-
-        *self = Self {
-            x: x_new,
-            y: y_new,
-            z: z_new,
-            z_sq: z_new_sq,
-        };
-
-        DoubleAndAddWitness {
-            lambda_1_numerator: r_d,
-            lambda_2_numerator,
-        }
     }
 }
 

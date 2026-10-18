@@ -1,4 +1,7 @@
-use super::{CircuitVersion, EccPoint, NonIdentityEccPoint, ScalarVar, T_Q, add};
+use super::{
+    CircuitVersion, EccPoint, NonIdentityEccPoint, ScalarVar, T_Q, add,
+    projective::{ProjectivePoint, square_with_runtime_backend},
+};
 use crate::utilities::{
     lookup_range_check::{PallasLookupRangeCheck, PallasLookupRangeCheckConfig},
     {bool_check, ternary},
@@ -43,93 +46,6 @@ const INCOMPLETE_LO_LEN: usize = INCOMPLETE_LEN - INCOMPLETE_HI_LEN;
 // Bits k_{3} to k_{1} inclusive are used in complete addition.
 // Bit k_{0} is handled separately.
 const COMPLETE_RANGE: Range<usize> = INCOMPLETE_LEN..(INCOMPLETE_LEN + NUM_COMPLETE_BITS);
-
-#[derive(Clone, Copy, Debug)]
-struct ProjectivePoint {
-    x: pallas::Base,
-    y: pallas::Base,
-    z: pallas::Base,
-    z_sq: pallas::Base,
-}
-
-impl ProjectivePoint {
-    fn from_affine(point: pallas::Affine) -> Self {
-        let coordinates = point
-            .coordinates()
-            .expect("the variable-base multiplication base is nonidentity");
-        Self {
-            x: *coordinates.x(),
-            y: *coordinates.y(),
-            z: pallas::Base::ONE,
-            z_sq: pallas::Base::ONE,
-        }
-    }
-
-    /// Doubles a nonidentity Pallas point without exceptional-case handling.
-    fn double_unchecked(self) -> Self {
-        // dbl-2009-l for a short-Weierstrass curve with a = 0.
-        let a = square_with_runtime_backend(&self.x);
-        let b = square_with_runtime_backend(&self.y);
-        let c = square_with_runtime_backend(&b);
-        let d = (square_with_runtime_backend(&(self.x + b)) - a - c).double();
-        let e = a.double() + a;
-        let f = square_with_runtime_backend(&e);
-        let z = (self.z * self.y).double();
-        let z_sq = square_with_runtime_backend(&z);
-        let x = f - d.double();
-        let y = e * (d - x) - c.double().double().double();
-
-        Self { x, y, z, z_sq }
-    }
-
-    /// Computes witnesses for the incomplete addition `2A + P` while keeping
-    /// the accumulator in projective coordinates.
-    fn double_and_add(&mut self, (x_p, y_p): (pallas::Base, pallas::Base)) -> DoubleAndAddWitness {
-        let z_cubed = self.z_sq * self.z;
-        let h = x_p * self.z_sq - self.x;
-        let r = y_p * z_cubed - self.y;
-
-        let h_sq = square_with_runtime_backend(&h);
-        let h_cubed = h_sq * h;
-        let x_h_sq = self.x * h_sq;
-        let x_r = square_with_runtime_backend(&r) - h_cubed - Field::double(&x_h_sq);
-        let d = x_h_sq - x_r;
-
-        let d_sq = square_with_runtime_backend(&d);
-        let d_cubed = d_sq * d;
-        let y_h_cubed = self.y * h_cubed;
-        // Scale lambda_1 by d so that both slopes use z_new as their
-        // denominator.
-        let r_d = r * d;
-        let lambda_2_numerator = Field::double(&y_h_cubed) - r_d;
-
-        let x_h_sq_d_sq = x_h_sq * d_sq;
-        let x_new = square_with_runtime_backend(&lambda_2_numerator) - Field::double(&x_h_sq_d_sq)
-            + d_cubed;
-        let y_new = lambda_2_numerator * (x_h_sq_d_sq - x_new) - y_h_cubed * d_cubed;
-        let z_new = self.z * h * d;
-        let z_new_sq = square_with_runtime_backend(&z_new);
-
-        *self = Self {
-            x: x_new,
-            y: y_new,
-            z: z_new,
-            z_sq: z_new_sq,
-        };
-
-        DoubleAndAddWitness {
-            lambda_1_numerator: r_d,
-            lambda_2_numerator,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DoubleAndAddWitness {
-    lambda_1_numerator: pallas::Base,
-    lambda_2_numerator: pallas::Base,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct IncompleteRowWitness {
     z: pallas::Base,
@@ -303,13 +219,6 @@ fn batch_invert_nonzero(values: &mut [pallas::Base], scratch: &mut [pallas::Base
     }
     *first = acc_0;
     *second = acc_1;
-}
-
-#[inline(always)]
-fn square_with_runtime_backend(value: &pallas::Base) -> pallas::Base {
-    // Method syntax selects `pallas::Base`'s portable inherent square.
-    // Trait dispatch selects the configured runtime backend instead.
-    Field::square(value)
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
