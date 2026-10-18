@@ -1049,7 +1049,7 @@ pub fn create_proof<
     pk: &ProvingKey<C>,
     circuits: &[ConcreteCircuit],
     instances: &[&[&[C::Scalar]]],
-    mut rng: R,
+    rng: R,
     transcript: &mut T,
 ) -> Result<(), Error>
 where
@@ -1059,6 +1059,54 @@ where
         return Err(Error::InvalidInstances);
     }
 
+    // Only configuration and witness synthesis depend on the circuit type.
+    // Hand them to the rest of the prover as one erased callback, so the
+    // prover body is monomorphized once per curve and transcript rather than
+    // once per circuit type.
+    let mut synthesize = |witnesses: &mut Vec<WitnessCollection<'_, C::Scalar>>| {
+        let cached_config = if ConcreteCircuit::CACHE_CONFIGURATION {
+            pk.circuit_config
+                .as_ref()
+                .and_then(ConcreteCircuit::configuration_from_cache)
+        } else {
+            None
+        };
+        let config = cached_config
+            .unwrap_or_else(|| ConcreteCircuit::configure(&mut ConstraintSystem::default()));
+
+        // Synthesize every circuit while allowing its floor planner to share
+        // circuit-shape-dependent work across the batch.
+        ConcreteCircuit::FloorPlanner::synthesize_batch(
+            witnesses,
+            circuits,
+            config,
+            &pk.vk.cs.constants,
+            pk.floor_plan.as_ref(),
+        )
+        .map(|_| ())
+    };
+
+    create_proof_with_synthesis(params, pk, instances, rng, transcript, &mut synthesize)
+}
+
+/// Fills the witnesses for every circuit in a batch, in order.
+type SynthesizeWitnesses<'s, F> =
+    dyn for<'w> FnMut(&mut Vec<WitnessCollection<'w, F>>) -> Result<(), Error> + 's;
+
+/// The circuit-independent body of [`create_proof`].
+fn create_proof_with_synthesis<
+    C: CurveAffine,
+    E: EncodedChallenge<C>,
+    R: Rng,
+    T: TranscriptWrite<C, E>,
+>(
+    params: &Params<C>,
+    pk: &ProvingKey<C>,
+    instances: &[&[&[C::Scalar]]],
+    mut rng: R,
+    transcript: &mut T,
+    synthesize: &mut SynthesizeWitnesses<'_, C::Scalar>,
+) -> Result<(), Error> {
     for instance in instances.iter() {
         if instance.len() != pk.vk.cs.num_instance_columns {
             return Err(Error::InvalidInstances);
@@ -1069,15 +1117,6 @@ where
     pk.vk.hash_into(transcript)?;
 
     let domain = &pk.vk.domain;
-    let cached_config = if ConcreteCircuit::CACHE_CONFIGURATION {
-        pk.circuit_config
-            .as_ref()
-            .and_then(ConcreteCircuit::configuration_from_cache)
-    } else {
-        None
-    };
-    let config = cached_config
-        .unwrap_or_else(|| ConcreteCircuit::configure(&mut ConstraintSystem::default()));
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
@@ -1207,18 +1246,6 @@ where
             }
             Ok(())
         };
-    let synthesize = |witnesses: &mut Vec<WitnessCollection<'_, C::Scalar>>| {
-        // Synthesize every circuit while allowing its floor planner to share
-        // circuit-shape-dependent work across the batch.
-        ConcreteCircuit::FloorPlanner::synthesize_batch(
-            witnesses,
-            circuits,
-            config,
-            &meta.constants,
-            pk.floor_plan.as_ref(),
-        )
-    };
-
     let prepare_advice = |witnesses: Vec<WitnessCollection<'_, C::Scalar>>, rng: &mut R| {
         // Rational advice evaluation is independent across circuits. Keep
         // every RNG draw below in circuit order and after successful
