@@ -467,6 +467,9 @@ impl V1 {
     }
 }
 
+/// A region's assignment closure, with its result kept by the caller.
+type RegionAssignment<'r, F> = &'r mut dyn FnMut(Region<'_, F>) -> Result<(), Error>;
+
 #[derive(Debug)]
 enum Pass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
     Measurement(&'p mut MeasurementPass),
@@ -495,17 +498,26 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> V1Pass<'p, 'a, F, CS> {
 impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F, CS> {
     type Root = Self;
 
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
     where
         A: FnMut(Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
+        // Erase the region closure here, once, so that each pass's region
+        // handling is compiled once rather than once per region closure.
+        let name = || name().into();
+        let mut result = None;
+        let mut assignment = |region: Region<'_, F>| {
+            result = Some(assignment(region)?);
+            Ok(())
+        };
         match &mut self.0 {
-            Pass::Measurement(pass) => pass.assign_region(name, assignment),
-            Pass::Assignment(pass) => pass.assign_region(name, assignment),
-            Pass::NamedAssignment(pass) => pass.assign_region(name, assignment),
-        }
+            Pass::Measurement(pass) => pass.assign_region(&name, &mut assignment),
+            Pass::Assignment(pass) => pass.assign_region(&name, &mut assignment),
+            Pass::NamedAssignment(pass) => pass.assign_region(&name, &mut assignment),
+        }?;
+        Ok(result.expect("a pass returns Ok only after its region assignment succeeded"))
     }
 
     fn assign_table<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
@@ -579,28 +591,23 @@ impl MeasurementPass {
         }
     }
 
-    fn assign_region<F: Field, A, AR, N, NR>(
+    fn assign_region<F: Field>(
         &mut self,
-        name: N,
-        mut assignment: A,
-    ) -> Result<AR, Error>
-    where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
-        N: Fn() -> NR,
-        NR: Into<String>,
-    {
+        name: &dyn Fn() -> String,
+        assignment: RegionAssignment<'_, F>,
+    ) -> Result<(), Error> {
         let region_index = self.regions.len();
 
         // Get shape of the region.
         let mut shape = RegionShape::new(region_index.into());
-        let result = {
+        {
             let region: &mut dyn RegionLayouter<F> = &mut shape;
             assignment(region.into())
         }?;
         self.regions.push(shape);
-        self.region_ids.push(self.names.next(name().into()));
+        self.region_ids.push(self.names.next(name()));
 
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -620,25 +627,24 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
         }
     }
 
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
-    where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
-        N: Fn() -> NR,
-        NR: Into<String>,
-    {
+    fn assign_region(
+        &mut self,
+        name: &dyn Fn() -> String,
+        assignment: RegionAssignment<'_, F>,
+    ) -> Result<(), Error> {
         // Get the next region we are assigning.
         let region_index = self.region_index;
         self.region_index += 1;
 
         self.plan.cs.enter_region(name);
         let mut region = V1Region::new(self.plan, region_index.into());
-        let result = {
+        {
             let region: &mut dyn RegionLayouter<F> = &mut region;
             assignment(region.into())
         }?;
         self.plan.cs.exit_region();
 
-        Ok(result)
+        Ok(())
     }
 
     fn assign_table<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
@@ -740,13 +746,12 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
         self.plan.cs.pop_namespace(gadget_name);
     }
 
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
-    where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
-        N: Fn() -> NR,
-        NR: Into<String>,
-    {
-        let name = name().into();
+    fn assign_region(
+        &mut self,
+        name: &dyn Fn() -> String,
+        assignment: RegionAssignment<'_, F>,
+    ) -> Result<(), Error> {
+        let name = name();
         let namespace = self
             .namespace_stack
             .last()
@@ -769,13 +774,13 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
 
         self.plan.cs.enter_region(|| name);
         let mut region = V1Region::new(self.plan, region_index);
-        let result = {
+        {
             let region: &mut dyn RegionLayouter<F> = &mut region;
             assignment(region.into())
         }?;
         self.plan.cs.exit_region();
 
-        Ok(result)
+        Ok(())
     }
 
     fn assign_table<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
