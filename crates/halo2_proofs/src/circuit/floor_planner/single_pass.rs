@@ -169,7 +169,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
         let first_unused = compute_table_lengths(&default_and_assigned)?;
 
         // Record these columns so that we can prevent them from being used again.
-        for column in default_and_assigned.keys() {
+        for (column, _) in &default_and_assigned {
             self.table_columns.push(*column);
         }
 

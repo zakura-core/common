@@ -664,7 +664,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
         let first_unused = compute_table_lengths(&default_and_assigned)?;
 
         // Record these columns so that we can prevent them from being used again.
-        for column in default_and_assigned.keys() {
+        for (column, _) in &default_and_assigned {
             self.plan.table_columns.push(*column);
         }
 
@@ -794,7 +794,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> NamedAssignmentPass<'p, 'a, F, CS
         self.plan.cs.exit_region();
 
         let first_unused = compute_table_lengths(&default_and_assigned)?;
-        for column in default_and_assigned.keys() {
+        for (column, _) in &default_and_assigned {
             self.plan.table_columns.push(*column);
         }
         for (col, (default_val, _)) in default_and_assigned {

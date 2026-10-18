@@ -1,9 +1,6 @@
 //! Implementations of common table layouters.
 
-use std::{
-    collections::HashMap,
-    fmt::{self, Debug},
-};
+use std::fmt::{self, Debug};
 
 use ff::Field;
 
@@ -38,11 +35,21 @@ pub trait TableLayouter<F: Field>: std::fmt::Debug {
 ///   witnesses or not.
 type DefaultTableValue<F> = Option<Value<Assigned<F>>>;
 
+/// An assigned table column with its default value and which of its rows are
+/// assigned.
+pub(crate) type TableColumnAssignment<F> = (TableColumn, (DefaultTableValue<F>, Vec<bool>));
+
+/// The assigned columns of one table.
+///
+/// A table has only a handful of columns, so a linear search is cheaper than
+/// hashing the column on every cell assignment.
+pub(crate) type TableColumnAssignments<F> = Vec<TableColumnAssignment<F>>;
+
 pub(crate) struct SimpleTableLayouter<'r, 'a, F: Field, CS: Assignment<F> + 'a> {
     cs: &'a mut CS,
     used_columns: &'r [TableColumn],
     // maps from a fixed column to a pair (default value, vector saying which rows are assigned)
-    pub(crate) default_and_assigned: HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
+    pub(crate) default_and_assigned: TableColumnAssignments<F>,
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for SimpleTableLayouter<'r, 'a, F, CS> {
@@ -59,7 +66,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> SimpleTableLayouter<'r, 'a, F, CS
         SimpleTableLayouter {
             cs,
             used_columns,
-            default_and_assigned: HashMap::default(),
+            default_and_assigned: Vec::new(),
         }
     }
 }
@@ -78,7 +85,18 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F>
             return Err(Error::TableError(TableError::UsedColumn(column)));
         }
 
-        let entry = self.default_and_assigned.entry(column).or_default();
+        let index = match self
+            .default_and_assigned
+            .iter()
+            .position(|(assigned_column, _)| *assigned_column == column)
+        {
+            Some(index) => index,
+            None => {
+                self.default_and_assigned.push((column, Default::default()));
+                self.default_and_assigned.len() - 1
+            }
+        };
+        let entry = &mut self.default_and_assigned[index].1;
 
         let mut value = Value::unknown();
         self.cs.assign_fixed(
@@ -116,7 +134,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F>
 }
 
 pub(crate) fn compute_table_lengths<F: Debug>(
-    default_and_assigned: &HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
+    default_and_assigned: &[TableColumnAssignment<F>],
 ) -> Result<usize, Error> {
     let column_lengths: Result<Vec<_>, Error> = default_and_assigned
         .iter()
