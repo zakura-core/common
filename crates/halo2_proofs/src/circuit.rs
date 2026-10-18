@@ -168,6 +168,18 @@ where
         A: Fn() -> AR,
         AR: Into<String>,
     {
+        // Erase the annotation so the copy is compiled once per value type
+        // rather than once per call site.
+        self.copy_advice_annotated(&|| annotation().into(), region, column, offset)
+    }
+
+    fn copy_advice_annotated(
+        &self,
+        annotation: &dyn Fn() -> String,
+        region: &mut Region<'_, F>,
+        column: Column<Advice>,
+        offset: usize,
+    ) -> Result<Self, Error> {
         let assigned_cell =
             region.assign_advice(annotation, column, offset, || self.value.clone())?;
         region.constrain_equal(assigned_cell.cell(), self.cell())?;
