@@ -24,6 +24,7 @@ pub mod constants;
 pub(crate) mod layout_dump;
 pub(super) mod mul;
 pub(super) mod mul_fixed;
+pub(crate) mod projective;
 pub(super) mod witness_point;
 
 pub use constants::*;
