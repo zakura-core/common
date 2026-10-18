@@ -10,6 +10,16 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc1] - 2026-10-18
+
+### Changed
+
+- Proof creation now compiles the halo2 prover once inside `zakura-orchard`
+  instead of in every crate that creates proofs, once per RNG type. Public
+  signatures and proof bytes are unchanged; a downstream caller's LLVM IR for
+  proof creation drops from about 1M lines to about 8k
+  ([#596](https://github.com/zakura-core/common/pull/596)).
+
 ## [4.0.0-rc0] - 2026-10-17
 
 ### Added
