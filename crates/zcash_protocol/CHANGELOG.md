@@ -10,6 +10,16 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc1] - 2026-10-18
+
+### Added
+
+- Added network-aware block spacing and anchor grids for ZIP 318, preserving reference durations across NU7 activation ([#593](https://github.com/zakura-core/common/pull/593)).
+
+### Changed
+
+- Scaled ZIP 318 anchor boundaries and rolling expiry by the NU7 spacing ratio. Pool-migration constants and the expiry function now require block spacing, and boundary methods belong to the anchor grid ([#593](https://github.com/zakura-core/common/pull/593)).
+
 ## [4.0.0-rc0] - 2026-10-17
 
 ### Removed

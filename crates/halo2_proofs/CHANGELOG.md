@@ -10,6 +10,21 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc1] - 2026-10-18
+
+### Changed
+
+- `plonk::create_proof` now compiles its circuit-independent proving body
+  once per curve and transcript instead of once per circuit type, so crates
+  that prove several circuit types emit one copy of the prover. The API and
+  proof bytes are unchanged
+  ([#600](https://github.com/zakura-core/common/pull/600)).
+- Key generation and proof creation now synthesize circuits against one
+  internal assignment backend, so each circuit's synthesis code is compiled
+  once instead of once per backend. Backend calls remain statically
+  dispatched; the API and proof bytes are unchanged
+  ([#601](https://github.com/zakura-core/common/pull/601)).
+
 ## [4.0.0-rc0] - 2026-10-17
 
 ### Removed
