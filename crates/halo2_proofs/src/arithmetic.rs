@@ -616,6 +616,12 @@ pub(crate) fn batch_invert_multi<F: Field>(values: &mut [F]) {
 /// performed over a mutable slice.
 
 pub fn parallelize<T: Send, F: Fn(&mut [T], usize) + Send + Sync + Clone>(v: &mut [T], f: F) {
+    // The scheduling below is compiled once per element type rather than once
+    // per closure; `f` is called indirectly once per chunk.
+    parallelize_dyn(v, &f);
+}
+
+fn parallelize_dyn<T: Send>(v: &mut [T], f: &(dyn Fn(&mut [T], usize) + Sync)) {
     let n = v.len();
     let num_threads = multicore::current_num_threads();
     let mut chunk = n / num_threads;
@@ -625,7 +631,6 @@ pub fn parallelize<T: Send, F: Fn(&mut [T], usize) + Send + Sync + Clone>(v: &mu
 
     multicore::scope(|scope| {
         for (chunk_num, v) in v.chunks_mut(chunk).enumerate() {
-            let f = f.clone();
             scope.spawn(move |_| {
                 let start = chunk_num * chunk;
                 f(v, start);
