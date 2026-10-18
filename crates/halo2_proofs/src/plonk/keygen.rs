@@ -18,6 +18,7 @@ use super::{
         Selector,
     },
     permutation,
+    synthesis_backend::SynthesisBackend,
 };
 use crate::{
     arithmetic::{CurveAffine, best_multiexp},
@@ -104,7 +105,7 @@ where
 
 /// Assembly to be used in circuit synthesis.
 #[derive(Debug)]
-struct Assembly<F: Field> {
+pub(super) struct Assembly<F: Field> {
     k: u32,
     fixed: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
     permutation: permutation::keygen::Assembly,
@@ -428,7 +429,7 @@ where
 
     // Synthesize the circuit to obtain URS
     ConcreteCircuit::FloorPlanner::synthesize(
-        &mut assembly,
+        &mut SynthesisBackend::Keygen(&mut assembly),
         circuit,
         config,
         cs.constants.clone(),
@@ -507,7 +508,7 @@ where
 
     // Synthesize the circuit to obtain URS and retain reusable planning data.
     let floor_plan = ConcreteCircuit::FloorPlanner::synthesize_batch(
-        core::slice::from_mut(&mut assembly),
+        &mut [SynthesisBackend::Keygen(&mut assembly)],
         core::slice::from_ref(circuit),
         config,
         &cs.constants,

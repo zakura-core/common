@@ -21,6 +21,7 @@ use super::{
 
 #[cfg(test)]
 use super::circuit::FloorPlan;
+use super::synthesis_backend::SynthesisBackend;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 #[cfg(feature = "batch")]
 use crate::{
@@ -836,7 +837,7 @@ fn prepare_nested_permutation_sets_in_parallel<C: CurveAffine>(
         )
 }
 
-struct WitnessCollection<'a, F: Field> {
+pub(super) struct WitnessCollection<'a, F: Field> {
     k: u32,
     advice: AdviceWitness<F>,
     instances: &'a [&'a [F]],
@@ -1076,8 +1077,9 @@ where
 
         // Synthesize every circuit while allowing its floor planner to share
         // circuit-shape-dependent work across the batch.
+        let mut backends: Vec<_> = witnesses.iter_mut().map(SynthesisBackend::Prove).collect();
         ConcreteCircuit::FloorPlanner::synthesize_batch(
-            witnesses,
+            &mut backends,
             circuits,
             config,
             &pk.vk.cs.constants,
