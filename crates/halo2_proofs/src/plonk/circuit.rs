@@ -1393,11 +1393,24 @@ impl<F: Field> ConstraintSystem<F> {
         let queried_selectors = cells.queried_selectors;
         let queried_cells = cells.queried_cells;
 
-        let (constraint_names, polys): (_, Vec<_>) = constraints
-            .into_iter()
-            .map(|c| c.into())
-            .map(|c| (c.name, c.poly))
-            .unzip();
+        // Only the gate's own expressions are compiled per call site; the
+        // shared bookkeeping below is erased behind the iterator.
+        self.push_gate(
+            name,
+            &mut constraints.into_iter().map(Into::into),
+            queried_selectors,
+            queried_cells,
+        );
+    }
+
+    fn push_gate(
+        &mut self,
+        name: &'static str,
+        constraints: &mut dyn Iterator<Item = Constraint<F>>,
+        queried_selectors: Vec<Selector>,
+        queried_cells: Vec<VirtualCell>,
+    ) {
+        let (constraint_names, polys): (_, Vec<_>) = constraints.map(|c| (c.name, c.poly)).unzip();
 
         assert!(
             !polys.is_empty(),
