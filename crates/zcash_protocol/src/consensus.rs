@@ -19,11 +19,25 @@ pub struct BlockHeight(u32);
 /// The height of the genesis block on a network.
 pub const H0: BlockHeight = BlockHeight(0);
 
-/// The target time between blocks, in seconds (the post-Blossom target spacing).
-pub const SECONDS_PER_BLOCK: u32 = 75;
+/// The target time between blocks, in seconds, after Blossom and before NU7.
+pub const PRE_NU7_SECONDS_PER_BLOCK: u32 = 75;
 
-/// The approximate number of blocks produced per hour at [`SECONDS_PER_BLOCK`].
-pub const BLOCKS_PER_HOUR: u32 = 3600 / SECONDS_PER_BLOCK;
+/// The approximate number of blocks produced per hour at [`PRE_NU7_SECONDS_PER_BLOCK`].
+pub const PRE_NU7_BLOCKS_PER_HOUR: u32 = 3600 / PRE_NU7_SECONDS_PER_BLOCK;
+
+/// The factor by which NU7 divides the target block spacing, from 75 seconds to 25 seconds
+/// ([ZIP 218]'s `NU7PoWTargetSpacingRatio`).
+///
+/// A duration that spans `n` blocks before NU7 activation spans `n` times this ratio after it.
+///
+/// [ZIP 218]: https://zips.z.cash/zip-0218
+pub const NU7_POW_TARGET_SPACING_RATIO: u32 = 3;
+
+/// The target time between blocks, in seconds, from NU7 activation.
+pub const NU7_SECONDS_PER_BLOCK: u32 = PRE_NU7_SECONDS_PER_BLOCK / NU7_POW_TARGET_SPACING_RATIO;
+
+/// The approximate number of blocks produced per hour from NU7 activation.
+pub const NU7_BLOCKS_PER_HOUR: u32 = PRE_NU7_BLOCKS_PER_HOUR * NU7_POW_TARGET_SPACING_RATIO;
 
 impl BlockHeight {
     pub const fn from_u32(v: u32) -> BlockHeight {
@@ -966,6 +980,15 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn block_time_constants_match_zip218() {
+        assert_eq!(super::PRE_NU7_SECONDS_PER_BLOCK, 75);
+        assert_eq!(super::PRE_NU7_BLOCKS_PER_HOUR, 48);
+        assert_eq!(super::NU7_POW_TARGET_SPACING_RATIO, 3);
+        assert_eq!(super::NU7_SECONDS_PER_BLOCK, 25);
+        assert_eq!(super::NU7_BLOCKS_PER_HOUR, 144);
+    }
+
     use super::{
         BlockHeight, BranchId, MAIN_NETWORK, Network, NetworkUpgrade, Parameters, TEST_NETWORK,
         UPGRADES_IN_ORDER,
