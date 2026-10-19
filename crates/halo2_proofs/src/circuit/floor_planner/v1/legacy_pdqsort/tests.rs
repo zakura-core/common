@@ -5,7 +5,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn sort_unstable() {
     // MODIFIED: test the implementations in this crate.
-    use crate::sort::{heapsort, quicksort};
+    use super::{heapsort, quicksort};
     use rand::{RngExt, SeedableRng, prelude::IndexedRandom, rngs::StdRng};
 
     // Miri is too slow (but still need to `chain` to make the types match)
@@ -81,4 +81,11 @@ fn sort_unstable() {
     // MODIFIED: test quicksort directly rather than via the slice API.
     quicksort(&mut v, |a, b| a < b);
     assert!(v == [0xDEADBEEF]);
+}
+
+#[test]
+fn quicksort_basic() {
+    let mut a = [3i32, 2, 1];
+    super::quicksort(&mut a, i32::lt);
+    assert_eq!(a, [1, 2, 3]);
 }

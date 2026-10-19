@@ -23,8 +23,8 @@
 # or a registry copy will silently coexist with the workspace crates.
 #
 # - equihash: proof-of-work verification and the optional Tromp CPU solver.
-# - pasta_curves, halo2_proofs, halo2_gadgets, halo2_poseidon,
-#   halo2_legacy_pdqsort, orchard: the proving stack itself.
+# - pasta_curves, halo2_proofs, halo2_gadgets, halo2_poseidon, orchard: the
+#   proving stack itself.
 # - pairing, bls12_381, jubjub, bellman: the shared pairing and Groth16
 #   foundation used by the Sapling proving stack.
 # - sinsemilla, reddsa, redjubjub, sapling-crypto, zcash_proofs: the middle
@@ -57,7 +57,6 @@ members = [
     "crates/bls12_381",
     "crates/equihash",
     "crates/halo2_gadgets",
-    "crates/halo2_legacy_pdqsort",
     "crates/halo2_poseidon",
     "crates/halo2_proofs",
     "crates/jubjub",
@@ -113,7 +112,6 @@ bento-macros = { package = "zakura-bento-macros", version = "0.1.0", path = "cra
 bls12_381 = { package = "zakura-bls12-381", version = "4.0.0-rc2", path = "crates/bls12_381", default-features = false }
 equihash = { package = "zakura-equihash", version = "4.0.0-rc2", path = "crates/equihash", default-features = false }
 halo2_gadgets = { package = "zakura-halo2-gadgets", version = "4.0.0-rc2", path = "crates/halo2_gadgets", default-features = false }
-halo2_legacy_pdqsort = { package = "zakura-halo2-legacy-pdqsort", version = "4.0.0-rc2", path = "crates/halo2_legacy_pdqsort", default-features = false }
 halo2_poseidon = { package = "zakura-halo2-poseidon", version = "4.0.0-rc2", path = "crates/halo2_poseidon", default-features = false }
 halo2_proofs = { package = "zakura-halo2-proofs", version = "4.0.0-rc2", path = "crates/halo2_proofs", default-features = false }
 jubjub = { package = "zakura-jubjub", version = "4.0.0-rc2", path = "crates/jubjub", default-features = false }

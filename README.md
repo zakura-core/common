@@ -31,7 +31,6 @@ This repository contains the Zakura Common libraries: the foundational Rust crat
 - [`zakura-halo2-proofs`](crates/halo2_proofs) (forked from [`halo2_proofs 0.3.5`](https://github.com/zcash/halo2/tree/8e22adbdce480e5db7625df56aff9c2c8ca79f8f/halo2_proofs))
 - [`zakura-halo2-gadgets`](crates/halo2_gadgets) (forked from [`halo2_gadgets 0.5.0`](https://github.com/zcash/halo2/tree/d751768afe0d2105b349dd93f73fde7f2eade088/halo2_gadgets))
 - [`zakura-halo2-poseidon`](crates/halo2_poseidon) (forked from [`halo2_poseidon 0.1.0`](https://github.com/zcash/halo2/tree/f066ace1f234d7fe1908851ed86b1801e0b1ffea/halo2_poseidon))
-- [`zakura-halo2-legacy-pdqsort`](crates/halo2_legacy_pdqsort) (forked from [`halo2_legacy_pdqsort 0.1.0`](https://github.com/zcash/halo2_legacy_pdqsort/tree/c3b69083adcc5ab63d02ffbbc716ee19bdcdc81f))
 
 ## Curves, hashes, and signatures
 

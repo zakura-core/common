@@ -72,8 +72,8 @@ pending fragments instead of a PR-owned fragment.
 dependencies against crates.io, so a crate cannot even be packaged until its
 workspace dependencies are published at the new version. Publish bottom-up:
 
-1. `zakura-equihash`, `zakura-halo2-legacy-pdqsort`, `zakura-pairing`,
-   `zakura-pasta-curves`, `zakura-protocol`, `zakura-note-encryption`
+1. `zakura-equihash`, `zakura-pairing`, `zakura-pasta-curves`,
+   `zakura-protocol`, `zakura-note-encryption`
 2. `zakura-bls12-381`, `zakura-jubjub`, `zakura-address`
 3. `zakura-bellman`, `zakura-reddsa`, `zakura-sinsemilla`,
    `zakura-halo2-poseidon`, then `zakura-halo2-proofs`,

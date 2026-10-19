@@ -52,9 +52,6 @@ audit-as-crates-io = false
 [policy.zakura-halo2-gadgets]
 audit-as-crates-io = false
 
-[policy.zakura-halo2-legacy-pdqsort]
-audit-as-crates-io = false
-
 [policy.zakura-halo2-poseidon]
 audit-as-crates-io = false
 

@@ -22,6 +22,9 @@ use crate::{
     },
 };
 
+#[cfg(feature = "floor-planner-v1-legacy-pdqsort")]
+#[allow(unsafe_code)]
+mod legacy_pdqsort;
 mod strategy;
 
 /// The version 1 [`FloorPlanner`] provided by `halo2`.

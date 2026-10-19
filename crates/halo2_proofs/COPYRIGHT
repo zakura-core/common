@@ -23,3 +23,15 @@ notices are preserved below:
 
   Copyright (c) 2020-2022 The Electric Coin Company
   Copyright (c) 2022 The Halo 2 developers
+
+==============================================================================
+
+The `circuit::floor_planner::v1::legacy_pdqsort` module was previously the
+"zakura-halo2-legacy-pdqsort" crate, which began as a fork of the
+"halo2_legacy_pdqsort" crate. That crate is a copy of the `core::slice::sort`
+module from the Rust 1.56.1 standard library (Copyright (c) The Rust Project
+Developers, licensed under Apache-2.0 or MIT). The original copyright notices
+are preserved below:
+
+  Copyright (c) 2023 The Electric Coin Company
+  Copyright (c) 2023 The Halo 2 developers

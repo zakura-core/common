@@ -227,7 +227,7 @@ pub fn slot_in_biggest_advice_first(
     // to its behaviour on 64-bit platforms.
     // https://github.com/rust-lang/rust/blob/1.56.1/library/core/src/slice/mod.rs#L2365-L2402
     #[cfg(feature = "floor-planner-v1-legacy-pdqsort")]
-    halo2_legacy_pdqsort::sort::quicksort(&mut sorted_regions, |a, b| sort_key(a).lt(&sort_key(b)));
+    super::legacy_pdqsort::quicksort(&mut sorted_regions, |a, b| sort_key(a).lt(&sort_key(b)));
 
     sorted_regions.reverse();
 

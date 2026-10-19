@@ -72,7 +72,6 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-pairing`
 - `zakura-equihash`
 - `zakura-pasta-curves`
-- `zakura-halo2-legacy-pdqsort`
 - `zakura-note-encryption`
 - `zakura-address`
 - `zakura-bls12-381`
