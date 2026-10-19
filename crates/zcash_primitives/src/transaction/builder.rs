@@ -53,9 +53,63 @@ use core::convert::Infallible;
 
 use super::components::sapling::zip212_enforcement;
 
-/// Since Blossom activation, the default transaction expiry delta should be 40 blocks.
+/// The default transaction expiry delta before NU7.
+/// Use [`default_tx_expiry_delta`] for height-aware construction.
 /// <https://zips.z.cash/zip-0203#changes-for-blossom>
-pub const DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
+pub const PRE_NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
+
+/// The default expiry delta from NU7, scaled by the block-spacing ratio to preserve
+/// approximately 50 minutes.
+pub const NU7_DEFAULT_TX_EXPIRY_DELTA: u32 =
+    consensus::NU7_POW_TARGET_SPACING_RATIO * PRE_NU7_DEFAULT_TX_EXPIRY_DELTA;
+
+/// Returns the ordinary transaction expiry delta at the candidate inclusion height.
+/// Explicit expiry overrides and coinbase expiry are independent of this default.
+pub fn default_tx_expiry_delta<P: consensus::Parameters>(
+    params: &P,
+    target_height: BlockHeight,
+) -> u32 {
+    if params.is_nu_active(consensus::NetworkUpgrade::Nu7, target_height) {
+        NU7_DEFAULT_TX_EXPIRY_DELTA
+    } else {
+        PRE_NU7_DEFAULT_TX_EXPIRY_DELTA
+    }
+}
+
+/// Checks the NU7 per-transaction shielded budget using final, padded bundle counts.
+/// Each Sapling spend/output and each Orchard/Ironwood action costs one unit.
+/// This construction policy prevents transactions that cannot fit in any NU7 block.
+pub fn check_shielded_budget<P: consensus::Parameters>(
+    params: &P,
+    target_height: BlockHeight,
+    sapling_spends: usize,
+    sapling_outputs: usize,
+    orchard_actions: usize,
+    ironwood_actions: usize,
+) -> Result<(), &'static str> {
+    if !params.is_nu_active(consensus::NetworkUpgrade::Nu7, target_height) {
+        return Ok(());
+    }
+    let sapling = sapling_spends
+        .checked_add(sapling_outputs)
+        .ok_or("Sapling count overflow")?;
+    if sapling > consensus::NU7_SAPLING_BLOCK_IO_LIMIT {
+        return Err("NU7 Sapling spends plus outputs exceed the per-pool limit");
+    }
+    if orchard_actions > consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT
+        || ironwood_actions > consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT
+    {
+        return Err("NU7 Orchard or Ironwood actions exceed the per-pool limit");
+    }
+    if sapling
+        .checked_add(orchard_actions)
+        .and_then(|n| n.checked_add(ironwood_actions))
+        .is_none_or(|n| n > consensus::NU7_GLOBAL_SHIELDED_BUDGET)
+    {
+        return Err("NU7 combined shielded budget exceeds the block limit");
+    }
+    Ok(())
+}
 
 /// Errors that can occur during fee calculation.
 #[derive(Debug)]
@@ -511,12 +565,13 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
             orchard::bundle::TxVersion::V6,
         )
         .map_err(Error::IronwoodBuild)?;
+        let expiry_height = target_height + default_tx_expiry_delta(&params, target_height);
         Ok(DeferredPcztBuilder {
             params,
             tx_version,
             consensus_branch_id,
             target_height,
-            expiry_height: target_height + DEFAULT_TX_EXPIRY_DELTA,
+            expiry_height,
             orchard_builder,
             orchard_bundle_version,
             ironwood_builder,
@@ -625,6 +680,22 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
     /// spends and outputs added so far (each pool's action count includes the padding its
     /// bundle type prescribes).
     pub fn get_fee<FR: FeeRule>(&self, fee_rule: &FR) -> Result<Zatoshis, FeeError<FR::Error>> {
+        check_shielded_budget(
+            &self.params,
+            self.target_height,
+            // This builder supports only Orchard and Ironwood, so both Sapling counts are zero.
+            0,
+            0,
+            orchard_action_count(&self.orchard_builder, false, self.orchard_bundle_version)
+                .map_err(FeeError::Bundle)?,
+            orchard_action_count(
+                &self.ironwood_builder,
+                false,
+                orchard::bundle::BundleVersion::ironwood_v3(),
+            )
+            .map_err(FeeError::Bundle)?,
+        )
+        .map_err(FeeError::Bundle)?;
         fee_rule
             .fee_required(
                 &self.params,
@@ -932,7 +1003,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
     /// # Default values
     ///
     /// The expiry height will be set to the given height plus the default transaction
-    /// expiry delta (20 blocks).
+    /// expiry delta (40 blocks before NU7; 120 blocks from NU7).
     pub fn new(params: P, target_height: BlockHeight, build_config: BuildConfig) -> Self {
         let consensus_branch_id = BranchId::for_height(&params, target_height);
         // Historical bundle versions remain available to readers; construction
@@ -975,7 +1046,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         let expiry_height = if build_config.is_coinbase() {
             target_height
         } else {
-            target_height + DEFAULT_TX_EXPIRY_DELTA
+            target_height + default_tx_expiry_delta(&params, target_height)
         };
 
         Builder {
@@ -1252,6 +1323,37 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
             .map_err(Error::TransparentBuild)
     }
 
+    fn check_shielded_budget(&self) -> Result<(), &'static str> {
+        let (spends, outputs) = self
+            .sapling_builder
+            .as_ref()
+            .zip(self.build_config.sapling_builder_config())
+            .map_or(Ok::<_, &'static str>((0, 0)), |(b, (kind, _))| {
+                Ok((
+                    kind.num_spends(b.inputs().len())?,
+                    kind.num_outputs(b.inputs().len(), b.outputs().len())?,
+                ))
+            })?;
+        let count = |builder: &orchard::builder::Builder, version| {
+            orchard_action_count(builder, self.build_config.is_coinbase(), version)
+        };
+        check_shielded_budget(
+            &self.params,
+            self.target_height,
+            spends,
+            outputs,
+            self.orchard_builder.as_ref().map_or(Ok(0), |b| {
+                count(
+                    b,
+                    self.orchard_bundle_version.expect("builder has a version"),
+                )
+            })?,
+            self.ironwood_builder.as_ref().map_or(Ok(0), |b| {
+                count(b, orchard::bundle::BundleVersion::ironwood_v3())
+            })?,
+        )
+    }
+
     /// Returns the sum of the transparent, Sapling, Orchard, and Ironwood value balances.
     #[cfg(any(feature = "circuits", feature = "pczt"))]
     fn value_balance(&self) -> Result<ZatBalance, BalanceError> {
@@ -1291,6 +1393,7 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
     /// This fee is a function of the spends and outputs that have been added to the builder,
     /// pursuant to the specified [`FeeRule`].
     pub fn get_fee<FR: FeeRule>(&self, fee_rule: &FR) -> Result<Zatoshis, FeeError<FR::Error>> {
+        self.check_shielded_budget().map_err(FeeError::Bundle)?;
         #[cfg(feature = "transparent-inputs")]
         let transparent_inputs = self.transparent_builder.inputs();
 
@@ -1487,6 +1590,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
     {
         self.check_version_compatibility::<FE>(self.tx_version)?;
         self.check_coinbase_expiry_height::<FE>()?;
+        self.check_shielded_budget()
+            .map_err(|e| Error::Fee(FeeError::Bundle(e)))?;
 
         //
         // Consistency checks
@@ -1932,7 +2037,9 @@ mod tests {
 
     #[cfg(feature = "transparent-inputs")]
     use {
-        crate::transaction::{OutPoint, TxOut, TxVersion, builder::DEFAULT_TX_EXPIRY_DELTA},
+        crate::transaction::{
+            OutPoint, TxOut, TxVersion, builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA,
+        },
         ::transparent::keys::{AccountPrivKey, IncomingViewingKey},
         zcash_protocol::consensus::BranchId,
         zip32::AccountId,
@@ -1946,6 +2053,241 @@ mod tests {
         not(feature = "transparent-inputs")
     ))]
     use {crate::transaction::TxVersion, zcash_protocol::consensus::BranchId};
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_shielded_budget_boundaries() {
+        // Pin the ZIP 218 limits independently of the constants used by the checker.
+        assert_eq!(zcash_protocol::consensus::NU7_SAPLING_BLOCK_IO_LIMIT, 300);
+        assert_eq!(
+            zcash_protocol::consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT,
+            330
+        );
+        assert_eq!(zcash_protocol::consensus::NU7_GLOBAL_SHIELDED_BUDGET, 330);
+        let params = nu7_test_network();
+        let activation = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        for counts in [
+            (298, 2, 30, 0),
+            (0, 0, 330, 0),
+            (0, 0, 0, 330),
+            (0, 0, 165, 165),
+        ] {
+            assert!(
+                super::check_shielded_budget(
+                    &params, activation, counts.0, counts.1, counts.2, counts.3
+                )
+                .is_ok()
+            );
+        }
+        for counts in [
+            (299, 2, 0, 0),
+            (0, 0, 331, 0),
+            (0, 0, 0, 331),
+            (0, 0, 200, 200),
+            (298, 2, 30, 1),
+            (usize::MAX, 1, 0, 0),
+        ] {
+            assert!(
+                super::check_shielded_budget(
+                    &params, activation, counts.0, counts.1, counts.2, counts.3
+                )
+                .is_err()
+            );
+            assert!(
+                super::check_shielded_budget(
+                    &params,
+                    activation - 1,
+                    counts.0,
+                    counts.1,
+                    counts.2,
+                    counts.3
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", feature = "pczt"))]
+    fn nu7_budget_rejects_real_padded_builders_before_funding_or_proofs() {
+        let params = nu7_test_network();
+        let height = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        let recipient = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        )
+        .address_at(0u32, orchard::keys::Scope::External);
+        let config = BuildConfig::Standard {
+            sapling_anchor: Some(sapling::Anchor::empty_tree()),
+            orchard_anchor: Some(orchard::Anchor::empty_tree()),
+            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+            orchard_padding: BundlePadding::DEFAULT,
+            ironwood_padding: BundlePadding::DEFAULT,
+        };
+        let mut builder = Builder::new(params, height, config);
+        let mut deferred = super::DeferredPcztBuilder::new::<Infallible>(
+            params,
+            height,
+            BundlePadding::DEFAULT,
+            BundlePadding::DEFAULT,
+        )
+        .unwrap();
+        for _ in 0..329 {
+            builder
+                .add_ironwood_output::<Infallible>(
+                    None,
+                    recipient,
+                    Zatoshis::ZERO,
+                    MemoBytes::empty(),
+                )
+                .unwrap();
+            deferred
+                .add_ironwood_output::<Infallible>(
+                    None,
+                    recipient,
+                    Zatoshis::ZERO,
+                    MemoBytes::empty(),
+                )
+                .unwrap();
+        }
+        assert!(builder.check_shielded_budget().is_ok());
+        // One real Orchard output pads to two actions: 329 + 2 exceeds 330.
+        // V3 Orchard outputs cannot create value, so use a zero-valued change output.
+        let fvk = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        );
+        builder
+            .add_orchard_change_output::<Infallible>(
+                fvk,
+                None,
+                recipient,
+                Zatoshis::ZERO,
+                MemoBytes::empty(),
+            )
+            .unwrap();
+        // A second Ironwood output takes the deferred builder past its limit.
+        for _ in 0..2 {
+            deferred
+                .add_ironwood_output::<Infallible>(
+                    None,
+                    recipient,
+                    Zatoshis::ZERO,
+                    MemoBytes::empty(),
+                )
+                .unwrap();
+        }
+        assert!(builder.check_shielded_budget().is_err());
+        let fee = crate::transaction::fees::zip317::FeeRule::standard();
+        assert!(matches!(
+            builder.build_for_pczt(thread_rng(), &fee),
+            Err(Error::Fee(super::FeeError::Bundle(_)))
+        ));
+        assert!(matches!(
+            deferred.build_for_pczt(thread_rng(), &fee),
+            Err(Error::Fee(super::FeeError::Bundle(_)))
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_sapling_budget_rejects_ordinary_coinbase_before_proving() {
+        let params = nu7_test_network();
+        let height = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        let mut builder = Builder::new(params, height, BuildConfig::Coinbase { miner_data: None });
+        let recipient = ExtendedSpendingKey::master(&[0; 32]).default_address().1;
+        for _ in 0..300 {
+            builder
+                .add_sapling_output::<Infallible>(
+                    None,
+                    recipient,
+                    Zatoshis::ZERO,
+                    MemoBytes::empty(),
+                )
+                .unwrap();
+        }
+        assert!(builder.check_shielded_budget().is_ok());
+        builder
+            .add_sapling_output::<Infallible>(None, recipient, Zatoshis::ZERO, MemoBytes::empty())
+            .unwrap();
+        assert!(matches!(
+            builder.mock_build(&TransparentSigningSet::new(), &[], &[], thread_rng()),
+            Err(Error::Fee(super::FeeError::Bundle(_)))
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_default_expiry_uses_target_height() {
+        // Pin the ZIP 218 value independently of the ratio used by the constant.
+        assert_eq!(super::NU7_DEFAULT_TX_EXPIRY_DELTA, 120);
+        let params = nu7_test_network();
+        let activation = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        for (target, delta) in [
+            (activation - 1, 40),
+            (activation, 120),
+            (activation + 1, 120),
+        ] {
+            let builder = Builder::new(
+                params,
+                target,
+                BuildConfig::Standard {
+                    sapling_anchor: None,
+                    orchard_anchor: None,
+                    ironwood_anchor: None,
+                    orchard_padding: BundlePadding::DEFAULT,
+                    ironwood_padding: BundlePadding::DEFAULT,
+                },
+            );
+            assert_eq!(builder.expiry_height, target + delta);
+            let explicit = builder.with_expiry_height(target + 7);
+            assert_eq!(explicit.expiry_height, target + 7);
+            #[cfg(feature = "pczt")]
+            {
+                let deferred = super::DeferredPcztBuilder::new::<Infallible>(
+                    params,
+                    target,
+                    BundlePadding::DEFAULT,
+                    BundlePadding::DEFAULT,
+                )
+                .unwrap();
+                assert_eq!(deferred.expiry_height, target + delta);
+                assert_eq!(
+                    deferred.with_expiry_height(target + 9).expiry_height,
+                    target + 9
+                );
+            }
+            let coinbase = Builder::new(params, target, BuildConfig::Coinbase { miner_data: None });
+            assert_eq!(coinbase.expiry_height, target);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_default_expiry_without_activation() {
+        use zcash_protocol::consensus::BlockHeight;
+
+        let params = nu6_3_test_network();
+        assert_eq!(params.activation_height(NetworkUpgrade::Nu7), None);
+        assert_eq!(
+            super::default_tx_expiry_delta(&params, BlockHeight::from_u32(u32::MAX)),
+            40
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_default_expiry_at_testnet_boundary() {
+        let activation = TEST_NETWORK.activation_height(NetworkUpgrade::Nu7).unwrap();
+        for (target, expected_delta) in [
+            (activation - 1, 40),
+            (activation, 120),
+            (activation + 1, 120),
+        ] {
+            assert_eq!(
+                super::default_tx_expiry_delta(&TEST_NETWORK, target),
+                expected_delta
+            );
+        }
+    }
 
     #[cfg(feature = "circuits")]
     fn nu6_3_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
@@ -2648,7 +2990,7 @@ mod tests {
                 ironwood_padding: BundlePadding::DEFAULT,
             },
             target_height: sapling_activation_height,
-            expiry_height: sapling_activation_height + DEFAULT_TX_EXPIRY_DELTA,
+            expiry_height: sapling_activation_height + PRE_NU7_DEFAULT_TX_EXPIRY_DELTA,
             transparent_builder: TransparentBuilder::empty(),
             sapling_builder: None,
             orchard_builder: None,
