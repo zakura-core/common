@@ -991,3 +991,250 @@ fn large_alpha_batches_match_independent_multiplication() {
         check::<Vesta>(width);
     }
 }
+
+#[test]
+fn alpha_fragmented_digit_views_match_reference() {
+    use crate::msm::{kernels, storage::Storage};
+    use core::{cell::Cell, ops::Range};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Contiguous {
+        Fragments(usize),
+        CodesOnly,
+        Never,
+    }
+
+    #[derive(Default)]
+    struct Accesses {
+        large: Cell<usize>,
+        codes: Cell<usize>,
+        indexed: Cell<usize>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct Digits<'a> {
+        bytes: &'a [u8],
+        start: usize,
+        len: usize,
+        contiguous: Contiguous,
+        accesses: &'a Accesses,
+    }
+
+    impl Storage<u8> for Digits<'_> {
+        fn len(self) -> usize {
+            self.len
+        }
+        fn get(self, index: usize) -> u8 {
+            assert!(index < self.len);
+            self.accesses.indexed.set(self.accesses.indexed.get() + 1);
+            self.bytes[self.start + index]
+        }
+        fn slice(self, range: Range<usize>) -> Self {
+            assert!(range.start <= range.end && range.end <= self.len);
+            Self {
+                start: self.start + range.start,
+                len: range.len(),
+                ..self
+            }
+        }
+        fn contiguous(&self) -> Option<&[u8]> {
+            let available = match self.contiguous {
+                Contiguous::Fragments(grain) => {
+                    self.len == 0 || self.start / grain == (self.start + self.len - 1) / grain
+                }
+                Contiguous::CodesOnly => self.len <= 4,
+                Contiguous::Never => false,
+            };
+            available.then(|| {
+                let counter = if self.len > 4 {
+                    &self.accesses.large
+                } else {
+                    &self.accesses.codes
+                };
+                counter.set(counter.get() + 1);
+                &self.bytes[self.start..self.start + self.len]
+            })
+        }
+    }
+
+    fn check<C: PastaCurve>() {
+        const TERMS: usize = 257;
+        const OFFSET: usize = 512;
+        let g = AffinePoint::<C>::GENERATOR;
+        let affine: Vec<_> = (1..=19)
+            .map(|i| {
+                *g.mul_projective(&PastaField::from_u64(i))
+                    .to_point()
+                    .as_affine()
+                    .unwrap()
+            })
+            .collect();
+        let mut scalars: Vec<_> = field_samples::<C::Scalar>().take(TERMS).collect();
+        let mut indices: Vec<_> = (0..TERMS).map(|i| (i * 7 % affine.len()) as u32).collect();
+        for i in (0..TERMS - 3).step_by(11) {
+            scalars[i + 1] = scalars[i].neg();
+            indices[i + 1] = indices[i];
+            scalars[i + 2] = PastaField::ZERO;
+        }
+        // This oracle uses the independent binary scalar ladder on originals;
+        // it knows nothing about Alpha codes, fragments, passes, or buckets.
+        let expected =
+            reference(&Input::indexed(Bases::Affine(&affine), &indices, &scalars).unwrap());
+        let mut records = vec![ScalarStorage::ZERO; TERMS];
+        PreparedScalars::prepare(&scalars, &mut records, TaskBudget::SERIAL, &SerialExecutor);
+
+        for width in 5..=7 {
+            let description = AlphaDescription::new(width).unwrap();
+            let mut codes = vec![0; description.codes()];
+            let mut coefficients = vec![AlphaCoefficient::ZERO; description.layers()];
+            let book = AlphaCodebook::prepare(
+                description,
+                &mut codes,
+                &mut coefficients,
+                &mut vec![0; description.codebook_scratch()],
+            );
+            let r = description
+                .requirements::<C, AffinePoint<C>>(affine.len())
+                .unwrap();
+            let mut entries = vec![g; r.table_entries];
+            AlphaTable::prepare(
+                book,
+                &affine,
+                &mut entries,
+                &mut vec![ProjectivePoint::IDENTITY; r.projective_scratch],
+                &mut vec![PastaField::ZERO; r.field_scratch],
+                TaskBudget::SERIAL,
+                &SerialExecutor,
+            );
+            let prepared: Vec<_> = entries
+                .iter()
+                .map(PreparedAffinePoint::from_affine)
+                .collect();
+            let geometry = recode::Geometry::Alpha(width);
+            let stride = geometry.stride();
+            let prefix = recode::CHUNK * stride;
+            let digit_len = TERMS * stride;
+            let mut bytes = vec![0xa5; prefix + digit_len + 7];
+            recode::write_bases(
+                &records,
+                geometry,
+                &mut bytes[prefix..prefix + digit_len],
+                Bases::Alpha(AlphaTable::bind(book, &entries)),
+            );
+
+            for bases in [
+                Bases::Alpha(AlphaTable::bind(book, &entries)),
+                Bases::AlphaPrepared(AlphaTable::bind(book, &prepared)),
+            ] {
+                let local_indices = indices.as_slice();
+                let input = kernels::BaseView {
+                    bases,
+                    indices: Some(kernels::Indices::Fragment {
+                        view: &local_indices,
+                        offset: OFFSET,
+                    }),
+                };
+                for pass in [TERMS, 255, 127] {
+                    let arithmetic = ArithmeticOptions::DEFAULT
+                        .with_algorithm(Algorithm::Alpha {
+                            accumulation: Accumulation::Affine,
+                        })
+                        .unwrap()
+                        .with_max_terms_per_pass(NonZeroUsize::new(pass));
+                    let work =
+                        super::super::schedule::fixed_geometry::<C>(TERMS, geometry, arithmetic)
+                            .unwrap()
+                            .work;
+                    let mut points = vec![g; work.affine() + 1];
+                    let mut projective = vec![g.to_projective(); work.projective() + 1];
+                    let mut fields = vec![PastaField::<C::Base>::ONE; work.field() + 1];
+                    let mut cursors = vec![usize::MAX; work.indices() + 1];
+                    for contiguous in [
+                        Contiguous::Fragments(recode::CHUNK * stride),
+                        // Provider boundaries may split preparation rows and codes.
+                        Contiguous::Fragments(13 * stride + 2),
+                        Contiguous::CodesOnly,
+                        Contiguous::Never,
+                    ] {
+                        let accesses = Accesses::default();
+                        // A nonzero storage start must remain independent of the
+                        // absolute base/index offset and of partition-local digits.
+                        let digits = Digits {
+                            bytes: &bytes,
+                            start: 0,
+                            len: bytes.len(),
+                            contiguous,
+                            accesses: &accesses,
+                        }
+                        .slice(prefix..prefix + digit_len);
+                        let mut scratch = kernels::Work {
+                            affine: &mut points[..work.affine()],
+                            projective: &mut projective[..work.projective()],
+                            field: &mut fields[..work.field()],
+                            indices: &mut cursors[..work.indices()],
+                        };
+                        let mut result = ProjectivePoint::IDENTITY;
+                        for window in (0..geometry.windows()).rev() {
+                            let partial = kernels::run_selected(
+                                &input,
+                                records.as_slice(),
+                                digits,
+                                kernels::Task {
+                                    offset: OFFSET,
+                                    window,
+                                    pass,
+                                    geometry,
+                                    accumulation: Accumulation::Affine,
+                                },
+                                &mut scratch,
+                            );
+                            for _ in 0..geometry.width() {
+                                result = result.double();
+                            }
+                            result = result.add(&partial);
+                        }
+                        assert_eq!(
+                            result, expected,
+                            "width={width} pass={pass} provider={contiguous:?}"
+                        );
+                        match contiguous {
+                            Contiguous::Fragments(grain) if grain == recode::CHUNK * stride => {
+                                assert!(accesses.large.get() > 0, "exercise whole-fragment reads");
+                            }
+                            Contiguous::CodesOnly => {
+                                assert_eq!(accesses.large.get(), 0);
+                                assert!(
+                                    accesses.codes.get() > 0,
+                                    "exercise per-code contiguous fallback"
+                                );
+                            }
+                            Contiguous::Never => {
+                                assert_eq!(accesses.large.get() + accesses.codes.get(), 0);
+                                assert!(
+                                    accesses.indexed.get() > 0,
+                                    "exercise indexed-byte fallback"
+                                );
+                            }
+                            _ => (),
+                        }
+                        assert!(points[work.affine()] == g);
+                        assert!(projective[work.projective()] == g.to_projective());
+                        assert_eq!(
+                            fields[work.field()].montgomery_limbs(),
+                            PastaField::<C::Base>::ONE.montgomery_limbs()
+                        );
+                        assert_eq!(cursors[work.indices()], usize::MAX);
+                    }
+                }
+            }
+            assert!(
+                bytes[..prefix]
+                    .iter()
+                    .chain(&bytes[prefix + digit_len..])
+                    .all(|&b| b == 0xa5)
+            );
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
+}
