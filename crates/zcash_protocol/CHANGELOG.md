@@ -10,6 +10,12 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc2] - 2026-10-18
+
+### Added
+
+- Added named NU7 block limits for Sapling spends and outputs, Orchard-family actions, and the combined shielded budget ([#598](https://github.com/zakura-core/common/pull/598)).
+
 ## [4.0.0-rc1] - 2026-10-18
 
 ### Added

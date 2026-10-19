@@ -10,6 +10,18 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc2] - 2026-10-18
+
+### Added
+
+- Added height-aware default expiry and padded shielded budget helpers for downstream wallets ([#598](https://github.com/zakura-core/common/pull/598)).
+
+### Changed
+
+- Renamed `DEFAULT_TX_EXPIRY_DELTA` to `PRE_NU7_DEFAULT_TX_EXPIRY_DELTA`; use `default_tx_expiry_delta` for height-aware construction ([#598](https://github.com/zakura-core/common/pull/598)).
+- Default ordinary and deferred PCZT expiry to 120 blocks from the target height at NU7, preserving explicit overrides and coinbase expiry ([#598](https://github.com/zakura-core/common/pull/598)).
+- Reject ordinary, PCZT, and deferred construction when padded shielded bundles exceed the NU7 per-pool or combined block budget ([#598](https://github.com/zakura-core/common/pull/598)).
+
 ## [4.0.0-rc0] - 2026-10-17
 
 ### Added
