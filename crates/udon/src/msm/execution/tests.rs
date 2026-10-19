@@ -141,12 +141,12 @@ impl<T> ReadView<T> for Fragments<'_, T> {
             .get(range.start..range.end.min((range.start / 13 + 1) * 13))
     }
 }
-struct ProducedLease<'a, C: PastaCurve> {
+struct ProducedLease<'a, C: PastaCurve, I = Fragments<'a, u32>> {
     arithmetic: Lease<'a, C>,
     scalars: Fragments<'a, PastaField<C::Scalar>>,
-    indices: Fragments<'a, u32>,
+    indices: I,
 }
-impl<C: PastaCurve> Resources<C> for ProducedLease<'_, C> {
+impl<C: PastaCurve, I: ReadView<u32>> Resources<C> for ProducedLease<'_, C, I> {
     fn buffers(&mut self) -> Buffers<'_, C> {
         self.arithmetic.buffers()
     }
@@ -484,6 +484,191 @@ fn invalid_produced_sources_preserve_destinations_and_drain_admitted_tasks() {
         assert!(arena.acquire(first, &work).is_some());
         assert!(arena.acquire(second, &work).is_some());
     }
+}
+
+#[test]
+fn produced_index_prefixes_preserve_validation_before_writes() {
+    struct Indices<'a> {
+        values: &'a [u32],
+        prefix: Option<usize>,
+        missing: Option<usize>,
+    }
+    impl ReadView<u32> for Indices<'_> {
+        fn len(&self) -> usize {
+            self.values.len()
+        }
+        fn get(&self, index: usize) -> Option<&u32> {
+            self.values
+                .get(index)
+                .filter(|_| self.missing != Some(index))
+        }
+        fn contiguous_prefix(&self, range: core::ops::Range<usize>) -> Option<&[u32]> {
+            let width = self.prefix?;
+            if width == 0 {
+                return Some(&[]);
+            }
+            if range.end > self.len() || range.start > range.end {
+                return None;
+            }
+            self.values
+                .get(range.start..range.end.min((range.start / width + 1) * width))
+        }
+    }
+    fn projective_words<C: PastaCurve>(points: &[ProjectivePoint<C>]) -> Vec<[[u64; 4]; 3]> {
+        points
+            .iter()
+            .map(|point| {
+                let (x, y, z) = point.coordinates();
+                [
+                    x.montgomery_limbs(),
+                    y.montgomery_limbs(),
+                    z.montgomery_limbs(),
+                ]
+            })
+            .collect()
+    }
+    macro_rules! destinations {
+        ($buffers:expr) => {{
+            let buffers = $buffers;
+            (
+                buffers.scratch.scalars.to_vec(),
+                buffers.scratch.digits.to_vec(),
+                buffers.scratch.affine.to_vec(),
+                projective_words(buffers.scratch.projective),
+                buffers
+                    .scratch
+                    .field
+                    .iter()
+                    .map(PastaField::montgomery_limbs)
+                    .collect::<Vec<_>>(),
+                buffers.scratch.indices.to_vec(),
+                projective_words(buffers.buckets),
+                projective_words(buffers.output),
+            )
+        }};
+    }
+    fn check<C: PastaCurve>() {
+        let bases = [AffinePoint::<C>::GENERATOR; 65];
+        let scalars = [PastaField::<C::Scalar>::from_u64(7); 64];
+        let valid = [0; 64];
+        for streaming in [false, true] {
+            let options = if streaming {
+                ArithmeticOptions::DEFAULT
+                    .with_algorithm(Algorithm::StreamingBooth { width: None })
+                    .unwrap()
+            } else {
+                ArithmeticOptions::DEFAULT
+            };
+            let plan = MsmPlan::new_with(65, options, NonZeroUsize::new(65).unwrap()).unwrap();
+            for prefix in [Some(64), Some(13), None, Some(0)] {
+                for fail_kind in [WorkKind::Prepare, WorkKind::Window] {
+                    // Cover both sides of prefix boundaries and a final short prefix.
+                    // Two invalid values ensure the first error keeps its absolute offset.
+                    for (invalid_at, missing) in [
+                        (Some(0), false),
+                        (Some(12), false),
+                        (Some(13), false),
+                        (Some(25), false),
+                        (Some(26), false),
+                        (Some(63), false),
+                        (None, false),
+                        (Some(13), true),
+                    ] {
+                        if missing && prefix.is_some_and(|width| width != 0) {
+                            continue;
+                        }
+                        let mut invalid = valid;
+                        if let Some(position) = invalid_at {
+                            invalid[position] = bases.len() as u32;
+                            invalid[63] = u32::MAX;
+                        }
+                        let arena = Arena::new(plan);
+                        let work = [RwLock::new(Work::new(core::iter::once(plan.temporary())))];
+                        let mut identity = Identity::new();
+                        let mut slots = [TaskStorage::EMPTY];
+                        let mut run = MsmRun::new_produced_partition(
+                            plan,
+                            ProducedInput::indexed(Bases::Affine(&bases), 65),
+                            1..65,
+                            &mut identity,
+                            &mut slots,
+                        );
+                        loop {
+                            let mut ready = [None];
+                            assert_eq!(run.ready(&mut ready), 1);
+                            let request = ready[0].unwrap();
+                            let failing = request.kind == fail_kind && invalid_at.is_some();
+                            // Window failures receive a fresh malformed view only after a
+                            // successful Prepare: validation cannot be cached across leases.
+                            let mut resources = ProducedLease {
+                                arithmetic: arena.acquire(request, &work).unwrap(),
+                                scalars: Fragments(&scalars),
+                                indices: Indices {
+                                    values: if failing { &invalid } else { &valid },
+                                    prefix,
+                                    missing: if failing && missing { invalid_at } else { None },
+                                },
+                            };
+                            let before = failing.then(|| {
+                                let buffers = resources.buffers();
+                                buffers.scratch.digits.fill(0xa5);
+                                buffers.scratch.projective.fill(ProjectivePoint::GENERATOR);
+                                buffers.scratch.field.fill(PastaField::ONE);
+                                buffers.scratch.indices.fill(usize::MAX);
+                                buffers.buckets.fill(ProjectivePoint::GENERATOR);
+                                buffers.output.fill(ProjectivePoint::GENERATOR);
+                                destinations!(buffers)
+                            });
+                            let mut task =
+                                run.try_claim(request, || Some(resources)).unwrap().unwrap();
+                            if failing && missing {
+                                assert!(
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        task.execute()
+                                    }))
+                                    .is_err()
+                                );
+                            } else {
+                                task.execute().unwrap();
+                            }
+                            let mut published = run.complete(task.finish()).unwrap();
+                            if let Some(before) = before {
+                                let position = invalid_at.unwrap();
+                                if missing {
+                                    assert_eq!(published.outcome, Outcome::Failed);
+                                    assert_eq!(published.error, None);
+                                } else {
+                                    assert_eq!(
+                                        published.error,
+                                        Some(CurveError::BaseIndexOutOfBounds {
+                                            position: request.offset + position,
+                                            index: invalid[position],
+                                            bases: bases.len(),
+                                        })
+                                    );
+                                }
+                                assert!(destinations!(published.resources.buffers()) == before);
+                                drop(published);
+                                assert!(run.is_failed());
+                                assert_eq!(run.inflight(), 0);
+                                assert_eq!(run.result(), None);
+                                break;
+                            }
+                            assert_eq!(published.error, None);
+                            drop(published);
+                            if let Some(result) = run.result() {
+                                assert!(invalid_at.is_none());
+                                assert_eq!(result, ladder::<C>(PastaField::from_u64(7 * 64)));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
 }
 
 #[test]

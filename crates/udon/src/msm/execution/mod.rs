@@ -600,15 +600,27 @@ impl<C: PastaCurve> MsmKernel<'_, C> {
             }
             if input.indexed && matches!(self.kind, WorkKind::Prepare | WorkKind::Window) {
                 assert_scratch("source indices", self.terms, source.indices.len());
-                for position in 0..self.terms {
-                    let index = *source.indices.get(position).expect("invalid source view");
-                    if u64::from(index) >= input.bases.len() as u64 {
-                        return Err(CurveError::BaseIndexOutOfBounds {
-                            position: self.offset + position,
-                            index,
-                            bases: input.bases.len(),
+                let mut first = 0;
+                while first < self.terms {
+                    let indices = source
+                        .indices
+                        .contiguous_prefix(first..self.terms)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| {
+                            core::slice::from_ref(
+                                source.indices.get(first).expect("invalid source view"),
+                            )
                         });
+                    for (position, &index) in indices.iter().enumerate() {
+                        if u64::from(index) >= input.bases.len() as u64 {
+                            return Err(CurveError::BaseIndexOutOfBounds {
+                                position: self.offset + first + position,
+                                index,
+                                bases: input.bases.len(),
+                            });
+                        }
                     }
+                    first += indices.len();
                 }
             }
         }
