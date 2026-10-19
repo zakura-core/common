@@ -1,7 +1,7 @@
 //! Monomorphic base access and arithmetic for one complete chunk or window.
 
 use super::storage::Storage;
-use crate::curve::pasta::reduce::{collapse, reduce};
+use crate::curve::pasta::reduce::{collapse, collapse_with_scratch, reduce};
 use crate::exec::execution::ReadView;
 
 use super::{
@@ -470,7 +470,13 @@ fn window<C: PastaCurve, B: Base<C>, const INDEXED: bool, const DIRECT: bool>(
             }
         }
     }
-    collapse(survivors, lens)
+    if task.geometry == Geometry::Booth(8) && task.accumulation == Accumulation::Affine {
+        // Deposit buffers and bucket metadata are dead after the final pass.
+        // Other geometries/accumulation paths retain their existing collapse.
+        collapse_with_scratch(survivors, lens, points, work.field, starts, cursors)
+    } else {
+        collapse(survivors, lens)
+    }
 }
 
 pub(super) fn stream<C: PastaCurve>(
