@@ -10,6 +10,10 @@ mod halo2;
 
 use halo2 as selected;
 
+// Voting circuits compose the same Halo2 gadgets without exposing the Action circuit.
+#[cfg(feature = "unstable-voting-circuits")]
+pub use halo2::{commit_ivk, gadget, note_commit};
+
 pub use crate::Proof;
 #[cfg(feature = "prover")]
 pub(crate) use selected::Circuit;

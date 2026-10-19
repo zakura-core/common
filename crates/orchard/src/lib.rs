@@ -72,8 +72,12 @@ pub mod builder;
 pub mod bundle;
 #[cfg(any(feature = "prover", feature = "verifier"))]
 pub mod circuit;
+#[cfg(not(feature = "unstable-voting-circuits"))]
 #[path = "backend/halo2/constants.rs"]
 mod constants;
+#[cfg(feature = "unstable-voting-circuits")]
+#[path = "backend/halo2/constants.rs"]
+pub mod constants;
 pub mod keys;
 pub mod note;
 pub mod note_encryption;
@@ -83,8 +87,12 @@ pub mod pczt;
 pub mod primitives;
 #[cfg(test)]
 mod rng_compat;
+#[cfg(not(feature = "unstable-voting-circuits"))]
 #[path = "backend/halo2/spec.rs"]
 mod spec;
+#[cfg(feature = "unstable-voting-circuits")]
+#[path = "backend/halo2/spec.rs"]
+pub mod spec;
 pub mod tree;
 pub mod value;
 #[cfg(feature = "wallet")]

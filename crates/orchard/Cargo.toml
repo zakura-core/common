@@ -79,6 +79,8 @@ portable = ["orchard-legacy?/portable"]
 std = ["corez/std", "orchard-legacy?/std"]
 test-dependencies = ["wallet", "orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
 unstable-frost = ["dep:visibility"]
+# Opt-in witness access and shared Halo2 gadgets for governance circuits.
+unstable-voting-circuits = ["backend-halo2", "circuit", "dep:visibility"]
 # Historical fingerprint fixtures use ZIP 32 indexed addresses.
 verifier-fingerprint = ["orchard-legacy?/verifier-fingerprint", "zip32-addresses", "circuit"]
 # Retained feature alias; historical formal-model tapes are replayed in tests.

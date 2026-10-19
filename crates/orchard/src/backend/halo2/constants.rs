@@ -9,7 +9,9 @@ pub mod util;
 #[cfg(any(feature = "prover", feature = "verifier"))]
 pub use self::sinsemilla::{OrchardCommitDomains, OrchardHashDomains};
 #[cfg(any(feature = "prover", feature = "verifier"))]
-pub use fixed_bases::{NullifierK, OrchardFixedBases, OrchardFixedBasesFull, ValueCommitV};
+pub use fixed_bases::{
+    NullifierK, OrchardBaseFieldBases, OrchardFixedBases, OrchardFixedBasesFull, ValueCommitV,
+};
 
 /// $\mathsf{MerkleDepth^{Orchard}}$
 pub const MERKLE_DEPTH_ORCHARD: usize = 32;

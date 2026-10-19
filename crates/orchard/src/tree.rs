@@ -69,6 +69,8 @@ impl Anchor {
         Anchor(MerkleHashOrchard::empty_root(Level::from(MERKLE_DEPTH_ORCHARD as u8)).0)
     }
 
+    /// Returns the field element used by the Halo2 membership witness.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
     }
@@ -116,6 +118,7 @@ impl From<incrementalmerkletree::MerklePath<MerkleHashOrchard, 32>> for MerklePa
 
 impl MerklePath {
     /// Generates a dummy Merkle path for use in dummy spent notes.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn dummy(mut rng: &mut impl Rng) -> Self {
         MerklePath {
             position: rng.next_u32(),
@@ -188,6 +191,8 @@ impl MerkleHashOrchard {
     }
 
     /// Only used in the circuit.
+    /// Returns the field element used by the Halo2 membership witness.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
     }

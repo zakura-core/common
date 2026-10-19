@@ -24,7 +24,11 @@ use crate::constants::{
     ValueCommitV,
 };
 
+#[cfg(not(feature = "unstable-voting-circuits"))]
 pub(in crate::circuit) mod add_chip;
+/// Addition constraints shared with governance circuits.
+#[cfg(feature = "unstable-voting-circuits")]
+pub mod add_chip;
 impl super::Config {
     pub(super) fn add_chip(&self) -> add_chip::AddChip {
         add_chip::AddChip::construct(self.add_config.clone())
@@ -76,6 +80,7 @@ impl super::Config {
 }
 
 /// An instruction set for adding two circuit words (field elements).
+#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) trait AddInstruction<F: Field>: Chip<F> {
     /// Constraints `a + b` and returns the sum.
     fn add(
@@ -91,6 +96,7 @@ pub(in crate::circuit) trait AddInstruction<F: Field>: Chip<F> {
 /// Usages of this helper are technically superfluous, as the single-cell region is only
 /// ever used in equality constraints. We could eliminate them with a
 /// [write-on-copy abstraction](https://github.com/zcash/halo2/issues/334).
+#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) fn assign_free_advice<F: Field, V: Copy>(
     mut layouter: impl Layouter<F>,
     column: Column<Advice>,
@@ -108,6 +114,7 @@ where
 /// `ValueCommit^Orchard` from [Section 5.4.8.3 Homomorphic Pedersen commitments (Sapling and Orchard)].
 ///
 /// [Section 5.4.8.3 Homomorphic Pedersen commitments (Sapling and Orchard)]: https://zips.z.cash/protocol/protocol.pdf#concretehomomorphiccommit
+#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) fn value_commit_orchard<
     EccChip: EccInstructions<
             pallas::Affine,
@@ -143,6 +150,7 @@ pub(in crate::circuit) fn value_commit_orchard<
 ///
 /// [Section 4.16: Note Commitments and Nullifiers]: https://zips.z.cash/protocol/protocol.pdf#commitmentsandnullifiers
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(in crate::circuit) fn derive_nullifier<
     PoseidonChip: PoseidonSpongeInstructions<pallas::Base, poseidon::P128Pow5T3, ConstantLength<2>, 3, 2>,
     AddChip: AddInstruction<pallas::Base>,
@@ -197,5 +205,11 @@ pub(in crate::circuit) fn derive_nullifier<
         .map(|res| res.extract_p())
 }
 
+#[cfg(not(feature = "unstable-voting-circuits"))]
 pub(in crate::circuit) use crate::circuit::halo2::commit_ivk::gadgets::commit_ivk;
+#[cfg(feature = "unstable-voting-circuits")]
+pub use crate::circuit::halo2::commit_ivk::gadgets::commit_ivk;
+#[cfg(not(feature = "unstable-voting-circuits"))]
 pub(in crate::circuit) use crate::circuit::halo2::note_commit::gadgets::note_commit;
+#[cfg(feature = "unstable-voting-circuits")]
+pub use crate::circuit::halo2::note_commit::gadgets::note_commit;

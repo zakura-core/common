@@ -58,6 +58,7 @@ impl SpendingKey {
     /// derived according to [ZIP 32].
     ///
     /// [ZIP 32]: https://zips.z.cash/zip-0032
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn random(rng: &mut impl Rng) -> Self {
         loop {
             let mut bytes = [0; 32];
@@ -128,6 +129,7 @@ pub struct SpendAuthorizingKey(redpallas::SigningKey<SpendAuth>);
 
 impl SpendAuthorizingKey {
     /// Derives ask from sk. Internal use only, does not enforce all constraints.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn derive_inner(sk: &SpendingKey) -> pallas::Scalar {
         to_scalar(PrfExpand::ORCHARD_ASK.with(&sk.0))
     }
@@ -172,6 +174,13 @@ pub struct SpendValidatingKey(redpallas::VerificationKey<SpendAuth>);
 impl From<&SpendAuthorizingKey> for SpendValidatingKey {
     fn from(ask: &SpendAuthorizingKey) -> Self {
         SpendValidatingKey((&ask.0).into())
+    }
+}
+
+#[cfg(feature = "unstable-voting-circuits")]
+impl From<&SpendValidatingKey> for pallas::Point {
+    fn from(key: &SpendValidatingKey) -> Self {
+        key.to_point()
     }
 }
 
@@ -237,10 +246,12 @@ impl SpendValidatingKey {
 /// [`Note`]: crate::note::Note
 /// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
 #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(crate) struct NullifierDerivingKey(pallas::Base);
 
 impl NullifierDerivingKey {
     /// Returns the inner base field element.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
     }
@@ -258,6 +269,7 @@ impl NullifierDerivingKey {
     }
 
     /// Converts this nullifier deriving key to its serialized form.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn to_bytes(self) -> [u8; 32] {
         self.0.to_repr()
     }
@@ -279,6 +291,7 @@ impl NullifierDerivingKey {
 ///
 /// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
 #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
 pub(crate) struct CommitIvkRandomness(pallas::Scalar);
 
 impl From<&SpendingKey> for CommitIvkRandomness {
@@ -289,6 +302,7 @@ impl From<&SpendingKey> for CommitIvkRandomness {
 
 impl CommitIvkRandomness {
     /// Returns the inner scalar value.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> pallas::Scalar {
         self.0
     }
@@ -344,11 +358,13 @@ impl From<FullViewingKey> for SpendValidatingKey {
 
 impl FullViewingKey {
     /// Returns the nullifier deriving key for this full viewing key.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn nk(&self) -> &NullifierDerivingKey {
         &self.nk
     }
 
     /// Returns either `rivk` or `rivk_internal` based on `scope`.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn rivk(&self, scope: Scope) -> CommitIvkRandomness {
         match scope {
             Scope::External => self.rivk,
@@ -760,6 +776,7 @@ pub struct DiversifiedTransmissionKey(NonIdentityPallasPoint);
 
 impl DiversifiedTransmissionKey {
     /// Returns the inner `NonIdentityPallasPoint`.
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn inner(&self) -> NonIdentityPallasPoint {
         self.0
     }
@@ -780,6 +797,7 @@ impl DiversifiedTransmissionKey {
     }
 
     /// $repr_P(self)$
+    #[cfg_attr(feature = "unstable-voting-circuits", visibility::make(pub))]
     pub(crate) fn to_bytes(self) -> [u8; 32] {
         self.0.to_bytes()
     }
