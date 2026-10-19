@@ -1,7 +1,7 @@
 //! Monomorphic base access and arithmetic for one complete chunk or window.
 
 use super::storage::Storage;
-use crate::curve::pasta::reduce::{collapse, reduce};
+use crate::curve::pasta::reduce::{collapse, collapse_with_scratch, reduce};
 use crate::exec::execution::ReadView;
 
 use super::{
@@ -470,7 +470,13 @@ fn window<C: PastaCurve, B: Base<C>, const INDEXED: bool, const DIRECT: bool>(
             }
         }
     }
-    collapse(survivors, lens)
+    if task.geometry == Geometry::Booth(8) && task.accumulation == Accumulation::Affine {
+        // Deposit buffers and bucket metadata are dead after the final pass.
+        // Other geometries/accumulation paths retain their existing collapse.
+        collapse_with_scratch(survivors, lens, points, work.field, starts, cursors)
+    } else {
+        collapse(survivors, lens)
+    }
 }
 
 pub(super) fn stream<C: PastaCurve>(
@@ -839,6 +845,53 @@ fn alpha_tail<C: PastaCurve, E: Base<C> + CurveTableEntry<C>>(
     sum
 }
 
+// Reuse a contiguous digit fragment across the codes in one pass intersection.
+// Providers may decline the larger view; retain per-code access as a fallback.
+#[inline(always)]
+fn alpha_fragment_codes(
+    digits: impl Storage<u8>,
+    stride: usize,
+    window: usize,
+    range: core::ops::Range<usize>,
+    mut visit: impl FnMut(usize, u32),
+) {
+    let mut first = range.start;
+    while first < range.end {
+        let chunk_start = first / recode::CHUNK * recode::CHUNK;
+        // Clamp to this pass's end as well as the preparation-fragment end.
+        // This handles short final fragments and passes ending mid-fragment.
+        let end = range.end.min(chunk_start + recode::CHUNK);
+        let fragment = digits.slice(chunk_start * stride..end * stride);
+        match fragment.contiguous() {
+            Some(bytes) => {
+                for term in first..end {
+                    let offset = (term - chunk_start) * stride + window * 4;
+                    let bits = u32::from_le_bytes(
+                        bytes[offset..offset + 4]
+                            .try_into()
+                            .expect("one alpha code"),
+                    );
+                    visit(term, bits);
+                }
+            }
+            None => {
+                // Preserve the per-code contiguous/get fallback.
+                // Arbitrary providers need not expose a complete fragment.
+                for term in first..end {
+                    let start = term * stride + window * 4;
+                    let bits =
+                        u32::from_le_bytes(match digits.slice(start..start + 4).contiguous() {
+                            Some(bytes) => bytes.try_into().expect("one alpha code"),
+                            None => core::array::from_fn(|i| digits.get(start + i)),
+                        });
+                    visit(term, bits);
+                }
+            }
+        }
+        first = end;
+    }
+}
+
 fn alpha<C: PastaCurve, E: Base<C> + CurveTableEntry<C>>(
     input: &BaseView<'_, C>,
     table: super::AlphaTable<'_, C, E>,
@@ -915,12 +968,12 @@ fn alpha<C: PastaCurve, E: Base<C> + CurveTableEntry<C>>(
     for first in (0..terms).step_by(pass) {
         let end = terms.min(first + pass);
         cursors.copy_from_slice(lens);
-        for term in first..end {
-            let c = super::alpha::Code::from_bits(code(term));
+        alpha_fragment_codes(digits, stride, task.window, first..end, |_, bits| {
+            let c = super::alpha::Code::from_bits(bits);
             if c.present() {
                 cursors[c.bucket()] += 1;
             }
-        }
+        });
         let mut total = 0;
         for bucket in 0..count {
             starts[bucket] = total;
@@ -945,14 +998,8 @@ fn alpha<C: PastaCurve, E: Base<C> + CurveTableEntry<C>>(
             cursors: &mut [usize],
         ) {
             let stride = task.geometry.stride();
-            for term in range {
-                let start = term * stride + task.window * 4;
-                let c = super::alpha::Code::from_bits(u32::from_le_bytes(
-                    match digits.slice(start..start + 4).contiguous() {
-                        Some(bytes) => bytes.try_into().expect("one alpha code"),
-                        None => core::array::from_fn(|i| digits.get(start + i)),
-                    },
-                ));
+            alpha_fragment_codes(digits, stride, task.window, range, |term, bits| {
+                let c = super::alpha::Code::from_bits(bits);
                 if c.present() {
                     let term = task.offset + term;
                     let base = input.indices.map_or(term, |indices| indices.get(term));
@@ -961,7 +1008,7 @@ fn alpha<C: PastaCurve, E: Base<C> + CurveTableEntry<C>>(
                     points[cursors[bucket]] = if c.negative() { p.neg() } else { p };
                     cursors[bucket] += 1;
                 }
-            }
+            });
         }
         scatter(input, table, digits, task, first..end, points, cursors);
         reduce(&mut points[..total], starts, lens, work.field, cursors);

@@ -254,9 +254,12 @@ pub(crate) fn montgomery_multiply_loose<M: PrimeModulus>(
 /// radix, so the block keeps the top carry and folds it into the single
 /// conditional subtraction of `2p`: the reduced candidate is selected when
 /// the addition carried or the subtraction did not borrow. This computes the
-/// same function as the portable kernel in `pasta::montgomery` on all inputs.
+/// same function as the portable kernel in `pasta::montgomery` for the
+/// supported Pasta moduli and inputs below `2p`.
+/// The sealed Pasta moduli have `twice_modulus[2] == 0`.
 #[inline(always)]
 pub(crate) fn add_loose(lhs: &[u64; 4], rhs: &[u64; 4], twice_modulus: &[u64; 4]) -> [u64; 4] {
+    debug_assert_eq!(twice_modulus[2], 0);
     let [mut r0, mut r1, mut r2, mut r3] = *lhs;
     // SAFETY: straight-line register-only arithmetic with no memory access
     // and no stack use; the outputs depend only on the declared inputs.
@@ -269,7 +272,7 @@ pub(crate) fn add_loose(lhs: &[u64; 4], rhs: &[u64; 4], twice_modulus: &[u64; 4]
             "cset {c}, cs",
             "subs {t0}, {r0}, {m0}",
             "sbcs {t1}, {r1}, {m1}",
-            "sbcs {t2}, {r2}, {m2}",
+            "sbcs {t2}, {r2}, xzr",
             "sbcs {t3}, {r3}, {m3}",
             "adcs {c}, {c}, xzr",
             "csel {r0}, {t0}, {r0}, ne",
@@ -286,7 +289,6 @@ pub(crate) fn add_loose(lhs: &[u64; 4], rhs: &[u64; 4], twice_modulus: &[u64; 4]
             b3 = in(reg) rhs[3],
             m0 = in(reg) twice_modulus[0],
             m1 = in(reg) twice_modulus[1],
-            m2 = in(reg) twice_modulus[2],
             m3 = in(reg) twice_modulus[3],
             t0 = out(reg) _,
             t1 = out(reg) _,
@@ -303,9 +305,11 @@ pub(crate) fn add_loose(lhs: &[u64; 4], rhs: &[u64; 4], twice_modulus: &[u64; 4]
 ///
 /// Loose arithmetic supplies `2p`; canonical arithmetic supplies `p`. The
 /// modulus is added back exactly when the subtraction borrows, discarding
-/// the final carry after wrapping modulo `2^256`.
+/// the final carry after wrapping modulo `2^256`. The supplied Pasta modulus
+/// must have `modulus[2] == 0`, as both `p` and `2p` do.
 #[inline(always)]
 pub(crate) fn sub_loose(lhs: &[u64; 4], rhs: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
+    debug_assert_eq!(modulus[2], 0);
     let [mut r0, mut r1, mut r2, mut r3] = *lhs;
     // SAFETY: straight-line register-only arithmetic with no memory access
     // and no stack use; the outputs depend only on the declared inputs.
@@ -317,11 +321,10 @@ pub(crate) fn sub_loose(lhs: &[u64; 4], rhs: &[u64; 4], modulus: &[u64; 4]) -> [
             "sbcs {r3}, {r3}, {b3}",
             "csel {t0}, {m0}, xzr, cc",
             "csel {t1}, {m1}, xzr, cc",
-            "csel {t2}, {m2}, xzr, cc",
             "csel {t3}, {m3}, xzr, cc",
             "adds {r0}, {r0}, {t0}",
             "adcs {r1}, {r1}, {t1}",
-            "adcs {r2}, {r2}, {t2}",
+            "adcs {r2}, {r2}, xzr",
             "adc {r3}, {r3}, {t3}",
             r0 = inout(reg) r0,
             r1 = inout(reg) r1,
@@ -333,11 +336,9 @@ pub(crate) fn sub_loose(lhs: &[u64; 4], rhs: &[u64; 4], modulus: &[u64; 4]) -> [
             b3 = in(reg) rhs[3],
             m0 = in(reg) modulus[0],
             m1 = in(reg) modulus[1],
-            m2 = in(reg) modulus[2],
             m3 = in(reg) modulus[3],
             t0 = out(reg) _,
             t1 = out(reg) _,
-            t2 = out(reg) _,
             t3 = out(reg) _,
             options(pure, nomem, nostack),
         );

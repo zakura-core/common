@@ -576,6 +576,121 @@ pub(crate) fn collapse<C: PastaCurve>(
     sum
 }
 
+/// Weights 128 affine survivors through four shared-inversion fronts.
+///
+/// Reuses dead deposit scratch: 448 affine points, 576 fields, and 96 entries
+/// in each index lane. `occupied` is disposable after entry. Other sizes or
+/// smaller workspaces retain the ordinary collapse. Logical bucket positions
+/// are preserved even when intermediate additions cancel.
+pub(crate) fn collapse_with_scratch<C: PastaCurve>(
+    points: &[AffinePoint<C>],
+    occupied: &mut [usize],
+    scratch: &mut [AffinePoint<C>],
+    fields: &mut [PastaField<C::Base>],
+    starts: &mut [usize],
+    loose_starts: &mut [usize],
+) -> ProjectivePoint<C> {
+    const BUCKETS: usize = 128;
+    const GROUPS: usize = 96;
+    if points.len() != BUCKETS
+        || occupied.len() != BUCKETS
+        || scratch.len() < 2 * BUCKETS + 2 * GROUPS
+        || fields.len() < 6 * GROUPS
+        || starts.len() < GROUPS
+        || loose_starts.len() < GROUPS
+    {
+        return collapse(points, occupied);
+    }
+    if occupied.iter().all(|&len| len == 0) {
+        return ProjectivePoint::IDENTITY;
+    }
+
+    // Snapshot occupancy before recycling its usize lane for pair lengths.
+    // Byte flags add only 256 bounded stack bytes; no workspace growth.
+    let mut flags_storage = [[0_u8; BUCKETS]; 2];
+    let (first_flags, second_flags) = flags_storage.split_at_mut(1);
+    let (mut flags, mut next_flags) = (&mut first_flags[0], &mut second_flags[0]);
+    for (flag, &len) in flags.iter_mut().zip(occupied.iter()) {
+        *flag = u8::from(len != 0);
+    }
+    let (mut front, rest) = scratch.split_at_mut(BUCKETS);
+    let (mut next, pairs) = rest.split_at_mut(BUCKETS);
+    let pairs = &mut pairs[..2 * GROUPS];
+    front.copy_from_slice(points);
+    for (group, start) in starts[..GROUPS].iter_mut().enumerate() {
+        *start = 2 * group;
+    }
+
+    let mut main_len = BUCKETS;
+    for depth in 0..4 {
+        let mut groups = 0;
+        {
+            let mut stage = |a: usize, b: usize| {
+                let mut len = 0;
+                for source in [a, b] {
+                    if flags[source] != 0 {
+                        pairs[2 * groups + len] = front[source];
+                        len += 1;
+                    }
+                }
+                occupied[groups] = len;
+                groups += 1;
+            };
+            for pair in 0..main_len / 2 {
+                stage(2 * pair, 2 * pair + 1);
+            }
+            // Existing odd-sum trees each occupy main_len/2 logical slots.
+            for odd in 0..depth {
+                let start = main_len + odd * (main_len / 2);
+                for pair in 0..main_len / 4 {
+                    stage(start + 2 * pair, start + 2 * pair + 1);
+                }
+            }
+            // New odd tree: one-based entries 1,3,5,... of the main list.
+            for pair in 0..main_len / 4 {
+                stage(4 * pair, 4 * pair + 2);
+            }
+        }
+        debug_assert_eq!(groups, [96, 64, 40, 24][depth]);
+        // Each disjoint group contains zero, one or two live nonidentity
+        // points. The existing complete fallback handles doubles and inverses.
+        reduce(
+            &mut pairs[..2 * groups],
+            &starts[..groups],
+            &mut occupied[..groups],
+            &mut fields[..6 * groups],
+            &mut loose_starts[..groups],
+        );
+        for group in 0..groups {
+            debug_assert!(occupied[group] <= 1);
+            next_flags[group] = occupied[group] as u8;
+            if occupied[group] != 0 {
+                next[group] = pairs[2 * group];
+            }
+        }
+        core::mem::swap(&mut front, &mut next);
+        core::mem::swap(&mut flags, &mut next_flags);
+        main_len /= 2;
+    }
+
+    // Q(P1,...,P2m) = 2 Q(P1+P2,...) - sum(P1,P3,...).
+    // The remaining main list has eight points; four odd trees have four each.
+    for i in 0..8 {
+        occupied[i] = usize::from(flags[i]);
+    }
+    let mut result = collapse(&front[..8], &occupied[..8]);
+    for odd in (0..4).rev() {
+        let mut odd_sum = ProjectivePoint::IDENTITY;
+        for i in 8 + odd * 4..12 + odd * 4 {
+            if flags[i] != 0 {
+                odd_sum = odd_sum.add_mixed(&front[i]);
+            }
+        }
+        result = result.double().add(&odd_sum.neg());
+    }
+    result
+}
+
 #[cfg(test)]
 #[path = "tests/reduce.rs"]
 mod tests;
