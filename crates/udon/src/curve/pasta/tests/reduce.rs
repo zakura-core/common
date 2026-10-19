@@ -102,3 +102,104 @@ fn affine_reducer_and_weighted_collapse_match_biguint() {
     check::<Pallas>();
     check::<Vesta>();
 }
+
+#[test]
+fn affine_sums_in_place_match_independent_group_sums() {
+    fn check<C: PastaCurve>() {
+        let g = AffinePoint::<C>::GENERATOR;
+        let mut bank = Vec::new();
+        let mut current = ProjectivePoint::<C>::IDENTITY;
+        for _ in 0..19 {
+            current = current.add_mixed(&g);
+            bank.push(*current.to_point().as_affine().unwrap());
+        }
+        let positive = bank.len();
+        for index in 0..positive {
+            bank.push(bank[index].neg());
+        }
+        let modulus = crate::field::pasta::test_support::modulus::<C::Base>();
+        for len in [0, 1, 16, 17, 531, 532] {
+            for pattern in 0..4 {
+                let input: Vec<_> = (0..len)
+                    .map(|i| {
+                        bank[match pattern {
+                            0 => i % positive,
+                            1 => 0,
+                            2 => {
+                                if i % 2 == 0 {
+                                    0
+                                } else {
+                                    positive
+                                }
+                            }
+                            _ => [0, 1, positive, positive + 1][i % 4],
+                        }]
+                    })
+                    .collect();
+                let expected = input
+                    .iter()
+                    .rev()
+                    .fold(ProjectivePoint::<C>::IDENTITY, |sum, point| {
+                        sum.add(&point.to_projective())
+                    });
+                if len <= 17 {
+                    let reference = input.iter().fold(Reference::identity(), |sum, point| {
+                        sum.add(&Reference::from_point(&point.to_point()), &modulus)
+                    });
+                    reference.assert_point(&expected.to_point());
+                }
+                for extra in [0, 3] {
+                    let mut points = input.clone();
+                    points.extend([g; 3]);
+                    let sentinel = PastaField::<C::Base>::from_u64(71);
+                    let mut fields = vec![sentinel; len + extra];
+                    let result = AffinePoint::sum_in_place(&mut points[..len], &mut fields);
+                    assert_eq!(result, expected);
+                    assert!(points[len..].iter().all(|point| *point == g));
+                    assert!(
+                        fields[len..].iter().all(|field| {
+                            field.montgomery_limbs() == sentinel.montgomery_limbs()
+                        })
+                    );
+                    // Reuse the modified field scratch with restored input points.
+                    points[..len].copy_from_slice(&input);
+                    assert_eq!(
+                        AffinePoint::sum_in_place(&mut points[..len], &mut fields),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
+}
+
+#[test]
+fn affine_sum_short_scratch_rejection_preserves_both_buffers() {
+    fn check<C: PastaCurve>() {
+        let g = AffinePoint::<C>::GENERATOR;
+        for len in [1, 16, 17, 531, 532] {
+            let mut points = vec![g; len + 3];
+            let original_points = points.clone();
+            let mut fields = vec![PastaField::<C::Base>::from_u64(29); len + 3];
+            let original_fields = fields.clone();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    AffinePoint::sum_in_place(&mut points[..len], &mut fields[..len - 1]);
+                }))
+                .is_err()
+            );
+            assert_eq!(
+                bento::bytes_of_slice(&points),
+                bento::bytes_of_slice(&original_points)
+            );
+            assert_eq!(
+                bento::bytes_of_slice(&fields),
+                bento::bytes_of_slice(&original_fields)
+            );
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
+}

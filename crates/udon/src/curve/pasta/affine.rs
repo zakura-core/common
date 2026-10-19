@@ -164,6 +164,34 @@ impl<C: PastaCurve> AffinePoint<C> {
         Self::from_slope(&self.x, &self.y, &q.x, &slope)
     }
 
+    /// Sums the original affine inputs, reusing their storage during reduction.
+    ///
+    /// Empty input and cancelling sums return identity. Repeated points and
+    /// inverse pairs are accepted. The point slice is scratch: its contents and
+    /// order may change, and no final representation is promised in that slice.
+    ///
+    /// `fields` must contain at least one element per input point. Its initial
+    /// contents do not matter; entries beyond `points.len()` are untouched.
+    /// Insufficient field scratch panics before either buffer is changed.
+    /// Execution is serial, allocation-free and variable-time, with no
+    /// constant-time guarantee for secret inputs.
+    ///
+    /// ```
+    /// use zakura_udon::{curve::PallasAffine, field::Fp};
+    /// let g = PallasAffine::GENERATOR;
+    /// let mut points = [g, g.neg()];
+    /// let sum = PallasAffine::sum_in_place(&mut points, &mut [Fp::ZERO; 2]);
+    /// assert!(sum.is_identity());
+    /// ```
+    pub fn sum_in_place(
+        points: &mut [Self],
+        fields: &mut [PastaField<C::Base>],
+    ) -> ProjectivePoint<C> {
+        let count = points.len();
+        crate::checks::assert_scratch("affine sum", count, fields.len());
+        super::reduce::sum(points, &mut fields[..count])
+    }
+
     /// Multiplies by a scalar without inversion.
     ///
     /// Processes the full canonical scalar; zero returns identity. The scalar
