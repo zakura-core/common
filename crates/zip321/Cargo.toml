@@ -6,7 +6,7 @@ authors = [
     "Kris Nuttycombe <kris@electriccoin.co>"
 ]
 repository.workspace = true
-readme = "README.md"
+readme.workspace = true
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
