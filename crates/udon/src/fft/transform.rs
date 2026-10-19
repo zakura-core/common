@@ -720,6 +720,7 @@ impl<M: PrimeModulus> Kernel<'_, '_, '_, M> {
         } else {
             values.len()
         };
+        let local_len = values.len();
         let mut block = self.run.first;
         while block <= last {
             let stride = self.plan.domain.size() / block;
@@ -730,6 +731,20 @@ impl<M: PrimeModulus> Kernel<'_, '_, '_, M> {
             };
             for chunk in values.chunks_exact_mut(block) {
                 let (left, right) = chunk.split_at_mut(block / 2);
+                // Separate prepared forward multiplies from the add/sub pass.
+                // Keep terminal stores and inverse finishing in their original loop.
+                if !self.run.inverse
+                    && block < local_len
+                    && let Some(table) = self.twiddles()
+                {
+                    for (index, value) in right.iter_mut().enumerate().skip(1) {
+                        *value = scale_loose(*value, &table[index * stride]);
+                    }
+                    for (left, right) in left.iter_mut().zip(right) {
+                        butterfly(left, right, None);
+                    }
+                    continue;
+                }
                 let mut power = PastaField::ONE;
                 for (index, (left, right)) in left.iter_mut().zip(right).enumerate() {
                     if index == 0 {
