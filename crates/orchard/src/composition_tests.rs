@@ -113,10 +113,7 @@ fn frozen_keys_cover_both_sign_correction_outcomes() {
         let zero = SpendAuthRandomizer::from_bytes(pallas::Scalar::ZERO.to_repr()).unwrap();
         let signing = ask.randomize(&zero);
         let verification = crate::primitives::redpallas::VerificationKey::from(&signing);
-        let signature = signing.sign(
-            &mut crate::rng_compat::OsRng,
-            b"composition witness agreement",
-        );
+        let signature = signing.sign(crate::rng_compat::OsRng, b"composition witness agreement");
         verification
             .verify(b"composition witness agreement", &signature)
             .unwrap();
