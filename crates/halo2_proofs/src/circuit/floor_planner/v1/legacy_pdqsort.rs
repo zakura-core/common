@@ -1,6 +1,14 @@
 //! Copy of https://github.com/rust-lang/rust/blob/1.56.1/library/core/src/slice/sort.rs
 //! "MODIFIED:" marks places that have been modified from the original.
 //!
+//! The V1 floor planner sorts regions with this copy because the circuit layout (and therefore
+//! the verifying key) of circuits such as Orchard depends on the exact order it produces for
+//! regions with equal sort keys. Do not change its behavior.
+//!
+//! Previously published separately as the `zakura-halo2-legacy-pdqsort` crate (forked from
+//! `halo2_legacy_pdqsort 0.1.0`, Copyright (c) 2023 The Electric Coin Company and The Halo 2
+//! developers).
+//!
 //! Slice sorting
 //!
 //! This module contains a sorting algorithm based on Orson Peters' pattern-defeating quicksort,
@@ -189,7 +197,7 @@ where
 
 /// Sorts `v` using heapsort, which guarantees *O*(*n* \* log(*n*)) worst-case.
 #[cold]
-pub fn heapsort<T, F>(v: &mut [T], mut is_less: F)
+pub(super) fn heapsort<T, F>(v: &mut [T], mut is_less: F)
 where
     F: FnMut(&T, &T) -> bool,
 {
@@ -795,7 +803,7 @@ where
 }
 
 /// Sorts `v` using pattern-defeating quicksort, which is *O*(*n* \* log(*n*)) worst-case.
-pub fn quicksort<T, F>(v: &mut [T], mut is_less: F)
+pub(super) fn quicksort<T, F>(v: &mut [T], mut is_less: F)
 where
     F: FnMut(&T, &T) -> bool,
 {
@@ -811,3 +819,6 @@ where
 }
 
 // MODIFIED: Delete `partition_at_index_loop` and `partition_at_index` which we don't use.
+
+#[cfg(test)]
+mod tests;

@@ -3338,13 +3338,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zakura-halo2-legacy-pdqsort"
-version = "4.0.0-rc2"
-dependencies = [
- "rand 0.10.2",
-]
-
-[[package]]
 name = "zakura-halo2-poseidon"
 version = "4.0.0-rc2"
 dependencies = [
@@ -3372,7 +3365,6 @@ dependencies = [
  "rand 0.10.2",
  "rand_core 0.10.1",
  "tracing",
- "zakura-halo2-legacy-pdqsort",
  "zakura-pasta-curves",
 ]
 

@@ -19,7 +19,7 @@ pasta_curves = { workspace = true, features = ["default", "glv"] }
 poseidon.workspace = true
 sinsemilla.workspace = true
 reddsa = { workspace = true, features = ["pallas-pasta"] }
-halo2_proofs = { workspace = true, optional = true, features = ["batch", "floor-planner-v1-legacy-pdqsort"] }
+halo2_proofs = { workspace = true, optional = true, features = ["batch"] }
 halo2_gadgets = { workspace = true, optional = true }
 
 [features]

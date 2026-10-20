@@ -7,27 +7,55 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
 IGNORE_LIST = Path(".github/semver-ignore-list.json")
+# Every package's semver job queries crates.io at once when a shared file
+# changes, which can trip its rate limit; retry transient responses.
+REGISTRY_ATTEMPTS = 5
+REGISTRY_MAX_DELAY = 60
+
+
+def retry_delay(error, attempt):
+    """Honor a numeric Retry-After, else back off exponentially, capped."""
+    retry_after = error.headers.get("Retry-After") if error.headers else None
+    if retry_after and retry_after.isdigit():
+        return min(int(retry_after), REGISTRY_MAX_DELAY)
+    return min(2**attempt, REGISTRY_MAX_DELAY)
 
 
 def has_registry_baseline(package):
-    """Only an explicit crates.io 404 identifies a crate's first release."""
+    """Only an explicit crates.io 404 identifies a crate's first release.
+
+    Rate limits (429) and server errors (5xx) are retried; any other error,
+    or a transient one that outlasts the retries, fails the check.
+    """
     request = Request(
         f"https://crates.io/api/v1/crates/{quote(package, safe='')}",
         headers={"User-Agent": "zakura-common-semver-ci (github.com/zakura-core/common)"},
     )
-    try:
-        with urlopen(request, timeout=30) as response:
-            crate = json.load(response)
-    except HTTPError as error:
-        if error.code == 404:
-            return False
-        raise
+    for attempt in range(REGISTRY_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=30) as response:
+                crate = json.load(response)
+            break
+        except HTTPError as error:
+            if error.code == 404:
+                return False
+            transient = error.code == 429 or error.code >= 500
+            if not transient or attempt + 1 == REGISTRY_ATTEMPTS:
+                raise
+            delay = retry_delay(error, attempt)
+            print(
+                f"crates.io returned HTTP {error.code} for {package}; "
+                f"retrying in {delay}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
     if crate.get("crate", {}).get("id") != package:
         raise ValueError(f"unexpected crates.io response for {package}")
     return True

@@ -73,20 +73,42 @@ class SemverPolicyTest(unittest.TestCase):
         error = HTTPError("https://crates.io", 404, "Not Found", {}, None)
         with patch.object(check_semver, "urlopen", side_effect=error):
             self.assertFalse(check_semver.has_registry_baseline("zakura-reddsa-frost"))
-        for code in [403, 429, 500, 503]:
+        for code, attempts in [(403, 1), (429, 5), (500, 5), (503, 5)]:
             with self.subTest(code=code):
                 error = HTTPError("https://crates.io", code, "Unavailable", {}, None)
                 with (
-                    patch.object(check_semver, "urlopen", side_effect=error),
+                    patch.object(check_semver, "urlopen", side_effect=error) as fetch,
+                    patch.object(check_semver.time, "sleep"),
+                    contextlib.redirect_stderr(io.StringIO()),
                     self.assertRaises(HTTPError),
                 ):
                     check_semver.has_registry_baseline("zakura-reddsa")
+                self.assertEqual(fetch.call_count, attempts)
         for error in [URLError("offline"), TimeoutError("timeout")]:
             with (
                 patch.object(check_semver, "urlopen", side_effect=error),
                 self.assertRaises(type(error)),
             ):
                 check_semver.has_registry_baseline("zakura-reddsa")
+
+    def test_transient_registry_errors_are_retried(self):
+        response = contextlib.nullcontext(
+            io.StringIO('{"crate": {"id": "zakura-proofs"}}')
+        )
+        limited = HTTPError(
+            "https://crates.io", 429, "Too Many Requests", {"Retry-After": "7"}, None
+        )
+        unavailable = HTTPError("https://crates.io", 503, "Unavailable", {}, None)
+        with (
+            patch.object(
+                check_semver, "urlopen", side_effect=[limited, unavailable, response]
+            ) as fetch,
+            patch.object(check_semver.time, "sleep") as sleep,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertTrue(check_semver.has_registry_baseline("zakura-proofs"))
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [7, 2])
 
     def test_malformed_registry_response_fails(self):
         for contents in ["broken JSON", "{}", '{"crate": {"id": "another-crate"}}']:
