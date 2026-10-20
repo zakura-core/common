@@ -8,7 +8,7 @@ use crate::backend::{ff::PrimeField, group::GroupEncoding, pallas};
 use crate::{keys, note, spec, value::NoteValue};
 use subtle::CtOption;
 
-macro_rules! component {
+macro_rules! witness_adapter {
     ($(#[$doc:meta])* $name:ident, $inner:ty, $encode:expr) => {
         $(#[$doc])*
         #[derive(Clone)]
@@ -34,7 +34,7 @@ macro_rules! component {
     };
 }
 
-component!(
+witness_adapter!(
     /// Private nullifier-derivation material obtained from a full viewing key.
     #[derive(Copy)]
     NullifierDerivingKey,
@@ -48,7 +48,7 @@ impl From<&keys::FullViewingKey> for NullifierDerivingKey {
     }
 }
 
-component!(
+witness_adapter!(
     /// Private randomness used to bind an incoming viewing key to a full viewing key.
     #[derive(Copy)]
     CommitIvkRandomness,
@@ -63,7 +63,7 @@ impl CommitIvkRandomness {
     }
 }
 
-component!(
+witness_adapter!(
     /// The canonical public spending-validation key used in address ownership.
     SpendValidatingKey,
     keys::SpendValidatingKey,
@@ -76,7 +76,7 @@ impl From<&keys::SpendValidatingKey> for SpendValidatingKey {
     }
 }
 
-component!(
+witness_adapter!(
     /// The sign-corrected authorization key. Its encoding permits spending.
     ///
     /// Extract this separately from viewing material, only in the trusted signer.
@@ -92,7 +92,7 @@ impl From<&keys::SpendAuthorizingKey> for SpendAuthorizingKey {
     }
 }
 
-component!(
+witness_adapter!(
     /// A canonically decoded nonidentity point used for address or synthetic components.
     #[derive(Copy, PartialEq, Eq)]
     NonIdentityPallasPoint,
@@ -134,7 +134,7 @@ impl NonIdentityPallasPoint {
     }
 }
 
-component!(
+witness_adapter!(
     /// The private note-randomness component bound into commitments and nullifiers.
     #[derive(Copy, PartialEq, Eq)]
     NotePsi,
@@ -166,7 +166,7 @@ impl NotePsi {
     }
 }
 
-component!(
+witness_adapter!(
     /// Private randomness for a note commitment.
     NoteCommitTrapdoor,
     note::commitment::NoteCommitTrapdoor,
@@ -195,7 +195,7 @@ impl NoteCommitTrapdoor {
     }
 }
 
-component!(
+witness_adapter!(
     /// A complete note-commitment point, including the coordinate omitted on-chain.
     NoteCommitment,
     note::NoteCommitment,
