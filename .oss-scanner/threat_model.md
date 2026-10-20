@@ -3,12 +3,14 @@
 This repository holds the Zakura Common libraries: Zakura's forks of the Zcash
 ecosystem's cryptography and protocol crates (halo2, Orchard, Sapling,
 `pasta_curves`, `bls12_381`, `jubjub`, `bellman`, RedDSA, Equihash, note
-encryption, transaction and address encoding, ZIP 321), plus `zakura-udon`
-(Pasta field and curve arithmetic with allocation-free FFTs) and the `bento`
-crates that build on it. The crates are published to crates.io. Their most
-important consumer is the [Zakura](https://github.com/zakura-core/zakura) full
-node, which uses them to verify every proof, signature, Equihash solution and
-transaction on the Zcash chain. Wallets and other Zcash tools use them too.
+encryption, transaction and address encoding, ZIP 321), plus two unpublished
+experimental members: `zakura-udon` (Pasta field and curve arithmetic with
+allocation-free FFTs, not yet used by Zakura) and the `zakura-bento*` crates
+(compile-time arithmetic that derives Udon's constants). The library crates
+are published to crates.io. Their most important consumer is the
+[Zakura](https://github.com/zakura-core/zakura) full node, which uses them to
+verify every proof, signature, Equihash solution and transaction on the Zcash
+chain. Wallets and other Zcash tools use them too.
 The repository's security policy is
 [`.github/SECURITY.md`](../.github/SECURITY.md).
 
@@ -61,10 +63,14 @@ by the caller, and documented preconditions on arguments.
    secrets through their outputs or through secret-dependent timing or
    memory access, and signing must never reuse a nonce.
 
+`zakura-udon` and the `zakura-bento*` crates matter less until Zakura uses
+them. A bug in `bento`'s compile-time arithmetic would surface as a wrong
+constant in Udon, so test it through Udon's vectors.
+
 Less important: proving performance, `no_std` and bare-metal build
 configurations, benchmarks, the `dev-graph`, `test-dependencies` and
-`cost-estimator` development features, examples, and the `bento` crates
-(experimental). Code that only runs in tests is out of scope.
+`cost-estimator` development features, and examples. Code that only runs in
+tests is out of scope.
 
 ## How to exercise it
 
@@ -76,12 +82,14 @@ configurations, benchmarks, the `dev-graph`, `test-dependencies` and
   with `--release`, as the Dockerfile does. `Cargo.toml` already optimizes
   the arithmetic crates in the test profile.
 - Test vectors from the Zcash specification and from `zcashd` are under
-  `src/test_vectors` or `tests/` in most crates. Equality with them, and
-  with the upstream crates each one was forked from (see `README.md`), is
-  the oracle for arithmetic and encoding bugs.
-- `zakura-orchard` and `zakura-sapling-crypto` have end-to-end tests that
-  build a transaction component, prove it, and verify it; they are the
-  quickest way to confirm a verification finding.
+  `src/test_vectors` in `orchard`, `sapling-crypto`, `equihash` and
+  `zcash_transparent`; other crates embed theirs in their test modules.
+  Equality with them, and with the upstream crates each one was forked from
+  (see `README.md`), is the oracle for arithmetic and encoding bugs.
+- `zakura-orchard`'s `tests/builder.rs` (`bundle_chain`) builds a bundle,
+  proves it and verifies it; it is the quickest way to confirm a
+  verification finding. `zakura-sapling-crypto` tests its Spend and Output
+  circuits in `src/circuit.rs`.
 
 ## How we rate severity
 

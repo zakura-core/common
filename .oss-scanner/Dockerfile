@@ -7,7 +7,7 @@
 # binaries in the configurations CI tests, leaving `cargo` able to work offline.
 # .oss-scanner/threat_model.md says what matters and how to run things.
 
-# The Rust release rust-toolchain.toml pins; CI's stable lanes also pass on it.
+# The Rust release rust-toolchain.toml pins for development.
 FROM rust:1.97.1-bookworm
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -31,9 +31,13 @@ ENV RUSTUP_TOOLCHAIN=1.97.1 \
     RUSTFLAGS="-C force-frame-pointers=yes"
 RUN rustup component add clippy rustfmt
 
+# Every crate in Cargo.lock, for every target and feature, so that builds with other
+# features than the ones below also work offline.
+RUN cargo fetch --locked
+
 # Compile the test binaries in each configuration CI tests (.github/workflows/ci.yml),
 # without running them. Running them is `cargo test` with the same arguments.
-RUN cargo test --locked --no-run -p zakura-equihash
+RUN cargo test --locked --no-run -p zakura-equihash --all-features
 RUN cargo test --locked --no-run -p zakura-orchard
 RUN cargo test --locked --no-run -p zakura-orchard \
       --no-default-features --features backend-halo2 --features circuit,multicore,wallet
