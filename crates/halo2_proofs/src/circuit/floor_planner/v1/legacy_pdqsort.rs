@@ -1,9 +1,8 @@
 //! Copy of https://github.com/rust-lang/rust/blob/1.56.1/library/core/src/slice/sort.rs
 //! "MODIFIED:" marks places that have been modified from the original.
 //!
-//! The V1 floor planner sorts regions with this copy, behind the
-//! `floor-planner-v1-legacy-pdqsort` feature, because the circuit layout (and therefore the
-//! verifying key) of circuits such as Orchard depends on the exact order it produces for
+//! The V1 floor planner sorts regions with this copy because the circuit layout (and therefore
+//! the verifying key) of circuits such as Orchard depends on the exact order it produces for
 //! regions with equal sort keys. Do not change its behavior.
 //!
 //! Previously published separately as the `zakura-halo2-legacy-pdqsort` crate (forked from
