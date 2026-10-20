@@ -350,17 +350,26 @@ pub(super) fn rows_view(
         let b = digits.slice(offset + len * bytes..offset + 2 * len * bytes);
         let ca = a.contiguous();
         let cb = b.contiguous();
-        for term in first..end {
-            let i = (term - start) * bytes;
-            let read = |row: _, contiguous: Option<&[u8]>| {
-                let byte = |j| contiguous.map_or_else(|| Storage::get(row, j), |s| s[j]);
-                if bytes == 1 {
-                    i16::from(byte(i) as i8)
-                } else {
-                    i16::from_le_bytes([byte(i), byte(i + 1)])
-                }
-            };
-            visit(term, read(a, ca), read(b, cb));
+        if bytes == 1
+            && let (Some(a), Some(b)) = (ca, cb)
+        {
+            for term in first..end {
+                let i = term - start;
+                visit(term, i16::from(a[i] as i8), i16::from(b[i] as i8));
+            }
+        } else {
+            for term in first..end {
+                let i = (term - start) * bytes;
+                let read = |row: _, contiguous: Option<&[u8]>| {
+                    let byte = |j| contiguous.map_or_else(|| Storage::get(row, j), |s| s[j]);
+                    if bytes == 1 {
+                        i16::from(byte(i) as i8)
+                    } else {
+                        i16::from_le_bytes([byte(i), byte(i + 1)])
+                    }
+                };
+                visit(term, read(a, ca), read(b, cb));
+            }
         }
         first = end;
     }

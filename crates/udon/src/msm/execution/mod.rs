@@ -572,6 +572,7 @@ pub struct MsmKernel<'i, C: PastaCurve> {
     window: usize,
     geometry: Geometry,
     first_chunk: bool,
+    scalar_bits: u8,
 }
 
 /// Opaque kernel output, published through [`MsmRun::complete`].
@@ -744,7 +745,16 @@ impl<C: PastaCurve> MsmKernel<'_, C> {
                         field: scratch.field,
                         indices: scratch.indices,
                     };
-                    output[0] = if let Some(input) = self.produced {
+                    output[0] = if matches!(geometry, Geometry::Booth(_))
+                        && self.scalar_bits <= 64
+                        && (self.scalar_bits == 0
+                            || self.window * geometry.width() > usize::from(self.scalar_bits) + 1)
+                    {
+                        // A centered carry can reach a window starting at bits + 1.
+                        // Prepare's completed maximum bounds both signed halves
+                        // only through 64 bits; keep every original partial slot.
+                        ProjectivePoint::IDENTITY
+                    } else if let Some(input) = self.produced {
                         kernels::run_selected(
                             &kernels::BaseView {
                                 bases: input.bases,
@@ -1100,6 +1110,7 @@ impl<'a, 'i, C: PastaCurve> MsmRun<'a, 'i, C> {
             window: request.key.index(),
             geometry: self.geometry,
             first_chunk: self.offset == self.start,
+            scalar_bits: self.shape.bits,
         })
     }
 
