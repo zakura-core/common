@@ -127,11 +127,6 @@ impl SpendingKey {
 pub struct SpendAuthorizingKey(redpallas::SigningKey<SpendAuth>);
 
 impl SpendAuthorizingKey {
-    /// Canonical encoding of the sign-corrected authorization key.
-    pub(crate) fn to_bytes(&self) -> [u8; 32] {
-        (&self.0).into()
-    }
-
     /// Derives ask from sk. Internal use only, does not enforce all constraints.
     pub(crate) fn derive_inner(sk: &SpendingKey) -> pallas::Scalar {
         to_scalar(PrfExpand::ORCHARD_ASK.with(&sk.0))
