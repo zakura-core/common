@@ -44,6 +44,18 @@
 //! remain available without it.
 //!
 
+//! ## Retired external circuit bridge
+//!
+//! Governance circuits own their composition implementation. Neither that bridge
+//! nor the payment circuit's implementation types are public:
+//!
+//! ```compile_fail
+//! use orchard::circuit::composition;
+//! ```
+//! ```compile_fail
+//! use orchard::circuit::{Circuit, Config};
+//! ```
+//!
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Temporary until we have more of the crate implemented.
@@ -256,6 +268,3 @@ trait BenchmarkCircuitWitnesses {
 }
 
 mod scope;
-
-#[cfg(all(test, feature = "circuit-composition"))]
-mod composition_tests;
