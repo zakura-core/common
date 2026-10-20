@@ -1,7 +1,7 @@
 //! A real external caller: only public Orchard imports, no payment circuit internals.
 use orchard::{
     circuit::voting::*,
-    keys::{FullViewingKey, Scope, SpendValidatingKey, testing::arb_spending_key},
+    keys::{Diversifier, FullViewingKey, Scope, SpendValidatingKey, testing::arb_spending_key},
     note::{Note, NoteVersion, RandomSeed, Rho},
     value::NoteValue,
 };
@@ -255,20 +255,22 @@ proptest! {
     fn public_gadgets_match_native_values_and_reject_altered_claims(sk in arb_spending_key()) {
         let fvk = FullViewingKey::from(&sk);
         for scope in [Scope::External, Scope::Internal] {
-            let address = fvk.address_at(0u32, scope);
+            let address = fvk.address(Diversifier::from_bytes([0; 11]), scope);
             let rho = Rho::from_bytes(&pallas::Base::ONE.to_repr()).unwrap();
             // Fixed fixture seed; production callers require properly sourced note randomness.
             let seed = RandomSeed::from_bytes([7; 32], &rho).unwrap();
-            for version in [NoteVersion::V2, NoteVersion::V3] {
-                let note = Note::from_parts(address, NoteValue::from_raw(1), rho, seed, version).unwrap();
-                let pk = affine(note.recipient().pk_d().to_bytes());
-                let cm = affine(note.commitment().to_bytes());
-                let claims = vec![*pk.coordinates().unwrap().x(), *pk.coordinates().unwrap().y(), *cm.coordinates().unwrap().x(), *cm.coordinates().unwrap().y(), base(note.nullifier(&fvk).to_bytes())];
-                let circuit = Composition { input: Some((fvk.clone(), scope, note)) };
-                MockProver::run(CIRCUIT_K, &circuit, vec![claims.clone()]).unwrap().assert_satisfied();
-                for offset in [PK_X, CM_X, NF] {
-                    let mut altered = claims.clone(); altered[offset] += pallas::Base::ONE;
-                    prop_assert!(MockProver::run(CIRCUIT_K, &circuit, vec![altered]).unwrap().verify().is_err());
+            for value in [0, 1, u64::MAX] {
+                for version in [NoteVersion::V2, NoteVersion::V3] {
+                    let note = Note::from_parts(address, NoteValue::from_raw(value), rho, seed, version).unwrap();
+                    let pk = affine(note.recipient().pk_d().to_bytes());
+                    let cm = affine(note.commitment().to_bytes());
+                    let claims = vec![*pk.coordinates().unwrap().x(), *pk.coordinates().unwrap().y(), *cm.coordinates().unwrap().x(), *cm.coordinates().unwrap().y(), base(note.nullifier(&fvk).to_bytes())];
+                    let circuit = Composition { input: Some((fvk.clone(), scope, note)) };
+                    MockProver::run(CIRCUIT_K, &circuit, vec![claims.clone()]).unwrap().assert_satisfied();
+                    for offset in [PK_X, CM_X, NF] {
+                        let mut altered = claims.clone(); altered[offset] += pallas::Base::ONE;
+                        prop_assert!(MockProver::run(CIRCUIT_K, &circuit, vec![altered]).unwrap().verify().is_err());
+                    }
                 }
             }
         }
