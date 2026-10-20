@@ -10,6 +10,25 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc3] - 2026-10-20
+
+### Changed
+
+- The V1 floor planner now always orders regions with the legacy Rust 1.56.1
+  pdqsort (64-bit behavior on every platform), which Orchard's circuit layout
+  and verifying keys depend on. Circuits that were laid out without the
+  former `floor-planner-v1-legacy-pdqsort` feature may get a different layout,
+  and therefore different verifying keys
+  ([#610](https://github.com/zakura-core/common/pull/610)).
+
+### Removed
+
+- Removed the `floor-planner-v1-legacy-pdqsort` feature, along with the
+  implicit `halo2_legacy_pdqsort` feature Cargo created for the former
+  optional `zakura-halo2-legacy-pdqsort` dependency; the legacy sort is now
+  built in unconditionally
+  ([#610](https://github.com/zakura-core/common/pull/610)).
+
 ## [4.0.0-rc1] - 2026-10-18
 
 ### Changed
