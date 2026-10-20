@@ -34,3 +34,7 @@ Do not open a public issue for an in-scope vulnerability. Submit it privately
 through [Zakura's security advisory
 reporting](https://github.com/zakura-core/zakura/security/advisories/new), and
 state that the report concerns `zakura-core/libraries`.
+
+If you cannot use GitHub, email the maintainers at <ewillbefull@gmail.com>.
+This is also the address that automated scanning services, such as
+Anthropic's OSS Scanner, report to.
