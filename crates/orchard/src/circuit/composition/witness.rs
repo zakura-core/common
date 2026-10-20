@@ -37,7 +37,8 @@ macro_rules! component {
 component!(
     /// Private nullifier-derivation material obtained from a full viewing key.
     #[derive(Copy)]
-    NullifierDerivingKey, keys::NullifierDerivingKey,
+    NullifierDerivingKey,
+    keys::NullifierDerivingKey,
     |key: &keys::NullifierDerivingKey| key.to_bytes()
 );
 
@@ -50,7 +51,8 @@ impl From<&keys::FullViewingKey> for NullifierDerivingKey {
 component!(
     /// Private randomness used to bind an incoming viewing key to a full viewing key.
     #[derive(Copy)]
-    CommitIvkRandomness, keys::CommitIvkRandomness,
+    CommitIvkRandomness,
+    keys::CommitIvkRandomness,
     |randomness: &keys::CommitIvkRandomness| randomness.inner().to_repr()
 );
 
@@ -63,7 +65,8 @@ impl CommitIvkRandomness {
 
 component!(
     /// The canonical public spending-validation key used in address ownership.
-    SpendValidatingKey, keys::SpendValidatingKey,
+    SpendValidatingKey,
+    keys::SpendValidatingKey,
     |key: &keys::SpendValidatingKey| key.to_bytes()
 );
 
@@ -78,7 +81,8 @@ component!(
     ///
     /// Extract this separately from viewing material, only in the trusted signer.
     /// Never send these bytes to an untrusted proving service or public instance.
-    SpendAuthorizingKey, keys::SpendAuthorizingKey,
+    SpendAuthorizingKey,
+    keys::SpendAuthorizingKey,
     |key: &keys::SpendAuthorizingKey| key.to_bytes()
 );
 
@@ -91,7 +95,8 @@ impl From<&keys::SpendAuthorizingKey> for SpendAuthorizingKey {
 component!(
     /// A canonically decoded nonidentity point used for address or synthetic components.
     #[derive(Copy, PartialEq, Eq)]
-    NonIdentityPallasPoint, spec::NonIdentityPallasPoint,
+    NonIdentityPallasPoint,
+    spec::NonIdentityPallasPoint,
     |point: &spec::NonIdentityPallasPoint| point.to_bytes()
 );
 
@@ -132,7 +137,9 @@ impl NonIdentityPallasPoint {
 component!(
     /// The private note-randomness component bound into commitments and nullifiers.
     #[derive(Copy, PartialEq, Eq)]
-    NotePsi, pallas::Base, |psi: &pallas::Base| psi.to_repr()
+    NotePsi,
+    pallas::Base,
+    |psi: &pallas::Base| psi.to_repr()
 );
 
 impl NotePsi {
@@ -161,7 +168,8 @@ impl NotePsi {
 
 component!(
     /// Private randomness for a note commitment.
-    NoteCommitTrapdoor, note::commitment::NoteCommitTrapdoor,
+    NoteCommitTrapdoor,
+    note::commitment::NoteCommitTrapdoor,
     |trapdoor: &note::commitment::NoteCommitTrapdoor| trapdoor.inner().to_repr()
 );
 
@@ -189,7 +197,8 @@ impl NoteCommitTrapdoor {
 
 component!(
     /// A complete note-commitment point, including the coordinate omitted on-chain.
-    NoteCommitment, note::NoteCommitment,
+    NoteCommitment,
+    note::NoteCommitment,
     |commitment: &note::NoteCommitment| commitment.inner().to_bytes()
 );
 
