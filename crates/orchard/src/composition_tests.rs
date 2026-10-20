@@ -5,12 +5,15 @@ use crate::backend::{
     pasta_curves::pallas,
 };
 use crate::{
-    circuit::voting::{NonIdentityPallasPoint, spend_auth_generator},
+    circuit::composition::{
+        spend_auth_generator,
+        witness::{self, NonIdentityPallasPoint, NoteCommitTrapdoor, NotePsi},
+    },
     keys::{
         FullViewingKey, Scope, SpendAuthorizingKey, SpendValidatingKey, SpendingKey,
         testing::arb_spending_key,
     },
-    note::{NotePsi, NoteVersion, testing::arb_note},
+    note::{NoteVersion, testing::arb_note},
     primitives::redpallas::SpendAuthRandomizer,
     value::NoteValue,
 };
@@ -22,16 +25,16 @@ proptest! {
         let ask = SpendAuthorizingKey::from(&sk);
         let zero = SpendAuthRandomizer::from_bytes(pallas::Scalar::ZERO.to_repr()).unwrap();
         let encoded: [u8; 32] = (&ask.randomize(&zero)).into();
-        prop_assert_eq!(ask.to_bytes(), encoded);
+        prop_assert_eq!(witness::SpendAuthorizingKey::from(&ask).to_bytes(), encoded);
         let fvk = FullViewingKey::from(&sk);
-        prop_assert_eq!(fvk.nk().to_bytes(), fvk.nk().inner().to_repr());
+        prop_assert_eq!(witness::NullifierDerivingKey::from(&fvk).to_bytes(), fvk.nk().inner().to_repr());
         for scope in [Scope::External, Scope::Internal] {
             let rivk = fvk.rivk(scope);
-            prop_assert_eq!(rivk.to_bytes(), rivk.inner().to_repr());
+            prop_assert_eq!(witness::CommitIvkRandomness::from_viewing_key(&fvk, scope).to_bytes(), rivk.inner().to_repr());
         }
         let mut encoded_stream = alloc::vec::Vec::new();
-        ask.write(&mut encoded_stream).unwrap();
-        prop_assert_eq!(encoded_stream, ask.to_bytes());
+        witness::SpendAuthorizingKey::from(&ask).write(&mut encoded_stream).unwrap();
+        prop_assert_eq!(encoded_stream, witness::SpendAuthorizingKey::from(&ask).to_bytes());
     }
 
     #[test]
@@ -46,18 +49,18 @@ proptest! {
     ) {
         let rho = note.rho();
         let seed = note.rseed();
-        let psi = seed.voting_psi(&rho);
+        let psi = NotePsi::derive(seed, &rho);
         prop_assert_eq!(psi.to_bytes(), seed.psi(&rho).to_repr());
         let address = note.recipient();
-        let gd = address.g_d();
-        let pkd = NonIdentityPallasPoint::from_bytes(&address.pk_d().to_bytes()).unwrap();
-        prop_assert_eq!(pkd, address.pk_d().inner());
+        let gd = NonIdentityPallasPoint::diversified_base(&address);
+        let pkd = NonIdentityPallasPoint::transmission_key(&address);
+        prop_assert_eq!(pkd.to_bytes(), address.pk_d().inner().to_bytes());
         let trapdoor = match note.version() {
-            NoteVersion::V2 => seed.rcm_v2(&rho),
-            NoteVersion::V3 => seed.voting_rcm_v3(&rho, &gd, &pkd, note.value(), &psi),
+            NoteVersion::V2 => NoteCommitTrapdoor::derive_v2(seed, &rho),
+            NoteVersion::V3 => NoteCommitTrapdoor::derive_v3(seed, &rho, &gd, &pkd, note.value(), &psi),
         };
         prop_assert_eq!(trapdoor.to_bytes(), note.rcm().inner().to_repr());
-        prop_assert_eq!(note.commitment().to_bytes(), note.commitment().inner().to_bytes());
+        prop_assert_eq!(witness::NoteCommitment::from(&note.commitment()).to_bytes(), note.commitment().inner().to_bytes());
         let mut bytes = alloc::vec::Vec::new();
         psi.write(&mut bytes).unwrap();
         prop_assert_eq!(NotePsi::read(bytes.as_slice()).unwrap(), psi);
@@ -65,8 +68,8 @@ proptest! {
         // Synthetic governance bases deliberately need not be diversified addresses.
         let synthetic_gd = NonIdentityPallasPoint::from_bytes(&spend_auth_generator().to_bytes()).unwrap();
         let synthetic_pkd = NonIdentityPallasPoint::from_bytes(&(spend_auth_generator() * pallas::Scalar::from(2)).to_bytes()).unwrap();
-        let typed = seed.voting_rcm_v3(&rho, &synthetic_gd, &synthetic_pkd, note.value(), &psi);
-        let native = seed.rcm_v3(&rho, &synthetic_gd, &synthetic_pkd, note.value().inner(), &seed.psi(&rho));
+        let typed = NoteCommitTrapdoor::derive_v3(seed, &rho, &synthetic_gd, &synthetic_pkd, note.value(), &psi);
+        let native = seed.rcm_v3(&rho, &crate::spec::NonIdentityPallasPoint::from_bytes(&synthetic_gd.to_bytes()).unwrap(), &crate::spec::NonIdentityPallasPoint::from_bytes(&synthetic_pkd.to_bytes()).unwrap(), note.value().inner(), &seed.psi(&rho));
         prop_assert_eq!(typed.to_bytes(), native.inner().to_repr());
     }
 
@@ -93,23 +96,33 @@ fn frozen_keys_cover_both_sign_correction_outcomes() {
         let negated = ((spend_auth_generator() * raw).to_affine().to_bytes()[31] >> 7) as usize;
         seen[negated] = true;
         let ask = SpendAuthorizingKey::from(&sk);
-        assert_eq!(ask.to_bytes(), vector.ask);
-        let scalar = pallas::Scalar::from_repr(ask.to_bytes()).unwrap();
+        assert_eq!(
+            witness::SpendAuthorizingKey::from(&ask).to_bytes(),
+            vector.ask
+        );
+        let scalar =
+            pallas::Scalar::from_repr(witness::SpendAuthorizingKey::from(&ask).to_bytes()).unwrap();
         assert_eq!(
             (spend_auth_generator() * scalar).to_affine().to_bytes(),
             vector.ak
         );
-        assert_eq!(SpendValidatingKey::from(&ask).to_bytes(), vector.ak);
+        assert_eq!(
+            witness::SpendValidatingKey::from(&SpendValidatingKey::from(&ask)).to_bytes(),
+            vector.ak
+        );
         let zero = SpendAuthRandomizer::from_bytes(pallas::Scalar::ZERO.to_repr()).unwrap();
         let signing = ask.randomize(&zero);
         let verification = crate::primitives::redpallas::VerificationKey::from(&signing);
-        let signature = signing.sign(&mut crate::rng_compat::OsRng, b"voting witness agreement");
+        let signature = signing.sign(
+            &mut crate::rng_compat::OsRng,
+            b"composition witness agreement",
+        );
         verification
-            .verify(b"voting witness agreement", &signature)
+            .verify(b"composition witness agreement", &signature)
             .unwrap();
         assert!(
             verification
-                .verify(b"altered voting witness", &signature)
+                .verify(b"altered composition witness", &signature)
                 .is_err()
         );
     }

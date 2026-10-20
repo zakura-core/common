@@ -9,8 +9,7 @@ use super::AddInstruction;
 
 /// Configuration for the addition chip.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "voting", visibility::make(pub))]
-pub(in crate::circuit) struct AddConfig {
+pub struct AddConfig {
     a: Column<Advice>,
     b: Column<Advice>,
     c: Column<Advice>,
@@ -19,8 +18,7 @@ pub(in crate::circuit) struct AddConfig {
 
 /// A chip implementing a single addition constraint `c = a + b` on a single row.
 #[derive(Debug)]
-#[cfg_attr(feature = "voting", visibility::make(pub))]
-pub(in crate::circuit) struct AddChip {
+pub struct AddChip {
     config: AddConfig,
 }
 
@@ -39,8 +37,7 @@ impl Chip<pallas::Base> for AddChip {
 
 impl AddChip {
     /// Configures the addition chip with the given advice columns.
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
-    pub(in crate::circuit) fn configure(
+    pub fn configure(
         meta: &mut ConstraintSystem<pallas::Base>,
         a: Column<Advice>,
         b: Column<Advice>,
@@ -60,8 +57,7 @@ impl AddChip {
     }
 
     /// Constructs an addition chip from the given config.
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
-    pub(in crate::circuit) fn construct(config: AddConfig) -> Self {
+    pub fn construct(config: AddConfig) -> Self {
         Self { config }
     }
 }

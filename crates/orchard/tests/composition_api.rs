@@ -1,6 +1,9 @@
 //! A real external caller: only public Orchard imports, no payment circuit internals.
 use orchard::{
-    circuit::voting::*,
+    circuit::composition::{
+        witness::{self, NonIdentityPallasPoint, NoteCommitTrapdoor, NotePsi},
+        *,
+    },
     keys::{Diversifier, FullViewingKey, Scope, SpendValidatingKey, testing::arb_spending_key},
     note::{Note, NoteVersion, RandomSeed, Rho},
     value::NoteValue,
@@ -145,20 +148,23 @@ impl Circuit<pallas::Base> for Composition {
         let ak = load(
             "validating key x",
             input.map(|(fvk, _, _)| {
-                *affine(SpendValidatingKey::from(fvk.clone()).to_bytes())
-                    .coordinates()
-                    .unwrap()
-                    .x()
+                *affine(
+                    witness::SpendValidatingKey::from(&SpendValidatingKey::from(fvk.clone()))
+                        .to_bytes(),
+                )
+                .coordinates()
+                .unwrap()
+                .x()
             }),
         )?;
         let nk = load(
             "nullifier key",
-            input.map(|(fvk, _, _)| base(fvk.nk().to_bytes())),
+            input.map(|(fvk, _, _)| base(witness::NullifierDerivingKey::from(fvk).to_bytes())),
         )?;
         let rho = load("rho", input.map(|(_, _, note)| base(note.rho().to_bytes())))?;
         let psi = load(
             "psi",
-            input.map(|(_, _, note)| base(note.rseed().voting_psi(&note.rho()).to_bytes())),
+            input.map(|(_, _, note)| base(NotePsi::derive(note.rseed(), &note.rho()).to_bytes())),
         )?;
         let value = load(
             "value",
@@ -167,17 +173,23 @@ impl Circuit<pallas::Base> for Composition {
         let gd = NonIdentityPoint::new(
             ecc.clone(),
             layouter.namespace(|| "diversified base"),
-            input.map(|(_, _, note)| affine(note.recipient().g_d().to_bytes())),
+            input.map(|(_, _, note)| {
+                affine(NonIdentityPallasPoint::diversified_base(&note.recipient()).to_bytes())
+            }),
         )?;
         let pkd = NonIdentityPoint::new(
             ecc.clone(),
             layouter.namespace(|| "transmission key"),
-            input.map(|(_, _, note)| affine(note.recipient().pk_d().to_bytes())),
+            input.map(|(_, _, note)| {
+                affine(NonIdentityPallasPoint::transmission_key(&note.recipient()).to_bytes())
+            }),
         )?;
         let rivk = ScalarFixed::new(
             ecc.clone(),
             layouter.namespace(|| "rivk"),
-            input.map(|(fvk, scope, _)| scalar(fvk.rivk(*scope).to_bytes())),
+            input.map(|(fvk, scope, _)| {
+                scalar(witness::CommitIvkRandomness::from_viewing_key(fvk, *scope).to_bytes())
+            }),
         )?;
         let ivk = commit_ivk(
             sinsemilla.clone(),
@@ -207,15 +219,16 @@ impl Circuit<pallas::Base> for Composition {
                 let rho = note.rho();
                 let seed = note.rseed();
                 let recipient = note.recipient();
-                let pkd = NonIdentityPallasPoint::from_bytes(&recipient.pk_d().to_bytes()).unwrap();
+                let pkd = NonIdentityPallasPoint::transmission_key(&recipient);
                 let trapdoor = match note.version() {
-                    NoteVersion::V2 => seed.rcm_v2(&rho),
-                    NoteVersion::V3 => seed.voting_rcm_v3(
+                    NoteVersion::V2 => NoteCommitTrapdoor::derive_v2(seed, &rho),
+                    NoteVersion::V3 => NoteCommitTrapdoor::derive_v3(
+                        seed,
                         &rho,
-                        &recipient.g_d(),
+                        &NonIdentityPallasPoint::diversified_base(&recipient),
                         &pkd,
                         note.value(),
-                        &seed.voting_psi(&rho),
+                        &NotePsi::derive(seed, &rho),
                     ),
                 };
                 scalar(trapdoor.to_bytes())
@@ -262,8 +275,8 @@ proptest! {
             for value in [0, 1, u64::MAX] {
                 for version in [NoteVersion::V2, NoteVersion::V3] {
                     let note = Note::from_parts(address, NoteValue::from_raw(value), rho, seed, version).unwrap();
-                    let pk = affine(note.recipient().pk_d().to_bytes());
-                    let cm = affine(note.commitment().to_bytes());
+                    let pk = affine(NonIdentityPallasPoint::transmission_key(&note.recipient()).to_bytes());
+                    let cm = affine(witness::NoteCommitment::from(&note.commitment()).to_bytes());
                     let claims = vec![*pk.coordinates().unwrap().x(), *pk.coordinates().unwrap().y(), *cm.coordinates().unwrap().x(), *cm.coordinates().unwrap().y(), base(note.nullifier(&fvk).to_bytes())];
                     let circuit = Composition { input: Some((fvk.clone(), scope, note)) };
                     MockProver::run(CIRCUIT_K, &circuit, vec![claims.clone()]).unwrap().assert_satisfied();

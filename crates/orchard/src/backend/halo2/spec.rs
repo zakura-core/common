@@ -21,7 +21,6 @@ pub(crate) use zcash_spec::PrfExpand;
 
 /// A Pallas point that is guaranteed to not be the identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "voting", visibility::make(pub))]
 pub(crate) struct NonIdentityPallasPoint(pallas::Point);
 
 impl Default for NonIdentityPallasPoint {
@@ -40,35 +39,9 @@ impl NonIdentityPallasPoint {
     /// Decodes a non-identity Pallas point from its canonical 32-byte encoding,
     /// returning `None` if the bytes do not decode to a valid curve point or if
     /// they decode to the identity.
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
     pub(crate) fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
         pallas::Point::from_bytes(bytes)
             .and_then(|p| CtOption::new(NonIdentityPallasPoint(p), !p.is_identity()))
-    }
-
-    /// Encodes a validated point for voting's circuit witness boundary.
-    #[cfg(feature = "voting")]
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_bytes()
-    }
-
-    /// Reads a canonical nonidentity point; rejects invalid, identity, and truncated input.
-    #[cfg(feature = "voting")]
-    pub fn read(mut reader: impl corez::io::Read) -> corez::io::Result<Self> {
-        let mut bytes = [0; 32];
-        reader.read_exact(&mut bytes)?;
-        Self::from_bytes(&bytes).into_option().ok_or_else(|| {
-            corez::io::Error::new(
-                corez::io::ErrorKind::InvalidData,
-                "invalid nonidentity point",
-            )
-        })
-    }
-
-    /// Writes the canonical nonidentity point encoding used by voting-circuits.
-    #[cfg(feature = "voting")]
-    pub fn write(&self, mut writer: impl corez::io::Write) -> corez::io::Result<()> {
-        writer.write_all(&self.to_bytes())
     }
 
     /// Constructs a wrapper for a point that is guaranteed to be non-identity
