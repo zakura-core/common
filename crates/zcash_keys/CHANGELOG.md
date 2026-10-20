@@ -10,20 +10,24 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [4.0.0-rc0] - 2026-10-17
+## [4.0.0] - 2026-10-20
 
 ### Added
 
 - Added the default-enabled `backend-halo2` feature forwarding the Orchard
   backend selection; builds with `--no-default-features` and `orchard` must
   enable it ([#591](https://github.com/zakura-core/common/pull/591)).
+- Added the default-enabled `wallet` feature gating the ZIP 32 wallet
+  derivation APIs and forwarding `wallet` to the Orchard, Sapling, and
+  transparent crates; builds with `--no-default-features` keep the
+  verification and direct-address APIs
+  ([#587](https://github.com/zakura-core/common/pull/587)).
 
 ### Changed
 
 - Reduced the dependencies enabled by `zcashd-compat` for legacy wallet recovery.
   Legacy seeds produce the same recovery phrases and derived seeds as before
   ([#579](https://github.com/zakura-core/common/pull/579)).
-- Keep wallet derivation APIs enabled by default behind `wallet`; allow verification and direct-address APIs without the external derivation dependency.
 
 ## [3.0.0] - 2026-10-13
 

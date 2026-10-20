@@ -10,23 +10,20 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [4.0.0-rc2] - 2026-10-18
-
-### Added
-
-- Added named NU7 block limits for Sapling spends and outputs, Orchard-family actions, and the combined shielded budget ([#598](https://github.com/zakura-core/common/pull/598)).
-
-## [4.0.0-rc1] - 2026-10-18
+## [4.0.0] - 2026-10-20
 
 ### Added
 
 - Added network-aware block spacing and anchor grids for ZIP 318, preserving reference durations across NU7 activation ([#593](https://github.com/zakura-core/common/pull/593)).
+- Added named NU7 block limits for Sapling spends and outputs, Orchard-family actions, and the combined shielded budget ([#598](https://github.com/zakura-core/common/pull/598)).
 
 ### Changed
 
 - Scaled ZIP 318 anchor boundaries and rolling expiry by the NU7 spacing ratio. Pool-migration constants and the expiry function now require block spacing, and boundary methods belong to the anchor grid ([#593](https://github.com/zakura-core/common/pull/593)).
-
-## [4.0.0-rc0] - 2026-10-17
+- Set the NU7 activation height for Mainnet to 3543405: `MAIN_NETWORK` now
+  returns `Some(3543405)` from `activation_height(NetworkUpgrade::Nu7)` and
+  selects `BranchId::Nu7` from that height onward
+  ([#616](https://github.com/zakura-core/common/pull/616)).
 
 ### Removed
 

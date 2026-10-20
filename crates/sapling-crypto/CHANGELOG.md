@@ -10,11 +10,18 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [4.0.0-rc0] - 2026-10-17
+## [4.0.0] - 2026-10-20
 
 ### Added
 
-- Add a coinbase bundle entry point without extended spending keys. Dummy notes reuse the existing master expansion while preserving their derivation and random-number consumption.
+- Added `builder::Builder::build_coinbase`, which builds a coinbase bundle
+  without extended spending keys; dummy notes keep their existing
+  derivation and random-number consumption
+  ([#587](https://github.com/zakura-core/common/pull/587)).
+- Added the default-enabled `wallet` feature gating the ZIP 32 wallet
+  derivation APIs; builds with `--no-default-features` keep the
+  verification and direct-address APIs without the derivation dependency
+  ([#587](https://github.com/zakura-core/common/pull/587)).
 
 ### Changed
 
@@ -22,7 +29,6 @@ internal implementation details are not tracked here.
   sharing cipher 0.5 with note encryption while preserving address formats
   and public interfaces
   ([#565](https://github.com/zakura-core/common/pull/565)).
-- Keep wallet derivation APIs enabled by default behind `wallet`; allow verification and direct-address APIs without the external derivation dependency.
 
 ### Removed
 

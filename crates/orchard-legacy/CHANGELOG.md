@@ -4,7 +4,7 @@ All notable public API changes to this support crate will be documented here.
 
 ## [Unreleased]
 
-## [4.0.0-rc0] - 2026-10-17
+## [4.0.0] - 2026-10-20
 
 ### Added
 

@@ -10,26 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [4.0.0-rc3] - 2026-10-20
-
-### Changed
-
-- The V1 floor planner now always orders regions with the legacy Rust 1.56.1
-  pdqsort (64-bit behavior on every platform), which Orchard's circuit layout
-  and verifying keys depend on. Circuits that were laid out without the
-  former `floor-planner-v1-legacy-pdqsort` feature may get a different layout,
-  and therefore different verifying keys
-  ([#610](https://github.com/zakura-core/common/pull/610)).
-
-### Removed
-
-- Removed the `floor-planner-v1-legacy-pdqsort` feature, along with the
-  implicit `halo2_legacy_pdqsort` feature Cargo created for the former
-  optional `zakura-halo2-legacy-pdqsort` dependency; the legacy sort is now
-  built in unconditionally
-  ([#610](https://github.com/zakura-core/common/pull/610)).
-
-## [4.0.0-rc1] - 2026-10-18
+## [4.0.0] - 2026-10-20
 
 ### Changed
 
@@ -43,8 +24,12 @@ internal implementation details are not tracked here.
   once instead of once per backend. Backend calls remain statically
   dispatched; the API and proof bytes are unchanged
   ([#601](https://github.com/zakura-core/common/pull/601)).
-
-## [4.0.0-rc0] - 2026-10-17
+- The V1 floor planner now always orders regions with the legacy Rust 1.56.1
+  pdqsort (64-bit behavior on every platform), which Orchard's circuit layout
+  and verifying keys depend on. Circuits that were laid out without the
+  former `floor-planner-v1-legacy-pdqsort` feature may get a different layout,
+  and therefore different verifying keys
+  ([#610](https://github.com/zakura-core/common/pull/610)).
 
 ### Removed
 
@@ -52,6 +37,11 @@ internal implementation details are not tracked here.
   output directly. The `tabbycat` Cargo feature remains as an empty compatibility
   feature for existing consumers
   ([#578](https://github.com/zakura-core/common/pull/578)).
+- Removed the `floor-planner-v1-legacy-pdqsort` feature, along with the
+  implicit `halo2_legacy_pdqsort` feature Cargo created for the former
+  optional `zakura-halo2-legacy-pdqsort` dependency; the legacy sort is now
+  built in unconditionally
+  ([#610](https://github.com/zakura-core/common/pull/610)).
 
 ### Fixed
 

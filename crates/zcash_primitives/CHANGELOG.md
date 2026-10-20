@@ -10,19 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [4.0.0-rc2] - 2026-10-18
-
-### Added
-
-- Added height-aware default expiry and padded shielded budget helpers for downstream wallets ([#598](https://github.com/zakura-core/common/pull/598)).
-
-### Changed
-
-- Renamed `DEFAULT_TX_EXPIRY_DELTA` to `PRE_NU7_DEFAULT_TX_EXPIRY_DELTA`; use `default_tx_expiry_delta` for height-aware construction ([#598](https://github.com/zakura-core/common/pull/598)).
-- Default ordinary and deferred PCZT expiry to 120 blocks from the target height at NU7, preserving explicit overrides and coinbase expiry ([#598](https://github.com/zakura-core/common/pull/598)).
-- Reject ordinary, PCZT, and deferred construction when padded shielded bundles exceed the NU7 per-pool or combined block budget ([#598](https://github.com/zakura-core/common/pull/598)).
-
-## [4.0.0-rc0] - 2026-10-17
+## [4.0.0] - 2026-10-20
 
 ### Added
 
@@ -31,14 +19,26 @@ internal implementation details are not tracked here.
   `PcztResult` and `PcztParts`, and is implied by `transparent-inputs`. Builds
   without default features that use these APIs must enable it
   ([#580](https://github.com/zakura-core/common/pull/580)).
-- Add a coinbase transaction builder entry point without wallet spending keys or a fee rule, sharing the existing validation and construction path. Requests made with a standard transaction configuration return `coinbase::Error::InvalidBuilderConfiguration`.
+- Added `transaction::builder::Builder::build_coinbase`, which builds a
+  coinbase transaction without wallet spending keys or a fee rule through
+  the existing validation and construction path; a standard transaction
+  configuration fails with
+  `Error::Coinbase(transparent::coinbase::Error::InvalidBuilderConfiguration)`
+  ([#587](https://github.com/zakura-core/common/pull/587)).
 - Added the default-enabled `backend-halo2` feature forwarding the Orchard
   backend selection; builds with `--no-default-features` must enable it
   ([#591](https://github.com/zakura-core/common/pull/591)).
+- Added the default-enabled `wallet` feature gating wallet derivation and
+  PCZT construction; `pczt`, `transparent-inputs`, and `test-dependencies`
+  select it automatically
+  ([#587](https://github.com/zakura-core/common/pull/587)).
+- Added height-aware default expiry and padded shielded budget helpers for downstream wallets ([#598](https://github.com/zakura-core/common/pull/598)).
 
 ### Changed
 
-- Make wallet derivation and PCZT construction opt-out through the default-enabled `wallet` feature. Indexed-address and wallet-input features select it automatically.
+- Renamed `DEFAULT_TX_EXPIRY_DELTA` to `PRE_NU7_DEFAULT_TX_EXPIRY_DELTA`; use `default_tx_expiry_delta` for height-aware construction ([#598](https://github.com/zakura-core/common/pull/598)).
+- Default ordinary and deferred PCZT expiry to 120 blocks from the target height at NU7, preserving explicit overrides and coinbase expiry ([#598](https://github.com/zakura-core/common/pull/598)).
+- Reject ordinary, PCZT, and deferred construction when padded shielded bundles exceed the NU7 per-pool or combined block budget ([#598](https://github.com/zakura-core/common/pull/598)).
 
 ### Removed
 
