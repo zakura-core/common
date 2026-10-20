@@ -13,7 +13,7 @@ repository.workspace = true
 readme.workspace = true
 
 [package.metadata.docs.rs]
-features = ["test-dependencies", "unstable-frost", "weighted-merkle"]
+features = ["test-dependencies", "unstable-frost", "weighted-merkle", "voting"]
 rustdoc-args = ["--cfg", "docsrs", "--html-in-header", "katex-header.html"]
 
 [lib]
@@ -78,6 +78,8 @@ orbits = ["orchard-legacy?/orbits"]
 portable = ["orchard-legacy?/portable"]
 std = ["corez/std", "orchard-legacy?/std"]
 test-dependencies = ["wallet", "orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
+# Backend-specific composition primitives and typed witnesses for voting-circuits.
+voting = ["backend-halo2", "prover", "dep:visibility"]
 unstable-frost = ["dep:visibility"]
 # Historical fingerprint fixtures use ZIP 32 indexed addresses.
 verifier-fingerprint = ["orchard-legacy?/verifier-fingerprint", "zip32-addresses", "circuit"]
@@ -121,3 +123,7 @@ required-features = ["test-dependencies", "circuit", "zip32-addresses"]
 name = "post_nu6_3_k11_keygen"
 harness = false
 required-features = ["test-dependencies", "circuit", "zip32-addresses"]
+
+[[test]]
+name = "voting_api"
+required-features = ["voting", "test-dependencies"]
