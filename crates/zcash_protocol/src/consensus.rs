@@ -516,7 +516,7 @@ impl Parameters for MainNetwork {
             NetworkUpgrade::Nu6_1 => Some(BlockHeight(3_146_400)),
             NetworkUpgrade::Nu6_2 => Some(BlockHeight(3_364_600)),
             NetworkUpgrade::Nu6_3 => Some(BlockHeight(3_428_143)),
-            NetworkUpgrade::Nu7 => None,
+            NetworkUpgrade::Nu7 => Some(BlockHeight(3_543_405)),
         }
     }
 }
@@ -619,9 +619,9 @@ pub enum NetworkUpgrade {
     Nu6_2,
     /// The Ironwood / NU6.3 network upgrade.
     Nu6_3,
-    /// The [Nu7 (proposed)] network upgrade.
+    /// The [Nu7] network upgrade.
     ///
-    /// [Nu7 (proposed)]: https://z.cash/upgrade/nu7/
+    /// [Nu7]: https://z.cash/upgrade/nu7/
     Nu7,
 }
 
@@ -1079,17 +1079,33 @@ mod tests {
     }
 
     #[test]
-    fn nu7_has_no_mainnet_activation_height() {
-        assert_eq!(MAIN_NETWORK.activation_height(NetworkUpgrade::Nu7), None);
+    fn nu7_mainnet_activation_height() {
         assert_eq!(
-            BranchId::for_height(&MAIN_NETWORK, BlockHeight(u32::MAX)),
+            MAIN_NETWORK.activation_height(NetworkUpgrade::Nu7),
+            Some(BlockHeight(3_543_405)),
+        );
+        assert!(!MAIN_NETWORK.is_nu_active(NetworkUpgrade::Nu7, BlockHeight(3_543_404)));
+        assert!(MAIN_NETWORK.is_nu_active(NetworkUpgrade::Nu7, BlockHeight(3_543_405)));
+        assert_eq!(
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(3_543_404)),
             BranchId::Nu6_3,
         );
         assert_eq!(
-            BranchId::Nu6_3.height_bounds(&MAIN_NETWORK),
-            Some((BlockHeight(3_428_143), None)),
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(3_543_405)),
+            BranchId::Nu7,
         );
-        assert_eq!(BranchId::Nu7.height_bounds(&MAIN_NETWORK), None);
+        assert_eq!(
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(u32::MAX)),
+            BranchId::Nu7,
+        );
+        assert_eq!(
+            BranchId::Nu6_3.height_bounds(&MAIN_NETWORK),
+            Some((BlockHeight(3_428_143), Some(BlockHeight(3_543_405)))),
+        );
+        assert_eq!(
+            BranchId::Nu7.height_bounds(&MAIN_NETWORK),
+            Some((BlockHeight(3_543_405), None)),
+        );
     }
 
     #[test]
@@ -1204,8 +1220,16 @@ mod tests {
             BranchId::Nu6_3,
         );
         assert_eq!(
-            BranchId::for_height(&MAIN_NETWORK, BlockHeight(5_000_000)),
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(3_543_404)),
             BranchId::Nu6_3,
+        );
+        assert_eq!(
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(3_543_405)),
+            BranchId::Nu7,
+        );
+        assert_eq!(
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(5_000_000)),
+            BranchId::Nu7,
         );
     }
 }
