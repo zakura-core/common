@@ -10,6 +10,17 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc3] - 2026-10-19
+
+### Added
+
+- Added the default-off `voting` feature and a curated
+  `circuit::voting` interface for composing governance proofs from the existing
+  Halo2 address-ownership, note-commitment, and nullifier gadgets. Typed witness
+  access and canonical encodings keep derivations owned by Orchard while the
+  payment circuit and unrelated implementation details remain private
+  ([#613](https://github.com/zakura-core/common/pull/613)).
+
 ## [4.0.0-rc1] - 2026-10-18
 
 ### Changed
