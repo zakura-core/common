@@ -1720,3 +1720,528 @@ fn explicit_kernels_dispatch_on_short_raw_prepared_and_cached_inputs() {
     small_kernel_dispatch::<Pallas>();
     small_kernel_dispatch::<Vesta>();
 }
+
+#[test]
+fn empty_booth_windows_preserve_actual_centered_carries() {
+    use crate::msm::recode::{self, Geometry};
+    fn check<C: PastaCurve>() {
+        let mut magnitudes = vec![0, 1, 127, 32767, (1_u64 << 63) - 1, u64::MAX];
+        for bit in 1..64 {
+            let power = 1_u64 << bit;
+            magnitudes.extend([power - 1, power, power + 1]);
+        }
+        magnitudes.sort_unstable();
+        magnitudes.dedup();
+        let signed: Vec<_> = magnitudes
+            .iter()
+            .flat_map(|&value| [i128::from(value), -i128::from(value)])
+            .collect();
+        let scalars: Vec<_> = signed
+            .iter()
+            .map(|&value| {
+                let scalar = PastaField::<C::Scalar>::from_u64(value.unsigned_abs() as u64);
+                if value < 0 { scalar.neg() } else { scalar }
+            })
+            .collect();
+        let mut records = vec![ScalarStorage::ZERO; scalars.len()];
+        let prepared =
+            PreparedScalars::prepare(&scalars, &mut records, TaskBudget::SERIAL, &SerialExecutor);
+        for width in 4..=12 {
+            let geometry = Geometry::Booth(width);
+            let mut digits = vec![0xa5; geometry.storage_len(scalars.len()).unwrap()];
+            recode::write(prepared.records, geometry, &mut digits);
+            let mut cached = vec![0_i128; scalars.len()];
+            let mut direct = cached.clone();
+            for window in 0..geometry.windows() {
+                let shift = window * usize::from(width);
+                recode::window_rows::<C, false>(
+                    prepared.records,
+                    &digits,
+                    0..scalars.len(),
+                    geometry,
+                    window,
+                    |term, a, b| {
+                        assert_eq!(b, 0);
+                        cached[term] += i128::from(a) << shift;
+                        let bits = prepared.records[term].bits;
+                        if bits == 0 || shift > usize::from(bits) + 1 {
+                            assert_eq!(
+                                a, 0,
+                                "width={width}, scalar={}, window={window}",
+                                signed[term]
+                            );
+                        }
+                        if (width == 4 && signed[term] == 127 && window == 2)
+                            || (width == 8 && signed[term] == 32767 && window == 2)
+                            || (width == 8 && signed[term] == (1_i128 << 63) - 1 && window == 8)
+                        {
+                            assert_eq!(a, 1, "the preceding midpoint propagates carry");
+                        }
+                    },
+                );
+                recode::window_rows::<C, true>(
+                    prepared.records,
+                    &digits,
+                    0..scalars.len(),
+                    geometry,
+                    window,
+                    |term, a, b| {
+                        assert_eq!(b, 0);
+                        direct[term] += i128::from(a) << shift;
+                        let bits = prepared.records[term].bits;
+                        if bits == 0 || shift > usize::from(bits) + 1 {
+                            assert_eq!(a, 0);
+                        }
+                        if width == 8 && signed[term] == 32767 && window == 2 {
+                            assert_eq!(a, 0, "direct and cached support differ");
+                        }
+                    },
+                );
+            }
+            assert_eq!(cached, signed);
+            assert_eq!(direct, signed);
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
+}
+
+fn identity_window_run<C: PastaCurve>(
+    scalar: PastaField<C::Scalar>,
+    width: u8,
+    accumulation: Accumulation,
+) {
+    use crate::msm::{recode::Geometry, test_support::count_kernels};
+    let scalars = [scalar];
+    let bases = [AffinePoint::<C>::GENERATOR];
+    let options = ArithmeticOptions::DEFAULT
+        .with_algorithm(Algorithm::Booth {
+            width: Some(u32::from(width)),
+            accumulation,
+        })
+        .unwrap();
+    let plan = MsmPlan::new_with(1, options, NonZeroUsize::MIN).unwrap();
+    let mut records = [ScalarStorage::ZERO];
+    let prepared =
+        PreparedScalars::prepare(&scalars, &mut records, TaskBudget::SERIAL, &SerialExecutor);
+    let mut digits = vec![0; prepared.cache_len_with(options).unwrap()];
+    let cached = prepared.cache_with(options, &mut digits).unwrap();
+    let selection = Selection::new(Bases::Affine(&bases));
+    let raw = selection.with_scalars(&scalars);
+    let arena = Arena::new(plan);
+    let work = [RwLock::new(Work::new(core::iter::once(plan.temporary())))];
+    let mut identity = Identity::new();
+    let mut slots = [TaskStorage::EMPTY];
+    let mut run = MsmRun::new(plan, raw, &mut identity, &mut slots);
+    for input in [
+        raw,
+        selection.with_prepared_scalars(prepared),
+        selection.with_prepared_scalars(cached),
+    ] {
+        if run.result().is_some() {
+            run.rebind(plan, input).unwrap();
+        }
+        let mut window_tasks = 0;
+        while run.result().is_none() {
+            let mut ready = [None];
+            assert_eq!(run.ready(&mut ready), 1);
+            let request = ready[0].unwrap();
+            let kernel = run.kernel(request).unwrap();
+            let is_window = request.kind == WorkKind::Window;
+            let skip = is_window
+                && kernel.scalar_bits <= 64
+                && (kernel.scalar_bits == 0
+                    || kernel.window * usize::from(width) > usize::from(kernel.scalar_bits) + 1);
+            if is_window {
+                window_tasks += 1;
+                assert_eq!(kernel.geometry, Geometry::Booth(width));
+                assert_eq!(kernel.scalar_bits, prepared.shape.bits);
+                // These cached carry windows must still enter arithmetic.
+                if (scalar.reduce() == PastaField::<C::Scalar>::from_u64(127).reduce()
+                    && width == 4
+                    && kernel.window == 2)
+                    || (scalar.reduce() == PastaField::<C::Scalar>::from_u64(32767).reduce()
+                        && width == 8
+                        && kernel.window == 2)
+                    || (scalar.reduce()
+                        == PastaField::<C::Scalar>::from_u64((1_u64 << 63) - 1).reduce()
+                        && width == 8
+                        && kernel.window == 8)
+                {
+                    assert!(!skip);
+                }
+            }
+            let mut lease = arena.acquire(request, &work).unwrap();
+            if is_window {
+                lease.buffers().output.fill(ProjectivePoint::GENERATOR);
+            }
+            let mut task = run.try_claim(request, || Some(lease)).unwrap().unwrap();
+            let (_, calls) = count_kernels(|| task.execute().unwrap());
+            let mut done = run.complete(task.finish()).unwrap();
+            assert_eq!(done.error, None);
+            if is_window {
+                assert_eq!(calls.total(), usize::from(!skip));
+                assert_eq!(
+                    calls.for_geometry(Geometry::Booth(width)),
+                    usize::from(!skip)
+                );
+                if skip {
+                    assert_eq!(
+                        done.resources.buffers().output[0],
+                        ProjectivePoint::IDENTITY
+                    );
+                }
+            }
+        }
+        assert_eq!(window_tasks, plan.output_slots());
+        assert_eq!(run.result(), Some(ladder::<C>(scalar)));
+    }
+}
+
+#[test]
+fn identity_booth_windows_keep_dirty_slots_and_ladder_results() {
+    fn check<C: PastaCurve>() {
+        for width in 4..=12 {
+            for magnitude in [0, 127, 32767, (1_u64 << 63) - 1, u64::MAX] {
+                let scalar = PastaField::<C::Scalar>::from_u64(magnitude);
+                for scalar in [scalar, scalar.neg()] {
+                    identity_window_run::<C>(scalar, width, Accumulation::Affine);
+                }
+            }
+        }
+        for accumulation in [
+            Accumulation::Affine,
+            Accumulation::Hybrid,
+            Accumulation::Projective,
+        ] {
+            // Canonical widths 65 and 128 must never inherit the small-half bound.
+            for limbs in [[0, 1, 0, 0], [0, 1_u64 << 63, 0, 0]] {
+                let scalar =
+                    PastaField::<C::Scalar>::from_canonical_uint(CanonicalUint::from_limbs(limbs))
+                        .unwrap();
+                for scalar in [scalar, scalar.neg()] {
+                    identity_window_run::<C>(scalar, 8, accumulation);
+                }
+            }
+            let full = PastaField::<C::Scalar>::from_u64(7).invert().unwrap();
+            assert_eq!(ScalarStorage::<C>::field(&full).bits, 255);
+            identity_window_run::<C>(full, 8, accumulation);
+            identity_window_run::<C>(full.neg(), 8, accumulation);
+            identity_window_run::<C>(PastaField::ZERO, 8, accumulation);
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
+}
+
+#[test]
+fn identity_window_shape_waits_for_late_prepare_and_resets_on_rebind() {
+    fn check<C: PastaCurve>() {
+        let bases = [AffinePoint::<C>::GENERATOR; 257];
+        let narrow = [PastaField::<C::Scalar>::from_u64(7); 257];
+        let mut wide = narrow;
+        wide[256] = PastaField::<C::Scalar>::from_u64(7).invert().unwrap();
+        let zero = [PastaField::ZERO; 257];
+        let options = ArithmeticOptions::DEFAULT
+            .with_algorithm(Algorithm::Booth {
+                width: Some(8),
+                accumulation: Accumulation::Affine,
+            })
+            .unwrap();
+        let plan = MsmPlan::new_with(257, options, NonZeroUsize::new(257).unwrap()).unwrap();
+        let arena = Arena::new(plan);
+        let work = [RwLock::new(Work::new(core::iter::once(plan.temporary())))];
+        let mut identity = Identity::new();
+        let mut slots = [const { TaskStorage::EMPTY }; 2];
+        let mut run = MsmRun::new(
+            plan,
+            Input::new(Bases::Affine(&bases), &narrow),
+            &mut identity,
+            &mut slots,
+        );
+        let mut stale = None;
+        for (iteration, scalars) in [&narrow, &wide, &zero, &wide, &narrow]
+            .into_iter()
+            .enumerate()
+        {
+            if iteration != 0 {
+                run.rebind(plan, Input::new(Bases::Affine(&bases), scalars))
+                    .unwrap();
+                assert!(matches!(run.kernel(stale.unwrap()), Err(TaskError::Stale)));
+                assert_eq!(run.shape.bits, 0);
+            }
+            let expected_bits = scalars
+                .iter()
+                .map(|value| ScalarStorage::<C>::field(value).bits)
+                .max()
+                .unwrap();
+            let mut ready = [None; 2];
+            assert_eq!(run.ready(&mut ready), 2);
+            let mut tasks = Vec::new();
+            for request in ready.into_iter().flatten() {
+                assert_eq!(request.kind, WorkKind::Prepare);
+                let mut task = run
+                    .try_claim(request, || arena.acquire(request, &work))
+                    .unwrap()
+                    .unwrap();
+                task.execute().unwrap();
+                tasks.push(task);
+            }
+            if iteration == 1 {
+                tasks.reverse();
+            }
+            let first = tasks.remove(0);
+            drop(run.complete(first.finish()).unwrap());
+            assert_eq!(
+                run.ready(&mut ready),
+                0,
+                "no Window before the last Prepare receipt"
+            );
+            let last = tasks.pop().unwrap();
+            drop(run.complete(last.finish()).unwrap());
+            assert_eq!(run.shape.bits, expected_bits);
+            let mut windows = 0;
+            while run.result().is_none() {
+                let count = run.ready(&mut ready);
+                assert!(count > 0);
+                for request in ready[..count].iter().flatten().copied() {
+                    if request.kind == WorkKind::Window {
+                        windows += 1;
+                        assert_eq!(run.kernel(request).unwrap().scalar_bits, expected_bits);
+                    }
+                    stale = Some(request);
+                    let mut lease = arena.acquire(request, &work).unwrap();
+                    if request.kind == WorkKind::Window {
+                        lease.buffers().output.fill(ProjectivePoint::GENERATOR);
+                    }
+                    let mut task = run.try_claim(request, || Some(lease)).unwrap().unwrap();
+                    task.execute().unwrap();
+                    assert_eq!(run.complete(task.finish()).unwrap().error, None);
+                }
+            }
+            assert_eq!(windows, plan.output_slots());
+            assert_eq!(
+                run.result(),
+                Some(ladder::<C>(
+                    scalars
+                        .iter()
+                        .fold(PastaField::ZERO, |sum, value| sum.add(value))
+                ))
+            );
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
+}
+
+#[test]
+fn identity_windows_validate_all_capacities_before_publication() {
+    fn check<C: PastaCurve>() {
+        let bases = [AffinePoint::<C>::GENERATOR; 2];
+        let scalars = [PastaField::<C::Scalar>::ZERO; 2];
+        for accumulation in [
+            Accumulation::Affine,
+            Accumulation::Hybrid,
+            Accumulation::Projective,
+        ] {
+            let options = ArithmeticOptions::DEFAULT
+                .with_algorithm(Algorithm::Booth {
+                    width: Some(8),
+                    accumulation,
+                })
+                .unwrap();
+            let plan = MsmPlan::new_with(2, options, NonZeroUsize::new(2).unwrap()).unwrap();
+            let r = plan.temporary();
+            // Records, digits, partial output, and every nonempty temporary bank.
+            // The final case supplies valid oversized storage with sentinel tails.
+            for shortened in 0..8 {
+                let capacities = [2, 64, 1, r.affine(), r.projective(), r.field(), r.indices()];
+                if shortened < 7 && capacities[shortened] == 0 {
+                    continue;
+                }
+                let arena = Arena::new(plan);
+                let work = [RwLock::new(Work::new(core::iter::once(r)))];
+                let mut identity = Identity::new();
+                let mut slots = [TaskStorage::EMPTY];
+                let mut run = MsmRun::new(
+                    plan,
+                    Input::new(Bases::Affine(&bases), &scalars),
+                    &mut identity,
+                    &mut slots,
+                );
+                let mut ready = [None];
+                assert_eq!(run.ready(&mut ready), 1);
+                let prepare = ready[0].unwrap();
+                let mut task = run
+                    .try_claim(prepare, || arena.acquire(prepare, &work))
+                    .unwrap()
+                    .unwrap();
+                task.execute().unwrap();
+                drop(run.complete(task.finish()).unwrap());
+                assert_eq!(run.ready(&mut ready), 1);
+                let request = ready[0].unwrap();
+                assert_eq!(request.kind, WorkKind::Window);
+                assert_eq!(run.kernel(request).unwrap().scalar_bits, 0);
+                assert_eq!(request.window, 0, "zero admits the very first window");
+                let records = [ScalarStorage::<C>::ZERO; 2];
+                let digits = [0_u8; 64];
+                assert_eq!(request.read_digits, digits.len());
+                let mut output = [ProjectivePoint::GENERATOR; 2];
+                let mut temporary = crate::msm::test_support::Buffers::<C>::new(r);
+                let length = |count: usize, kind: usize| count - usize::from(shortened == kind);
+                let record_view = &records[..length(records.len(), 0)];
+                let digit_view = &digits[..length(digits.len(), 1)];
+                let mut task = run
+                    .try_claim(request, || {
+                        Some(Buffers {
+                            records: &record_view,
+                            digits: &digit_view,
+                            scratch: Scratch::new(
+                                &mut [],
+                                &mut [],
+                                &mut temporary.affine[..length(r.affine(), 3)],
+                                &mut temporary.projective[..length(r.projective(), 4)],
+                                &mut temporary.field[..length(r.field(), 5)],
+                                &mut temporary.indices[..length(r.indices(), 6)],
+                            ),
+                            buckets: &mut [],
+                            output: &mut output[..if shortened == 2 { 0 } else { 2 }],
+                            partials: &[],
+                        })
+                    })
+                    .unwrap()
+                    .unwrap();
+                if shortened < 7 {
+                    assert!(
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.execute()))
+                            .is_err()
+                    );
+                    let done = run.complete(task.finish()).unwrap();
+                    assert_eq!(done.outcome, Outcome::Failed);
+                    assert_eq!(done.error, None);
+                    assert_eq!(output, [ProjectivePoint::GENERATOR; 2]);
+                    assert!(run.is_failed());
+                    assert_eq!(run.inflight(), 0);
+                    assert_eq!(run.result(), None);
+                } else {
+                    let (_, calls) =
+                        crate::msm::test_support::count_kernels(|| task.execute().unwrap());
+                    assert_eq!(calls.total(), 0);
+                    assert_eq!(run.complete(task.finish()).unwrap().error, None);
+                    assert_eq!(
+                        output,
+                        [ProjectivePoint::IDENTITY, ProjectivePoint::GENERATOR]
+                    );
+                }
+                temporary.tails(r);
+            }
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
+}
+
+#[test]
+fn identity_windows_revalidate_produced_indices_after_prepare() {
+    struct ChangingIndices<'a> {
+        values: &'a [u32],
+        missing: bool,
+    }
+    impl ReadView<u32> for ChangingIndices<'_> {
+        fn len(&self) -> usize {
+            self.values.len()
+        }
+        fn get(&self, index: usize) -> Option<&u32> {
+            self.values
+                .get(index)
+                .filter(|_| !self.missing || index != 1)
+        }
+    }
+    fn check<C: PastaCurve>() {
+        let bases = [AffinePoint::<C>::GENERATOR; 3];
+        let valid = [0_u32; 2];
+        let invalid = [0_u32, 3];
+        let options = ArithmeticOptions::DEFAULT
+            .with_algorithm(Algorithm::Booth {
+                width: Some(8),
+                accumulation: Accumulation::Affine,
+            })
+            .unwrap();
+        let plan = MsmPlan::new_with(3, options, NonZeroUsize::new(3).unwrap()).unwrap();
+        for value in [0, 7] {
+            let scalars = [PastaField::<C::Scalar>::from_u64(value); 2];
+            for missing in [false, true] {
+                let arena = Arena::new(plan);
+                let work = [RwLock::new(Work::new(core::iter::once(plan.temporary())))];
+                let mut identity = Identity::new();
+                let mut slots = [TaskStorage::EMPTY];
+                let input = ProducedInput::indexed(Bases::Affine(&bases), 3);
+                let mut run =
+                    MsmRun::new_produced_partition(plan, input, 1..3, &mut identity, &mut slots);
+                loop {
+                    let mut ready = [None];
+                    assert_eq!(run.ready(&mut ready), 1);
+                    let request = ready[0].unwrap();
+                    let kernel = run.kernel(request).unwrap();
+                    let qualifying = request.kind == WorkKind::Window
+                        && (kernel.scalar_bits == 0
+                            || kernel.window * 8 > usize::from(kernel.scalar_bits) + 1);
+                    if qualifying {
+                        assert_eq!(request.window, usize::from(value != 0));
+                    }
+                    let mut resources = ProducedLease {
+                        arithmetic: arena.acquire(request, &work).unwrap(),
+                        scalars: Fragments(&scalars),
+                        indices: ChangingIndices {
+                            values: if qualifying { &invalid } else { &valid },
+                            missing: qualifying && missing,
+                        },
+                    };
+                    if qualifying {
+                        resources.buffers().output.fill(ProjectivePoint::GENERATOR);
+                    }
+                    let mut task = run.try_claim(request, || Some(resources)).unwrap().unwrap();
+                    if qualifying && missing {
+                        assert!(
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                || task.execute()
+                            ))
+                            .is_err()
+                        );
+                    } else {
+                        task.execute().unwrap();
+                    }
+                    let mut done = run.complete(task.finish()).unwrap();
+                    if qualifying {
+                        assert_eq!(
+                            done.resources.buffers().output[0],
+                            ProjectivePoint::GENERATOR
+                        );
+                        if missing {
+                            assert_eq!(done.outcome, Outcome::Failed);
+                            assert_eq!(done.error, None);
+                        } else {
+                            assert_eq!(
+                                done.error,
+                                Some(CurveError::BaseIndexOutOfBounds {
+                                    position: 2,
+                                    index: 3,
+                                    bases: 3
+                                })
+                            );
+                        }
+                        drop(done);
+                        assert!(run.is_failed());
+                        assert_eq!(run.inflight(), 0);
+                        assert_eq!(run.result(), None);
+                        assert_eq!(run.rebind_produced(plan, input), Err(TaskError::Failed));
+                        break;
+                    }
+                    assert_eq!(done.error, None);
+                }
+            }
+        }
+    }
+    check::<Pallas>();
+    check::<Vesta>();
+}
