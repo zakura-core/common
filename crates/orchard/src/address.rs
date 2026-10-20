@@ -39,11 +39,13 @@ impl Address {
     }
 
     /// Returns the diversified base point for this address.
+    #[cfg_attr(feature = "voting", visibility::make(pub))]
     pub(crate) fn g_d(&self) -> NonIdentityPallasPoint {
         diversify_hash(self.d.as_array())
     }
 
     /// Returns the diversified transmission key for this address.
+    #[cfg_attr(feature = "voting", visibility::make(pub))]
     pub(crate) fn pk_d(&self) -> &DiversifiedTransmissionKey {
         &self.pk_d
     }

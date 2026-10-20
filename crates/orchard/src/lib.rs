@@ -256,3 +256,6 @@ trait BenchmarkCircuitWitnesses {
 }
 
 mod scope;
+
+#[cfg(all(test, feature = "voting"))]
+mod voting_tests;

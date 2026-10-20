@@ -8,6 +8,10 @@
 
 mod halo2;
 
+/// Halo2-specific composition primitives for governance proofs.
+#[cfg(feature = "voting")]
+pub mod voting;
+
 use halo2 as selected;
 
 pub use crate::Proof;
