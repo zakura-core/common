@@ -1448,7 +1448,7 @@ impl NoteCommitChip {
     /// Configures the chip's gates, Sinsemilla instances, and canonicity checks.
     #[allow(non_snake_case)]
     #[allow(clippy::many_single_char_names)]
-    pub(in crate::circuit) fn configure(
+    pub fn configure(
         meta: &mut ConstraintSystem<pallas::Base>,
         advices: [Column<Advice>; 10],
         sinsemilla_config: SinsemillaConfig<
@@ -1568,7 +1568,7 @@ impl NoteCommitChip {
     }
 
     /// Constructs the chip from a [`NoteCommitConfig`].
-    pub(in crate::circuit) fn construct(config: NoteCommitConfig) -> Self {
+    pub fn construct(config: NoteCommitConfig) -> Self {
         Self { config }
     }
 }
@@ -1583,7 +1583,7 @@ pub(in crate::circuit) mod gadgets {
     #[allow(clippy::many_single_char_names)]
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::circuit) fn note_commit(
+    pub fn note_commit(
         mut layouter: impl Layouter<pallas::Base>,
         chip: SinsemillaChip<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases>,
         ecc_chip: EccChip<OrchardFixedBases>,

@@ -10,6 +10,18 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [4.0.0-rc3] - 2026-10-19
+
+### Added
+
+- Added the default-off `circuit-composition` feature and a curated
+  `circuit::composition` interface for composing external proofs from the existing
+  Halo2 address-ownership, note-commitment, and nullifier gadgets. Typed witness
+  adapters in `circuit::composition::witness` keep derivations and canonical
+  encodings owned by Orchard while the
+  payment circuit and unrelated implementation details remain private
+  ([#613](https://github.com/zakura-core/common/pull/613)).
+
 ## [4.0.0-rc1] - 2026-10-18
 
 ### Changed

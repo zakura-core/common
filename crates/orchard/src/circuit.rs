@@ -8,6 +8,10 @@
 
 mod halo2;
 
+/// Halo2-specific components for constructing circuits that reuse Orchard relations.
+#[cfg(feature = "circuit-composition")]
+pub mod composition;
+
 use halo2 as selected;
 
 pub use crate::Proof;

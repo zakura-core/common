@@ -67,9 +67,9 @@ use crate::{
     value::{NoteValue, ValueCommitTrapdoor},
 };
 
-mod commit_ivk;
+pub(in crate::circuit) mod commit_ivk;
 pub mod gadget;
-mod note_commit;
+pub(in crate::circuit) mod note_commit;
 
 pub use crate::Proof;
 
