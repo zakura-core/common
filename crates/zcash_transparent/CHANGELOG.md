@@ -10,7 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [4.0.0-rc0] - 2026-10-17
+## [4.0.0] - 2026-10-20
 
 ### Added
 
@@ -19,6 +19,14 @@ internal implementation details are not tracked here.
   gates the conversions between `keys::TransparentKeyScope` /
   `keys::NonHardenedChildIndex` and `bip32::ChildNumber`
   ([#580](https://github.com/zakura-core/common/pull/580)).
+- Added the default-enabled `wallet` feature gating the ZIP 32 wallet
+  derivation APIs; builds with `--no-default-features` keep the
+  verification and direct-address APIs without the derivation dependency
+  ([#587](https://github.com/zakura-core/common/pull/587)).
+- Added `coinbase::Error::InvalidBuilderConfiguration`, returned when a
+  coinbase builder is given a standard transaction configuration, so
+  that case is reported separately from `coinbase::Error::UnexpectedInputs`
+  ([#587](https://github.com/zakura-core/common/pull/587)).
 
 ### Changed
 
@@ -28,9 +36,6 @@ internal implementation details are not tracked here.
   builds that use the PCZT types or the `ChildNumber` conversions must enable
   `pczt` or `bip32`; `transparent-inputs` now implies `pczt`
   ([#580](https://github.com/zakura-core/common/pull/580)).
-- Distinguish an invalid coinbase builder configuration from unexpected transaction inputs.
-
-- Keep wallet derivation APIs enabled by default behind `wallet`; allow verification and direct-address APIs without the external derivation dependency.
 
 ## [3.0.0] - 2026-10-13
 

@@ -10,29 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [4.0.0-rc3] - 2026-10-19
-
-### Added
-
-- Added the default-off `circuit-composition` feature and a curated
-  `circuit::composition` interface for composing external proofs from the existing
-  Halo2 address-ownership, note-commitment, and nullifier gadgets. Typed witness
-  adapters in `circuit::composition::witness` keep derivations and canonical
-  encodings owned by Orchard while the
-  payment circuit and unrelated implementation details remain private
-  ([#613](https://github.com/zakura-core/common/pull/613)).
-
-## [4.0.0-rc1] - 2026-10-18
-
-### Changed
-
-- Proof creation now compiles the halo2 prover once inside `zakura-orchard`
-  instead of in every crate that creates proofs, once per RNG type. Public
-  signatures and proof bytes are unchanged; a downstream caller's LLVM IR for
-  proof creation drops from about 1M lines to about 8k
-  ([#596](https://github.com/zakura-core/common/pull/596)).
-
-## [4.0.0-rc0] - 2026-10-17
+## [4.0.0] - 2026-10-20
 
 ### Added
 
@@ -52,6 +30,17 @@ internal implementation details are not tracked here.
 - Added the `aarch64-asm` feature selecting the aarch64 assembly
   implementation in the proving dependencies
   ([#591](https://github.com/zakura-core/common/pull/591)).
+- Added the default-enabled `wallet` feature gating the ZIP 32 wallet
+  derivation APIs; builds with `--no-default-features` keep the
+  verification and direct-address APIs without the derivation dependency
+  ([#587](https://github.com/zakura-core/common/pull/587)).
+- Added the default-off `circuit-composition` feature and a curated
+  `circuit::composition` interface for composing external proofs from the existing
+  Halo2 address-ownership, note-commitment, and nullifier gadgets. Typed witness
+  adapters in `circuit::composition::witness` keep derivations and canonical
+  encodings owned by Orchard while the
+  payment circuit and unrelated implementation details remain private
+  ([#613](https://github.com/zakura-core/common/pull/613)).
 
 ### Changed
 
@@ -59,7 +48,6 @@ internal implementation details are not tracked here.
   sharing cipher 0.5 with note encryption while preserving address formats
   and public interfaces
   ([#565](https://github.com/zakura-core/common/pull/565)).
-- Keep wallet derivation APIs enabled by default behind `wallet`; allow verification and direct-address APIs without the external derivation dependency.
 - `primitives::redpallas` now defines Orchard-owned signature domain, key,
   signature, and error types instead of reexporting `reddsa` types
   ([#591](https://github.com/zakura-core/common/pull/591)).
@@ -67,6 +55,11 @@ internal implementation details are not tracked here.
   synthesis, raw arithmetic conversions, and scalar generators are private
   implementation details
   ([#591](https://github.com/zakura-core/common/pull/591)).
+- Proof creation now compiles the halo2 prover once inside `zakura-orchard`
+  instead of in every crate that creates proofs, once per RNG type. Public
+  signatures and proof bytes are unchanged; a downstream caller's LLVM IR for
+  proof creation drops from about 1M lines to about 8k
+  ([#596](https://github.com/zakura-core/common/pull/596)).
 
 ### Removed
 
