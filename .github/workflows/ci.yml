@@ -602,8 +602,8 @@ jobs:
         run: cargo +stable test -p zakura-orchard --verbose
       - name: Test voting witness encodings
         run: cargo +stable test -p zakura-orchard --locked --features voting --lib voting_tests
-      - name: Test public voting composition and altered claims
-        run: cargo +stable test -p zakura-orchard --locked --features voting,test-dependencies --test voting_api
+      - name: Test public voting composition without default features
+        run: cargo +stable test -p zakura-orchard --locked --no-default-features --features voting,test-dependencies --test voting_api
       - name: Test voting API privacy documentation
         run: cargo +stable test -p zakura-orchard --locked --features voting --doc circuit::voting
       - name: Test without indexed ZIP 32 addresses
