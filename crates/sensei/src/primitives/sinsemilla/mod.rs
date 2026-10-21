@@ -1,0 +1,439 @@
+//! Sinsemilla hashing and commitments, including optimized Merkle workspaces.
+//!
+//! Ordinary hashing and weighted-table construction access a lazy affine `S`
+//! generator vector. Its [cache ownership](crate::primitives#lazy-data-and-ownership)
+//! depends on pointer atomics: atomic targets retain one vector with at most
+//! one initializer; other targets construct and drop an owned vector per access.
+//! Explicitly constructed domains remain caller-owned. In particular,
+//! [`weighted::UncheckedFixedLengthHashDomain`] owns its expanded tables until
+//! dropped; [`crate::primitives::merkle`] separately caches a domain for its helpers.
+
+use crate::primitives::pallas;
+use alloc::{format, vec::Vec};
+use subtle::CtOption;
+
+mod addition;
+use self::addition::IncompletePoint;
+mod once;
+use self::once::OnceTable;
+pub mod weighted;
+
+static SINSEMILLA_S_AFFINE: OnceTable<Vec<pallas::Affine>> = OnceTable::new();
+
+#[cfg(target_has_atomic = "ptr")]
+fn sinsemilla_s_affine() -> &'static [pallas::Affine] {
+    SINSEMILLA_S_AFFINE.get_or_init(make_s_affine)
+}
+
+#[cfg(not(target_has_atomic = "ptr"))]
+fn sinsemilla_s_affine() -> alloc::boxed::Box<Vec<pallas::Affine>> {
+    SINSEMILLA_S_AFFINE.get_or_init(make_s_affine)
+}
+
+fn make_s_affine() -> Vec<pallas::Affine> {
+    super::tables::sinsemilla_generators()
+        .iter()
+        .map(|point| pallas::Affine::from_native(point.to_point()))
+        .collect()
+}
+
+/// Number of bits of each message piece in $\mathsf{SinsemillaHashToPoint}$
+pub const K: usize = 10;
+
+/// $\frac{1}{2^K}$
+pub const INV_TWO_POW_K: [u8; 32] = [
+    1, 0, 192, 196, 160, 229, 70, 82, 221, 165, 74, 202, 85, 7, 62, 34, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 240, 63,
+];
+
+/// The largest integer such that $2^c \leq (r_P - 1) / 2$, where $r_P$ is the order
+/// of Pallas.
+pub const C: usize = 253;
+
+// Sinsemilla Q generators
+
+/// SWU hash-to-curve personalization for Sinsemilla $Q$ generators.
+pub const Q_PERSONALIZATION: &str = "z.cash:SinsemillaQ";
+
+// Sinsemilla S generators
+
+/// SWU hash-to-curve personalization for Sinsemilla $S$ generators.
+pub const S_PERSONALIZATION: &str = "z.cash:SinsemillaS";
+
+/// Converts a little-endian [`K`]-bit string into an integer.
+pub fn lebs2ip_k(bits: [bool; K]) -> u32 {
+    bits.iter()
+        .enumerate()
+        .fold(0u32, |acc, (i, b)| acc + if *b { 1 << i } else { 0 })
+}
+
+/// Coordinate extractor for Pallas.
+///
+/// Defined in [Zcash Protocol Spec § 5.4.9.7: Coordinate Extractor for Pallas][concreteextractorpallas].
+///
+/// [concreteextractorpallas]: https://zips.z.cash/protocol/nu5.pdf#concreteextractorpallas
+fn extract_p_bottom(point: CtOption<pallas::Point>) -> CtOption<pallas::Base> {
+    point.map(|p| {
+        p.to_affine()
+            .coordinates()
+            .map(|c| *c.x())
+            .unwrap_or_else(pallas::Base::zero)
+    })
+}
+
+/// Converts a bit iterator into zero-padded [`K`]-bit words.
+struct MessageWords<I: Iterator<Item = bool>> {
+    inner: I,
+    bits_read: usize,
+    finished: bool,
+}
+
+impl<I: Iterator<Item = bool>> MessageWords<I> {
+    fn new(inner: I) -> Self {
+        Self {
+            inner,
+            bits_read: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<I: Iterator<Item = bool>> Iterator for MessageWords<I> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        let mut word = 0;
+        for bit_index in 0..K {
+            match self.inner.next() {
+                Some(bit) => {
+                    self.bits_read += 1;
+                    assert!(self.bits_read <= K * C);
+                    word |= u32::from(bit) << bit_index;
+                }
+                None => {
+                    self.finished = true;
+                    return (bit_index > 0).then_some(word);
+                }
+            }
+        }
+
+        Some(word)
+    }
+}
+
+/// A domain in which $\mathsf{SinsemillaHashToPoint}$ and $\mathsf{SinsemillaHash}$ can
+/// be used.
+#[derive(Debug, Clone)]
+#[allow(non_snake_case)]
+pub struct HashDomain {
+    Q: pallas::Point,
+}
+
+impl HashDomain {
+    /// Constructs a new `HashDomain` with a specific prefix string.
+    pub fn new(domain: &str) -> Self {
+        HashDomain {
+            Q: pallas::Point::hash_to_curve(Q_PERSONALIZATION)(domain.as_bytes()),
+        }
+    }
+
+    /// $\mathsf{SinsemillaHashToPoint}$ from [§ 5.4.1.9][concretesinsemillahash].
+    ///
+    /// Consumes bits in iterator order as little-endian [`K`]-bit words,
+    /// zero-padding the final word if incomplete. An empty message uses no
+    /// words and returns this domain's `Q` point.
+    ///
+    /// Returns an empty [`CtOption`] if any Sinsemilla incomplete addition
+    /// fails: either operand is identity or both have the same x coordinate.
+    ///
+    /// [concretesinsemillahash]: https://zips.z.cash/protocol/nu5.pdf#concretesinsemillahash
+    ///
+    /// # Panics
+    ///
+    /// Panics if the message contains more than [`K`] * [`C`] bits.
+    pub fn hash_to_point(&self, msg: impl Iterator<Item = bool>) -> CtOption<pallas::Point> {
+        self.hash_to_point_inner(msg).into()
+    }
+
+    #[allow(non_snake_case)]
+    fn hash_to_point_inner(&self, msg: impl Iterator<Item = bool>) -> IncompletePoint {
+        let generators = sinsemilla_s_affine();
+        MessageWords::new(msg).fold(IncompletePoint::from(self.Q), |acc, word| {
+            let S_chunk = generators[word as usize];
+            acc.double_and_add(S_chunk)
+        })
+    }
+
+    /// $\mathsf{SinsemillaHash}$ from [§ 5.4.1.9][concretesinsemillahash].
+    ///
+    /// Uses [`Self::hash_to_point`]'s message padding and incomplete-addition
+    /// failure semantics, extracting the resulting point's x coordinate (zero
+    /// for identity).
+    ///
+    /// [concretesinsemillahash]: https://zips.z.cash/protocol/nu5.pdf#concretesinsemillahash
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::hash_to_point`] does.
+    pub fn hash(&self, msg: impl Iterator<Item = bool>) -> CtOption<pallas::Base> {
+        extract_p_bottom(self.hash_to_point(msg))
+    }
+
+    /// Constructs a new `HashDomain` from a given `Q`.
+    ///
+    /// This is only for testing use.
+    #[cfg(any(test, feature = "test-dependencies"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
+    #[allow(non_snake_case)]
+    pub fn from_Q(Q: pallas::Point) -> Self {
+        HashDomain { Q }
+    }
+
+    /// Returns the Sinsemilla $Q$ constant for this domain.
+    #[cfg(any(test, feature = "test-dependencies"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
+    #[allow(non_snake_case)]
+    pub fn Q(&self) -> pallas::Point {
+        self.Q
+    }
+}
+
+/// A domain in which $\mathsf{SinsemillaCommit}$ and $\mathsf{SinsemillaShortCommit}$ can
+/// be used.
+#[derive(Debug)]
+#[allow(non_snake_case)]
+pub struct CommitDomain {
+    M: HashDomain,
+    R: pallas::Point,
+}
+
+impl CommitDomain {
+    /// Constructs a new `CommitDomain` with a specific prefix string.
+    pub fn new(domain: &str) -> Self {
+        let m_prefix = format!("{}-M", domain);
+        let r_prefix = format!("{}-r", domain);
+        let hasher_r = pallas::Point::hash_to_curve(&r_prefix);
+        CommitDomain {
+            M: HashDomain::new(&m_prefix),
+            R: hasher_r(&[]),
+        }
+    }
+
+    /// $\mathsf{SinsemillaCommit}$ from [§ 5.4.8.4][concretesinsemillacommit].
+    ///
+    /// Hashes `msg` with [`HashDomain::hash_to_point`]'s message padding and
+    /// incomplete-addition failure semantics, then adds the blinding term
+    /// using complete addition. Blinding adds no incomplete-addition failures.
+    ///
+    /// [concretesinsemillacommit]: https://zips.z.cash/protocol/nu5.pdf#concretesinsemillacommit
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`HashDomain::hash_to_point`] does.
+    #[allow(non_snake_case)]
+    pub fn commit(
+        &self,
+        msg: impl Iterator<Item = bool>,
+        r: &pallas::Scalar,
+    ) -> CtOption<pallas::Point> {
+        // We use complete addition for the blinding factor.
+        CtOption::<pallas::Point>::from(self.M.hash_to_point_inner(msg)).map(|p| p + self.R * r)
+    }
+
+    /// $\mathsf{SinsemillaShortCommit}$ from [§ 5.4.8.4][concretesinsemillacommit].
+    ///
+    /// Uses [`Self::commit`]'s message padding and incomplete-addition failure
+    /// semantics, extracting the resulting point's x coordinate (zero for
+    /// identity).
+    ///
+    /// [concretesinsemillacommit]: https://zips.z.cash/protocol/nu5.pdf#concretesinsemillacommit
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::commit`] does.
+    pub fn short_commit(
+        &self,
+        msg: impl Iterator<Item = bool>,
+        r: &pallas::Scalar,
+    ) -> CtOption<pallas::Base> {
+        extract_p_bottom(self.commit(msg, r))
+    }
+
+    /// Returns the Sinsemilla $R$ constant for this domain.
+    #[cfg(any(test, feature = "test-dependencies"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
+    #[allow(non_snake_case)]
+    pub fn R(&self) -> pallas::Point {
+        self.R
+    }
+
+    /// Returns the Sinsemilla $Q$ constant for this domain.
+    #[cfg(any(test, feature = "test-dependencies"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
+    #[allow(non_snake_case)]
+    pub fn Q(&self) -> pallas::Point {
+        self.M.Q
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{vec, vec::Vec};
+
+    use super::{C, HashDomain, IncompletePoint, K, MessageWords};
+    use crate::primitives::pallas;
+    use subtle::CtOption;
+
+    fn hash_to_point_with_two_additions(
+        domain: &HashDomain,
+        msg: impl Iterator<Item = bool>,
+    ) -> CtOption<pallas::Point> {
+        MessageWords::new(msg)
+            .fold(IncompletePoint::from(domain.Q), |acc, word| {
+                let generator = super::sinsemilla_s_affine()[word as usize];
+                (acc + generator) + acc
+            })
+            .into()
+    }
+
+    fn assert_same_point(expected: CtOption<pallas::Point>, actual: CtOption<pallas::Point>) {
+        let expected_is_some = bool::from(expected.is_some());
+        assert_eq!(bool::from(actual.is_some()), expected_is_some);
+        if expected_is_some {
+            assert_eq!(actual.unwrap(), expected.unwrap());
+        }
+    }
+
+    #[test]
+    fn message_words_zero_pad_the_final_word() {
+        assert_eq!(
+            MessageWords::new([].into_iter()).collect::<Vec<_>>(),
+            vec![]
+        );
+        assert_eq!(
+            MessageWords::new([true].into_iter()).collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            MessageWords::new([true, true].into_iter()).collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(
+            MessageWords::new([true, true, true].into_iter()).collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert_eq!(
+            MessageWords::new(
+                [
+                    true, true, false, true, false, true, false, true, false, true
+                ]
+                .into_iter()
+            )
+            .collect::<Vec<_>>(),
+            vec![683]
+        );
+        assert_eq!(
+            MessageWords::new(
+                [
+                    true, true, false, true, false, true, false, true, false, true, true
+                ]
+                .into_iter()
+            )
+            .collect::<Vec<_>>(),
+            vec![683, 1]
+        );
+    }
+
+    #[test]
+    fn message_words_match_padded_bit_chunks_at_every_valid_length() {
+        for bit_len in 0..=K * super::C {
+            let bits = (0..bit_len)
+                .map(|index| index % 5 == 2 || index % 11 == 7)
+                .collect::<Vec<_>>();
+            let expected = bits
+                .chunks(K)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .fold(0, |word, (index, bit)| word | (u32::from(*bit) << index))
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                MessageWords::new(bits.into_iter()).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn message_words_accept_the_maximum_message_length() {
+        let words =
+            MessageWords::new((0..K * super::C).map(|index| index % 5 == 2)).collect::<Vec<_>>();
+        assert_eq!(words.len(), super::C);
+    }
+
+    #[test]
+    #[should_panic]
+    fn message_words_reject_messages_past_the_maximum_length() {
+        MessageWords::new(core::iter::repeat_n(false, K * super::C + 1)).for_each(drop);
+    }
+
+    #[test]
+    fn sinsemilla_s() {
+        let generators = super::sinsemilla_s_affine();
+        use crate::primitives::pallas;
+
+        let hasher = pallas::Point::hash_to_curve(super::S_PERSONALIZATION);
+
+        for j in 0..(1u32 << K) {
+            let computed = {
+                let point = hasher(&j.to_le_bytes()).to_affine().coordinates().unwrap();
+                (*point.x(), *point.y())
+            };
+            let actual = generators[j as usize].raw_coordinates();
+            assert_eq!(computed, actual);
+
+            let decoded = super::sinsemilla_s_affine()[j as usize]
+                .coordinates()
+                .unwrap();
+            assert_eq!((*decoded.x(), *decoded.y()), actual);
+        }
+    }
+
+    #[test]
+    fn hash_to_point_matches_two_additions() {
+        const ORCHARD_COMMIT_IVK_BITS: usize = 510;
+        const ORCHARD_MERKLE_CRH_BITS: usize = 520;
+        const ORCHARD_NOTE_COMMITMENT_BITS: usize = 1_086;
+        const MESSAGE_LENGTHS: [usize; 12] = [
+            0,
+            1,
+            K - 1,
+            K,
+            K + 1,
+            ORCHARD_COMMIT_IVK_BITS - 1,
+            ORCHARD_COMMIT_IVK_BITS,
+            ORCHARD_COMMIT_IVK_BITS + 1,
+            ORCHARD_MERKLE_CRH_BITS,
+            ORCHARD_NOTE_COMMITMENT_BITS,
+            K * C - 1,
+            K * C,
+        ];
+
+        let domain = HashDomain::new("sinsemilla-fused-step-test");
+        for message_len in MESSAGE_LENGTHS {
+            let message: Vec<_> = (0..message_len)
+                .map(|index| (index + message_len) % 5 < 2)
+                .collect();
+            let expected = hash_to_point_with_two_additions(&domain, message.iter().copied());
+            let actual = domain.hash_to_point(message.iter().copied());
+            assert_same_point(expected, actual);
+        }
+    }
+}

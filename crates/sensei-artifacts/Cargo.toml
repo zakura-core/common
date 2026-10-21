@@ -1,0 +1,15 @@
+[package]
+name = "zakura-sensei-artifacts"
+description = "Host-side generators for the sensei prover's embedded data"
+version = "0.1.0"
+authors = ["Sean Bowe <ewillbefull@gmail.com>"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+udon.workspace = true
+bento.workspace = true
+sensei-shared.workspace = true
