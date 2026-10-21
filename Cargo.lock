@@ -3729,7 +3729,7 @@ dependencies = [
 [[package]]
 name = "zcash_script"
 version = "0.6.0"
-source = "git+https://github.com/p0mvn/zcash_script?rev=8368e3c05656165b770352b3600811878caebeb9#8368e3c05656165b770352b3600811878caebeb9"
+source = "git+https://github.com/p0mvn/zcash_script?rev=c9c5f0c04961d6313b6ee49b1121c6786223018f#c9c5f0c04961d6313b6ee49b1121c6786223018f"
 dependencies = [
  "bip32",
  "bitflags 2.13.1",

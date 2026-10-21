@@ -19,7 +19,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-wots-plus = { git = "https://github.com/p0mvn/wots-plus", rev = "35fe5dabbc2ec3dcf6610ca0a97fdbacb11e56bf", optional = true }
+wots-plus = { version = "0.0.0", git = "https://github.com/p0mvn/wots-plus", rev = "35fe5dabbc2ec3dcf6610ca0a97fdbacb11e56bf", optional = true }
 zcash_address.workspace = true
 zcash_protocol.workspace = true
 zip32 = { version = "0.2", default-features = false, optional = true }

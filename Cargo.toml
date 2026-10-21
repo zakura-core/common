@@ -105,7 +105,7 @@ readme = "crates/README.md"
 # dependency names members use in code and feature syntax, so several keys
 # alias the same package (halo2_poseidon/poseidon, sapling, zcash_primitives).
 [workspace.dependencies]
-zcash_script = { git = "https://github.com/p0mvn/zcash_script", rev = "8368e3c05656165b770352b3600811878caebeb9", default-features = false }
+zcash_script = { version = "0.6.0", git = "https://github.com/p0mvn/zcash_script", rev = "c9c5f0c04961d6313b6ee49b1121c6786223018f", default-features = false }
 bellman = { package = "zakura-bellman", version = "4.0.0", path = "crates/bellman", default-features = false }
 bento = { package = "zakura-bento", version = "0.1.0", path = "crates/bento", default-features = false }
 bento-core = { package = "zakura-bento-core", version = "0.1.0", path = "crates/bento-core", default-features = false }
