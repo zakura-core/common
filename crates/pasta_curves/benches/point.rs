@@ -38,6 +38,14 @@ fn point_bench<C: CurveExt>(c: &mut Criterion, name: &str) {
             black_box(point)
         });
     });
+    let affine = b.to_affine();
+    group.bench_function("mixed addition serial", |bencher| {
+        let mut point = a;
+        bencher.iter(|| {
+            point = black_box(point) + black_box(affine);
+            black_box(point)
+        });
+    });
 
     group.bench_function("point to_bytes", |bencher| bencher.iter(|| a.to_bytes()));
 
