@@ -41,6 +41,7 @@ jobs:
       reddsa: ${{ steps.filter.outputs.reddsa }}
       redjubjub: ${{ steps.filter.outputs.redjubjub }}
       sapling_crypto: ${{ steps.filter.outputs.sapling_crypto }}
+      sensei: ${{ steps.filter.outputs.sensei }}
       sinsemilla: ${{ steps.filter.outputs.sinsemilla }}
       librustzcash: ${{ steps.filter.outputs.librustzcash }}
       udon: ${{ steps.filter.outputs.udon }}
@@ -98,6 +99,7 @@ jobs:
           reddsa=false
           redjubjub=false
           sapling_crypto=false
+          sensei=false
           sinsemilla=false
           librustzcash=false
           udon=false
@@ -125,6 +127,10 @@ jobs:
             crates/reddsa-frost
             crates/redjubjub
             crates/sapling-crypto
+            crates/sensei
+            crates/sensei-artifacts
+            crates/sensei-macros
+            crates/sensei-shared
             crates/sinsemilla
             crates/udon
             crates/zcash_address
@@ -188,6 +194,9 @@ jobs:
               crates/sapling-crypto/*)
                 sapling_crypto=true
                 ;;
+              crates/sensei/*|crates/sensei-artifacts/*|crates/sensei-macros/*|crates/sensei-shared/*)
+                sensei=true
+                ;;
               crates/sinsemilla/*)
                 sinsemilla=true
                 ;;
@@ -208,6 +217,7 @@ jobs:
             reddsa=true
             redjubjub=true
             sapling_crypto=true
+            sensei=true
             sinsemilla=true
             librustzcash=true
             udon=true
@@ -239,6 +249,11 @@ jobs:
           fi
           if [[ "$orchard" == true ]]; then
             librustzcash=true
+            # Sensei's verification tests embed Orchard's circuit fixtures.
+            sensei=true
+          fi
+          if [[ "$udon" == true ]]; then
+            sensei=true
           fi
           if [[ "$equihash" == true ]]; then
             librustzcash=true
@@ -255,6 +270,7 @@ jobs:
             "$reddsa" == true ||
             "$redjubjub" == true ||
             "$sapling_crypto" == true ||
+            "$sensei" == true ||
             "$sinsemilla" == true ||
             "$librustzcash" == true ||
             "$udon" == true ]]; then
@@ -269,6 +285,7 @@ jobs:
             echo "reddsa=$reddsa"
             echo "redjubjub=$redjubjub"
             echo "sapling_crypto=$sapling_crypto"
+            echo "sensei=$sensei"
             echo "sinsemilla=$sinsemilla"
             echo "librustzcash=$librustzcash"
             echo "udon=$udon"
@@ -286,7 +303,7 @@ jobs:
       matrix:
         # Groups run as parallel jobs, balanced by their check time. Each
         # step below names its group.
-        group: [Udon and equihash, halo2 and Orchard, Sapling and librustzcash]
+        group: [Udon and equihash, halo2 and Orchard, Sapling and librustzcash, Sensei]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -364,6 +381,20 @@ jobs:
             -p zakura-bento-core -p zakura-bento-macros -p zakura-bento -p zakura-udon
           # `--all-features` enables `portable`, which hides the x86-64 assembly.
           cargo +1.97.0 check --locked --features x86_64-asm --all-targets -p zakura-udon
+
+      - name: Sensei / Stable and MSRV checks
+        if: ${{ !cancelled() && matrix.group == 'Sensei' && needs.changes.outputs.sensei == 'true' }}
+        run: |
+          bash .github/scripts/check_rust_group.sh zakura-sensei-shared true false
+          bash .github/scripts/check_rust_group.sh zakura-sensei-artifacts true false
+          bash .github/scripts/check_rust_group.sh zakura-sensei-macros true false
+          bash .github/scripts/check_rust_group.sh zakura-sensei true false
+      - name: Sensei / MSRV feature check
+        if: ${{ !cancelled() && matrix.group == 'Sensei' && needs.changes.outputs.sensei == 'true' }}
+        run: |
+          cargo +1.97.0 check --locked --all-features --all-targets -p zakura-sensei
+          # `--all-features` enables `portable`, which hides the x86-64 assembly.
+          cargo +1.97.0 check --locked --features x86_64-asm --all-targets -p zakura-sensei
 
   formatting:
     name: Formatting
@@ -1554,6 +1585,72 @@ jobs:
           fi
           cargo +1.97.0 build "${packages[@]}" "${backend_args[@]}" --no-default-features --target "$TARGET" --verbose
 
+  sensei-features:
+    name: Sensei / Features (${{ matrix.features || 'primitives only' }})
+    needs: changes
+    if: needs.changes.outputs.sensei == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "prover", "verifier", "prover,verifier,multicore,x86_64-asm"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          cache: false
+      - name: Check feature configuration
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: cargo clippy --locked -p zakura-sensei --all-targets --no-default-features --features "$FEATURES" -- -D warnings
+      - name: Check documentation
+        env:
+          FEATURES: ${{ matrix.features }}
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked -p zakura-sensei --no-default-features --features "$FEATURES" --no-deps
+
+  # Keep proof tests disabled alongside Udon's test suites. Build, lint, feature,
+  # formatting, and documentation checks remain active. Restore
+  # `if: needs.changes.outputs.sensei == 'true'` to enable this job.
+  sensei-test:
+    name: Sensei / Tests (${{ matrix.arch }}, ${{ matrix.features || 'default' }})
+    needs: changes
+    if: false # Temporarily disabled; see the note above `sensei-test`.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        features: ["", "portable"]
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      PROPTEST_CASES: "32"
+      RAYON_NUM_THREADS: "2"
+      RUST_BACKTRACE: "1"
+      FEATURES: ${{ matrix.features }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          cache: false
+      - name: Test shared definitions, generators, and macros
+        run: |
+          cargo test --release --locked -p zakura-sensei-shared
+          cargo test --release --locked -p zakura-sensei-artifacts
+          cargo test --release --locked -p zakura-sensei-macros
+      - name: Test primitives, proving, and verification
+        run: cargo test --release --locked -p zakura-sensei --features "$FEATURES"
+
   # tachyon-zcash/udon .github/workflows/ci.yml @
   # 586329a8c94fe042e7ec264b61bfd632888828cb
   udon-features:
@@ -1889,6 +1986,8 @@ jobs:
       - librustzcash-test
       - librustzcash-configurations
       - librustzcash-no-std
+      - sensei-features
+      - sensei-test
       - udon-features
       - udon-test
       - udon-consumers
@@ -1939,6 +2038,8 @@ jobs:
             librustzcash-test,
             librustzcash-configurations,
             librustzcash-no-std,
+            sensei-features,
+            sensei-test,
             udon-features,
             udon-test,
             udon-consumers,

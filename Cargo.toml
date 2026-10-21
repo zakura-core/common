@@ -41,6 +41,8 @@
 # - udon, bento, bento-core, bento-macros: experimental arithmetic and
 #   compile-time storage libraries. These remain unpublished and version
 #   independently of the coordinated Common release.
+# - sensei, sensei-artifacts, sensei-macros, sensei-shared: unpublished native
+#   Orchard primitives, Ironwood proving, and historical proof verification.
 
 [workspace]
 # Resolver 3 is resolver 2 plus MSRV-aware version selection: `cargo update`
@@ -68,6 +70,10 @@ members = [
     "crates/reddsa-frost",
     "crates/redjubjub",
     "crates/sapling-crypto",
+    "crates/sensei",
+    "crates/sensei-artifacts",
+    "crates/sensei-macros",
+    "crates/sensei-shared",
     "crates/sinsemilla",
     "crates/udon",
     "crates/zcash_address",
@@ -123,6 +129,10 @@ poseidon = { package = "zakura-halo2-poseidon", version = "4.0.0", path = "crate
 reddsa = { package = "zakura-reddsa", version = "4.0.0", path = "crates/reddsa", default-features = false }
 redjubjub = { package = "zakura-redjubjub", version = "4.0.0", path = "crates/redjubjub", default-features = false }
 sapling = { package = "zakura-sapling-crypto", version = "4.0.0", path = "crates/sapling-crypto", default-features = false }
+sensei = { package = "zakura-sensei", version = "0.1.0", path = "crates/sensei", default-features = false }
+sensei-artifacts = { package = "zakura-sensei-artifacts", version = "0.1.0", path = "crates/sensei-artifacts", default-features = false }
+sensei-macros = { package = "zakura-sensei-macros", version = "0.1.0", path = "crates/sensei-macros", default-features = false }
+sensei-shared = { package = "zakura-sensei-shared", version = "0.1.0", path = "crates/sensei-shared", default-features = false }
 sinsemilla = { package = "zakura-sinsemilla", version = "4.0.0", path = "crates/sinsemilla", default-features = false }
 udon = { package = "zakura-udon", version = "0.1.0", path = "crates/udon", default-features = false }
 zcash_address = { package = "zakura-address", version = "4.0.0", path = "crates/zcash_address", default-features = false }

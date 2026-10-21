@@ -54,11 +54,15 @@ Threshold signing is a separate dependency. Consumers migrating from the
 do not resolve or compile the FROST stack. The Common workspace lockfile still
 includes it for the dedicated FROST crate.
 
-## Experimental arithmetic
+## Experimental arithmetic and proving
 
 - [`zakura-udon`](crates/udon): Pasta field and curve arithmetic and allocation-free FFTs.
 - [`zakura-bento`](crates/bento): compile-time arithmetic and checked POD storage and embedding.
 - [`zakura-bento-core`](crates/bento-core) and [`zakura-bento-macros`](crates/bento-macros): Bento implementation crates.
+- [`zakura-sensei`](crates/sensei): proves post-NU6.3 Ironwood Actions, verifies
+  all three Orchard circuit versions, and provides RedPallas signatures.
+- [`zakura-sensei-shared`](crates/sensei-shared): circuit descriptions and prover record layouts.
+- [`zakura-sensei-artifacts`](crates/sensei-artifacts) and [`zakura-sensei-macros`](crates/sensei-macros): host-side data and code generators.
 
 ## Rust toolchain
 
