@@ -1406,6 +1406,8 @@ fn recursive_butterfly_pair_after_prefix<F: Field>(
 }
 
 #[inline(always)]
+// The add/sub loops read and write both slices; they are not plain copies.
+#[allow(clippy::manual_memcpy)]
 fn butterfly_chunk<F: Field>(
     left: &mut [F],
     right: &mut [F],
@@ -1422,30 +1424,38 @@ fn butterfly_chunk<F: Field>(
     first_left[0] += &t;
     first_right[0] -= &t;
 
+    // Indexed loops over slices cut to one length, rather than `zip`: zip's
+    // constructor is a non-inline `core` generic whose copy may live in another
+    // codegen unit, and whether it is inlined early changed this loop's
+    // register allocation with unrelated edits elsewhere in the crate.
+    let len = left.len();
+    let right = &mut right[..len];
+
     if let Some(table) = tables.get(level) {
-        debug_assert_eq!(table.len(), right.len());
-        for (right, twiddle) in right.iter_mut().zip(table) {
-            *right *= twiddle;
+        debug_assert_eq!(table.len(), len);
+        let table = &table[..len];
+        for index in 0..len {
+            right[index] *= &table[index];
         }
-        for (left, right) in left.iter_mut().zip(right.iter_mut()) {
-            let t = *right;
-            *right = *left;
-            *left += &t;
-            *right -= &t;
+        for index in 0..len {
+            let t = right[index];
+            right[index] = left[index];
+            left[index] += &t;
+            right[index] -= &t;
         }
     } else {
-        for (index, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
-            let mut t = *right;
+        for index in 0..len {
+            let mut t = right[index];
             t *= &twiddles[(index + 1) * twiddle_chunk];
-            *right = *left;
-            *left += &t;
-            *right -= &t;
+            right[index] = left[index];
+            left[index] += &t;
+            right[index] -= &t;
         }
     }
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::manual_memcpy, clippy::too_many_arguments)]
 fn butterfly_chunk_pair<F: Field>(
     first_left: &mut [F],
     first_right: &mut [F],
@@ -1474,49 +1484,51 @@ fn butterfly_chunk_pair<F: Field>(
     first_b[0] -= &first_t;
     second_b[0] -= &second_t;
 
+    // Indexed rather than `zip` loops; see `butterfly_chunk`.
+    let len = first_left.len();
+    let first_right = &mut first_right[..len];
+    let second_left = &mut second_left[..len];
+    let second_right = &mut second_right[..len];
+
     if let Some(table) = tables.get(level) {
-        debug_assert_eq!(table.len(), first_right.len());
-        for (right, twiddle) in first_right.iter_mut().zip(table) {
-            *right *= twiddle;
+        debug_assert_eq!(table.len(), len);
+        let table = &table[..len];
+        for index in 0..len {
+            first_right[index] *= &table[index];
         }
-        for (right, twiddle) in second_right.iter_mut().zip(table) {
-            *right *= twiddle;
+        for index in 0..len {
+            second_right[index] *= &table[index];
         }
-        for ((first_left, first_right), (second_left, second_right)) in first_left
-            .iter_mut()
-            .zip(first_right.iter_mut())
-            .zip(second_left.iter_mut().zip(second_right.iter_mut()))
-        {
-            let first_t = *first_right;
-            let second_t = *second_right;
-            *first_right = *first_left;
-            *second_right = *second_left;
-            *first_left += &first_t;
-            *second_left += &second_t;
-            *first_right -= &first_t;
-            *second_right -= &second_t;
+        // One butterfly per iteration: interleaving two 4-limb add/sub
+        // butterflies needs more registers than x86-64 has and spills.
+        for index in 0..len {
+            let t = first_right[index];
+            first_right[index] = first_left[index];
+            first_left[index] += &t;
+            first_right[index] -= &t;
+        }
+        for index in 0..len {
+            let t = second_right[index];
+            second_right[index] = second_left[index];
+            second_left[index] += &t;
+            second_right[index] -= &t;
         }
         return;
     }
 
-    for (index, ((first_left, first_right), (second_left, second_right))) in first_left
-        .iter_mut()
-        .zip(first_right.iter_mut())
-        .zip(second_left.iter_mut().zip(second_right.iter_mut()))
-        .enumerate()
-    {
+    for index in 0..len {
         let twiddle = &twiddles[(index + 1) * twiddle_chunk];
-        let mut first_t = *first_right;
-        let mut second_t = *second_right;
+        let mut first_t = first_right[index];
+        let mut second_t = second_right[index];
         first_t *= twiddle;
         second_t *= twiddle;
 
-        *first_right = *first_left;
-        *second_right = *second_left;
-        *first_left += &first_t;
-        *second_left += &second_t;
-        *first_right -= &first_t;
-        *second_right -= &second_t;
+        first_right[index] = first_left[index];
+        second_right[index] = second_left[index];
+        first_left[index] += &first_t;
+        second_left[index] += &second_t;
+        first_right[index] -= &first_t;
+        second_right[index] -= &second_t;
     }
 }
 
