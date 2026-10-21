@@ -81,22 +81,24 @@ proptest! {
         prop_assert_eq!(view.version(), TxVersion::V6);
     }
 
-    /// ZIP 229: authorizing data (proofs, signatures, anchors) is outside the v6
-    /// transaction ID; effecting data is inside it. Each mutation is checked
-    /// against Common too.
+    /// ZIP 244 and ZIP 229: authorizing data (proofs, signatures) is outside the
+    /// transaction ID and effecting data is inside it. Anchors are effecting in
+    /// v5 but authorizing in v6. Each mutation is checked against Common too.
     #[test]
-    fn v6_authorizing_mutations_keep_txid_effecting_mutations_change_it(
-        tx in arb_tx(BranchId::Nu6_3),
+    fn authorizing_mutations_keep_txid_effecting_mutations_change_it(
+        tx in prop_oneof![arb_tx(BranchId::Nu5), arb_tx(BranchId::Nu6_3)],
     ) {
         let bytes = encode(&tx);
         let view = TransactionView::parse_exact(&bytes).unwrap();
         let txid = view.txid();
+        let v6 = view.version() == TxVersion::V6;
 
         let mut auth_offsets = vec![];
         let mut effect_offsets = vec![];
+        let mut anchor_offsets = vec![];
         if let Some(s) = view.sapling() {
             if let Some(spend) = s.spends.first() {
-                auth_offsets.push(offset_of(&bytes, spend.anchor));
+                anchor_offsets.push(offset_of(&bytes, spend.anchor));
                 auth_offsets.push(offset_of(&bytes, spend.zkproof));
                 auth_offsets.push(offset_of(&bytes, spend.spend_auth_sig));
                 effect_offsets.push(offset_of(&bytes, spend.nullifier));
@@ -108,12 +110,17 @@ proptest! {
             auth_offsets.push(offset_of(&bytes, s.binding_sig));
         }
         for bundle in [view.orchard(), view.ironwood()].into_iter().flatten() {
-            auth_offsets.push(offset_of(&bytes, bundle.anchor));
+            anchor_offsets.push(offset_of(&bytes, bundle.anchor));
             auth_offsets.push(offset_of(&bytes, bundle.proof));
             auth_offsets.push(offset_of(&bytes, bundle.binding_sig));
             auth_offsets.push(offset_of(&bytes, bundle.actions[0].spend_auth_sig));
             effect_offsets.push(offset_of(&bytes, bundle.actions[0].enc_ciphertext));
             effect_offsets.push(offset_of(&bytes, bundle.actions[0].out_ciphertext));
+        }
+        if v6 {
+            auth_offsets.extend(anchor_offsets);
+        } else {
+            effect_offsets.extend(anchor_offsets);
         }
         if let Some(input) = view.transparent_inputs().first() {
             // scriptSig is authorizing data in v5/v6.
@@ -129,7 +136,7 @@ proptest! {
                 mutated[at] ^= 1;
                 // Anchors and other fields may stop being valid field elements;
                 // skip mutations Common's typed decoder cannot represent.
-                let Ok(oracle) = Transaction::read(&mutated[..], BranchId::Nu6_3) else {
+                let Ok(oracle) = Transaction::read(&mutated[..], view.branch_id().unwrap()) else {
                     continue;
                 };
                 let mutated_view = TransactionView::parse_exact(&mutated).unwrap();

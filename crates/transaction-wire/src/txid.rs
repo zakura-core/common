@@ -31,6 +31,8 @@ const SAPLING_OUTPUTS_NONCOMPACT: &[u8; 16] = b"ZTxIdSOutN__Hash";
 
 /// Personalizations of one Orchard-protocol bundle digest format.
 struct ActionDomain {
+    /// The pool whose bundles this format hashes.
+    pool: ActionPool,
     bundle: &'static [u8; 16],
     compact: &'static [u8; 16],
     memos: &'static [u8; 16],
@@ -41,6 +43,7 @@ struct ActionDomain {
 }
 
 const ORCHARD_V5: ActionDomain = ActionDomain {
+    pool: ActionPool::Orchard,
     bundle: b"ZTxIdOrchardHash",
     compact: b"ZTxIdOrcActCHash",
     memos: b"ZTxIdOrcActMHash",
@@ -50,6 +53,7 @@ const ORCHARD_V5: ActionDomain = ActionDomain {
 
 // Orchard v6 reuses the v5 action-level personalizations.
 const ORCHARD_V6: ActionDomain = ActionDomain {
+    pool: ActionPool::Orchard,
     bundle: b"ZTxIdOrchardH_v6",
     compact: b"ZTxIdOrcActCHash",
     memos: b"ZTxIdOrcActMHash",
@@ -58,6 +62,7 @@ const ORCHARD_V6: ActionDomain = ActionDomain {
 };
 
 const IRONWOOD_V6: ActionDomain = ActionDomain {
+    pool: ActionPool::Ironwood,
     bundle: b"ZTxIdIronwd_H_v6",
     compact: b"ZTxIdIrnActCH_v6",
     memos: b"ZTxIdIrnActMH_v6",
@@ -209,8 +214,8 @@ fn action_digest(bundle: Option<&ActionBundle<'_>>, domain: &ActionDomain) -> Ha
     let Some(bundle) = bundle else {
         return empty(domain.bundle);
     };
-    debug_assert!(
-        (bundle.pool == ActionPool::Ironwood) == core::ptr::eq(domain, &IRONWOOD_V6),
+    debug_assert_eq!(
+        bundle.pool, domain.pool,
         "bundle hashed under another pool's domain"
     );
     let mut compact = hasher(domain.compact);
