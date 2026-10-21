@@ -34,6 +34,8 @@ pub mod keys;
 pub mod pczt;
 pub mod sighash;
 pub mod util;
+#[cfg(feature = "experimental-wots")]
+pub mod wots;
 #[cfg(feature = "transparent-inputs")]
 pub mod zip48;
 
