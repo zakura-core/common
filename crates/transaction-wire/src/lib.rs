@@ -35,11 +35,11 @@ use alloc::vec::Vec;
 
 use zcash_protocol::{
     consensus::BranchId,
+    consensus::OrchardProtocolRevision,
     constants::{
         V3_TX_VERSION, V3_VERSION_GROUP_ID, V4_TX_VERSION, V4_VERSION_GROUP_ID, V5_TX_VERSION,
         V5_VERSION_GROUP_ID, V6_TX_VERSION, V6_VERSION_GROUP_ID,
     },
-    consensus::OrchardProtocolRevision,
     value::{ZatBalance, Zatoshis},
 };
 
@@ -583,10 +583,12 @@ impl<'a> TransactionView<'a> {
     /// `zakura_primitives::transaction::components::sprout::Bundle::value_balance`.
     pub fn sprout_value_balance(&self) -> Option<ZatBalance> {
         self.sprout.as_ref().map_or(Some(ZatBalance::zero()), |b| {
-            b.joinsplits.iter().try_fold(ZatBalance::zero(), |total, js| {
-                let net = (ZatBalance::from(js.vpub_new) - ZatBalance::from(js.vpub_old))?;
-                total + net
-            })
+            b.joinsplits
+                .iter()
+                .try_fold(ZatBalance::zero(), |total, js| {
+                    let net = (ZatBalance::from(js.vpub_new) - ZatBalance::from(js.vpub_old))?;
+                    total + net
+                })
         })
     }
 
@@ -660,8 +662,14 @@ fn read_joinsplit<'a>(r: &mut Reader<'a>, proof_size: usize) -> Result<JoinSplit
         vpub_old: read_vpub(r, "vpub_old")?,
         vpub_new: read_vpub(r, "vpub_new")?,
         anchor: r.array("JoinSplit anchor")?,
-        nullifiers: [r.array("JoinSplit nullifier")?, r.array("JoinSplit nullifier")?],
-        commitments: [r.array("JoinSplit commitment")?, r.array("JoinSplit commitment")?],
+        nullifiers: [
+            r.array("JoinSplit nullifier")?,
+            r.array("JoinSplit nullifier")?,
+        ],
+        commitments: [
+            r.array("JoinSplit commitment")?,
+            r.array("JoinSplit commitment")?,
+        ],
         ephemeral_key: r.array("JoinSplit ephemeral key")?,
         random_seed: r.array("JoinSplit random seed")?,
         macs: [r.array("JoinSplit MAC")?, r.array("JoinSplit MAC")?],
@@ -787,7 +795,8 @@ fn read_action_bundle<'a>(
 
     let revision = branch.orchard_protocol_revision();
     let enforce_proof_size = match (pool, revision) {
-        (_, None) | (ActionPool::Ironwood, Some(OrchardProtocolRevision::InsecureV1))
+        (_, None)
+        | (ActionPool::Ironwood, Some(OrchardProtocolRevision::InsecureV1))
         | (ActionPool::Ironwood, Some(OrchardProtocolRevision::V2)) => {
             return Err(DecodeError::PoolNotActive { pool: pool.name() });
         }

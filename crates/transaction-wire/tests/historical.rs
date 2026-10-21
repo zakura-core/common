@@ -26,8 +26,14 @@ fn read_hex(path: &PathBuf) -> Vec<u8> {
 fn compact_size(bytes: &mut &[u8]) -> usize {
     let (n, len) = match bytes[0] {
         n @ 0..=252 => (u64::from(n), 1),
-        253 => (u64::from(u16::from_le_bytes(bytes[1..3].try_into().unwrap())), 3),
-        254 => (u64::from(u32::from_le_bytes(bytes[1..5].try_into().unwrap())), 5),
+        253 => (
+            u64::from(u16::from_le_bytes(bytes[1..3].try_into().unwrap())),
+            3,
+        ),
+        254 => (
+            u64::from(u32::from_le_bytes(bytes[1..5].try_into().unwrap())),
+            5,
+        ),
         255 => (u64::from_le_bytes(bytes[1..9].try_into().unwrap()), 9),
     };
     *bytes = &bytes[len..];
@@ -93,7 +99,10 @@ fn historical_blocks_match_header_merkle_roots_and_common() {
         };
         let block = read_hex(path);
         let (root, txs) = parse_block(&block);
-        assert!(txs[0].is_coinbase(), "{name}: first transaction is a coinbase");
+        assert!(
+            txs[0].is_coinbase(),
+            "{name}: first transaction is a coinbase"
+        );
         let txids = txs.iter().map(TransactionView::txid).collect();
         assert_eq!(merkle_root(txids), root, "{name}: Merkle root");
         for view in &txs {

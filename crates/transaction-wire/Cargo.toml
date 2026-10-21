@@ -16,7 +16,7 @@ name = "zcash_transaction_wire"
 # Normal dependencies are deliberately limited to the protocol constants and
 # value types plus the two hash libraries the transaction IDs need. No Sapling,
 # Orchard, Halo2, primitives, node, or wallet crate may appear here; the
-# dependency-metadata test in tests/dependencies.rs enforces this.
+# dependency test in tests/dependencies.rs enforces this.
 [dependencies]
 blake2b_simd = { version = "1", default-features = false }
 sha2 = { version = "0.10", default-features = false }

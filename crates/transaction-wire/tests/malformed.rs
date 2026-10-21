@@ -302,7 +302,10 @@ fn flags_follow_the_pool_rules() {
     orchard[orchard_flags_at] |= 0b100;
     assert!(matches!(
         err(&orchard),
-        DecodeError::InvalidFlags { pool: "Orchard", .. }
+        DecodeError::InvalidFlags {
+            pool: "Orchard",
+            ..
+        }
     ));
     orchard[orchard_flags_at] &= !0b100;
     let view = TransactionView::parse_exact(&orchard).unwrap();

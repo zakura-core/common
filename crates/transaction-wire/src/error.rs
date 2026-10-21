@@ -21,7 +21,10 @@ pub enum DecodeError {
     /// A collection's declared element count cannot fit in the remaining input.
     CountExceedsInput { field: &'static str, count: usize },
     /// The header is not one of the supported version/overwintered/group combinations.
-    UnsupportedVersion { header: u32, version_group_id: Option<u32> },
+    UnsupportedVersion {
+        header: u32,
+        version_group_id: Option<u32>,
+    },
     /// The embedded consensus branch ID is not a known branch.
     UnknownBranchId(u32),
     /// The transaction version is not permitted under the embedded branch ID.

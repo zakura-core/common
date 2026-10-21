@@ -138,8 +138,14 @@ fn assert_actions_match(
         assert_eq!(wa.rk, &<[u8; 32]>::from(ta.rk()));
         assert_eq!(wa.cmx, &ta.cmx().to_bytes());
         assert_eq!(wa.ephemeral_key, &ta.encrypted_note().epk_bytes);
-        assert_eq!(&wa.enc_ciphertext[..], &ta.encrypted_note().enc_ciphertext[..]);
-        assert_eq!(&wa.out_ciphertext[..], &ta.encrypted_note().out_ciphertext[..]);
+        assert_eq!(
+            &wa.enc_ciphertext[..],
+            &ta.encrypted_note().enc_ciphertext[..]
+        );
+        assert_eq!(
+            &wa.out_ciphertext[..],
+            &ta.encrypted_note().out_ciphertext[..]
+        );
         assert_eq!(wa.spend_auth_sig, &<[u8; 64]>::from(ta.authorization()));
     }
 }
