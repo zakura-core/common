@@ -76,7 +76,9 @@ Versions 1 to 4 use SHA-256d of the encoding. Versions 5 and 6 port the
 and `orchard::bundle::commitments` to the raw fields, including the separate
 Orchard v6 and Ironwood personalizations and the v6 move of anchors from the
 effecting to the authorizing digest. ZIP 229 is a draft; this crate follows
-Common, which the tests use as the oracle.
+Common, which the tests use as the oracle. Its personalization strings, the
+omitted v6 Sapling, Orchard and Ironwood anchors, and the proof length rule
+were compared with the ZIP 229 text published on 2026-10-21 and agree.
 
 ## Tests
 
