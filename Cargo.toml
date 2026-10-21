@@ -69,6 +69,7 @@ members = [
     "crates/redjubjub",
     "crates/sapling-crypto",
     "crates/sinsemilla",
+    "crates/transaction-wire",
     "crates/udon",
     "crates/zcash_address",
     "crates/zcash_keys",

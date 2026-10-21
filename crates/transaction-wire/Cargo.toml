@@ -1,0 +1,32 @@
+[package]
+name = "zakura-transaction-wire"
+description = "Experimental borrowed reader for the Zcash transaction wire format (prototype, unpublished)"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Prototype: this crate is not published and is not a supported API yet.
+publish = false
+
+[lib]
+name = "zcash_transaction_wire"
+
+# Normal dependencies are deliberately limited to the protocol constants and
+# value types plus the two hash libraries the transaction IDs need. No Sapling,
+# Orchard, Halo2, primitives, node, or wallet crate may appear here; the
+# dependency-metadata test in tests/dependencies.rs enforces this.
+[dependencies]
+blake2b_simd = { version = "1", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+zcash_protocol.workspace = true
+
+# The existing typed decoder is the differential oracle. It is only a test
+# dependency, so it never enters a normal consumer's dependency graph.
+[dev-dependencies]
+hex = "0.4"
+orchard.workspace = true
+proptest = ">=1,<1.7"
+zcash_primitives = { workspace = true, features = ["backend-halo2", "std", "test-dependencies"] }
+zcash_protocol = { workspace = true, features = ["std"] }

@@ -3660,6 +3660,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-transaction-wire"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "hex",
+ "proptest",
+ "sha2 0.10.9",
+ "zakura-orchard",
+ "zakura-primitives",
+ "zakura-protocol",
+]
+
+[[package]]
 name = "zakura-transparent"
 version = "4.0.0"
 dependencies = [
