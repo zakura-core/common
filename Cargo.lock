@@ -501,6 +501,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
+name = "convert_case"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -748,6 +757,29 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "derive_more"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
+dependencies = [
+ "derive_more-impl",
+]
+
+[[package]]
+name = "derive_more-impl"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn 2.0.119",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -1520,6 +1552,9 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin 0.9.9",
+]
 
 [[package]]
 name = "lebe"
@@ -2045,6 +2080,85 @@ name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+
+[[package]]
+name = "ragu"
+version = "0.0.0"
+source = "git+https://github.com/tachyon-zcash/ragu?rev=0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9#0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9"
+dependencies = [
+ "blake2b_simd",
+ "ragu_arithmetic",
+ "ragu_core",
+ "ragu_pasta",
+]
+
+[[package]]
+name = "ragu_arithmetic"
+version = "0.0.0"
+source = "git+https://github.com/tachyon-zcash/ragu?rev=0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9#0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9"
+dependencies = [
+ "ff",
+ "group",
+ "ragu_macros",
+ "rand 0.10.2",
+ "tachyon-maybe-rayon",
+ "zakura-pasta-curves 1.2.0",
+]
+
+[[package]]
+name = "ragu_circuits"
+version = "0.0.0"
+source = "git+https://github.com/tachyon-zcash/ragu?rev=0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9#0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9"
+dependencies = [
+ "blake2b_simd",
+ "ragu_arithmetic",
+ "ragu_core",
+ "ragu_primitives",
+ "tachyon-maybe-rayon",
+]
+
+[[package]]
+name = "ragu_core"
+version = "0.0.0"
+source = "git+https://github.com/tachyon-zcash/ragu?rev=0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9#0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9"
+dependencies = [
+ "ragu_arithmetic",
+ "ragu_macros",
+ "thiserror",
+]
+
+[[package]]
+name = "ragu_macros"
+version = "0.0.0"
+source = "git+https://github.com/tachyon-zcash/ragu?rev=0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9#0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9"
+dependencies = [
+ "num-bigint 0.4.8",
+ "num-traits",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "ragu_pasta"
+version = "0.0.0"
+source = "git+https://github.com/tachyon-zcash/ragu?rev=0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9#0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9"
+dependencies = [
+ "lazy_static",
+ "ragu_arithmetic",
+]
+
+[[package]]
+name = "ragu_primitives"
+version = "0.0.0"
+source = "git+https://github.com/tachyon-zcash/ragu?rev=0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9#0881656dc3d9f47d3d9eaaf692b15dd8938d9bf9"
+dependencies = [
+ "ragu_arithmetic",
+ "ragu_core",
+ "ragu_macros",
+ "thiserror",
+]
 
 [[package]]
 name = "rand"
@@ -2619,6 +2733,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachyon-maybe-rayon"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85270e8ca1975f46b1e703622f0720c0b92b36394442843381c31c5c34aca3f9"
+dependencies = [
+ "cfg-if",
+ "rayon",
+]
+
+[[package]]
 name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2807,6 +2931,18 @@ checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
 dependencies = [
  "tinyvec",
 ]
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+
+[[package]]
+name = "unicode-xid"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "universal-hash"
@@ -3253,7 +3389,7 @@ dependencies = [
  "rayon",
  "sha2 0.10.9",
  "subtle",
- "zakura-bls12-381",
+ "zakura-bls12-381 4.0.0",
  "zakura-pairing",
 ]
 
@@ -3285,6 +3421,17 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "zakura-bento-core",
+]
+
+[[package]]
+name = "zakura-bls12-381"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2edea13b7bba94ccb7aa473b30e4c390549ffe7c25d83919d6ba4e9b65626497"
+dependencies = [
+ "ff",
+ "rand_core 0.10.1",
+ "subtle",
 ]
 
 [[package]]
@@ -3333,7 +3480,7 @@ dependencies = [
  "subtle",
  "zakura-halo2-poseidon",
  "zakura-halo2-proofs",
- "zakura-pasta-curves",
+ "zakura-pasta-curves 4.0.0",
  "zakura-sinsemilla",
 ]
 
@@ -3344,7 +3491,7 @@ dependencies = [
  "bitvec",
  "ff",
  "group",
- "zakura-pasta-curves",
+ "zakura-pasta-curves 4.0.0",
 ]
 
 [[package]]
@@ -3365,7 +3512,21 @@ dependencies = [
  "rand 0.10.2",
  "rand_core 0.10.1",
  "tracing",
- "zakura-pasta-curves",
+ "zakura-pasta-curves 4.0.0",
+]
+
+[[package]]
+name = "zakura-jubjub"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7cc2178b04ba26be2676cd74018add8768fcda53326aae8255e7b676f877ee6"
+dependencies = [
+ "bitvec",
+ "ff",
+ "group",
+ "rand_core 0.10.1",
+ "subtle",
+ "zakura-bls12-381 1.2.0",
 ]
 
 [[package]]
@@ -3379,7 +3540,7 @@ dependencies = [
  "rand_core 0.10.1",
  "rand_xorshift 0.5.0",
  "subtle",
- "zakura-bls12-381",
+ "zakura-bls12-381 4.0.0",
 ]
 
 [[package]]
@@ -3465,8 +3626,8 @@ dependencies = [
  "zakura-halo2-gadgets",
  "zakura-halo2-poseidon",
  "zakura-halo2-proofs",
- "zakura-pasta-curves",
- "zakura-reddsa",
+ "zakura-pasta-curves 4.0.0",
+ "zakura-reddsa 4.0.0",
  "zakura-sinsemilla",
 ]
 
@@ -3475,6 +3636,21 @@ name = "zakura-pairing"
 version = "4.0.0"
 dependencies = [
  "group",
+]
+
+[[package]]
+name = "zakura-pasta-curves"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33817e907eaf89e5871ab0cdfc1054907ec0b3a86759c7a9d41875690f6fd9f4"
+dependencies = [
+ "blake2b_simd",
+ "ff",
+ "group",
+ "once_cell",
+ "rand 0.10.2",
+ "static_assertions",
+ "subtle",
 ]
 
 [[package]]
@@ -3518,9 +3694,9 @@ dependencies = [
  "rand_core 0.10.1",
  "secp256k1",
  "sha2 0.10.9",
- "zakura-bls12-381",
+ "zakura-bls12-381 4.0.0",
  "zakura-equihash",
- "zakura-jubjub",
+ "zakura-jubjub 4.0.0",
  "zakura-note-encryption",
  "zakura-orchard",
  "zakura-protocol",
@@ -3528,6 +3704,7 @@ dependencies = [
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zcash_script",
+ "zcash_tachyon",
  "zip32",
 ]
 
@@ -3546,8 +3723,8 @@ dependencies = [
  "wagyu-zcash-parameters",
  "xdg",
  "zakura-bellman",
- "zakura-bls12-381",
- "zakura-jubjub",
+ "zakura-bls12-381 4.0.0",
+ "zakura-jubjub 4.0.0",
  "zakura-primitives",
  "zakura-sapling-crypto",
 ]
@@ -3561,6 +3738,24 @@ dependencies = [
  "incrementalmerkletree-testing",
  "nonempty",
  "proptest",
+]
+
+[[package]]
+name = "zakura-reddsa"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23f5849526a1f308f3c522ebdcccd49e4add198d7b31297dedcfce9ff392c9e4"
+dependencies = [
+ "blake2b_simd",
+ "frost-rerandomized",
+ "group",
+ "hex",
+ "rand_core 0.10.1",
+ "serde",
+ "thiserror",
+ "zakura-jubjub 1.2.0",
+ "zakura-pasta-curves 1.2.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -3579,8 +3774,8 @@ dependencies = [
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "serde",
- "zakura-jubjub",
- "zakura-pasta-curves",
+ "zakura-jubjub 4.0.0",
+ "zakura-pasta-curves 4.0.0",
 ]
 
 [[package]]
@@ -3594,9 +3789,9 @@ dependencies = [
  "hex",
  "rand_core 0.10.1",
  "rand_core 0.6.4",
- "zakura-jubjub",
- "zakura-pasta-curves",
- "zakura-reddsa",
+ "zakura-jubjub 4.0.0",
+ "zakura-pasta-curves 4.0.0",
+ "zakura-reddsa 4.0.0",
 ]
 
 [[package]]
@@ -3611,7 +3806,7 @@ dependencies = [
  "rand_core 0.10.1",
  "serde",
  "thiserror",
- "zakura-reddsa",
+ "zakura-reddsa 4.0.0",
 ]
 
 [[package]]
@@ -3640,8 +3835,8 @@ dependencies = [
  "subtle",
  "tracing",
  "zakura-bellman",
- "zakura-bls12-381",
- "zakura-jubjub",
+ "zakura-bls12-381 4.0.0",
+ "zakura-jubjub 4.0.0",
  "zakura-note-encryption",
  "zakura-redjubjub",
  "zcash_spec",
@@ -3656,7 +3851,7 @@ dependencies = [
  "group",
  "once_cell",
  "subtle",
- "zakura-pasta-curves",
+ "zakura-pasta-curves 4.0.0",
 ]
 
 [[package]]
@@ -3731,6 +3926,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ded3f58b93486aa79b85acba1001f5298f27a46489859934954d262533ee2915"
 dependencies = [
  "blake2b_simd",
+]
+
+[[package]]
+name = "zcash_tachyon"
+version = "0.0.0"
+source = "git+https://github.com/tachyon-zcash/tachyon?rev=7acbdf5976d9d86b7210aa5cd721f201a329f16b#7acbdf5976d9d86b7210aa5cd721f201a329f16b"
+dependencies = [
+ "blake2b_simd",
+ "corez",
+ "derive_more",
+ "ff",
+ "group",
+ "lazy_static",
+ "ragu",
+ "ragu_arithmetic",
+ "ragu_circuits",
+ "ragu_core",
+ "ragu_pasta",
+ "ragu_primitives",
+ "rand_core 0.10.1",
+ "zakura-pasta-curves 1.2.0",
+ "zakura-reddsa 1.2.0",
 ]
 
 [[package]]

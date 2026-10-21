@@ -40,6 +40,9 @@ zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] 
 zcash_protocol.workspace = true
 zcash_script = { version = "0.6", default-features = false }
 
+[target.'cfg(zcash_unstable = "nutachyon")'.dependencies]
+zcash_tachyon = { git = "https://github.com/tachyon-zcash/tachyon", rev = "7acbdf5976d9d86b7210aa5cd721f201a329f16b", version = "0.0.0", default-features = false }
+
 [dev-dependencies]
 assert_matches = "1.5"
 bls12_381 = { workspace = true, features = ["default"] }
@@ -78,6 +81,7 @@ std = [
     "sapling/std",
     "orchard/std",
     "transparent/std",
+    "zcash_tachyon/std",
 ]
 temporary-zcashd = []
 test-dependencies = [
@@ -96,7 +100,7 @@ level = "warn"
 priority = 0
 check-cfg = [
     "cfg(tokio_unstable)",
-    'cfg(zcash_unstable, values("nu7"))',
+    'cfg(zcash_unstable, values("nu7", "nutachyon"))',
     "cfg(live_network_tests)",
 ]
 
