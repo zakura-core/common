@@ -233,11 +233,7 @@ pub(crate) fn v4_signature_hash_with_digests<A: Authorization>(
 
         h.update(&tx.version.header().to_le_bytes());
         h.update(&tx.version.version_group_id().to_le_bytes());
-        update_hash!(
-            h,
-            hash_type & SIGHASH_ANYONECANPAY == 0,
-            digests.prevouts
-        );
+        update_hash!(h, hash_type & SIGHASH_ANYONECANPAY == 0, digests.prevouts);
         update_hash!(
             h,
             (hash_type & SIGHASH_ANYONECANPAY) == 0

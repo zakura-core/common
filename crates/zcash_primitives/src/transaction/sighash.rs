@@ -5,7 +5,9 @@ use blake2b_simd::Hash as Blake2bHash;
 
 use super::{
     Authorization, TransactionData, TxDigests, TxVersion,
-    sighash_v4::{Zip143Digests, v4_signature_hash, v4_signature_hash_with_digests, zip143_digests},
+    sighash_v4::{
+        Zip143Digests, v4_signature_hash, v4_signature_hash_with_digests, zip143_digests,
+    },
     sighash_v5::{
         TransparentInputsDigests, v5_signature_hash, v5_signature_hash_with_inputs_digests,
     },

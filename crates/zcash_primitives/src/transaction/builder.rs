@@ -1486,7 +1486,9 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
 
                 self.build_internal::<Unauthorized, _, _, _, _>(
                     |b| Ok(b.build()),
-                    |b, sighash_data| authorize_transparent(b, sighash_data, transparent_signing_set),
+                    |b, sighash_data| {
+                        authorize_transparent(b, sighash_data, transparent_signing_set)
+                    },
                     sapling_extsks,
                     orchard_saks,
                     rng,
