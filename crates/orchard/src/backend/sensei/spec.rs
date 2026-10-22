@@ -1,0 +1,368 @@
+//! Helper functions defined in the Zcash Protocol Specification.
+
+use core::ops::Deref;
+
+use sensei::primitives::pallas;
+use subtle::{ConditionallySelectable, CtOption};
+
+use crate::constants::util::gen_const_array;
+
+pub(crate) use zcash_spec::PrfExpand;
+
+/// A Pallas point that is guaranteed to not be the identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NonIdentityPallasPoint(pallas::Point);
+
+impl Default for NonIdentityPallasPoint {
+    fn default() -> Self {
+        NonIdentityPallasPoint(pallas::Point::generator())
+    }
+}
+
+impl ConditionallySelectable for NonIdentityPallasPoint {
+    fn conditional_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
+        NonIdentityPallasPoint(pallas::Point::conditional_select(&a.0, &b.0, choice))
+    }
+}
+
+impl NonIdentityPallasPoint {
+    pub(crate) fn backend(self) -> sensei::NonIdentityPallasPoint {
+        sensei::NonIdentityPallasPoint::from_native(
+            *self
+                .0
+                .native()
+                .to_point()
+                .as_affine()
+                .expect("nonidentity point"),
+        )
+    }
+
+    /// Decodes a non-identity Pallas point from its canonical 32-byte encoding,
+    /// returning `None` if the bytes do not decode to a valid curve point or if
+    /// they decode to the identity.
+    pub(crate) fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
+        pallas::Point::from_bytes(bytes)
+            .and_then(|p| CtOption::new(NonIdentityPallasPoint(p), !p.is_identity()))
+    }
+
+    /// Constructs a wrapper for a point that is guaranteed to be non-identity
+    /// (such as the product of a non-zero scalar and a non-identity point in
+    /// the prime-order Pallas group).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `p.is_identity()`.
+    pub(crate) fn expect_non_identity(p: pallas::Point) -> Self {
+        assert!(!bool::from(p.is_identity()));
+        NonIdentityPallasPoint(p)
+    }
+}
+
+impl Deref for NonIdentityPallasPoint {
+    type Target = pallas::Point;
+
+    fn deref(&self) -> &pallas::Point {
+        &self.0
+    }
+}
+
+/// An integer in [1..q_P].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NonZeroPallasBase(pallas::Base);
+
+impl Default for NonZeroPallasBase {
+    fn default() -> Self {
+        NonZeroPallasBase(pallas::Base::one())
+    }
+}
+
+impl ConditionallySelectable for NonZeroPallasBase {
+    fn conditional_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
+        NonZeroPallasBase(pallas::Base::conditional_select(&a.0, &b.0, choice))
+    }
+}
+
+impl NonZeroPallasBase {
+    pub(crate) fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
+        pallas::Base::from_repr(*bytes).and_then(NonZeroPallasBase::from_base)
+    }
+
+    pub(crate) fn from_base(b: pallas::Base) -> CtOption<Self> {
+        CtOption::new(
+            NonZeroPallasBase(b),
+            subtle::Choice::from((!b.is_zero()) as u8),
+        )
+    }
+}
+
+/// An integer in [1..r_P].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct NonZeroPallasScalar(pallas::Scalar);
+
+impl Default for NonZeroPallasScalar {
+    fn default() -> Self {
+        NonZeroPallasScalar(pallas::Scalar::one())
+    }
+}
+
+impl From<NonZeroPallasBase> for NonZeroPallasScalar {
+    fn from(s: NonZeroPallasBase) -> Self {
+        NonZeroPallasScalar::guaranteed(mod_r_p(s.0))
+    }
+}
+
+impl ConditionallySelectable for NonZeroPallasScalar {
+    fn conditional_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
+        NonZeroPallasScalar(pallas::Scalar::conditional_select(&a.0, &b.0, choice))
+    }
+}
+
+impl NonZeroPallasScalar {
+    pub(crate) fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
+        pallas::Scalar::from_repr(*bytes).and_then(NonZeroPallasScalar::from_scalar)
+    }
+
+    pub(crate) fn from_scalar(s: pallas::Scalar) -> CtOption<Self> {
+        CtOption::new(
+            NonZeroPallasScalar(s),
+            subtle::Choice::from((!s.is_zero()) as u8),
+        )
+    }
+
+    /// Constructs a wrapper for a scalar field element that is guaranteed to be non-zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `s.is_zero()`.
+    fn guaranteed(s: pallas::Scalar) -> Self {
+        assert!(!s.is_zero());
+        NonZeroPallasScalar(s)
+    }
+}
+
+impl Deref for NonZeroPallasScalar {
+    type Target = pallas::Scalar;
+
+    fn deref(&self) -> &pallas::Scalar {
+        &self.0
+    }
+}
+
+/// Retains every endomorphism rotation of a key-agreement base.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedNonIdentityBase(sensei::primitives::agreement::PreparedBase);
+impl PreparedNonIdentityBase {
+    pub(crate) fn new(base: NonIdentityPallasPoint) -> Self {
+        let affine = *base
+            .native()
+            .to_point()
+            .as_affine()
+            .expect("nonidentity base");
+        Self(sensei::primitives::agreement::PreparedBase::new(
+            sensei::NonIdentityPallasPoint::from_native(affine),
+        ))
+    }
+    pub(crate) fn from_prepared(base: sensei::primitives::agreement::PreparedBase) -> Self {
+        Self(base)
+    }
+    pub(crate) fn table(&self) -> &sensei::primitives::agreement::PreparedBase {
+        &self.0
+    }
+}
+
+/// Retains the scalar and its digit schedule across all agreement calls.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedNonZeroScalar(sensei::primitives::agreement::PreparedScalar);
+impl PreparedNonZeroScalar {
+    pub(crate) fn new(scalar: &NonZeroPallasScalar) -> Self {
+        Self(sensei::primitives::agreement::PreparedScalar::new(**scalar))
+    }
+    pub(crate) fn raw_scalar(&self) -> pallas::Scalar {
+        self.0.scalar()
+    }
+    pub(crate) fn prepared(&self) -> &sensei::primitives::agreement::PreparedScalar {
+        &self.0
+    }
+}
+
+/// $\mathsf{ToBase}^\mathsf{Orchard}(x) := LEOS2IP_{\ell_\mathsf{PRFexpand}}(x) (mod q_P)$
+///
+/// Defined in [Zcash Protocol Spec § 4.2.3: Orchard Key Components][orchardkeycomponents].
+///
+/// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
+pub(crate) fn to_base(x: [u8; 64]) -> pallas::Base {
+    pallas::Base::from_uniform_bytes(&x)
+}
+
+/// $\mathsf{ToScalar}^\mathsf{Orchard}(x) := LEOS2IP_{\ell_\mathsf{PRFexpand}}(x) (mod r_P)$
+///
+/// Defined in [Zcash Protocol Spec § 4.2.3: Orchard Key Components][orchardkeycomponents].
+///
+/// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
+pub(crate) fn to_scalar(x: [u8; 64]) -> pallas::Scalar {
+    pallas::Scalar::from_uniform_bytes(&x)
+}
+
+/// Converts from pallas::Base to pallas::Scalar (aka $x \pmod{r_\mathbb{P}}$).
+///
+/// This requires no modular reduction because Pallas' base field is smaller than its
+/// scalar field.
+pub(crate) fn mod_r_p(x: pallas::Base) -> pallas::Scalar {
+    sensei::primitives::protocol::base_to_scalar(x)
+}
+
+/// Defined in [Zcash Protocol Spec § 5.4.8.4: Sinsemilla commitments][concretesinsemillacommit].
+///
+/// [concretesinsemillacommit]: https://zips.z.cash/protocol/protocol.pdf#concretesinsemillacommit
+pub(crate) fn commit_ivk(
+    ak: &pallas::Base,
+    nk: &pallas::Base,
+    rivk: &pallas::Scalar,
+) -> CtOption<pallas::Base> {
+    sensei::primitives::protocol::commit_ivk(*ak, *nk, *rivk)
+}
+
+/// Defined in [Zcash Protocol Spec § 5.4.1.6: DiversifyHash^Sapling and DiversifyHash^Orchard Hash Functions][concretediversifyhash].
+///
+/// [concretediversifyhash]: https://zips.z.cash/protocol/nu5.pdf#concretediversifyhash
+pub(crate) fn diversify_hash(d: &[u8; 11]) -> NonIdentityPallasPoint {
+    NonIdentityPallasPoint(pallas::Point::from_native(
+        sensei::primitives::protocol::diversify_hash(d)
+            .native()
+            .to_projective(),
+    ))
+}
+
+/// $PRF^\mathsf{nfOrchard}(nk, \rho) := Poseidon(nk, \rho)$
+///
+/// Defined in [Zcash Protocol Spec § 5.4.2: Pseudo Random Functions][concreteprfs].
+///
+/// [concreteprfs]: https://zips.z.cash/protocol/nu5.pdf#concreteprfs
+pub(crate) fn prf_nf(nk: pallas::Base, rho: pallas::Base) -> pallas::Base {
+    sensei::primitives::poseidon::hash([nk, rho])
+}
+
+/// Defined in [Zcash Protocol Spec § 5.4.5.5: Orchard Key Agreement][concreteorchardkeyagreement].
+///
+/// [concreteorchardkeyagreement]: https://zips.z.cash/protocol/nu5.pdf#concreteorchardkeyagreement
+pub(crate) fn ka_orchard(
+    sk: &NonZeroPallasScalar,
+    b: &NonIdentityPallasPoint,
+) -> NonIdentityPallasPoint {
+    ka_orchard_prepared(
+        &PreparedNonZeroScalar::new(sk),
+        &PreparedNonIdentityBase::new(*b),
+    )
+}
+
+/// Defined in [Zcash Protocol Spec § 5.4.5.5: Orchard Key Agreement][concreteorchardkeyagreement].
+///
+/// [concreteorchardkeyagreement]: https://zips.z.cash/protocol/nu5.pdf#concreteorchardkeyagreement
+pub(crate) fn ka_orchard_prepared(
+    sk: &PreparedNonZeroScalar,
+    b: &PreparedNonIdentityBase,
+) -> NonIdentityPallasPoint {
+    NonIdentityPallasPoint(b.0.multiply(&sk.0))
+}
+
+/// Coordinate extractor for Pallas.
+///
+/// Defined in [Zcash Protocol Spec § 5.4.9.7: Coordinate Extractor for Pallas][concreteextractorpallas].
+///
+/// [concreteextractorpallas]: https://zips.z.cash/protocol/nu5.pdf#concreteextractorpallas
+pub(crate) fn extract_p(point: &pallas::Point) -> pallas::Base {
+    point
+        .to_affine()
+        .coordinates()
+        .map(|c| *c.x())
+        .unwrap_or_else(pallas::Base::zero)
+}
+
+/// Coordinate extractor for Pallas.
+///
+/// Defined in [Zcash Protocol Spec § 5.4.9.7: Coordinate Extractor for Pallas][concreteextractorpallas].
+///
+/// [concreteextractorpallas]: https://zips.z.cash/protocol/nu5.pdf#concreteextractorpallas
+pub(crate) fn extract_p_bottom(point: CtOption<pallas::Point>) -> CtOption<pallas::Base> {
+    point.map(|p| extract_p(&p))
+}
+
+/// The u64 integer represented by an L-bit little-endian bitstring.
+///
+/// # Panics
+///
+/// Panics if the bitstring is longer than 64 bits.
+pub fn lebs2ip<const L: usize>(bits: &[bool; L]) -> u64 {
+    assert!(L <= 64);
+    bits.iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, b)| acc + if *b { 1 << i } else { 0 })
+}
+
+/// The sequence of bits representing a u64 in little-endian order.
+///
+/// # Panics
+///
+/// Panics if the expected length of the sequence `NUM_BITS` exceeds
+/// 64.
+pub fn i2lebsp<const NUM_BITS: usize>(int: u64) -> [bool; NUM_BITS] {
+    assert!(NUM_BITS <= 64);
+    gen_const_array(|mask: usize| (int & (1 << mask)) != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{i2lebsp, lebs2ip};
+
+    use rand::Rng;
+
+    use crate::rng_compat::OsRng;
+
+    #[test]
+    #[cfg(feature = "circuit")]
+    fn diversify_hash_substitution() {
+        use sensei::primitives::pallas;
+
+        assert!(!bool::from(
+            pallas::Point::hash_to_curve("z.cash:Orchard-gd")(&[]).is_identity()
+        ));
+    }
+
+    #[test]
+    fn lebs2ip_round_trip() {
+        let mut rng = OsRng;
+        {
+            let int = rng.next_u64();
+            assert_eq!(lebs2ip::<64>(&i2lebsp(int)), int);
+        }
+
+        assert_eq!(lebs2ip::<64>(&i2lebsp(0)), 0);
+        assert_eq!(
+            lebs2ip::<64>(&i2lebsp(0xFFFFFFFFFFFFFFFF)),
+            0xFFFFFFFFFFFFFFFF
+        );
+    }
+
+    #[test]
+    fn i2lebsp_round_trip() {
+        {
+            let bitstring = [0; 64].map(|_| rand::random());
+            assert_eq!(i2lebsp(lebs2ip(&bitstring)), bitstring);
+        }
+
+        {
+            let bitstring = [false; 64];
+            assert_eq!(i2lebsp(lebs2ip(&bitstring)), bitstring);
+        }
+
+        {
+            let bitstring = [true; 64];
+            assert_eq!(i2lebsp(lebs2ip(&bitstring)), bitstring);
+        }
+
+        {
+            let bitstring = [];
+            assert_eq!(i2lebsp(lebs2ip(&bitstring)), bitstring);
+        }
+    }
+}

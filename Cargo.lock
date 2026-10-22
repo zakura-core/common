@@ -3452,6 +3452,7 @@ dependencies = [
  "visibility",
  "zakura-note-encryption",
  "zakura-orchard-legacy",
+ "zakura-sensei",
  "zcash_spec",
  "zip32",
 ]
@@ -3581,6 +3582,7 @@ dependencies = [
  "serde",
  "zakura-jubjub",
  "zakura-pasta-curves",
+ "zakura-sensei",
 ]
 
 [[package]]
@@ -3597,6 +3599,7 @@ dependencies = [
  "zakura-jubjub",
  "zakura-pasta-curves",
  "zakura-reddsa",
+ "zakura-sensei",
 ]
 
 [[package]]

@@ -41,6 +41,26 @@ impl NoteCommitment {
     /// Defined in [Zcash Protocol Spec § 5.4.8.4: Sinsemilla commitments][concretesinsemillacommit].
     ///
     /// [concretesinsemillacommit]: https://zips.z.cash/protocol/nu5.pdf#concretesinsemillacommit
+    #[cfg(feature = "backend-sensei")]
+    pub(super) fn derive(
+        g_d: crate::spec::NonIdentityPallasPoint,
+        pk_d: crate::spec::NonIdentityPallasPoint,
+        v: NoteValue,
+        rho: pallas::Base,
+        psi: pallas::Base,
+        rcm: NoteCommitTrapdoor,
+    ) -> CtOption<Self> {
+        sensei::primitives::protocol::note_commitment(
+            g_d.backend(),
+            pk_d.backend(),
+            v.inner(),
+            rho,
+            psi,
+            rcm.0,
+        )
+        .map(NoteCommitment)
+    }
+    #[cfg(feature = "backend-halo2")]
     pub(super) fn derive(
         g_d: crate::spec::NonIdentityPallasPoint,
         pk_d: crate::spec::NonIdentityPallasPoint,
@@ -122,6 +142,7 @@ impl PartialEq for ExtractedNoteCommitment {
 
 impl Eq for ExtractedNoteCommitment {}
 
+#[cfg(feature = "backend-halo2")]
 mod legacy {
 
     use crate::once::OnceTable;
