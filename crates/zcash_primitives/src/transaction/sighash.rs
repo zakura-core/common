@@ -98,7 +98,9 @@ enum SharedDigests {
 ///
 /// The transaction is owned and cannot be modified, so the digests always match it. To
 /// change the transaction, take it back with [`PrecomputedSighashData::into_tx`] and
-/// compute new digests for the changed transaction.
+/// compute new digests for the changed transaction. The input amounts and
+/// `scriptPubKey`s of the transparent authorizing context are read once, when the
+/// digests are computed.
 pub struct PrecomputedSighashData<A: Authorization> {
     tx: TransactionData<A>,
     digests: SharedDigests,

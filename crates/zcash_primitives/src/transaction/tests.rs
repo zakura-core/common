@@ -1006,8 +1006,11 @@ fn zip_0243() {
         replaced.sapling_spends = replaced.sapling_spends.map(|_| other);
         replaced.sapling_outputs = replaced.sapling_outputs.map(|_| other);
         let hash_type = signable_input.hash_type();
-        let uses_shared_digests = hash_type & 0x80 == 0
-            || !matches!(hash_type & 0x1f, 2 | 3)
+        let uses_shared_digests = hash_type & ::transparent::sighash::SIGHASH_ANYONECANPAY == 0
+            || !matches!(
+                hash_type & ::transparent::sighash::SIGHASH_MASK,
+                ::transparent::sighash::SIGHASH_NONE | ::transparent::sighash::SIGHASH_SINGLE
+            )
             || digests.joinsplits.is_some()
             || digests.sapling_spends.is_some()
             || digests.sapling_outputs.is_some();
