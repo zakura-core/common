@@ -3,16 +3,20 @@ use proptest::prelude::*;
 #[cfg(test)]
 use {
     crate::transaction::{
-        Authorization, Transaction, TransactionData, TxDigests, TxIn, TxVersion,
-        sighash::SignableInput, sighash_v4::v4_signature_hash, sighash_v5::v5_signature_hash,
-        testing::arb_tx, transparent, txid::TxIdDigester,
+        Authorization, Authorized, Transaction, TransactionData, TxDigests, TxIn, TxVersion,
+        sighash::{PrecomputedSighashData, SignableInput, Zip244Error, signature_hash},
+        sighash_v4::{v4_signature_hash, v4_signature_hash_with_digests, zip143_digests},
+        sighash_v5::v5_signature_hash,
+        testing::arb_tx,
+        transparent,
+        txid::TxIdDigester,
     },
     ::transparent::{
         address::Script, sighash::SighashType, sighash::TransparentAuthorizingContext,
     },
     alloc::vec::Vec,
     blake2b_simd::Hash as Blake2bHash,
-    core::ops::Deref,
+    core::{cell::Cell, ops::Deref},
     zcash_protocol::{consensus::BranchId, value::Zatoshis},
     zcash_script::script,
 };
@@ -942,6 +946,14 @@ fn zip_0143() {
             v4_signature_hash(tx.deref(), &signable_input).as_ref(),
             tv.sighash
         );
+
+        let precomputed =
+            PrecomputedSighashData::new(with_test_transparent_auth(tx.deref(), vec![], vec![]));
+        assert_eq!(
+            precomputed.signature_hash(&signable_input).as_ref(),
+            &tv.sighash
+        );
+        check_v4_precomputed_matches_legacy(&precomputed);
     }
 }
 
@@ -968,14 +980,164 @@ fn zip_0243() {
             v4_signature_hash(tx.deref(), &signable_input).as_ref(),
             tv.sighash
         );
+
+        let precomputed =
+            PrecomputedSighashData::new(with_test_transparent_auth(tx.deref(), vec![], vec![]));
+        assert_eq!(
+            precomputed.signature_hash(&signable_input).as_ref(),
+            &tv.sighash
+        );
+        check_v4_precomputed_matches_legacy(&precomputed);
+
+        // The signature hash of each input takes the digests of the transparent inputs and
+        // outputs, JoinSplits and Sapling spends and outputs from the precomputed digests,
+        // instead of hashing the transaction again.
+        let digests = zip143_digests(tx.deref());
+        assert_eq!(
+            v4_signature_hash_with_digests(tx.deref(), &signable_input, &digests).as_ref(),
+            tv.sighash
+        );
+        let mut replaced = digests.clone();
+        let other = blake2b_simd::Params::new().hash_length(32).hash(b"other");
+        replaced.prevouts = other;
+        replaced.sequence = other;
+        replaced.outputs = other;
+        replaced.joinsplits = replaced.joinsplits.map(|_| other);
+        replaced.sapling_spends = replaced.sapling_spends.map(|_| other);
+        replaced.sapling_outputs = replaced.sapling_outputs.map(|_| other);
+        let hash_type = signable_input.hash_type();
+        let uses_shared_digests = hash_type & ::transparent::sighash::SIGHASH_ANYONECANPAY == 0
+            || !matches!(
+                hash_type & ::transparent::sighash::SIGHASH_MASK,
+                ::transparent::sighash::SIGHASH_NONE | ::transparent::sighash::SIGHASH_SINGLE
+            )
+            || digests.joinsplits.is_some()
+            || digests.sapling_spends.is_some()
+            || digests.sapling_outputs.is_some();
+        assert_eq!(
+            v4_signature_hash_with_digests(tx.deref(), &signable_input, &replaced).as_ref()
+                == tv.sighash,
+            !uses_shared_digests
+        );
     }
 }
+
+/// Checks that the precomputed signature hash of every transparent input under every
+/// canonical hash type, and of the shielded input, of a version 4 or earlier transaction
+/// matches the signature hash computed without precomputation.
+#[cfg(test)]
+fn check_v4_precomputed_matches_legacy(precomputed: &PrecomputedSighashData<TestUnauthorized>) {
+    let tx = precomputed.tx();
+    let script_code = Script(script::Code(vec![0x51]));
+    let check = |signable_input: &SignableInput<'_>| {
+        assert_eq!(
+            precomputed.signature_hash(signable_input).as_ref(),
+            v4_signature_hash(tx, signable_input).as_bytes()
+        );
+    };
+    check(&SignableInput::Shielded);
+    if let Some(bundle) = tx.transparent_bundle() {
+        for index in 0..bundle.vin.len() {
+            for hash_type in ALL_HASH_TYPES {
+                check(&SignableInput::Transparent(
+                    ::transparent::sighash::SignableInput::from_parts(
+                        bundle,
+                        hash_type,
+                        index,
+                        &script_code,
+                        &script_code,
+                        Zatoshis::const_from_u64(1),
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+    }
+}
+
+/// The six canonical transparent signature hash types.
+#[cfg(test)]
+const ALL_HASH_TYPES: [SighashType; 6] = [
+    SighashType::ALL,
+    SighashType::NONE,
+    SighashType::SINGLE,
+    SighashType::ALL_ANYONECANPAY,
+    SighashType::NONE_ANYONECANPAY,
+    SighashType::SINGLE_ANYONECANPAY,
+];
 
 #[cfg(test)]
 #[derive(Debug)]
 struct TestTransparentAuth {
     input_amounts: Vec<Zatoshis>,
     input_scriptpubkeys: Vec<Script>,
+    /// The number of calls to `input_amounts` and `input_scriptpubkeys`.
+    reads: Cell<usize>,
+}
+
+#[cfg(test)]
+impl TestTransparentAuth {
+    fn new(input_amounts: Vec<Zatoshis>, input_scriptpubkeys: Vec<Script>) -> Self {
+        TestTransparentAuth {
+            input_amounts,
+            input_scriptpubkeys,
+            reads: Cell::new(0),
+        }
+    }
+}
+
+/// Returns a copy of `txdata` whose transparent inputs spend outputs with the given
+/// `input_amounts` and `input_scriptpubkeys`.
+#[cfg(test)]
+fn with_test_transparent_auth(
+    txdata: &TransactionData<Authorized>,
+    input_amounts: Vec<Zatoshis>,
+    input_scriptpubkeys: Vec<Script>,
+) -> TransactionData<TestUnauthorized> {
+    let test_bundle = txdata
+        .transparent_bundle
+        .as_ref()
+        .map(|b| transparent::Bundle {
+            // we have to do this map/clone to make the types line up, since the
+            // Authorization::ScriptSig type is bound to transparent::Authorized, and we need
+            // it to be bound to TestTransparentAuth.
+            vin: b
+                .vin
+                .iter()
+                .map(|vin| {
+                    TxIn::from_parts(
+                        vin.prevout().clone(),
+                        vin.script_sig().clone(),
+                        vin.sequence(),
+                    )
+                })
+                .collect(),
+            vout: b.vout.clone(),
+            authorization: TestTransparentAuth::new(input_amounts, input_scriptpubkeys),
+        });
+
+    if txdata.version() == TxVersion::V6 {
+        TransactionData::from_parts_v6(
+            txdata.consensus_branch_id(),
+            txdata.lock_time(),
+            txdata.expiry_height(),
+            test_bundle,
+            txdata.sapling_bundle().cloned(),
+            txdata.orchard_bundle().cloned(),
+            txdata.ironwood_bundle().cloned(),
+        )
+    } else {
+        TransactionData::from_parts(
+            txdata.version(),
+            txdata.consensus_branch_id(),
+            txdata.lock_time(),
+            txdata.expiry_height(),
+            test_bundle,
+            txdata.sprout_bundle().cloned(),
+            txdata.sapling_bundle().cloned(),
+            txdata.orchard_bundle().cloned(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -986,10 +1148,12 @@ impl transparent::Authorization for TestTransparentAuth {
 #[cfg(test)]
 impl TransparentAuthorizingContext for TestTransparentAuth {
     fn input_amounts(&self) -> Vec<Zatoshis> {
+        self.reads.set(self.reads.get() + 1);
         self.input_amounts.clone()
     }
 
     fn input_scriptpubkeys(&self) -> Vec<Script> {
+        self.reads.set(self.reads.get() + 1);
         self.input_scriptpubkeys.clone()
     }
 }
@@ -1048,10 +1212,7 @@ fn zip_0244() {
                     })
                     .collect(),
                 vout: b.vout.clone(),
-                authorization: TestTransparentAuth {
-                    input_amounts,
-                    input_scriptpubkeys,
-                },
+                authorization: TestTransparentAuth::new(input_amounts, input_scriptpubkeys),
             });
 
         let tdata = TransactionData::from_parts(
@@ -1069,6 +1230,23 @@ fn zip_0244() {
 
     for tv in self::data::zip_0244::make_test_vectors() {
         let (txdata, txid_parts) = to_test_txdata(&tv);
+        let precomputed = PrecomputedSighashData::new(txdata);
+        let txdata = precomputed.tx();
+
+        // Computes the signature hash both without and with precomputation, and checks
+        // that the results agree.
+        let check_sighash = |signable_input: &SignableInput<'_>| {
+            let sighash = v5_signature_hash(txdata, signable_input, &txid_parts);
+            assert_eq!(
+                precomputed.signature_hash(signable_input).as_ref(),
+                sighash.as_bytes()
+            );
+            assert_eq!(
+                signature_hash(txdata, signable_input, &txid_parts).as_ref(),
+                sighash.as_bytes()
+            );
+            sighash
+        };
 
         if let Some(index) = tv.transparent_input {
             // nIn is a u32, but to actually use it we need a usize.
@@ -1091,20 +1269,18 @@ fn zip_0244() {
             };
 
             assert_eq!(
-                v5_signature_hash(&txdata, &signable_input(SighashType::ALL), &txid_parts).as_ref(),
+                check_sighash(&signable_input(SighashType::ALL)).as_ref(),
                 &tv.sighash_all.unwrap()
             );
 
             assert_eq!(
-                v5_signature_hash(&txdata, &signable_input(SighashType::NONE), &txid_parts)
-                    .as_ref(),
+                check_sighash(&signable_input(SighashType::NONE)).as_ref(),
                 &tv.sighash_none.unwrap()
             );
 
             if index < bundle.vout.len() {
                 assert_eq!(
-                    v5_signature_hash(&txdata, &signable_input(SighashType::SINGLE), &txid_parts)
-                        .as_ref(),
+                    check_sighash(&signable_input(SighashType::SINGLE)).as_ref(),
                     &tv.sighash_single.unwrap()
                 );
             } else {
@@ -1112,33 +1288,18 @@ fn zip_0244() {
             }
 
             assert_eq!(
-                v5_signature_hash(
-                    &txdata,
-                    &signable_input(SighashType::ALL_ANYONECANPAY),
-                    &txid_parts,
-                )
-                .as_ref(),
+                check_sighash(&signable_input(SighashType::ALL_ANYONECANPAY)).as_ref(),
                 &tv.sighash_all_anyone.unwrap()
             );
 
             assert_eq!(
-                v5_signature_hash(
-                    &txdata,
-                    &signable_input(SighashType::NONE_ANYONECANPAY),
-                    &txid_parts,
-                )
-                .as_ref(),
+                check_sighash(&signable_input(SighashType::NONE_ANYONECANPAY)).as_ref(),
                 &tv.sighash_none_anyone.unwrap()
             );
 
             if index < bundle.vout.len() {
                 assert_eq!(
-                    v5_signature_hash(
-                        &txdata,
-                        &signable_input(SighashType::SINGLE_ANYONECANPAY),
-                        &txid_parts,
-                    )
-                    .as_ref(),
+                    check_sighash(&signable_input(SighashType::SINGLE_ANYONECANPAY)).as_ref(),
                     &tv.sighash_single_anyone.unwrap()
                 );
             } else {
@@ -1147,8 +1308,273 @@ fn zip_0244() {
         };
 
         assert_eq!(
-            v5_signature_hash(&txdata, &SignableInput::Shielded, &txid_parts).as_ref(),
+            check_sighash(&SignableInput::Shielded).as_ref(),
             tv.sighash_shielded
         );
+
+        // Computing the signature hashes of every input under every hash type, including
+        // `SIGHASH_SINGLE` for inputs without a corresponding output, and of the shielded
+        // input, reads the input amounts and `scriptPubKey`s once each, when the digests
+        // are precomputed. Coinbase transactions and transactions without transparent
+        // inputs never read them.
+        let precomputed = PrecomputedSighashData::new(to_test_txdata(&tv).0);
+        let reads_on_precompute = precomputed
+            .tx()
+            .transparent_bundle()
+            .map_or(0, |b| b.authorization.reads.get());
+        precomputed.signature_hash(&SignableInput::Shielded);
+        if let Some(bundle) = precomputed.tx().transparent_bundle() {
+            let has_inputs = !bundle.is_coinbase() && !bundle.vin.is_empty();
+            assert_eq!(reads_on_precompute, if has_inputs { 2 } else { 0 });
+            assert_eq!(bundle.authorization.reads.get(), reads_on_precompute);
+            if has_inputs {
+                for index in 0..bundle.vin.len() {
+                    let script_pubkey = &bundle.authorization.input_scriptpubkeys[index];
+                    for hash_type in ALL_HASH_TYPES {
+                        let signable_input = SignableInput::Transparent(
+                            ::transparent::sighash::SignableInput::from_parts(
+                                bundle,
+                                hash_type,
+                                index,
+                                script_pubkey,
+                                script_pubkey,
+                                bundle.authorization.input_amounts[index],
+                            )
+                            .unwrap(),
+                        );
+                        let reads = bundle.authorization.reads.get();
+                        let legacy =
+                            v5_signature_hash(precomputed.tx(), &signable_input, &txid_parts);
+                        assert_eq!(
+                            precomputed.signature_hash(&signable_input).as_ref(),
+                            legacy.as_bytes()
+                        );
+                        // Without precomputation, each signature hash that commits to the
+                        // input amounts and `scriptPubKey`s reads them again.
+                        let legacy_reads = if hash_type.encode()
+                            & ::transparent::sighash::SIGHASH_ANYONECANPAY
+                            == 0
+                        {
+                            2
+                        } else {
+                            0
+                        };
+                        assert_eq!(bundle.authorization.reads.get(), reads + legacy_reads);
+                    }
+                }
+            }
+        }
     }
+}
+
+#[test]
+fn v6_signature_hashes_match_independent_values() {
+    // The synthetic version 6 transaction from
+    // `v6_encoding_hashes_and_fee_are_independent_of_nu7_cfg`, whose one input spends a
+    // 65000 zatoshi output with `scriptPubKey` `OP_TRUE`. The expected signature hashes
+    // were computed independently with Python hashlib.blake2b, following the ZIP 244
+    // signature digest with the version 6 empty Sapling, Orchard and Ironwood digests.
+    let bytes = hex::decode("0600008098b684d85b16a53701000000020000000100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff0150c3000000000000015100000000").unwrap();
+    let tx = Transaction::read(&bytes[..], BranchId::Nu6_3).unwrap();
+    let script_pubkey = Script(script::Code(vec![0x51]));
+    let value = Zatoshis::const_from_u64(65_000);
+    let txdata = with_test_transparent_auth(tx.deref(), vec![value], vec![script_pubkey.clone()]);
+    let txid_parts = txdata.digest(TxIdDigester);
+    let precomputed = PrecomputedSighashData::new_zip244(txdata).unwrap();
+    let txdata = precomputed.tx();
+    let bundle = txdata.transparent_bundle().unwrap();
+
+    // The input amounts and `scriptPubKey`s were read once each, when precomputing.
+    assert_eq!(bundle.authorization.reads.get(), 2);
+
+    let check = |signable_input: &SignableInput<'_>, expected: &str| {
+        let reads = bundle.authorization.reads.get();
+        assert_eq!(
+            hex::encode(precomputed.signature_hash(signable_input).as_ref()),
+            expected
+        );
+        // Signing with the precomputed digests does not read them again.
+        assert_eq!(bundle.authorization.reads.get(), reads);
+        assert_eq!(
+            hex::encode(v6_signature_hash(txdata, signable_input, &txid_parts).as_bytes()),
+            expected
+        );
+        assert_eq!(
+            hex::encode(signature_hash(txdata, signable_input, &txid_parts).as_ref()),
+            expected
+        );
+    };
+
+    check(
+        &SignableInput::Shielded,
+        "e578a96e09df5cccb704c5e31a6c2d3036c6e643ff5e936ff357e022fe5fe125",
+    );
+    for (hash_type, expected) in ALL_HASH_TYPES.into_iter().zip([
+        "a9ea94cb98c86b2ea59aaffd150685e7393da151d02bd269cb16937ccc520c7a",
+        "460e26bfb4510a8c4c3eafc545ae00d45a0071671847fe5526b01a49075d6ecd",
+        "9438babdf52d52af0115bdfd6d909b18ae52fdd392371f5aa1b2321baf8f00f9",
+        "9088337ed7401d7c6587c9662a5399737160ca183ac6150749c94e7ca32f3401",
+        "5fbd6a2157fad3a1ce0161195261d0d9b19e87848cf55de20b9f8605c5369748",
+        "aa2baf9945baaf63de5cb20c4f9fa279e416a886606c23b04eb430c7c6afb6ab",
+    ]) {
+        check(
+            &SignableInput::Transparent(
+                ::transparent::sighash::SignableInput::from_parts(
+                    bundle,
+                    hash_type,
+                    0,
+                    &script_pubkey,
+                    &script_pubkey,
+                    value,
+                )
+                .unwrap(),
+            ),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn precomputed_sighash_zip244_constructor_rejects_v4_and_accepts_v5() {
+    for tv in self::data::zip_0243::make_test_vectors() {
+        let tx = Transaction::read(&tv.tx[..], tv.consensus_branch_id).unwrap();
+        let txdata = with_test_transparent_auth(tx.deref(), vec![], vec![]);
+        match PrecomputedSighashData::new_zip244(txdata) {
+            Err(Zip244Error::NotZip244(txdata)) => {
+                // The transaction is returned unchanged.
+                assert_eq!(txdata.version(), tx.version());
+                assert_eq!(
+                    txdata.transparent_bundle().map(|b| b.vin.len()),
+                    tx.transparent_bundle().map(|b| b.vin.len())
+                );
+                assert_eq!(
+                    zip143_digests(&*txdata).prevouts,
+                    zip143_digests(tx.deref()).prevouts
+                );
+            }
+            Ok(_) => panic!("a version 4 transaction was accepted"),
+        }
+    }
+
+    for tv in self::data::zip_0244::make_test_vectors() {
+        let tx = Transaction::read(&tv.tx[..], BranchId::Nu5).unwrap();
+        let amounts = tv
+            .amounts
+            .iter()
+            .map(|amount| Zatoshis::from_nonnegative_i64(*amount).unwrap())
+            .collect::<Vec<_>>();
+        let scripts = tv
+            .script_pubkeys
+            .iter()
+            .cloned()
+            .map(|s| Script(script::Code(s)))
+            .collect::<Vec<_>>();
+        let zip244 = PrecomputedSighashData::new_zip244(with_test_transparent_auth(
+            tx.deref(),
+            amounts.clone(),
+            scripts.clone(),
+        ))
+        .unwrap();
+        let general =
+            PrecomputedSighashData::new(with_test_transparent_auth(tx.deref(), amounts, scripts));
+        assert_eq!(
+            zip244.signature_hash(&SignableInput::Shielded).as_ref(),
+            general.signature_hash(&SignableInput::Shielded).as_ref()
+        );
+        assert_eq!(
+            zip244.signature_hash(&SignableInput::Shielded).as_ref(),
+            &tv.sighash_shielded
+        );
+    }
+}
+
+#[test]
+fn precomputed_sighash_follows_the_transaction_it_was_computed_for() {
+    let mut checked = false;
+    for tv in self::data::zip_0244::make_test_vectors() {
+        let Some(index) = tv.transparent_input else {
+            continue;
+        };
+        let index = index as usize;
+        let tx = Transaction::read(&tv.tx[..], BranchId::Nu5).unwrap();
+        let amounts = tv
+            .amounts
+            .iter()
+            .map(|amount| Zatoshis::from_nonnegative_i64(*amount).unwrap())
+            .collect::<Vec<_>>();
+        let scripts = tv
+            .script_pubkeys
+            .iter()
+            .cloned()
+            .map(|s| Script(script::Code(s)))
+            .collect::<Vec<_>>();
+
+        // The same transaction, except that the input being signed spends one more zatoshi,
+        // and another input spends one more zatoshi too if there is one.
+        let mut changed_amounts = amounts.clone();
+        for amount in changed_amounts.iter_mut() {
+            *amount = (*amount + Zatoshis::const_from_u64(1)).unwrap();
+        }
+
+        let original = PrecomputedSighashData::new(with_test_transparent_auth(
+            tx.deref(),
+            amounts.clone(),
+            scripts.clone(),
+        ));
+        let changed = PrecomputedSighashData::new(with_test_transparent_auth(
+            tx.deref(),
+            changed_amounts.clone(),
+            scripts.clone(),
+        ));
+
+        let sighash = |precomputed: &PrecomputedSighashData<TestUnauthorized>,
+                       amounts: &[Zatoshis],
+                       hash_type| {
+            let bundle = precomputed.tx().transparent_bundle().unwrap();
+            let signable_input = SignableInput::Transparent(
+                ::transparent::sighash::SignableInput::from_parts(
+                    bundle,
+                    hash_type,
+                    index,
+                    &scripts[index],
+                    &scripts[index],
+                    amounts[index],
+                )
+                .unwrap(),
+            );
+            let txid_parts = precomputed.tx().digest(TxIdDigester);
+            let legacy = v5_signature_hash(precomputed.tx(), &signable_input, &txid_parts);
+            let cached = precomputed.signature_hash(&signable_input);
+            assert_eq!(cached.as_ref(), legacy.as_bytes());
+            *cached.as_ref()
+        };
+
+        // The original digests still give the known signature hash after the changed
+        // transaction's digests are computed, and the changed transaction's signature hash
+        // commits to its own amounts.
+        assert_eq!(
+            sighash(&original, &amounts, SighashType::ALL),
+            tv.sighash_all.unwrap()
+        );
+        assert_ne!(
+            sighash(&changed, &changed_amounts, SighashType::ALL),
+            tv.sighash_all.unwrap()
+        );
+        // With `SIGHASH_ANYONECANPAY`, only the amount of the input being signed changes
+        // the signature hash, and it changed here.
+        assert_ne!(
+            sighash(&changed, &changed_amounts, SighashType::ALL_ANYONECANPAY),
+            tv.sighash_all_anyone.unwrap()
+        );
+
+        // Taking the transaction back and computing its digests again gives the same
+        // signature hashes.
+        let recomputed = PrecomputedSighashData::new(original.into_tx());
+        assert_eq!(
+            sighash(&recomputed, &amounts, SighashType::ALL),
+            tv.sighash_all.unwrap()
+        );
+        checked = true;
+    }
+    assert!(checked);
 }
