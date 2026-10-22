@@ -149,13 +149,7 @@ impl<'a, 'b> Sub<&'b Fp> for &'a Fp {
 
     #[inline]
     fn sub(self, rhs: &'b Fp) -> Fp {
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little",
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         {
             Fp(super::aarch64_asm::sub(&self.0, &rhs.0, &MODULUS.0))
         }
@@ -168,13 +162,7 @@ impl<'a, 'b> Sub<&'b Fp> for &'a Fp {
             Fp(super::x86_64_asm::sub(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
         }
         #[cfg(not(any(
-            all(
-                feature = "aarch64-asm",
-                target_arch = "aarch64",
-                any(target_family = "unix", target_os = "none"),
-                target_pointer_width = "64",
-                target_endian = "little",
-            ),
+            pasta_curves_aarch64_asm,
             all(
                 pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
@@ -192,13 +180,7 @@ impl<'a, 'b> Add<&'b Fp> for &'a Fp {
 
     #[inline]
     fn add(self, rhs: &'b Fp) -> Fp {
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little",
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         {
             Fp(super::aarch64_asm::add(&self.0, &rhs.0, &MODULUS.0))
         }
@@ -211,13 +193,7 @@ impl<'a, 'b> Add<&'b Fp> for &'a Fp {
             Fp(super::x86_64_asm::add(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
         }
         #[cfg(not(any(
-            all(
-                feature = "aarch64-asm",
-                target_arch = "aarch64",
-                any(target_family = "unix", target_os = "none"),
-                target_pointer_width = "64",
-                target_endian = "little",
-            ),
+            pasta_curves_aarch64_asm,
             all(
                 pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
@@ -473,13 +449,7 @@ impl Fp {
 
     #[inline]
     fn mul_runtime(&self, rhs: &Self) -> Self {
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         {
             Fp(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
         }
@@ -494,13 +464,7 @@ impl Fp {
         }
 
         #[cfg(not(any(
-            all(
-                feature = "aarch64-asm",
-                target_arch = "aarch64",
-                any(target_family = "unix", target_os = "none"),
-                target_pointer_width = "64",
-                target_endian = "little"
-            ),
+            pasta_curves_aarch64_asm,
             all(
                 pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
@@ -514,13 +478,7 @@ impl Fp {
 
     #[inline]
     fn square_runtime(&self) -> Self {
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         {
             Fp(super::aarch64_asm::square(&self.0, &MODULUS.0, INV))
         }
@@ -535,13 +493,7 @@ impl Fp {
         }
 
         #[cfg(not(any(
-            all(
-                feature = "aarch64-asm",
-                target_arch = "aarch64",
-                any(target_family = "unix", target_os = "none"),
-                target_pointer_width = "64",
-                target_endian = "little"
-            ),
+            pasta_curves_aarch64_asm,
             all(
                 pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
@@ -560,26 +512,14 @@ impl Fp {
     fn sqr_n_mul_runtime(&self, n: u32, by: &Self) -> Self {
         assert!(n >= 1);
 
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         {
             Fp(super::aarch64_asm::sqr_n_mul(
                 &self.0, n as usize, &by.0, &MODULUS.0, INV,
             ))
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        )))]
+        #[cfg(not(pasta_curves_aarch64_asm))]
         {
             // Leave the accumulator unreduced between squarings. The closing
             // multiplication canonicalizes its result.
@@ -594,13 +534,7 @@ impl Fp {
     fn sqr_n_runtime(&self, n: u32) -> Self {
         assert!(n >= 1);
 
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         {
             // Calling the dedicated single-square routine is faster than
             // entering the repeated-squaring loop for a one-element chain.
@@ -613,13 +547,7 @@ impl Fp {
             }
         }
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        )))]
+        #[cfg(not(pasta_curves_aarch64_asm))]
         {
             Fp(portable::canonicalize(
                 &portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV),
@@ -799,13 +727,7 @@ impl ff::Field for Fp {
 
     #[inline(always)]
     fn double(&self) -> Self {
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            target_vendor = "apple",
-            target_pointer_width = "64",
-            target_endian = "little",
-        ))]
+        #[cfg(all(pasta_curves_aarch64_asm, target_vendor = "apple"))]
         {
             Self(super::aarch64_asm::add(&self.0, &self.0, &MODULUS.0))
         }
@@ -818,13 +740,7 @@ impl ff::Field for Fp {
             Self(super::x86_64_asm::add(&self.0, &self.0, &X86_64_ASM_PARAMS))
         }
         #[cfg(not(any(
-            all(
-                feature = "aarch64-asm",
-                target_arch = "aarch64",
-                target_vendor = "apple",
-                target_pointer_width = "64",
-                target_endian = "little",
-            ),
+            all(pasta_curves_aarch64_asm, target_vendor = "apple"),
             all(
                 pasta_curves_x86_64_asm,
                 target_arch = "x86_64",
@@ -985,22 +901,10 @@ impl ff::PrimeField for Fp {
     fn to_repr(&self) -> Self::Repr {
         // Turn into canonical form by computing
         // (a.R) / R = a
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         let tmp = Fp(super::aarch64_asm::from_mont(&self.0, &MODULUS.0, INV));
 
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        )))]
+        #[cfg(not(pasta_curves_aarch64_asm))]
         let tmp = Fp::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
 
         let mut res = [0; 32];
@@ -1167,14 +1071,7 @@ impl ec_gpu::GpuField for Fp {
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
-))]
+#[cfg(all(test, pasta_curves_aarch64_asm))]
 fn aarch64_asm_portable_repr(value: Fp) -> [u8; 32] {
     let value = Fp::montgomery_reduce(value.0[0], value.0[1], value.0[2], value.0[3], 0, 0, 0, 0);
     let mut repr = [0; 32];
@@ -1184,14 +1081,7 @@ fn aarch64_asm_portable_repr(value: Fp) -> [u8; 32] {
     repr
 }
 
-#[cfg(all(
-    test,
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
-))]
+#[cfg(all(test, pasta_curves_aarch64_asm))]
 fn aarch64_asm_check_repr(value: Fp) {
     let portable = aarch64_asm_portable_repr(value);
     assert_eq!(value.to_repr(), portable);
@@ -1199,14 +1089,7 @@ fn aarch64_asm_check_repr(value: Fp) {
     assert_eq!(value.is_odd().unwrap_u8(), portable[0] & 1);
 }
 
-#[cfg(all(
-    test,
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
-))]
+#[cfg(all(test, pasta_curves_aarch64_asm))]
 fn aarch64_asm_portable_cmp(lhs: Fp, rhs: Fp) -> core::cmp::Ordering {
     aarch64_asm_portable_repr(lhs)
         .iter()
@@ -1219,14 +1102,7 @@ fn aarch64_asm_portable_cmp(lhs: Fp, rhs: Fp) -> core::cmp::Ordering {
         .unwrap_or(core::cmp::Ordering::Equal)
 }
 
-#[cfg(all(
-    test,
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
-))]
+#[cfg(all(test, pasta_curves_aarch64_asm))]
 #[test]
 fn aarch64_asm_matches_portable_arithmetic() {
     use rand::{Rng, SeedableRng};
@@ -1729,14 +1605,7 @@ fn test_from_u512() {
     );
 }
 
-#[cfg(all(
-    test,
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
-))]
+#[cfg(all(test, pasta_curves_aarch64_asm))]
 #[test]
 fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
     use rand::{Rng, SeedableRng};
@@ -1867,13 +1736,7 @@ fn constants_are_canonical() {
 #[cfg(all(
     test,
     any(
-        all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ),
+        pasta_curves_aarch64_asm,
         all(
             pasta_curves_x86_64_asm,
             target_arch = "x86_64",
@@ -1914,13 +1777,7 @@ fn asm_arithmetic_canonical_sweep_matches_portable() {
 #[cfg(all(
     test,
     any(
-        all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ),
+        pasta_curves_aarch64_asm,
         all(
             pasta_curves_x86_64_asm,
             target_arch = "x86_64",
@@ -1972,13 +1829,7 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
     test,
     debug_assertions,
     any(
-        all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ),
+        pasta_curves_aarch64_asm,
         all(
             pasta_curves_x86_64_asm,
             target_arch = "x86_64",

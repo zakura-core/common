@@ -11,6 +11,7 @@
 //! selecting Rayon's global pool. The executor owns neither circuit data nor
 //! request scratch and receives no caller RNG: proof APIs sample on the calling
 //! thread before entering it for proof work.
+use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 use udon::exec::{Executor, SerialExecutor, TaskBudget};
 pub(super) struct PoolExecutor {
@@ -21,11 +22,20 @@ pub(super) struct PoolExecutor {
 impl PoolExecutor {
     /// Shared workers without initializing either the prover or verifier state.
     pub(super) fn get() -> &'static Self {
-        static EXECUTOR: OnceLock<PoolExecutor> = OnceLock::new();
-        EXECUTOR.get_or_init(Self::new)
+        Self::with_workers(None)
     }
 
-    fn new() -> Self {
+    /// Shared workers, sized by the first caller's request.
+    ///
+    /// `None` preserves the normal defaults. An explicit count only takes
+    /// effect if no pool exists yet; callers that require exactness must
+    /// compare the realized [`Self::budget`] against their request.
+    pub(super) fn with_workers(requested: Option<NonZeroUsize>) -> &'static Self {
+        static EXECUTOR: OnceLock<PoolExecutor> = OnceLock::new();
+        EXECUTOR.get_or_init(|| Self::new(requested))
+    }
+
+    fn new(requested: Option<NonZeroUsize>) -> Self {
         #[cfg(feature = "multicore")]
         {
             let workers = std::thread::available_parallelism().map_or(1, usize::from);
@@ -34,6 +44,7 @@ impl PoolExecutor {
                 .ok()
                 .map(|value| value.parse::<usize>().expect("positive worker count"))
                 .unwrap_or(workers);
+            let workers = requested.map_or(workers, NonZeroUsize::get);
             assert!(workers > 0);
             // Worker creation is an optimization; failure keeps a serial path.
             let pool = (workers > 1)
@@ -47,7 +58,12 @@ impl PoolExecutor {
             Self { pool }
         }
         #[cfg(not(feature = "multicore"))]
-        Self {}
+        {
+            // Worker counts are advisory without a pool; exactness is the
+            // caller's check against the serial budget.
+            let _ = requested;
+            Self {}
+        }
     }
 
     pub(super) fn budget(&self) -> TaskBudget {

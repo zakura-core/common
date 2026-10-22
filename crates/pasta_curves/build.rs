@@ -1,10 +1,12 @@
 use std::env;
 
 const X86_64_ASM_CFG: &str = "pasta_curves_x86_64_asm";
+const AARCH64_ASM_CFG: &str = "pasta_curves_aarch64_asm";
 const REQUIRED_X86_64_FEATURES: [&str; 2] = ["adx", "bmi2"];
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg({X86_64_ASM_CFG})");
+    println!("cargo:rustc-check-cfg=cfg({AARCH64_ASM_CFG})");
     println!("cargo:rerun-if-changed=src/asm/pasta_mul-armv8.S");
 
     if use_x86_64_asm() {
@@ -47,6 +49,11 @@ fn has_required_x86_64_features(target_features: &str) -> bool {
 
 #[cfg(feature = "aarch64-asm")]
 fn build_aarch64_asm() {
+    // Override even an explicitly requested assembly feature. Keep the Rust
+    // dispatch and the linked archive governed by the same decision.
+    if cfg!(feature = "portable") {
+        return;
+    }
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let target_endian = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap();
     let target_family = env::var("CARGO_CFG_TARGET_FAMILY").ok();
@@ -61,6 +68,7 @@ fn build_aarch64_asm() {
         && (target_is_unix || target_os == "none")
         && target_pointer_width == "64"
     {
+        println!("cargo:rustc-cfg={AARCH64_ASM_CFG}");
         cc::Build::new()
             .file("src/asm/pasta_mul-armv8.S")
             .compile("pasta_curves_aarch64");

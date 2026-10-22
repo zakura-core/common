@@ -51,13 +51,7 @@ fn mul_by_inverse_power_of_two(
 // Keep the assembly FFI exception contained within a private module whose
 // public interface consists only of safe wrappers.
 #[allow(unsafe_code)]
-#[cfg(all(
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
-))]
+#[cfg(pasta_curves_aarch64_asm)]
 mod aarch64_asm;
 
 // Keep the build-selected x86-64 inline-assembly exception behind the same

@@ -20,12 +20,19 @@ use halo2 as selected;
 #[cfg(feature = "backend-sensei")]
 use sensei as selected;
 
+#[cfg(all(feature = "verifier", feature = "sensei-bench"))]
+mod proof_batch;
+#[cfg(all(feature = "verifier", feature = "sensei-bench"))]
+pub use proof_batch::ProofBatch;
+
 pub use crate::Proof;
 #[cfg(feature = "prover")]
 pub(crate) use selected::Circuit;
 #[cfg(feature = "prover")]
 pub use selected::ProvingKey;
 pub use selected::VerifyingKey;
+#[cfg(all(feature = "backend-sensei", feature = "verifier"))]
+pub(crate) use selected::verify_batch;
 
 /// Selects which version of the Orchard Action circuit to build.
 ///

@@ -105,7 +105,7 @@ if not args.interop_only:
     for backend in backends:
         for capabilities in ["", "std", "prover", "verifier", "circuit", "circuit,multicore,zip32-addresses,test-dependencies,weighted-merkle"]:
             cargo("check", backend, capabilities)
-        cargo("check", backend, "circuit,multicore,zip32-addresses,test-dependencies", "--all-targets")
+        cargo("check", backend, "circuit,multicore,zip32-addresses,test-dependencies,sensei-bench", "--all-targets")
         # Default-shaped features without test-dependencies: catches targets
         # that require test-only APIs without declaring the feature.
         cargo("check", backend, "circuit,multicore,zip32-addresses,std", "--all-targets")

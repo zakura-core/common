@@ -370,6 +370,7 @@ fn assembly_feature_selects_the_supported_native_backend() {
         cfg!(udon_aarch64_asm),
         cfg!(all(
             feature = "aarch64-asm",
+            not(feature = "portable"),
             target_arch = "aarch64",
             target_endian = "little",
             target_pointer_width = "64",

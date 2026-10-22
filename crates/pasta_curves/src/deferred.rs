@@ -9,24 +9,12 @@
 use core::fmt::Debug;
 
 use crate::arithmetic::adc;
-#[cfg(not(all(
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
-)))]
+#[cfg(not(pasta_curves_aarch64_asm))]
 use crate::arithmetic::mac;
 
 // Keep the assembly exception within this private arithmetic backend.
 #[allow(unsafe_code)]
-#[cfg(all(
-    feature = "aarch64-asm",
-    target_arch = "aarch64",
-    any(target_family = "unix", target_os = "none"),
-    target_pointer_width = "64",
-    target_endian = "little"
-))]
+#[cfg(pasta_curves_aarch64_asm)]
 mod aarch64;
 
 #[cfg(target_arch = "aarch64")]
@@ -112,13 +100,7 @@ impl<F> Product<F> {
     /// and adding it in a second pass.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) fn mul_accumulate(&mut self, lhs: &[u64; 4], rhs: &[u64; 4]) {
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         {
             let (limbs, overflow) = aarch64::mul_accumulate(self.limbs, lhs, rhs);
             self.limbs = limbs;
@@ -129,13 +111,7 @@ impl<F> Product<F> {
             );
             self.carry = carry;
         }
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        )))]
+        #[cfg(not(pasta_curves_aarch64_asm))]
         {
             // Row 0 contributes lhs[0] * rhs at limbs 0 through 3. Starting the
             // multiply-add chain from the stored limbs incorporates that part of
@@ -313,23 +289,11 @@ impl<F> Product<F> {
     /// Montgomery reduction.
     #[cfg_attr(not(feature = "uninline-portable"), inline)]
     pub(crate) fn partial_reduce(&self, b448: &[u64; 4], r2: &[u64; 4]) -> [u64; 8] {
-        #[cfg(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        ))]
+        #[cfg(pasta_curves_aarch64_asm)]
         {
             aarch64::partial_reduce(self.limbs, self.carry, b448, r2)
         }
-        #[cfg(not(all(
-            feature = "aarch64-asm",
-            target_arch = "aarch64",
-            any(target_family = "unix", target_os = "none"),
-            target_pointer_width = "64",
-            target_endian = "little"
-        )))]
+        #[cfg(not(pasta_curves_aarch64_asm))]
         {
             let b7 = self.limbs[7];
             let b8 = self.carry;

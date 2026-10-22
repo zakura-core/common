@@ -59,6 +59,11 @@ fn build_aarch64_asm() -> bool {
 // Assembles the AArch64 routines and reports whether that backend is selected.
 #[cfg(feature = "aarch64-asm")]
 fn build_aarch64_asm() -> bool {
+    // Override even an explicitly requested assembly feature. Keep the Rust
+    // dispatch and the linked archive governed by the same decision.
+    if cfg!(feature = "portable") {
+        return false;
+    }
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let endian = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap();
     let family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();

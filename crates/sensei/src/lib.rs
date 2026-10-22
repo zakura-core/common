@@ -270,6 +270,31 @@ pub fn warm_up_verifier() {
     native::verifier::warm_up_verifier();
 }
 
+/// Initializes the runtime for an external benchmark and returns its worker count.
+///
+/// `None` preserves the normal backend defaults. An explicit count must be
+/// supplied before any preparation or proving; a conflicting existing pool or
+/// failure to obtain the requested count returns [`Error::InvalidInput`].
+/// Other initialization failures propagate normally. This unstable control is
+/// available only with the `benchmark-internals` feature.
+#[cfg(all(feature = "prover", feature = "benchmark-internals"))]
+pub fn benchmark_initialize(
+    workers: Option<core::num::NonZeroUsize>,
+) -> Result<core::num::NonZeroUsize, Error> {
+    native::benchmark_initialize(workers)
+}
+
+/// Initializes verification for an external benchmark without preparing the prover.
+///
+/// Worker selection and mismatch handling match [`benchmark_initialize`]. This
+/// unstable control is available only with the `benchmark-internals` feature.
+#[cfg(all(feature = "verifier", feature = "benchmark-internals"))]
+pub fn benchmark_initialize_verifier(
+    workers: Option<core::num::NonZeroUsize>,
+) -> Result<core::num::NonZeroUsize, Error> {
+    native::verifier::benchmark_initialize(workers)
+}
+
 /// Verifies a batch of Action proofs for their selected circuit versions and
 /// ordered statements. Versions may be mixed in a batch.
 ///

@@ -58,6 +58,7 @@ proptest = ">=1.0.0, <1.7.0"
 rand = { version = "0.10", features = ["thread_rng"], default-features = false }
 rand_chacha = "0.10"
 rayon = "1"
+serde_json = "1"
 shardtree = "0.6"
 
 zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] }
@@ -81,8 +82,11 @@ dev-graph = ["orchard-legacy?/dev-graph", "image", "plotters"]
 image = []
 multicore = ["sensei?/multicore", "orchard-legacy?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
 orbits = ["orchard-legacy?/orbits"]
-# Disable automatic x86-64 assembly selection in the proving dependencies.
+# Disable all handwritten assembly in the proving dependencies, on every
+# platform, including assembly enabled by default or by another feature.
 portable = ["sensei?/portable", "orchard-legacy?/portable"]
+# Benchmark-only controls; does not enable the optional backend by itself.
+sensei-bench = ["sensei?/benchmark-internals"]
 std = ["corez/std", "sensei?/std", "orchard-legacy?/std"]
 test-dependencies = ["wallet", "sensei?/test-dependencies", "orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
 # Backend-specific components and typed witnesses for external circuit composition.
@@ -130,6 +134,11 @@ required-features = ["test-dependencies", "circuit", "zip32-addresses"]
 name = "post_nu6_3_k11_keygen"
 harness = false
 required-features = ["test-dependencies", "circuit", "zip32-addresses"]
+
+[[bench]]
+name = "sensei_compare"
+harness = false
+required-features = ["test-dependencies", "circuit", "multicore", "zip32-addresses", "sensei-bench"]
 
 [[test]]
 name = "composition_api"
