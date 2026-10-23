@@ -24,9 +24,7 @@ pub(crate) type PreparedScalar = WnafScalar<jubjub::Scalar, PREPARED_WINDOW_SIZE
 ///
 /// [endian]: https://zips.z.cash/protocol/protocol.pdf#endian
 pub(crate) fn leos2bsp<const N: usize>(bytes: [u8; N]) -> impl Iterator<Item = bool> {
-    bytes
-        .into_iter()
-        .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1))
+    (0..N * 8).map(move |i| (bytes[i / 8] >> (i % 8)) & 1 == 1)
 }
 
 /// $CRH^\mathsf{ivk}(ak, nk)$
