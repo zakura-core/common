@@ -2,7 +2,7 @@ use super::{
     EccBaseFieldElemFixed, EccScalarFixed, EccScalarFixedShort, FIXED_BASE_WINDOW_SIZE, FixedPoint,
     H, NonIdentityEccPoint, add, add_incomplete,
 };
-use crate::utilities::decompose_running_sum::RunningSumConfig;
+use crate::utilities::{decompose_running_sum::RunningSumConfig, le_bit};
 
 use arrayvec::ArrayVec;
 use std::{
@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-use group::ff::{Field, PrimeField, PrimeFieldBits};
+use group::ff::{Field, PrimeField};
 #[cfg(test)]
 use group::{Curve, CurveAffine as _, Group};
 use halo2_proofs::{
@@ -704,13 +704,10 @@ impl ScalarFixed {
         // The scalar decomposition is constrained to three-bit windows. Read
         // those bits directly from the base-field element for table indexing.
         window.map(|window| {
-            window
-                .to_le_bits()
-                .iter()
-                .by_vals()
-                .take(FIXED_BASE_WINDOW_SIZE)
-                .rev()
-                .fold(0, |acc, bit| 2 * acc + usize::from(bit))
+            let repr = window.to_repr();
+            (0..FIXED_BASE_WINDOW_SIZE).rev().fold(0, |acc, bit| {
+                2 * acc + usize::from(le_bit(repr.as_ref(), bit))
+            })
         })
     }
 }

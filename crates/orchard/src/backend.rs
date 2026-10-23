@@ -10,7 +10,7 @@ pub(crate) use orchard_legacy::{halo2_gadgets, halo2_proofs};
 pub(crate) mod prelude {
 
     pub(crate) use orchard_legacy::{
-        ff::{Field as _, FromUniformBytes as _, PrimeField as _, PrimeFieldBits as _},
+        ff::{Field as _, FromUniformBytes as _, PrimeField as _},
         group::{Curve as _, CurveAffine as _, Group as _, GroupEncoding as _},
         pasta_curves::arithmetic::{CurveAffine as _, CurveExt as _},
     };

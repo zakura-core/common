@@ -5,7 +5,9 @@ use crate::backend::prelude::*;
 use alloc::vec::Vec;
 use core::iter;
 
-use crate::{constants::MERKLE_DEPTH_ORCHARD, note::commitment::ExtractedNoteCommitment};
+use crate::{
+    constants::MERKLE_DEPTH_ORCHARD, note::commitment::ExtractedNoteCommitment, spec::leos2bsp,
+};
 
 use crate::backend::pallas;
 
@@ -214,8 +216,8 @@ fn merkle_crh_message(
 ) -> impl Iterator<Item = bool> + use<> {
     i2lebsp_k(usize::from(level))
         .into_iter()
-        .chain(left.0.to_le_bits().into_iter().take(L_ORCHARD_MERKLE))
-        .chain(right.0.to_le_bits().into_iter().take(L_ORCHARD_MERKLE))
+        .chain(leos2bsp(left.0.to_repr()).take(L_ORCHARD_MERKLE))
+        .chain(leos2bsp(right.0.to_repr()).take(L_ORCHARD_MERKLE))
 }
 
 impl ConditionallySelectable for MerkleHashOrchard {
