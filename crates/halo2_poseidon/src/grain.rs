@@ -2,7 +2,6 @@
 
 use core::marker::PhantomData;
 
-use bitvec::prelude::*;
 use group::ff::{Field, FromUniformBytes, PrimeField};
 
 const STATE: usize = 80;
@@ -36,7 +35,7 @@ impl SboxType {
 }
 
 pub(super) struct Grain<F: Field> {
-    state: BitArr!(for 80, in u8, Msb0),
+    state: [bool; STATE],
     next_bit: usize,
     _field: PhantomData<F>,
 }
@@ -44,11 +43,11 @@ pub(super) struct Grain<F: Field> {
 impl<F: PrimeField> Grain<F> {
     pub(super) fn new(sbox: SboxType, t: u16, r_f: u16, r_p: u16) -> Self {
         // Initialize the LFSR state.
-        let mut state = bitarr![u8, Msb0; 1; STATE];
+        let mut state = [true; STATE];
         let mut set_bits = |offset: usize, len, value| {
             // Poseidon reference impl sets initial state bits in MSB order.
             for i in 0..len {
-                *state.get_mut(offset + len - 1 - i).unwrap() = (value >> i) & 1 != 0;
+                state[offset + len - 1 - i] = (value >> i) & 1 != 0;
             }
         };
         set_bits(0, 2, FieldType::PrimeOrder.tag() as u16);
@@ -87,7 +86,7 @@ impl<F: PrimeField> Grain<F> {
         self.state.rotate_left(8);
         self.next_bit -= 8;
         for i in 0..8 {
-            *self.state.get_mut(self.next_bit + i).unwrap() = (new_bits >> i) & 1 != 0;
+            self.state[self.next_bit + i] = (new_bits >> i) & 1 != 0;
         }
     }
 

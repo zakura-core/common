@@ -17,6 +17,18 @@ pub(crate) type PreparedBase = WnafBase<jubjub::ExtendedPoint, PREPARED_WINDOW_S
 pub(crate) type PreparedBaseSubgroup = WnafBase<jubjub::SubgroupPoint, PREPARED_WINDOW_SIZE>;
 pub(crate) type PreparedScalar = WnafScalar<jubjub::Scalar, PREPARED_WINDOW_SIZE>;
 
+/// $LEOS2BSP_{8N}$: the bits of `bytes`, starting with the least-significant bit
+/// of `bytes[0]`.
+///
+/// Defined in [Zcash Protocol Spec § 5.1: Integers, Bit Sequences, and Endianness][endian].
+///
+/// [endian]: https://zips.z.cash/protocol/protocol.pdf#endian
+pub(crate) fn leos2bsp<const N: usize>(bytes: [u8; N]) -> impl Iterator<Item = bool> {
+    bytes
+        .into_iter()
+        .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1))
+}
+
 /// $CRH^\mathsf{ivk}(ak, nk)$
 ///
 /// Defined in [Zcash Protocol Spec § 5.4.1.5: CRH^ivk Hash Function][concretecrhivk].

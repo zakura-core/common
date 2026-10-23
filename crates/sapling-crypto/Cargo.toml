@@ -21,7 +21,6 @@ name = "sapling_crypto"
 [dependencies]
 aes = { version = "0.9", optional = true }
 bellman = { workspace = true, features = ["groth16"], optional = true }
-bitvec = { version = "1", default-features = false }
 blake2b_simd = { version = "1", default-features = false }
 blake2s_simd = { version = "1", default-features = false }
 bls12_381 = { workspace = true, features = ["alloc"] }
@@ -64,10 +63,8 @@ pinned-vk-only = ["circuit"]
 zip32-addresses = ["wallet", "dep:aes", "dep:fpe"]
 circuit = [
     "dep:bellman",
-    "bls12_381/bits",
     "bls12_381/groups",
     "bls12_381/pairings",
-    "jubjub/bits",
     "std",
 ]
 default = ["wallet", "zip32-addresses", "multicore", "circuit"]
