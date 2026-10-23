@@ -1,8 +1,8 @@
 //! Gadgets for allocating bits in the circuit and performing boolean logic.
 
-use ff::{PrimeField, PrimeFieldBits};
+use ff::PrimeField;
 
-use crate::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
+use crate::{ConstraintSystem, LinearCombination, SynthesisError, Variable, le_bit};
 
 use super::Assignment;
 
@@ -300,7 +300,7 @@ pub fn u64_into_boolean_vec_le<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>
 pub fn field_into_boolean_vec_le<
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
-    F: PrimeFieldBits,
+    F: PrimeField,
 >(
     cs: CS,
     value: Option<F>,
@@ -313,7 +313,7 @@ pub fn field_into_boolean_vec_le<
 pub fn field_into_allocated_bits_le<
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
-    F: PrimeFieldBits,
+    F: PrimeField,
 >(
     mut cs: CS,
     value: Option<F>,
@@ -321,25 +321,13 @@ pub fn field_into_allocated_bits_le<
     // Deconstruct in big-endian bit order
     let values = match value {
         Some(ref value) => {
-            let field_char = F::char_le_bits();
-            let mut field_char = field_char.iter().by_refs().rev();
-
-            let mut tmp = Vec::with_capacity(F::NUM_BITS as usize);
-
-            let mut found_one = false;
-            for b in value.to_le_bits().iter().by_vals().rev() {
-                // Skip leading bits
-                found_one |= field_char.next().unwrap();
-                if !found_one {
-                    continue;
-                }
-
-                tmp.push(Some(b));
-            }
-
-            assert_eq!(tmp.len(), F::NUM_BITS as usize);
-
-            tmp
+            // The characteristic's highest set bit is bit NUM_BITS - 1, so a
+            // canonical value has no set bits above it.
+            let repr = value.to_repr();
+            (0..F::NUM_BITS as usize)
+                .rev()
+                .map(|i| Some(le_bit(repr.as_ref(), i)))
+                .collect()
         }
         None => vec![None; F::NUM_BITS as usize],
     };

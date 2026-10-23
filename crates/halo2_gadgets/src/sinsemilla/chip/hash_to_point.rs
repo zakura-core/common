@@ -847,8 +847,8 @@ where
         // Check equivalence to result from primitives::sinsemilla::hash_to_point
         {
             use crate::sinsemilla::primitives::{K, S_PERSONALIZATION, lebs2ip_k};
+            use crate::utilities::le_bits;
 
-            use group::ff::PrimeFieldBits;
             use group::{Curve, CurveAffine as _};
             use pasta_curves::arithmetic::CurveExt;
 
@@ -869,9 +869,7 @@ where
                     // Get message as a bitstring.
                     let bitstring: Vec<bool> = field_elems
                         .iter()
-                        .flat_map(|(elem, num_words)| {
-                            elem.to_le_bits().into_iter().take(K * num_words)
-                        })
+                        .flat_map(|(elem, num_words)| le_bits(elem).take(K * num_words))
                         .collect();
 
                     let hasher_S = pallas::Point::hash_to_curve(S_PERSONALIZATION);
@@ -940,10 +938,11 @@ mod tests {
         has_merkle_initial_q,
     };
     use crate::sinsemilla::primitives::{K, SINSEMILLA_S, lebs2ip_k};
+    use crate::utilities::le_bits;
 
     use group::{
         Curve, Group,
-        ff::{Field, PrimeField, PrimeFieldBits},
+        ff::{Field, PrimeField},
     };
     use halo2_proofs::plonk::Assigned;
     use pasta_curves::{arithmetic::CurveAffine, pallas};
@@ -988,7 +987,7 @@ mod tests {
         let max_words = pallas::Base::CAPACITY as usize / K;
 
         for value in values {
-            let bits = value.to_le_bits();
+            let bits: Vec<bool> = le_bits(&value).collect();
             for num_words in [1, 2, max_words] {
                 let expected = bits[..K * num_words]
                     .chunks_exact(K)

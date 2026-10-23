@@ -22,7 +22,7 @@ bench = false
 [dependencies]
 backtrace = { version = "0.3", optional = true }
 blake2b_simd = "1"
-ff = "0.14"
+ff = { version = "0.14", default-features = false, features = ["std"] }
 group = "0.14"
 maybe-rayon = { version = "0.1.0", default-features = false }
 pasta_curves = { workspace = true, features = ["default", "deferred", "glv"] }

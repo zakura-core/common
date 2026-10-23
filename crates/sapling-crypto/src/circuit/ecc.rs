@@ -625,7 +625,7 @@ mod test {
     use bellman::ConstraintSystem;
     use group::{
         Curve, Group,
-        ff::{Field, PrimeField, PrimeFieldBits},
+        ff::{Field, PrimeField},
     };
     use rand_core::{Rng, SeedableRng};
     use rand_xorshift::XorShiftRng;
@@ -634,6 +634,7 @@ mod test {
 
     use super::{AllocatedNum, EdwardsPoint, MontgomeryPoint, fixed_base_multiplication};
     use crate::circuit::constants::{note_commitment_randomness_generator, to_montgomery_coords};
+    use crate::spec::leos2bsp;
     use bellman::gadgets::boolean::{AllocatedBit, Boolean};
 
     #[test]
@@ -740,10 +741,7 @@ mod test {
             let q = jubjub::ExtendedPoint::from(p * s).to_affine();
             let (u1, v1) = (q.get_u(), q.get_v());
 
-            let s_bits = s
-                .to_le_bits()
-                .iter()
-                .by_vals()
+            let s_bits = leos2bsp(s.to_repr())
                 .take(jubjub::Fr::NUM_BITS as usize)
                 .enumerate()
                 .map(|(i, b)| {
@@ -791,10 +789,7 @@ mod test {
                 v: num_v0,
             };
 
-            let s_bits = s
-                .to_le_bits()
-                .iter()
-                .by_vals()
+            let s_bits = leos2bsp(s.to_repr())
                 .take(jubjub::Fr::NUM_BITS as usize)
                 .enumerate()
                 .map(|(i, b)| {
