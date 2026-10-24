@@ -112,9 +112,9 @@ pub(crate) fn build_native_witness_matrices(
     }
     let actions = request.action_count();
     let active_actions = actions.min(execution.budget.get());
-    // Completed Actions retain their main matrices; only active Actions retain
-    // all six temporary chain matrices until merge. Reserve the complete live
-    // set before dispatch so later proofs need not grow the pool after priming.
+    // Completed Actions retain their main matrices; active Actions can also
+    // retain every chain matrix until merge. Action admission is bounded by the
+    // task budget, so this covers the maximum live set for this construction.
     execution.provision(
         super::target::N,
         (actions + CHAINS.len() * active_actions) * super::target::ADVICE_COLUMNS,
