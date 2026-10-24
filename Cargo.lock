@@ -3649,6 +3649,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-sensei"
+version = "0.1.0"
+dependencies = [
+ "bitvec",
+ "blake2b_simd",
+ "hex",
+ "once_cell",
+ "proptest",
+ "rand 0.10.2",
+ "rand_chacha 0.10.0",
+ "rayon",
+ "sha2 0.10.9",
+ "subtle",
+ "zakura-bento",
+ "zakura-sensei-artifacts",
+ "zakura-sensei-macros",
+ "zakura-sensei-shared",
+ "zakura-udon",
+]
+
+[[package]]
+name = "zakura-sensei-artifacts"
+version = "0.1.0"
+dependencies = [
+ "zakura-bento",
+ "zakura-sensei-shared",
+ "zakura-udon",
+]
+
+[[package]]
+name = "zakura-sensei-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "zakura-sensei-shared",
+]
+
+[[package]]
+name = "zakura-sensei-shared"
+version = "0.1.0"
+dependencies = [
+ "zakura-bento",
+ "zakura-udon",
+]
+
+[[package]]
 name = "zakura-sinsemilla"
 version = "4.0.0"
 dependencies = [

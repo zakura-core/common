@@ -1,0 +1,66 @@
+[package]
+name = "zakura-sensei"
+description = "Native Orchard primitives, Ironwood proving, and historical proof verification"
+version = "0.1.0"
+authors = ["Sean Bowe <ewillbefull@gmail.com>"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bento.workspace = true
+sensei-macros = { workspace = true, optional = true }
+sensei-shared.workspace = true
+udon = { workspace = true, features = ["sqrt-table-large", "poseidon"] }
+blake2b_simd = { version = "1", default-features = false }
+rayon = { version = "1", optional = true }
+subtle = { version = "2.6", default-features = false }
+rand = { version = "0.10", default-features = false }
+bitvec = { version = "1", default-features = false }
+
+[target.'cfg(target_has_atomic = "ptr")'.dependencies]
+once_cell = { version = "1", default-features = false, features = ["alloc", "race"] }
+
+[dev-dependencies]
+rayon = "1"
+proptest = ">=1.0.0, <1.7.0"
+sensei-artifacts.workspace = true
+hex = "0.4"
+sha2 = "0.10"
+rand = "0.10"
+rand_chacha = "0.10"
+
+[build-dependencies]
+bento.workspace = true
+sensei-artifacts.workspace = true
+sensei-shared.workspace = true
+udon.workspace = true
+
+[features]
+default = ["prover", "verifier", "multicore"]
+std = []
+prover = ["std", "dep:sensei-macros"]
+verifier = ["std"]
+multicore = ["std", "dep:rayon"]
+portable = ["udon/portable"]
+x86_64-asm = ["udon/x86_64-asm"]
+aarch64-asm = ["udon/aarch64-asm"]
+test-dependencies = []
+
+[[test]]
+name = "api"
+required-features = ["prover", "verifier"]
+
+[[test]]
+name = "golden"
+required-features = ["prover"]
+
+[[test]]
+name = "large_proofs"
+required-features = ["prover", "verifier"]
+
+[[test]]
+name = "verification"
+required-features = ["verifier"]

@@ -94,6 +94,18 @@ audit-as-crates-io = false
 [policy.zakura-sapling-crypto]
 audit-as-crates-io = false
 
+[policy.zakura-sensei]
+audit-as-crates-io = false
+
+[policy.zakura-sensei-artifacts]
+audit-as-crates-io = false
+
+[policy.zakura-sensei-macros]
+audit-as-crates-io = false
+
+[policy.zakura-sensei-shared]
+audit-as-crates-io = false
+
 [policy.zakura-sinsemilla]
 audit-as-crates-io = false
 
