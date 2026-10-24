@@ -313,7 +313,8 @@ pub(crate) fn verify(
             },
         )
     });
-    let mut combined = Equation::new();
+    let mut results = results.into_iter();
+    let mut combined = results.next().expect("nonempty verification batch")?;
     for result in results {
         combined.merge(result?);
     }
