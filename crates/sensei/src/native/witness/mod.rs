@@ -110,12 +110,14 @@ pub(crate) fn build_native_witness_matrices(
     if statements.len() != request.action_count() {
         return Err(Error::InternalInvariant);
     }
-    // An Action retains its main writer and all six chain results until merge.
-    // Reserve the complete wave before dispatch: overlap between Actions must
-    // not make a later proof grow the pool after its first priming proof.
+    let actions = request.action_count();
+    let active_actions = actions.min(execution.budget.get());
+    // Completed Actions retain their main matrices; only active Actions retain
+    // all six temporary chain matrices until merge. Reserve the complete live
+    // set before dispatch so later proofs need not grow the pool after priming.
     execution.provision(
         super::target::N,
-        request.action_count() * (CHAINS.len() + 1) * super::target::ADVICE_COLUMNS,
+        (actions + CHAINS.len() * active_actions) * super::target::ADVICE_COLUMNS,
     );
     let build_matrices =
         || build_action_witness_matrices(target, execution, request.actions(), statements);

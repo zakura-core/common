@@ -18,6 +18,43 @@ const CMX_START: usize = PUBLIC_START + 6 * FIELD_SIZE;
 const DISABLE_CROSS_ADDRESS_START: usize = PUBLIC_START + 9 * FIELD_SIZE;
 
 #[test]
+fn witness_reservation_respects_task_budget() {
+    use crate::native::{
+        buffer::BufferPool, prover::LookupWorkspace, target::N, worker::Execution,
+    };
+    use udon::exec::{SerialExecutor, TaskBudget};
+
+    let original = crate::test_codec::decode_iwpr(crate::test_codec::FIXTURES[0].request).unwrap();
+    let mut action = original.actions()[0].clone();
+    action.statement.enable_spend = false;
+    action.witness.v_old = 1;
+    let target = crate::test_codec::target();
+
+    // Fail before gadget work so the inventory isolates the initial reservation.
+    for (actions, workers, columns) in [(1, 1, 70), (4, 1, 100), (4, 2, 160), (4, 8, 280)] {
+        let request = ProvingRequest::new(vec![action.clone(); actions]).unwrap();
+        let buffers = BufferPool::default();
+        let execution = Execution::new(&SerialExecutor, TaskBudget::new(workers).unwrap())
+            .with_buffers(&buffers);
+        assert_eq!(
+            super::super::build_native_witness_matrices(
+                target,
+                execution,
+                &request,
+                &request.native_statements(),
+                &LookupWorkspace::default(),
+            )
+            .err(),
+            Some(Error::InvalidStatement),
+        );
+        let inventory = buffers.inventory();
+        assert_eq!(inventory.allocations, columns);
+        assert_eq!(inventory.buffers, columns);
+        assert_eq!(inventory.bytes, columns * N * size_of::<Fp>());
+    }
+}
+
+#[test]
 fn native_nullifier_rejects_a_mismatched_public_value() {
     const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/one-action.iwpr");
     let mut request = FIXTURE.to_vec();
