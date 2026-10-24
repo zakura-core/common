@@ -18,11 +18,18 @@
 //! The first incomplete addition in a step can fail only when
 //! `A_i = +/-S[m_i]`. If it succeeds, the second can fail only when
 //! `A_i + S[m_i] = -A_i`; equality with `A_i` would imply
-//! `S[m_i] = O`. Thus every exceptional step gives
+//! `S[m_i] = O`.
+//!
+//! The weighted affine evaluator adds `B_i` to
+//! `W_i = [2^(N-i-1)] S[m_i]`. Its chord denominator vanishes when
+//! `B_i = +/-W_i`, equivalently `[2] A_i = +/-S[m_i]`. The positive case
+//! `[2] A_i = S[m_i]` is an additional doubling collision that need not
+//! cause either ordinary Sinsemilla addition to fail.
+//! Thus every exceptional step gives
 //!
 //! `[alpha] A_i + S[m_i] = O`
 //!
-//! for some `alpha` in `{-1, 1, 2}`. Substitution gives the efficiently
+//! for some `alpha` in `{-2, -1, 1, 2}`. Substitution gives the efficiently
 //! computable discrete-logarithm relation
 //!
 //! `[alpha * 2^i] Q
@@ -34,8 +41,8 @@
 //! the Pallas group order.
 //! Therefore an input on which this evaluator differs from [`HashDomain`]
 //! yields a nontrivial discrete-logarithm relation among the independently
-//! generated Sinsemilla bases. This is the reduction in the
-//! [Sinsemilla exceptional-case theorem].
+//! generated Sinsemilla bases. This extends the reduction in the
+//! [Sinsemilla exceptional-case theorem] to the affine doubling collision.
 //!
 //! Finding such a relation tightly reduces to the discrete logarithm
 //! problem [by Jaeger and Tessaro]. The [Pasta curve parameters] give Pallas
@@ -88,7 +95,7 @@ const FUSED_FIRST_WORDS: usize = 8;
 /// rebuild the 16-lane level holds 16 of 1023 combines.
 const BATCH_AFFINE_MIN_MESSAGES: usize = 32;
 
-/// Two-lane Montgomery batch inversion for provably nonzero values (the
+/// Two-lane Montgomery batch inversion for nonzero values (the
 /// chord denominators of [`UncheckedFixedLengthHashDomain::evaluate_batch_affine`]).
 ///
 /// The nonzero-only contract matches Udon's field batch inversion used by
@@ -185,9 +192,10 @@ fn extract(point: pallas::Point) -> pallas::Base {
 /// instances built for different domains are interchangeable at the type
 /// level, so callers must pair each table with messages for its own domain.
 ///
-/// This evaluator deliberately omits Sinsemilla's incomplete-addition checks.
-/// Finding an input that triggers one of those exceptional cases for the
-/// protocol's independently generated `Q` and `S` points would exhibit a
+/// This evaluator deliberately omits Sinsemilla's incomplete-addition checks
+/// and the additional affine doubling check. Finding an input that triggers
+/// one of these exceptional cases for the protocol's independently generated
+/// `Q` and `S` points would exhibit a
 /// nontrivial discrete-logarithm relation between those points, as shown in
 /// the [module-level security argument](self). Callers that require exact
 /// partial-function semantics must use [`HashDomain`] instead.
@@ -441,11 +449,13 @@ impl<const N: usize> UncheckedFixedLengthHashDomain<N> {
     ///
     /// The chord formula is undefined when a lane's accumulator collides
     /// with its table point (`x` equal: the lane is adding `±P` to `P`) or
-    /// is the identity; both are exactly the exceptional cases of the
-    /// module-level discrete-logarithm reduction, so — as with the omitted
-    /// mixed-addition checks — they are infeasible to reach and are not
-    /// checked. The denominators are therefore provably nonzero, which the
-    /// lean batched inversion below relies on.
+    /// is the identity. The module-level discrete-logarithm reduction covers
+    /// these cases, including the additional affine doubling collision
+    /// `[2] A_i = S[m_i]`. Reaching a zero denominator requires a nontrivial
+    /// relation among the independently generated bases and is computationally
+    /// infeasible under the stated assumptions. As with the omitted
+    /// mixed-addition checks, these cases are left unchecked; the batched
+    /// inversion below relies on nonzero denominators.
     ///
     /// Both the inversion and the field arithmetic run two interleaved
     /// even/odd lanes so the dependency chains overlap (the same
