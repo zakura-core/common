@@ -7,8 +7,12 @@
 # binaries in the configurations CI tests, leaving `cargo` able to work offline.
 # .oss-scanner/threat_model.md says what matters and how to run things.
 
-# The Rust release rust-toolchain.toml pins for development.
-FROM rust:1.97.1-bookworm
+# The Rust release rust-toolchain.toml pins for development. The digest pins the
+# bytes the scanner builds from: the tag stays a tag, and Docker Hub re-publishes
+# `1.97.1-bookworm` when Debian ships a point release. Refresh with
+#   docker buildx imagetools inspect rust:1.97.1-bookworm --format '{{.Manifest.Digest}}'
+# Dependabot's docker entry in .github/dependabot.yml proposes the refresh.
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
 ENV DEBIAN_FRONTEND=noninteractive
 
 # libfontconfig1-dev is for halo2's dev-graph feature (plotters). python3 runs
