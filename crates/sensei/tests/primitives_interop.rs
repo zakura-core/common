@@ -85,6 +85,31 @@ fn prepared_agreement_matches_legacy_across_live_thresholds() {
 }
 
 #[test]
+fn prepared_agreement_debug_redacts_key_material() {
+    let compact = "PreparedScalar { scalar: \"<redacted>\", schedule: \"<redacted>\" }";
+    let pretty = concat!(
+        "PreparedScalar {\n",
+        "    scalar: \"<redacted>\",\n",
+        "    schedule: \"<redacted>\",\n",
+        "}",
+    );
+    for bytes in [[0; 32], [0x11; 32]] {
+        let prepared = PreparedScalar::new(Fq::from_bytes(bytes).unwrap());
+        let cloned = prepared.clone();
+        for value in [&prepared, &cloned] {
+            assert!(
+                format!("{value:?}") == compact,
+                "Debug must redact both the scalar and schedule",
+            );
+            assert!(
+                format!("{value:#?}") == pretty,
+                "pretty Debug must redact both the scalar and schedule",
+            );
+        }
+    }
+}
+
+#[test]
 fn independent_migration_fixtures_match_the_manifest() {
     use sha2::{Digest, Sha256};
     let manifest = include_str!("fixtures/migration/manifest.json");
