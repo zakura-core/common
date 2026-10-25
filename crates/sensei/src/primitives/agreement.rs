@@ -5,6 +5,7 @@
 //! with enough scratch for its synchronized affine ladders.
 use super::{Fq, NonIdentityPallasPoint, pallas::Point};
 use alloc::{boxed::Box, vec, vec::Vec};
+use core::fmt;
 use udon::{
     curve::{
         EisensteinScalar, EisensteinTable, EisensteinTableBatch, Pallas, PallasAffine,
@@ -20,10 +21,21 @@ type Entry = RotatedAffinePoint<Pallas>;
 type Batch<'a> = EisensteinTableBatch<'a, Pallas, Entry>;
 
 /// A scalar with its reusable Eisenstein digit schedule.
-#[derive(Clone, Debug)]
+///
+/// Clones contain the scalar and its derived schedule and are not zeroized on
+/// drop; [`core::fmt::Debug`] redacts both.
+#[derive(Clone)]
 pub struct PreparedScalar {
     scalar: Fq,
     schedule: EisensteinScalar<Pallas>,
+}
+impl fmt::Debug for PreparedScalar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedScalar")
+            .field("scalar", &"<redacted>")
+            .field("schedule", &"<redacted>")
+            .finish()
+    }
 }
 impl PreparedScalar {
     /// Recodes this scalar once for use across agreement calls.
