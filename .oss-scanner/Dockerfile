@@ -12,7 +12,7 @@
 # `1.97.1-bookworm` when Debian ships a point release. Refresh with
 #   docker buildx imagetools inspect rust:1.97.1-bookworm --format '{{.Manifest.Digest}}'
 # Dependabot's docker entry in .github/dependabot.yml proposes the refresh.
-FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
 ENV DEBIAN_FRONTEND=noninteractive
 
 # libfontconfig1-dev is for halo2's dev-graph feature (plotters). python3 runs
