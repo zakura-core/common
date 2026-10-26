@@ -10,6 +10,12 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `NoteEncryption::encrypt_outgoing_plaintext` now requires
+  `CryptoRng` in addition to `Rng`, including when an outgoing viewing key is
+  supplied. Callers must use a securely seeded cryptographic RNG.
+
 ## [4.0.0] - 2026-10-20
 
 ### Changed

@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `builder::Builder::{build, build_coinbase, build_for_pczt}`,
+  `builder::bundle`, `builder::OutputInfo::dummy`, and
+  `note_encryption::sapling_note_encryption` now require `CryptoRng` in addition
+  to `Rng`. Callers must use a securely seeded cryptographic RNG.
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

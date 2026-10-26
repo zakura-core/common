@@ -22,7 +22,7 @@ use crate::{
     },
     note::ExtractedNoteCommitment,
     note_encryption::{Zip212Enforcement, sapling_note_encryption},
-    util::generate_random_rseed_internal,
+    util::generate_random_rseed,
     value::{NoteValue, ValueCommitTrapdoor, ValueCommitment, ValueSum},
 };
 
@@ -392,7 +392,9 @@ impl OutputInfo {
     }
 
     /// Constructs a new dummy Sapling output.
-    pub fn dummy<R: Rng>(mut rng: &mut R) -> Self {
+    ///
+    /// `rng` must be securely seeded.
+    pub fn dummy<R: Rng + CryptoRng>(mut rng: &mut R) -> Self {
         // This is a dummy output
         let dummy_to = {
             let mut diversifier = Diversifier([0; 11]);
@@ -408,12 +410,12 @@ impl OutputInfo {
         Self::new(None, dummy_to, NoteValue::ZERO, [0u8; 512])
     }
 
-    fn prepare<R: Rng>(
+    fn prepare<R: Rng + CryptoRng>(
         self,
         rng: &mut R,
         zip212_enforcement: Zip212Enforcement,
     ) -> PreparedOutputInfo {
-        let rseed = generate_random_rseed_internal(zip212_enforcement, rng);
+        let rseed = generate_random_rseed(zip212_enforcement, rng);
 
         let note = Note::from_parts(self.to, self.value, rseed);
 
@@ -435,7 +437,7 @@ struct PreparedOutputInfo {
 }
 
 impl PreparedOutputInfo {
-    fn build_inner<P, R: Rng>(
+    fn build_inner<P, R: Rng + CryptoRng>(
         &self,
         zkproof: impl FnOnce(&EphemeralSecretKey) -> P,
         rng: &mut R,
@@ -472,7 +474,10 @@ impl PreparedOutputInfo {
     }
 
     #[cfg(feature = "circuit")]
-    fn build<Pr: OutputProver, R: Rng>(self, rng: &mut R) -> OutputDescription<circuit::Output> {
+    fn build<Pr: OutputProver, R: Rng + CryptoRng>(
+        self,
+        rng: &mut R,
+    ) -> OutputDescription<circuit::Output> {
         let (cv, cmu, ephemeral_key, enc_ciphertext, out_ciphertext, zkproof) = self.build_inner(
             |esk| {
                 Pr::prepare_circuit(
@@ -497,7 +502,7 @@ impl PreparedOutputInfo {
     }
 
     #[cfg(feature = "wallet")]
-    fn into_pczt<R: Rng>(self, rng: &mut R) -> crate::pczt::Output {
+    fn into_pczt<R: Rng + CryptoRng>(self, rng: &mut R) -> crate::pczt::Output {
         let (cv, cmu, ephemeral_key, enc_ciphertext, out_ciphertext, _) =
             self.build_inner(|_| (), rng);
 
@@ -670,8 +675,10 @@ impl Builder {
     }
 
     /// Constructs the Sapling bundle from the builder's accumulated state.
+    ///
+    /// `rng` must be securely seeded; it supplies note and encryption secrets.
     #[cfg(all(feature = "circuit", feature = "wallet"))]
-    pub fn build<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
+    pub fn build<SP: SpendProver, OP: OutputProver, R: Rng + CryptoRng, V: TryFrom<i64>>(
         self,
         extsks: &[ExtendedSpendingKey],
         rng: R,
@@ -689,10 +696,17 @@ impl Builder {
 
     /// Constructs an output-only coinbase bundle without wallet derivation keys.
     ///
+    /// `rng` must be securely seeded; it supplies note and encryption secrets.
+    ///
     /// Returns [`Error::BundleTypeNotSatisfiable`] if the builder was not created
     /// with [`BundleType::Coinbase`].
     #[cfg(feature = "circuit")]
-    pub fn build_coinbase<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
+    pub fn build_coinbase<
+        SP: SpendProver,
+        OP: OutputProver,
+        R: Rng + CryptoRng,
+        V: TryFrom<i64>,
+    >(
         self,
         rng: R,
     ) -> Result<Option<(UnauthorizedBundle<V>, SaplingMetadata)>, Error> {
@@ -710,12 +724,24 @@ impl Builder {
         )
     }
 
-    /// Builds a bundle containing the given spent notes and outputs along with their
-    /// metadata, for inclusion in a PCZT.
+    /// Builds a bundle containing the given spent notes and outputs along with
+    /// their metadata, for inclusion in a PCZT.
+    ///
+    /// `rng` must be securely seeded; it supplies note and encryption secrets.
+    /// A generator implementing only [`Rng`] is insufficient:
+    ///
+    /// ```compile_fail
+    /// use rand::Rng;
+    /// use sapling_crypto::builder::Builder;
+    ///
+    /// fn build(builder: Builder, rng: impl Rng) {
+    ///     builder.build_for_pczt(rng);
+    /// }
+    /// ```
     #[cfg(feature = "wallet")]
     pub fn build_for_pczt(
         self,
-        rng: impl Rng,
+        rng: impl Rng + CryptoRng,
     ) -> Result<(crate::pczt::Bundle, SaplingMetadata), Error> {
         match self.zip212_enforcement {
             Zip212Enforcement::Off | Zip212Enforcement::GracePeriod => {
@@ -755,10 +781,12 @@ impl Builder {
     }
 }
 
-/// Constructs a new Sapling transaction bundle of the given type from the specified set of spends
-/// and outputs.
+/// Constructs a new Sapling transaction bundle of the given type from the
+/// specified set of spends and outputs.
+///
+/// `rng` must be securely seeded; it supplies note and encryption secrets.
 #[cfg(all(feature = "circuit", feature = "wallet"))]
-pub fn bundle<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
+pub fn bundle<SP: SpendProver, OP: OutputProver, R: Rng + CryptoRng, V: TryFrom<i64>>(
     rng: R,
     bundle_type: BundleType,
     zip212_enforcement: Zip212Enforcement,
@@ -786,7 +814,12 @@ pub fn bundle<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
 
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "circuit")]
-fn bundle_with_key_lookup<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<i64>>(
+fn bundle_with_key_lookup<
+    SP: SpendProver,
+    OP: OutputProver,
+    R: Rng + CryptoRng,
+    V: TryFrom<i64>,
+>(
     rng: R,
     bundle_type: BundleType,
     zip212_enforcement: Zip212Enforcement,
@@ -856,7 +889,7 @@ fn bundle_with_key_lookup<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<
     )
 }
 
-fn build_bundle<B, R: Rng>(
+fn build_bundle<B, R: Rng + CryptoRng>(
     mut rng: R,
     bundle_type: BundleType,
     zip212_enforcement: Zip212Enforcement,

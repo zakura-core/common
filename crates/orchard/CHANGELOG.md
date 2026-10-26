@@ -10,6 +10,12 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `builder::Builder::{build, build_for_pczt}`, `builder::bundle`,
+  and `builder::OutputInfo::dummy` now require `CryptoRng` in addition to `Rng`.
+  Callers must use a securely seeded cryptographic RNG.
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

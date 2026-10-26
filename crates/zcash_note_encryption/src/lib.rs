@@ -38,7 +38,7 @@ use chacha20::{
 };
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInOut};
 
-use rand_core::Rng;
+use rand_core::{CryptoRng, Rng};
 use subtle::{Choice, ConstantTimeEq};
 
 #[cfg(feature = "alloc")]
@@ -494,7 +494,26 @@ impl<D: Domain> NoteEncryption<D> {
     }
 
     /// Generates `outCiphertext` for this note.
-    pub fn encrypt_outgoing_plaintext<R: Rng>(
+    ///
+    /// When no outgoing viewing key is set, `rng` supplies a fresh outgoing
+    /// cipher key and dummy plaintext. It must be securely seeded.
+    ///
+    /// A generator implementing only [`Rng`] is insufficient:
+    ///
+    /// ```compile_fail
+    /// use rand_core::Rng;
+    /// use zcash_note_encryption::{Domain, NoteEncryption};
+    ///
+    /// fn encrypt<D: Domain>(
+    ///     context: &NoteEncryption<D>,
+    ///     cv: &D::ValueCommitment,
+    ///     cm: &D::ExtractedCommitment,
+    ///     rng: &mut impl Rng,
+    /// ) {
+    ///     context.encrypt_outgoing_plaintext(cv, cm, rng);
+    /// }
+    /// ```
+    pub fn encrypt_outgoing_plaintext<R: Rng + CryptoRng>(
         &self,
         cv: &D::ValueCommitment,
         cmstar: &D::ExtractedCommitment,
