@@ -95,6 +95,9 @@ pub(crate) mod private {
         Copy + Clone + Default + Eq + PartialEq + core::fmt::Debug
     {
         const H_STAR_PERSONALIZATION: &'static [u8; 16];
+        #[cfg(feature = "zeroize-signing-key")]
+        type Scalar: SealedScalar + zeroize::Zeroize;
+        #[cfg(not(feature = "zeroize-signing-key"))]
         type Scalar: SealedScalar;
 
         // `Point: VartimeMultiscalarMul` is conditioned by `alloc` feature flag

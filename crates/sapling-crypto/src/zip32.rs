@@ -162,6 +162,17 @@ impl FvkTag {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiversifierKey([u8; 32]);
 
+/// Overwrites the key bytes with zeros.
+///
+/// `DiversifierKey` is `Copy`, so this does not run on drop and does not reach
+/// copies. Owners of a key erase their own copy.
+#[cfg(feature = "zeroize")]
+impl zeroize::Zeroize for DiversifierKey {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 impl DiversifierKey {
     pub fn master(sk_m: &[u8]) -> Self {
         let mut dk_m = [0u8; 32];
@@ -284,6 +295,18 @@ pub struct ExtendedSpendingKey {
     chain_code: ChainCode,
     pub expsk: ExpandedSpendingKey,
     dk: DiversifierKey,
+}
+
+/// Overwrites the expanded spending key and the diversifier key with zeros.
+///
+/// The chain code is not erased: `zip32` 0.2 provides no way to overwrite a
+/// `ChainCode`.
+#[cfg(feature = "zeroize")]
+impl zeroize::Zeroize for ExtendedSpendingKey {
+    fn zeroize(&mut self) {
+        self.expsk.zeroize();
+        self.dk.zeroize();
+    }
 }
 
 impl core::cmp::PartialEq for ExtendedSpendingKey {
@@ -1923,5 +1946,28 @@ pub mod testing {
         pub fn arb_extended_spending_key()(v in vec(any::<u8>(), 32..252)) -> ExtendedSpendingKey {
             ExtendedSpendingKey::master(&v)
         }
+    }
+}
+
+#[cfg(all(test, feature = "zeroize"))]
+mod zeroize_tests {
+    use zeroize::Zeroize;
+
+    use super::ExtendedSpendingKey;
+
+    #[test]
+    fn extended_spending_key_zeroizes_its_spending_material() {
+        let mut xsk = ExtendedSpendingKey::master(&[7; 32]);
+        let before = xsk.to_bytes();
+        // depth (1) || parent tag (4) || child index (4) || chain code (32) ||
+        // expanded spending key (96) || diversifier key (32)
+        assert_ne!(before[41..], [0; 128]);
+
+        xsk.zeroize();
+
+        let after = xsk.to_bytes();
+        assert_eq!(after[41..], [0; 128]);
+        // `zip32` 0.2 cannot overwrite the chain code, so it survives.
+        assert_eq!(after[..41], before[..41]);
     }
 }

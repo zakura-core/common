@@ -27,6 +27,7 @@ ff = { version = "0.14", default-features = false }
 group = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc", "serde"], optional = true, default-features = false }
 maybe-rayon = { version = "0.1.0", optional = true, default-features = false }
+zeroize = { version = "1", optional = true, default-features = false }
 once_cell = { version = "1", features = ["race", "alloc"], optional = true, default-features = false }
 rand = { version = "0.10", default-features = false }
 serde_crate = { version = "1.0.16", features = ["alloc"], optional = true, default-features = false, package = "serde" }
@@ -58,6 +59,8 @@ alloc = ["group/alloc", "blake2b_simd"]
 bits = ["ff/bits"]
 default = ["bits", "sqrt-table"]
 deferred = []
+# Implements `zeroize::DefaultIsZeroes` for `Fp` and `Fq`.
+zeroize = ["dep:zeroize"]
 glv = ["alloc"]
 gpu = ["alloc", "ec-gpu"]
 # Parallel evaluation of the GLV multiscalar windows and affine batches in

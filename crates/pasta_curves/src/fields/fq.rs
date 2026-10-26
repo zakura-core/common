@@ -335,6 +335,10 @@ impl Default for Fq {
     }
 }
 
+/// Zeroizing a field element overwrites it with zero, which is the `Default` value.
+#[cfg(feature = "zeroize")]
+impl zeroize::DefaultIsZeroes for Fq {}
+
 impl Fq {
     /// Returns zero, the additive identity.
     #[inline]
@@ -1990,4 +1994,14 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
 fn asm_mul_rejects_non_canonical_rhs_in_debug() {
     // The modulus itself is the smallest non-canonical value.
     let _ = Fq::one().mul_runtime(&MODULUS);
+}
+
+#[cfg(all(test, feature = "zeroize"))]
+#[test]
+fn test_zeroize() {
+    use zeroize::Zeroize;
+
+    let mut a = Fq::one();
+    a.zeroize();
+    assert_eq!(a, Fq::zero());
 }

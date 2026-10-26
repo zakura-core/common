@@ -22,6 +22,18 @@ use rand_core::{CryptoRng, Rng};
 #[cfg_attr(feature = "serde", serde(bound = "T: SigType"))]
 pub struct SigningKey<T: SigType>(reddsa::SigningKey<T::RedDSASigType>);
 
+/// Overwrites the secret scalar with zero. The verification key is public and
+/// is left intact.
+///
+/// `SigningKey` is `Copy`, so this does not run on drop and does not reach
+/// copies. Owners of a key erase their own copy.
+#[cfg(feature = "zeroize")]
+impl<T: SigType> zeroize::Zeroize for SigningKey<T> {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 impl<'a, T: SigType> From<&'a SigningKey<T>> for VerificationKey<T> {
     fn from(sk: &'a SigningKey<T>) -> VerificationKey<T> {
         let reddsa_vk = reddsa::VerificationKey::<_>::from(&sk.0);
@@ -81,5 +93,25 @@ impl<T: SigType> SigningKey<T> {
     pub fn sign<R: Rng + CryptoRng>(&self, rng: R, msg: &[u8]) -> Signature<T> {
         let reddsa_sig = self.0.sign(rng, msg);
         Signature(reddsa_sig)
+    }
+}
+
+#[cfg(all(test, feature = "zeroize"))]
+mod zeroize_tests {
+    use core::convert::TryFrom;
+
+    use zeroize::Zeroize;
+
+    use crate::{SigningKey, SpendAuth};
+
+    #[test]
+    fn zeroize_erases_the_secret_scalar() {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 7;
+        let mut sk = SigningKey::<SpendAuth>::try_from(bytes).unwrap();
+
+        sk.zeroize();
+
+        assert_eq!(<[u8; 32]>::from(sk), [0; 32]);
     }
 }

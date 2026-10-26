@@ -26,6 +26,7 @@ jubjub = { workspace = true }
 pasta_curves = { workspace = true, optional = true, features = ["alloc"] }
 rand_core = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
+zeroize = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
 bincode = "1"
@@ -46,6 +47,9 @@ nightly = []
 thiserror = []
 zeroize = []
 serde = ["dep:serde"]
+# Implements `zeroize::Zeroize` for `SigningKey`. Separate from the inert
+# `zeroize` feature above, which `std` enables.
+zeroize-signing-key = ["dep:zeroize", "jubjub/zeroize", "pasta_curves?/zeroize"]
 std = [
     "blake2b_simd/std",
     "thiserror",

@@ -57,7 +57,7 @@ backend-halo2 = ["orchard?/backend-halo2"]
 wallet = ["dep:zip32", "orchard?/wallet", "sapling?/wallet", "transparent/wallet"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["wallet", "orchard?/zip32-addresses", "sapling?/zip32-addresses"]
-default = ["backend-halo2", "wallet", "std", "zip32-addresses"]
+default = ["backend-halo2", "wallet", "std", "zip32-addresses", "zeroize"]
 orchard = ["dep:orchard", "wallet"]
 sapling = ["dep:sapling", "wallet"]
 std = [
@@ -76,6 +76,9 @@ test-dependencies = [
 transparent-inputs = ["wallet", "dep:bip32", "transparent/transparent-inputs"]
 transparent-key-encoding = ["dep:bip32", "dep:secp256k1"]
 unstable = ["dep:byteorder"]
+# Erases the Sapling and Orchard key material held by `UnifiedSpendingKey` when
+# it is dropped. Enabled by default.
+zeroize = ["orchard?/zeroize", "sapling?/zeroize"]
 unstable-frost = ["orchard"]
 zcashd-compat = ["dep:bip0039", "dep:regex"]
 

@@ -39,6 +39,7 @@ rand = { version = "0.10", default-features = false }
 rand_core = { version = "0.10", default-features = false }
 redjubjub = { workspace = true }
 subtle = { version = "2.6", default-features = false }
+zeroize = { version = "1", optional = true, default-features = false }
 tracing = { version = "0.1", default-features = false }
 zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] }
 zcash_spec = "0.2"
@@ -77,6 +78,8 @@ std = [
     "redjubjub/std",
 ]
 temporary-zcashd = []
+# Implements `zeroize::Zeroize` for the spending-key types.
+zeroize = ["dep:zeroize", "jubjub/zeroize", "redjubjub/zeroize"]
 test-dependencies = [
     "wallet",
     "incrementalmerkletree/test-dependencies",

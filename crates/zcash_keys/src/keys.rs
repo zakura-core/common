@@ -35,9 +35,16 @@ use {
     byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt},
     core::convert::TryFrom,
     corez::io::{Read, Write},
+    secrecy::SecretVec,
     zcash_protocol::consensus::BranchId,
     zcash_protocol::encoding::CompactSize,
 };
+
+#[cfg(all(
+    feature = "unstable",
+    any(feature = "sapling", feature = "transparent-inputs")
+))]
+use secrecy::zeroize::Zeroizing;
 
 #[cfg(feature = "orchard")]
 use orchard::{self, keys::Scope};
@@ -212,6 +219,10 @@ impl Era {
 }
 
 /// A set of spending keys that are all associated with a single ZIP-0032 account identifier.
+///
+/// With the `zeroize` feature, the Sapling and Orchard spending keys are erased from
+/// memory when this key is dropped. The Sapling ZIP 32 chain code and the transparent
+/// spending key are not erased.
 #[derive(Clone)]
 pub struct UnifiedSpendingKey {
     #[cfg(feature = "transparent-inputs")]
@@ -220,6 +231,17 @@ pub struct UnifiedSpendingKey {
     sapling: sapling::ExtendedSpendingKey,
     #[cfg(feature = "orchard")]
     orchard: orchard::keys::SpendingKey,
+}
+
+#[cfg(feature = "zeroize")]
+impl Drop for UnifiedSpendingKey {
+    fn drop(&mut self) {
+        use secrecy::zeroize::Zeroize;
+        #[cfg(feature = "sapling")]
+        self.sapling.zeroize();
+        #[cfg(feature = "orchard")]
+        self.orchard.zeroize();
+    }
 }
 
 impl core::fmt::Debug for UnifiedSpendingKey {
@@ -319,42 +341,45 @@ impl UnifiedSpendingKey {
     /// internal validation metadata (such as checksums) as keys decoded from
     /// this form will necessarily be validated when the attempt is made to
     /// spend a note that they have authority for.
+    ///
+    /// The returned bytes, and the intermediate key encodings built along the way, are
+    /// erased from memory when dropped.
     #[cfg(feature = "unstable")]
-    pub fn to_bytes(&self, era: Era) -> Vec<u8> {
-        let mut result = vec![];
-        result.write_u32::<LittleEndian>(era.id()).unwrap();
-
-        #[cfg(feature = "orchard")]
-        {
-            let orchard_key = self.orchard();
-            CompactSize::write(&mut result, usize::try_from(Typecode::Orchard).unwrap()).unwrap();
-
-            let orchard_key_bytes = orchard_key.to_bytes();
-            CompactSize::write(&mut result, orchard_key_bytes.len()).unwrap();
-            result.write_all(orchard_key_bytes).unwrap();
-        }
-
+    pub fn to_bytes(&self, era: Era) -> SecretVec<u8> {
         #[cfg(feature = "sapling")]
-        {
-            let sapling_key = self.sapling();
-            CompactSize::write(&mut result, usize::try_from(Typecode::Sapling).unwrap()).unwrap();
-
-            let sapling_key_bytes = sapling_key.to_bytes();
-            CompactSize::write(&mut result, sapling_key_bytes.len()).unwrap();
-            result.write_all(&sapling_key_bytes).unwrap();
-        }
-
+        let sapling_key_bytes = Zeroizing::new(self.sapling().to_bytes());
         #[cfg(feature = "transparent-inputs")]
-        {
-            let account_tkey = self.transparent();
-            CompactSize::write(&mut result, usize::try_from(Typecode::P2pkh).unwrap()).unwrap();
+        let transparent_key_bytes = Zeroizing::new(self.transparent().to_bytes());
 
-            let account_tkey_bytes = account_tkey.to_bytes();
-            CompactSize::write(&mut result, account_tkey_bytes.len()).unwrap();
-            result.write_all(&account_tkey_bytes).unwrap();
+        let items: Vec<(Typecode, &[u8])> = vec![
+            #[cfg(feature = "orchard")]
+            (Typecode::Orchard, &self.orchard().to_bytes()[..]),
+            #[cfg(feature = "sapling")]
+            (Typecode::Sapling, &sapling_key_bytes[..]),
+            #[cfg(feature = "transparent-inputs")]
+            (Typecode::P2pkh, &transparent_key_bytes[..]),
+        ];
+
+        // Reserve the full length up front, so that growing the buffer does not leave
+        // copies of the key material in freed memory.
+        let encoded_len =
+            items
+                .iter()
+                .fold(core::mem::size_of::<u32>(), |len, (typecode, key_bytes)| {
+                    len + CompactSize::serialized_size(usize::try_from(*typecode).unwrap())
+                        + CompactSize::serialized_size(key_bytes.len())
+                        + key_bytes.len()
+                });
+        let mut result = Vec::with_capacity(encoded_len);
+        result.write_u32::<LittleEndian>(era.id()).unwrap();
+        for (typecode, key_bytes) in items {
+            CompactSize::write(&mut result, usize::try_from(typecode).unwrap()).unwrap();
+            CompactSize::write(&mut result, key_bytes.len()).unwrap();
+            result.write_all(key_bytes).unwrap();
         }
+        debug_assert_eq!(result.len(), encoded_len);
 
-        result
+        SecretVec::new(result)
     }
 
     /// Decodes a [`UnifiedSpendingKey`] value from its serialized representation.
@@ -1942,6 +1967,9 @@ mod tests {
     #[cfg(all(feature = "orchard", feature = "unstable"))]
     use subtle::ConstantTimeEq;
 
+    #[cfg(feature = "unstable")]
+    use secrecy::ExposeSecret;
+
     #[cfg(feature = "transparent-inputs")]
     fn seed() -> Vec<u8> {
         let seed_hex = "6ef5f84def6f4b9d38f466586a8380a38593bd47c8cda77f091856176da47f26b5bd1c8d097486e5635df5a66e820d28e1d73346f499801c86228d43f390304f";
@@ -2348,6 +2376,7 @@ mod tests {
         #[cfg(feature = "unstable")]
         fn prop_usk_roundtrip(usk in arb_unified_spending_key(zcash_protocol::consensus::Network::MainNetwork)) {
             let encoded = usk.to_bytes(Era::Orchard);
+            let encoded = encoded.expose_secret();
 
             #[allow(clippy::let_and_return)]
             let encoded_len = {
@@ -2356,6 +2385,7 @@ mod tests {
                 #[cfg(feature = "orchard")]
                 let len = len + 2 + 32;
 
+                #[cfg(feature = "sapling")]
                 let len = len + 2 + 169;
 
                 // Transparent part is an `xprv` transparent extended key deserialized
@@ -2368,12 +2398,13 @@ mod tests {
             };
             assert_eq!(encoded.len(), encoded_len);
 
-            let decoded = UnifiedSpendingKey::from_bytes(Era::Orchard, &encoded);
+            let decoded = UnifiedSpendingKey::from_bytes(Era::Orchard, encoded);
             let decoded = decoded.unwrap_or_else(|e| panic!("Error decoding USK: {:?}", e));
 
             #[cfg(feature = "orchard")]
             assert!(bool::from(decoded.orchard().ct_eq(usk.orchard())));
 
+            #[cfg(feature = "sapling")]
             assert_eq!(decoded.sapling(), usk.sapling());
 
             #[cfg(feature = "transparent-inputs")]
