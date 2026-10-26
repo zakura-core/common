@@ -5,9 +5,9 @@ use crate::backend::prelude::*;
 use alloc::vec::Vec;
 use core::iter;
 
-use crate::{
-    constants::MERKLE_DEPTH_ORCHARD, note::commitment::ExtractedNoteCommitment, spec::leos2bsp,
-};
+#[cfg(any(test, feature = "backend-halo2"))]
+use crate::spec::leos2bsp;
+use crate::{constants::MERKLE_DEPTH_ORCHARD, note::commitment::ExtractedNoteCommitment};
 
 use crate::backend::pallas;
 #[cfg(any(test, feature = "backend-halo2"))]

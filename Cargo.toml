@@ -39,10 +39,11 @@
 #   same workspace as their public-type consumers so the graph contains one
 #   coherent family of types.
 # - udon, bento, bento-core, bento-macros: experimental arithmetic and
-#   compile-time storage libraries. These remain unpublished and version
-#   independently of the coordinated Common release.
-# - sensei, sensei-artifacts, sensei-macros, sensei-shared: unpublished native
-#   Orchard primitives, Ironwood proving, and historical proof verification.
+#   compile-time storage libraries, versioned independently of the coordinated
+#   Common release.
+# - sensei, sensei-artifacts, sensei-macros, sensei-shared: native Orchard
+#   primitives, Ironwood proving, and historical proof verification, also
+#   versioned independently.
 
 [workspace]
 # Resolver 3 is resolver 2 plus MSRV-aware version selection: `cargo update`

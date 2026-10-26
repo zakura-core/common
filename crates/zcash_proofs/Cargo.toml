@@ -12,7 +12,7 @@ repository.workspace = true
 readme.workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["backend-halo2", "bundled-prover", "download-params", "local-prover", "multicore"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]

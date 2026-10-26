@@ -287,6 +287,16 @@ pub(crate) fn extract_p_bottom(point: CtOption<pallas::Point>) -> CtOption<palla
     point.map(|p| extract_p(&p))
 }
 
+/// $LEOS2BSP_{8N}$: the bits of `bytes`, starting with the least-significant bit
+/// of `bytes[0]`.
+///
+/// Defined in [Zcash Protocol Spec § 5.1: Integers, Bit Sequences, and Endianness][endian].
+///
+/// [endian]: https://zips.z.cash/protocol/protocol.pdf#endian
+pub(crate) fn leos2bsp<const N: usize>(bytes: [u8; N]) -> impl Iterator<Item = bool> {
+    (0..N * 8).map(move |i| (bytes[i / 8] >> (i % 8)) & 1 == 1)
+}
+
 /// The u64 integer represented by an L-bit little-endian bitstring.
 ///
 /// # Panics
