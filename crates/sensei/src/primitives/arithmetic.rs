@@ -64,10 +64,6 @@ macro_rules! field {
                 }
                 Self::from_uniform_bytes(&bytes)
             }
-            /// Returns the canonical integer's little-endian bits.
-            pub fn to_le_bits(self) -> bitvec::array::BitArray<[u8; 32], bitvec::order::Lsb0> {
-                self.to_bytes().into()
-            }
             /// Returns whether this element is zero.
             pub const fn is_zero(&self) -> bool {
                 self.0.is_zero()
