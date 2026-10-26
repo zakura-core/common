@@ -135,7 +135,7 @@ sensei-artifacts = { package = "zakura-sensei-artifacts", version = "0.1.0", pat
 sensei-macros = { package = "zakura-sensei-macros", version = "0.1.0", path = "crates/sensei-macros", default-features = false }
 sensei-shared = { package = "zakura-sensei-shared", version = "0.1.0", path = "crates/sensei-shared", default-features = false }
 sinsemilla = { package = "zakura-sinsemilla", version = "5.0.0", path = "crates/sinsemilla", default-features = false }
-udon = { package = "zakura-udon", version = "0.1.0", path = "crates/udon", default-features = false }
+udon = { package = "zakura-udon", version = "0.2.0", path = "crates/udon", default-features = false }
 zcash_address = { package = "zakura-address", version = "5.0.0", path = "crates/zcash_address", default-features = false }
 zcash_note_encryption = { package = "zakura-note-encryption", version = "5.0.0", path = "crates/zcash_note_encryption", default-features = false }
 zcash_keys = { package = "zakura-keys", version = "5.0.0", path = "crates/zcash_keys", default-features = false }

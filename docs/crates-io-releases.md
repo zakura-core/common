@@ -102,7 +102,8 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-proofs`
 
 Cargo metadata currently selects all 32 workspace members. Sensei, Udon, Bento,
-and their implementation crates retain their independent `0.1.0` versions.
+and their implementation crates retain independent versions (Udon is `0.2.0`,
+the rest `0.1.0`), separate from the coordinated Common release.
 New members and publishing policy changes are discovered automatically. Local
 dependencies must also allow crates.io publication; optional, target-specific,
 build, and development edges all participate in the dependency order. A cycle
