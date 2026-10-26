@@ -72,6 +72,7 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-pairing`
 - `zakura-equihash`
 - `zakura-pasta-curves`
+- `zakura-zcash-script`
 - `zakura-note-encryption`
 - `zakura-address`
 - `zakura-bls12-381`
@@ -93,10 +94,11 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-primitives`
 - `zakura-proofs`
 
-Cargo metadata currently selects 25 of the 29 workspace members. Bento, Bento
-Core, Bento Macros, and Udon disable publication. New members and publishing
-policy changes are discovered automatically. Local dependencies must also allow
-crates.io publication; optional, target-specific, build, and development edges
+Cargo metadata currently selects 25 of the 33 workspace members. Bento, Bento
+Core, Bento Macros, Sensei, Sensei Artifacts, Sensei Macros, Sensei Shared, and
+Udon disable publication. New members and publishing policy changes are
+discovered automatically. Local dependencies must also allow crates.io
+publication; optional, target-specific, build, and development edges
 all participate in the dependency order. A cycle or excluded local dependency
 stops the plan. Cargo's full packaging verification checks version requirements.
 

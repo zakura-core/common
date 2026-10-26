@@ -96,7 +96,7 @@ jobs:
         run: >-
           echo "LIBRUSTZCASH_FEATURES=$(python3 .github/scripts/supported_features.py
           zakura-equihash zakura-address zakura-keys zakura-primitives
-          zakura-protocol zakura-proofs zakura-transparent zakura-zip321)"
+          zakura-protocol zakura-proofs zakura-transparent zakura-zcash-script zakura-zip321)"
           >> "$GITHUB_ENV"
       - name: Remove lockfile
         run: rm Cargo.lock
@@ -111,6 +111,7 @@ jobs:
           -p zakura-protocol
           -p zakura-proofs
           -p zakura-transparent
+          -p zakura-zcash-script
           -p zakura-zip321
           --all-targets
           --features "$LIBRUSTZCASH_FEATURES"

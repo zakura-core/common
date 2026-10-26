@@ -1,0 +1,52 @@
+[package]
+name = "zakura-zcash-script"
+description = "Zcash transparent script parsing, building, and interpretation"
+version.workspace = true
+authors = [
+    "Electric Coin Company <info@electriccoin.co>",
+    "Greg Pfeil <greg@technomadic.org>",
+    "Tamas Blummer <tamas.blummer@gmail.com>",
+    "Zcash Foundation <zebra@zfnd.org>",
+]
+homepage = "https://github.com/ZcashFoundation/zcash_script"
+repository.workspace = true
+readme.workspace = true
+# Upstream is licensed under Apache-2.0 only, unlike the rest of the workspace.
+license = "Apache-2.0"
+edition.workspace = true
+rust-version.workspace = true
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["zcash"]
+
+[lib]
+name = "zcash_script"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+bip32 = { version = "0.6", default-features = false, features = ["alloc", "secp256k1-ffi"], optional = true }
+bitflags = "2.8"
+bounded-vec = "0.9"
+hex = { version = "0.4.3", default-features = false, optional = true }
+lazy_static = { version = "1.5", optional = true }
+ripemd = { version = "0.1", default-features = false }
+secp256k1 = { version = "0.33", default-features = false, features = ["alloc"], optional = true }
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+thiserror = { version = "2", default-features = false }
+
+[dev-dependencies]
+hex = { version = "0.4.3", default-features = false, features = ["std"] }
+lazy_static = "1.5"
+
+[features]
+default = ["std", "signature-validation"]
+descriptor = ["dep:bip32", "dep:hex", "dep:secp256k1"]
+## Whether to allow signature validation (and lock time verification). If disabled, the
+## `CallbackTransactionSignatureChecker` will be unavailable, and only the `NullSignatureChecker`
+## can be used.
+signature-validation = ["dep:secp256k1"]
+std = []
+test-dependencies = ["dep:hex", "dep:lazy_static", "hex/std"]

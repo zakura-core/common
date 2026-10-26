@@ -3405,7 +3405,7 @@ dependencies = [
  "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
- "zcash_script",
+ "zakura-zcash-script",
  "zip32",
 ]
 
@@ -3523,7 +3523,7 @@ dependencies = [
  "zakura-redjubjub",
  "zakura-sapling-crypto",
  "zakura-transparent",
- "zcash_script",
+ "zakura-zcash-script",
  "zip32",
 ]
 
@@ -3719,7 +3719,7 @@ dependencies = [
  "subtle",
  "zakura-address",
  "zakura-protocol",
- "zcash_script",
+ "zakura-zcash-script",
  "zcash_spec",
  "zip32",
 ]
@@ -3739,6 +3739,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-zcash-script"
+version = "5.0.0"
+dependencies = [
+ "bip32",
+ "bitflags 2.13.1",
+ "bounded-vec",
+ "hex",
+ "lazy_static",
+ "ripemd 0.1.3",
+ "secp256k1",
+ "sha1",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
 name = "zakura-zip321"
 version = "5.0.0"
 dependencies = [
@@ -3748,23 +3764,6 @@ dependencies = [
  "proptest",
  "zakura-address",
  "zakura-protocol",
-]
-
-[[package]]
-name = "zcash_script"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10106859d08a2a4119af8a0fa8db72afe35647768b562f94b7a2124adad41275"
-dependencies = [
- "bip32",
- "bitflags 2.13.1",
- "bounded-vec",
- "hex",
- "ripemd 0.1.3",
- "secp256k1",
- "sha1",
- "sha2 0.10.9",
- "thiserror",
 ]
 
 [[package]]
