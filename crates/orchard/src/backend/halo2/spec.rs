@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::iter;
 use core::ops::Deref;
 
-use crate::backend::ff::{Field, FromUniformBytes, PrimeField, PrimeFieldBits};
+use crate::backend::ff::{Field, FromUniformBytes, PrimeField};
 use crate::backend::group::{Curve, CurveAffine as _, Group, GroupEncoding, WnafBase, WnafScalar};
 use crate::backend::pasta_curves::{
     arithmetic::{CurveAffine, CurveExt},
@@ -205,13 +205,13 @@ pub(crate) fn commit_ivk(
     nk: &pallas::Base,
     rivk: &pallas::Scalar,
 ) -> CtOption<pallas::Base> {
-    // We rely on the API contract that to_le_bits() returns at least PrimeField::NUM_BITS
-    // bits, which is equal to L_ORCHARD_BASE.
+    // The 256-bit repr holds at least PrimeField::NUM_BITS bits, which is equal to
+    // L_ORCHARD_BASE.
     let domain = crate::backend::sinsemilla::CommitDomain::new(COMMIT_IVK_PERSONALIZATION);
     domain.short_commit(
         iter::empty()
-            .chain(ak.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE))
-            .chain(nk.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE)),
+            .chain(leos2bsp(ak.to_repr()).take(L_ORCHARD_BASE))
+            .chain(leos2bsp(nk.to_repr()).take(L_ORCHARD_BASE)),
         rivk,
     )
 }
@@ -315,6 +315,16 @@ pub(crate) fn extract_p_bottom_batch(
             .unwrap_or_else(pallas::Base::zero);
         CtOption::new(x, valid)
     })
+}
+
+/// $LEOS2BSP_{8N}$: the bits of `bytes`, starting with the least-significant bit
+/// of `bytes[0]`.
+///
+/// Defined in [Zcash Protocol Spec § 5.1: Integers, Bit Sequences, and Endianness][endian].
+///
+/// [endian]: https://zips.z.cash/protocol/protocol.pdf#endian
+pub(crate) fn leos2bsp<const N: usize>(bytes: [u8; N]) -> impl Iterator<Item = bool> {
+    (0..N * 8).map(move |i| (bytes[i / 8] >> (i % 8)) & 1 == 1)
 }
 
 /// The field element representation of a u64 integer represented by

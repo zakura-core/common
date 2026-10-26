@@ -44,7 +44,6 @@ use core::iter::Sum;
 use core::ops::{Add, RangeInclusive, Sub};
 
 use crate::backend::pallas;
-use bitvec::{array::BitArray, order::Lsb0};
 use rand::Rng;
 use subtle::CtOption;
 
@@ -116,8 +115,8 @@ impl NoteValue {
         self.0.to_le_bytes()
     }
 
-    pub(crate) fn to_le_bits(self) -> BitArray<[u8; 8], Lsb0> {
-        BitArray::<_, Lsb0>::new(self.0.to_le_bytes())
+    pub(crate) fn to_le_bits(self) -> impl Iterator<Item = bool> {
+        crate::spec::leos2bsp(self.0.to_le_bytes())
     }
 }
 

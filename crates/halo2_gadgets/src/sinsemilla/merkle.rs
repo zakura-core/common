@@ -323,7 +323,7 @@ pub mod tests {
         },
         test_circuits::test_utils::test_against_stored_circuit,
         utilities::{
-            UtilitiesInstructions, i2lebsp,
+            UtilitiesInstructions, i2lebsp, le_bits,
             lookup_range_check::{
                 PallasLookupRangeCheck, PallasLookupRangeCheck4_5BConfig,
                 PallasLookupRangeCheckConfig,
@@ -333,7 +333,7 @@ pub mod tests {
 
     use group::{
         Curve, Group,
-        ff::{Field, PrimeField, PrimeFieldBits},
+        ff::{Field, PrimeField},
     };
     use halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
@@ -541,16 +541,10 @@ pub mod tests {
                                         iter::empty()
                                             .chain(i2lebsp::<10>(l as u64).iter().copied())
                                             .chain(
-                                                left.to_le_bits()
-                                                    .iter()
-                                                    .by_vals()
-                                                    .take(pallas::Base::NUM_BITS as usize),
+                                                le_bits(left).take(pallas::Base::NUM_BITS as usize),
                                             )
                                             .chain(
-                                                right
-                                                    .to_le_bits()
-                                                    .iter()
-                                                    .by_vals()
+                                                le_bits(right)
                                                     .take(pallas::Base::NUM_BITS as usize),
                                             ),
                                     )
@@ -732,16 +726,10 @@ pub mod tests {
                                         iter::empty()
                                             .chain(i2lebsp::<10>(l as u64).iter().copied())
                                             .chain(
-                                                left.to_le_bits()
-                                                    .iter()
-                                                    .by_vals()
-                                                    .take(pallas::Base::NUM_BITS as usize),
+                                                le_bits(left).take(pallas::Base::NUM_BITS as usize),
                                             )
                                             .chain(
-                                                right
-                                                    .to_le_bits()
-                                                    .iter()
-                                                    .by_vals()
+                                                le_bits(right)
                                                     .take(pallas::Base::NUM_BITS as usize),
                                             ),
                                     )
