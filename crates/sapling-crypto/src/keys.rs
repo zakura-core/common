@@ -83,6 +83,14 @@ impl std::error::Error for DecodingError {}
 #[derive(Clone, Debug)]
 pub struct SpendAuthorizingKey(redjubjub::SigningKey<SpendAuth>);
 
+/// Overwrites the secret scalar with zero.
+#[cfg(feature = "zeroize")]
+impl zeroize::Zeroize for SpendAuthorizingKey {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 impl PartialEq for SpendAuthorizingKey {
     fn eq(&self, other: &Self) -> bool {
         <[u8; 32]>::from(self.0)
@@ -241,12 +249,33 @@ impl SpendValidatingKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutgoingViewingKey(pub [u8; 32]);
 
+/// Overwrites the key bytes with zeros.
+///
+/// `OutgoingViewingKey` is `Copy`, so this does not run on drop and does not
+/// reach copies. Owners of a key erase their own copy.
+#[cfg(feature = "zeroize")]
+impl zeroize::Zeroize for OutgoingViewingKey {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// A Sapling expanded spending key
 #[derive(Clone)]
 pub struct ExpandedSpendingKey {
     pub ask: SpendAuthorizingKey,
     pub nsk: jubjub::Fr,
     pub ovk: OutgoingViewingKey,
+}
+
+/// Overwrites `ask`, `nsk` and `ovk` with zeros.
+#[cfg(feature = "zeroize")]
+impl zeroize::Zeroize for ExpandedSpendingKey {
+    fn zeroize(&mut self) {
+        self.ask.zeroize();
+        self.nsk.zeroize();
+        self.ovk.zeroize();
+    }
 }
 
 impl fmt::Debug for ExpandedSpendingKey {

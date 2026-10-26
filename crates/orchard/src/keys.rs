@@ -3,6 +3,7 @@
 #[allow(unused_imports)]
 use crate::backend::prelude::*;
 use alloc::vec::Vec;
+use core::fmt;
 use corez::io::{self, Read, Write};
 
 use crate::backend::pallas;
@@ -42,8 +43,26 @@ const ZIP32_PURPOSE: u32 = 32;
 /// $\mathsf{sk}$ as defined in [Zcash Protocol Spec § 4.2.3: Orchard Key Components][orchardkeycomponents].
 ///
 /// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub struct SpendingKey([u8; 32]);
+
+impl fmt::Debug for SpendingKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Deliberately redacted: do not print secret key material.
+        f.debug_struct("SpendingKey").finish_non_exhaustive()
+    }
+}
+
+/// Overwrites the key bytes with zeros.
+///
+/// `SpendingKey` is `Copy`, so this does not run on drop and does not reach
+/// copies. Owners of a key erase their own copy.
+#[cfg(feature = "zeroize")]
+impl zeroize::Zeroize for SpendingKey {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 impl ConstantTimeEq for SpendingKey {
     fn ct_eq(&self, other: &Self) -> Choice {
@@ -1130,5 +1149,31 @@ mod tests {
             let internal_ovk = fvk.to_ovk(Scope::Internal);
             assert_eq!(internal_ovk.0, tv.internal_ovk);
         }
+    }
+}
+
+#[cfg(test)]
+mod secret_hygiene_tests {
+    use super::SpendingKey;
+
+    fn spending_key() -> SpendingKey {
+        SpendingKey::from_bytes([7; 32]).expect("[7; 32] is a valid Orchard spending key")
+    }
+
+    #[test]
+    fn spending_key_debug_is_redacted() {
+        assert_eq!(alloc::format!("{:?}", spending_key()), "SpendingKey { .. }");
+    }
+
+    #[cfg(feature = "zeroize")]
+    #[test]
+    fn spending_key_zeroizes() {
+        use zeroize::Zeroize;
+
+        let mut sk = spending_key();
+        assert_ne!(sk.to_bytes(), &[0; 32]);
+
+        sk.zeroize();
+        assert_eq!(sk.to_bytes(), &[0; 32]);
     }
 }

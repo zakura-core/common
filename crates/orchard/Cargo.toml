@@ -38,6 +38,7 @@ proptest = { version = ">=1.0.0, <1.7.0", optional = true }
 rand = { version = "0.10", default-features = false }
 serde = { version = "1.0", features = ["derive"], default-features = false }
 subtle = { version = "2.6", default-features = false }
+zeroize = { version = "1", optional = true, default-features = false }
 tracing = { version = "0.1", default-features = false }
 visibility = { version = "0.1.1", optional = true }
 zcash_note_encryption = { workspace = true, features = ["alloc"] }
@@ -65,6 +66,8 @@ backend-halo2 = ["dep:orchard-legacy"]
 wallet = ["dep:zip32"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["wallet", "dep:aes", "dep:fpe"]
+# Implements `zeroize::Zeroize` for `keys::SpendingKey`.
+zeroize = ["dep:zeroize"]
 circuit = ["prover", "verifier"]
 prover = ["std", "orchard-legacy?/circuit"]
 verifier = ["std", "orchard-legacy?/circuit"]

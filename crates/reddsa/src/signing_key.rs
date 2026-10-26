@@ -41,6 +41,18 @@ impl<T: SigType> fmt::Debug for SigningKey<T> {
     }
 }
 
+/// Overwrites the secret scalar with zero. The verification key is public and
+/// is left intact.
+///
+/// `SigningKey` is `Copy`, so this does not run on drop and does not reach
+/// copies. Owners of a key erase their own copy.
+#[cfg(feature = "zeroize-signing-key")]
+impl<T: SigType> zeroize::Zeroize for SigningKey<T> {
+    fn zeroize(&mut self) {
+        self.sk.zeroize();
+    }
+}
+
 impl<T: SigType> From<&SigningKey<T>> for VerificationKey<T> {
     fn from(sk: &SigningKey<T>) -> VerificationKey<T> {
         sk.pk
@@ -144,5 +156,28 @@ impl<T: SigType> SigningKey<T> {
             s_bytes,
             _marker: PhantomData,
         }
+    }
+}
+
+#[cfg(all(test, feature = "zeroize-signing-key"))]
+mod zeroize_tests {
+    use core::convert::TryFrom;
+
+    use zeroize::Zeroize;
+
+    use crate::{SigningKey, VerificationKey, sapling};
+
+    #[test]
+    fn zeroize_erases_the_secret_scalar_and_keeps_the_verification_key() {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 7;
+        let mut sk = SigningKey::<sapling::SpendAuth>::try_from(bytes).unwrap();
+        let vk: VerificationKey<sapling::SpendAuth> = (&sk).into();
+
+        sk.zeroize();
+
+        assert_eq!(<[u8; 32]>::from(sk), [0; 32]);
+        let vk_after: VerificationKey<sapling::SpendAuth> = (&sk).into();
+        assert_eq!(<[u8; 32]>::from(vk_after), <[u8; 32]>::from(vk));
     }
 }

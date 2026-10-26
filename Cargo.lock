@@ -3380,6 +3380,7 @@ dependencies = [
  "rand_xorshift 0.5.0",
  "subtle",
  "zakura-bls12-381",
+ "zeroize",
 ]
 
 [[package]]
@@ -3453,6 +3454,7 @@ dependencies = [
  "zakura-note-encryption",
  "zakura-orchard-legacy",
  "zcash_spec",
+ "zeroize",
  "zip32",
 ]
 
@@ -3498,6 +3500,7 @@ dependencies = [
  "serde_json",
  "static_assertions",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -3581,6 +3584,7 @@ dependencies = [
  "serde",
  "zakura-jubjub",
  "zakura-pasta-curves",
+ "zeroize",
 ]
 
 [[package]]
@@ -3612,6 +3616,7 @@ dependencies = [
  "serde",
  "thiserror",
  "zakura-reddsa",
+ "zeroize",
 ]
 
 [[package]]
@@ -3645,6 +3650,7 @@ dependencies = [
  "zakura-note-encryption",
  "zakura-redjubjub",
  "zcash_spec",
+ "zeroize",
  "zip32",
 ]
 
