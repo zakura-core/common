@@ -36,7 +36,7 @@ if not backends:
     raise SystemExit("no Orchard backend features found")
 
 def check_composition_visibility():
-    """Compile external snippets against the exact metadata from each feature build."""
+    """Require the retired bridge and payment internals to remain inaccessible."""
     orchard_id = next(package["id"] for package in metadata["packages"]
                       if package["name"] == "zakura-orchard")
     public = {
@@ -59,7 +59,7 @@ def check_composition_visibility():
     }
     with tempfile.TemporaryDirectory(prefix="orchard-composition-api-") as temporary:
         source = Path(temporary) / "consumer.rs"
-        for selected in [None, "prover", "verifier", "circuit-composition"]:
+        for selected in [None, "prover", "verifier"]:
             command = ["cargo", "check", "--locked", "--offline", "-p", "zakura-orchard", "--lib", "--message-format=json"]
             if selected is not None:
                 command.extend(["--no-default-features", "--features", f"backend-halo2,{selected}"])
@@ -68,10 +68,8 @@ def check_composition_visibility():
             artifact = next(Path(filename) for item in reversed(artifacts)
                             if item.get("reason") == "compiler-artifact" and item.get("package_id") == orchard_id
                             for filename in item["filenames"] if filename.endswith(".rmeta"))
-            snippets = [(name, code, selected == "circuit-composition") for name, code in public.items()]
+            snippets = [(name, code, False) for name, code in public.items()]
             snippets.extend((name, code, False) for name, code in private.items())
-            if selected == "circuit-composition":
-                snippets.append(("raw viewing field", "fn raw(f: &orchard::keys::FullViewingKey) { let _ = orchard::circuit::composition::witness::NullifierDerivingKey::from(f).inner(); }", False))
             for name, code, allowed in snippets:
                 source.write_text(code)
                 result = subprocess.run([
