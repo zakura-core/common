@@ -1,15 +1,21 @@
 //! Minimal RedPallas types with private arithmetic supplied by the selected backend.
 use crate::backend::pallas;
-
+#[cfg(feature = "backend-halo2")]
 use crate::backend::prelude::*;
 use core::{cmp::Ordering, marker::PhantomData};
 use rand::{CryptoRng, Rng};
 
+#[cfg(feature = "backend-halo2")]
 use crate::backend::reddsa as raw;
-
+#[cfg(all(feature = "backend-sensei", feature = "std"))]
+pub(crate) use raw::BatchItem;
+#[cfg(feature = "backend-halo2")]
 use raw::orchard::{Binding as RawBinding, SpendAuth as RawSpendAuth};
-
-#[cfg(feature = "std")]
+#[cfg(feature = "backend-sensei")]
+use raw::{Binding as RawBinding, SpendAuth as RawSpendAuth};
+#[cfg(feature = "backend-sensei")]
+use sensei::redpallas as raw;
+#[cfg(all(feature = "backend-halo2", feature = "std"))]
 pub(crate) type BatchItem = raw::batch::Item<RawSpendAuth, RawBinding>;
 /// The scalar randomizer of an Orchard spend authorization key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +126,16 @@ impl<T: SigType> TryFrom<[u8; 32]> for SigningKey<T> {
 }
 impl<T: SigType> SigningKey<T> {
     pub(crate) fn from_scalar(scalar: pallas::Scalar) -> Self {
+        #[cfg(feature = "backend-sensei")]
+        {
+            let key = if T::SPEND_AUTH {
+                SigningKeyInner::SpendAuth(raw::SigningKey::from_native(scalar))
+            } else {
+                SigningKeyInner::Binding(raw::SigningKey::from_native(scalar))
+            };
+            Self(key, PhantomData)
+        }
+        #[cfg(feature = "backend-halo2")]
         {
             scalar
                 .to_repr()
@@ -129,6 +145,18 @@ impl<T: SigType> SigningKey<T> {
     }
     /// Signs `msg` using fresh randomness from `rng`.
     pub fn sign<R: Rng + CryptoRng>(&self, mut rng: R, msg: &[u8]) -> Signature<T> {
+        #[cfg(feature = "backend-sensei")]
+        let bytes = match &self.0 {
+            SigningKeyInner::SpendAuth(key) => key
+                .sign(&mut || Ok(rng.next_u64()), msg)
+                .expect("infallible randomness")
+                .into(),
+            SigningKeyInner::Binding(key) => key
+                .sign(&mut || Ok(rng.next_u64()), msg)
+                .expect("infallible randomness")
+                .into(),
+        };
+        #[cfg(feature = "backend-halo2")]
         let bytes = match &self.0 {
             SigningKeyInner::SpendAuth(key) => key.sign(&mut rng, msg).into(),
             SigningKeyInner::Binding(key) => key.sign(&mut rng, msg).into(),
@@ -210,6 +238,18 @@ impl<T: SigType> Ord for VerificationKey<T> {
 }
 impl<T: SigType> VerificationKey<T> {
     pub(crate) fn from_point(point: pallas::Point) -> Self {
+        #[cfg(feature = "backend-sensei")]
+        {
+            let key = if T::SPEND_AUTH {
+                VerificationKeyInner::SpendAuth(raw::VerificationKey::from_native(
+                    point.to_affine(),
+                ))
+            } else {
+                VerificationKeyInner::Binding(raw::VerificationKey::from_native(point.to_affine()))
+            };
+            Self(key, PhantomData)
+        }
+        #[cfg(feature = "backend-halo2")]
         {
             point
                 .to_bytes()
@@ -217,7 +257,13 @@ impl<T: SigType> VerificationKey<T> {
                 .expect("canonical verification point")
         }
     }
-
+    #[cfg(feature = "backend-sensei")]
+    pub(crate) fn native(&self) -> sensei::PallasPoint {
+        match &self.0 {
+            VerificationKeyInner::SpendAuth(key) => key.point(),
+            VerificationKeyInner::Binding(key) => key.point(),
+        }
+    }
     /// Verifies a signature over `msg`.
     pub fn verify(&self, msg: &[u8], signature: &Signature<T>) -> Result<(), Error> {
         match &self.0 {
@@ -257,8 +303,14 @@ impl VerificationKey<SpendAuth> {
         let VerificationKeyInner::SpendAuth(key) = &self.0 else {
             unreachable!("domain is fixed at construction")
         };
-
-        BatchItem::from_spendauth((*key).into(), sig.0.into(), msg)
+        #[cfg(feature = "backend-sensei")]
+        {
+            BatchItem::new(key, &sig.0.into(), msg.as_ref())
+        }
+        #[cfg(feature = "backend-halo2")]
+        {
+            BatchItem::from_spendauth((*key).into(), sig.0.into(), msg)
+        }
     }
 }
 impl VerificationKey<Binding> {
@@ -271,8 +323,14 @@ impl VerificationKey<Binding> {
         let VerificationKeyInner::Binding(key) = &self.0 else {
             unreachable!("domain is fixed at construction")
         };
-
-        BatchItem::from_binding((*key).into(), sig.0.into(), msg)
+        #[cfg(feature = "backend-sensei")]
+        {
+            BatchItem::new(key, &sig.0.into(), msg.as_ref())
+        }
+        #[cfg(feature = "backend-halo2")]
+        {
+            BatchItem::from_binding((*key).into(), sig.0.into(), msg)
+        }
     }
 }
 
@@ -292,6 +350,11 @@ impl<T: SigType> From<&Signature<T>> for [u8; 64] {
 
 #[cfg(feature = "std")]
 pub(crate) fn verify_batch(items: &[BatchItem], mut rng: impl CryptoRng) -> Result<(), Error> {
+    #[cfg(feature = "backend-sensei")]
+    {
+        raw::verify_batch(items, &mut || Ok(rng.next_u64())).map_err(|_| Error::InvalidSignature)
+    }
+    #[cfg(feature = "backend-halo2")]
     {
         let mut verifier = raw::batch::Verifier::new();
         for item in items {
@@ -338,6 +401,7 @@ pub mod testing {
 
     /// Generate a canonical Orchard spend authorization randomizer.
     pub fn arb_spend_auth_randomizer() -> impl Strategy<Value = super::SpendAuthRandomizer> {
+        #[cfg(feature = "backend-halo2")]
         use crate::backend::prelude::*;
         any::<[u8; 64]>().prop_map(|bytes| {
             super::SpendAuthRandomizer::from_scalar(

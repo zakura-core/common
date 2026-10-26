@@ -5,12 +5,12 @@ use crate::backend::prelude::*;
 use alloc::vec::Vec;
 use core::iter;
 
-use crate::{
-    constants::MERKLE_DEPTH_ORCHARD, note::commitment::ExtractedNoteCommitment, spec::leos2bsp,
-};
+#[cfg(any(test, feature = "backend-halo2"))]
+use crate::spec::leos2bsp;
+use crate::{constants::MERKLE_DEPTH_ORCHARD, note::commitment::ExtractedNoteCommitment};
 
 use crate::backend::pallas;
-
+#[cfg(any(test, feature = "backend-halo2"))]
 use crate::constants::sinsemilla::{L_ORCHARD_MERKLE, i2lebsp_k};
 use incrementalmerkletree::{Hashable, Level};
 
@@ -21,7 +21,8 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use subtle::{Choice, ConditionallySelectable, CtOption};
 
-#[path = "tree/halo2.rs"]
+#[cfg_attr(feature = "backend-halo2", path = "tree/halo2.rs")]
+#[cfg_attr(feature = "backend-sensei", path = "tree/sensei.rs")]
 mod hashing;
 use hashing::merkle_crh;
 
@@ -177,8 +178,11 @@ pub struct MerkleHashOrchard(pallas::Base);
 #[cfg(feature = "weighted-merkle")]
 #[derive(Debug, Default)]
 pub struct MerkleHashBatchWorkspace {
+    #[cfg(feature = "backend-sensei")]
+    inner: sensei::primitives::merkle::BatchWorkspace,
+    #[cfg(feature = "backend-halo2")]
     messages: Vec<[u16; hashing::MERKLE_CRH_WORDS]>,
-
+    #[cfg(feature = "backend-halo2")]
     hash: crate::backend::sinsemilla::weighted::BatchHashWorkspace,
 }
 
@@ -209,6 +213,7 @@ impl MerkleHashOrchard {
     }
 }
 
+#[cfg(any(test, feature = "backend-halo2"))]
 fn merkle_crh_message(
     level: Level,
     left: &MerkleHashOrchard,

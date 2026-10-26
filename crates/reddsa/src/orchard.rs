@@ -1,4 +1,8 @@
 //! Signature types for the Orchard protocol.
+//!
+//! With `pallas-sensei`, Pallas operations use Sensei/Udon variable-time
+//! arithmetic. Secret-key operations have the timing assumptions documented
+//! by that implementation’s RedPallas module.
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -11,6 +15,8 @@ use group::GroupEncoding as _;
 use group::{Group as _, ff::PrimeField as _};
 #[cfg(feature = "pallas-pasta")]
 use pasta_curves::pallas;
+#[cfg(feature = "pallas-sensei")]
+use sensei::primitives::pallas;
 
 use crate::{SigType, private};
 

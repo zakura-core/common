@@ -21,6 +21,7 @@ name = "orchard"
 bench = false
 
 [dependencies]
+sensei = { workspace = true, optional = true }
 orchard-legacy = { workspace = true, optional = true }
 maybe-rayon = { version = "0.1.0", default-features = false, optional = true }
 plotters = { version = "0.3.0", optional = true }
@@ -43,6 +44,11 @@ zcash_note_encryption = { workspace = true, features = ["alloc"] }
 zcash_spec = "0.2.1"
 zip32 = { version = "0.2.0", default-features = false, optional = true }
 
+# Preserve the accelerated arithmetic selected by the previous proving backend
+# on supported AArch64 Unix targets, including prepared agreement and tree work.
+[target.'cfg(all(target_arch = "aarch64", target_family = "unix"))'.dependencies]
+sensei = { workspace = true, optional = true, features = ["aarch64-asm"] }
+
 [dev-dependencies]
 criterion = "0.5"
 hex = "0.4"
@@ -60,23 +66,24 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
 backend-halo2 = ["dep:orchard-legacy"]
+backend-sensei = ["dep:sensei"]
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32"]
 # Indexed ZIP 32 addresses and diversifier-index recovery, enabled by default.
 zip32-addresses = ["wallet", "dep:aes", "dep:fpe"]
 circuit = ["prover", "verifier"]
-prover = ["std", "orchard-legacy?/circuit"]
-verifier = ["std", "orchard-legacy?/circuit"]
+prover = ["std", "sensei?/prover", "orchard-legacy?/circuit"]
+verifier = ["std", "sensei?/verifier", "orchard-legacy?/circuit"]
 default = ["backend-halo2", "wallet", "zip32-addresses", "circuit", "multicore", "std"]
 dev-graph = ["orchard-legacy?/dev-graph", "image", "plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
-multicore = ["orchard-legacy?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
+multicore = ["sensei?/multicore", "orchard-legacy?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
 orbits = ["orchard-legacy?/orbits"]
 # Disable automatic x86-64 assembly selection in the proving dependencies.
-portable = ["orchard-legacy?/portable"]
-std = ["corez/std", "orchard-legacy?/std"]
-test-dependencies = ["wallet", "orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
+portable = ["sensei?/portable", "orchard-legacy?/portable"]
+std = ["corez/std", "sensei?/std", "orchard-legacy?/std"]
+test-dependencies = ["wallet", "sensei?/test-dependencies", "orchard-legacy?/test-dependencies", "proptest", "rand/std", "rand/std_rng"]
 # Backend-specific components and typed witnesses for external circuit composition.
 circuit-composition = ["backend-halo2", "prover"]
 unstable-frost = ["dep:visibility"]
@@ -86,8 +93,8 @@ verifier-fingerprint = ["orchard-legacy?/verifier-fingerprint", "zip32-addresses
 prover-fingerprint = ["orchard-legacy?/prover-fingerprint", "zip32-addresses", "circuit"]
 circuit-fixtures = ["orchard-legacy?/circuit-fixtures", "circuit"]
 weighted-merkle = []
-x86_64-asm = ["orchard-legacy?/x86_64-asm"]
-aarch64-asm = ["orchard-legacy?/aarch64-asm"]
+x86_64-asm = ["sensei?/x86_64-asm", "orchard-legacy?/x86_64-asm"]
+aarch64-asm = ["sensei?/aarch64-asm", "orchard-legacy?/aarch64-asm"]
 
 [[test]]
 name = "ironwood_batch_timings"

@@ -128,3 +128,7 @@ assert!(is_signature_valid);
 
 # Ok::<(), frost::Error>(())
 ```
+
+With `pallas-sensei`, Pallas operations use Sensei/Udon variable-time arithmetic.
+Secret-key operations have the timing assumptions documented by
+`sensei::redpallas`.
