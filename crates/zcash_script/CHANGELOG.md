@@ -18,9 +18,10 @@ from [upstream commit 8d2fc24](https://github.com/ZcashFoundation/zcash_script/c
 `10106859d08a2a4119af8a0fa8db72afe35647768b562f94b7a2124adad41275`, and its
 sources are byte-identical to that commit's. The import keeps the script,
 interpreter, solver, descriptor, and signature code unchanged, and uses
-Common's coordinated package version, edition 2024, and MSRV. Two changes
-come with it: `rustfmt` for edition 2024, which only reorders imports and
-rewraps lines, and gating the test module's signature-validation imports so
-its tests compile with `--no-default-features`. The `libfuzzer-sys`
-development dependency, which only upstream's fuzz workspace used, is
-dropped. Upstream authors and the Apache-2.0 license are retained.
+Common's coordinated package version, edition 2024, and MSRV. The other
+changes are `rustfmt` for edition 2024, which only reorders imports and
+rewraps lines, and two test-only fixes so the tests compile in every feature
+combination: the crate tests gate their signature-validation imports, and the
+descriptor tests import `ToString` from `alloc` instead of `std`. The
+`libfuzzer-sys` development dependency, which only upstream's fuzz workspace
+used, is dropped. Upstream authors and the Apache-2.0 license are retained.

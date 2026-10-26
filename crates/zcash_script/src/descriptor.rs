@@ -274,7 +274,7 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use std::string::ToString;
+    use alloc::string::ToString;
 
     use bip32::{ChildNumber, Prefix};
 
