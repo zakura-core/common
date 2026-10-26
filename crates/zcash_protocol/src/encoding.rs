@@ -160,6 +160,16 @@ impl Vector {
         Array::read_collected_mut(reader, count, func)
     }
 
+    /// Reads a CompactSize-prefixed byte vector, as written by [`Vector::write`] with one byte
+    /// per element.
+    ///
+    /// Returns the same bytes and errors as [`Vector::read`] with a single-byte element reader,
+    /// but reads the contents in bulk. See [`Array::read_bytes`] for the allocation behavior.
+    pub fn read_bytes<R: Read>(mut reader: R) -> io::Result<Vec<u8>> {
+        let count: usize = CompactSize::read_t(&mut reader)?;
+        Array::read_bytes(reader, count)
+    }
+
     /// Writes a slice of values by writing [`CompactSize`]-encoded integer specifying the length
     /// of the slice to the stream, followed by the encoding of each element of the slice as
     /// performed by the provided function.
@@ -206,6 +216,11 @@ impl Vector {
     }
 }
 
+/// Most bytes [`Array::read_bytes`] requests from its reader at once.
+///
+/// This bounds the memory reserved ahead of the input that fills it.
+const BYTE_READ_CHUNK: usize = 4096;
+
 /// Namespace for functions that perform encoding of array contents.
 ///
 /// This is similar to the [`Vector`] encoding except that no length information
@@ -247,6 +262,23 @@ impl Array {
         F: FnMut(&mut R) -> io::Result<E>,
     {
         (0..count).map(|_| func(&mut reader)).collect()
+    }
+
+    /// Reads `count` bytes from a stream, as written by [`Array::write`] with one byte per
+    /// element.
+    ///
+    /// Returns the same bytes and errors as [`Array::read`] with a single-byte element reader,
+    /// but reads the contents in bulk. The buffer grows only as input arrives, so a large
+    /// `count` taken from untrusted input does not reserve memory the stream never supplies.
+    pub fn read_bytes<R: Read>(mut reader: R, count: usize) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        while bytes.len() < count {
+            let start = bytes.len();
+            let end = start + (count - start).min(BYTE_READ_CHUNK);
+            bytes.resize(end, 0);
+            reader.read_exact(&mut bytes[start..])?;
+        }
+        Ok(bytes)
     }
 
     /// Writes an iterator full of values to a stream by sequentially
