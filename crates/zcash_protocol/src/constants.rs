@@ -11,6 +11,9 @@ pub mod testnet;
 // before enabling WOTS on a public network.
 pub const WOTS_KEY_COMMITMENT_DOMAIN: &[u8] = b"Zcash/WOTS/key/v1";
 
+/// Domain separator for the Merkle nodes committing to one account step's spare keys.
+pub const WOTS_NODE_DOMAIN: &[u8] = b"Zcash/WOTS/node/v1";
+
 // The `V<n>_TX_VERSION` constants, although trivial, serve to clarify that a
 // transaction version is meant in APIs that use a bare `u32`. Consider using
 // `zcash_primitives::transaction::TxVersion` instead.
