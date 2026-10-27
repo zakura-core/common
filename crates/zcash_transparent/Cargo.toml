@@ -19,6 +19,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+wots-plus = { version = "0.1.0-rc1", git = "https://github.com/p0mvn/wots-plus", rev = "e61767ce08b1f9042d50062584885aec0e1cdae6", optional = true }
 zcash_address.workspace = true
 zcash_protocol.workspace = true
 zip32 = { version = "0.2", default-features = false, optional = true }
@@ -41,6 +42,8 @@ proptest = ">=1,<1.7"
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
+# Disposable-key regtest experiments only; not a wallet lifecycle API.
+experimental-wots = ["std", "dep:wots-plus", "zcash_script/experimental-wots"]
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32"]
 default = ["wallet", "std", "pczt"]
