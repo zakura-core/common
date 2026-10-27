@@ -80,6 +80,7 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-pairing`
 - `zakura-equihash`
 - `zakura-pasta-curves`
+- `zakura-zcash-script`
 - `zakura-note-encryption`
 - `zakura-address`
 - `zakura-bls12-381`
@@ -101,9 +102,10 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-primitives`
 - `zakura-proofs`
 
-Cargo metadata currently selects all 32 workspace members. Sensei, Udon, Bento,
+Cargo metadata currently selects all 33 workspace members. Sensei, Udon, Bento,
 and their implementation crates retain independent versions (Udon is `0.2.0`,
-the rest `0.1.0`), separate from the coordinated Common release.
+the rest `0.1.0`), as does Zcash Script (`0.0.1`), separate from the coordinated
+Common release.
 New members and publishing policy changes are discovered automatically. Local
 dependencies must also allow crates.io publication; optional, target-specific,
 build, and development edges all participate in the dependency order. A cycle

@@ -49,7 +49,7 @@ secp256k1 = { version = "0.33", features = ["alloc"], default-features = false }
 subtle = { version = "2.2.3", default-features = false }
 transparent = { workspace = true, features = ["test-dependencies"] }
 zcash_address = { workspace = true, features = ["test-dependencies"] }
-zcash_script = { version = "0.6", default-features = false }
+zcash_script.workspace = true
 
 [features]
 backend-halo2 = ["orchard?/backend-halo2"]
