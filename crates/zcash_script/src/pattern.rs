@@ -108,13 +108,29 @@ pub enum Error {
     TooManyPubKeys(usize),
     #[error("PubKeys shouldn’t be longer than 65 bytes")]
     OverlongPubKey,
+    #[error("a PubKey must be 33 bytes starting with 0x02 or 0x03, or 65 bytes starting with 0x04")]
+    InvalidPubKey,
+    #[error("a multisig threshold must be between 1 and the number of keys ({1}), but was {0}")]
+    InvalidThreshold(u8, usize),
+    #[error("a P2SH redeem script must be at most 520 bytes to be spendable, but was {0}")]
+    RedeemScriptTooLarge(usize),
 }
 
+/// The most keys `OP_CHECKMULTISIG` accepts.
+const MAX_MULTISIG_PUBKEYS: usize = 20;
+
 /// Generate an [`Opcode`] that would push the provided pubkey onto the stack.
+///
+/// The key must use an encoding that `OP_CHECKSIG` accepts under strict encoding: compressed
+/// (33 bytes starting with `0x02` or `0x03`) or uncompressed (65 bytes starting with `0x04`).
 pub fn push_pubkey(pubkey: &[u8]) -> Result<Opcode, Error> {
-    pv::push_value(pubkey)
-        .map(PushValue)
-        .ok_or(Error::OverlongPubKey)
+    match (pubkey.len(), pubkey.first()) {
+        (66.., _) => Err(Error::OverlongPubKey),
+        (33, Some(0x02 | 0x03)) | (65, Some(0x04)) => Ok(PushValue(
+            pv::push_value(pubkey).expect("a public key is shorter than 520 bytes"),
+        )),
+        _ => Err(Error::InvalidPubKey),
+    }
 }
 
 /// Performs a `sig_count`-of-`pks.len()` multisig.
@@ -123,7 +139,16 @@ pub fn push_pubkey(pubkey: &[u8]) -> Result<Opcode, Error> {
 ///   type: `sig_count*Signature -> 💥?`
 /// else
 ///   type: `sig_count*Signature -> [Bool]`
+///
+/// `sig_count` must be between 1 and `pks.len()`, and there can be at most 20 keys: any
+/// other script would either be spendable without signatures or never spendable.
 pub fn check_multisig(sig_count: u8, pks: &[&[u8]], verify: bool) -> Result<Vec<Opcode>, Error> {
+    if pks.len() > MAX_MULTISIG_PUBKEYS {
+        return Err(Error::TooManyPubKeys(pks.len()));
+    }
+    if sig_count == 0 || usize::from(sig_count) > pks.len() {
+        return Err(Error::InvalidThreshold(sig_count, pks.len()));
+    }
     Ok([
         &[PushValue(push_num(sig_count.into()))],
         &pks.iter()
@@ -133,7 +158,7 @@ pub fn check_multisig(sig_count: u8, pks: &[&[u8]], verify: bool) -> Result<Vec<
             PushValue(push_num(
                 pks.len()
                     .try_into()
-                    .map_err(|_| Error::TooManyPubKeys(pks.len()))?,
+                    .expect("checked to be at most 20 above"),
             )),
             if verify {
                 op::CHECKMULTISIGVERIFY
@@ -248,18 +273,25 @@ pub fn pay_to_pubkey_hash(pk: &[u8]) -> Vec<Opcode> {
 
 /// P2SH
 ///
+/// Fails if the redeem script is longer than 520 bytes: spending a P2SH output pushes its
+/// redeem script, and no push can be larger.
+///
 /// type: `[_] -> [Bool]`
 pub fn pay_to_script_hash<T: Into<opcode::PossiblyBad> + opcode::Evaluable + Clone>(
     redeem_script: &script::Component<T>,
-) -> Vec<Opcode> {
-    [
+) -> Result<Vec<Opcode>, Error> {
+    let redeem_script = redeem_script.to_bytes();
+    if pv::push_value(&redeem_script).is_none() {
+        return Err(Error::RedeemScriptTooLarge(redeem_script.len()));
+    }
+    Ok([
         &[op::HASH160],
         &equals(
-            push_160b_hash(&Ripemd160::digest(Sha256::digest(redeem_script.to_bytes())).into()),
+            push_160b_hash(&Ripemd160::digest(Sha256::digest(redeem_script)).into()),
             false,
         )[..],
     ]
-    .concat()
+    .concat())
 }
 
 /// multisig with ignored value and empty stack check
@@ -494,7 +526,16 @@ pub fn sha256_htlc_size_check(
 
 /// One party has SHA-256 hashlock, other party can spend unconditionally
 ///
-/// type: `[Signature, PubKey, _, Bool] -> ([Signature, PubKey] + 💥) ∪ [Bool]`
+/// The on-chain scripts with this label omit `OP_DUP` in the unconditional branch, so their
+/// `OP_HASH160` and `OP_CHECKSIG` consume different stack values: anyone who knows the hashed
+/// value can spend with a key of their own. This builder uses P2PKH for that branch, so only
+/// the holder of `sender_pk` can spend through it.
+///
+/// type: `[Signature, PubKey, _?, Bool] -> ([Signature, PubKey] + 💥) ∪ [Bool]`
+///
+/// dependent type:
+/// - `[Signature, PubKey, _, True] -> ([Signature, PubKey] + 💥) ∪ [Bool]`
+/// - `[Signature, PubKey, False] -> ([Signature, PubKey] + 💥) ∪ [Bool]`
 pub fn sha256_htlc_with_unconditional(
     sender_pk: &[u8],
     recipient_sha: &[u8; 32],
@@ -509,12 +550,7 @@ pub fn sha256_htlc_with_unconditional(
         .concat(),
         &[
             &ignored_value(pv::_1)[..],
-            &[op::HASH160],
-            &equals(
-                push_160b_hash(&Ripemd160::digest(Sha256::digest(sender_pk)).into()),
-                true,
-            )[..],
-            &[op::CHECKSIG],
+            &pay_to_pubkey_hash(sender_pk)[..],
         ]
         .concat(),
     )
@@ -552,4 +588,148 @@ pub fn dual_hash160_htlc_size_check(
         .concat(),
         &verify(recipient_hash, recipient_pk)?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use super::{
+        Error, check_multisig, pay_to_pubkey, pay_to_script_hash, push_pubkey,
+        sha256_htlc_with_unconditional,
+    };
+    use crate::{
+        op, pv,
+        script::{self, Evaluable},
+    };
+
+    const COMPRESSED: [u8; 33] = [0x02; 33];
+
+    fn uncompressed() -> [u8; 65] {
+        let mut key = [0x11; 65];
+        key[0] = 0x04;
+        key
+    }
+
+    #[test]
+    fn push_pubkey_accepts_only_strict_encodings() {
+        assert!(push_pubkey(&COMPRESSED).is_ok());
+        assert!(push_pubkey(&[&[0x03][..], &[0; 32]].concat()).is_ok());
+        assert!(push_pubkey(&uncompressed()).is_ok());
+
+        assert_eq!(push_pubkey(&[0x04; 33]), Err(Error::InvalidPubKey));
+        assert_eq!(push_pubkey(&[0x02; 65]), Err(Error::InvalidPubKey));
+        assert_eq!(push_pubkey(&[0x02; 32]), Err(Error::InvalidPubKey));
+        assert_eq!(push_pubkey(&[]), Err(Error::InvalidPubKey));
+        assert_eq!(push_pubkey(&[0x04; 66]), Err(Error::OverlongPubKey));
+        assert_eq!(pay_to_pubkey(&[0x05; 33]), Err(Error::InvalidPubKey));
+    }
+
+    #[test]
+    fn check_multisig_rejects_unusable_thresholds_and_key_counts() {
+        let keys = |n| core::iter::repeat_n(&COMPRESSED[..], n).collect::<Vec<_>>();
+
+        assert!(check_multisig(1, &keys(1), false).is_ok());
+        assert!(check_multisig(20, &keys(20), true).is_ok());
+
+        // 0-of-n passes `OP_CHECKMULTISIG` without any signature.
+        assert_eq!(
+            check_multisig(0, &keys(3), false),
+            Err(Error::InvalidThreshold(0, 3))
+        );
+        assert_eq!(
+            check_multisig(4, &keys(3), false),
+            Err(Error::InvalidThreshold(4, 3))
+        );
+        // `OP_CHECKMULTISIG` fails with more than 20 keys.
+        assert_eq!(
+            check_multisig(1, &keys(21), false),
+            Err(Error::TooManyPubKeys(21))
+        );
+        assert_eq!(
+            check_multisig(1, &[&[0x02; 32][..]], false),
+            Err(Error::InvalidPubKey)
+        );
+    }
+
+    #[test]
+    fn pay_to_script_hash_rejects_redeem_scripts_over_520_bytes() {
+        let redeem = |len| {
+            script::Component(vec![
+                op::push_value(&vec![0; len]).expect("at most 520 bytes"),
+                op::DROP,
+            ])
+        };
+        // A 517-byte push takes 3 bytes of overhead, plus 1 for `OP_DROP`.
+        assert_eq!(redeem(516).byte_len(), 520);
+        assert!(pay_to_script_hash(&redeem(516)).is_ok());
+        assert_eq!(
+            pay_to_script_hash(&redeem(517)),
+            Err(Error::RedeemScriptTooLarge(521))
+        );
+    }
+
+    /// Accepts a signature only for `signer`, modelling a spender who holds only that
+    /// key.
+    #[cfg(feature = "signature-validation")]
+    struct SignsOnlyFor<'a> {
+        signer: &'a [u8],
+    }
+
+    #[cfg(feature = "signature-validation")]
+    impl crate::interpreter::SignatureChecker for SignsOnlyFor<'_> {
+        fn check_sig(
+            &self,
+            _script_sig: &crate::signature::Decoded,
+            vch_pub_key: &[u8],
+            _script_code: &script::Code,
+        ) -> bool {
+            vch_pub_key == self.signer
+        }
+
+        fn check_lock_time(&self, _lock_time: i64) -> bool {
+            false
+        }
+    }
+
+    /// The unconditional branch requires the sender's signature, not just their public key.
+    #[cfg(feature = "signature-validation")]
+    #[test]
+    fn htlc_unconditional_branch_needs_the_sender_signature() {
+        use hex::FromHex;
+
+        use crate::interpreter::Flags;
+
+        // A strict-DER signature with `SIGHASH_ALL`; `SignsOnlyFor` ignores its contents.
+        let sig = <Vec<u8>>::from_hex(
+            "3044022013e15d865010c257eef133064ef69a780b4bc7ebe6eda367504e806614f940c3022062fdbc8c2d049f91db2042d6c9771de6f1ef0b3b1fea76c1ab5542e44ed29ed801",
+        )
+        .unwrap();
+        let sender = COMPRESSED;
+        let attacker = [&[0x03][..], &[0x22; 32]].concat();
+        let recipient = uncompressed();
+        let script_pubkey = script::Component(sha256_htlc_with_unconditional(
+            &sender, &[0; 32], &recipient,
+        ))
+        .to_bytes();
+        let spend = |stack: &[&[u8]], signer: &[u8]| {
+            let script_sig = script::Component(
+                stack
+                    .iter()
+                    .map(|v| op::push_value(v).unwrap())
+                    .chain([crate::Opcode::PushValue(pv::_0)])
+                    .collect(),
+            )
+            .to_bytes();
+            script::Raw::from_raw_parts(script_sig, script_pubkey.clone())
+                .eval(Flags::empty(), &SignsOnlyFor { signer })
+                .unwrap_or(false)
+        };
+
+        assert!(spend(&[&sig, &sender], &sender));
+        // Upstream accepted this: the sender's public key satisfies `OP_HASH160`, and
+        // `OP_CHECKSIG` checked the attacker's signature against the attacker's key.
+        assert!(!spend(&[&sig, &attacker, &sender], &attacker));
+        assert!(!spend(&[&sig, &sender], &attacker));
+    }
 }

@@ -348,7 +348,8 @@ impl FullViewingKey {
         // fix it here.
         let redeem_script = sortedmulti(self.threshold.get(), &keys)
             .expect("child numbers are non-hardened, chance of failure is around 2^-127");
-        let script_pubkey = sh(&redeem_script);
+        let script_pubkey = sh(&redeem_script)
+            .expect("ZIP 48 allows at most 15 keys, so the redeem script is at most 513 bytes");
 
         // Extract the address from the script.
         let addr = TransparentAddress::from_script_pubkey(&script_pubkey).expect("valid");

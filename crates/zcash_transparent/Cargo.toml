@@ -38,6 +38,7 @@ ripemd = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 proptest = ">=1,<1.7"
+zcash_script = { workspace = true, features = ["signature-validation"] }
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
