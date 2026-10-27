@@ -6,11 +6,11 @@
 
 use super::cache::Cache as OnceBox;
 use alloc::boxed::Box;
-use bitvec::{array::BitArray, order::Lsb0};
 use subtle::CtOption;
 
 use super::{
-    Fp, Fq, NonIdentityPallasPoint, generators::FixedGenerator, pallas, sinsemilla::HashDomain,
+    Fp, Fq, NonIdentityPallasPoint, generators::FixedGenerator, leos2bsp, pallas,
+    sinsemilla::HashDomain,
 };
 
 const BASE_BITS: usize = Fp::NUM_BITS as usize;
@@ -37,10 +37,9 @@ pub fn base_to_scalar(value: Fp) -> Fq {
 pub fn commit_ivk(ak: Fp, nk: Fp, randomness: Fq) -> CtOption<Fp> {
     IVK.get_or_init(|| Box::new(HashDomain::new(IVK_DOMAIN)))
         .hash_to_point(
-            ak.to_le_bits()
-                .into_iter()
+            leos2bsp(ak.to_bytes())
                 .take(BASE_BITS)
-                .chain(nk.to_le_bits().into_iter().take(BASE_BITS)),
+                .chain(leos2bsp(nk.to_bytes()).take(BASE_BITS)),
         )
         .map(|point| extract(point + FixedGenerator::CommitIvkR.multiply(&randomness)))
 }
@@ -57,12 +56,11 @@ pub fn note_commitment(
 ) -> CtOption<pallas::Point> {
     NOTE.get_or_init(|| Box::new(HashDomain::new(NOTE_DOMAIN)))
         .hash_to_point(
-            BitArray::<_, Lsb0>::new(diversified_base.to_bytes())
-                .into_iter()
-                .chain(BitArray::<_, Lsb0>::new(transmission_key.to_bytes()))
-                .chain(BitArray::<_, Lsb0>::new(value.to_le_bytes()))
-                .chain(rho.to_le_bits().into_iter().take(BASE_BITS))
-                .chain(psi.to_le_bits().into_iter().take(BASE_BITS)),
+            leos2bsp(diversified_base.to_bytes())
+                .chain(leos2bsp(transmission_key.to_bytes()))
+                .chain(leos2bsp(value.to_le_bytes()))
+                .chain(leos2bsp(rho.to_bytes()).take(BASE_BITS))
+                .chain(leos2bsp(psi.to_bytes()).take(BASE_BITS)),
         )
         .map(|point| point + FixedGenerator::NoteCommitR.multiply(&randomness))
 }
