@@ -20,7 +20,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 blake2b_simd = { version = "1", default-features = false, optional = true }
-wots-plus = { version = "0.1.0-rc1", git = "https://github.com/p0mvn/wots-plus", rev = "e61767ce08b1f9042d50062584885aec0e1cdae6", optional = true }
+wots-plus = { version = "0.1.0-rc1", git = "https://github.com/p0mvn/pq-crypto", rev = "e61767ce08b1f9042d50062584885aec0e1cdae6", optional = true }
 zcash_address.workspace = true
 zcash_protocol.workspace = true
 zip32 = { version = "0.2", default-features = false, optional = true }

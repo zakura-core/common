@@ -3209,7 +3209,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wots-plus"
 version = "0.1.0-rc1"
-source = "git+https://github.com/p0mvn/wots-plus?rev=e61767ce08b1f9042d50062584885aec0e1cdae6#e61767ce08b1f9042d50062584885aec0e1cdae6"
+source = "git+https://github.com/p0mvn/pq-crypto?rev=e61767ce08b1f9042d50062584885aec0e1cdae6#e61767ce08b1f9042d50062584885aec0e1cdae6"
 dependencies = [
  "rand_core 0.10.1",
  "sha2 0.11.1",
