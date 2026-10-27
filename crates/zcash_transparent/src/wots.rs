@@ -6,6 +6,7 @@
 
 use alloc::vec::Vec;
 use sha2::{Digest, Sha256};
+use zcash_protocol::constants::WOTS_KEY_COMMITMENT_DOMAIN;
 use zcash_script::script::Code;
 
 use crate::address::{Script, TransparentAddress};
@@ -115,7 +116,7 @@ pub fn sigop_cost(code: &[u8]) -> u32 {
 
 fn key_commitment(key: &[u8]) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(b"Zakura/WOTS/key/v1");
+    hash.update(WOTS_KEY_COMMITMENT_DOMAIN);
     hash.update(key);
     hash.finalize().into()
 }
