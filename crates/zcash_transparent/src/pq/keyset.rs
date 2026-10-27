@@ -1,21 +1,21 @@
 //! Commitments to one step's spare keys.
 
 use sha2::{Digest, Sha256};
-use zcash_protocol::constants::{WOTS_KEY_COMMITMENT_DOMAIN, WOTS_NODE_DOMAIN};
+use zcash_protocol::constants::PQ_KEY_SET_NODE_DOMAIN;
 
-use super::{SPARES, VerifyingKey};
+use super::{PublicKey, SPARES, Scheme, SignatureScheme};
 
-/// Commits to one key's canonical encoding: its public seed followed by its chain endpoints.
-pub fn leaf_commit(key: &VerifyingKey) -> [u8; 32] {
+/// Commits to one key's canonical encoding, under the scheme's key domain.
+pub fn leaf_commit(key: &PublicKey) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(WOTS_KEY_COMMITMENT_DOMAIN);
-    hash.update(key.to_bytes());
+    hash.update(Scheme::KEY_DOMAIN);
+    hash.update(Scheme::encode_public_key(key));
     hash.finalize().into()
 }
 
 fn node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(WOTS_NODE_DOMAIN);
+    hash.update(PQ_KEY_SET_NODE_DOMAIN);
     hash.update(left);
     hash.update(right);
     hash.finalize().into()
@@ -41,19 +41,19 @@ pub fn root_from_path(leaf: [u8; 32], spare: u8, path: &[[u8; 32]; 2]) -> Option
 /// The public keys of one step's spares and the root committing to them.
 #[derive(Clone, Debug)]
 pub struct KeySet {
-    keys: [VerifyingKey; SPARES],
+    keys: [PublicKey; SPARES],
     leaves: [[u8; 32]; SPARES],
 }
 
 impl KeySet {
     /// Commits to the given keys in spare order.
-    pub fn new(keys: [VerifyingKey; SPARES]) -> Self {
+    pub fn new(keys: [PublicKey; SPARES]) -> Self {
         let leaves = core::array::from_fn(|index| leaf_commit(&keys[index]));
         Self { keys, leaves }
     }
 
     /// The public key of one spare.
-    pub fn key(&self, spare: u8) -> Option<&VerifyingKey> {
+    pub fn key(&self, spare: u8) -> Option<&PublicKey> {
         self.keys.get(usize::from(spare))
     }
 

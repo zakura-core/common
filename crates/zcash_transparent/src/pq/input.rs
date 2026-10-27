@@ -4,7 +4,7 @@ use super::{AccountScript, Authorization, ControlOutput, authorization::PUSHES, 
 
 /// An input spending from an account. The script interpreter must not run on these.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WotsInput {
+pub enum AccountInput {
     /// Spends the account's control output, signed by a spare of its step.
     Control {
         /// The control output being spent.
@@ -26,7 +26,7 @@ pub enum WotsInput {
     },
 }
 
-impl WotsInput {
+impl AccountInput {
     /// The account hash `A` this input spends from.
     pub fn account_hash(&self) -> [u8; 20] {
         match self {
@@ -54,12 +54,12 @@ pub enum FormError {
 /// Returns `None` for any other input, which the script interpreter handles. A payment to
 /// an account can only be redeemed through its account script, which contains an opcode
 /// the interpreter rejects, so returning `None` never lets an account input skip checks.
-pub fn classify(script_sig: &[u8], spent_script: &[u8]) -> Option<Result<WotsInput, FormError>> {
+pub fn classify(script_sig: &[u8], spent_script: &[u8]) -> Option<Result<AccountInput, FormError>> {
     if let Some(control) = ControlOutput::parse(spent_script) {
         let form = pushes(script_sig)
             .filter(|values| values.len() == PUSHES)
             .and_then(|values| Authorization::from_pushes(&values))
-            .map(|authorization| WotsInput::Control {
+            .map(|authorization| AccountInput::Control {
                 control,
                 authorization,
             })
@@ -78,9 +78,9 @@ pub fn classify(script_sig: &[u8], spent_script: &[u8]) -> Option<Result<WotsInp
         return None;
     }
     let form = match rest.len() {
-        0 => Ok(WotsInput::CoveredDeposit { account }),
+        0 => Ok(AccountInput::CoveredDeposit { account }),
         PUSHES => Authorization::from_pushes(rest)
-            .map(|authorization| WotsInput::SigningDeposit {
+            .map(|authorization| AccountInput::SigningDeposit {
                 account,
                 authorization,
             })

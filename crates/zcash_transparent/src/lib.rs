@@ -32,10 +32,10 @@ pub mod coinbase;
 pub mod keys;
 #[cfg(feature = "pczt")]
 pub mod pczt;
+#[cfg(feature = "experimental-pq-transparent")]
+pub mod pq;
 pub mod sighash;
 pub mod util;
-#[cfg(feature = "experimental-pq-transparent")]
-pub mod wots;
 #[cfg(feature = "transparent-inputs")]
 pub mod zip48;
 
