@@ -10,12 +10,14 @@ use core::fmt::Debug;
 
 use super::derive::KeySeed;
 
+mod slh_dsa;
 mod wots_plus;
 
+pub use slh_dsa::{Parameters as SlhDsaParameters, SlhDsa, SlhDsaSha2_128s};
 pub use wots_plus::WotsPlus;
 
 /// The scheme every account uses.
-pub type Scheme = WotsPlus;
+pub type Scheme = SlhDsaSha2_128s;
 /// A key that signs one account spend.
 pub type SigningKey = <Scheme as SignatureScheme>::SigningKey;
 /// The public key an account commits to for one spare.

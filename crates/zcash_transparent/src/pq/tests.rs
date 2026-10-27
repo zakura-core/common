@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+use super::scheme::{SlhDsa, WotsPlus};
 use super::*;
 
 const MASTER_SEED: &[u8] = b"account rules test seed";
@@ -96,8 +97,8 @@ fn key_set_roots_match_known_answers_and_every_spare_proves_membership() {
     let keys = keys(0);
     assert_eq!(
         hex::encode(keys.root()),
-        "17e11db887209c0627934b29357ef4ebbb2185c97f9b8a38ddcdcb9bc97acca4",
-        "derivation, leaf or node hashing changed; this pins the WOTS+ keys"
+        "4efebdb4f423c62e9b1d47b88336434acd8b02956960ee5608fdf517157f9c5f",
+        "derivation, leaf or node hashing changed; this pins the SLH-DSA keys"
     );
     for spare in 0..4 {
         let leaf = leaf_commit(keys.key(spare).unwrap());
@@ -141,9 +142,9 @@ fn script_signature_sizes_match_their_constants() {
         SIGNING_DEPOSIT_SCRIPT_SIG_SIZE
     );
     assert_eq!(covered_sig().len(), COVERED_DEPOSIT_SCRIPT_SIG_SIZE);
-    // The WOTS+ witness is 2176 bytes.
-    assert_eq!(CONTROL_SCRIPT_SIG_SIZE, 2257);
-    assert_eq!(input_size(CONTROL_SCRIPT_SIG_SIZE), 2300);
+    // The SLH-DSA-SHA2-128s witness is a 7856-byte signature and a 32-byte public key.
+    assert_eq!(CONTROL_SCRIPT_SIG_SIZE, 8002);
+    assert_eq!(input_size(CONTROL_SCRIPT_SIG_SIZE), 8045);
 }
 
 #[test]
@@ -332,16 +333,22 @@ fn signing_with_a_key_that_is_not_the_named_spare_fails() {
 }
 
 #[test]
-fn the_scheme_recovers_only_the_signing_key() {
+fn every_scheme_recovers_only_the_signing_key() {
     // The contract every scheme behind `Scheme` must meet.
-    let key = signing_key(&master(), 0, 0, 0).unwrap();
-    let public = Scheme::public_key(&key);
-    let witness = Scheme::sign(key, &[7; 32]);
-    assert_eq!(witness.len(), Scheme::WITNESS_BYTES);
-    assert_eq!(Scheme::recover(&[7; 32], &witness), Some(public.clone()));
-    assert_ne!(Scheme::recover(&[8; 32], &witness), Some(public.clone()));
-    let mut tampered = witness.clone();
-    tampered[0] ^= 1;
-    assert_ne!(Scheme::recover(&[7; 32], &tampered), Some(public));
-    assert_eq!(Scheme::recover(&[7; 32], &witness[1..]), None);
+    fn check<S: SignatureScheme>() {
+        let key = S::derive(&KeySeed::new(&master(), 0, 0, 0)).unwrap();
+        let public = S::public_key(&key);
+        let witness = S::sign(key, &[7; 32]);
+        assert_eq!(witness.len(), S::WITNESS_BYTES);
+        assert_eq!(S::recover(&[7; 32], &witness), Some(public.clone()));
+        assert_ne!(S::recover(&[8; 32], &witness), Some(public.clone()));
+        let mut tampered = witness.clone();
+        tampered[0] ^= 1;
+        assert_ne!(S::recover(&[7; 32], &tampered), Some(public));
+        assert_eq!(S::recover(&[7; 32], &witness[1..]), None);
+    }
+    check::<Scheme>();
+    check::<WotsPlus>();
+    check::<SlhDsa<slh_dsa::Sha2_128f>>();
+    check::<SlhDsa<slh_dsa::Sha2_256s>>();
 }

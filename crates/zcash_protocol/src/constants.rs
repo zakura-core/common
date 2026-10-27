@@ -11,6 +11,11 @@ pub mod testnet;
 // before enabling WOTS on a public network.
 pub const WOTS_KEY_COMMITMENT_DOMAIN: &[u8] = b"Zcash/WOTS/key/v1";
 
+/// Domain separator for experimental SLH-DSA public-key commitments.
+///
+/// The committed encoding is the FIPS 205 public key: the public seed followed by the root.
+pub const SLH_DSA_KEY_COMMITMENT_DOMAIN: &[u8] = b"Zcash/SLH-DSA/key/v1";
+
 /// Domain separator for the Merkle nodes committing to one account step's spare keys.
 pub const PQ_KEY_SET_NODE_DOMAIN: &[u8] = b"Zcash/PQ/node/v1";
 
