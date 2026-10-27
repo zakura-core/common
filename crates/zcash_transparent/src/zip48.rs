@@ -256,6 +256,17 @@ impl FullViewingKey {
                 if derivations.len() != 1 {
                     return Err(FullViewingKeyError::IncompatiblePubKeys);
                 }
+
+                // Each cosigner must have a distinct key. `OP_CHECKMULTISIG` counts a
+                // repeated key once per occurrence, so one holder could meet the
+                // threshold alone.
+                let pubkeys = key_info
+                    .iter()
+                    .map(|key| key.key.public_key().serialize())
+                    .collect::<BTreeSet<_>>();
+                if pubkeys.len() != key_info.len() {
+                    return Err(FullViewingKeyError::DuplicatePubKeys);
+                }
             }
 
             // TODO: Decide whether `key_info` should be sorted (or checked to be sorted)
@@ -369,6 +380,8 @@ pub enum FullViewingKeyError {
     InvalidThreshold,
     /// The pubkeys were not all derived following ZIP 48.
     IncompatiblePubKeys,
+    /// The same pubkey was provided more than once.
+    DuplicatePubKeys,
 }
 
 #[cfg(test)]
@@ -384,8 +397,34 @@ mod tests {
     use crate::{
         keys::NonHardenedChildIndex,
         test_vectors::zip_0048::TEST_VECTORS,
-        zip48::{AccountPrivKey, AccountPubKey, FullViewingKey},
+        zip48::{AccountPrivKey, AccountPubKey, FullViewingKey, FullViewingKeyError},
     };
+
+    #[test]
+    fn rejects_duplicate_pubkeys() {
+        let params = MainNetwork;
+        let key = |seed: [u8; 32]| {
+            AccountPrivKey::from_seed(&params, &seed, AccountId::ZERO)
+                .unwrap()
+                .to_account_pubkey()
+        };
+
+        // 2-of-3 with a repeated key would let the holder of [1; 32] spend alone.
+        assert!(matches!(
+            FullViewingKey::standard(
+                NonZeroU8::new(2).unwrap(),
+                vec![key([1; 32]), key([1; 32]), key([2; 32])],
+            ),
+            Err(FullViewingKeyError::DuplicatePubKeys)
+        ));
+        assert!(
+            FullViewingKey::standard(
+                NonZeroU8::new(2).unwrap(),
+                vec![key([1; 32]), key([2; 32]), key([3; 32])],
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn zip_48_example() {
