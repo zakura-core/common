@@ -180,7 +180,7 @@ bitflags::bitflags! {
         const CHECKLOCKTIMEVERIFY = 1 << 9;
 
         /// Enable the experimental regtest WOTS opcode.
-        #[cfg(feature = "experimental-wots")]
+        #[cfg(feature = "experimental-pq-transparent")]
         const CHECKWOTS = 1 << 10;
     }
 }
@@ -189,7 +189,7 @@ bitflags::bitflags! {
 pub trait SignatureChecker {
     /// Reconstruct a WOTS key from the signature and public seed and authenticate
     /// it against the key commitment. The caller supplies the transaction digest.
-    #[cfg(feature = "experimental-wots")]
+    #[cfg(feature = "experimental-pq-transparent")]
     fn check_wots(&self, _signature: &[u8], _public_seed: &[u8], _commitment: &[u8]) -> bool {
         false
     }

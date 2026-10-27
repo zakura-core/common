@@ -1306,7 +1306,7 @@ impl Evaluable for PossiblyBad {
         state: interpreter::State,
     ) -> Result<interpreter::State, interpreter::Error> {
         match self {
-            #[cfg(feature = "experimental-wots")]
+            #[cfg(feature = "experimental-pq-transparent")]
             Self::Bad(Bad::Unknown(0xba)) if flags.contains(interpreter::Flags::CHECKWOTS) => {
                 let mut state = state;
                 state.increment_op_count(1)?;
@@ -1587,5 +1587,5 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "experimental-wots"))]
+#[cfg(all(test, feature = "experimental-pq-transparent"))]
 mod wots_tests;

@@ -43,7 +43,7 @@ zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
 # Disposable-key regtest experiments only; not a wallet lifecycle API.
-experimental-wots = ["std", "dep:wots-plus", "zcash_script/experimental-wots"]
+experimental-pq-transparent = ["std", "dep:wots-plus", "zcash_script/experimental-pq-transparent"]
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32"]
 default = ["wallet", "std", "pczt"]

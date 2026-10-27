@@ -43,7 +43,7 @@ lazy_static = "1.5"
 
 [features]
 # Execution also requires the explicit runtime CHECKWOTS flag.
-experimental-wots = []
+experimental-pq-transparent = []
 default = ["std", "signature-validation"]
 descriptor = ["dep:bip32", "dep:hex", "dep:secp256k1"]
 ## Whether to allow signature validation (and lock time verification). If disabled, the
