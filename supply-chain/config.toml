@@ -118,6 +118,9 @@ audit-as-crates-io = false
 [policy.zakura-udon]
 audit-as-crates-io = false
 
+[policy.zakura-zcash-script]
+audit-as-crates-io = false
+
 [policy.zakura-zip321]
 audit-as-crates-io = false
 
@@ -1282,10 +1285,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zcash_protocol]]
 version = "0.10.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.zcash_script]]
-version = "0.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_spec]]

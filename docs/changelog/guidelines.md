@@ -19,7 +19,8 @@ checks and release assembly. PRs affecting only these unpublished crates still
 follow the fragment requirement below, using `<!-- changelog: none -->` with a
 reason. Sensei, Udon, Bento, and their implementation crates allow publication
 and participate in changelog checks while retaining their independent
-`0.1.0` package versions.
+`0.1.0` package versions. Zcash Script does the same at `0.0.1` until it joins
+the coordinated Common version.
 
 ## Per-crate changelog structure
 
@@ -40,7 +41,8 @@ Each `crates/<name>/CHANGELOG.md` contains, in order:
 
 A forked crate's version lineage restarts at `1.0.0`; it does not continue
 the original numbering. A fork added after Common's initial release joins
-the next coordinated Common version rather than publishing independently.
+the next coordinated Common version rather than publishing independently
+(Zcash Script is a temporary exception, released as `0.0.1`).
 These files intentionally do not reproduce pre-fork release history (the repository the code was forked from remains the
 record for that).
 
