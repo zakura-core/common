@@ -4,6 +4,13 @@ pub mod mainnet;
 pub mod regtest;
 pub mod testnet;
 
+/// Domain separator for experimental WOTS public-key commitments.
+///
+/// The committed encoding contains the public seed followed by the ordered chain endpoints.
+// TODO: Specify this tag and the canonical key encoding in the protocol specification
+// before enabling WOTS on a public network.
+pub const WOTS_KEY_COMMITMENT_DOMAIN: &[u8] = b"Zakura/WOTS/key/v1";
+
 // The `V<n>_TX_VERSION` constants, although trivial, serve to clarify that a
 // transaction version is meant in APIs that use a bare `u32`. Consider using
 // `zcash_primitives::transaction::TxVersion` instead.
