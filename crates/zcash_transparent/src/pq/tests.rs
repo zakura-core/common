@@ -96,8 +96,8 @@ fn key_set_roots_match_known_answers_and_every_spare_proves_membership() {
     let keys = keys(0);
     assert_eq!(
         hex::encode(keys.root()),
-        "fb7cda6b9d87122155f09fcb0abb45e25cd7ae979dc4231bb1bca96d02467659",
-        "derivation, leaf or node hashing changed"
+        "17e11db887209c0627934b29357ef4ebbb2185c97f9b8a38ddcdcb9bc97acca4",
+        "derivation, leaf or node hashing changed; this pins the WOTS+ keys"
     );
     for spare in 0..4 {
         let leaf = leaf_commit(keys.key(spare).unwrap());
@@ -141,8 +141,9 @@ fn script_signature_sizes_match_their_constants() {
         SIGNING_DEPOSIT_SCRIPT_SIG_SIZE
     );
     assert_eq!(covered_sig().len(), COVERED_DEPOSIT_SCRIPT_SIG_SIZE);
-    assert_eq!(CONTROL_SCRIPT_SIG_SIZE, 2258);
-    assert_eq!(input_size(CONTROL_SCRIPT_SIG_SIZE), 2301);
+    // The WOTS+ witness is 2176 bytes.
+    assert_eq!(CONTROL_SCRIPT_SIG_SIZE, 2257);
+    assert_eq!(input_size(CONTROL_SCRIPT_SIG_SIZE), 2300);
 }
 
 #[test]
@@ -160,7 +161,7 @@ fn a_first_spend_and_later_steps_are_accepted() {
     assert_eq!(
         check(&inputs, &outputs),
         Ok(AccountCheck {
-            wots_inputs: vec![0, 1],
+            account_inputs: vec![0, 1],
             authorizations: 1
         })
     );
@@ -272,7 +273,7 @@ fn signatures_must_match_the_step_input_and_spare() {
 
     // An altered signature, and a spare index outside the key set.
     let mut altered = authorize(1, 0, 0);
-    altered.signature[0] ^= 1;
+    altered.witness[0] ^= 1;
     let inputs = [(control_sig(&altered), control(1).to_bytes().to_vec())];
     assert_eq!(check(&inputs, &outputs), Err(AccountError::Signature));
     let mut outside = authorize(1, 3, 0);
@@ -328,4 +329,19 @@ fn malformed_forms_and_missing_digests_are_rejected() {
 fn signing_with_a_key_that_is_not_the_named_spare_fails() {
     let key = signing_key(&master(), 0, 1, 2).unwrap();
     assert!(Authorization::sign(key, &keys(1), 0, [0; 32]).is_err());
+}
+
+#[test]
+fn the_scheme_recovers_only_the_signing_key() {
+    // The contract every scheme behind `Scheme` must meet.
+    let key = signing_key(&master(), 0, 0, 0).unwrap();
+    let public = Scheme::public_key(&key);
+    let witness = Scheme::sign(key, &[7; 32]);
+    assert_eq!(witness.len(), Scheme::WITNESS_BYTES);
+    assert_eq!(Scheme::recover(&[7; 32], &witness), Some(public.clone()));
+    assert_ne!(Scheme::recover(&[8; 32], &witness), Some(public.clone()));
+    let mut tampered = witness.clone();
+    tampered[0] ^= 1;
+    assert_ne!(Scheme::recover(&[7; 32], &tampered), Some(public));
+    assert_eq!(Scheme::recover(&[7; 32], &witness[1..]), None);
 }

@@ -1,6 +1,6 @@
 //! Experimental post-quantum transparent accounts for regtest.
 //!
-//! An account has one fixed P2SH address, while the WOTS+ key allowed to spend from it
+//! An account has one fixed P2SH address, while the one-time key allowed to spend from it
 //! changes on every spend. The current key is named by the account's control output;
 //! each spend consumes that output, is signed by a key it names, and creates the next one.
 //! Other payments to the address are spent alongside it without signatures of their own.
@@ -8,32 +8,34 @@
 //! Each step commits to [`SPARES`] keys so an unconfirmed spend can be replaced without
 //! signing twice with one key. Callers must never sign twice with the same spare: the
 //! derived keys can always be recomputed, so this module cannot prevent it.
+//!
+//! The signature scheme is defined in [`scheme`]; the rest of this module uses it only
+//! through [`SignatureScheme`].
 
 mod authorization;
 mod derive;
 mod input;
 mod keyset;
 mod rules;
+pub mod scheme;
 mod templates;
 
 pub use authorization::Authorization;
-pub use derive::{master_from_seed, signing_key};
-pub use input::{FormError, WotsInput, classify};
+pub use derive::{KeySeed, master_from_seed, signing_key};
+pub use input::{AccountInput, FormError, classify};
 pub use keyset::{KeySet, leaf_commit, root_from_path};
 pub use rules::{AccountCheck, AccountError, check_accounts};
+pub use scheme::{DeriveError, PublicKey, Scheme, SignatureScheme, SigningKey};
 pub use templates::{AccountScript, ControlOutput};
-pub use wots_plus::{MessageDigest, SigningKey, VerifyingKey};
 
 /// The only account and control-output version defined for the prototype.
 pub const VERSION: u8 = 0x01;
 /// Marks an account redeem script. The script interpreter treats it as an invalid opcode.
-pub const OP_CHECKWOTSACCOUNT: u8 = 0xba;
+pub const OP_CHECKPQACCOUNT: u8 = 0xba;
 /// Marks a control output. The script interpreter treats it as an invalid opcode.
-pub const OP_WOTSCONTROL: u8 = 0xbb;
+pub const OP_PQCONTROL: u8 = 0xbb;
 /// Number of keys committed for each step.
 pub const SPARES: usize = 4;
-/// Experimental verification charge per authorization; not a production cost model.
-pub const WOTS_SIGOP_COST: u32 = 100;
 
 /// Script signature of a control input: the authorization pushes only.
 pub const CONTROL_SCRIPT_SIG_SIZE: usize = authorization::ENCODED_SIZE;

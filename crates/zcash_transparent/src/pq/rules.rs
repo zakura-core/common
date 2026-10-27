@@ -3,16 +3,25 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::fmt;
 
-use super::{ControlOutput, FormError, VERSION, WotsInput, classify};
+use super::{
+    AccountInput, ControlOutput, FormError, SPARES, Scheme, SignatureScheme, VERSION, classify,
+};
 
 /// What a transaction that passed [`check_accounts`] spends from accounts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccountCheck {
     /// Indices of the inputs these rules fully validated. The script interpreter must not
     /// run on them.
-    pub wots_inputs: Vec<usize>,
+    pub account_inputs: Vec<usize>,
     /// Number of verified authorizations, one per account spent from.
     pub authorizations: u32,
+}
+
+impl AccountCheck {
+    /// The experimental verification charge for the transaction's authorizations.
+    pub fn sigops(&self) -> u32 {
+        self.authorizations.saturating_mul(Scheme::SIGOPS)
+    }
 }
 
 /// Why a transaction breaks the account rules.
@@ -96,10 +105,10 @@ pub fn check_accounts(
             input: index,
             error,
         })?;
-        check.wots_inputs.push(index);
+        check.account_inputs.push(index);
         let authorizations = accounts.entry(form.account_hash()).or_default();
         match form {
-            WotsInput::Control {
+            AccountInput::Control {
                 control,
                 authorization,
             } => {
@@ -108,7 +117,7 @@ pub fn check_accounts(
                 }
                 authorizations.push((index, authorization, control.root, control.step));
             }
-            WotsInput::SigningDeposit {
+            AccountInput::SigningDeposit {
                 account,
                 authorization,
             } => {
@@ -117,7 +126,7 @@ pub fn check_accounts(
                 }
                 authorizations.push((index, authorization, account.root, 0));
             }
-            WotsInput::CoveredDeposit { account } => {
+            AccountInput::CoveredDeposit { account } => {
                 if account.version != VERSION {
                     return Err(AccountError::Version);
                 }
@@ -147,10 +156,10 @@ pub fn check_accounts(
         };
         let next = step.checked_add(1).ok_or(AccountError::StepOverflow)?;
         let digest = digest(*index).ok_or(AccountError::Digest)?;
-        let recovered = authorization
-            .recover_root(digest)
-            .ok_or(AccountError::Spare)?;
-        if &recovered != root {
+        if usize::from(authorization.spare) >= SPARES {
+            return Err(AccountError::Spare);
+        }
+        if !authorization.verify(digest, root) {
             return Err(AccountError::Signature);
         }
         match created.get(&account).map(Vec::as_slice) {

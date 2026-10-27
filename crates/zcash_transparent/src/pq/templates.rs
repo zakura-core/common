@@ -3,12 +3,12 @@
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
 
-use super::{OP_CHECKWOTSACCOUNT, OP_WOTSCONTROL, VERSION};
+use super::{OP_CHECKPQACCOUNT, OP_PQCONTROL, VERSION};
 use crate::address::{Script, TransparentAddress};
 
 /// The P2SH redeem script that defines an account: its version and the step-0 key-set root.
 ///
-/// Encoded as `0x01 v 0x20 K(0) OP_CHECKWOTSACCOUNT`.
+/// Encoded as `0x01 v 0x20 K(0) OP_CHECKPQACCOUNT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AccountScript {
     /// Must be [`VERSION`] for a spend to be valid.
@@ -32,7 +32,7 @@ impl AccountScript {
     /// Recognizes the template with any version byte; consensus rejects unknown versions.
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         let bytes: &[u8; Self::SIZE] = bytes.try_into().ok()?;
-        (bytes[0] == 1 && bytes[2] == 32 && bytes[35] == OP_CHECKWOTSACCOUNT).then(|| Self {
+        (bytes[0] == 1 && bytes[2] == 32 && bytes[35] == OP_CHECKPQACCOUNT).then(|| Self {
             version: bytes[1],
             root: bytes[3..35].try_into().expect("fixed slice"),
         })
@@ -45,7 +45,7 @@ impl AccountScript {
         bytes[1] = self.version;
         bytes[2] = 32;
         bytes[3..35].copy_from_slice(&self.root);
-        bytes[35] = OP_CHECKWOTSACCOUNT;
+        bytes[35] = OP_CHECKPQACCOUNT;
         bytes
     }
 
@@ -62,7 +62,7 @@ impl AccountScript {
 
 /// The output naming the key-set root allowed to sign an account's next spend.
 ///
-/// Encoded as `0x01 v 0x14 A 0x20 K(n) 0x04 n OP_WOTSCONTROL`, with `n` little-endian.
+/// Encoded as `0x01 v 0x14 A 0x20 K(n) 0x04 n OP_PQCONTROL`, with `n` little-endian.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlOutput {
     /// Must be [`VERSION`] for a spend or creation to be valid.
@@ -96,7 +96,7 @@ impl ControlOutput {
             && bytes[2] == 20
             && bytes[23] == 32
             && bytes[56] == 4
-            && bytes[61] == OP_WOTSCONTROL)
+            && bytes[61] == OP_PQCONTROL)
             .then(|| Self {
                 version: bytes[1],
                 account: bytes[3..23].try_into().expect("fixed slice"),
@@ -116,7 +116,7 @@ impl ControlOutput {
         bytes[24..56].copy_from_slice(&self.root);
         bytes[56] = 4;
         bytes[57..61].copy_from_slice(&self.step.to_le_bytes());
-        bytes[61] = OP_WOTSCONTROL;
+        bytes[61] = OP_PQCONTROL;
         bytes
     }
 
