@@ -495,6 +495,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "808ac43170e95b11dd23d78aa9eaac5bea45776a602955552c4e833f3f0f823d"
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -768,8 +774,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
+ "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -3199,6 +3207,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "wots-plus"
+version = "0.1.0-rc1"
+source = "git+https://github.com/p0mvn/wots-plus?rev=e61767ce08b1f9042d50062584885aec0e1cdae6#e61767ce08b1f9042d50062584885aec0e1cdae6"
+dependencies = [
+ "rand_core 0.10.1",
+ "sha2 0.11.1",
+ "zeroize",
+]
+
+[[package]]
 name = "wyz"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3720,6 +3738,7 @@ dependencies = [
  "secp256k1",
  "sha2 0.10.9",
  "subtle",
+ "wots-plus",
  "zakura-address",
  "zakura-protocol",
  "zcash_script",
@@ -3756,8 +3775,7 @@ dependencies = [
 [[package]]
 name = "zcash_script"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10106859d08a2a4119af8a0fa8db72afe35647768b562f94b7a2124adad41275"
+source = "git+https://github.com/p0mvn/zcash_script?rev=ec914a0f99703ab033af37e241be9b59e095043b#ec914a0f99703ab033af37e241be9b59e095043b"
 dependencies = [
  "bip32",
  "bitflags 2.13.1",
