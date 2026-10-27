@@ -23,6 +23,7 @@ blake2b_simd = { version = "1", default-features = false }
 group = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], optional = true, default-features = false }
 jubjub = { workspace = true }
+sensei = { workspace = true, optional = true }
 pasta_curves = { workspace = true, optional = true, features = ["alloc"] }
 rand_core = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -39,6 +40,7 @@ rand_chacha = "0.10"
 
 [features]
 pallas-pasta = ["dep:pasta_curves"]
+pallas-sensei = ["dep:sensei"]
 alloc = ["hex", "jubjub/alloc"]
 default = ["std", "pallas-pasta"]
 nightly = []

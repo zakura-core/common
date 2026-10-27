@@ -68,6 +68,14 @@ only by `ebfull`, and their private publisher settings could not be inspected by
 that account. Sean must inspect and configure those crates. The current release
 selection is listed below; this list is documentation, not the workflow's input.
 
+- `zakura-bento-core`
+- `zakura-bento-macros`
+- `zakura-bento`
+- `zakura-udon`
+- `zakura-sensei-shared`
+- `zakura-sensei-artifacts`
+- `zakura-sensei-macros`
+- `zakura-sensei`
 - `zakura-protocol`
 - `zakura-pairing`
 - `zakura-equihash`
@@ -94,13 +102,14 @@ selection is listed below; this list is documentation, not the workflow's input.
 - `zakura-primitives`
 - `zakura-proofs`
 
-Cargo metadata currently selects 25 of the 33 workspace members. Bento, Bento
-Core, Bento Macros, Sensei, Sensei Artifacts, Sensei Macros, Sensei Shared, and
-Udon disable publication. New members and publishing policy changes are
-discovered automatically. Local dependencies must also allow crates.io
-publication; optional, target-specific, build, and development edges
-all participate in the dependency order. A cycle or excluded local dependency
-stops the plan. Cargo's full packaging verification checks version requirements.
+Cargo metadata currently selects all 33 workspace members. Sensei, Udon, Bento,
+and their implementation crates retain independent versions (Udon is `0.2.0`,
+the rest `0.1.0`), separate from the coordinated Common release.
+New members and publishing policy changes are discovered automatically. Local
+dependencies must also allow crates.io publication; optional, target-specific,
+build, and development edges all participate in the dependency order. A cycle
+or excluded local dependency stops the plan. Cargo's full packaging verification
+checks version requirements.
 
 ## Verify after merge
 

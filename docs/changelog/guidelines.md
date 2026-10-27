@@ -14,10 +14,12 @@ describe the crate's public API and observable behavior from a consumer's
 perspective; internal implementation details, refactors, and CI changes live
 in commit messages and pull requests instead.
 
-Workspace members with `publish = false`, including Udon and Bento, version
-independently and are excluded from Common's changelog checks and release
-assembly. PRs affecting only these unpublished crates still follow the
-fragment requirement below, using `<!-- changelog: none -->` with a reason.
+Workspace members with `publish = false` are excluded from Common's changelog
+checks and release assembly. PRs affecting only these unpublished crates still
+follow the fragment requirement below, using `<!-- changelog: none -->` with a
+reason. Sensei, Udon, Bento, and their implementation crates allow publication
+and participate in changelog checks while retaining their independent
+`0.1.0` package versions.
 
 ## Per-crate changelog structure
 
