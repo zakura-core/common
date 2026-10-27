@@ -145,7 +145,7 @@ zcash_keys = { package = "zakura-keys", version = "5.0.0", path = "crates/zcash_
 zcash_primitives = { package = "zakura-primitives", version = "5.0.0", path = "crates/zcash_primitives", default-features = false }
 zcash_protocol = { package = "zakura-protocol", version = "5.0.0", path = "crates/zcash_protocol", default-features = false }
 zcash_proofs = { package = "zakura-proofs", version = "5.0.0", path = "crates/zcash_proofs", default-features = false }
-zcash_script = { package = "zakura-zcash-script", version = "5.0.0", path = "crates/zcash_script", default-features = false }
+zcash_script = { package = "zakura-zcash-script", version = "0.0.1", path = "crates/zcash_script", default-features = false }
 transparent = { package = "zakura-transparent", version = "5.0.0", path = "crates/zcash_transparent", default-features = false }
 zip321 = { package = "zakura-zip321", version = "5.0.0", path = "crates/zip321", default-features = false }
 

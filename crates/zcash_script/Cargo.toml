@@ -1,7 +1,7 @@
 [package]
 name = "zakura-zcash-script"
 description = "Zcash transparent script parsing, building, and interpretation"
-version.workspace = true
+version = "0.0.1"
 authors = [
     "Electric Coin Company <info@electriccoin.co>",
     "Greg Pfeil <greg@technomadic.org>",

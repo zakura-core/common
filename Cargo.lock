@@ -3742,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-zcash-script"
-version = "5.0.0"
+version = "0.0.1"
 dependencies = [
  "bip32",
  "bitflags 2.13.1",
