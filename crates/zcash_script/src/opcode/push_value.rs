@@ -51,6 +51,9 @@ impl LargeValue {
     /// Returns a [`LargeValue`] as minimally-encoded as possible. That is, values that
     /// should be minimally-encoded as [`SmallValue`]s will be [`LargeValue`].
     pub(crate) fn from_slice(v: &[u8]) -> Option<LargeValue> {
+        if v.len() > Self::MAX_SIZE {
+            return None;
+        }
         if let Ok(bv) = BoundedVec::try_from(v.to_vec()) {
             Some(PushdataBytelength(bv))
         } else if let Ok(bv) = BoundedVec::try_from(v.to_vec()) {
@@ -194,23 +197,26 @@ impl LargeValue {
 }
 
 impl From<&LargeValue> for Vec<u8> {
+    /// Encodes the value the way [`LargeValue::parse`] reads it: the `OP_PUSHDATA*` opcode,
+    /// the length as an unsigned little-endian field of the width that opcode selects, then
+    /// the data. For `PushdataBytelength`, the single length byte is itself the opcode.
     fn from(value: &LargeValue) -> Self {
-        let to_vec = |prefix: Option<u8>, contents: &[u8]| {
-            prefix
-                .into_iter()
-                .chain(num::serialize(
-                    contents.len().try_into().expect("upper bound fits in i64"),
-                ))
-                .chain(contents.iter().copied())
-                .collect()
+        let (prefix, len_width, contents): (&[u8], usize, &[u8]) = match value {
+            PushdataBytelength(bv) => (&[], 1, bv.as_slice()),
+            OP_PUSHDATA1(bv) => (&[LargeValue::PUSHDATA1_BYTE], 1, bv.as_slice()),
+            OP_PUSHDATA2(bv) => (&[LargeValue::PUSHDATA2_BYTE], 2, bv.as_slice()),
+            OP_PUSHDATA4(bv) => (&[LargeValue::PUSHDATA4_BYTE], 4, bv.as_slice()),
         };
+        let len = u32::try_from(contents.len())
+            .expect("contents are at most `LargeValue::MAX_SIZE` bytes")
+            .to_le_bytes();
 
-        match value {
-            PushdataBytelength(bv) => to_vec(None, bv.as_slice()),
-            OP_PUSHDATA1(bv) => to_vec(Some(LargeValue::PUSHDATA1_BYTE), bv.as_slice()),
-            OP_PUSHDATA2(bv) => to_vec(Some(LargeValue::PUSHDATA2_BYTE), bv.as_slice()),
-            OP_PUSHDATA4(bv) => to_vec(Some(LargeValue::PUSHDATA4_BYTE), bv.as_slice()),
-        }
+        prefix
+            .iter()
+            .chain(&len[..len_width])
+            .chain(contents)
+            .copied()
+            .collect()
     }
 }
 
@@ -365,5 +371,106 @@ impl Asm for SmallValue {
             OP_16 => "16",
         }
         .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use super::LargeValue;
+    use crate::num;
+
+    /// Data whose bytes all differ from their neighbours, so a misplaced length field
+    /// shows up as different data rather than an identical shifted copy.
+    fn data(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// The encoding the parser accepts: the opcode, a `len_width`-byte unsigned
+    /// little-endian length (absent for direct pushes, whose opcode is the length), then
+    /// the data.
+    fn wire_encoding(opcode: Option<u8>, len_width: usize, contents: &[u8]) -> Vec<u8> {
+        let len = u32::try_from(contents.len()).unwrap().to_le_bytes();
+        match opcode {
+            None => [&len[..1], contents].concat(),
+            Some(op) => [&[op][..], &len[..len_width], contents].concat(),
+        }
+    }
+
+    /// The upstream `zcash_script` 0.6.0 encoder, which wrote lengths as script numbers.
+    fn legacy_encoding(value: &LargeValue) -> Vec<u8> {
+        let (prefix, contents) = match value {
+            LargeValue::PushdataBytelength(bv) => (None, bv.as_slice()),
+            LargeValue::OP_PUSHDATA1(bv) => (Some(LargeValue::PUSHDATA1_BYTE), bv.as_slice()),
+            LargeValue::OP_PUSHDATA2(bv) => (Some(LargeValue::PUSHDATA2_BYTE), bv.as_slice()),
+            LargeValue::OP_PUSHDATA4(bv) => (Some(LargeValue::PUSHDATA4_BYTE), bv.as_slice()),
+        };
+        prefix
+            .into_iter()
+            .chain(num::serialize(contents.len().try_into().unwrap()))
+            .chain(contents.iter().copied())
+            .collect()
+    }
+
+    /// Every push encoding a script can contain, including non-minimal ones (which
+    /// consensus accepts), parses and re-encodes to the same bytes.
+    #[test]
+    fn every_push_encoding_round_trips() {
+        let forms = [
+            (None, 1, 1..=0x4b),
+            (Some(LargeValue::PUSHDATA1_BYTE), 1, 0..=0xff),
+            (
+                Some(LargeValue::PUSHDATA2_BYTE),
+                2,
+                0..=LargeValue::MAX_SIZE,
+            ),
+            (
+                Some(LargeValue::PUSHDATA4_BYTE),
+                4,
+                0..=LargeValue::MAX_SIZE,
+            ),
+        ];
+        for (opcode, len_width, lens) in forms {
+            for len in lens {
+                let bytes = wire_encoding(opcode, len_width, &data(len));
+                let (parsed, rest) = LargeValue::parse(&bytes).expect("a push opcode");
+                let parsed = parsed.expect("a valid push");
+                assert!(rest.is_empty(), "{opcode:?} {len}: trailing bytes");
+                assert_eq!(parsed.value(), data(len), "{opcode:?} {len}: value");
+                assert_eq!(parsed.byte_len(), bytes.len(), "{opcode:?} {len}: byte_len");
+                assert_eq!(Vec::from(&parsed), bytes, "{opcode:?} {len}: re-encoding");
+            }
+        }
+    }
+
+    /// Values built by `push_value` encode the way the parser reads them, and differ from
+    /// the upstream encoder only for 128–255-byte pushes, where upstream added a sign
+    /// byte.
+    #[test]
+    fn minimal_pushes_change_only_for_128_to_255_bytes() {
+        for len in 1..=LargeValue::MAX_SIZE {
+            let value = LargeValue::from_slice(&data(len)).expect("at most 520 bytes");
+            let bytes = Vec::from(&value);
+            assert_eq!(
+                LargeValue::parse(&bytes).map(|(v, rest)| (v, rest.len())),
+                Some((Ok(value.clone()), 0)),
+                "{len}: does not round-trip"
+            );
+            assert_eq!(
+                bytes == legacy_encoding(&value),
+                !(128..=255).contains(&len),
+                "{len}: unexpected difference from the upstream encoding"
+            );
+        }
+    }
+
+    #[test]
+    fn from_slice_rejects_values_over_520_bytes() {
+        assert!(LargeValue::from_slice(&data(LargeValue::MAX_SIZE)).is_some());
+        assert_eq!(
+            LargeValue::from_slice(&data(LargeValue::MAX_SIZE + 1)),
+            None
+        );
     }
 }
