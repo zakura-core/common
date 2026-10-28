@@ -166,6 +166,14 @@ opt-level = 3
 [profile.test.package.equihash]
 opt-level = 3
 
+# Experimental post-quantum account signatures: key generation hashes a 2^10-leaf
+# subtree per key, which takes seconds per key set when unoptimized.
+[profile.test.package.sphincs]
+opt-level = 3
+
+[profile.test.package.sha256]
+opt-level = 3
+
 # Field, curve, and proof-system arithmetic dominates unoptimized test runs
 # of these crates and of everything built on them. Optimizing only these
 # packages keeps the test profile's assertions and overflow checks, as above,

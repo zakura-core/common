@@ -21,6 +21,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 blake2b_simd = { version = "1", default-features = false, optional = true }
 wots-plus = { version = "0.1.0-rc1", git = "https://github.com/p0mvn/pq-crypto", rev = "e61767ce08b1f9042d50062584885aec0e1cdae6", optional = true }
+sphincs = { version = "0.1.0", git = "https://github.com/TomWambsgans/sphincs.art", rev = "f181496415205c2958f0813544ee3027d643f4f0", optional = true }
 zcash_address.workspace = true
 zcash_protocol.workspace = true
 zip32 = { version = "0.2", default-features = false, optional = true }
@@ -44,7 +45,7 @@ zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
 # Regtest-only post-quantum accounts; not a wallet lifecycle API.
-experimental-pq-transparent = ["std", "dep:wots-plus", "dep:blake2b_simd"]
+experimental-pq-transparent = ["std", "dep:wots-plus", "dep:sphincs", "dep:blake2b_simd"]
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32"]
 default = ["wallet", "std", "pczt"]

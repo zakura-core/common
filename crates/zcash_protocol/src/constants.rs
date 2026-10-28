@@ -11,6 +11,11 @@ pub mod testnet;
 // before enabling WOTS on a public network.
 pub const WOTS_KEY_COMMITMENT_DOMAIN: &[u8] = b"Zcash/WOTS/key/v1";
 
+/// Domain separator for experimental leanSphincs public-key commitments.
+///
+/// The committed encoding is the tree root followed by the public parameter.
+pub const SPHINCS_KEY_COMMITMENT_DOMAIN: &[u8] = b"Zcash/SPHINCS/key/v1";
+
 /// Domain separator for the Merkle nodes committing to one account step's spare keys.
 pub const PQ_KEY_SET_NODE_DOMAIN: &[u8] = b"Zcash/PQ/node/v1";
 

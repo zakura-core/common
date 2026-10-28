@@ -96,8 +96,8 @@ fn key_set_roots_match_known_answers_and_every_spare_proves_membership() {
     let keys = keys(0);
     assert_eq!(
         hex::encode(keys.root()),
-        "17e11db887209c0627934b29357ef4ebbb2185c97f9b8a38ddcdcb9bc97acca4",
-        "derivation, leaf or node hashing changed; this pins the WOTS+ keys"
+        "38d8269fcaf4d52650cc2fc938177b2cae8b2cf4f74503b2b069fccfc6ff00a1",
+        "derivation, leaf or node hashing changed; this pins the scheme's keys"
     );
     for spare in 0..4 {
         let leaf = leaf_commit(keys.key(spare).unwrap());
@@ -141,9 +141,9 @@ fn script_signature_sizes_match_their_constants() {
         SIGNING_DEPOSIT_SCRIPT_SIG_SIZE
     );
     assert_eq!(covered_sig().len(), COVERED_DEPOSIT_SCRIPT_SIG_SIZE);
-    // The WOTS+ witness is 2176 bytes.
-    assert_eq!(CONTROL_SCRIPT_SIG_SIZE, 2257);
-    assert_eq!(input_size(CONTROL_SCRIPT_SIG_SIZE), 2300);
+    // The leanSphincs witness is 4244 bytes: the public key and the signature.
+    assert_eq!(CONTROL_SCRIPT_SIG_SIZE, 4337);
+    assert_eq!(input_size(CONTROL_SCRIPT_SIG_SIZE), 4380);
 }
 
 #[test]
@@ -338,10 +338,10 @@ fn the_scheme_recovers_only_the_signing_key() {
     let public = Scheme::public_key(&key);
     let witness = Scheme::sign(key, &[7; 32]);
     assert_eq!(witness.len(), Scheme::WITNESS_BYTES);
-    assert_eq!(Scheme::recover(&[7; 32], &witness), Some(public.clone()));
-    assert_ne!(Scheme::recover(&[8; 32], &witness), Some(public.clone()));
+    assert_eq!(Scheme::recover(&[7; 32], &witness).as_ref(), Some(&public));
+    assert_ne!(Scheme::recover(&[8; 32], &witness).as_ref(), Some(&public));
     let mut tampered = witness.clone();
     tampered[0] ^= 1;
-    assert_ne!(Scheme::recover(&[7; 32], &tampered), Some(public));
+    assert_ne!(Scheme::recover(&[7; 32], &tampered).as_ref(), Some(&public));
     assert_eq!(Scheme::recover(&[7; 32], &witness[1..]), None);
 }
