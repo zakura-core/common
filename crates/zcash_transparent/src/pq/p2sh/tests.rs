@@ -211,11 +211,13 @@ fn pq_arguments_and_redeem_script_use_larger_bounds_after_authentication() {
 
 #[test]
 fn full_input_bounds_include_final_script_and_its_push() {
-    let redeem = redeem_script(&Code(vec![0x75, 0x75, 0x75, 0x51])).unwrap();
-    let mut args = push(&vec![1; pq::MAX_PUSH_BYTES]);
-    args.extend_from_slice(&push(&vec![1; pq::MAX_PUSH_BYTES]));
-    let remaining = pq::MAX_INPUT_BYTES - args.len() - 3 - push(&redeem.0).len();
-    args.extend_from_slice(&push(&vec![1; remaining]));
+    let redeem = redeem_script(&Code(vec![0x51])).unwrap();
+    let mut args = Vec::new();
+    let target = pq::MAX_INPUT_BYTES - push(&redeem.0).len();
+    while args.len() + pq::MAX_PUSH_BYTES + 3 < target {
+        args.extend(push(&vec![1; pq::MAX_PUSH_BYTES]));
+    }
+    args.extend(push(&vec![1; target - args.len() - 3]));
     let mut spend = raw(&args, &redeem.0);
     assert_eq!(spend.sig.0.len(), pq::MAX_INPUT_BYTES);
     assert_eq!(check(&spend), Ok(true));
@@ -254,7 +256,7 @@ fn preliminary_scan_rejects_malformed_input_without_executing_it() {
 }
 
 #[test]
-fn callback_receives_complete_redeem_script_and_failed_checks_consume_budget() {
+fn callback_receives_complete_redeem_script_for_each_failed_check() {
     let mut body = vec![0x76, 0x30]; // DUP argument; push key
     body.extend_from_slice(&[0; super::super::PUBLIC_KEY_BYTES]);
     body.extend_from_slice(&[0xac, 0x75, 0x30]); // CHECKSIG DROP; push key
@@ -275,15 +277,75 @@ fn callback_receives_complete_redeem_script_and_failed_checks_consume_budget() {
         lock_time: 0,
         is_final: false,
     };
-    assert!(matches!(
-        verify_spend(&spend, flags(), &checker),
-        Err(Error::Pq(pq::Error::Script(script::Error::Interpreter(
-            _,
-            InterpreterError::PqSignatureBudget
-        ))))
-    ));
-    assert_eq!(calls.get(), 1);
+    assert_eq!(verify_spend(&spend, flags(), &checker), Ok(false));
+    assert_eq!(calls.get(), 2);
     let mut changed = spend;
     changed.pub_key.0[2] ^= 1;
     assert_eq!(check(&changed), Err(Error::CommitmentMismatch));
+}
+
+#[test]
+fn shared_operation_limit_charges_failed_multisig_matches_before_verifying() {
+    // Every CHECKMULTISIG costs its own operation plus twenty keys; DROP costs
+    // one more. Nine groups fit at 198 operations, the tenth must abort before
+    // requesting any further digests, even though every signature check fails.
+    for groups in [9, 10] {
+        let mut body = Vec::new();
+        let mut arguments = Vec::new();
+        let mut signature = vec![0; super::super::SIGNATURE_BYTES];
+        signature.push(1);
+        for _ in 0..groups {
+            arguments.push(0);
+            arguments.extend(push(&signature));
+            body.push(0x51); // one required signature
+            for _ in 0..20 {
+                body.push(48);
+                body.extend([0; 48]);
+            }
+            body.extend([1, 20, 0xae, 0x75]); // twenty keys, CHECKMULTISIG DROP
+        }
+        body.push(0x51);
+        let redeem = redeem_script(&Code(body)).unwrap();
+        let calls = core::cell::Cell::new(0);
+        let sighash = |_: &Code, _: &zcash_script::signature::HashType| {
+            calls.set(calls.get() + 1);
+            None // Failed checks still consume the multisig operation allowance.
+        };
+        let transaction = CallbackTransactionSignatureChecker {
+            sighash: &sighash,
+            lock_time: 0,
+            is_final: false,
+        };
+        let result = verify_spend(&raw(&arguments, &redeem.0), flags(), &transaction);
+        if groups == 9 {
+            assert_eq!(result, Ok(true));
+        } else {
+            assert!(matches!(
+                result,
+                Err(Error::Pq(pq::Error::Script(script::Error::Interpreter(
+                    _,
+                    InterpreterError::OpCount
+                ))))
+            ));
+        }
+        assert_eq!(calls.get(), 180);
+    }
+}
+
+#[test]
+fn multisig_rejects_more_than_twenty_keys_before_requesting_a_digest() {
+    let mut body = vec![0];
+    for _ in 0..21 {
+        body.push(48);
+        body.extend([0; 48]);
+    }
+    body.extend([1, 21, 0xae]);
+    let redeem = redeem_script(&Code(body)).unwrap();
+    assert!(matches!(
+        check(&raw(&[0], &redeem.0)),
+        Err(Error::Pq(pq::Error::Script(script::Error::Interpreter(
+            _,
+            InterpreterError::PubKeyCount(_)
+        ))))
+    ));
 }

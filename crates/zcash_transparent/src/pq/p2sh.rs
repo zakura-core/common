@@ -112,8 +112,8 @@ pub fn redeem_script(body: &Code) -> Result<Code, Error> {
 /// For ordinary legacy redeem scripts, preliminary parsing can change error
 /// reporting but not acceptance.
 ///
-/// PQ mode uses its fixed harness rules (including absolute locktimes and one
-/// verification attempt); `legacy_flags` do not define PQ relay-policy rules.
+/// PQ mode uses its fixed harness rules (including absolute locktimes and the shared
+/// operation-count limit); `legacy_flags` do not define PQ relay-policy rules.
 /// The digest callback receives the complete authenticated redeem script, while
 /// only its body executes. For v5, the retained digest commits to the previous
 /// P2SH scriptPubKey, hence indirectly to the identifier and body through HASH160.

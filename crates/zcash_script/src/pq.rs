@@ -7,7 +7,7 @@
 //!
 //! Only the push-only input has larger items. The spending program uses the existing
 //! opcode parser and shared execution loop. These provisional harness limits are not proposed
-//! consensus limits; multisigner/resource qualification is a later increment.
+//! consensus limits; transaction/block work and relay qualification remain separate.
 
 use alloc::vec::Vec;
 
@@ -16,12 +16,14 @@ use crate::{
     script,
 };
 
-/// Enough for two signature arguments and small auxiliary arguments in the harness.
-pub const MAX_INPUT_BYTES: usize = 32 * 1024;
+/// Provisional serialized authorization bound, including pushes and the P2SH redeem
+/// script. Accommodates 20 full signatures and multiple checking instructions; it
+/// is a byte bound, not a signature-count limit or a final consensus parameter.
+pub const MAX_INPUT_BYTES: usize = 512 * 1024;
 /// One SLH-DSA-SHA2-192s signature and its one-byte signing-mode selector.
 pub const MAX_PUSH_BYTES: usize = 16_225;
 /// Combined primary and alternate stack payload bytes, checked after every opcode.
-pub const MAX_STACK_BYTES: usize = 64 * 1024;
+pub const MAX_STACK_BYTES: usize = 1024 * 1024;
 /// Spending scripts retain the existing script-size bound.
 pub const MAX_SCRIPT_BYTES: usize = script::Code::MAX_SIZE;
 
@@ -309,9 +311,71 @@ mod tests {
     }
 
     #[test]
-    fn additional_stack_byte_limit_applies_only_to_pq_and_stops_at_the_crossing_instruction() {
-        let input = push(520);
-        let mut program = vec![0x76; 125]; // 126 items total: 65,520 bytes fit.
+    fn shared_signature_operation_budget_stops_before_the_extra_check() {
+        struct CountingChecker(core::cell::Cell<usize>);
+        impl interpreter::SignatureChecker for CountingChecker {
+            fn check_signature(
+                &self,
+                _: &[u8],
+                _: &[u8],
+                _: Flags,
+                _: &script::Code,
+            ) -> Result<bool, interpreter::Error> {
+                self.0.set(self.0.get() + 1);
+                Ok(true)
+            }
+            fn check_sig(&self, _: &crate::signature::Decoded, _: &[u8], _: &script::Code) -> bool {
+                unreachable!()
+            }
+            fn check_lock_time(&self, _: i64) -> bool {
+                unreachable!()
+            }
+        }
+        for count in [201, 202] {
+            let checker = CountingChecker(core::cell::Cell::new(0));
+            let code = script::Code([0, 0, 0xac].repeat(count));
+            let result = eval_script(&[], &code, &checker);
+            if count == 201 {
+                assert_eq!(result, Ok(true));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::Script(script::Error::Interpreter(
+                        _,
+                        interpreter::Error::OpCount
+                    )))
+                ));
+            }
+            assert_eq!(checker.0.get(), 201);
+        }
+    }
+
+    #[test]
+    fn complete_serialized_input_fits_at_the_byte_boundary() {
+        let mut input = Vec::new();
+        while input.len() + MAX_PUSH_BYTES + 5 < MAX_INPUT_BYTES {
+            input.extend(push(MAX_PUSH_BYTES));
+        }
+        input.extend(push(MAX_INPUT_BYTES - input.len() - 5));
+        assert_eq!(input.len(), MAX_INPUT_BYTES);
+        assert!(SpendingInput::scan(&input).unwrap().pq_arguments().is_ok());
+        assert_eq!(
+            eval_script(&input, &script::Code(vec![0x51]), &NullSignatureChecker()),
+            Ok(true)
+        );
+        input.push(0);
+        assert!(matches!(SpendingInput::scan(&input), Err(Error::InputSize)));
+        assert_eq!(
+            eval_script(&input, &script::Code(vec![0x51]), &NullSignatureChecker()),
+            Err(Error::InputSize)
+        );
+    }
+
+    #[test]
+    fn additional_stack_byte_limit_counts_main_and_alternate_payloads() {
+        let input = push(MAX_PUSH_BYTES);
+        let copies = MAX_STACK_BYTES / MAX_PUSH_BYTES;
+        let mut program = vec![0x76; copies - 1]; // DUP up to the byte bound.
         assert_eq!(
             eval_script(
                 &input,
@@ -320,14 +384,8 @@ mod tests {
             ),
             Ok(true)
         );
-        program.push(0x76); // One more DUP exceeds the PQ byte bound.
-        let legacy = script::Raw::from_raw_parts(input.clone(), program.clone());
-        assert_eq!(
-            legacy.eval(Flags::CHECKLOCKTIMEVERIFY, &NullSignatureChecker()),
-            Ok(true)
-        );
-        // The memory error must precede the later OP_RETURN failure.
-        program.push(0x6a);
+        program.push(0x6b); // TOALTSTACK must not free the payload budget.
+        program.extend_from_slice(&[0x76, 0x6a]); // DUP crosses the bound before RETURN.
         assert!(matches!(
             eval_script(&input, &script::Code(program), &NullSignatureChecker()),
             Err(Error::Script(script::Error::Interpreter(
@@ -335,25 +393,13 @@ mod tests {
                 interpreter::Error::StackBytes
             )))
         ));
-    }
-
-    #[test]
-    fn stack_bound_includes_duplicates_and_alternate_stack() {
-        let input = push(MAX_PUSH_BYTES);
-        // Four copies fit. Moving one to the alternate stack must not free its budget.
-        let program = script::Code(vec![0x76, 0x76, 0x76, 0x6b, 0x76]);
-        assert!(matches!(
-            eval_script(&input, &program, &NullSignatureChecker()),
-            Err(Error::Script(script::Error::Interpreter(
-                _,
-                interpreter::Error::StackBytes
-            )))
-        ));
-        let program = script::Code(vec![0x76, 0x76, 0x76]);
-        assert_eq!(
-            eval_script(&input, &program, &NullSignatureChecker()),
-            Ok(true)
+        assert!(
+            eval_script(
+                &vec![0; 1001],
+                &script::Code(vec![0x51]),
+                &NullSignatureChecker()
+            )
+            .is_err()
         );
-        assert!(eval_script(&vec![0; 1001], &program, &NullSignatureChecker()).is_err());
     }
 }

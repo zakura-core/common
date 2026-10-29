@@ -79,11 +79,6 @@ pub enum Error {
     #[error("invalid PQ signature length")]
     PqSignatureSize,
 
-    /// The single-signer harness permits one cryptographic verification attempt.
-    #[cfg(feature = "pq")]
-    #[error("PQ signature verification budget exhausted")]
-    PqSignatureBudget,
-
     /// The PQ evaluator bounds bytes as well as the legacy item count.
     #[cfg(feature = "pq")]
     #[error("PQ script stack byte limit exceeded")]

@@ -1,4 +1,4 @@
-//! Library-level single-signer PQ script execution.
+//! Library-level PQ script execution with existing multisig matching.
 //!
 //! The caller authenticates the spending script, selects this path explicitly, and
 //! supplies the real transaction digest callback. The context is also caller-supplied:
@@ -7,8 +7,6 @@
 //! (including SINGLE's corresponding output) remain the digest callback's responsibility.
 //! Use [`super::p2sh::verify_spend`] to authenticate a P2SH redeem script before
 //! selecting PQ execution and its fixed context.
-
-use core::cell::Cell;
 
 use zcash_script::{
     interpreter::{CallbackTransactionSignatureChecker, Error, Flags, SignatureChecker},
@@ -19,12 +17,11 @@ use zcash_script::{
 
 use super::{PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 
-// Keep this private: callers must enter through verify_script, which resets the
-// attempt budget and selects the bounded PQ parser and evaluator together.
+// Keep this private: callers enter through verify_script, which selects the
+// bounded PQ parser and shared evaluator together.
 struct Checker<'a, 'tx> {
     transaction: &'a CallbackTransactionSignatureChecker<'tx>,
     context: &'a [u8],
-    attempted: Cell<bool>,
 }
 
 impl SignatureChecker for Checker<'_, '_> {
@@ -48,9 +45,6 @@ impl SignatureChecker for Checker<'_, '_> {
         }
         let hash_type = HashType::from_bits(i32::from(argument[SIGNATURE_BYTES]), true)
             .map_err(|e| Error::from(signature::Error::from(e)))?;
-        if self.attempted.replace(true) {
-            return Err(Error::PqSignatureBudget);
-        }
         let Some(digest) = (self.transaction.sighash)(program, &hash_type) else {
             return Ok(false);
         };
@@ -73,12 +67,14 @@ impl SignatureChecker for Checker<'_, '_> {
     }
 }
 
-/// Executes a supplied script using SLH-DSA and at most one verification attempt.
+/// Executes a supplied script using SLH-DSA and the shared operation-count limit.
 ///
 /// This library-only harness parses actual serialized input pushes and runs existing
 /// script opcodes, including CHECKSIG and CHECKSIGVERIFY. It does not authenticate an
-/// output commitment, activate PQ transactions, or qualify multisig spending. Its
-/// one-attempt limit counts unsuccessful checks too, including multisig key matches.
+/// output commitment or activate PQ transactions. CHECKSIG consumes an operation;
+/// multisig additionally charges its key count before matching, bounding failed
+/// matches as well as successful checks. Aggregate transaction/block work limits
+/// and relay policy still require qualification.
 /// The private verifier cannot be passed to a legacy evaluator by callers.
 ///
 /// Malformed nonempty signatures, keys, and selectors abort. A cryptographically
@@ -98,7 +94,6 @@ pub fn verify_script(
         &Checker {
             transaction,
             context,
-            attempted: Cell::new(false),
         },
     )
 }
