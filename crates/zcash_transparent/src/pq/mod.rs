@@ -1,9 +1,10 @@
 //! Standalone SLH-DSA-SHA2-192s primitives, backed by RustCrypto's `slh-dsa`.
 //!
-//! This experimental module implements deterministic Pure SLH-DSA as specified in
+//! This module implements deterministic Pure SLH-DSA as specified in
 //! [FIPS 205](https://doi.org/10.6028/NIST.FIPS.205). The message and context are supplied
 //! by the caller; no transaction digest, wallet derivation, authorization encoding,
-//! address format, or script behavior is defined here. This is not HashSLH-DSA.
+//! or address format is defined by these primitives. The separate [`script`] module
+//! provides a library-only script harness. This is not HashSLH-DSA.
 //!
 //! Verification authenticates the message only relative to the supplied public key.
 //! The caller must authenticate that key and choose the message and context that bind
@@ -12,6 +13,8 @@
 use alloc::vec::Vec;
 
 use slh_dsa::Sha2_192s;
+
+pub mod script;
 
 /// A malformed encoding, overlong context, or invalid signature.
 pub use slh_dsa::signature::Error;

@@ -74,6 +74,21 @@ pub enum Error {
     #[error("public key type error")]
     PubKeyType,
 
+    /// PQ encodings have a fixed signature size.
+    #[cfg(feature = "pq")]
+    #[error("invalid PQ signature length")]
+    PqSignatureSize,
+
+    /// The single-signer harness permits one cryptographic verification attempt.
+    #[cfg(feature = "pq")]
+    #[error("PQ signature verification budget exhausted")]
+    PqSignatureBudget,
+
+    /// The PQ evaluator bounds bytes as well as the legacy item count.
+    #[cfg(feature = "pq")]
+    #[error("PQ script stack byte limit exceeded")]
+    StackBytes,
+
     // softfork safeness
     #[error("discouraged upgradable NOP encountered")]
     DiscourageUpgradableNOPs,
@@ -183,6 +198,22 @@ bitflags::bitflags! {
 
 /// This verifies that a signature is correct for the given pubkey and script code.
 pub trait SignatureChecker {
+    /// Decode and check a signature argument under this checker's rules.
+    ///
+    /// The default preserves legacy ECDSA decoding, encoding errors, and verification
+    /// order. Alternative implementations must be selected by trusted validation
+    /// context, never by script arguments. This does not select parsing limits or
+    /// activate a new output type.
+    fn check_signature(
+        &self,
+        signature: &[u8],
+        public_key: &[u8],
+        flags: Flags,
+        script_code: &script::Code,
+    ) -> Result<bool, Error> {
+        crate::opcode::Operation::is_sig_valid(signature, public_key, flags, script_code, self)
+    }
+
     /// Check that the signature is valid.
     fn check_sig(
         &self,
@@ -431,6 +462,15 @@ impl State {
     /// Extract the altstack from the state.
     pub(crate) fn altstack(&self) -> &Stack<Vec<u8>> {
         &self.altstack
+    }
+
+    #[cfg(feature = "pq")]
+    pub(crate) fn check_stack_bytes(&self, limit: usize) -> Result<(), Error> {
+        let mut remaining = limit;
+        for item in self.stack.iter().chain(self.altstack.iter()) {
+            remaining = remaining.checked_sub(item.len()).ok_or(Error::StackBytes)?;
+        }
+        Ok(())
     }
 }
 

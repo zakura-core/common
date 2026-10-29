@@ -1,5 +1,8 @@
 use proptest::prelude::*;
 
+#[cfg(all(test, feature = "pq"))]
+mod pq;
+
 #[cfg(test)]
 use {
     crate::transaction::{
