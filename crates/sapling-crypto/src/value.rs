@@ -130,8 +130,10 @@ impl ValueCommitTrapdoor {
 ///   [`NoteValue`] and [`ValueCommitTrapdoor`] are zero. However, the only constructor
 ///   available for `ValueCommitTrapdoor` is [`ValueCommitTrapdoor::random`], which will
 ///   produce zero with negligible probability (assuming a non-broken PRNG).
-/// - [`ValueCommitment::from_bytes_not_small_order`] enforces this by definition, and is
-///   the only constructor that can be used with data received over the network.
+/// - [`ValueCommitment::from_bytes_not_small_order`] enforces this by definition.
+/// - Data received over the network may also be wrapped with
+///   [`ValueCommitment::from_bytes_unvalidated`] (transaction parsing does this), but must
+///   then pass [`ValueCommitment::try_point`] before it is used as a point.
 ///
 /// # Representation
 ///
@@ -200,16 +202,6 @@ impl ValueCommitment {
             .and_then(|cv| CtOption::new(cv, !cv.is_small_order()))
     }
 
-    /// The point of a value commitment this crate derived itself.
-    ///
-    /// [`ValueCommitment::derive`] only yields a small-order point when both the value and
-    /// the trapdoor are zero, which a random trapdoor makes negligible; this is for the
-    /// builder's and the PCZT finalizer's own commitments, never for parsed ones.
-    pub(crate) fn derived_point(&self) -> jubjub::ExtendedPoint {
-        self.try_point()
-            .expect("a value commitment derived by this crate is a valid point")
-    }
-
     /// Serializes this value commitment to its canonical byte representation.
     pub fn to_bytes(&self) -> [u8; 32] {
         self.bytes
@@ -267,12 +259,146 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use proptest::prelude::*;
 
+    use ff::{Field, PrimeField};
+    use group::GroupEncoding;
+
     use super::{
-        BalanceError, CommitmentSum, TrapdoorSum, ValueCommitment, ValueSum,
+        BalanceError, CommitmentSum, NoteValue, TrapdoorSum, ValueCommitTrapdoor, ValueCommitment,
+        ValueSum,
         testing::{arb_note_value_bounded, arb_trapdoor},
     };
+
+    /// The rule transaction parsing applied before value commitments were held as bytes: a
+    /// canonical (ZIP 216) encoding of a Jubjub point that is not of small order.
+    fn parse_time_rule(bytes: [u8; 32]) -> bool {
+        Option::<jubjub::AffinePoint>::from(jubjub::AffinePoint::from_bytes(bytes))
+            .is_some_and(|p| !bool::from(jubjub::ExtendedPoint::from(p).is_small_order()))
+    }
+
+    /// The little-endian encoding of a field's modulus.
+    fn modulus<F: PrimeField<Repr = [u8; 32]>>() -> [u8; 32] {
+        add_le(&(-F::ONE).to_repr(), 1)
+    }
+
+    fn add_le(bytes: &[u8; 32], mut carry: u16) -> [u8; 32] {
+        let mut out = *bytes;
+        for b in out.iter_mut() {
+            let sum = u16::from(*b) + carry;
+            *b = sum as u8;
+            carry = sum >> 8;
+        }
+        out
+    }
+
+    /// The eight points of Jubjub's torsion subgroup, as `[r]P` for points `P` decoded from
+    /// successive encodings, where `r` is the order of the prime-order subgroup.
+    fn small_order_points() -> Vec<jubjub::ExtendedPoint> {
+        let r = modulus::<jubjub::Fr>();
+        let mut points: Vec<jubjub::ExtendedPoint> = Vec::new();
+        for v in 0u8..=255 {
+            let mut bytes = [0u8; 32];
+            bytes[0] = v;
+            let Some(p) =
+                Option::<jubjub::AffinePoint>::from(jubjub::AffinePoint::from_bytes(bytes))
+            else {
+                continue;
+            };
+            let p = jubjub::ExtendedPoint::from(p);
+            let mut torsion = jubjub::ExtendedPoint::identity();
+            for bit in (0..256).rev().map(|i| (r[i / 8] >> (i % 8)) & 1 == 1) {
+                torsion = torsion.double();
+                if bit {
+                    torsion += p;
+                }
+            }
+            if !points.contains(&torsion) {
+                points.push(torsion);
+            }
+            if points.len() == 8 {
+                return points;
+            }
+        }
+        panic!("found only {} small-order points", points.len());
+    }
+
+    /// `try_point` accepts exactly the encodings that parsing used to accept, and a value
+    /// commitment keeps the bytes it was given.
+    #[test]
+    fn try_point_matches_the_parse_time_rule() {
+        let small_order = small_order_points();
+        let identity = jubjub::ExtendedPoint::identity().to_bytes();
+        let minus_one = (-jubjub::Fq::ONE).to_repr();
+        assert!(small_order.iter().any(|p| p.to_bytes() == identity));
+        assert!(small_order.iter().any(|p| p.to_bytes() == minus_one));
+
+        let with_sign = |mut b: [u8; 32]| {
+            b[31] |= 0x80;
+            b
+        };
+        let q = modulus::<jubjub::Fq>();
+
+        let mut invalid = small_order.iter().map(|p| p.to_bytes()).collect::<Vec<_>>();
+        // The ZIP 216 non-canonical encodings of (0, 1) and (0, -1).
+        invalid.push(with_sign(identity));
+        invalid.push(with_sign(minus_one));
+        // `v` at or beyond the field modulus.
+        invalid.push(q);
+        invalid.push(add_le(&q, 1));
+        invalid.push(with_sign(q));
+        invalid.push([0xff; 32]);
+        // Field elements that are the `v` of no curve point.
+        invalid.extend(
+            (2u8..=255)
+                .map(|v| {
+                    let mut b = [0u8; 32];
+                    b[0] = v;
+                    b
+                })
+                .filter(|b| bool::from(jubjub::AffinePoint::from_bytes(*b).is_none()))
+                .take(5),
+        );
+        assert_eq!(invalid.len(), 8 + 2 + 4 + 5);
+
+        let mut rcv = jubjub::Fr::from(0x9e37_79b9_7f4a_7c15);
+        let valid = (0u64..300)
+            .map(|i| {
+                rcv = rcv.square() + jubjub::Fr::ONE;
+                ValueCommitment::derive(NoteValue(i * 1_000_003), ValueCommitTrapdoor(rcv))
+                    .to_bytes()
+            })
+            .collect::<Vec<_>>();
+
+        for (bytes, expected) in invalid
+            .iter()
+            .map(|b| (b, false))
+            .chain(valid.iter().map(|b| (b, true)))
+        {
+            let cv = ValueCommitment::from_bytes_unvalidated(*bytes);
+            let point = cv.try_point();
+            assert_eq!(bool::from(point.is_some()), parse_time_rule(*bytes));
+            assert_eq!(bool::from(point.is_some()), expected);
+            assert_eq!(
+                bool::from(ValueCommitment::from_bytes_not_small_order(bytes).is_some()),
+                expected
+            );
+            assert_eq!(cv.to_bytes(), *bytes);
+            if expected {
+                assert_eq!(point.unwrap().to_bytes(), *bytes);
+            }
+        }
+
+        // Small-order points are on the curve; only the small-order rule rejects them.
+        for p in &small_order {
+            assert!(bool::from(p.is_small_order()));
+            assert!(bool::from(
+                jubjub::AffinePoint::from_bytes(p.to_bytes()).is_some()
+            ));
+        }
+    }
 
     proptest! {
         #[test]
@@ -296,10 +422,12 @@ mod tests {
                 .sum::<TrapdoorSum>()
                 .into_bsk();
 
-            let bvk = values
+            let cvs = values
                 .into_iter()
                 .map(|(value, rcv)| ValueCommitment::derive(value, rcv))
-                .sum::<CommitmentSum>()
+                .collect::<Vec<_>>();
+            let bvk = CommitmentSum::try_sum(&cvs)
+                .expect("derived commitments are valid points")
                 .into_bvk(value_balance);
 
             assert_eq!(redjubjub::VerificationKey::from(&bsk), bvk);
