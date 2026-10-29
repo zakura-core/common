@@ -1152,3 +1152,155 @@ fn zip_0244() {
         );
     }
 }
+
+/// Replaces the single occurrence of `old` in `data` with `new`.
+#[cfg(test)]
+fn replace_once(data: &[u8], old: &[u8; 32], new: &[u8; 32]) -> Vec<u8> {
+    let positions = data
+        .windows(32)
+        .enumerate()
+        .filter(|(_, w)| w == old)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert_eq!(positions.len(), 1, "the 32 bytes occur exactly once");
+    let mut out = data.to_vec();
+    out[positions[0]..positions[0] + 32].copy_from_slice(new);
+    out
+}
+
+/// A Sapling `cv` that is not a valid, non-small-order point no longer fails to parse.
+/// Parsing keeps the bytes, and verification rejects them, without panicking anywhere.
+#[test]
+fn invalid_sapling_value_commitments_parse_and_fail_verification() {
+    use bellman::groth16::Proof;
+    use sapling::{
+        BatchValidator, SaplingVerificationContext, circuit::pinned_verifying_keys,
+        value::CommitmentSum,
+    };
+
+    use crate::transaction::sighash_v4::v4_signature_hash;
+
+    let (spend_vk, output_vk) = pinned_verifying_keys();
+    let spend_pvk = spend_vk.prepare();
+    let output_pvk = output_vk.prepare();
+
+    // Reads a Canopy transaction and checks it round-trips, returning it and its sighash.
+    let read = |data: &[u8]| {
+        let tx = Transaction::read(data, BranchId::Canopy).unwrap();
+        let mut encoded = Vec::with_capacity(data.len());
+        tx.write(&mut encoded).unwrap();
+        assert_eq!(data, &encoded[..]);
+        let sighash: [u8; 32] = v4_signature_hash(tx.deref(), &SignableInput::Shielded)
+            .as_ref()
+            .try_into()
+            .unwrap();
+        (tx, sighash)
+    };
+    // Runs every Sapling check reachable for the bundle: the batch validator, the single
+    // verifier for each spend and output, and `try_sum` over all the commitments.
+    let verify = |tx: &Transaction, sighash: [u8; 32]| {
+        let bundle = tx.sapling_bundle().unwrap();
+
+        let mut batch = BatchValidator::new();
+        let batch_ok = batch.check_bundle(bundle.clone(), sighash)
+            && batch.validate(spend_vk, output_vk, rand::rng());
+
+        let mut ctx = SaplingVerificationContext::new();
+        let spends_ok = bundle
+            .shielded_spends()
+            .iter()
+            .map(|spend| {
+                ctx.check_spend(
+                    spend.cv(),
+                    *spend.anchor(),
+                    &spend.nullifier().0,
+                    *spend.rk(),
+                    &sighash,
+                    *spend.spend_auth_sig(),
+                    Proof::read(&spend.zkproof()[..]).unwrap(),
+                    &spend_pvk,
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs_ok = bundle
+            .shielded_outputs()
+            .iter()
+            .map(|output| {
+                ctx.check_output(
+                    output.cv(),
+                    *output.cmu(),
+                    jubjub::AffinePoint::from_bytes(output.ephemeral_key().0)
+                        .unwrap()
+                        .into(),
+                    Proof::read(&output.zkproof()[..]).unwrap(),
+                    &output_pvk,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let cvs = bundle
+            .shielded_spends()
+            .iter()
+            .map(|spend| spend.cv())
+            .chain(bundle.shielded_outputs().iter().map(|output| output.cv()));
+        let sum_ok = CommitmentSum::try_sum(cvs).is_some();
+
+        (batch_ok, spends_ok, outputs_ok, sum_ok)
+    };
+
+    let data = &hex::decode(self::data::sapling_spend_output::TX_HEX.concat()).unwrap()[..];
+    let (tx, sighash) = read(data);
+    assert_eq!(
+        format!("{}", tx.txid()),
+        self::data::sapling_spend_output::TXID
+    );
+    let bundle = tx.sapling_bundle().unwrap();
+    assert!(!bundle.shielded_spends().is_empty());
+    assert!(!bundle.shielded_outputs().is_empty());
+
+    // The unmodified transaction passes every check, so a failure below is the `cv`'s.
+    let (batch_ok, spends_ok, outputs_ok, sum_ok) = verify(&tx, sighash);
+    assert!(batch_ok);
+    assert!(spends_ok.iter().all(|ok| *ok));
+    assert!(outputs_ok.iter().all(|ok| *ok));
+    assert!(sum_ok);
+
+    // The identity, which is of small order, and bytes that decode to no curve point.
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut off_curve = [0u8; 32];
+    off_curve[0] = 2;
+    assert!(bool::from(
+        jubjub::AffinePoint::from_bytes(off_curve).is_none()
+    ));
+
+    let spend_cv = bundle.shielded_spends()[0].cv().to_bytes();
+    let output_cv = bundle.shielded_outputs()[0].cv().to_bytes();
+    for bad in [identity, off_curve] {
+        // A bad spend `cv`.
+        let (tx, sighash) = read(&replace_once(data, &spend_cv, &bad));
+        assert_eq!(
+            tx.sapling_bundle().unwrap().shielded_spends()[0]
+                .cv()
+                .to_bytes(),
+            bad
+        );
+        let (batch_ok, spends_ok, _, sum_ok) = verify(&tx, sighash);
+        assert!(!batch_ok);
+        assert!(!spends_ok[0]);
+        assert!(!sum_ok);
+
+        // A bad output `cv`.
+        let (tx, sighash) = read(&replace_once(data, &output_cv, &bad));
+        assert_eq!(
+            tx.sapling_bundle().unwrap().shielded_outputs()[0]
+                .cv()
+                .to_bytes(),
+            bad
+        );
+        let (batch_ok, _, outputs_ok, sum_ok) = verify(&tx, sighash);
+        assert!(!batch_ok);
+        assert!(!outputs_ok[0]);
+        assert!(!sum_ok);
+    }
+}
