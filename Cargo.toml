@@ -199,3 +199,22 @@ opt-level = 3
 
 [profile.test.package.zakura-bellman]
 opt-level = 3
+
+# SLH-DSA signing in the opt-in `pq` tests spends nearly all of its time in
+# SHA-256 compression and fixed-size array construction. Optimizing only the
+# signature and hash packages keeps the test profile's assertions and overflow
+# checks, as above.
+[profile.test.package.slh-dsa]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
+
+[profile.test.package.hybrid-array]
+opt-level = 3
+
+[profile.test.package.digest]
+opt-level = 3
+
+[profile.test.package.block-buffer]
+opt-level = 3
