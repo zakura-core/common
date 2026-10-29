@@ -61,6 +61,21 @@ impl Nullifier {
     /// Defined in [Zcash Protocol Spec § 4.16: Note Commitments and Nullifiers][commitmentsandnullifiers].
     ///
     /// [commitmentsandnullifiers]: https://zips.z.cash/protocol/nu5.pdf#commitmentsandnullifiers
+    #[cfg(feature = "backend-sensei")]
+    pub(super) fn derive(
+        nk: &NullifierDerivingKey,
+        rho: pallas::Base,
+        psi: pallas::Base,
+        cm: NoteCommitment,
+    ) -> Self {
+        Nullifier(sensei::primitives::protocol::nullifier(
+            nk.inner(),
+            rho,
+            psi,
+            cm.0,
+        ))
+    }
+    #[cfg(feature = "backend-halo2")]
     pub(super) fn derive(
         nk: &NullifierDerivingKey,
         rho: pallas::Base,
