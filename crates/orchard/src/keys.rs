@@ -190,9 +190,27 @@ impl Eq for SpendValidatingKey {}
 
 impl SpendValidatingKey {
     pub(crate) fn to_point(&self) -> pallas::Point {
-        pallas::Point::from_bytes(&(&self.0).into()).unwrap()
+        #[cfg(feature = "backend-sensei")]
+        {
+            self.0.native().to_curve()
+        }
+        #[cfg(feature = "backend-halo2")]
+        {
+            pallas::Point::from_bytes(&(&self.0).into()).unwrap()
+        }
     }
-
+    #[cfg(feature = "backend-sensei")]
+    pub(crate) fn native(&self) -> sensei::SpendValidatingKey {
+        sensei::SpendValidatingKey::from_native(
+            *self
+                .0
+                .native()
+                .native()
+                .as_affine()
+                .expect("nonidentity spend key"),
+        )
+        .expect("spend key has canonical sign")
+    }
     /// Randomizes this spend validating key with the given `randomizer`.
     pub fn randomize(
         &self,
@@ -858,7 +876,8 @@ impl EphemeralPublicKey {
     }
 }
 
-#[path = "keys/halo2.rs"]
+#[cfg_attr(feature = "backend-halo2", path = "keys/halo2.rs")]
+#[cfg_attr(feature = "backend-sensei", path = "keys/sensei.rs")]
 mod prepared;
 pub use prepared::PreparedEphemeralPublicKey;
 
@@ -878,6 +897,22 @@ impl SharedSecret {
     }
 
     /// Only for use in batched note encryption.
+    #[cfg(feature = "backend-sensei")]
+    pub(crate) fn batch_to_affine(
+        shared_secrets: Vec<Option<Self>>,
+    ) -> impl Iterator<Item = Option<pallas::Affine>> {
+        // Filter out the positions for which ephemeral_key was not a valid encoding.
+        let mut secrets_affine = pallas::normalize_batch(
+            shared_secrets
+                .iter()
+                .filter_map(|s| s.as_ref().map(|s| *(s.0))),
+        )
+        .into_iter();
+        shared_secrets
+            .into_iter()
+            .map(move |s| s.and_then(|_| secrets_affine.next()))
+    }
+    #[cfg(feature = "backend-halo2")]
     pub(crate) fn batch_to_affine(
         shared_secrets: Vec<Option<Self>>,
     ) -> impl Iterator<Item = Option<pallas::Affine>> {

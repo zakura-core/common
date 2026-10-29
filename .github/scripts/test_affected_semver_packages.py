@@ -17,13 +17,17 @@ class AffectedSemverPackagesTest(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
-    def package(self, name, *, publish=None, dependencies=None):
+    def package(self, name, *, publish=None, dependencies=None, target_kinds=None):
         package_root = self.root / name
         package = {
             "id": name,
             "name": name,
             "manifest_path": str(package_root / "Cargo.toml"),
             "dependencies": dependencies or [],
+            "targets": [
+                {"name": name, "kind": kinds}
+                for kinds in (target_kinds if target_kinds is not None else [["lib"]])
+            ],
         }
         if publish is not None:
             package["publish"] = publish
@@ -160,6 +164,28 @@ class AffectedSemverPackagesTest(unittest.TestCase):
         )
 
         self.assertEqual(affected, ["default", "explicit", "registry"])
+
+    def test_skips_packages_without_a_library_target(self):
+        packages = [
+            self.package("macros", target_kinds=[["proc-macro"]]),
+            self.package(
+                "consumer",
+                dependencies=[self.dependency("macros")],
+            ),
+            self.package("binary-only", target_kinds=[["bin"]]),
+            self.package("c-library", target_kinds=[["cdylib", "rlib"]]),
+        ]
+
+        affected = affected_semver_packages.affected_publishable_packages(
+            self.metadata(packages),
+            changed_files=[
+                "macros/src/lib.rs",
+                "binary-only/src/main.rs",
+                "c-library/src/lib.rs",
+            ],
+        )
+
+        self.assertEqual(affected, ["c-library", "consumer"])
 
     def test_diff_reports_both_sides_of_a_rename(self):
         old_path = self.root / "source" / "src" / "lib.rs"

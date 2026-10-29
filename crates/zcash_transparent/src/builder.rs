@@ -1139,6 +1139,81 @@ mod tests {
         assert!(result.is_ok(), "P2SH apply_signatures failed: {result:?}");
     }
 
+    /// Wallet-built P2SH multisig spends pass the consensus interpreter for every key count
+    /// ZIP 48 allows. With 4–7 keys the redeem script is 139–241 bytes, which upstream
+    /// `zcash_script` 0.6.0 pushed with a malformed `OP_PUSHDATA1` length.
+    #[test]
+    fn apply_signatures_p2sh_multisig_passes_the_interpreter() {
+        use super::TransparentSigningSet;
+        use zcash_script::{
+            interpreter::{CallbackTransactionSignatureChecker, Flags},
+            pattern::check_multisig,
+            script::{Component, Evaluable, FromChain, Raw},
+        };
+
+        let addr_str = "tmNUFAr71YAW3eXetm8fhx7k8zpUJYQiKZP";
+        let taddr: TransparentAddress =
+            addr_str.parse::<ZcashAddress>().unwrap().convert().unwrap();
+
+        for keys in 1..=15u8 {
+            let required = keys.div_ceil(2);
+            let sks = (1..=keys)
+                .map(|i| SecretKey::from_secret_bytes([i; 32]).unwrap())
+                .collect::<Vec<_>>();
+            let pks = sks
+                .iter()
+                .map(|sk| secp256k1::PublicKey::from_secret_key(sk).serialize())
+                .collect::<Vec<_>>();
+            let redeem_script: FromChain = Component(
+                check_multisig(
+                    required,
+                    &pks.iter().map(|pk| &pk[..]).collect::<Vec<_>>(),
+                    false,
+                )
+                .unwrap(),
+            )
+            .weaken();
+            let taddr_in = TransparentAddress::ScriptHash(crate::util::hash160::hash(
+                &redeem_script.to_bytes(),
+            ));
+            let coin = TxOut::new(Zatoshis::from_u64(10000).unwrap(), taddr_in.script().into());
+
+            let mut builder = TransparentBuilder::empty();
+            builder
+                .add_p2sh_input(redeem_script, OutPoint::new([0u8; 32], 0), coin.clone())
+                .unwrap();
+            builder
+                .add_output(&taddr, Zatoshis::from_u64(5000).unwrap())
+                .unwrap();
+
+            let mut signing_set = TransparentSigningSet::new();
+            for sk in &sks {
+                signing_set.add_key(*sk);
+            }
+            let sighash = [0u8; 32];
+            let bundle = builder
+                .build()
+                .unwrap()
+                .apply_signatures(|_| sighash, &signing_set)
+                .unwrap();
+
+            let checker = CallbackTransactionSignatureChecker {
+                sighash: &|_, _| Some(sighash),
+                lock_time: 0,
+                is_final: true,
+            };
+            let spend = Raw::from_raw_parts(
+                bundle.vin[0].script_sig().0.0.clone(),
+                coin.script_pubkey().0.0.clone(),
+            );
+            assert_eq!(
+                spend.eval(Flags::P2SH | Flags::CHECKLOCKTIMEVERIFY, &checker),
+                Ok(true),
+                "{required}-of-{keys} multisig spend"
+            );
+        }
+    }
+
     #[test]
     fn apply_signatures_p2sh_missing_key() {
         use super::TransparentSigningSet;

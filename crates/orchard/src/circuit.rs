@@ -1,18 +1,24 @@
 //! Orchard proof statements, protocol versions, and opaque proving and verifying keys.
+//! Select the implementation with `backend-halo2` or `backend-sensei`.
 //!
 //! Circuit synthesis is private. Use the builder or PCZT APIs to produce proofs.
 //!
 //! ```compile_fail
 //! use orchard::circuit::{Circuit, Config};
 //! ```
-
+#[cfg(feature = "backend-halo2")]
 mod halo2;
+#[cfg(feature = "backend-sensei")]
+mod sensei;
 
 /// Halo2-specific components for constructing circuits that reuse Orchard relations.
 #[cfg(feature = "circuit-composition")]
 pub mod composition;
 
+#[cfg(feature = "backend-halo2")]
 use halo2 as selected;
+#[cfg(feature = "backend-sensei")]
+use sensei as selected;
 
 pub use crate::Proof;
 #[cfg(feature = "prover")]
@@ -83,6 +89,15 @@ impl OrchardCircuitVersion {
             OrchardCircuitVersion::PostNu6_3 => true,
         }
     }
+
+    #[cfg(feature = "backend-sensei")]
+    pub(crate) fn native(self) -> ::sensei::CircuitVersion {
+        match self {
+            Self::InsecurePreNu6_2 => ::sensei::CircuitVersion::InsecurePreNu6_2,
+            Self::FixedPostNu6_2 => ::sensei::CircuitVersion::FixedPostNu6_2,
+            Self::PostNu6_3 => ::sensei::CircuitVersion::PostNu6_3,
+        }
+    }
 }
 
 /// A historical circuit version for which proving is no longer supported.
@@ -148,7 +163,9 @@ pub enum ProofError {
     /// The request is malformed: it is empty, its circuits and statements disagree in
     /// number or circuit version, it selects a circuit version that does not support the
     /// operation, or a statement disables cross-address transfers under a key whose
-    /// circuit version cannot enforce that restriction.
+    /// circuit version cannot enforce that restriction. A backend that checks witness
+    /// satisfaction during proving also returns it when the witness does not prove the
+    /// statement.
     InvalidInput,
     /// The proof does not verify for the supplied statements. This includes truncated
     /// and corrupted proof encodings. Only verification returns it.

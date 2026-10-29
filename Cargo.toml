@@ -38,11 +38,14 @@
 #   address, transparent value, and payment request types. They are kept in the
 #   same workspace as their public-type consumers so the graph contains one
 #   coherent family of types.
+# - zcash_script: transparent script parsing, building, and interpretation.
+#   Its script types appear in zcash_transparent's public API.
 # - udon, bento, bento-core, bento-macros: experimental arithmetic and
-#   compile-time storage libraries. These remain unpublished and version
-#   independently of the coordinated Common release.
-# - sensei, sensei-artifacts, sensei-macros, sensei-shared: unpublished native
-#   Orchard primitives, Ironwood proving, and historical proof verification.
+#   compile-time storage libraries, versioned independently of the coordinated
+#   Common release.
+# - sensei, sensei-artifacts, sensei-macros, sensei-shared: native Orchard
+#   primitives, Ironwood proving, and historical proof verification, also
+#   versioned independently.
 
 [workspace]
 # Resolver 3 is resolver 2 plus MSRV-aware version selection: `cargo update`
@@ -82,6 +85,7 @@ members = [
     "crates/zcash_primitives",
     "crates/zcash_protocol",
     "crates/zcash_proofs",
+    "crates/zcash_script",
     "crates/zcash_transparent",
     "crates/zip321",
 ]
@@ -134,13 +138,14 @@ sensei-artifacts = { package = "zakura-sensei-artifacts", version = "0.1.0", pat
 sensei-macros = { package = "zakura-sensei-macros", version = "0.1.0", path = "crates/sensei-macros", default-features = false }
 sensei-shared = { package = "zakura-sensei-shared", version = "0.1.0", path = "crates/sensei-shared", default-features = false }
 sinsemilla = { package = "zakura-sinsemilla", version = "5.0.0", path = "crates/sinsemilla", default-features = false }
-udon = { package = "zakura-udon", version = "0.1.0", path = "crates/udon", default-features = false }
+udon = { package = "zakura-udon", version = "0.2.0", path = "crates/udon", default-features = false }
 zcash_address = { package = "zakura-address", version = "5.0.0", path = "crates/zcash_address", default-features = false }
 zcash_note_encryption = { package = "zakura-note-encryption", version = "5.0.0", path = "crates/zcash_note_encryption", default-features = false }
 zcash_keys = { package = "zakura-keys", version = "5.0.0", path = "crates/zcash_keys", default-features = false }
 zcash_primitives = { package = "zakura-primitives", version = "5.0.0", path = "crates/zcash_primitives", default-features = false }
 zcash_protocol = { package = "zakura-protocol", version = "5.0.0", path = "crates/zcash_protocol", default-features = false }
 zcash_proofs = { package = "zakura-proofs", version = "5.0.0", path = "crates/zcash_proofs", default-features = false }
+zcash_script = { package = "zakura-zcash-script", version = "0.0.1", path = "crates/zcash_script", default-features = false }
 transparent = { package = "zakura-transparent", version = "5.0.0", path = "crates/zcash_transparent", default-features = false }
 zip321 = { package = "zakura-zip321", version = "5.0.0", path = "crates/zip321", default-features = false }
 

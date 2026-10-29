@@ -14,7 +14,9 @@ extern crate std;
 mod rng_compat;
 
 pub mod redjubjub;
-#[cfg(feature = "pallas-pasta")]
+#[cfg(all(feature = "pallas-pasta", feature = "pallas-sensei"))]
+compile_error!("select at most one Pallas backend: pallas-pasta or pallas-sensei");
+#[cfg(any(feature = "pallas-pasta", feature = "pallas-sensei"))]
 pub mod redpallas;
 
 // Obtain the protocol generator through RedDSA's existing public key API.

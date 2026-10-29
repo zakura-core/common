@@ -1,4 +1,4 @@
-#![cfg(feature = "pallas-pasta")]
+#![cfg(any(feature = "pallas-pasta", feature = "pallas-sensei"))]
 #[cfg(feature = "pallas-pasta")]
 use group::GroupEncoding as _;
 use std::collections::BTreeMap;

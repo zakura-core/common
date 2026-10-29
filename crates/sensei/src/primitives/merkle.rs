@@ -7,7 +7,7 @@
 //! [`BatchWorkspace`] retains caller-owned scratch independently of those caches.
 use super::cache::{Cache as OnceBox, Cached};
 use super::{
-    Fp, pallas,
+    Fp, leos2bsp, pallas,
     sinsemilla::{
         HashDomain, K,
         weighted::{BatchHashWorkspace, UncheckedFixedLengthHashDomain},
@@ -49,8 +49,8 @@ fn weighted() -> Cached<UncheckedFixedLengthHashDomain<MERKLE_CRH_WORDS>> {
 fn message(level: u8, left: Fp, right: Fp) -> impl Iterator<Item = bool> {
     (0..K)
         .map(move |bit| (u16::from(level) >> bit) & 1 != 0)
-        .chain(left.to_le_bits().into_iter().take(BASE_BITS))
-        .chain(right.to_le_bits().into_iter().take(BASE_BITS))
+        .chain(leos2bsp(left.to_bytes()).take(BASE_BITS))
+        .chain(leos2bsp(right.to_bytes()).take(BASE_BITS))
 }
 /// Computes a Merkle parent with Sinsemilla failure mapped to zero.
 pub fn hash(level: u8, left: Fp, right: Fp) -> Fp {
