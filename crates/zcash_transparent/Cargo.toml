@@ -46,7 +46,7 @@ zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32"]
 default = ["wallet", "std", "pczt"]
-# SLH-DSA primitives and an explicit library-only script execution harness.
+# SLH-DSA primitives, bounded script execution, and a library-only P2SH adapter.
 pq = ["dep:slh-dsa", "zcash_script/pq"]
 std = [
     "secp256k1?/std",

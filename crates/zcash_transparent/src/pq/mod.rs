@@ -4,7 +4,8 @@
 //! [FIPS 205](https://doi.org/10.6028/NIST.FIPS.205). The message and context are supplied
 //! by the caller; no transaction digest, wallet derivation, authorization encoding,
 //! or address format is defined by these primitives. The separate [`script`] module
-//! provides a library-only script harness. This is not HashSLH-DSA.
+//! provides a library-only script harness, and [`p2sh`] authenticates a proposed PQ
+//! execution identifier inside an existing P2SH redeem script. This is not HashSLH-DSA.
 //!
 //! Verification authenticates the message only relative to the supplied public key.
 //! The caller must authenticate that key and choose the message and context that bind
@@ -14,6 +15,7 @@ use alloc::vec::Vec;
 
 use slh_dsa::Sha2_192s;
 
+pub mod p2sh;
 pub mod script;
 
 /// A malformed encoding, overlong context, or invalid signature.

@@ -10,7 +10,8 @@
 //! - `transparent-inputs`: Transparent key derivation and spending. Implies `pczt`.
 //! - `test-dependencies`: Exposes APIs useful for testing.
 //! - `pq`: SLH-DSA-SHA2-192s primitives and an explicit
-//!   single-signer script evaluator. Does not activate PQ transaction outputs.
+//!   bounded script evaluator, with a proposed PQ identifier inside existing
+//!   P2SH redeem scripts. Does not activate PQ transaction validation.
 //!
 //! Disabling `pczt` (by turning off default features) removes the `bip32` dependency,
 //! which a consumer that only parses, validates, or builds coinbase transparent bundles

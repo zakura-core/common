@@ -5,6 +5,8 @@
 //! this module deliberately does not freeze a protocol context, marker, or address.
 //! All current strict signing-mode selectors are decoded; transaction-dependent rules
 //! (including SINGLE's corresponding output) remain the digest callback's responsibility.
+//! Use [`super::p2sh::verify_spend`] to authenticate a P2SH redeem script before
+//! selecting PQ execution and its fixed context.
 
 use core::cell::Cell;
 

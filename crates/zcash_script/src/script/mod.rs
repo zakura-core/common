@@ -252,6 +252,7 @@ impl<T: Into<opcode::PossiblyBad> + opcode::Evaluable + Clone> Evaluable for Com
                 &Code(self.to_bytes()),
                 stack,
                 checker,
+                iter::AdditionalStackByteLimit::None,
             ),
             n => Err(Error::ScriptSize(Some(n))),
         }
@@ -422,6 +423,7 @@ impl Evaluable for Code {
                 self,
                 stack,
                 checker,
+                iter::AdditionalStackByteLimit::None,
             ),
             n => Err(Error::ScriptSize(Some(n))),
         }
