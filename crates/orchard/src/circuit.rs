@@ -8,9 +8,8 @@
 
 mod halo2;
 
-/// Halo2-specific composition primitives for governance proofs.
-#[cfg(feature = "voting")]
-pub mod voting;
+#[cfg(feature = "circuit-composition")]
+pub mod composition;
 
 use halo2 as selected;
 

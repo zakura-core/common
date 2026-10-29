@@ -1,21 +1,25 @@
-//! Orchard components used to construct separate governance proofs in voting-circuits.
+//! Orchard's Halo2 gadgets and typed witnesses for composing other circuits.
 //!
-//! Enable the default-off `voting` feature to use this interface. It selects the
-//! Halo2 prover and deliberately exposes Halo2/Pallas types; this is not a
-//! backend-independent proof interface. Payment callers should use the ordinary
-//! builder and opaque proof APIs instead. Cargo features are additive across a
-//! dependency graph: this opt-in controls API availability, not access to secrets
-//! or the size of a build that already enables proving.
+//! Enable the default-off `circuit-composition` feature to use this module. It
+//! selects the Halo2 backend and prover and deliberately exposes Halo2/Pallas
+//! types; it is not a backend-independent proof interface. Payment callers
+//! should use the builder and opaque proof APIs instead. For example, the
+//! governance circuits in voting-circuits reuse Orchard's address-ownership,
+//! note-commitment, and nullifier relations through this module. Cargo features
+//! are additive across a dependency graph: this opt-in controls API
+//! availability, not access to secrets or the size of a build that already
+//! enables proving.
 //!
 //! These are the same gadgets and constants used by Orchard payments. A caller
 //! must configure their columns/tables, constrain claimed results, and bind all
-//! required public inputs. Gadget use alone does not authenticate a voting
-//! session, establish chain membership, or prove an application's authorization
-//! policy. Treat private key/note components as secret witnesses, never public
-//! instances. Decode their owner-provided canonical encodings only at the circuit
-//! boundary; do not implement competing Orchard wire codecs downstream.
+//! required public inputs. Gadget use alone does not establish chain
+//! membership, freshness, or an application's authorization policy. Treat
+//! private key/note components as secret witnesses, never public instances.
+//! Obtain them from [`witness`] and decode their canonical encodings only at
+//! the circuit boundary; do not implement competing Orchard derivations or
+//! wire codecs downstream.
 //!
-//! The payment circuit remains private even with voting enabled:
+//! The payment circuit remains private with this feature enabled:
 //! ```compile_fail
 //! use orchard::circuit::{Circuit, Config};
 //! ```
@@ -29,13 +33,22 @@
 //! use orchard::{constants, spec};
 //! use orchard::circuit::halo2;
 //! ```
-//! Typed components do not expose raw field getters:
+//! Payment key and address types gain no composition accessors:
 //! ```compile_fail
-//! use orchard::keys::FullViewingKey;
-//! fn raw(fvk: &FullViewingKey) { fvk.nk().inner(); }
+//! fn raw(fvk: &orchard::keys::FullViewingKey) { fvk.nk(); }
+//! ```
+//! ```compile_fail
+//! fn raw(address: &orchard::Address) { address.g_d(); }
+//! ```
+//! Typed witnesses do not expose raw field getters:
+//! ```compile_fail
+//! use orchard::circuit::composition::witness::NullifierKey;
+//! fn raw(nk: &NullifierKey) { nk.inner(); }
 //! ```
 
-/// Constrains the incoming-viewing-key commitment for voting address ownership.
+pub mod witness;
+
+/// Constrains the incoming-viewing-key commitment used by address ownership.
 pub use super::halo2::commit_ivk::gadgets::commit_ivk;
 /// Existing incoming-viewing-key commitment chip and column configuration.
 pub use super::halo2::commit_ivk::{CommitIvkChip, CommitIvkConfig};
@@ -55,7 +68,7 @@ pub use crate::constants::fixed_bases::spend_auth_g::{
 pub use crate::constants::fixed_bases::{
     COMMIT_IVK_PERSONALIZATION, NOTE_COMMITMENT_PERSONALIZATION,
 };
-/// Orchard's fixed-base carrier types used by voting's ECC chips.
+/// Orchard's fixed-base carrier types used by composed ECC chips.
 pub use crate::constants::fixed_bases::{
     OrchardBaseFieldBases, OrchardFixedBases, OrchardFixedBasesFull,
 };
@@ -63,5 +76,8 @@ pub use crate::constants::fixed_bases::{
 pub use crate::constants::{
     L_ORCHARD_BASE, L_VALUE, MERKLE_DEPTH_ORCHARD, OrchardCommitDomains, OrchardHashDomains,
 };
-/// A canonically decoded nonidentity point for synthetic governance components.
+/// A canonically decoded nonidentity point, for addresses and synthetic notes.
 pub use crate::spec::NonIdentityPallasPoint;
+
+#[cfg(test)]
+mod tests;

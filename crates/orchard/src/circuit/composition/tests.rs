@@ -1,16 +1,22 @@
-//! Native agreement and codec boundaries for governance witnesses.
+//! Native agreement and codec boundaries for composition witnesses.
+use super::{
+    NonIdentityPallasPoint, spend_auth_generator,
+    witness::{
+        AddressPoints, IvkCommitRandomness, NoteCommitmentPoint, NotePsi, NoteTrapdoor,
+        NullifierKey, SpendAuthorization, ValidatingKey,
+    },
+};
 use crate::backend::{
     ff::{Field, PrimeField},
     group::{Curve, GroupEncoding},
     pasta_curves::pallas,
 };
 use crate::{
-    circuit::voting::{NonIdentityPallasPoint, spend_auth_generator},
     keys::{
         FullViewingKey, Scope, SpendAuthorizingKey, SpendValidatingKey, SpendingKey,
         testing::arb_spending_key,
     },
-    note::{NotePsi, NoteVersion, testing::arb_note},
+    note::{NoteVersion, testing::arb_note},
     primitives::redpallas::SpendAuthRandomizer,
     value::NoteValue,
 };
@@ -20,18 +26,31 @@ proptest! {
     #[test]
     fn viewing_and_signing_witnesses_keep_canonical_material(sk in arb_spending_key()) {
         let ask = SpendAuthorizingKey::from(&sk);
+        let authorization = SpendAuthorization::from_spend_authorizing_key(&ask);
         let zero = SpendAuthRandomizer::from_bytes(pallas::Scalar::ZERO.to_repr()).unwrap();
         let encoded: [u8; 32] = (&ask.randomize(&zero)).into();
-        prop_assert_eq!(ask.to_bytes(), encoded);
+        prop_assert_eq!(authorization.to_bytes(), encoded);
         let fvk = FullViewingKey::from(&sk);
-        prop_assert_eq!(fvk.nk().to_bytes(), fvk.nk().inner().to_repr());
+        let nk = NullifierKey::from_viewing_key(&fvk);
+        prop_assert_eq!(nk.to_bytes(), fvk.nk().inner().to_repr());
         for scope in [Scope::External, Scope::Internal] {
-            let rivk = fvk.rivk(scope);
-            prop_assert_eq!(rivk.to_bytes(), rivk.inner().to_repr());
+            let rivk = IvkCommitRandomness::from_viewing_key(&fvk, scope);
+            prop_assert_eq!(rivk.to_bytes(), fvk.rivk(scope).inner().to_repr());
         }
-        let mut encoded_stream = alloc::vec::Vec::new();
-        ask.write(&mut encoded_stream).unwrap();
-        prop_assert_eq!(encoded_stream, ask.to_bytes());
+        let ak = ValidatingKey::from_viewing_key(&fvk);
+        prop_assert_eq!(ak.to_bytes(), SpendValidatingKey::from(&ask).to_bytes());
+        prop_assert_eq!(ak.to_bytes(), ValidatingKey::from(&SpendValidatingKey::from(fvk.clone())).to_bytes());
+        for (written, expected) in [
+            (encode(|w| authorization.write(w)), authorization.to_bytes()),
+            (encode(|w| nk.write(w)), nk.to_bytes()),
+            (encode(|w| ak.write(w)), ak.to_bytes()),
+            (
+                encode(|w| IvkCommitRandomness::from_viewing_key(&fvk, Scope::Internal).write(w)),
+                IvkCommitRandomness::from_viewing_key(&fvk, Scope::Internal).to_bytes(),
+            ),
+        ] {
+            prop_assert_eq!(written, expected);
+        }
     }
 
     #[test]
@@ -46,26 +65,32 @@ proptest! {
     ) {
         let rho = note.rho();
         let seed = note.rseed();
-        let psi = seed.voting_psi(&rho);
+        let psi = NotePsi::derive(seed, &rho);
         prop_assert_eq!(psi.to_bytes(), seed.psi(&rho).to_repr());
         let address = note.recipient();
-        let gd = address.g_d();
-        let pkd = NonIdentityPallasPoint::from_bytes(&address.pk_d().to_bytes()).unwrap();
+        let points = AddressPoints::from_address(&address);
+        let gd = points.diversified_base();
+        let pkd = points.transmission_key();
+        prop_assert_eq!(gd, address.g_d());
         prop_assert_eq!(pkd, address.pk_d().inner());
+        prop_assert_eq!(pkd.to_bytes(), address.pk_d().to_bytes());
         let trapdoor = match note.version() {
-            NoteVersion::V2 => seed.rcm_v2(&rho),
-            NoteVersion::V3 => seed.voting_rcm_v3(&rho, &gd, &pkd, note.value(), &psi),
+            NoteVersion::V2 => NoteTrapdoor::derive_v2(seed, &rho),
+            NoteVersion::V3 => NoteTrapdoor::derive_v3(seed, &rho, &gd, &pkd, note.value(), &psi),
         };
         prop_assert_eq!(trapdoor.to_bytes(), note.rcm().inner().to_repr());
-        prop_assert_eq!(note.commitment().to_bytes(), note.commitment().inner().to_bytes());
-        let mut bytes = alloc::vec::Vec::new();
-        psi.write(&mut bytes).unwrap();
+        prop_assert_eq!(NoteTrapdoor::from_note(&note).to_bytes(), trapdoor.to_bytes());
+        prop_assert_eq!(encode(|w| trapdoor.write(w)), trapdoor.to_bytes());
+        let cm = NoteCommitmentPoint::from(&note.commitment());
+        prop_assert_eq!(cm.to_bytes(), note.commitment().inner().to_bytes());
+        prop_assert_eq!(encode(|w| cm.write(w)), cm.to_bytes());
+        let bytes = encode(|w| psi.write(w));
         prop_assert_eq!(NotePsi::read(bytes.as_slice()).unwrap(), psi);
 
         // Synthetic governance bases deliberately need not be diversified addresses.
         let synthetic_gd = NonIdentityPallasPoint::from_bytes(&spend_auth_generator().to_bytes()).unwrap();
         let synthetic_pkd = NonIdentityPallasPoint::from_bytes(&(spend_auth_generator() * pallas::Scalar::from(2)).to_bytes()).unwrap();
-        let typed = seed.voting_rcm_v3(&rho, &synthetic_gd, &synthetic_pkd, note.value(), &psi);
+        let typed = NoteTrapdoor::derive_v3(seed, &rho, &synthetic_gd, &synthetic_pkd, note.value(), &psi);
         let native = seed.rcm_v3(&rho, &synthetic_gd, &synthetic_pkd, note.value().inner(), &seed.psi(&rho));
         prop_assert_eq!(typed.to_bytes(), native.inner().to_repr());
     }
@@ -93,23 +118,38 @@ fn frozen_keys_cover_both_sign_correction_outcomes() {
         let negated = ((spend_auth_generator() * raw).to_affine().to_bytes()[31] >> 7) as usize;
         seen[negated] = true;
         let ask = SpendAuthorizingKey::from(&sk);
-        assert_eq!(ask.to_bytes(), vector.ask);
-        let scalar = pallas::Scalar::from_repr(ask.to_bytes()).unwrap();
+        let authorization = SpendAuthorization::from_spend_authorizing_key(&ask);
+        assert_eq!(authorization.to_bytes(), vector.ask);
+        let scalar = pallas::Scalar::from_repr(authorization.to_bytes()).unwrap();
         assert_eq!(
             (spend_auth_generator() * scalar).to_affine().to_bytes(),
             vector.ak
         );
         assert_eq!(SpendValidatingKey::from(&ask).to_bytes(), vector.ak);
+        let fvk = FullViewingKey::from(&sk);
+        assert_eq!(ValidatingKey::from_viewing_key(&fvk).to_bytes(), vector.ak);
+        assert_eq!(NullifierKey::from_viewing_key(&fvk).to_bytes(), vector.nk);
+        assert_eq!(
+            IvkCommitRandomness::from_viewing_key(&fvk, Scope::External).to_bytes(),
+            vector.rivk
+        );
+        assert_eq!(
+            IvkCommitRandomness::from_viewing_key(&fvk, Scope::Internal).to_bytes(),
+            vector.internal_rivk
+        );
         let zero = SpendAuthRandomizer::from_bytes(pallas::Scalar::ZERO.to_repr()).unwrap();
         let signing = ask.randomize(&zero);
         let verification = crate::primitives::redpallas::VerificationKey::from(&signing);
-        let signature = signing.sign(&mut crate::rng_compat::OsRng, b"voting witness agreement");
+        let signature = signing.sign(
+            &mut crate::rng_compat::OsRng,
+            b"composition witness agreement",
+        );
         verification
-            .verify(b"voting witness agreement", &signature)
+            .verify(b"composition witness agreement", &signature)
             .unwrap();
         assert!(
             verification
-                .verify(b"altered voting witness", &signature)
+                .verify(b"altered composition witness", &signature)
                 .is_err()
         );
     }
@@ -118,6 +158,14 @@ fn frozen_keys_cover_both_sign_correction_outcomes() {
         [true, true],
         "fixed vectors must exercise both sign corrections"
     );
+}
+
+fn encode(
+    write: impl FnOnce(&mut alloc::vec::Vec<u8>) -> corez::io::Result<()>,
+) -> alloc::vec::Vec<u8> {
+    let mut bytes = alloc::vec::Vec::new();
+    write(&mut bytes).unwrap();
+    bytes
 }
 
 fn successor(mut bytes: [u8; 32]) -> [u8; 32] {

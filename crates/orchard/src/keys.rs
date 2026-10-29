@@ -127,24 +127,18 @@ impl SpendingKey {
 pub struct SpendAuthorizingKey(redpallas::SigningKey<SpendAuth>);
 
 impl SpendAuthorizingKey {
-    /// Encodes the sign-corrected authorization key for voting-circuits.
-    ///
-    /// These bytes permit spending; protect them like the spending key. Encoding
-    /// does not log or persist them, and callers own their lifetime and erasure.
-    #[cfg(feature = "voting")]
-    pub fn to_bytes(&self) -> [u8; 32] {
-        (&self.0).into()
-    }
-
-    /// Writes the canonical secret-key encoding for a voting witness.
-    #[cfg(feature = "voting")]
-    pub fn write(&self, mut writer: impl corez::io::Write) -> corez::io::Result<()> {
-        writer.write_all(&self.to_bytes())
-    }
-
     /// Derives ask from sk. Internal use only, does not enforce all constraints.
     pub(crate) fn derive_inner(sk: &SpendingKey) -> pallas::Scalar {
         to_scalar(PrfExpand::ORCHARD_ASK.with(&sk.0))
+    }
+
+    /// Returns the canonical encoding of the sign-corrected scalar `ask`, whose
+    /// validating key `[ask] G` has ỹ = 0.
+    ///
+    /// These bytes permit spending. Internal use only; circuit composition
+    /// exposes them through an explicit spending-authorization witness.
+    pub(crate) fn to_sign_corrected_bytes(&self) -> [u8; 32] {
+        (&self.0).into()
     }
 
     /// Randomizes this spend authorizing key with the given `randomizer`.
@@ -213,10 +207,7 @@ impl SpendValidatingKey {
 
     /// Converts this spend validating key to its serialized form,
     /// I2LEOSP_256(ak).
-    #[cfg_attr(
-        any(feature = "unstable-frost", feature = "voting"),
-        visibility::make(pub)
-    )]
+    #[cfg_attr(feature = "unstable-frost", visibility::make(pub))]
     pub(crate) fn to_bytes(&self) -> [u8; 32] {
         // This is correct because the wrapped point must have ỹ = 0, and
         // so the point repr is the same as I2LEOSP of its x-coordinate.
@@ -255,17 +246,9 @@ impl SpendValidatingKey {
 /// [`Note`]: crate::note::Note
 /// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
 #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "voting", visibility::make(pub))]
 pub(crate) struct NullifierDerivingKey(pallas::Base);
 
 impl NullifierDerivingKey {
-    /// Writes canonical nullifier-derivation material for a voting witness.
-    /// This is private viewing material and must not be logged or published.
-    #[cfg(feature = "voting")]
-    pub fn write(&self, mut writer: impl corez::io::Write) -> corez::io::Result<()> {
-        writer.write_all(&self.to_bytes())
-    }
-
     /// Returns the inner base field element.
     pub(crate) fn inner(&self) -> pallas::Base {
         self.0
@@ -284,7 +267,6 @@ impl NullifierDerivingKey {
     }
 
     /// Converts this nullifier deriving key to its serialized form.
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
     pub(crate) fn to_bytes(self) -> [u8; 32] {
         self.0.to_repr()
     }
@@ -306,7 +288,6 @@ impl NullifierDerivingKey {
 ///
 /// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
 #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "voting", visibility::make(pub))]
 pub(crate) struct CommitIvkRandomness(pallas::Scalar);
 
 impl From<&SpendingKey> for CommitIvkRandomness {
@@ -316,19 +297,6 @@ impl From<&SpendingKey> for CommitIvkRandomness {
 }
 
 impl CommitIvkRandomness {
-    /// Encodes viewing-key commitment randomness for voting-circuits.
-    /// This is private viewing material; do not log or publish it.
-    #[cfg(feature = "voting")]
-    pub fn to_bytes(self) -> [u8; 32] {
-        self.0.to_repr()
-    }
-
-    /// Writes the canonical private viewing-material encoding.
-    #[cfg(feature = "voting")]
-    pub fn write(&self, mut writer: impl corez::io::Write) -> corez::io::Result<()> {
-        writer.write_all(&self.to_bytes())
-    }
-
     /// Returns the inner scalar value.
     pub(crate) fn inner(&self) -> pallas::Scalar {
         self.0
@@ -385,15 +353,11 @@ impl From<FullViewingKey> for SpendValidatingKey {
 
 impl FullViewingKey {
     /// Returns the nullifier deriving key for this full viewing key.
-    /// Voting-circuits uses its canonical encoding as private witness material.
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
     pub(crate) fn nk(&self) -> &NullifierDerivingKey {
         &self.nk
     }
 
     /// Returns either `rivk` or `rivk_internal` based on `scope`.
-    /// Voting-circuits must select the same scope as the address being proven.
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
     pub(crate) fn rivk(&self, scope: Scope) -> CommitIvkRandomness {
         match scope {
             Scope::External => self.rivk,
@@ -825,7 +789,6 @@ impl DiversifiedTransmissionKey {
     }
 
     /// $repr_P(self)$
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
     pub(crate) fn to_bytes(self) -> [u8; 32] {
         self.0.to_bytes()
     }

@@ -76,8 +76,7 @@ impl super::Config {
 }
 
 /// An instruction set for adding two circuit words (field elements).
-#[cfg_attr(feature = "voting", visibility::make(pub))]
-pub(in crate::circuit) trait AddInstruction<F: Field>: Chip<F> {
+pub trait AddInstruction<F: Field>: Chip<F> {
     /// Constraints `a + b` and returns the sum.
     fn add(
         &self,
@@ -92,8 +91,7 @@ pub(in crate::circuit) trait AddInstruction<F: Field>: Chip<F> {
 /// Usages of this helper are technically superfluous, as the single-cell region is only
 /// ever used in equality constraints. We could eliminate them with a
 /// [write-on-copy abstraction](https://github.com/zcash/halo2/issues/334).
-#[cfg_attr(feature = "voting", visibility::make(pub))]
-pub(in crate::circuit) fn assign_free_advice<F: Field, V: Copy>(
+pub fn assign_free_advice<F: Field, V: Copy>(
     mut layouter: impl Layouter<F>,
     column: Column<Advice>,
     value: Value<V>,
@@ -145,8 +143,7 @@ pub(in crate::circuit) fn value_commit_orchard<
 ///
 /// [Section 4.16: Note Commitments and Nullifiers]: https://zips.z.cash/protocol/protocol.pdf#commitmentsandnullifiers
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(feature = "voting", visibility::make(pub))]
-pub(in crate::circuit) fn derive_nullifier<
+pub fn derive_nullifier<
     PoseidonChip: PoseidonSpongeInstructions<pallas::Base, poseidon::P128Pow5T3, ConstantLength<2>, 3, 2>,
     AddChip: AddInstruction<pallas::Base>,
     EccChip: EccInstructions<

@@ -37,8 +37,7 @@ pub struct CommitIvkChip {
 
 impl CommitIvkChip {
     /// Configures the chip's gate and column assignments.
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
-    pub(in crate::circuit) fn configure(
+    pub fn configure(
         meta: &mut ConstraintSystem<pallas::Base>,
         advices: [Column<Advice>; 10],
     ) -> CommitIvkConfig {
@@ -237,8 +236,7 @@ impl CommitIvkChip {
     }
 
     /// Constructs the chip from a [`CommitIvkConfig`].
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
-    pub(in crate::circuit) fn construct(config: CommitIvkConfig) -> Self {
+    pub fn construct(config: CommitIvkConfig) -> Self {
         Self { config }
     }
 }
@@ -258,8 +256,7 @@ pub(in crate::circuit) mod gadgets {
     /// [Section 5.4.8.4 Sinsemilla commitments]: https://zips.z.cash/protocol/protocol.pdf#concretesinsemillacommit
     #[allow(non_snake_case)]
     #[allow(clippy::type_complexity)]
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
-    pub(in crate::circuit) fn commit_ivk(
+    pub fn commit_ivk(
         sinsemilla_chip: SinsemillaChip<
             OrchardHashDomains,
             OrchardCommitDomains,

@@ -15,23 +15,9 @@ use crate::{spec::extract_p, value::NoteValue};
 
 /// The trapdoor for a note commitment.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "voting", visibility::make(pub))]
 pub(crate) struct NoteCommitTrapdoor(pub(super) pallas::Scalar);
 
 impl NoteCommitTrapdoor {
-    /// Encodes this commitment component for a voting circuit witness.
-    /// Trapdoor bytes are private note material and must not be published.
-    #[cfg(feature = "voting")]
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_repr()
-    }
-
-    /// Writes the canonical commitment-component encoding for voting-circuits.
-    #[cfg(feature = "voting")]
-    pub fn write(&self, mut writer: impl corez::io::Write) -> corez::io::Result<()> {
-        writer.write_all(&self.to_bytes())
-    }
-
     /// Returns the inner scalar value.
     pub(crate) fn inner(&self) -> pallas::Scalar {
         self.0
@@ -43,19 +29,6 @@ impl NoteCommitTrapdoor {
 pub struct NoteCommitment(pub(super) pallas::Point);
 
 impl NoteCommitment {
-    /// Encodes this commitment component for a voting circuit witness.
-    /// This encodes the complete point, unlike the extracted commitment on-chain.
-    #[cfg(feature = "voting")]
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_bytes()
-    }
-
-    /// Writes the canonical commitment-component encoding for voting-circuits.
-    #[cfg(feature = "voting")]
-    pub fn write(&self, mut writer: impl corez::io::Write) -> corez::io::Result<()> {
-        writer.write_all(&self.to_bytes())
-    }
-
     /// Returns the inner Pallas curve point.
     pub(crate) fn inner(&self) -> pallas::Point {
         self.0

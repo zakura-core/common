@@ -19,8 +19,6 @@ const PRF_EXPAND_PERSONALIZATION: &[u8; 16] = b"Zcash_ExpandSeed";
 const ZIP2005_ORCHARD_QR_RCM_DOMAIN_SEPARATOR: u8 = 0x0B;
 
 pub(crate) mod commitment;
-#[cfg(feature = "voting")]
-pub use self::commitment::NoteCommitTrapdoor;
 pub use self::commitment::{ExtractedNoteCommitment, NoteCommitment};
 
 /// Note plaintext version.
@@ -156,7 +154,6 @@ impl RandomSeed {
     /// Defined in [Zcash Protocol Spec § 4.7.3: Sending Notes (Orchard)][orchardsend].
     ///
     /// [orchardsend]: https://zips.z.cash/protocol/nu5.pdf#orchardsend
-    #[cfg_attr(feature = "voting", visibility::make(pub))]
     pub(crate) fn rcm_v2(&self, rho: &Rho) -> commitment::NoteCommitTrapdoor {
         commitment::NoteCommitTrapdoor(to_scalar(
             PrfExpand::ORCHARD_RCM.with(&self.0, &rho.to_bytes()),
@@ -607,64 +604,5 @@ mod tests {
                 "vector {i}: cmx_qr mismatch"
             );
         }
-    }
-}
-
-/// The note-randomness component bound into Orchard nullifiers and commitments.
-///
-/// Used by voting-circuits at its witness boundary. This is private note material,
-/// not a public voting-session identifier.
-#[cfg(feature = "voting")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotePsi(pallas::Base);
-
-#[cfg(feature = "voting")]
-impl NotePsi {
-    /// Parses a canonical field encoding, rejecting encodings at or above the modulus.
-    pub fn from_bytes(bytes: [u8; 32]) -> CtOption<Self> {
-        pallas::Base::from_repr(bytes).map(Self)
-    }
-    /// Encodes this private note component for the circuit boundary.
-    pub fn to_bytes(self) -> [u8; 32] {
-        self.0.to_repr()
-    }
-    /// Reads one canonical note-randomness component; rejects truncated input.
-    pub fn read(mut reader: impl corez::io::Read) -> corez::io::Result<Self> {
-        let mut bytes = [0; 32];
-        reader.read_exact(&mut bytes)?;
-        Self::from_bytes(bytes).into_option().ok_or_else(|| {
-            corez::io::Error::new(
-                corez::io::ErrorKind::InvalidData,
-                "noncanonical note randomness",
-            )
-        })
-    }
-    /// Writes the canonical private note-randomness encoding.
-    pub fn write(&self, mut writer: impl corez::io::Write) -> corez::io::Result<()> {
-        writer.write_all(&self.to_bytes())
-    }
-}
-
-#[cfg(feature = "voting")]
-impl RandomSeed {
-    /// Derives a typed witness component for voting-circuits from this seed and rho.
-    pub fn voting_psi(&self, rho: &Rho) -> NotePsi {
-        NotePsi(self.psi(rho))
-    }
-
-    /// Derives the existing ZIP 2005 V3 trapdoor for voting-circuits.
-    ///
-    /// Supports synthetic governance points and values. The caller must supply
-    /// the same components to the note commitment gadget; this operation does
-    /// not validate address ownership, freshness, chain existence, or spendability.
-    pub fn voting_rcm_v3(
-        &self,
-        rho: &Rho,
-        g_d: &crate::circuit::voting::NonIdentityPallasPoint,
-        pk_d: &crate::circuit::voting::NonIdentityPallasPoint,
-        value: NoteValue,
-        psi: &NotePsi,
-    ) -> NoteCommitTrapdoor {
-        self.rcm_v3(rho, g_d, pk_d, value.inner(), &psi.0)
     }
 }
