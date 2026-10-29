@@ -16,6 +16,7 @@ use fpe::ff1::{BinaryNumeralString, FF1};
 use rand::Rng;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zcash_note_encryption::EphemeralKeyBytes;
+use zeroize::Zeroize;
 
 use crate::{
     address::Address,
@@ -262,6 +263,15 @@ impl SpendValidatingKey {
 #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NullifierDerivingKey(pallas::Base);
 
+/// The zero key, which only overwrites a key being wiped.
+impl Default for NullifierDerivingKey {
+    fn default() -> Self {
+        NullifierDerivingKey(pallas::Base::zero())
+    }
+}
+
+impl zeroize::DefaultIsZeroes for NullifierDerivingKey {}
+
 impl NullifierDerivingKey {
     /// Returns the inner base field element.
     pub(crate) fn inner(&self) -> pallas::Base {
@@ -304,6 +314,15 @@ impl NullifierDerivingKey {
 #[derive(Copy, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct CommitIvkRandomness(pallas::Scalar);
 
+/// Zero randomness, which only overwrites randomness being wiped.
+impl Default for CommitIvkRandomness {
+    fn default() -> Self {
+        CommitIvkRandomness(pallas::Scalar::zero())
+    }
+}
+
+impl zeroize::DefaultIsZeroes for CommitIvkRandomness {}
+
 impl From<&SpendingKey> for CommitIvkRandomness {
     fn from(sk: &SpendingKey) -> Self {
         CommitIvkRandomness(to_scalar(PrfExpand::ORCHARD_RIVK.with(&sk.0)))
@@ -342,6 +361,15 @@ pub struct FullViewingKey {
     rivk: CommitIvkRandomness,
 }
 
+/// Overwrites $\mathsf{nk}$ and $\mathsf{rivk}$, the components that give the key its
+/// viewing capability; $\mathsf{ak}$ is a public key.
+impl Drop for FullViewingKey {
+    fn drop(&mut self) {
+        self.nk.zeroize();
+        self.rivk.zeroize();
+    }
+}
+
 impl From<&SpendingKey> for FullViewingKey {
     fn from(sk: &SpendingKey) -> Self {
         FullViewingKey {
@@ -361,7 +389,8 @@ impl From<&ExtendedSpendingKey> for FullViewingKey {
 
 impl From<FullViewingKey> for SpendValidatingKey {
     fn from(fvk: FullViewingKey) -> Self {
-        fvk.ak
+        // `ak` is cloned out because `fvk`'s secret components are wiped when it drops.
+        fvk.ak.clone()
     }
 }
 
@@ -658,6 +687,14 @@ pub struct IncomingViewingKey {
     ivk: KeyAgreementPrivateKey,
 }
 
+/// Overwrites $\mathsf{dk}$ and $\mathsf{ivk}$.
+impl Drop for IncomingViewingKey {
+    fn drop(&mut self) {
+        self.dk.0.zeroize();
+        self.ivk.0.zeroize();
+    }
+}
+
 impl IncomingViewingKey {
     /// Helper method.
     fn from_fvk(fvk: &FullViewingKey) -> Self {
@@ -753,6 +790,12 @@ impl PreparedIncomingViewingKey {
 /// [orchardkeycomponents]: https://zips.z.cash/protocol/nu5.pdf#orchardkeycomponents
 #[derive(Debug, Clone)]
 pub struct OutgoingViewingKey([u8; 32]);
+
+impl Drop for OutgoingViewingKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 impl OutgoingViewingKey {
     /// Helper method.
@@ -1032,6 +1075,27 @@ mod tests {
         note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho},
         value::NoteValue,
     };
+
+    /// Wiping a key's secret components overwrites them with values that hold no key
+    /// material, and leaves the non-zero scalar of an IVK in range.
+    #[test]
+    fn wiping_overwrites_viewing_key_secrets() {
+        let fvk = FullViewingKey::from(&SpendingKey::from_bytes([7; 32]).unwrap());
+        let ivk = fvk.to_ivk(Scope::External);
+
+        let mut nk = fvk.nk;
+        nk.zeroize();
+        assert_eq!(nk.inner(), pallas::Base::zero());
+
+        let mut rivk = fvk.rivk;
+        rivk.zeroize();
+        assert_eq!(rivk.inner(), pallas::Scalar::zero());
+
+        let mut scalar = ivk.ivk.0;
+        assert_ne!(scalar, NonZeroPallasScalar::default());
+        scalar.zeroize();
+        assert_eq!(scalar, NonZeroPallasScalar::default());
+    }
 
     #[test]
     fn spend_validating_key_from_bytes() {

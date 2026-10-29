@@ -3450,6 +3450,7 @@ dependencies = [
  "zakura-orchard-legacy",
  "zakura-sensei",
  "zcash_spec",
+ "zeroize",
  "zip32",
 ]
 
