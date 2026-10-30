@@ -597,7 +597,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             negative: false,
             magnitude: 0,
         };
-        codebook::try_recode_with(&self.codebook, self.live.len(), num_threads, |index| {
+        codebook::try_recode_with(&self.codebook, self.live.len(), num_threads, &|index| {
             if !self.live[index] {
                 return Some((zero, zero));
             }
@@ -720,7 +720,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             &self.codebook,
             recoded_terms,
             num_threads,
-            decompose_checked,
+            &decompose_checked,
         ) else {
             return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
         };
@@ -792,7 +792,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             checked_signed_magnitudes(decompose::<C>(scalar))
         };
         let Some(recoded) =
-            codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
+            codebook::try_recode_with(&self.codebook, terms, num_threads, &decompose_checked)
         else {
             return self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra);
         };
@@ -896,40 +896,13 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let _ = (num_threads, main_window_fold);
         #[cfg(feature = "multicore")]
         if num_threads > 1 {
-            // Point-returning MSMs reduce the main windows independently
-            // and combine them with one Horner fold. Zero checks retain the
-            // paired schedule tuned for an isolated MSM. The residual tail
-            // and extras MSM run concurrently with the main windows.
-            let main = || {
-                maybe_rayon::join(
-                    || match main_window_fold {
-                        MainWindowFold::Paired => {
-                            super::paired_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum(recoded, window)
-                            })
-                        }
-                        MainWindowFold::Horner => {
-                            super::parallel_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum(recoded, window)
-                            })
-                        }
-                    },
-                    || self.tail_sum(recoded, num_threads),
-                )
-            };
-            let (extras_part, (windows_part, tail)) = if extras.is_empty() {
-                (Some(C::identity()), main())
-            } else {
-                maybe_rayon::join(|| self.extras_sum(extras), main)
-            };
-            let windows_part = windows_part?;
-            let mut tail = tail?;
-            if !bool::from(tail.is_identity()) {
-                for _ in 0..window_bits * main_windows {
-                    tail = tail.double();
-                }
-            }
-            return Some(windows_part + tail + extras_part?);
+            return self.evaluate_parallel(
+                active,
+                extras,
+                main_window_fold,
+                &|window| self.window_sum(recoded, window),
+                &|| self.tail_sum(recoded, num_threads),
+            );
         }
 
         let mut acc = self.tail_sum(recoded, num_threads)?;
@@ -1018,6 +991,53 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         (points, offsets)
     }
 
+    /// The parallel schedule shared by [`Self::evaluate`] and
+    /// [`Self::evaluate_range`]: `window_sum` reduces one main window and
+    /// `tail_sum` the unshifted residual tail. Both are trait objects, so the
+    /// Rayon joins are compiled once per curve rather than once per caller.
+    #[cfg(feature = "multicore")]
+    fn evaluate_parallel(
+        &self,
+        active: usize,
+        extras: &[(C::ScalarExt, C::AffineExt)],
+        main_window_fold: MainWindowFold,
+        window_sum: &(dyn Fn(usize) -> Option<C> + Sync),
+        tail_sum: &(dyn Fn() -> Option<C> + Sync),
+    ) -> Option<C> {
+        let window_bits = self.codebook.window_bits();
+        let main_windows = self.codebook.main_windows();
+        // Point-returning MSMs reduce the main windows independently and
+        // combine them with one Horner fold. Zero checks retain the paired
+        // schedule tuned for an isolated MSM. The residual tail and extras
+        // MSM run concurrently with the main windows.
+        let main = || {
+            maybe_rayon::join(
+                || match main_window_fold {
+                    MainWindowFold::Paired => {
+                        super::paired_windows_sum::<C>(active, window_bits, window_sum)
+                    }
+                    MainWindowFold::Horner => {
+                        super::parallel_windows_sum::<C>(active, window_bits, window_sum)
+                    }
+                },
+                tail_sum,
+            )
+        };
+        let (extras_part, (windows_part, tail)) = if extras.is_empty() {
+            (Some(C::identity()), main())
+        } else {
+            maybe_rayon::join(|| self.extras_sum(extras), main)
+        };
+        let windows_part = windows_part?;
+        let mut tail = tail?;
+        if !bool::from(tail.is_identity()) {
+            for _ in 0..window_bits * main_windows {
+                tail = tail.double();
+            }
+        }
+        Some(windows_part + tail + extras_part?)
+    }
+
     /// The range counterpart of [`Self::evaluate`].
     fn evaluate_range(
         &self,
@@ -1035,40 +1055,13 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let _ = (num_threads, main_window_fold);
         #[cfg(feature = "multicore")]
         if num_threads > 1 {
-            // Point-returning MSMs reduce the main windows independently
-            // and combine them with one Horner fold. Zero checks retain the
-            // paired schedule tuned for an isolated MSM. The residual tail
-            // and extras MSM run concurrently with the main windows.
-            let main = || {
-                maybe_rayon::join(
-                    || match main_window_fold {
-                        MainWindowFold::Paired => {
-                            super::paired_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum_range(recoded, base_offset, window)
-                            })
-                        }
-                        MainWindowFold::Horner => {
-                            super::parallel_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum_range(recoded, base_offset, window)
-                            })
-                        }
-                    },
-                    || self.tail_sum_range(&recoded.residuals, base_offset, num_threads),
-                )
-            };
-            let (extras_part, (windows_part, tail)) = if extras.is_empty() {
-                (Some(C::identity()), main())
-            } else {
-                maybe_rayon::join(|| self.extras_sum(extras), main)
-            };
-            let windows_part = windows_part?;
-            let mut tail = tail?;
-            if !bool::from(tail.is_identity()) {
-                for _ in 0..window_bits * main_windows {
-                    tail = tail.double();
-                }
-            }
-            return Some(windows_part + tail + extras_part?);
+            return self.evaluate_parallel(
+                active,
+                extras,
+                main_window_fold,
+                &|window| self.window_sum_range(recoded, base_offset, window),
+                &|| self.tail_sum_range(&recoded.residuals, base_offset, num_threads),
+            );
         }
 
         let mut acc = self.tail_sum_range(&recoded.residuals, base_offset, num_threads)?;
@@ -1404,7 +1397,7 @@ fn tail_multiexp<C: GlvParams>(
             .map(|(row, &(first, second))| orbit::recode_row(params, first, second, row))
             .max()
             .unwrap_or(0);
-        return super::paired_windows_sum::<C>(active, params.width(), |window| {
+        return super::paired_windows_sum::<C>(active, params.width(), &|window| {
             if let Some(base_indices) = base_indices {
                 orbit::windows_sum_indexed::<C>(
                     params,
@@ -1936,7 +1929,7 @@ mod tests {
             scalars[index] = C::ScalarExt::ZERO;
         }
         let recode = |prepared: &PreparedZeroMsm<C>, indices: &[usize], all_zero: bool| {
-            codebook::try_recode_with(&prepared.codebook, indices.len(), 1, |row| {
+            codebook::try_recode_with(&prepared.codebook, indices.len(), 1, &|row| {
                 let base = indices[row];
                 let scalar = if all_zero || !prepared.live[base] {
                     C::ScalarExt::ZERO
