@@ -2045,17 +2045,40 @@ fn multiexp_serial<C: GlvParams>(
     Some(acc)
 }
 
-/// Evaluates `job(i)` for every `i < jobs` on the Rayon pool and returns the
-/// results in index order.
+/// Runs `job(i)` for every `i < jobs` on the Rayon pool.
 ///
-/// Every parallel stage in this module is coarse (a whole window, batch, or
-/// twiddle per job), so taking `job` as a trait object costs one indirect call
-/// per job. In exchange, Rayon's join and bridge machinery is compiled once
-/// per result type instead of once per closure, which is most of the
-/// `multicore` feature's code-generation cost.
+/// This is the module's only Rayon index pipeline, so Rayon's join and bridge
+/// machinery is compiled once rather than once per closure and result type;
+/// that per-closure code was most of the `multicore` feature's
+/// code-generation cost. Every parallel stage here is coarse (a whole window,
+/// batch, or twiddle per job), so the indirect call is negligible.
+#[cfg(feature = "multicore")]
+fn par_for_each_index(jobs: usize, job: &(dyn Fn(usize) + Sync)) {
+    (0..jobs).into_par_iter().for_each(job);
+}
+
+/// Evaluates `job(i)` for every `i < jobs` through [`par_for_each_index`] and
+/// returns the results in index order. Each job stores its result in its own
+/// uncontended slot.
 #[cfg(feature = "multicore")]
 fn par_map_indices<T: Send>(jobs: usize, job: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
-    (0..jobs).into_par_iter().map(job).collect()
+    use std::sync::Mutex;
+
+    let slots = (0..jobs).map(|_| Mutex::new(None)).collect::<Vec<_>>();
+    par_for_each_index(jobs, &|index| {
+        let result = job(index);
+        *slots[index]
+            .lock()
+            .expect("a slot is never locked while a job runs") = Some(result);
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .expect("a slot is never locked while a job runs")
+                .expect("every job stores its result")
+        })
+        .collect()
 }
 
 /// [`Table::mul_decomposed_pairs_affine`] split into one batch per worker,
