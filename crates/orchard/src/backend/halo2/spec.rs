@@ -101,6 +101,9 @@ impl Default for NonZeroPallasScalar {
     }
 }
 
+/// Overwrites a scalar being wiped with one, its default, so that it stays in range.
+impl zeroize::DefaultIsZeroes for NonZeroPallasScalar {}
+
 impl From<NonZeroPallasBase> for NonZeroPallasScalar {
     fn from(s: NonZeroPallasBase) -> Self {
         NonZeroPallasScalar::guaranteed(mod_r_p(s.0))
