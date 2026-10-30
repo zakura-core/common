@@ -24,6 +24,7 @@ use crate::{
     transaction::{Transaction, TxVersion},
 };
 
+#[cfg(feature = "equihash")]
 pub use equihash;
 
 /// The identifier for a Zcash block.
