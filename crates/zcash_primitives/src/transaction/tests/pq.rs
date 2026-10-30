@@ -1,9 +1,10 @@
-//! Library integration for supplied programs and authenticated P2SH redeem scripts.
-//! These tests do not activate PQ validation or establish node acceptance.
+// Library integration for supplied programs and authenticated P2SH redeem scripts.
+// These tests do not activate PQ validation or establish node acceptance.
 
 use alloc::vec::Vec;
 
-use super::{TestTransparentAuth, TestUnauthorized};
+use crate::transaction::tests::{TestTransparentAuth, TestUnauthorized};
+use self::crypto::SigningKey;
 use crate::transaction::{
     TransactionData, TxVersion,
     sighash::{SignableInput, signature_hash},
@@ -12,7 +13,7 @@ use crate::transaction::{
 use transparent::{
     address::Script,
     bundle::{Bundle, OutPoint, TxIn, TxOut},
-    pq::{self, SigningKey},
+    pq::{self},
     sighash::{self, SighashType},
 };
 use zcash_protocol::{consensus::BranchId, value::Zatoshis};
@@ -192,14 +193,14 @@ mod p2sh_spends {
     #[test]
     fn serialized_p2sh_multisig_authenticates_distinct_signers_and_order() {
         let keys: Vec<_> = (3..=5)
-            .map(|seed| SigningKey::from_seed(&[seed; pq::SEED_BYTES]))
+            .map(|seed| SigningKey::from_seed(&[seed; crypto::SEED_BYTES]))
             .collect();
         let body = multisig_program(
             2,
             &keys.iter().map(SigningKey::public_key).collect::<Vec<_>>(),
             false,
         );
-        let redeem = p2sh::redeem_script(&body).unwrap();
+        let redeem = p2sh::redeem_script(PARAMETERS, &body).unwrap();
         let mut tx = transaction(&redeem);
         let arguments: Vec<_> = keys
             .iter()
@@ -209,7 +210,7 @@ mod p2sh_spends {
                     &tx,
                     &redeem,
                     sighash::SIGHASH_ALL,
-                    p2sh::SIGNING_CONTEXT,
+                    p2sh::signing_context(PARAMETERS),
                 );
                 input.truncate(input.len() - pushed(&redeem.0).len());
                 input
@@ -239,16 +240,16 @@ mod p2sh_spends {
 
     #[test]
     fn serialized_p2sh_spend_authenticates_script_and_v5_transaction() {
-        let key = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
+        let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
         let body = program(&key.public_key());
-        let redeem = p2sh::redeem_script(&body).unwrap();
+        let redeem = p2sh::redeem_script(PARAMETERS, &body).unwrap();
         let mut tx = transaction(&redeem);
         let input = signed_input(
             &key,
             &tx,
             &redeem,
             sighash::SIGHASH_ALL,
-            p2sh::SIGNING_CONTEXT,
+            p2sh::signing_context(PARAMETERS),
         );
         install_input(&mut tx, &input);
         assert_eq!(check(&tx, &redeem), Ok(true));
@@ -291,7 +292,8 @@ mod p2sh_spends {
         // Equivalent execution with different bytes still needs a different output/signature.
         let mut changed_body = vec![0x61]; // NOP
         changed_body.extend_from_slice(&body.0);
-        let changed_redeem = p2sh::redeem_script(&Code(changed_body)).unwrap();
+        let changed_redeem =
+            p2sh::redeem_script(PARAMETERS, &Code(changed_body)).unwrap();
         let mut substituted = input[..input.len() - pushed(&redeem.0).len()].to_vec();
         substituted.extend_from_slice(&pushed(&changed_redeem.0));
         install_input(&mut tx, &substituted);
@@ -310,14 +312,20 @@ mod p2sh_spends {
 
     #[test]
     fn p2sh_retains_six_signing_modes_and_absolute_locktime() {
-        let key = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
+        let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
         let mut body = vec![0x01, 100, 0xb1, 0x75]; // 100 CLTV DROP
         body.extend_from_slice(&program(&key.public_key()).0);
-        let redeem = p2sh::redeem_script(&Code(body)).unwrap();
+        let redeem = p2sh::redeem_script(PARAMETERS, &Code(body)).unwrap();
         for selector in [1, 2, 3, 0x81, 0x82, 0x83] {
             let mut tx = transaction(&redeem);
             tx.lock_time = 100;
-            let input = signed_input(&key, &tx, &redeem, selector, p2sh::SIGNING_CONTEXT);
+            let input = signed_input(
+                &key,
+                &tx,
+                &redeem,
+                selector,
+                p2sh::signing_context(PARAMETERS),
+            );
             install_input(&mut tx, &input);
             assert_eq!(check(&tx, &redeem), Ok(true));
             tx.transparent_bundle.as_mut().unwrap().vout[0] =
@@ -362,7 +370,7 @@ fn check(
         lock_time: i64::from(tx.lock_time()),
         is_final: tx.transparent_bundle().unwrap().vin[0].sequence() == u32::MAX,
     };
-    pq::script::verify_script(input, code, context, &checker)
+    pq::script::verify_script(PARAMETERS, input, code, context, &checker)
 }
 
 fn signature(key: &SigningKey, tx: &TransactionData<TestUnauthorized>, selector: u8) -> Vec<u8> {
@@ -371,7 +379,11 @@ fn signature(key: &SigningKey, tx: &TransactionData<TestUnauthorized>, selector:
     signature
 }
 
-fn multisig_program(required: u8, keys: &[[u8; pq::PUBLIC_KEY_BYTES]], verify: bool) -> Code {
+fn multisig_program(
+    required: u8,
+    keys: &[[u8; crypto::PUBLIC_KEY_BYTES]],
+    verify: bool,
+) -> Code {
     assert!((1..=20).contains(&required));
     assert!((usize::from(required)..=20).contains(&keys.len()));
     let mut bytes = pushed(&zcash_script::num::serialize(i64::from(required)));
@@ -395,13 +407,13 @@ fn interpreter_error(result: Result<bool, pq_script::Error>) -> InterpreterError
 
 #[test]
 fn pq_script_executes_serialized_signature_over_real_v5_digest() {
-    let key = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
+    let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
     let public_key = key.public_key();
     let mut tx = transaction(&public_key);
     let code = program(&public_key);
     let argument = signature(&key, &tx, sighash::SIGHASH_ALL);
     let input = pushed(&argument);
-    assert_eq!(input.len(), 16_228);
+    assert_eq!(input.len(), crypto::SIGNATURE_BYTES + 4);
 
     // Pass through the same length-prefixed script field used in transaction inputs.
     let mut wire = Vec::new();
@@ -443,10 +455,10 @@ fn pq_script_executes_serialized_signature_over_real_v5_digest() {
         check(&tx, &input, &code, &[0; 256]),
         Err(pq_script::Error::ContextSize)
     );
-    let other_key = SigningKey::from_seed(&[4; pq::SEED_BYTES]).public_key();
+    let other_key = SigningKey::from_seed(&[4; crypto::SEED_BYTES]).public_key();
     assert_eq!(check(&tx, &input, &program(&other_key), CONTEXT), Ok(false));
 
-    for position in [0, 24, pq::SIGNATURE_BYTES - 1] {
+    for position in [0, 24, crypto::SIGNATURE_BYTES - 1] {
         let mut altered = argument.clone();
         altered[position] ^= 1;
         assert_eq!(check(&tx, &pushed(&altered), &code, CONTEXT), Ok(false));
@@ -486,7 +498,7 @@ fn pq_script_executes_serialized_signature_over_real_v5_digest() {
 
 #[test]
 fn pq_script_preserves_false_and_abort() {
-    let key = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
+    let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
     let tx = transaction(&key.public_key());
     let code = program(&key.public_key());
     let argument = signature(&key, &tx, sighash::SIGHASH_ALL);
@@ -503,8 +515,8 @@ fn pq_script_preserves_false_and_abort() {
             InterpreterError::Verify
         )))
     ));
-    for public_key in [&[0; 47][..], &[0; 49][..]] {
-        let mut bad_program = program(public_key);
+    for length in [crypto::PUBLIC_KEY_BYTES - 1, crypto::PUBLIC_KEY_BYTES + 1] {
+        let mut bad_program = program(&vec![0; length]);
         bad_program.0.push(0x91);
         assert!(matches!(
             check(&tx, &[0], &bad_program, CONTEXT),
@@ -514,7 +526,7 @@ fn pq_script_preserves_false_and_abort() {
             )))
         ));
     }
-    for short in [&argument[..1], &argument[..pq::SIGNATURE_BYTES]] {
+    for short in [&argument[..1], &argument[..crypto::SIGNATURE_BYTES]] {
         assert!(matches!(
             check(&tx, &pushed(short), &code, CONTEXT),
             Err(pq_script::Error::Script(script::Error::Interpreter(
@@ -525,10 +537,12 @@ fn pq_script_preserves_false_and_abort() {
     }
     let mut extended = argument.clone();
     extended.push(0);
-    assert_eq!(
-        check(&tx, &pushed(&extended), &code, CONTEXT),
-        Err(pq_script::Error::PushSize)
-    );
+    let result = check(&tx, &pushed(&extended), &code, CONTEXT);
+    if PARAMETERS == pq::ParameterSet::Sha2_128f {
+        assert_eq!(result, Err(pq_script::Error::PushSize));
+    } else {
+        assert_eq!(interpreter_error(result), InterpreterError::PqSignatureSize);
+    }
     let mut bad_selector = argument.clone();
     *bad_selector.last_mut().unwrap() = 0x04;
     assert!(check(&tx, &pushed(&bad_selector), &code, CONTEXT).is_err());
@@ -541,7 +555,7 @@ fn pq_script_preserves_false_and_abort() {
 
 #[test]
 fn pq_script_multisig_one_of_one_checks_signatures_and_consumes_dummy() {
-    let key = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
+    let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
     for verify in [false, true] {
         let mut code = multisig_program(1, &[key.public_key()], verify);
         if verify {
@@ -582,8 +596,8 @@ fn pq_script_multisig_one_of_one_checks_signatures_and_consumes_dummy() {
 
 #[test]
 fn pq_script_multisig_one_of_two_searches_past_failed_matches() {
-    let alice = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
-    let bob = SigningKey::from_seed(&[4; pq::SEED_BYTES]);
+    let alice = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
+    let bob = SigningKey::from_seed(&[4; crypto::SEED_BYTES]);
     let code = multisig_program(1, &[alice.public_key(), bob.public_key()], false);
     let tx = transaction_with_program(&code);
 
@@ -601,7 +615,7 @@ fn pq_script_multisig_one_of_two_searches_past_failed_matches() {
 #[test]
 fn pq_script_multisig_two_of_three_accepts_each_pair_and_rejects_wrong_order() {
     let keys: Vec<_> = (3..=5)
-        .map(|seed| SigningKey::from_seed(&[seed; pq::SEED_BYTES]))
+        .map(|seed| SigningKey::from_seed(&[seed; crypto::SEED_BYTES]))
         .collect();
     for verify in [false, true] {
         let mut code = multisig_program(
@@ -633,13 +647,13 @@ fn pq_script_multisig_two_of_three_accepts_each_pair_and_rejects_wrong_order() {
         let reversed = [vec![0], pushed(&arguments[2]), pushed(&arguments[0])].concat();
         let forged = [
             vec![0],
-            pushed(&vec![0; pq::SIGNATURE_BYTES + 1]),
+            pushed(&vec![0; crypto::SIGNATURE_BYTES + 1]),
             pushed(&arguments[2]),
         ]
         .concat();
         // Use a valid selector for the cryptographically invalid signature.
         let mut forged = forged;
-        forged[3 + pq::SIGNATURE_BYTES + 1] = sighash::SIGHASH_ALL;
+        forged[3 + crypto::SIGNATURE_BYTES + 1] = sighash::SIGHASH_ALL;
         for input in [reversed, forged] {
             let result = check(&tx, &input, &code, CONTEXT);
             if verify {
@@ -657,7 +671,7 @@ fn pq_script_multisig_two_of_three_accepts_each_pair_and_rejects_wrong_order() {
 
 #[test]
 fn pq_script_large_multisig_and_multiple_checks_fit_bounded_resources() {
-    let key = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
+    let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
     // Duplicate keys remain legal, as in legacy Script. This fixture measures
     // signature transport and twenty verifications, not distinct ownership.
     let code = multisig_program(20, &[key.public_key(); 20], false);
@@ -754,9 +768,9 @@ fn pq_script_absolute_locktime_checks_boundaries_types_and_sequence() {
 
 #[test]
 fn pq_script_recovery_branch_requires_its_key_and_absolute_locktime() {
-    let owner = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
-    let recovery = SigningKey::from_seed(&[4; pq::SEED_BYTES]);
-    let cosigner = SigningKey::from_seed(&[5; pq::SEED_BYTES]);
+    let owner = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
+    let recovery = SigningKey::from_seed(&[4; crypto::SEED_BYTES]);
+    let cosigner = SigningKey::from_seed(&[5; crypto::SEED_BYTES]);
     let mut bytes = vec![0x63]; // IF: owner and cosigner may spend before recovery.
     bytes.extend_from_slice(
         &multisig_program(2, &[owner.public_key(), cosigner.public_key()], false).0,
@@ -813,7 +827,7 @@ fn pq_script_recovery_branch_requires_its_key_and_absolute_locktime() {
 
 #[test]
 fn pq_script_uses_existing_branches_and_absolute_locktime() {
-    let key = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
+    let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
     let public_key = key.public_key();
     let single = program(&public_key);
     let mut bytes = vec![0x63, 0x51, 0xb1, 0x75]; // IF 1 CLTV DROP
@@ -848,7 +862,7 @@ fn pq_script_uses_existing_branches_and_absolute_locktime() {
 
 #[test]
 fn pq_script_accepts_existing_signing_modes_without_an_all_only_rule() {
-    let key = SigningKey::from_seed(&[3; pq::SEED_BYTES]);
+    let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
     let public_key = key.public_key();
     let tx = transaction(&public_key);
     let code = program(&public_key);

@@ -1,13 +1,13 @@
 //! Library-level PQ execution inside existing P2SH outputs.
 //!
-//! The proposed redeem script is `50 02 50 51 01 01 || body`: OP_RESERVED,
-//! a two-byte `PQ` tag, a one-byte push of execution identifier 1, then the
+//! The redeem script is `50 02 50 51 01 <version> || body`: OP_RESERVED,
+//! a two-byte `PQ` tag, a one-byte push of an execution version, then the
 //! ordinary script body. The first four bytes identify the PQ namespace. The
 //! whole redeem script, including this header, is committed by the unchanged
 //! `OP_HASH160 <20-byte hash> OP_EQUAL` output and existing P2SH address.
 //!
-//! Authenticate that hash before selecting rules. Identifier 1 selects the
-//! existing bounded SLH-DSA-SHA2-192s evaluator and [`SIGNING_CONTEXT`]. Only the
+//! Authenticate that hash before selecting rules. Version 1 selects SHA2-128f;
+//! version 2 selects SHA2-192s, each with its fixed [`signing_context`]. Only the
 //! body is executed; the digest callback receives the complete redeem script.
 //! OP_RESERVED makes the redeem script fail under legacy execution. Unknown
 //! identifiers in the recognized namespace fail without ECDSA fallback.
@@ -33,11 +33,17 @@ use zcash_script::{
 
 use crate::util::hash160;
 
-/// Fixed pure SLH-DSA context for the initial committed P2SH execution identifier.
-pub const SIGNING_CONTEXT: &[u8] = b"ZCASH/PQ/P2SH\x01";
+use super::ParameterSet;
+
+/// Fixed Pure SLH-DSA context bound to the committed execution version.
+pub const fn signing_context(parameters: ParameterSet) -> &'static [u8] {
+    match parameters {
+        ParameterSet::Sha2_128f => b"ZCASH/PQ/P2SH\x01",
+        ParameterSet::Sha2_192s => b"ZCASH/PQ/P2SH\x02",
+    }
+}
 
 const NAMESPACE: &[u8] = &[0x50, 0x02, b'P', b'Q'];
-const IDENTIFIER: u8 = 1;
 const HEADER_BYTES: usize = 6;
 
 /// A rejected P2SH commitment, execution identifier, or script evaluation.
@@ -88,18 +94,22 @@ impl From<pq::Error> for Error {
     }
 }
 
-/// Prefixes a script body with the proposed initial PQ execution identifier.
+/// Prefixes a script body with the execution version for the selected parameter set.
 ///
 /// Construct its ordinary P2SH output/address using HASH160 of the returned
 /// bytes. The complete redeem script shares the existing script-size bound.
 /// This checks size, not satisfiability, activation or wallet derivation rules.
-pub fn redeem_script(body: &Code) -> Result<Code, Error> {
+pub fn redeem_script(parameters: ParameterSet, body: &Code) -> Result<Code, Error> {
     if body.0.len() > pq::MAX_SCRIPT_BYTES - HEADER_BYTES {
         return Err(pq::Error::from(script::Error::ScriptSize(None)).into());
     }
     let mut bytes = Vec::with_capacity(HEADER_BYTES + body.0.len());
     bytes.extend_from_slice(NAMESPACE);
-    bytes.extend_from_slice(&[0x01, IDENTIFIER]);
+    let version = match parameters {
+        ParameterSet::Sha2_128f => 1,
+        ParameterSet::Sha2_192s => 2,
+    };
+    bytes.extend_from_slice(&[0x01, version]);
     bytes.extend_from_slice(&body.0);
     Ok(Code(bytes))
 }
@@ -130,30 +140,17 @@ pub fn verify_spend(
             .eval(legacy_flags, transaction)
             .map_err(|(part, error)| Error::Legacy(part, error))
     };
-    let output = &spend.pub_key.0;
-    // Exact BIP 16 template, matching the existing evaluator's P2SH recognition.
-    if output.len() != 23 || output[..2] != [0xa9, 0x14] || output[22] != 0x87 {
+    let SpendMode::Pq(selected) = classify_spend(&spend.sig.0, &spend.pub_key)? else {
         return legacy();
-    }
-    let input = pq::SpendingInput::scan(&spend.sig.0)?;
-    let redeem = input.redeem_script();
-    if hash160::hash(redeem) != output[2..22] {
-        return Err(Error::CommitmentMismatch);
-    }
-    if !redeem.starts_with(NAMESPACE) {
-        return legacy();
-    }
-    if redeem.len() < HEADER_BYTES || redeem[4] != 0x01 {
-        return Err(Error::IdentifierEncoding);
-    }
-    if redeem[5] != IDENTIFIER {
-        return Err(Error::UnsupportedIdentifier(redeem[5]));
-    }
-    let arguments = input.pq_arguments()?;
+    };
+    let parameters = selected.parameters;
+    let redeem = selected.input.redeem_script();
+    let body_bytes = selected.body();
+    let arguments = selected.arguments;
     // Copy only authenticated, size-bounded scripts. Keep the full representation
     // for hashing even though the interpreter executes the body after the header.
     let script_code = Code(redeem.to_vec());
-    let body = Code(redeem[HEADER_BYTES..].to_vec());
+    let body = Code(body_bytes.to_vec());
     let sighash = |_: &Code, mode: &zcash_script::signature::HashType| {
         (transaction.sighash)(&script_code, mode)
     };
@@ -162,7 +159,72 @@ pub fn verify_spend(
         lock_time: transaction.lock_time,
         is_final: transaction.is_final,
     };
-    super::script::verify_script(arguments, &body, SIGNING_CONTEXT, &checker).map_err(Error::from)
+    super::script::verify_script(
+        parameters,
+        arguments,
+        &body,
+        signing_context(parameters),
+        &checker,
+    )
+    .map_err(Error::from)
+}
+
+/// Authenticated execution classification. This does not verify signatures or activate PQ.
+pub enum SpendMode<'a> {
+    /// Use the unchanged legacy evaluator on the original scripts.
+    Legacy,
+    /// A supported, authenticated PQ script with bounded argument transport.
+    Pq(PqSpend<'a>),
+}
+
+/// Borrowed PQ script components, constructible only through commitment authentication.
+pub struct PqSpend<'a> {
+    parameters: ParameterSet,
+    input: pq::SpendingInput<'a>,
+    arguments: &'a [u8],
+}
+impl PqSpend<'_> {
+    /// Parameter set selected by the authenticated version.
+    pub fn parameters(&self) -> ParameterSet {
+        self.parameters
+    }
+    /// Executed body, excluding the committed version header.
+    pub fn body(&self) -> &[u8] {
+        &self.input.redeem_script()[HEADER_BYTES..]
+    }
+}
+
+/// Authenticates the final pushed script against a trusted previous output before
+/// selecting parameters. Callers supply network/version activation independently.
+/// Non-P2SH outputs and ordinary redeem scripts retain legacy evaluation. Recognized
+/// malformed or unknown PQ versions reject, never fall back to another verifier.
+pub fn classify_spend<'a>(input: &'a [u8], previous_output: &Code) -> Result<SpendMode<'a>, Error> {
+    let output = &previous_output.0;
+    if output.len() != 23 || output[..2] != [0xa9, 0x14] || output[22] != 0x87 {
+        return Ok(SpendMode::Legacy);
+    }
+    let input = pq::SpendingInput::scan(input)?;
+    let redeem = input.redeem_script();
+    if hash160::hash(redeem) != output[2..22] {
+        return Err(Error::CommitmentMismatch);
+    }
+    if !redeem.starts_with(NAMESPACE) {
+        return Ok(SpendMode::Legacy);
+    }
+    if redeem.len() < HEADER_BYTES || redeem[4] != 0x01 {
+        return Err(Error::IdentifierEncoding);
+    }
+    let parameters = match redeem[5] {
+        1 => ParameterSet::Sha2_128f,
+        2 => ParameterSet::Sha2_192s,
+        id => return Err(Error::UnsupportedIdentifier(id)),
+    };
+    let arguments = input.pq_arguments()?;
+    Ok(SpendMode::Pq(PqSpend {
+        parameters,
+        input,
+        arguments,
+    }))
 }
 
 #[cfg(test)]

@@ -15,13 +15,14 @@ use zcash_script::{
     signature::{self, HashType},
 };
 
-use super::{PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
+use super::ParameterSet;
 
 // Keep this private: callers enter through verify_script, which selects the
 // bounded PQ parser and shared evaluator together.
 struct Checker<'a, 'tx> {
     transaction: &'a CallbackTransactionSignatureChecker<'tx>,
     context: &'a [u8],
+    parameters: ParameterSet,
 }
 
 impl SignatureChecker for Checker<'_, '_> {
@@ -34,25 +35,27 @@ impl SignatureChecker for Checker<'_, '_> {
     ) -> Result<bool, Error> {
         // Encoding errors abort even when the signature is empty. An empty signature
         // with a well-formed key deliberately pushes false without doing cryptography.
-        if public_key.len() != PUBLIC_KEY_BYTES {
+        if public_key.len() != self.parameters.public_key_bytes() {
             return Err(Error::PubKeyType);
         }
         if argument.is_empty() {
             return Ok(false);
         }
-        if argument.len() != SIGNATURE_BYTES + 1 {
+        if argument.len() != self.parameters.signature_bytes() + 1 {
             return Err(Error::PqSignatureSize);
         }
-        let hash_type = HashType::from_bits(i32::from(argument[SIGNATURE_BYTES]), true)
-            .map_err(|e| Error::from(signature::Error::from(e)))?;
+        let hash_type =
+            HashType::from_bits(i32::from(argument[self.parameters.signature_bytes()]), true)
+                .map_err(|e| Error::from(signature::Error::from(e)))?;
         let Some(digest) = (self.transaction.sighash)(program, &hash_type) else {
             return Ok(false);
         };
         Ok(super::verify(
+            self.parameters,
             public_key,
             &digest,
             self.context,
-            &argument[..SIGNATURE_BYTES],
+            &argument[..self.parameters.signature_bytes()],
         )
         .is_ok())
     }
@@ -80,6 +83,7 @@ impl SignatureChecker for Checker<'_, '_> {
 /// Malformed nonempty signatures, keys, and selectors abort. A cryptographically
 /// incorrect signature or an empty signature with a valid-length key evaluates false.
 pub fn verify_script(
+    parameters: ParameterSet,
     input: &[u8],
     program: &Code,
     context: &[u8],
@@ -94,6 +98,7 @@ pub fn verify_script(
         &Checker {
             transaction,
             context,
+            parameters,
         },
     )
 }

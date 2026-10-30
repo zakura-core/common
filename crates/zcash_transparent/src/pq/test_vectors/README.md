@@ -1,4 +1,4 @@
-# SLH-DSA-SHA2-192s reference vectors
+# SLH-DSA-SHA2 reference vectors
 
 These files contain public test material, never wallet secrets.
 
@@ -42,3 +42,19 @@ with tempfile.TemporaryDirectory() as directory:
 The Rust tests compare the generated public key and entire signature to these
 fixtures, then verify the independent signature. Tests use the bundled fixtures
 and need neither OpenSSL nor network access.
+
+## SHA2-128f references
+
+`sha2_128f_nist.seed` and `sha2_128f_nist.pk` use the same pinned NIST
+key-generation source above, group 3, case 21 (SLH-DSA-SHA2-128f). Its
+48-byte seed is `skSeed || skPrf || pkSeed`; its public key is 32 bytes.
+The source JSON SHA-256 is
+`d7c53a1b6450087047b57aae83a5a51a0ac89ecdb23ebe071e83fbb69ae9d920`.
+
+`sha2_128f_openssl.sig` was generated using the same message, context and
+deterministic Pure interface as the 192s fixture, with OpenSSL 4.0.3 and
+`SLH-DSA-SHA2-128f`. It is 17,088 bytes, with SHA-256
+`02066fd92ecbc2c18251f36056051e50b74366cc93ee52ba8a73cb3127aa1ac7`.
+An independent in-memory OpenSSL run reproduced this signature hash. To
+reproduce it, substitute the 128f fixture names and algorithm in the
+commands above. These are public test vectors, never wallet secrets.

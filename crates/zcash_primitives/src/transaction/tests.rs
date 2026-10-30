@@ -1,7 +1,18 @@
 use proptest::prelude::*;
 
 #[cfg(all(test, feature = "pq"))]
-mod pq;
+mod pq {
+    mod sha2_128f {
+        use transparent::pq::sha2_128f as crypto;
+        const PARAMETERS: transparent::pq::ParameterSet = transparent::pq::ParameterSet::Sha2_128f;
+        include!("tests/pq.rs");
+    }
+    mod sha2_192s {
+        use transparent::pq::sha2_192s as crypto;
+        const PARAMETERS: transparent::pq::ParameterSet = transparent::pq::ParameterSet::Sha2_192s;
+        include!("tests/pq.rs");
+    }
+}
 
 #[cfg(test)]
 use {

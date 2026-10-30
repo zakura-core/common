@@ -20,8 +20,8 @@ use crate::{
 /// script. Accommodates 20 full signatures and multiple checking instructions; it
 /// is a byte bound, not a signature-count limit or a final consensus parameter.
 pub const MAX_INPUT_BYTES: usize = 512 * 1024;
-/// One SLH-DSA-SHA2-192s signature and its one-byte signing-mode selector.
-pub const MAX_PUSH_BYTES: usize = 16_225;
+/// One SLH-DSA-SHA2-128f signature and its one-byte signing-mode selector.
+pub const MAX_PUSH_BYTES: usize = 17_089;
 /// Combined primary and alternate stack payload bytes, checked after every opcode.
 pub const MAX_STACK_BYTES: usize = 1024 * 1024;
 /// Spending scripts retain the existing script-size bound.
@@ -353,10 +353,12 @@ mod tests {
     #[test]
     fn complete_serialized_input_fits_at_the_byte_boundary() {
         let mut input = Vec::new();
-        while input.len() + MAX_PUSH_BYTES + 5 < MAX_INPUT_BYTES {
+        // Reserve a final empty redeem-script push, independently of argument size.
+        while input.len() + MAX_PUSH_BYTES + 10 < MAX_INPUT_BYTES {
             input.extend(push(MAX_PUSH_BYTES));
         }
-        input.extend(push(MAX_INPUT_BYTES - input.len() - 5));
+        input.extend(push(MAX_INPUT_BYTES - input.len() - 10));
+        input.extend(push(0));
         assert_eq!(input.len(), MAX_INPUT_BYTES);
         assert!(SpendingInput::scan(&input).unwrap().pq_arguments().is_ok());
         assert_eq!(

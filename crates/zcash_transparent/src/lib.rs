@@ -9,7 +9,7 @@
 //!   [`keys::NonHardenedChildIndex`] and `bip32::ChildNumber`.
 //! - `transparent-inputs`: Transparent key derivation and spending. Implies `pczt`.
 //! - `test-dependencies`: Exposes APIs useful for testing.
-//! - `pq`: SLH-DSA-SHA2-192s primitives and an explicit
+//! - `pq`: SLH-DSA-SHA2-128f and SLH-DSA-SHA2-192s primitives and an explicit
 //!   bounded script evaluator, with a proposed PQ identifier inside existing
 //!   P2SH redeem scripts. Does not activate PQ transaction validation.
 //!
