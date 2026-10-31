@@ -1,4 +1,4 @@
-use ff::{Field, FieldBits, PrimeField, PrimeFieldBits};
+use ff::{Field, PrimeField};
 use group::{
     Curve, CurveAffine, Group, GroupEncoding, UncompressedEncoding, WnafGroup,
     prime::{PrimeCurve, PrimeGroup},
@@ -318,18 +318,6 @@ impl PrimeField for Fr {
     const ROOT_OF_UNITY: Self = Fr(Wrapping(57751));
     const ROOT_OF_UNITY_INV: Self = Fr(Wrapping(12832));
     const DELTA: Self = Fr(Wrapping(38779));
-}
-
-impl PrimeFieldBits for Fr {
-    type ReprBits = u64;
-
-    fn to_le_bits(&self) -> FieldBits<Self::ReprBits> {
-        FieldBits::new((self.0).0 as u64)
-    }
-
-    fn char_le_bits() -> FieldBits<Self::ReprBits> {
-        FieldBits::new(MODULUS_R.0 as u64)
-    }
 }
 
 #[derive(Clone, Debug)]

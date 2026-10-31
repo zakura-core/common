@@ -682,7 +682,7 @@ mod tests {
     use core::iter;
 
     use super::{CommitIvkChip, CommitIvkConfig, gadgets};
-    use crate::backend::group::ff::{Field, PrimeField, PrimeFieldBits};
+    use crate::backend::group::ff::{Field, PrimeField};
     use crate::backend::halo2_gadgets::{
         ecc::{
             ScalarFixed,
@@ -708,6 +708,7 @@ mod tests {
         fixed_bases::COMMIT_IVK_PERSONALIZATION,
     };
     use crate::rng_compat::OsRng;
+    use crate::spec::leos2bsp;
 
     #[test]
     fn commit_ivk() {
@@ -858,12 +859,8 @@ mod tests {
                             domain
                                 .short_commit(
                                     iter::empty()
-                                        .chain(
-                                            ak.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE),
-                                        )
-                                        .chain(
-                                            nk.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE),
-                                        ),
+                                        .chain(leos2bsp(ak.to_repr()).take(L_ORCHARD_BASE))
+                                        .chain(leos2bsp(nk.to_repr()).take(L_ORCHARD_BASE)),
                                     &rivk,
                                 )
                                 .unwrap()

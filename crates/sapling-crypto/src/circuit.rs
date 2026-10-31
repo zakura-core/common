@@ -24,7 +24,7 @@ use self::constants::{
 use crate::{PaymentAddress, ProofGenerationKey, value::NoteValue};
 
 #[cfg(test)]
-use group::ff::PrimeFieldBits;
+use crate::spec::leos2bsp;
 
 mod constants;
 mod ecc;
@@ -776,19 +776,11 @@ fn test_input_circuit_with_bls12_381() {
                     ::core::mem::swap(&mut lhs, &mut rhs);
                 }
 
-                let lhs = lhs.to_le_bits();
-                let rhs = rhs.to_le_bits();
-
                 cur = jubjub::ExtendedPoint::from(pedersen_hash::pedersen_hash(
                     pedersen_hash::Personalization::MerkleTree(i),
-                    lhs.iter()
-                        .by_vals()
+                    leos2bsp(lhs.to_repr())
                         .take(bls12_381::Scalar::NUM_BITS as usize)
-                        .chain(
-                            rhs.iter()
-                                .by_vals()
-                                .take(bls12_381::Scalar::NUM_BITS as usize),
-                        ),
+                        .chain(leos2bsp(rhs.to_repr()).take(bls12_381::Scalar::NUM_BITS as usize)),
                 ))
                 .to_affine()
                 .get_u();
@@ -964,19 +956,11 @@ fn test_input_circuit_with_bls12_381_external_test_vectors() {
                     ::core::mem::swap(&mut lhs, &mut rhs);
                 }
 
-                let lhs = lhs.to_le_bits();
-                let rhs = rhs.to_le_bits();
-
                 cur = jubjub::ExtendedPoint::from(pedersen_hash::pedersen_hash(
                     pedersen_hash::Personalization::MerkleTree(i),
-                    lhs.iter()
-                        .by_vals()
+                    leos2bsp(lhs.to_repr())
                         .take(bls12_381::Scalar::NUM_BITS as usize)
-                        .chain(
-                            rhs.iter()
-                                .by_vals()
-                                .take(bls12_381::Scalar::NUM_BITS as usize),
-                        ),
+                        .chain(leos2bsp(rhs.to_repr()).take(bls12_381::Scalar::NUM_BITS as usize)),
                 ))
                 .to_affine()
                 .get_u();

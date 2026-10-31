@@ -786,6 +786,28 @@ impl PrimeFieldBits for Fr {
     }
 }
 
+#[cfg(feature = "bits")]
+#[test]
+fn test_to_le_bits_matches_repr() {
+    // Callers read this field's bits from `to_repr()`, starting with the
+    // least-significant bit of byte 0, in place of `PrimeFieldBits`.
+    let mut a = -Fr::ONE;
+    for _ in 0..1000 {
+        let repr = a.to_repr();
+        let repr_bits = repr
+            .iter()
+            .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1));
+        assert!(a.to_le_bits().iter().by_vals().eq(repr_bits));
+        a = a.square() + Fr::from(7);
+    }
+
+    // The characteristic's highest set bit is bit NUM_BITS - 1.
+    assert_eq!(
+        Fr::char_le_bits().iter().by_vals().rposition(|bit| bit),
+        Some(Fr::NUM_BITS as usize - 1)
+    );
+}
+
 #[test]
 fn test_constants() {
     assert_eq!(

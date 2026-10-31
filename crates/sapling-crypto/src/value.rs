@@ -37,13 +37,15 @@
 //! [`Builder::add_output`]: crate::builder::Builder::add_output
 //! [Rust documentation]: https://doc.rust-lang.org/stable/std/primitive.i64.html
 
-use bitvec::{array::BitArray, order::Lsb0};
 use ff::{Field, PrimeField};
 use group::GroupEncoding;
 use rand::Rng;
 use subtle::CtOption;
 
-use super::constants::{VALUE_COMMITMENT_RANDOMNESS_GENERATOR, VALUE_COMMITMENT_VALUE_GENERATOR};
+use super::{
+    constants::{VALUE_COMMITMENT_RANDOMNESS_GENERATOR, VALUE_COMMITMENT_VALUE_GENERATOR},
+    spec::leos2bsp,
+};
 
 mod sums;
 pub use sums::{BalanceError, CommitmentSum, TrapdoorSum, ValueSum};
@@ -76,8 +78,8 @@ impl NoteValue {
         NoteValue(u64::from_le_bytes(bytes))
     }
 
-    pub(crate) fn to_le_bits(self) -> BitArray<[u8; 8], Lsb0> {
-        BitArray::<_, Lsb0>::new(self.0.to_le_bytes())
+    pub(crate) fn to_le_bits(self) -> impl Iterator<Item = bool> {
+        leos2bsp(self.0.to_le_bytes())
     }
 }
 

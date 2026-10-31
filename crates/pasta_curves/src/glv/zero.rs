@@ -125,8 +125,32 @@ use prepared::{PreparedPoint, VariantTable, unit_coords};
 const PREPARED_PREFETCH_DISTANCE: usize = 16;
 const PREPARED_PREFETCH_RECORD_BYTES: usize = 96;
 const PREPARED_PREFETCH_SECOND_LINE: usize = 64;
+#[cfg(any(
+    test,
+    all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )
+))]
 const PREFETCH_XSAVE_OSXSAVE_AVX: u32 = (1 << 26) | (1 << 27) | (1 << 28);
+#[cfg(any(
+    test,
+    all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )
+))]
 const PREFETCH_REQUIRED_XCR0: u64 = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 7);
+#[cfg(any(
+    test,
+    all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )
+))]
 const PREFETCH_AVX512_F_IFMA_VL: u32 = (1 << 16) | (1 << 21) | (1 << 31);
 
 fn prepared_prefetch_field_supported<F: 'static>() -> bool {
@@ -135,6 +159,14 @@ fn prepared_prefetch_field_supported<F: 'static>() -> bool {
     TypeId::of::<F>() == TypeId::of::<crate::Fp>() || TypeId::of::<F>() == TypeId::of::<crate::Fq>()
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )
+))]
 fn prepared_prefetch_flags_supported(leaf1_ecx: u32, leaf7_ebx: u32, xcr0: u64) -> bool {
     leaf1_ecx & PREFETCH_XSAVE_OSXSAVE_AVX == PREFETCH_XSAVE_OSXSAVE_AVX
         && leaf7_ebx & PREFETCH_AVX512_F_IFMA_VL == PREFETCH_AVX512_F_IFMA_VL
@@ -143,10 +175,11 @@ fn prepared_prefetch_flags_supported(leaf1_ecx: u32, leaf7_ebx: u32, xcr0: u64) 
 
 /// Keeps prefetching within the measured CPU and operating-system policy.
 ///
-/// The hint itself only requires baseline x86-64 SSE support. This stricter
-/// gate is a performance policy, not an instruction-safety requirement: the
-/// prepared-table measurements cover AVX-512F/IFMA/VL hosts with OS support
-/// for the corresponding register state. Detection also works without `std`.
+/// The instructions only require baseline SSE or AArch64. This stricter
+/// gate is a performance policy: x86 measurements cover AVX-512F/IFMA/VL
+/// hosts with OS support for the corresponding register state; the ARM
+/// policy covers Apple targets. Other ARM targets await separate measurements.
+/// Detection and hint emission do not require `std`.
 #[allow(unsafe_code)]
 fn prepared_prefetch_cpu_available() -> bool {
     #[cfg(all(
@@ -180,14 +213,31 @@ fn prepared_prefetch_cpu_available() -> bool {
         AVAILABLE.store(if available { 2 } else { 1 }, Ordering::Relaxed);
         available
     }
-    #[cfg(not(all(
-        feature = "x86_64-asm",
-        target_arch = "x86_64",
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple",
         target_pointer_width = "64"
+    ))]
+    {
+        // The 16-row look-ahead improved complete Ironwood proving on M3 Max.
+        true
+    }
+    #[cfg(not(any(
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ),
+        all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_pointer_width = "64"
+        )
     )))]
     {
-        // Other targets have none of the measured x86 feature state.
-        prepared_prefetch_flags_supported(0, 0, 0)
+        false
     }
 }
 
@@ -224,10 +274,39 @@ fn prefetch_prepared_point<F>(point: &PreparedPoint<F>) {
             );
         }
     }
-    #[cfg(not(all(
-        feature = "x86_64-asm",
-        target_arch = "x86_64",
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple",
         target_pointer_width = "64"
+    ))]
+    {
+        let address = core::ptr::from_ref(point).cast::<u8>();
+        // SAFETY: both hints stay within the checked 96-byte live record.
+        // PRFM only hints a load; it neither changes memory nor interprets
+        // a field representation. It is available in baseline AArch64.
+        unsafe {
+            core::arch::asm!(
+                "prfm pldl1keep, [{address}]",
+                "prfm pldl1keep, [{address}, #{second}]",
+                address = in(reg) address,
+                second = const PREPARED_PREFETCH_SECOND_LINE,
+                options(readonly, nostack, preserves_flags),
+            );
+        }
+    }
+    #[cfg(not(any(
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ),
+        all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_pointer_width = "64"
+        )
     )))]
     let _ = point;
 }
@@ -2049,13 +2128,28 @@ mod tests {
             prepared_prefetch_enabled::<crate::Fq>(),
             prepared_prefetch_cpu_available(),
         );
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_pointer_width = "64"
+        ))]
+        assert!(prepared_prefetch_cpu_available());
         assert!(prepared_prefetch_field_supported::<crate::Fp>());
         assert!(prepared_prefetch_field_supported::<crate::Fq>());
         assert!(!prepared_prefetch_field_supported::<u8>());
-        #[cfg(not(all(
-            feature = "x86_64-asm",
-            target_arch = "x86_64",
-            target_pointer_width = "64"
+        #[cfg(not(any(
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            ),
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple",
+                target_pointer_width = "64"
+            )
         )))]
         {
             assert!(!prepared_prefetch_enabled::<crate::Fp>());

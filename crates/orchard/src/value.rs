@@ -44,7 +44,6 @@ use core::iter::Sum;
 use core::ops::{Add, RangeInclusive, Sub};
 
 use crate::backend::pallas;
-use bitvec::{array::BitArray, order::Lsb0};
 use rand::Rng;
 use subtle::CtOption;
 
@@ -116,8 +115,8 @@ impl NoteValue {
         self.0.to_le_bytes()
     }
 
-    pub(crate) fn to_le_bits(self) -> BitArray<[u8; 8], Lsb0> {
-        BitArray::<_, Lsb0>::new(self.0.to_le_bytes())
+    pub(crate) fn to_le_bits(self) -> impl Iterator<Item = bool> {
+        crate::spec::leos2bsp(self.0.to_le_bytes())
     }
 }
 
@@ -336,6 +335,18 @@ impl ValueCommitment {
     /// Defined in [Zcash Protocol Spec § 5.4.8.3: Homomorphic Pedersen commitments (Sapling and Orchard)][concretehomomorphiccommit].
     ///
     /// [concretehomomorphiccommit]: https://zips.z.cash/protocol/nu5.pdf#concretehomomorphiccommit
+    #[allow(non_snake_case)]
+    #[cfg(feature = "backend-sensei")]
+    pub fn derive(value: ValueSum, rcv: ValueCommitTrapdoor) -> Self {
+        let magnitude = u64::try_from(value.0.abs()).expect("value must be in valid range");
+        ValueCommitment(sensei::primitives::protocol::value_commitment(
+            magnitude,
+            value.0.is_negative(),
+            rcv.0,
+        ))
+    }
+    #[cfg(feature = "backend-halo2")]
+    /// Derives a value commitment from the net value and its trapdoor.
     #[allow(non_snake_case)]
     pub fn derive(value: ValueSum, rcv: ValueCommitTrapdoor) -> Self {
         use crate::constants::fixed_bases::{
