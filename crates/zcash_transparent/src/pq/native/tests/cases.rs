@@ -7,6 +7,12 @@ fn push(value: &[u8]) -> Vec<u8> {
     if value.is_empty() {
         return vec![0];
     }
+    if let [value @ 1..=16] = value {
+        return vec![0x50 + value];
+    }
+    if value == [0x81] {
+        return vec![0x4f];
+    }
     let mut bytes = if value.len() <= 75 {
         vec![u8::try_from(value.len()).unwrap()]
     } else {
