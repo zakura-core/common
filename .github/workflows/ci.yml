@@ -971,7 +971,7 @@ jobs:
       - name: Check baseline bare-metal x86-64 without std
         if: matrix.features == ''
         run: |
-          rustup target add x86_64-unknown-none
+          rustup target add --toolchain stable x86_64-unknown-none
           cargo +stable check --locked -p zakura-pasta-curves \
             --no-default-features --target x86_64-unknown-none
       - name: Verify working directory is clean

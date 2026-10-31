@@ -28,15 +28,20 @@ pub(super) fn asm_available() -> bool {
     }
     #[cfg(not(pasta_curves_x86_64_asm_static))]
     {
+        let cached = STATE.load(Ordering::Relaxed);
         #[cfg(test)]
-        if FORCE_PORTABLE.get() {
-            return false;
-        }
+        let cached = if FORCE_PORTABLE.get() {
+            UNAVAILABLE
+        } else {
+            cached
+        };
 
-        match STATE.load(Ordering::Relaxed) {
-            AVAILABLE => true,
-            UNAVAILABLE => false,
-            _ => detect_and_cache(),
+        if cached == AVAILABLE {
+            true
+        } else {
+            // Keep the assembly path short when inlined into field operations.
+            core::hint::cold_path();
+            cached != UNAVAILABLE && detect_and_cache()
         }
     }
 }
