@@ -64,7 +64,13 @@ audit-as-crates-io = false
 [policy.zakura-keys]
 audit-as-crates-io = false
 
+[policy.zakura-note-encryption]
+audit-as-crates-io = false
+
 [policy.zakura-orchard]
+audit-as-crates-io = false
+
+[policy.zakura-orchard-legacy]
 audit-as-crates-io = false
 
 [policy.zakura-pairing]

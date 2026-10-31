@@ -70,6 +70,8 @@ equihash = ["dep:equihash"]
 # Retained for compatibility with the former optional documentation dependency.
 document-features = []
 expensive-tests = []
+# Enables the library-only PQ script integration tests and transparent harness.
+pq = ["transparent/pq"]
 multicore = ["orchard/multicore", "sapling/multicore"]
 no-expensive-tests = []
 non-standard-fees = []
