@@ -30,9 +30,63 @@ fn hasher(personal: &[u8; 16]) -> StateWrite {
     StateWrite(Params::new().hash_length(32).personal(personal).to_state())
 }
 
+/// The digests of the transparent input amounts and `scriptPubKey`s that every [ZIP 244]
+/// signature hash of a transaction without `SIGHASH_ANYONECANPAY` shares.
+///
+/// [ZIP 244]: https://zips.z.cash/zip-0244#s-2c-amounts-sig-digest
+#[derive(Clone, Debug)]
+pub(crate) struct TransparentInputsDigests {
+    pub(crate) amounts: Blake2bHash,
+    pub(crate) scripts: Blake2bHash,
+}
+
+impl TransparentInputsDigests {
+    /// Computes the digests of the inputs of `bundle`, reading the input amounts and
+    /// `scriptPubKey`s once, in time linear in the number of inputs.
+    fn new<A: TransparentAuthorizingContext>(bundle: &transparent::Bundle<A>) -> Self {
+        let mut amounts = hasher(ZCASH_TRANSPARENT_AMOUNTS_HASH_PERSONALIZATION);
+        Array::write(
+            &mut amounts,
+            bundle.authorization.input_amounts(),
+            |w, amount| w.write_all(&amount.to_i64_le_bytes()),
+        )
+        .unwrap();
+
+        let mut scripts = hasher(ZCASH_TRANSPARENT_SCRIPTS_HASH_PERSONALIZATION);
+        Array::write(
+            &mut scripts,
+            bundle.authorization.input_scriptpubkeys(),
+            |w, script| script.write(w),
+        )
+        .unwrap();
+
+        TransparentInputsDigests {
+            amounts: amounts.finalize(),
+            scripts: scripts.finalize(),
+        }
+    }
+
+    /// Computes the digests of the inputs of `bundle` if a [ZIP 244] signature hash of a
+    /// transaction containing `bundle` commits to them.
+    ///
+    /// Returns `None` if `bundle` is a coinbase bundle or has no inputs.
+    ///
+    /// [ZIP 244]: https://zips.z.cash/zip-0244#s-2-transparent-sig-digest
+    pub(crate) fn for_bundle<A: TransparentAuthorizingContext>(
+        bundle: &transparent::Bundle<A>,
+    ) -> Option<Self> {
+        (!bundle.is_coinbase() && !bundle.vin.is_empty()).then(|| Self::new(bundle))
+    }
+}
+
 /// Implements [ZIP 244 section S.2](https://zips.z.cash/zip-0244#s-2-transparent-sig-digest).
+///
+/// `inputs_digests` are the digests of the inputs of the bundle in `tx_data`, as computed
+/// by [`TransparentInputsDigests::for_bundle`]. If they are `None` while the bundle has
+/// non-coinbase inputs, this function computes them, in time linear in the number of inputs.
 pub(super) fn transparent_sig_digest<A: TransparentAuthorizingContext>(
     tx_data: Option<(&transparent::Bundle<A>, &TransparentDigests<Blake2bHash>)>,
+    inputs_digests: Option<&TransparentInputsDigests>,
     input: &SignableInput<'_>,
 ) -> Blake2bHash {
     match tx_data {
@@ -55,28 +109,19 @@ pub(super) fn transparent_sig_digest<A: TransparentAuthorizingContext>(
                 txid_digests.prevouts_digest
             };
 
-            let amounts_digest = {
-                let mut h = hasher(ZCASH_TRANSPARENT_AMOUNTS_HASH_PERSONALIZATION);
-                if !flag_anyonecanpay {
-                    Array::write(&mut h, bundle.authorization.input_amounts(), |w, amount| {
-                        w.write_all(&amount.to_i64_le_bytes())
-                    })
-                    .unwrap();
+            let (amounts_digest, scripts_digest) = if flag_anyonecanpay {
+                (
+                    hasher(ZCASH_TRANSPARENT_AMOUNTS_HASH_PERSONALIZATION).finalize(),
+                    hasher(ZCASH_TRANSPARENT_SCRIPTS_HASH_PERSONALIZATION).finalize(),
+                )
+            } else {
+                match inputs_digests {
+                    Some(digests) => (digests.amounts, digests.scripts),
+                    None => {
+                        let digests = TransparentInputsDigests::new(bundle);
+                        (digests.amounts, digests.scripts)
+                    }
                 }
-                h.finalize()
-            };
-
-            let scripts_digest = {
-                let mut h = hasher(ZCASH_TRANSPARENT_SCRIPTS_HASH_PERSONALIZATION);
-                if !flag_anyonecanpay {
-                    Array::write(
-                        &mut h,
-                        bundle.authorization.input_scriptpubkeys(),
-                        |w, script| script.write(w),
-                    )
-                    .unwrap();
-                }
-                h.finalize()
             };
 
             let sequence_digest = if flag_anyonecanpay {
@@ -129,6 +174,11 @@ pub(super) fn transparent_sig_digest<A: TransparentAuthorizingContext>(
 }
 
 /// Implements the [Signature Digest section of ZIP 244](https://zips.z.cash/zip-0244#signature-digest)
+///
+/// This hashes every transparent input amount and `scriptPubKey` for every call. To
+/// compute the signature hashes of several inputs of one transaction, use
+/// [`PrecomputedSighashData`](super::sighash::PrecomputedSighashData), which hashes them
+/// once.
 pub fn v5_signature_hash<
     TA: TransparentAuthorizingContext,
     A: Authorization<TransparentAuth = TA>,
@@ -136,6 +186,20 @@ pub fn v5_signature_hash<
     tx: &TransactionData<A>,
     signable_input: &SignableInput<'_>,
     txid_parts: &TxDigests<Blake2bHash>,
+) -> Blake2bHash {
+    v5_signature_hash_with_inputs_digests(tx, signable_input, txid_parts, None)
+}
+
+/// Implements the [Signature Digest section of ZIP 244](https://zips.z.cash/zip-0244#signature-digest),
+/// using the `txid_parts` and the transparent `inputs_digests` of `tx`.
+pub(crate) fn v5_signature_hash_with_inputs_digests<
+    TA: TransparentAuthorizingContext,
+    A: Authorization<TransparentAuth = TA>,
+>(
+    tx: &TransactionData<A>,
+    signable_input: &SignableInput<'_>,
+    txid_parts: &TxDigests<Blake2bHash>,
+    inputs_digests: Option<&TransparentInputsDigests>,
 ) -> Blake2bHash {
     // The caller must provide the transparent digests if and only if the transaction has a
     // transparent component.
@@ -152,6 +216,7 @@ pub fn v5_signature_hash<
             tx.transparent_bundle
                 .as_ref()
                 .zip(txid_parts.transparent_digests.as_ref()),
+            inputs_digests,
             signable_input,
         ),
         txid_parts.sapling_digest,
