@@ -382,19 +382,30 @@ mod tests {
 
     #[test]
     fn to_asm_works() {
+        let expected_annotations = |expected: &str| {
+            if cfg!(feature = "signature-validation") {
+                expected.to_string()
+            } else {
+                expected.replace("[ALL]", "01")
+            }
+        };
         assert_eq!(
             SCRIPT.to_asm(true),
-            "0 3045022100d2ab3e6258fe244fa442cfb38f6cef9ac9a18c54e70b2f508e83fa87e20d040502200eead947521de943831d07a350e45af8e36c2166984a8636f0a8811ff03ed094[ALL] 3044022013e15d865010c257eef133064ef69a780b4bc7ebe6eda367504e806614f940c3022062fdbc8c2d049f91db2042d6c9771de6f1ef0b3b1fea76c1ab5542e44ed29ed8[ALL] 522103b2cc71d23eb30020a4893982a1e2d352da0d20ee657fa02901c432758909ed8f21029d1e9a9354c0d2aee9ffd0f0cea6c39bbf98c4066cf143115ba2279d0ba7dabe2103e32096b63fd57f3308149d238dcbb24d8d28aad95c0e4e74e3e5e6a11b61bcc453ae OP_HASH160 c117756dcbe144a12a7c33a77cfa81aa5aeeb381 OP_EQUAL"
+            expected_annotations(
+                "0 3045022100d2ab3e6258fe244fa442cfb38f6cef9ac9a18c54e70b2f508e83fa87e20d040502200eead947521de943831d07a350e45af8e36c2166984a8636f0a8811ff03ed094[ALL] 3044022013e15d865010c257eef133064ef69a780b4bc7ebe6eda367504e806614f940c3022062fdbc8c2d049f91db2042d6c9771de6f1ef0b3b1fea76c1ab5542e44ed29ed8[ALL] 522103b2cc71d23eb30020a4893982a1e2d352da0d20ee657fa02901c432758909ed8f21029d1e9a9354c0d2aee9ffd0f0cea6c39bbf98c4066cf143115ba2279d0ba7dabe2103e32096b63fd57f3308149d238dcbb24d8d28aad95c0e4e74e3e5e6a11b61bcc453ae OP_HASH160 c117756dcbe144a12a7c33a77cfa81aa5aeeb381 OP_EQUAL"
+            )
         );
 
         assert_eq!(
             AUTHORED_SCRIPT.to_asm(true),
-            "0 3045022100d2ab3e6258fe244fa442cfb38f6cef9ac9a18c54e70b2f508e83fa87e20d040502200eead947521de943831d07a350e45af8e36c2166984a8636f0a8811ff03ed094[ALL] 3044022013e15d865010c257eef133064ef69a780b4bc7ebe6eda367504e806614f940c3022062fdbc8c2d049f91db2042d6c9771de6f1ef0b3b1fea76c1ab5542e44ed29ed8[ALL] 522103b2cc71d23eb30020a4893982a1e2d352da0d20ee657fa02901c432758909ed8f21029d1e9a9354c0d2aee9ffd0f0cea6c39bbf98c4066cf143115ba2279d0ba7dabe2103e32096b63fd57f3308149d238dcbb24d8d28aad95c0e4e74e3e5e6a11b61bcc453ae OP_HASH160 c117756dcbe144a12a7c33a77cfa81aa5aeeb381 OP_EQUAL"
+            expected_annotations(
+                "0 3045022100d2ab3e6258fe244fa442cfb38f6cef9ac9a18c54e70b2f508e83fa87e20d040502200eead947521de943831d07a350e45af8e36c2166984a8636f0a8811ff03ed094[ALL] 3044022013e15d865010c257eef133064ef69a780b4bc7ebe6eda367504e806614f940c3022062fdbc8c2d049f91db2042d6c9771de6f1ef0b3b1fea76c1ab5542e44ed29ed8[ALL] 522103b2cc71d23eb30020a4893982a1e2d352da0d20ee657fa02901c432758909ed8f21029d1e9a9354c0d2aee9ffd0f0cea6c39bbf98c4066cf143115ba2279d0ba7dabe2103e32096b63fd57f3308149d238dcbb24d8d28aad95c0e4e74e3e5e6a11b61bcc453ae OP_HASH160 c117756dcbe144a12a7c33a77cfa81aa5aeeb381 OP_EQUAL"
+            )
         );
 
         let decoded = Code(hex::decode("004830450221008549700e9f2be9a9986b690ef0a3df6b5a81cb71c6b1392d4136ec19fc09c414022034491aaeb00d455033377c53de8b6496348178c7fcb170bd494622436d7c393601473044022007f264890935969ff73a9dd56ecd00a4462ca39d5d3c7c8bb2c0c9284df68c3702202f24463448d23db8240b233ca3ef56abdbe7867801886af68a72cd2a2d27ad93014c69522103598e93d3702e45890545716c70a5d643dd6779f02fe1dd75b8b5b39c2d368b87210365045e8f10b3602ad02c7d75dce867533c7ba18cf80669a509bc240be272b36c2102714e7e89b7838881be418f577d4320b9280939dc9cd5028414989a739de631ee53ae").unwrap()).to_asm(true);
         let expected = "0 30450221008549700e9f2be9a9986b690ef0a3df6b5a81cb71c6b1392d4136ec19fc09c414022034491aaeb00d455033377c53de8b6496348178c7fcb170bd494622436d7c3936[ALL] 3044022007f264890935969ff73a9dd56ecd00a4462ca39d5d3c7c8bb2c0c9284df68c3702202f24463448d23db8240b233ca3ef56abdbe7867801886af68a72cd2a2d27ad93[ALL] 522103598e93d3702e45890545716c70a5d643dd6779f02fe1dd75b8b5b39c2d368b87210365045e8f10b3602ad02c7d75dce867533c7ba18cf80669a509bc240be272b36c2102714e7e89b7838881be418f577d4320b9280939dc9cd5028414989a739de631ee53ae";
-        assert_eq!(decoded, expected);
+        assert_eq!(decoded, expected_annotations(expected));
 
         let decoded =
             Code(hex::decode("76a914d6791b1b29afe3997a5cdbc40f03d37baed379b988ac").unwrap())
@@ -415,6 +426,11 @@ mod tests {
         fn check_sig_display(der_sig: &str, pubkey: &str, suffix: &str, expected_suffix: &str) {
             let sig_bytes = hex::decode(der_sig.to_string() + suffix).expect("valid sig");
             let vch_pubkey = hex::decode(pubkey).unwrap();
+            let expected_suffix = if cfg!(feature = "signature-validation") {
+                expected_suffix
+            } else {
+                suffix
+            };
             let expected = der_sig.to_string() + expected_suffix + " " + pubkey;
             let actual = format!(
                 "{} {}",

@@ -338,7 +338,7 @@ fn failed_multisig_matches_are_charged_before_more_work() {
             input.extend(push(&sig));
             body.push(0x51);
             for _ in 0..20 {
-                body.extend(push(&vec![0; crypto::PUBLIC_KEY_BYTES]));
+                body.extend(push(&[0; crypto::PUBLIC_KEY_BYTES]));
             }
             body.extend([1, 20, 0xbc, 0x75]);
         }
