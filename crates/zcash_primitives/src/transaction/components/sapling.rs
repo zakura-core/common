@@ -85,18 +85,19 @@ impl MapAuth<Authorized, Authorized> for () {
 }
 
 /// Consensus rules (§4.4) & (§4.5):
-/// - Canonical encoding is enforced here.
-/// - "Not small order" is enforced here.
+/// - Canonical encoding is enforced by [`ValueCommitment::try_point`], which verification
+///   calls; it is not enforced here.
+/// - "Not small order" likewise.
+///
+/// Parsing keeps the 32 bytes as they are. Every use of a value commitment short of
+/// verifying a proof or a binding signature wants those bytes - the txid digest, the
+/// outgoing cipher key, re-serialization - and decompressing the point costs a field square
+/// root per spend and per output, which a wallet that only trial-decrypts a transaction was
+/// paying for nothing.
 fn read_value_commitment<R: Read>(mut reader: R) -> io::Result<ValueCommitment> {
     let mut bytes = [0u8; 32];
     reader.read_exact(&mut bytes)?;
-    let cv = ValueCommitment::from_bytes_not_small_order(&bytes);
-
-    if cv.is_none().into() {
-        Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid cv"))
-    } else {
-        Ok(cv.unwrap())
-    }
+    Ok(ValueCommitment::from_bytes_unvalidated(bytes))
 }
 
 /// Consensus rules (§7.3) & (§7.4):

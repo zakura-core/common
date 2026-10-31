@@ -45,16 +45,10 @@ impl super::Bundle {
 
         // Verify that bsk and bvk are consistent.
         let bvk = {
-            let spends = self
-                .spends
-                .iter()
-                .map(|spend| spend.cv())
-                .sum::<CommitmentSum>();
-            let outputs = self
-                .outputs
-                .iter()
-                .map(|output| output.cv())
-                .sum::<CommitmentSum>();
+            let spends = CommitmentSum::try_sum(self.spends.iter().map(|spend| spend.cv()))
+                .ok_or(IoFinalizerError::ValueCommitMismatch)?;
+            let outputs = CommitmentSum::try_sum(self.outputs.iter().map(|output| output.cv()))
+                .ok_or(IoFinalizerError::ValueCommitMismatch)?;
             (spends - outputs).into_bvk(
                 i64::try_from(self.value_sum).map_err(|_| IoFinalizerError::InvalidValueSum)?,
             )

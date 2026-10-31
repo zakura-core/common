@@ -75,8 +75,14 @@ impl SaplingVerificationContextInner {
             return false;
         }
 
+        // The value commitment is held as bytes; recovering the point is where the
+        // "canonical encoding" and "not small order" rules are enforced.
+        let Some(cv) = cv.try_point().into_option() else {
+            return false;
+        };
+
         // Accumulate the value commitment in the context
-        self.cv_sum += cv;
+        self.cv_sum += &cv;
 
         // Verify the spend_auth_sig
         if !spend_auth_sig_verifier(verifier_ctx, rk) {
@@ -92,7 +98,7 @@ impl SaplingVerificationContextInner {
             public_input[1] = v;
         }
         {
-            let affine = cv.as_inner().to_affine();
+            let affine = cv.to_affine();
             let (u, v) = (affine.get_u(), affine.get_v());
             public_input[2] = u;
             public_input[3] = v;
@@ -128,13 +134,18 @@ impl SaplingVerificationContextInner {
             return false;
         }
 
+        // As in `check_spend`: the point is recovered and validated here.
+        let Some(cv) = cv.try_point().into_option() else {
+            return false;
+        };
+
         // Accumulate the value commitment in the context
-        self.cv_sum -= cv;
+        self.cv_sum -= &cv;
 
         // Construct public input for circuit
         let mut public_input = [bls12_381::Scalar::zero(); OUTPUT_PUBLIC_INPUT_COUNT];
         {
-            let affine = cv.as_inner().to_affine();
+            let affine = cv.to_affine();
             let (u, v) = (affine.get_u(), affine.get_v());
             public_input[0] = u;
             public_input[1] = v;

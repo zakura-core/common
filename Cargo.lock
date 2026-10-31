@@ -3516,6 +3516,7 @@ dependencies = [
  "rand_core 0.10.1",
  "secp256k1",
  "sha2 0.10.9",
+ "zakura-bellman",
  "zakura-bls12-381",
  "zakura-equihash",
  "zakura-jubjub",

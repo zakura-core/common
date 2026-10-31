@@ -183,6 +183,18 @@ impl CommitmentSum {
         CommitmentSum(jubjub::ExtendedPoint::identity())
     }
 
+    /// Sums value commitments, or returns `None` if any of them is not a canonical
+    /// encoding of a Jubjub point that is not of small order.
+    ///
+    /// A [`ValueCommitment`] parsed from a transaction is not validated until its point is
+    /// recovered, so summing one must be able to fail.
+    pub fn try_sum<'a>(cvs: impl IntoIterator<Item = &'a ValueCommitment>) -> Option<Self> {
+        cvs.into_iter().try_fold(Self::zero(), |mut acc, cv| {
+            acc += &cv.try_point().into_option()?;
+            Some(acc)
+        })
+    }
+
     /// Transform this value commitment sum into the corresponding RedJubjub public key.
     ///
     /// This is public for access by `zcash_proofs`.
@@ -210,39 +222,18 @@ impl CommitmentSum {
     }
 }
 
-impl Add<&ValueCommitment> for ValueCommitment {
-    type Output = CommitmentSum;
-
-    fn add(self, rhs: &Self) -> Self::Output {
-        CommitmentSum(self.0 + rhs.0)
+/// Accumulates a value commitment's point. A verifier obtains it with
+/// [`ValueCommitment::try_point`] and rejects the description if that fails.
+impl AddAssign<&jubjub::ExtendedPoint> for CommitmentSum {
+    fn add_assign(&mut self, rhs: &jubjub::ExtendedPoint) {
+        self.0 += rhs;
     }
 }
 
-impl Add<&ValueCommitment> for CommitmentSum {
-    type Output = CommitmentSum;
-
-    fn add(self, rhs: &ValueCommitment) -> Self::Output {
-        CommitmentSum(self.0 + rhs.0)
-    }
-}
-
-impl AddAssign<&ValueCommitment> for CommitmentSum {
-    fn add_assign(&mut self, rhs: &ValueCommitment) {
-        self.0 += rhs.0;
-    }
-}
-
-impl Sub<&ValueCommitment> for ValueCommitment {
-    type Output = CommitmentSum;
-
-    fn sub(self, rhs: &Self) -> Self::Output {
-        CommitmentSum(self.0 - rhs.0)
-    }
-}
-
-impl SubAssign<&ValueCommitment> for CommitmentSum {
-    fn sub_assign(&mut self, rhs: &ValueCommitment) {
-        self.0 -= rhs.0;
+/// See [`AddAssign<&jubjub::ExtendedPoint>`].
+impl SubAssign<&jubjub::ExtendedPoint> for CommitmentSum {
+    fn sub_assign(&mut self, rhs: &jubjub::ExtendedPoint) {
+        self.0 -= rhs;
     }
 }
 
@@ -251,17 +242,5 @@ impl Sub<CommitmentSum> for CommitmentSum {
 
     fn sub(self, rhs: Self) -> Self::Output {
         CommitmentSum(self.0 - rhs.0)
-    }
-}
-
-impl Sum<ValueCommitment> for CommitmentSum {
-    fn sum<I: Iterator<Item = ValueCommitment>>(iter: I) -> Self {
-        iter.fold(CommitmentSum::zero(), |acc, cv| acc + &cv)
-    }
-}
-
-impl<'a> Sum<&'a ValueCommitment> for CommitmentSum {
-    fn sum<I: Iterator<Item = &'a ValueCommitment>>(iter: I) -> Self {
-        iter.fold(CommitmentSum::zero(), |acc, cv| acc + cv)
     }
 }
