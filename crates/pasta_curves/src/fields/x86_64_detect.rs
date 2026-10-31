@@ -36,12 +36,10 @@ pub(super) fn asm_available() -> bool {
             cached
         };
 
-        if cached == AVAILABLE {
-            true
-        } else {
-            // Keep the assembly path short when inlined into field operations.
-            core::hint::cold_path();
-            cached != UNAVAILABLE && detect_and_cache()
+        match cached {
+            AVAILABLE => true,
+            UNAVAILABLE => false,
+            _ => detect_and_cache(),
         }
     }
 }
