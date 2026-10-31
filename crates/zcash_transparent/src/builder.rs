@@ -670,15 +670,14 @@ impl Bundle<Unauthorized> {
                                     if sigs_found == required {
                                         break;
                                     }
-                                    let pubkey_bytes: [u8; 33] = pubkey_data
-                                        .as_slice()
-                                        .try_into()
-                                        .map_err(|_| Error::UnsupportedScript)?;
+                                    // The script may commit to either encoding of a key.
+                                    let pubkey_bytes = pubkey_data.as_slice();
 
-                                    if let Some((sk, _)) = signing_set
-                                        .keys
-                                        .iter()
-                                        .find(|(_, pk)| pk.serialize() == pubkey_bytes)
+                                    if let Some((sk, _)) =
+                                        signing_set.keys.iter().find(|(_, pk)| {
+                                            pk.serialize()[..] == *pubkey_bytes
+                                                || pk.serialize_uncompressed()[..] == *pubkey_bytes
+                                        })
                                     {
                                         let sig = secp256k1::ecdsa::sign(msg, sk);
                                         let mut sig_bytes: Vec<u8> = sig.serialize_der().to_vec();
@@ -1212,6 +1211,75 @@ mod tests {
                 "{required}-of-{keys} multisig spend"
             );
         }
+    }
+
+    /// A multisig whose redeem script includes an uncompressed key is signed with whichever
+    /// keys the signing set holds, in either encoding.
+    #[test]
+    fn apply_signatures_p2sh_multisig_with_an_uncompressed_key() {
+        use super::TransparentSigningSet;
+        use zcash_script::{
+            interpreter::{CallbackTransactionSignatureChecker, Flags},
+            pattern::check_multisig,
+            script::{Component, Evaluable, FromChain, Raw},
+        };
+
+        let addr_str = "tmNUFAr71YAW3eXetm8fhx7k8zpUJYQiKZP";
+        let taddr: TransparentAddress =
+            addr_str.parse::<ZcashAddress>().unwrap().convert().unwrap();
+        let sks = [1u8, 2, 3].map(|i| SecretKey::from_secret_bytes([i; 32]).unwrap());
+        let pk = |i: usize| secp256k1::PublicKey::from_secret_key(&sks[i]);
+        let uncompressed = pk(0).serialize_uncompressed();
+        let compressed = [pk(1).serialize(), pk(2).serialize()];
+
+        // `signers` index into `sks`; key 0 appears in its uncompressed encoding.
+        let spend = |signers: &[usize]| {
+            let redeem_script: FromChain = Component(
+                check_multisig(
+                    2,
+                    &[&uncompressed[..], &compressed[0], &compressed[1]],
+                    false,
+                )
+                .unwrap(),
+            )
+            .weaken();
+            let taddr_in = TransparentAddress::ScriptHash(crate::util::hash160::hash(
+                &redeem_script.to_bytes(),
+            ));
+            let coin = TxOut::new(Zatoshis::from_u64(10000).unwrap(), taddr_in.script().into());
+
+            let mut builder = TransparentBuilder::empty();
+            builder
+                .add_p2sh_input(redeem_script, OutPoint::new([0u8; 32], 0), coin.clone())
+                .unwrap();
+            builder
+                .add_output(&taddr, Zatoshis::from_u64(5000).unwrap())
+                .unwrap();
+            let mut signing_set = TransparentSigningSet::new();
+            for &i in signers {
+                signing_set.add_key(sks[i]);
+            }
+            let bundle = builder
+                .build()
+                .unwrap()
+                .apply_signatures(|_| [0u8; 32], &signing_set)?;
+
+            let checker = CallbackTransactionSignatureChecker {
+                sighash: &|_, _| Some([0u8; 32]),
+                lock_time: 0,
+                is_final: true,
+            };
+            Ok(Raw::from_raw_parts(
+                bundle.vin[0].script_sig().0.0.clone(),
+                coin.script_pubkey().0.0.clone(),
+            )
+            .eval(Flags::P2SH | Flags::CHECKLOCKTIMEVERIFY, &checker))
+        };
+
+        assert_eq!(spend(&[0, 1]), Ok(Ok(true)));
+        assert_eq!(spend(&[1, 2]), Ok(Ok(true)));
+        assert_eq!(spend(&[0, 2]), Ok(Ok(true)));
+        assert_eq!(spend(&[1]), Err(Error::MissingSigningKey));
     }
 
     #[test]

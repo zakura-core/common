@@ -263,7 +263,7 @@ pub mod testing {
             ],
             false).expect("all keys are valid and there’s not more than 20 of them"));
         /// The scriptPubkey used for the static test case.
-        pub static ref SCRIPT_PUBKEY: script::PubKey = script::Component(pay_to_script_hash(&REDEEM_SCRIPT));
+        pub static ref SCRIPT_PUBKEY: script::PubKey = script::Component(pay_to_script_hash(&REDEEM_SCRIPT).expect("the redeem script is under 520 bytes"));
         /// The scriptSig used for the static test case.
         pub static ref SCRIPT_SIG: script::Sig = script::Component(vec![
             push_num(0),

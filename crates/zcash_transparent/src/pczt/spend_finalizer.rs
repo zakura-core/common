@@ -63,6 +63,7 @@ impl super::Bundle {
                                 // signatures in the order that the pubkeys exist in
                                 // `redeem_script`.
                                 let mut signatures_found = 0;
+                                let mut skipped_uncompressed = false;
                                 for pubkey in pubkeys {
                                     // Once we reach the threshold of required signatures,
                                     // any additional signatures present in the PCZT are
@@ -71,11 +72,13 @@ impl super::Bundle {
                                         break;
                                     }
 
-                                    // PCZT requires compressed pubkeys.
-                                    let pubkey =
-                                        <[u8; 33]>::try_from(pubkey.as_slice()).map_err(|_| {
-                                            SpendFinalizerError::UncompressedPubkeyInScript
-                                        })?;
+                                    // PCZT only carries signatures for compressed pubkeys,
+                                    // so the other keys in the script can still meet the
+                                    // threshold.
+                                    let Ok(pubkey) = <[u8; 33]>::try_from(pubkey.as_slice()) else {
+                                        skipped_uncompressed = true;
+                                        continue;
+                                    };
 
                                     // If we have a signature from this pubkey, use it.
                                     if let Some(sig) = input.partial_signatures.get(&pubkey) {
@@ -88,7 +91,11 @@ impl super::Bundle {
                                     }
                                 }
                                 if signatures_found < required {
-                                    return Err(SpendFinalizerError::MissingSignature);
+                                    return Err(if skipped_uncompressed {
+                                        SpendFinalizerError::UncompressedPubkeyInScript
+                                    } else {
+                                        SpendFinalizerError::MissingSignature
+                                    });
                                 }
 
                                 // - PushData(redeem_script)
@@ -138,7 +145,9 @@ pub enum SpendFinalizerError {
     MissingSignature,
     /// `partial_signatures` contained an invalid signature.
     InvalidSignature,
-    /// `redeem_script` contained an uncompressed pubkey, which PCZT does not support.
+    /// `redeem_script` contained an uncompressed pubkey, which PCZT cannot carry a
+    /// signature for, and the signatures for its compressed pubkeys did not meet the
+    /// threshold.
     UncompressedPubkeyInScript,
     /// `partial_signatures` contained unexpected signatures.
     UnexpectedSignatures,
@@ -146,4 +155,77 @@ pub enum SpendFinalizerError {
     UnsupportedScriptPubkey,
     /// The `redeem_script` kind is unsupported.
     UnsupportedRedeemScript,
+}
+
+#[cfg(all(test, feature = "std", feature = "transparent-inputs"))]
+mod tests {
+    use secp256k1::SecretKey;
+    use zcash_protocol::value::Zatoshis;
+    use zcash_script::{
+        interpreter::{CallbackTransactionSignatureChecker, Flags},
+        pattern::check_multisig,
+        script::{Component, Evaluable, FromChain, Raw},
+    };
+
+    use super::SpendFinalizerError;
+    use crate::{
+        address::TransparentAddress,
+        builder::TransparentBuilder,
+        bundle::{OutPoint, TxOut},
+    };
+
+    /// Finalizes a 2-of-3 multisig spend whose first key is uncompressed, signed by the
+    /// keys at `signers` (indices into the three keys).
+    fn finalize(signers: &[usize]) -> Result<bool, SpendFinalizerError> {
+        let sks = [1u8, 2, 3].map(|i| SecretKey::from_secret_bytes([i; 32]).unwrap());
+        let pk = |i: usize| secp256k1::PublicKey::from_secret_key(&sks[i]);
+        let uncompressed = pk(0).serialize_uncompressed();
+        let compressed = [pk(1).serialize(), pk(2).serialize()];
+        let redeem_script: FromChain = Component(
+            check_multisig(
+                2,
+                &[&uncompressed[..], &compressed[0], &compressed[1]],
+                false,
+            )
+            .unwrap(),
+        )
+        .weaken();
+        let taddr =
+            TransparentAddress::ScriptHash(crate::util::hash160::hash(&redeem_script.to_bytes()));
+        let coin = TxOut::new(Zatoshis::from_u64(10000).unwrap(), taddr.script().into());
+
+        let mut builder = TransparentBuilder::empty();
+        builder
+            .add_p2sh_input(redeem_script, OutPoint::new([0u8; 32], 0), coin.clone())
+            .unwrap();
+        let mut bundle = builder.build_for_pczt().unwrap();
+        for &i in signers {
+            // PCZT signs only with compressed keys, so key 0 cannot add a signature.
+            let _ = bundle.inputs_mut()[0].sign(0, |_| [0u8; 32], &sks[i]);
+        }
+        bundle.finalize_spends()?;
+
+        let checker = CallbackTransactionSignatureChecker {
+            sighash: &|_, _| Some([0u8; 32]),
+            lock_time: 0,
+            is_final: true,
+        };
+        let script_sig = bundle.inputs[0].script_sig.as_ref().unwrap().to_bytes();
+        Ok(
+            Raw::from_raw_parts(script_sig, coin.script_pubkey().0.0.clone())
+                .eval(Flags::P2SH | Flags::CHECKLOCKTIMEVERIFY, &checker)
+                .unwrap(),
+        )
+    }
+
+    /// The compressed keys can still meet the threshold when the script also has an
+    /// uncompressed key.
+    #[test]
+    fn multisig_finalizes_around_an_uncompressed_key() {
+        assert!(matches!(finalize(&[1, 2]), Ok(true)));
+        assert!(matches!(
+            finalize(&[0, 1]),
+            Err(SpendFinalizerError::UncompressedPubkeyInScript)
+        ));
+    }
 }
