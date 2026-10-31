@@ -20,6 +20,8 @@ pub mod num;
 pub mod op;
 pub mod opcode;
 pub mod pattern;
+#[cfg(feature = "pq")]
+pub mod pq;
 pub mod pv;
 pub mod script;
 pub mod signature;
@@ -113,6 +115,10 @@ impl opcode::Evaluable for Opcode {
             Self::Operation(normal) => {
                 state.increment_op_count(1)?;
                 if interpreter::should_exec(&state.vexec) {
+                    #[cfg(feature = "pq")]
+                    if normal.is_pq_signature() && !flags.contains(interpreter::Flags::NativePq) {
+                        return Err(interpreter::Error::BadOpcode);
+                    }
                     normal.eval(flags, script, checker, state)
                 } else {
                     Ok(state)

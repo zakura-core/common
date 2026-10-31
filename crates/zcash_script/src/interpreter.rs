@@ -74,6 +74,16 @@ pub enum Error {
     #[error("public key type error")]
     PubKeyType,
 
+    /// A nonempty PQ signature has the wrong encoded length.
+    #[cfg(feature = "pq")]
+    #[error("invalid PQ signature length")]
+    PqSignatureSize,
+
+    /// Combined stack payload exceeds the native execution limit.
+    #[cfg(feature = "pq")]
+    #[error("native PQ stack byte limit exceeded")]
+    PqStackBytes,
+
     // softfork safeness
     #[error("discouraged upgradable NOP encountered")]
     DiscourageUpgradableNOPs,
@@ -178,11 +188,28 @@ bitflags::bitflags! {
         ///
         /// See [BIP65](https://github.com/bitcoin/bips/blob/master/bip-0065.mediawiki) for details.
         const CHECKLOCKTIMEVERIFY = 1 << 9;
+
+        /// Enable native PQ opcodes and their additional stack-byte bound.
+        /// Callers select this from trusted validation context, never input arguments.
+        #[cfg(feature = "pq")]
+        const NativePq = 1 << 10;
     }
 }
 
 /// This verifies that a signature is correct for the given pubkey and script code.
 pub trait SignatureChecker {
+    /// Check a raw native-PQ signature argument, including its signing-mode byte.
+    /// The default rejects; implementing this does not enable the native execution flag.
+    #[cfg(feature = "pq")]
+    fn check_pq_signature(
+        &self,
+        _signature: &[u8],
+        _public_key: &[u8],
+        _script_code: &script::Code,
+    ) -> Result<bool, Error> {
+        Err(Error::BadOpcode)
+    }
+
     /// Check that the signature is valid.
     fn check_sig(
         &self,
@@ -305,7 +332,7 @@ impl<T> Stack<T> {
     }
 
     /// Returns an iterator over the stack.
-    fn iter(&self) -> Iter<'_, T> {
+    pub(crate) fn iter(&self) -> Iter<'_, T> {
         self.0.iter()
     }
 

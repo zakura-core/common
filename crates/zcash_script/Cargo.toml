@@ -42,6 +42,7 @@ hex = { version = "0.4.3", default-features = false, features = ["std"] }
 lazy_static = "1.5"
 
 [features]
+pq = []
 default = ["std", "signature-validation"]
 descriptor = ["dep:bip32", "dep:hex", "dep:secp256k1"]
 ## Whether to allow signature validation (and lock time verification). If disabled, the

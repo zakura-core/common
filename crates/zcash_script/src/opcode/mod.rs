@@ -393,6 +393,14 @@ pub enum Operation {
     OP_CHECKSIGVERIFY = 0xad,
     OP_CHECKMULTISIG = 0xae,
     OP_CHECKMULTISIGVERIFY = 0xaf,
+    #[cfg(feature = "pq")]
+    OP_CHECKSIG_PQ = 0xba,
+    #[cfg(feature = "pq")]
+    OP_CHECKSIGVERIFY_PQ = 0xbb,
+    #[cfg(feature = "pq")]
+    OP_CHECKMULTISIG_PQ = 0xbc,
+    #[cfg(feature = "pq")]
+    OP_CHECKMULTISIGVERIFY_PQ = 0xbd,
 
     // expansion
     OP_NOP1 = 0xb0,
@@ -465,6 +473,14 @@ impl Operation {
             0xad => Some(Self::OP_CHECKSIGVERIFY),
             0xae => Some(Self::OP_CHECKMULTISIG),
             0xaf => Some(Self::OP_CHECKMULTISIGVERIFY),
+            #[cfg(feature = "pq")]
+            0xba => Some(Self::OP_CHECKSIG_PQ),
+            #[cfg(feature = "pq")]
+            0xbb => Some(Self::OP_CHECKSIGVERIFY_PQ),
+            #[cfg(feature = "pq")]
+            0xbc => Some(Self::OP_CHECKMULTISIG_PQ),
+            #[cfg(feature = "pq")]
+            0xbd => Some(Self::OP_CHECKMULTISIGVERIFY_PQ),
             0xb0 => Some(Self::OP_NOP1),
             0xb1 => Some(Self::OP_CHECKLOCKTIMEVERIFY),
             0xb2 => Some(Self::OP_NOP3),
@@ -552,6 +568,43 @@ impl Operation {
             let bn1 = num::parse(&x1, require_minimal, None).map_err(interpreter::Error::Num)?;
             op(bn1, bn2)
         })
+    }
+
+    #[cfg(feature = "pq")]
+    pub(crate) fn is_pq_signature(&self) -> bool {
+        matches!(
+            self,
+            Self::OP_CHECKSIG_PQ
+                | Self::OP_CHECKSIGVERIFY_PQ
+                | Self::OP_CHECKMULTISIG_PQ
+                | Self::OP_CHECKMULTISIGVERIFY_PQ
+        )
+    }
+
+    #[cfg(feature = "pq")]
+    pub(crate) fn pq_sig_op_count(&self, last_opcode: Option<PossiblyBad>) -> u32 {
+        match self {
+            Self::OP_CHECKSIG_PQ | Self::OP_CHECKSIGVERIFY_PQ => 1,
+            Self::OP_CHECKMULTISIG_PQ | Self::OP_CHECKMULTISIGVERIFY_PQ => {
+                Self::OP_CHECKMULTISIG.sig_op_count(last_opcode)
+            }
+            _ => self.sig_op_count(last_opcode),
+        }
+    }
+
+    fn check_signature(
+        &self,
+        signature: &[u8],
+        public_key: &[u8],
+        flags: interpreter::Flags,
+        script: &script::Code,
+        checker: &dyn interpreter::SignatureChecker,
+    ) -> Result<bool, interpreter::Error> {
+        #[cfg(feature = "pq")]
+        if self.is_pq_signature() {
+            return checker.check_pq_signature(signature, public_key, script);
+        }
+        Self::is_sig_valid(signature, public_key, flags, script, checker)
     }
 
     #[cfg(feature = "signature-validation")]
@@ -682,7 +735,20 @@ impl Operation {
             unfn_num(stack, &|bn| Self::cast_from_bool(op(bn)))
         };
 
-        match self {
+        // PQ operations share the established stack behavior and matching loop.
+        // Keep `self` for verifier selection; only normalize the operation's behavior.
+        let operation = match self {
+            #[cfg(feature = "pq")]
+            Self::OP_CHECKSIG_PQ => &Self::OP_CHECKSIG,
+            #[cfg(feature = "pq")]
+            Self::OP_CHECKSIGVERIFY_PQ => &Self::OP_CHECKSIGVERIFY,
+            #[cfg(feature = "pq")]
+            Self::OP_CHECKMULTISIG_PQ => &Self::OP_CHECKMULTISIG,
+            #[cfg(feature = "pq")]
+            Self::OP_CHECKMULTISIGVERIFY_PQ => &Self::OP_CHECKMULTISIGVERIFY,
+            _ => self,
+        };
+        match operation {
             //
             // Control
             //
@@ -958,9 +1024,9 @@ impl Operation {
                 let vch_pub_key = state.stack.pop()?;
                 let vch_sig = state.stack.pop()?;
 
-                Self::is_sig_valid(&vch_sig, &vch_pub_key, flags, script, checker).and_then(
-                    |success| {
-                        if self == &Self::OP_CHECKSIGVERIFY {
+                self.check_signature(&vch_sig, &vch_pub_key, flags, script, checker)
+                    .and_then(|success| {
+                        if operation == &Self::OP_CHECKSIGVERIFY {
                             if success {
                                 Ok(())
                             } else {
@@ -969,8 +1035,7 @@ impl Operation {
                         } else {
                             Ok(state.stack.push(Self::cast_from_bool(success)))
                         }
-                    },
-                )
+                    })
             }
 
             // ([sig ...] num_of_signatures [pubkey ...] num_of_pubkeys -- bool)
@@ -1012,7 +1077,7 @@ impl Operation {
 
                     // Check signature
                     let ok: bool =
-                        Self::is_sig_valid(vch_sig, vch_pub_key, flags, script, checker)?;
+                        self.check_signature(vch_sig, vch_pub_key, flags, script, checker)?;
 
                     if ok {
                         isig += 1;
@@ -1046,7 +1111,7 @@ impl Operation {
                 }
                 state.stack.pop()?;
 
-                if self == &Self::OP_CHECKMULTISIGVERIFY {
+                if operation == &Self::OP_CHECKMULTISIGVERIFY {
                     if success {
                         Ok(())
                     } else {
@@ -1056,6 +1121,8 @@ impl Operation {
                     Ok(state.stack.push(Self::cast_from_bool(success)))
                 }
             }
+            #[cfg(feature = "pq")]
+            _ => Err(interpreter::Error::BadOpcode),
         }
         .map(|()| state)
     }
@@ -1127,6 +1194,14 @@ impl Asm for Operation {
             Operation::OP_CHECKSIGVERIFY => "OP_CHECKSIGVERIFY",
             Operation::OP_CHECKMULTISIG => "OP_CHECKMULTISIG",
             Operation::OP_CHECKMULTISIGVERIFY => "OP_CHECKMULTISIGVERIFY",
+            #[cfg(feature = "pq")]
+            Operation::OP_CHECKSIG_PQ => "OP_CHECKSIG_PQ",
+            #[cfg(feature = "pq")]
+            Operation::OP_CHECKSIGVERIFY_PQ => "OP_CHECKSIGVERIFY_PQ",
+            #[cfg(feature = "pq")]
+            Operation::OP_CHECKMULTISIG_PQ => "OP_CHECKMULTISIG_PQ",
+            #[cfg(feature = "pq")]
+            Operation::OP_CHECKMULTISIGVERIFY_PQ => "OP_CHECKMULTISIGVERIFY_PQ",
             Operation::OP_NOP1 => "OP_NOP1",
             Operation::OP_CHECKLOCKTIMEVERIFY => "OP_NOP2",
             Operation::OP_NOP3 => "OP_NOP3",

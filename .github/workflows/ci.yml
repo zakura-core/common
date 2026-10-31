@@ -1387,6 +1387,33 @@ jobs:
       - name: Verify working directory is clean
         run: git diff --exit-code
 
+  native-pq:
+    name: Native PQ / Script and transaction authorization
+    needs: changes
+    if: needs.changes.outputs.librustzcash == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_TEST_DEBUG: 1
+      RAYON_NUM_THREADS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ca36e3307eb02aaffd8a9268ae90e586fd4f461e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.97.0; action uses orphan commits
+      - name: Test both native versions and shared script behavior
+        run: cargo +1.97.0 test --locked -p zakura-transparent -p zakura-zcash-script --features pq
+      - name: Test transaction digest binding and signing modes
+        run: cargo +1.97.0 test --locked -p zakura-primitives --features pq --lib transaction::tests::native_pq
+      - name: Check PQ without default features
+        run: cargo +1.97.0 check --locked -p zakura-transparent -p zakura-zcash-script --no-default-features --features pq
+      - name: Test shared interpreter without signature-validation defaults
+        run: cargo +1.97.0 test --locked -p zakura-zcash-script --no-default-features --features pq --lib
+      - name: Check legacy feature configuration
+        run: cargo +1.97.0 check --locked -p zakura-transparent -p zakura-zcash-script --no-default-features
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
   librustzcash-configurations:
     name: librustzcash subset / Configuration checks
     needs: changes
@@ -1995,6 +2022,7 @@ jobs:
       - sinsemilla-weighted-test
       - equihash-test
       - librustzcash-test
+      - native-pq
       - librustzcash-configurations
       - librustzcash-no-std
       - sensei-features
@@ -2047,6 +2075,7 @@ jobs:
             sinsemilla-weighted-test,
             equihash-test,
             librustzcash-test,
+            native-pq,
             librustzcash-configurations,
             librustzcash-no-std,
             sensei-features,
