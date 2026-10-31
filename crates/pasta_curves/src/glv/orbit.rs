@@ -671,7 +671,7 @@ pub(super) fn multiexp<C: GlvParams>(
     let _ = num_threads;
     #[cfg(feature = "multicore")]
     if num_threads > 1 {
-        return super::paired_windows_sum::<C>(active_windows, window_bits, |window| {
+        return super::paired_windows_sum::<C>(active_windows, window_bits, &|window| {
             windows_sum::<C>(&params, &digits, &rotated, window..window + 1)
         });
     }

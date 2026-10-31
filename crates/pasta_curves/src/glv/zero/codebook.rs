@@ -1035,7 +1035,7 @@ pub(super) fn recode(
     components: &[(SignedMagnitude, SignedMagnitude)],
     num_threads: usize,
 ) -> Recoded {
-    try_recode_with(codebook, components.len(), num_threads, |index| {
+    try_recode_with(codebook, components.len(), num_threads, &|index| {
         Some(components[index])
     })
     .expect("component slices cannot decline recoding")
@@ -1043,11 +1043,15 @@ pub(super) fn recode(
 
 /// Recodes components produced on demand, so prepared evaluations can fuse
 /// scalar decomposition into the row-major recoding pass.
+///
+/// `component_at` is a trait object so this pass is compiled once rather than
+/// once per caller; each call decomposes a full scalar, which dwarfs the
+/// indirect call.
 pub(super) fn try_recode_with(
     codebook: &Codebook,
     terms: usize,
     num_threads: usize,
-    component_at: impl Fn(usize) -> Option<(SignedMagnitude, SignedMagnitude)> + Sync,
+    component_at: &(dyn Fn(usize) -> Option<(SignedMagnitude, SignedMagnitude)> + Sync),
 ) -> Option<Recoded> {
     let width = codebook.main_windows();
     let bucket_count = codebook.bucket_count();
@@ -1418,7 +1422,7 @@ mod tests {
             negative: false,
             magnitude: 0,
         };
-        let recoded = try_recode_with(&codebook, 4, 1, |_| Some((zero, zero)))
+        let recoded = try_recode_with(&codebook, 4, 1, &|_| Some((zero, zero)))
             .expect("zero rows can be recoded");
         assert_eq!(recoded.terms, 4);
         assert_eq!(recoded.active_windows, 0);
@@ -1428,7 +1432,7 @@ mod tests {
 
         for num_threads in [1, 2] {
             assert!(
-                try_recode_with(&codebook, 4, num_threads, |index| {
+                try_recode_with(&codebook, 4, num_threads, &|index| {
                     (index != 2).then_some((zero, zero))
                 })
                 .is_none()

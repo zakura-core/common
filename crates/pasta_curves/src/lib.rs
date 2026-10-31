@@ -25,6 +25,10 @@ extern crate alloc;
 #[macro_use]
 extern crate std;
 
+// Rayon already requires `std`; the parallel GLV helpers use its `Mutex`.
+#[cfg(all(feature = "multicore", not(test)))]
+extern crate std;
+
 #[macro_use]
 mod macros;
 mod curves;
