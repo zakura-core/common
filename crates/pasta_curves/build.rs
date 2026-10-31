@@ -1,32 +1,33 @@
 use std::env;
 
-const X86_64_ASM_CFG: &str = "pasta_curves_x86_64_asm";
+const X86_64_ASM_COMPILED_CFG: &str = "pasta_curves_x86_64_asm_compiled";
+const X86_64_ASM_STATIC_CFG: &str = "pasta_curves_x86_64_asm_static";
 const REQUIRED_X86_64_FEATURES: [&str; 2] = ["adx", "bmi2"];
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg({X86_64_ASM_CFG})");
+    println!("cargo:rustc-check-cfg=cfg({X86_64_ASM_COMPILED_CFG})");
+    println!("cargo:rustc-check-cfg=cfg({X86_64_ASM_STATIC_CFG})");
     println!("cargo:rerun-if-changed=src/asm/pasta_mul-armv8.S");
 
-    if use_x86_64_asm() {
-        println!("cargo:rustc-cfg={X86_64_ASM_CFG}");
+    if compile_x86_64_asm() {
+        println!("cargo:rustc-cfg={X86_64_ASM_COMPILED_CFG}");
+        if use_static_x86_64_asm() {
+            println!("cargo:rustc-cfg={X86_64_ASM_STATIC_CFG}");
+        }
     }
 
     #[cfg(feature = "aarch64-asm")]
     build_aarch64_asm();
 }
 
-fn use_x86_64_asm() -> bool {
-    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64")
-        || env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() != Ok("64")
-    {
-        return false;
-    }
-
+fn compile_x86_64_asm() -> bool {
     // `portable` is a safety override, including under `--all-features`.
-    if cfg!(feature = "portable") {
-        return false;
-    }
+    env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
+        && env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() == Ok("64")
+        && !cfg!(feature = "portable")
+}
 
+fn use_static_x86_64_asm() -> bool {
     if cfg!(feature = "x86_64-asm") {
         return true;
     }

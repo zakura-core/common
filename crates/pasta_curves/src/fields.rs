@@ -1,6 +1,17 @@
 //! This module contains implementations for the two finite fields of the Pallas
 //! and Vesta curves.
 
+// The expression is resolved only when the x86-64 backend is compiled.
+// Static selection folds the availability check away.
+macro_rules! return_if_x86_64_asm {
+    ($value:expr) => {
+        #[cfg(pasta_curves_x86_64_asm_compiled)]
+        if super::x86_64_detect::asm_available() {
+            return $value;
+        }
+    };
+}
+
 mod fp;
 mod fq;
 mod modinv62;
@@ -60,15 +71,18 @@ fn mul_by_inverse_power_of_two(
 ))]
 mod aarch64_asm;
 
-// Keep the build-selected x86-64 inline-assembly exception behind the same
+// Keep the x86-64 inline-assembly exception behind the same
 // private boundary.
 #[allow(unsafe_code)]
 #[cfg(all(
-    pasta_curves_x86_64_asm,
+    pasta_curves_x86_64_asm_compiled,
     target_arch = "x86_64",
     target_pointer_width = "64"
 ))]
 mod x86_64_asm;
+
+#[cfg(pasta_curves_x86_64_asm_compiled)]
+mod x86_64_detect;
 
 pub use fp::*;
 pub use fq::*;

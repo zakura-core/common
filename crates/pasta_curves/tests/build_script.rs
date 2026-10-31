@@ -5,7 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const ASM_DIRECTIVE: &str = "cargo:rustc-cfg=pasta_curves_x86_64_asm";
+const COMPILED_DIRECTIVE: &str = "cargo:rustc-cfg=pasta_curves_x86_64_asm_compiled";
+const STATIC_DIRECTIVE: &str = "cargo:rustc-cfg=pasta_curves_x86_64_asm_static";
+const COMPILED: [bool; 4] = [true, true, false, false];
 const BASELINE: [bool; 4] = [false, true, false, false];
 const TARGET_ASM: [bool; 4] = [true, true, false, false];
 const NEVER_ASM: [bool; 4] = [false; 4];
@@ -13,6 +15,7 @@ const NEVER_ASM: [bool; 4] = [false; 4];
 struct Case<'a> {
     name: &'a str,
     environment: &'a [(&'a str, Option<&'a str>)],
+    compiled: [bool; 4],
     selected: [bool; 4],
 }
 
@@ -83,7 +86,7 @@ impl Drop for BuildScript {
 }
 
 #[test]
-fn x86_64_assembly_respects_target_features_and_overrides() {
+fn x86_64_assembly_compilation_and_static_selection_respect_overrides() {
     // Expected selections follow this mode order. `portable` always wins.
     let modes: &[(&str, &[&str])] = &[
         ("default", &[]),
@@ -95,51 +98,61 @@ fn x86_64_assembly_respects_target_features_and_overrides() {
         Case {
             name: "same-triple baseline",
             environment: &[],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
             name: "missing target features",
             environment: &[("CARGO_CFG_TARGET_FEATURE", None)],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
             name: "empty target features",
             environment: &[("CARGO_CFG_TARGET_FEATURE", Some(""))],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
             name: "ADX alone",
             environment: &[("CARGO_CFG_TARGET_FEATURE", Some("sse2,adx"))],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
             name: "BMI2 alone",
             environment: &[("CARGO_CFG_TARGET_FEATURE", Some("bmi2,sse2"))],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
             name: "both required features",
             environment: &[("CARGO_CFG_TARGET_FEATURE", Some("adx,bmi2"))],
+            compiled: COMPILED,
             selected: TARGET_ASM,
         },
         Case {
             name: "required features among other features",
             environment: &[("CARGO_CFG_TARGET_FEATURE", Some("bmi2,sse2,adx"))],
+            compiled: COMPILED,
             selected: TARGET_ASM,
         },
         Case {
             name: "ADX token must match exactly",
             environment: &[("CARGO_CFG_TARGET_FEATURE", Some("adx2,bmi2"))],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
             name: "BMI2 token must match exactly",
             environment: &[("CARGO_CFG_TARGET_FEATURE", Some("adx,bmi20"))],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
             name: "native rustflags do not replace resolved features",
             environment: &[("CARGO_ENCODED_RUSTFLAGS", Some("-C\x1ftarget-cpu=native"))],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
@@ -148,6 +161,7 @@ fn x86_64_assembly_respects_target_features_and_overrides() {
                 "CARGO_ENCODED_RUSTFLAGS",
                 Some("-C\x1ftarget-feature=+adx,+bmi2"),
             )],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
@@ -156,11 +170,13 @@ fn x86_64_assembly_respects_target_features_and_overrides() {
                 ("CARGO_CFG_TARGET_FEATURE", Some("adx,bmi2")),
                 ("CARGO_ENCODED_RUSTFLAGS", Some("-C\x1ftarget-feature=-adx")),
             ],
+            compiled: COMPILED,
             selected: TARGET_ASM,
         },
         Case {
             name: "cross-compilation baseline",
             environment: &[("HOST", Some("aarch64-unknown-linux-gnu"))],
+            compiled: COMPILED,
             selected: BASELINE,
         },
         Case {
@@ -169,6 +185,7 @@ fn x86_64_assembly_respects_target_features_and_overrides() {
                 ("HOST", Some("aarch64-unknown-linux-gnu")),
                 ("CARGO_CFG_TARGET_FEATURE", Some("adx,bmi2")),
             ],
+            compiled: COMPILED,
             selected: TARGET_ASM,
         },
         Case {
@@ -177,6 +194,7 @@ fn x86_64_assembly_respects_target_features_and_overrides() {
                 ("CARGO_CFG_TARGET_ARCH", Some("aarch64")),
                 ("CARGO_CFG_TARGET_FEATURE", Some("adx,bmi2")),
             ],
+            compiled: NEVER_ASM,
             selected: NEVER_ASM,
         },
         Case {
@@ -185,6 +203,7 @@ fn x86_64_assembly_respects_target_features_and_overrides() {
                 ("CARGO_CFG_TARGET_POINTER_WIDTH", Some("32")),
                 ("CARGO_CFG_TARGET_FEATURE", Some("adx,bmi2")),
             ],
+            compiled: NEVER_ASM,
             selected: NEVER_ASM,
         },
     ];
@@ -201,7 +220,13 @@ fn x86_64_assembly_respects_target_features_and_overrides() {
                 case.name,
             );
             assert_eq!(
-                stdout.lines().any(|line| line == ASM_DIRECTIVE),
+                stdout.lines().any(|line| line == COMPILED_DIRECTIVE),
+                case.compiled[index],
+                "{mode}: {}; stdout: {stdout}; stderr: {stderr}",
+                case.name,
+            );
+            assert_eq!(
+                stdout.lines().any(|line| line == STATIC_DIRECTIVE),
                 case.selected[index],
                 "{mode}: {}; stdout: {stdout}; stderr: {stderr}",
                 case.name,
