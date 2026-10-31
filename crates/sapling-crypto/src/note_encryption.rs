@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
 use ff::PrimeField;
-use rand_core::Rng;
+use rand_core::{CryptoRng, Rng};
 
 use zcash_note_encryption::{
     BatchDomain, COMPACT_NOTE_SIZE, Domain, ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes,
@@ -343,6 +343,9 @@ impl ShieldedOutput<SaplingDomain, COMPACT_NOTE_SIZE> for CompactOutputDescripti
 /// Setting `ovk` to `None` represents the `ovk = ⊥` case, where the note cannot be
 /// recovered by the sender.
 ///
+/// `rng` must be securely seeded; pre-ZIP-212 notes use it to generate the
+/// ephemeral secret key.
+///
 /// NB: the example code here only covers the post-Canopy case.
 ///
 /// # Examples
@@ -379,13 +382,13 @@ impl ShieldedOutput<SaplingDomain, COMPACT_NOTE_SIZE> for CompactOutputDescripti
 /// let encCiphertext = enc.encrypt_note_plaintext();
 /// let outCiphertext = enc.encrypt_outgoing_plaintext(&cv, &cmu, &mut rng);
 /// ```
-pub fn sapling_note_encryption<R: Rng>(
+pub fn sapling_note_encryption<R: Rng + CryptoRng>(
     ovk: Option<OutgoingViewingKey>,
     note: Note,
     memo: [u8; 512],
     rng: &mut R,
 ) -> NoteEncryption<SaplingDomain> {
-    let esk = note.generate_or_derive_esk_internal(rng);
+    let esk = note.generate_or_derive_esk(rng);
     NoteEncryption::new_with_esk(esk, ovk, note, memo)
 }
 

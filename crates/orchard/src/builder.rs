@@ -561,8 +561,10 @@ impl OutputInfo {
 
     /// Defined in [Zcash Protocol Spec § 4.8.3: Dummy Notes (Orchard)][orcharddummynotes].
     ///
+    /// `rng` must be securely seeded.
+    ///
     /// [orcharddummynotes]: https://zips.z.cash/protocol/nu5.pdf#orcharddummynotes
-    pub fn dummy(note_version: NoteVersion, rng: &mut impl Rng) -> Self {
+    pub fn dummy(note_version: NoteVersion, rng: &mut (impl Rng + CryptoRng)) -> Self {
         let fvk: FullViewingKey = (&SpendingKey::random(rng)).into();
         // Dummy outputs do not need a reproducible ZIP 32 address index.
         let mut diversifier_bytes: [u8; 11] = Default::default();
@@ -581,7 +583,7 @@ impl OutputInfo {
         &self,
         cv_net: &ValueCommitment,
         nf_old: Nullifier,
-        mut rng: impl Rng,
+        mut rng: impl Rng + CryptoRng,
     ) -> (Note, ExtractedNoteCommitment, TransmittedNoteCiphertext) {
         let rho = Rho::from_nf_old(nf_old);
         let note = Note::new(self.recipient, self.value, rho, self.note_version, &mut rng);
@@ -621,7 +623,7 @@ impl OutputInfo {
         self,
         cv_net: &ValueCommitment,
         nf_old: Nullifier,
-        rng: impl Rng,
+        rng: impl Rng + CryptoRng,
     ) -> crate::pczt::Output {
         let (note, cmx, encrypted_note) = self.build(cv_net, nf_old, rng);
 
@@ -721,7 +723,7 @@ impl ActionInfo {
     ///
     /// [orchardsend]: https://zips.z.cash/protocol/nu5.pdf#orchardsend
     #[cfg(feature = "prover")]
-    fn build(self, mut rng: impl Rng) -> (Action<SigningMetadata>, Circuit) {
+    fn build(self, mut rng: impl Rng + CryptoRng) -> (Action<SigningMetadata>, Circuit) {
         let v_net = self.value_sum();
         let cv_net = ValueCommitment::derive(v_net, self.rcv.clone());
 
@@ -749,7 +751,7 @@ impl ActionInfo {
     }
 
     #[cfg(feature = "wallet")]
-    fn build_for_pczt(self, mut rng: impl Rng) -> crate::pczt::Action {
+    fn build_for_pczt(self, mut rng: impl Rng + CryptoRng) -> crate::pczt::Action {
         let v_net = self.value_sum();
         let cv_net = ValueCommitment::derive(v_net, self.rcv.clone());
 
@@ -1158,10 +1160,12 @@ impl Builder {
     /// [`Bundle::create_proof`] and [`Bundle::apply_signatures`] respectively. The proof must be
     /// created with a [`ProvingKey`] for the circuit version consistent with the builder's
     /// bundle version.
+    ///
+    /// `rng` must be securely seeded; it supplies note and encryption secrets.
     #[cfg(feature = "prover")]
     pub fn build<V: TryFrom<i64>>(
         self,
-        rng: impl Rng,
+        rng: impl Rng + CryptoRng,
     ) -> Result<Option<(UnauthorizedBundle<V>, BundleMetadata)>, BuildError> {
         // An in-memory bundle proves against its anchor immediately; a deferred-anchor
         // bundle has none, so it can only be built for a PCZT.
@@ -1181,12 +1185,24 @@ impl Builder {
         )
     }
 
-    /// Builds a bundle containing the given spent notes and outputs along with their
-    /// metadata, for inclusion in a PCZT.
+    /// Builds a bundle containing the given spent notes and outputs along with
+    /// their metadata, for inclusion in a PCZT.
+    ///
+    /// `rng` must be securely seeded; it supplies note and encryption secrets.
+    /// A generator implementing only [`Rng`] is insufficient:
+    ///
+    /// ```compile_fail
+    /// use orchard::builder::Builder;
+    /// use rand::Rng;
+    ///
+    /// fn build(builder: Builder, rng: impl Rng) {
+    ///     builder.build_for_pczt(rng);
+    /// }
+    /// ```
     #[cfg(feature = "wallet")]
     pub fn build_for_pczt(
         self,
-        rng: impl Rng,
+        rng: impl Rng + CryptoRng,
     ) -> Result<(crate::pczt::Bundle, BundleMetadata), BuildError> {
         // The PCZT bundle's `anchor` field is required (public API), so a deferred-anchor
         // bundle carries the empty-tree root purely as a placeholder alongside the
@@ -1237,6 +1253,8 @@ impl Builder {
 /// In a bundle that disables cross-address transfers, `outputs` must be empty (every output
 /// is addressed to the note it spends); retained value must be supplied as `changes`.
 ///
+/// `rng` must be securely seeded; it supplies note and encryption secrets.
+///
 /// # Errors
 ///
 /// Returns [`BuildError::UnsupportedProtocolVersion`] for historical bundle versions,
@@ -1248,7 +1266,7 @@ impl Builder {
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "prover")]
 pub fn bundle<V: TryFrom<i64>>(
-    rng: impl Rng,
+    rng: impl Rng + CryptoRng,
     bundle_type: BundleType,
     bundle_version: BundleVersion,
     flags: Flags,
@@ -1281,7 +1299,7 @@ pub fn bundle<V: TryFrom<i64>>(
 }
 
 #[cfg(feature = "prover")]
-fn finish_unauthorized_bundle<V: TryFrom<i64>, R: Rng>(
+fn finish_unauthorized_bundle<V: TryFrom<i64>, R: Rng + CryptoRng>(
     pre_actions: Vec<ActionInfo>,
     flags: Flags,
     value_balance: ValueSum,
@@ -1337,7 +1355,7 @@ fn finish_unauthorized_bundle<V: TryFrom<i64>, R: Rng>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_bundle<B, R: Rng>(
+fn build_bundle<B, R: Rng + CryptoRng>(
     mut rng: R,
     bundle_version: BundleVersion,
     flags: Flags,

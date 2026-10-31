@@ -126,13 +126,6 @@ impl Note {
     /// Derives `esk` from the internal `Rseed` value, or generates a random value if this
     /// note was created with a v1 (i.e. pre-ZIP 212) note plaintext.
     pub fn generate_or_derive_esk<R: Rng + CryptoRng>(&self, rng: &mut R) -> EphemeralSecretKey {
-        self.generate_or_derive_esk_internal(rng)
-    }
-
-    pub(crate) fn generate_or_derive_esk_internal<R: Rng>(
-        &self,
-        rng: &mut R,
-    ) -> EphemeralSecretKey {
         match self.derive_esk() {
             None => EphemeralSecretKey(jubjub::Fr::random(rng)),
             Some(esk) => esk,

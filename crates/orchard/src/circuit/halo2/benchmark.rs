@@ -11,7 +11,7 @@ use crate::backend::halo2_proofs::{
 use crate::backend::pasta_curves::{pallas, vesta};
 use alloc::vec::Vec;
 use incrementalmerkletree::{Hashable, Level};
-use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+use rand::{CryptoRng, Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -411,7 +411,7 @@ fn ironwood_payment_values(
 fn ironwood_payment_fixture(
     action_count: usize,
     fixture_index: usize,
-    mut rng: impl Rng,
+    mut rng: impl Rng + CryptoRng,
 ) -> IronwoodPaymentFixture {
     assert_ne!(action_count, 0, "a payment has at least one Action");
     let bundle_version = BundleVersion::ironwood_v3();
