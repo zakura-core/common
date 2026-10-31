@@ -57,6 +57,7 @@ zip32 = { version = "0.2", default-features = false }
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [features]
+pq = ["transparent/pq"]
 backend-halo2 = ["orchard/backend-halo2"]
 backend-sensei = ["orchard/backend-sensei"]
 # Wallet key derivation and spending transaction construction.
