@@ -88,18 +88,13 @@
 //!
 //! `x86_64-asm` enables the same kernels on 64-bit x86-64 targets as
 //! MULX/ADCX/ADOX inline assembly transcribed from the zakura-pasta-curves
-//! backend; no C assembler is needed. The backend is also selected without
-//! the feature when the compiler's resolved target features include both
-//! BMI2 and ADX, for example with `-C target-cpu=native` on a supporting CPU
-//! or `-C target-feature=+adx,+bmi2`. There is no runtime dispatch: the
-//! feature forces the backend on, and an assembly-enabled binary faults with
-//! an illegal instruction on a CPU without those extensions. `portable`
-//! disables the x86-64 backend in either case, including under
-//! `--all-features`; it does not undo instructions enabled by Rust's target
-//! flags and does not affect `aarch64-asm`. Miri uses portable Rust. Unsafe
-//! arithmetic is again confined to the assembly module, whose blocks read
-//! only their declared fixed-size operands; negation and doubling keep their
-//! portable forms, which x86-64 compiles at least as well.
+//! backend; no C assembler is needed. Ordinary x86-64 builds include the
+//! backend and use cached runtime detection of BMI2 and ADX, falling back to
+//! portable Rust when either is unavailable. `x86_64-asm` forces assembly
+//! without detection and requires a supporting CPU. `portable` disables the
+//! x86-64 backend, including under `--all-features`; it does not undo
+//! instructions enabled by Rust's target flags or affect `aarch64-asm`.
+//! Miri uses portable Rust. Unsafe arithmetic stays in the assembly module.
 //!
 //! Cargo features are additive: any consumer enabling `sqrt-table-large`,
 //! `aarch64-asm`, `x86_64-asm`, or `portable` selects it for that Udon build.

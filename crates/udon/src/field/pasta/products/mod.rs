@@ -6,7 +6,6 @@
 use core::marker::PhantomData;
 
 use super::montgomery::{montgomery_reduce_unreduced, reduce_once, reduce_twice_modulus};
-#[cfg(not(all(udon_asm, not(miri))))]
 use super::word::mac;
 use super::word::{adc, multiply_wide, sbb, square_wide};
 use super::{PastaField, PrimeModulus, ReductionState};
@@ -138,36 +137,7 @@ impl<M: PrimeModulus> ProductSum<M> {
         lhs: &PastaField<M, impl ReductionState>,
         rhs: &PastaField<M, impl ReductionState>,
     ) {
-        #[cfg(all(udon_asm, not(miri)))]
-        let (wide, overflow) = crate::field::asm::mul_accumulate(self.wide, &lhs.limbs, &rhs.limbs);
-        #[cfg(not(all(udon_asm, not(miri))))]
-        let (wide, overflow) = {
-            let (d0, carry) = mac(self.wide[0], lhs.limbs[0], rhs.limbs[0], 0);
-            let (d1, carry) = mac(self.wide[1], lhs.limbs[0], rhs.limbs[1], carry);
-            let (d2, carry) = mac(self.wide[2], lhs.limbs[0], rhs.limbs[2], carry);
-            let (d3, carry) = mac(self.wide[3], lhs.limbs[0], rhs.limbs[3], carry);
-            let (d4, overflow) = adc(self.wide[4], carry, 0);
-
-            let (d1, carry) = mac(d1, lhs.limbs[1], rhs.limbs[0], 0);
-            let (d2, carry) = mac(d2, lhs.limbs[1], rhs.limbs[1], carry);
-            let (d3, carry) = mac(d3, lhs.limbs[1], rhs.limbs[2], carry);
-            let (d4, carry) = mac(d4, lhs.limbs[1], rhs.limbs[3], carry);
-            let (d5, overflow) = adc(self.wide[5], carry, overflow);
-
-            let (d2, carry) = mac(d2, lhs.limbs[2], rhs.limbs[0], 0);
-            let (d3, carry) = mac(d3, lhs.limbs[2], rhs.limbs[1], carry);
-            let (d4, carry) = mac(d4, lhs.limbs[2], rhs.limbs[2], carry);
-            let (d5, carry) = mac(d5, lhs.limbs[2], rhs.limbs[3], carry);
-            let (d6, overflow) = adc(self.wide[6], carry, overflow);
-
-            let (d3, carry) = mac(d3, lhs.limbs[3], rhs.limbs[0], 0);
-            let (d4, carry) = mac(d4, lhs.limbs[3], rhs.limbs[1], carry);
-            let (d5, carry) = mac(d5, lhs.limbs[3], rhs.limbs[2], carry);
-            let (d6, carry) = mac(d6, lhs.limbs[3], rhs.limbs[3], carry);
-            let (d7, overflow) = adc(self.wide[7], carry, overflow);
-
-            ([d0, d1, d2, d3, d4, d5, d6, d7], overflow)
-        };
+        let (wide, overflow) = accumulate_product(self.wide, &lhs.limbs, &rhs.limbs);
         self.wide = wide;
         let (carry, carry_overflow) = adc(self.carry, overflow, 0);
         self.carry = carry;
@@ -341,10 +311,9 @@ impl<M: PrimeModulus> ProductSum<M> {
     #[inline(always)]
     fn partial_reduce(&self) -> [u64; 8] {
         #[cfg(all(udon_asm, not(miri)))]
-        {
-            crate::field::asm::partial_reduce(self.wide, self.carry, &M::B448, &M::R2)
+        if crate::field::assembly_available() {
+            return crate::field::asm::partial_reduce(self.wide, self.carry, &M::B448, &M::R2);
         }
-        #[cfg(not(all(udon_asm, not(miri))))]
         {
             let upper = self.wide[7];
             let (t0, carry) = mac(0, upper, M::B448[0], 0);
@@ -630,4 +599,38 @@ fn merge_columns(columns: [[u64; 3]; 4]) -> [u64; 3] {
         result = [low, middle, high];
     }
     result
+}
+
+/// Adds one full product to the wide accumulator and returns its overflow limb.
+#[inline(always)]
+fn accumulate_product(wide: [u64; 8], lhs: &[u64; 4], rhs: &[u64; 4]) -> ([u64; 8], u64) {
+    #[cfg(all(udon_asm, not(miri)))]
+    if crate::field::assembly_available() {
+        return crate::field::asm::mul_accumulate(wide, lhs, rhs);
+    }
+    let (d0, carry) = mac(wide[0], lhs[0], rhs[0], 0);
+    let (d1, carry) = mac(wide[1], lhs[0], rhs[1], carry);
+    let (d2, carry) = mac(wide[2], lhs[0], rhs[2], carry);
+    let (d3, carry) = mac(wide[3], lhs[0], rhs[3], carry);
+    let (d4, overflow) = adc(wide[4], carry, 0);
+
+    let (d1, carry) = mac(d1, lhs[1], rhs[0], 0);
+    let (d2, carry) = mac(d2, lhs[1], rhs[1], carry);
+    let (d3, carry) = mac(d3, lhs[1], rhs[2], carry);
+    let (d4, carry) = mac(d4, lhs[1], rhs[3], carry);
+    let (d5, overflow) = adc(wide[5], carry, overflow);
+
+    let (d2, carry) = mac(d2, lhs[2], rhs[0], 0);
+    let (d3, carry) = mac(d3, lhs[2], rhs[1], carry);
+    let (d4, carry) = mac(d4, lhs[2], rhs[2], carry);
+    let (d5, carry) = mac(d5, lhs[2], rhs[3], carry);
+    let (d6, overflow) = adc(wide[6], carry, overflow);
+
+    let (d3, carry) = mac(d3, lhs[3], rhs[0], 0);
+    let (d4, carry) = mac(d4, lhs[3], rhs[1], carry);
+    let (d5, carry) = mac(d5, lhs[3], rhs[2], carry);
+    let (d6, carry) = mac(d6, lhs[3], rhs[3], carry);
+    let (d7, overflow) = adc(wide[7], carry, overflow);
+
+    ([d0, d1, d2, d3, d4, d5, d6, d7], overflow)
 }
