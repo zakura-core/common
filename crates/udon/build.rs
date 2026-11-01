@@ -6,7 +6,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(udon_asm)");
     println!("cargo:rerun-if-changed=src/asm/pasta_mul-armv8.S");
 
-    let x86_64 = use_x86_64_asm();
+    let x86_64 = include_x86_64_asm();
     let aarch64 = build_aarch64_asm();
     if x86_64 {
         println!("cargo:rustc-cfg=udon_x86_64_asm");
@@ -19,7 +19,7 @@ fn main() {
 }
 
 // Whether the x86-64 inline-assembly backend is selected for this build.
-fn use_x86_64_asm() -> bool {
+fn include_x86_64_asm() -> bool {
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64")
         || env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() != Ok("64")
     {
