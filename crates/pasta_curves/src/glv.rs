@@ -2058,27 +2058,47 @@ fn par_for_each_index(jobs: usize, job: &(dyn Fn(usize) + Sync)) {
 }
 
 /// Evaluates `job(i)` for every `i < jobs` through [`par_for_each_index`] and
-/// returns the results in index order. Each job stores its result in its own
-/// uncontended slot.
+/// returns the results in index order.
+///
+/// Each job writes its result straight into its own slot of the output
+/// buffer. [`par_for_each_index`] is type-erased, so it cannot hand each job
+/// a disjoint `&mut` slot the way `par_iter_mut` would (that would compile
+/// Rayon's pipeline once per `T` again); the disjointness argument lives in
+/// the `SAFETY` comments instead. If a job panics, the panic propagates out
+/// of [`par_for_each_index`] before `set_len`, so results already written are
+/// leaked, never dropped twice or read uninitialized.
 #[cfg(feature = "multicore")]
+#[allow(unsafe_code)]
 fn par_map_indices<T: Send>(jobs: usize, job: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
-    use std::sync::Mutex;
+    /// The output buffer's base pointer, shared by every job.
+    struct Slots<T>(*mut T);
+    // SAFETY: jobs only move `T` values into distinct slots (see the write
+    // below), handing them to the thread that owns the buffer; that is sound
+    // exactly when `T: Send`.
+    unsafe impl<T: Send> Sync for Slots<T> {}
+    impl<T> Slots<T> {
+        /// A method rather than field access, so closures capture the whole
+        /// (`Sync`) `Slots` instead of its raw-pointer field.
+        fn base(&self) -> *mut T {
+            self.0
+        }
+    }
 
-    let slots = (0..jobs).map(|_| Mutex::new(None)).collect::<Vec<_>>();
+    let mut results: Vec<T> = Vec::with_capacity(jobs);
+    let slots = Slots(results.as_mut_ptr());
     par_for_each_index(jobs, &|index| {
         let result = job(index);
-        *slots[index]
-            .lock()
-            .expect("a slot is never locked while a job runs") = Some(result);
+        // SAFETY: `index < jobs <= results.capacity()`, so the slot lies in
+        // the allocation. `par_for_each_index` runs the closure exactly once
+        // per index in `0..jobs`, so no other job writes this slot and nothing
+        // reads it before the loop returns. `write` does not drop the slot's
+        // uninitialized previous contents.
+        unsafe { slots.base().add(index).write(result) };
     });
-    slots
-        .into_iter()
-        .map(|slot| {
-            slot.into_inner()
-                .expect("a slot is never locked while a job runs")
-                .expect("every job stores its result")
-        })
-        .collect()
+    // SAFETY: `par_for_each_index` returned normally, so every job ran and
+    // initialized its slot, and Rayon's join makes those writes visible here.
+    unsafe { results.set_len(jobs) };
+    results
 }
 
 /// [`Table::mul_decomposed_pairs_affine`] split into one batch per worker,
@@ -4844,6 +4864,61 @@ mod tests {
     #[test]
     fn strauss_multiexp_matches_expected_vesta() {
         strauss_multiexp_matches_expected::<vesta::Point>();
+    }
+
+    #[cfg(feature = "multicore")]
+    fn with_pool(num_threads: usize, f: impl FnOnce() + Send) {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("test thread pool must build")
+            .install(f);
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn par_map_indices_returns_results_in_index_order() {
+        for num_threads in [1, 2, 8] {
+            with_pool(num_threads, || {
+                for jobs in [0usize, 1, 2, 7, 64, 1_000] {
+                    // Heap-owning results, so a bad slot write would show up
+                    // as a corrupted or double-freed value.
+                    let results = par_map_indices(jobs, &|index| std::format!("job {index}"));
+                    let expected: Vec<_> =
+                        (0..jobs).map(|index| std::format!("job {index}")).collect();
+                    assert_eq!(results, expected, "{jobs} jobs on {num_threads} threads");
+                }
+                let units = par_map_indices(5, &|_| ());
+                assert_eq!(units.len(), 5);
+            });
+        }
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn par_map_indices_leaks_written_results_when_a_job_panics() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct Counted;
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        with_pool(4, || {
+            let outcome = std::panic::catch_unwind(|| {
+                par_map_indices(64, &|index| {
+                    assert_ne!(index, 37, "injected job panic");
+                    Counted
+                })
+            });
+            assert!(outcome.is_err(), "the job panic must propagate");
+        });
+        // Completed results stay in the abandoned buffer: leaked, not dropped
+        // (and so never dropped twice).
+        assert_eq!(DROPS.load(Ordering::Relaxed), 0);
     }
 
     #[cfg(feature = "multicore")]
