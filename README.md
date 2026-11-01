@@ -90,6 +90,19 @@ feature removals explicitly recorded in the permanent
 compatibility failures block CI. See the [SemVer policy](docs/semver-policy.md)
 for enforcement details and local checks.
 
+## Assembly selection
+
+Ordinary x86-64 builds of `zakura-pasta-curves` and `zakura-udon` include
+BMI2/ADX assembly and select it using cached runtime CPU detection. CPUs
+without either extension use portable Rust, including when a binary is
+cross-compiled. Detection uses the existing `cpufeatures` dependency family
+and also works without the Rust standard library.
+
+The `x86_64-asm` feature skips detection and requires a supporting CPU.
+The `portable` feature overrides x86-64 assembly selection, including with
+`--all-features`. It does not undo CPU-specific compiler flags. AArch64
+assembly selection is unchanged.
+
 ## Acknowledgements
 
 The AArch64 and x86-64 assembly field arithmetic in

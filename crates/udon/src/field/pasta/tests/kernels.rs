@@ -4,6 +4,10 @@ use crate::field::pasta::{montgomery, word};
 #[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_mul_accumulate_matches_full_width_integer_arithmetic() {
+    if !crate::field::assembly_available() {
+        return;
+    }
+
     fn check(accumulator: [u64; 8], lhs: [u64; 4], rhs: [u64; 4]) {
         let (wide, overflow) = crate::field::asm::mul_accumulate(accumulator, &lhs, &rhs);
         assert!(overflow <= 1);
@@ -49,6 +53,10 @@ fn assembly_mul_accumulate_matches_full_width_integer_arithmetic() {
 #[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_partial_reduce_matches_full_width_integer_arithmetic() {
+    if !crate::field::assembly_available() {
+        return;
+    }
+
     fn check(wide: [u64; 8], carry: u64, b448: [u64; 4], r2: [u64; 4]) {
         let folded = crate::field::asm::partial_reduce(wide, carry, &b448, &r2);
         assert!(folded[7] <= 1);
@@ -209,6 +217,10 @@ fn check_montgomery<M: PrimeModulus>() {
 #[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_multiply_matches_portable_kernel_on_loose_inputs() {
+    if !crate::field::assembly_available() {
+        return;
+    }
+
     fn check<M: PrimeModulus>() {
         let mut state = 0x6a09_e667_f3bc_c908;
         let p = modulus::<M>();
@@ -285,6 +297,10 @@ fn loose_add_and_sub_kernels_reduce_modulo_twice_modulus() {
 #[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_add_and_sub_match_portable_kernels_on_loose_inputs() {
+    if !crate::field::assembly_available() {
+        return;
+    }
+
     fn check<M: PrimeModulus>() {
         let values = loose_samples::<M>(0x3c6e_f372_fe94_f82b);
         for a in &values {
@@ -376,18 +392,14 @@ fn assembly_feature_selects_the_supported_native_backend() {
             any(target_family = "unix", target_os = "none"),
         )),
     );
-    // The x86-64 backend is forced by its feature or selected from the
-    // compiler's resolved target features, and `portable` overrides both.
+    // Ordinary x86-64 builds include assembly; CPU detection selects it at
+    // runtime, and `portable` excludes it entirely.
     assert_eq!(
         cfg!(udon_x86_64_asm),
         cfg!(all(
             target_arch = "x86_64",
             target_pointer_width = "64",
             not(feature = "portable"),
-            any(
-                feature = "x86_64-asm",
-                all(target_feature = "bmi2", target_feature = "adx"),
-            ),
         )),
     );
     assert_eq!(cfg!(udon_asm), cfg!(any(udon_aarch64_asm, udon_x86_64_asm)));
@@ -474,6 +486,10 @@ fn loose_arithmetic_preserves_exact_integer_results() {
 #[cfg(all(udon_asm, not(miri)))]
 #[test]
 fn assembly_wrapping_subtraction_matches_integer_arithmetic() {
+    if !crate::field::assembly_available() {
+        return;
+    }
+
     let modulus = BigUint::from(1u8) << 256usize;
     let check = |a: [u64; 4], b: [u64; 4]| {
         let actual = crate::field::asm::subtract_wrapping(&a, &b);
@@ -501,4 +517,32 @@ fn assembly_wrapping_subtraction_matches_integer_arithmetic() {
         let b = core::array::from_fn(|_| xorshift64(&mut state));
         check(a, b);
     }
+}
+
+#[cfg(all(udon_x86_64_asm, not(miri)))]
+#[test]
+fn assembly_selection_matches_the_running_cpu() {
+    let detected = (
+        std::is_x86_feature_detected!("bmi2"),
+        std::is_x86_feature_detected!("adx"),
+    );
+    // CI supplies an expectation so a fallback cannot masquerade as assembly
+    // coverage, and each missing-extension case exercises the intended CPU.
+    if let Ok(expected) = std::env::var("ZAKURA_TEST_X86_FEATURES") {
+        let expected = match expected.as_str() {
+            "bmi2,adx" => (true, true),
+            "bmi2" => (true, false),
+            "adx" => (false, true),
+            "neither" => (false, false),
+            _ => panic!("invalid expected x86 CPU features: {expected}"),
+        };
+        assert_eq!(
+            detected, expected,
+            "test CPU must expose the expected features"
+        );
+    }
+    assert_eq!(
+        crate::field::assembly_available(),
+        cfg!(feature = "x86_64-asm") || (detected.0 && detected.1)
+    );
 }

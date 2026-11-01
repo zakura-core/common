@@ -1,14 +1,12 @@
 use std::env;
 
-const REQUIRED_X86_64_FEATURES: [&str; 2] = ["adx", "bmi2"];
-
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(udon_aarch64_asm)");
     println!("cargo:rustc-check-cfg=cfg(udon_x86_64_asm)");
     println!("cargo:rustc-check-cfg=cfg(udon_asm)");
     println!("cargo:rerun-if-changed=src/asm/pasta_mul-armv8.S");
 
-    let x86_64 = use_x86_64_asm();
+    let x86_64 = include_x86_64_asm();
     let aarch64 = build_aarch64_asm();
     if x86_64 {
         println!("cargo:rustc-cfg=udon_x86_64_asm");
@@ -21,7 +19,7 @@ fn main() {
 }
 
 // Whether the x86-64 inline-assembly backend is selected for this build.
-fn use_x86_64_asm() -> bool {
+fn include_x86_64_asm() -> bool {
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64")
         || env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() != Ok("64")
     {
@@ -33,22 +31,9 @@ fn use_x86_64_asm() -> bool {
         return false;
     }
 
-    if cfg!(feature = "x86_64-asm") {
-        return true;
-    }
-
-    // Use the compiler's resolved target features, not the build CPU. Equal
-    // HOST and TARGET triples do not imply an implicit native target.
-    let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
-    has_required_x86_64_features(&target_features)
-}
-
-fn has_required_x86_64_features(target_features: &str) -> bool {
-    REQUIRED_X86_64_FEATURES.iter().all(|required| {
-        target_features
-            .split(',')
-            .any(|feature| feature == *required)
-    })
+    // Include the backend for baseline and cross-compiled x86-64 builds.
+    // Runtime CPU detection decides whether its instructions may execute.
+    true
 }
 
 #[cfg(not(feature = "aarch64-asm"))]

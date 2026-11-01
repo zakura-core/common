@@ -122,10 +122,9 @@ impl<M: PrimeModulus, S: ReductionState> PastaField<M, S> {
 
     pub(super) fn canonical_limbs(&self) -> [u64; 4] {
         #[cfg(all(udon_asm, not(miri)))]
-        {
-            crate::field::asm::from_mont::<M>(&self.limbs)
+        if crate::field::assembly_available() {
+            return crate::field::asm::from_mont::<M>(&self.limbs);
         }
-        #[cfg(not(all(udon_asm, not(miri))))]
         {
             let mut wide = [0; 8];
             wide[..4].copy_from_slice(&self.limbs);

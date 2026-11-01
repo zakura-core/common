@@ -65,6 +65,7 @@ mod aarch64_asm;
 #[allow(unsafe_code)]
 #[cfg(all(
     pasta_curves_x86_64_asm,
+    not(miri),
     target_arch = "x86_64",
     target_pointer_width = "64"
 ))]
