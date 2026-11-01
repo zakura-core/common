@@ -1345,7 +1345,7 @@ impl<V> Bundle<InProgress<Proven, PartiallyAuthorized>, V> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "circuit"))]
 mod tests {
     use rand::{SeedableRng, rngs::StdRng};
 
