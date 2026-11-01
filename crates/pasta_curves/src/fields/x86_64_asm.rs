@@ -627,9 +627,27 @@ pub(super) fn square(value: &Limbs, params: &[u64; 5]) -> Limbs {
 #[cfg(test)]
 #[test]
 fn selection_matches_the_running_cpu() {
+    let detected = (
+        std::is_x86_feature_detected!("bmi2"),
+        std::is_x86_feature_detected!("adx"),
+    );
+    // CI supplies an expectation so a fallback cannot masquerade as assembly
+    // coverage, and each missing-extension case exercises the intended CPU.
+    if let Ok(expected) = std::env::var("ZAKURA_TEST_X86_FEATURES") {
+        let expected = match expected.as_str() {
+            "bmi2,adx" => (true, true),
+            "bmi2" => (true, false),
+            "adx" => (false, true),
+            "neither" => (false, false),
+            _ => panic!("invalid expected x86 CPU features: {expected}"),
+        };
+        assert_eq!(
+            detected, expected,
+            "test CPU must expose the expected features"
+        );
+    }
     assert_eq!(
         available(),
-        cfg!(feature = "x86_64-asm")
-            || (std::is_x86_feature_detected!("bmi2") && std::is_x86_feature_detected!("adx"))
+        cfg!(feature = "x86_64-asm") || (detected.0 && detected.1)
     );
 }
