@@ -10,6 +10,41 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.3] - 2026-11-01
+
+### Added
+
+- Added `ValueCommitment::try_point`, which decompresses and validates the
+  commitment on demand, and `ValueCommitment::from_bytes_unvalidated`
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+- Added `CommitmentSum::try_sum`, which sums value commitments or returns
+  `None` if any of them is not a valid point that is not of small order
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+
+### Changed
+
+- `ValueCommitment` holds its 32-byte encoding instead of a Jubjub point.
+  `to_bytes` returns the stored bytes without recompressing, and a parsed
+  `cv` is validated when a bundle is verified rather than when it is parsed.
+  The set of accepted `cv` encodings is unchanged; rejection moves from
+  parsing to verification
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+- Building a bundle with no spends and no outputs no longer derives its binding
+  keys before discarding it, which makes coinbase construction for transparent
+  or Orchard-only payouts cheaper
+  ([#659](https://github.com/zakura-core/common/pull/659)).
+
+### Removed
+
+- Removed `ValueCommitment::as_inner`; use `try_point`. `CommitmentSum`'s
+  `AddAssign` and `SubAssign` now take `&jubjub::ExtendedPoint`
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+- Removed `Add<&ValueCommitment>` and `Sub<&ValueCommitment>` for
+  `ValueCommitment`, `Add<&ValueCommitment>` for `CommitmentSum`, and
+  `Sum<ValueCommitment>` and `Sum<&ValueCommitment>` for `CommitmentSum`,
+  which could not fail on an invalid commitment; use `CommitmentSum::try_sum`
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+
 ## [5.0.0-rc.1] - 2026-10-31
 
 ### Changed
