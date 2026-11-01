@@ -33,19 +33,6 @@ pub(crate) use aarch64_asm as asm;
 pub(crate) mod x86_64_asm;
 #[cfg(all(udon_x86_64_asm, not(miri)))]
 pub(crate) use x86_64_asm as asm;
-#[cfg(all(udon_asm, not(miri)))]
-#[inline]
-pub(crate) fn assembly_available() -> bool {
-    #[cfg(udon_x86_64_asm)]
-    {
-        x86_64_asm::available()
-    }
-    #[cfg(udon_aarch64_asm)]
-    {
-        true
-    }
-}
-
 #[cfg(feature = "traits")]
 mod consumer;
 pub(crate) mod pasta;

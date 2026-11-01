@@ -161,16 +161,11 @@ impl<'a, 'b> Sub<&'b Fp> for &'a Fp {
         }
         #[cfg(all(
             pasta_curves_x86_64_asm,
-            not(miri),
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
         {
-            if super::x86_64_asm::available() {
-                Fp(super::x86_64_asm::sub(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
-            } else {
-                self.sub(rhs)
-            }
+            Fp(super::x86_64_asm::sub(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
         }
         #[cfg(not(any(
             all(
@@ -182,7 +177,6 @@ impl<'a, 'b> Sub<&'b Fp> for &'a Fp {
             ),
             all(
                 pasta_curves_x86_64_asm,
-                not(miri),
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -210,16 +204,11 @@ impl<'a, 'b> Add<&'b Fp> for &'a Fp {
         }
         #[cfg(all(
             pasta_curves_x86_64_asm,
-            not(miri),
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
         {
-            if super::x86_64_asm::available() {
-                Fp(super::x86_64_asm::add(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
-            } else {
-                self.add(rhs)
-            }
+            Fp(super::x86_64_asm::add(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
         }
         #[cfg(not(any(
             all(
@@ -231,7 +220,6 @@ impl<'a, 'b> Add<&'b Fp> for &'a Fp {
             ),
             all(
                 pasta_curves_x86_64_asm,
-                not(miri),
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -271,7 +259,6 @@ const INV: u64 = 0x992d30ecffffffff;
 
 #[cfg(all(
     pasta_curves_x86_64_asm,
-    not(miri),
     target_arch = "x86_64",
     target_pointer_width = "64"
 ))]
@@ -499,16 +486,11 @@ impl Fp {
 
         #[cfg(all(
             pasta_curves_x86_64_asm,
-            not(miri),
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
         {
-            if super::x86_64_asm::available() {
-                Fp(super::x86_64_asm::mul(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
-            } else {
-                self.mul(rhs)
-            }
+            Fp(super::x86_64_asm::mul(&self.0, &rhs.0, &X86_64_ASM_PARAMS))
         }
 
         #[cfg(not(any(
@@ -521,7 +503,6 @@ impl Fp {
             ),
             all(
                 pasta_curves_x86_64_asm,
-                not(miri),
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -546,16 +527,11 @@ impl Fp {
 
         #[cfg(all(
             pasta_curves_x86_64_asm,
-            not(miri),
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
         {
-            if super::x86_64_asm::available() {
-                Fp(super::x86_64_asm::square(&self.0, &X86_64_ASM_PARAMS))
-            } else {
-                self.square()
-            }
+            Fp(super::x86_64_asm::square(&self.0, &X86_64_ASM_PARAMS))
         }
 
         #[cfg(not(any(
@@ -568,7 +544,6 @@ impl Fp {
             ),
             all(
                 pasta_curves_x86_64_asm,
-                not(miri),
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -836,16 +811,11 @@ impl ff::Field for Fp {
         }
         #[cfg(all(
             pasta_curves_x86_64_asm,
-            not(miri),
             target_arch = "x86_64",
             target_pointer_width = "64"
         ))]
         {
-            if super::x86_64_asm::available() {
-                Self(super::x86_64_asm::add(&self.0, &self.0, &X86_64_ASM_PARAMS))
-            } else {
-                self.double()
-            }
+            Self(super::x86_64_asm::add(&self.0, &self.0, &X86_64_ASM_PARAMS))
         }
         #[cfg(not(any(
             all(
@@ -857,7 +827,6 @@ impl ff::Field for Fp {
             ),
             all(
                 pasta_curves_x86_64_asm,
-                not(miri),
                 target_arch = "x86_64",
                 target_pointer_width = "64"
             )
@@ -1929,7 +1898,6 @@ fn constants_are_canonical() {
         ),
         all(
             pasta_curves_x86_64_asm,
-            not(miri),
             target_arch = "x86_64",
             target_pointer_width = "64"
         )
@@ -1977,7 +1945,6 @@ fn asm_arithmetic_canonical_sweep_matches_portable() {
         ),
         all(
             pasta_curves_x86_64_asm,
-            not(miri),
             target_arch = "x86_64",
             target_pointer_width = "64"
         )
@@ -2036,18 +2003,14 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
         ),
         all(
             pasta_curves_x86_64_asm,
-            not(miri),
             target_arch = "x86_64",
             target_pointer_width = "64"
         )
     )
 ))]
 #[test]
+#[should_panic(expected = "requires a canonical rhs")]
 fn asm_mul_rejects_non_canonical_rhs_in_debug() {
     // The modulus itself is the smallest non-canonical value.
-    #[cfg(all(pasta_curves_x86_64_asm, not(miri)))]
-    if !super::x86_64_asm::available() {
-        return;
-    }
-    assert!(std::panic::catch_unwind(|| Fp::one().mul_runtime(&MODULUS)).is_err());
+    let _ = Fp::one().mul_runtime(&MODULUS);
 }

@@ -406,13 +406,8 @@ impl<M: PrimeModulus> PastaField<M, Reduced> {
     #[inline(always)]
     pub(crate) fn sub_reduced(&self, rhs: &Self) -> Self {
         #[cfg(all(udon_asm, not(miri)))]
-        if crate::field::assembly_available() {
-            return Self::from_montgomery(crate::field::asm::sub_loose(
-                &self.limbs,
-                &rhs.limbs,
-                &M::MODULUS,
-            ));
-        }
+        let limbs = crate::field::asm::sub_loose(&self.limbs, &rhs.limbs, &M::MODULUS);
+        #[cfg(not(all(udon_asm, not(miri))))]
         let limbs = {
             let (difference, borrow) = word::borrow_sub_limbs(&self.limbs, &rhs.limbs);
             let mask = (borrow as u64).wrapping_neg();
@@ -433,12 +428,8 @@ impl<M: PrimeModulus> PastaField<M, Reduced> {
     pub(crate) fn negate_nonzero(&self) -> Self {
         debug_assert!(!self.is_zero());
         #[cfg(all(udon_asm, not(miri)))]
-        if crate::field::assembly_available() {
-            return PastaField::from_montgomery(crate::field::asm::subtract_wrapping(
-                &M::MODULUS,
-                &self.limbs,
-            ));
-        }
+        let limbs = crate::field::asm::subtract_wrapping(&M::MODULUS, &self.limbs);
+        #[cfg(not(all(udon_asm, not(miri))))]
         let limbs = word::subtract_limbs(&M::MODULUS, &self.limbs).0;
         PastaField::from_montgomery(limbs)
     }

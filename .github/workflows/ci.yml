@@ -963,65 +963,6 @@ jobs:
       - name: Verify working directory is clean
         run: git diff --exit-code
 
-  assembly-runtime:
-    name: Pasta and Udon / x86 runtime dispatch
-    needs: changes
-    if: needs.changes.outputs.pasta_curves == 'true' || needs.changes.outputs.udon == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      # Keep the same baseline-built binaries for every CPU model. Compiler
-      # target features must not bypass runtime detection or the Rust fallback.
-      RUSTFLAGS: -C target-cpu=x86-64
-      CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ca36e3307eb02aaffd8a9268ae90e586fd4f461e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.97.0; action uses orphan commits
-      - name: Install CPU emulation
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y qemu-user
-      - name: Check native assembly and each unsupported CPU combination
-        shell: bash
-        run: |
-          set -euo pipefail
-          run_suite() {
-            cargo test --locked --release --target x86_64-unknown-linux-gnu \
-              "$@" 2>&1 | tee "$RUNNER_TEMP/runtime-dispatch-tests.log"
-            # A renamed filter or excluded selector must not pass with zero tests.
-            grep -Eq '^test result: ok\. [1-9][0-9]* passed;' \
-              "$RUNNER_TEMP/runtime-dispatch-tests.log"
-          }
-          run_tests() {
-            for package in zakura-pasta-curves zakura-udon; do
-              run_suite -p "$package" --lib selection_matches_the_running_cpu
-            done
-            run_suite -p zakura-pasta-curves --lib
-            for suite in kernels arithmetic encoding products; do
-              run_suite -p zakura-udon --lib "field::pasta::tests::${suite}::"
-            done
-            run_suite -p zakura-udon --lib field::pasta::butterfly::tests::
-          }
-
-          # Require actual native assembly execution, rather than accepting a
-          # passing suite that silently fell back on an unsupported runner.
-          export ZAKURA_TEST_X86_FEATURES=bmi2,adx
-          run_tests
-
-          # These runs retain the assembly backend in the binary. They prove
-          # fallback at runtime, which a `portable` build does not exercise.
-          for features in bmi2 adx neither; do
-            case "$features" in
-              bmi2) cpu=max,adx=off ;;
-              adx) cpu=max,bmi2=off ;;
-              neither) cpu=max,bmi2=off,adx=off ;;
-            esac
-            echo "Testing runtime fallback with CPU features: $features"
-            export ZAKURA_TEST_X86_FEATURES="$features"
-            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="qemu-x86_64 -cpu $cpu"
-            run_tests
-          done
-
   pasta-platform-smoke:
     name: pasta_curves / Platform smoke test on ${{ matrix.os }}
     needs: changes
@@ -2039,7 +1980,6 @@ jobs:
       - orchard-no-std
       - orchard-backends
       - pasta-test
-      - assembly-runtime
       - pasta-platform-smoke
       - pasta-aarch64-linux-build
       - pasta-aarch64-none-build
@@ -2092,7 +2032,6 @@ jobs:
             orchard-no-std,
             orchard-backends,
             pasta-test,
-            assembly-runtime,
             pasta-platform-smoke,
             pasta-aarch64-linux-build,
             pasta-aarch64-none-build,

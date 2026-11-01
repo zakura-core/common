@@ -10,7 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-31
+## [0.2.0] - 2026-11-01
 
 ### Added
 
@@ -21,11 +21,12 @@ internal implementation details are not tracked here.
   because exhaustive matches on the published `0.1.0` surface must handle them
   ([#624](https://github.com/zakura-core/common/pull/624)).
 
-### Fixed
+### Changed
 
-- Select x86-64 assembly automatically on CPUs with BMI2 and ADX, retaining
-  portable arithmetic on unsupported CPUs and the explicit portable override
-  ([#657](https://github.com/zakura-core/common/pull/657)).
+- Select x86-64 assembly at build time with BMI2 and ADX compiler target
+  features or the explicit assembly feature. Baseline builds use portable
+  Rust, and the portable override retains precedence
+  ([#661](https://github.com/zakura-core/common/pull/661)).
 
 ## Record of Fork
 

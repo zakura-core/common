@@ -10,6 +10,15 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.2] - 2026-11-01
+
+### Changed
+
+- Restore build-time x86-64 assembly selection. Baseline builds use portable
+  Rust; assembly requires BMI2 and ADX compiler target features or the explicit
+  assembly feature. The portable override retains precedence
+  ([#661](https://github.com/zakura-core/common/pull/661)).
+
 ## [5.0.0-rc.1] - 2026-10-31
 
 ### Changed
