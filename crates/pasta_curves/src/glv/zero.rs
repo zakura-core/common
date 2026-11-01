@@ -597,7 +597,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             negative: false,
             magnitude: 0,
         };
-        codebook::try_recode_with(&self.codebook, self.live.len(), num_threads, &|index| {
+        codebook::try_recode_with(&self.codebook, self.live.len(), num_threads, |index| {
             if !self.live[index] {
                 return Some((zero, zero));
             }
@@ -720,7 +720,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             &self.codebook,
             recoded_terms,
             num_threads,
-            &decompose_checked,
+            decompose_checked,
         ) else {
             return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
         };
@@ -792,7 +792,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             checked_signed_magnitudes(decompose::<C>(scalar))
         };
         let Some(recoded) =
-            codebook::try_recode_with(&self.codebook, terms, num_threads, &decompose_checked)
+            codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
         else {
             return self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra);
         };
@@ -1929,7 +1929,7 @@ mod tests {
             scalars[index] = C::ScalarExt::ZERO;
         }
         let recode = |prepared: &PreparedZeroMsm<C>, indices: &[usize], all_zero: bool| {
-            codebook::try_recode_with(&prepared.codebook, indices.len(), 1, &|row| {
+            codebook::try_recode_with(&prepared.codebook, indices.len(), 1, |row| {
                 let base = indices[row];
                 let scalar = if all_zero || !prepared.live[base] {
                     C::ScalarExt::ZERO
