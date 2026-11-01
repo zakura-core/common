@@ -52,6 +52,39 @@ fn tx_read_write() {
     assert_eq!(&data[..], &encoded[..]);
 }
 
+/// Reading only the data parses the same transaction as a full read: freezing it gives the
+/// same ID and writes the same bytes.
+#[test]
+fn reading_data_without_the_txid_parses_the_same_transaction() {
+    let mut cases: Vec<(Vec<u8>, BranchId)> = vec![(
+        self::data::tx_read_write::TX_READ_WRITE.to_vec(),
+        BranchId::Canopy,
+    )];
+    cases.extend(
+        self::data::zip_0243::make_test_vectors()
+            .into_iter()
+            .map(|tv| (tv.tx, tv.consensus_branch_id)),
+    );
+    cases.extend(
+        self::data::zip_0244::make_test_vectors()
+            .into_iter()
+            .map(|tv| (tv.tx, BranchId::Nu5)),
+    );
+
+    for (bytes, branch_id) in cases {
+        let full = Transaction::read(&bytes[..], branch_id).unwrap();
+        let from_data = TransactionData::read(&bytes[..], branch_id)
+            .unwrap()
+            .freeze()
+            .unwrap();
+
+        assert_eq!(from_data.txid(), full.txid());
+        let mut encoded = Vec::with_capacity(bytes.len());
+        from_data.write(&mut encoded).unwrap();
+        assert_eq!(encoded, bytes);
+    }
+}
+
 #[test]
 fn v6_encoding_hashes_and_fee_are_independent_of_nu7_cfg() {
     // Synthetic transparent transaction with a 20-byte ZIP 229 header.
