@@ -281,10 +281,17 @@ impl<M: PrimeModulus> ProductSum<M> {
     }
 
     /// Returns the accumulated field value with one Montgomery reduction.
+    ///
+    /// Baseline x86-64 builds use portable reduction for this short operation:
+    /// runtime selection costs more than the assembly kernel saves. Assembly
+    /// remains selected by explicit features or compiled CPU support.
     #[inline(always)]
     pub fn finish(self) -> PastaField<M> {
         #[cfg(all(udon_asm, not(miri)))]
-        if crate::field::assembly_available() {
+        if cfg!(udon_aarch64_asm)
+            || cfg!(feature = "x86_64-asm")
+            || cfg!(all(target_feature = "bmi2", target_feature = "adx"))
+        {
             let wide = crate::field::asm::partial_reduce(self.wide, self.carry, &M::B448, &M::R2);
             return PastaField::from_montgomery(crate::field::asm::reduce_wide::<M>(wide));
         }

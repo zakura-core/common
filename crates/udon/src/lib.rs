@@ -96,6 +96,11 @@
 //! instructions enabled by Rust's target flags or affect `aarch64-asm`.
 //! Miri uses portable Rust. Unsafe arithmetic stays in the assembly module.
 //!
+//! Finishing a product accumulator keeps portable reduction in baseline x86-64
+//! builds because runtime selection outweighs the short assembly kernel's
+//! savings. Explicit assembly and targets compiled with BMI2 and ADX retain
+//! assembly for this operation.
+//!
 //! Cargo features are additive: any consumer enabling `sqrt-table-large`,
 //! `aarch64-asm`, `x86_64-asm`, or `portable` selects it for that Udon build.
 

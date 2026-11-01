@@ -103,6 +103,11 @@ The `portable` feature overrides x86-64 assembly selection, including with
 `--all-features`. It does not undo CPU-specific compiler flags. AArch64
 assembly selection is unchanged.
 
+Udon's short product-accumulator finish uses portable reduction in baseline
+x86-64 builds, where runtime selection costs more than the assembly kernel
+saves. Explicit assembly and targets compiled with BMI2 and ADX still use
+assembly for that operation.
+
 ## Acknowledgements
 
 The AArch64 and x86-64 assembly field arithmetic in
