@@ -10,6 +10,22 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.1] - 2026-10-31
+
+### Changed
+
+- Improve prepared multi-scalar multiplication performance on Apple AArch64
+  targets with the `aarch64-asm` feature enabled
+  ([#547](https://github.com/zakura-core/common/pull/547)).
+- Removed `bits` from the default features; enable it explicitly for the
+  `PrimeFieldBits` implementations ([#626](https://github.com/zakura-core/common/pull/626)).
+
+### Fixed
+
+- Select x86-64 assembly automatically on CPUs with BMI2 and ADX, retaining
+  portable arithmetic on unsupported CPUs and the explicit portable override
+  ([#657](https://github.com/zakura-core/common/pull/657)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed

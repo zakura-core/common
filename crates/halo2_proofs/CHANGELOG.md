@@ -10,6 +10,12 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.1] - 2026-10-31
+
+### Changed
+
+- Stopped enabling `ff`'s `bits` feature ([#626](https://github.com/zakura-core/common/pull/626)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Changed

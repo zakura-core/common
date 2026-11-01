@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-31
+
+### Added
+
+- Enabled crates.io publication of Sensei's circuit descriptions and prover
+  record layouts ([#624](https://github.com/zakura-core/common/pull/624)).
+
 ## Record of Fork
 
 `zakura-sensei-shared` is an original implementation imported into the Zakura

@@ -10,6 +10,52 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-10-31
+
+### Added
+
+- Added the complete `zcash_script 0.6.0` implementation as the
+  `zakura-zcash-script` package, retaining the `zcash_script` library target,
+  the script, interpreter, solver, descriptor, and signature APIs, features,
+  and no-std support. The package keeps upstream's Apache-2.0 license,
+  inherits Common's edition 2024 and MSRV, and starts at its own version,
+  `0.0.1`
+  ([#634](https://github.com/zakura-core/common/pull/634)).
+
+### Changed
+
+- Changed `pattern::pay_to_script_hash` and `descriptor::sh` to return a
+  `Result`, failing for redeem scripts longer than 520 bytes, which a P2SH
+  spend cannot push. Added the `pattern::Error::RedeemScriptTooLarge` and
+  `descriptor::Error::RedeemScriptTooLarge` variants
+  ([#641](https://github.com/zakura-core/common/pull/641)).
+- Changed `pattern::push_pubkey`, and the builders that use it, to reject
+  public keys that are not 33 bytes starting with `0x02` or `0x03`, or 65
+  bytes starting with `0x04`, with the new `pattern::Error::InvalidPubKey`
+  ([#641](https://github.com/zakura-core/common/pull/641)).
+- Changed `pattern::check_multisig` to reject thresholds of 0 or above the
+  number of keys, with the new `pattern::Error::InvalidThreshold`, and more
+  than 20 keys ([#641](https://github.com/zakura-core/common/pull/641)).
+
+### Fixed
+
+- Fixed `descriptor::multi` and `descriptor::sortedmulti` accepting a
+  threshold of 0, which produces an output that anyone can spend
+  ([#641](https://github.com/zakura-core/common/pull/641)).
+- Fixed the encoding of `OP_PUSHDATA1`, `OP_PUSHDATA2`, and `OP_PUSHDATA4`
+  lengths, which were written as script numbers instead of fixed-width
+  unsigned fields. Pushes of 128–255 bytes gained an extra byte that the
+  parser read as data, so P2SH multisig spends with 4–7 keys were invalid.
+  Script parsing and evaluation are unchanged
+  ([#647](https://github.com/zakura-core/common/pull/647)).
+
+### Security
+
+- Fixed `pattern::sha256_htlc_with_unconditional` omitting `OP_DUP` in its
+  unconditional branch, which let anyone who knew the hashed public key
+  spend with their own key
+  ([#641](https://github.com/zakura-core/common/pull/641)).
+
 ## Record of Fork
 
 Forked from [`zcash_script 0.6.0`](https://crates.io/crates/zcash_script/0.6.0),

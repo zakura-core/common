@@ -10,6 +10,37 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.1] - 2026-10-31
+
+### Changed
+
+- Sped up `Script::read` by reading script bytes in bulk
+  ([#631](https://github.com/zakura-core/common/pull/631)).
+- Changed the script types in public signatures, such as `address::Script`
+  and `TransparentAddress::script`, from the `zcash_script` package to
+  `zakura-zcash-script`. Import paths are unchanged, but upstream
+  `zcash_script` types cannot be mixed with the fork's
+  ([#634](https://github.com/zakura-core/common/pull/634)).
+
+### Fixed
+
+- Fixed signing P2SH multisig inputs whose redeem script contains an
+  uncompressed public key. `Bundle::apply_signatures` now signs for keys in
+  either encoding, and the PCZT spend finalizer uses the signatures for the
+  compressed keys, returning `UncompressedPubkeyInScript` only when they do not
+  meet the threshold
+  ([#641](https://github.com/zakura-core/common/pull/641)).
+- Fixed signed P2SH multisig spends with 4–7 keys, whose redeem script
+  pushes the previous encoding broke
+  ([#647](https://github.com/zakura-core/common/pull/647)).
+
+### Security
+
+- Changed `zip48::FullViewingKey::standard` to reject repeated public keys
+  with the new `FullViewingKeyError::DuplicatePubKeys`. A repeated key let
+  its holder count once per occurrence toward the multisig threshold
+  ([#641](https://github.com/zakura-core/common/pull/641)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

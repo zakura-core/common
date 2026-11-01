@@ -10,6 +10,17 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.1] - 2026-10-31
+
+### Added
+
+- Added the `backend-sensei` feature forwarding the Orchard backend selection
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+- Added `AddressStore::address_range_present`, a defaulted method a store
+  can implement to report that every index in a range already has an
+  address row; `generate_gap_addresses` then skips deriving that gap's
+  addresses ([#636](https://github.com/zakura-core/common/pull/636)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

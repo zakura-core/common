@@ -10,6 +10,23 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-31
+
+### Added
+
+- Enabled crates.io publication of Pasta field and curve arithmetic and
+  allocation-free FFTs ([#624](https://github.com/zakura-core/common/pull/624)).
+- Added the `Alpha`, `AlphaPrepared`, `Odd`, and `OddPrepared` table variants
+  to the exhaustive `msm::Bases` enum; the crate version becomes `0.2.0`
+  because exhaustive matches on the published `0.1.0` surface must handle them
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+
+### Fixed
+
+- Select x86-64 assembly automatically on CPUs with BMI2 and ADX, retaining
+  portable arithmetic on unsupported CPUs and the explicit portable override
+  ([#657](https://github.com/zakura-core/common/pull/657)).
+
 ## Record of Fork
 
 `zakura-udon` is an original implementation imported into the Zakura

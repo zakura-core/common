@@ -10,6 +10,27 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.1] - 2026-10-31
+
+### Added
+
+- Added the `backend-sensei` feature selecting the Sensei cryptographic
+  implementation; select exactly one of `backend-halo2` (the default) and
+  `backend-sensei`
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+
+### Changed
+
+- Removed the `bitvec` dependency ([#626](https://github.com/zakura-core/common/pull/626)).
+
+### Security
+
+- `keys::FullViewingKey`, `keys::IncomingViewingKey` and
+  `keys::OutgoingViewingKey` overwrite their secret components when dropped:
+  `nk` and `rivk`, `dk` and `ivk`, and `ovk`. Previously their memory was freed
+  without being overwritten, and their private fields left no way to wipe them
+  ([#651](https://github.com/zakura-core/common/pull/651)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added
