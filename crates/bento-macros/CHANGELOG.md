@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-29
+
+### Added
+
+- Enabled crates.io publication of Bento's compile-time macros
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+
 ## Record of Fork
 
 `zakura-bento-macros` is an original implementation imported into the Zakura

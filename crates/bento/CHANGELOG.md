@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-29
+
+### Added
+
+- Enabled crates.io publication of compile-time arithmetic and checked POD storage
+  and embedding ([#624](https://github.com/zakura-core/common/pull/624)).
+
 ## Record of Fork
 
 `zakura-bento` is an original implementation imported into the Zakura

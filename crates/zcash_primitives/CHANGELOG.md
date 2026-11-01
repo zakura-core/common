@@ -10,6 +10,28 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.1] - 2026-10-31
+
+### Added
+
+- Added the `backend-sensei` feature forwarding the Orchard backend selection
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+- Added the default-enabled `equihash` feature, which controls the
+  `zakura-equihash` dependency and the `block::equihash` re-export. Wallets
+  can disable it with `default-features = false`; block header parsing,
+  serialization, hashing and the Equihash solution bytes are unchanged
+  ([#654](https://github.com/zakura-core/common/pull/654)).
+
+### Changed
+
+- Sped up transaction and block header parsing by reading Orchard-family
+  proof bytes and Equihash solutions in bulk
+  ([#631](https://github.com/zakura-core/common/pull/631)).
+- `block::equihash` now requires the `equihash` feature, and `std` no longer
+  enables `zakura-equihash`. Consumers that disable default features and use
+  the re-export must enable `equihash`
+  ([#654](https://github.com/zakura-core/common/pull/654)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added
