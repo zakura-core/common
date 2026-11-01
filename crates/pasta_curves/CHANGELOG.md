@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.3] - 2026-11-01
+
+### Changed
+
+- Reduced the release build time of the `multicore` GLV code by compiling its
+  Rayon pipelines once per result type instead of once per call site
+  ([#653](https://github.com/zakura-core/common/pull/653)).
+
 ## [5.0.0-rc.2] - 2026-11-01
 
 ### Changed
