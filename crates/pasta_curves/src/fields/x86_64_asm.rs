@@ -52,18 +52,12 @@
 //! constant-time.
 //!
 //! ISA requirement: MULX needs BMI2 and ADCX/ADOX need ADX (Intel Broadwell
-//! / AMD Zen or newer). Ordinary x86-64 builds include this backend and use
-//! cached runtime detection before calling it. `x86_64-asm` skips that check;
-//! the caller then guarantees CPU support. `portable` excludes the backend,
-//! but does not undo CPU instructions enabled by Rust's target flags.
-
-cpufeatures::new!(required_cpu_features, "bmi2", "adx");
-
-/// Whether the running CPU can execute this backend, or the caller forced it.
-#[inline]
-pub(super) fn available() -> bool {
-    cfg!(feature = "x86_64-asm") || required_cpu_features::get()
-}
+//! / AMD Zen or newer). Builds select this backend when Rust's resolved target
+//! features include both extensions, or when `x86_64-asm` is enabled. The
+//! `portable` Cargo feature disables this backend in either case, but does not
+//! undo CPU instructions enabled by Rust's target flags. There is no runtime
+//! dispatch, so running an assembly-enabled binary on an unsupported CPU can
+//! cause an illegal-instruction fault.
 
 use core::arch::asm;
 
@@ -622,32 +616,4 @@ pub(super) fn square(value: &Limbs, params: &[u64; 5]) -> Limbs {
         );
     }
     [o0, o1, o2, o3]
-}
-
-#[cfg(test)]
-#[test]
-fn selection_matches_the_running_cpu() {
-    let detected = (
-        std::is_x86_feature_detected!("bmi2"),
-        std::is_x86_feature_detected!("adx"),
-    );
-    // CI supplies an expectation so a fallback cannot masquerade as assembly
-    // coverage, and each missing-extension case exercises the intended CPU.
-    if let Ok(expected) = std::env::var("ZAKURA_TEST_X86_FEATURES") {
-        let expected = match expected.as_str() {
-            "bmi2,adx" => (true, true),
-            "bmi2" => (true, false),
-            "adx" => (false, true),
-            "neither" => (false, false),
-            _ => panic!("invalid expected x86 CPU features: {expected}"),
-        };
-        assert_eq!(
-            detected, expected,
-            "test CPU must expose the expected features"
-        );
-    }
-    assert_eq!(
-        available(),
-        cfg!(feature = "x86_64-asm") || (detected.0 && detected.1)
-    );
 }

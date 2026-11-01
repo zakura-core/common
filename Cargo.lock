@@ -3482,7 +3482,6 @@ dependencies = [
  "bincode",
  "blake2b_simd",
  "cc",
- "cpufeatures 0.3.0",
  "criterion 0.5.1",
  "ec-gpu",
  "ff",
@@ -3733,7 +3732,6 @@ name = "zakura-udon"
 version = "0.2.0"
 dependencies = [
  "cc",
- "cpufeatures 0.3.0",
  "criterion 0.6.0",
  "num-bigint 0.4.8",
  "proptest",

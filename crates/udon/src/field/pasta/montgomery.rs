@@ -35,10 +35,13 @@ pub(super) fn reduce_twice_modulus<M: PrimeModulus>(limbs: [u64; 4], carry: u64)
 #[inline(always)]
 pub(super) fn add_twice_modulus<M: PrimeModulus>(lhs: &[u64; 4], rhs: &[u64; 4]) -> [u64; 4] {
     #[cfg(all(udon_asm, not(miri)))]
-    if crate::field::assembly_available() {
-        return crate::field::asm::add_loose(lhs, rhs, &M::TWICE_MODULUS);
+    {
+        crate::field::asm::add_loose(lhs, rhs, &M::TWICE_MODULUS)
     }
-    add_twice_modulus_rust::<M>(lhs, rhs)
+    #[cfg(not(all(udon_asm, not(miri))))]
+    {
+        add_twice_modulus_rust::<M>(lhs, rhs)
+    }
 }
 
 /// Portable [`add_twice_modulus`]; the oracle for the assembly block.
@@ -55,10 +58,13 @@ pub(super) fn add_twice_modulus_rust<M: PrimeModulus>(lhs: &[u64; 4], rhs: &[u64
 #[inline(always)]
 pub(super) fn sub_twice_modulus<M: PrimeModulus>(lhs: &[u64; 4], rhs: &[u64; 4]) -> [u64; 4] {
     #[cfg(all(udon_asm, not(miri)))]
-    if crate::field::assembly_available() {
-        return crate::field::asm::sub_loose(lhs, rhs, &M::TWICE_MODULUS);
+    {
+        crate::field::asm::sub_loose(lhs, rhs, &M::TWICE_MODULUS)
     }
-    sub_twice_modulus_rust::<M>(lhs, rhs)
+    #[cfg(not(all(udon_asm, not(miri))))]
+    {
+        sub_twice_modulus_rust::<M>(lhs, rhs)
+    }
 }
 
 /// Portable [`sub_twice_modulus`]; the oracle for the assembly block.
@@ -137,10 +143,13 @@ pub(super) fn montgomery_multiply_loose<M: PrimeModulus>(
     debug_assert!(super::word::compare_limbs(lhs, &M::TWICE_MODULUS).is_lt());
     debug_assert!(super::word::compare_limbs(rhs, &M::TWICE_MODULUS).is_lt());
     #[cfg(all(udon_asm, not(miri)))]
-    if crate::field::assembly_available() {
-        return crate::field::asm::montgomery_multiply_loose::<M>(lhs, rhs);
+    {
+        crate::field::asm::montgomery_multiply_loose::<M>(lhs, rhs)
     }
-    montgomery_multiply_loose_rust::<M>(lhs, rhs)
+    #[cfg(not(all(udon_asm, not(miri))))]
+    {
+        montgomery_multiply_loose_rust::<M>(lhs, rhs)
+    }
 }
 
 /// The portable form of [`montgomery_multiply_loose`], and the oracle for
@@ -192,14 +201,18 @@ pub(super) fn montgomery_multiply_loose_rust<M: PrimeModulus>(
 #[inline(always)]
 pub(super) fn montgomery_square<M: PrimeModulus>(value: &[u64; 4]) -> [u64; 4] {
     #[cfg(all(udon_asm, not(miri)))]
-    if crate::field::assembly_available() {
-        return crate::field::asm::square::<M>(value);
+    {
+        crate::field::asm::square::<M>(value)
     }
-    montgomery_reduce_unreduced::<M>(super::word::square_wide(value))
+    #[cfg(not(all(udon_asm, not(miri))))]
+    {
+        montgomery_reduce_unreduced::<M>(super::word::square_wide(value))
+    }
 }
 
 /// Montgomery REDC: maps an eight-limb integer below `p * R` to its
 /// reduced residue after multiplication by `R^-1`, where `R = 2^256`.
+#[cfg(any(test, not(all(udon_asm, not(miri)))))]
 #[inline(always)]
 pub(super) fn montgomery_reduce<M: PrimeModulus>(limbs: [u64; 8]) -> [u64; 4] {
     reduce_once::<M>(montgomery_reduce_unreduced::<M>(limbs))
@@ -216,9 +229,10 @@ pub(super) fn montgomery_reduce<M: PrimeModulus>(limbs: [u64; 8]) -> [u64; 4] {
 #[inline(always)]
 pub(super) fn montgomery_reduce_unreduced<M: PrimeModulus>(limbs: [u64; 8]) -> [u64; 4] {
     #[cfg(all(udon_asm, not(miri)))]
-    if crate::field::assembly_available() {
-        return crate::field::asm::reduce_wide::<M>(limbs);
+    {
+        crate::field::asm::reduce_wide::<M>(limbs)
     }
+    #[cfg(not(all(udon_asm, not(miri))))]
     {
         // Cancel only the low half, then add the untouched high half once.
         // This is the same REDC integer as full-width cancellation. Under the
@@ -263,18 +277,19 @@ pub(super) fn square_run<M: PrimeModulus>(
     factor: Option<&[u64; 4]>,
 ) -> [u64; 4] {
     #[cfg(all(udon_asm, not(miri)))]
-    if crate::field::assembly_available() {
+    {
         if count == 0 {
             return factor.map_or(*value, |factor| {
                 montgomery_multiply_loose::<M>(value, factor)
             });
         }
-        return match factor {
+        match factor {
             Some(factor) => crate::field::asm::sqr_n_mul::<M>(value, count, factor),
             None if count == 1 => montgomery_square::<M>(value),
             None => crate::field::asm::sqr_n::<M>(value, count),
-        };
+        }
     }
+    #[cfg(not(all(udon_asm, not(miri))))]
     {
         let mut value = *value;
         for _ in 0..count {

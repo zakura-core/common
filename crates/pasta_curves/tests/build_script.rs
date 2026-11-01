@@ -6,7 +6,7 @@ use std::{
 };
 
 const ASM_DIRECTIVE: &str = "cargo:rustc-cfg=pasta_curves_x86_64_asm";
-const BASELINE: [bool; 4] = [true, true, false, false];
+const BASELINE: [bool; 4] = [false, true, false, false];
 const TARGET_ASM: [bool; 4] = [true, true, false, false];
 const NEVER_ASM: [bool; 4] = [false; 4];
 
@@ -83,7 +83,7 @@ impl Drop for BuildScript {
 }
 
 #[test]
-fn x86_64_assembly_is_included_by_default_and_respects_portable() {
+fn x86_64_assembly_respects_target_features_and_overrides() {
     // Expected selections follow this mode order. `portable` always wins.
     let modes: &[(&str, &[&str])] = &[
         ("default", &[]),

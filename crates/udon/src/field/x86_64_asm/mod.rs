@@ -3,8 +3,8 @@
 //! This contains the crate's unsafe arithmetic for x86-64, selected by the
 //! build script (see the crate-level `x86_64-asm` feature documentation) and
 //! unavailable under Miri. Multiplication uses MULX (BMI2) with ADCX/ADOX
-//! dual carry chains (ADX). Callers check cached CPU support before entering
-//! this module. `x86_64-asm` skips detection and requires a supporting CPU.
+//! dual carry chains (ADX). There is no runtime dispatch: an assembly-enabled
+//! binary faults with an illegal instruction on a CPU without BMI2 and ADX.
 //!
 //! The multiplication and squaring rounds are transcriptions of the x86-64
 //! backend in zakura-pasta-curves, itself a transcription of the AArch64
@@ -41,14 +41,6 @@
 //! control flow.
 
 #![allow(unsafe_code)]
-
-cpufeatures::new!(required_cpu_features, "bmi2", "adx");
-
-/// Whether the running CPU can execute this backend, or the caller forced it.
-#[inline]
-pub(super) fn available() -> bool {
-    cfg!(feature = "x86_64-asm") || required_cpu_features::get()
-}
 
 use core::arch::asm;
 
