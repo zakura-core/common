@@ -345,6 +345,8 @@ fn all_accumulator_mutations_preserve_overflow_bits() {
 }
 
 fn check_partial_reduce<M: PrimeModulus>() {
+    let p = modulus::<M>();
+    let inverse_r_squared = (BigUint::from(1u8) << 512usize).modinv(&p).unwrap();
     let check = |wide: [u64; 8], carry: u64| {
         let sum = ProductSum::<M> {
             wide,
@@ -359,6 +361,8 @@ fn check_partial_reduce<M: PrimeModulus>() {
                 + BigUint::from(wide[7]) * integer(&M::B448)
                 + BigUint::from(carry) * integer(&M::R2)
         );
+        let accumulator = integer(&wide) + (BigUint::from(carry) << 512usize);
+        assert_value(sum.finish(), &(accumulator * &inverse_r_squared));
     };
     for carry in [0, 1, u64::MAX] {
         check([0; 8], carry);
@@ -378,10 +382,10 @@ fn check_partial_reduce<M: PrimeModulus>() {
     }
 }
 
-// Exact full-width equality over the whole accumulator range covers both the
-// portable fold and the assembly kernel behind the same private entry point.
+// Check the exact fold and final field value across the full accumulator range,
+// including zero and maximum carries, against independent integer arithmetic.
 #[test]
-fn partial_reduce_folds_the_top_words_exactly() {
+fn full_accumulator_reductions_match_integer_arithmetic() {
     check_partial_reduce::<PallasBase>();
     check_partial_reduce::<PallasScalar>();
 }

@@ -219,6 +219,12 @@ pub(super) fn montgomery_reduce_unreduced<M: PrimeModulus>(limbs: [u64; 8]) -> [
     if crate::field::assembly_available() {
         return crate::field::asm::reduce_wide::<M>(limbs);
     }
+    montgomery_reduce_unreduced_rust::<M>(limbs)
+}
+
+/// Portable REDC with the same input and output bounds as the selected kernel.
+#[inline(always)]
+pub(super) fn montgomery_reduce_unreduced_rust<M: PrimeModulus>(limbs: [u64; 8]) -> [u64; 4] {
     {
         // Cancel only the low half, then add the untouched high half once.
         // This is the same REDC integer as full-width cancellation. Under the

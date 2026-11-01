@@ -5,7 +5,10 @@
 
 use core::marker::PhantomData;
 
-use super::montgomery::{montgomery_reduce_unreduced, reduce_once, reduce_twice_modulus};
+use super::montgomery::{
+    montgomery_reduce_unreduced, montgomery_reduce_unreduced_rust, reduce_once,
+    reduce_twice_modulus,
+};
 use super::word::mac;
 use super::word::{adc, multiply_wide, sbb, square_wide};
 use super::{PastaField, PrimeModulus, ReductionState};
@@ -280,7 +283,14 @@ impl<M: PrimeModulus> ProductSum<M> {
     /// Returns the accumulated field value with one Montgomery reduction.
     #[inline(always)]
     pub fn finish(self) -> PastaField<M> {
-        PastaField::from_montgomery(montgomery_reduce_unreduced::<M>(self.partial_reduce()))
+        #[cfg(all(udon_asm, not(miri)))]
+        if crate::field::assembly_available() {
+            let wide = crate::field::asm::partial_reduce(self.wide, self.carry, &M::B448, &M::R2);
+            return PastaField::from_montgomery(crate::field::asm::reduce_wide::<M>(wide));
+        }
+        PastaField::from_montgomery(montgomery_reduce_unreduced_rust::<M>(
+            self.partial_reduce_rust(),
+        ))
     }
 
     // Restore the bit lost when the 576-bit accumulator overflows. First
@@ -314,6 +324,12 @@ impl<M: PrimeModulus> ProductSum<M> {
         if crate::field::assembly_available() {
             return crate::field::asm::partial_reduce(self.wide, self.carry, &M::B448, &M::R2);
         }
+        self.partial_reduce_rust()
+    }
+
+    // Kept separate so finishing an accumulator selects both reduction steps once.
+    #[inline(always)]
+    fn partial_reduce_rust(&self) -> [u64; 8] {
         {
             let upper = self.wide[7];
             let (t0, carry) = mac(0, upper, M::B448[0], 0);
