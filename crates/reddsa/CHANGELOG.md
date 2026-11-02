@@ -10,15 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [5.0.0-rc.4] - 2026-11-02
-
-### Changed
-
-- Sped up RedDSA batch verification by giving one signature in each batch
-  weight 1 instead of a random weight
-  ([#667](https://github.com/zakura-core/common/pull/667)).
-
-## [5.0.0-rc.1] - 2026-10-31
+## [5.0.0] - 2026-11-02
 
 ### Added
 
@@ -26,6 +18,12 @@ internal implementation details are not tracked here.
   implementation; select at most one of `pallas-pasta` (the default) and
   `pallas-sensei`
   ([#624](https://github.com/zakura-core/common/pull/624)).
+
+### Changed
+
+- Sped up RedDSA batch verification by giving one signature in each batch
+  weight 1 instead of a random weight
+  ([#667](https://github.com/zakura-core/common/pull/667)).
 
 ## [4.0.0] - 2026-10-20
 

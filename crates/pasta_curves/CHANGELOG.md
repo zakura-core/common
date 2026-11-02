@@ -10,32 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [5.0.0-rc.4] - 2026-11-02
+## [5.0.0] - 2026-11-02
 
-### Changed
+### Added
 
-- Improved deferred inner-product performance on supported AArch64 targets
-  with the `aarch64-asm` feature enabled
-  ([#522](https://github.com/zakura-core/common/pull/522)).
-
-## [5.0.0-rc.3] - 2026-11-01
-
-### Changed
-
-- Reduced the release build time of the `multicore` GLV code by compiling its
-  Rayon pipelines once per result type instead of once per call site
-  ([#653](https://github.com/zakura-core/common/pull/653)).
-
-## [5.0.0-rc.2] - 2026-11-01
-
-### Changed
-
-- Restore build-time x86-64 assembly selection. Baseline builds use portable
-  Rust; assembly requires BMI2 and ADX compiler target features or the explicit
-  assembly feature. The portable override retains precedence
-  ([#661](https://github.com/zakura-core/common/pull/661)).
-
-## [5.0.0-rc.1] - 2026-10-31
+- Added `CurveExt::try_multiexp_full_width_is_identity_vartime`, an optional
+  exact variable-time identity test optimized for public full-width scalar
+  multiscalar multiplications
+  ([#292](https://github.com/zakura-core/common/pull/292)).
 
 ### Changed
 
@@ -44,6 +26,16 @@ internal implementation details are not tracked here.
   ([#547](https://github.com/zakura-core/common/pull/547)).
 - Removed `bits` from the default features; enable it explicitly for the
   `PrimeFieldBits` implementations ([#626](https://github.com/zakura-core/common/pull/626)).
+- Restore build-time x86-64 assembly selection. Baseline builds use portable
+  Rust; assembly requires BMI2 and ADX compiler target features or the explicit
+  assembly feature. The portable override retains precedence
+  ([#661](https://github.com/zakura-core/common/pull/661)).
+- Reduced the release build time of the `multicore` GLV code by compiling its
+  Rayon pipelines once per result type instead of once per call site
+  ([#653](https://github.com/zakura-core/common/pull/653)).
+- Improved deferred inner-product performance on supported AArch64 targets
+  with the `aarch64-asm` feature enabled
+  ([#522](https://github.com/zakura-core/common/pull/522)).
 
 ### Fixed
 

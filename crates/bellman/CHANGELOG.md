@@ -10,10 +10,20 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [5.0.0-rc.4] - 2026-11-02
+## [5.0.0] - 2026-11-02
 
 ### Changed
 
+- Replaced `multiexp::Exponent::Bits`, which held `ff::FieldBits`, with
+  `Exponent::Repr`, which holds the exponent's `PrimeField::Repr`
+  ([#626](https://github.com/zakura-core/common/pull/626)).
+- Relaxed the `PrimeFieldBits` bounds on the Groth16 prover, `multiexp`,
+  `boolean::field_into_boolean_vec_le`, `boolean::field_into_allocated_bits_le`
+  and `AllocatedNum::to_bits_le(_strict)` to `PrimeField`. Fields used with
+  them must encode `Repr` as the little-endian bytes of the canonical value
+  ([#626](https://github.com/zakura-core/common/pull/626)).
+- Stopped enabling `ff`'s `bits` feature, so the crate no longer depends on
+  `bitvec` ([#626](https://github.com/zakura-core/common/pull/626)).
 - Sped up Groth16 batch verification when the batch contains one proof
   ([#500](https://github.com/zakura-core/common/pull/500)).
 - Sped up Groth16 batch verification by about 30–58% (more for larger
@@ -28,21 +38,6 @@ internal implementation details are not tracked here.
 - Fixed a panic in Groth16 parameter generation without the `multicore`
   feature for circuits with no auxiliary variables
   ([#668](https://github.com/zakura-core/common/pull/668)).
-
-## [5.0.0-rc.1] - 2026-10-31
-
-### Changed
-
-- Replaced `multiexp::Exponent::Bits`, which held `ff::FieldBits`, with
-  `Exponent::Repr`, which holds the exponent's `PrimeField::Repr`
-  ([#626](https://github.com/zakura-core/common/pull/626)).
-- Relaxed the `PrimeFieldBits` bounds on the Groth16 prover, `multiexp`,
-  `boolean::field_into_boolean_vec_le`, `boolean::field_into_allocated_bits_le`
-  and `AllocatedNum::to_bits_le(_strict)` to `PrimeField`. Fields used with
-  them must encode `Repr` as the little-endian bytes of the canonical value
-  ([#626](https://github.com/zakura-core/common/pull/626)).
-- Stopped enabling `ff`'s `bits` feature, so the crate no longer depends on
-  `bitvec` ([#626](https://github.com/zakura-core/common/pull/626)).
 
 ## [3.0.0] - 2026-10-13
 

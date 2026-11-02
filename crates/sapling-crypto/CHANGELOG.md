@@ -10,7 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [5.0.0-rc.3] - 2026-11-01
+## [5.0.0] - 2026-11-02
 
 ### Added
 
@@ -23,6 +23,8 @@ internal implementation details are not tracked here.
 
 ### Changed
 
+- Stopped enabling `bls12_381/bits` and `jubjub/bits` from the `circuit`
+  feature, and removed the `bitvec` dependency ([#626](https://github.com/zakura-core/common/pull/626)).
 - `ValueCommitment` holds its 32-byte encoding instead of a Jubjub point.
   `to_bytes` returns the stored bytes without recompressing, and a parsed
   `cv` is validated when a bundle is verified rather than when it is parsed.
@@ -44,13 +46,6 @@ internal implementation details are not tracked here.
   `Sum<ValueCommitment>` and `Sum<&ValueCommitment>` for `CommitmentSum`,
   which could not fail on an invalid commitment; use `CommitmentSum::try_sum`
   ([#638](https://github.com/zakura-core/common/pull/638)).
-
-## [5.0.0-rc.1] - 2026-10-31
-
-### Changed
-
-- Stopped enabling `bls12_381/bits` and `jubjub/bits` from the `circuit`
-  feature, and removed the `bitvec` dependency ([#626](https://github.com/zakura-core/common/pull/626)).
 
 ## [4.0.0] - 2026-10-20
 
