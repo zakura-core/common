@@ -369,9 +369,13 @@ where
     /// Proofs, public inputs, and batch weights are all public, so the
     /// weighted points use variable-time wNAF multiplication. `z·A` is pushed
     /// in projective form; [`Accumulator::finish`] normalizes every point at once.
-    fn accumulate(Item { proof, inputs }: &Item<E>, z: Option<E::Fr>, acc: &mut Accumulator<E>) {
+    fn accumulate(
+        Item { proof, inputs }: &Item<E>,
+        weight: Option<u128>,
+        acc: &mut Accumulator<E>,
+    ) {
         acc.neg_bs.push((-proof.b).into());
-        match z {
+        match weight {
             None => {
                 acc.a_terms.push(proof.a.to_curve());
                 acc.gammas[0] += E::Fr::ONE; // a_0 is implicitly set to 1
@@ -383,7 +387,8 @@ where
                 acc.delta += proof.c.to_curve();
                 acc.y += E::Fr::ONE;
             }
-            Some(z) => {
+            Some(weight) => {
+                let z = E::Fr::from_u128(weight);
                 let z_wnaf = WnafScalar::<E::Fr, WEIGHT_WINDOW>::new(&z);
                 acc.a_terms
                     .push(&WnafBase::<E::G1, WEIGHT_WINDOW>::new(proof.a.to_curve()) * &z_wnaf);
@@ -393,7 +398,8 @@ where
                 {
                     *acc_gamma_i += &(z * a_i);
                 }
-                acc.delta += &WnafBase::<E::G1, WEIGHT_WINDOW>::new(proof.c.to_curve()) * &z_wnaf;
+                acc.c_points.push(proof.c);
+                acc.c_weights.push(weight);
                 acc.y += &z;
             }
         }
@@ -488,7 +494,7 @@ where
         // independent random weight. Only one proof in the final pairing
         // equation may have weight 1: two unit-weight proofs could carry
         // errors that cancel.
-        let (acc, ml_result) = self
+        let (mut acc, ml_result) = self
             .items
             .par_chunks(chunk_size)
             .enumerate()
@@ -509,6 +515,7 @@ where
                     Self::accumulate(item, z, &mut acc);
                 }
                 let ml_result = acc.proof_miller_loop();
+                acc.fold_c();
                 (acc, Some(ml_result))
             })
             .reduce(
@@ -557,13 +564,78 @@ const WEIGHT_WINDOW: usize = 4;
 /// of that proof's weight, so with probability at most `1/(2^128 - 1)`. That
 /// is below the roughly 2^-117 security level of BLS12-381. Weights shorter
 /// than the field halve the doublings in each weighted multiplication.
-fn random_weight<F: PrimeField>(mut draw: impl FnMut() -> u128) -> F {
+fn random_weight(mut draw: impl FnMut() -> u128) -> u128 {
     loop {
         let weight = draw();
         if weight != 0 {
-            return F::from_u128(weight);
+            return weight;
         }
     }
+}
+
+/// wNAF window for the interleaved `Σ z·C` sum.
+const SUM_WINDOW: u32 = 5;
+
+/// Width-[`SUM_WINDOW`] NAF digits of `k`, least significant first.
+fn wnaf_digits(k: u128) -> Vec<i8> {
+    let width = 1u32 << SUM_WINDOW;
+    let mut digits = vec![0i8; 129];
+    let (mut pos, mut carry) = (0, 0);
+    while pos < digits.len() {
+        let bits = if pos < 128 {
+            (k >> pos) as u32 & (width - 1)
+        } else {
+            0
+        };
+        let window = carry + bits;
+        if window & 1 == 0 {
+            pos += 1;
+            continue;
+        }
+        if window < width / 2 {
+            carry = 0;
+            digits[pos] = window as i8;
+        } else {
+            carry = 1;
+            digits[pos] = window as i8 - width as i8;
+        }
+        pos += SUM_WINDOW as usize;
+    }
+    let len = digits.iter().rposition(|&d| d != 0).map_or(0, |i| i + 1);
+    digits.truncate(len);
+    digits
+}
+
+/// Computes `Σ weights_i·points_i` in variable time, sharing one chain of
+/// doublings across all points (interleaved wNAF).
+fn weighted_sum_vartime<G: Group>(points: &[G], weights: &[u128]) -> G {
+    let digits = weights.iter().map(|&w| wnaf_digits(w)).collect::<Vec<_>>();
+    // Odd multiples P, 3P, ..., (2^(SUM_WINDOW-1) - 1)P of each point.
+    let tables = points
+        .iter()
+        .map(|&point| {
+            let double = point.double();
+            let mut table = Vec::with_capacity(1 << (SUM_WINDOW - 2));
+            table.push(point);
+            for i in 1..(1 << (SUM_WINDOW - 2)) {
+                table.push(table[i - 1] + double);
+            }
+            table
+        })
+        .collect::<Vec<_>>();
+    let top = digits.iter().map(Vec::len).max().unwrap_or(0);
+    let mut acc = G::identity();
+    for i in (0..top).rev() {
+        acc = acc.double();
+        for (digits, table) in digits.iter().zip(&tables) {
+            match digits.get(i).copied().unwrap_or(0) {
+                0 => {}
+                d if d > 0 => acc += table[(d / 2) as usize],
+                d => acc -= table[(-d / 2) as usize],
+            }
+        }
+    }
+    acc
 }
 
 /// Multiplies a public point by a public full-width scalar in variable time.
@@ -587,8 +659,11 @@ struct Accumulator<E: MultiMillerLoop> {
     neg_bs: Vec<E::G2Prepared>,
     /// `Σ z·a_i` for each public input `i`, with `a_0 = 1`.
     gammas: Vec<E::Fr>,
-    /// `Σ z·C`.
+    /// `Σ z·C` over the proofs already folded in; see [`Self::fold_c`].
     delta: E::G1,
+    /// `C` and its weight for each proof not yet folded into `delta`.
+    c_points: Vec<E::G1Affine>,
+    c_weights: Vec<u128>,
     /// `Σ z`.
     y: E::Fr,
 }
@@ -600,8 +675,21 @@ impl<E: MultiMillerLoop> Accumulator<E> {
             neg_bs: Vec::with_capacity(proofs),
             gammas: vec![E::Fr::ZERO; ic_len],
             delta: E::G1::identity(),
+            c_points: Vec::with_capacity(proofs),
+            c_weights: Vec::with_capacity(proofs),
             y: E::Fr::ZERO,
         }
+    }
+
+    /// Adds the pending `Σ z·C` terms to `delta` as one interleaved sum.
+    fn fold_c(&mut self) {
+        let points = self
+            .c_points
+            .drain(..)
+            .map(|c| c.to_curve())
+            .collect::<Vec<_>>();
+        self.delta += weighted_sum_vartime(&points, &self.c_weights);
+        self.c_weights.clear();
     }
 
     /// The G1 points paired with the key's delta, gamma, and beta:
@@ -609,7 +697,8 @@ impl<E: MultiMillerLoop> Accumulator<E> {
     ///
     /// The beta term stands in for `[Σ z]·e(alpha, beta)`, which would need
     /// an exponentiation in the target group: `[y]·e(alpha, beta) = e([y]·alpha, beta)`.
-    fn key_points(&self, vk: &VerifyingKey<E>) -> [E::G1; 3] {
+    fn key_points(&mut self, vk: &VerifyingKey<E>) -> [E::G1; 3] {
+        self.fold_c();
         let psi = vk
             .ic
             .iter()
@@ -642,6 +731,70 @@ impl<E: MultiMillerLoop> Accumulator<E> {
             delta,
             gamma,
             beta,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{weighted_sum_vartime, wnaf_digits};
+    use bls12_381::{G1Projective, Scalar};
+    use ff::{Field, PrimeField};
+    use group::Group;
+    use rand::{RngExt, SeedableRng};
+    use rand_xorshift::XorShiftRng;
+
+    const EDGE_WEIGHTS: [u128; 7] = [
+        1,
+        2,
+        15,
+        16,
+        1 << 127,
+        u128::MAX,
+        0x5555_5555_5555_5555_5555_5555_5555_5555,
+    ];
+
+    #[test]
+    fn wnaf_digits_reconstruct_the_weight() {
+        let mut rng = XorShiftRng::from_seed([3; 16]);
+        let randoms = (0..256).map(|_| rng.random::<u128>());
+        for k in EDGE_WEIGHTS.into_iter().chain(randoms) {
+            let digits = wnaf_digits(k);
+            let mut value = Scalar::ZERO;
+            for &d in digits.iter().rev() {
+                value = value.double()
+                    + Scalar::from(d.unsigned_abs() as u64)
+                        * if d < 0 { -Scalar::ONE } else { Scalar::ONE };
+            }
+            assert_eq!(value, Scalar::from_u128(k), "{k:#x}");
+            assert!(
+                digits
+                    .iter()
+                    .all(|&d| d == 0 || (d % 2 != 0 && d.abs() < 16))
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_sum_matches_scalar_multiplication() {
+        let mut rng = XorShiftRng::from_seed([5; 16]);
+        for n in [0, 1, 2, 7, 8, 9] {
+            let points = (0..n)
+                .map(|_| G1Projective::random(&mut rng))
+                .collect::<Vec<_>>();
+            let weights = (0..n)
+                .map(|i| EDGE_WEIGHTS.get(i).copied().unwrap_or_else(|| rng.random()))
+                .collect::<Vec<_>>();
+            let expected = points
+                .iter()
+                .zip(&weights)
+                .map(|(p, &w)| p * Scalar::from_u128(w))
+                .sum::<G1Projective>();
+            assert_eq!(
+                weighted_sum_vartime(&points, &weights),
+                expected,
+                "{n} points"
+            );
         }
     }
 }
