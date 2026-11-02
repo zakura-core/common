@@ -738,11 +738,24 @@ impl DeferredField for Fp {
     fn inner_product(lhs: &[Fp], rhs: &[Fp]) -> Fp {
         assert_eq!(lhs.len(), rhs.len());
         let mut accumulator = Self::Accumulator::default();
-        for (lhs, rhs) in lhs
-            .chunks(INNER_PRODUCT_BLOCK_SIZE)
-            .zip(rhs.chunks(INNER_PRODUCT_BLOCK_SIZE))
-        {
-            accumulator.mul_accumulate_block(lhs, rhs, inner_product_limbs);
+        // Use the ARM carry-chain kernel directly when available. Blocked
+        // accumulation remains the fallback for the portable scalar kernel.
+        if cfg!(all(
+            feature = "aarch64-asm",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )) {
+            for (lhs, rhs) in lhs.iter().zip(rhs) {
+                Self::mul_accumulate(&mut accumulator, lhs, rhs);
+            }
+        } else {
+            for (lhs, rhs) in lhs
+                .chunks(INNER_PRODUCT_BLOCK_SIZE)
+                .zip(rhs.chunks(INNER_PRODUCT_BLOCK_SIZE))
+            {
+                accumulator.mul_accumulate_block(lhs, rhs, inner_product_limbs);
+            }
         }
         Self::reduce(accumulator)
     }
