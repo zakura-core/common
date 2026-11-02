@@ -17,10 +17,10 @@
 
 use std::{borrow::Cow, ops::AddAssign};
 
-use ff::Field;
-use group::{Curve, CurveAffine, Group};
+use ff::{Field, PrimeField};
+use group::{Curve, CurveAffine, Group, prime::PrimeCurve};
 use pairing::{MillerLoopResult, MultiMillerLoop};
-use rand_core::{CryptoRng, Rng};
+use rand_core::{CryptoRng, Rng, TryRng};
 
 #[cfg(feature = "multicore")]
 use rand::rngs::SysRng;
@@ -35,6 +35,130 @@ use crate::{
     VerificationError,
     groth16::{PreparedVerifyingKey, Proof, VerifyingKey},
 };
+
+/// Width of the wNAF digits used to multiply by 128-bit batch weights.
+const WEIGHT_WNAF_WIDTH: u32 = 5;
+
+/// Samples batch weights: `1` for the first item when `unit_first` is set,
+/// and an independent uniform nonzero 128-bit integer for every other item.
+///
+/// For a batch with an invalid proof, fix every weight except that of one
+/// invalid proof that is not a unit-weight proof (if the only invalid proof
+/// has weight 1, the check fails outright). Exactly one value of the
+/// remaining weight satisfies the combined check modulo r, and distinct
+/// 128-bit integers stay distinct modulo r, so the batch is accepted with
+/// probability at most 1 / (2^128 - 1), independent of the batch size.
+/// That argument needs every random weight in one pairing equation to be
+/// independent and at most one weight to be 1.
+fn random_weights<R: TryRng + ?Sized>(
+    rng: &mut R,
+    count: usize,
+    unit_first: bool,
+) -> Result<Vec<u128>, R::Error> {
+    // One read fills every weight, so a system RNG costs one call per batch.
+    let mut bytes = vec![0u8; count * 16];
+    rng.try_fill_bytes(&mut bytes)?;
+    let mut weights = Vec::with_capacity(count);
+    for (i, chunk) in bytes.chunks_exact(16).enumerate() {
+        if unit_first && i == 0 {
+            weights.push(1);
+            continue;
+        }
+        let mut weight = u128::from_le_bytes(chunk.try_into().expect("16-byte chunk"));
+        while weight == 0 {
+            let mut redraw = [0u8; 16];
+            rng.try_fill_bytes(&mut redraw)?;
+            weight = u128::from_le_bytes(redraw);
+        }
+        weights.push(weight);
+    }
+    Ok(weights)
+}
+
+/// Width-`WEIGHT_WNAF_WIDTH` non-adjacent form of `k`, least significant
+/// digit first, with trailing zero digits removed. Every nonzero digit is
+/// odd and lies in (-2^(w-1), 2^(w-1)).
+fn wnaf_u128(k: u128) -> Vec<i8> {
+    let width = 1u32 << WEIGHT_WNAF_WIDTH;
+    let window_mask = width - 1;
+    // A final carry can produce one digit beyond bit 127.
+    let mut naf = vec![0i8; 129];
+    let mut pos = 0;
+    let mut carry = 0;
+    while pos < naf.len() {
+        let bits = if pos < 128 {
+            (k >> pos) as u32 & window_mask
+        } else {
+            0
+        };
+        let window = carry + bits;
+        if window & 1 == 0 {
+            // An even window keeps the carry: either carry and the low bit
+            // are both 0, or both 1.
+            pos += 1;
+            continue;
+        }
+        if window < width / 2 {
+            carry = 0;
+            naf[pos] = window as i8;
+        } else {
+            carry = 1;
+            naf[pos] = (window as i8).wrapping_sub(width as i8);
+        }
+        pos += WEIGHT_WNAF_WIDTH as usize;
+    }
+    debug_assert_eq!(carry, 0);
+    let len = naf.iter().rposition(|&d| d != 0).map_or(0, |i| i + 1);
+    naf.truncate(len);
+    naf
+}
+
+/// Computes `sum(weights[i] * points[i])` in variable time.
+///
+/// The weights are public once the batch is fixed, so variable time is safe.
+/// Points share one doubling chain (interleaved wNAF). A weight of 1 adds its
+/// point directly.
+fn vartime_weighted_sum<G: PrimeCurve>(
+    points: impl IntoIterator<Item = G::Affine>,
+    weights: &[u128],
+) -> G {
+    let mut unit = G::identity();
+    let mut nafs = Vec::with_capacity(weights.len());
+    let mut tables = Vec::with_capacity(weights.len());
+    let mut top = 0;
+    for (point, &weight) in points.into_iter().zip(weights) {
+        if weight == 1 {
+            unit += point;
+            continue;
+        }
+        let naf = wnaf_u128(weight);
+        top = top.max(naf.len());
+        nafs.push(naf);
+        // Odd multiples P, 3P, ..., (2^(w-1) - 1)P.
+        let point = point.to_curve();
+        let double = point.double();
+        let mut table = Vec::with_capacity(1 << (WEIGHT_WNAF_WIDTH - 2));
+        table.push(point);
+        for i in 1..(1 << (WEIGHT_WNAF_WIDTH - 2)) {
+            let next = table[i - 1] + double;
+            table.push(next);
+        }
+        tables.push(table);
+    }
+
+    let mut acc = G::identity();
+    for i in (0..top).rev() {
+        acc = acc.double();
+        for (naf, table) in nafs.iter().zip(&tables) {
+            match naf.get(i).copied().unwrap_or(0) {
+                0 => {}
+                d if d > 0 => acc += table[(d / 2) as usize],
+                d => acc -= table[(-d / 2) as usize],
+            }
+        }
+    }
+    acc + unit
+}
 
 /// A batch verification item.
 ///
@@ -130,6 +254,18 @@ impl<E: MultiMillerLoop> PreparedBatchG2<E> {
 pub struct PreparedBatchVerifyingKey<'a, E: MultiMillerLoop> {
     vk: &'a VerifyingKey<E>,
     g2: Cow<'a, PreparedBatchG2<E>>,
+}
+
+/// Weighted sums for proofs in one pairing equation.
+struct WeightedTerms<E: MultiMillerLoop> {
+    /// Each proof's weighted A, paired with its negated B.
+    a_terms: Vec<(E::G1Affine, E::G2Prepared)>,
+    /// Weighted public inputs, with the implicit leading 1.
+    gammas: Vec<E::Fr>,
+    /// Weighted sum of C.
+    delta: E::G1,
+    /// Sum of weights.
+    y: E::Fr,
 }
 
 struct PreparedBatchTerms<E: MultiMillerLoop> {
@@ -362,48 +498,48 @@ where
         }
     }
 
-    /// Adds one proof to the batch accumulators with weight `z`, where `None`
-    /// means weight 1 and skips the scalar multiplications.
-    #[allow(non_snake_case)]
-    fn accumulate(
-        Item { proof, inputs }: &Item<E>,
-        z: Option<E::Fr>,
-        acc_Gammas: &mut [E::Fr],
-        acc_Delta: &mut E::G1,
-        acc_Y: &mut E::Fr,
-        ml_terms: &mut Vec<(E::G1Affine, E::G2Prepared)>,
-    ) {
-        let neg_b = (-proof.b).into();
-        match z {
-            None => {
-                ml_terms.push((proof.a, neg_b));
-                acc_Gammas[0] += E::Fr::ONE; // a_0 is implicitly set to 1
-                for (a_i, acc_Gamma_i) in
-                    Iterator::zip(inputs.iter(), acc_Gammas.iter_mut().skip(1))
-                {
-                    *acc_Gamma_i += a_i;
-                }
-                *acc_Delta += proof.c.to_curve();
-                *acc_Y += E::Fr::ONE;
+    /// Weighs a run of proofs that belong to one pairing equation.
+    fn weigh(items: &[Item<E>], weights: &[u128], ic_len: usize) -> WeightedTerms<E> {
+        let mut gammas = vec![E::Fr::ZERO; ic_len];
+        let mut y = E::Fr::ZERO;
+        for (Item { inputs, .. }, &weight) in items.iter().zip(weights) {
+            let weight = E::Fr::from_u128(weight);
+            gammas[0] += weight; // a_0 is implicitly set to 1
+            for (a_i, gamma_i) in Iterator::zip(inputs.iter(), gammas.iter_mut().skip(1)) {
+                *gamma_i += weight * a_i;
             }
-            Some(z) => {
-                ml_terms.push(((proof.a * z).into(), neg_b));
-                acc_Gammas[0] += &z; // a_0 is implicitly set to 1
-                for (a_i, acc_Gamma_i) in
-                    Iterator::zip(inputs.iter(), acc_Gammas.iter_mut().skip(1))
-                {
-                    *acc_Gamma_i += &(z * a_i);
-                }
-                *acc_Delta += proof.c * z;
-                *acc_Y += &z;
-            }
+            y += weight;
+        }
+
+        // Each A pairs with its own B, so each needs its own multiplication;
+        // all C terms pair with delta and share one weighted sum.
+        let weighted_a = items
+            .iter()
+            .zip(weights)
+            .map(|(item, &weight)| vartime_weighted_sum::<E::G1>([item.proof.a], &[weight]))
+            .collect::<Vec<_>>();
+        let mut affine_a = vec![E::G1Affine::identity(); weighted_a.len()];
+        E::G1::batch_normalize(&weighted_a, &mut affine_a);
+        let a_terms = affine_a
+            .into_iter()
+            .zip(items)
+            .map(|(a, item)| (a, (-item.proof.b).into()))
+            .collect();
+        let delta = vartime_weighted_sum(items.iter().map(|item| item.proof.c), weights);
+
+        WeightedTerms {
+            a_terms,
+            gammas,
+            delta,
+            y,
         }
     }
 
     /// Builds the batch's pairing terms. When `unit_first` is set, the first
-    /// proof has weight 1 and every other proof gets an independent nonzero
-    /// random weight. At most one proof in a combined pairing equation may
-    /// have weight 1: two unit-weight proofs could carry errors that cancel.
+    /// proof has weight 1. Every other proof gets an independent nonzero
+    /// 128-bit weight (see [`random_weights`]). At most one proof in a
+    /// combined pairing equation may have weight 1: two unit-weight proofs
+    /// could carry errors that cancel.
     #[allow(non_snake_case)]
     fn randomize_terms<R: Rng + CryptoRng>(
         self,
@@ -412,36 +548,14 @@ where
         unit_first: bool,
     ) -> PreparedBatchTerms<E> {
         let vk = pvk.vk;
-        let mut ml_terms = Vec::<(E::G1Affine, E::G2Prepared)>::with_capacity(self.items.len());
-        let mut acc_Gammas = vec![E::Fr::ZERO; vk.ic.len()];
-        let mut acc_Delta = E::G1::identity();
-        let mut acc_Y = E::Fr::ZERO;
-
-        for (i, item) in self.items.iter().enumerate() {
-            let z = if unit_first && i == 0 {
-                None
-            } else {
-                // The spec is explicit that z != 0.  Field::random is defined to
-                // return a uniformly-random field element (which may be 0), so we
-                // loop until it's not, avoiding needing an assert or throwing an
-                // error through no fault of the batch items. This will likely never
-                // actually loop, but handles the edge case.
-                Some(loop {
-                    let z = E::Fr::random(&mut rng);
-                    if !z.is_zero_vartime() {
-                        break z;
-                    }
-                })
-            };
-            Self::accumulate(
-                item,
-                z,
-                &mut acc_Gammas,
-                &mut acc_Delta,
-                &mut acc_Y,
-                &mut ml_terms,
-            );
-        }
+        let weights = random_weights(&mut rng, self.items.len(), unit_first)
+            .unwrap_or_else(|never| match never {});
+        let WeightedTerms {
+            a_terms: ml_terms,
+            gammas: acc_Gammas,
+            delta: acc_Delta,
+            y: acc_Y,
+        } = Self::weigh(&self.items, &weights, vk.ic.len());
 
         let delta = acc_Delta.to_affine();
 
@@ -553,41 +667,29 @@ where
         let threads = rayon::current_num_threads();
         let chunk_size = self.items.len().div_ceil(threads).clamp(1, MAX_CHUNK_SIZE);
 
-        // Each chunk weights its proofs by successive powers of one nonzero
-        // random z. Only chunk 0 starts at z^0 = 1 (1, z, ..., z^(k-1)); every
-        // other chunk starts at z (z, ..., z^k), so exactly one proof in the
-        // final pairing equation has weight 1. Giving each chunk a unit
-        // weight would let errors in two chunks' first proofs cancel.
+        // Every proof gets an independent 128-bit weight, except that the
+        // first proof of chunk 0 has weight 1. All chunks feed one pairing
+        // equation, so no other chunk may also have a unit-weight proof:
+        // errors in two unit-weight proofs could cancel.
         let acc = self
             .items
             .par_chunks(chunk_size)
             .enumerate()
             .map(|(chunk_index, items)| {
-                let mut acc = Accumulator::<E>::new(ic_len);
-                let mut ml_terms: Vec<(E::G1Affine, E::G2Prepared)> =
-                    Vec::with_capacity(items.len());
-                let z = loop {
-                    let z = E::Fr::try_random(&mut SysRng)
-                        .expect("system randomness must be available");
-                    if !z.is_zero_vartime() {
-                        break z;
-                    }
-                };
-                let mut cur_z = (chunk_index != 0).then_some(z);
-                for item in items {
-                    Self::accumulate(
-                        item,
-                        cur_z,
-                        &mut acc.gammas,
-                        &mut acc.delta,
-                        &mut acc.y,
-                        &mut ml_terms,
-                    );
-                    cur_z = Some(cur_z.map_or(z, |cur_z| cur_z * z));
+                let weights = random_weights(&mut SysRng, items.len(), chunk_index == 0)
+                    .expect("system randomness must be available");
+                let terms = Self::weigh(items, &weights, ic_len);
+                let ml_terms = terms
+                    .a_terms
+                    .iter()
+                    .map(|(a, b)| (a, b))
+                    .collect::<Vec<_>>();
+                Accumulator::<E> {
+                    gammas: terms.gammas,
+                    delta: terms.delta,
+                    y: terms.y,
+                    ml_result: Some(E::multi_miller_loop(&ml_terms[..])),
                 }
-                let ml_terms = ml_terms.iter().map(|(a, b)| (a, b)).collect::<Vec<_>>();
-                acc.ml_result = Some(E::multi_miller_loop(&ml_terms[..]));
-                acc
             })
             .reduce(
                 || Accumulator::<E>::new(ic_len),
@@ -630,5 +732,179 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bls12_381::{G1Affine, G1Projective, Scalar};
+    use core::convert::Infallible;
+    use rand_core::SeedableRng;
+    use rand_xorshift::XorShiftRng;
+
+    fn edge_weights() -> Vec<u128> {
+        let mut weights = vec![
+            1,
+            2,
+            3,
+            15,
+            16,
+            17,
+            31,
+            32,
+            33,
+            u64::MAX as u128,
+            1 << 64,
+            (1 << 64) + 1,
+            1 << 127,
+            (1 << 127) - 1,
+            u128::MAX,
+            u128::MAX - 1,
+            u128::MAX - 16,
+            0x5555_5555_5555_5555_5555_5555_5555_5555,
+            0xaaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa,
+            0xf0f0_f0f0_f0f0_f0f0_f0f0_f0f0_f0f0_f0f0,
+        ];
+        // Long runs of ones around every window boundary exercise the carry.
+        for shift in 0..128 {
+            weights.push(u128::MAX >> shift);
+            weights.push(u128::MAX << shift);
+        }
+        weights
+    }
+
+    #[test]
+    fn wnaf_digits_reconstruct_the_weight() {
+        let mut rng = XorShiftRng::from_seed([7; 16]);
+        let mut weights = edge_weights();
+        weights.extend(
+            (0..1000).map(|_| u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64())),
+        );
+        let half = 1i8 << (WEIGHT_WNAF_WIDTH - 1);
+        for weight in weights {
+            let naf = wnaf_u128(weight);
+            assert!(naf.len() <= 129);
+            let mut value = Scalar::ZERO;
+            let mut previous_nonzero: Option<usize> = None;
+            for (i, &digit) in naf.iter().enumerate().rev() {
+                value = value.double()
+                    + Scalar::from(digit.unsigned_abs() as u64)
+                        * if digit < 0 { -Scalar::ONE } else { Scalar::ONE };
+                if digit != 0 {
+                    assert_eq!(digit & 1, 1, "{weight:#x}: even digit");
+                    assert!(-half < digit && digit < half, "{weight:#x}: digit {digit}");
+                    if let Some(j) = previous_nonzero {
+                        assert!(
+                            j - i >= WEIGHT_WNAF_WIDTH as usize,
+                            "{weight:#x}: adjacent digits"
+                        );
+                    }
+                    previous_nonzero = Some(i);
+                }
+            }
+            assert_eq!(value, Scalar::from_u128(weight), "{weight:#x}");
+        }
+        assert!(wnaf_u128(0).is_empty());
+    }
+
+    #[test]
+    fn weighted_sum_matches_scalar_multiplication() {
+        let mut rng = XorShiftRng::from_seed([9; 16]);
+        let random_point = |rng: &mut XorShiftRng| {
+            G1Affine::from(G1Projective::generator() * Scalar::random(&mut *rng))
+        };
+
+        for weight in edge_weights() {
+            let point = random_point(&mut rng);
+            assert_eq!(
+                vartime_weighted_sum::<G1Projective>([point], &[weight]),
+                point * Scalar::from_u128(weight),
+                "{weight:#x}"
+            );
+        }
+
+        for count in [0, 1, 2, 3, 8, 33] {
+            let points = (0..count)
+                .map(|_| random_point(&mut rng))
+                .collect::<Vec<_>>();
+            let mut weights = random_weights(&mut rng, count, true).unwrap();
+            if count > 2 {
+                weights[2] = u128::MAX;
+            }
+            let expected: G1Projective = points
+                .iter()
+                .zip(&weights)
+                .map(|(point, &weight)| point * Scalar::from_u128(weight))
+                .sum();
+            assert_eq!(
+                vartime_weighted_sum::<G1Projective>(points.iter().copied(), &weights),
+                expected,
+                "{count} points"
+            );
+        }
+        assert_eq!(
+            vartime_weighted_sum::<G1Projective>([G1Affine::identity()], &[u128::MAX]),
+            G1Projective::identity()
+        );
+    }
+
+    /// Yields zero bytes for the first `zeros` bytes, then 0x01 bytes.
+    struct ZerosThenOnes {
+        zeros: usize,
+    }
+
+    impl TryRng for ZerosThenOnes {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            let mut bytes = [0; 4];
+            self.try_fill_bytes(&mut bytes)?;
+            Ok(u32::from_le_bytes(bytes))
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+            let mut bytes = [0; 8];
+            self.try_fill_bytes(&mut bytes)?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+            for byte in dst {
+                *byte = if self.zeros > 0 {
+                    self.zeros -= 1;
+                    0
+                } else {
+                    1
+                };
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn random_weights_are_nonzero_with_one_unit_weight() {
+        let ones = u128::from_le_bytes([1; 16]);
+        // The first 48 bytes cover three weights: the unit slot and two zero
+        // draws that must be redrawn.
+        let mut rng = ZerosThenOnes { zeros: 48 };
+        assert_eq!(
+            random_weights(&mut rng, 4, true).unwrap(),
+            vec![1, ones, ones, ones]
+        );
+        let mut rng = ZerosThenOnes { zeros: 16 };
+        assert_eq!(
+            random_weights(&mut rng, 2, false).unwrap(),
+            vec![ones, ones]
+        );
+        assert!(random_weights(&mut rng, 0, true).unwrap().is_empty());
+
+        let mut rng = XorShiftRng::from_seed([3; 16]);
+        let weights = random_weights(&mut rng, 64, true).unwrap();
+        assert_eq!(weights[0], 1);
+        assert!(
+            weights[1..].iter().all(|&w| w > 1 << 64),
+            "weights use all 128 bits"
+        );
     }
 }
