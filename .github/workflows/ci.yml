@@ -1257,6 +1257,10 @@ jobs:
         run: >-
           cargo +stable test -p zakura-sapling-crypto --locked
           --no-default-features --features circuit,multicore,wallet --release
+      - name: Test bellman without multicore
+        run: >-
+          cargo +stable test -p zakura-bellman --locked
+          --no-default-features --features groth16 --release
       - name: Verify working directory is clean
         run: git diff --exit-code
 
