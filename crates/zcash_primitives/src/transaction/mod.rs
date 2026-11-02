@@ -637,6 +637,21 @@ impl TransactionData<Authorized> {
     pub fn freeze(self) -> io::Result<Transaction> {
         Transaction::from_data(self)
     }
+
+    /// Reads a transaction's data without computing its transaction ID.
+    ///
+    /// This parses exactly what [`Transaction::read`] parses. Use it when the caller already
+    /// knows the ID, or does not need it, to skip hashing the transaction while reading it.
+    pub fn read<R: Read>(mut reader: R, consensus_branch_id: BranchId) -> io::Result<Self> {
+        let version = TxVersion::read(&mut reader)?;
+        match version {
+            TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => {
+                Transaction::read_v4_data(reader, version, consensus_branch_id)
+            }
+            TxVersion::V5 => Transaction::read_v5_data(reader, version),
+            TxVersion::V6 => Transaction::read_v6_data(reader, version),
+        }
+    }
 }
 
 struct V6HeaderFragment {
@@ -699,19 +714,31 @@ impl Transaction {
         let version = TxVersion::read(&mut reader)?;
         match version {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => {
-                Self::read_v4(reader, version, consensus_branch_id)
+                let data = Self::read_v4_data(&mut reader, version, consensus_branch_id)?;
+                let mut txid = [0; 32];
+                txid.copy_from_slice(&reader.into_hash());
+                Ok(Transaction {
+                    txid: TxId::from_bytes(txid),
+                    data,
+                })
             }
-            TxVersion::V5 => Self::read_v5(reader.into_base_reader(), version),
-            TxVersion::V6 => Self::read_v6(reader.into_base_reader(), version),
+            TxVersion::V5 => Ok(Self::from_data_v5(Self::read_v5_data(
+                reader.into_base_reader(),
+                version,
+            )?)),
+            TxVersion::V6 => Ok(Self::from_data_v6(Self::read_v6_data(
+                reader.into_base_reader(),
+                version,
+            )?)),
         }
     }
 
     #[allow(clippy::redundant_closure)]
-    fn read_v4<R: Read>(
-        mut reader: HashReader<R>,
+    fn read_v4_data<R: Read>(
+        mut reader: R,
         version: TxVersion,
         consensus_branch_id: BranchId,
-    ) -> io::Result<Self> {
+    ) -> io::Result<TransactionData<Authorized>> {
         let transparent_bundle = Self::read_transparent(&mut reader)?;
 
         let lock_time = reader.read_u32_le()?;
@@ -755,30 +782,23 @@ impl Transaction {
             None
         };
 
-        let mut txid = [0; 32];
-        let hash_bytes = reader.into_hash();
-        txid.copy_from_slice(&hash_bytes);
-
-        Ok(Transaction {
-            txid: TxId::from_bytes(txid),
-            data: TransactionData {
-                version,
-                consensus_branch_id,
-                lock_time,
-                expiry_height,
-                transparent_bundle,
-                sprout_bundle,
-                sapling_bundle: binding_sig.and_then(|binding_sig| {
-                    sapling::Bundle::from_parts(
-                        shielded_spends,
-                        shielded_outputs,
-                        value_balance,
-                        sapling::bundle::Authorized { binding_sig },
-                    )
-                }),
-                orchard_bundle: None,
-                ironwood_bundle: None,
-            },
+        Ok(TransactionData {
+            version,
+            consensus_branch_id,
+            lock_time,
+            expiry_height,
+            transparent_bundle,
+            sprout_bundle,
+            sapling_bundle: binding_sig.and_then(|binding_sig| {
+                sapling::Bundle::from_parts(
+                    shielded_spends,
+                    shielded_outputs,
+                    value_balance,
+                    sapling::bundle::Authorized { binding_sig },
+                )
+            }),
+            orchard_bundle: None,
+            ironwood_bundle: None,
         })
     }
 
@@ -805,7 +825,10 @@ impl Transaction {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "valueBalance out of range"))
     }
 
-    fn read_v5<R: Read>(mut reader: R, version: TxVersion) -> io::Result<Self> {
+    fn read_v5_data<R: Read>(
+        mut reader: R,
+        version: TxVersion,
+    ) -> io::Result<TransactionData<Authorized>> {
         let (consensus_branch_id, lock_time, expiry_height) =
             Self::read_header_fragment(&mut reader)?;
 
@@ -826,10 +849,13 @@ impl Transaction {
             ironwood_bundle: None,
         };
 
-        Ok(Self::from_data_v5(data))
+        Ok(data)
     }
 
-    fn read_v6<R: Read>(mut reader: R, version: TxVersion) -> io::Result<Self> {
+    fn read_v6_data<R: Read>(
+        mut reader: R,
+        version: TxVersion,
+    ) -> io::Result<TransactionData<Authorized>> {
         let header_fragment = Self::read_v6_header_fragment(&mut reader)?;
 
         let transparent_bundle = Self::read_transparent(&mut reader)?;
@@ -857,7 +883,7 @@ impl Transaction {
             ironwood_bundle,
         };
 
-        Ok(Self::from_data_v6(data))
+        Ok(data)
     }
 
     /// Utility function for reading header data common to v5 and v6 transactions.
