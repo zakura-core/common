@@ -164,7 +164,7 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
     /// - R_i is the signature's R value;
     /// - s_i is the signature's s value;
     /// - c_i is the hash of the message and other data;
-    /// - z_i is a random 128-bit Scalar;
+    /// - z_i is a random 128-bit Scalar, except that z_0 = 1;
     /// - h_G is the cofactor of the group;
     /// - P_G is the generator of the subgroup;
     ///
@@ -209,7 +209,11 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
         }))
         .map(|points| points.into_iter());
 
-        for item in self.signatures.iter() {
+        // The first signature has weight 1, so its R joins the check by a
+        // plain addition instead of a multiscalar-multiplication term.
+        let mut unit_R = None;
+
+        for (i, item) in self.signatures.iter().enumerate() {
             let (s_bytes, r_bytes, c) = match item.inner {
                 Inner::SpendAuth { sig, c, .. } => (sig.s_bytes, sig.r_bytes, c),
                 Inner::Binding { sig, c, .. } => (sig.s_bytes, sig.r_bytes, c),
@@ -265,9 +269,17 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
                 };
             }
 
-            let z = S::Scalar::from_raw(gen_128_bits(&mut rng));
-
-            let P_coeff = z * s;
+            // Only one signature in the check may have weight 1: two
+            // unit-weight signatures could carry errors that cancel.
+            let (P_coeff, VK_coeff) = if i == 0 {
+                unit_R = Some(R);
+                (s, c)
+            } else {
+                let z = S::Scalar::from_raw(gen_128_bits(&mut rng));
+                R_coeffs.push(z);
+                Rs.push(R);
+                (z * s, z * c)
+            };
             match item.inner {
                 Inner::SpendAuth { .. } => {
                     P_spendauth_coeff -= P_coeff;
@@ -277,10 +289,7 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
                 }
             };
 
-            R_coeffs.push(z);
-            Rs.push(R);
-
-            VK_coeffs.push(S::Scalar::ZERO + (z * c));
+            VK_coeffs.push(VK_coeff);
             VKs.push(VK);
         }
 
@@ -294,7 +303,8 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
         let basepoints = [S::basepoint(), B::basepoint()];
         let points = basepoints.iter().chain(VKs.iter()).chain(Rs.iter());
 
-        let check = S::Point::vartime_multiscalar_mul(scalars, points);
+        let check = S::Point::vartime_multiscalar_mul(scalars, points)
+            + unit_R.expect("a nonempty batch has a first signature");
 
         if check.is_small_order() {
             Ok(())
