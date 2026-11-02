@@ -10,17 +10,7 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [5.0.0-rc.3] - 2026-11-01
-
-### Changed
-
-- Sapling bundle parsing no longer decompresses value commitments;
-  `Transaction::read` is about twice as fast on Sapling-heavy transactions.
-  A transaction whose Sapling `cv` is not a valid, non-small-order point now
-  parses, and Sapling verification rejects it
-  ([#638](https://github.com/zakura-core/common/pull/638)).
-
-## [5.0.0-rc.1] - 2026-10-31
+## [5.0.0] - 2026-11-02
 
 ### Added
 
@@ -32,6 +22,9 @@ internal implementation details are not tracked here.
   serialization, hashing and the Equihash solution bytes are unchanged
   ([#654](https://github.com/zakura-core/common/pull/654)).
 
+- Added `TransactionData::<Authorized>::read`, which parses a transaction without computing its transaction ID
+  ([#665](https://github.com/zakura-core/common/pull/665)).
+
 ### Changed
 
 - Sped up transaction and block header parsing by reading Orchard-family
@@ -41,6 +34,11 @@ internal implementation details are not tracked here.
   enables `zakura-equihash`. Consumers that disable default features and use
   the re-export must enable `equihash`
   ([#654](https://github.com/zakura-core/common/pull/654)).
+- Sapling bundle parsing no longer decompresses value commitments;
+  `Transaction::read` is about twice as fast on Sapling-heavy transactions.
+  A transaction whose Sapling `cv` is not a valid, non-small-order point now
+  parses, and Sapling verification rejects it
+  ([#638](https://github.com/zakura-core/common/pull/638)).
 
 ## [4.0.0] - 2026-10-20
 
