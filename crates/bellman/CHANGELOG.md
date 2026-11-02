@@ -10,6 +10,25 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.4] - 2026-11-02
+
+### Changed
+
+- Sped up Groth16 batch verification when the batch contains one proof
+  ([#500](https://github.com/zakura-core/common/pull/500)).
+- Sped up Groth16 batch verification by about 30–58% (more for larger
+  batches) by giving one proof weight 1, using independent random 128-bit
+  weights for the others, and applying them with variable-time arithmetic.
+  A batch containing an invalid proof is accepted with probability at most
+  1 / (2^128 - 1), including in the multicore verifier
+  ([#667](https://github.com/zakura-core/common/pull/667)).
+
+### Fixed
+
+- Fixed a panic in Groth16 parameter generation without the `multicore`
+  feature for circuits with no auxiliary variables
+  ([#668](https://github.com/zakura-core/common/pull/668)).
+
 ## [5.0.0-rc.1] - 2026-10-31
 
 ### Changed
