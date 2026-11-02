@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use bellman::groth16;
 use bls12_381::Bls12;
 use group::GroupEncoding;
@@ -94,11 +95,15 @@ impl BatchValidator {
 
         let mut ctx = SaplingVerificationContextInner::new();
 
-        for spend in bundle.shielded_spends() {
-            // Deserialize the proof
-            let zkproof = match groth16::Proof::read(&spend.zkproof()[..]) {
-                Ok(p) => p,
-                Err(_) => return false,
+        // Proof parsing decompresses and subgroup-checks curve points, which dominates bundle
+        // preparation, so parse large bundles' proofs in parallel before the ordered checks.
+        let spend_proofs = read_proofs(bundle.shielded_spends().iter().map(|s| s.zkproof()));
+        let output_proofs = read_proofs(bundle.shielded_outputs().iter().map(|o| o.zkproof()));
+
+        for (spend, zkproof) in bundle.shielded_spends().iter().zip(spend_proofs) {
+            let zkproof = match zkproof {
+                Some(p) => p,
+                None => return false,
             };
 
             // Check the Spend consensus rules, and batch its proof and spend
@@ -126,17 +131,16 @@ impl BatchValidator {
             }
         }
 
-        for output in bundle.shielded_outputs() {
+        for (output, zkproof) in bundle.shielded_outputs().iter().zip(output_proofs) {
             // Deserialize the ephemeral key
             let epk = match jubjub::ExtendedPoint::from_bytes(&output.ephemeral_key().0).into() {
                 Some(p) => p,
                 None => return false,
             };
 
-            // Deserialize the proof
-            let zkproof = match groth16::Proof::read(&output.zkproof()[..]) {
-                Ok(p) => p,
-                Err(_) => return false,
+            let zkproof = match zkproof {
+                Some(p) => p,
+                None => return false,
             };
 
             // Check the Output consensus rules, and batch its proof.
@@ -261,6 +265,26 @@ impl BatchValidator {
 
         true
     }
+}
+
+/// The smallest number of proofs in a bundle that are parsed in parallel.
+#[cfg(feature = "multicore")]
+const MIN_PARALLEL_PROOF_READS: usize = 4;
+
+/// Parses Groth16 proofs, in parallel for large bundles, keeping their order.
+///
+/// Returns `None` in place of each proof that does not parse.
+fn read_proofs<'a>(
+    proofs: impl ExactSizeIterator<Item = &'a [u8; 192]>,
+) -> Vec<Option<groth16::Proof<Bls12>>> {
+    let read = |bytes: &[u8; 192]| groth16::Proof::read(&bytes[..]).ok();
+    #[cfg(feature = "multicore")]
+    if proofs.len() >= MIN_PARALLEL_PROOF_READS {
+        use rayon::prelude::*;
+        let proofs: Vec<_> = proofs.collect();
+        return proofs.into_par_iter().map(read).collect();
+    }
+    proofs.map(read).collect()
 }
 
 #[cfg(test)]
