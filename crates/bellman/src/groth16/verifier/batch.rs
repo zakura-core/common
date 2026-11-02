@@ -26,7 +26,10 @@ use rand_core::{CryptoRng, Rng};
 use rand::rngs::SysRng;
 
 #[cfg(feature = "multicore")]
-use rayon::{iter::ParallelIterator, prelude::ParallelSlice};
+use rayon::{
+    iter::{IndexedParallelIterator, ParallelIterator},
+    prelude::ParallelSlice,
+};
 
 use crate::{
     VerificationError,
@@ -304,8 +307,10 @@ where
     /// Verify two batches using different [`PreparedBatchVerifyingKey`] values
     /// in one Miller loop.
     ///
-    /// Independent nonzero randomizers are sampled for every proof in both
-    /// batches. This shares the Miller-loop squares and final exponentiation.
+    /// The first proof of `self` has weight 1; every other proof in both
+    /// batches gets an independent nonzero randomizer. Only one proof in the
+    /// combined pairing equation may have weight 1, so `other` gets none.
+    /// This shares the Miller-loop squares and final exponentiation.
     pub fn verify_joint_prepared<R: Rng + CryptoRng>(
         self,
         other: Self,
@@ -331,8 +336,8 @@ where
             return self.verify_prepared(rng, key);
         }
 
-        let first = self.randomize_terms(&mut rng, key);
-        let second = other.randomize_terms(&mut rng, other_key);
+        let first = self.randomize_terms(&mut rng, key, true);
+        let second = other.randomize_terms(&mut rng, other_key, false);
         let mut terms = first.with_key(key);
         terms.extend(second.with_key(other_key));
 
@@ -349,7 +354,7 @@ where
         rng: R,
         pvk: &PreparedBatchVerifyingKey<'_, E>,
     ) -> Result<(), VerificationError> {
-        let terms = self.randomize_terms(rng, pvk);
+        let terms = self.randomize_terms(rng, pvk, true);
         if E::multi_miller_loop(&terms.with_key(pvk)).final_exponentiation() == E::Gt::identity() {
             Ok(())
         } else {
@@ -357,11 +362,54 @@ where
         }
     }
 
+    /// Adds one proof to the batch accumulators with weight `z`, where `None`
+    /// means weight 1 and skips the scalar multiplications.
+    #[allow(non_snake_case)]
+    fn accumulate(
+        Item { proof, inputs }: &Item<E>,
+        z: Option<E::Fr>,
+        acc_Gammas: &mut [E::Fr],
+        acc_Delta: &mut E::G1,
+        acc_Y: &mut E::Fr,
+        ml_terms: &mut Vec<(E::G1Affine, E::G2Prepared)>,
+    ) {
+        let neg_b = (-proof.b).into();
+        match z {
+            None => {
+                ml_terms.push((proof.a, neg_b));
+                acc_Gammas[0] += E::Fr::ONE; // a_0 is implicitly set to 1
+                for (a_i, acc_Gamma_i) in
+                    Iterator::zip(inputs.iter(), acc_Gammas.iter_mut().skip(1))
+                {
+                    *acc_Gamma_i += a_i;
+                }
+                *acc_Delta += proof.c.to_curve();
+                *acc_Y += E::Fr::ONE;
+            }
+            Some(z) => {
+                ml_terms.push(((proof.a * z).into(), neg_b));
+                acc_Gammas[0] += &z; // a_0 is implicitly set to 1
+                for (a_i, acc_Gamma_i) in
+                    Iterator::zip(inputs.iter(), acc_Gammas.iter_mut().skip(1))
+                {
+                    *acc_Gamma_i += &(z * a_i);
+                }
+                *acc_Delta += proof.c * z;
+                *acc_Y += &z;
+            }
+        }
+    }
+
+    /// Builds the batch's pairing terms. When `unit_first` is set, the first
+    /// proof has weight 1 and every other proof gets an independent nonzero
+    /// random weight. At most one proof in a combined pairing equation may
+    /// have weight 1: two unit-weight proofs could carry errors that cancel.
     #[allow(non_snake_case)]
     fn randomize_terms<R: Rng + CryptoRng>(
         self,
         mut rng: R,
         pvk: &PreparedBatchVerifyingKey<'_, E>,
+        unit_first: bool,
     ) -> PreparedBatchTerms<E> {
         let vk = pvk.vk;
         let mut ml_terms = Vec::<(E::G1Affine, E::G2Prepared)>::with_capacity(self.items.len());
@@ -369,27 +417,30 @@ where
         let mut acc_Delta = E::G1::identity();
         let mut acc_Y = E::Fr::ZERO;
 
-        for Item { proof, inputs } in self.items.into_iter() {
-            // The spec is explicit that z != 0.  Field::random is defined to
-            // return a uniformly-random field element (which may be 0), so we
-            // loop until it's not, avoiding needing an assert or throwing an
-            // error through no fault of the batch items. This will likely never
-            // actually loop, but handles the edge case.
-            let z = loop {
-                let z = E::Fr::random(&mut rng);
-                if !z.is_zero_vartime() {
-                    break z;
-                }
+        for (i, item) in self.items.iter().enumerate() {
+            let z = if unit_first && i == 0 {
+                None
+            } else {
+                // The spec is explicit that z != 0.  Field::random is defined to
+                // return a uniformly-random field element (which may be 0), so we
+                // loop until it's not, avoiding needing an assert or throwing an
+                // error through no fault of the batch items. This will likely never
+                // actually loop, but handles the edge case.
+                Some(loop {
+                    let z = E::Fr::random(&mut rng);
+                    if !z.is_zero_vartime() {
+                        break z;
+                    }
+                })
             };
-
-            ml_terms.push(((proof.a * z).into(), (-proof.b).into()));
-
-            acc_Gammas[0] += &z; // a_0 is implicitly set to 1
-            for (a_i, acc_Gamma_i) in Iterator::zip(inputs.iter(), acc_Gammas.iter_mut().skip(1)) {
-                *acc_Gamma_i += &(z * a_i);
-            }
-            acc_Delta += proof.c * z;
-            acc_Y += &z;
+            Self::accumulate(
+                item,
+                z,
+                &mut acc_Gammas,
+                &mut acc_Delta,
+                &mut acc_Y,
+                &mut ml_terms,
+            );
         }
 
         let delta = acc_Delta.to_affine();
@@ -502,12 +553,19 @@ where
         let threads = rayon::current_num_threads();
         let chunk_size = self.items.len().div_ceil(threads).clamp(1, MAX_CHUNK_SIZE);
 
+        // Each chunk weights its proofs by successive powers of one nonzero
+        // random z. Only chunk 0 starts at z^0 = 1 (1, z, ..., z^(k-1)); every
+        // other chunk starts at z (z, ..., z^k), so exactly one proof in the
+        // final pairing equation has weight 1. Giving each chunk a unit
+        // weight would let errors in two chunks' first proofs cancel.
         let acc = self
             .items
             .par_chunks(chunk_size)
-            .map(|items| {
+            .enumerate()
+            .map(|(chunk_index, items)| {
                 let mut acc = Accumulator::<E>::new(ic_len);
-                let mut ml_terms: Vec<(E::G1Affine, E::G2Prepared)> = vec![];
+                let mut ml_terms: Vec<(E::G1Affine, E::G2Prepared)> =
+                    Vec::with_capacity(items.len());
                 let z = loop {
                     let z = E::Fr::try_random(&mut SysRng)
                         .expect("system randomness must be available");
@@ -515,19 +573,17 @@ where
                         break z;
                     }
                 };
-                let mut cur_z = z;
-                for Item { proof, inputs } in items {
-                    acc.gammas[0] += &cur_z;
-                    for (a_i, acc_gamma_i) in
-                        Iterator::zip(inputs.iter(), acc.gammas.iter_mut().skip(1))
-                    {
-                        *acc_gamma_i += &(cur_z * a_i);
-                    }
-                    acc.delta += proof.c * cur_z;
-                    acc.y += &cur_z;
-                    ml_terms.push(((proof.a * cur_z).into(), (-proof.b).into()));
-
-                    cur_z *= z;
+                let mut cur_z = (chunk_index != 0).then_some(z);
+                for item in items {
+                    Self::accumulate(
+                        item,
+                        cur_z,
+                        &mut acc.gammas,
+                        &mut acc.delta,
+                        &mut acc.y,
+                        &mut ml_terms,
+                    );
+                    cur_z = Some(cur_z.map_or(z, |cur_z| cur_z * z));
                 }
                 let ml_terms = ml_terms.iter().map(|(a, b)| (a, b)).collect::<Vec<_>>();
                 acc.ml_result = Some(E::multi_miller_loop(&ml_terms[..]));

@@ -208,3 +208,33 @@ fn orchard_single_signature_batches_verify() {
     ));
     assert_eq!(invalid.verify(&mut rng), Err(Error::InvalidSignature));
 }
+
+#[test]
+fn cancelling_signature_errors_are_rejected() {
+    // Shifting one signature's s by +1 and another's by -1 gives check errors
+    // of -P and +P. They cancel if both signatures have weight 1, so only one
+    // signature in the batch may have it.
+    let mut rng = thread_rng();
+    let shifted = |shift: jubjub::Scalar, rng: &mut _| {
+        let sk = SigningKey::<sapling::SpendAuth>::new(&mut *rng);
+        let vk = VerificationKey::from(&sk);
+        let msg = b"BatchVerifyTest";
+        let mut bytes: [u8; 64] = sk.sign(&mut *rng, msg).into();
+        let s = jubjub::Scalar::from_bytes(bytes[32..].try_into().unwrap()).unwrap();
+        bytes[32..].copy_from_slice(&(s + shift).to_bytes());
+        batch::Item::<sapling::SpendAuth, sapling::Binding>::from_spendauth(
+            vk.into(),
+            bytes.into(),
+            msg,
+        )
+    };
+    for order in [[1u64, 0], [0, 1]] {
+        let mut batch = batch::Verifier::new();
+        for sign in order {
+            let one = jubjub::Scalar::one();
+            let shift = if sign == 1 { one } else { -one };
+            batch.queue(shifted(shift, &mut rng));
+        }
+        assert_eq!(batch.verify(&mut rng), Err(Error::InvalidSignature));
+    }
+}
