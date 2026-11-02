@@ -36,6 +36,11 @@ internal implementation details are not tracked here.
   or Orchard-only payouts cheaper
   ([#659](https://github.com/zakura-core/common/pull/659)).
 
+- With the `multicore` feature, `BatchValidator::check_bundle` parses a
+  bundle's Groth16 proofs in parallel when it has 4 or more, which cut bundle
+  preparation for a 374-spend Mainnet block by about a third
+  ([#670](https://github.com/zakura-core/common/pull/670)).
+
 ### Removed
 
 - Removed `ValueCommitment::as_inner`; use `try_point`. `CommitmentSum`'s
