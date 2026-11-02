@@ -101,10 +101,11 @@ mod zero;
 mod private {
     use crate::arithmetic::CurveExt;
 
-    /// Proof-of-crate argument for [`Sealed::affine_unchecked`]: unnameable
-    /// outside this crate, with a `pub(super)` field, so downstream code
-    /// cannot construct one — not even through a `C: GlvParams` bound, which
-    /// does expose supertrait items to generic code.
+    /// Proof-of-crate argument for representation-sensitive [`Sealed`]
+    /// operations: unnameable outside this crate, with a `pub(super)` field,
+    /// so downstream code cannot construct one — not even through a
+    /// `C: GlvParams` bound, which does expose supertrait items to generic
+    /// code.
     #[derive(Debug)]
     pub struct CrateToken(pub(super) ());
 
@@ -138,6 +139,15 @@ mod private {
             z: Self::Base,
             token: CrateToken,
         ) -> Self;
+
+        /// Returns the four little-endian limbs of the reduced integer
+        /// $Rk \bmod q$, where `k` is `scalar` and $R$ is this scalar field's
+        /// Montgomery factor, or `None` if the internal representation is
+        /// not reduced. The GLV split is only guaranteed exact for inputs
+        /// below $q$, so the full-width identity test declines rather than
+        /// relying on every field operation keeping its output canonical.
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, token: CrateToken)
+        -> Option<[u64; 4]>;
     }
 
     impl Sealed for crate::pallas::Point {
@@ -158,6 +168,10 @@ mod private {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
         }
+
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> Option<[u64; 4]> {
+            scalar.is_canonical().then_some(scalar.0)
+        }
     }
 
     impl Sealed for crate::vesta::Point {
@@ -177,6 +191,10 @@ mod private {
         ) -> Self {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
+        }
+
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> Option<[u64; 4]> {
+            scalar.is_canonical().then_some(scalar.0)
         }
     }
 }
@@ -374,10 +392,11 @@ fn scalar_limbs<F: PrimeField>(k: &F) -> [u64; 4] {
     limbs
 }
 
-/// GLV split: `k = k1 + k2 * lambda (mod n)` with `|k1|`, `|k2|` strictly
-/// below `2^127`, each half returned as `(is_negative, magnitude)`.
-fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
-    let kl = scalar_limbs(k);
+/// GLV-splits the scalar integer encoded by `kl`: `k = k1 + k2 * lambda
+/// (mod n)` with `|k1|`, `|k2|` strictly below `2^127`, each half returned as
+/// `(is_negative, magnitude)`.
+#[inline(always)]
+fn decompose_limbs<C: GlvParams>(kl: [u64; 4]) -> ((bool, u128), (bool, u128)) {
     let c1 = round_mul_shift(&C::G1, &kl);
     let c2 = round_mul_shift(&C::G2, &kl);
     // k1 = k - c1*V1A - c2*V2A   (two's complement over 256 bits)
@@ -385,6 +404,15 @@ fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
     // k2 = c1*V1B_NEG - c2*V2B   (v1.b = -V1B_NEG, v2.b = +V2B)
     let k2 = sub256(mul_u128(c1, C::V1B_NEG), mul_u128(c2, C::V2B));
     (signed_halves(k1), signed_halves(k2))
+}
+
+fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
+    decompose_limbs::<C>(scalar_limbs(k))
+}
+
+fn decompose_montgomery<C: GlvParams>(k: &C::ScalarExt) -> Option<((bool, u128), (bool, u128))> {
+    <C as private::Sealed>::scalar_montgomery_limbs(k, private::CrateToken(()))
+        .map(decompose_limbs::<C>)
 }
 
 /// The eight Eisenstein digit-orbit representatives $\Delta$, as coefficient
@@ -2265,19 +2293,37 @@ pub(crate) fn try_multiexp<C: GlvParams>(
         return Some(result);
     }
 
+    try_large_multiexp::<C, _>(scalars, bases, num_threads, |scalar| {
+        Some(decompose::<C>(scalar))
+    })
+}
+
+fn try_large_multiexp<C, D>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+    num_threads: usize,
+    decompose_scalar: D,
+) -> Option<C>
+where
+    C: GlvParams,
+    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))>,
+{
+    if scalars.len() < MIN_GLV_MULTIEXP_TERMS {
+        return None;
+    }
+
+    #[cfg(not(feature = "orbits"))]
+    let window_bits = glv_multiexp_window_bits::<C>(scalars.len(), num_threads)?;
+
+    // Decompose once for the selected backend. With `orbits`, the planner
+    // also prices these exact component magnitudes.
+    let components = scalars
+        .iter()
+        .map(|scalar| decompose_scalar(scalar).and_then(checked_signed_magnitudes))
+        .collect::<Option<Vec<_>>>()?;
+
     #[cfg(feature = "orbits")]
     {
-        if scalars.len() < MIN_GLV_MULTIEXP_TERMS {
-            return None;
-        }
-
-        // Decompose before planning: both backends consume the components,
-        // and the planner prices them by their actual magnitudes.
-        let components = scalars
-            .iter()
-            .map(decompose::<C>)
-            .map(checked_signed_magnitudes)
-            .collect::<Option<Vec<_>>>()?;
         let profile = MagnitudeProfile::new(&components);
         let plan = plan_multiexp::<C>(&profile, num_threads)?;
         match plan {
@@ -2293,15 +2339,28 @@ pub(crate) fn try_multiexp<C: GlvParams>(
 
     #[cfg(not(feature = "orbits"))]
     {
-        let window_bits = glv_multiexp_window_bits::<C>(scalars.len(), num_threads)?;
-        let components = scalars
-            .iter()
-            .map(decompose::<C>)
-            .map(checked_signed_magnitudes)
-            .collect::<Option<Vec<_>>>()?;
         let bases = multiexp_bases::<C>(bases);
         multiexp(&components, &bases, window_bits, num_threads)
     }
+}
+
+/// Attempts an exact identity test for a full-width Pasta MSM by interpreting
+/// every scalar's internal Montgomery residue as its integer value. This
+/// scales the ordinary MSM result by the Montgomery factor $R$. Because $R$
+/// is invertible modulo the prime group order, this preserves whether the
+/// result is the identity while avoiding canonical scalar conversion.
+pub(crate) fn try_multiexp_full_width_is_identity<C: GlvParams>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+) -> Option<bool> {
+    assert_eq!(scalars.len(), bases.len());
+    try_large_multiexp::<C, _>(
+        scalars,
+        bases,
+        current_num_threads(),
+        decompose_montgomery::<C>,
+    )
+    .map(|sum| bool::from(sum.is_identity()))
 }
 
 /// The GLV digit window for one base point: the eight Eisenstein orbit
@@ -4826,6 +4885,99 @@ mod tests {
             "GLV must be selected for at least one verifier-sized MSM with \
              {num_threads} threads"
         );
+    }
+
+    fn full_width_identity_multiexp_at_boundary<C: GlvParams>() {
+        for terms in [
+            MIN_GLV_MULTIEXP_TERMS - 1,
+            MIN_GLV_MULTIEXP_TERMS,
+            MIN_GLV_MULTIEXP_TERMS + 1,
+        ] {
+            let (mut scalars, mut bases, expected) = verifier_multiexp_inputs::<C>(terms - 1);
+            assert!(!bool::from(expected.is_identity()));
+
+            // Complete the known sum to the identity while preserving the
+            // requested term count.
+            scalars.push(-C::ScalarExt::ONE);
+            bases.push(expected.to_affine());
+
+            let evaluate = |scalars: &[C::ScalarExt]| {
+                try_large_multiexp::<C, _>(scalars, &bases, 1, decompose_montgomery::<C>)
+                    .map(|sum| bool::from(sum.is_identity()))
+            };
+
+            if terms < MIN_GLV_MULTIEXP_TERMS {
+                assert_eq!(evaluate(&scalars), None);
+                continue;
+            }
+
+            assert_eq!(evaluate(&scalars), Some(true));
+
+            // Removing the cancelling term leaves the known nonidentity sum.
+            scalars[terms - 1] = C::ScalarExt::ZERO;
+            assert_eq!(evaluate(&scalars), Some(false));
+        }
+    }
+
+    #[test]
+    fn full_width_identity_multiexp_at_boundary_pallas() {
+        full_width_identity_multiexp_at_boundary::<pallas::Point>();
+    }
+
+    #[test]
+    fn full_width_identity_multiexp_at_boundary_vesta() {
+        full_width_identity_multiexp_at_boundary::<vesta::Point>();
+    }
+
+    /// A scalar whose internal limbs are congruent but not reduced declines
+    /// the Montgomery-limb path, so the caller falls back to the canonical
+    /// MSM rather than trusting a GLV split outside its input range.
+    fn full_width_identity_declines_noncanonical_scalar<C: GlvParams>(
+        from_limbs: fn([u64; 4]) -> C::ScalarExt,
+    ) {
+        let modulus = <C::ScalarExt as PrimeField>::MODULUS;
+        let modulus: [u64; 4] = core::array::from_fn(|i| {
+            let end = modulus.len() - 16 * i;
+            u64::from_str_radix(&modulus[end - 16..end], 16).unwrap()
+        });
+        let (mut scalars, mut bases, expected) =
+            verifier_multiexp_inputs::<C>(MIN_GLV_MULTIEXP_TERMS - 1);
+        scalars.push(-C::ScalarExt::ONE);
+        bases.push(expected.to_affine());
+        assert_eq!(
+            try_multiexp_full_width_is_identity::<C>(&scalars, &bases),
+            Some(true)
+        );
+
+        // Re-encode the first scalar as its reduced limbs plus the modulus:
+        // the same field element, but no longer below the modulus.
+        let limbs =
+            <C as private::Sealed>::scalar_montgomery_limbs(&scalars[0], private::CrateToken(()))
+                .unwrap();
+        let (l0, carry) = adc(limbs[0], modulus[0], 0);
+        let (l1, carry) = adc(limbs[1], modulus[1], carry);
+        let (l2, carry) = adc(limbs[2], modulus[2], carry);
+        let (l3, carry) = adc(limbs[3], modulus[3], carry);
+        assert_eq!(carry, 0);
+        scalars[0] = from_limbs([l0, l1, l2, l3]);
+
+        assert!(decompose_montgomery::<C>(&scalars[0]).is_none());
+        assert_eq!(
+            try_multiexp_full_width_is_identity::<C>(&scalars, &bases),
+            None
+        );
+        // The modulus itself encodes zero but is likewise rejected.
+        assert!(decompose_montgomery::<C>(&from_limbs(modulus)).is_none());
+    }
+
+    #[test]
+    fn full_width_identity_declines_noncanonical_scalar_pallas() {
+        full_width_identity_declines_noncanonical_scalar::<pallas::Point>(crate::Fq);
+    }
+
+    #[test]
+    fn full_width_identity_declines_noncanonical_scalar_vesta() {
+        full_width_identity_declines_noncanonical_scalar::<vesta::Point>(crate::Fp);
     }
 
     fn duplicate_base_multiexp_matches_expected<C: GlvParams>() {

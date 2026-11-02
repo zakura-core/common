@@ -336,6 +336,20 @@ impl Default for Fq {
 }
 
 impl Fq {
+    /// Whether this element holds a reduced residue (limbs below the
+    /// modulus). Every constructor and arithmetic result maintains this;
+    /// callers that consume the raw limbs check it rather than assume it.
+    #[cfg(any(test, feature = "glv"))]
+    #[inline]
+    pub(crate) fn is_canonical(&self) -> bool {
+        for i in (0..4).rev() {
+            if self.0[i] != MODULUS.0[i] {
+                return self.0[i] < MODULUS.0[i];
+            }
+        }
+        false
+    }
+
     /// Returns zero, the additive identity.
     #[inline]
     pub const fn zero() -> Fq {
@@ -1850,24 +1864,13 @@ fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
     }
 }
 
-/// Whether `x` holds a reduced residue (limbs below the modulus).
-#[cfg(test)]
-fn is_canonical(x: &Fq) -> bool {
-    for i in (0..4).rev() {
-        if x.0[i] != MODULUS.0[i] {
-            return x.0[i] < MODULUS.0[i];
-        }
-    }
-    false
-}
-
 #[test]
 fn constants_are_canonical() {
     // Every named constant must be a reduced residue: the assembly
     // multiplication requires a canonical rhs, and constants are the one
     // class of values that bypass the reducing constructors.
     assert!(
-        !is_canonical(&MODULUS),
+        !MODULUS.is_canonical(),
         "the modulus itself is not canonical"
     );
     let constants: [(&str, Fq); 11] = [
@@ -1891,7 +1894,7 @@ fn constants_are_canonical() {
     ];
     for (name, value) in constants {
         assert!(
-            is_canonical(&value),
+            value.is_canonical(),
             "{name} is not canonical: {:x?}",
             value.0
         );
@@ -1938,9 +1941,9 @@ fn asm_arithmetic_canonical_sweep_matches_portable() {
         assert_eq!(add, Fq::add(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
         assert_eq!(sub, Fq::sub(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
         assert_eq!(mul, Fq::mul(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
-        assert!(is_canonical(&add));
-        assert!(is_canonical(&sub));
-        assert!(is_canonical(&mul));
+        assert!(add.is_canonical());
+        assert!(sub.is_canonical());
+        assert!(mul.is_canonical());
         assert_eq!(a.square_runtime(), a.square(), "value {:x?}", a.0);
     }
 }
@@ -1986,7 +1989,7 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
         if rng.next_u32() & 1 == 1 {
             rhs.0[1] = rhs.0[1].wrapping_sub(rng.next_u64() >> 60);
         }
-        if !is_canonical(&rhs) || rhs.0.iter().any(|&l| l > u64::MAX - 3) {
+        if !rhs.is_canonical() || rhs.0.iter().any(|&l| l > u64::MAX - 3) {
             continue;
         }
         n += 1;
@@ -1998,7 +2001,7 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
             lhs.0,
             rhs.0
         );
-        assert!(is_canonical(&asm));
+        assert!(asm.is_canonical());
     }
 }
 
