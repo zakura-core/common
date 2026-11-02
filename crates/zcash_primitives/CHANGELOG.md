@@ -22,6 +22,9 @@ internal implementation details are not tracked here.
   serialization, hashing and the Equihash solution bytes are unchanged
   ([#654](https://github.com/zakura-core/common/pull/654)).
 
+- Added `TransactionData::<Authorized>::read`, which parses a transaction without computing its transaction ID
+  ([#665](https://github.com/zakura-core/common/pull/665)).
+
 ### Changed
 
 - Sped up transaction and block header parsing by reading Orchard-family
