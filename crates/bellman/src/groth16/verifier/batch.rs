@@ -737,10 +737,10 @@ impl<E: MultiMillerLoop> Accumulator<E> {
 
 #[cfg(test)]
 mod tests {
-    use super::{weighted_sum_vartime, wnaf_digits};
+    use super::{WEIGHT_WINDOW, random_weight, weighted_sum_vartime, wnaf_digits};
     use bls12_381::{G1Projective, Scalar};
     use ff::{Field, PrimeField};
-    use group::Group;
+    use group::{Group, WnafBase, WnafScalar};
     use rand::{RngExt, SeedableRng};
     use rand_xorshift::XorShiftRng;
 
@@ -796,5 +796,84 @@ mod tests {
                 "{n} points"
             );
         }
+    }
+
+    /// Weights around every bit position: runs of ones exercise the wNAF
+    /// carry at each window boundary, and single bits cover every length.
+    fn carry_sweep() -> Vec<u128> {
+        let mut weights = vec![
+            3,
+            17,
+            31,
+            32,
+            33,
+            u64::MAX as u128,
+            1 << 64,
+            (1 << 64) + 1,
+            (1 << 127) - 1,
+            u128::MAX - 1,
+            u128::MAX - 16,
+            0xaaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa,
+            0xf0f0_f0f0_f0f0_f0f0_f0f0_f0f0_f0f0_f0f0,
+        ];
+        for shift in 0..128 {
+            weights.extend([u128::MAX >> shift, u128::MAX << shift, 1 << shift]);
+        }
+        weights.extend(EDGE_WEIGHTS);
+        weights
+    }
+
+    #[test]
+    fn weighted_multiplication_handles_every_carry_position() {
+        let mut rng = XorShiftRng::from_seed([7; 16]);
+        let weights = carry_sweep();
+        let point = G1Projective::random(&mut rng);
+        for &weight in &weights {
+            let digits = wnaf_digits(weight);
+            assert!(digits.len() <= 129, "{weight:#x}");
+            for (i, &d) in digits.iter().enumerate().filter(|&(_, &d)| d != 0) {
+                // Nonzero digits are at least a window apart.
+                assert!(
+                    digits[i + 1..]
+                        .iter()
+                        .take(super::SUM_WINDOW as usize - 1)
+                        .all(|&next| next == 0),
+                    "{weight:#x}: digit {d} at {i} has a close neighbor"
+                );
+            }
+
+            let expected = point * Scalar::from_u128(weight);
+            assert_eq!(
+                weighted_sum_vartime(&[point], &[weight]),
+                expected,
+                "sum {weight:#x}"
+            );
+            // The A terms use the group crate's wNAF with the weight window.
+            let a = &WnafBase::<G1Projective, WEIGHT_WINDOW>::new(point)
+                * &WnafScalar::<Scalar, WEIGHT_WINDOW>::new(&Scalar::from_u128(weight));
+            assert_eq!(a, expected, "wNAF {weight:#x}");
+        }
+
+        let points = (0..weights.len())
+            .map(|_| G1Projective::random(&mut rng))
+            .collect::<Vec<_>>();
+        let expected = points
+            .iter()
+            .zip(&weights)
+            .map(|(p, &w)| p * Scalar::from_u128(w))
+            .sum::<G1Projective>();
+        assert_eq!(weighted_sum_vartime(&points, &weights), expected);
+        assert_eq!(
+            weighted_sum_vartime(&[G1Projective::identity()], &[u128::MAX]),
+            G1Projective::identity()
+        );
+    }
+
+    #[test]
+    fn random_weight_redraws_zero() {
+        let mut draws = [0, 0, 7, 9].into_iter();
+        assert_eq!(random_weight(|| draws.next().unwrap()), 7);
+        assert_eq!(draws.next(), Some(9), "stops at the first nonzero draw");
+        assert_eq!(random_weight(|| u128::MAX), u128::MAX);
     }
 }
