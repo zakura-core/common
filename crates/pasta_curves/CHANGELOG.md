@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0-rc.4] - 2026-11-02
+
+### Changed
+
+- Improved deferred inner-product performance on supported AArch64 targets
+  with the `aarch64-asm` feature enabled
+  ([#522](https://github.com/zakura-core/common/pull/522)).
+
 ## [5.0.0-rc.3] - 2026-11-01
 
 ### Changed
