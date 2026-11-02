@@ -18,7 +18,7 @@
 use std::{borrow::Cow, ops::AddAssign};
 
 use ff::Field;
-use group::{Curve, Group};
+use group::{Curve, CurveAffine, Group};
 use pairing::{MillerLoopResult, MultiMillerLoop};
 use rand_core::{CryptoRng, Rng};
 
@@ -241,7 +241,11 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
-        self.verify_prepared_unchecked(rng, &PreparedBatchVerifyingKey::for_one_batch(vk))
+        let pvk = PreparedBatchVerifyingKey::for_one_batch(vk);
+        if self.items.len() == 1 {
+            return Self::verify_one_prepared(&self.items[0], &pvk);
+        }
+        self.verify_prepared_unchecked(rng, &pvk)
     }
 
     /// Verify a batch using fixed G2 terms prepared for its verifying key.
@@ -261,7 +265,40 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
+        if self.items.len() == 1 {
+            return Self::verify_one_prepared(&self.items[0], pvk);
+        }
         self.verify_prepared_unchecked(rng, pvk)
+    }
+
+    // A single proof cannot cancel another invalid proof, so the batch
+    // randomizer is unnecessary. This also avoids multiplying A, C, and
+    // alpha by that randomizer.
+    fn verify_one_prepared(
+        item: &Item<E>,
+        pvk: &PreparedBatchVerifyingKey<'_, E>,
+    ) -> Result<(), VerificationError> {
+        let vk = pvk.vk;
+        let mut gamma = vk.ic[0].to_curve();
+        for (input, base) in item.inputs.iter().zip(vk.ic.iter().skip(1)) {
+            gamma += *base * input;
+        }
+        let gamma = E::g1_to_affine_vartime(&gamma);
+        let neg_b = (-item.proof.b).into();
+
+        if E::multi_miller_loop(&[
+            (&item.proof.a, &neg_b),
+            (&item.proof.c, &pvk.g2.delta_g2),
+            (&gamma, &pvk.g2.gamma_g2),
+            (&vk.alpha_g1, &pvk.g2.beta_g2),
+        ])
+        .final_exponentiation()
+            == E::Gt::identity()
+        {
+            Ok(())
+        } else {
+            Err(VerificationError::InvalidProof)
+        }
     }
 
     /// Verify two batches using different [`PreparedBatchVerifyingKey`] values
@@ -401,7 +438,11 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
-        self.verify_multicore_prepared_unchecked(&PreparedBatchVerifyingKey::for_one_batch(vk))
+        let pvk = PreparedBatchVerifyingKey::for_one_batch(vk);
+        if self.items.len() == 1 {
+            return Self::verify_one_prepared(&self.items[0], &pvk);
+        }
+        self.verify_multicore_prepared_unchecked(&pvk)
     }
 
     /// Verify a batch with prepared fixed G2 terms using the global Rayon
@@ -421,6 +462,9 @@ where
         }
         if self.items.is_empty() {
             return Ok(());
+        }
+        if self.items.len() == 1 {
+            return Self::verify_one_prepared(&self.items[0], pvk);
         }
         self.verify_multicore_prepared_unchecked(pvk)
     }
