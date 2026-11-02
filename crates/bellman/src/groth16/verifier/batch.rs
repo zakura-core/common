@@ -17,13 +17,15 @@
 
 use std::{borrow::Cow, ops::AddAssign};
 
-use ff::Field;
-use group::{Curve, CurveAffine, Group};
+use ff::{Field, PrimeField};
+use group::{Curve, CurveAffine, Group, WnafBase, WnafScalar};
 use pairing::{MillerLoopResult, MultiMillerLoop};
 use rand_core::{CryptoRng, Rng};
 
 #[cfg(feature = "multicore")]
 use rand::rngs::SysRng;
+#[cfg(feature = "multicore")]
+use rand_core::TryRng;
 
 #[cfg(feature = "multicore")]
 use rayon::{
@@ -33,7 +35,7 @@ use rayon::{
 
 use crate::{
     VerificationError,
-    groth16::{PreparedVerifyingKey, Proof, VerifyingKey},
+    groth16::{PUBLIC_INPUT_WINDOW, PreparedVerifyingKey, Proof, VerifyingKey},
 };
 
 /// A batch verification item.
@@ -284,7 +286,7 @@ where
         let vk = pvk.vk;
         let mut gamma = vk.ic[0].to_curve();
         for (input, base) in item.inputs.iter().zip(vk.ic.iter().skip(1)) {
-            gamma += *base * input;
+            gamma += mul_vartime::<E>(base, input);
         }
         let gamma = E::g1_to_affine_vartime(&gamma);
         let neg_b = (-item.proof.b).into();
@@ -308,7 +310,7 @@ where
     /// in one Miller loop.
     ///
     /// The first proof of `self` has weight 1; every other proof in both
-    /// batches gets an independent nonzero randomizer. Only one proof in the
+    /// batches gets an independent random 128-bit weight. Only one proof in the
     /// combined pairing equation may have weight 1, so `other` gets none.
     /// This shares the Miller-loop squares and final exponentiation.
     pub fn verify_joint_prepared<R: Rng + CryptoRng>(
@@ -348,7 +350,6 @@ where
         }
     }
 
-    #[allow(non_snake_case)]
     fn verify_prepared_unchecked<R: Rng + CryptoRng>(
         self,
         rng: R,
@@ -364,113 +365,62 @@ where
 
     /// Adds one proof to the batch accumulators with weight `z`, where `None`
     /// means weight 1 and skips the scalar multiplications.
-    #[allow(non_snake_case)]
-    fn accumulate(
-        Item { proof, inputs }: &Item<E>,
-        z: Option<E::Fr>,
-        acc_Gammas: &mut [E::Fr],
-        acc_Delta: &mut E::G1,
-        acc_Y: &mut E::Fr,
-        ml_terms: &mut Vec<(E::G1Affine, E::G2Prepared)>,
-    ) {
-        let neg_b = (-proof.b).into();
+    ///
+    /// Proofs, public inputs, and batch weights are all public, so the
+    /// weighted points use variable-time wNAF multiplication. `z·A` is pushed
+    /// in projective form; [`Accumulator::finish`] normalizes every point at once.
+    fn accumulate(Item { proof, inputs }: &Item<E>, z: Option<E::Fr>, acc: &mut Accumulator<E>) {
+        acc.neg_bs.push((-proof.b).into());
         match z {
             None => {
-                ml_terms.push((proof.a, neg_b));
-                acc_Gammas[0] += E::Fr::ONE; // a_0 is implicitly set to 1
-                for (a_i, acc_Gamma_i) in
-                    Iterator::zip(inputs.iter(), acc_Gammas.iter_mut().skip(1))
+                acc.a_terms.push(proof.a.to_curve());
+                acc.gammas[0] += E::Fr::ONE; // a_0 is implicitly set to 1
+                for (a_i, acc_gamma_i) in
+                    Iterator::zip(inputs.iter(), acc.gammas.iter_mut().skip(1))
                 {
-                    *acc_Gamma_i += a_i;
+                    *acc_gamma_i += a_i;
                 }
-                *acc_Delta += proof.c.to_curve();
-                *acc_Y += E::Fr::ONE;
+                acc.delta += proof.c.to_curve();
+                acc.y += E::Fr::ONE;
             }
             Some(z) => {
-                ml_terms.push(((proof.a * z).into(), neg_b));
-                acc_Gammas[0] += &z; // a_0 is implicitly set to 1
-                for (a_i, acc_Gamma_i) in
-                    Iterator::zip(inputs.iter(), acc_Gammas.iter_mut().skip(1))
+                let z_wnaf = WnafScalar::<E::Fr, WEIGHT_WINDOW>::new(&z);
+                acc.a_terms
+                    .push(&WnafBase::<E::G1, WEIGHT_WINDOW>::new(proof.a.to_curve()) * &z_wnaf);
+                acc.gammas[0] += &z; // a_0 is implicitly set to 1
+                for (a_i, acc_gamma_i) in
+                    Iterator::zip(inputs.iter(), acc.gammas.iter_mut().skip(1))
                 {
-                    *acc_Gamma_i += &(z * a_i);
+                    *acc_gamma_i += &(z * a_i);
                 }
-                *acc_Delta += proof.c * z;
-                *acc_Y += &z;
+                acc.delta += &WnafBase::<E::G1, WEIGHT_WINDOW>::new(proof.c.to_curve()) * &z_wnaf;
+                acc.y += &z;
             }
         }
     }
 
     /// Builds the batch's pairing terms. When `unit_first` is set, the first
-    /// proof has weight 1 and every other proof gets an independent nonzero
-    /// random weight. At most one proof in a combined pairing equation may
+    /// proof has weight 1 and every other proof gets an independent random
+    /// 128-bit weight (see [`random_weight`]). At most one proof in a combined pairing equation may
     /// have weight 1: two unit-weight proofs could carry errors that cancel.
-    #[allow(non_snake_case)]
     fn randomize_terms<R: Rng + CryptoRng>(
         self,
         mut rng: R,
         pvk: &PreparedBatchVerifyingKey<'_, E>,
         unit_first: bool,
     ) -> PreparedBatchTerms<E> {
-        let vk = pvk.vk;
-        let mut ml_terms = Vec::<(E::G1Affine, E::G2Prepared)>::with_capacity(self.items.len());
-        let mut acc_Gammas = vec![E::Fr::ZERO; vk.ic.len()];
-        let mut acc_Delta = E::G1::identity();
-        let mut acc_Y = E::Fr::ZERO;
-
+        let mut acc = Accumulator::new(pvk.vk.ic.len(), self.items.len());
         for (i, item) in self.items.iter().enumerate() {
             let z = if unit_first && i == 0 {
                 None
             } else {
-                // The spec is explicit that z != 0.  Field::random is defined to
-                // return a uniformly-random field element (which may be 0), so we
-                // loop until it's not, avoiding needing an assert or throwing an
-                // error through no fault of the batch items. This will likely never
-                // actually loop, but handles the edge case.
-                Some(loop {
-                    let z = E::Fr::random(&mut rng);
-                    if !z.is_zero_vartime() {
-                        break z;
-                    }
-                })
+                Some(random_weight(|| {
+                    u128::from(rng.next_u64()) | (u128::from(rng.next_u64()) << 64)
+                }))
             };
-            Self::accumulate(
-                item,
-                z,
-                &mut acc_Gammas,
-                &mut acc_Delta,
-                &mut acc_Y,
-                &mut ml_terms,
-            );
+            Self::accumulate(item, z, &mut acc);
         }
-
-        let delta = acc_Delta.to_affine();
-
-        let Psi = vk
-            .ic
-            .iter()
-            .zip(acc_Gammas.iter())
-            .map(|(&Psi_i, acc_Gamma_i)| Psi_i * acc_Gamma_i)
-            .sum();
-
-        let gamma = E::G1Affine::from(Psi);
-
-        // Covers the [acc_Y]⋅e(alpha_g1, beta_g2) component
-        //
-        // The multiplication by acc_Y is expensive -- it involves
-        // exponentiating by acc_Y because the result of the pairing is an
-        // element of a multiplicative subgroup of a large extension field.
-        // Instead, we add
-        //     ([acc_Y]⋅alpha_g1, beta_g2)
-        // to our Miller loop terms because
-        //     [acc_Y]⋅e(alpha_g1, beta_g2) = e([acc_Y]⋅alpha_g1, beta_g2)
-        let beta = E::G1Affine::from(vk.alpha_g1 * acc_Y);
-
-        PreparedBatchTerms {
-            variable: ml_terms,
-            delta,
-            gamma,
-            beta,
-        }
+        acc.finish(pvk.vk)
     }
 
     /// Perform batch verification using the global Rayon thread pool.
@@ -521,30 +471,11 @@ where
     }
 
     #[cfg(feature = "multicore")]
-    #[allow(non_snake_case)]
     fn verify_multicore_prepared_unchecked(
         self,
         pvk: &PreparedBatchVerifyingKey<'_, E>,
     ) -> Result<(), VerificationError> {
         let vk = pvk.vk;
-        struct Accumulator<E: MultiMillerLoop> {
-            gammas: Vec<E::Fr>,
-            delta: E::G1,
-            y: E::Fr,
-            ml_result: Option<E::Result>,
-        }
-
-        impl<E: MultiMillerLoop> Accumulator<E> {
-            fn new(ic_len: usize) -> Self {
-                Accumulator {
-                    gammas: vec![E::Fr::ZERO; ic_len],
-                    delta: E::G1::identity(),
-                    y: E::Fr::ZERO,
-                    ml_result: None,
-                }
-            }
-        }
-
         let ic_len = vk.ic.len();
 
         // Give each Rayon thread a Miller-loop work item while retaining
@@ -553,82 +484,164 @@ where
         let threads = rayon::current_num_threads();
         let chunk_size = self.items.len().div_ceil(threads).clamp(1, MAX_CHUNK_SIZE);
 
-        // Each chunk weights its proofs by successive powers of one nonzero
-        // random z. Only chunk 0 starts at z^0 = 1 (1, z, ..., z^(k-1)); every
-        // other chunk starts at z (z, ..., z^k), so exactly one proof in the
-        // final pairing equation has weight 1. Giving each chunk a unit
-        // weight would let errors in two chunks' first proofs cancel.
-        let acc = self
+        // The first proof of chunk 0 has weight 1; every other proof gets an
+        // independent random weight. Only one proof in the final pairing
+        // equation may have weight 1: two unit-weight proofs could carry
+        // errors that cancel.
+        let (acc, ml_result) = self
             .items
             .par_chunks(chunk_size)
             .enumerate()
             .map(|(chunk_index, items)| {
-                let mut acc = Accumulator::<E>::new(ic_len);
-                let mut ml_terms: Vec<(E::G1Affine, E::G2Prepared)> =
-                    Vec::with_capacity(items.len());
-                let z = loop {
-                    let z = E::Fr::try_random(&mut SysRng)
-                        .expect("system randomness must be available");
-                    if !z.is_zero_vartime() {
-                        break z;
-                    }
-                };
-                let mut cur_z = (chunk_index != 0).then_some(z);
-                for item in items {
-                    Self::accumulate(
-                        item,
-                        cur_z,
-                        &mut acc.gammas,
-                        &mut acc.delta,
-                        &mut acc.y,
-                        &mut ml_terms,
-                    );
-                    cur_z = Some(cur_z.map_or(z, |cur_z| cur_z * z));
+                let mut acc = Accumulator::<E>::new(ic_len, items.len());
+                for (i, item) in items.iter().enumerate() {
+                    let z = if chunk_index == 0 && i == 0 {
+                        None
+                    } else {
+                        Some(random_weight(|| {
+                            let mut bytes = [0; 16];
+                            SysRng
+                                .try_fill_bytes(&mut bytes)
+                                .expect("system randomness must be available");
+                            u128::from_le_bytes(bytes)
+                        }))
+                    };
+                    Self::accumulate(item, z, &mut acc);
                 }
-                let ml_terms = ml_terms.iter().map(|(a, b)| (a, b)).collect::<Vec<_>>();
-                acc.ml_result = Some(E::multi_miller_loop(&ml_terms[..]));
-                acc
+                let ml_result = acc.proof_miller_loop();
+                (acc, Some(ml_result))
             })
             .reduce(
-                || Accumulator::<E>::new(ic_len),
-                |mut a, b| {
-                    for (a, b) in a.gammas.iter_mut().zip(b.gammas.into_iter()) {
+                || (Accumulator::<E>::new(ic_len, 0), None),
+                |(mut a, a_ml), (b, b_ml)| {
+                    for (a, b) in a.gammas.iter_mut().zip(b.gammas) {
                         *a += b;
                     }
                     a.delta += b.delta;
                     a.y += b.y;
-                    a.ml_result = match (a.ml_result, b.ml_result) {
+                    let ml = match (a_ml, b_ml) {
                         (Some(a), Some(b)) => Some(a + b),
                         (Some(a), None) | (None, Some(a)) => Some(a),
                         (None, None) => None,
                     };
-                    a
+                    (a, ml)
                 },
             );
 
-        match acc.ml_result {
-            None => Ok(()),
-            Some(mut ml_result) => {
-                // TODO: could use a multiexp (Bos-Coster maybe?)
-                let psi = vk
-                    .ic
-                    .iter()
-                    .zip(acc.gammas.into_iter())
-                    .map(|(&psi_i, acc_gamma_i)| psi_i * acc_gamma_i)
-                    .sum();
+        let Some(mut ml_result) = ml_result else {
+            return Ok(());
+        };
+        let [delta, gamma, beta] = normalize::<E>(&acc.key_points(vk))[..] else {
+            unreachable!("three key points");
+        };
+        ml_result += E::multi_miller_loop(&[
+            (&delta, &pvk.g2.delta_g2),
+            (&gamma, &pvk.g2.gamma_g2),
+            (&beta, &pvk.g2.beta_g2),
+        ]);
 
-                ml_result += E::multi_miller_loop(&[
-                    (&acc.delta.to_affine(), &pvk.g2.delta_g2),
-                    (&E::G1Affine::from(psi), &pvk.g2.gamma_g2),
-                    (&E::G1Affine::from(vk.alpha_g1 * acc.y), &pvk.g2.beta_g2),
-                ]);
+        if ml_result.final_exponentiation() == E::Gt::identity() {
+            Ok(())
+        } else {
+            Err(VerificationError::InvalidProof)
+        }
+    }
+}
 
-                if ml_result.final_exponentiation() == E::Gt::identity() {
-                    Ok(())
-                } else {
-                    Err(VerificationError::InvalidProof)
-                }
-            }
+/// wNAF window for the 128-bit batch weights.
+const WEIGHT_WINDOW: usize = 4;
+
+/// Draws a batch weight uniformly from `[1, 2^128)`.
+///
+/// If any proof in a batch is invalid, the batch passes for at most one value
+/// of that proof's weight, so with probability at most `1/(2^128 - 1)`. That
+/// is below the roughly 2^-117 security level of BLS12-381. Weights shorter
+/// than the field halve the doublings in each weighted multiplication.
+fn random_weight<F: PrimeField>(mut draw: impl FnMut() -> u128) -> F {
+    loop {
+        let weight = draw();
+        if weight != 0 {
+            return F::from_u128(weight);
+        }
+    }
+}
+
+/// Multiplies a public point by a public full-width scalar in variable time.
+fn mul_vartime<E: MultiMillerLoop>(base: &E::G1Affine, scalar: &E::Fr) -> E::G1 {
+    &WnafBase::<E::G1, PUBLIC_INPUT_WINDOW>::new(base.to_curve())
+        * &WnafScalar::<E::Fr, PUBLIC_INPUT_WINDOW>::new(scalar)
+}
+
+/// Converts `points` to affine form with one shared field inversion.
+fn normalize<E: MultiMillerLoop>(points: &[E::G1]) -> Vec<E::G1Affine> {
+    let mut affine = vec![E::G1Affine::identity(); points.len()];
+    E::G1::batch_normalize(points, &mut affine);
+    affine
+}
+
+/// Weighted sums of a batch's proofs.
+struct Accumulator<E: MultiMillerLoop> {
+    /// `z·A` for each proof, in projective form.
+    a_terms: Vec<E::G1>,
+    /// `-B` for each proof, in the same order as `a_terms`.
+    neg_bs: Vec<E::G2Prepared>,
+    /// `Σ z·a_i` for each public input `i`, with `a_0 = 1`.
+    gammas: Vec<E::Fr>,
+    /// `Σ z·C`.
+    delta: E::G1,
+    /// `Σ z`.
+    y: E::Fr,
+}
+
+impl<E: MultiMillerLoop> Accumulator<E> {
+    fn new(ic_len: usize, proofs: usize) -> Self {
+        Self {
+            a_terms: Vec::with_capacity(proofs),
+            neg_bs: Vec::with_capacity(proofs),
+            gammas: vec![E::Fr::ZERO; ic_len],
+            delta: E::G1::identity(),
+            y: E::Fr::ZERO,
+        }
+    }
+
+    /// The G1 points paired with the key's delta, gamma, and beta:
+    /// `Σ z·C`, `Ψ = Σ_i ic_i·gammas_i`, and `[Σ z]·alpha`.
+    ///
+    /// The beta term stands in for `[Σ z]·e(alpha, beta)`, which would need
+    /// an exponentiation in the target group: `[y]·e(alpha, beta) = e([y]·alpha, beta)`.
+    fn key_points(&self, vk: &VerifyingKey<E>) -> [E::G1; 3] {
+        let psi = vk
+            .ic
+            .iter()
+            .zip(&self.gammas)
+            .map(|(base, scalar)| mul_vartime::<E>(base, scalar))
+            .sum();
+        [self.delta, psi, mul_vartime::<E>(&vk.alpha_g1, &self.y)]
+    }
+
+    /// Runs the Miller loop over the accumulated `(z·A, -B)` pairs.
+    #[cfg(feature = "multicore")]
+    fn proof_miller_loop(&mut self) -> E::Result {
+        let a_terms = normalize::<E>(&std::mem::take(&mut self.a_terms));
+        let neg_bs = std::mem::take(&mut self.neg_bs);
+        let terms = a_terms.iter().zip(neg_bs.iter()).collect::<Vec<_>>();
+        E::multi_miller_loop(&terms)
+    }
+
+    /// Builds the batch's pairing terms, normalizing every G1 point with one
+    /// shared inversion.
+    fn finish(mut self, vk: &VerifyingKey<E>) -> PreparedBatchTerms<E> {
+        let key_points = self.key_points(vk);
+        self.a_terms.extend(key_points);
+        let mut affine = normalize::<E>(&self.a_terms);
+        let beta = affine.pop().expect("key points were appended");
+        let gamma = affine.pop().expect("key points were appended");
+        let delta = affine.pop().expect("key points were appended");
+        PreparedBatchTerms {
+            variable: affine.into_iter().zip(self.neg_bs).collect(),
+            delta,
+            gamma,
+            beta,
         }
     }
 }
