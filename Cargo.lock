@@ -3612,6 +3612,7 @@ dependencies = [
  "rand_core 0.10.1",
  "serde",
  "thiserror",
+ "zakura-jubjub",
  "zakura-reddsa",
 ]
 

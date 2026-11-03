@@ -19,6 +19,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 name = "redjubjub"
 
 [dependencies]
+jubjub.workspace = true
 rand_core = { version = "0.10", default-features = false }
 reddsa = { workspace = true, features = ["alloc"] }
 serde = { version = "1", features = ["derive"], optional = true, default-features = false }

@@ -465,6 +465,30 @@ mod tests {
     }
 
     #[test]
+    fn binding_key_preserves_identity_and_torsion() {
+        for torsion in small_order_points() {
+            let mixed = jubjub::ExtendedPoint::from(VALUE_COMMITMENT_VALUE_GENERATOR) + torsion;
+            for point in [torsion, mixed] {
+                let mut sum = CommitmentSum::zero();
+                sum += &point;
+                for balance in [0, 1, -1, i64::MIN, i64::MAX] {
+                    let magnitude = jubjub::Scalar::from(balance.unsigned_abs());
+                    let scalar = if balance.is_negative() {
+                        -magnitude
+                    } else {
+                        magnitude
+                    };
+                    let bytes = (point - VALUE_COMMITMENT_VALUE_GENERATOR * scalar).to_bytes();
+                    let expected = redjubjub::VerificationKey::try_from(bytes).unwrap();
+                    let actual = sum.into_bvk(balance);
+                    assert_eq!(actual, expected);
+                    assert_eq!(<[u8; 32]>::from(actual), bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn into_bvk_matches_constant_time_product_at_range_edges() {
         let cv = ValueCommitment::derive(
             NoteValue::from_raw(7),
