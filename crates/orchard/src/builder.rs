@@ -1311,7 +1311,7 @@ fn finish_unauthorized_bundle<V: TryFrom<i64>, R: Rng>(
 
     // Verify that bsk and bvk are consistent.
     let bvk = (actions.iter().map(|a| a.cv_net()).sum::<ValueCommitment>()
-        - ValueCommitment::derive(value_balance, ValueCommitTrapdoor::zero()))
+        - ValueCommitment::derive_public(value_balance))
     .into_bvk();
     assert_eq!(redpallas::VerificationKey::from(&bsk), bvk);
 

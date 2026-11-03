@@ -50,7 +50,7 @@ impl super::Bundle {
             .iter()
             .map(|a| a.cv_net())
             .sum::<ValueCommitment>()
-            - ValueCommitment::derive(self.value_sum, ValueCommitTrapdoor::zero()))
+            - ValueCommitment::derive_public(self.value_sum))
         .into_bvk();
         if redpallas::VerificationKey::from(&bsk) != bvk {
             return Err(IoFinalizerError::ValueCommitMismatch);
