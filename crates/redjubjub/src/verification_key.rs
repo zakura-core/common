@@ -69,6 +69,16 @@ impl From<jubjub::ExtendedPoint> for VerificationKey<crate::Binding> {
     }
 }
 
+impl From<VerificationKey<SpendAuth>> for jubjub::AffinePoint {
+    /// Normalizes the stored spend authorization point without decoding it.
+    ///
+    /// This preserves all accepted points, including small-order points.
+    /// Protocol-specific restrictions must still be checked by the caller.
+    fn from(key: VerificationKey<SpendAuth>) -> Self {
+        Self::from(key.0)
+    }
+}
+
 impl<T: SigType> From<VerificationKey<T>> for VerificationKeyBytes<T> {
     fn from(pk: VerificationKey<T>) -> VerificationKeyBytes<T> {
         VerificationKeyBytes(pk.0.into())

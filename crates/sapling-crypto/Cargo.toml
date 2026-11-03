@@ -93,3 +93,7 @@ harness = false
 [[bench]]
 name = "binding_key"
 harness = false
+
+[[bench]]
+name = "spend_key"
+harness = false

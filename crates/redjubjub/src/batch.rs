@@ -59,6 +59,18 @@ impl<'msg, M: AsRef<[u8]>> From<(VerificationKeyBytes<Binding>, Signature<Bindin
 }
 
 impl Item {
+    /// Creates a spend authorization item retaining an existing key's point.
+    ///
+    /// Verification reuses the point instead of decoding the key again. The
+    /// challenge still hashes the key's canonical encoding.
+    pub fn from_spendauth_key<M: AsRef<[u8]>>(
+        vk: VerificationKey<SpendAuth>,
+        sig: Signature<SpendAuth>,
+        msg: &M,
+    ) -> Self {
+        Self(reddsa::batch::Item::from_spendauth_key(vk.0, sig.0, msg))
+    }
+
     /// Creates a binding item retaining an existing verification key's point.
     ///
     /// Verification reuses the point instead of decoding the key again. The
