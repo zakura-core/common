@@ -10,6 +10,34 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-11-03
+
+### Added
+
+- Added `From<jubjub::ExtendedPoint>` for
+  `VerificationKey<sapling::Binding>` to retain an existing valid point and
+  derive its canonical encoding without decoding it again
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+- Added `batch::Item::from_binding_key` to retain a binding verification key's
+  point through batch and fallback verification instead of decoding it again
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+- Added `From<pasta_curves::pallas::Point>` for
+  `VerificationKey<orchard::Binding>` with `pallas-pasta`, retaining a valid
+  native point and its canonical encoding with a debug round-trip assertion
+  ([#676](https://github.com/zakura-core/common/pull/676)).
+- Added `batch::Item::from_spendauth_key` with `alloc` to retain an existing
+  spend authorization verification key through batch and fallback verification
+  ([#676](https://github.com/zakura-core/common/pull/676)).
+- Added `From<VerificationKey<sapling::SpendAuth>> for jubjub::AffinePoint`
+  to normalize a stored spend authorization point without decoding its bytes
+  ([#677](https://github.com/zakura-core/common/pull/677)).
+
+### Changed
+
+- Corrected verification-key documentation to reflect the existing acceptance
+  of identity and other small-order keys during byte decoding
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+
 ## [5.0.0] - 2026-11-02
 
 ### Added
