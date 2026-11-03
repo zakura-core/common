@@ -100,6 +100,27 @@ impl From<jubjub::ExtendedPoint> for VerificationKey<crate::sapling::Binding> {
     }
 }
 
+#[cfg(feature = "pallas-pasta")]
+impl From<pasta_curves::pallas::Point> for VerificationKey<crate::orchard::Binding> {
+    /// Constructs an Orchard binding key from an existing valid Pallas point.
+    ///
+    /// Retains the point and computes its canonical encoding, including for
+    /// identity. Release builds trust the native point's curve invariants;
+    /// debug builds check that its encoding decodes to the same point.
+    fn from(point: pasta_curves::pallas::Point) -> Self {
+        let bytes = VerificationKeyBytes {
+            bytes: point.to_bytes(),
+            _marker: PhantomData,
+        };
+        debug_assert_eq!(
+            pasta_curves::pallas::Point::from_bytes(&bytes.bytes),
+            Some(point),
+            "binding verification key point must match its encoding",
+        );
+        Self { point, bytes }
+    }
+}
+
 impl<T: SigType> From<VerificationKey<T>> for VerificationKeyBytes<T> {
     fn from(pk: VerificationKey<T>) -> VerificationKeyBytes<T> {
         pk.bytes

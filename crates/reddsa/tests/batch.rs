@@ -239,7 +239,7 @@ fn cancelling_signature_errors_are_rejected() {
     }
 }
 
-fn retained_binding_keys<S, B>()
+fn retained_keys<S, B>()
 where
     S: SpendAuth,
     B: Binding<Scalar = S::Scalar, Point = S::Point>,
@@ -247,20 +247,24 @@ where
     let mut rng = thread_rng();
     let msg = b"RetainedBindingKeyTest";
     // Test each item as the failing signature, including the unit-weight item.
-    for bad_index in [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)] {
+    for bad_index in core::iter::once(None).chain((0..8).map(Some)) {
         let mut batch = batch::Verifier::<S, B>::new();
-        for i in 0..6 {
+        for i in 0..8 {
             let signed_msg: &[u8] = if bad_index == Some(i) { b"wrong" } else { msg };
-            let item = if i % 3 == 1 {
+            let item = if i % 4 < 2 {
                 let sk = SigningKey::<S>::new(&mut rng);
                 let vk = VerificationKey::from(&sk);
                 let sig = sk.sign(&mut rng, signed_msg);
-                batch::Item::from_spendauth(vk.into(), sig, msg)
+                if i % 4 == 0 {
+                    batch::Item::from_spendauth(vk.into(), sig, msg)
+                } else {
+                    batch::Item::from_spendauth_key(vk, sig, msg)
+                }
             } else {
                 let sk = SigningKey::<B>::new(&mut rng);
                 let vk = VerificationKey::from(&sk);
                 let sig = sk.sign(&mut rng, signed_msg);
-                if i % 3 == 0 {
+                if i % 4 == 3 {
                     batch::Item::from_binding_key(vk, sig, msg)
                 } else {
                     batch::Item::from_binding(vk.into(), sig, msg)
@@ -279,13 +283,13 @@ where
 
 #[test]
 fn sapling_retained_binding_keys_verify() {
-    retained_binding_keys::<sapling::SpendAuth, sapling::Binding>();
+    retained_keys::<sapling::SpendAuth, sapling::Binding>();
 }
 
 #[test]
 #[cfg(any(feature = "pallas-pasta", feature = "pallas-sensei"))]
 fn orchard_retained_binding_keys_verify() {
-    retained_binding_keys::<orchard::SpendAuth, orchard::Binding>();
+    retained_keys::<orchard::SpendAuth, orchard::Binding>();
 }
 
 #[test]
@@ -301,7 +305,22 @@ fn retained_keys_preserve_malformed_encoding_errors() {
     malformed_r[..32].fill(0xff);
     let mut malformed_s: [u8; 64] = sig.into();
     malformed_s[32..].fill(0xff);
+    let spend_sk = SigningKey::<sapling::SpendAuth>::new(&mut rng);
+    let spend_vk = VerificationKey::from(&spend_sk);
+    let spend_sig = spend_sk.sign(&mut rng, msg);
+    let mut spend_r: [u8; 64] = spend_sig.into();
+    spend_r[..32].fill(0xff);
+    let mut spend_s: [u8; 64] = spend_sig.into();
+    spend_s[32..].fill(0xff);
     let cases = [
+        (
+            batch::Item::from_spendauth_key(spend_vk, spend_r.into(), msg),
+            Error::InvalidSignature,
+        ),
+        (
+            batch::Item::from_spendauth_key(spend_vk, spend_s.into(), msg),
+            Error::InvalidSignature,
+        ),
         (
             batch::Item::from_binding(malformed_vk, sig, msg),
             Error::MalformedVerificationKey,
