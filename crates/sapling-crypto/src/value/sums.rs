@@ -2,7 +2,6 @@ use core::fmt::{self, Debug};
 use core::iter::Sum;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 
-use group::GroupEncoding;
 use redjubjub::Binding;
 
 use super::{NoteValue, ValueCommitTrapdoor, ValueCommitment};
@@ -230,8 +229,7 @@ impl CommitmentSum {
             self.0 - product
         };
 
-        redjubjub::VerificationKey::try_from(bvk.to_bytes())
-            .expect("valid points are valid verification keys")
+        redjubjub::VerificationKey::from(bvk)
     }
 }
 

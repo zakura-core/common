@@ -238,3 +238,102 @@ fn cancelling_signature_errors_are_rejected() {
         assert_eq!(batch.verify(&mut rng), Err(Error::InvalidSignature));
     }
 }
+
+fn retained_binding_keys<S, B>()
+where
+    S: SpendAuth,
+    B: Binding<Scalar = S::Scalar, Point = S::Point>,
+{
+    let mut rng = thread_rng();
+    let msg = b"RetainedBindingKeyTest";
+    // Test each item as the failing signature, including the unit-weight item.
+    for bad_index in [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)] {
+        let mut batch = batch::Verifier::<S, B>::new();
+        for i in 0..6 {
+            let signed_msg: &[u8] = if bad_index == Some(i) { b"wrong" } else { msg };
+            let item = if i % 3 == 1 {
+                let sk = SigningKey::<S>::new(&mut rng);
+                let vk = VerificationKey::from(&sk);
+                let sig = sk.sign(&mut rng, signed_msg);
+                batch::Item::from_spendauth(vk.into(), sig, msg)
+            } else {
+                let sk = SigningKey::<B>::new(&mut rng);
+                let vk = VerificationKey::from(&sk);
+                let sig = sk.sign(&mut rng, signed_msg);
+                if i % 3 == 0 {
+                    batch::Item::from_binding_key(vk, sig, msg)
+                } else {
+                    batch::Item::from_binding(vk.into(), sig, msg)
+                }
+            };
+            assert_eq!(item.clone().verify_single().is_ok(), bad_index != Some(i));
+            // Also exercise the n = 1 path for each kind of item.
+            let mut single = batch::Verifier::new();
+            single.queue(item.clone());
+            assert_eq!(single.verify(&mut rng).is_ok(), bad_index != Some(i));
+            batch.queue(item);
+        }
+        assert_eq!(batch.verify(&mut rng).is_ok(), bad_index.is_none());
+    }
+}
+
+#[test]
+fn sapling_retained_binding_keys_verify() {
+    retained_binding_keys::<sapling::SpendAuth, sapling::Binding>();
+}
+
+#[test]
+#[cfg(any(feature = "pallas-pasta", feature = "pallas-sensei"))]
+fn orchard_retained_binding_keys_verify() {
+    retained_binding_keys::<orchard::SpendAuth, orchard::Binding>();
+}
+
+#[test]
+fn retained_keys_preserve_malformed_encoding_errors() {
+    let mut rng = thread_rng();
+    let sk = SigningKey::<sapling::Binding>::new(&mut rng);
+    let vk = VerificationKey::from(&sk);
+    let msg = b"RetainedBindingKeyTest";
+    let sig = sk.sign(&mut rng, msg);
+    let valid = batch::Item::from_binding_key(vk, sig, msg);
+    let malformed_vk = VerificationKeyBytes::from([0xff; 32]);
+    let mut malformed_r: [u8; 64] = sig.into();
+    malformed_r[..32].fill(0xff);
+    let mut malformed_s: [u8; 64] = sig.into();
+    malformed_s[32..].fill(0xff);
+    let cases = [
+        (
+            batch::Item::from_binding(malformed_vk, sig, msg),
+            Error::MalformedVerificationKey,
+        ),
+        (
+            batch::Item::from_binding_key(vk, malformed_r.into(), msg),
+            Error::InvalidSignature,
+        ),
+        (
+            batch::Item::from_binding_key(vk, malformed_s.into(), msg),
+            Error::InvalidSignature,
+        ),
+        (
+            batch::Item::from_binding(malformed_vk, malformed_r.into(), msg),
+            Error::InvalidSignature,
+        ),
+        (
+            batch::Item::from_binding(malformed_vk, malformed_s.into(), msg),
+            Error::InvalidSignature,
+        ),
+    ];
+    for (bad, error) in cases {
+        for index in 0..3 {
+            let mut batch = batch::Verifier::<sapling::SpendAuth, sapling::Binding>::new();
+            for i in 0..3 {
+                batch.queue(if i == index {
+                    bad.clone()
+                } else {
+                    valid.clone()
+                });
+            }
+            assert_eq!(batch.verify(&mut rng), Err(error));
+        }
+    }
+}

@@ -63,11 +63,9 @@ impl<T: SigType> From<VerificationKeyBytes<T>> for [u8; 32] {
 ///
 /// ## Consensus properties
 ///
-/// The `TryFrom<VerificationKeyBytes>` conversion performs the following Zcash
-/// consensus rule checks:
-///
-/// 1. The check that the bytes are a canonical encoding of a verification key;
-/// 2. The check that the verification key is not a point of small order.
+/// [`TryFrom<VerificationKeyBytes<T>>`] checks that the bytes canonically encode
+/// a point on the curve. Small-order points, including the identity, are
+/// accepted. Sapling separately rejects small-order spend authorization keys.
 #[derive(PartialEq, Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "VerificationKeyBytes<T>"))]
@@ -76,6 +74,30 @@ impl<T: SigType> From<VerificationKeyBytes<T>> for [u8; 32] {
 pub struct VerificationKey<T: SigType> {
     pub(crate) point: T::Point,
     pub(crate) bytes: VerificationKeyBytes<T>,
+}
+
+impl From<jubjub::ExtendedPoint> for VerificationKey<crate::sapling::Binding> {
+    /// Constructs a Sapling binding key from an existing valid Jubjub point.
+    ///
+    /// Retains the point and computes its canonical encoding without decoding
+    /// it again. Identity and other small-order points are accepted, as with
+    /// decoding [`VerificationKeyBytes`].
+    ///
+    /// The point must satisfy Jubjub's curve invariants. Release builds do not
+    /// validate coordinates supplied through unchecked point constructors.
+    /// Debug builds check that decoding the encoding recovers the same point.
+    fn from(point: jubjub::ExtendedPoint) -> Self {
+        let bytes = VerificationKeyBytes {
+            bytes: point.to_bytes(),
+            _marker: PhantomData,
+        };
+        debug_assert_eq!(
+            jubjub::ExtendedPoint::from_bytes(&bytes.bytes),
+            Some(point),
+            "binding verification key point must match its encoding",
+        );
+        Self { point, bytes }
+    }
 }
 
 impl<T: SigType> From<VerificationKey<T>> for VerificationKeyBytes<T> {

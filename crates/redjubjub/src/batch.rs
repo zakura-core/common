@@ -59,6 +59,18 @@ impl<'msg, M: AsRef<[u8]>> From<(VerificationKeyBytes<Binding>, Signature<Bindin
 }
 
 impl Item {
+    /// Creates a binding item retaining an existing verification key's point.
+    ///
+    /// Verification reuses the point instead of decoding the key again. The
+    /// challenge still hashes the key's canonical encoding.
+    pub fn from_binding_key<M: AsRef<[u8]>>(
+        vk: VerificationKey<Binding>,
+        sig: Signature<Binding>,
+        msg: &M,
+    ) -> Self {
+        Self(reddsa::batch::Item::from_binding_key(vk.0, sig.0, msg))
+    }
+
     /// Perform non-batched verification of this `Item`.
     ///
     /// This is useful (in combination with `Item::clone`) for implementing fallback

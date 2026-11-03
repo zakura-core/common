@@ -163,7 +163,11 @@ impl BatchValidator {
         // Check the whole-bundle consensus rules, and batch the binding signature.
         ctx.final_check(*bundle.value_balance(), |bvk| {
             self.signatures
-                .queue((bvk.into(), bundle.authorization().binding_sig, &sighash));
+                .queue(redjubjub::batch::Item::from_binding_key(
+                    bvk,
+                    bundle.authorization().binding_sig,
+                    &sighash,
+                ));
             true
         })
     }
@@ -379,6 +383,58 @@ mod tests {
             validator.output_proof_count = 1;
         }
         validator
+    }
+
+    #[test]
+    fn bundle_binding_signatures_use_retained_keys() {
+        use crate::{
+            bundle::{Authorized, Bundle, OutputDescription},
+            constants::{GROTH_PROOF_SIZE, VALUE_COMMITMENT_RANDOMNESS_GENERATOR},
+            note::ExtractedNoteCommitment,
+            value::{NoteValue, TrapdoorSum, ValueCommitTrapdoor, ValueCommitment},
+        };
+        use group::GroupEncoding;
+        use zcash_note_encryption::{ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes, OUT_CIPHERTEXT_SIZE};
+
+        let mut rng = rand::rng();
+        let trapdoor = ValueCommitTrapdoor::from_bytes([7; 32]).unwrap();
+        let mut trapdoor_sum = TrapdoorSum::zero();
+        trapdoor_sum -= &trapdoor;
+        let bsk = trapdoor_sum.into_bsk();
+        let cv = ValueCommitment::derive(NoteValue::ZERO, trapdoor);
+        let sighash = [42; 32];
+        let binding_sig = bsk.sign(&mut rng, &sighash);
+
+        // Proof verification is deferred. A parseable dummy proof lets this
+        // test exercise bundle preparation and its signature queue directly.
+        let proof = groth16::Proof::<Bls12> {
+            a: bls12_381::G1Affine::generator(),
+            b: G2Affine::generator(),
+            c: bls12_381::G1Affine::generator(),
+        };
+        let mut proof_bytes = [0; GROTH_PROOF_SIZE];
+        proof.write(&mut proof_bytes[..]).unwrap();
+        let output = OutputDescription::from_parts(
+            cv,
+            ExtractedNoteCommitment::from_bytes(&[0; 32]).unwrap(),
+            EphemeralKeyBytes(VALUE_COMMITMENT_RANDOMNESS_GENERATOR.to_bytes()),
+            [0; ENC_CIPHERTEXT_SIZE],
+            [0; OUT_CIPHERTEXT_SIZE],
+            proof_bytes,
+        );
+        let bundle =
+            Bundle::from_parts(vec![], vec![output], 0i64, Authorized { binding_sig }).unwrap();
+
+        for count in [1, 3] {
+            for valid in [true, false] {
+                let mut validator = BatchValidator::new();
+                for i in 0..count {
+                    let hash = if valid || i != 0 { sighash } else { [43; 32] };
+                    assert!(validator.check_bundle(bundle.clone(), hash));
+                }
+                assert_eq!(validator.signatures.verify(&mut rng).is_ok(), valid);
+            }
+        }
     }
 
     #[test]

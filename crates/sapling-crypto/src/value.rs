@@ -465,6 +465,64 @@ mod tests {
     }
 
     #[test]
+    fn binding_key_preserves_identity_and_torsion() {
+        for torsion in small_order_points() {
+            let mixed = jubjub::ExtendedPoint::from(VALUE_COMMITMENT_VALUE_GENERATOR) + torsion;
+            for point in [torsion, mixed] {
+                let mut sum = CommitmentSum::zero();
+                sum += &point;
+                for balance in [0, 1, -1, i64::MIN, i64::MAX] {
+                    let magnitude = jubjub::Scalar::from(balance.unsigned_abs());
+                    let scalar = if balance.is_negative() {
+                        -magnitude
+                    } else {
+                        magnitude
+                    };
+                    let bytes = (point - VALUE_COMMITMENT_VALUE_GENERATOR * scalar).to_bytes();
+                    let expected = redjubjub::VerificationKey::try_from(bytes).unwrap();
+                    let actual = sum.into_bvk(balance);
+                    assert_eq!(actual, expected);
+                    assert_eq!(<[u8; 32]>::from(actual), bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn derived_binding_keys_verify_in_batches_with_torsion() {
+        let mut rng = rand::rng();
+        let trapdoor = ValueCommitTrapdoor(jubjub::Scalar::from(11u64));
+        let bsk = (TrapdoorSum::zero() + &trapdoor).into_bsk();
+        let cv = ValueCommitment::derive(NoteValue::ZERO, trapdoor);
+        let msg = b"BindingKeyBatchTest";
+        let sig = bsk.sign(&mut rng, msg);
+        let mut batch = redjubjub::batch::Verifier::new();
+        let bvk = CommitmentSum::try_sum([&cv]).unwrap().into_bvk(0);
+        batch.queue(redjubjub::batch::Item::from_binding_key(bvk, sig, msg));
+
+        // With R = identity and s = 0, any small-order key satisfies the
+        // cofactored verification equation, regardless of the challenge.
+        let mut torsion_sig = [0; 64];
+        torsion_sig[..32].copy_from_slice(&jubjub::AffinePoint::identity().to_bytes());
+        for torsion in small_order_points() {
+            let mut sum = CommitmentSum::zero();
+            sum += &torsion;
+            let bvk = sum.into_bvk(0);
+            let item = redjubjub::batch::Item::from_binding_key(bvk, torsion_sig.into(), msg);
+            assert_eq!(item.clone().verify_single(), Ok(()));
+            batch.queue(item);
+        }
+        assert_eq!(batch.verify(&mut rng), Ok(()));
+
+        let mut invalid = redjubjub::batch::Verifier::new();
+        invalid.queue(redjubjub::batch::Item::from_binding_key(bvk, sig, b"wrong"));
+        assert_eq!(
+            invalid.verify(&mut rng),
+            Err(redjubjub::Error::InvalidSignature)
+        );
+    }
+
+    #[test]
     fn into_bvk_matches_constant_time_product_at_range_edges() {
         let cv = ValueCommitment::derive(
             NoteValue::from_raw(7),

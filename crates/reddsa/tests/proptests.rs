@@ -102,6 +102,27 @@ use rand_core::SeedableRng;
 
 proptest! {
 
+    #[test]
+    fn binding_point_conversion_matches_byte_decoding(
+        point in prop::array::uniform32(any::<u8>()).prop_filter_map(
+            "canonical Jubjub point",
+            |bytes| Option::<jubjub::AffinePoint>::from(jubjub::AffinePoint::from_bytes(bytes))
+                .map(jubjub::ExtendedPoint::from),
+        ),
+    ) {
+        let identity = jubjub::ExtendedPoint::identity();
+        let torsion = jubjub::ExtendedPoint::from(
+            jubjub::AffinePoint::from_bytes((-jubjub::Fq::one()).to_bytes()).unwrap(),
+        );
+        for point in [identity, torsion, point, point + torsion] {
+            let bytes = jubjub::AffinePoint::from(point).to_bytes();
+            let expected = VerificationKey::<sapling::Binding>::try_from(bytes).unwrap();
+            let actual = VerificationKey::<sapling::Binding>::from(point);
+            prop_assert_eq!(actual, expected);
+            prop_assert_eq!(<[u8; 32]>::from(actual), bytes);
+        }
+    }
+
      #[test]
     fn tweak_signature(
         tweaks in prop::collection::vec(tweak_strategy(), (0,5)),

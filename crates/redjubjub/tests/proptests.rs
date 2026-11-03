@@ -102,6 +102,30 @@ use rand_core::SeedableRng;
 
 proptest! {
 
+    #[test]
+    fn binding_point_conversion_preserves_signatures(
+        seed in prop::array::uniform32(any::<u8>()),
+        message in prop::collection::vec(any::<u8>(), 0..128),
+    ) {
+        let mut rng = ChaChaRng::from_seed(seed);
+        let sk = SigningKey::<Binding>::new(&mut rng);
+        let expected = VerificationKey::from(&sk);
+        let bytes = <[u8; 32]>::from(expected);
+        let point = jubjub::ExtendedPoint::from(jubjub::AffinePoint::from_bytes(bytes).unwrap());
+        // Commitment sums retain projective coordinates rather than Z = 1.
+        let point = point + jubjub::ExtendedPoint::identity();
+        let actual = VerificationKey::<Binding>::from(point);
+        let signature = sk.sign(&mut rng, &message);
+        prop_assert_eq!(actual, expected);
+        prop_assert_eq!(<[u8; 32]>::from(actual), bytes);
+        prop_assert_eq!(actual.verify(&message, &signature), Ok(()));
+
+        let mut modified = message;
+        modified.push(0);
+        prop_assert_eq!(actual.verify(&modified, &signature), expected.verify(&modified, &signature));
+        prop_assert!(actual.verify(&modified, &signature).is_err());
+    }
+
      #[test]
     fn tweak_signature(
         tweaks in prop::collection::vec(tweak_strategy(), (0,5)),
