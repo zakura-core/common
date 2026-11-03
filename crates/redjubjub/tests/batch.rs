@@ -127,3 +127,44 @@ fn bad_batch_verify() {
         }
     }
 }
+
+#[test]
+fn retained_spend_keys_preserve_verification_and_encoding_checks() {
+    let mut rng = thread_rng();
+    let sk = SigningKey::<SpendAuth>::new(&mut rng);
+    let vk = VerificationKey::from(&sk);
+    let msg = b"RetainedSpendTest";
+    let sig = sk.sign(&mut rng, msg);
+    let valid = batch::Item::from_spendauth_key(vk, sig, msg);
+    let mut bad_r: [u8; 64] = sig.into();
+    bad_r[..32].fill(0xff);
+    let mut bad_s: [u8; 64] = sig.into();
+    bad_s[32..].fill(0xff);
+    let invalid = [
+        batch::Item::from_spendauth_key(vk, sig, b"wrong"),
+        batch::Item::from_spendauth_key(vk, bad_r.into(), msg),
+        batch::Item::from_spendauth_key(vk, bad_s.into(), msg),
+    ];
+    assert_eq!(valid.clone().verify_single(), Ok(()));
+    for bad in invalid {
+        assert_eq!(bad.clone().verify_single(), Err(Error::InvalidSignature));
+        for index in 0..3 {
+            let mut batch = batch::Verifier::new();
+            for i in 0..3 {
+                batch.queue(if i == index {
+                    bad.clone()
+                } else {
+                    valid.clone()
+                });
+            }
+            assert_eq!(batch.verify(&mut rng), Err(Error::InvalidSignature));
+        }
+        let mut batch = batch::Verifier::new();
+        batch.queue(bad);
+        assert_eq!(batch.verify(&mut rng), Err(Error::InvalidSignature));
+    }
+    let mut mixed = batch::Verifier::new();
+    mixed.queue(valid);
+    mixed.queue((vk.into(), sig, msg));
+    assert_eq!(mixed.verify(rng), Ok(()));
+}

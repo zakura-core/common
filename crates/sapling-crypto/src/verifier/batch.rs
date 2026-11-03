@@ -117,7 +117,11 @@ impl BatchValidator {
                 self,
                 |this, rk| {
                     this.signatures
-                        .queue(((*rk).into(), *spend.spend_auth_sig(), &sighash));
+                        .queue(redjubjub::batch::Item::from_spendauth_key(
+                            *rk,
+                            *spend.spend_auth_sig(),
+                            &sighash,
+                        ));
                     true
                 },
                 |this, proof, public_inputs| {
@@ -383,6 +387,59 @@ mod tests {
             validator.output_proof_count = 1;
         }
         validator
+    }
+
+    #[test]
+    fn bundle_spend_signatures_use_retained_keys() {
+        use crate::{
+            Nullifier,
+            bundle::{Authorized, Bundle, SpendDescription},
+            constants::GROTH_PROOF_SIZE,
+            value::{NoteValue, TrapdoorSum, ValueCommitTrapdoor, ValueCommitment},
+        };
+        let mut rng = rand::rng();
+        let sk = redjubjub::SigningKey::<redjubjub::SpendAuth>::new(&mut rng);
+        let rk = redjubjub::VerificationKey::from(&sk);
+        let trapdoor = ValueCommitTrapdoor::from_bytes([7; 32]).unwrap();
+        let bsk = (TrapdoorSum::zero() + &trapdoor).into_bsk();
+        let cv = ValueCommitment::derive(NoteValue::ZERO, trapdoor);
+        let sighash = [42; 32];
+        // Proof verification is deferred; use a parseable dummy proof to
+        // exercise preparation and the signature queue directly.
+        let proof = groth16::Proof::<Bls12> {
+            a: bls12_381::G1Affine::generator(),
+            b: G2Affine::generator(),
+            c: bls12_381::G1Affine::generator(),
+        };
+        let mut proof_bytes = [0; GROTH_PROOF_SIZE];
+        proof.write(&mut proof_bytes[..]).unwrap();
+        let spend = SpendDescription::<Authorized>::from_parts(
+            cv,
+            Scalar::zero(),
+            Nullifier([0; 32]),
+            rk,
+            proof_bytes,
+            sk.sign(&mut rng, &sighash),
+        );
+        let bundle = Bundle::from_parts(
+            vec![spend],
+            vec![],
+            0i64,
+            Authorized {
+                binding_sig: bsk.sign(&mut rng, &sighash),
+            },
+        )
+        .unwrap();
+        for count in [1, 3] {
+            for valid in [true, false] {
+                let mut validator = BatchValidator::new();
+                for i in 0..count {
+                    let hash = if valid || i != 0 { sighash } else { [43; 32] };
+                    assert!(validator.check_bundle(bundle.clone(), hash));
+                }
+                assert_eq!(validator.signatures.verify(&mut rng).is_ok(), valid);
+            }
+        }
     }
 
     #[test]

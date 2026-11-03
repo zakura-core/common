@@ -121,6 +121,18 @@ impl From<pasta_curves::pallas::Point> for VerificationKey<crate::orchard::Bindi
     }
 }
 
+impl From<VerificationKey<crate::sapling::SpendAuth>> for jubjub::AffinePoint {
+    /// Normalizes the stored spend authorization point without decoding it.
+    ///
+    /// This preserves all accepted points, including small-order points.
+    /// Protocol-specific restrictions must still be checked by the caller.
+    fn from(key: VerificationKey<crate::sapling::SpendAuth>) -> Self {
+        let affine = Self::from(key.point);
+        debug_assert_eq!(affine.to_bytes(), key.bytes.bytes);
+        affine
+    }
+}
+
 impl<T: SigType> From<VerificationKey<T>> for VerificationKeyBytes<T> {
     fn from(pk: VerificationKey<T>) -> VerificationKeyBytes<T> {
         pk.bytes

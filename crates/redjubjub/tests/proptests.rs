@@ -173,5 +173,9 @@ proptest! {
         let pk_r_via_pk_rand: [u8; 32] = VerificationKeyBytes::from(pk_r).into();
 
         assert_eq!(pk_r_via_pk_rand, pk_r_via_sk_rand);
+        prop_assert_eq!(
+            jubjub::AffinePoint::from(pk_r),
+            jubjub::AffinePoint::from_bytes(pk_r_via_sk_rand).unwrap(),
+        );
     }
 }

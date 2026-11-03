@@ -103,7 +103,7 @@ use rand_core::SeedableRng;
 proptest! {
 
     #[test]
-    fn binding_point_conversion_matches_byte_decoding(
+    fn point_conversions_match_byte_decoding(
         point in prop::array::uniform32(any::<u8>()).prop_filter_map(
             "canonical Jubjub point",
             |bytes| Option::<jubjub::AffinePoint>::from(jubjub::AffinePoint::from_bytes(bytes))
@@ -120,6 +120,8 @@ proptest! {
             let actual = VerificationKey::<sapling::Binding>::from(point);
             prop_assert_eq!(actual, expected);
             prop_assert_eq!(<[u8; 32]>::from(actual), bytes);
+            let spend = VerificationKey::<sapling::SpendAuth>::try_from(bytes).unwrap();
+            prop_assert_eq!(jubjub::AffinePoint::from(spend), jubjub::AffinePoint::from(point));
         }
     }
 
