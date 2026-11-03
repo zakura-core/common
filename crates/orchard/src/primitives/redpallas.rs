@@ -251,10 +251,17 @@ impl<T: SigType> VerificationKey<T> {
         }
         #[cfg(feature = "backend-halo2")]
         {
-            point
-                .to_bytes()
-                .try_into()
-                .expect("canonical verification point")
+            let key = if T::SPEND_AUTH {
+                VerificationKeyInner::SpendAuth(
+                    point
+                        .to_bytes()
+                        .try_into()
+                        .expect("canonical verification point"),
+                )
+            } else {
+                VerificationKeyInner::Binding(raw::VerificationKey::from(point))
+            };
+            Self(key, PhantomData)
         }
     }
     #[cfg(feature = "backend-sensei")]
@@ -309,7 +316,7 @@ impl VerificationKey<SpendAuth> {
         }
         #[cfg(feature = "backend-halo2")]
         {
-            BatchItem::from_spendauth((*key).into(), sig.0.into(), msg)
+            BatchItem::from_spendauth_key(*key, sig.0.into(), msg)
         }
     }
 }
@@ -329,7 +336,7 @@ impl VerificationKey<Binding> {
         }
         #[cfg(feature = "backend-halo2")]
         {
-            BatchItem::from_binding((*key).into(), sig.0.into(), msg)
+            BatchItem::from_binding_key(*key, sig.0.into(), msg)
         }
     }
 }
@@ -473,6 +480,34 @@ mod tests {
 
     /// Exercise empty messages through the largest short application message in this test.
     const MESSAGE_LENGTH_LIMIT: usize = 128;
+
+    #[cfg(feature = "std")]
+    proptest! {
+        #[test]
+        fn retained_batch_keys_match_single_verification(
+            spend in super::testing::arb_valid_spendauth_keypair(),
+            binding in super::testing::arb_binding_signing_key(),
+            seed in any::<[u8; 32]>(),
+            message in prop::collection::vec(any::<u8>(), 0..MESSAGE_LENGTH_LIMIT),
+        ) {
+            let mut rng = ChaCha20Rng::from_seed(seed);
+            let (spend_sk, spend_vk) = spend;
+            let binding_vk = VerificationKey::from(&binding);
+            let spend_sig = spend_sk.sign(&mut rng, &message);
+            let binding_sig = binding.sign(&mut rng, &message);
+            let mut changed = message.clone();
+            changed.push(0);
+            for (msg, valid) in [(&message, true), (&changed, false)] {
+                let items = [
+                    spend_vk.create_batch_item(spend_sig.clone(), msg),
+                    binding_vk.create_batch_item(binding_sig.clone(), msg),
+                ];
+                prop_assert_eq!(super::verify_batch(&items, &mut rng).is_ok(), valid);
+                prop_assert_eq!(super::verify_batch(&items[..1], &mut rng).is_ok(), valid);
+                prop_assert_eq!(super::verify_batch(&items[1..], &mut rng).is_ok(), valid);
+            }
+        }
+    }
 
     proptest! {
         #[test]

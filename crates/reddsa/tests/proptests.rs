@@ -172,3 +172,27 @@ proptest! {
         assert_eq!(pk_r_via_pk_rand, pk_r_via_sk_rand);
     }
 }
+
+#[cfg(feature = "pallas-pasta")]
+proptest! {
+    #[test]
+    fn orchard_binding_point_matches_decoding(seed in any::<[u8; 32]>()) {
+        use group::{Group, GroupEncoding};
+        let mut rng = ChaChaRng::from_seed(seed);
+        let sk = SigningKey::<orchard::Binding>::new(&mut rng);
+        let expected = VerificationKey::from(&sk);
+        let bytes: [u8; 32] = expected.into();
+        let point = pasta_curves::pallas::Point::from_bytes(&bytes).unwrap();
+        let identity = pasta_curves::pallas::Point::identity();
+        for point in [point, point + identity, identity] {
+            let actual = VerificationKey::<orchard::Binding>::from(point);
+            let decoded = VerificationKey::try_from(point.to_bytes()).unwrap();
+            prop_assert_eq!(actual, decoded);
+            prop_assert_eq!(<[u8; 32]>::from(actual), point.to_bytes());
+        }
+        let actual = VerificationKey::<orchard::Binding>::from(point + identity);
+        let sig = sk.sign(&mut rng, b"message");
+        prop_assert_eq!(actual.verify(b"message", &sig), Ok(()));
+        prop_assert_eq!(actual.verify(b"wrong", &sig), Err(Error::InvalidSignature));
+    }
+}

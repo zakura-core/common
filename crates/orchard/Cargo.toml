@@ -134,3 +134,8 @@ required-features = ["test-dependencies", "circuit", "zip32-addresses"]
 [[test]]
 name = "composition_api"
 required-features = ["circuit-composition", "test-dependencies"]
+
+[[bench]]
+name = "binding_key"
+harness = false
+required-features = ["test-dependencies", "std"]
