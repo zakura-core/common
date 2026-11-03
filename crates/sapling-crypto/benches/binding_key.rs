@@ -34,7 +34,7 @@ fn binding_key(c: &mut Criterion) {
     group.finish();
 }
 
-fn binding_key_batch(c: &mut Criterion) {
+fn binding_verification(c: &mut Criterion) {
     let mut rng = rand::rng();
     let msg = b"BindingKeyBatchBenchmark";
     let fixtures: Vec<_> = (0..32)
@@ -48,16 +48,22 @@ fn binding_key_batch(c: &mut Criterion) {
             (sum, bsk.sign(&mut rng, msg))
         })
         .collect();
-    let mut group = c.benchmark_group("binding_key_batch");
+    let mut group = c.benchmark_group("binding_verification");
     for n in [1, 8, 32] {
-        for retain_point in [false, true] {
-            let path = if retain_point { "point" } else { "bytes" };
+        for path in ["serial", "batch_bytes", "batch_point"] {
             group.bench_with_input(BenchmarkId::new(path, n), &n, |b, &n| {
                 b.iter(|| {
+                    if path == "serial" {
+                        for (sum, sig) in &fixtures[..n] {
+                            let bvk = black_box(*sum).into_bvk(black_box(0));
+                            bvk.verify(msg, sig).unwrap();
+                        }
+                        return;
+                    }
                     let mut batch = redjubjub::batch::Verifier::new();
                     for (sum, sig) in &fixtures[..n] {
                         let bvk = black_box(*sum).into_bvk(black_box(0));
-                        if retain_point {
+                        if path == "batch_point" {
                             batch.queue(redjubjub::batch::Item::from_binding_key(bvk, *sig, msg));
                         } else {
                             batch.queue((bvk.into(), *sig, msg));
@@ -71,5 +77,5 @@ fn binding_key_batch(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, binding_key, binding_key_batch);
+criterion_group!(benches, binding_key, binding_verification);
 criterion_main!(benches);
