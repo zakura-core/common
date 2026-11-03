@@ -127,7 +127,7 @@ impl<T: SigType> SigningKey<T> {
             .update(msg)
             .finalize();
 
-        let r: T::Point = T::basepoint() * nonce;
+        let r = T::mul_basepoint(nonce);
         let r_bytes: [u8; 32] = r.to_bytes().as_ref().try_into().unwrap();
 
         let c = HStar::<T>::default()

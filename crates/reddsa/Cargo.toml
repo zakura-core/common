@@ -24,9 +24,12 @@ group = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], optional = true, default-features = false }
 jubjub = { workspace = true }
 sensei = { workspace = true, optional = true }
-pasta_curves = { workspace = true, optional = true, features = ["alloc"] }
+pasta_curves = { workspace = true, optional = true, features = ["glv"] }
 rand_core = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
+
+[target.'cfg(target_has_atomic = "ptr")'.dependencies]
+once_cell = { version = "1", default-features = false, features = ["alloc", "race"], optional = true }
 
 [dev-dependencies]
 bincode = "1"
@@ -39,7 +42,7 @@ rand = "0.10"
 rand_chacha = "0.10"
 
 [features]
-pallas-pasta = ["dep:pasta_curves"]
+pallas-pasta = ["dep:pasta_curves", "dep:once_cell"]
 pallas-sensei = ["dep:sensei"]
 alloc = ["hex", "jubjub/alloc"]
 default = ["std", "pallas-pasta"]

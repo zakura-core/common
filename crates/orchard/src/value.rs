@@ -347,20 +347,30 @@ impl ValueCommitment {
     }
     #[cfg(feature = "backend-halo2")]
     /// Derives a value commitment from the net value and its trapdoor.
-    #[allow(non_snake_case)]
+    ///
+    /// # Timing
+    ///
+    /// This uses variable-time arithmetic in both `value` and `rcv`.
     pub fn derive(value: ValueSum, rcv: ValueCommitTrapdoor) -> Self {
+        use crate::backend::pasta_curves::glv::Table;
         use crate::constants::fixed_bases::{value_commit_r, value_commit_v};
-        let V = value_commit_v::generator();
-        let R = value_commit_r::generator();
+        use crate::once::OnceTable;
+
+        static VALUE: OnceTable<Table<pallas::Point>> = OnceTable::new();
+        static RANDOMNESS: OnceTable<Table<pallas::Point>> = OnceTable::new();
+        let value_base = VALUE.get_or_init(|| Table::new(&value_commit_v::generator().to_curve()));
+        let randomness_base =
+            RANDOMNESS.get_or_init(|| Table::new(&value_commit_r::generator().to_curve()));
         let abs_value = u64::try_from(value.0.abs()).expect("value must be in valid range");
 
+        let magnitude = value_base.mul(&pallas::Scalar::from(abs_value));
         let value = if value.0.is_negative() {
-            -pallas::Scalar::from(abs_value)
+            -magnitude
         } else {
-            pallas::Scalar::from(abs_value)
+            magnitude
         };
 
-        ValueCommitment(V * value + R * rcv.0)
+        ValueCommitment(value + randomness_base.mul(&rcv.0))
     }
 
     /// Derives the commitment to a public `value` with a zero trapdoor.
@@ -530,6 +540,24 @@ mod tests {
     use crate::primitives::redpallas;
 
     proptest! {
+        #[cfg(feature = "backend-halo2")]
+        #[test]
+        fn prepared_commitment_matches_native_ladder(
+            value in super::testing::arb_value_sum(),
+            trapdoor in arb_trapdoor(),
+        ) {
+            use crate::backend::pallas;
+            use crate::constants::fixed_bases::{value_commit_r, value_commit_v};
+
+            let magnitude = pallas::Scalar::from(
+                u64::try_from(value.0.abs()).expect("generated value is in range"),
+            );
+            let scalar = if value.0.is_negative() { -magnitude } else { magnitude };
+            let expected = value_commit_v::generator() * scalar
+                + value_commit_r::generator() * trapdoor.0;
+            prop_assert_eq!(ValueCommitment::derive(value, trapdoor).0, expected);
+        }
+
         #[test]
         fn bsk_consistent_with_bvk(
             values in (1usize..10).prop_flat_map(|n_values|

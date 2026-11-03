@@ -125,6 +125,18 @@ proptest! {
 
         assert!(binding.check());
         assert!(spendauth.check());
+
+        #[cfg(any(feature = "pallas-pasta", feature = "pallas-sensei"))]
+        {
+            let mut binding = SignatureCase::<orchard::Binding>::new(&mut rng, msg.to_vec());
+            let mut spendauth = SignatureCase::<orchard::SpendAuth>::new(&mut rng, msg.to_vec());
+            for tweak in &tweaks {
+                binding.apply_tweak(tweak);
+                spendauth.apply_tweak(tweak);
+            }
+            assert!(binding.check());
+            assert!(spendauth.check());
+        }
     }
 
     #[test]
@@ -149,5 +161,19 @@ proptest! {
         let pk_r_via_pk_rand: [u8; 32] = VerificationKeyBytes::from(pk_r).into();
 
         assert_eq!(pk_r_via_pk_rand, pk_r_via_sk_rand);
+
+        #[cfg(feature = "pallas-pasta")]
+        {
+            use group::ff::FromUniformBytes;
+            let mut bytes = [0; 64];
+            rng.fill_bytes(&mut bytes);
+            let randomizer = pasta_curves::pallas::Scalar::from_uniform_bytes(&bytes);
+            let sk = SigningKey::<orchard::SpendAuth>::new(&mut rng);
+            let pk = VerificationKey::from(&sk);
+            let randomized_sk = sk.randomize(&randomizer);
+            let expected = VerificationKeyBytes::from(VerificationKey::from(&randomized_sk));
+            let actual = VerificationKeyBytes::from(pk.randomize(&randomizer));
+            assert_eq!(actual, expected);
+        }
     }
 }

@@ -14,8 +14,8 @@
 //! A standalone implementation of the RedDSA signature scheme, instantiated
 //! over the Jubjub and Pallas curves.
 
-#[cfg(feature = "alloc")]
-#[macro_use]
+#[cfg(any(feature = "alloc", feature = "pallas-pasta"))]
+#[cfg_attr(feature = "alloc", macro_use)]
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
@@ -108,6 +108,11 @@ pub(crate) mod private {
         type Point: crate::backend::Point<Self::Scalar>;
 
         fn basepoint() -> T::Point;
+
+        /// Multiplies the signature base using the selected timing policy.
+        fn mul_basepoint(scalar: T::Scalar) -> T::Point {
+            Self::basepoint() * scalar
+        }
 
         #[cfg(feature = "alloc")]
         fn batch_decode_points(

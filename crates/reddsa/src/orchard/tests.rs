@@ -7,12 +7,34 @@ use rand::rng as thread_rng;
 #[cfg(feature = "pallas-pasta")]
 use group::{
     Group as _, GroupEncoding as _,
-    ff::{Field as _, PrimeField as _},
+    ff::{Field as _, FromUniformBytes as _, PrimeField as _},
 };
 #[cfg(feature = "pallas-pasta")]
 use pasta_curves::{arithmetic::CurveExt as _, pallas};
 #[cfg(feature = "pallas-sensei")]
 use sensei::primitives::pallas;
+
+#[cfg(feature = "pallas-pasta")]
+proptest::proptest! {
+    #[test]
+    fn prepared_signature_bases_match_native_ladder(
+        bytes in proptest::array::uniform32(proptest::prelude::any::<u8>()),
+    ) {
+        use crate::{backend::Point as _, private::Sealed};
+        let mut wide = [0; 64];
+        wide[..bytes.len()].copy_from_slice(&bytes);
+        let random = pallas::Scalar::from_uniform_bytes(&wide);
+
+        for scalar in [pallas::Scalar::ZERO, pallas::Scalar::ONE, -pallas::Scalar::ONE, random] {
+            let spend = super::SpendAuth::basepoint();
+            let binding = super::Binding::basepoint();
+            proptest::prop_assert_eq!(super::SpendAuth::mul_basepoint(scalar), spend * scalar);
+            proptest::prop_assert_eq!(super::Binding::mul_basepoint(scalar), binding * scalar);
+            proptest::prop_assert_eq!(spend.multiply(scalar), spend * scalar);
+            proptest::prop_assert_eq!(pallas::Point::identity().multiply(scalar), pallas::Point::identity());
+        }
+    }
+}
 
 #[test]
 fn orchard_spendauth_basepoint() {

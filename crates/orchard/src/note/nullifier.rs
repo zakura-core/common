@@ -82,10 +82,15 @@ impl Nullifier {
         psi: pallas::Base,
         cm: NoteCommitment,
     ) -> Self {
-        let k = pallas::Point::hash_to_curve("z.cash:Orchard")(b"K");
+        use crate::backend::pasta_curves::glv::Table;
+        use crate::constants::fixed_bases::nullifier_k;
+        use crate::once::OnceTable;
+
+        static K: OnceTable<Table<pallas::Point>> = OnceTable::new();
+        let k = K.get_or_init(|| Table::new(&nullifier_k::generator().to_curve()));
 
         Nullifier(extract_p(
-            &(k * crate::spec::mod_r_p(nk.prf_nf(rho) + psi) + cm.0),
+            &(k.mul(&crate::spec::mod_r_p(nk.prf_nf(rho) + psi)) + cm.0),
         ))
     }
 }

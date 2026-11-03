@@ -117,6 +117,11 @@ harness = false
 required-features = ["test-dependencies", "zip32-addresses"]
 
 [[bench]]
+name = "legacy_scalar_mul"
+harness = false
+required-features = ["backend-halo2", "wallet", "zip32-addresses"]
+
+[[bench]]
 name = "merkle"
 harness = false
 required-features = ["test-dependencies"]

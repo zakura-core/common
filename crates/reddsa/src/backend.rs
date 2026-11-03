@@ -24,6 +24,11 @@ pub trait Point<S>:
     fn from_bytes(bytes: &[u8; 32]) -> Option<Self>;
     fn to_bytes(&self) -> [u8; 32];
     fn is_small_order(&self) -> bool;
+
+    /// Multiplies using the selected backend's timing policy.
+    fn multiply(&self, scalar: S) -> Self {
+        *self * scalar
+    }
 }
 
 impl Scalar for jubjub::Scalar {
@@ -108,5 +113,10 @@ impl Point<pasta_curves::pallas::Scalar> for pasta_curves::pallas::Point {
     }
     fn is_small_order(&self) -> bool {
         <Self as group::Group>::is_identity(self).into()
+    }
+
+    fn multiply(&self, scalar: pasta_curves::pallas::Scalar) -> Self {
+        use pasta_curves::glv::GlvParams;
+        self.mul_glv(&scalar)
     }
 }

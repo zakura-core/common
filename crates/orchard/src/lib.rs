@@ -24,6 +24,10 @@
 //! that chain and selects the backend, plus the capabilities it needs, at
 //! each crate. `--all-features` is unsupported because the backends conflict.
 //!
+//! Both backends use variable-time arithmetic for wallet primitives, including
+//! value commitments, nullifier derivation, and RedPallas signing. These
+//! operations provide no constant-time guarantee for secret inputs.
+//!
 //! ## Proof capabilities
 //!
 //! `prover` and `verifier` independently enable proof creation and

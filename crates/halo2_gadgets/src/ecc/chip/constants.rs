@@ -34,10 +34,16 @@ pub(crate) const T_Q: u128 = 45560315531506369815346746415080538113;
 /// <https://github.com/zcash/pasta>
 pub(crate) const T_P: u128 = 45560315531419706090280762371685220353;
 
+/// Four-bit WNAF retains eight odd multiples for the public window scalars.
+const WINDOW_TABLE_WNAF_WINDOW: usize = 4;
+
 /// For each fixed base, we calculate its scalar multiples in three-bit windows.
 /// Each window will have $2^3 = 8$ points. The tables are computed as described in
 /// [the Halo 2 book](https://zcash.github.io/halo2/design/gadgets/ecc/fixed-base-scalar-mul.html#load-fixed-base).
 fn compute_window_table<C: CurveAffine>(base: C, num_windows: usize) -> Vec<[C; H]> {
+    // All window scalars are public. Reuse a variable-time multiplication
+    // table instead of rebuilding a full-width ladder for every entry.
+    let base = group::WnafBase::<C::Curve, WINDOW_TABLE_WNAF_WINDOW>::new(base.to_curve());
     let mut window_table: Vec<[C; H]> = Vec::with_capacity(num_windows);
     let h = C::Scalar::from(H as u64);
     let mut window_scale = C::Scalar::ONE;
@@ -51,7 +57,7 @@ fn compute_window_table<C: CurveAffine>(base: C, num_windows: usize) -> Vec<[C; 
                 .map(|k| {
                     // scalar = (k+2)*(8^w)
                     let scalar = C::Scalar::from(k as u64 + 2) * window_scale;
-                    (base * scalar).to_affine()
+                    (&base * &group::WnafScalar::new(&scalar)).to_affine()
                 })
                 .collect::<ArrayVec<C, H>>()
                 .into_inner()
@@ -74,7 +80,7 @@ fn compute_window_table<C: CurveAffine>(base: C, num_windows: usize) -> Vec<[C; 
             .map(|k| {
                 // scalar = k * (2^3)^w - sum, where w = `num_windows - 1`
                 let scalar = C::Scalar::from(k as u64) * window_scale - sum;
-                (base * scalar).to_affine()
+                (&base * &group::WnafScalar::new(&scalar)).to_affine()
             })
             .collect::<ArrayVec<C, H>>()
             .into_inner()

@@ -3,6 +3,10 @@
 //! With `pallas-sensei`, Pallas operations use Sensei/Udon variable-time
 //! arithmetic. Secret-key operations have the timing assumptions documented
 //! by that implementation’s RedPallas module.
+//!
+//! With `pallas-pasta`, signing, key derivation, and key randomization also use
+//! variable-time arithmetic, including for secret scalars. Callers must accept
+//! timing leakage from these operations.
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -19,6 +23,38 @@ use pasta_curves::pallas;
 use sensei::primitives::pallas;
 
 use crate::{SigType, private};
+
+#[cfg(feature = "pallas-pasta")]
+struct Basepoint {
+    #[cfg(target_has_atomic = "ptr")]
+    table: once_cell::race::OnceBox<pasta_curves::glv::Table<pallas::Point>>,
+}
+
+#[cfg(feature = "pallas-pasta")]
+impl Basepoint {
+    const fn new() -> Self {
+        Self {
+            #[cfg(target_has_atomic = "ptr")]
+            table: once_cell::race::OnceBox::new(),
+        }
+    }
+
+    fn multiply(&self, basepoint: fn() -> pallas::Point, scalar: pallas::Scalar) -> pallas::Point {
+        #[cfg(target_has_atomic = "ptr")]
+        {
+            use alloc::boxed::Box;
+            use pasta_curves::glv::Table;
+            self.table
+                .get_or_init(|| Box::new(Table::new(&basepoint())))
+                .mul(&scalar)
+        }
+        #[cfg(not(target_has_atomic = "ptr"))]
+        {
+            use pasta_curves::glv::GlvParams;
+            basepoint().mul_glv(&scalar)
+        }
+    }
+}
 
 #[cfg(feature = "alloc")]
 use crate::scalar_mul::{LookupTable5, NonAdjacentForm, VartimeMultiscalarMul};
@@ -74,6 +110,12 @@ impl private::Sealed<SpendAuth> for SpendAuth {
     fn basepoint() -> pallas::Point {
         pallas::Point::from_bytes(&ORCHARD_SPENDAUTHSIG_BASEPOINT_BYTES).unwrap()
     }
+
+    #[cfg(feature = "pallas-pasta")]
+    fn mul_basepoint(scalar: pallas::Scalar) -> pallas::Point {
+        static BASE: Basepoint = Basepoint::new();
+        BASE.multiply(Self::basepoint, scalar)
+    }
 }
 impl private::Sealed<Binding> for Binding {
     const H_STAR_PERSONALIZATION: &'static [u8; 16] = b"Zcash_RedPallasH";
@@ -82,6 +124,12 @@ impl private::Sealed<Binding> for Binding {
 
     fn basepoint() -> pallas::Point {
         pallas::Point::from_bytes(&ORCHARD_BINDINGSIG_BASEPOINT_BYTES).unwrap()
+    }
+
+    #[cfg(feature = "pallas-pasta")]
+    fn mul_basepoint(scalar: pallas::Scalar) -> pallas::Point {
+        static BASE: Basepoint = Basepoint::new();
+        BASE.multiply(Self::basepoint, scalar)
     }
 }
 

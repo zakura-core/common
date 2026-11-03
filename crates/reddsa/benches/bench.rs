@@ -91,5 +91,38 @@ fn bench_batch_verify(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "pallas-pasta")]
+fn bench_redpallas(c: &mut Criterion) {
+    use std::hint::black_box;
+
+    /// A canonical nonzero signing scalar for the benchmark fixture.
+    const KEY_BYTES: [u8; 32] = [7; 32];
+    /// Key randomization uses a separate canonical scalar.
+    const RANDOMIZER: u64 = 50_000;
+    /// The signed message stays fixed while signing samples fresh nonce input.
+    const MESSAGE: &[u8] = b"RedPallas scalar multiplication benchmark";
+
+    let sk = SigningKey::<orchard::SpendAuth>::try_from(KEY_BYTES).unwrap();
+    let pk = VerificationKey::from(&sk);
+    let randomizer = pasta_curves::pallas::Scalar::from(RANDOMIZER);
+    let mut rng = thread_rng();
+    black_box(sk.sign(&mut rng, MESSAGE));
+
+    let mut group = c.benchmark_group("redpallas");
+    group.bench_function("derive_key", |b| {
+        b.iter(|| SigningKey::<orchard::SpendAuth>::try_from(black_box(KEY_BYTES)).unwrap())
+    });
+    group.bench_function("sign", |b| {
+        b.iter(|| black_box(&sk).sign(&mut rng, black_box(MESSAGE)))
+    });
+    group.bench_function("randomize_key", |b| {
+        b.iter(|| black_box(&pk).randomize(black_box(&randomizer)))
+    });
+    group.finish();
+}
+
+#[cfg(feature = "pallas-pasta")]
+criterion_group!(benches, bench_batch_verify, bench_redpallas);
+#[cfg(not(feature = "pallas-pasta"))]
 criterion_group!(benches, bench_batch_verify);
 criterion_main!(benches);

@@ -126,7 +126,7 @@ impl<T: SpendAuth> VerificationKey<T> {
     ///
     /// Randomization is only supported for `SpendAuth` keys.
     pub fn randomize(&self, randomizer: &Randomizer<T>) -> VerificationKey<T> {
-        let point = self.point + (T::basepoint() * *randomizer);
+        let point = self.point + T::mul_basepoint(*randomizer);
         let bytes = VerificationKeyBytes {
             bytes: point.to_bytes().as_ref().try_into().unwrap(),
             _marker: PhantomData,
@@ -137,7 +137,7 @@ impl<T: SpendAuth> VerificationKey<T> {
 
 impl<T: SigType> VerificationKey<T> {
     pub(crate) fn from(s: &T::Scalar) -> VerificationKey<T> {
-        let point = T::basepoint() * *s;
+        let point = T::mul_basepoint(*s);
         let bytes = VerificationKeyBytes {
             bytes: point.to_bytes().as_ref().try_into().unwrap(),
             _marker: PhantomData,
@@ -192,8 +192,8 @@ impl<T: SigType> VerificationKey<T> {
         };
         #[cfg(not(feature = "alloc"))]
         let check = {
-            let sB = T::basepoint() * s;
-            let cA = self.point * c;
+            let sB = T::mul_basepoint(s);
+            let cA = self.point.multiply(c);
             sB - cA - r
         };
 
