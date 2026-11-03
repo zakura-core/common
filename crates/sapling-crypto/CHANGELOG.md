@@ -10,6 +10,26 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-11-03
+
+### Changed
+
+- `CommitmentSum::into_bvk` multiplies by the value balance in variable time
+  over only the balance's significant bits, instead of a constant-time
+  multiplication by a full-width scalar. The value balance is public
+  transaction data ([#673](https://github.com/zakura-core/common/pull/673)).
+- `CommitmentSum::into_bvk` retains the computed binding verification key's
+  point instead of serializing and decoding it, avoiding a redundant field
+  inversion and square root
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+- Batch validation retains the derived binding verification key through the
+  signature queue, avoiding a second redundant decode during verification
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+- Spend preparation reuses the stored randomized verification-key point for
+  affine coordinates and the existing small-order check, and signature
+  batching retains the key instead of decoding it again
+  ([#677](https://github.com/zakura-core/common/pull/677)).
+
 ## [5.0.0] - 2026-11-02
 
 ### Added

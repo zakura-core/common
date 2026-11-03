@@ -10,6 +10,30 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-11-03
+
+### Added
+
+- Added `ValueCommitment::derive_public`, the commitment to a public value with
+  a zero trapdoor. It runs in variable time with respect to the value, so it
+  must only be given public values such as a bundle's value balance
+  ([#672](https://github.com/zakura-core/common/pull/672)).
+
+### Changed
+
+- `Bundle::binding_validating_key` and the builder and PCZT IO finalizer
+  binding keys derive the value-balance commitment with
+  `ValueCommitment::derive_public`. This drops a multiplication by the zero
+  trapdoor and, on the halo2 backend, multiplies only over the value's
+  significant bits ([#672](https://github.com/zakura-core/common/pull/672)).
+- On the halo2 backend, `ValueCommitment::derive` reads the value-commitment
+  generators from precomputed constants instead of hashing to the curve on
+  every call ([#672](https://github.com/zakura-core/common/pull/672)).
+- The legacy/Halo2 backend retains computed binding-key points and already
+  decoded binding and spend authorization keys through signature batching,
+  avoiding redundant point decoding for Orchard and Ironwood
+  ([#676](https://github.com/zakura-core/common/pull/676)).
+
 ## [5.0.0] - 2026-11-02
 
 ### Added

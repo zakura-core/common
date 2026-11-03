@@ -10,6 +10,29 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-11-03
+
+### Added
+
+- Added `From<jubjub::ExtendedPoint>` for `VerificationKey<Binding>` to retain
+  an existing valid point and derive its canonical encoding without decoding
+  it again ([#675](https://github.com/zakura-core/common/pull/675)).
+- Added `batch::Item::from_binding_key` to retain a binding verification key's
+  point through batch and fallback verification instead of decoding it again
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+- Added `From<VerificationKey<SpendAuth>> for jubjub::AffinePoint` to expose
+  a spend authorization key's normalized point without decoding it again
+  ([#677](https://github.com/zakura-core/common/pull/677)).
+- Added `batch::Item::from_spendauth_key` to retain an existing spend key
+  through batch and fallback signature verification
+  ([#677](https://github.com/zakura-core/common/pull/677)).
+
+### Changed
+
+- Corrected verification-key documentation to reflect the existing acceptance
+  of identity and other small-order keys during byte decoding
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed
