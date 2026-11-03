@@ -271,6 +271,7 @@ mod tests {
         ValueSum,
         testing::{arb_note_value_bounded, arb_trapdoor},
     };
+    use crate::constants::VALUE_COMMITMENT_VALUE_GENERATOR;
 
     /// The rule transaction parsing applied before value commitments were held as bytes: a
     /// canonical (ZIP 216) encoding of a Jubjub point that is not of small order.
@@ -431,6 +432,51 @@ mod tests {
                 .into_bvk(value_balance);
 
             assert_eq!(redjubjub::VerificationKey::from(&bsk), bvk);
+        }
+
+        #[test]
+        fn into_bvk_matches_constant_time_product(
+            value_balance in any::<i64>(),
+            value in arb_note_value_bounded(u64::MAX),
+            rcv in arb_trapdoor(),
+        ) {
+            let cv = ValueCommitment::derive(value, rcv);
+            let sum = CommitmentSum::try_sum([&cv]).expect("a derived commitment is a valid point");
+            assert_eq!(
+                <[u8; 32]>::from(sum.into_bvk(value_balance)),
+                constant_time_bvk(&cv, value_balance),
+            );
+        }
+    }
+
+    /// The constant-time `CommitmentSum::into_bvk` formula for a single commitment, as a
+    /// reference.
+    fn constant_time_bvk(cv: &ValueCommitment, value: i64) -> [u8; 32] {
+        let magnitude = jubjub::Scalar::from(value.unsigned_abs());
+        let scalar = if value.is_negative() {
+            -magnitude
+        } else {
+            magnitude
+        };
+        let point = cv
+            .try_point()
+            .expect("a derived commitment is a valid point");
+        (point - VALUE_COMMITMENT_VALUE_GENERATOR * scalar).to_bytes()
+    }
+
+    #[test]
+    fn into_bvk_matches_constant_time_product_at_range_edges() {
+        let cv = ValueCommitment::derive(
+            NoteValue::from_raw(7),
+            ValueCommitTrapdoor(jubjub::Scalar::from(11u64)),
+        );
+        let sum = CommitmentSum::try_sum([&cv]).expect("a derived commitment is a valid point");
+        for value in [0, 1, -1, 2, -2, i64::MAX, i64::MIN, i64::MIN + 1] {
+            assert_eq!(
+                <[u8; 32]>::from(sum.into_bvk(value)),
+                constant_time_bvk(&cv, value),
+                "value {value}",
+            );
         }
     }
 }

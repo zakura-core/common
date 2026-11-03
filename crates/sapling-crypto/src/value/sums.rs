@@ -198,24 +198,37 @@ impl CommitmentSum {
     /// Transform this value commitment sum into the corresponding RedJubjub public key.
     ///
     /// This is public for access by `zcash_proofs`.
+    ///
+    /// # Security
+    ///
+    /// This runs in variable time with respect to `value_balance`, which is public
+    /// transaction data.
     pub fn into_bvk<V: Into<i64>>(self, value_balance: V) -> redjubjub::VerificationKey<Binding> {
         let value: i64 = value_balance.into();
+        let magnitude = value.unsigned_abs();
 
-        // Compute the absolute value.
-        let abs_value = match value.checked_abs() {
-            Some(v) => u64::try_from(v).expect("v is non-negative"),
-            None => 1u64 << 63,
-        };
-
-        // Construct the field representation of the signed value.
-        let value_balance = if value.is_negative() {
-            -jubjub::Scalar::from(abs_value)
-        } else {
-            jubjub::Scalar::from(abs_value)
-        };
+        // [|value_balance|] V by double-and-add over only the magnitude's significant
+        // bits, adding the generator only at set bits. A negative balance flips the
+        // final subtraction rather than multiplying by a full-width negated scalar.
+        let generator = jubjub::ExtendedPoint::from(VALUE_COMMITMENT_VALUE_GENERATOR).to_niels();
+        let product = (0..u64::BITS - magnitude.leading_zeros()).rev().fold(
+            jubjub::ExtendedPoint::identity(),
+            |acc, bit| {
+                let acc = acc.double();
+                if (magnitude >> bit) & 1 == 1 {
+                    acc + generator
+                } else {
+                    acc
+                }
+            },
+        );
 
         // Subtract `value_balance` from the sum to get the final bvk.
-        let bvk = self.0 - VALUE_COMMITMENT_VALUE_GENERATOR * value_balance;
+        let bvk = if value.is_negative() {
+            self.0 + product
+        } else {
+            self.0 - product
+        };
 
         redjubjub::VerificationKey::try_from(bvk.to_bytes())
             .expect("valid points are valid verification keys")
