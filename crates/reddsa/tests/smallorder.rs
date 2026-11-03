@@ -22,3 +22,12 @@ fn smallorder_publickey_passes() {
     let pk_bytes = VerificationKeyBytes::<sapling::SpendAuth>::from(bytes);
     assert!(VerificationKey::<sapling::SpendAuth>::try_from(pk_bytes).is_ok());
 }
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "binding verification key point must match its encoding")]
+fn binding_key_rejects_unchecked_off_curve_point_in_debug_builds() {
+    let invalid =
+        jubjub::ExtendedPoint::from(AffinePoint::from_raw_unchecked(Fq::one(), Fq::zero()));
+    let _ = VerificationKey::<sapling::Binding>::from(invalid);
+}

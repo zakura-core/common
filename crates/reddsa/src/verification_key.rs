@@ -83,13 +83,19 @@ impl From<jubjub::ExtendedPoint> for VerificationKey<crate::sapling::Binding> {
     /// it again. Identity and other small-order points are accepted, as with
     /// decoding [`VerificationKeyBytes`].
     ///
-    /// The point must satisfy Jubjub's curve invariants; this does not validate
-    /// coordinates supplied through unchecked point constructors.
+    /// The point must satisfy Jubjub's curve invariants. Release builds do not
+    /// validate coordinates supplied through unchecked point constructors.
+    /// Debug builds check that decoding the encoding recovers the same point.
     fn from(point: jubjub::ExtendedPoint) -> Self {
         let bytes = VerificationKeyBytes {
             bytes: point.to_bytes(),
             _marker: PhantomData,
         };
+        debug_assert_eq!(
+            jubjub::ExtendedPoint::from_bytes(&bytes.bytes),
+            Some(point),
+            "binding verification key point must match its encoding",
+        );
         Self { point, bytes }
     }
 }

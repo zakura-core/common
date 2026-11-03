@@ -61,8 +61,9 @@ impl From<jubjub::ExtendedPoint> for VerificationKey<crate::Binding> {
     /// it again. Identity and other small-order points are accepted, as with
     /// decoding [`VerificationKeyBytes`].
     ///
-    /// The point must satisfy Jubjub's curve invariants; this does not validate
-    /// coordinates supplied through unchecked point constructors.
+    /// The point must satisfy Jubjub's curve invariants. Release builds do not
+    /// validate coordinates supplied through unchecked point constructors.
+    /// Debug builds check that decoding the encoding recovers the same point.
     fn from(point: jubjub::ExtendedPoint) -> Self {
         Self(reddsa::VerificationKey::from(point))
     }
