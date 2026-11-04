@@ -159,7 +159,7 @@ impl<'a> BatchValidator<'a> {
             let statements: Vec<Vec<_>> = self
                 .proofs
                 .iter()
-                .map(|(_, instances)| instances.iter().map(Instance::native).collect())
+                .map(|(_, instances)| Instance::natives(instances))
                 .collect();
             let requests = self
                 .proofs

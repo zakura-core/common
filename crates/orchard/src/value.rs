@@ -433,7 +433,6 @@ impl ValueCommitment {
     }
 
     /// The committed Pallas point.
-    #[cfg(feature = "backend-halo2")]
     pub(crate) fn point(&self) -> pallas::Point {
         self.0
     }
