@@ -127,7 +127,7 @@ impl private::Sealed<Binding> for Binding {
 #[cfg(all(feature = "alloc", feature = "pallas-pasta", feature = "multicore"))]
 const MIN_PARALLEL_DECODE_POINTS: usize = 16;
 
-/// Encodings per parallel task: one full batch of the decoder's lanes.
+/// The most encodings per parallel task: one full batch of the decoder's lanes.
 #[cfg(all(feature = "alloc", feature = "pallas-pasta", feature = "multicore"))]
 const DECODE_LANES: usize = 8;
 
@@ -138,7 +138,8 @@ const DECODE_LANES: usize = 8;
 /// which computes several square roots at once. With the `multicore` feature,
 /// a pool of two or more threads, and at least
 /// [`MIN_PARALLEL_DECODE_POINTS`] encodings, the batch is also split across
-/// the pool, one task per [`DECODE_LANES`] encodings.
+/// the pool in tasks of at most [`DECODE_LANES`] encodings, sized so every
+/// worker gets a share.
 /// Results are returned in input order, each equal to `from_bytes` of its
 /// encoding, and consumed in the verifier's order, so a batch with a
 /// malformed encoding reports the same error as decoding one at a time.
@@ -160,13 +161,15 @@ fn batch_decode_pallas_points(
     {
         use maybe_rayon::prelude::*;
 
-        if maybe_rayon::current_num_threads() >= 2 && encodings.len() >= MIN_PARALLEL_DECODE_POINTS
-        {
-            // One decoder batch per task keeps every worker busy; each task is
-            // tens of microseconds, far above the pool's scheduling cost.
+        let threads = maybe_rayon::current_num_threads();
+        if threads >= 2 && encodings.len() >= MIN_PARALLEL_DECODE_POINTS {
+            // Give every worker a share, batching up to the decoder's lanes:
+            // a full batch when there are enough encodings per worker, and
+            // smaller ones otherwise, so no worker idles behind a large batch.
+            let chunk = encodings.len().div_ceil(threads).clamp(1, DECODE_LANES);
             return Some(
                 encodings
-                    .par_chunks(DECODE_LANES)
+                    .par_chunks(chunk)
                     .map(decode)
                     .collect::<Vec<_>>()
                     .concat(),
