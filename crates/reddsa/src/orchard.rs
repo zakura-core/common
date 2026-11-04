@@ -127,6 +127,10 @@ impl private::Sealed<Binding> for Binding {
 #[cfg(all(feature = "alloc", feature = "pallas-pasta", feature = "multicore"))]
 const MIN_PARALLEL_DECODE_POINTS: usize = 16;
 
+/// Encodings per parallel task: one full batch of the decoder's lanes.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta", feature = "multicore"))]
+const DECODE_LANES: usize = 8;
+
 /// Decodes a batch's point encodings (each signature's `R`, plus any keys
 /// still held as bytes) together.
 ///
@@ -134,7 +138,7 @@ const MIN_PARALLEL_DECODE_POINTS: usize = 16;
 /// which computes several square roots at once. With the `multicore` feature,
 /// a pool of two or more threads, and at least
 /// [`MIN_PARALLEL_DECODE_POINTS`] encodings, the batch is also split across
-/// the pool in chunks that are multiples of the decoder's eight lanes.
+/// the pool, one task per [`DECODE_LANES`] encodings.
 /// Results are returned in input order, each equal to `from_bytes` of its
 /// encoding, and consumed in the verifier's order, so a batch with a
 /// malformed encoding reports the same error as decoding one at a time.
@@ -156,12 +160,13 @@ fn batch_decode_pallas_points(
     {
         use maybe_rayon::prelude::*;
 
-        let threads = maybe_rayon::current_num_threads();
-        if threads >= 2 && encodings.len() >= MIN_PARALLEL_DECODE_POINTS {
-            let chunk = encodings.len().div_ceil(threads).next_multiple_of(8);
+        if maybe_rayon::current_num_threads() >= 2 && encodings.len() >= MIN_PARALLEL_DECODE_POINTS
+        {
+            // One decoder batch per task keeps every worker busy; each task is
+            // tens of microseconds, far above the pool's scheduling cost.
             return Some(
                 encodings
-                    .par_chunks(chunk)
+                    .par_chunks(DECODE_LANES)
                     .map(decode)
                     .collect::<Vec<_>>()
                     .concat(),
