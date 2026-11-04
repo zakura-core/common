@@ -98,6 +98,9 @@ pub mod zero;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 mod zero;
 
+mod fixed_base;
+pub(super) use fixed_base::prepare_fixed_base_sum;
+
 mod private {
     use crate::arithmetic::CurveExt;
 

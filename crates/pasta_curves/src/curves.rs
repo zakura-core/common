@@ -126,6 +126,13 @@ macro_rules! impl_prepare_zero_check {
         ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<Self>>> {
             crate::glv::prepare_zero_check::<$name>(bases)
         }
+
+        #[cfg(feature = "glv")]
+        fn try_prepare_fixed_base_sum(
+            bases: &[Self::AffineExt],
+        ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedFixedBaseSum<Self>>> {
+            Some(crate::glv::prepare_fixed_base_sum::<$name>(bases))
+        }
     };
     (native, $name:ident) => {};
 }
