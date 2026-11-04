@@ -13,8 +13,37 @@ compile_error!(
 
 pub use maybe_rayon::{
     iter::{IntoParallelIterator, ParallelIterator},
-    join, scope,
+    scope,
 };
+
+/// Runs `a` and `b`, potentially in parallel, and returns both results, like
+/// `rayon::join`.
+///
+/// The tasks are called through `&mut dyn FnMut`, so rayon's join machinery is
+/// compiled once for all callers, rather than once per pair of closure types. That
+/// costs two indirect calls per join, which is negligible for the coarse tasks halo2
+/// joins: whole polynomials, columns, and FFT halves above a fixed recursion depth.
+pub fn join<A, B, RA, RB>(a: A, b: B) -> (RA, RB)
+where
+    A: FnOnce() -> RA + Send,
+    B: FnOnce() -> RB + Send,
+    RA: Send,
+    RB: Send,
+{
+    let (mut a, mut a_result) = (Some(a), None);
+    let (mut b, mut b_result) = (Some(b), None);
+    join_dyn(&mut || a_result = a.take().map(|a| a()), &mut || {
+        b_result = b.take().map(|b| b())
+    });
+    (
+        a_result.expect("join_dyn runs each task once, or propagates its panic"),
+        b_result.expect("join_dyn runs each task once, or propagates its panic"),
+    )
+}
+
+fn join_dyn(a: &mut (dyn FnMut() + Send), b: &mut (dyn FnMut() + Send)) {
+    maybe_rayon::join(a, b);
+}
 
 #[cfg(feature = "multicore")]
 pub use maybe_rayon::{current_num_threads, iter::IndexedParallelIterator};
