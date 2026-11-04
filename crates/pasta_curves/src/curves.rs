@@ -881,8 +881,9 @@ macro_rules! new_curve_impl {
             /// [`GroupEncoding::from_bytes`].
             ///
             /// Decoding is dominated by one square root per point. This computes
-            /// the square roots of up to eight points together: on x86-64 builds
-            /// with the `avx2` target feature they run four per vector register;
+            /// the square roots of up to eight points together: on x86-64, when
+            /// the x86-64 field backend is selected (BMI2 and ADX, which imply
+            /// AVX2) or the target enables AVX2, they run four per AVX2 register;
             /// elsewhere their scalar dependency chains are interleaved. For
             /// batches of two or more points this is faster than decoding each
             /// point separately.
@@ -902,7 +903,7 @@ macro_rules! new_curve_impl {
                 // Pad a short final chunk only up to a vector width; scalar
                 // lanes cost about as much per lane as a separate decode.
                 let rest = chunks.remainder();
-                #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+                #[cfg(pasta_curves_avx2)]
                 match rest.len() {
                     0 => {}
                     1 => out.push(Self::from_bytes(&rest[0])),
@@ -910,7 +911,7 @@ macro_rules! new_curve_impl {
                     3 | 4 => Self::decode_chunk::<4>(rest, &mut out),
                     _ => Self::decode_chunk::<8>(rest, &mut out),
                 }
-                #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+                #[cfg(not(pasta_curves_avx2))]
                 match rest.len() {
                     0 => {}
                     1 => out.push(Self::from_bytes(&rest[0])),
@@ -963,7 +964,7 @@ macro_rules! new_curve_impl {
             /// `sqrt_alt` of `K` independent values.
             #[inline(always)]
             fn square_roots<const K: usize>(rhs: &[$base; K]) -> [(Choice, $base); K] {
-                #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+                #[cfg(pasta_curves_avx2)]
                 {
                     if K == 4 {
                         let rhs: &[$base; 4] = rhs[..].try_into().unwrap();

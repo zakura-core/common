@@ -1110,86 +1110,65 @@ impl Fq {
     }
 }
 
-#[cfg(all(
-    feature = "sqrt-table",
-    target_arch = "x86_64",
-    target_feature = "avx2"
-))]
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
 impl crate::arithmetic::avx2_sqrt::Avx2Chain for Fq {
     fn limbs(&self) -> [u64; 4] {
         self.0
     }
-    fn from_limbs(limbs: [u64; 4]) -> Self {
-        Fq(limbs)
+
+    fn from_limbs_lazy(limbs: [u64; 4]) -> Self {
+        Fq(portable::canonicalize(&limbs, &MODULUS.0))
     }
-    fn canonical_limbs(limbs: [u64; 4]) -> [u64; 4] {
-        portable::canonicalize(&limbs, &MODULUS.0)
-    }
-    fn c_in() -> [u64; 4] {
-        let e = Fq::from_raw(R.0) * Fq::from(1024);
-        let b = e.to_repr();
-        core::array::from_fn(|i| u64::from_le_bytes(b[8 * i..8 * i + 8].try_into().unwrap()))
-    }
-    fn c_out() -> [u64; 4] {
-        R.0
-    }
-    fn pow_chain<const G: usize>(
-        x: &[crate::arithmetic::avx2_sqrt::V; G],
-    ) -> [crate::arithmetic::avx2_sqrt::V; G] {
-        crate::arithmetic::avx2_sqrt::run_chain::<Self, G>(
-            x,
-            &[
-                (129, 1),
-                (7, 9),
-                (7, 13),
-                (4, 3),
-                (6, 7),
-                (3, 7),
-                (10, 9),
-                (4, 9),
-                (5, 9),
-                (5, 9),
-                (3, 9),
-                (4, 11),
-                (4, 11),
-                (5, 3),
-                (4, 1),
-                (5, 3),
-                (4, 7),
-                (5, 11),
-                (3, 1),
-            ],
-            4,
-        )
-    }
-    #[inline(always)]
-    fn sqr_v(a: &crate::arithmetic::avx2_sqrt::V) -> crate::arithmetic::avx2_sqrt::V {
-        crate::arithmetic::avx2_sqrt::sqr::<
-            { MODULUS.0[0] },
-            { MODULUS.0[1] },
-            { MODULUS.0[2] },
-            { MODULUS.0[3] },
-        >(a)
-    }
-    #[inline(always)]
-    fn mul_v(
-        a: &crate::arithmetic::avx2_sqrt::V,
-        b: &crate::arithmetic::avx2_sqrt::V,
-    ) -> crate::arithmetic::avx2_sqrt::V {
-        crate::arithmetic::avx2_sqrt::mul::<
-            { MODULUS.0[0] },
-            { MODULUS.0[1] },
-            { MODULUS.0[2] },
-            { MODULUS.0[3] },
-        >(a, b)
+
+    // The one call into AVX2 code; `unused_unsafe` when AVX2 is enabled for
+    // the whole build.
+    #[allow(unsafe_code, unused_unsafe)]
+    fn sqrt_chain<const G: usize>(
+        u: &crate::arithmetic::avx2_sqrt::Lanes<G>,
+    ) -> [crate::arithmetic::avx2_sqrt::Lanes<G>; 5] {
+        // The addition chain of `pow_by_t_minus1_over2`, as (squarings, power).
+        const STEPS: &[(u32, u32)] = &[
+            (129, 1),
+            (7, 9),
+            (7, 13),
+            (4, 3),
+            (6, 7),
+            (3, 7),
+            (10, 9),
+            (4, 9),
+            (5, 9),
+            (5, 9),
+            (3, 9),
+            (4, 11),
+            (4, 11),
+            (5, 3),
+            (4, 1),
+            (5, 3),
+            (4, 7),
+            (5, 11),
+            (3, 1),
+        ];
+        // 2^266 mod p: R' = 2^261 squared, divided by R = 2^256.
+        let c_in = (Fq::from_raw(R.0) * Fq::from(1 << 10)).to_repr();
+        let c_in = core::array::from_fn(|i| {
+            u64::from_le_bytes(c_in[8 * i..8 * i + 8].try_into().unwrap())
+        });
+        // SAFETY: `pasta_curves_avx2` is set only for builds that target AVX2 or
+        // select the x86-64 backend, whose BMI2 and ADX requirement implies AVX2
+        // on every Intel and AMD CPU (see the `avx2_sqrt` module docs).
+        unsafe {
+            crate::arithmetic::avx2_sqrt::sqrt_chain::<
+                { MODULUS.0[0] },
+                { MODULUS.0[1] },
+                { MODULUS.0[2] },
+                { MODULUS.0[3] },
+                G,
+            >(u, &c_in, &R.0, STEPS, 4)
+        }
     }
 }
 
-#[cfg(all(
-    feature = "sqrt-table",
-    target_arch = "x86_64",
-    target_feature = "avx2"
-))]
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
 impl Fq {
     /// `sqrt_alt` of `N = 4 * G` values, exponentiating in four-way AVX2 lanes.
     pub(crate) fn sqrt_alt_avx2<const G: usize, const N: usize>(

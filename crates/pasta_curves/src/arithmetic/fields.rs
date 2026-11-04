@@ -322,31 +322,19 @@ impl<F: SqrtTableHelpers> SqrtTables<F> {
 
     /// [`Self::sqrt_alt`] of `N = 4 * G` values, with the exponentiation in
     /// four-way AVX2 lanes. The table-driven finish stays scalar.
-    #[cfg(all(
-        feature = "sqrt-table",
-        target_arch = "x86_64",
-        target_feature = "avx2"
-    ))]
+    #[cfg(pasta_curves_avx2)]
     pub fn sqrt_alt_avx2<const G: usize, const N: usize>(&self, u: &[F; N]) -> [(Choice, F); N]
     where
         F: super::avx2_sqrt::Avx2Chain,
     {
-        use super::avx2_sqrt::{enter, leave, mul_g, pack, sqr_n};
         assert_eq!(N, 4 * G);
-        let c_in = pack(&[F::c_in(); 4]);
-        let c_out = pack(&[F::c_out(); 4]);
-        let x = enter::<F, G>(u, &c_in);
-        let v = F::pow_chain::<G>(&x);
-        let uv = mul_g::<F, G>(&x, &v);
-        let x3 = mul_g::<F, G>(&uv, &v);
-        let x2 = sqr_n::<F, G>(&x3, 8);
-        let x1 = sqr_n::<F, G>(&x2, 8);
-        let x0 = sqr_n::<F, G>(&x1, 8);
-        let mut s = [[F::ZERO; N]; 5];
-        for (dst, src) in s.iter_mut().zip([&uv, &x0, &x1, &x2, &x3]) {
-            leave::<F, G>(src, &c_out, dst);
+        let mut lanes = [[[0u64; 4]; 4]; G];
+        for (k, u) in u.iter().enumerate() {
+            lanes[k / 4][k % 4] = u.limbs();
         }
-        let [uv, x0, x1, x2, x3] = s;
+        let out = F::sqrt_chain::<G>(&lanes);
+        let [uv, x0, x1, x2, x3] =
+            out.map(|v| core::array::from_fn::<F, N, _>(|k| F::from_limbs_lazy(v[k / 4][k % 4])));
         core::array::from_fn(|k| {
             let res = self.sqrt_finish(&uv[k], &x0[k], &x1[k], &x2[k], &x3[k]);
             let sq = res.square();

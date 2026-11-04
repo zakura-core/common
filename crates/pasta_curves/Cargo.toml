@@ -52,7 +52,9 @@ portable = []
 # The backend is automatically selected when Rust's target enables both
 # BMI2 and ADX, e.g. with `-C target-cpu=native` on a supporting CPU.
 # This forces the backend on; unsupported CPUs will fault unless `portable`
-# is also enabled.
+# is also enabled. The backend also enables the AVX2 batch square root used by
+# `Affine::batch_from_bytes`: every Intel and AMD CPU with BMI2 and ADX also
+# implements AVX2.
 x86_64-asm = []
 alloc = ["group/alloc", "blake2b_simd"]
 bits = ["ff/bits"]

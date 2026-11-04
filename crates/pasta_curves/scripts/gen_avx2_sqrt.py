@@ -36,11 +36,11 @@ def gen(name, square):
     args = "a: &V" if square else "a: &V, b: &V"
     doc = "Lane-wise Montgomery square." if square else "Lane-wise Montgomery product."
     out.append(f"/// {doc}")
-    out.append("#[inline(always)]")
-    out.append(f"pub(crate) fn {name}<const P0: u64, const P1: u64, const P2: u64, const P3: u64>({args}) -> V {{")
+    out.append('#[target_feature(enable = "avx2")]')
+    out.append("#[inline]")
+    out.append(f"fn {name}<const P0: u64, const P1: u64, const P2: u64, const P3: u64>({args}) -> V {{")
     out.append("    let p = const { pasta_limbs29(&[P0, P1, P2, P3]) };")
-    out.append("    // SAFETY: this module is only compiled with the `avx2` target feature.")
-    out.append("    unsafe {")
+    out.append("    {")
     out.append("        let mask = _mm256_set1_epi64x(MASK as i64);")
     out.append("        let zero = _mm256_setzero_si256();")
     for j in range(1, 5):
