@@ -216,6 +216,16 @@ impl<T: SigType> SigningKey<T> {
     pub fn verification_key(&self) -> VerificationKey<T> {
         self.key
     }
+    /// Returns the key for the negated scalar.
+    ///
+    /// Its verification key is the negation of this key's, obtained by
+    /// negating the stored point rather than by a new scalar multiplication.
+    pub fn negate(&self) -> Self {
+        Self {
+            scalar: self.scalar.neg(),
+            key: VerificationKey::from_point(self.key.point.neg()),
+        }
+    }
     /// Signs arbitrary message bytes with fresh randomness.
     ///
     /// Consumes ten [`RandomSource`] words, each encoded little-endian in draw
@@ -242,6 +252,29 @@ impl SigningKey<SpendAuth> {
     /// verification key with the same scalar.
     pub fn randomize(&self, randomizer: &crate::Fq) -> Self {
         Self::from_scalar(self.scalar.add(&randomizer.native()))
+    }
+    /// Randomizes this key when the randomized verification key is already
+    /// known, skipping the scalar multiplication that [`Self::randomize`]
+    /// performs to derive it.
+    ///
+    /// `randomized_key` must equal [`VerificationKey::randomize`] applied to
+    /// this key's verification key with the same `randomizer`. Otherwise the
+    /// returned key produces signatures that do not verify. Debug builds
+    /// check this.
+    pub fn randomize_with_verification_key(
+        &self,
+        randomizer: &crate::Fq,
+        randomized_key: &VerificationKey<SpendAuth>,
+    ) -> Self {
+        debug_assert_eq!(
+            self.key.randomize(randomizer),
+            *randomized_key,
+            "randomized verification key does not match the randomizer",
+        );
+        Self {
+            scalar: self.scalar.add(&randomizer.native()),
+            key: *randomized_key,
+        }
     }
 }
 impl<T: SigType> TryFrom<[u8; 32]> for SigningKey<T> {

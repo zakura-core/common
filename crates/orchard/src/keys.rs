@@ -147,6 +147,16 @@ impl SpendAuthorizingKey {
     ) -> redpallas::SigningKey<SpendAuth> {
         self.0.randomize(randomizer)
     }
+
+    /// Randomizes this key when the randomized verification key `rk` is
+    /// already known. `rk` must equal `ak` randomized by `randomizer`.
+    pub(crate) fn randomize_with_rk(
+        &self,
+        randomizer: &crate::primitives::redpallas::SpendAuthRandomizer,
+        rk: &redpallas::VerificationKey<SpendAuth>,
+    ) -> redpallas::SigningKey<SpendAuth> {
+        self.0.randomize_with_verification_key(randomizer, rk)
+    }
 }
 
 impl From<&SpendingKey> for SpendAuthorizingKey {
@@ -156,9 +166,10 @@ impl From<&SpendingKey> for SpendAuthorizingKey {
         assert!(!crate::backend::scalar_is_zero(&ask));
         // TODO: Add TryFrom<S::Scalar> for SpendAuthorizingKey.
         let ret = SpendAuthorizingKey(ask.to_repr().try_into().unwrap());
-        // If the last bit of repr_P(ak) is 1, negate ask.
+        // If the last bit of repr_P(ak) is 1, negate ask. Negating the key
+        // also negates its stored ak, so [-ask]G is not recomputed.
         if (<[u8; 32]>::from(SpendValidatingKey::from(&ret).0)[31] >> 7) == 1 {
-            SpendAuthorizingKey((-ask).to_repr().try_into().unwrap())
+            SpendAuthorizingKey(ret.0.negate())
         } else {
             ret
         }

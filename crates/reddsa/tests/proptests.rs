@@ -175,6 +175,66 @@ proptest! {
     }
 }
 
+/// `negate` and `randomize_with_verification_key` must produce exactly the
+/// keys that rebuilding from the scalar would, and those keys must sign.
+fn check_derived_keys<T: SpendAuth>(
+    sk: SigningKey<T>,
+    randomizer: Randomizer<T>,
+    rng: &mut ChaChaRng,
+) {
+    let sk_bytes: [u8; 32] = sk.into();
+
+    let negated = sk.negate();
+    let rebuilt = SigningKey::<T>::try_from(<[u8; 32]>::from(negated)).unwrap();
+    assert_ne!(<[u8; 32]>::from(negated), sk_bytes);
+    assert_eq!(
+        VerificationKey::from(&negated),
+        VerificationKey::from(&rebuilt)
+    );
+    let sig = negated.sign(&mut *rng, b"negated");
+    assert!(
+        VerificationKey::from(&rebuilt)
+            .verify(b"negated", &sig)
+            .is_ok()
+    );
+    assert_eq!(<[u8; 32]>::from(negated.negate()), sk_bytes);
+
+    let rk = VerificationKey::from(&sk).randomize(&randomizer);
+    let expected = sk.randomize(&randomizer);
+    let actual = sk.randomize_with_verification_key(&randomizer, &rk);
+    assert_eq!(<[u8; 32]>::from(actual), <[u8; 32]>::from(expected));
+    assert_eq!(
+        VerificationKey::from(&actual),
+        VerificationKey::from(&expected)
+    );
+    let sig = actual.sign(&mut *rng, b"randomized");
+    assert!(rk.verify(b"randomized", &sig).is_ok());
+}
+
+proptest! {
+    #[test]
+    fn sapling_derived_keys_match_rebuilt(rng_seed in prop::array::uniform32(any::<u8>())) {
+        let mut rng = ChaChaRng::from_seed(rng_seed);
+        let mut bytes = [0; 64];
+        rng.fill_bytes(&mut bytes);
+        let randomizer = jubjub::Scalar::from_bytes_wide(&bytes);
+        let sk = SigningKey::<sapling::SpendAuth>::new(&mut rng);
+        check_derived_keys(sk, randomizer, &mut rng);
+    }
+}
+
+#[cfg(feature = "pallas-pasta")]
+proptest! {
+    #[test]
+    fn orchard_derived_keys_match_rebuilt(rng_seed in prop::array::uniform32(any::<u8>())) {
+        use group::ff::Field;
+        let mut rng = ChaChaRng::from_seed(rng_seed);
+        let randomizer = pasta_curves::pallas::Scalar::random(&mut rng);
+        let sk = SigningKey::<orchard::SpendAuth>::new(&mut rng);
+        check_derived_keys(sk, randomizer, &mut rng);
+    }
+}
+
 #[cfg(feature = "pallas-pasta")]
 proptest! {
     #[test]
