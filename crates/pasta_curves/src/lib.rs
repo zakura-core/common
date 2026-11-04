@@ -21,8 +21,10 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(test)]
-#[macro_use]
+// `multicore` builds run on Rayon, so `std` is present; the GLV MSM keeps
+// per-thread scratch buffers in a `thread_local!`.
+#[cfg(any(test, feature = "multicore"))]
+#[cfg_attr(test, macro_use)]
 extern crate std;
 
 #[macro_use]
