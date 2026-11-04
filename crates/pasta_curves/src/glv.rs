@@ -846,6 +846,10 @@ fn estimated_signed_booth_costs(
 /// workers). The weights below were fitted to timing grids on Apple M4 (asm
 /// backend) and two AMD Zen 4 hosts (portable and `-C target-cpu=native`
 /// builds), 256 to 65,536 terms on 1 to 16 workers.
+///
+/// These weights and their helpers share the cfg of
+/// [`glv_multiexp_window_bits`], their only user.
+#[cfg(any(test, not(feature = "orbits")))]
 #[derive(Clone, Copy)]
 struct PlannerWeights {
     point_visit: usize,
@@ -854,6 +858,7 @@ struct PlannerWeights {
 }
 
 /// The GLV ladder: affine batched point visits, projective bucket sums.
+#[cfg(any(test, not(feature = "orbits")))]
 const GLV_PLANNER_WEIGHTS: PlannerWeights = PlannerWeights {
     point_visit: 5,
     bucket_addition: 10,
@@ -861,6 +866,7 @@ const GLV_PLANNER_WEIGHTS: PlannerWeights = PlannerWeights {
 };
 
 /// The generic ladder: projective (mixed) point visits and bucket sums.
+#[cfg(any(test, not(feature = "orbits")))]
 const GENERIC_PLANNER_WEIGHTS: PlannerWeights = PlannerWeights {
     point_visit: 7,
     bucket_addition: 5,
@@ -869,6 +875,7 @@ const GENERIC_PLANNER_WEIGHTS: PlannerWeights = PlannerWeights {
 
 /// [`estimated_signed_booth_costs`]'s work component, with each operation
 /// weighted by its backend's cost (see [`PlannerWeights`]).
+#[cfg(any(test, not(feature = "orbits")))]
 fn estimated_weighted_work(
     terms: usize,
     scalar_bits: usize,
@@ -1012,10 +1019,12 @@ fn glv_multiexp_window_bits<C: GlvParams>(terms: usize, num_threads: usize) -> O
 /// components are half as long, so wider windows (fewer of them) often pay
 /// off; the timing grids put the best width at most two bits above the
 /// default in nearly every cell.
+#[cfg(any(test, not(feature = "orbits")))]
 const GLV_EXTRA_WINDOW_BITS: usize = 2;
 
 /// The generic Signed-Booth MSM's estimated `(work, traffic)` costs at its
 /// default width (see [`estimated_signed_booth_costs`]).
+#[cfg(feature = "orbits")]
 fn estimated_generic_costs<C: GlvParams>(
     terms: usize,
     num_threads: usize,
@@ -1027,7 +1036,8 @@ fn estimated_generic_costs<C: GlvParams>(
 
 /// The Signed-Booth GLV backend's cheapest `(work, window width)` over the
 /// candidate widths `w` and `w + 1` (see [`glv_multiexp_window_bits`]).
-#[cfg(any(test, not(feature = "orbits")))]
+/// Only the `orbits` timing harness (`msm_backend_timings`) still uses it.
+#[cfg(all(test, feature = "orbits"))]
 fn booth_multiexp_estimate<C: GlvParams>(
     terms: usize,
     num_threads: usize,
