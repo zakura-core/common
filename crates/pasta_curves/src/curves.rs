@@ -1721,6 +1721,7 @@ mod curve_op_tests {
         check_curve_ops!(Eq, Fp);
     }
 
+    #[cfg(feature = "alloc")]
     macro_rules! check_from_xy_unchecked {
         ($curve:ty, $affine:ty) => {{
             use crate::arithmetic::CurveAffine;
@@ -1740,6 +1741,7 @@ mod curve_op_tests {
 
     /// Rebuilding a point from its own coordinates, or from the negated
     /// y-coordinate, agrees with the checked constructor.
+    #[cfg(feature = "alloc")]
     #[test]
     fn from_xy_unchecked_matches_from_xy() {
         check_from_xy_unchecked!(Ep, EpAffine);
@@ -1747,7 +1749,7 @@ mod curve_op_tests {
     }
 
     /// Debug builds still reject coordinates that are not on the curve.
-    #[cfg(debug_assertions)]
+    #[cfg(all(feature = "alloc", debug_assertions))]
     #[test]
     #[should_panic(expected = "the point must be on the curve")]
     fn from_xy_unchecked_rejects_off_curve_points_in_debug() {
