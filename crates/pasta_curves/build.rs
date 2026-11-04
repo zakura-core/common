@@ -13,10 +13,14 @@ fn main() {
     if x86_64_asm {
         println!("cargo:rustc-cfg={X86_64_ASM_CFG}");
     }
-    // The AVX2 batch square root rides on the x86-64 backend: every Intel and
-    // AMD CPU with BMI2 and ADX also implements AVX2. Builds that enable AVX2
-    // directly (e.g. `-C target-cpu=x86-64-v3`, which lacks ADX) use it too.
-    if x86_64_asm || (is_x86_64() && target_has_feature("avx2")) {
+    // The AVX2 batch square root runs when the target enables AVX2, or when
+    // the `x86_64-asm` feature forces the backend: that feature's contract is
+    // that the CPU supports the backend, and every Intel and AMD CPU with BMI2
+    // and ADX also implements AVX2. Automatic selection from ADX and BMI2
+    // alone does not enable it, so a target that leaves out (or explicitly
+    // disables) AVX2 never runs AVX2 code.
+    let forced_x86_64_asm = x86_64_asm && cfg!(feature = "x86_64-asm");
+    if is_x86_64() && (target_has_feature("avx2") || forced_x86_64_asm) {
         println!("cargo:rustc-cfg={AVX2_CFG}");
     }
 

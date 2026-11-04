@@ -8,15 +8,22 @@
 //! # Availability
 //!
 //! The module is compiled (`pasta_curves_avx2`, set by `build.rs`) when the
-//! x86-64 field backend is selected or the target enables AVX2. The backend
-//! already requires BMI2 and ADX at run time, and every Intel and AMD CPU that
-//! implements both also implements AVX2: on Intel they arrived with Haswell
-//! (AVX2, BMI2) and Broadwell (ADX), and the Pentium, Celeron and Atom parts
-//! that lack AVX2 lack BMI2 as well; on AMD all three are present from Zen on.
-//! The code therefore enables AVX2 per function with `#[target_feature]`
-//! rather than requiring it for the whole build. A virtual machine that
-//! exposes BMI2 and ADX while hiding AVX would fault, as it would for any other
-//! instruction the selected backend requires.
+//! target enables AVX2, or when the `x86_64-asm` feature forces the x86-64
+//! field backend. Calling AVX2 code on a CPU without AVX2 is undefined
+//! behavior, so both conditions guarantee AVX2 at compile time:
+//!
+//! - A target that enables AVX2 promises a CPU that has it.
+//! - The forced backend's contract is a CPU with BMI2 and ADX, and every Intel
+//!   and AMD CPU that implements both also implements AVX2: on Intel they
+//!   arrived with Haswell (AVX2, BMI2) and Broadwell (ADX), and the Pentium,
+//!   Celeron and Atom parts that lack AVX2 lack BMI2 as well; on AMD all three
+//!   are present from Zen on. The `x86_64-asm` documentation states AVX2 as
+//!   part of the requirement. A virtual machine that exposes BMI2 and ADX
+//!   while hiding AVX does not meet it.
+//!
+//! Automatic backend selection from ADX and BMI2 target features does not
+//! enable this module by itself: such a target may leave out, or explicitly
+//! disable, AVX2.
 //!
 //! # Arithmetic
 //!

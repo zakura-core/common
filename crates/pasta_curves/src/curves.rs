@@ -882,8 +882,9 @@ macro_rules! new_curve_impl {
             ///
             /// Decoding is dominated by one square root per point. This computes
             /// the square roots of up to eight points together: on x86-64, when
-            /// the x86-64 field backend is selected (BMI2 and ADX, which imply
-            /// AVX2) or the target enables AVX2, they run four per AVX2 register;
+            /// the target enables AVX2 or the `x86_64-asm` feature forces the
+            /// x86-64 field backend (whose CPU requirement includes AVX2), they
+            /// run four per AVX2 register;
             /// elsewhere their scalar dependency chains are interleaved. For
             /// batches of two or more points this is faster than decoding each
             /// point separately.

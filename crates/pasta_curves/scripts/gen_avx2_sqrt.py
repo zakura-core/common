@@ -96,10 +96,12 @@ def main():
     if "--check" in sys.argv:
         import subprocess, tempfile
 
-        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
-            f.write(new)
-        subprocess.run(["rustfmt", "--edition", "2024", f.name], check=True)
-        if pathlib.Path(f.name).read_text() != src:
+        with tempfile.TemporaryDirectory() as tmp:
+            formatted = pathlib.Path(tmp) / "avx2_sqrt.rs"
+            formatted.write_text(new)
+            subprocess.run(["rustfmt", "--edition", "2024", str(formatted)], check=True)
+            current = formatted.read_text() == src
+        if not current:
             sys.exit("avx2_sqrt.rs is out of date; rerun scripts/gen_avx2_sqrt.py and cargo fmt")
         return
     path.write_text(new)
