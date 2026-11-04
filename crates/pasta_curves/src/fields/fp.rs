@@ -2180,3 +2180,69 @@ fn asm_mul_rejects_non_canonical_rhs_in_debug() {
     // The modulus itself is the smallest non-canonical value.
     let _ = Fp::one().mul_runtime(&MODULUS);
 }
+
+/// The lazy squaring step used by the interleaved square-root lanes accepts
+/// any input below `2p` and keeps its output below `2p`, including over a
+/// longer run than any in the square-root chain.
+#[test]
+fn sqr_lazy_near_two_p() {
+    fn add(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+        let mut out = [0; 4];
+        let mut carry = 0u128;
+        for i in 0..4 {
+            let t = a[i] as u128 + b[i] as u128 + carry;
+            out[i] = t as u64;
+            carry = t >> 64;
+        }
+        out
+    }
+    fn sub(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+        let mut out = [0; 4];
+        let mut borrow = 0i128;
+        for i in 0..4 {
+            let t = a[i] as i128 - b[i] as i128 - borrow;
+            out[i] = t as u64;
+            borrow = (t < 0) as i128;
+        }
+        out
+    }
+    fn lt(a: &[u64; 4], b: &[u64; 4]) -> bool {
+        (0..4)
+            .rev()
+            .find(|&i| a[i] != b[i])
+            .is_some_and(|i| a[i] < b[i])
+    }
+
+    let p = MODULUS.0;
+    let one = [1, 0, 0, 0];
+    let two_p = add(p, p);
+    let mut inputs = vec![
+        [0; 4],
+        one,
+        sub(p, one),
+        p,
+        add(p, one),
+        sub(two_p, one),
+        sub(two_p, [2, 0, 0, 0]),
+    ];
+    for k in (0..254).step_by(13) {
+        let mut bit = [0u64; 4];
+        bit[k / 64] = 1 << (k % 64);
+        inputs.push(sub(two_p, add(bit, one)));
+        inputs.push(sub(p, bit));
+    }
+    // All ones below the top limb's high bits, the largest below 2p.
+    inputs.push([u64::MAX, u64::MAX, u64::MAX, (1 << 63) - 1]);
+    inputs.retain(|x| lt(x, &two_p));
+
+    for x in inputs {
+        let mut lazy = x;
+        let mut canonical = Fp(portable::canonicalize(&x, &MODULUS.0));
+        for _ in 0..300 {
+            lazy = portable::sqr_lazy(&lazy, &MODULUS.0, INV);
+            canonical = canonical.square();
+            assert!(lt(&lazy, &two_p), "lazy square left [0, 2p)");
+            assert_eq!(Fp(portable::canonicalize(&lazy, &MODULUS.0)), canonical);
+        }
+    }
+}
