@@ -995,7 +995,9 @@ jobs:
       # This is the only CI runner that executes the aarch64-asm backend; the
       # AArch64 Linux and bare-metal jobs only build, and the Linux test jobs
       # run the portable path. Run the whole suite so every assembly-backed
-      # path, including deferred accumulation, meets its portable oracles.
+      # path, including deferred accumulation and the interleaved square-root
+      # lanes behind `batch_from_bytes` (tests/batch_decompress.rs), meets its
+      # portable oracles.
       - name: Test Apple AArch64 assembly
         if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: >-

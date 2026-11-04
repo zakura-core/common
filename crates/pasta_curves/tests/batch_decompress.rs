@@ -61,3 +61,65 @@ fn batch_from_bytes_matches_from_bytes() {
     check!(pallas::Affine, pallas::Point, &mut rng);
     check!(vesta::Affine, vesta::Point, &mut rng);
 }
+
+/// A wider differential sweep: x values next to 0 and p with both sign bits,
+/// every single-bit and all-but-one-bit encoding, and a seeded mix of valid
+/// points and arbitrary bytes, decoded in chunks that span every remainder
+/// length.
+macro_rules! sweep {
+    ($affine:ty, $group:ty, $base:ty, $rng:expr) => {{
+        let rng = $rng;
+        let mut all: Vec<[u8; 32]> = Vec::new();
+        for k in 0..512u64 {
+            for x in [<$base>::from(k), -<$base>::from(k + 1)] {
+                let mut bytes = x.to_repr();
+                all.push(bytes);
+                bytes[31] |= 0x80;
+                all.push(bytes);
+            }
+        }
+        for bit in 0..256 {
+            let mut one = [0u8; 32];
+            one[bit / 8] = 1 << (bit % 8);
+            all.push(one);
+            let mut all_but_one = [0xff; 32];
+            all_but_one[bit / 8] &= !(1 << (bit % 8));
+            all.push(all_but_one);
+        }
+        for _ in 0..4096 {
+            all.push(<$group>::random(&mut *rng).to_bytes());
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            all.push(bytes);
+        }
+
+        let mut valid = 0;
+        for chunk in all.chunks(1013) {
+            let got = <$affine>::batch_from_bytes(chunk.iter().copied());
+            assert_eq!(got.len(), chunk.len());
+            for (g, bytes) in got.iter().zip(chunk) {
+                let e = <$affine>::from_bytes(bytes);
+                assert_eq!(
+                    bool::from(g.is_some()),
+                    bool::from(e.is_some()),
+                    "{bytes:02x?}"
+                );
+                if bool::from(e.is_some()) {
+                    assert_eq!(g.unwrap(), e.unwrap(), "{bytes:02x?}");
+                    valid += 1;
+                }
+            }
+        }
+        assert!(valid > 4096 && valid < all.len());
+    }};
+}
+
+#[test]
+fn batch_from_bytes_matches_from_bytes_sweep() {
+    use ff::PrimeField;
+    use pasta_curves::{Fp, Fq};
+
+    let mut rng = XorShiftRng::from_seed([11; 16]);
+    sweep!(pallas::Affine, pallas::Point, Fp, &mut rng);
+    sweep!(vesta::Affine, vesta::Point, Fq, &mut rng);
+}
