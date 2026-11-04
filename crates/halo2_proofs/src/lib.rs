@@ -160,6 +160,48 @@ struct PreparedInstanceTable<C: pasta_curves::arithmetic::CurveAffine> {
     offsets: [C::Curve; PREPARED_INSTANCE_OFFSETS],
 }
 
+/// A doubling-free GLV table for the dense rows of the one-column Orchard
+/// instance shape, built lazily for batch verification.
+///
+/// `dense` evaluates the full-width rows (see
+/// [`pasta_curves::arithmetic::PreparedFixedBaseSum`]). As in
+/// [`PreparedInstanceTable`], the eight possible Boolean-row contributions are
+/// pre-added to `w` in `offsets`, indexed by [`instance_flag_mask`].
+#[cfg(feature = "batch")]
+struct GlvInstanceTable<C: pasta_curves::arithmetic::CurveAffine> {
+    // The table is immutable once built and its methods take `&self`, so a
+    // panic cannot leave it in a broken state; asserting unwind safety keeps
+    // `Params` unwind safe, as the prepared zero-check caches do.
+    dense: core::panic::AssertUnwindSafe<
+        Box<dyn pasta_curves::arithmetic::PreparedFixedBaseSum<C::CurveExt>>,
+    >,
+    offsets: [C::Curve; PREPARED_INSTANCE_OFFSETS],
+}
+
+/// The bit mask of a one-column Orchard-shaped instance's Boolean rows, or
+/// `None` if any of them is neither zero nor one.
+///
+/// # Panics
+///
+/// Panics if `instance` has fewer than [`PREPARED_INSTANCE_ROWS`] rows.
+#[cfg(feature = "batch")]
+fn instance_flag_mask<F: ff::Field>(instance: &[F]) -> Option<usize> {
+    let mut mask = 0;
+    let flags = &instance[PREPARED_INSTANCE_DENSE_ROWS
+        ..PREPARED_INSTANCE_DENSE_ROWS + PREPARED_INSTANCE_BOOLEAN_ROWS];
+    for (flag, scalar) in flags.iter().enumerate() {
+        if bool::from(scalar.is_zero()) {
+            continue;
+        }
+        if bool::from((*scalar - F::ONE).is_zero()) {
+            mask |= 1 << flag;
+        } else {
+            return None;
+        }
+    }
+    Some(mask)
+}
+
 #[cfg(feature = "batch")]
 trait InstanceWindowTable<C: pasta_curves::arithmetic::CurveAffine> {
     fn instance_window_table(&self, base_count: usize) -> std::sync::Arc<Vec<C>>;
@@ -167,4 +209,8 @@ trait InstanceWindowTable<C: pasta_curves::arithmetic::CurveAffine> {
     fn prepare_instance_table(&self) -> bool;
 
     fn prepared_instance_table(&self) -> Option<std::sync::Arc<PreparedInstanceTable<C>>>;
+
+    /// The GLV instance table, built on first use; `None` if the curve has no
+    /// GLV backend or the parameters have too few Lagrange bases.
+    fn glv_instance_table(&self) -> Option<std::sync::Arc<GlvInstanceTable<C>>>;
 }

@@ -9,7 +9,8 @@ use std::sync::Arc;
 use super::{VerificationStrategy, validate_instances, verify_proof_with_instance_commitments};
 use crate::{
     INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE, InstanceWindowTable,
-    MAX_CACHED_INSTANCE_ROWS,
+    MAX_CACHED_INSTANCE_ROWS, PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_ROWS,
+    instance_flag_mask,
     multicore::{IntoParallelIterator, TryFoldAndReduce},
     plonk::{Error, VerifyingKey, commit_instance},
     poly::commitment::{Guard, MSM, Params},
@@ -318,14 +319,16 @@ fn compute_batch_instance_commitments<C: CurveAffine>(
         item_column_counts.push(item.instances.iter().map(Vec::len).collect::<Vec<_>>());
     }
 
-    let table = InstanceFixedWindowTable::new(params, max_cached_instance_len);
     let instances = items
         .iter()
         .flat_map(|item| item.instances.iter())
         .flat_map(|instances| instances.iter())
         .map(Vec::as_slice)
         .collect::<Vec<_>>();
-    let projective = table.commit_batch_parallel(params, &instances);
+    let projective = commit_glv_instances(params, &instances).unwrap_or_else(|| {
+        InstanceFixedWindowTable::new(params, max_cached_instance_len)
+            .commit_batch_parallel(params, &instances)
+    });
     let mut affine = vec![C::identity(); projective.len()];
     C::Curve::batch_normalize(&projective, &mut affine);
     let mut affine = affine.into_iter();
@@ -341,6 +344,60 @@ fn compute_batch_instance_commitments<C: CurveAffine>(
     assert!(affine.next().is_none());
 
     Ok(commitments)
+}
+
+/// Commits every column with the doubling-free GLV table when every column
+/// has the one-column Orchard instance shape: [`PREPARED_INSTANCE_DENSE_ROWS`]
+/// full-width rows followed by [`crate::PREPARED_INSTANCE_BOOLEAN_ROWS`] Boolean
+/// rows. The columns are split into one contiguous chunk per worker.
+///
+/// Returns `None`, committing nothing, if any column has another length or a
+/// Boolean row that is neither zero nor one, or if the params have no GLV
+/// table; the caller then uses the generic fixed-window path.
+fn commit_glv_instances<C: CurveAffine>(
+    params: &Params<C>,
+    instances: &[&[C::Scalar]],
+) -> Option<Vec<C::Curve>> {
+    if instances.is_empty()
+        || instances
+            .iter()
+            .any(|column| column.len() != PREPARED_INSTANCE_ROWS)
+    {
+        return None;
+    }
+    let masks = instances
+        .iter()
+        .map(|column| instance_flag_mask(column))
+        .collect::<Option<Vec<_>>>()?;
+    let table = params.glv_instance_table()?;
+
+    let chunk_len = instances
+        .len()
+        .div_ceil(crate::multicore::current_num_threads());
+    Some(
+        (0..instances.len().div_ceil(chunk_len))
+            .into_par_iter()
+            .map(|chunk| {
+                let start = chunk * chunk_len;
+                let end = (start + chunk_len).min(instances.len());
+                // One batched call per chunk: the dense sums share their
+                // affine reduction and its inversions.
+                let dense = instances[start..end]
+                    .iter()
+                    .map(|column| &column[..PREPARED_INSTANCE_DENSE_ROWS])
+                    .collect::<Vec<_>>();
+                let sums = table.dense.sum_batch_vartime(&dense);
+                // `zip` would silently drop columns if an implementation
+                // returned fewer sums than it was given.
+                debug_assert_eq!(sums.len(), dense.len(), "one sum per column");
+                sums.into_iter()
+                    .zip(&masks[start..end])
+                    .map(|(sum, &mask)| table.offsets[mask] + sum)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .concat(),
+    )
 }
 
 /// A verifier that checks multiple proofs in a batch. **This requires the
@@ -454,8 +511,8 @@ mod tests {
     use pasta_curves::{EpAffine, EqAffine, Fp, Fq};
 
     use super::{
-        InstanceFixedWindowTable, commit_instance_with_table, signed_fixed_window_digit,
-        signed_instance_window_count,
+        InstanceFixedWindowTable, commit_glv_instances, commit_instance_with_table,
+        signed_fixed_window_digit, signed_instance_window_count,
     };
     use crate::{
         INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE, MAX_CACHED_INSTANCE_ROWS,
@@ -553,6 +610,99 @@ mod tests {
 
         check_curve!(EqAffine, Fp);
         check_curve!(EpAffine, Fq);
+    }
+
+    /// Orchard-shaped columns: seven full-width rows, then three flags taking
+    /// every mask in turn.
+    fn orchard_shaped_columns(count: u64) -> Vec<Vec<Fp>> {
+        (0..count)
+            .map(|column| {
+                let mut rows = (0..7u64)
+                    .map(|row| {
+                        let mut bytes = [0; 64];
+                        let mut x = (column * 16 + row).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+                        for chunk in bytes.chunks_mut(8) {
+                            x ^= x << 13;
+                            x ^= x >> 7;
+                            x ^= x << 17;
+                            chunk.copy_from_slice(&x.to_le_bytes());
+                        }
+                        Fp::from_uniform_bytes(&bytes)
+                    })
+                    .collect::<Vec<_>>();
+                rows[(column % 7) as usize] = match column % 3 {
+                    0 => Fp::ZERO,
+                    1 => Fp::ONE,
+                    _ => -Fp::ONE,
+                };
+                rows.extend((0..3).map(|flag| {
+                    if (column >> flag) & 1 == 1 {
+                        Fp::ONE
+                    } else {
+                        Fp::ZERO
+                    }
+                }));
+                rows
+            })
+            .collect()
+    }
+
+    #[test]
+    fn glv_instance_commitments_match_fixed_window() {
+        let params = Params::<EqAffine>::new(7);
+        let table = InstanceFixedWindowTable::new(&params, 10);
+        let columns = orchard_shaped_columns(19);
+        let slices = columns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+        let glv = commit_glv_instances(&params, &slices).expect("Orchard-shaped columns");
+        assert_eq!(glv, table.commit_batch(&params, &slices));
+        for (column, commitment) in slices.iter().zip(&glv) {
+            assert_eq!(*commitment, commit_instance(&params, column));
+        }
+    }
+
+    #[test]
+    fn glv_instance_commitments_decline_other_shapes() {
+        let params = Params::<EqAffine>::new(7);
+        let columns = orchard_shaped_columns(4);
+        let mut slices = columns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        assert!(commit_glv_instances(&params, &[]).is_none());
+
+        // A column of another length declines the whole batch.
+        slices[2] = &columns[2][..9];
+        assert!(commit_glv_instances(&params, &slices).is_none());
+
+        // So does a Boolean row that is neither zero nor one.
+        let mut non_boolean = columns[1].clone();
+        non_boolean[8] = Fp::from(2);
+        let slices = [columns[0].as_slice(), non_boolean.as_slice()];
+        assert!(commit_glv_instances(&params, &slices).is_none());
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn glv_instance_commitments_match_across_pool_widths() {
+        let params = Params::<EqAffine>::new(7);
+        let columns = orchard_shaped_columns(23);
+        let slices = columns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let serial = slices
+            .iter()
+            .map(|column| commit_instance(&params, column))
+            .collect::<Vec<_>>();
+        for threads in [1, 2, 3, 4, 8] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool builds");
+            for count in [1, 2, 5, 23] {
+                let glv = pool.install(|| commit_glv_instances(&params, &slices[..count]));
+                assert_eq!(
+                    glv.as_deref(),
+                    Some(&serial[..count]),
+                    "threads {threads}, columns {count}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "multicore")]
