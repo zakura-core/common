@@ -1500,22 +1500,25 @@ impl Instance {
     /// normalizes all of them with one shared inversion instead of decoding `rk` from
     /// its bytes (a square root) and inverting each coordinate separately.
     fn to_halo2_instances(instances: &[Self]) -> Vec<Halo2Instance> {
+        // All `cv_net` points, then all `rk` points.
         let points: Vec<pallas::Point> = instances
             .iter()
-            .flat_map(|instance| [instance.cv_net.point(), instance.rk.point()])
+            .map(|instance| instance.cv_net.point())
+            .chain(instances.iter().map(|instance| instance.rk.point()))
             .collect();
         let mut affine = alloc::vec![pallas::Affine::default(); points.len()];
         pallas::Point::batch_normalize(&points, &mut affine);
+        let (cv_nets, rks) = affine.split_at(instances.len());
 
         instances
             .iter()
-            .zip(affine.chunks_exact(2))
-            .map(|(i, affine)| {
+            .zip(cv_nets.iter().zip(rks))
+            .map(|(i, (cv_net, rk))| {
                 let mut instance = [vesta::Scalar::zero(); INSTANCE_ROWS];
 
                 instance[ANCHOR] = i.anchor.inner();
                 // An identity cv_net is encoded as (0, 0).
-                let (cv_net_x, cv_net_y) = affine[0]
+                let (cv_net_x, cv_net_y) = cv_net
                     .coordinates()
                     .into_option()
                     .map_or((pallas::Base::zero(), pallas::Base::zero()), |c| {
@@ -1525,7 +1528,7 @@ impl Instance {
                 instance[CV_NET_Y] = cv_net_y;
                 instance[NF_OLD] = i.nf_old.inner();
 
-                let rk = affine[1]
+                let rk = rk
                     .coordinates()
                     .expect("rk is non-identity by construction");
                 instance[RK_X] = *rk.x();
