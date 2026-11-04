@@ -245,7 +245,7 @@ pub trait CurveExt:
     ///
     /// The Pasta implementation stores every positive signed-digit magnitude
     /// of each GLV half-scalar window, shifted into position, for each base:
-    /// about 44 KiB per base.
+    /// about 76 KiB per base.
     ///
     /// # Security
     ///
@@ -285,6 +285,20 @@ pub trait PreparedFixedBaseSum<C: CurveExt>: core::fmt::Debug + Send + Sync {
     ///
     /// Panics if `scalars.len()` exceeds [`Self::bases`].
     fn sum_vartime(&self, scalars: &[C::ScalarExt]) -> C;
+
+    /// [`Self::sum_vartime`] of each scalar vector, in order. Implementations
+    /// may share work across the sums.
+    ///
+    /// # Security
+    ///
+    /// Variable-time in the scalars, which must be public.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any vector is longer than [`Self::bases`].
+    fn sum_batch_vartime(&self, scalars: &[&[C::ScalarExt]]) -> alloc::vec::Vec<C> {
+        scalars.iter().map(|s| self.sum_vartime(s)).collect()
+    }
 }
 
 /// An object-safe handle to a prepared fixed-base multiscalar zero-check:

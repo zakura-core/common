@@ -380,13 +380,18 @@ fn commit_glv_instances<C: CurveAffine>(
             .map(|chunk| {
                 let start = chunk * chunk_len;
                 let end = (start + chunk_len).min(instances.len());
-                (start..end)
-                    .map(|column| {
-                        table.offsets[masks[column]]
-                            + table
-                                .dense
-                                .sum_vartime(&instances[column][..PREPARED_INSTANCE_DENSE_ROWS])
-                    })
+                // One batched call per chunk: the dense sums share their
+                // affine reduction and its inversions.
+                let dense = instances[start..end]
+                    .iter()
+                    .map(|column| &column[..PREPARED_INSTANCE_DENSE_ROWS])
+                    .collect::<Vec<_>>();
+                table
+                    .dense
+                    .sum_batch_vartime(&dense)
+                    .into_iter()
+                    .zip(&masks[start..end])
+                    .map(|(sum, &mask)| table.offsets[mask] + sum)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>()
