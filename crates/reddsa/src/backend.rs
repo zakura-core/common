@@ -19,7 +19,13 @@ pub trait Scalar:
 }
 
 pub trait Point<S>:
-    Copy + Debug + PartialEq + Add<Output = Self> + Sub<Output = Self> + Mul<S, Output = Self>
+    Copy
+    + Debug
+    + PartialEq
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Neg<Output = Self>
+    + Mul<S, Output = Self>
 {
     fn from_bytes(bytes: &[u8; 32]) -> Option<Self>;
     fn to_bytes(&self) -> [u8; 32];

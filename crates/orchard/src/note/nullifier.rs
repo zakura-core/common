@@ -82,7 +82,9 @@ impl Nullifier {
         psi: pallas::Base,
         cm: NoteCommitment,
     ) -> Self {
-        let k = pallas::Point::hash_to_curve("z.cash:Orchard")(b"K");
+        // K^Orchard = GroupHash("z.cash:Orchard", "K"), pinned by the
+        // `nullifier_k::generator` test.
+        let k = pallas::Point::from(crate::constants::fixed_bases::nullifier_k::generator());
 
         Nullifier(extract_p(
             &(k * crate::spec::mod_r_p(nk.prf_nf(rho) + psi) + cm.0),

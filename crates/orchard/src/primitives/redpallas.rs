@@ -163,8 +163,38 @@ impl<T: SigType> SigningKey<T> {
         };
         Signature(bytes, PhantomData)
     }
+    /// Returns the key for the negated scalar, negating the stored
+    /// verification point instead of recomputing it.
+    pub(crate) fn negate(&self) -> Self {
+        let key = match &self.0 {
+            SigningKeyInner::SpendAuth(key) => SigningKeyInner::SpendAuth(key.negate()),
+            SigningKeyInner::Binding(key) => SigningKeyInner::Binding(key.negate()),
+        };
+        Self(key, PhantomData)
+    }
 }
 impl SigningKey<SpendAuth> {
+    /// Randomizes this key when `randomized_key` (`rk`) is already known,
+    /// skipping its recomputation. `randomized_key` must equal this key's
+    /// verification key randomized by `randomizer`.
+    pub(crate) fn randomize_with_verification_key(
+        &self,
+        randomizer: &SpendAuthRandomizer,
+        randomized_key: &VerificationKey<SpendAuth>,
+    ) -> Self {
+        let SigningKeyInner::SpendAuth(key) = &self.0 else {
+            unreachable!("domain is fixed at construction")
+        };
+        let VerificationKeyInner::SpendAuth(randomized_key) = &randomized_key.0 else {
+            unreachable!("domain is fixed at construction")
+        };
+        Self(
+            SigningKeyInner::SpendAuth(
+                key.randomize_with_verification_key(&randomizer.0, randomized_key),
+            ),
+            PhantomData,
+        )
+    }
     /// Randomizes this spend authorization key.
     pub fn randomize(&self, randomizer: &SpendAuthRandomizer) -> Self {
         let SigningKeyInner::SpendAuth(key) = &self.0 else {
