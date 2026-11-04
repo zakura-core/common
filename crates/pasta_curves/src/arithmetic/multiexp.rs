@@ -2,7 +2,7 @@
 //! RedPallas batch verification.
 //!
 //! [`best_multiexp_vartime`] first offers the multiplication to the curve's
-//! specialized planner ([`CurveExt::try_multiexp_vartime_with_threads`], the
+//! specialized planner ([`CurveExt::try_multiexp_vartime_with_parallelism`], the
 //! GLV backends for Pallas and Vesta). When the planner declines, it runs the
 //! generic Signed-Booth bucket method below, so every size gets an answer
 //! without callers keeping a fallback of their own.
@@ -29,13 +29,14 @@ use super::{CurveAffine, CurveExt};
 /// Callers must explicitly accept timing leakage when the coefficients are
 /// secret.
 pub fn best_multiexp_vartime<C: CurveAffine>(coeffs: &[C::ScalarExt], bases: &[C]) -> C::CurveExt {
-    best_multiexp_vartime_with_threads(coeffs, bases, current_num_threads())
+    best_multiexp_vartime_with_parallelism(coeffs, bases, true)
 }
 
-/// Like [`best_multiexp_vartime`], but uses at most `max_threads` workers of
-/// the current Rayon pool (at least one). Callers with small batches can pass
-/// `1` to stay on the calling thread, where splitting would cost more in
-/// wake-ups than it saves.
+/// Like [`best_multiexp_vartime`], but runs entirely on the calling thread
+/// when `use_parallelism` is `false`. Callers with small batches can use this
+/// where waking pool workers would cost more than splitting saves. When
+/// `use_parallelism` is `true`, this is [`best_multiexp_vartime`], which may
+/// use the whole current pool.
 ///
 /// # Panics
 ///
@@ -44,14 +45,19 @@ pub fn best_multiexp_vartime<C: CurveAffine>(coeffs: &[C::ScalarExt], bases: &[C
 /// # Timing
 ///
 /// Same as [`best_multiexp_vartime`].
-pub fn best_multiexp_vartime_with_threads<C: CurveAffine>(
+pub fn best_multiexp_vartime_with_parallelism<C: CurveAffine>(
     coeffs: &[C::ScalarExt],
     bases: &[C],
-    max_threads: usize,
+    use_parallelism: bool,
 ) -> C::CurveExt {
     assert_eq!(coeffs.len(), bases.len());
-    let num_threads = max_threads.clamp(1, current_num_threads());
-    if let Some(result) = C::CurveExt::try_multiexp_vartime_with_threads(coeffs, bases, num_threads)
+    let num_threads = if use_parallelism {
+        current_num_threads()
+    } else {
+        1
+    };
+    if let Some(result) =
+        C::CurveExt::try_multiexp_vartime_with_parallelism(coeffs, bases, use_parallelism)
     {
         return result;
     }
@@ -354,11 +360,11 @@ mod tests {
                 expected,
                 "Pallas, {len} terms"
             );
-            for max_threads in [0, 1, 2, 64] {
+            for use_parallelism in [false, true] {
                 assert_eq!(
-                    best_multiexp_vartime_with_threads(&coeffs, &bases, max_threads),
+                    best_multiexp_vartime_with_parallelism(&coeffs, &bases, use_parallelism),
                     expected,
-                    "Pallas, {len} terms, max_threads {max_threads}"
+                    "Pallas, {len} terms, use_parallelism {use_parallelism}"
                 );
             }
 

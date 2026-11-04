@@ -15,7 +15,7 @@ pub(crate) use fields::*;
 pub(crate) use multiexp::default_multiexp_window_bits;
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
-pub use multiexp::{best_multiexp_vartime, best_multiexp_vartime_with_threads};
+pub use multiexp::{best_multiexp_vartime, best_multiexp_vartime_with_parallelism};
 
 /// Multiplies an [`Fp`](crate::Fp) element by `2^-exponent`.
 ///

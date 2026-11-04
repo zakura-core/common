@@ -2249,7 +2249,9 @@ pub(crate) fn try_multiexp<C: GlvParams>(
     try_multiexp_with_threads::<C>(scalars, bases, current_num_threads())
 }
 
-/// [`try_multiexp`] planned and run for at most `num_threads` workers.
+/// [`try_multiexp`] planned for `num_threads` workers. `1` keeps every
+/// backend on the calling thread; larger values select the parallel
+/// backends, which then use the whole current pool.
 pub(crate) fn try_multiexp_with_threads<C: GlvParams>(
     scalars: &[C::ScalarExt],
     bases: &[C::AffineExt],

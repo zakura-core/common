@@ -107,12 +107,16 @@ macro_rules! impl_multiexp_vartime {
         }
 
         #[cfg(feature = "glv")]
-        fn try_multiexp_vartime_with_threads(
+        fn try_multiexp_vartime_with_parallelism(
             scalars: &[Self::ScalarExt],
             bases: &[Self::AffineExt],
-            num_threads: usize,
+            use_parallelism: bool,
         ) -> Option<Self> {
-            crate::glv::try_multiexp_with_threads::<$name>(scalars, bases, num_threads)
+            if use_parallelism {
+                crate::glv::try_multiexp::<$name>(scalars, bases)
+            } else {
+                crate::glv::try_multiexp_with_threads::<$name>(scalars, bases, 1)
+            }
         }
 
         #[cfg(feature = "glv")]

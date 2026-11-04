@@ -166,20 +166,23 @@ pub trait CurveExt:
         None
     }
 
-    /// Like [`Self::try_multiexp_vartime`], but plans and runs on at most
-    /// `num_threads` workers of the current Rayon pool (at least one). Small
-    /// multiscalar multiplications can be cheaper on one thread than split
-    /// across a wide pool, and only the caller knows its batch shape.
+    /// Like [`Self::try_multiexp_vartime`], but runs entirely on the calling
+    /// thread when `use_parallelism` is `false`. When it is `true`, this is
+    /// [`Self::try_multiexp_vartime`]: planned for, and free to use, the whole
+    /// current Rayon pool. Small multiscalar multiplications can be cheaper on
+    /// one thread than split across a wide pool, and only the caller knows
+    /// its batch shape.
     ///
-    /// The default ignores the cap and calls [`Self::try_multiexp_vartime`].
+    /// The default ignores `use_parallelism` and calls
+    /// [`Self::try_multiexp_vartime`].
     ///
     /// # Security
     ///
     /// Same as [`Self::try_multiexp_vartime`].
-    fn try_multiexp_vartime_with_threads(
+    fn try_multiexp_vartime_with_parallelism(
         scalars: &[Self::ScalarExt],
         bases: &[Self::AffineExt],
-        _num_threads: usize,
+        _use_parallelism: bool,
     ) -> Option<Self> {
         Self::try_multiexp_vartime(scalars, bases)
     }

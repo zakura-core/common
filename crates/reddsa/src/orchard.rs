@@ -192,7 +192,7 @@ where
     J: IntoIterator<Item = Option<pallas::Point>>,
 {
     use group::{Curve as _, CurveAffine as _};
-    use pasta_curves::arithmetic::best_multiexp_vartime_with_threads;
+    use pasta_curves::arithmetic::best_multiexp_vartime_with_parallelism;
 
     let points = points.into_iter().collect::<Option<Vec<_>>>()?;
     let scalars = scalars.into_iter().map(|c| *c.borrow()).collect::<Vec<_>>();
@@ -200,15 +200,10 @@ where
 
     let mut affine = vec![pallas::Affine::identity(); points.len()];
     pallas::Point::batch_normalize(&points, &mut affine);
-    let max_threads = if scalars.len() < MIN_PARALLEL_MSM_TERMS {
-        1
-    } else {
-        usize::MAX
-    };
-    Some(best_multiexp_vartime_with_threads(
+    Some(best_multiexp_vartime_with_parallelism(
         &scalars,
         &affine,
-        max_threads,
+        scalars.len() >= MIN_PARALLEL_MSM_TERMS,
     ))
 }
 
