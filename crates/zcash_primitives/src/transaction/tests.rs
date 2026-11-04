@@ -178,7 +178,7 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
     use crate::transaction::{Authorized, sighash_v6::v7_signature_hash};
     use rand::{SeedableRng, rngs::StdRng};
     use zcash_tachyon::{
-        ActionPlan, Bundle, BundlePlan, Note, PointerStamp, TachyonBundle,
+        ActionPlan, AggregateId, Bundle, BundlePlan, Note, PointerStamp, TachyonBundle,
         effect::Output,
         entropy::ActionEntropy,
         keys::private::SpendingKey,
@@ -202,6 +202,12 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
             ActionEntropy::random(rng),
             Trapdoor::random(rng),
         )],
+        Note {
+            pk: spending_key.derive_payment_key(),
+            value: Positive::ZERO,
+            psi: nullifier::Trapdoor::random(rng),
+            rcm: CommitmentTrapdoor::random(rng),
+        },
     );
     let unproven = plan
         .sign(rng, &[0; 32], &spending_key.derive_auth_private())
@@ -209,9 +215,13 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
     let tachyon_bundle = TachyonBundle::Adjunct(Bundle {
         actions: unproven.actions,
         value_balance: unproven.value_balance,
+        fee_max_commitment: unproven.fee_max_commitment,
         binding_sig: unproven.binding_sig,
         memo: unproven.memo,
-        stamp: PointerStamp::try_from([0xee; 64]).unwrap(),
+        stamp: PointerStamp {
+            wtxid: AggregateId::try_from([0xee; 64]).unwrap(),
+            fee: Positive::ZERO,
+        },
     });
 
     let transaction = TransactionData::<Authorized>::from_parts_v7(
@@ -314,6 +324,74 @@ fn v7_tachyon_bundle_roundtrips_and_changes_commitments() {
 
 #[test]
 #[cfg(zcash_unstable = "nutachyon")]
+fn v7_chosen_fee_changes_authorization_and_net_balance_only() {
+    use crate::transaction::{Authorized, sighash_v6::v7_signature_hash};
+    use zcash_tachyon::{TachyonBundle, value};
+
+    // Use a populated wire fixture; these tests inspect accounting and commitments,
+    // independently of signature/proof verification.
+    let bytes = hex::decode(include_str!("tests/data/v7_tachyon_adjunct.hex").trim()).unwrap();
+    let fixture = Transaction::read(&bytes[..], BranchId::NuTachyon).unwrap();
+    let TachyonBundle::Adjunct(mut bundle) = fixture.tachyon_bundle().clone() else {
+        panic!("the fixture contains a pointer-stamped bundle");
+    };
+    let transaction = |bundle| {
+        TransactionData::<Authorized>::from_parts_v7(
+            BranchId::NuTachyon,
+            0,
+            0u32.into(),
+            Zatoshis::ZERO,
+            None,
+            None,
+            None,
+            None,
+            TachyonBundle::Adjunct(bundle),
+        )
+        .freeze()
+        .unwrap()
+    };
+    let sighash = |bundle| {
+        let data = TransactionData::<TestUnauthorized>::from_parts_v7(
+            BranchId::NuTachyon,
+            0,
+            0u32.into(),
+            Zatoshis::ZERO,
+            None,
+            None,
+            None,
+            None,
+            TachyonBundle::Adjunct(bundle),
+        );
+        v7_signature_hash(&data, &SignableInput::Shielded, &data.digest(TxIdDigester))
+    };
+    bundle.value_balance = value::Balance::try_from(3i64).unwrap();
+    bundle.stamp.fee = value::Positive::try_from(2u64).unwrap();
+    let a = transaction(bundle.clone());
+    let sighash_a = sighash(bundle.clone());
+    assert_eq!(
+        a.fee_paid::<zcash_protocol::value::BalanceError, _>(|_| unreachable!()),
+        Ok(Some(Zatoshis::from_u64(5).unwrap()))
+    );
+    bundle.stamp.fee = value::Positive::try_from(3u64).unwrap();
+    let b = transaction(bundle.clone());
+    assert_eq!(
+        b.fee_paid::<zcash_protocol::value::BalanceError, _>(|_| unreachable!()),
+        Ok(Some(Zatoshis::from_u64(6).unwrap()))
+    );
+    assert_eq!(a.txid(), b.txid());
+    assert_eq!(sighash_a, sighash(bundle.clone()));
+    assert_ne!(a.auth_commitment(), b.auth_commitment());
+
+    bundle.value_balance = value::Balance::try_from(2_100_000_000_000_000i64).unwrap();
+    assert!(
+        transaction(bundle)
+            .fee_paid::<zcash_protocol::value::BalanceError, _>(|_| unreachable!())
+            .is_err()
+    );
+}
+
+#[test]
+#[cfg(zcash_unstable = "nutachyon")]
 fn v7_zakura_serialization_vectors_deserialize_and_reserialize_exactly() {
     use zcash_tachyon::TachyonBundle;
 
@@ -383,6 +461,24 @@ fn v7_zakura_serialization_vectors_deserialize_and_reserialize_exactly() {
         let mut reencoded = Vec::new();
         transaction.write(&mut reencoded).unwrap();
         assert_eq!(reencoded, encoded, "{name} reserialization differs");
+
+        let from_data = TransactionData::read(&encoded[..], BranchId::Sprout)
+            .unwrap()
+            .freeze()
+            .unwrap();
+        assert_eq!(
+            from_data.txid(),
+            transaction.txid(),
+            "{name} data-only txid"
+        );
+        assert_eq!(
+            from_data.auth_commitment(),
+            transaction.auth_commitment(),
+            "{name} data-only auth digest"
+        );
+        let mut from_data_bytes = Vec::new();
+        from_data.write(&mut from_data_bytes).unwrap();
+        assert_eq!(from_data_bytes, encoded, "{name} data-only serialization");
     }
 }
 

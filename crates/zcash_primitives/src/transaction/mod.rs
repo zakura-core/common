@@ -613,12 +613,17 @@ impl<A: Authorization> TransactionData<A> {
                         .map_or_else(ZatBalance::zero, |b| *b.value_balance()),
                     #[cfg(zcash_unstable = "nutachyon")]
                     {
-                        let value_balance = match &self.tachyon_bundle {
-                            zcash_tachyon::TachyonBundle::NoBundle => 0i64,
-                            zcash_tachyon::TachyonBundle::Proven(s) => i64::from(s.value_balance),
-                            zcash_tachyon::TachyonBundle::Adjunct(s) => i64::from(s.value_balance),
-                        };
-                        ZatBalance::try_from(value_balance).map_err(|_| BalanceError::Overflow)?
+                        // The signed balance reserves the maximum fee; the stamp releases
+                        // the chosen fee from the pool and retains the rest as fee change.
+                        self.tachyon_bundle
+                            .as_dyn()
+                            .map_or(Ok(ZatBalance::zero()), |bundle| {
+                                let balance = ZatBalance::try_from(i64::from(bundle.value_balance))
+                                    .map_err(|_| BalanceError::Overflow)?;
+                                let fee = ZatBalance::try_from(i64::from(bundle.stamp.fee()))
+                                    .map_err(|_| BalanceError::Overflow)?;
+                                (balance + fee).ok_or(BalanceError::Overflow)
+                            })?
                     },
                     #[cfg(zcash_unstable = "nutachyon")]
                     if self.version.has_zip233() {
