@@ -53,8 +53,11 @@ const WINDOWS: usize = GLV_COMPONENT_BITS / WINDOW_BITS + 1;
 ///
 /// Each Orchard-shaped sum holds about 270 points (17 KiB), so a reduction
 /// over many sums outgrows the core's L2 cache; on Zen 4, 64 or 128 sums per
-/// call ran about a third slower per sum than 8 to 32. Larger batches are split.
-const REDUCE_SUMS: usize = 16;
+/// call ran about a third slower per sum than 8 to 32. Caps of 8, 16 and 32
+/// measured the same, so the smallest keeps the working set (about 136 KiB)
+/// furthest from cache limits; it costs only one more shared inversion per
+/// tree level. Larger batches are split.
+const REDUCE_SUMS: usize = 8;
 
 /// Builds a [`PreparedFixedBaseSum`] over `bases`.
 pub(crate) fn prepare_fixed_base_sum<C: GlvParams>(
