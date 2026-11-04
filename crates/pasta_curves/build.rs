@@ -1,24 +1,47 @@
 use std::env;
 
 const X86_64_ASM_CFG: &str = "pasta_curves_x86_64_asm";
+const AVX2_CFG: &str = "pasta_curves_avx2";
 const REQUIRED_X86_64_FEATURES: [&str; 2] = ["adx", "bmi2"];
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg({X86_64_ASM_CFG})");
+    println!("cargo:rustc-check-cfg=cfg({AVX2_CFG})");
     println!("cargo:rerun-if-changed=src/asm/pasta_mul-armv8.S");
 
-    if use_x86_64_asm() {
+    let x86_64_asm = use_x86_64_asm();
+    if x86_64_asm {
         println!("cargo:rustc-cfg={X86_64_ASM_CFG}");
+    }
+    // The AVX2 batch square root runs when the target enables AVX2, or when
+    // the `x86_64-asm` feature forces the backend: that feature's contract is
+    // that the CPU supports the backend, and every Intel and AMD CPU with BMI2
+    // and ADX also implements AVX2. Automatic selection from ADX and BMI2
+    // alone does not enable it, so a target that leaves out (or explicitly
+    // disables) AVX2 never runs AVX2 code.
+    let forced_x86_64_asm = x86_64_asm && cfg!(feature = "x86_64-asm");
+    if is_x86_64() && (target_has_feature("avx2") || forced_x86_64_asm) {
+        println!("cargo:rustc-cfg={AVX2_CFG}");
     }
 
     #[cfg(feature = "aarch64-asm")]
     build_aarch64_asm();
 }
 
+fn is_x86_64() -> bool {
+    env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
+        && env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() == Ok("64")
+}
+
+fn target_has_feature(feature: &str) -> bool {
+    env::var("CARGO_CFG_TARGET_FEATURE")
+        .unwrap_or_default()
+        .split(',')
+        .any(|f| f == feature)
+}
+
 fn use_x86_64_asm() -> bool {
-    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64")
-        || env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() != Ok("64")
-    {
+    if !is_x86_64() {
         return false;
     }
 

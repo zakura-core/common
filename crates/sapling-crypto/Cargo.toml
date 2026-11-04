@@ -21,7 +21,6 @@ name = "sapling_crypto"
 [dependencies]
 aes = { version = "0.9", optional = true }
 bellman = { workspace = true, features = ["groth16"], optional = true }
-bitvec = { version = "1", default-features = false }
 blake2b_simd = { version = "1", default-features = false }
 blake2s_simd = { version = "1", default-features = false }
 bls12_381 = { workspace = true, features = ["alloc"] }
@@ -38,6 +37,7 @@ proptest = { version = ">=1.0.0, <1.7.0", optional = true }
 rand = { version = "0.10", default-features = false }
 rand_core = { version = "0.10", default-features = false }
 redjubjub = { workspace = true }
+rayon = { version = "1.5.1", optional = true }
 subtle = { version = "2.6", default-features = false }
 tracing = { version = "0.1", default-features = false }
 zcash_note_encryption = { workspace = true, features = ["alloc", "pre-zip-212"] }
@@ -64,14 +64,12 @@ pinned-vk-only = ["circuit"]
 zip32-addresses = ["wallet", "dep:aes", "dep:fpe"]
 circuit = [
     "dep:bellman",
-    "bls12_381/bits",
     "bls12_381/groups",
     "bls12_381/pairings",
-    "jubjub/bits",
     "std",
 ]
 default = ["wallet", "zip32-addresses", "multicore", "circuit"]
-multicore = ["bellman?/multicore"]
+multicore = ["bellman?/multicore", "dep:rayon"]
 std = [
     "corez/std",
     "redjubjub/std",
@@ -90,4 +88,12 @@ harness = false
 
 [[bench]]
 name = "pedersen_hash"
+harness = false
+
+[[bench]]
+name = "binding_key"
+harness = false
+
+[[bench]]
+name = "spend_key"
 harness = false

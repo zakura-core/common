@@ -412,25 +412,20 @@ where
         // Check layer hash output against Sinsemilla primitives hash
         #[cfg(test)]
         {
-            use crate::{sinsemilla::primitives::HashDomain, utilities::i2lebsp};
-
-            use group::ff::PrimeFieldBits;
+            use crate::{
+                sinsemilla::primitives::HashDomain,
+                utilities::{i2lebsp, le_bits},
+            };
 
             left.value()
                 .zip(right.value())
                 .zip(hash.value())
                 .assert_if_known(|((left, right), hash)| {
                     let l = i2lebsp::<10>(l as u64);
-                    let left: Vec<_> = left
-                        .to_le_bits()
-                        .iter()
-                        .by_vals()
+                    let left: Vec<_> = le_bits(*left)
                         .take(pallas::Base::NUM_BITS as usize)
                         .collect();
-                    let right: Vec<_> = right
-                        .to_le_bits()
-                        .iter()
-                        .by_vals()
+                    let right: Vec<_> = le_bits(*right)
                         .take(pallas::Base::NUM_BITS as usize)
                         .collect();
                     let merkle_crh = HashDomain::from_Q(Q.into());

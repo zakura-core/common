@@ -11,6 +11,11 @@ This does not change the workspace's minimum supported Rust version of 1.97,
 which is tested separately.
 
 Every Criterion target requires `test-dependencies` for its fixture generators.
+The commands below use the default Halo2 backend. For the public Criterion
+targets, select Sensei with `--no-default-features` and replace the feature list
+with `backend-sensei,circuit,multicore,zip32-addresses,test-dependencies`. The
+library-internal witness-assignment and batch-verifier corpus harnesses are
+Halo2-only.
 
 ## Merkle hashing
 
@@ -211,12 +216,18 @@ sample.
 
 ## Historical sweeps
 
-Read `required-features` from each revision's benchmark target in `Cargo.toml`.
-Current targets need `test-dependencies`; payment/proof targets also need
-`circuit` and `zip32-addresses`. Record the resolved features alongside each
-binary and result when crossing this API boundary.
+When a sweep crosses the backend-selection change, read `required-features` from
+each revision's benchmark target in `Cargo.toml`. Current targets need
+`test-dependencies`; payment/proof targets also need `circuit` and
+`zip32-addresses`. With defaults disabled, select `backend-halo2` or
+`backend-sensei` explicitly. Older revisions may not recognize those selectors.
+Record the resolved features alongside each binary and result.
 
-With defaults disabled, select `backend-halo2` explicitly. Older revisions
-may not recognize this selector. Private test harnesses moved from
-`circuit::benchmark::...` to `circuit::halo2::benchmark::...`; confirm an
-exact filter runs a test rather than succeeding with zero tests.
+Private Halo2 test harness names moved from `circuit::benchmark::...` to
+`circuit::halo2::benchmark::...`; confirm an exact test filter actually runs one
+test instead of reporting a successful zero-test run.
+
+The `first-after-build-and-prepare` group's cache-reset interpretation applies to
+Halo2's per-key state. Sensei uses shared process state, so constructing another
+key does not reset its caches. Cross-backend cold-start comparisons need fresh
+processes and an appropriate timing harness.

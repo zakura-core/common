@@ -303,15 +303,21 @@ pub(super) const fn canonicalize(value: &[u64; 4], modulus: &[u64; 4]) -> [u64; 
 pub(super) fn sqr_n_lazy(value: &[u64; 4], n: u32, modulus: &[u64; 4], inv: u64) -> [u64; 4] {
     let mut acc = *value;
     for _ in 0..n {
-        #[cfg(target_arch = "x86_64")]
-        {
-            acc = square_reduce_lazy_pasta(&acc, modulus, inv);
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            acc = reduce_square_lazy(&square_wide(&acc), modulus, inv);
-        }
+        acc = sqr_lazy(&acc, modulus, inv);
     }
     acc
+}
+
+/// One lazy squaring: input and output below `2p`.
+#[inline(always)]
+pub(super) fn sqr_lazy(value: &[u64; 4], modulus: &[u64; 4], inv: u64) -> [u64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        square_reduce_lazy_pasta(value, modulus, inv)
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        reduce_square_lazy(&square_wide(value), modulus, inv)
+    }
 }

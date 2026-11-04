@@ -2,7 +2,7 @@
 
 use arrayvec::ArrayVec;
 use group::{
-    Curve,
+    Curve, Group,
     ff::{Field, PrimeField},
 };
 use halo2_proofs::arithmetic::lagrange_interpolate;
@@ -38,50 +38,44 @@ pub(crate) const T_P: u128 = 45560315531419706090280762371685220353;
 /// Each window will have $2^3 = 8$ points. The tables are computed as described in
 /// [the Halo 2 book](https://zcash.github.io/halo2/design/gadgets/ecc/fixed-base-scalar-mul.html#load-fixed-base).
 fn compute_window_table<C: CurveAffine>(base: C, num_windows: usize) -> Vec<[C; H]> {
-    let mut window_table: Vec<[C; H]> = Vec::with_capacity(num_windows);
-    let h = C::Scalar::from(H as u64);
-    let mut window_scale = C::Scalar::ONE;
+    // Every multiplier is a public constant, so instead of one scalar
+    // multiplication per entry, walk the multiples with additions and
+    // doublings and normalize the whole table with one shared inversion.
+    let mut table: Vec<C::CurveExt> = Vec::with_capacity(num_windows * H);
+    // [(2^3)^w]B for the current window w.
+    let mut window_base: C::CurveExt = base.into();
+    // [sum]B, where sum = \sum_{j = 0}^{`num_windows - 2`} 2^{3j+1}.
+    let mut sum = C::CurveExt::identity();
 
     // Generate window table entries for all windows but the last.
     // For these first `num_windows - 1` windows, we compute the multiple [(k+2)*(2^3)^w]B.
     // Here, w ranges from [0..`num_windows - 1`)
     for _ in 0..(num_windows - 1) {
-        window_table.push(
-            (0..H)
-                .map(|k| {
-                    // scalar = (k+2)*(8^w)
-                    let scalar = C::Scalar::from(k as u64 + 2) * window_scale;
-                    (base * scalar).to_affine()
-                })
-                .collect::<ArrayVec<C, H>>()
-                .into_inner()
-                .unwrap(),
-        );
-        window_scale *= h;
+        let mut multiple = window_base.double();
+        sum += multiple;
+        for _ in 0..H {
+            table.push(multiple);
+            multiple += window_base;
+        }
+        for _ in 0..FIXED_BASE_WINDOW_SIZE {
+            window_base = window_base.double();
+        }
     }
 
     // Generate window table entries for the last window, w = `num_windows - 1`.
-    // For the last window, we compute [k * (2^3)^w - sum]B, where sum is defined
-    // as sum = \sum_{j = 0}^{`num_windows - 2`} 2^{3j+1}
-    let mut offset = C::Scalar::from(2);
-    let mut sum = C::Scalar::ZERO;
-    for _ in 0..(num_windows - 1) {
-        sum += offset;
-        offset *= h;
+    // For the last window, we compute [k * (2^3)^w - sum]B.
+    let mut multiple = -sum;
+    for _ in 0..H {
+        table.push(multiple);
+        multiple += window_base;
     }
-    window_table.push(
-        (0..H)
-            .map(|k| {
-                // scalar = k * (2^3)^w - sum, where w = `num_windows - 1`
-                let scalar = C::Scalar::from(k as u64) * window_scale - sum;
-                (base * scalar).to_affine()
-            })
-            .collect::<ArrayVec<C, H>>()
-            .into_inner()
-            .unwrap(),
-    );
 
-    window_table
+    let mut affine = vec![C::identity(); table.len()];
+    C::CurveExt::batch_normalize(&table, &mut affine);
+    affine
+        .chunks_exact(H)
+        .map(|window| window.try_into().unwrap())
+        .collect()
 }
 
 /// For each window, we interpolate the $x$-coordinate.

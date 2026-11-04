@@ -1,4 +1,3 @@
-use ff::PrimeFieldBits;
 use group::ff::PrimeField;
 use halo2_proofs::{
     circuit::Layouter,
@@ -89,7 +88,7 @@ impl GeneratorTableConfig {
         layouter: &mut impl Layouter<pallas::Base>,
     ) -> Result<(), Error>
     where
-        F: PrimeFieldBits,
+        F: PrimeField,
     {
         lookup_config.load(self, layouter)
     }

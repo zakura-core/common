@@ -1,5 +1,5 @@
 use super::Params;
-use crate::arithmetic::{CurveAffine, best_multiexp};
+use crate::arithmetic::{CurveAffine, CurveExt, best_multiexp};
 use ff::{Field, PrimeField};
 use group::Group;
 
@@ -70,6 +70,13 @@ impl<F: PrimeField> Ord for CanonicalFieldKey<F> {
     }
 }
 
+/// A term over an arbitrary point, keyed by its x-coordinate.
+///
+/// Every stored `(x, y)` pair is the affine coordinates of a non-identity
+/// point on the curve: terms enter only through [`MSM::append_term`], which
+/// takes them from a valid point, and merging keeps one of two such pairs,
+/// `(x, y)` or `(x, -y)`. The bases are therefore rebuilt with
+/// [`CurveAffine::from_xy_unchecked`] rather than re-checked.
 type ArbitraryTerm<C> = (
     CanonicalFieldKey<<C as CurveAffine>::Base>,
     (<C as CurveAffine>::ScalarExt, <C as CurveAffine>::Base),
@@ -78,6 +85,12 @@ type OtherTerms<C> = BTreeMap<
     CanonicalFieldKey<<C as CurveAffine>::Base>,
     (<C as CurveAffine>::ScalarExt, <C as CurveAffine>::Base),
 >;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ScalarProfile {
+    General,
+    FullWidth,
+}
 
 /// A multiscalar multiplication in the polynomial commitment scheme
 #[derive(Debug, Clone)]
@@ -296,7 +309,7 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         self.u_scalar = self.u_scalar.map(|a| a * &factor);
     }
 
-    fn multiexp(self) -> C::Curve {
+    fn multiexp_terms(self) -> (Vec<C::Scalar>, Vec<C>) {
         let Self {
             params,
             g_scalars,
@@ -325,14 +338,14 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             bases.extend(
                 other
                     .iter()
-                    .map(|(x, (_, y))| C::from_xy(x.value, *y).unwrap()),
+                    .map(|(x, (_, y))| C::from_xy_unchecked(x.value, *y)),
             );
         } else {
             scalars.extend(batched_other.iter().map(|(_, (scalar, _))| *scalar));
             bases.extend(
                 batched_other
                     .iter()
-                    .map(|(x, (_, y))| C::from_xy(x.value, *y).unwrap()),
+                    .map(|(x, (_, y))| C::from_xy_unchecked(x.value, *y)),
             );
         }
 
@@ -353,12 +366,27 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
 
         assert_eq!(scalars.len(), len);
 
+        (scalars, bases)
+    }
+
+    fn multiexp(self) -> C::Curve {
+        let (scalars, bases) = self.multiexp_terms();
         best_multiexp(&scalars, &bases)
     }
 
-    /// Perform multiexp and check that it results in zero
+    /// Perform multiexp and check that it results in zero.
+    pub fn eval(self) -> bool {
+        self.eval_with_profile(ScalarProfile::General)
+    }
+
+    /// Evaluates a verifier MSM whose dominant generator-scalar vector is
+    /// expected to be random-like and full-width.
+    pub(crate) fn eval_full_width(self) -> bool {
+        self.eval_with_profile(ScalarProfile::FullWidth)
+    }
+
     #[cfg_attr(not(feature = "orbits"), allow(unused_mut))]
-    pub fn eval(mut self) -> bool {
+    fn eval_with_profile(mut self, scalar_profile: ScalarProfile) -> bool {
         // A prepared fixed-base zero-check over [g..., w, u] (built by
         // `Params::prepare_zero_checks`, under the opt-in `orbits`
         // feature) evaluates the identity test
@@ -405,12 +433,12 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
                 let extra: Vec<(C::Scalar, C)> = if self.batched_other.is_empty() {
                     self.other
                         .iter()
-                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(x.value, *y).unwrap()))
+                        .map(|(x, (scalar, y))| (*scalar, C::from_xy_unchecked(x.value, *y)))
                         .collect()
                 } else {
                     self.batched_other
                         .iter()
-                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(x.value, *y).unwrap()))
+                        .map(|(x, (scalar, y))| (*scalar, C::from_xy_unchecked(x.value, *y)))
                         .collect()
                 };
                 if extra.len() <= n {
@@ -430,7 +458,17 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             }
         }
 
-        bool::from(self.multiexp().is_identity())
+        if scalar_profile == ScalarProfile::General {
+            return bool::from(self.multiexp().is_identity());
+        }
+
+        let (scalars, bases) = self.multiexp_terms();
+        if let Some(is_identity) =
+            C::CurveExt::try_multiexp_full_width_is_identity_vartime(&scalars, &bases)
+        {
+            return is_identity;
+        }
+        bool::from(best_multiexp(&scalars, &bases).is_identity())
     }
 
     /// The MSM's accumulated terms, exposed for capturing the verifier fingerprint without consuming
@@ -469,8 +507,12 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
 mod tests {
     use super::CanonicalFieldKey;
     use crate::poly::commitment::{MSM, Params};
-    use group::Curve;
-    use pasta_curves::{EpAffine, EqAffine, Fp, Fq, arithmetic::CurveAffine};
+    use ff::Field;
+    use group::{Curve, Group};
+    use pasta_curves::{
+        EpAffine, EqAffine, Fp, Fq,
+        arithmetic::{CurveAffine, CurveExt},
+    };
 
     fn assert_cached_key_order<F: ff::PrimeField + Ord>(values: &[F]) {
         for left in values {
@@ -502,6 +544,46 @@ mod tests {
             .chain([Fq::from(0), Fq::from(1)])
             .collect::<Vec<_>>();
         assert_cached_key_order(&vesta_xs);
+    }
+
+    fn cancelling_full_width_msm(params: &Params<EpAffine>) -> MSM<'_, EpAffine> {
+        let g_scalars = (0..params.n)
+            .map(|index| Fq::from(index + 2).invert().unwrap())
+            .collect::<Vec<_>>();
+        let mut msm = MSM::new(params);
+        msm.add_to_g_scalars(&g_scalars);
+        let sum = msm.clone().multiexp();
+        assert!(!bool::from(sum.is_identity()));
+        msm.append_term(-Fq::ONE, sum.to_affine());
+        msm
+    }
+
+    #[test]
+    fn eval_full_width_is_exact() {
+        let params = Params::<EpAffine>::new(8);
+        let valid = cancelling_full_width_msm(&params);
+        assert!(valid.clone().eval_full_width());
+
+        let mut invalid = valid;
+        invalid.append_term(Fq::ONE, params.w);
+        assert!(!invalid.eval_full_width());
+    }
+
+    #[test]
+    fn eval_full_width_falls_back_below_glv_threshold() {
+        let params = Params::<EpAffine>::new(4);
+        let valid = cancelling_full_width_msm(&params);
+        let (scalars, bases) = valid.clone().multiexp_terms();
+        assert!(
+            <<EpAffine as CurveAffine>::CurveExt as CurveExt>::
+                try_multiexp_full_width_is_identity_vartime(&scalars, &bases)
+                .is_none()
+        );
+        assert!(valid.clone().eval_full_width());
+
+        let mut invalid = valid;
+        invalid.append_term(Fq::ONE, params.w);
+        assert!(!invalid.eval_full_width());
     }
 
     #[test]

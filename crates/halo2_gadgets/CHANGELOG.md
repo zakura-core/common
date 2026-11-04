@@ -10,6 +10,16 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-02
+
+### Changed
+
+- Relaxed the `PrimeFieldBits` bounds on the lookup range check, running sum,
+  Sinsemilla message and generator-table APIs, `bitrange_subset` and
+  `decompose_word` to `PrimeField`. Fields used with them must encode `Repr`
+  as the little-endian bytes of the canonical value ([#626](https://github.com/zakura-core/common/pull/626)).
+- Stopped enabling `ff`'s `bits` feature ([#626](https://github.com/zakura-core/common/pull/626)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed

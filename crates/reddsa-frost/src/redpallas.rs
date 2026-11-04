@@ -12,6 +12,8 @@ use group::{
 };
 #[cfg(feature = "pallas-pasta")]
 use pasta_curves::pallas;
+#[cfg(feature = "pallas-sensei")]
+use sensei::primitives::pallas;
 
 pub mod rerandomized;
 

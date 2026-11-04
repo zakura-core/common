@@ -2048,10 +2048,11 @@ mod tests {
             L_ORCHARD_BASE, L_VALUE, OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains,
             T_Q, fixed_bases::NOTE_COMMITMENT_PERSONALIZATION,
         },
+        spec::leos2bsp,
         value::NoteValue,
     };
 
-    use crate::backend::ff::{Field, PrimeField, PrimeFieldBits};
+    use crate::backend::ff::{Field, PrimeField};
     use crate::backend::group::Curve;
     use crate::backend::halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
@@ -2270,25 +2271,13 @@ mod tests {
                             domain
                                 .commit(
                                     iter::empty()
-                                        .chain(
-                                            gd_x.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE),
-                                        )
+                                        .chain(leos2bsp(gd_x.to_repr()).take(L_ORCHARD_BASE))
                                         .chain(Some(lsb(gd_y_lsb)))
-                                        .chain(
-                                            pkd_x
-                                                .to_le_bits()
-                                                .iter()
-                                                .by_vals()
-                                                .take(L_ORCHARD_BASE),
-                                        )
+                                        .chain(leos2bsp(pkd_x.to_repr()).take(L_ORCHARD_BASE))
                                         .chain(Some(lsb(pkd_y_lsb)))
-                                        .chain(value.to_le_bits().iter().by_vals().take(L_VALUE))
-                                        .chain(
-                                            rho.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE),
-                                        )
-                                        .chain(
-                                            psi.to_le_bits().iter().by_vals().take(L_ORCHARD_BASE),
-                                        ),
+                                        .chain(value.to_le_bits().take(L_VALUE))
+                                        .chain(leos2bsp(rho.to_repr()).take(L_ORCHARD_BASE))
+                                        .chain(leos2bsp(psi.to_repr()).take(L_ORCHARD_BASE)),
                                     &rcm,
                                 )
                                 .unwrap()

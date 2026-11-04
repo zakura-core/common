@@ -94,6 +94,18 @@ audit-as-crates-io = false
 [policy.zakura-sapling-crypto]
 audit-as-crates-io = false
 
+[policy.zakura-sensei]
+audit-as-crates-io = false
+
+[policy.zakura-sensei-artifacts]
+audit-as-crates-io = false
+
+[policy.zakura-sensei-macros]
+audit-as-crates-io = false
+
+[policy.zakura-sensei-shared]
+audit-as-crates-io = false
+
 [policy.zakura-sinsemilla]
 audit-as-crates-io = false
 
@@ -101,6 +113,9 @@ audit-as-crates-io = false
 audit-as-crates-io = false
 
 [policy.zakura-udon]
+audit-as-crates-io = false
+
+[policy.zakura-zcash-script]
 audit-as-crates-io = false
 
 [policy.zakura-zip321]
@@ -1262,10 +1277,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zcash_protocol]]
 version = "0.10.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.zcash_script]]
-version = "0.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_spec]]

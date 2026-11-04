@@ -12,7 +12,7 @@ repository.workspace = true
 readme.workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["backend-halo2", "bundled-prover", "download-params", "local-prover", "multicore"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -40,6 +40,7 @@ byteorder = "1"
 
 [features]
 backend-halo2 = ["zcash_primitives/backend-halo2"]
+backend-sensei = ["zcash_primitives/backend-sensei"]
 bundled-prover = ["dep:wagyu-zcash-parameters"]
 default = ["backend-halo2", "multicore"]
 directories = ["dep:home", "dep:known-folders", "dep:xdg"]

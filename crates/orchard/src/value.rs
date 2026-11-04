@@ -44,7 +44,6 @@ use core::iter::Sum;
 use core::ops::{Add, RangeInclusive, Sub};
 
 use crate::backend::pallas;
-use bitvec::{array::BitArray, order::Lsb0};
 use rand::Rng;
 use subtle::CtOption;
 
@@ -116,8 +115,8 @@ impl NoteValue {
         self.0.to_le_bytes()
     }
 
-    pub(crate) fn to_le_bits(self) -> BitArray<[u8; 8], Lsb0> {
-        BitArray::<_, Lsb0>::new(self.0.to_le_bytes())
+    pub(crate) fn to_le_bits(self) -> impl Iterator<Item = bool> {
+        crate::spec::leos2bsp(self.0.to_le_bytes())
     }
 }
 
@@ -337,13 +336,22 @@ impl ValueCommitment {
     ///
     /// [concretehomomorphiccommit]: https://zips.z.cash/protocol/nu5.pdf#concretehomomorphiccommit
     #[allow(non_snake_case)]
+    #[cfg(feature = "backend-sensei")]
     pub fn derive(value: ValueSum, rcv: ValueCommitTrapdoor) -> Self {
-        use crate::constants::fixed_bases::{
-            VALUE_COMMITMENT_PERSONALIZATION, VALUE_COMMITMENT_R_BYTES, VALUE_COMMITMENT_V_BYTES,
-        };
-        let hasher = pallas::Point::hash_to_curve(VALUE_COMMITMENT_PERSONALIZATION);
-        let V = hasher(&VALUE_COMMITMENT_V_BYTES);
-        let R = hasher(&VALUE_COMMITMENT_R_BYTES);
+        let magnitude = u64::try_from(value.0.abs()).expect("value must be in valid range");
+        ValueCommitment(sensei::primitives::protocol::value_commitment(
+            magnitude,
+            value.0.is_negative(),
+            rcv.0,
+        ))
+    }
+    #[cfg(feature = "backend-halo2")]
+    /// Derives a value commitment from the net value and its trapdoor.
+    #[allow(non_snake_case)]
+    pub fn derive(value: ValueSum, rcv: ValueCommitTrapdoor) -> Self {
+        use crate::constants::fixed_bases::{value_commit_r, value_commit_v};
+        let V = value_commit_v::generator();
+        let R = value_commit_r::generator();
         let abs_value = u64::try_from(value.0.abs()).expect("value must be in valid range");
 
         let value = if value.0.is_negative() {
@@ -353,6 +361,61 @@ impl ValueCommitment {
         };
 
         ValueCommitment(V * value + R * rcv.0)
+    }
+
+    /// Derives the commitment to a public `value` with a zero trapdoor.
+    ///
+    /// This equals `derive(value, ValueCommitTrapdoor::zero())`, the term a bundle's
+    /// value balance contributes to its binding validating key.
+    ///
+    /// # Security
+    ///
+    /// This may run in variable time with respect to `value`. **`value` must be public.**
+    /// Use [`ValueCommitment::derive`] for a note's value.
+    #[cfg(feature = "backend-sensei")]
+    pub fn derive_public(value: ValueSum) -> Self {
+        let magnitude = u64::try_from(value.0.abs()).expect("value must be in valid range");
+        let commitment = sensei::primitives::generators::FixedGenerator::ValueCommitV
+            .multiply(&pallas::Scalar::from(magnitude));
+        ValueCommitment(if value.0.is_negative() {
+            -commitment
+        } else {
+            commitment
+        })
+    }
+
+    /// Derives the commitment to a public `value` with a zero trapdoor.
+    ///
+    /// This equals `derive(value, ValueCommitTrapdoor::zero())`, the term a bundle's
+    /// value balance contributes to its binding validating key.
+    ///
+    /// # Security
+    ///
+    /// This runs in variable time with respect to `value`. **`value` must be public.**
+    /// Use [`ValueCommitment::derive`] for a note's value.
+    #[cfg(feature = "backend-halo2")]
+    pub fn derive_public(value: ValueSum) -> Self {
+        let magnitude = u64::try_from(value.0.abs()).expect("value must be in valid range");
+        let generator = crate::constants::fixed_bases::value_commit_v::generator();
+        // Double-and-add over only the magnitude's significant bits, adding the
+        // generator only at set bits. A negative value negates the product rather
+        // than multiplying by a full-width negated scalar.
+        let commitment = (0..u64::BITS - magnitude.leading_zeros()).rev().fold(
+            pallas::Point::identity(),
+            |acc, bit| {
+                let acc = acc.double();
+                if (magnitude >> bit) & 1 == 1 {
+                    acc + generator
+                } else {
+                    acc
+                }
+            },
+        );
+        ValueCommitment(if value.0.is_negative() {
+            -commitment
+        } else {
+            commitment
+        })
     }
 
     pub(crate) fn into_bvk(self) -> redpallas::VerificationKey<Binding> {
@@ -367,6 +430,11 @@ impl ValueCommitment {
     /// Serialize this value commitment to its canonical byte representation.
     pub fn to_bytes(&self) -> [u8; 32] {
         self.0.to_bytes()
+    }
+
+    /// The committed Pallas point.
+    pub(crate) fn point(&self) -> pallas::Point {
+        self.0
     }
 
     /// x-coordinate of this value commitment.
@@ -461,7 +529,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        BalanceError, MAX_NOTE_VALUE, ValueCommitTrapdoor, ValueCommitment, ValueSum,
+        BalanceError, MAX_NOTE_VALUE, NoteValue, ValueCommitTrapdoor, ValueCommitment, ValueSum,
         testing::{arb_note_value_bounded, arb_trapdoor, arb_value_sum_bounded},
     };
     use crate::primitives::redpallas;
@@ -495,6 +563,39 @@ mod tests {
             .into_bvk();
 
             assert_eq!(redpallas::VerificationKey::from(&bsk), bvk);
+        }
+
+        #[test]
+        fn derive_public_matches_derive_with_zero_trapdoor(
+            value in arb_value_sum_bounded(NoteValue::from_raw(MAX_NOTE_VALUE)),
+        ) {
+            assert_eq!(
+                ValueCommitment::derive_public(value).to_bytes(),
+                ValueCommitment::derive(value, ValueCommitTrapdoor::zero()).to_bytes(),
+            );
+        }
+    }
+
+    #[test]
+    fn derive_public_matches_derive_at_range_edges() {
+        let edges = [
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            i128::from(u64::MAX),
+            -i128::from(u64::MAX),
+            i128::from(i64::MIN),
+            i128::from(i64::MAX),
+        ];
+        for raw in edges {
+            let value = ValueSum(raw);
+            assert_eq!(
+                ValueCommitment::derive_public(value).to_bytes(),
+                ValueCommitment::derive(value, ValueCommitTrapdoor::zero()).to_bytes(),
+                "value {raw}",
+            );
         }
     }
 }

@@ -23,7 +23,10 @@ blake2b_simd = { version = "1", default-features = false }
 group = { version = "0.14", default-features = false }
 hex = { version = "0.4", features = ["alloc"], optional = true, default-features = false }
 jubjub = { workspace = true }
+once_cell = { version = "1", features = ["race", "alloc"], optional = true, default-features = false }
+sensei = { workspace = true, optional = true }
 pasta_curves = { workspace = true, optional = true, features = ["alloc"] }
+maybe-rayon = { version = "0.1.0", optional = true, default-features = false }
 rand_core = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
 
@@ -38,7 +41,15 @@ rand = "0.10"
 rand_chacha = "0.10"
 
 [features]
-pallas-pasta = ["dep:pasta_curves"]
+pallas-pasta = [
+    "dep:pasta_curves",
+    "pasta_curves/glv",
+    "pasta_curves/sqrt-table",
+    "dep:once_cell",
+]
+pallas-sensei = ["dep:sensei"]
+# Lets the Pallas batch-verification MSM use the Rayon pool.
+multicore = ["pasta_curves?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
 alloc = ["hex", "jubjub/alloc"]
 default = ["std", "pallas-pasta"]
 nightly = []
@@ -57,3 +68,8 @@ std = [
 [[bench]]
 name = "bench"
 harness = false
+
+[[bench]]
+name = "retained_points"
+harness = false
+required-features = ["std", "pallas-pasta"]

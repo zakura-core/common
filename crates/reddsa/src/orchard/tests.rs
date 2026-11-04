@@ -11,6 +11,8 @@ use group::{
 };
 #[cfg(feature = "pallas-pasta")]
 use pasta_curves::{arithmetic::CurveExt as _, pallas};
+#[cfg(feature = "pallas-sensei")]
+use sensei::primitives::pallas;
 
 #[test]
 fn orchard_spendauth_basepoint() {
@@ -114,4 +116,99 @@ fn test_non_adjacent_form() {
 
     let scalar = pallas::Scalar::random(&mut rng);
     scalar_mul::tests::test_non_adjacent_form_for_scalar(5, scalar);
+}
+
+/// The shared pasta MSM must agree with the interleaved wNAF on every shape
+/// batch verification produces: 128-bit weights, full-width products, zero
+/// scalars, and identity points (an all-zero `R` decodes to the identity).
+#[cfg(feature = "pallas-pasta")]
+#[test]
+fn pasta_multiscalar_mul_matches_wnaf() {
+    use rand::RngExt as _;
+
+    let mut rng = thread_rng();
+    for len in [
+        0usize, 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 49, 64, 97, 194, 200, 385, 400,
+    ] {
+        let scalars = (0..len)
+            .map(|i| match i % 5 {
+                0 => pallas::Scalar::ZERO,
+                1 => pallas::Scalar::from_u128(rng.random::<u128>()),
+                _ => pallas::Scalar::random(&mut rng),
+            })
+            .collect::<Vec<_>>();
+        let points = (0..len)
+            .map(|i| {
+                if i % 7 == 3 {
+                    pallas::Point::identity()
+                } else {
+                    pallas::Point::random(&mut rng)
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected =
+            super::wnaf_multiscalar_mul(scalars.iter(), points.iter().copied().map(Some)).unwrap();
+        let actual =
+            super::pasta_multiscalar_mul(scalars.iter(), points.iter().copied().map(Some)).unwrap();
+        assert_eq!(actual, expected, "len {len}");
+    }
+
+    // All-identity bases short-circuit to the identity.
+    let identity = pallas::Point::identity();
+    assert_eq!(
+        super::pasta_multiscalar_mul(
+            [pallas::Scalar::ONE, pallas::Scalar::ONE],
+            [Some(identity), Some(identity)],
+        ),
+        Some(identity)
+    );
+    // A missing point still fails the whole MSM.
+    assert_eq!(
+        super::pasta_multiscalar_mul([pallas::Scalar::ONE], [None]),
+        None
+    );
+}
+
+/// Batch decoding, serial or across the pool, must agree with decoding each
+/// encoding on its own, including non-canonical and off-curve encodings, at
+/// every batch size around the parallel cutoff and the decoder's eight lanes.
+#[cfg(all(feature = "pallas-pasta", feature = "multicore"))]
+#[test]
+fn parallel_batch_decode_matches_serial() {
+    let mut rng = thread_rng();
+    for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 64, 385] {
+        let encodings = (0..len)
+            .map(|i| match i % 6 {
+                // Non-canonical x-coordinate.
+                3 => [0xff; 32],
+                // Canonical x with no point on the curve, or a sign-bit
+                // variant; either way decoding decides.
+                5 => {
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = i as u8;
+                    bytes[31] = 0x80;
+                    bytes
+                }
+                _ => pallas::Point::random(&mut rng).to_bytes(),
+            })
+            .collect::<Vec<_>>();
+        let serial = encodings
+            .iter()
+            .map(|bytes| Option::<pallas::Point>::from(pallas::Point::from_bytes(bytes)))
+            .collect::<Vec<_>>();
+        for threads in [1usize, 2, 8] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool");
+            // Every size decodes as a batch, across the pool from the cutoff.
+            let decoded =
+                pool.install(|| super::batch_decode_pallas_points(encodings.iter().copied()));
+            assert_eq!(
+                decoded,
+                Some(serial.clone()),
+                "len {len}, {threads} threads"
+            );
+        }
+    }
 }

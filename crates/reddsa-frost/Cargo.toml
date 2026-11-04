@@ -23,6 +23,7 @@ blake2b_simd = { version = "1", default-features = false }
 frost-rerandomized = { version = "3.0.0", features = ["serialization"], default-features = false }
 group = { version = "0.14", default-features = false }
 jubjub = { workspace = true }
+sensei = { workspace = true, optional = true }
 pasta_curves = { workspace = true, optional = true, features = ["alloc"] }
 rand_core = { version = "0.10", default-features = false }
 rand_core_06 = { version = "0.6", features = ["getrandom"], default-features = false, package = "rand_core" }
@@ -36,6 +37,7 @@ rand_core_06 = { version = "0.6", features = ["getrandom"], package = "rand_core
 
 [features]
 pallas-pasta = ["dep:pasta_curves", "reddsa/pallas-pasta"]
+pallas-sensei = ["dep:sensei", "reddsa/pallas-sensei"]
 default = ["std", "pallas-pasta"]
 serde = ["frost-rerandomized/serde"]
 std = ["blake2b_simd/std", "reddsa/std", "serde"]

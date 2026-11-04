@@ -125,8 +125,32 @@ use prepared::{PreparedPoint, VariantTable, unit_coords};
 const PREPARED_PREFETCH_DISTANCE: usize = 16;
 const PREPARED_PREFETCH_RECORD_BYTES: usize = 96;
 const PREPARED_PREFETCH_SECOND_LINE: usize = 64;
+#[cfg(any(
+    test,
+    all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )
+))]
 const PREFETCH_XSAVE_OSXSAVE_AVX: u32 = (1 << 26) | (1 << 27) | (1 << 28);
+#[cfg(any(
+    test,
+    all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )
+))]
 const PREFETCH_REQUIRED_XCR0: u64 = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 7);
+#[cfg(any(
+    test,
+    all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )
+))]
 const PREFETCH_AVX512_F_IFMA_VL: u32 = (1 << 16) | (1 << 21) | (1 << 31);
 
 fn prepared_prefetch_field_supported<F: 'static>() -> bool {
@@ -135,6 +159,14 @@ fn prepared_prefetch_field_supported<F: 'static>() -> bool {
     TypeId::of::<F>() == TypeId::of::<crate::Fp>() || TypeId::of::<F>() == TypeId::of::<crate::Fq>()
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )
+))]
 fn prepared_prefetch_flags_supported(leaf1_ecx: u32, leaf7_ebx: u32, xcr0: u64) -> bool {
     leaf1_ecx & PREFETCH_XSAVE_OSXSAVE_AVX == PREFETCH_XSAVE_OSXSAVE_AVX
         && leaf7_ebx & PREFETCH_AVX512_F_IFMA_VL == PREFETCH_AVX512_F_IFMA_VL
@@ -143,10 +175,11 @@ fn prepared_prefetch_flags_supported(leaf1_ecx: u32, leaf7_ebx: u32, xcr0: u64) 
 
 /// Keeps prefetching within the measured CPU and operating-system policy.
 ///
-/// The hint itself only requires baseline x86-64 SSE support. This stricter
-/// gate is a performance policy, not an instruction-safety requirement: the
-/// prepared-table measurements cover AVX-512F/IFMA/VL hosts with OS support
-/// for the corresponding register state. Detection also works without `std`.
+/// The instructions only require baseline SSE or AArch64. This stricter
+/// gate is a performance policy: x86 measurements cover AVX-512F/IFMA/VL
+/// hosts with OS support for the corresponding register state; the ARM
+/// policy covers Apple targets. Other ARM targets await separate measurements.
+/// Detection and hint emission do not require `std`.
 #[allow(unsafe_code)]
 fn prepared_prefetch_cpu_available() -> bool {
     #[cfg(all(
@@ -180,14 +213,31 @@ fn prepared_prefetch_cpu_available() -> bool {
         AVAILABLE.store(if available { 2 } else { 1 }, Ordering::Relaxed);
         available
     }
-    #[cfg(not(all(
-        feature = "x86_64-asm",
-        target_arch = "x86_64",
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple",
         target_pointer_width = "64"
+    ))]
+    {
+        // The 16-row look-ahead improved complete Ironwood proving on M3 Max.
+        true
+    }
+    #[cfg(not(any(
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ),
+        all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_pointer_width = "64"
+        )
     )))]
     {
-        // Other targets have none of the measured x86 feature state.
-        prepared_prefetch_flags_supported(0, 0, 0)
+        false
     }
 }
 
@@ -224,10 +274,39 @@ fn prefetch_prepared_point<F>(point: &PreparedPoint<F>) {
             );
         }
     }
-    #[cfg(not(all(
-        feature = "x86_64-asm",
-        target_arch = "x86_64",
+    #[cfg(all(
+        feature = "aarch64-asm",
+        target_arch = "aarch64",
+        target_vendor = "apple",
         target_pointer_width = "64"
+    ))]
+    {
+        let address = core::ptr::from_ref(point).cast::<u8>();
+        // SAFETY: both hints stay within the checked 96-byte live record.
+        // PRFM only hints a load; it neither changes memory nor interprets
+        // a field representation. It is available in baseline AArch64.
+        unsafe {
+            core::arch::asm!(
+                "prfm pldl1keep, [{address}]",
+                "prfm pldl1keep, [{address}, #{second}]",
+                address = in(reg) address,
+                second = const PREPARED_PREFETCH_SECOND_LINE,
+                options(readonly, nostack, preserves_flags),
+            );
+        }
+    }
+    #[cfg(not(any(
+        all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ),
+        all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_pointer_width = "64"
+        )
     )))]
     let _ = point;
 }
@@ -896,40 +975,13 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let _ = (num_threads, main_window_fold);
         #[cfg(feature = "multicore")]
         if num_threads > 1 {
-            // Point-returning MSMs reduce the main windows independently
-            // and combine them with one Horner fold. Zero checks retain the
-            // paired schedule tuned for an isolated MSM. The residual tail
-            // and extras MSM run concurrently with the main windows.
-            let main = || {
-                maybe_rayon::join(
-                    || match main_window_fold {
-                        MainWindowFold::Paired => {
-                            super::paired_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum(recoded, window)
-                            })
-                        }
-                        MainWindowFold::Horner => {
-                            super::parallel_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum(recoded, window)
-                            })
-                        }
-                    },
-                    || self.tail_sum(recoded, num_threads),
-                )
-            };
-            let (extras_part, (windows_part, tail)) = if extras.is_empty() {
-                (Some(C::identity()), main())
-            } else {
-                maybe_rayon::join(|| self.extras_sum(extras), main)
-            };
-            let windows_part = windows_part?;
-            let mut tail = tail?;
-            if !bool::from(tail.is_identity()) {
-                for _ in 0..window_bits * main_windows {
-                    tail = tail.double();
-                }
-            }
-            return Some(windows_part + tail + extras_part?);
+            return self.evaluate_parallel(
+                active,
+                extras,
+                main_window_fold,
+                &|window| self.window_sum(recoded, window),
+                &|| self.tail_sum(recoded, num_threads),
+            );
         }
 
         let mut acc = self.tail_sum(recoded, num_threads)?;
@@ -1018,6 +1070,53 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         (points, offsets)
     }
 
+    /// The parallel schedule shared by [`Self::evaluate`] and
+    /// [`Self::evaluate_range`]: `window_sum` reduces one main window and
+    /// `tail_sum` the unshifted residual tail. Both are trait objects, so the
+    /// Rayon joins are compiled once per curve rather than once per caller.
+    #[cfg(feature = "multicore")]
+    fn evaluate_parallel(
+        &self,
+        active: usize,
+        extras: &[(C::ScalarExt, C::AffineExt)],
+        main_window_fold: MainWindowFold,
+        window_sum: &(dyn Fn(usize) -> Option<C> + Sync),
+        tail_sum: &(dyn Fn() -> Option<C> + Sync),
+    ) -> Option<C> {
+        let window_bits = self.codebook.window_bits();
+        let main_windows = self.codebook.main_windows();
+        // Point-returning MSMs reduce the main windows independently and
+        // combine them with one Horner fold. Zero checks retain the paired
+        // schedule tuned for an isolated MSM. The residual tail and extras
+        // MSM run concurrently with the main windows.
+        let main = || {
+            maybe_rayon::join(
+                || match main_window_fold {
+                    MainWindowFold::Paired => {
+                        super::paired_windows_sum::<C>(active, window_bits, window_sum)
+                    }
+                    MainWindowFold::Horner => {
+                        super::parallel_windows_sum::<C>(active, window_bits, window_sum)
+                    }
+                },
+                tail_sum,
+            )
+        };
+        let (extras_part, (windows_part, tail)) = if extras.is_empty() {
+            (Some(C::identity()), main())
+        } else {
+            maybe_rayon::join(|| self.extras_sum(extras), main)
+        };
+        let windows_part = windows_part?;
+        let mut tail = tail?;
+        if !bool::from(tail.is_identity()) {
+            for _ in 0..window_bits * main_windows {
+                tail = tail.double();
+            }
+        }
+        Some(windows_part + tail + extras_part?)
+    }
+
     /// The range counterpart of [`Self::evaluate`].
     fn evaluate_range(
         &self,
@@ -1035,40 +1134,13 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let _ = (num_threads, main_window_fold);
         #[cfg(feature = "multicore")]
         if num_threads > 1 {
-            // Point-returning MSMs reduce the main windows independently
-            // and combine them with one Horner fold. Zero checks retain the
-            // paired schedule tuned for an isolated MSM. The residual tail
-            // and extras MSM run concurrently with the main windows.
-            let main = || {
-                maybe_rayon::join(
-                    || match main_window_fold {
-                        MainWindowFold::Paired => {
-                            super::paired_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum_range(recoded, base_offset, window)
-                            })
-                        }
-                        MainWindowFold::Horner => {
-                            super::parallel_windows_sum::<C>(active, window_bits, |window| {
-                                self.window_sum_range(recoded, base_offset, window)
-                            })
-                        }
-                    },
-                    || self.tail_sum_range(&recoded.residuals, base_offset, num_threads),
-                )
-            };
-            let (extras_part, (windows_part, tail)) = if extras.is_empty() {
-                (Some(C::identity()), main())
-            } else {
-                maybe_rayon::join(|| self.extras_sum(extras), main)
-            };
-            let windows_part = windows_part?;
-            let mut tail = tail?;
-            if !bool::from(tail.is_identity()) {
-                for _ in 0..window_bits * main_windows {
-                    tail = tail.double();
-                }
-            }
-            return Some(windows_part + tail + extras_part?);
+            return self.evaluate_parallel(
+                active,
+                extras,
+                main_window_fold,
+                &|window| self.window_sum_range(recoded, base_offset, window),
+                &|| self.tail_sum_range(&recoded.residuals, base_offset, num_threads),
+            );
         }
 
         let mut acc = self.tail_sum_range(&recoded.residuals, base_offset, num_threads)?;
@@ -1404,7 +1476,7 @@ fn tail_multiexp<C: GlvParams>(
             .map(|(row, &(first, second))| orbit::recode_row(params, first, second, row))
             .max()
             .unwrap_or(0);
-        return super::paired_windows_sum::<C>(active, params.width(), |window| {
+        return super::paired_windows_sum::<C>(active, params.width(), &|window| {
             if let Some(base_indices) = base_indices {
                 orbit::windows_sum_indexed::<C>(
                     params,
@@ -2049,13 +2121,28 @@ mod tests {
             prepared_prefetch_enabled::<crate::Fq>(),
             prepared_prefetch_cpu_available(),
         );
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_pointer_width = "64"
+        ))]
+        assert!(prepared_prefetch_cpu_available());
         assert!(prepared_prefetch_field_supported::<crate::Fp>());
         assert!(prepared_prefetch_field_supported::<crate::Fq>());
         assert!(!prepared_prefetch_field_supported::<u8>());
-        #[cfg(not(all(
-            feature = "x86_64-asm",
-            target_arch = "x86_64",
-            target_pointer_width = "64"
+        #[cfg(not(any(
+            all(
+                feature = "x86_64-asm",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            ),
+            all(
+                feature = "aarch64-asm",
+                target_arch = "aarch64",
+                target_vendor = "apple",
+                target_pointer_width = "64"
+            )
         )))]
         {
             assert!(!prepared_prefetch_enabled::<crate::Fp>());

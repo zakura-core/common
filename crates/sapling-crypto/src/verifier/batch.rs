@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use bellman::groth16;
 use bls12_381::Bls12;
 use group::GroupEncoding;
@@ -94,11 +95,15 @@ impl BatchValidator {
 
         let mut ctx = SaplingVerificationContextInner::new();
 
-        for spend in bundle.shielded_spends() {
-            // Deserialize the proof
-            let zkproof = match groth16::Proof::read(&spend.zkproof()[..]) {
-                Ok(p) => p,
-                Err(_) => return false,
+        // Proof parsing decompresses and subgroup-checks curve points, which dominates bundle
+        // preparation, so parse large bundles' proofs in parallel before the ordered checks.
+        let spend_proofs = read_proofs(bundle.shielded_spends().iter().map(|s| s.zkproof()));
+        let output_proofs = read_proofs(bundle.shielded_outputs().iter().map(|o| o.zkproof()));
+
+        for (spend, zkproof) in bundle.shielded_spends().iter().zip(spend_proofs) {
+            let zkproof = match zkproof {
+                Some(p) => p,
+                None => return false,
             };
 
             // Check the Spend consensus rules, and batch its proof and spend
@@ -112,7 +117,11 @@ impl BatchValidator {
                 self,
                 |this, rk| {
                     this.signatures
-                        .queue(((*rk).into(), *spend.spend_auth_sig(), &sighash));
+                        .queue(redjubjub::batch::Item::from_spendauth_key(
+                            *rk,
+                            *spend.spend_auth_sig(),
+                            &sighash,
+                        ));
                     true
                 },
                 |this, proof, public_inputs| {
@@ -126,17 +135,16 @@ impl BatchValidator {
             }
         }
 
-        for output in bundle.shielded_outputs() {
+        for (output, zkproof) in bundle.shielded_outputs().iter().zip(output_proofs) {
             // Deserialize the ephemeral key
             let epk = match jubjub::ExtendedPoint::from_bytes(&output.ephemeral_key().0).into() {
                 Some(p) => p,
                 None => return false,
             };
 
-            // Deserialize the proof
-            let zkproof = match groth16::Proof::read(&output.zkproof()[..]) {
-                Ok(p) => p,
-                Err(_) => return false,
+            let zkproof = match zkproof {
+                Some(p) => p,
+                None => return false,
             };
 
             // Check the Output consensus rules, and batch its proof.
@@ -159,7 +167,11 @@ impl BatchValidator {
         // Check the whole-bundle consensus rules, and batch the binding signature.
         ctx.final_check(*bundle.value_balance(), |bvk| {
             self.signatures
-                .queue((bvk.into(), bundle.authorization().binding_sig, &sighash));
+                .queue(redjubjub::batch::Item::from_binding_key(
+                    bvk,
+                    bundle.authorization().binding_sig,
+                    &sighash,
+                ));
             true
         })
     }
@@ -263,6 +275,26 @@ impl BatchValidator {
     }
 }
 
+/// The smallest number of proofs in a bundle that are parsed in parallel.
+#[cfg(feature = "multicore")]
+const MIN_PARALLEL_PROOF_READS: usize = 4;
+
+/// Parses Groth16 proofs, in parallel for large bundles, keeping their order.
+///
+/// Returns `None` in place of each proof that does not parse.
+fn read_proofs<'a>(
+    proofs: impl ExactSizeIterator<Item = &'a [u8; 192]>,
+) -> Vec<Option<groth16::Proof<Bls12>>> {
+    let read = |bytes: &[u8; 192]| groth16::Proof::read(&bytes[..]).ok();
+    #[cfg(feature = "multicore")]
+    if proofs.len() >= MIN_PARALLEL_PROOF_READS {
+        use rayon::prelude::*;
+        let proofs: Vec<_> = proofs.collect();
+        return proofs.into_par_iter().map(read).collect();
+    }
+    proofs.map(read).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{OUTPUT_PUBLIC_INPUT_COUNT, SPEND_PUBLIC_INPUT_COUNT};
@@ -355,6 +387,111 @@ mod tests {
             validator.output_proof_count = 1;
         }
         validator
+    }
+
+    #[test]
+    fn bundle_spend_signatures_use_retained_keys() {
+        use crate::{
+            Nullifier,
+            bundle::{Authorized, Bundle, SpendDescription},
+            constants::GROTH_PROOF_SIZE,
+            value::{NoteValue, TrapdoorSum, ValueCommitTrapdoor, ValueCommitment},
+        };
+        let mut rng = rand::rng();
+        let sk = redjubjub::SigningKey::<redjubjub::SpendAuth>::new(&mut rng);
+        let rk = redjubjub::VerificationKey::from(&sk);
+        let trapdoor = ValueCommitTrapdoor::from_bytes([7; 32]).unwrap();
+        let bsk = (TrapdoorSum::zero() + &trapdoor).into_bsk();
+        let cv = ValueCommitment::derive(NoteValue::ZERO, trapdoor);
+        let sighash = [42; 32];
+        // Proof verification is deferred; use a parseable dummy proof to
+        // exercise preparation and the signature queue directly.
+        let proof = groth16::Proof::<Bls12> {
+            a: bls12_381::G1Affine::generator(),
+            b: G2Affine::generator(),
+            c: bls12_381::G1Affine::generator(),
+        };
+        let mut proof_bytes = [0; GROTH_PROOF_SIZE];
+        proof.write(&mut proof_bytes[..]).unwrap();
+        let spend = SpendDescription::<Authorized>::from_parts(
+            cv,
+            Scalar::zero(),
+            Nullifier([0; 32]),
+            rk,
+            proof_bytes,
+            sk.sign(&mut rng, &sighash),
+        );
+        let bundle = Bundle::from_parts(
+            vec![spend],
+            vec![],
+            0i64,
+            Authorized {
+                binding_sig: bsk.sign(&mut rng, &sighash),
+            },
+        )
+        .unwrap();
+        for count in [1, 3] {
+            for valid in [true, false] {
+                let mut validator = BatchValidator::new();
+                for i in 0..count {
+                    let hash = if valid || i != 0 { sighash } else { [43; 32] };
+                    assert!(validator.check_bundle(bundle.clone(), hash));
+                }
+                assert_eq!(validator.signatures.verify(&mut rng).is_ok(), valid);
+            }
+        }
+    }
+
+    #[test]
+    fn bundle_binding_signatures_use_retained_keys() {
+        use crate::{
+            bundle::{Authorized, Bundle, OutputDescription},
+            constants::{GROTH_PROOF_SIZE, VALUE_COMMITMENT_RANDOMNESS_GENERATOR},
+            note::ExtractedNoteCommitment,
+            value::{NoteValue, TrapdoorSum, ValueCommitTrapdoor, ValueCommitment},
+        };
+        use group::GroupEncoding;
+        use zcash_note_encryption::{ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes, OUT_CIPHERTEXT_SIZE};
+
+        let mut rng = rand::rng();
+        let trapdoor = ValueCommitTrapdoor::from_bytes([7; 32]).unwrap();
+        let mut trapdoor_sum = TrapdoorSum::zero();
+        trapdoor_sum -= &trapdoor;
+        let bsk = trapdoor_sum.into_bsk();
+        let cv = ValueCommitment::derive(NoteValue::ZERO, trapdoor);
+        let sighash = [42; 32];
+        let binding_sig = bsk.sign(&mut rng, &sighash);
+
+        // Proof verification is deferred. A parseable dummy proof lets this
+        // test exercise bundle preparation and its signature queue directly.
+        let proof = groth16::Proof::<Bls12> {
+            a: bls12_381::G1Affine::generator(),
+            b: G2Affine::generator(),
+            c: bls12_381::G1Affine::generator(),
+        };
+        let mut proof_bytes = [0; GROTH_PROOF_SIZE];
+        proof.write(&mut proof_bytes[..]).unwrap();
+        let output = OutputDescription::from_parts(
+            cv,
+            ExtractedNoteCommitment::from_bytes(&[0; 32]).unwrap(),
+            EphemeralKeyBytes(VALUE_COMMITMENT_RANDOMNESS_GENERATOR.to_bytes()),
+            [0; ENC_CIPHERTEXT_SIZE],
+            [0; OUT_CIPHERTEXT_SIZE],
+            proof_bytes,
+        );
+        let bundle =
+            Bundle::from_parts(vec![], vec![output], 0i64, Authorized { binding_sig }).unwrap();
+
+        for count in [1, 3] {
+            for valid in [true, false] {
+                let mut validator = BatchValidator::new();
+                for i in 0..count {
+                    let hash = if valid || i != 0 { sighash } else { [43; 32] };
+                    assert!(validator.check_bundle(bundle.clone(), hash));
+                }
+                assert_eq!(validator.signatures.verify(&mut rng).is_ok(), valid);
+            }
+        }
     }
 
     #[test]

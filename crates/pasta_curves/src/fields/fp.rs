@@ -336,6 +336,20 @@ impl Default for Fp {
 }
 
 impl Fp {
+    /// Whether this element holds a reduced residue (limbs below the
+    /// modulus). Every constructor and arithmetic result maintains this;
+    /// callers that consume the raw limbs check it rather than assume it.
+    #[cfg(any(test, feature = "glv"))]
+    #[inline]
+    pub(crate) fn is_canonical(&self) -> bool {
+        for i in (0..4).rev() {
+            if self.0[i] != MODULUS.0[i] {
+                return self.0[i] < MODULUS.0[i];
+            }
+        }
+        false
+    }
+
     /// Returns zero, the additive identity.
     #[inline]
     pub const fn zero() -> Fp {
@@ -738,11 +752,24 @@ impl DeferredField for Fp {
     fn inner_product(lhs: &[Fp], rhs: &[Fp]) -> Fp {
         assert_eq!(lhs.len(), rhs.len());
         let mut accumulator = Self::Accumulator::default();
-        for (lhs, rhs) in lhs
-            .chunks(INNER_PRODUCT_BLOCK_SIZE)
-            .zip(rhs.chunks(INNER_PRODUCT_BLOCK_SIZE))
-        {
-            accumulator.mul_accumulate_block(lhs, rhs, inner_product_limbs);
+        // Use the ARM carry-chain kernel directly when available. Blocked
+        // accumulation remains the fallback for the portable scalar kernel.
+        if cfg!(all(
+            feature = "aarch64-asm",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )) {
+            for (lhs, rhs) in lhs.iter().zip(rhs) {
+                Self::mul_accumulate(&mut accumulator, lhs, rhs);
+            }
+        } else {
+            for (lhs, rhs) in lhs
+                .chunks(INNER_PRODUCT_BLOCK_SIZE)
+                .zip(rhs.chunks(INNER_PRODUCT_BLOCK_SIZE))
+            {
+                accumulator.mul_accumulate_block(lhs, rhs, inner_product_limbs);
+            }
         }
         Self::reduce(accumulator)
     }
@@ -1076,6 +1103,82 @@ fn fp_tables() -> &'static SqrtTables<Fp> {
     FP_TABLES.get_or_init(|| SqrtTables::new(0x54C11DB5))
 }
 
+impl Fp {
+    /// `sqrt_alt` of `K` independent values, with their chains interleaved.
+    #[cfg(feature = "sqrt-table")]
+    pub(crate) fn sqrt_alt_lanes<const K: usize>(u: &[Self; K]) -> [(Choice, Self); K] {
+        fp_tables().sqrt_alt_lanes(u)
+    }
+}
+
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+impl crate::arithmetic::avx2_sqrt::Avx2Chain for Fp {
+    fn limbs(&self) -> [u64; 4] {
+        self.0
+    }
+
+    fn from_limbs_lazy(limbs: [u64; 4]) -> Self {
+        Fp(portable::canonicalize(&limbs, &MODULUS.0))
+    }
+
+    // The one call into AVX2 code; `unused_unsafe` when AVX2 is enabled for
+    // the whole build.
+    #[allow(unsafe_code, unused_unsafe)]
+    fn sqrt_chain<const G: usize>(
+        u: &crate::arithmetic::avx2_sqrt::Lanes<G>,
+    ) -> [crate::arithmetic::avx2_sqrt::Lanes<G>; 5] {
+        // The addition chain of `pow_by_t_minus1_over2`, as (squarings, power).
+        const STEPS: &[(u32, u32)] = &[
+            (129, 1),
+            (7, 9),
+            (7, 13),
+            (4, 3),
+            (6, 7),
+            (3, 7),
+            (10, 9),
+            (5, 9),
+            (4, 9),
+            (3, 7),
+            (4, 9),
+            (5, 3),
+            (4, 7),
+            (4, 3),
+            (6, 9),
+            (5, 13),
+            (4, 3),
+            (7, 7),
+            (3, 3),
+        ];
+        // 2^266 mod p: R' = 2^261 squared, divided by R = 2^256.
+        let c_in = (Fp::from_raw(R.0) * Fp::from(1 << 10)).to_repr();
+        let c_in = core::array::from_fn(|i| {
+            u64::from_le_bytes(c_in[8 * i..8 * i + 8].try_into().unwrap())
+        });
+        // SAFETY: `pasta_curves_avx2` is set only for builds that target AVX2 or
+        // select the x86-64 backend, whose BMI2 and ADX requirement implies AVX2
+        // on every Intel and AMD CPU (see the `avx2_sqrt` module docs).
+        unsafe {
+            crate::arithmetic::avx2_sqrt::sqrt_chain::<
+                { MODULUS.0[0] },
+                { MODULUS.0[1] },
+                { MODULUS.0[2] },
+                { MODULUS.0[3] },
+                G,
+            >(u, &c_in, &R.0, STEPS, 1)
+        }
+    }
+}
+
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+impl Fp {
+    /// `sqrt_alt` of `N = 4 * G` values, exponentiating in four-way AVX2 lanes.
+    pub(crate) fn sqrt_alt_avx2<const G: usize, const N: usize>(
+        u: &[Self; N],
+    ) -> [(Choice, Self); N] {
+        fp_tables().sqrt_alt_avx2::<G, N>(u)
+    }
+}
+
 impl SqrtTableHelpers for Fp {
     fn pow_by_t_minus1_over2(&self) -> Self {
         let r10 = self.square_runtime();
@@ -1112,6 +1215,80 @@ impl SqrtTableHelpers for Fp {
 
     fn sqr_n_mul(&self, n: u32, by: &Self) -> Self {
         self.sqr_n_mul_runtime(n, by)
+    }
+
+    #[cfg(feature = "sqrt-table")]
+    fn sqr_n_lanes<const K: usize>(v: &mut [Self; K], n: u32) {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ))]
+        {
+            for _ in 0..n {
+                for x in v.iter_mut() {
+                    *x = x.square_runtime();
+                }
+            }
+        }
+
+        // Leave each lane unreduced between squarings, as `sqr_n` does.
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )))]
+        {
+            let mut acc = v.map(|x| x.0);
+            for _ in 0..n {
+                for lane in acc.iter_mut() {
+                    *lane = portable::sqr_lazy(lane, &MODULUS.0, INV);
+                }
+            }
+            for (x, lane) in v.iter_mut().zip(acc) {
+                *x = Fp(portable::canonicalize(&lane, &MODULUS.0));
+            }
+        }
+    }
+
+    #[cfg(feature = "sqrt-table")]
+    fn pow_by_t_minus1_over2_lanes<const K: usize>(x: &[Self; K]) -> [Self; K] {
+        use crate::arithmetic::{mul_lanes, sqr_n_mul_lanes};
+        let sqr_n_lanes_of = |a: &[Self; K], n: u32| {
+            let mut t = *a;
+            Self::sqr_n_lanes(&mut t, n);
+            t
+        };
+        let r10 = sqr_n_lanes_of(x, 1);
+        let r11 = mul_lanes(&r10, x);
+        let r110 = sqr_n_lanes_of(&r11, 1);
+        let r111 = mul_lanes(&r110, x);
+        let r1001 = mul_lanes(&r111, &r10);
+        let r1101 = mul_lanes(&r111, &r110);
+        let ra = sqr_n_mul_lanes(x, 129, x);
+        let rb = sqr_n_mul_lanes(&ra, 7, &r1001);
+        let rc = sqr_n_mul_lanes(&rb, 7, &r1101);
+        let rd = sqr_n_mul_lanes(&rc, 4, &r11);
+        let re = sqr_n_mul_lanes(&rd, 6, &r111);
+        let rf = sqr_n_mul_lanes(&re, 3, &r111);
+        let rg = sqr_n_mul_lanes(&rf, 10, &r1001);
+        let rh = sqr_n_mul_lanes(&rg, 5, &r1001);
+        let ri = sqr_n_mul_lanes(&rh, 4, &r1001);
+        let rj = sqr_n_mul_lanes(&ri, 3, &r111);
+        let rk = sqr_n_mul_lanes(&rj, 4, &r1001);
+        let rl = sqr_n_mul_lanes(&rk, 5, &r11);
+        let rm = sqr_n_mul_lanes(&rl, 4, &r111);
+        let rn = sqr_n_mul_lanes(&rm, 4, &r11);
+        let ro = sqr_n_mul_lanes(&rn, 6, &r1001);
+        let rp = sqr_n_mul_lanes(&ro, 5, &r1101);
+        let rq = sqr_n_mul_lanes(&rp, 4, &r11);
+        let rr = sqr_n_mul_lanes(&rq, 7, &r111);
+        let rs = sqr_n_mul_lanes(&rr, 3, &r11);
+        sqr_n_lanes_of(&rs, 1)
     }
 
     fn sqrt_hash_key(&self) -> u32 {
@@ -1329,6 +1506,28 @@ fn aarch64_asm_matches_portable_arithmetic() {
             );
         }
     }
+}
+
+#[cfg(feature = "bits")]
+#[test]
+fn test_to_le_bits_matches_repr() {
+    // Callers read this field's bits from `to_repr()`, starting with the
+    // least-significant bit of byte 0, in place of `PrimeFieldBits`.
+    let mut a = -Fp::ONE;
+    for _ in 0..1000 {
+        let repr = a.to_repr();
+        let repr_bits = repr
+            .iter()
+            .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1));
+        assert!(a.to_le_bits().iter().by_vals().eq(repr_bits));
+        a = a.square() + Fp::from(7);
+    }
+
+    // The characteristic's highest set bit is bit NUM_BITS - 1.
+    assert_eq!(
+        Fp::char_le_bits().iter().by_vals().rposition(|bit| bit),
+        Some(Fp::NUM_BITS as usize - 1)
+    );
 }
 
 #[test]
@@ -1816,24 +2015,13 @@ fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
     }
 }
 
-/// Whether `x` holds a reduced residue (limbs below the modulus).
-#[cfg(test)]
-fn is_canonical(x: &Fp) -> bool {
-    for i in (0..4).rev() {
-        if x.0[i] != MODULUS.0[i] {
-            return x.0[i] < MODULUS.0[i];
-        }
-    }
-    false
-}
-
 #[test]
 fn constants_are_canonical() {
     // Every named constant must be a reduced residue: the assembly
     // multiplication requires a canonical rhs, and constants are the one
     // class of values that bypass the reducing constructors.
     assert!(
-        !is_canonical(&MODULUS),
+        !MODULUS.is_canonical(),
         "the modulus itself is not canonical"
     );
     let constants: [(&str, Fp); 11] = [
@@ -1857,7 +2045,7 @@ fn constants_are_canonical() {
     ];
     for (name, value) in constants {
         assert!(
-            is_canonical(&value),
+            value.is_canonical(),
             "{name} is not canonical: {:x?}",
             value.0
         );
@@ -1904,9 +2092,9 @@ fn asm_arithmetic_canonical_sweep_matches_portable() {
         assert_eq!(add, Fp::add(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
         assert_eq!(sub, Fp::sub(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
         assert_eq!(mul, Fp::mul(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
-        assert!(is_canonical(&add));
-        assert!(is_canonical(&sub));
-        assert!(is_canonical(&mul));
+        assert!(add.is_canonical());
+        assert!(sub.is_canonical());
+        assert!(mul.is_canonical());
         assert_eq!(a.square_runtime(), a.square(), "value {:x?}", a.0);
     }
 }
@@ -1952,7 +2140,7 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
         if rng.next_u32() & 1 == 1 {
             rhs.0[1] = rhs.0[1].wrapping_sub(rng.next_u64() >> 60);
         }
-        if !is_canonical(&rhs) || rhs.0.iter().any(|&l| l > u64::MAX - 3) {
+        if !rhs.is_canonical() || rhs.0.iter().any(|&l| l > u64::MAX - 3) {
             continue;
         }
         n += 1;
@@ -1964,7 +2152,7 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
             lhs.0,
             rhs.0
         );
-        assert!(is_canonical(&asm));
+        assert!(asm.is_canonical());
     }
 }
 
@@ -1991,4 +2179,70 @@ fn asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
 fn asm_mul_rejects_non_canonical_rhs_in_debug() {
     // The modulus itself is the smallest non-canonical value.
     let _ = Fp::one().mul_runtime(&MODULUS);
+}
+
+/// The lazy squaring step used by the interleaved square-root lanes accepts
+/// any input below `2p` and keeps its output below `2p`, including over a
+/// longer run than any in the square-root chain.
+#[test]
+fn sqr_lazy_near_two_p() {
+    fn add(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+        let mut out = [0; 4];
+        let mut carry = 0u128;
+        for i in 0..4 {
+            let t = a[i] as u128 + b[i] as u128 + carry;
+            out[i] = t as u64;
+            carry = t >> 64;
+        }
+        out
+    }
+    fn sub(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+        let mut out = [0; 4];
+        let mut borrow = 0i128;
+        for i in 0..4 {
+            let t = a[i] as i128 - b[i] as i128 - borrow;
+            out[i] = t as u64;
+            borrow = (t < 0) as i128;
+        }
+        out
+    }
+    fn lt(a: &[u64; 4], b: &[u64; 4]) -> bool {
+        (0..4)
+            .rev()
+            .find(|&i| a[i] != b[i])
+            .is_some_and(|i| a[i] < b[i])
+    }
+
+    let p = MODULUS.0;
+    let one = [1, 0, 0, 0];
+    let two_p = add(p, p);
+    let mut inputs = vec![
+        [0; 4],
+        one,
+        sub(p, one),
+        p,
+        add(p, one),
+        sub(two_p, one),
+        sub(two_p, [2, 0, 0, 0]),
+    ];
+    for k in (0..254).step_by(13) {
+        let mut bit = [0u64; 4];
+        bit[k / 64] = 1 << (k % 64);
+        inputs.push(sub(two_p, add(bit, one)));
+        inputs.push(sub(p, bit));
+    }
+    // All ones below the top limb's high bits, the largest below 2p.
+    inputs.push([u64::MAX, u64::MAX, u64::MAX, (1 << 63) - 1]);
+    inputs.retain(|x| lt(x, &two_p));
+
+    for x in inputs {
+        let mut lazy = x;
+        let mut canonical = Fp(portable::canonicalize(&x, &MODULUS.0));
+        for _ in 0..300 {
+            lazy = portable::sqr_lazy(&lazy, &MODULUS.0, INV);
+            canonical = canonical.square();
+            assert!(lt(&lazy, &two_p), "lazy square left [0, 2p)");
+            assert_eq!(Fp(portable::canonicalize(&lazy, &MODULUS.0)), canonical);
+        }
+    }
 }

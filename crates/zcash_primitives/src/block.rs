@@ -24,6 +24,7 @@ use crate::{
     transaction::{Transaction, TxVersion},
 };
 
+#[cfg(feature = "equihash")]
 pub use equihash;
 
 /// The identifier for a Zcash block.
@@ -145,7 +146,7 @@ impl BlockHeader {
         let mut nonce = [0; 32];
         reader.read_exact(&mut nonce)?;
 
-        let solution = Vector::read(&mut reader, |r| r.read_u8())?;
+        let solution = Vector::read_bytes(&mut reader)?;
 
         BlockHeader::from_data(BlockHeaderData {
             version,

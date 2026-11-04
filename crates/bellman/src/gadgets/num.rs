@@ -1,8 +1,8 @@
 //! Gadgets representing numbers in the scalar field of the underlying curve.
 
-use ff::{PrimeField, PrimeFieldBits};
+use ff::PrimeField;
 
-use crate::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
+use crate::{ConstraintSystem, LinearCombination, SynthesisError, Variable, le_bit};
 
 use super::Assignment;
 
@@ -69,7 +69,7 @@ impl<Scalar: PrimeField> AllocatedNum<Scalar> {
     /// congruency is not allowed.)
     pub fn to_bits_le_strict<CS>(&self, mut cs: CS) -> Result<Vec<Boolean>, SynthesisError>
     where
-        Scalar: PrimeFieldBits,
+        Scalar: PrimeField,
         CS: ConstraintSystem<Scalar>,
     {
         pub fn kary_and<Scalar, CS>(
@@ -103,11 +103,8 @@ impl<Scalar: PrimeField> AllocatedNum<Scalar> {
 
         // We want to ensure that the bit representation of a is
         // less than or equal to r - 1.
-        let a = self.value.map(|e| e.to_le_bits());
-        let b = (-Scalar::ONE).to_le_bits();
-
-        // Get the bits of a in big-endian order
-        let mut a = a.as_ref().map(|e| e.iter().by_vals().rev());
+        let a = self.value.map(|e| e.to_repr());
+        let b = (-Scalar::ONE).to_repr();
 
         let mut result = vec![];
 
@@ -117,8 +114,10 @@ impl<Scalar: PrimeField> AllocatedNum<Scalar> {
 
         let mut found_one = false;
         let mut i = 0;
-        for b in b.iter().by_vals().rev() {
-            let a_bit = a.as_mut().map(|e| e.next().unwrap());
+        // Walk the bits of a and r - 1 in big-endian order
+        for bit in (0..b.as_ref().len() * 8).rev() {
+            let b = le_bit(b.as_ref(), bit);
+            let a_bit = a.as_ref().map(|a| le_bit(a.as_ref(), bit));
 
             // Skip over unset bits at the beginning
             found_one |= b;
@@ -197,7 +196,7 @@ impl<Scalar: PrimeField> AllocatedNum<Scalar> {
     /// "in the field."
     pub fn to_bits_le<CS>(&self, mut cs: CS) -> Result<Vec<Boolean>, SynthesisError>
     where
-        Scalar: PrimeFieldBits,
+        Scalar: PrimeField,
         CS: ConstraintSystem<Scalar>,
     {
         let bits = boolean::field_into_allocated_bits_le(&mut cs, self.value)?;
@@ -416,9 +415,9 @@ impl<Scalar: PrimeField> Num<Scalar> {
 
 #[cfg(test)]
 mod test {
-    use crate::ConstraintSystem;
+    use crate::{ConstraintSystem, le_bit};
     use bls12_381::Scalar;
-    use ff::{Field, PrimeField, PrimeFieldBits};
+    use ff::{Field, PrimeField};
     use rand_core::SeedableRng;
     use rand_xorshift::XorShiftRng;
     use std::ops::{Neg, SubAssign};
@@ -565,12 +564,10 @@ mod test {
 
             assert!(cs.is_satisfied());
 
-            for (b, a) in r
-                .to_le_bits()
-                .iter()
-                .by_vals()
+            let r_repr = r.to_repr();
+            for (b, a) in (0..Scalar::NUM_BITS as usize)
                 .rev()
-                .skip(1)
+                .map(|i| le_bit(r_repr.as_ref(), i))
                 .zip(bits.iter().rev())
             {
                 if let Boolean::Is(a) = a {

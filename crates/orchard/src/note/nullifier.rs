@@ -61,16 +61,42 @@ impl Nullifier {
     /// Defined in [Zcash Protocol Spec § 4.16: Note Commitments and Nullifiers][commitmentsandnullifiers].
     ///
     /// [commitmentsandnullifiers]: https://zips.z.cash/protocol/nu5.pdf#commitmentsandnullifiers
+    #[cfg(feature = "backend-sensei")]
     pub(super) fn derive(
         nk: &NullifierDerivingKey,
         rho: pallas::Base,
         psi: pallas::Base,
         cm: NoteCommitment,
     ) -> Self {
-        let k = pallas::Point::hash_to_curve("z.cash:Orchard")(b"K");
+        Nullifier(sensei::primitives::protocol::nullifier(
+            nk.inner(),
+            rho,
+            psi,
+            cm.0,
+        ))
+    }
+    #[cfg(feature = "backend-halo2")]
+    pub(super) fn derive(
+        nk: &NullifierDerivingKey,
+        rho: pallas::Base,
+        psi: pallas::Base,
+        cm: NoteCommitment,
+    ) -> Self {
+        use crate::backend::pasta_curves::glv::Table;
+
+        // GLV window for K^Orchard = GroupHash("z.cash:Orchard", "K"), pinned
+        // by the `nullifier_k::generator` test. The multiplication is
+        // variable-time.
+        static K_TABLE: crate::once::OnceTable<Table<pallas::Point>> =
+            crate::once::OnceTable::new();
+        let k = K_TABLE.get_or_init(|| {
+            Table::new(&pallas::Point::from(
+                crate::constants::fixed_bases::nullifier_k::generator(),
+            ))
+        });
 
         Nullifier(extract_p(
-            &(k * crate::spec::mod_r_p(nk.prf_nf(rho) + psi) + cm.0),
+            &(k.mul(&crate::spec::mod_r_p(nk.prf_nf(rho) + psi)) + cm.0),
         ))
     }
 }

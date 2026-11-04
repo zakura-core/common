@@ -70,13 +70,19 @@ impl SaplingVerificationContextInner {
         // The "cv is not small order" happens when a SpendDescription is deserialized.
         // This happens when transactions or blocks are received over the network, or when
         // mined blocks are introduced via the `submitblock` RPC method on full nodes.
-        let rk_affine = jubjub::AffinePoint::from_bytes((*rk).into()).unwrap();
+        let rk_affine = jubjub::AffinePoint::from(*rk);
         if rk_affine.is_small_order().into() {
             return false;
         }
 
+        // The value commitment is held as bytes; recovering the point is where the
+        // "canonical encoding" and "not small order" rules are enforced.
+        let Some(cv) = cv.try_point().into_option() else {
+            return false;
+        };
+
         // Accumulate the value commitment in the context
-        self.cv_sum += cv;
+        self.cv_sum += &cv;
 
         // Verify the spend_auth_sig
         if !spend_auth_sig_verifier(verifier_ctx, rk) {
@@ -92,7 +98,7 @@ impl SaplingVerificationContextInner {
             public_input[1] = v;
         }
         {
-            let affine = cv.as_inner().to_affine();
+            let affine = cv.to_affine();
             let (u, v) = (affine.get_u(), affine.get_v());
             public_input[2] = u;
             public_input[3] = v;
@@ -128,13 +134,18 @@ impl SaplingVerificationContextInner {
             return false;
         }
 
+        // As in `check_spend`: the point is recovered and validated here.
+        let Some(cv) = cv.try_point().into_option() else {
+            return false;
+        };
+
         // Accumulate the value commitment in the context
-        self.cv_sum -= cv;
+        self.cv_sum -= &cv;
 
         // Construct public input for circuit
         let mut public_input = [bls12_381::Scalar::zero(); OUTPUT_PUBLIC_INPUT_COUNT];
         {
-            let affine = cv.as_inner().to_affine();
+            let affine = cv.to_affine();
             let (u, v) = (affine.get_u(), affine.get_v());
             public_input[0] = u;
             public_input[1] = v;
@@ -172,6 +183,61 @@ mod tests {
     use bellman::gadgets::multipack;
 
     use super::pack_nullifier;
+
+    #[test]
+    fn spend_key_coordinates_and_small_order_policy_are_preserved() {
+        use crate::{
+            constants::SPENDING_KEY_GENERATOR,
+            value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
+        };
+        use core::cell::Cell;
+        use redjubjub::{SpendAuth, VerificationKey};
+
+        let order_two = jubjub::AffinePoint::from_bytes((-jubjub::Fq::one()).to_bytes()).unwrap();
+        let order_four = jubjub::AffinePoint::from_bytes([0; 32]).unwrap();
+        let generator = jubjub::ExtendedPoint::from(SPENDING_KEY_GENERATOR);
+        let cv = ValueCommitment::derive(
+            NoteValue::ZERO,
+            ValueCommitTrapdoor::from_bytes([7; 32]).unwrap(),
+        );
+        // Preparation checks key policy and builds public inputs; proof
+        // verification is supplied separately by the caller.
+        let proof = bellman::groth16::Proof::<bls12_381::Bls12> {
+            a: bls12_381::G1Affine::generator(),
+            b: bls12_381::G2Affine::generator(),
+            c: bls12_381::G1Affine::generator(),
+        };
+        for torsion in [jubjub::AffinePoint::identity(), order_two, order_four] {
+            for point in [jubjub::ExtendedPoint::from(torsion), generator + torsion] {
+                let expected = jubjub::AffinePoint::from(point);
+                let key = VerificationKey::<SpendAuth>::try_from(expected.to_bytes()).unwrap();
+                let signature_checked = Cell::new(false);
+                let proof_checked = Cell::new(false);
+                let valid = super::SaplingVerificationContextInner::new().check_spend(
+                    &cv,
+                    bls12_381::Scalar::zero(),
+                    &[0; 32],
+                    &key,
+                    proof.clone(),
+                    &mut (),
+                    |_, _| {
+                        signature_checked.set(true);
+                        true
+                    },
+                    |_, _, inputs| {
+                        proof_checked.set(true);
+                        assert_eq!(inputs[0], expected.get_u());
+                        assert_eq!(inputs[1], expected.get_v());
+                        true
+                    },
+                );
+                let expected_valid = !bool::from(expected.is_small_order());
+                assert_eq!(valid, expected_valid);
+                assert_eq!(signature_checked.get(), expected_valid);
+                assert_eq!(proof_checked.get(), expected_valid);
+            }
+        }
+    }
 
     #[test]
     fn nullifier_packing_matches_circuit() {

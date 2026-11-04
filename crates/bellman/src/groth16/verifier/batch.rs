@@ -17,20 +17,25 @@
 
 use std::{borrow::Cow, ops::AddAssign};
 
-use ff::Field;
-use group::{Curve, Group};
+use ff::{Field, PrimeField};
+use group::{Curve, CurveAffine, Group, WnafBase, WnafScalar};
 use pairing::{MillerLoopResult, MultiMillerLoop};
 use rand_core::{CryptoRng, Rng};
 
 #[cfg(feature = "multicore")]
 use rand::rngs::SysRng;
+#[cfg(feature = "multicore")]
+use rand_core::TryRng;
 
 #[cfg(feature = "multicore")]
-use rayon::{iter::ParallelIterator, prelude::ParallelSlice};
+use rayon::{
+    iter::{IndexedParallelIterator, ParallelIterator},
+    prelude::ParallelSlice,
+};
 
 use crate::{
     VerificationError,
-    groth16::{PreparedVerifyingKey, Proof, VerifyingKey},
+    groth16::{PUBLIC_INPUT_WINDOW, PreparedVerifyingKey, Proof, VerifyingKey},
 };
 
 /// A batch verification item.
@@ -241,7 +246,11 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
-        self.verify_prepared_unchecked(rng, &PreparedBatchVerifyingKey::for_one_batch(vk))
+        let pvk = PreparedBatchVerifyingKey::for_one_batch(vk);
+        if self.items.len() == 1 {
+            return Self::verify_one_prepared(&self.items[0], &pvk);
+        }
+        self.verify_prepared_unchecked(rng, &pvk)
     }
 
     /// Verify a batch using fixed G2 terms prepared for its verifying key.
@@ -261,14 +270,49 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
+        if self.items.len() == 1 {
+            return Self::verify_one_prepared(&self.items[0], pvk);
+        }
         self.verify_prepared_unchecked(rng, pvk)
+    }
+
+    // A single proof cannot cancel another invalid proof, so the batch
+    // randomizer is unnecessary. This also avoids multiplying A, C, and
+    // alpha by that randomizer.
+    fn verify_one_prepared(
+        item: &Item<E>,
+        pvk: &PreparedBatchVerifyingKey<'_, E>,
+    ) -> Result<(), VerificationError> {
+        let vk = pvk.vk;
+        let mut gamma = vk.ic[0].to_curve();
+        for (input, base) in item.inputs.iter().zip(vk.ic.iter().skip(1)) {
+            gamma += mul_vartime::<E>(base, input);
+        }
+        let gamma = E::g1_to_affine_vartime(&gamma);
+        let neg_b = (-item.proof.b).into();
+
+        if E::multi_miller_loop(&[
+            (&item.proof.a, &neg_b),
+            (&item.proof.c, &pvk.g2.delta_g2),
+            (&gamma, &pvk.g2.gamma_g2),
+            (&vk.alpha_g1, &pvk.g2.beta_g2),
+        ])
+        .final_exponentiation()
+            == E::Gt::identity()
+        {
+            Ok(())
+        } else {
+            Err(VerificationError::InvalidProof)
+        }
     }
 
     /// Verify two batches using different [`PreparedBatchVerifyingKey`] values
     /// in one Miller loop.
     ///
-    /// Independent nonzero randomizers are sampled for every proof in both
-    /// batches. This shares the Miller-loop squares and final exponentiation.
+    /// The first proof of `self` has weight 1; every other proof in both
+    /// batches gets an independent random 128-bit weight. Only one proof in the
+    /// combined pairing equation may have weight 1, so `other` gets none.
+    /// This shares the Miller-loop squares and final exponentiation.
     pub fn verify_joint_prepared<R: Rng + CryptoRng>(
         self,
         other: Self,
@@ -294,8 +338,8 @@ where
             return self.verify_prepared(rng, key);
         }
 
-        let first = self.randomize_terms(&mut rng, key);
-        let second = other.randomize_terms(&mut rng, other_key);
+        let first = self.randomize_terms(&mut rng, key, true);
+        let second = other.randomize_terms(&mut rng, other_key, false);
         let mut terms = first.with_key(key);
         terms.extend(second.with_key(other_key));
 
@@ -306,13 +350,12 @@ where
         }
     }
 
-    #[allow(non_snake_case)]
     fn verify_prepared_unchecked<R: Rng + CryptoRng>(
         self,
         rng: R,
         pvk: &PreparedBatchVerifyingKey<'_, E>,
     ) -> Result<(), VerificationError> {
-        let terms = self.randomize_terms(rng, pvk);
+        let terms = self.randomize_terms(rng, pvk, true);
         if E::multi_miller_loop(&terms.with_key(pvk)).final_exponentiation() == E::Gt::identity() {
             Ok(())
         } else {
@@ -320,69 +363,70 @@ where
         }
     }
 
-    #[allow(non_snake_case)]
+    /// Adds one proof to the batch accumulators with weight `z`, where `None`
+    /// means weight 1 and skips the scalar multiplications.
+    ///
+    /// Proofs, public inputs, and batch weights are all public, so the
+    /// weighted points use variable-time wNAF multiplication. `z·A` is pushed
+    /// in projective form; [`Accumulator::finish`] normalizes every point at once.
+    fn accumulate(
+        Item { proof, inputs }: &Item<E>,
+        weight: Option<u128>,
+        acc: &mut Accumulator<E>,
+    ) {
+        acc.neg_bs.push((-proof.b).into());
+        match weight {
+            None => {
+                acc.a_terms.push(proof.a.to_curve());
+                acc.gammas[0] += E::Fr::ONE; // a_0 is implicitly set to 1
+                for (a_i, acc_gamma_i) in
+                    Iterator::zip(inputs.iter(), acc.gammas.iter_mut().skip(1))
+                {
+                    *acc_gamma_i += a_i;
+                }
+                acc.delta += proof.c.to_curve();
+                acc.y += E::Fr::ONE;
+            }
+            Some(weight) => {
+                let z = E::Fr::from_u128(weight);
+                let z_wnaf = WnafScalar::<E::Fr, WEIGHT_WINDOW>::new(&z);
+                acc.a_terms
+                    .push(&WnafBase::<E::G1, WEIGHT_WINDOW>::new(proof.a.to_curve()) * &z_wnaf);
+                acc.gammas[0] += &z; // a_0 is implicitly set to 1
+                for (a_i, acc_gamma_i) in
+                    Iterator::zip(inputs.iter(), acc.gammas.iter_mut().skip(1))
+                {
+                    *acc_gamma_i += &(z * a_i);
+                }
+                acc.c_points.push(proof.c);
+                acc.c_weights.push(weight);
+                acc.y += &z;
+            }
+        }
+    }
+
+    /// Builds the batch's pairing terms. When `unit_first` is set, the first
+    /// proof has weight 1 and every other proof gets an independent random
+    /// 128-bit weight (see [`random_weight`]). At most one proof in a combined pairing equation may
+    /// have weight 1: two unit-weight proofs could carry errors that cancel.
     fn randomize_terms<R: Rng + CryptoRng>(
         self,
         mut rng: R,
         pvk: &PreparedBatchVerifyingKey<'_, E>,
+        unit_first: bool,
     ) -> PreparedBatchTerms<E> {
-        let vk = pvk.vk;
-        let mut ml_terms = Vec::<(E::G1Affine, E::G2Prepared)>::with_capacity(self.items.len());
-        let mut acc_Gammas = vec![E::Fr::ZERO; vk.ic.len()];
-        let mut acc_Delta = E::G1::identity();
-        let mut acc_Y = E::Fr::ZERO;
-
-        for Item { proof, inputs } in self.items.into_iter() {
-            // The spec is explicit that z != 0.  Field::random is defined to
-            // return a uniformly-random field element (which may be 0), so we
-            // loop until it's not, avoiding needing an assert or throwing an
-            // error through no fault of the batch items. This will likely never
-            // actually loop, but handles the edge case.
-            let z = loop {
-                let z = E::Fr::random(&mut rng);
-                if !z.is_zero_vartime() {
-                    break z;
-                }
+        let mut acc = Accumulator::new(pvk.vk.ic.len(), self.items.len());
+        for (i, item) in self.items.iter().enumerate() {
+            let z = if unit_first && i == 0 {
+                None
+            } else {
+                Some(random_weight(|| {
+                    u128::from(rng.next_u64()) | (u128::from(rng.next_u64()) << 64)
+                }))
             };
-
-            ml_terms.push(((proof.a * z).into(), (-proof.b).into()));
-
-            acc_Gammas[0] += &z; // a_0 is implicitly set to 1
-            for (a_i, acc_Gamma_i) in Iterator::zip(inputs.iter(), acc_Gammas.iter_mut().skip(1)) {
-                *acc_Gamma_i += &(z * a_i);
-            }
-            acc_Delta += proof.c * z;
-            acc_Y += &z;
+            Self::accumulate(item, z, &mut acc);
         }
-
-        let delta = acc_Delta.to_affine();
-
-        let Psi = vk
-            .ic
-            .iter()
-            .zip(acc_Gammas.iter())
-            .map(|(&Psi_i, acc_Gamma_i)| Psi_i * acc_Gamma_i)
-            .sum();
-
-        let gamma = E::G1Affine::from(Psi);
-
-        // Covers the [acc_Y]⋅e(alpha_g1, beta_g2) component
-        //
-        // The multiplication by acc_Y is expensive -- it involves
-        // exponentiating by acc_Y because the result of the pairing is an
-        // element of a multiplicative subgroup of a large extension field.
-        // Instead, we add
-        //     ([acc_Y]⋅alpha_g1, beta_g2)
-        // to our Miller loop terms because
-        //     [acc_Y]⋅e(alpha_g1, beta_g2) = e([acc_Y]⋅alpha_g1, beta_g2)
-        let beta = E::G1Affine::from(vk.alpha_g1 * acc_Y);
-
-        PreparedBatchTerms {
-            variable: ml_terms,
-            delta,
-            gamma,
-            beta,
-        }
+        acc.finish(pvk.vk)
     }
 
     /// Perform batch verification using the global Rayon thread pool.
@@ -401,7 +445,11 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
-        self.verify_multicore_prepared_unchecked(&PreparedBatchVerifyingKey::for_one_batch(vk))
+        let pvk = PreparedBatchVerifyingKey::for_one_batch(vk);
+        if self.items.len() == 1 {
+            return Self::verify_one_prepared(&self.items[0], &pvk);
+        }
+        self.verify_multicore_prepared_unchecked(&pvk)
     }
 
     /// Verify a batch with prepared fixed G2 terms using the global Rayon
@@ -422,34 +470,18 @@ where
         if self.items.is_empty() {
             return Ok(());
         }
+        if self.items.len() == 1 {
+            return Self::verify_one_prepared(&self.items[0], pvk);
+        }
         self.verify_multicore_prepared_unchecked(pvk)
     }
 
     #[cfg(feature = "multicore")]
-    #[allow(non_snake_case)]
     fn verify_multicore_prepared_unchecked(
         self,
         pvk: &PreparedBatchVerifyingKey<'_, E>,
     ) -> Result<(), VerificationError> {
         let vk = pvk.vk;
-        struct Accumulator<E: MultiMillerLoop> {
-            gammas: Vec<E::Fr>,
-            delta: E::G1,
-            y: E::Fr,
-            ml_result: Option<E::Result>,
-        }
-
-        impl<E: MultiMillerLoop> Accumulator<E> {
-            fn new(ic_len: usize) -> Self {
-                Accumulator {
-                    gammas: vec![E::Fr::ZERO; ic_len],
-                    delta: E::G1::identity(),
-                    y: E::Fr::ZERO,
-                    ml_result: None,
-                }
-            }
-        }
-
         let ic_len = vk.ic.len();
 
         // Give each Rayon thread a Miller-loop work item while retaining
@@ -458,77 +490,390 @@ where
         let threads = rayon::current_num_threads();
         let chunk_size = self.items.len().div_ceil(threads).clamp(1, MAX_CHUNK_SIZE);
 
-        let acc = self
+        // The first proof of chunk 0 has weight 1; every other proof gets an
+        // independent random weight. Only one proof in the final pairing
+        // equation may have weight 1: two unit-weight proofs could carry
+        // errors that cancel.
+        let (mut acc, ml_result) = self
             .items
             .par_chunks(chunk_size)
-            .map(|items| {
-                let mut acc = Accumulator::<E>::new(ic_len);
-                let mut ml_terms: Vec<(E::G1Affine, E::G2Prepared)> = vec![];
-                let z = loop {
-                    let z = E::Fr::try_random(&mut SysRng)
-                        .expect("system randomness must be available");
-                    if !z.is_zero_vartime() {
-                        break z;
-                    }
-                };
-                let mut cur_z = z;
-                for Item { proof, inputs } in items {
-                    acc.gammas[0] += &cur_z;
-                    for (a_i, acc_gamma_i) in
-                        Iterator::zip(inputs.iter(), acc.gammas.iter_mut().skip(1))
-                    {
-                        *acc_gamma_i += &(cur_z * a_i);
-                    }
-                    acc.delta += proof.c * cur_z;
-                    acc.y += &cur_z;
-                    ml_terms.push(((proof.a * cur_z).into(), (-proof.b).into()));
-
-                    cur_z *= z;
+            .enumerate()
+            .map(|(chunk_index, items)| {
+                let mut acc = Accumulator::<E>::new(ic_len, items.len());
+                for (i, item) in items.iter().enumerate() {
+                    let z = if chunk_index == 0 && i == 0 {
+                        None
+                    } else {
+                        Some(random_weight(|| {
+                            let mut bytes = [0; 16];
+                            SysRng
+                                .try_fill_bytes(&mut bytes)
+                                .expect("system randomness must be available");
+                            u128::from_le_bytes(bytes)
+                        }))
+                    };
+                    Self::accumulate(item, z, &mut acc);
                 }
-                let ml_terms = ml_terms.iter().map(|(a, b)| (a, b)).collect::<Vec<_>>();
-                acc.ml_result = Some(E::multi_miller_loop(&ml_terms[..]));
-                acc
+                let ml_result = acc.proof_miller_loop();
+                acc.fold_c();
+                (acc, Some(ml_result))
             })
             .reduce(
-                || Accumulator::<E>::new(ic_len),
-                |mut a, b| {
-                    for (a, b) in a.gammas.iter_mut().zip(b.gammas.into_iter()) {
+                || (Accumulator::<E>::new(ic_len, 0), None),
+                |(mut a, a_ml), (b, b_ml)| {
+                    for (a, b) in a.gammas.iter_mut().zip(b.gammas) {
                         *a += b;
                     }
                     a.delta += b.delta;
                     a.y += b.y;
-                    a.ml_result = match (a.ml_result, b.ml_result) {
+                    let ml = match (a_ml, b_ml) {
                         (Some(a), Some(b)) => Some(a + b),
                         (Some(a), None) | (None, Some(a)) => Some(a),
                         (None, None) => None,
                     };
-                    a
+                    (a, ml)
                 },
             );
 
-        match acc.ml_result {
-            None => Ok(()),
-            Some(mut ml_result) => {
-                // TODO: could use a multiexp (Bos-Coster maybe?)
-                let psi = vk
-                    .ic
-                    .iter()
-                    .zip(acc.gammas.into_iter())
-                    .map(|(&psi_i, acc_gamma_i)| psi_i * acc_gamma_i)
-                    .sum();
+        let Some(mut ml_result) = ml_result else {
+            return Ok(());
+        };
+        let [delta, gamma, beta] = normalize::<E>(&acc.key_points(vk))[..] else {
+            unreachable!("three key points");
+        };
+        ml_result += E::multi_miller_loop(&[
+            (&delta, &pvk.g2.delta_g2),
+            (&gamma, &pvk.g2.gamma_g2),
+            (&beta, &pvk.g2.beta_g2),
+        ]);
 
-                ml_result += E::multi_miller_loop(&[
-                    (&acc.delta.to_affine(), &pvk.g2.delta_g2),
-                    (&E::G1Affine::from(psi), &pvk.g2.gamma_g2),
-                    (&E::G1Affine::from(vk.alpha_g1 * acc.y), &pvk.g2.beta_g2),
-                ]);
+        if ml_result.final_exponentiation() == E::Gt::identity() {
+            Ok(())
+        } else {
+            Err(VerificationError::InvalidProof)
+        }
+    }
+}
 
-                if ml_result.final_exponentiation() == E::Gt::identity() {
-                    Ok(())
-                } else {
-                    Err(VerificationError::InvalidProof)
-                }
+/// wNAF window for the 128-bit batch weights.
+const WEIGHT_WINDOW: usize = 4;
+
+/// Draws a batch weight uniformly from `[1, 2^128)`.
+///
+/// If any proof in a batch is invalid, the batch passes for at most one value
+/// of that proof's weight, so with probability at most `1/(2^128 - 1)`. That
+/// is below the roughly 2^-117 security level of BLS12-381. Weights shorter
+/// than the field halve the doublings in each weighted multiplication.
+fn random_weight(mut draw: impl FnMut() -> u128) -> u128 {
+    loop {
+        let weight = draw();
+        if weight != 0 {
+            return weight;
+        }
+    }
+}
+
+/// wNAF window for the interleaved `Σ z·C` sum.
+const SUM_WINDOW: u32 = 5;
+
+/// Width-[`SUM_WINDOW`] NAF digits of `k`, least significant first.
+fn wnaf_digits(k: u128) -> Vec<i8> {
+    let width = 1u32 << SUM_WINDOW;
+    let mut digits = vec![0i8; 129];
+    let (mut pos, mut carry) = (0, 0);
+    while pos < digits.len() {
+        let bits = if pos < 128 {
+            (k >> pos) as u32 & (width - 1)
+        } else {
+            0
+        };
+        let window = carry + bits;
+        if window & 1 == 0 {
+            pos += 1;
+            continue;
+        }
+        if window < width / 2 {
+            carry = 0;
+            digits[pos] = window as i8;
+        } else {
+            carry = 1;
+            digits[pos] = window as i8 - width as i8;
+        }
+        pos += SUM_WINDOW as usize;
+    }
+    let len = digits.iter().rposition(|&d| d != 0).map_or(0, |i| i + 1);
+    digits.truncate(len);
+    digits
+}
+
+/// Computes `Σ weights_i·points_i` in variable time, sharing one chain of
+/// doublings across all points (interleaved wNAF).
+fn weighted_sum_vartime<G: Group>(points: &[G], weights: &[u128]) -> G {
+    let digits = weights.iter().map(|&w| wnaf_digits(w)).collect::<Vec<_>>();
+    // Odd multiples P, 3P, ..., (2^(SUM_WINDOW-1) - 1)P of each point.
+    let tables = points
+        .iter()
+        .map(|&point| {
+            let double = point.double();
+            let mut table = Vec::with_capacity(1 << (SUM_WINDOW - 2));
+            table.push(point);
+            for i in 1..(1 << (SUM_WINDOW - 2)) {
+                table.push(table[i - 1] + double);
+            }
+            table
+        })
+        .collect::<Vec<_>>();
+    let top = digits.iter().map(Vec::len).max().unwrap_or(0);
+    let mut acc = G::identity();
+    for i in (0..top).rev() {
+        acc = acc.double();
+        for (digits, table) in digits.iter().zip(&tables) {
+            match digits.get(i).copied().unwrap_or(0) {
+                0 => {}
+                d if d > 0 => acc += table[(d / 2) as usize],
+                d => acc -= table[(-d / 2) as usize],
             }
         }
+    }
+    acc
+}
+
+/// Multiplies a public point by a public full-width scalar in variable time.
+fn mul_vartime<E: MultiMillerLoop>(base: &E::G1Affine, scalar: &E::Fr) -> E::G1 {
+    &WnafBase::<E::G1, PUBLIC_INPUT_WINDOW>::new(base.to_curve())
+        * &WnafScalar::<E::Fr, PUBLIC_INPUT_WINDOW>::new(scalar)
+}
+
+/// Converts `points` to affine form with one shared field inversion.
+fn normalize<E: MultiMillerLoop>(points: &[E::G1]) -> Vec<E::G1Affine> {
+    let mut affine = vec![E::G1Affine::identity(); points.len()];
+    E::G1::batch_normalize(points, &mut affine);
+    affine
+}
+
+/// Weighted sums of a batch's proofs.
+struct Accumulator<E: MultiMillerLoop> {
+    /// `z·A` for each proof, in projective form.
+    a_terms: Vec<E::G1>,
+    /// `-B` for each proof, in the same order as `a_terms`.
+    neg_bs: Vec<E::G2Prepared>,
+    /// `Σ z·a_i` for each public input `i`, with `a_0 = 1`.
+    gammas: Vec<E::Fr>,
+    /// `Σ z·C` over the proofs already folded in; see [`Self::fold_c`].
+    delta: E::G1,
+    /// `C` and its weight for each proof not yet folded into `delta`.
+    c_points: Vec<E::G1Affine>,
+    c_weights: Vec<u128>,
+    /// `Σ z`.
+    y: E::Fr,
+}
+
+impl<E: MultiMillerLoop> Accumulator<E> {
+    fn new(ic_len: usize, proofs: usize) -> Self {
+        Self {
+            a_terms: Vec::with_capacity(proofs),
+            neg_bs: Vec::with_capacity(proofs),
+            gammas: vec![E::Fr::ZERO; ic_len],
+            delta: E::G1::identity(),
+            c_points: Vec::with_capacity(proofs),
+            c_weights: Vec::with_capacity(proofs),
+            y: E::Fr::ZERO,
+        }
+    }
+
+    /// Adds the pending `Σ z·C` terms to `delta` as one interleaved sum.
+    fn fold_c(&mut self) {
+        let points = self
+            .c_points
+            .drain(..)
+            .map(|c| c.to_curve())
+            .collect::<Vec<_>>();
+        self.delta += weighted_sum_vartime(&points, &self.c_weights);
+        self.c_weights.clear();
+    }
+
+    /// The G1 points paired with the key's delta, gamma, and beta:
+    /// `Σ z·C`, `Ψ = Σ_i ic_i·gammas_i`, and `[Σ z]·alpha`.
+    ///
+    /// The beta term stands in for `[Σ z]·e(alpha, beta)`, which would need
+    /// an exponentiation in the target group: `[y]·e(alpha, beta) = e([y]·alpha, beta)`.
+    fn key_points(&mut self, vk: &VerifyingKey<E>) -> [E::G1; 3] {
+        self.fold_c();
+        let psi = vk
+            .ic
+            .iter()
+            .zip(&self.gammas)
+            .map(|(base, scalar)| mul_vartime::<E>(base, scalar))
+            .sum();
+        [self.delta, psi, mul_vartime::<E>(&vk.alpha_g1, &self.y)]
+    }
+
+    /// Runs the Miller loop over the accumulated `(z·A, -B)` pairs.
+    #[cfg(feature = "multicore")]
+    fn proof_miller_loop(&mut self) -> E::Result {
+        let a_terms = normalize::<E>(&std::mem::take(&mut self.a_terms));
+        let neg_bs = std::mem::take(&mut self.neg_bs);
+        let terms = a_terms.iter().zip(neg_bs.iter()).collect::<Vec<_>>();
+        E::multi_miller_loop(&terms)
+    }
+
+    /// Builds the batch's pairing terms, normalizing every G1 point with one
+    /// shared inversion.
+    fn finish(mut self, vk: &VerifyingKey<E>) -> PreparedBatchTerms<E> {
+        let key_points = self.key_points(vk);
+        self.a_terms.extend(key_points);
+        let mut affine = normalize::<E>(&self.a_terms);
+        let beta = affine.pop().expect("key points were appended");
+        let gamma = affine.pop().expect("key points were appended");
+        let delta = affine.pop().expect("key points were appended");
+        PreparedBatchTerms {
+            variable: affine.into_iter().zip(self.neg_bs).collect(),
+            delta,
+            gamma,
+            beta,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WEIGHT_WINDOW, random_weight, weighted_sum_vartime, wnaf_digits};
+    use bls12_381::{G1Projective, Scalar};
+    use ff::{Field, PrimeField};
+    use group::{Group, WnafBase, WnafScalar};
+    use rand::{RngExt, SeedableRng};
+    use rand_xorshift::XorShiftRng;
+
+    const EDGE_WEIGHTS: [u128; 7] = [
+        1,
+        2,
+        15,
+        16,
+        1 << 127,
+        u128::MAX,
+        0x5555_5555_5555_5555_5555_5555_5555_5555,
+    ];
+
+    #[test]
+    fn wnaf_digits_reconstruct_the_weight() {
+        let mut rng = XorShiftRng::from_seed([3; 16]);
+        let randoms = (0..256).map(|_| rng.random::<u128>());
+        for k in EDGE_WEIGHTS.into_iter().chain(randoms) {
+            let digits = wnaf_digits(k);
+            let mut value = Scalar::ZERO;
+            for &d in digits.iter().rev() {
+                value = value.double()
+                    + Scalar::from(d.unsigned_abs() as u64)
+                        * if d < 0 { -Scalar::ONE } else { Scalar::ONE };
+            }
+            assert_eq!(value, Scalar::from_u128(k), "{k:#x}");
+            assert!(
+                digits
+                    .iter()
+                    .all(|&d| d == 0 || (d % 2 != 0 && d.abs() < 16))
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_sum_matches_scalar_multiplication() {
+        let mut rng = XorShiftRng::from_seed([5; 16]);
+        for n in [0, 1, 2, 7, 8, 9] {
+            let points = (0..n)
+                .map(|_| G1Projective::random(&mut rng))
+                .collect::<Vec<_>>();
+            let weights = (0..n)
+                .map(|i| EDGE_WEIGHTS.get(i).copied().unwrap_or_else(|| rng.random()))
+                .collect::<Vec<_>>();
+            let expected = points
+                .iter()
+                .zip(&weights)
+                .map(|(p, &w)| p * Scalar::from_u128(w))
+                .sum::<G1Projective>();
+            assert_eq!(
+                weighted_sum_vartime(&points, &weights),
+                expected,
+                "{n} points"
+            );
+        }
+    }
+
+    /// Weights around every bit position: runs of ones exercise the wNAF
+    /// carry at each window boundary, and single bits cover every length.
+    fn carry_sweep() -> Vec<u128> {
+        let mut weights = vec![
+            3,
+            17,
+            31,
+            32,
+            33,
+            u64::MAX as u128,
+            1 << 64,
+            (1 << 64) + 1,
+            (1 << 127) - 1,
+            u128::MAX - 1,
+            u128::MAX - 16,
+            0xaaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa,
+            0xf0f0_f0f0_f0f0_f0f0_f0f0_f0f0_f0f0_f0f0,
+        ];
+        for shift in 0..128 {
+            weights.extend([u128::MAX >> shift, u128::MAX << shift, 1 << shift]);
+        }
+        weights.extend(EDGE_WEIGHTS);
+        weights
+    }
+
+    #[test]
+    fn weighted_multiplication_handles_every_carry_position() {
+        let mut rng = XorShiftRng::from_seed([7; 16]);
+        let weights = carry_sweep();
+        let point = G1Projective::random(&mut rng);
+        for &weight in &weights {
+            let digits = wnaf_digits(weight);
+            assert!(digits.len() <= 129, "{weight:#x}");
+            for (i, &d) in digits.iter().enumerate().filter(|&(_, &d)| d != 0) {
+                // Nonzero digits are at least a window apart.
+                assert!(
+                    digits[i + 1..]
+                        .iter()
+                        .take(super::SUM_WINDOW as usize - 1)
+                        .all(|&next| next == 0),
+                    "{weight:#x}: digit {d} at {i} has a close neighbor"
+                );
+            }
+
+            let expected = point * Scalar::from_u128(weight);
+            assert_eq!(
+                weighted_sum_vartime(&[point], &[weight]),
+                expected,
+                "sum {weight:#x}"
+            );
+            // The A terms use the group crate's wNAF with the weight window.
+            let a = &WnafBase::<G1Projective, WEIGHT_WINDOW>::new(point)
+                * &WnafScalar::<Scalar, WEIGHT_WINDOW>::new(&Scalar::from_u128(weight));
+            assert_eq!(a, expected, "wNAF {weight:#x}");
+        }
+
+        let points = (0..weights.len())
+            .map(|_| G1Projective::random(&mut rng))
+            .collect::<Vec<_>>();
+        let expected = points
+            .iter()
+            .zip(&weights)
+            .map(|(p, &w)| p * Scalar::from_u128(w))
+            .sum::<G1Projective>();
+        assert_eq!(weighted_sum_vartime(&points, &weights), expected);
+        assert_eq!(
+            weighted_sum_vartime(&[G1Projective::identity()], &[u128::MAX]),
+            G1Projective::identity()
+        );
+    }
+
+    #[test]
+    fn random_weight_redraws_zero() {
+        let mut draws = [0, 0, 7, 9].into_iter();
+        assert_eq!(random_weight(|| draws.next().unwrap()), 7);
+        assert_eq!(draws.next(), Some(9), "stops at the first nonzero draw");
+        assert_eq!(random_weight(|| u128::MAX), u128::MAX);
     }
 }

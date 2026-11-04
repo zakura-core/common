@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-address"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "assert_matches",
  "bech32",
@@ -3375,9 +3375,8 @@ dependencies = [
 
 [[package]]
 name = "zakura-bellman"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
- "bitvec",
  "blake2s_simd",
  "criterion 0.5.1",
  "ff",
@@ -3389,7 +3388,7 @@ dependencies = [
  "rayon",
  "sha2 0.10.9",
  "subtle",
- "zakura-bls12-381 4.0.0",
+ "zakura-bls12-381 5.1.0",
  "zakura-pairing",
 ]
 
@@ -3436,7 +3435,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-bls12-381"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "criterion 0.5.1",
  "digest 0.10.7",
@@ -3455,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-equihash"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -3467,7 +3466,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-halo2-gadgets"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "arrayvec",
  "criterion 0.5.1",
@@ -3480,23 +3479,22 @@ dependencies = [
  "subtle",
  "zakura-halo2-poseidon",
  "zakura-halo2-proofs",
- "zakura-pasta-curves 4.0.0",
+ "zakura-pasta-curves 5.1.0",
  "zakura-sinsemilla",
 ]
 
 [[package]]
 name = "zakura-halo2-poseidon"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
- "bitvec",
  "ff",
  "group",
- "zakura-pasta-curves 4.0.0",
+ "zakura-pasta-curves 5.1.0",
 ]
 
 [[package]]
 name = "zakura-halo2-proofs"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "assert_matches",
  "backtrace",
@@ -3512,7 +3510,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_core 0.10.1",
  "tracing",
- "zakura-pasta-curves 4.0.0",
+ "zakura-pasta-curves 5.1.0",
 ]
 
 [[package]]
@@ -3531,21 +3529,20 @@ dependencies = [
 
 [[package]]
 name = "zakura-jubjub"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
- "bitvec",
  "criterion 0.5.1",
  "ff",
  "group",
  "rand_core 0.10.1",
  "rand_xorshift 0.5.0",
  "subtle",
- "zakura-bls12-381 4.0.0",
+ "zakura-bls12-381 5.1.0",
 ]
 
 [[package]]
 name = "zakura-keys"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "assert_matches",
  "bech32",
@@ -3569,13 +3566,13 @@ dependencies = [
  "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
- "zcash_script",
+ "zakura-zcash-script",
  "zip32",
 ]
 
 [[package]]
 name = "zakura-note-encryption"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "chacha20",
  "chacha20poly1305",
@@ -3586,10 +3583,9 @@ dependencies = [
 
 [[package]]
 name = "zakura-orchard"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "aes",
- "bitvec",
  "blake2b_simd",
  "corez",
  "criterion 0.5.1",
@@ -3613,27 +3609,29 @@ dependencies = [
  "visibility",
  "zakura-note-encryption",
  "zakura-orchard-legacy",
+ "zakura-sensei",
  "zcash_spec",
+ "zeroize",
  "zip32",
 ]
 
 [[package]]
 name = "zakura-orchard-legacy"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "ff",
  "group",
  "zakura-halo2-gadgets",
  "zakura-halo2-poseidon",
  "zakura-halo2-proofs",
- "zakura-pasta-curves 4.0.0",
- "zakura-reddsa 4.0.0",
+ "zakura-pasta-curves 5.1.0",
+ "zakura-reddsa 5.1.0",
  "zakura-sinsemilla",
 ]
 
 [[package]]
 name = "zakura-pairing"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "group",
 ]
@@ -3655,7 +3653,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pasta-curves"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode",
  "blake2b_simd",
@@ -3678,7 +3676,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-primitives"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "assert_matches",
  "blake2b_simd",
@@ -3694,23 +3692,24 @@ dependencies = [
  "rand_core 0.10.1",
  "secp256k1",
  "sha2 0.10.9",
- "zakura-bls12-381 4.0.0",
+ "zakura-bellman",
+ "zakura-bls12-381 5.1.0",
  "zakura-equihash",
- "zakura-jubjub 4.0.0",
+ "zakura-jubjub 5.1.0",
  "zakura-note-encryption",
  "zakura-orchard",
  "zakura-protocol",
  "zakura-redjubjub",
  "zakura-sapling-crypto",
  "zakura-transparent",
- "zcash_script",
+ "zakura-zcash-script",
  "zcash_tachyon",
  "zip32",
 ]
 
 [[package]]
 name = "zakura-proofs"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "blake2b_simd",
  "byteorder",
@@ -3723,15 +3722,15 @@ dependencies = [
  "wagyu-zcash-parameters",
  "xdg",
  "zakura-bellman",
- "zakura-bls12-381 4.0.0",
- "zakura-jubjub 4.0.0",
+ "zakura-bls12-381 5.1.0",
+ "zakura-jubjub 5.1.0",
  "zakura-primitives",
  "zakura-sapling-crypto",
 ]
 
 [[package]]
 name = "zakura-protocol"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "corez",
  "hex",
@@ -3760,27 +3759,30 @@ dependencies = [
 
 [[package]]
 name = "zakura-reddsa"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode",
  "blake2b_simd",
  "criterion 0.6.0",
  "group",
  "hex",
+ "maybe-rayon",
  "num-bigint 0.4.8",
  "num-traits",
+ "once_cell",
  "proptest",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "serde",
- "zakura-jubjub 4.0.0",
- "zakura-pasta-curves 4.0.0",
+ "zakura-jubjub 5.1.0",
+ "zakura-pasta-curves 5.1.0",
+ "zakura-sensei",
 ]
 
 [[package]]
 name = "zakura-reddsa-frost"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "blake2b_simd",
  "criterion 0.6.0",
@@ -3789,14 +3791,15 @@ dependencies = [
  "hex",
  "rand_core 0.10.1",
  "rand_core 0.6.4",
- "zakura-jubjub 4.0.0",
- "zakura-pasta-curves 4.0.0",
- "zakura-reddsa 4.0.0",
+ "zakura-jubjub 5.1.0",
+ "zakura-pasta-curves 5.1.0",
+ "zakura-reddsa 5.1.0",
+ "zakura-sensei",
 ]
 
 [[package]]
 name = "zakura-redjubjub"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode",
  "criterion 0.5.1",
@@ -3806,15 +3809,15 @@ dependencies = [
  "rand_core 0.10.1",
  "serde",
  "thiserror",
- "zakura-reddsa 4.0.0",
+ "zakura-jubjub 5.1.0",
+ "zakura-reddsa 5.1.0",
 ]
 
 [[package]]
 name = "zakura-sapling-crypto"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "aes",
- "bitvec",
  "blake2b_simd",
  "blake2s_simd",
  "chacha20poly1305",
@@ -3832,11 +3835,12 @@ dependencies = [
  "rand 0.10.2",
  "rand_core 0.10.1",
  "rand_xorshift 0.5.0",
+ "rayon",
  "subtle",
  "tracing",
  "zakura-bellman",
- "zakura-bls12-381 4.0.0",
- "zakura-jubjub 4.0.0",
+ "zakura-bls12-381 5.1.0",
+ "zakura-jubjub 5.1.0",
  "zakura-note-encryption",
  "zakura-redjubjub",
  "zcash_spec",
@@ -3844,19 +3848,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-sensei"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "hex",
+ "once_cell",
+ "proptest",
+ "rand 0.10.2",
+ "rand_chacha 0.10.0",
+ "rayon",
+ "sha2 0.10.9",
+ "subtle",
+ "zakura-bento",
+ "zakura-sensei-artifacts",
+ "zakura-sensei-macros",
+ "zakura-sensei-shared",
+ "zakura-udon",
+]
+
+[[package]]
+name = "zakura-sensei-artifacts"
+version = "0.1.0"
+dependencies = [
+ "zakura-bento",
+ "zakura-sensei-shared",
+ "zakura-udon",
+]
+
+[[package]]
+name = "zakura-sensei-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "zakura-sensei-shared",
+]
+
+[[package]]
+name = "zakura-sensei-shared"
+version = "0.1.0"
+dependencies = [
+ "zakura-bento",
+ "zakura-udon",
+]
+
+[[package]]
 name = "zakura-sinsemilla"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "criterion 0.5.1",
  "group",
  "once_cell",
  "subtle",
- "zakura-pasta-curves 4.0.0",
+ "zakura-pasta-curves 5.1.0",
 ]
 
 [[package]]
 name = "zakura-transparent"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "bip32",
  "bs58",
@@ -3871,14 +3922,14 @@ dependencies = [
  "subtle",
  "zakura-address",
  "zakura-protocol",
- "zcash_script",
+ "zakura-zcash-script",
  "zcash_spec",
  "zip32",
 ]
 
 [[package]]
 name = "zakura-udon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "criterion 0.6.0",
@@ -3891,8 +3942,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-zcash-script"
+version = "0.0.1"
+dependencies = [
+ "bip32",
+ "bitflags 2.13.1",
+ "bounded-vec",
+ "hex",
+ "lazy_static",
+ "ripemd 0.1.3",
+ "secp256k1",
+ "sha1",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
 name = "zakura-zip321"
-version = "4.0.0"
+version = "5.1.0"
 dependencies = [
  "base64",
  "nom",
@@ -3900,23 +3967,6 @@ dependencies = [
  "proptest",
  "zakura-address",
  "zakura-protocol",
-]
-
-[[package]]
-name = "zcash_script"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10106859d08a2a4119af8a0fa8db72afe35647768b562f94b7a2124adad41275"
-dependencies = [
- "bip32",
- "bitflags 2.13.1",
- "bounded-vec",
- "hex",
- "ripemd 0.1.3",
- "secp256k1",
- "sha1",
- "sha2 0.10.9",
- "thiserror",
 ]
 
 [[package]]

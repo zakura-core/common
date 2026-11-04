@@ -10,6 +10,16 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-02
+
+### Changed
+
+- Stopped enabling `ff`'s `bits` feature ([#626](https://github.com/zakura-core/common/pull/626)).
+- Built-in single and batch verifiers now use optimized full-width identity
+  multiscalar multiplications when supported, reducing measured verification
+  latency by about 1–2%
+  ([#292](https://github.com/zakura-core/common/pull/292)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Changed

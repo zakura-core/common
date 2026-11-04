@@ -307,25 +307,37 @@ fn prepared_batch_verify() {
     for count in [1, 2] {
         let mut valid = batch::Verifier::new();
         let mut invalid = batch::Verifier::new();
+        let mut valid_raw = batch::Verifier::new();
+        let mut invalid_raw = batch::Verifier::new();
         #[cfg(feature = "multicore")]
         let mut valid_multicore = batch::Verifier::new();
         #[cfg(feature = "multicore")]
         let mut invalid_multicore = batch::Verifier::new();
+        #[cfg(feature = "multicore")]
+        let mut valid_multicore_raw = batch::Verifier::new();
+        #[cfg(feature = "multicore")]
+        let mut invalid_multicore_raw = batch::Verifier::new();
 
         for i in 0..count {
             let valid_item = (proof.clone(), vec![image]);
             let invalid_item = (proof.clone(), vec![image + Scalar::from((i == 0) as u64)]);
             valid.queue(valid_item.clone());
             invalid.queue(invalid_item.clone());
+            valid_raw.queue(valid_item.clone());
+            invalid_raw.queue(invalid_item.clone());
             #[cfg(feature = "multicore")]
             {
-                valid_multicore.queue(valid_item);
-                invalid_multicore.queue(invalid_item);
+                valid_multicore.queue(valid_item.clone());
+                invalid_multicore.queue(invalid_item.clone());
+                valid_multicore_raw.queue(valid_item);
+                invalid_multicore_raw.queue(invalid_item);
             }
         }
 
         assert!(valid.verify_prepared(&mut rng, &prepared).is_ok());
         assert!(invalid.verify_prepared(&mut rng, &prepared).is_err());
+        assert!(valid_raw.verify(&mut rng, &params.vk).is_ok());
+        assert!(invalid_raw.verify(&mut rng, &params.vk).is_err());
         #[cfg(feature = "multicore")]
         {
             assert!(valid_multicore.verify_multicore_prepared(&prepared).is_ok());
@@ -334,8 +346,32 @@ fn prepared_batch_verify() {
                     .verify_multicore_prepared(&prepared)
                     .is_err()
             );
+            assert!(valid_multicore_raw.verify_multicore(&params.vk).is_ok());
+            assert!(invalid_multicore_raw.verify_multicore(&params.vk).is_err());
         }
     }
+
+    // Two invalid proofs whose pairing-equation errors are inverses: input
+    // shifts of +1 and -1 under the same key. If both had weight 1 the
+    // errors would cancel, so only one proof per equation may have it.
+    let cancelling =
+        || [Scalar::ONE, -Scalar::ONE].map(|shift| (proof.clone(), vec![image + shift]));
+    let mut pair = batch::Verifier::new();
+    let mut pair_raw = batch::Verifier::new();
+    for item in cancelling() {
+        pair.queue(item.clone());
+        pair_raw.queue(item);
+    }
+    assert!(pair.verify_prepared(&mut rng, &prepared).is_err());
+    assert!(pair_raw.verify(&mut rng, &params.vk).is_err());
+    let [plus, minus] = cancelling();
+    let (mut first, mut second) = (batch::Verifier::new(), batch::Verifier::new());
+    first.queue(plus);
+    second.queue(minus);
+    assert!(matches!(
+        first.verify_joint_prepared(second, &mut rng, &prepared, &prepared),
+        Err(bellman::VerificationError::InvalidProof)
+    ));
 }
 
 #[test]
@@ -429,4 +465,93 @@ fn joint_prepared_batch_verify() {
         make_batch(&proof_a, image_a).verify_joint_prepared(malformed, &mut rng, &key_a, &key_b),
         Err(bellman::VerificationError::InvalidVerifyingKey)
     ));
+}
+
+/// Two invalid proofs with inverse pairing-equation errors (input shifts of
+/// +1 and -1) must not cancel in the multicore verifier, wherever the Rayon
+/// chunking puts them. Each case forces the thread count, so the chunk
+/// layout is known: chunk size is `ceil(n / threads)`, capped at 8.
+#[cfg(feature = "multicore")]
+#[test]
+fn multicore_rejects_cancelling_errors_across_chunks() {
+    let mut rng = rng();
+    let constants = (0..MIMC_ROUNDS)
+        .map(|_| Scalar::random(&mut rng))
+        .collect::<Vec<_>>();
+    let params = generate_random_parameters::<Bls12, _, _>(
+        MiMCDemo {
+            xl: None,
+            xr: None,
+            constants: &constants,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    let (xl, xr) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
+    let image = mimc(xl, xr, &constants);
+    let proof = create_random_proof(
+        MiMCDemo {
+            xl: Some(xl),
+            xr: Some(xr),
+            constants: &constants,
+        },
+        &params,
+        &mut rng,
+    )
+    .unwrap();
+    let prepared = batch::PreparedBatchVerifyingKey::from(&params.vk);
+
+    // (threads, batch size, positions of the +1 and -1 proofs)
+    let cases: [(usize, usize, Option<[usize; 2]>); 7] = [
+        // Chunk size 1: each proof leads its own chunk.
+        (2, 2, Some([0, 1])),
+        // Chunk size 8: the leading proofs of chunks 0 and 1.
+        (2, 16, Some([0, 8])),
+        // Chunk size 8: the leading proofs of chunks 1 and 3, neither in chunk 0.
+        (4, 32, Some([8, 24])),
+        // Chunk size 2: the second proofs of chunks 0 and 1.
+        (4, 8, Some([1, 3])),
+        // One chunk: the unit-weight proof and the next one.
+        (1, 8, Some([0, 1])),
+        // Valid batches still pass with several chunks and with one.
+        (4, 16, None),
+        (1, 4, None),
+    ];
+    for (threads, n, invalid) in cases {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let make_batch = || {
+            let mut verifier = batch::Verifier::new();
+            for i in 0..n {
+                let shift = match invalid {
+                    Some([plus, _]) if i == plus => Scalar::ONE,
+                    Some([_, minus]) if i == minus => -Scalar::ONE,
+                    _ => Scalar::ZERO,
+                };
+                verifier.queue((proof.clone(), vec![image + shift]));
+            }
+            verifier
+        };
+        let prepared_result = pool.install(|| make_batch().verify_multicore_prepared(&prepared));
+        let raw_result = pool.install(|| make_batch().verify_multicore(&params.vk));
+        let context = format!("{threads} threads, {n} proofs, invalid at {invalid:?}");
+        if invalid.is_some() {
+            assert!(
+                matches!(
+                    prepared_result,
+                    Err(bellman::VerificationError::InvalidProof)
+                ),
+                "{context}"
+            );
+            assert!(
+                matches!(raw_result, Err(bellman::VerificationError::InvalidProof)),
+                "{context}"
+            );
+        } else {
+            assert!(prepared_result.is_ok(), "{context}");
+            assert!(raw_result.is_ok(), "{context}");
+        }
+    }
 }

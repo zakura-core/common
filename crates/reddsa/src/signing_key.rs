@@ -15,7 +15,8 @@ use core::{
 };
 
 use crate::{
-    Error, Randomizer, SigType, Signature, SpendAuth, VerificationKey, private::SealedScalar,
+    Error, Randomizer, SigType, Signature, SpendAuth, VerificationKey, VerificationKeyBytes,
+    private::SealedScalar,
 };
 
 use crate::backend::Point as _;
@@ -93,9 +94,50 @@ impl<T: SpendAuth> SigningKey<T> {
         let pk = VerificationKey::from(&sk);
         SigningKey { sk, pk }
     }
+
+    /// Randomizes this key when the randomized verification key is already
+    /// known, skipping the scalar multiplication that [`Self::randomize`]
+    /// performs to derive it.
+    ///
+    /// `randomized_key` must equal the result of [`VerificationKey::randomize`]
+    /// on this key's verification key with the same `randomizer`. Otherwise
+    /// the returned key produces signatures that do not verify. Debug builds
+    /// check this.
+    pub fn randomize_with_verification_key(
+        &self,
+        randomizer: &Randomizer<T>,
+        randomized_key: &VerificationKey<T>,
+    ) -> SigningKey<T> {
+        debug_assert!(
+            self.pk.randomize(randomizer) == *randomized_key,
+            "randomized verification key does not match the randomizer",
+        );
+        SigningKey {
+            sk: self.sk + *randomizer,
+            pk: *randomized_key,
+        }
+    }
 }
 
 impl<T: SigType> SigningKey<T> {
+    /// Returns the signing key for the negated scalar.
+    ///
+    /// Its verification key is the negation of this key's, obtained by
+    /// negating the stored point rather than by a new scalar multiplication.
+    pub fn negate(&self) -> SigningKey<T> {
+        let point = -self.pk.point;
+        SigningKey {
+            sk: -self.sk,
+            pk: VerificationKey {
+                point,
+                bytes: VerificationKeyBytes {
+                    bytes: point.to_bytes(),
+                    _marker: PhantomData,
+                },
+            },
+        }
+    }
+
     /// Generate a new signing key.
     pub fn new<R: Rng + CryptoRng>(mut rng: R) -> SigningKey<T> {
         let sk = {

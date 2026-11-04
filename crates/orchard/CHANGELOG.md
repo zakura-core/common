@@ -10,6 +10,51 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-11-03
+
+### Added
+
+- Added `ValueCommitment::derive_public`, the commitment to a public value with
+  a zero trapdoor. It runs in variable time with respect to the value, so it
+  must only be given public values such as a bundle's value balance
+  ([#672](https://github.com/zakura-core/common/pull/672)).
+
+### Changed
+
+- `Bundle::binding_validating_key` and the builder and PCZT IO finalizer
+  binding keys derive the value-balance commitment with
+  `ValueCommitment::derive_public`. This drops a multiplication by the zero
+  trapdoor and, on the halo2 backend, multiplies only over the value's
+  significant bits ([#672](https://github.com/zakura-core/common/pull/672)).
+- On the halo2 backend, `ValueCommitment::derive` reads the value-commitment
+  generators from precomputed constants instead of hashing to the curve on
+  every call ([#672](https://github.com/zakura-core/common/pull/672)).
+- The legacy/Halo2 backend retains computed binding-key points and already
+  decoded binding and spend authorization keys through signature batching,
+  avoiding redundant point decoding for Orchard and Ironwood
+  ([#676](https://github.com/zakura-core/common/pull/676)).
+
+## [5.0.0] - 2026-11-02
+
+### Added
+
+- Added the `backend-sensei` feature selecting the Sensei cryptographic
+  implementation; select exactly one of `backend-halo2` (the default) and
+  `backend-sensei`
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+
+### Changed
+
+- Removed the `bitvec` dependency ([#626](https://github.com/zakura-core/common/pull/626)).
+
+### Security
+
+- `keys::FullViewingKey`, `keys::IncomingViewingKey` and
+  `keys::OutgoingViewingKey` overwrite their secret components when dropped:
+  `nk` and `rivk`, `dk` and `ivk`, and `ovk`. Previously their memory was freed
+  without being overwritten, and their private fields left no way to wipe them
+  ([#651](https://github.com/zakura-core/common/pull/651)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

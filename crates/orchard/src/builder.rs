@@ -731,13 +731,13 @@ impl ActionInfo {
         (
             Action::from_parts(
                 nf_old,
-                rk,
+                rk.clone(),
                 cmx,
                 encrypted_note,
                 cv_net,
                 SigningMetadata {
                     dummy_ask: self.spend.dummy_sk.as_ref().map(SpendAuthorizingKey::from),
-                    parts: SigningParts { ak, alpha },
+                    parts: SigningParts { ak, alpha, rk },
                 },
             )
             .expect(
@@ -1311,7 +1311,7 @@ fn finish_unauthorized_bundle<V: TryFrom<i64>, R: Rng>(
 
     // Verify that bsk and bvk are consistent.
     let bvk = (actions.iter().map(|a| a.cv_net()).sum::<ValueCommitment>()
-        - ValueCommitment::derive(value_balance, ValueCommitTrapdoor::zero()))
+        - ValueCommitment::derive_public(value_balance))
     .into_bvk();
     assert_eq!(redpallas::VerificationKey::from(&bsk), bvk);
 
@@ -1657,6 +1657,8 @@ pub struct SigningParts {
     ak: SpendValidatingKey,
     /// The randomization needed to derive the actual signing key for this note.
     alpha: crate::primitives::redpallas::SpendAuthRandomizer,
+    /// The randomized verification key `ak + [alpha]G`, as stored in the action.
+    rk: redpallas::VerificationKey<SpendAuth>,
 }
 
 /// Marker for an unauthorized bundle with no signatures.
@@ -1696,6 +1698,10 @@ impl InProgressSignatures for PartiallyAuthorized {
 ///
 /// [`Signature`]: redpallas::Signature
 #[derive(Debug)]
+// One short-lived value per action while signing; carrying `rk` in
+// `SigningParts` avoids recomputing it, and boxing would change the public
+// variant type.
+#[allow(clippy::large_enum_variant)]
 pub enum MaybeSigned {
     /// The information needed to sign this [`Action`](crate::Action).
     SigningMetadata(SigningParts),
@@ -1726,7 +1732,10 @@ impl<P: fmt::Debug, V> Bundle<InProgress<P, Unauthorized>, V> {
             |rng, _, SigningMetadata { dummy_ask, parts }| {
                 // We can create signatures for dummy spends immediately.
                 dummy_ask
-                    .map(|ask| ask.randomize(&parts.alpha).sign(rng, &sighash))
+                    .map(|ask| {
+                        ask.randomize_with_rk(&parts.alpha, &parts.rk)
+                            .sign(rng, &sighash)
+                    })
                     .map(MaybeSigned::Signature)
                     .unwrap_or(MaybeSigned::SigningMetadata(parts))
             },
@@ -1772,7 +1781,8 @@ impl<P: fmt::Debug, V> Bundle<InProgress<P, PartiallyAuthorized>, V> {
             |rng, partial, maybe| match maybe {
                 MaybeSigned::SigningMetadata(parts) if parts.ak == expected_ak => {
                     MaybeSigned::Signature(
-                        ask.randomize(&parts.alpha).sign(rng, &partial.sigs.sighash),
+                        ask.randomize_with_rk(&parts.alpha, &parts.rk)
+                            .sign(rng, &partial.sigs.sighash),
                     )
                 }
                 s => s,
@@ -1803,8 +1813,11 @@ impl<P: fmt::Debug, V> Bundle<InProgress<P, PartiallyAuthorized>, V> {
             &mut signature_valid_for,
             |valid_for, partial, maybe| match maybe {
                 MaybeSigned::SigningMetadata(parts) => {
-                    let rk = parts.ak.randomize(&parts.alpha);
-                    if rk.verify(&partial.sigs.sighash[..], signature).is_ok() {
+                    if parts
+                        .rk
+                        .verify(&partial.sigs.sighash[..], signature)
+                        .is_ok()
+                    {
                         *valid_for += 1;
                         MaybeSigned::Signature(signature.clone())
                     } else {
@@ -3505,7 +3518,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "prover"))]
+#[cfg(all(test, feature = "backend-halo2", feature = "prover"))]
 impl crate::BenchmarkCircuitWitnesses for UnauthorizedBundle<i64> {
     fn benchmark_circuits(&self) -> &[Circuit] {
         &self.authorization().proof.circuits

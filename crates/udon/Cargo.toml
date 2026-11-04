@@ -3,13 +3,13 @@ name = "zakura-udon"
 description = """
 Pasta field and curve arithmetic with allocation-free FFTs
 """
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Sean Bowe <ewillbefull@gmail.com>"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 
 [features]
 # Unstable consumer-facing traits and generic arithmetic adapters.

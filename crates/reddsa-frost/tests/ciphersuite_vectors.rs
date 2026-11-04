@@ -44,11 +44,11 @@ fn ciphersuites_match_before_extraction() {
     // using the same public ciphersuite calls through `reddsa::frost`.
     let mut output = String::new();
     vectors::<reddsa_frost::redjubjub::JubjubBlake2b512>(&mut output);
-    #[cfg(feature = "pallas-pasta")]
+    #[cfg(any(feature = "pallas-pasta", feature = "pallas-sensei"))]
     vectors::<reddsa_frost::redpallas::PallasBlake2b512>(&mut output);
     let expected = include_str!("fixtures/ciphersuites.txt");
-    #[cfg(feature = "pallas-pasta")]
+    #[cfg(any(feature = "pallas-pasta", feature = "pallas-sensei"))]
     assert_eq!(output, expected);
-    #[cfg(not(feature = "pallas-pasta"))]
+    #[cfg(not(any(feature = "pallas-pasta", feature = "pallas-sensei")))]
     assert_eq!(output, expected[..output.len()]);
 }

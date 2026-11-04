@@ -1,12 +1,11 @@
 use core::iter;
 
-use bitvec::{array::BitArray, order::Lsb0};
 use group::ff::PrimeField;
 use subtle::{ConstantTimeEq, CtOption};
 
 use crate::{
     pedersen_hash::Personalization,
-    spec::{extract_p, windowed_pedersen_commit},
+    spec::{extract_p, leos2bsp, windowed_pedersen_commit},
     value::NoteValue,
 };
 
@@ -50,9 +49,9 @@ impl NoteCommitment {
         NoteCommitment(windowed_pedersen_commit(
             Personalization::NoteCommitment,
             iter::empty()
-                .chain(v.to_le_bits().iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(g_d).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(pk_d).iter().by_vals()),
+                .chain(v.to_le_bits())
+                .chain(leos2bsp(g_d))
+                .chain(leos2bsp(pk_d)),
             rcm.0,
         ))
     }

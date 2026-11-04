@@ -22,12 +22,14 @@ use super::{
 #[cfg(test)]
 use super::circuit::FloorPlan;
 use super::synthesis_backend::SynthesisBackend;
+#[cfg(all(test, feature = "batch"))]
+use crate::PREPARED_INSTANCE_BOOLEAN_ROWS;
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 #[cfg(feature = "batch")]
 use crate::{
-    InstanceScalarByteOrder, InstanceWindowTable, PREPARED_INSTANCE_BOOLEAN_ROWS,
-    PREPARED_INSTANCE_COLUMNS, PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_ROWS,
-    PREPARED_INSTANCE_WINDOW_BITS, PREPARED_INSTANCE_WINDOW_MAGNITUDES, PreparedInstanceTable,
+    InstanceScalarByteOrder, InstanceWindowTable, PREPARED_INSTANCE_COLUMNS,
+    PREPARED_INSTANCE_DENSE_ROWS, PREPARED_INSTANCE_ROWS, PREPARED_INSTANCE_WINDOW_BITS,
+    PREPARED_INSTANCE_WINDOW_MAGNITUDES, PreparedInstanceTable, instance_flag_mask,
 };
 use crate::{
     arithmetic::{CurveAffine, batch_invert_multi},
@@ -230,24 +232,6 @@ fn evaluate_prepared_instance_terms<C: CurveAffine>(
             .map(|product| product.unwrap_or_else(C::Curve::identity))
             .collect(),
     )
-}
-
-#[cfg(feature = "batch")]
-fn instance_flag_mask<F: Field>(instance: &[F]) -> Option<usize> {
-    let mut mask = 0;
-    let flags = &instance[PREPARED_INSTANCE_DENSE_ROWS
-        ..PREPARED_INSTANCE_DENSE_ROWS + PREPARED_INSTANCE_BOOLEAN_ROWS];
-    for (flag, scalar) in flags.iter().enumerate() {
-        if bool::from(scalar.is_zero()) {
-            continue;
-        }
-        if bool::from((*scalar - F::ONE).is_zero()) {
-            mask |= 1 << flag;
-        } else {
-            return None;
-        }
-    }
-    Some(mask)
 }
 
 /// Commits the exact one-column Orchard instance shape, sharing any dense row
@@ -1426,7 +1410,7 @@ fn create_proof_with_synthesis<
         .collect();
 
     // Create polynomial evaluator context for cosets.
-    let mut coset_evaluator = poly::new_evaluator(|| {});
+    let mut coset_evaluator = poly::new_evaluator(evaluator_schedule::quotient_evaluator_brand);
 
     // Register fixed cosets with the polynomial evaluator.
     let fixed_cosets: Vec<_> = pk

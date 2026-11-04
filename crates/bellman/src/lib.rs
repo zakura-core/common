@@ -153,6 +153,15 @@ use std::io;
 use std::marker::PhantomData;
 use std::ops::{Add, Sub};
 
+/// Bit `i` of a little-endian byte representation, numbered from 0 for the LSB.
+///
+/// The scalar fields this crate is used with encode `PrimeField::Repr` as the
+/// little-endian bytes of the canonical value, so this reads the bits of a field
+/// element from its `to_repr()`.
+pub(crate) fn le_bit(repr: &[u8], i: usize) -> bool {
+    (repr[i / 8] >> (i % 8)) & 1 == 1
+}
+
 /// Computations are expressed in terms of arithmetic circuits, in particular
 /// rank-1 quadratic constraint systems. The `Circuit` trait represents a
 /// circuit that can be synthesized. The `synthesize` method is called during

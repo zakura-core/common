@@ -102,6 +102,29 @@ use rand_core::SeedableRng;
 
 proptest! {
 
+    #[test]
+    fn point_conversions_match_byte_decoding(
+        point in prop::array::uniform32(any::<u8>()).prop_filter_map(
+            "canonical Jubjub point",
+            |bytes| Option::<jubjub::AffinePoint>::from(jubjub::AffinePoint::from_bytes(bytes))
+                .map(jubjub::ExtendedPoint::from),
+        ),
+    ) {
+        let identity = jubjub::ExtendedPoint::identity();
+        let torsion = jubjub::ExtendedPoint::from(
+            jubjub::AffinePoint::from_bytes((-jubjub::Fq::one()).to_bytes()).unwrap(),
+        );
+        for point in [identity, torsion, point, point + torsion] {
+            let bytes = jubjub::AffinePoint::from(point).to_bytes();
+            let expected = VerificationKey::<sapling::Binding>::try_from(bytes).unwrap();
+            let actual = VerificationKey::<sapling::Binding>::from(point);
+            prop_assert_eq!(actual, expected);
+            prop_assert_eq!(<[u8; 32]>::from(actual), bytes);
+            let spend = VerificationKey::<sapling::SpendAuth>::try_from(bytes).unwrap();
+            prop_assert_eq!(jubjub::AffinePoint::from(spend), jubjub::AffinePoint::from(point));
+        }
+    }
+
      #[test]
     fn tweak_signature(
         tweaks in prop::collection::vec(tweak_strategy(), (0,5)),
@@ -149,5 +172,109 @@ proptest! {
         let pk_r_via_pk_rand: [u8; 32] = VerificationKeyBytes::from(pk_r).into();
 
         assert_eq!(pk_r_via_pk_rand, pk_r_via_sk_rand);
+    }
+}
+
+/// `negate` and `randomize_with_verification_key` must produce exactly the
+/// keys that rebuilding from the scalar would, and those keys must sign.
+fn check_derived_keys<T: SpendAuth>(
+    sk: SigningKey<T>,
+    randomizer: Randomizer<T>,
+    rng: &mut ChaChaRng,
+) {
+    let sk_bytes: [u8; 32] = sk.into();
+
+    let negated = sk.negate();
+    let rebuilt = SigningKey::<T>::try_from(<[u8; 32]>::from(negated)).unwrap();
+    assert_ne!(<[u8; 32]>::from(negated), sk_bytes);
+    assert_eq!(
+        VerificationKey::from(&negated),
+        VerificationKey::from(&rebuilt)
+    );
+    let sig = negated.sign(&mut *rng, b"negated");
+    assert!(
+        VerificationKey::from(&rebuilt)
+            .verify(b"negated", &sig)
+            .is_ok()
+    );
+    assert_eq!(<[u8; 32]>::from(negated.negate()), sk_bytes);
+
+    let rk = VerificationKey::from(&sk).randomize(&randomizer);
+    let expected = sk.randomize(&randomizer);
+    let actual = sk.randomize_with_verification_key(&randomizer, &rk);
+    assert_eq!(<[u8; 32]>::from(actual), <[u8; 32]>::from(expected));
+    assert_eq!(
+        VerificationKey::from(&actual),
+        VerificationKey::from(&expected)
+    );
+    let sig = actual.sign(&mut *rng, b"randomized");
+    assert!(rk.verify(b"randomized", &sig).is_ok());
+}
+
+proptest! {
+    #[test]
+    fn sapling_derived_keys_match_rebuilt(rng_seed in prop::array::uniform32(any::<u8>())) {
+        let mut rng = ChaChaRng::from_seed(rng_seed);
+        let mut bytes = [0; 64];
+        rng.fill_bytes(&mut bytes);
+        let randomizer = jubjub::Scalar::from_bytes_wide(&bytes);
+        let sk = SigningKey::<sapling::SpendAuth>::new(&mut rng);
+        check_derived_keys(sk, randomizer, &mut rng);
+    }
+}
+
+#[cfg(feature = "pallas-pasta")]
+proptest! {
+    #[test]
+    fn orchard_derived_keys_match_rebuilt(rng_seed in prop::array::uniform32(any::<u8>())) {
+        use group::ff::Field;
+        let mut rng = ChaChaRng::from_seed(rng_seed);
+        let randomizer = pasta_curves::pallas::Scalar::random(&mut rng);
+        let sk = SigningKey::<orchard::SpendAuth>::new(&mut rng);
+        check_derived_keys(sk, randomizer, &mut rng);
+    }
+}
+
+#[cfg(feature = "pallas-pasta")]
+proptest! {
+    #[test]
+    fn orchard_binding_point_matches_decoding(seed in any::<[u8; 32]>()) {
+        use group::{Group, GroupEncoding};
+        let mut rng = ChaChaRng::from_seed(seed);
+        let sk = SigningKey::<orchard::Binding>::new(&mut rng);
+        let expected = VerificationKey::from(&sk);
+        let bytes: [u8; 32] = expected.into();
+        let point = pasta_curves::pallas::Point::from_bytes(&bytes).unwrap();
+        let identity = pasta_curves::pallas::Point::identity();
+        for point in [point, point + identity, identity] {
+            let actual = VerificationKey::<orchard::Binding>::from(point);
+            let decoded = VerificationKey::try_from(point.to_bytes()).unwrap();
+            prop_assert_eq!(actual, decoded);
+            prop_assert_eq!(<[u8; 32]>::from(actual), point.to_bytes());
+        }
+        let actual = VerificationKey::<orchard::Binding>::from(point + identity);
+        let sig = sk.sign(&mut rng, b"message");
+        prop_assert_eq!(actual.verify(b"message", &sig), Ok(()));
+        prop_assert_eq!(actual.verify(b"wrong", &sig), Err(Error::InvalidSignature));
+    }
+
+    #[test]
+    fn orchard_tweak_signature(
+        tweaks in prop::collection::vec(tweak_strategy(), (0,5)),
+        rng_seed in prop::array::uniform32(any::<u8>()),
+    ) {
+        let mut rng = ChaChaRng::from_seed(rng_seed);
+
+        let msg = b"test message for proptests";
+        let mut binding = SignatureCase::<orchard::Binding>::new(&mut rng, msg.to_vec());
+        let mut spendauth = SignatureCase::<orchard::SpendAuth>::new(&mut rng, msg.to_vec());
+
+        for t in &tweaks {
+            binding.apply_tweak(t);
+            spendauth.apply_tweak(t);
+        }
+
+        assert!(binding.check());
+        assert!(spendauth.check());
     }
 }

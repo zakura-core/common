@@ -160,7 +160,9 @@ mod implementation {
         where
             F: FnOnce(&DummyScope, usize) -> R,
         {
-            f(&DummyScope, elements)
+            // Callers pass the chunk size to `chunks`, which panics on zero,
+            // so an empty scope still gets chunks of one (as with Rayon).
+            f(&DummyScope, elements.max(1))
         }
     }
 
@@ -205,3 +207,20 @@ mod implementation {
 }
 
 pub use self::implementation::*;
+
+#[cfg(test)]
+mod tests {
+    use super::Worker;
+
+    #[test]
+    fn scope_chunk_size_is_never_zero() {
+        for elements in [0, 1, 2, 7, 1000] {
+            let chunk = Worker::new().scope(elements, |_, chunk| chunk);
+            assert!(chunk >= 1, "{elements} elements gave chunk size {chunk}");
+            assert!(
+                chunk <= elements.max(1),
+                "{elements} elements gave chunk size {chunk}"
+            );
+        }
+    }
+}

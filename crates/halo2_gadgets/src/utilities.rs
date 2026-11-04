@@ -1,6 +1,6 @@
 //! Utility gadgets.
 
-use ff::{Field, PrimeField, PrimeFieldBits};
+use ff::{Field, PrimeField};
 use halo2_proofs::{
     circuit::{AssignedCell, Cell, Layouter, Value},
     plonk::{Advice, Column, Error, Expression},
@@ -130,7 +130,7 @@ impl<F: Field, T: FieldValue<F>> RangeConstrained<F, T> {
     }
 }
 
-impl<F: PrimeFieldBits> RangeConstrained<F, Value<F>> {
+impl<F: PrimeField> RangeConstrained<F, Value<F>> {
     /// Constructs a `RangeConstrained<Value<F>>` as a bitrange of the given value.
     pub fn bitrange_of(value: Value<&F>, bitrange: Range<usize>) -> Self {
         let num_bits = bitrange.len();
@@ -179,39 +179,52 @@ pub fn ternary<F: Field>(a: Expression<F>, b: Expression<F>, c: Expression<F>) -
     a * b + one_minus_a * c
 }
 
+/// Bit `i` of a little-endian byte representation, numbered from 0 for the LSB.
+pub(crate) fn le_bit(repr: &[u8], i: usize) -> bool {
+    (repr[i / 8] >> (i % 8)) & 1 == 1
+}
+
+/// The little-endian bitstring of the canonical representation of `field_elem`,
+/// starting with its LSB.
+///
+/// This relies on `F::Repr` being the little-endian encoding of the canonical value,
+/// as it is for the Pasta fields this crate's gadgets are built over.
+#[cfg(test)]
+pub(crate) fn le_bits<F: PrimeField>(field_elem: &F) -> impl Iterator<Item = bool> {
+    let repr = field_elem.to_repr();
+    (0..repr.as_ref().len() * 8).map(move |i| le_bit(repr.as_ref(), i))
+}
+
 /// Takes a specified subsequence of the little-endian bit representation of a field element.
 /// The bits are numbered from 0 for the LSB.
-pub fn bitrange_subset<F: PrimeFieldBits>(field_elem: &F, bitrange: Range<usize>) -> F {
+pub fn bitrange_subset<F: PrimeField>(field_elem: &F, bitrange: Range<usize>) -> F {
     // We can allow a subsequence of length NUM_BITS, because
-    // field_elem.to_le_bits() returns canonical bitstrings.
+    // field_elem.to_repr() is canonical.
     assert!(bitrange.end <= F::NUM_BITS as usize);
 
+    let repr = field_elem.to_repr();
+    // The integer value of a range of at most 64 bits.
+    let chunk_value = |chunk: Range<usize>| {
+        chunk.rev().fold(0_u64, |value, bit| {
+            (value << 1) | u64::from(le_bit(repr.as_ref(), bit))
+        })
+    };
+
     let bitrange_len = bitrange.len();
-    let bits = field_elem.to_le_bits();
-    let mut chunks = bits[bitrange].chunks(u64::BITS as usize).rev();
-    let Some(high_chunk) = chunks.next() else {
+    let mut chunk_starts = bitrange.clone().step_by(u64::BITS as usize).rev();
+    let Some(high_start) = chunk_starts.next() else {
         return F::ZERO;
     };
 
-    let high_value = high_chunk
-        .iter()
-        .by_vals()
-        .enumerate()
-        .fold(0_u64, |value, (bit, set)| value | ((set as u64) << bit));
-    let mut subset = F::from(high_value);
+    let mut subset = F::from(chunk_value(high_start..bitrange.end));
 
     if bitrange_len > u64::BITS as usize {
         // Every remaining chunk contains exactly 64 less-significant bits.
         // Build the subset in radix 2^64, reducing in the field after each
         // chunk.
         let radix = F::from(u64::MAX) + F::ONE;
-        for chunk in chunks {
-            let value = chunk
-                .iter()
-                .by_vals()
-                .enumerate()
-                .fold(0_u64, |value, (bit, set)| value | ((set as u64) << bit));
-            subset = subset * radix + F::from(value);
+        for start in chunk_starts {
+            subset = subset * radix + F::from(chunk_value(start..start + u64::BITS as usize));
         }
     }
 
@@ -234,20 +247,20 @@ pub fn range_check<F: PrimeField>(word: Expression<F>, range: usize) -> Expressi
 ///
 /// We are returning a `Vec<u8>` which means the window size is limited to
 /// <= 8 bits.
-pub fn decompose_word<F: PrimeFieldBits>(
+pub fn decompose_word<F: PrimeField>(
     word: &F,
     word_num_bits: usize,
     window_num_bits: usize,
 ) -> Vec<u8> {
     assert!(window_num_bits <= 8);
 
-    let bits = word.to_le_bits();
+    let repr = word.to_repr();
     let num_windows = word_num_bits.div_ceil(window_num_bits);
     (0..num_windows)
         .map(|window| {
             (0..window_num_bits).rev().fold(0, |acc, bit| {
                 let bit = window * window_num_bits + bit;
-                (acc << 1) + u8::from(bit < word_num_bits && bits[bit])
+                (acc << 1) + u8::from(bit < word_num_bits && le_bit(repr.as_ref(), bit))
             })
         })
         .collect()

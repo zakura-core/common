@@ -2,7 +2,7 @@ use rand_core::Rng;
 use std::ops::{AddAssign, MulAssign};
 use std::sync::Arc;
 
-use ff::{Field, PrimeField, PrimeFieldBits};
+use ff::{Field, PrimeField};
 use group::CurveAffine;
 use pairing::Engine;
 
@@ -164,7 +164,6 @@ pub fn create_random_proof<E, C, R, P: ParameterSource<E>>(
 ) -> Result<Proof<E>, SynthesisError>
 where
     E: Engine,
-    E::Fr: PrimeFieldBits,
     C: Circuit<E::Fr>,
     R: Rng,
 {
@@ -183,7 +182,6 @@ pub fn create_proof<E, C, P: ParameterSource<E>>(
 ) -> Result<Proof<E>, SynthesisError>
 where
     E: Engine,
-    E::Fr: PrimeFieldBits,
     C: Circuit<E::Fr>,
 {
     let mut prover = ProvingAssignment {

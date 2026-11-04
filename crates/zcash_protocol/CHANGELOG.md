@@ -10,6 +10,15 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-02
+
+### Added
+
+- Added `encoding::Vector::read_bytes` and `encoding::Array::read_bytes`,
+  which decode byte vectors in bulk with the same results and errors as
+  per-byte `Vector::read` and `Array::read`
+  ([#631](https://github.com/zakura-core/common/pull/631)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

@@ -1,0 +1,23 @@
+{
+  "baseline_revision": "770c2c1623e8fac7659b06b30645f90ef12a1e4f",
+  "equation_records": 767,
+  "files": {
+    "current-128-1.instances": "9b4066b804592a0e4ea0e929cf4bb99f7701391011c444128834caf78a86e1a0",
+    "current-128-1.proof": "94a9f2909e778d509ec04c411736a478295bae1a1edf811b243c143f9ee82d47",
+    "current-3-0.instances": "a9de345deea7a9c2facd2a67d652a160455ffcd4df64cce0688deb8da07d3cf9",
+    "current-3-0.proof": "2a51e2668153545214d8a3e92a46dcd0e0cb7dcb1e105f0bac264d7cab769537",
+    "current-3-1.instances": "508a8e02e5609fa98d5297bf9f21f897c3e340f30155ad33f014dcd0e798ad16",
+    "current-3-1.proof": "97dadb716b21b3afc767468a926ba06328f4289c300498ed7d527586cb162b2a",
+    "current-65-1.instances": "49aebed76d439f3dda11cc0de09139965e4675e2d7de942d142d2882c87d2d16",
+    "current-65-1.proof": "424fb1fc728a3ff9e6675ab72c3bcdd9b1a21b22ee7b4f8dd263b80a76eaf8a5",
+    "equations.bin": "ffcbea8ab57418eb740b3300d552444b53c154f5b440db067e8753861c38787c",
+    "poseidon-hash.bin": "d2a6b9e89ae5f3a4d081cc8c7d7832cfffd2697a817c3f737dd50aa5f409c1fe",
+    "poseidon-permute.bin": "160528fb278c1962889d5a05e705f0ecaaf34c8452297dd44794a7dc412419e6",
+    "primitives.bin": "dbef07549d68be9600f2dfa202bba91bcd8da74b523531a96f15aec362a1de32"
+  },
+  "verified_large_proofs": {
+    "large-128.proof": "8de211cca02b7d64fd633e74d15884fefd1f3606fd52adfcbdd29d9258b4111f",
+    "large-17.proof": "91e9e898d8397f76b907e06b1cedee263b8a5fcd26a551ec4745fb4bd00f96c9",
+    "large-65.proof": "51dbd88fd194aba2f9af74c93d5759c3b46e9acc9a916905abf99e019c46c3d3"
+  }
+}

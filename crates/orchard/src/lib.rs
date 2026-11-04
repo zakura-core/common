@@ -9,19 +9,20 @@
 //!
 //! ## Backend selection
 //!
-//! `backend-halo2` selects the cryptographic implementation and is enabled
-//! by default. Builds with defaults disabled must select it explicitly, and
-//! a build that selects no backend fails to compile with a diagnostic naming
-//! the available selection.
+//! `backend-halo2` (enabled by default) and `backend-sensei` each select a
+//! complete cryptographic implementation. Builds with defaults disabled must
+//! select one explicitly, and a build that selects no backend or both fails
+//! to compile with a diagnostic naming the available selections.
 //!
 //! Backend features are mutually exclusive, and the selection is resolved
 //! once for the final artifact. Cargo unifies features across every
 //! dependant, so a library that hard-enabled a backend would force it on the
 //! whole build; the workspace crates that depend on this one (`zakura-keys`,
-//! `zakura-primitives`, `zakura-proofs`) instead forward the selection
-//! through their own default-enabled `backend-halo2` feature. An application
-//! selecting a different backend disables default features along that chain
-//! and selects the backend at each crate.
+//! `zakura-primitives`, `zakura-proofs`) instead forward both selections
+//! through features of their own, with `backend-halo2` enabled by default.
+//! An application selecting `backend-sensei` disables default features along
+//! that chain and selects the backend, plus the capabilities it needs, at
+//! each crate. `--all-features` is unsupported because the backends conflict.
 //!
 //! ## Proof capabilities
 //!
@@ -62,8 +63,12 @@ extern crate std;
 
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "backend-halo2"))]
-compile_error!("select an Orchard backend: backend-halo2");
+#[cfg(all(feature = "backend-halo2", feature = "backend-sensei"))]
+compile_error!(
+    "select exactly one Orchard backend; disable default features to select backend-sensei"
+);
+#[cfg(not(any(feature = "backend-halo2", feature = "backend-sensei")))]
+compile_error!("select an Orchard backend: backend-halo2 or backend-sensei");
 
 mod action;
 mod address;
@@ -72,7 +77,8 @@ pub mod builder;
 pub mod bundle;
 #[cfg(any(feature = "prover", feature = "verifier"))]
 pub mod circuit;
-#[path = "backend/halo2/constants.rs"]
+#[cfg_attr(feature = "backend-halo2", path = "backend/halo2/constants.rs")]
+#[cfg_attr(feature = "backend-sensei", path = "backend/sensei/constants.rs")]
 mod constants;
 pub mod keys;
 pub mod note;
@@ -83,7 +89,8 @@ pub mod pczt;
 pub mod primitives;
 #[cfg(test)]
 mod rng_compat;
-#[path = "backend/halo2/spec.rs"]
+#[cfg_attr(feature = "backend-halo2", path = "backend/halo2/spec.rs")]
+#[cfg_attr(feature = "backend-sensei", path = "backend/sensei/spec.rs")]
 mod spec;
 pub mod tree;
 pub mod value;
@@ -250,7 +257,7 @@ impl ProtocolVersion {
     }
 }
 
-#[cfg(all(test, feature = "prover"))]
+#[cfg(all(test, feature = "backend-halo2", feature = "prover"))]
 trait BenchmarkCircuitWitnesses {
     fn benchmark_circuits(&self) -> &[circuit::Circuit];
 }

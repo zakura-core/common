@@ -803,6 +803,11 @@ fn bundle_with_key_lookup<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<
         spends,
         outputs,
         |spend_infos, output_infos, value_balance, tx_metadata, mut rng| {
+            // `Bundle::from_parts` discards a bundle with no spends and no outputs, so skip
+            // deriving its binding keys: a coinbase builder reaches this on every template.
+            if spend_infos.is_empty() && output_infos.is_empty() {
+                return Ok(None);
+            }
             let value_balance_i64 =
                 i64::try_from(value_balance).map_err(|_| Error::InvalidAmount)?;
 
@@ -830,14 +835,12 @@ fn bundle_with_key_lookup<SP: SpendProver, OP: OutputProver, R: Rng, V: TryFrom<
 
             // Verify that bsk and bvk are consistent.
             let bvk = {
-                let spends = shielded_spends
-                    .iter()
-                    .map(|spend| spend.cv())
-                    .sum::<CommitmentSum>();
-                let outputs = shielded_outputs
-                    .iter()
-                    .map(|output| output.cv())
-                    .sum::<CommitmentSum>();
+                // This builder derived every one of these commitments itself.
+                let spends = CommitmentSum::try_sum(shielded_spends.iter().map(|spend| spend.cv()))
+                    .expect("value commitments derived by the builder are valid points");
+                let outputs =
+                    CommitmentSum::try_sum(shielded_outputs.iter().map(|output| output.cv()))
+                        .expect("value commitments derived by the builder are valid points");
                 (spends - outputs).into_bvk(value_balance_i64)
             };
             assert_eq!(redjubjub::VerificationKey::from(&bsk), bvk);
@@ -1337,5 +1340,29 @@ impl<V> Bundle<InProgress<Proven, PartiallyAuthorized>, V> {
                 })
             },
         )
+    }
+}
+
+#[cfg(all(test, feature = "circuit"))]
+mod tests {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use super::{Builder, BundleType, Zip212Enforcement};
+    use crate::{
+        Anchor,
+        prover::mock::{MockOutputProver, MockSpendProver},
+    };
+
+    #[test]
+    fn coinbase_without_outputs_builds_no_bundle() {
+        let builder = Builder::new(
+            Zip212Enforcement::On,
+            BundleType::Coinbase,
+            Anchor::empty_tree(),
+        );
+        let bundle = builder
+            .build_coinbase::<MockSpendProver, MockOutputProver, _, i64>(StdRng::seed_from_u64(0))
+            .expect("an empty coinbase bundle is satisfiable");
+        assert!(bundle.is_none());
     }
 }

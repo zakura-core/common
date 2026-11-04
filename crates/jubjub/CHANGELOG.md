@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-02
+
+### Changed
+
+- Removed `bits` from the default features; enable it explicitly for the
+  `PrimeFieldBits` implementation. The crate no longer depends on `bitvec`
+  ([#626](https://github.com/zakura-core/common/pull/626)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed

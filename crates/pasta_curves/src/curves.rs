@@ -105,6 +105,27 @@ macro_rules! impl_multiexp_vartime {
         ) -> Option<Self> {
             crate::glv::try_multiexp::<$name>(scalars, bases)
         }
+
+        #[cfg(feature = "glv")]
+        fn try_multiexp_vartime_with_parallelism(
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+            use_parallelism: bool,
+        ) -> Option<Self> {
+            if use_parallelism {
+                crate::glv::try_multiexp::<$name>(scalars, bases)
+            } else {
+                crate::glv::try_multiexp_with_threads::<$name>(scalars, bases, 1)
+            }
+        }
+
+        #[cfg(feature = "glv")]
+        fn try_multiexp_full_width_is_identity_vartime(
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+        ) -> Option<bool> {
+            crate::glv::try_multiexp_full_width_is_identity::<$name>(scalars, bases)
+        }
     };
     (native, $name:ident) => {};
 }
@@ -117,6 +138,13 @@ macro_rules! impl_prepare_zero_check {
             bases: &[Self::AffineExt],
         ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedZeroCheck<Self>>> {
             crate::glv::prepare_zero_check::<$name>(bases)
+        }
+
+        #[cfg(feature = "glv")]
+        fn try_prepare_fixed_base_sum(
+            bases: &[Self::AffineExt],
+        ) -> Option<alloc::boxed::Box<dyn crate::arithmetic::PreparedFixedBaseSum<Self>>> {
+            Some(crate::glv::prepare_fixed_base_sum::<$name>(bases))
         }
     };
     (native, $name:ident) => {};
@@ -864,6 +892,116 @@ macro_rules! new_curve_impl {
             }
         }
 
+        #[cfg(all(feature = "sqrt-table", feature = "alloc"))]
+        // The macro also instantiates the crate-private isogenous curves, which
+        // never decode compressed points.
+        #[allow(dead_code)]
+        impl $name_affine {
+            /// Decodes compressed points, with the same result for each input as
+            /// [`GroupEncoding::from_bytes`].
+            ///
+            /// Decoding is dominated by one square root per point. This computes
+            /// the square roots of up to eight points together: on x86-64, when
+            /// the target enables AVX2 or the `x86_64-asm` feature forces the
+            /// x86-64 field backend (whose CPU requirement includes AVX2), they
+            /// run four per AVX2 register;
+            /// elsewhere their scalar dependency chains are interleaved. For
+            /// batches of two or more points this is faster than decoding each
+            /// point separately.
+            ///
+            /// Like `from_bytes`, the running time does not depend on whether an
+            /// input decodes, apart from the variable-time square-root table
+            /// lookups that `from_bytes` also performs.
+            pub fn batch_from_bytes(
+                items: impl Iterator<Item = [u8; 32]>,
+            ) -> alloc::vec::Vec<CtOption<Self>> {
+                let items: alloc::vec::Vec<[u8; 32]> = items.collect();
+                let mut out = alloc::vec::Vec::with_capacity(items.len());
+                let mut chunks = items.chunks_exact(8);
+                for chunk in &mut chunks {
+                    Self::decode_chunk::<8>(chunk, &mut out);
+                }
+                // Pad a short final chunk only up to a vector width; scalar
+                // lanes cost about as much per lane as a separate decode.
+                let rest = chunks.remainder();
+                #[cfg(pasta_curves_avx2)]
+                match rest.len() {
+                    0 => {}
+                    1 => out.push(Self::from_bytes(&rest[0])),
+                    2 => Self::decode_chunk::<2>(rest, &mut out),
+                    3 | 4 => Self::decode_chunk::<4>(rest, &mut out),
+                    _ => Self::decode_chunk::<8>(rest, &mut out),
+                }
+                #[cfg(not(pasta_curves_avx2))]
+                match rest.len() {
+                    0 => {}
+                    1 => out.push(Self::from_bytes(&rest[0])),
+                    2 => Self::decode_chunk::<2>(rest, &mut out),
+                    3 => Self::decode_chunk::<3>(rest, &mut out),
+                    4 => Self::decode_chunk::<4>(rest, &mut out),
+                    5 => Self::decode_chunk::<5>(rest, &mut out),
+                    6 => Self::decode_chunk::<6>(rest, &mut out),
+                    _ => Self::decode_chunk::<7>(rest, &mut out),
+                }
+                out
+            }
+
+            /// Decodes up to `K` points, padding the unused lanes.
+            fn decode_chunk<const K: usize>(
+                chunk: &[[u8; 32]],
+                out: &mut alloc::vec::Vec<CtOption<Self>>,
+            ) {
+                debug_assert!(chunk.len() <= K);
+                let mut xs = [$base::zero(); K];
+                let mut x_ok = [Choice::from(0u8); K];
+                let mut ysigns = [Choice::from(0u8); K];
+                for (k, bytes) in chunk.iter().enumerate() {
+                    let mut tmp = *bytes;
+                    ysigns[k] = Choice::from(tmp[31] >> 7);
+                    tmp[31] &= 0b0111_1111;
+                    let x = $base::from_repr(tmp);
+                    x_ok[k] = x.is_some();
+                    xs[k] = x.unwrap_or($base::zero());
+                }
+                let rhs: [$base; K] =
+                    core::array::from_fn(|k| xs[k].square() * xs[k] + $name::curve_constant_b());
+                let roots = Self::square_roots::<K>(&rhs);
+                for k in 0..chunk.len() {
+                    let (is_square, y) = roots[k];
+                    let (x, ysign) = (xs[k], ysigns[k]);
+                    let y = $base::conditional_select(&y, &-y, ysign ^ y.is_odd());
+                    // As in `from_bytes`, x = 0 with a clear sign bit encodes the
+                    // identity.
+                    let is_identity = x.is_zero() & !ysign;
+                    let point = Self::conditional_select(
+                        &$name_affine { x, y },
+                        &Self::identity(),
+                        is_identity,
+                    );
+                    out.push(CtOption::new(point, x_ok[k] & (is_identity | is_square)));
+                }
+            }
+
+            /// `sqrt_alt` of `K` independent values.
+            #[inline(always)]
+            fn square_roots<const K: usize>(rhs: &[$base; K]) -> [(Choice, $base); K] {
+                #[cfg(pasta_curves_avx2)]
+                {
+                    if K == 4 {
+                        let rhs: &[$base; 4] = rhs[..].try_into().unwrap();
+                        let roots = $base::sqrt_alt_avx2::<1, 4>(rhs);
+                        return core::array::from_fn(|k| roots[k]);
+                    }
+                    if K == 8 {
+                        let rhs: &[$base; 8] = rhs[..].try_into().unwrap();
+                        let roots = $base::sqrt_alt_avx2::<2, 8>(rhs);
+                        return core::array::from_fn(|k| roots[k]);
+                    }
+                }
+                $base::sqrt_alt_lanes(rhs)
+            }
+        }
+
         impl GroupEncoding for $name_affine {
             type Repr = [u8; 32];
 
@@ -935,12 +1073,26 @@ macro_rules! new_curve_impl {
                 CtOption::new(p, p.is_on_curve())
             }
 
+            fn from_xy_unchecked(x: Self::Base, y: Self::Base) -> Self {
+                let p = $name_affine { x, y };
+                debug_assert!(
+                    bool::from(p.is_on_curve()),
+                    "from_xy_unchecked: the point must be on the curve"
+                );
+                p
+            }
+
             fn a() -> Self::Base {
                 $name::curve_constant_a()
             }
 
             fn b() -> Self::Base {
                 $name::curve_constant_b()
+            }
+
+            #[cfg(feature = "sqrt-table")]
+            fn batch_decode(encodings: &[[u8; 32]]) -> alloc::vec::Vec<CtOption<Self>> {
+                Self::batch_from_bytes(encodings.iter().copied())
             }
         }
 
@@ -1567,5 +1719,44 @@ mod curve_op_tests {
     fn default_ops_handle_exceptional_cases() {
         check_curve_ops!(Ep, Fq);
         check_curve_ops!(Eq, Fp);
+    }
+
+    #[cfg(feature = "alloc")]
+    macro_rules! check_from_xy_unchecked {
+        ($curve:ty, $affine:ty) => {{
+            use crate::arithmetic::CurveAffine;
+            use rand::SeedableRng;
+            let mut rng = rand_xorshift::XorShiftRng::from_seed([0x5a; 16]);
+            for _ in 0..32 {
+                let point = <$curve>::random(&mut rng).to_affine();
+                let xy = point.coordinates().unwrap();
+                let (x, y) = (*xy.x(), *xy.y());
+                // Fully qualified: with `glv`, the affine types also have a
+                // crate-private inherent `from_xy_unchecked` without the check.
+                let rebuilt = <$affine as CurveAffine>::from_xy_unchecked(x, y);
+                assert_eq!(rebuilt, point);
+                assert_eq!(rebuilt, <$affine>::from_xy(x, y).unwrap());
+                assert_eq!(<$affine as CurveAffine>::from_xy_unchecked(x, -y), -point);
+            }
+        }};
+    }
+
+    /// Rebuilding a point from its own coordinates, or from the negated
+    /// y-coordinate, agrees with the checked constructor.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn from_xy_unchecked_matches_from_xy() {
+        check_from_xy_unchecked!(Ep, EpAffine);
+        check_from_xy_unchecked!(Eq, EqAffine);
+    }
+
+    /// Debug builds still reject coordinates that are not on the curve.
+    #[cfg(all(feature = "alloc", debug_assertions))]
+    #[test]
+    #[should_panic(expected = "the point must be on the curve")]
+    fn from_xy_unchecked_rejects_off_curve_points_in_debug() {
+        use crate::arithmetic::CurveAffine;
+        // Fully qualified, as in `check_from_xy_unchecked`.
+        let _ = <EpAffine as CurveAffine>::from_xy_unchecked(Fp::one(), Fp::one());
     }
 }

@@ -13,8 +13,37 @@ compile_error!(
 
 pub use maybe_rayon::{
     iter::{IntoParallelIterator, ParallelIterator},
-    join, scope,
+    scope,
 };
+
+/// Runs `a` and `b`, potentially in parallel, and returns both results, like
+/// `rayon::join`.
+///
+/// The tasks are called through `&mut dyn FnMut`, so rayon's join machinery is
+/// compiled once for all callers, rather than once per pair of closure types. That
+/// costs two indirect calls per join, which is negligible for the coarse tasks halo2
+/// joins: whole polynomials, columns, and FFT halves above a fixed recursion depth.
+pub fn join<A, B, RA, RB>(a: A, b: B) -> (RA, RB)
+where
+    A: FnOnce() -> RA + Send,
+    B: FnOnce() -> RB + Send,
+    RA: Send,
+    RB: Send,
+{
+    let (mut a, mut a_result) = (Some(a), None);
+    let (mut b, mut b_result) = (Some(b), None);
+    join_dyn(&mut || a_result = a.take().map(|a| a()), &mut || {
+        b_result = b.take().map(|b| b())
+    });
+    (
+        a_result.expect("join_dyn runs each task once, or propagates its panic"),
+        b_result.expect("join_dyn runs each task once, or propagates its panic"),
+    )
+}
+
+fn join_dyn(a: &mut (dyn FnMut() + Send), b: &mut (dyn FnMut() + Send)) {
+    maybe_rayon::join(a, b);
+}
 
 #[cfg(feature = "multicore")]
 pub use maybe_rayon::{current_num_threads, iter::IndexedParallelIterator};
@@ -66,48 +95,5 @@ where
         fold_op: impl Fn(T, Result<T, E>) -> Result<T, E> + Send + Sync,
     ) -> Result<T, E> {
         self.try_fold(identity(), fold_op)
-    }
-}
-
-pub(crate) trait TheBestReduce {
-    type Item;
-
-    /// Combines the best of `std::iter` and `rayon` reductions.
-    fn the_best_reduce(
-        self,
-        identity: impl Fn() -> Self::Item + Send + Sync,
-        op: impl Fn(Self::Item, Self::Item) -> Self::Item + Send + Sync,
-    ) -> Option<Self::Item>;
-}
-
-#[cfg(feature = "multicore")]
-impl<I> TheBestReduce for I
-where
-    I: maybe_rayon::iter::ParallelIterator,
-{
-    type Item = <Self as maybe_rayon::iter::ParallelIterator>::Item;
-
-    fn the_best_reduce(
-        self,
-        identity: impl Fn() -> Self::Item + Send + Sync,
-        op: impl Fn(Self::Item, Self::Item) -> Self::Item + Send + Sync,
-    ) -> Option<Self::Item> {
-        Some(self.reduce(identity, op))
-    }
-}
-
-#[cfg(not(feature = "multicore"))]
-impl<I> TheBestReduce for I
-where
-    I: std::iter::Iterator,
-{
-    type Item = <Self as std::iter::Iterator>::Item;
-
-    fn the_best_reduce(
-        self,
-        _: impl Fn() -> Self::Item + Send + Sync,
-        f: impl Fn(Self::Item, Self::Item) -> Self::Item + Send + Sync,
-    ) -> Option<Self::Item> {
-        self.reduce(f)
     }
 }

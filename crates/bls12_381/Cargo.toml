@@ -38,7 +38,7 @@ sha3 = "0.10"
 [features]
 alloc = ["group/alloc"]
 bits = ["ff/bits"]
-default = ["groups", "pairings", "alloc", "bits"]
+default = ["groups", "pairings", "alloc"]
 experimental = ["digest", "groups"]
 groups = ["group"]
 nightly = ["subtle/nightly"]

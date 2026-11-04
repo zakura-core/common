@@ -18,7 +18,7 @@
 //! and loss of the ability to easily pinpoint failing signatures.
 //!
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::convert::TryFrom;
 
 use crate::backend::Point as _;
@@ -37,6 +37,38 @@ fn gen_128_bits<R: Rng + CryptoRng>(mut rng: R) -> [u64; 4] {
     bytes
 }
 
+/// A verification key received as bytes or retained from an existing key.
+///
+/// Boxing keeps the larger point representation out of byte-based items.
+#[derive(Clone, Debug)]
+enum BatchKey<T: SigType> {
+    Bytes(VerificationKeyBytes<T>),
+    Key(Box<VerificationKey<T>>),
+}
+
+impl<T: SigType> BatchKey<T> {
+    fn bytes(&self) -> VerificationKeyBytes<T> {
+        match self {
+            Self::Bytes(bytes) => *bytes,
+            Self::Key(key) => key.bytes,
+        }
+    }
+
+    fn encoding(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes.bytes),
+            Self::Key(_) => None,
+        }
+    }
+
+    fn into_key(self) -> Result<VerificationKey<T>, Error> {
+        match self {
+            Self::Bytes(bytes) => VerificationKey::try_from(bytes),
+            Self::Key(key) => Ok(*key),
+        }
+    }
+}
+
 /// Inner type of a batch verification item.
 ///
 /// This struct exists to allow batch processing to be decoupled from the
@@ -49,13 +81,13 @@ fn gen_128_bits<R: Rng + CryptoRng>(mut rng: R) -> [u64; 4] {
 enum Inner<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> {
     /// A RedDSA signature using the SpendAuth generator group element.
     SpendAuth {
-        vk_bytes: VerificationKeyBytes<S>,
+        vk: BatchKey<S>,
         sig: Signature<S>,
         c: S::Scalar,
     },
     /// A RedDSA signature using the Binding generator group element.
     Binding {
-        vk_bytes: VerificationKeyBytes<B>,
+        vk: BatchKey<B>,
         sig: Signature<B>,
         c: B::Scalar,
     },
@@ -78,14 +110,30 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Item<S, B> 
         sig: Signature<S>,
         msg: &M,
     ) -> Self {
+        Self::spendauth(BatchKey::Bytes(vk_bytes), sig, msg)
+    }
+
+    /// Creates a spend authorization item retaining an existing key's point.
+    ///
+    /// Verification reuses the point instead of decoding the key again. The
+    /// challenge still hashes the key's canonical encoding.
+    pub fn from_spendauth_key<M: AsRef<[u8]>>(
+        vk: VerificationKey<S>,
+        sig: Signature<S>,
+        msg: &M,
+    ) -> Self {
+        Self::spendauth(BatchKey::Key(Box::new(vk)), sig, msg)
+    }
+
+    fn spendauth<M: AsRef<[u8]>>(vk: BatchKey<S>, sig: Signature<S>, msg: &M) -> Self {
         // Compute c now to avoid dependency on the msg lifetime.
         let c = HStar::<S>::default()
             .update(&sig.r_bytes[..])
-            .update(&vk_bytes.bytes[..])
+            .update(&vk.bytes().bytes[..])
             .update(msg)
             .finalize();
         Self {
-            inner: Inner::SpendAuth { vk_bytes, sig, c },
+            inner: Inner::SpendAuth { vk, sig, c },
         }
     }
 
@@ -95,15 +143,40 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Item<S, B> 
         sig: Signature<B>,
         msg: &M,
     ) -> Self {
+        Self::binding(BatchKey::Bytes(vk_bytes), sig, msg)
+    }
+
+    /// Creates a binding item retaining an existing verification key's point.
+    ///
+    /// Verification reuses the point instead of decoding the key again. The
+    /// challenge still hashes the key's canonical encoding.
+    pub fn from_binding_key<M: AsRef<[u8]>>(
+        vk: VerificationKey<B>,
+        sig: Signature<B>,
+        msg: &M,
+    ) -> Self {
+        Self::binding(BatchKey::Key(Box::new(vk)), sig, msg)
+    }
+
+    fn binding<M: AsRef<[u8]>>(vk: BatchKey<B>, sig: Signature<B>, msg: &M) -> Self {
         // Compute c now to avoid dependency on the msg lifetime.
         let c = HStar::<B>::default()
             .update(&sig.r_bytes[..])
-            .update(&vk_bytes.bytes[..])
+            .update(&vk.bytes().bytes[..])
             .update(msg)
             .finalize();
         Self {
-            inner: Inner::Binding { vk_bytes, sig, c },
+            inner: Inner::Binding { vk, sig, c },
         }
+    }
+
+    /// Encodings that still need curve and canonical-encoding checks.
+    fn point_encodings(&self) -> impl Iterator<Item = [u8; 32]> {
+        let (r, vk) = match &self.inner {
+            Inner::SpendAuth { sig, vk, .. } => (sig.r_bytes, vk.encoding()),
+            Inner::Binding { sig, vk, .. } => (sig.r_bytes, vk.encoding()),
+        };
+        [Some(r), vk].into_iter().flatten()
     }
 
     /// Perform non-batched verification of this `Item`.
@@ -116,11 +189,11 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Item<S, B> 
     #[allow(non_snake_case)]
     pub fn verify_single(self) -> Result<(), Error> {
         match self.inner {
-            Inner::Binding { vk_bytes, sig, c } => {
-                VerificationKey::<B>::try_from(vk_bytes).and_then(|vk| vk.verify_prehashed(&sig, c))
+            Inner::Binding { vk, sig, c } => {
+                vk.into_key().and_then(|vk| vk.verify_prehashed(&sig, c))
             }
-            Inner::SpendAuth { vk_bytes, sig, c } => {
-                VerificationKey::<S>::try_from(vk_bytes).and_then(|vk| vk.verify_prehashed(&sig, c))
+            Inner::SpendAuth { vk, sig, c } => {
+                vk.into_key().and_then(|vk| vk.verify_prehashed(&sig, c))
             }
         }
     }
@@ -164,7 +237,7 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
     /// - R_i is the signature's R value;
     /// - s_i is the signature's s value;
     /// - c_i is the hash of the message and other data;
-    /// - z_i is a random 128-bit Scalar;
+    /// - z_i is a random 128-bit Scalar, except that z_0 = 1;
     /// - h_G is the cofactor of the group;
     /// - P_G is the generator of the subgroup;
     ///
@@ -198,18 +271,17 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
         let mut P_spendauth_coeff = S::Scalar::ZERO;
         let mut P_binding_coeff = B::Scalar::ZERO;
 
-        // For Sapling, decode each R and verification key together so their
-        // field inversions share one batch inversion.
-        let mut decoded_points = S::batch_decode_points(self.signatures.iter().flat_map(|item| {
-            let (r_bytes, vk_bytes) = match item.inner {
-                Inner::SpendAuth { sig, vk_bytes, .. } => (sig.r_bytes, vk_bytes.bytes),
-                Inner::Binding { sig, vk_bytes, .. } => (sig.r_bytes, vk_bytes.bytes),
-            };
-            [r_bytes, vk_bytes]
-        }))
-        .map(|points| points.into_iter());
+        // For Sapling, decode each R and any keys still held as bytes
+        // together so their field inversions share one batch inversion.
+        let mut decoded_points =
+            S::batch_decode_points(self.signatures.iter().flat_map(Item::point_encodings))
+                .map(|points| points.into_iter());
 
-        for item in self.signatures.iter() {
+        // The first signature has weight 1, so its R joins the check by a
+        // plain addition instead of a multiscalar-multiplication term.
+        let mut unit_R = None;
+
+        for (i, item) in self.signatures.iter().enumerate() {
             let (s_bytes, r_bytes, c) = match item.inner {
                 Inner::SpendAuth { sig, c, .. } => (sig.s_bytes, sig.r_bytes, c),
                 Inner::Binding { sig, c, .. } => (sig.s_bytes, sig.r_bytes, c),
@@ -231,18 +303,30 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
                 maybe_point.ok_or(Error::InvalidSignature)?
             };
 
-            let VK = if let Some(points) = decoded_points.as_mut() {
-                points
-                    .next()
-                    .unwrap()
-                    .ok_or(Error::MalformedVerificationKey)?
-            } else {
-                match item.inner {
-                    Inner::SpendAuth { vk_bytes, .. } => {
-                        VerificationKey::<S>::try_from(vk_bytes.bytes)?.point
-                    }
-                    Inner::Binding { vk_bytes, .. } => {
-                        VerificationKey::<B>::try_from(vk_bytes.bytes)?.point
+            let VK = match &item.inner {
+                Inner::SpendAuth {
+                    vk: BatchKey::Key(key),
+                    ..
+                } => key.point,
+                Inner::Binding {
+                    vk: BatchKey::Key(key),
+                    ..
+                } => key.point,
+                _ => {
+                    if let Some(points) = decoded_points.as_mut() {
+                        points
+                            .next()
+                            .unwrap()
+                            .ok_or(Error::MalformedVerificationKey)?
+                    } else {
+                        match &item.inner {
+                            Inner::SpendAuth { vk, .. } => {
+                                VerificationKey::<S>::try_from(vk.bytes())?.point
+                            }
+                            Inner::Binding { vk, .. } => {
+                                VerificationKey::<B>::try_from(vk.bytes())?.point
+                            }
+                        }
                     }
                 }
             };
@@ -265,9 +349,17 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
                 };
             }
 
-            let z = S::Scalar::from_raw(gen_128_bits(&mut rng));
-
-            let P_coeff = z * s;
+            // Only one signature in the check may have weight 1: two
+            // unit-weight signatures could carry errors that cancel.
+            let (P_coeff, VK_coeff) = if i == 0 {
+                unit_R = Some(R);
+                (s, c)
+            } else {
+                let z = S::Scalar::from_raw(gen_128_bits(&mut rng));
+                R_coeffs.push(z);
+                Rs.push(R);
+                (z * s, z * c)
+            };
             match item.inner {
                 Inner::SpendAuth { .. } => {
                     P_spendauth_coeff -= P_coeff;
@@ -277,10 +369,7 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
                 }
             };
 
-            R_coeffs.push(z);
-            Rs.push(R);
-
-            VK_coeffs.push(S::Scalar::ZERO + (z * c));
+            VK_coeffs.push(VK_coeff);
             VKs.push(VK);
         }
 
@@ -294,12 +383,41 @@ impl<S: SpendAuth, B: Binding<Scalar = S::Scalar, Point = S::Point>> Verifier<S,
         let basepoints = [S::basepoint(), B::basepoint()];
         let points = basepoints.iter().chain(VKs.iter()).chain(Rs.iter());
 
-        let check = S::Point::vartime_multiscalar_mul(scalars, points);
+        let check = S::Point::vartime_multiscalar_mul(scalars, points)
+            + unit_R.expect("a nonempty batch has a first signature");
 
         if check.is_small_order() {
             Ok(())
         } else {
             Err(Error::InvalidSignature)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_keys_are_omitted_from_batch_decoding() {
+        let bytes = jubjub::AffinePoint::identity().to_bytes();
+        let key = VerificationKey::<sapling::Binding>::try_from(bytes).unwrap();
+        let sig = Signature::from([42; 64]);
+        let retained =
+            Item::<sapling::SpendAuth, sapling::Binding>::from_binding_key(key, sig, b"message");
+        let encoded = Item::from_binding(key.into(), sig, b"message");
+        let spend = Item::from_spendauth(bytes.into(), [43; 64].into(), b"message");
+
+        let spend_key = VerificationKey::<sapling::SpendAuth>::try_from(bytes).unwrap();
+        let retained_spend = Item::from_spendauth_key(spend_key, [44; 64].into(), b"message");
+        // Every R still needs decoding; only retained keys omit their VK slot.
+        let encodings: Vec<_> = [retained, encoded, spend, retained_spend]
+            .iter()
+            .flat_map(Item::point_encodings)
+            .collect();
+        assert_eq!(
+            encodings,
+            [[42; 32], [42; 32], bytes, [43; 32], bytes, [44; 32]]
+        );
     }
 }

@@ -63,11 +63,9 @@ impl<T: SigType> From<VerificationKeyBytes<T>> for [u8; 32] {
 ///
 /// ## Consensus properties
 ///
-/// The `TryFrom<VerificationKeyBytes>` conversion performs the following Zcash
-/// consensus rule checks:
-///
-/// 1. The check that the bytes are a canonical encoding of a verification key;
-/// 2. The check that the verification key is not a point of small order.
+/// [`TryFrom<VerificationKeyBytes<T>>`] checks that the bytes canonically encode
+/// a point on the curve. Small-order points, including the identity, are
+/// accepted. Sapling separately rejects small-order spend authorization keys.
 #[derive(PartialEq, Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "VerificationKeyBytes<T>"))]
@@ -76,6 +74,75 @@ impl<T: SigType> From<VerificationKeyBytes<T>> for [u8; 32] {
 pub struct VerificationKey<T: SigType> {
     pub(crate) point: T::Point,
     pub(crate) bytes: VerificationKeyBytes<T>,
+}
+
+impl From<jubjub::ExtendedPoint> for VerificationKey<crate::sapling::Binding> {
+    /// Constructs a Sapling binding key from an existing valid Jubjub point.
+    ///
+    /// Retains the point and computes its canonical encoding without decoding
+    /// it again. Identity and other small-order points are accepted, as with
+    /// decoding [`VerificationKeyBytes`].
+    ///
+    /// The point must satisfy Jubjub's curve invariants. Release builds do not
+    /// validate coordinates supplied through unchecked point constructors.
+    /// Debug builds check that decoding the encoding recovers the same point.
+    fn from(point: jubjub::ExtendedPoint) -> Self {
+        let bytes = VerificationKeyBytes {
+            bytes: point.to_bytes(),
+            _marker: PhantomData,
+        };
+        debug_assert_eq!(
+            jubjub::ExtendedPoint::from_bytes(&bytes.bytes),
+            Some(point),
+            "binding verification key point must match its encoding",
+        );
+        Self { point, bytes }
+    }
+}
+
+#[cfg(feature = "pallas-pasta")]
+impl From<pasta_curves::pallas::Point> for VerificationKey<crate::orchard::Binding> {
+    /// Constructs an Orchard binding key from an existing valid Pallas point.
+    ///
+    /// Retains the point and computes its canonical encoding, including for
+    /// identity. Release builds trust the native point's curve invariants;
+    /// debug builds check that its encoding decodes to the same point.
+    fn from(point: pasta_curves::pallas::Point) -> Self {
+        let bytes = VerificationKeyBytes {
+            bytes: point.to_bytes(),
+            _marker: PhantomData,
+        };
+        debug_assert_eq!(
+            pasta_curves::pallas::Point::from_bytes(&bytes.bytes),
+            Some(point),
+            "binding verification key point must match its encoding",
+        );
+        Self { point, bytes }
+    }
+}
+
+impl From<VerificationKey<crate::sapling::SpendAuth>> for jubjub::AffinePoint {
+    /// Normalizes the stored spend authorization point without decoding it.
+    ///
+    /// This preserves all accepted points, including small-order points.
+    /// Protocol-specific restrictions must still be checked by the caller.
+    fn from(key: VerificationKey<crate::sapling::SpendAuth>) -> Self {
+        let affine = Self::from(key.point);
+        debug_assert_eq!(affine.to_bytes(), key.bytes.bytes);
+        affine
+    }
+}
+
+#[cfg(feature = "pallas-pasta")]
+impl From<VerificationKey<crate::orchard::SpendAuth>> for pasta_curves::pallas::Point {
+    /// Returns the stored spend authorization point without decoding it.
+    ///
+    /// This preserves all accepted points, including the identity.
+    /// Protocol-specific restrictions must still be checked by the caller.
+    fn from(key: VerificationKey<crate::orchard::SpendAuth>) -> Self {
+        debug_assert_eq!(key.point.to_bytes(), key.bytes.bytes);
+        key.point
+    }
 }
 
 impl<T: SigType> From<VerificationKey<T>> for VerificationKeyBytes<T> {
@@ -125,8 +192,12 @@ impl<T: SpendAuth> VerificationKey<T> {
     /// Randomize this verification key with the given `randomizer`.
     ///
     /// Randomization is only supported for `SpendAuth` keys.
+    ///
+    /// For RedPallas, the multiplication by `randomizer` is variable-time:
+    /// its running time and memory access pattern may depend on the
+    /// randomizer's value. RedJubjub randomization remains constant-time.
     pub fn randomize(&self, randomizer: &Randomizer<T>) -> VerificationKey<T> {
-        let point = self.point + (T::basepoint() * *randomizer);
+        let point = self.point + T::basepoint_mul_vartime(*randomizer);
         let bytes = VerificationKeyBytes {
             bytes: point.to_bytes().as_ref().try_into().unwrap(),
             _marker: PhantomData,
@@ -192,8 +263,9 @@ impl<T: SigType> VerificationKey<T> {
         };
         #[cfg(not(feature = "alloc"))]
         let check = {
-            let sB = T::basepoint() * s;
-            let cA = self.point * c;
+            // Both scalars are public signature data, so variable time is safe.
+            let sB = T::basepoint_mul_vartime(s);
+            let cA = self.point.mul_vartime(c);
             sB - cA - r
         };
 

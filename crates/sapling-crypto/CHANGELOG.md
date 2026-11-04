@@ -10,6 +10,68 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-11-03
+
+### Changed
+
+- `CommitmentSum::into_bvk` multiplies by the value balance in variable time
+  over only the balance's significant bits, instead of a constant-time
+  multiplication by a full-width scalar. The value balance is public
+  transaction data ([#673](https://github.com/zakura-core/common/pull/673)).
+- `CommitmentSum::into_bvk` retains the computed binding verification key's
+  point instead of serializing and decoding it, avoiding a redundant field
+  inversion and square root
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+- Batch validation retains the derived binding verification key through the
+  signature queue, avoiding a second redundant decode during verification
+  ([#675](https://github.com/zakura-core/common/pull/675)).
+- Spend preparation reuses the stored randomized verification-key point for
+  affine coordinates and the existing small-order check, and signature
+  batching retains the key instead of decoding it again
+  ([#677](https://github.com/zakura-core/common/pull/677)).
+
+## [5.0.0] - 2026-11-02
+
+### Added
+
+- Added `ValueCommitment::try_point`, which decompresses and validates the
+  commitment on demand, and `ValueCommitment::from_bytes_unvalidated`
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+- Added `CommitmentSum::try_sum`, which sums value commitments or returns
+  `None` if any of them is not a valid point that is not of small order
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+
+### Changed
+
+- Stopped enabling `bls12_381/bits` and `jubjub/bits` from the `circuit`
+  feature, and removed the `bitvec` dependency ([#626](https://github.com/zakura-core/common/pull/626)).
+- `ValueCommitment` holds its 32-byte encoding instead of a Jubjub point.
+  `to_bytes` returns the stored bytes without recompressing, and a parsed
+  `cv` is validated when a bundle is verified rather than when it is parsed.
+  The set of accepted `cv` encodings is unchanged; rejection moves from
+  parsing to verification
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+- Building a bundle with no spends and no outputs no longer derives its binding
+  keys before discarding it, which makes coinbase construction for transparent
+  or Orchard-only payouts cheaper
+  ([#659](https://github.com/zakura-core/common/pull/659)).
+
+- With the `multicore` feature, `BatchValidator::check_bundle` parses a
+  bundle's Groth16 proofs in parallel when it has 4 or more, which cut bundle
+  preparation for a 374-spend Mainnet block by about a third
+  ([#670](https://github.com/zakura-core/common/pull/670)).
+
+### Removed
+
+- Removed `ValueCommitment::as_inner`; use `try_point`. `CommitmentSum`'s
+  `AddAssign` and `SubAssign` now take `&jubjub::ExtendedPoint`
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+- Removed `Add<&ValueCommitment>` and `Sub<&ValueCommitment>` for
+  `ValueCommitment`, `Add<&ValueCommitment>` for `CommitmentSum`, and
+  `Sum<ValueCommitment>` and `Sum<&ValueCommitment>` for `CommitmentSum`,
+  which could not fail on an invalid commitment; use `CommitmentSum::try_sum`
+  ([#638](https://github.com/zakura-core/common/pull/638)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

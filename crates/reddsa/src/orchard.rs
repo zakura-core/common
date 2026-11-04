@@ -1,4 +1,8 @@
 //! Signature types for the Orchard protocol.
+//!
+//! With `pallas-sensei`, Pallas operations use Sensei/Udon variable-time
+//! arithmetic. Secret-key operations have the timing assumptions documented
+//! by that implementation’s RedPallas module.
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -10,7 +14,9 @@ use group::GroupEncoding as _;
 #[cfg(all(feature = "pallas-pasta", feature = "alloc"))]
 use group::{Group as _, ff::PrimeField as _};
 #[cfg(feature = "pallas-pasta")]
-use pasta_curves::pallas;
+use pasta_curves::{glv::Table, pallas};
+#[cfg(feature = "pallas-sensei")]
+use sensei::primitives::pallas;
 
 use crate::{SigType, private};
 
@@ -68,6 +74,24 @@ impl private::Sealed<SpendAuth> for SpendAuth {
     fn basepoint() -> pallas::Point {
         pallas::Point::from_bytes(&ORCHARD_SPENDAUTHSIG_BASEPOINT_BYTES).unwrap()
     }
+
+    #[cfg(feature = "pallas-pasta")]
+    fn basepoint_mul_vartime(scalar: pallas::Scalar) -> pallas::Point {
+        #[cfg(target_has_atomic = "ptr")]
+        static TABLE: once_cell::race::OnceBox<Table<pallas::Point>> =
+            once_cell::race::OnceBox::new();
+        basepoint_mul_vartime::<SpendAuth>(
+            #[cfg(target_has_atomic = "ptr")]
+            &TABLE,
+            &scalar,
+        )
+    }
+    #[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+    fn batch_decode_points(
+        items: impl Iterator<Item = [u8; 32]>,
+    ) -> Option<Vec<Option<pallas::Point>>> {
+        batch_decode_pallas_points(items)
+    }
 }
 impl private::Sealed<Binding> for Binding {
     const H_STAR_PERSONALIZATION: &'static [u8; 16] = b"Zcash_RedPallasH";
@@ -77,6 +101,101 @@ impl private::Sealed<Binding> for Binding {
     fn basepoint() -> pallas::Point {
         pallas::Point::from_bytes(&ORCHARD_BINDINGSIG_BASEPOINT_BYTES).unwrap()
     }
+
+    #[cfg(feature = "pallas-pasta")]
+    fn basepoint_mul_vartime(scalar: pallas::Scalar) -> pallas::Point {
+        #[cfg(target_has_atomic = "ptr")]
+        static TABLE: once_cell::race::OnceBox<Table<pallas::Point>> =
+            once_cell::race::OnceBox::new();
+        basepoint_mul_vartime::<Binding>(
+            #[cfg(target_has_atomic = "ptr")]
+            &TABLE,
+            &scalar,
+        )
+    }
+    #[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+    fn batch_decode_points(
+        items: impl Iterator<Item = [u8; 32]>,
+    ) -> Option<Vec<Option<pallas::Point>>> {
+        batch_decode_pallas_points(items)
+    }
+}
+
+/// Batches with fewer point encodings than this decode on the calling
+/// thread. Each decode is a square root, a few microseconds, so smaller
+/// batches would spend more waking pool workers than they save.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta", feature = "multicore"))]
+const MIN_PARALLEL_DECODE_POINTS: usize = 16;
+
+/// The most encodings per parallel task: one full batch of the decoder's lanes.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta", feature = "multicore"))]
+const DECODE_LANES: usize = 8;
+
+/// Decodes a batch's point encodings (each signature's `R`, plus any keys
+/// still held as bytes) together.
+///
+/// Points decode through [`pasta_curves::arithmetic::CurveAffine::batch_decode`],
+/// which computes several square roots at once. With the `multicore` feature,
+/// a pool of two or more threads, and at least
+/// [`MIN_PARALLEL_DECODE_POINTS`] encodings, the batch is also split across
+/// the pool in tasks of at most [`DECODE_LANES`] encodings, sized so every
+/// worker gets a share.
+/// Results are returned in input order, each equal to `from_bytes` of its
+/// encoding, and consumed in the verifier's order, so a batch with a
+/// malformed encoding reports the same error as decoding one at a time.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+fn batch_decode_pallas_points(
+    items: impl Iterator<Item = [u8; 32]>,
+) -> Option<Vec<Option<pallas::Point>>> {
+    use pasta_curves::arithmetic::CurveAffine as _;
+
+    fn decode(encodings: &[[u8; 32]]) -> Vec<Option<pallas::Point>> {
+        pallas::Affine::batch_decode(encodings)
+            .into_iter()
+            .map(|point| Option::<pallas::Affine>::from(point).map(pallas::Point::from))
+            .collect()
+    }
+
+    let encodings = items.collect::<Vec<_>>();
+    #[cfg(feature = "multicore")]
+    {
+        use maybe_rayon::prelude::*;
+
+        let threads = maybe_rayon::current_num_threads();
+        if threads >= 2 && encodings.len() >= MIN_PARALLEL_DECODE_POINTS {
+            // Split each worker's share evenly into tasks of at most the
+            // decoder's lanes, so no worker idles behind an extra full batch
+            // (66 encodings on eight threads: 14 tasks of five, not nine of
+            // eight).
+            let per_thread = encodings.len().div_ceil(threads);
+            let chunk = per_thread.div_ceil(per_thread.div_ceil(DECODE_LANES));
+            return Some(
+                encodings
+                    .par_chunks(chunk)
+                    .map(decode)
+                    .collect::<Vec<_>>()
+                    .concat(),
+            );
+        }
+    }
+    Some(decode(&encodings))
+}
+
+/// Variable-time `[scalar]B` through a GLV table for `T`'s basepoint.
+///
+/// With pointer atomics the table is built once and cached in `table`;
+/// racing first uses may each build one, and all but one are discarded.
+/// Without them it is rebuilt on each call.
+#[cfg(feature = "pallas-pasta")]
+fn basepoint_mul_vartime<T: SigType + private::Sealed<T, Point = pallas::Point>>(
+    #[cfg(target_has_atomic = "ptr")] table: &once_cell::race::OnceBox<Table<pallas::Point>>,
+    scalar: &pallas::Scalar,
+) -> pallas::Point {
+    #[cfg(target_has_atomic = "ptr")]
+    let table = table.get_or_init(|| alloc::boxed::Box::new(Table::new(&T::basepoint())));
+    #[cfg(not(target_has_atomic = "ptr"))]
+    let table = &Table::new(&T::basepoint());
+    table.mul(scalar)
 }
 
 #[cfg(feature = "alloc")]
@@ -118,6 +237,59 @@ impl VartimeMultiscalarMul for pallas::Point {
         I::Item: Borrow<Self::Scalar>,
         J: IntoIterator<Item = Option<pallas::Point>>,
     {
+        #[cfg(feature = "pallas-pasta")]
+        {
+            pasta_multiscalar_mul(scalars, points)
+        }
+        #[cfg(not(feature = "pallas-pasta"))]
+        {
+            wnaf_multiscalar_mul(scalars, points)
+        }
+    }
+}
+
+/// Batches below this many terms evaluate on the calling thread: waking pool
+/// workers costs more than splitting such a small multiplication saves.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+const MIN_PARALLEL_MSM_TERMS: usize = 16;
+
+/// Evaluates the MSM with pasta's shared `best_multiexp_vartime`, the one
+/// halo2 uses: GLV backends where its planner selects them, the Signed-Booth
+/// bucket method otherwise, on the Rayon pool under the `multicore` feature.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+fn pasta_multiscalar_mul<I, J>(scalars: I, points: J) -> Option<pallas::Point>
+where
+    I: IntoIterator,
+    I::Item: Borrow<pallas::Scalar>,
+    J: IntoIterator<Item = Option<pallas::Point>>,
+{
+    use group::{Curve as _, CurveAffine as _};
+    use pasta_curves::arithmetic::best_multiexp_vartime_with_parallelism;
+
+    let points = points.into_iter().collect::<Option<Vec<_>>>()?;
+    let scalars = scalars.into_iter().map(|c| *c.borrow()).collect::<Vec<_>>();
+    assert_eq!(scalars.len(), points.len());
+
+    let mut affine = vec![pallas::Affine::identity(); points.len()];
+    pallas::Point::batch_normalize(&points, &mut affine);
+    Some(best_multiexp_vartime_with_parallelism(
+        &scalars,
+        &affine,
+        scalars.len() >= MIN_PARALLEL_MSM_TERMS,
+    ))
+}
+
+/// Interleaved width-5 wNAF over projective lookup tables (the Sensei
+/// backend's MSM, and the reference for the pasta path's tests).
+#[cfg(all(feature = "alloc", any(test, not(feature = "pallas-pasta"))))]
+#[allow(non_snake_case)]
+fn wnaf_multiscalar_mul<I, J>(scalars: I, points: J) -> Option<pallas::Point>
+where
+    I: IntoIterator,
+    I::Item: Borrow<pallas::Scalar>,
+    J: IntoIterator<Item = Option<pallas::Point>>,
+{
+    {
         let nafs: Vec<_> = scalars
             .into_iter()
             .map(|c| c.borrow().non_adjacent_form(5))
@@ -129,7 +301,7 @@ impl VartimeMultiscalarMul for pallas::Point {
             .collect::<Option<Vec<_>>>()?;
 
         let mut r = pallas::Point::identity();
-        let naf_size = Self::Scalar::naf_length();
+        let naf_size = pallas::Scalar::naf_length();
 
         for i in (0..naf_size).rev() {
             let mut t = r.double();

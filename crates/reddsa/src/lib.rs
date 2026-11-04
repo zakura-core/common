@@ -17,6 +17,9 @@
 #[cfg(feature = "alloc")]
 #[macro_use]
 extern crate alloc;
+// The cached RedPallas basepoint tables are boxed.
+#[cfg(all(feature = "pallas-pasta", not(feature = "alloc")))]
+extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
@@ -26,7 +29,9 @@ pub mod batch;
 mod constants;
 mod error;
 mod hash;
-#[cfg(feature = "pallas-pasta")]
+#[cfg(all(feature = "pallas-pasta", feature = "pallas-sensei"))]
+compile_error!("select at most one Pallas backend: pallas-pasta or pallas-sensei");
+#[cfg(any(feature = "pallas-pasta", feature = "pallas-sensei"))]
 pub mod orchard;
 pub mod sapling;
 #[cfg(feature = "alloc")]
@@ -106,6 +111,13 @@ pub(crate) mod private {
         type Point: crate::backend::Point<Self::Scalar>;
 
         fn basepoint() -> T::Point;
+
+        /// `[scalar]` times the basepoint, possibly in variable time. Only
+        /// call this where variable time is acceptable for `scalar`.
+        fn basepoint_mul_vartime(scalar: T::Scalar) -> T::Point {
+            use crate::backend::Point as _;
+            T::basepoint().mul_vartime(scalar)
+        }
 
         #[cfg(feature = "alloc")]
         fn batch_decode_points(

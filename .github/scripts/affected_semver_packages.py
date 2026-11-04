@@ -23,6 +23,16 @@ def is_publishable(package):
     return publish is None or bool(publish)
 
 
+def has_library_target(package):
+    """cargo-semver-checks compares library targets; it rejects a selected
+    crate without one, so published proc-macro crates must not be selected."""
+    return any(
+        kind in {"lib", "rlib", "dylib"}
+        for target in package["targets"]
+        for kind in target["kind"]
+    )
+
+
 def package_graph(metadata):
     workspace_ids = set(metadata["workspace_members"])
     packages = {
@@ -138,6 +148,7 @@ def affected_publishable_packages(metadata, changed_files=None, check_all=False)
         packages[package_id]["name"]
         for package_id in ordered
         if is_publishable(packages[package_id])
+        and has_library_target(packages[package_id])
     ]
 
 

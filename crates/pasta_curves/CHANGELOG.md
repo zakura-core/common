@@ -10,6 +10,39 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-02
+
+### Added
+
+- Added `CurveExt::try_multiexp_full_width_is_identity_vartime`, an optional
+  exact variable-time identity test optimized for public full-width scalar
+  multiscalar multiplications
+  ([#292](https://github.com/zakura-core/common/pull/292)).
+
+### Changed
+
+- Improve prepared multi-scalar multiplication performance on Apple AArch64
+  targets with the `aarch64-asm` feature enabled
+  ([#547](https://github.com/zakura-core/common/pull/547)).
+- Removed `bits` from the default features; enable it explicitly for the
+  `PrimeFieldBits` implementations ([#626](https://github.com/zakura-core/common/pull/626)).
+- Restore build-time x86-64 assembly selection. Baseline builds use portable
+  Rust; assembly requires BMI2 and ADX compiler target features or the explicit
+  assembly feature. The portable override retains precedence
+  ([#661](https://github.com/zakura-core/common/pull/661)).
+- Reduced the release build time of the `multicore` GLV code by compiling its
+  Rayon pipelines once per result type instead of once per call site
+  ([#653](https://github.com/zakura-core/common/pull/653)).
+- Improved deferred inner-product performance on supported AArch64 targets
+  with the `aarch64-asm` feature enabled
+  ([#522](https://github.com/zakura-core/common/pull/522)).
+
+### Fixed
+
+- Select x86-64 assembly automatically on CPUs with BMI2 and ADX, retaining
+  portable arithmetic on unsupported CPUs and the explicit portable override
+  ([#657](https://github.com/zakura-core/common/pull/657)).
+
 ## [3.0.0] - 2026-10-13
 
 ### Changed

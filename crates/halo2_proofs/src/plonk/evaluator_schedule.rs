@@ -272,6 +272,14 @@ impl<F: Field> QuotientPlans<F> {
     }
 }
 
+/// The brand of the quotient evaluators: the coset evaluator in `create_proof` and
+/// the virtual evaluator that compiles quotient plans for it.
+///
+/// No [`poly::Ast`] passes between the two; they register the same polynomials in the
+/// same order and exchange only compiled, brand-free plans. Sharing one brand compiles
+/// the evaluator's internals once for both, rather than once per `|| {}` closure type.
+pub(super) fn quotient_evaluator_brand() {}
+
 /// Prepares bounded compiled quotient plans from proving-key topology alone.
 pub(super) fn prepare_quotient_plans<C: CurveAffine>(pk: &ProvingKey<C>) {
     let cs = &pk.vk.cs;
@@ -280,7 +288,7 @@ pub(super) fn prepare_quotient_plans<C: CurveAffine>(pk: &ProvingKey<C>) {
     let plans = RETAINED_QUOTIENT_CIRCUIT_COUNTS
         .into_par_iter()
         .map(|circuit_count| {
-            let mut evaluator = poly::new_virtual_evaluator(|| {});
+            let mut evaluator = poly::new_virtual_evaluator(quotient_evaluator_brand);
 
             // Keep this registration order synchronized with quotient setup in
             // `create_proof`. Exact validation fails closed if the order drifts.

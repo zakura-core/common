@@ -21,7 +21,7 @@ bench = false
 
 [dependencies]
 arrayvec = "0.7.0"
-ff = "0.14"
+ff = { version = "0.14", default-features = false, features = ["std"] }
 group = "0.14"
 halo2_poseidon = { workspace = true }
 halo2_proofs = { workspace = true }

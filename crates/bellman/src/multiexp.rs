@@ -1,6 +1,5 @@
 use super::multicore::{Waiter, Worker};
-use bitvec::vec::BitVec;
-use ff::{FieldBits, PrimeField, PrimeFieldBits};
+use ff::PrimeField;
 use group::{
     Curve,
     prime::{PrimeCurve, PrimeCurveAffine},
@@ -16,7 +15,7 @@ use rayon::prelude::*;
 #[cfg(not(feature = "multicore"))]
 use crate::multicore::FakeParallelIterator;
 
-use super::SynthesisError;
+use super::{SynthesisError, le_bit};
 
 /// An object that builds a source of bases.
 pub trait SourceBuilder<G: PrimeCurveAffine>: Send + Sync + 'static + Clone {
@@ -117,19 +116,22 @@ impl<'a> QueryDensity for &'a FullDensity {
     }
 }
 
+/// Tracks which bases a query uses, one bit per base.
 pub struct DensityTracker {
-    bv: BitVec,
+    /// The bits, 64 per word, starting with the least-significant bit of `words[0]`.
+    words: Vec<u64>,
+    len: usize,
 }
 
 impl<'a> QueryDensity for &'a DensityTracker {
     type Iter = Box<dyn 'a + Iterator<Item = bool>>;
 
     fn iter(self) -> Self::Iter {
-        Box::new(self.bv.iter().by_vals())
+        Box::new((0..self.len).map(|idx| (self.words[idx / 64] >> (idx % 64)) & 1 == 1))
     }
 
     fn get_query_size(self) -> Option<usize> {
-        Some(self.bv.len())
+        Some(self.len)
     }
 }
 
@@ -141,21 +143,34 @@ impl Default for DensityTracker {
 
 impl DensityTracker {
     pub fn new() -> DensityTracker {
-        DensityTracker { bv: BitVec::new() }
-    }
-
-    pub fn add_element(&mut self) {
-        self.bv.push(false);
-    }
-
-    pub fn inc(&mut self, idx: usize) {
-        if !self.bv.get(idx).unwrap() {
-            self.bv.set(idx, true);
+        DensityTracker {
+            words: Vec::new(),
+            len: 0,
         }
     }
 
+    pub fn add_element(&mut self) {
+        if self.len.is_multiple_of(64) {
+            self.words.push(0);
+        }
+        self.len += 1;
+    }
+
+    /// Marks base `idx` as used.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx` has not been added with `add_element`.
+    pub fn inc(&mut self, idx: usize) {
+        assert!(idx < self.len, "density index out of range");
+        self.words[idx / 64] |= 1 << (idx % 64);
+    }
+
     pub fn get_total_density(&self) -> usize {
-        self.bv.count_ones()
+        self.words
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
     }
 }
 
@@ -166,48 +181,55 @@ enum ChunkedExponent {
 }
 
 /// An exponent
-pub enum Exponent<F: PrimeFieldBits> {
+pub enum Exponent<F: PrimeField> {
     Zero,
     One,
-    Bits(FieldBits<F::ReprBits>),
+    /// The canonical little-endian representation of any other exponent.
+    Repr(F::Repr),
 }
 
-impl<F: PrimeFieldBits> From<&F> for Exponent<F> {
+impl<F: PrimeField> From<&F> for Exponent<F> {
     fn from(exp: &F) -> Self {
         if exp.is_zero_vartime() {
             Exponent::Zero
         } else if exp == &F::ONE {
             Exponent::One
         } else {
-            Exponent::Bits(exp.to_le_bits())
+            Exponent::Repr(exp.to_repr())
         }
     }
 }
 
-impl<F: PrimeFieldBits> From<F> for Exponent<F> {
+impl<F: PrimeField> From<F> for Exponent<F> {
     fn from(exp: F) -> Self {
         (&exp).into()
     }
 }
 
-impl<F: PrimeFieldBits> Exponent<F> {
+impl<F: PrimeField> Exponent<F> {
+    /// Splits the exponent into `c`-bit windows, starting with the least
+    /// significant, covering its `F::NUM_BITS` bits.
     fn chunks(&self, c: usize) -> ChunkedExponent {
         match self {
             Self::Zero => ChunkedExponent::Zero,
             Self::One => ChunkedExponent::One,
-            Self::Bits(exp) => ChunkedExponent::Chunks(
-                exp.chunks(c)
-                    .map(|chunk| {
-                        chunk
-                            .iter()
-                            .by_vals()
-                            .enumerate()
-                            .fold(0u64, |acc, (i, b)| acc + ((b as u64) << i))
-                    })
+            Self::Repr(repr) => ChunkedExponent::Chunks(
+                (0..F::NUM_BITS as usize)
+                    .step_by(c)
+                    .map(|start| window(repr.as_ref(), start, c))
                     .collect(),
             ),
         }
     }
+}
+
+/// The `c`-bit window of the little-endian `repr` that starts at bit `start`.
+/// Bits past the end of `repr` read as zero.
+fn window(repr: &[u8], start: usize, c: usize) -> u64 {
+    debug_assert!(c < 64);
+    (start..(start + c).min(repr.len() * 8))
+        .rev()
+        .fold(0, |acc, bit| (acc << 1) | u64::from(le_bit(repr, bit)))
 }
 
 fn multiexp_inner<Q, D, G, S>(
@@ -220,7 +242,7 @@ where
     for<'a> &'a Q: QueryDensity,
     D: Send + Sync + 'static + Clone + AsRef<Q>,
     G: PrimeCurve,
-    G::Scalar: PrimeFieldBits,
+    G::Scalar: PrimeField,
     S: SourceBuilder<<G as Curve>::Affine>,
 {
     // Perform this region of the multiexp
@@ -315,7 +337,7 @@ where
     for<'a> &'a Q: QueryDensity,
     D: Send + Sync + 'static + Clone + AsRef<Q>,
     G: PrimeCurve,
-    G::Scalar: PrimeFieldBits,
+    G::Scalar: PrimeField,
     S: SourceBuilder<<G as Curve>::Affine>,
 {
     let c = if exponents.len() < 32 {

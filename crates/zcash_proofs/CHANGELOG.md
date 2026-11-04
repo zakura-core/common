@@ -10,6 +10,19 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-02
+
+### Added
+
+- Added the `backend-sensei` feature forwarding the Orchard backend selection
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+
+### Fixed
+
+- Fixed docs.rs builds by selecting Halo2 explicitly while documenting bundled
+  and local proving, parameter downloads, and multicore capabilities
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

@@ -4,11 +4,23 @@
 //! This module is temporary, and the extension traits defined here are expected to be
 //! upstreamed into the `ff` and `group` crates after some refactoring.
 
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+pub(crate) mod avx2_sqrt;
 mod curves;
 mod fields;
+#[cfg(feature = "alloc")]
+mod multiexp;
 
 pub use curves::*;
 pub(crate) use fields::*;
+#[cfg(feature = "glv")]
+pub(crate) use multiexp::default_multiexp_window_bits;
+// The timing grid in `glv` compares against the generic MSM directly.
+#[cfg(all(test, feature = "multicore"))]
+pub(crate) use multiexp::signed_booth_multiexp;
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub use multiexp::{best_multiexp_vartime, best_multiexp_vartime_with_parallelism};
 
 /// Multiplies an [`Fp`](crate::Fp) element by `2^-exponent`.
 ///

@@ -1,15 +1,21 @@
 //! Minimal RedPallas types with private arithmetic supplied by the selected backend.
 use crate::backend::pallas;
-
+#[cfg(feature = "backend-halo2")]
 use crate::backend::prelude::*;
 use core::{cmp::Ordering, marker::PhantomData};
 use rand::{CryptoRng, Rng};
 
+#[cfg(feature = "backend-halo2")]
 use crate::backend::reddsa as raw;
-
+#[cfg(all(feature = "backend-sensei", feature = "std"))]
+pub(crate) use raw::BatchItem;
+#[cfg(feature = "backend-halo2")]
 use raw::orchard::{Binding as RawBinding, SpendAuth as RawSpendAuth};
-
-#[cfg(feature = "std")]
+#[cfg(feature = "backend-sensei")]
+use raw::{Binding as RawBinding, SpendAuth as RawSpendAuth};
+#[cfg(feature = "backend-sensei")]
+use sensei::redpallas as raw;
+#[cfg(all(feature = "backend-halo2", feature = "std"))]
 pub(crate) type BatchItem = raw::batch::Item<RawSpendAuth, RawBinding>;
 /// The scalar randomizer of an Orchard spend authorization key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +126,16 @@ impl<T: SigType> TryFrom<[u8; 32]> for SigningKey<T> {
 }
 impl<T: SigType> SigningKey<T> {
     pub(crate) fn from_scalar(scalar: pallas::Scalar) -> Self {
+        #[cfg(feature = "backend-sensei")]
+        {
+            let key = if T::SPEND_AUTH {
+                SigningKeyInner::SpendAuth(raw::SigningKey::from_native(scalar))
+            } else {
+                SigningKeyInner::Binding(raw::SigningKey::from_native(scalar))
+            };
+            Self(key, PhantomData)
+        }
+        #[cfg(feature = "backend-halo2")]
         {
             scalar
                 .to_repr()
@@ -129,14 +145,56 @@ impl<T: SigType> SigningKey<T> {
     }
     /// Signs `msg` using fresh randomness from `rng`.
     pub fn sign<R: Rng + CryptoRng>(&self, mut rng: R, msg: &[u8]) -> Signature<T> {
+        #[cfg(feature = "backend-sensei")]
+        let bytes = match &self.0 {
+            SigningKeyInner::SpendAuth(key) => key
+                .sign(&mut || Ok(rng.next_u64()), msg)
+                .expect("infallible randomness")
+                .into(),
+            SigningKeyInner::Binding(key) => key
+                .sign(&mut || Ok(rng.next_u64()), msg)
+                .expect("infallible randomness")
+                .into(),
+        };
+        #[cfg(feature = "backend-halo2")]
         let bytes = match &self.0 {
             SigningKeyInner::SpendAuth(key) => key.sign(&mut rng, msg).into(),
             SigningKeyInner::Binding(key) => key.sign(&mut rng, msg).into(),
         };
         Signature(bytes, PhantomData)
     }
+    /// Returns the key for the negated scalar, negating the stored
+    /// verification point instead of recomputing it.
+    pub(crate) fn negate(&self) -> Self {
+        let key = match &self.0 {
+            SigningKeyInner::SpendAuth(key) => SigningKeyInner::SpendAuth(key.negate()),
+            SigningKeyInner::Binding(key) => SigningKeyInner::Binding(key.negate()),
+        };
+        Self(key, PhantomData)
+    }
 }
 impl SigningKey<SpendAuth> {
+    /// Randomizes this key when `randomized_key` (`rk`) is already known,
+    /// skipping its recomputation. `randomized_key` must equal this key's
+    /// verification key randomized by `randomizer`.
+    pub(crate) fn randomize_with_verification_key(
+        &self,
+        randomizer: &SpendAuthRandomizer,
+        randomized_key: &VerificationKey<SpendAuth>,
+    ) -> Self {
+        let SigningKeyInner::SpendAuth(key) = &self.0 else {
+            unreachable!("domain is fixed at construction")
+        };
+        let VerificationKeyInner::SpendAuth(randomized_key) = &randomized_key.0 else {
+            unreachable!("domain is fixed at construction")
+        };
+        Self(
+            SigningKeyInner::SpendAuth(
+                key.randomize_with_verification_key(&randomizer.0, randomized_key),
+            ),
+            PhantomData,
+        )
+    }
     /// Randomizes this spend authorization key.
     pub fn randomize(&self, randomizer: &SpendAuthRandomizer) -> Self {
         let SigningKeyInner::SpendAuth(key) = &self.0 else {
@@ -210,14 +268,39 @@ impl<T: SigType> Ord for VerificationKey<T> {
 }
 impl<T: SigType> VerificationKey<T> {
     pub(crate) fn from_point(point: pallas::Point) -> Self {
+        #[cfg(feature = "backend-sensei")]
         {
-            point
-                .to_bytes()
-                .try_into()
-                .expect("canonical verification point")
+            let key = if T::SPEND_AUTH {
+                VerificationKeyInner::SpendAuth(raw::VerificationKey::from_native(
+                    point.to_affine(),
+                ))
+            } else {
+                VerificationKeyInner::Binding(raw::VerificationKey::from_native(point.to_affine()))
+            };
+            Self(key, PhantomData)
+        }
+        #[cfg(feature = "backend-halo2")]
+        {
+            let key = if T::SPEND_AUTH {
+                VerificationKeyInner::SpendAuth(
+                    point
+                        .to_bytes()
+                        .try_into()
+                        .expect("canonical verification point"),
+                )
+            } else {
+                VerificationKeyInner::Binding(raw::VerificationKey::from(point))
+            };
+            Self(key, PhantomData)
         }
     }
-
+    #[cfg(feature = "backend-sensei")]
+    pub(crate) fn native(&self) -> sensei::PallasPoint {
+        match &self.0 {
+            VerificationKeyInner::SpendAuth(key) => key.point(),
+            VerificationKeyInner::Binding(key) => key.point(),
+        }
+    }
     /// Verifies a signature over `msg`.
     pub fn verify(&self, msg: &[u8], signature: &Signature<T>) -> Result<(), Error> {
         match &self.0 {
@@ -232,6 +315,14 @@ impl<T: SigType> VerificationKey<T> {
     }
 }
 impl VerificationKey<SpendAuth> {
+    /// Returns the stored point without decoding the key's byte encoding.
+    #[cfg(feature = "backend-halo2")]
+    pub(crate) fn point(&self) -> pallas::Point {
+        let VerificationKeyInner::SpendAuth(key) = &self.0 else {
+            unreachable!("domain is fixed at construction")
+        };
+        (*key).into()
+    }
     #[cfg(test)]
     pub(crate) fn dummy() -> Self {
         Self::from(&SigningKey::from_scalar(pallas::Scalar::random(
@@ -239,6 +330,9 @@ impl VerificationKey<SpendAuth> {
         )))
     }
     /// Randomizes this spend authorization verification key.
+    ///
+    /// The multiplication by the randomizer is variable-time: its running
+    /// time and memory access pattern may depend on the randomizer's value.
     pub fn randomize(&self, randomizer: &SpendAuthRandomizer) -> Self {
         let VerificationKeyInner::SpendAuth(key) = &self.0 else {
             unreachable!("domain is fixed at construction")
@@ -257,8 +351,14 @@ impl VerificationKey<SpendAuth> {
         let VerificationKeyInner::SpendAuth(key) = &self.0 else {
             unreachable!("domain is fixed at construction")
         };
-
-        BatchItem::from_spendauth((*key).into(), sig.0.into(), msg)
+        #[cfg(feature = "backend-sensei")]
+        {
+            BatchItem::new(key, &sig.0.into(), msg.as_ref())
+        }
+        #[cfg(feature = "backend-halo2")]
+        {
+            BatchItem::from_spendauth_key(*key, sig.0.into(), msg)
+        }
     }
 }
 impl VerificationKey<Binding> {
@@ -271,8 +371,14 @@ impl VerificationKey<Binding> {
         let VerificationKeyInner::Binding(key) = &self.0 else {
             unreachable!("domain is fixed at construction")
         };
-
-        BatchItem::from_binding((*key).into(), sig.0.into(), msg)
+        #[cfg(feature = "backend-sensei")]
+        {
+            BatchItem::new(key, &sig.0.into(), msg.as_ref())
+        }
+        #[cfg(feature = "backend-halo2")]
+        {
+            BatchItem::from_binding_key(*key, sig.0.into(), msg)
+        }
     }
 }
 
@@ -292,6 +398,11 @@ impl<T: SigType> From<&Signature<T>> for [u8; 64] {
 
 #[cfg(feature = "std")]
 pub(crate) fn verify_batch(items: &[BatchItem], mut rng: impl CryptoRng) -> Result<(), Error> {
+    #[cfg(feature = "backend-sensei")]
+    {
+        raw::verify_batch(items, &mut || Ok(rng.next_u64())).map_err(|_| Error::InvalidSignature)
+    }
+    #[cfg(feature = "backend-halo2")]
     {
         let mut verifier = raw::batch::Verifier::new();
         for item in items {
@@ -338,6 +449,7 @@ pub mod testing {
 
     /// Generate a canonical Orchard spend authorization randomizer.
     pub fn arb_spend_auth_randomizer() -> impl Strategy<Value = super::SpendAuthRandomizer> {
+        #[cfg(feature = "backend-halo2")]
         use crate::backend::prelude::*;
         any::<[u8; 64]>().prop_map(|bytes| {
             super::SpendAuthRandomizer::from_scalar(
@@ -409,6 +521,34 @@ mod tests {
 
     /// Exercise empty messages through the largest short application message in this test.
     const MESSAGE_LENGTH_LIMIT: usize = 128;
+
+    #[cfg(feature = "std")]
+    proptest! {
+        #[test]
+        fn retained_batch_keys_match_single_verification(
+            spend in super::testing::arb_valid_spendauth_keypair(),
+            binding in super::testing::arb_binding_signing_key(),
+            seed in any::<[u8; 32]>(),
+            message in prop::collection::vec(any::<u8>(), 0..MESSAGE_LENGTH_LIMIT),
+        ) {
+            let mut rng = ChaCha20Rng::from_seed(seed);
+            let (spend_sk, spend_vk) = spend;
+            let binding_vk = VerificationKey::from(&binding);
+            let spend_sig = spend_sk.sign(&mut rng, &message);
+            let binding_sig = binding.sign(&mut rng, &message);
+            let mut changed = message.clone();
+            changed.push(0);
+            for (msg, valid) in [(&message, true), (&changed, false)] {
+                let items = [
+                    spend_vk.create_batch_item(spend_sig.clone(), msg),
+                    binding_vk.create_batch_item(binding_sig.clone(), msg),
+                ];
+                prop_assert_eq!(super::verify_batch(&items, &mut rng).is_ok(), valid);
+                prop_assert_eq!(super::verify_batch(&items[..1], &mut rng).is_ok(), valid);
+                prop_assert_eq!(super::verify_batch(&items[1..], &mut rng).is_ok(), valid);
+            }
+        }
+    }
 
     proptest! {
         #[test]

@@ -10,6 +10,15 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-02
+
+### Added
+
+- Added the `pallas-sensei` feature gating the RedPallas ciphersuite through
+  the native Pallas implementation; select at most one of `pallas-pasta` (the
+  default) and `pallas-sensei`
+  ([#624](https://github.com/zakura-core/common/pull/624)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

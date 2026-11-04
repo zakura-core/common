@@ -79,6 +79,7 @@
 //!
 //! One-shot use is [`GlvParams::mul_glv`].
 
+use crate::arithmetic::default_multiexp_window_bits;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -98,13 +99,17 @@ pub mod zero;
 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
 mod zero;
 
+mod fixed_base;
+pub(super) use fixed_base::prepare_fixed_base_sum;
+
 mod private {
     use crate::arithmetic::CurveExt;
 
-    /// Proof-of-crate argument for [`Sealed::affine_unchecked`]: unnameable
-    /// outside this crate, with a `pub(super)` field, so downstream code
-    /// cannot construct one — not even through a `C: GlvParams` bound, which
-    /// does expose supertrait items to generic code.
+    /// Proof-of-crate argument for representation-sensitive [`Sealed`]
+    /// operations: unnameable outside this crate, with a `pub(super)` field,
+    /// so downstream code cannot construct one — not even through a
+    /// `C: GlvParams` bound, which does expose supertrait items to generic
+    /// code.
     #[derive(Debug)]
     pub struct CrateToken(pub(super) ());
 
@@ -138,6 +143,15 @@ mod private {
             z: Self::Base,
             token: CrateToken,
         ) -> Self;
+
+        /// Returns the four little-endian limbs of the reduced integer
+        /// $Rk \bmod q$, where `k` is `scalar` and $R$ is this scalar field's
+        /// Montgomery factor, or `None` if the internal representation is
+        /// not reduced. The GLV split is only guaranteed exact for inputs
+        /// below $q$, so the full-width identity test declines rather than
+        /// relying on every field operation keeping its output canonical.
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, token: CrateToken)
+        -> Option<[u64; 4]>;
     }
 
     impl Sealed for crate::pallas::Point {
@@ -158,6 +172,10 @@ mod private {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
         }
+
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> Option<[u64; 4]> {
+            scalar.is_canonical().then_some(scalar.0)
+        }
     }
 
     impl Sealed for crate::vesta::Point {
@@ -177,6 +195,10 @@ mod private {
         ) -> Self {
             use crate::arithmetic::CurveExtUnchecked as _;
             Self::new_jacobian_unchecked(x, y, z)
+        }
+
+        fn scalar_montgomery_limbs(scalar: &Self::ScalarExt, _: CrateToken) -> Option<[u64; 4]> {
+            scalar.is_canonical().then_some(scalar.0)
         }
     }
 }
@@ -374,10 +396,11 @@ fn scalar_limbs<F: PrimeField>(k: &F) -> [u64; 4] {
     limbs
 }
 
-/// GLV split: `k = k1 + k2 * lambda (mod n)` with `|k1|`, `|k2|` strictly
-/// below `2^127`, each half returned as `(is_negative, magnitude)`.
-fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
-    let kl = scalar_limbs(k);
+/// GLV-splits the scalar integer encoded by `kl`: `k = k1 + k2 * lambda
+/// (mod n)` with `|k1|`, `|k2|` strictly below `2^127`, each half returned as
+/// `(is_negative, magnitude)`.
+#[inline(always)]
+fn decompose_limbs<C: GlvParams>(kl: [u64; 4]) -> ((bool, u128), (bool, u128)) {
     let c1 = round_mul_shift(&C::G1, &kl);
     let c2 = round_mul_shift(&C::G2, &kl);
     // k1 = k - c1*V1A - c2*V2A   (two's complement over 256 bits)
@@ -385,6 +408,15 @@ fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
     // k2 = c1*V1B_NEG - c2*V2B   (v1.b = -V1B_NEG, v2.b = +V2B)
     let k2 = sub256(mul_u128(c1, C::V1B_NEG), mul_u128(c2, C::V2B));
     (signed_halves(k1), signed_halves(k2))
+}
+
+fn decompose<C: GlvParams>(k: &C::ScalarExt) -> ((bool, u128), (bool, u128)) {
+    decompose_limbs::<C>(scalar_limbs(k))
+}
+
+fn decompose_montgomery<C: GlvParams>(k: &C::ScalarExt) -> Option<((bool, u128), (bool, u128))> {
+    <C as private::Sealed>::scalar_montgomery_limbs(k, private::CrateToken(()))
+        .map(decompose_limbs::<C>)
 }
 
 /// The eight Eisenstein digit-orbit representatives $\Delta$, as coefficient
@@ -801,6 +833,81 @@ fn estimated_signed_booth_costs(
     ))
 }
 
+/// Relative cost weights for the planner's Signed-Booth work estimates, in
+/// units of one fifth of a doubling.
+///
+/// The two backends add points differently. The GLV ladder gathers each
+/// window's points into buckets with batched affine additions (one shared
+/// inversion per reduction level), the cheapest addition available, while the
+/// generic ladder adds each point into a projective bucket. Both then sum
+/// their buckets with projective additions. Counting every addition alike
+/// overprices the GLV ladder, so the planner chose the generic MSM in cells
+/// where GLV measured up to 1.8x faster (e.g. 7,150 terms on 6, 10, or 12
+/// workers). The weights below were fitted to timing grids on Apple M4 (asm
+/// backend) and two AMD Zen 4 hosts (portable and `-C target-cpu=native`
+/// builds), 256 to 65,536 terms on 1 to 16 workers.
+#[derive(Clone, Copy)]
+struct PlannerWeights {
+    point_visit: usize,
+    bucket_addition: usize,
+    doubling: usize,
+}
+
+/// The GLV ladder: affine batched point visits, projective bucket sums.
+const GLV_PLANNER_WEIGHTS: PlannerWeights = PlannerWeights {
+    point_visit: 5,
+    bucket_addition: 10,
+    doubling: 5,
+};
+
+/// The generic ladder: projective (mixed) point visits and bucket sums.
+const GENERIC_PLANNER_WEIGHTS: PlannerWeights = PlannerWeights {
+    point_visit: 7,
+    bucket_addition: 5,
+    doubling: 5,
+};
+
+/// [`estimated_signed_booth_costs`]'s work component, with each operation
+/// weighted by its backend's cost (see [`PlannerWeights`]).
+fn estimated_weighted_work(
+    terms: usize,
+    scalar_bits: usize,
+    window_bits: usize,
+    num_threads: usize,
+    weights: PlannerWeights,
+) -> Option<usize> {
+    let windows = scalar_bits.checked_div(window_bits)?.checked_add(1)?;
+    let bucket_shift = u32::try_from(window_bits.checked_sub(1)?).ok()?;
+    let buckets = 1usize.checked_shl(bucket_shift)?;
+    let visit = |count: usize| count.checked_mul(weights.point_visit);
+    let bucket_adds = |count: usize| count.checked_mul(weights.bucket_addition);
+    let doublings = |count: usize| count.checked_mul(weights.doubling);
+
+    if num_threads <= 1 {
+        return visit(terms.checked_mul(windows)?)?
+            .checked_add(bucket_adds(buckets.checked_mul(windows)?.checked_mul(2)?)?)?
+            .checked_add(doublings(
+                window_bits.checked_mul(windows.checked_sub(1)?)?,
+            )?);
+    }
+
+    let workers = num_threads.min(windows);
+    let waves = windows.div_ceil(workers);
+    let per_window = visit(terms)?.checked_add(bucket_adds(buckets.checked_mul(2)?)?)?;
+    let mut shift_doublings = 0usize;
+    let mut window = windows.checked_sub(1)?;
+    for _ in 0..waves {
+        shift_doublings = shift_doublings.checked_add(window_bits.checked_mul(window)?)?;
+        match window.checked_sub(workers) {
+            Some(next) => window = next,
+            None => break,
+        }
+    }
+    per_window
+        .checked_mul(waves)?
+        .checked_add(doublings(shift_doublings)?)
+}
+
 /// Test convenience: the work component of [`estimated_signed_booth_costs`].
 #[cfg(test)]
 fn estimated_signed_booth_work(
@@ -810,48 +917,6 @@ fn estimated_signed_booth_work(
     num_threads: usize,
 ) -> Option<usize> {
     estimated_signed_booth_costs(terms, scalar_bits, window_bits, num_threads).map(|(work, _)| work)
-}
-
-/// Floors of `e^k` for `k = 4..=22`.
-///
-/// These preserve the established `ceil(ln(terms))` window schedule without
-/// requiring floating-point transcendental functions, which are unavailable
-/// in `no_std` builds.
-const DEFAULT_MULTIEXP_WINDOW_THRESHOLDS: [u32; 19] = [
-    54,
-    148,
-    403,
-    1_096,
-    2_980,
-    8_103,
-    22_026,
-    59_874,
-    162_754,
-    442_413,
-    1_202_604,
-    3_269_017,
-    8_886_110,
-    24_154_952,
-    65_659_969,
-    178_482_300,
-    485_165_195,
-    1_318_815_734,
-    3_584_912_846,
-];
-
-fn default_multiexp_window_bits(terms: usize) -> Option<usize> {
-    if terms < 4 {
-        Some(1)
-    } else if terms < 32 {
-        Some(3)
-    } else {
-        let terms = u32::try_from(terms).ok()?;
-        let threshold = DEFAULT_MULTIEXP_WINDOW_THRESHOLDS
-            .iter()
-            .position(|upper| terms <= *upper)
-            .unwrap_or(DEFAULT_MULTIEXP_WINDOW_THRESHOLDS.len());
-        Some(4 + threshold)
-    }
 }
 
 fn scalar_repr_bits<C: GlvParams>() -> Option<usize> {
@@ -917,10 +982,37 @@ fn glv_multiexp_window_bits<C: GlvParams>(terms: usize, num_threads: usize) -> O
     if terms < MIN_GLV_MULTIEXP_TERMS {
         return None;
     }
-    let (generic, _) = estimated_generic_costs::<C>(terms, num_threads)?;
-    let (glv, glv_window_bits) = booth_multiexp_estimate::<C>(terms, num_threads)?;
-    (glv < generic).then_some(glv_window_bits)
+    let window_bits = multiexp_window_bits::<C>(terms, num_threads)?;
+    let generic = estimated_weighted_work(
+        terms,
+        scalar_repr_bits::<C>()?,
+        window_bits,
+        num_threads,
+        GENERIC_PLANNER_WEIGHTS,
+    )?;
+    let glv_terms = terms.checked_mul(2)?;
+    let mut best: Option<(usize, usize)> = None;
+    for candidate in window_bits..=window_bits.checked_add(GLV_EXTRA_WINDOW_BITS)? {
+        if let Some(work) = estimated_weighted_work(
+            glv_terms,
+            GLV_COMPONENT_BITS,
+            candidate,
+            num_threads,
+            GLV_PLANNER_WEIGHTS,
+        ) && best.is_none_or(|(best_work, _)| work < best_work)
+        {
+            best = Some((work, candidate));
+        }
+    }
+    let (glv, glv_window_bits) = best?;
+    (glv <= generic).then_some(glv_window_bits)
 }
+
+/// How far past the generic default width the GLV ladder may widen. Its
+/// components are half as long, so wider windows (fewer of them) often pay
+/// off; the timing grids put the best width at most two bits above the
+/// default in nearly every cell.
+const GLV_EXTRA_WINDOW_BITS: usize = 2;
 
 /// The generic Signed-Booth MSM's estimated `(work, traffic)` costs at its
 /// default width (see [`estimated_signed_booth_costs`]).
@@ -1494,16 +1586,12 @@ fn planned_strauss_multiexp<C: GlvParams>(
         if worker_jobs == 1 {
             return Some(strauss_multiexp_leaves::<C>(scalars, bases));
         }
-        return Some(
-            (0..worker_jobs)
-                .into_par_iter()
-                .map(|job| {
-                    let start = scalars.len() * job / worker_jobs;
-                    let end = scalars.len() * (job + 1) / worker_jobs;
-                    strauss_multiexp_leaves::<C>(&scalars[start..end], &bases[start..end])
-                })
-                .reduce(C::identity, |left, right| left + right),
-        );
+        let partial_sums = par_map_indices(worker_jobs, &|job| {
+            let start = scalars.len() * job / worker_jobs;
+            let end = scalars.len() * (job + 1) / worker_jobs;
+            strauss_multiexp_leaves::<C>(&scalars[start..end], &bases[start..end])
+        });
+        return Some(partial_sums.into_iter().sum());
     }
 
     if scalars.len() <= STRAUSS_LEAF_TERMS {
@@ -2049,6 +2137,85 @@ fn multiexp_serial<C: GlvParams>(
     Some(acc)
 }
 
+/// Runs `job(i)` for every `i < jobs` on the Rayon pool.
+///
+/// This is the module's only Rayon index pipeline, so Rayon's join and bridge
+/// machinery is compiled once rather than once per closure and result type;
+/// that per-closure code was most of the `multicore` feature's
+/// code-generation cost. Every parallel stage here is coarse (a whole window,
+/// batch, or twiddle per job), so the indirect call is negligible.
+#[cfg(feature = "multicore")]
+fn par_for_each_index(jobs: usize, job: &(dyn Fn(usize) + Sync)) {
+    (0..jobs).into_par_iter().for_each(job);
+}
+
+/// Evaluates `job(i)` for every `i < jobs` through [`par_for_each_index`] and
+/// returns the results in index order.
+///
+/// Each job writes its result straight into its own slot of the output
+/// buffer. [`par_for_each_index`] is type-erased, so it cannot hand each job
+/// a disjoint `&mut` slot the way `par_iter_mut` would (that would compile
+/// Rayon's pipeline once per `T` again); the disjointness argument lives in
+/// the `SAFETY` comments instead. If a job panics, the panic propagates out
+/// of [`par_for_each_index`] before `set_len`, so results already written are
+/// leaked, never dropped twice or read uninitialized.
+#[cfg(feature = "multicore")]
+#[allow(unsafe_code)]
+fn par_map_indices<T: Send>(jobs: usize, job: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+    /// The output buffer's base pointer, shared by every job.
+    struct Slots<T>(*mut T);
+    // SAFETY: jobs only move `T` values into distinct slots (see the write
+    // below), handing them to the thread that owns the buffer; that is sound
+    // exactly when `T: Send`.
+    unsafe impl<T: Send> Sync for Slots<T> {}
+    impl<T> Slots<T> {
+        /// A method rather than field access, so closures capture the whole
+        /// (`Sync`) `Slots` instead of its raw-pointer field.
+        fn base(&self) -> *mut T {
+            self.0
+        }
+    }
+
+    let mut results: Vec<T> = Vec::with_capacity(jobs);
+    let slots = Slots(results.as_mut_ptr());
+    par_for_each_index(jobs, &|index| {
+        let result = job(index);
+        // SAFETY: `index < jobs <= results.capacity()`, so the slot lies in
+        // the allocation. `par_for_each_index` runs the closure exactly once
+        // per index in `0..jobs`, so no other job writes this slot and nothing
+        // reads it before the loop returns. `write` does not drop the slot's
+        // uninitialized previous contents.
+        unsafe { slots.base().add(index).write(result) };
+    });
+    // SAFETY: `par_for_each_index` returned normally, so every job ran and
+    // initialized its slot, and Rayon's join makes those writes visible here.
+    unsafe { results.set_len(jobs) };
+    results
+}
+
+/// [`Table::mul_decomposed_pairs_affine`] split into one batch per worker,
+/// each batch at least `BATCH_AFFINE_MIN_POINTS` long so it keeps the
+/// batch-affine ladder.
+fn mul_decomposed_pairs_affine_parallel<C: GlvParams>(
+    points: &[C],
+    scalars: &[&Decomposed<C>],
+) -> Vec<C::AffineExt> {
+    #[cfg(feature = "multicore")]
+    {
+        assert_eq!(points.len(), scalars.len());
+        let threads = maybe_rayon::current_num_threads();
+        let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
+        par_map_indices(points.len().div_ceil(batch_len), &|batch| {
+            let start = batch * batch_len;
+            let end = points.len().min(start + batch_len);
+            Table::<C>::mul_decomposed_pairs_affine(&points[start..end], &scalars[start..end])
+        })
+        .concat()
+    }
+    #[cfg(not(feature = "multicore"))]
+    Table::<C>::mul_decomposed_pairs_affine(points, scalars)
+}
+
 /// $\sum_{w < \text{windows}} B^w C_w$ for $C_w$ = `window_sum(w)`, with
 /// adjacent windows paired per rayon task. The pair members are still
 /// computed as independent (joined) subtasks — so wide pools stay as
@@ -2060,11 +2227,15 @@ fn multiexp_serial<C: GlvParams>(
 /// `window_sum` (an arithmetic guard) propagates out. Shared by the
 /// Eisenstein-orbit backend and the prepared zero-check's main-window and
 /// tail drivers.
+///
+/// `window_sum` is a trait object so the Rayon pipeline is compiled once per
+/// curve rather than once per caller; each call reduces a whole window, so
+/// the indirect call is negligible.
 #[cfg(feature = "multicore")]
 fn paired_windows_sum<C: GlvParams>(
     windows: usize,
     window_bits: usize,
-    window_sum: impl Fn(usize) -> Option<C> + Sync,
+    window_sum: &(dyn Fn(usize) -> Option<C> + Sync),
 ) -> Option<C> {
     const WINDOWS_PER_PAIR: usize = 2;
     let pair_count = windows.div_ceil(WINDOWS_PER_PAIR);
@@ -2102,10 +2273,11 @@ fn paired_windows_sum<C: GlvParams>(
 fn parallel_windows_sum<C: GlvParams>(
     windows: usize,
     window_bits: usize,
-    window_sum: impl Fn(usize) -> Option<C> + Sync,
+    window_sum: &(dyn Fn(usize) -> Option<C> + Sync),
 ) -> Option<C> {
-    let window_sums: Option<Vec<C>> = (0..windows).into_par_iter().map(&window_sum).collect();
-    let window_sums = window_sums?;
+    let window_sums = par_map_indices(windows, window_sum)
+        .into_iter()
+        .collect::<Option<Vec<C>>>()?;
     let mut acc = C::identity();
     for (window, sum) in window_sums.into_iter().enumerate().rev() {
         if window + 1 != windows {
@@ -2125,7 +2297,7 @@ fn multiexp_parallel<C: GlvParams>(
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
-    parallel_windows_sum::<C>(window_count, window_bits, |window| {
+    parallel_windows_sum::<C>(window_count, window_bits, &|window| {
         let buckets = fill_window::<C>(components, bases, window_bits, window)?;
         Some(sum_buckets::<C>(&buckets))
     })
@@ -2179,25 +2351,54 @@ pub(crate) fn try_multiexp<C: GlvParams>(
     scalars: &[C::ScalarExt],
     bases: &[C::AffineExt],
 ) -> Option<C> {
+    try_multiexp_with_threads::<C>(scalars, bases, current_num_threads())
+}
+
+/// [`try_multiexp`] planned for `num_threads` workers. `1` keeps every
+/// backend on the calling thread; larger values select the parallel
+/// backends, which then use the whole current pool.
+pub(crate) fn try_multiexp_with_threads<C: GlvParams>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+    num_threads: usize,
+) -> Option<C> {
     assert_eq!(scalars.len(), bases.len());
-    let num_threads = current_num_threads();
+    let num_threads = num_threads.clamp(1, current_num_threads());
     if let Some(result) = planned_strauss_multiexp::<C>(scalars, bases, num_threads) {
         return Some(result);
     }
 
+    try_large_multiexp::<C, _>(scalars, bases, num_threads, |scalar| {
+        Some(decompose::<C>(scalar))
+    })
+}
+
+fn try_large_multiexp<C, D>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+    num_threads: usize,
+    decompose_scalar: D,
+) -> Option<C>
+where
+    C: GlvParams,
+    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))>,
+{
+    if scalars.len() < MIN_GLV_MULTIEXP_TERMS {
+        return None;
+    }
+
+    #[cfg(not(feature = "orbits"))]
+    let window_bits = glv_multiexp_window_bits::<C>(scalars.len(), num_threads)?;
+
+    // Decompose once for the selected backend. With `orbits`, the planner
+    // also prices these exact component magnitudes.
+    let components = scalars
+        .iter()
+        .map(|scalar| decompose_scalar(scalar).and_then(checked_signed_magnitudes))
+        .collect::<Option<Vec<_>>>()?;
+
     #[cfg(feature = "orbits")]
     {
-        if scalars.len() < MIN_GLV_MULTIEXP_TERMS {
-            return None;
-        }
-
-        // Decompose before planning: both backends consume the components,
-        // and the planner prices them by their actual magnitudes.
-        let components = scalars
-            .iter()
-            .map(decompose::<C>)
-            .map(checked_signed_magnitudes)
-            .collect::<Option<Vec<_>>>()?;
         let profile = MagnitudeProfile::new(&components);
         let plan = plan_multiexp::<C>(&profile, num_threads)?;
         match plan {
@@ -2213,15 +2414,28 @@ pub(crate) fn try_multiexp<C: GlvParams>(
 
     #[cfg(not(feature = "orbits"))]
     {
-        let window_bits = glv_multiexp_window_bits::<C>(scalars.len(), num_threads)?;
-        let components = scalars
-            .iter()
-            .map(decompose::<C>)
-            .map(checked_signed_magnitudes)
-            .collect::<Option<Vec<_>>>()?;
         let bases = multiexp_bases::<C>(bases);
         multiexp(&components, &bases, window_bits, num_threads)
     }
+}
+
+/// Attempts an exact identity test for a full-width Pasta MSM by interpreting
+/// every scalar's internal Montgomery residue as its integer value. This
+/// scales the ordinary MSM result by the Montgomery factor $R$. Because $R$
+/// is invertible modulo the prime group order, this preserves whether the
+/// result is the identity while avoiding canonical scalar conversion.
+pub(crate) fn try_multiexp_full_width_is_identity<C: GlvParams>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+) -> Option<bool> {
+    assert_eq!(scalars.len(), bases.len());
+    try_large_multiexp::<C, _>(
+        scalars,
+        bases,
+        current_num_threads(),
+        decompose_montgomery::<C>,
+    )
+    .map(|sum| bool::from(sum.is_identity()))
 }
 
 /// The GLV digit window for one base point: the eight Eisenstein orbit
@@ -3657,19 +3871,7 @@ fn mixed_radix_diagonal_transpose<C: GlvParams>(
         target_slots.extend(destinations);
     }
 
-    #[cfg(feature = "multicore")]
-    let products = {
-        let threads = maybe_rayon::current_num_threads();
-        let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
-        let batches: Vec<Vec<_>> = points
-            .par_chunks(batch_len)
-            .zip(scalar_refs.par_chunks(batch_len))
-            .map(|(points, scalars)| Table::<C>::mul_decomposed_pairs_affine(points, scalars))
-            .collect();
-        batches.into_iter().flatten().collect::<Vec<_>>()
-    };
-    #[cfg(not(feature = "multicore"))]
-    let products = Table::<C>::mul_decomposed_pairs_affine(&points, &scalar_refs);
+    let products = mul_decomposed_pairs_affine_parallel::<C>(&points, &scalar_refs);
     assert_eq!(products.len(), target_slots.len());
     for (product, (target_index, negate)) in products.into_iter().zip(target_slots) {
         target[target_index] = if negate { -product } else { product };
@@ -3862,33 +4064,20 @@ pub(crate) fn fft_vartime<C: GlvParams>(
         // batch as an independent Rayon task. With one worker, the repeated
         // table normalizations cost more than the transpose saves.
         if use_twiddle_major {
+            let twiddle_products = |j: usize| {
+                let points: Vec<_> = output
+                    .chunks(chunk)
+                    .map(|block| C::from(block[half + j]))
+                    .collect();
+                Table::<C>::mul_decomposed_same_scalar_affine(
+                    &points,
+                    &twiddles[j * twiddle_stride],
+                )
+            };
             #[cfg(feature = "multicore")]
-            let products: Vec<Vec<_>> = (1..half)
-                .into_par_iter()
-                .map(|j| {
-                    let points: Vec<_> = output
-                        .chunks(chunk)
-                        .map(|block| C::from(block[half + j]))
-                        .collect();
-                    Table::<C>::mul_decomposed_same_scalar_affine(
-                        &points,
-                        &twiddles[j * twiddle_stride],
-                    )
-                })
-                .collect();
+            let products = par_map_indices(half - 1, &|j| twiddle_products(j + 1));
             #[cfg(not(feature = "multicore"))]
-            let products: Vec<Vec<_>> = (1..half)
-                .map(|j| {
-                    let points: Vec<_> = output
-                        .chunks(chunk)
-                        .map(|block| C::from(block[half + j]))
-                        .collect();
-                    Table::<C>::mul_decomposed_same_scalar_affine(
-                        &points,
-                        &twiddles[j * twiddle_stride],
-                    )
-                })
-                .collect();
+            let products: Vec<Vec<_>> = (1..half).map(twiddle_products).collect();
 
             let blocks = output.len() / chunk;
             let mut right_scaled = Vec::with_capacity(output.len() / 2);
@@ -3919,19 +4108,7 @@ pub(crate) fn fft_vartime<C: GlvParams>(
             }
         }
 
-        #[cfg(feature = "multicore")]
-        let products = {
-            let threads = maybe_rayon::current_num_threads();
-            let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
-            let batches: Vec<Vec<_>> = points
-                .par_chunks(batch_len)
-                .zip(scalars.par_chunks(batch_len))
-                .map(|(points, scalars)| Table::<C>::mul_decomposed_pairs_affine(points, scalars))
-                .collect();
-            batches.into_iter().flatten().collect::<Vec<_>>()
-        };
-        #[cfg(not(feature = "multicore"))]
-        let products = Table::<C>::mul_decomposed_pairs_affine(&points, &scalars);
+        let products = mul_decomposed_pairs_affine_parallel::<C>(&points, &scalars);
         let mut products = products.into_iter();
         let mut right_scaled = Vec::with_capacity(output.len() / 2);
         for block in output.chunks(chunk) {
@@ -4362,19 +4539,17 @@ fn mul_same_scalars_affine<C: GlvParams>(
     record_fft_scalar_multiplications(scalar_inputs.iter().map(Vec::len).sum());
     #[cfg(feature = "multicore")]
     {
-        scalar_inputs
-            .into_par_iter()
-            .zip(scalars.par_iter())
-            .map(|(points, scalar)| {
-                let threads = maybe_rayon::current_num_threads();
-                let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
-                let batches: Vec<Vec<_>> = points
-                    .par_chunks(batch_len)
-                    .map(|points| Table::<C>::mul_decomposed_same_scalar_affine(points, scalar))
-                    .collect();
-                batches.into_iter().flatten().collect()
+        par_map_indices(scalar_inputs.len(), &|group| {
+            let (points, scalar) = (&scalar_inputs[group], &scalars[group]);
+            let threads = maybe_rayon::current_num_threads();
+            let batch_len = points.len().div_ceil(threads).max(BATCH_AFFINE_MIN_POINTS);
+            par_map_indices(points.len().div_ceil(batch_len), &|batch| {
+                let start = batch * batch_len;
+                let end = points.len().min(start + batch_len);
+                Table::<C>::mul_decomposed_same_scalar_affine(&points[start..end], scalar)
             })
-            .collect()
+            .concat()
+        })
     }
     #[cfg(not(feature = "multicore"))]
     {
@@ -4787,6 +4962,99 @@ mod tests {
         );
     }
 
+    fn full_width_identity_multiexp_at_boundary<C: GlvParams>() {
+        for terms in [
+            MIN_GLV_MULTIEXP_TERMS - 1,
+            MIN_GLV_MULTIEXP_TERMS,
+            MIN_GLV_MULTIEXP_TERMS + 1,
+        ] {
+            let (mut scalars, mut bases, expected) = verifier_multiexp_inputs::<C>(terms - 1);
+            assert!(!bool::from(expected.is_identity()));
+
+            // Complete the known sum to the identity while preserving the
+            // requested term count.
+            scalars.push(-C::ScalarExt::ONE);
+            bases.push(expected.to_affine());
+
+            let evaluate = |scalars: &[C::ScalarExt]| {
+                try_large_multiexp::<C, _>(scalars, &bases, 1, decompose_montgomery::<C>)
+                    .map(|sum| bool::from(sum.is_identity()))
+            };
+
+            if terms < MIN_GLV_MULTIEXP_TERMS {
+                assert_eq!(evaluate(&scalars), None);
+                continue;
+            }
+
+            assert_eq!(evaluate(&scalars), Some(true));
+
+            // Removing the cancelling term leaves the known nonidentity sum.
+            scalars[terms - 1] = C::ScalarExt::ZERO;
+            assert_eq!(evaluate(&scalars), Some(false));
+        }
+    }
+
+    #[test]
+    fn full_width_identity_multiexp_at_boundary_pallas() {
+        full_width_identity_multiexp_at_boundary::<pallas::Point>();
+    }
+
+    #[test]
+    fn full_width_identity_multiexp_at_boundary_vesta() {
+        full_width_identity_multiexp_at_boundary::<vesta::Point>();
+    }
+
+    /// A scalar whose internal limbs are congruent but not reduced declines
+    /// the Montgomery-limb path, so the caller falls back to the canonical
+    /// MSM rather than trusting a GLV split outside its input range.
+    fn full_width_identity_declines_noncanonical_scalar<C: GlvParams>(
+        from_limbs: fn([u64; 4]) -> C::ScalarExt,
+    ) {
+        let modulus = <C::ScalarExt as PrimeField>::MODULUS;
+        let modulus: [u64; 4] = core::array::from_fn(|i| {
+            let end = modulus.len() - 16 * i;
+            u64::from_str_radix(&modulus[end - 16..end], 16).unwrap()
+        });
+        let (mut scalars, mut bases, expected) =
+            verifier_multiexp_inputs::<C>(MIN_GLV_MULTIEXP_TERMS - 1);
+        scalars.push(-C::ScalarExt::ONE);
+        bases.push(expected.to_affine());
+        assert_eq!(
+            try_multiexp_full_width_is_identity::<C>(&scalars, &bases),
+            Some(true)
+        );
+
+        // Re-encode the first scalar as its reduced limbs plus the modulus:
+        // the same field element, but no longer below the modulus.
+        let limbs =
+            <C as private::Sealed>::scalar_montgomery_limbs(&scalars[0], private::CrateToken(()))
+                .unwrap();
+        let (l0, carry) = adc(limbs[0], modulus[0], 0);
+        let (l1, carry) = adc(limbs[1], modulus[1], carry);
+        let (l2, carry) = adc(limbs[2], modulus[2], carry);
+        let (l3, carry) = adc(limbs[3], modulus[3], carry);
+        assert_eq!(carry, 0);
+        scalars[0] = from_limbs([l0, l1, l2, l3]);
+
+        assert!(decompose_montgomery::<C>(&scalars[0]).is_none());
+        assert_eq!(
+            try_multiexp_full_width_is_identity::<C>(&scalars, &bases),
+            None
+        );
+        // The modulus itself encodes zero but is likewise rejected.
+        assert!(decompose_montgomery::<C>(&from_limbs(modulus)).is_none());
+    }
+
+    #[test]
+    fn full_width_identity_declines_noncanonical_scalar_pallas() {
+        full_width_identity_declines_noncanonical_scalar::<pallas::Point>(crate::Fq);
+    }
+
+    #[test]
+    fn full_width_identity_declines_noncanonical_scalar_vesta() {
+        full_width_identity_declines_noncanonical_scalar::<vesta::Point>(crate::Fp);
+    }
+
     fn duplicate_base_multiexp_matches_expected<C: GlvParams>() {
         let terms = VERIFIER_MULTIEXP_SIZES[0];
         let scalar = scalars::<C::ScalarExt>(1)
@@ -4823,6 +5091,61 @@ mod tests {
     #[test]
     fn strauss_multiexp_matches_expected_vesta() {
         strauss_multiexp_matches_expected::<vesta::Point>();
+    }
+
+    #[cfg(feature = "multicore")]
+    fn with_pool(num_threads: usize, f: impl FnOnce() + Send) {
+        maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("test thread pool must build")
+            .install(f);
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn par_map_indices_returns_results_in_index_order() {
+        for num_threads in [1, 2, 8] {
+            with_pool(num_threads, || {
+                for jobs in [0usize, 1, 2, 7, 64, 1_000] {
+                    // Heap-owning results, so a bad slot write would show up
+                    // as a corrupted or double-freed value.
+                    let results = par_map_indices(jobs, &|index| std::format!("job {index}"));
+                    let expected: Vec<_> =
+                        (0..jobs).map(|index| std::format!("job {index}")).collect();
+                    assert_eq!(results, expected, "{jobs} jobs on {num_threads} threads");
+                }
+                let units = par_map_indices(5, &|_| ());
+                assert_eq!(units.len(), 5);
+            });
+        }
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn par_map_indices_leaks_written_results_when_a_job_panics() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct Counted;
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        with_pool(4, || {
+            let outcome = std::panic::catch_unwind(|| {
+                par_map_indices(64, &|index| {
+                    assert_ne!(index, 37, "injected job panic");
+                    Counted
+                })
+            });
+            assert!(outcome.is_err(), "the job panic must propagate");
+        });
+        // Completed results stay in the abandoned buffer: leaked, not dropped
+        // (and so never dropped twice).
+        assert_eq!(DROPS.load(Ordering::Relaxed), 0);
     }
 
     #[cfg(feature = "multicore")]
@@ -4937,8 +5260,8 @@ mod tests {
         assert_eq!(multiexp_window_bits::<pallas::Point>(5_678, 8), Some(9));
 
         assert_eq!(glv_multiexp_window_bits::<pallas::Point>(255, 1), None);
-        assert_eq!(glv_multiexp_window_bits::<pallas::Point>(2_150, 1), Some(9));
-        assert_eq!(glv_multiexp_window_bits::<vesta::Point>(5_678, 1), Some(11));
+        assert_eq!(glv_multiexp_window_bits::<pallas::Point>(2_150, 1), Some(8));
+        assert_eq!(glv_multiexp_window_bits::<vesta::Point>(5_678, 1), Some(10));
 
         assert_eq!(estimated_signed_booth_work(2_150, 256, 8, 8), Some(12_670));
         assert_eq!(
@@ -4953,24 +5276,24 @@ mod tests {
         assert_eq!(glv_multiexp_window_bits::<pallas::Point>(2_150, 8), Some(8));
         assert_eq!(glv_multiexp_window_bits::<vesta::Point>(5_678, 8), Some(9));
 
-        // At sufficiently large sizes with whole waves on every worker,
-        // doubling the term count outweighs the shorter components at both
-        // candidate widths, and an overflowing term count is never planned.
-        assert_eq!(
-            glv_multiexp_window_bits::<pallas::Point>(1_000_000, 8),
-            None
-        );
+        // Beyond the measured grids the weighted model extrapolates to GLV at
+        // a width within its candidate range; an overflowing term count is
+        // never planned.
+        let default = multiexp_window_bits::<pallas::Point>(1_000_000, 8).unwrap();
+        let width = glv_multiexp_window_bits::<pallas::Point>(1_000_000, 8).unwrap();
+        assert!((default..=default + GLV_EXTRA_WINDOW_BITS).contains(&width));
         assert_eq!(
             glv_multiexp_window_bits::<pallas::Point>(usize::MAX, 8),
             None
         );
     }
 
-    /// The planner's decisions at cells measured on Apple M4 (asm backend)
-    /// and EPYC (portable) with explicit Rayon pools. Each expected value is
-    /// the backend (and for GLV, the width) that measured fastest; every
-    /// `None` is a cell where the generic ladder measured at least as fast as
-    /// GLV at every candidate width.
+    /// The planner's decisions at cells of the timing grids
+    /// (`glv_vs_generic_timing_grid`): Apple M4 with the asm backend on 1-16
+    /// workers, and two AMD Zen 4 hosts with portable and
+    /// `-C target-cpu=native` builds on 1-8 workers. Unless noted, every
+    /// pinned decision measured within 3% of the fastest backend and width on
+    /// every grid that ran the cell.
     #[test]
     fn glv_multiexp_plan_matches_measured_cells() {
         fn plan(terms: usize, threads: usize) -> Option<usize> {
@@ -4980,46 +5303,155 @@ mod tests {
         assert_eq!(plan(255, 1), None);
         assert_eq!(plan(255, 8), None);
 
-        // Cells the single-width comparison rejected although GLV measured
-        // 4–27% faster. Widening to `w + 1` turns a partial final wave into
-        // whole waves for the 127-bit components.
-        assert_eq!(plan(2_600, 3), Some(9));
-        assert_eq!(plan(8_192, 2), Some(11));
-        assert_eq!(plan(8_192, 3), Some(11));
-        assert_eq!(plan(8_192, 4), Some(11));
-        assert_eq!(plan(16_384, 2), Some(11));
-        assert_eq!(plan(16_384, 3), Some(11));
-        assert_eq!(plan(16_384, 4), Some(11));
-        assert_eq!(plan(65_536, 2), Some(13));
+        // Cells where the unweighted model chose the generic ladder although
+        // GLV measured 1.3-1.8x faster: the weights price GLV's batched affine
+        // point visits below the generic ladder's projective ones. The 7,150-
+        // term cells are the final MSM of a 64-bundle Orchard batch.
+        assert_eq!(plan(7_150, 6), Some(11));
+        assert_eq!(plan(7_150, 12), Some(11));
+        assert_eq!(plan(2_049, 12), Some(8));
+        assert_eq!(plan(4_096, 6), Some(11));
+        // GLV at w = 10 beats the generic ladder 1.3x here, though w = 13
+        // measured faster still: the model's wave count does not capture it.
+        assert_eq!(plan(16_384, 10), Some(10));
+        assert_eq!(plan(32_768, 10), Some(13));
 
-        // Cells where both widths agree with the previous selection.
-        assert_eq!(plan(2_150, 1), Some(9));
-        assert_eq!(plan(2_600, 8), Some(8));
-        assert_eq!(plan(4_300, 1), Some(10));
-        assert_eq!(plan(8_192, 1), Some(11));
-        assert_eq!(plan(8_192, 8), Some(10));
-        assert_eq!(plan(16_384, 8), Some(10));
-        assert_eq!(plan(32_768, 1), Some(12));
-        assert_eq!(plan(32_768, 4), Some(11));
+        // Cells measured within 3% of the best on all five grids.
+        for (terms, threads, width) in [
+            (256, 1, 6),
+            (256, 4, 7),
+            (512, 4, 8),
+            (1_024, 1, 8),
+            (1_024, 6, 8),
+            (4_096, 1, 10),
+            (7_150, 2, 11),
+            (8_192, 4, 11),
+            (8_192, 6, 11),
+            (16_384, 3, 11),
+            (32_768, 2, 13),
+            (32_768, 4, 11),
+            (65_536, 2, 13),
+        ] {
+            assert_eq!(
+                plan(terms, threads),
+                Some(width),
+                "{terms} terms on {threads}"
+            );
+        }
 
-        // Cells where the generic ladder measured faster on both machines:
-        // the GLV ladder's doubled term count costs more than the halved
-        // window count saves once every worker already has whole waves.
-        assert_eq!(plan(32_768, 8), None);
-        assert_eq!(plan(65_536, 8), None);
+        // The grids disagree at the largest sizes on eight workers: GLV
+        // measured 1.3x faster on M4, the generic ladder 2-9% faster on Zen 4.
+        // The planner keeps GLV there.
+        assert_eq!(plan(32_768, 8), Some(11));
+        assert_eq!(plan(65_536, 8), Some(12));
 
-        // The planner never asks for a width the generic default would not
-        // reach within one bit, and both curves plan identically.
+        // The planner widens at most GLV_EXTRA_WINDOW_BITS past the generic
+        // default, and both curves plan identically.
         for terms in [2_600usize, 8_192, 65_536] {
             for threads in [1usize, 3, 8] {
                 let default = multiexp_window_bits::<pallas::Point>(terms, threads).unwrap();
                 if let Some(width) = plan(terms, threads) {
-                    assert!(width == default || width == default + 1);
+                    assert!((default..=default + GLV_EXTRA_WINDOW_BITS).contains(&width));
                 }
                 assert_eq!(
                     plan(terms, threads),
                     glv_multiexp_window_bits::<vesta::Point>(terms, threads)
                 );
+            }
+        }
+    }
+
+    /// Timing grid behind the GLV-versus-generic planner: the generic
+    /// Signed-Booth MSM against the GLV ladder at several widths, with the
+    /// planner's pick. `GRID_SIZES` and `GRID_THREADS` override the grid.
+    #[cfg(feature = "multicore")]
+    #[test]
+    #[ignore = "manual timing grid"]
+    fn glv_vs_generic_timing_grid() {
+        use group::{Curve, Group};
+        use rand::SeedableRng;
+        use std::time::Instant;
+        type C = pallas::Point;
+        let list = |key: &str, default: &[usize]| -> Vec<usize> {
+            std::env::var(key)
+                .ok()
+                .map(|v| v.split(',').map(|x| x.trim().parse().unwrap()).collect())
+                .unwrap_or_else(|| default.to_vec())
+        };
+        let sizes = list(
+            "GRID_SIZES",
+            &[
+                256, 512, 1_024, 2_049, 4_096, 7_150, 8_192, 16_384, 32_768, 65_536,
+            ],
+        );
+        let threads_list = list("GRID_THREADS", &[1, 2, 3, 4, 6, 8]);
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([0x42; 16]);
+        let max = *sizes.iter().max().unwrap();
+        let projective = (0..max).map(|_| C::random(&mut rng)).collect::<Vec<_>>();
+        let mut all_bases = alloc::vec![pallas::Affine::identity(); max];
+        C::batch_normalize(&projective, &mut all_bases);
+        let all_scalars = (0..max)
+            .map(|_| pallas::Scalar::random(&mut rng))
+            .collect::<Vec<_>>();
+
+        fn median_ms(mut f: impl FnMut()) -> f64 {
+            for _ in 0..2 {
+                f();
+            }
+            let mut samples = Vec::new();
+            let start = Instant::now();
+            while samples.len() < 5 || (start.elapsed().as_secs_f64() < 0.4 && samples.len() < 201)
+            {
+                let t = Instant::now();
+                f();
+                samples.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        }
+
+        for &n in &sizes {
+            let bases = &all_bases[..n];
+            let scalars = &all_scalars[..n];
+            for &threads in &threads_list {
+                let pool = maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                pool.install(|| {
+                    let w0 = multiexp_window_bits::<C>(n, threads).unwrap();
+                    let plan = glv_multiexp_window_bits::<C>(n, threads);
+                    let booth = median_ms(|| {
+                        core::hint::black_box(crate::arithmetic::signed_booth_multiexp(
+                            scalars, bases, threads,
+                        ));
+                    });
+                    let mut row = std::format!("GRID n={n} t={threads} w0={w0} booth={booth:.4}");
+                    let mut best = (std::string::String::from("booth"), booth);
+                    for w in w0.saturating_sub(1).max(4)..=w0 + 3 {
+                        let glv = median_ms(|| {
+                            let components = scalars
+                                .iter()
+                                .map(|k| checked_signed_magnitudes(decompose::<C>(k)).unwrap())
+                                .collect::<Vec<_>>();
+                            let prepared = multiexp_bases::<C>(bases);
+                            core::hint::black_box(multiexp::<C>(
+                                &components,
+                                &prepared,
+                                w,
+                                threads,
+                            ));
+                        });
+                        row += &std::format!(" glv{w}={glv:.4}");
+                        if glv < best.1 {
+                            best = (std::format!("glv{w}"), glv);
+                        }
+                    }
+                    let pick = plan.map_or(std::string::String::from("booth"), |w| {
+                        std::format!("glv{w}")
+                    });
+                    std::eprintln!("{row} plan={pick} best={}", best.0);
+                });
             }
         }
     }

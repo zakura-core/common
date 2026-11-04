@@ -8,8 +8,6 @@ use halo2_proofs::{
 };
 use std::{fmt::Debug, marker::PhantomData};
 
-use ff::PrimeFieldBits;
-
 use crate::sinsemilla::{chip::generator_table::GeneratorTableConfig, primitives as sinsemilla};
 use pasta_curves::pallas;
 use sinsemilla::SINSEMILLA_S;
@@ -18,8 +16,8 @@ use super::*;
 
 /// The running sum $[z_0, ..., z_W]$. If created in strict mode, $z_W = 0$.
 #[derive(Debug)]
-pub struct RunningSum<F: PrimeFieldBits>(Vec<AssignedCell<F, F>>);
-impl<F: PrimeFieldBits> std::ops::Deref for RunningSum<F> {
+pub struct RunningSum<F: PrimeField>(Vec<AssignedCell<F, F>>);
+impl<F: PrimeField> std::ops::Deref for RunningSum<F> {
     type Target = Vec<AssignedCell<F, F>>;
 
     fn deref(&self) -> &Vec<AssignedCell<F, F>> {
@@ -27,7 +25,7 @@ impl<F: PrimeFieldBits> std::ops::Deref for RunningSum<F> {
     }
 }
 
-impl<F: PrimeFieldBits> RangeConstrained<F, AssignedCell<F, F>> {
+impl<F: PrimeField> RangeConstrained<F, AssignedCell<F, F>> {
     /// Witnesses a subset of the bits in `value` and constrains them to be the correct
     /// number of bits.
     ///
@@ -60,7 +58,7 @@ impl<F: PrimeFieldBits> RangeConstrained<F, AssignedCell<F, F>> {
 
 /// Configuration that provides methods for a lookup range check.
 #[derive(Eq, PartialEq, Debug, Clone, Copy)]
-pub struct LookupRangeCheckConfig<F: PrimeFieldBits, const K: usize> {
+pub struct LookupRangeCheckConfig<F: PrimeField, const K: usize> {
     q_lookup: Selector,
     q_running: Selector,
     q_bitshift: Selector,
@@ -70,7 +68,7 @@ pub struct LookupRangeCheckConfig<F: PrimeFieldBits, const K: usize> {
 }
 
 /// Trait that provides common methods for a lookup range check.
-pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug {
+pub trait LookupRangeCheck<F: PrimeField, const K: usize>: Eq + Copy + Debug {
     /// Returns a reference to the `LookupRangeCheckConfig` instance.
     fn config(&self) -> &LookupRangeCheckConfig<F, K>;
 
@@ -178,7 +176,7 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
         // `num_words` must fit into a single field element.
         assert!(num_words * K <= F::CAPACITY as usize);
 
-        let bits = element.value().map(|element| element.to_le_bits());
+        let repr = element.value().map(|element| element.to_repr());
 
         let mut zs = Vec::with_capacity(num_words + 1);
         zs.push(element.clone());
@@ -198,8 +196,8 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
 
             // z_next = (z_cur - m_cur) / 2^K
             z = {
-                let word = bits.as_ref().map(|bits| {
-                    let word = std::array::from_fn(|bit| bits[idx * K + bit]);
+                let word = repr.as_ref().map(|repr| {
+                    let word = std::array::from_fn(|bit| le_bit(repr.as_ref(), idx * K + bit));
                     F::from(lebs2ip::<K>(&word))
                 });
                 let z_val = z
@@ -280,7 +278,7 @@ pub trait LookupRangeCheck<F: PrimeFieldBits, const K: usize>: Eq + Copy + Debug
     }
 }
 
-impl<F: PrimeFieldBits, const K: usize> LookupRangeCheck<F, K> for LookupRangeCheckConfig<F, K> {
+impl<F: PrimeField, const K: usize> LookupRangeCheck<F, K> for LookupRangeCheckConfig<F, K> {
     fn config(&self) -> &LookupRangeCheckConfig<F, K> {
         self
     }
@@ -489,14 +487,14 @@ impl PallasLookupRangeCheck for PallasLookupRangeCheckConfig {}
 
 /// Configuration that provides methods for an efficient 4, 5, and K-bit lookup range check.
 #[derive(Eq, PartialEq, Debug, Clone, Copy)]
-pub struct LookupRangeCheck4_5BConfig<F: PrimeFieldBits, const K: usize> {
+pub struct LookupRangeCheck4_5BConfig<F: PrimeField, const K: usize> {
     base: LookupRangeCheckConfig<F, K>,
     q_range_check_4: Selector,
     q_range_check_5: Selector,
     table_range_check_tag: TableColumn,
 }
 
-impl<F: PrimeFieldBits, const K: usize> LookupRangeCheck4_5BConfig<F, K> {
+impl<F: PrimeField, const K: usize> LookupRangeCheck4_5BConfig<F, K> {
     /// The `running_sum` advice column breaks the field element into `K`-bit
     /// words. It is used to construct the input expression to the lookup
     /// argument.
@@ -619,9 +617,7 @@ impl<F: PrimeFieldBits, const K: usize> LookupRangeCheck4_5BConfig<F, K> {
     }
 }
 
-impl<F: PrimeFieldBits, const K: usize> LookupRangeCheck<F, K>
-    for LookupRangeCheck4_5BConfig<F, K>
-{
+impl<F: PrimeField, const K: usize> LookupRangeCheck<F, K> for LookupRangeCheck4_5BConfig<F, K> {
     fn config(&self) -> &LookupRangeCheckConfig<F, K> {
         &self.base
     }
@@ -846,9 +842,9 @@ impl PallasLookupRangeCheck for PallasLookupRangeCheck4_5BConfig {}
 
 #[cfg(test)]
 mod tests {
-    use super::super::{inverse_power_of_two, lebs2ip};
+    use super::super::{inverse_power_of_two, le_bits, lebs2ip};
 
-    use ff::{Field, PrimeFieldBits};
+    use ff::{Field, PrimeField};
     use halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner, Value},
         dev::{FailureLocation, MockProver, VerifyFailure},
@@ -867,12 +863,12 @@ mod tests {
     use std::{convert::TryInto, marker::PhantomData};
 
     #[derive(Clone, Copy)]
-    struct MyLookupCircuit<F: PrimeFieldBits, Lookup: LookupRangeCheck<F, K>> {
+    struct MyLookupCircuit<F: PrimeField, Lookup: LookupRangeCheck<F, K>> {
         num_words: usize,
         _marker: PhantomData<(F, Lookup)>,
     }
 
-    impl<F: PrimeFieldBits, Lookup: LookupRangeCheck<F, K>> MyLookupCircuit<F, Lookup> {
+    impl<F: PrimeField, Lookup: LookupRangeCheck<F, K>> MyLookupCircuit<F, Lookup> {
         fn new(num_words: usize) -> Self {
             MyLookupCircuit {
                 num_words,
@@ -881,7 +877,7 @@ mod tests {
         }
     }
 
-    impl<F: PrimeFieldBits, Lookup: LookupRangeCheck<F, K> + std::clone::Clone> Circuit<F>
+    impl<F: PrimeField, Lookup: LookupRangeCheck<F, K> + std::clone::Clone> Circuit<F>
         for MyLookupCircuit<F, Lookup>
     {
         type Config = Lookup;
@@ -914,15 +910,9 @@ mod tests {
                 (F::from(1 << (self.num_words * K)), F::ONE, false), // a word that is just over self.num_words * K bits long
             ];
 
-            fn expected_zs<F: PrimeFieldBits, const K: usize>(
-                element: F,
-                num_words: usize,
-            ) -> Vec<F> {
+            fn expected_zs<F: PrimeField, const K: usize>(element: F, num_words: usize) -> Vec<F> {
                 let chunks = {
-                    element
-                        .to_le_bits()
-                        .iter()
-                        .by_vals()
+                    le_bits(&element)
                         .take(num_words * K)
                         .collect::<Vec<_>>()
                         .chunks_exact(K)
@@ -988,13 +978,13 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    struct MyShortRangeCheckCircuit<F: PrimeFieldBits, Lookup: LookupRangeCheck<F, K>> {
+    struct MyShortRangeCheckCircuit<F: PrimeField, Lookup: LookupRangeCheck<F, K>> {
         element: Value<F>,
         num_bits: usize,
         _lookup_marker: PhantomData<Lookup>,
     }
 
-    impl<F: PrimeFieldBits, Lookup: LookupRangeCheck<F, K>> MyShortRangeCheckCircuit<F, Lookup> {
+    impl<F: PrimeField, Lookup: LookupRangeCheck<F, K>> MyShortRangeCheckCircuit<F, Lookup> {
         fn new(element: Value<F>, num_bits: usize) -> Self {
             MyShortRangeCheckCircuit {
                 element,
@@ -1004,7 +994,7 @@ mod tests {
         }
     }
 
-    impl<F: PrimeFieldBits, Lookup: LookupRangeCheck<F, K> + std::clone::Clone> Circuit<F>
+    impl<F: PrimeField, Lookup: LookupRangeCheck<F, K> + std::clone::Clone> Circuit<F>
         for MyShortRangeCheckCircuit<F, Lookup>
     {
         type Config = Lookup;

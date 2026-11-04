@@ -61,10 +61,7 @@ impl Eq for Script {}
 
 impl Script {
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
-        let script = Vector::read(&mut reader, |r| {
-            let mut bytes = [0; 1];
-            r.read_exact(&mut bytes).map(|_| bytes[0])
-        })?;
+        let script = Vector::read_bytes(&mut reader)?;
         Ok(Script(script::Code(script)))
     }
 

@@ -31,3 +31,16 @@ updates:
       actions:
         patterns:
           - "*"
+  # The scanner image's base is pinned by digest (see .oss-scanner/Dockerfile);
+  # this keeps the pin fresh without unpinning it.
+  - package-ecosystem: docker
+    directory: /.oss-scanner
+    schedule:
+      interval: weekly
+      day: wednesday
+      timezone: America/New_York
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 4
+    labels:
+      - dependencies
