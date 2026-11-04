@@ -1426,7 +1426,7 @@ fn create_proof_with_synthesis<
         .collect();
 
     // Create polynomial evaluator context for cosets.
-    let mut coset_evaluator = poly::new_evaluator(|| {});
+    let mut coset_evaluator = poly::new_evaluator(evaluator_schedule::quotient_evaluator_brand);
 
     // Register fixed cosets with the polynomial evaluator.
     let fixed_cosets: Vec<_> = pk
