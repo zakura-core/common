@@ -2339,10 +2339,15 @@ fn multiexp_bases<C: GlvParams>(bases: &[C::AffineExt]) -> Vec<MultiexpBase<C::B
 }
 
 /// Per-term preparation (scalar decomposition, base conversion) runs on the
-/// pool in chunks of at least this many terms. Below a chunk it is cheaper on
-/// the calling thread than a task dispatch.
+/// pool from this many terms. It costs tens of nanoseconds per term, so
+/// smaller MSMs (a few-proof batch's ~2-3k terms) lose more to dispatch
+/// than they save.
 #[cfg(feature = "multicore")]
-const PARALLEL_PREPARATION_CHUNK_TERMS: usize = 256;
+const PARALLEL_PREPARATION_MIN_TERMS: usize = 4096;
+
+/// Each parallel preparation task handles at least this many terms.
+#[cfg(feature = "multicore")]
+const PARALLEL_PREPARATION_CHUNK_TERMS: usize = 512;
 
 /// [`multiexp_bases`], split across the pool when the multiplication is
 /// planned for more than one worker.
@@ -2351,7 +2356,7 @@ fn planned_multiexp_bases<C: GlvParams>(
     num_threads: usize,
 ) -> Vec<MultiexpBase<C::Base>> {
     #[cfg(feature = "multicore")]
-    if num_threads > 1 && bases.len() >= 2 * PARALLEL_PREPARATION_CHUNK_TERMS {
+    if num_threads > 1 && bases.len() >= PARALLEL_PREPARATION_MIN_TERMS {
         return bases
             .par_iter()
             .with_min_len(PARALLEL_PREPARATION_CHUNK_TERMS)
@@ -2378,12 +2383,16 @@ where
     let component =
         |scalar: &C::ScalarExt| decompose_scalar(scalar).and_then(checked_signed_magnitudes);
     #[cfg(feature = "multicore")]
-    if num_threads > 1 && scalars.len() >= 2 * PARALLEL_PREPARATION_CHUNK_TERMS {
-        return scalars
+    if num_threads > 1 && scalars.len() >= PARALLEL_PREPARATION_MIN_TERMS {
+        // Collect into an indexed `Vec` (written in place) and check for a
+        // failed decomposition afterwards, instead of a short-circuiting
+        // `Option` collect, which gathers per-task vectors and appends them.
+        let components: Vec<_> = scalars
             .par_iter()
             .with_min_len(PARALLEL_PREPARATION_CHUNK_TERMS)
             .map(component)
             .collect();
+        return components.into_iter().collect();
     }
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
@@ -5522,7 +5531,8 @@ mod tests {
     #[test]
     fn planned_preparation_matches_serial() {
         fn check<C: GlvParams>() {
-            let (scalars, bases, _) = verifier_multiexp_inputs::<C>(1_537);
+            let (scalars, bases, _) =
+                verifier_multiexp_inputs::<C>(PARALLEL_PREPARATION_MIN_TERMS + 513);
             let split = |k: &C::ScalarExt| Some(decompose::<C>(k));
             let serial_components = planned_components::<C, _>(&scalars, 1, &split);
             let serial_bases = multiexp_bases::<C>(&bases);
@@ -5541,7 +5551,7 @@ mod tests {
 
                     // One failing decomposition in the middle fails it all.
                     let failing = |k: &C::ScalarExt| {
-                        if *k == scalars[900] {
+                        if *k == scalars[PARALLEL_PREPARATION_MIN_TERMS / 2 + 7] {
                             None
                         } else {
                             Some(decompose::<C>(k))

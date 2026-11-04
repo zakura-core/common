@@ -106,11 +106,12 @@ pub struct MSM<'a, C: CurveAffine> {
     batched_other: Vec<ArbitraryTerm<C>>,
 }
 
-/// Batch verification accumulates dozens of commitment terms per proof. At
-/// least this many are sorted and rebuilt into points on the Rayon pool;
-/// fewer are cheaper on the calling thread.
+/// Batch verification accumulates dozens of commitment terms per proof
+/// (about 2,500 for a 32-bundle Orchard batch). At least this many are sorted
+/// and rebuilt into points on the Rayon pool; fewer are cheaper on the calling
+/// thread.
 #[cfg(feature = "multicore")]
-const PARALLEL_TERM_PREPARATION_MIN: usize = 512;
+const PARALLEL_TERM_PREPARATION_MIN: usize = 2048;
 
 #[cfg(feature = "multicore")]
 fn parallelize_term_preparation(terms: usize) -> bool {
@@ -784,7 +785,7 @@ mod tests {
         let params = Params::<EpAffine>::new(6);
         let build = || {
             let mut batched = MSM::new(&params);
-            for proof in 0..96u64 {
+            for proof in 0..240u64 {
                 let mut msm = MSM::new(&params);
                 msm.add_to_w_scalar(Fq::from(proof + 3));
                 for term in 0..8u64 {
