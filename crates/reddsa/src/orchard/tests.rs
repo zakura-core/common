@@ -196,12 +196,21 @@ fn parallel_batch_decode_matches_serial() {
             .iter()
             .map(|bytes| Option::<pallas::Point>::from(pallas::Point::from_bytes(bytes)))
             .collect::<Vec<_>>();
-        match super::batch_decode_pallas_points(encodings.iter().copied()) {
-            Some(parallel) => {
-                assert!(len >= super::MIN_PARALLEL_DECODE_POINTS, "len {len}");
-                assert_eq!(parallel, serial, "len {len}");
+        for threads in [1usize, 2, 8] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool");
+            let decoded =
+                pool.install(|| super::batch_decode_pallas_points(encodings.iter().copied()));
+            let parallel = threads > 1 && len >= super::MIN_PARALLEL_DECODE_POINTS;
+            match decoded {
+                Some(decoded) => {
+                    assert!(parallel, "len {len}, {threads} threads");
+                    assert_eq!(decoded, serial, "len {len}, {threads} threads");
+                }
+                None => assert!(!parallel, "len {len}, {threads} threads"),
             }
-            None => assert!(len < super::MIN_PARALLEL_DECODE_POINTS, "len {len}"),
         }
     }
 }

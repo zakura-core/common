@@ -131,7 +131,8 @@ const MIN_PARALLEL_DECODE_POINTS: usize = 16;
 /// still held as bytes) across the Rayon pool.
 ///
 /// Returns `None`, so the batch verifier decodes each point in its loop as
-/// before, without the `multicore` feature or for small batches. Results are
+/// before, without the `multicore` feature, on a one-thread pool, or for
+/// small batches. Results are
 /// returned in input order and consumed in the verifier's order, so a batch
 /// with a malformed encoding reports the same error either way.
 #[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
@@ -142,6 +143,10 @@ fn batch_decode_pallas_points(
     {
         use maybe_rayon::prelude::*;
 
+        // A one-thread pool only adds dispatch overhead.
+        if maybe_rayon::current_num_threads() < 2 {
+            return None;
+        }
         let encodings = items.collect::<Vec<_>>();
         if encodings.len() < MIN_PARALLEL_DECODE_POINTS {
             return None;
