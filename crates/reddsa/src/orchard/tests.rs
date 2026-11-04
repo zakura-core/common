@@ -169,14 +169,14 @@ fn pasta_multiscalar_mul_matches_wnaf() {
     );
 }
 
-/// Parallel batch decoding must agree with decoding each encoding on its own,
-/// including non-canonical and off-curve encodings, at every batch size
-/// around the parallel cutoff.
+/// Batch decoding, serial or across the pool, must agree with decoding each
+/// encoding on its own, including non-canonical and off-curve encodings, at
+/// every batch size around the parallel cutoff and the decoder's eight lanes.
 #[cfg(all(feature = "pallas-pasta", feature = "multicore"))]
 #[test]
 fn parallel_batch_decode_matches_serial() {
     let mut rng = thread_rng();
-    for len in [0usize, 1, 15, 16, 17, 64, 385] {
+    for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 64, 385] {
         let encodings = (0..len)
             .map(|i| match i % 6 {
                 // Non-canonical x-coordinate.
@@ -201,16 +201,14 @@ fn parallel_batch_decode_matches_serial() {
                 .num_threads(threads)
                 .build()
                 .expect("test thread pool");
+            // Every size decodes as a batch, across the pool from the cutoff.
             let decoded =
                 pool.install(|| super::batch_decode_pallas_points(encodings.iter().copied()));
-            let parallel = threads > 1 && len >= super::MIN_PARALLEL_DECODE_POINTS;
-            match decoded {
-                Some(decoded) => {
-                    assert!(parallel, "len {len}, {threads} threads");
-                    assert_eq!(decoded, serial, "len {len}, {threads} threads");
-                }
-                None => assert!(!parallel, "len {len}, {threads} threads"),
-            }
+            assert_eq!(
+                decoded,
+                Some(serial.clone()),
+                "len {len}, {threads} threads"
+            );
         }
     }
 }

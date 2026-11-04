@@ -493,6 +493,18 @@ pub trait CurveAffine:
 
     /// Returns the curve constant $b$.
     fn b() -> Self::Base;
+
+    /// Decodes each encoding, with the same result for each as
+    /// [`group::GroupEncoding::from_bytes`].
+    ///
+    /// Implementations may decode several points together; the Pallas and
+    /// Vesta affine types use their `batch_from_bytes`. Like `from_bytes`, the
+    /// running time does not depend on whether an encoding is valid.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+    fn batch_decode(encodings: &[Self::Repr]) -> alloc::vec::Vec<CtOption<Self>> {
+        encodings.iter().map(Self::from_bytes).collect()
+    }
 }
 
 /// The affine coordinates of a point on an elliptic curve.
