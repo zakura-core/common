@@ -21,11 +21,9 @@ use crate::{
     value::{NoteValue, ValueCommitTrapdoor},
 };
 use alloc::string::String;
-#[cfg(feature = "verifier")]
 use alloc::vec::Vec;
 #[cfg(feature = "prover")]
 use rand::Rng;
-#[cfg(feature = "prover")]
 use sensei::primitives::pallas;
 
 #[cfg(feature = "prover")]
