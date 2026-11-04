@@ -247,8 +247,9 @@ impl<T: SigType> VerificationKey<T> {
         };
         #[cfg(not(feature = "alloc"))]
         let check = {
-            let sB = T::basepoint() * s;
-            let cA = self.point * c;
+            // Both scalars are public signature data, so variable time is safe.
+            let sB = T::basepoint().mul_vartime(s);
+            let cA = self.point.mul_vartime(c);
             sB - cA - r
         };
 

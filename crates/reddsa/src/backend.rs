@@ -24,6 +24,12 @@ pub trait Point<S>:
     fn from_bytes(bytes: &[u8; 32]) -> Option<Self>;
     fn to_bytes(&self) -> [u8; 32];
     fn is_small_order(&self) -> bool;
+
+    /// `self * scalar`, possibly in variable time. Only call this with public
+    /// inputs. Backends without a faster variable-time path use `Mul`.
+    fn mul_vartime(&self, scalar: S) -> Self {
+        *self * scalar
+    }
 }
 
 impl Scalar for jubjub::Scalar {
@@ -108,5 +114,9 @@ impl Point<pasta_curves::pallas::Scalar> for pasta_curves::pallas::Point {
     }
     fn is_small_order(&self) -> bool {
         <Self as group::Group>::is_identity(self).into()
+    }
+    fn mul_vartime(&self, scalar: pasta_curves::pallas::Scalar) -> Self {
+        // One-shot GLV: heap-free, one inversion to build the table.
+        pasta_curves::glv::Table::new(self).mul(&scalar)
     }
 }
