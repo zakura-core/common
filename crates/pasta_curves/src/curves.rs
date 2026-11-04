@@ -1731,10 +1731,12 @@ mod curve_op_tests {
                 let point = <$curve>::random(&mut rng).to_affine();
                 let xy = point.coordinates().unwrap();
                 let (x, y) = (*xy.x(), *xy.y());
-                let rebuilt = <$affine>::from_xy_unchecked(x, y);
+                // Fully qualified: with `glv`, the affine types also have a
+                // crate-private inherent `from_xy_unchecked` without the check.
+                let rebuilt = <$affine as CurveAffine>::from_xy_unchecked(x, y);
                 assert_eq!(rebuilt, point);
                 assert_eq!(rebuilt, <$affine>::from_xy(x, y).unwrap());
-                assert_eq!(<$affine>::from_xy_unchecked(x, -y), -point);
+                assert_eq!(<$affine as CurveAffine>::from_xy_unchecked(x, -y), -point);
             }
         }};
     }
@@ -1754,6 +1756,7 @@ mod curve_op_tests {
     #[should_panic(expected = "the point must be on the curve")]
     fn from_xy_unchecked_rejects_off_curve_points_in_debug() {
         use crate::arithmetic::CurveAffine;
-        let _ = EpAffine::from_xy_unchecked(Fp::one(), Fp::one());
+        // Fully qualified, as in `check_from_xy_unchecked`.
+        let _ = <EpAffine as CurveAffine>::from_xy_unchecked(Fp::one(), Fp::one());
     }
 }
