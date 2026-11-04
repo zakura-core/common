@@ -60,6 +60,43 @@ pub(crate) trait SqrtTableHelpers: ff::PrimeField {
     /// verifies that the resulting hash is injective on the complete
     /// 256-element lookup domain before constructing the inverse table.
     fn sqrt_hash_key(&self) -> u32;
+
+    #[cfg(feature = "sqrt-table")]
+    /// Squares each of `K` independent elements `n` times, interleaving the
+    /// lanes so their dependency chains overlap.
+    fn sqr_n_lanes<const K: usize>(v: &mut [Self; K], n: u32) {
+        for _ in 0..n {
+            for x in v.iter_mut() {
+                *x = x.square();
+            }
+        }
+    }
+
+    #[cfg(feature = "sqrt-table")]
+    /// Lane-wise [`Self::pow_by_t_minus1_over2`].
+    fn pow_by_t_minus1_over2_lanes<const K: usize>(x: &[Self; K]) -> [Self; K] {
+        x.map(|x| x.pow_by_t_minus1_over2())
+    }
+}
+
+#[cfg(feature = "sqrt-table")]
+/// Lane-wise product.
+#[inline(always)]
+pub(crate) fn mul_lanes<F: ff::Field, const K: usize>(a: &[F; K], b: &[F; K]) -> [F; K] {
+    core::array::from_fn(|k| a[k] * b[k])
+}
+
+#[cfg(feature = "sqrt-table")]
+/// Lane-wise `a^(2^n) * b`.
+#[inline(always)]
+pub(crate) fn sqr_n_mul_lanes<F: SqrtTableHelpers, const K: usize>(
+    a: &[F; K],
+    n: u32,
+    b: &[F; K],
+) -> [F; K] {
+    let mut t = *a;
+    F::sqr_n_lanes(&mut t, n);
+    mul_lanes(&t, b)
 }
 
 /// Parameters for a perfect hash function used in square root computation.
@@ -261,32 +298,96 @@ impl<F: SqrtTableHelpers> SqrtTables<F> {
         (is_square, res)
     }
 
+    /// Lane-wise [`Self::sqrt_alt`] over `K` independent inputs.
+    pub fn sqrt_alt_lanes<const K: usize>(&self, u: &[F; K]) -> [(Choice, F); K] {
+        let v = F::pow_by_t_minus1_over2_lanes(u);
+        let uv = mul_lanes(u, &v);
+        let x3 = mul_lanes(&uv, &v);
+        let mut x2 = x3;
+        F::sqr_n_lanes(&mut x2, 8);
+        let mut x1 = x2;
+        F::sqr_n_lanes(&mut x1, 8);
+        let mut x0 = x1;
+        F::sqr_n_lanes(&mut x0, 8);
+
+        core::array::from_fn(|k| {
+            let res = self.sqrt_finish(&uv[k], &x0[k], &x1[k], &x2[k], &x3[k]);
+            let sq = res.square();
+            let is_square = (sq - u[k]).is_zero();
+            let is_nonsquare = (sq - F::ROOT_OF_UNITY * u[k]).is_zero();
+            assert!(bool::from(u[k].is_zero() | (is_square ^ is_nonsquare)));
+            (is_square, res)
+        })
+    }
+
+    /// [`Self::sqrt_alt`] of `N = 4 * G` values, with the exponentiation in
+    /// four-way AVX2 lanes. The table-driven finish stays scalar.
+    #[cfg(all(
+        feature = "sqrt-table",
+        target_arch = "x86_64",
+        target_feature = "avx2"
+    ))]
+    pub fn sqrt_alt_avx2<const G: usize, const N: usize>(&self, u: &[F; N]) -> [(Choice, F); N]
+    where
+        F: super::avx2_sqrt::Avx2Chain,
+    {
+        use super::avx2_sqrt::{enter, leave, mul_g, pack, sqr_n};
+        assert_eq!(N, 4 * G);
+        let c_in = pack(&[F::c_in(); 4]);
+        let c_out = pack(&[F::c_out(); 4]);
+        let x = enter::<F, G>(u, &c_in);
+        let v = F::pow_chain::<G>(&x);
+        let uv = mul_g::<F, G>(&x, &v);
+        let x3 = mul_g::<F, G>(&uv, &v);
+        let x2 = sqr_n::<F, G>(&x3, 8);
+        let x1 = sqr_n::<F, G>(&x2, 8);
+        let x0 = sqr_n::<F, G>(&x1, 8);
+        let mut s = [[F::ZERO; N]; 5];
+        for (dst, src) in s.iter_mut().zip([&uv, &x0, &x1, &x2, &x3]) {
+            leave::<F, G>(src, &c_out, dst);
+        }
+        let [uv, x0, x1, x2, x3] = s;
+        core::array::from_fn(|k| {
+            let res = self.sqrt_finish(&uv[k], &x0[k], &x1[k], &x2[k], &x3[k]);
+            let sq = res.square();
+            let is_square = (sq - u[k]).is_zero();
+            let is_nonsquare = (sq - F::ROOT_OF_UNITY * u[k]).is_zero();
+            assert!(bool::from(u[k].is_zero() | (is_square ^ is_nonsquare)));
+            (is_square, res)
+        })
+    }
+
     /// Common part of sqrt_ratio and sqrt_alt: return their result given v = u^((T-1)/2) and uv = u * v.
     fn sqrt_common(&self, uv: &F, v: &F) -> F {
-        let inv = |x: F| self.inv[self.hasher.hash(&x)] as usize;
-
         let x3 = *uv * v;
         let x2 = x3.sqr_n(8);
         let x1 = x2.sqr_n(8);
         let x0 = x1.sqr_n(8);
+        self.sqrt_finish(uv, &x0, &x1, &x2, &x3)
+    }
+
+    /// Table-driven tail of [`Self::sqrt_common`], given `x3 = uv * v` and
+    /// `x2, x1, x0` = `x3` squared 8, 16 and 24 times.
+    fn sqrt_finish(&self, uv: &F, x0: &F, x1: &F, x2: &F, x3: &F) -> F {
+        let inv = |x: F| self.inv[self.hasher.hash(&x)] as usize;
 
         // i = 0, 1
-        let mut t_ = inv(x0); // = t >> 16
+        let mut t_ = inv(*x0); // = t >> 16
         // 1 == x0 * ROOT_OF_UNITY^(t_ << 24)
         assert!(t_ < 0x100);
-        let alpha = x1 * self.g2[t_];
+        let alpha = *x1 * self.g2[t_];
 
         // i = 2
         t_ += inv(alpha) << 8; // = t >> 8
         // 1 == x1 * ROOT_OF_UNITY^(t_ << 16)
         assert!(t_ < 0x10000);
-        let alpha = x2 * self.g1[t_ & 0xFF] * self.g2[t_ >> 8];
+        let alpha = *x2 * self.g1[t_ & 0xFF] * self.g2[t_ >> 8];
 
         // i = 3
         t_ += inv(alpha) << 16; // = t
         // 1 == x2 * ROOT_OF_UNITY^(t_ << 8)
         assert!(t_ < 0x1000000);
-        let alpha = x3 * self.g0[t_ & 0xFF] * self.g1[(t_ >> 8) & 0xFF] * self.g2[t_ >> 16];
+        let alpha = *x3 * self.g0[t_ & 0xFF] * self.g1[(t_ >> 8) & 0xFF] * self.g2[t_ >> 16];
 
         t_ += inv(alpha) << 24; // = t << 1
         // 1 == x3 * ROOT_OF_UNITY^t_

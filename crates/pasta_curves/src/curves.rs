@@ -872,6 +872,114 @@ macro_rules! new_curve_impl {
             }
         }
 
+        #[cfg(all(feature = "sqrt-table", feature = "alloc"))]
+        // The macro also instantiates the crate-private isogenous curves, which
+        // never decode compressed points.
+        #[allow(dead_code)]
+        impl $name_affine {
+            /// Decodes compressed points, with the same result for each input as
+            /// [`GroupEncoding::from_bytes`].
+            ///
+            /// Decoding is dominated by one square root per point. This computes
+            /// the square roots of up to eight points together: on x86-64 builds
+            /// with the `avx2` target feature they run four per vector register;
+            /// elsewhere their scalar dependency chains are interleaved. For
+            /// batches of two or more points this is faster than decoding each
+            /// point separately.
+            ///
+            /// Like `from_bytes`, the running time does not depend on whether an
+            /// input decodes, apart from the variable-time square-root table
+            /// lookups that `from_bytes` also performs.
+            pub fn batch_from_bytes(
+                items: impl Iterator<Item = [u8; 32]>,
+            ) -> alloc::vec::Vec<CtOption<Self>> {
+                let items: alloc::vec::Vec<[u8; 32]> = items.collect();
+                let mut out = alloc::vec::Vec::with_capacity(items.len());
+                let mut chunks = items.chunks_exact(8);
+                for chunk in &mut chunks {
+                    Self::decode_chunk::<8>(chunk, &mut out);
+                }
+                // Pad a short final chunk only up to a vector width; scalar
+                // lanes cost about as much per lane as a separate decode.
+                let rest = chunks.remainder();
+                #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+                match rest.len() {
+                    0 => {}
+                    1 => out.push(Self::from_bytes(&rest[0])),
+                    2 => Self::decode_chunk::<2>(rest, &mut out),
+                    3 | 4 => Self::decode_chunk::<4>(rest, &mut out),
+                    _ => Self::decode_chunk::<8>(rest, &mut out),
+                }
+                #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+                match rest.len() {
+                    0 => {}
+                    1 => out.push(Self::from_bytes(&rest[0])),
+                    2 => Self::decode_chunk::<2>(rest, &mut out),
+                    3 => Self::decode_chunk::<3>(rest, &mut out),
+                    4 => Self::decode_chunk::<4>(rest, &mut out),
+                    5 => Self::decode_chunk::<5>(rest, &mut out),
+                    6 => Self::decode_chunk::<6>(rest, &mut out),
+                    _ => Self::decode_chunk::<7>(rest, &mut out),
+                }
+                out
+            }
+
+            /// Decodes up to `K` points, padding the unused lanes.
+            fn decode_chunk<const K: usize>(
+                chunk: &[[u8; 32]],
+                out: &mut alloc::vec::Vec<CtOption<Self>>,
+            ) {
+                debug_assert!(chunk.len() <= K);
+                let mut xs = [$base::zero(); K];
+                let mut x_ok = [Choice::from(0u8); K];
+                let mut ysigns = [Choice::from(0u8); K];
+                for (k, bytes) in chunk.iter().enumerate() {
+                    let mut tmp = *bytes;
+                    ysigns[k] = Choice::from(tmp[31] >> 7);
+                    tmp[31] &= 0b0111_1111;
+                    let x = $base::from_repr(tmp);
+                    x_ok[k] = x.is_some();
+                    xs[k] = x.unwrap_or($base::zero());
+                }
+                let rhs: [$base; K] =
+                    core::array::from_fn(|k| xs[k].square() * xs[k] + $name::curve_constant_b());
+                let roots = Self::square_roots::<K>(&rhs);
+                for k in 0..chunk.len() {
+                    let (is_square, y) = roots[k];
+                    let (x, ysign) = (xs[k], ysigns[k]);
+                    let y = $base::conditional_select(&y, &-y, ysign ^ y.is_odd());
+                    // As in `from_bytes`, x = 0 with a clear sign bit encodes the
+                    // identity.
+                    let is_identity = x.is_zero() & !ysign;
+                    let point = Self::conditional_select(
+                        &$name_affine { x, y },
+                        &Self::identity(),
+                        is_identity,
+                    );
+                    out.push(CtOption::new(point, x_ok[k] & (is_identity | is_square)));
+                }
+            }
+
+            /// `sqrt_alt` of `K` independent values.
+            #[inline(always)]
+            fn square_roots<const K: usize>(rhs: &[$base; K]) -> [(Choice, $base); K] {
+                #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+                {
+                    if K == 4 {
+                        let rhs: &[$base; 4] = rhs[..].try_into().unwrap();
+                        let roots = $base::sqrt_alt_avx2::<1, 4>(rhs);
+                        return core::array::from_fn(|k| roots[k]);
+                    }
+                    if K == 8 {
+                        let rhs: &[$base; 8] = rhs[..].try_into().unwrap();
+                        let roots = $base::sqrt_alt_avx2::<2, 8>(rhs);
+                        return core::array::from_fn(|k| roots[k]);
+                    }
+                }
+                $base::sqrt_alt_lanes(rhs)
+            }
+        }
+
         impl GroupEncoding for $name_affine {
             type Repr = [u8; 32];
 

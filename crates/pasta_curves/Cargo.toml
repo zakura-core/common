@@ -75,6 +75,11 @@ sqrt-table = ["alloc", "dep:once_cell"]
 uninline-portable = []
 
 [[bench]]
+name = "decompress"
+harness = false
+required-features = ["sqrt-table"]
+
+[[bench]]
 name = "fp"
 harness = false
 

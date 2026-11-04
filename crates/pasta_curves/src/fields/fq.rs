@@ -1102,6 +1102,103 @@ fn fq_tables() -> &'static SqrtTables<Fq> {
     FQ_TABLES.get_or_init(|| SqrtTables::new(0x4B7FDD31))
 }
 
+impl Fq {
+    /// `sqrt_alt` of `K` independent values, with their chains interleaved.
+    #[cfg(feature = "sqrt-table")]
+    pub(crate) fn sqrt_alt_lanes<const K: usize>(u: &[Self; K]) -> [(Choice, Self); K] {
+        fq_tables().sqrt_alt_lanes(u)
+    }
+}
+
+#[cfg(all(
+    feature = "sqrt-table",
+    target_arch = "x86_64",
+    target_feature = "avx2"
+))]
+impl crate::arithmetic::avx2_sqrt::Avx2Chain for Fq {
+    fn limbs(&self) -> [u64; 4] {
+        self.0
+    }
+    fn from_limbs(limbs: [u64; 4]) -> Self {
+        Fq(limbs)
+    }
+    fn canonical_limbs(limbs: [u64; 4]) -> [u64; 4] {
+        portable::canonicalize(&limbs, &MODULUS.0)
+    }
+    fn c_in() -> [u64; 4] {
+        let e = Fq::from_raw(R.0) * Fq::from(1024);
+        let b = e.to_repr();
+        core::array::from_fn(|i| u64::from_le_bytes(b[8 * i..8 * i + 8].try_into().unwrap()))
+    }
+    fn c_out() -> [u64; 4] {
+        R.0
+    }
+    fn pow_chain<const G: usize>(
+        x: &[crate::arithmetic::avx2_sqrt::V; G],
+    ) -> [crate::arithmetic::avx2_sqrt::V; G] {
+        crate::arithmetic::avx2_sqrt::run_chain::<Self, G>(
+            x,
+            &[
+                (129, 1),
+                (7, 9),
+                (7, 13),
+                (4, 3),
+                (6, 7),
+                (3, 7),
+                (10, 9),
+                (4, 9),
+                (5, 9),
+                (5, 9),
+                (3, 9),
+                (4, 11),
+                (4, 11),
+                (5, 3),
+                (4, 1),
+                (5, 3),
+                (4, 7),
+                (5, 11),
+                (3, 1),
+            ],
+            4,
+        )
+    }
+    #[inline(always)]
+    fn sqr_v(a: &crate::arithmetic::avx2_sqrt::V) -> crate::arithmetic::avx2_sqrt::V {
+        crate::arithmetic::avx2_sqrt::sqr::<
+            { MODULUS.0[0] },
+            { MODULUS.0[1] },
+            { MODULUS.0[2] },
+            { MODULUS.0[3] },
+        >(a)
+    }
+    #[inline(always)]
+    fn mul_v(
+        a: &crate::arithmetic::avx2_sqrt::V,
+        b: &crate::arithmetic::avx2_sqrt::V,
+    ) -> crate::arithmetic::avx2_sqrt::V {
+        crate::arithmetic::avx2_sqrt::mul::<
+            { MODULUS.0[0] },
+            { MODULUS.0[1] },
+            { MODULUS.0[2] },
+            { MODULUS.0[3] },
+        >(a, b)
+    }
+}
+
+#[cfg(all(
+    feature = "sqrt-table",
+    target_arch = "x86_64",
+    target_feature = "avx2"
+))]
+impl Fq {
+    /// `sqrt_alt` of `N = 4 * G` values, exponentiating in four-way AVX2 lanes.
+    pub(crate) fn sqrt_alt_avx2<const G: usize, const N: usize>(
+        u: &[Self; N],
+    ) -> [(Choice, Self); N] {
+        fq_tables().sqrt_alt_avx2::<G, N>(u)
+    }
+}
+
 impl SqrtTableHelpers for Fq {
     fn pow_by_t_minus1_over2(&self) -> Self {
         let s10 = self.square_runtime();
@@ -1138,6 +1235,80 @@ impl SqrtTableHelpers for Fq {
 
     fn sqr_n_mul(&self, n: u32, by: &Self) -> Self {
         self.sqr_n_mul_runtime(n, by)
+    }
+
+    #[cfg(feature = "sqrt-table")]
+    fn sqr_n_lanes<const K: usize>(v: &mut [Self; K], n: u32) {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ))]
+        {
+            for _ in 0..n {
+                for x in v.iter_mut() {
+                    *x = x.square_runtime();
+                }
+            }
+        }
+
+        // Leave each lane unreduced between squarings, as `sqr_n` does.
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )))]
+        {
+            let mut acc = v.map(|x| x.0);
+            for _ in 0..n {
+                for lane in acc.iter_mut() {
+                    *lane = portable::sqr_lazy(lane, &MODULUS.0, INV);
+                }
+            }
+            for (x, lane) in v.iter_mut().zip(acc) {
+                *x = Fq(portable::canonicalize(&lane, &MODULUS.0));
+            }
+        }
+    }
+
+    #[cfg(feature = "sqrt-table")]
+    fn pow_by_t_minus1_over2_lanes<const K: usize>(x: &[Self; K]) -> [Self; K] {
+        use crate::arithmetic::{mul_lanes, sqr_n_mul_lanes};
+        let sqr_n_lanes_of = |a: &[Self; K], n: u32| {
+            let mut t = *a;
+            Self::sqr_n_lanes(&mut t, n);
+            t
+        };
+        let s10 = sqr_n_lanes_of(x, 1);
+        let s11 = mul_lanes(&s10, x);
+        let s111 = sqr_n_mul_lanes(&s11, 1, x);
+        let s1001 = mul_lanes(&s111, &s10);
+        let s1011 = mul_lanes(&s1001, &s10);
+        let s1101 = mul_lanes(&s1011, &s10);
+        let sa = sqr_n_mul_lanes(x, 129, x);
+        let sb = sqr_n_mul_lanes(&sa, 7, &s1001);
+        let sc = sqr_n_mul_lanes(&sb, 7, &s1101);
+        let sd = sqr_n_mul_lanes(&sc, 4, &s11);
+        let se = sqr_n_mul_lanes(&sd, 6, &s111);
+        let sf = sqr_n_mul_lanes(&se, 3, &s111);
+        let sg = sqr_n_mul_lanes(&sf, 10, &s1001);
+        let sh = sqr_n_mul_lanes(&sg, 4, &s1001);
+        let si = sqr_n_mul_lanes(&sh, 5, &s1001);
+        let sj = sqr_n_mul_lanes(&si, 5, &s1001);
+        let sk = sqr_n_mul_lanes(&sj, 3, &s1001);
+        let sl = sqr_n_mul_lanes(&sk, 4, &s1011);
+        let sm = sqr_n_mul_lanes(&sl, 4, &s1011);
+        let sn = sqr_n_mul_lanes(&sm, 5, &s11);
+        let so = sqr_n_mul_lanes(&sn, 4, x);
+        let sp = sqr_n_mul_lanes(&so, 5, &s11);
+        let sq = sqr_n_mul_lanes(&sp, 4, &s111);
+        let sr = sqr_n_mul_lanes(&sq, 5, &s1011);
+        let ss = sqr_n_mul_lanes(&sr, 3, x);
+        sqr_n_lanes_of(&ss, 4)
     }
 
     fn sqrt_hash_key(&self) -> u32 {
