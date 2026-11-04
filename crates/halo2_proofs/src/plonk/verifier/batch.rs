@@ -14,7 +14,7 @@ use crate::{
     multicore::{IntoParallelIterator, TryFoldAndReduce},
     plonk::{Error, VerifyingKey, commit_instance},
     poly::commitment::{Guard, MSM, Params},
-    transcript::{Blake2bRead, EncodedChallenge},
+    transcript::{EncodedChallenge, PrefetchedBlake2bRead},
 };
 
 const SERIAL_INSTANCE_WINDOW_BITS: usize = 8;
@@ -400,6 +400,29 @@ fn commit_glv_instances<C: CurveAffine>(
     )
 }
 
+/// Decodes the points of `proof` at `offsets` together, ahead of reading it.
+///
+/// Each result equals `from_bytes` of the bytes at its offset (see
+/// [`CurveAffine::batch_decode`]); offsets past the end of the proof are
+/// skipped, and the transcript reports those reads as truncation.
+fn prefetch_points<C: CurveAffine>(proof: &[u8], offsets: &[usize]) -> Vec<(usize, Option<C>)> {
+    let len = C::Repr::default().as_ref().len();
+    let (offsets, encodings): (Vec<usize>, Vec<C::Repr>) = offsets
+        .iter()
+        .filter_map(|&offset| {
+            let bytes = proof.get(offset..offset.checked_add(len)?)?;
+            let mut repr = C::Repr::default();
+            repr.as_mut().copy_from_slice(bytes);
+            Some((offset, repr))
+        })
+        .unzip();
+    offsets
+        .into_iter()
+        .zip(C::batch_decode(&encodings))
+        .map(|(offset, point)| (offset, Option::from(point)))
+        .collect()
+}
+
 /// A verifier that checks multiple proofs in a batch. **This requires the
 /// `batch` crate feature to be enabled.**
 #[derive(Debug, Default)]
@@ -473,16 +496,31 @@ where
                     C::Scalar::try_random(&mut SysRng).expect("system randomness must be available")
                 };
                 let strategy = BatchStrategy::new(params, rho_i);
-                let mut transcript = Blake2bRead::init(&item.proof[..]);
-                verify_proof_with_instance_commitments(
+                let layouts = vk.proof_point_layouts();
+                let circuits = item.instances.len();
+                let mut transcript = match layouts.get(circuits) {
+                    Some(offsets) => PrefetchedBlake2bRead::with_prefetched(
+                        &item.proof[..],
+                        prefetch_points(&item.proof, &offsets),
+                    ),
+                    None => PrefetchedBlake2bRead::recording(&item.proof[..]),
+                };
+                let result = verify_proof_with_instance_commitments(
                     params,
                     vk,
                     strategy,
                     &instances,
                     instance_commitments,
                     &mut transcript,
-                )
-                .map_err(|e| {
+                );
+                // `Ok` means the transcript was read completely; the proof's
+                // validity is decided by the final MSM check.
+                if result.is_ok() {
+                    if let Some(offsets) = transcript.into_recorded() {
+                        layouts.insert(circuits, offsets);
+                    }
+                }
+                result.map_err(|e| {
                     tracing::debug!("Batch item {} failed verification: {}", i, e);
                     e
                 })
