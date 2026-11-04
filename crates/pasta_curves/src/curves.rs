@@ -1073,6 +1073,15 @@ macro_rules! new_curve_impl {
                 CtOption::new(p, p.is_on_curve())
             }
 
+            fn from_xy_unchecked(x: Self::Base, y: Self::Base) -> Self {
+                let p = $name_affine { x, y };
+                debug_assert!(
+                    bool::from(p.is_on_curve()),
+                    "from_xy_unchecked: the point must be on the curve"
+                );
+                p
+            }
+
             fn a() -> Self::Base {
                 $name::curve_constant_a()
             }
@@ -1710,5 +1719,44 @@ mod curve_op_tests {
     fn default_ops_handle_exceptional_cases() {
         check_curve_ops!(Ep, Fq);
         check_curve_ops!(Eq, Fp);
+    }
+
+    #[cfg(feature = "alloc")]
+    macro_rules! check_from_xy_unchecked {
+        ($curve:ty, $affine:ty) => {{
+            use crate::arithmetic::CurveAffine;
+            use rand::SeedableRng;
+            let mut rng = rand_xorshift::XorShiftRng::from_seed([0x5a; 16]);
+            for _ in 0..32 {
+                let point = <$curve>::random(&mut rng).to_affine();
+                let xy = point.coordinates().unwrap();
+                let (x, y) = (*xy.x(), *xy.y());
+                // Fully qualified: with `glv`, the affine types also have a
+                // crate-private inherent `from_xy_unchecked` without the check.
+                let rebuilt = <$affine as CurveAffine>::from_xy_unchecked(x, y);
+                assert_eq!(rebuilt, point);
+                assert_eq!(rebuilt, <$affine>::from_xy(x, y).unwrap());
+                assert_eq!(<$affine as CurveAffine>::from_xy_unchecked(x, -y), -point);
+            }
+        }};
+    }
+
+    /// Rebuilding a point from its own coordinates, or from the negated
+    /// y-coordinate, agrees with the checked constructor.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn from_xy_unchecked_matches_from_xy() {
+        check_from_xy_unchecked!(Ep, EpAffine);
+        check_from_xy_unchecked!(Eq, EqAffine);
+    }
+
+    /// Debug builds still reject coordinates that are not on the curve.
+    #[cfg(all(feature = "alloc", debug_assertions))]
+    #[test]
+    #[should_panic(expected = "the point must be on the curve")]
+    fn from_xy_unchecked_rejects_off_curve_points_in_debug() {
+        use crate::arithmetic::CurveAffine;
+        // Fully qualified, as in `check_from_xy_unchecked`.
+        let _ = <EpAffine as CurveAffine>::from_xy_unchecked(Fp::one(), Fp::one());
     }
 }
