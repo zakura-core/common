@@ -386,10 +386,11 @@ fn commit_glv_instances<C: CurveAffine>(
                     .iter()
                     .map(|column| &column[..PREPARED_INSTANCE_DENSE_ROWS])
                     .collect::<Vec<_>>();
-                table
-                    .dense
-                    .sum_batch_vartime(&dense)
-                    .into_iter()
+                let sums = table.dense.sum_batch_vartime(&dense);
+                // `zip` would silently drop columns if an implementation
+                // returned fewer sums than it was given.
+                debug_assert_eq!(sums.len(), dense.len(), "one sum per column");
+                sums.into_iter()
                     .zip(&masks[start..end])
                     .map(|(sum, &mask)| table.offsets[mask] + sum)
                     .collect::<Vec<_>>()
