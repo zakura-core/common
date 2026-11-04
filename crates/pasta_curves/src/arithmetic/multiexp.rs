@@ -127,32 +127,48 @@ fn signed_booth_multiexp<C: CurveAffine>(
 
     let mut multi_buckets: Vec<BoothBuckets<C>> =
         vec![BoothBuckets::new(c); booth_window_count(&coeffs, c)];
+
+    // Each window's bucket sum is independent, so workers fill windows in
+    // parallel. The windows are then combined on this thread by Horner's
+    // rule, which costs about one scalar's worth of doublings in total;
+    // shifting every window by its own offset in parallel instead would
+    // spend about `c * windows^2 / 2` doublings.
     #[cfg(feature = "multicore")]
-    if should_parallelize_multiexp(coeffs.len(), num_threads) {
-        return multi_buckets
+    let window_sums = if should_parallelize_multiexp(coeffs.len(), num_threads) {
+        multi_buckets
             .par_iter_mut()
             .enumerate()
-            .rev()
-            .map(|(i, buckets)| {
-                let mut acc = buckets.sum(&coeffs, bases, i);
-                (0..c * i).for_each(|_| acc = acc.double());
-                acc
-            })
-            .reduce(C::CurveExt::identity, |a, b| a + b);
-    }
+            .map(|(i, buckets)| buckets.sum(&coeffs, bases, i))
+            .collect::<Vec<_>>()
+    } else {
+        serial_window_sums(&mut multi_buckets, &coeffs, bases)
+    };
     #[cfg(not(feature = "multicore"))]
-    let _ = num_threads;
+    let window_sums = {
+        let _ = num_threads;
+        serial_window_sums(&mut multi_buckets, &coeffs, bases)
+    };
 
+    window_sums
+        .into_iter()
+        .rev()
+        .fold(C::CurveExt::identity(), |mut sum, window| {
+            // restore original evaluation point
+            (0..c).for_each(|_| sum = sum.double());
+            sum + window
+        })
+}
+
+fn serial_window_sums<C: CurveAffine>(
+    multi_buckets: &mut [BoothBuckets<C>],
+    coeffs: &[<C::ScalarExt as PrimeField>::Repr],
+    bases: &[C],
+) -> Vec<C::CurveExt> {
     multi_buckets
         .iter_mut()
         .enumerate()
-        .rev()
-        .map(|(i, buckets)| buckets.sum(&coeffs, bases, i))
-        .fold(C::CurveExt::identity(), |mut sum, bucket| {
-            // restore original evaluation point
-            (0..c).for_each(|_| sum = sum.double());
-            sum + bucket
-        })
+        .map(|(i, buckets)| buckets.sum(coeffs, bases, i))
+        .collect()
 }
 
 #[cfg(feature = "multicore")]
