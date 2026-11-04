@@ -168,3 +168,40 @@ fn pasta_multiscalar_mul_matches_wnaf() {
         None
     );
 }
+
+/// Parallel batch decoding must agree with decoding each encoding on its own,
+/// including non-canonical and off-curve encodings, at every batch size
+/// around the parallel cutoff.
+#[cfg(all(feature = "pallas-pasta", feature = "multicore"))]
+#[test]
+fn parallel_batch_decode_matches_serial() {
+    let mut rng = thread_rng();
+    for len in [0usize, 1, 15, 16, 17, 64, 385] {
+        let encodings = (0..len)
+            .map(|i| match i % 6 {
+                // Non-canonical x-coordinate.
+                3 => [0xff; 32],
+                // Canonical x with no point on the curve, or a sign-bit
+                // variant; either way decoding decides.
+                5 => {
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = i as u8;
+                    bytes[31] = 0x80;
+                    bytes
+                }
+                _ => pallas::Point::random(&mut rng).to_bytes(),
+            })
+            .collect::<Vec<_>>();
+        let serial = encodings
+            .iter()
+            .map(|bytes| Option::<pallas::Point>::from(pallas::Point::from_bytes(bytes)))
+            .collect::<Vec<_>>();
+        match super::batch_decode_pallas_points(encodings.iter().copied()) {
+            Some(parallel) => {
+                assert!(len >= super::MIN_PARALLEL_DECODE_POINTS, "len {len}");
+                assert_eq!(parallel, serial, "len {len}");
+            }
+            None => assert!(len < super::MIN_PARALLEL_DECODE_POINTS, "len {len}"),
+        }
+    }
+}

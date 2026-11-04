@@ -86,6 +86,12 @@ impl private::Sealed<SpendAuth> for SpendAuth {
             &scalar,
         )
     }
+    #[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+    fn batch_decode_points(
+        items: impl Iterator<Item = [u8; 32]>,
+    ) -> Option<Vec<Option<pallas::Point>>> {
+        batch_decode_pallas_points(items)
+    }
 }
 impl private::Sealed<Binding> for Binding {
     const H_STAR_PERSONALIZATION: &'static [u8; 16] = b"Zcash_RedPallasH";
@@ -106,6 +112,51 @@ impl private::Sealed<Binding> for Binding {
             &TABLE,
             &scalar,
         )
+    }
+    #[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+    fn batch_decode_points(
+        items: impl Iterator<Item = [u8; 32]>,
+    ) -> Option<Vec<Option<pallas::Point>>> {
+        batch_decode_pallas_points(items)
+    }
+}
+
+/// Batches with fewer point encodings than this decode one at a time inside
+/// the verification loop. Each decode is a square root, a few microseconds,
+/// so smaller batches would spend more waking pool workers than they save.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta", feature = "multicore"))]
+const MIN_PARALLEL_DECODE_POINTS: usize = 16;
+
+/// Decodes a batch's point encodings (each signature's `R`, plus any keys
+/// still held as bytes) across the Rayon pool.
+///
+/// Returns `None`, so the batch verifier decodes each point in its loop as
+/// before, without the `multicore` feature or for small batches. Results are
+/// returned in input order and consumed in the verifier's order, so a batch
+/// with a malformed encoding reports the same error either way.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+fn batch_decode_pallas_points(
+    items: impl Iterator<Item = [u8; 32]>,
+) -> Option<Vec<Option<pallas::Point>>> {
+    #[cfg(feature = "multicore")]
+    {
+        use maybe_rayon::prelude::*;
+
+        let encodings = items.collect::<Vec<_>>();
+        if encodings.len() < MIN_PARALLEL_DECODE_POINTS {
+            return None;
+        }
+        Some(
+            encodings
+                .par_iter()
+                .map(|bytes| Option::from(pallas::Point::from_bytes(bytes)))
+                .collect(),
+        )
+    }
+    #[cfg(not(feature = "multicore"))]
+    {
+        let _ = items;
+        None
     }
 }
 
