@@ -42,6 +42,8 @@ rand_chacha = "0.10"
 [features]
 pallas-pasta = ["dep:pasta_curves", "pasta_curves/glv", "dep:once_cell"]
 pallas-sensei = ["dep:sensei"]
+# Lets the Pallas batch-verification MSM use the Rayon pool.
+multicore = ["pasta_curves?/multicore"]
 alloc = ["hex", "jubjub/alloc"]
 default = ["std", "pallas-pasta"]
 nightly = []

@@ -107,6 +107,19 @@ macro_rules! impl_multiexp_vartime {
         }
 
         #[cfg(feature = "glv")]
+        fn try_multiexp_vartime_with_parallelism(
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+            use_parallelism: bool,
+        ) -> Option<Self> {
+            if use_parallelism {
+                crate::glv::try_multiexp::<$name>(scalars, bases)
+            } else {
+                crate::glv::try_multiexp_with_threads::<$name>(scalars, bases, 1)
+            }
+        }
+
+        #[cfg(feature = "glv")]
         fn try_multiexp_full_width_is_identity_vartime(
             scalars: &[Self::ScalarExt],
             bases: &[Self::AffineExt],

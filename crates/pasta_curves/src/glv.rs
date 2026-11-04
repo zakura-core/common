@@ -79,6 +79,7 @@
 //!
 //! One-shot use is [`GlvParams::mul_glv`].
 
+use crate::arithmetic::default_multiexp_window_bits;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -838,48 +839,6 @@ fn estimated_signed_booth_work(
     num_threads: usize,
 ) -> Option<usize> {
     estimated_signed_booth_costs(terms, scalar_bits, window_bits, num_threads).map(|(work, _)| work)
-}
-
-/// Floors of `e^k` for `k = 4..=22`.
-///
-/// These preserve the established `ceil(ln(terms))` window schedule without
-/// requiring floating-point transcendental functions, which are unavailable
-/// in `no_std` builds.
-const DEFAULT_MULTIEXP_WINDOW_THRESHOLDS: [u32; 19] = [
-    54,
-    148,
-    403,
-    1_096,
-    2_980,
-    8_103,
-    22_026,
-    59_874,
-    162_754,
-    442_413,
-    1_202_604,
-    3_269_017,
-    8_886_110,
-    24_154_952,
-    65_659_969,
-    178_482_300,
-    485_165_195,
-    1_318_815_734,
-    3_584_912_846,
-];
-
-fn default_multiexp_window_bits(terms: usize) -> Option<usize> {
-    if terms < 4 {
-        Some(1)
-    } else if terms < 32 {
-        Some(3)
-    } else {
-        let terms = u32::try_from(terms).ok()?;
-        let threshold = DEFAULT_MULTIEXP_WINDOW_THRESHOLDS
-            .iter()
-            .position(|upper| terms <= *upper)
-            .unwrap_or(DEFAULT_MULTIEXP_WINDOW_THRESHOLDS.len());
-        Some(4 + threshold)
-    }
 }
 
 fn scalar_repr_bits<C: GlvParams>() -> Option<usize> {
@@ -2287,8 +2246,19 @@ pub(crate) fn try_multiexp<C: GlvParams>(
     scalars: &[C::ScalarExt],
     bases: &[C::AffineExt],
 ) -> Option<C> {
+    try_multiexp_with_threads::<C>(scalars, bases, current_num_threads())
+}
+
+/// [`try_multiexp`] planned for `num_threads` workers. `1` keeps every
+/// backend on the calling thread; larger values select the parallel
+/// backends, which then use the whole current pool.
+pub(crate) fn try_multiexp_with_threads<C: GlvParams>(
+    scalars: &[C::ScalarExt],
+    bases: &[C::AffineExt],
+    num_threads: usize,
+) -> Option<C> {
     assert_eq!(scalars.len(), bases.len());
-    let num_threads = current_num_threads();
+    let num_threads = num_threads.clamp(1, current_num_threads());
     if let Some(result) = planned_strauss_multiexp::<C>(scalars, bases, num_threads) {
         return Some(result);
     }

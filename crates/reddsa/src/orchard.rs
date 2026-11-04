@@ -165,6 +165,59 @@ impl VartimeMultiscalarMul for pallas::Point {
         I::Item: Borrow<Self::Scalar>,
         J: IntoIterator<Item = Option<pallas::Point>>,
     {
+        #[cfg(feature = "pallas-pasta")]
+        {
+            pasta_multiscalar_mul(scalars, points)
+        }
+        #[cfg(not(feature = "pallas-pasta"))]
+        {
+            wnaf_multiscalar_mul(scalars, points)
+        }
+    }
+}
+
+/// Batches below this many terms evaluate on the calling thread: waking pool
+/// workers costs more than splitting such a small multiplication saves.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+const MIN_PARALLEL_MSM_TERMS: usize = 16;
+
+/// Evaluates the MSM with pasta's shared `best_multiexp_vartime`, the one
+/// halo2 uses: GLV backends where its planner selects them, the Signed-Booth
+/// bucket method otherwise, on the Rayon pool under the `multicore` feature.
+#[cfg(all(feature = "alloc", feature = "pallas-pasta"))]
+fn pasta_multiscalar_mul<I, J>(scalars: I, points: J) -> Option<pallas::Point>
+where
+    I: IntoIterator,
+    I::Item: Borrow<pallas::Scalar>,
+    J: IntoIterator<Item = Option<pallas::Point>>,
+{
+    use group::{Curve as _, CurveAffine as _};
+    use pasta_curves::arithmetic::best_multiexp_vartime_with_parallelism;
+
+    let points = points.into_iter().collect::<Option<Vec<_>>>()?;
+    let scalars = scalars.into_iter().map(|c| *c.borrow()).collect::<Vec<_>>();
+    assert_eq!(scalars.len(), points.len());
+
+    let mut affine = vec![pallas::Affine::identity(); points.len()];
+    pallas::Point::batch_normalize(&points, &mut affine);
+    Some(best_multiexp_vartime_with_parallelism(
+        &scalars,
+        &affine,
+        scalars.len() >= MIN_PARALLEL_MSM_TERMS,
+    ))
+}
+
+/// Interleaved width-5 wNAF over projective lookup tables (the Sensei
+/// backend's MSM, and the reference for the pasta path's tests).
+#[cfg(all(feature = "alloc", any(test, not(feature = "pallas-pasta"))))]
+#[allow(non_snake_case)]
+fn wnaf_multiscalar_mul<I, J>(scalars: I, points: J) -> Option<pallas::Point>
+where
+    I: IntoIterator,
+    I::Item: Borrow<pallas::Scalar>,
+    J: IntoIterator<Item = Option<pallas::Point>>,
+{
+    {
         let nafs: Vec<_> = scalars
             .into_iter()
             .map(|c| c.borrow().non_adjacent_form(5))
@@ -176,7 +229,7 @@ impl VartimeMultiscalarMul for pallas::Point {
             .collect::<Option<Vec<_>>>()?;
 
         let mut r = pallas::Point::identity();
-        let naf_size = Self::Scalar::naf_length();
+        let naf_size = pallas::Scalar::naf_length();
 
         for i in (0..naf_size).rev() {
             let mut t = r.double();

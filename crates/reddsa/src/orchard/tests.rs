@@ -117,3 +117,54 @@ fn test_non_adjacent_form() {
     let scalar = pallas::Scalar::random(&mut rng);
     scalar_mul::tests::test_non_adjacent_form_for_scalar(5, scalar);
 }
+
+/// The shared pasta MSM must agree with the interleaved wNAF on every shape
+/// batch verification produces: 128-bit weights, full-width products, zero
+/// scalars, and identity points (an all-zero `R` decodes to the identity).
+#[cfg(feature = "pallas-pasta")]
+#[test]
+fn pasta_multiscalar_mul_matches_wnaf() {
+    use rand::RngExt as _;
+
+    let mut rng = thread_rng();
+    for len in [
+        0usize, 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 49, 64, 97, 194, 200, 385, 400,
+    ] {
+        let scalars = (0..len)
+            .map(|i| match i % 5 {
+                0 => pallas::Scalar::ZERO,
+                1 => pallas::Scalar::from_u128(rng.random::<u128>()),
+                _ => pallas::Scalar::random(&mut rng),
+            })
+            .collect::<Vec<_>>();
+        let points = (0..len)
+            .map(|i| {
+                if i % 7 == 3 {
+                    pallas::Point::identity()
+                } else {
+                    pallas::Point::random(&mut rng)
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected =
+            super::wnaf_multiscalar_mul(scalars.iter(), points.iter().copied().map(Some)).unwrap();
+        let actual =
+            super::pasta_multiscalar_mul(scalars.iter(), points.iter().copied().map(Some)).unwrap();
+        assert_eq!(actual, expected, "len {len}");
+    }
+
+    // All-identity bases short-circuit to the identity.
+    let identity = pallas::Point::identity();
+    assert_eq!(
+        super::pasta_multiscalar_mul(
+            [pallas::Scalar::ONE, pallas::Scalar::ONE],
+            [Some(identity), Some(identity)],
+        ),
+        Some(identity)
+    );
+    // A missing point still fails the whole MSM.
+    assert_eq!(
+        super::pasta_multiscalar_mul([pallas::Scalar::ONE], [None]),
+        None
+    );
+}
