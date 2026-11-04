@@ -315,6 +315,14 @@ impl<T: SigType> VerificationKey<T> {
     }
 }
 impl VerificationKey<SpendAuth> {
+    /// Returns the stored point without decoding the key's byte encoding.
+    #[cfg(feature = "backend-halo2")]
+    pub(crate) fn point(&self) -> pallas::Point {
+        let VerificationKeyInner::SpendAuth(key) = &self.0 else {
+            unreachable!("domain is fixed at construction")
+        };
+        (*key).into()
+    }
     #[cfg(test)]
     pub(crate) fn dummy() -> Self {
         Self::from(&SigningKey::from_scalar(pallas::Scalar::random(
