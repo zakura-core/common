@@ -182,6 +182,35 @@ impl<C: CurveAffine> InstanceFixedWindowTable<C> {
         commitments
     }
 
+    /// Commits every column, splitting the columns into one contiguous chunk
+    /// per worker. Each chunk runs [`Self::commit_batch`] on its own
+    /// accumulators, so the result is identical to one serial call.
+    ///
+    /// A chunk never drops below the lockstep threshold, so splitting never
+    /// moves a column from the lockstep path to per-column commitments.
+    fn commit_batch_parallel(
+        &self,
+        params: &Params<C>,
+        instances: &[&[C::Scalar]],
+    ) -> Vec<C::Curve> {
+        let chunk_len = instances
+            .len()
+            .div_ceil(crate::multicore::current_num_threads())
+            .max(MIN_LOCKSTEP_INSTANCE_COLUMNS);
+        if chunk_len >= instances.len() {
+            return self.commit_batch(params, instances);
+        }
+        (0..instances.len().div_ceil(chunk_len))
+            .into_par_iter()
+            .map(|chunk| {
+                let start = chunk * chunk_len;
+                let end = (start + chunk_len).min(instances.len());
+                self.commit_batch(params, &instances[start..end])
+            })
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
     #[cfg(test)]
     fn retained_bytes(&self) -> usize {
         self.multiples.len() * core::mem::size_of::<C>()
@@ -296,7 +325,7 @@ fn compute_batch_instance_commitments<C: CurveAffine>(
         .flat_map(|instances| instances.iter())
         .map(Vec::as_slice)
         .collect::<Vec<_>>();
-    let projective = table.commit_batch(params, &instances);
+    let projective = table.commit_batch_parallel(params, &instances);
     let mut affine = vec![C::identity(); projective.len()];
     C::Curve::batch_normalize(&projective, &mut affine);
     let mut affine = affine.into_iter();
@@ -524,5 +553,45 @@ mod tests {
 
         check_curve!(EqAffine, Fp);
         check_curve!(EpAffine, Fq);
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn parallel_instance_commitments_match_serial_lockstep() {
+        const K: u32 = 7;
+
+        let params = Params::<EqAffine>::new(K);
+        let table = InstanceFixedWindowTable::new(&params, 10);
+        let instances = (0..23u64)
+            .map(|column| {
+                (0..10u64)
+                    .map(|row| {
+                        let mut bytes = [0; 64];
+                        bytes[..8].copy_from_slice(&(column * 10 + row).to_le_bytes());
+                        bytes[8] = 0x5a;
+                        Fp::from_uniform_bytes(&bytes)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let slices = instances.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+        // Column counts below, at, and above the lockstep threshold, and ones
+        // that do not divide evenly across the pool.
+        for threads in [1, 2, 3, 4, 8] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool builds");
+            for columns in [0, 1, 2, 3, 4, 5, 7, 11, 23] {
+                let slices = &slices[..columns];
+                let parallel = pool.install(|| table.commit_batch_parallel(&params, slices));
+                assert_eq!(
+                    parallel,
+                    table.commit_batch(&params, slices),
+                    "threads {threads}, columns {columns}",
+                );
+            }
+        }
     }
 }
