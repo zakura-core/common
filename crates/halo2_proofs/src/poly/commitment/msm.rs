@@ -106,6 +106,17 @@ pub struct MSM<'a, C: CurveAffine> {
     batched_other: Vec<ArbitraryTerm<C>>,
 }
 
+/// Batch verification accumulates dozens of commitment terms per proof. At
+/// least this many are sorted and rebuilt into points on the Rayon pool;
+/// fewer are cheaper on the calling thread.
+#[cfg(feature = "multicore")]
+const PARALLEL_TERM_PREPARATION_MIN: usize = 512;
+
+#[cfg(feature = "multicore")]
+fn parallelize_term_preparation(terms: usize) -> bool {
+    terms >= PARALLEL_TERM_PREPARATION_MIN && crate::multicore::current_num_threads() > 1
+}
+
 fn canonicalize_other<C: CurveAffine>(mut terms: Vec<ArbitraryTerm<C>>) -> Vec<ArbitraryTerm<C>> {
     // The stable sort keeps the first-encountered orientation for each
     // x-coordinate. Which orientation that is depends on aggregation order
@@ -113,6 +124,15 @@ fn canonicalize_other<C: CurveAffine>(mut terms: Vec<ArbitraryTerm<C>>) -> Vec<A
     // the evaluated sum: `(scalar, P)` and `(-scalar, -P)` are the same term,
     // and the coalescing below negates the scalar exactly when the stored
     // orientation differs.
+    #[cfg(feature = "multicore")]
+    if parallelize_term_preparation(terms.len()) {
+        // Rayon's `par_sort_by` is stable, like `sort_by`.
+        use maybe_rayon::slice::ParallelSliceMut as _;
+        terms.par_sort_by(|a, b| a.0.cmp(&b.0));
+    } else {
+        terms.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    #[cfg(not(feature = "multicore"))]
     terms.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut canonical = Vec::with_capacity(terms.len());
@@ -342,11 +362,17 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             );
         } else {
             scalars.extend(batched_other.iter().map(|(_, (scalar, _))| *scalar));
-            bases.extend(
-                batched_other
-                    .iter()
-                    .map(|(x, (_, y))| C::from_xy_unchecked(x.value, *y)),
-            );
+            let point = |(x, (_, y)): &ArbitraryTerm<C>| C::from_xy_unchecked(x.value, *y);
+            #[cfg(feature = "multicore")]
+            if parallelize_term_preparation(batched_other.len()) {
+                use maybe_rayon::prelude::*;
+                // `par_extend` appends in iteration order.
+                bases.par_extend(batched_other.par_iter().map(point));
+            } else {
+                bases.extend(batched_other.iter().map(point));
+            }
+            #[cfg(not(feature = "multicore"))]
+            bases.extend(batched_other.iter().map(point));
         }
 
         if let Some(w_scalar) = w_scalar {
@@ -747,6 +773,55 @@ mod tests {
         assert!(batched.eval());
         broken.append_term(Fq::one(), params.g[1]);
         assert!(!broken.eval());
+    }
+
+    /// Batches with enough accumulated commitment terms sort and rebuild them on
+    /// the pool. The canonical term list must not depend on the pool size,
+    /// including duplicate points and opposite orientations of one point.
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn parallel_term_preparation_matches_serial() {
+        let params = Params::<EpAffine>::new(6);
+        let build = || {
+            let mut batched = MSM::new(&params);
+            for proof in 0..96u64 {
+                let mut msm = MSM::new(&params);
+                msm.add_to_w_scalar(Fq::from(proof + 3));
+                for term in 0..8u64 {
+                    let base = params.g[((proof * 8 + term) % u64::from(params.n)) as usize];
+                    let base = if term % 3 == 1 { -base } else { base };
+                    let point: EpAffine = (base * Fq::from(proof * 31 + term + 1)).into();
+                    msm.append_term(Fq::from(proof + term + 5), point);
+                }
+                // A point every proof shares, in both orientations.
+                msm.append_term(Fq::from(proof + 7), params.g[1]);
+                msm.append_term(Fq::from(proof + 9), -params.g[1]);
+                batched.add_msm_batch(msm);
+            }
+            batched
+        };
+        assert!(build().batched_other.len() >= super::PARALLEL_TERM_PREPARATION_MIN);
+
+        let terms_on = |threads: usize| {
+            maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool")
+                .install(|| build().multiexp_terms())
+        };
+        let serial = terms_on(1);
+        for threads in [2, 4, 8] {
+            assert!(terms_on(threads) == serial, "{threads} threads");
+        }
+        let expected = build().multiexp();
+        for threads in [1, 4] {
+            let result = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool")
+                .install(|| build().multiexp());
+            assert_eq!(result, expected, "{threads} threads");
+        }
     }
 
     #[test]

@@ -2324,19 +2324,70 @@ fn multiexp<C: GlvParams>(
     acc
 }
 
+fn multiexp_base<C: GlvParams>(base: &C::AffineExt) -> MultiexpBase<C::Base> {
+    let (x, y) = C::affine_xy(base);
+    MultiexpBase {
+        x,
+        endo_x: x * C::Base::ZETA,
+        y,
+        identity: bool::from(base.is_identity()),
+    }
+}
+
 fn multiexp_bases<C: GlvParams>(bases: &[C::AffineExt]) -> Vec<MultiexpBase<C::Base>> {
-    bases
-        .iter()
-        .map(|base| {
-            let (x, y) = C::affine_xy(base);
-            MultiexpBase {
-                x,
-                endo_x: x * C::Base::ZETA,
-                y,
-                identity: bool::from(base.is_identity()),
-            }
-        })
-        .collect()
+    bases.iter().map(multiexp_base::<C>).collect()
+}
+
+/// Per-term preparation (scalar decomposition, base conversion) runs on the
+/// pool in chunks of at least this many terms. Below a chunk it is cheaper on
+/// the calling thread than a task dispatch.
+#[cfg(feature = "multicore")]
+const PARALLEL_PREPARATION_CHUNK_TERMS: usize = 256;
+
+/// [`multiexp_bases`], split across the pool when the multiplication is
+/// planned for more than one worker.
+fn planned_multiexp_bases<C: GlvParams>(
+    bases: &[C::AffineExt],
+    num_threads: usize,
+) -> Vec<MultiexpBase<C::Base>> {
+    #[cfg(feature = "multicore")]
+    if num_threads > 1 && bases.len() >= 2 * PARALLEL_PREPARATION_CHUNK_TERMS {
+        return bases
+            .par_iter()
+            .with_min_len(PARALLEL_PREPARATION_CHUNK_TERMS)
+            .map(multiexp_base::<C>)
+            .collect();
+    }
+    #[cfg(not(feature = "multicore"))]
+    let _ = num_threads;
+    multiexp_bases::<C>(bases)
+}
+
+/// Decomposes every scalar into checked GLV components, split across the pool
+/// when the multiplication is planned for more than one worker. Returns
+/// `None` if any scalar fails its decomposition or bound check.
+fn planned_components<C, D>(
+    scalars: &[C::ScalarExt],
+    num_threads: usize,
+    decompose_scalar: &D,
+) -> Option<Vec<(SignedMagnitude, SignedMagnitude)>>
+where
+    C: GlvParams,
+    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))> + Sync,
+{
+    let component =
+        |scalar: &C::ScalarExt| decompose_scalar(scalar).and_then(checked_signed_magnitudes);
+    #[cfg(feature = "multicore")]
+    if num_threads > 1 && scalars.len() >= 2 * PARALLEL_PREPARATION_CHUNK_TERMS {
+        return scalars
+            .par_iter()
+            .with_min_len(PARALLEL_PREPARATION_CHUNK_TERMS)
+            .map(component)
+            .collect();
+    }
+    #[cfg(not(feature = "multicore"))]
+    let _ = num_threads;
+    scalars.iter().map(component).collect()
 }
 
 /// Attempts a GLV bucket multiscalar multiplication for a large Pasta MSM,
@@ -2381,7 +2432,7 @@ fn try_large_multiexp<C, D>(
 ) -> Option<C>
 where
     C: GlvParams,
-    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))>,
+    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))> + Sync,
 {
     if scalars.len() < MIN_GLV_MULTIEXP_TERMS {
         return None;
@@ -2392,10 +2443,7 @@ where
 
     // Decompose once for the selected backend. With `orbits`, the planner
     // also prices these exact component magnitudes.
-    let components = scalars
-        .iter()
-        .map(|scalar| decompose_scalar(scalar).and_then(checked_signed_magnitudes))
-        .collect::<Option<Vec<_>>>()?;
+    let components = planned_components::<C, D>(scalars, num_threads, &decompose_scalar)?;
 
     #[cfg(feature = "orbits")]
     {
@@ -2403,7 +2451,7 @@ where
         let plan = plan_multiexp::<C>(&profile, num_threads)?;
         match plan {
             MultiexpPlan::Booth { window_bits } => {
-                let bases = multiexp_bases::<C>(bases);
+                let bases = planned_multiexp_bases::<C>(bases, num_threads);
                 multiexp(&components, &bases, window_bits, num_threads)
             }
             MultiexpPlan::Orbit { window_bits } => {
@@ -2414,7 +2462,7 @@ where
 
     #[cfg(not(feature = "orbits"))]
     {
-        let bases = multiexp_bases::<C>(bases);
+        let bases = planned_multiexp_bases::<C>(bases, num_threads);
         multiexp(&components, &bases, window_bits, num_threads)
     }
 }
@@ -5465,6 +5513,49 @@ mod tests {
         assert!(checked_signed_magnitudes(((false, 1u128 << in_bounds), (false, 0))).is_some());
         assert!(checked_signed_magnitudes(((false, out_of_bounds), (false, 0))).is_none());
         assert!(checked_signed_magnitudes(((false, 0), (true, out_of_bounds))).is_none());
+    }
+
+    /// Parallel scalar decomposition and base conversion must equal the
+    /// serial preparation element for element, and a failed decomposition
+    /// anywhere must still fail the whole preparation.
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn planned_preparation_matches_serial() {
+        fn check<C: GlvParams>() {
+            let (scalars, bases, _) = verifier_multiexp_inputs::<C>(1_537);
+            let split = |k: &C::ScalarExt| Some(decompose::<C>(k));
+            let serial_components = planned_components::<C, _>(&scalars, 1, &split);
+            let serial_bases = multiexp_bases::<C>(&bases);
+            for num_threads in [1, 2, 8] {
+                with_pool(num_threads, || {
+                    assert_eq!(
+                        planned_components::<C, _>(&scalars, num_threads, &split),
+                        serial_components
+                    );
+                    let parallel = planned_multiexp_bases::<C>(&bases, num_threads);
+                    assert_eq!(parallel.len(), serial_bases.len());
+                    for (a, b) in parallel.iter().zip(&serial_bases) {
+                        assert!(a.x == b.x && a.endo_x == b.endo_x && a.y == b.y);
+                        assert_eq!(a.identity, b.identity);
+                    }
+
+                    // One failing decomposition in the middle fails it all.
+                    let failing = |k: &C::ScalarExt| {
+                        if *k == scalars[900] {
+                            None
+                        } else {
+                            Some(decompose::<C>(k))
+                        }
+                    };
+                    assert_eq!(
+                        planned_components::<C, _>(&scalars, num_threads, &failing),
+                        None
+                    );
+                });
+            }
+        }
+        check::<pallas::Point>();
+        check::<vesta::Point>();
     }
 
     #[test]
