@@ -49,6 +49,13 @@ const MAGNITUDES: usize = 1 << (WINDOW_BITS - 1);
 /// and signed recoding can carry into one more window.
 const WINDOWS: usize = GLV_COMPONENT_BITS / WINDOW_BITS + 1;
 
+/// Sums reduced together by one call to the affine bucket reducer.
+///
+/// Each Orchard-shaped sum holds about 270 points (17 KiB), so a reduction
+/// over many sums outgrows the core's L2 cache; on Zen 4, 64 or 128 sums per
+/// call ran about a third slower per sum than 8 to 32. Larger batches are split.
+const REDUCE_SUMS: usize = 16;
+
 /// Builds a [`PreparedFixedBaseSum`] over `bases`.
 pub(crate) fn prepare_fixed_base_sum<C: GlvParams>(
     bases: &[C::AffineExt],
@@ -174,6 +181,16 @@ impl<C: GlvParams> PreparedFixedBaseSum<C> for FixedBaseSum<C> {
     }
 
     fn sum_batch_vartime(&self, scalars: &[&[C::ScalarExt]]) -> Vec<C> {
+        scalars
+            .chunks(REDUCE_SUMS)
+            .flat_map(|chunk| self.reduce_sums(chunk))
+            .collect()
+    }
+}
+
+impl<C: GlvParams> FixedBaseSum<C> {
+    /// Reduces the sums of `scalars` together; see [`REDUCE_SUMS`].
+    fn reduce_sums(&self, scalars: &[&[C::ScalarExt]]) -> Vec<C> {
         // One bucket per sum, laid out contiguously for the reducer.
         let mut points =
             Vec::with_capacity(scalars.iter().map(|s| s.len()).sum::<usize>() * 2 * WINDOWS);
