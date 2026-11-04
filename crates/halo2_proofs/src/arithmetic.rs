@@ -397,11 +397,31 @@ pub fn best_fft<Scalar: Field, G: FftGroup<Scalar>>(a: &mut [G], omega: Scalar, 
 }
 
 /// This perform recursive butterfly arithmetic
+///
+/// The two halves run in parallel only for the first `ceil(log2(threads))`
+/// levels of recursion, which gives one task per thread. Deeper levels recurse
+/// serially, so a transform makes fewer than `2 * threads` joins rather than one
+/// per butterfly.
 pub fn recursive_butterfly_arithmetic<Scalar: Field, G: FftGroup<Scalar>>(
     a: &mut [G],
     n: usize,
     twiddle_chunk: usize,
     twiddles: &[Scalar],
+) {
+    let parallel_depth = multicore::current_num_threads()
+        .next_power_of_two()
+        .trailing_zeros();
+    butterfly_arithmetic_to_depth(a, n, twiddle_chunk, twiddles, parallel_depth);
+}
+
+/// Like `recursive_butterfly_arithmetic`, but joins only while `parallel_depth`
+/// is nonzero, decrementing it at each level.
+fn butterfly_arithmetic_to_depth<Scalar: Field, G: FftGroup<Scalar>>(
+    a: &mut [G],
+    n: usize,
+    twiddle_chunk: usize,
+    twiddles: &[Scalar],
+    parallel_depth: u32,
 ) {
     if n == 2 {
         let t = a[1];
@@ -410,10 +430,18 @@ pub fn recursive_butterfly_arithmetic<Scalar: Field, G: FftGroup<Scalar>>(
         a[1] -= &t;
     } else {
         let (left, right) = a.split_at_mut(n / 2);
-        multicore::join(
-            || recursive_butterfly_arithmetic(left, n / 2, twiddle_chunk * 2, twiddles),
-            || recursive_butterfly_arithmetic(right, n / 2, twiddle_chunk * 2, twiddles),
-        );
+        let half = |half: &mut [G], depth| {
+            butterfly_arithmetic_to_depth(half, n / 2, twiddle_chunk * 2, twiddles, depth)
+        };
+        if parallel_depth > 0 {
+            multicore::join(
+                || half(left, parallel_depth - 1),
+                || half(right, parallel_depth - 1),
+            );
+        } else {
+            half(left, 0);
+            half(right, 0);
+        }
 
         // case when twiddle factor is one
         let (a, left) = left.split_at_mut(1);
