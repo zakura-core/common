@@ -52,7 +52,11 @@
 //! constant-time.
 //!
 //! ISA requirement: MULX needs BMI2 and ADCX/ADOX need ADX (Intel Broadwell
-//! / AMD Zen or newer). Builds select this backend when Rust's resolved target
+//! / AMD Zen or newer). Forcing this backend with the `x86_64-asm` feature
+//! also enables the AVX2 batch square root (`arithmetic::avx2_sqrt`), so the
+//! CPU must implement AVX2 as well; every Intel and AMD CPU with BMI2 and ADX
+//! does. When the backend is selected from the target's features instead,
+//! the AVX2 path requires the target to enable AVX2. Builds select this backend when Rust's resolved target
 //! features include both extensions, or when `x86_64-asm` is enabled. The
 //! `portable` Cargo feature disables this backend in either case, but does not
 //! undo CPU instructions enabled by Rust's target flags. There is no runtime
