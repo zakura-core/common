@@ -185,7 +185,7 @@ impl<T: SpendAuth> VerificationKey<T> {
     /// its running time and memory access pattern may depend on the
     /// randomizer's value. RedJubjub randomization remains constant-time.
     pub fn randomize(&self, randomizer: &Randomizer<T>) -> VerificationKey<T> {
-        let point = self.point + T::basepoint().mul_vartime(*randomizer);
+        let point = self.point + T::basepoint_mul_vartime(*randomizer);
         let bytes = VerificationKeyBytes {
             bytes: point.to_bytes().as_ref().try_into().unwrap(),
             _marker: PhantomData,
@@ -252,7 +252,7 @@ impl<T: SigType> VerificationKey<T> {
         #[cfg(not(feature = "alloc"))]
         let check = {
             // Both scalars are public signature data, so variable time is safe.
-            let sB = T::basepoint().mul_vartime(s);
+            let sB = T::basepoint_mul_vartime(s);
             let cA = self.point.mul_vartime(c);
             sB - cA - r
         };
