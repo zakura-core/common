@@ -70,6 +70,13 @@ impl<F: PrimeField> Ord for CanonicalFieldKey<F> {
     }
 }
 
+/// A term over an arbitrary point, keyed by its x-coordinate.
+///
+/// Every stored `(x, y)` pair is the affine coordinates of a non-identity
+/// point on the curve: terms enter only through [`MSM::append_term`], which
+/// takes them from a valid point, and merging keeps one of two such pairs,
+/// `(x, y)` or `(x, -y)`. The bases are therefore rebuilt with
+/// [`CurveAffine::from_xy_unchecked`] rather than re-checked.
 type ArbitraryTerm<C> = (
     CanonicalFieldKey<<C as CurveAffine>::Base>,
     (<C as CurveAffine>::ScalarExt, <C as CurveAffine>::Base),
@@ -331,14 +338,14 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             bases.extend(
                 other
                     .iter()
-                    .map(|(x, (_, y))| C::from_xy(x.value, *y).unwrap()),
+                    .map(|(x, (_, y))| C::from_xy_unchecked(x.value, *y)),
             );
         } else {
             scalars.extend(batched_other.iter().map(|(_, (scalar, _))| *scalar));
             bases.extend(
                 batched_other
                     .iter()
-                    .map(|(x, (_, y))| C::from_xy(x.value, *y).unwrap()),
+                    .map(|(x, (_, y))| C::from_xy_unchecked(x.value, *y)),
             );
         }
 
@@ -426,12 +433,12 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
                 let extra: Vec<(C::Scalar, C)> = if self.batched_other.is_empty() {
                     self.other
                         .iter()
-                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(x.value, *y).unwrap()))
+                        .map(|(x, (scalar, y))| (*scalar, C::from_xy_unchecked(x.value, *y)))
                         .collect()
                 } else {
                     self.batched_other
                         .iter()
-                        .map(|(x, (scalar, y))| (*scalar, C::from_xy(x.value, *y).unwrap()))
+                        .map(|(x, (scalar, y))| (*scalar, C::from_xy_unchecked(x.value, *y)))
                         .collect()
                 };
                 if extra.len() <= n {

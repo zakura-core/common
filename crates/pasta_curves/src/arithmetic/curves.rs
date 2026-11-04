@@ -484,6 +484,18 @@ pub trait CurveAffine:
     /// curve.
     fn from_xy(x: Self::Base, y: Self::Base) -> CtOption<Self>;
 
+    /// Obtains a point given $(x, y)$ that the caller knows is on the curve,
+    /// such as coordinates taken from an existing point with
+    /// [`Self::coordinates`].
+    ///
+    /// Implementations may skip the curve check that [`Self::from_xy`]
+    /// performs; the default performs it and panics if it fails. The Pasta
+    /// curves check only in debug builds. Passing coordinates that are not
+    /// on the curve produces a value whose arithmetic is meaningless.
+    fn from_xy_unchecked(x: Self::Base, y: Self::Base) -> Self {
+        Self::from_xy(x, y).expect("from_xy_unchecked: the point must be on the curve")
+    }
+
     /// Returns whether or not this element is on the curve; should
     /// always be true unless an "unchecked" API was used.
     fn is_on_curve(&self) -> Choice;
