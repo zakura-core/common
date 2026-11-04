@@ -21,11 +21,9 @@ use crate::{
     value::{NoteValue, ValueCommitTrapdoor},
 };
 use alloc::string::String;
-#[cfg(feature = "verifier")]
 use alloc::vec::Vec;
 #[cfg(feature = "prover")]
 use rand::Rng;
-#[cfg(feature = "prover")]
 use sensei::primitives::pallas;
 
 #[cfg(feature = "prover")]
@@ -229,17 +227,29 @@ impl ProvingKey {
 
 use super::Instance;
 impl Instance {
-    pub(crate) fn native(&self) -> sensei::PublicStatement {
-        sensei::PublicStatement {
-            anchor: self.anchor.inner(),
-            cv_net: (self.cv_net.x(), self.cv_net.y()),
-            nf_old: self.nf_old.inner(),
-            rk: self.rk.native().raw_coordinates(),
-            cmx: self.cmx.inner(),
-            enable_spend: self.enable_spend,
-            enable_output: self.enable_output,
-            disable_cross_address: self.cross_address_disabled,
-        }
+    /// Encodes each instance as a Sensei public statement.
+    ///
+    /// `rk` is already held in affine form; the projective `cv_net` points are
+    /// normalized together with one shared inversion.
+    pub(crate) fn natives(instances: &[Self]) -> Vec<sensei::PublicStatement> {
+        let cv_nets: Vec<pallas::Point> = instances.iter().map(|i| i.cv_net.point()).collect();
+        let mut affine = alloc::vec![pallas::Affine::default(); cv_nets.len()];
+        pallas::Point::batch_normalize(&cv_nets, &mut affine);
+        instances
+            .iter()
+            .zip(affine)
+            .map(|(i, cv_net)| sensei::PublicStatement {
+                anchor: i.anchor.inner(),
+                // An identity cv_net is encoded as (0, 0).
+                cv_net: cv_net.raw_coordinates(),
+                nf_old: i.nf_old.inner(),
+                rk: i.rk.native().raw_coordinates(),
+                cmx: i.cmx.inner(),
+                enable_spend: i.enable_spend,
+                enable_output: i.enable_output,
+                disable_cross_address: i.cross_address_disabled,
+            })
+            .collect()
     }
 }
 
@@ -345,9 +355,9 @@ impl Proof {
         }
         let actions = circuits
             .iter()
-            .zip(instances)
-            .map(|(c, i)| sensei::Action {
-                statement: i.native(),
+            .zip(Instance::natives(instances))
+            .map(|(c, statement)| sensei::Action {
+                statement,
                 witness: c.native(),
             })
             .collect();
@@ -386,7 +396,7 @@ impl Proof {
         if instances.is_empty() {
             return Err(ProofError::InvalidInput);
         }
-        let statements: Vec<_> = instances.iter().map(Instance::native).collect();
+        let statements = Instance::natives(instances);
         let request = sensei::VerificationRequest::new(
             vk.circuit_version.native(),
             &statements,
@@ -447,6 +457,63 @@ mod classification_tests {
         for &(error, as_prover, as_verifier) in table {
             assert_eq!(prover_error(error), as_prover, "{error:?}");
             assert_eq!(verifier_error(error), as_verifier, "{error:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::Instance;
+    use crate::{
+        bundle::Flags,
+        note::{ExtractedNoteCommitment, Nullifier},
+        primitives::redpallas::VerificationKey,
+        rng_compat::OsRng,
+        tree::Anchor,
+        value::{ValueCommitTrapdoor, ValueCommitment, ValueSum},
+    };
+    use alloc::vec::Vec;
+
+    #[test]
+    fn batched_statements_match_per_instance_encoding() {
+        let mut rng = OsRng;
+        let identity = ValueCommitment::derive(ValueSum::zero(), ValueCommitTrapdoor::zero());
+        assert_eq!(identity.to_bytes(), [0; 32]);
+        // Place an identity cv_net first (where the running product starts), in the
+        // middle, and last.
+        let instances: Vec<Instance> = (0..20)
+            .map(|i| {
+                let cv_net = if [0, 7, 19].contains(&i) {
+                    identity.clone()
+                } else {
+                    ValueCommitment::derive(
+                        ValueSum::from_raw(i64::from(i) * 1_000 - 5_000),
+                        ValueCommitTrapdoor::random(&mut rng),
+                    )
+                };
+                Instance::from_parts(
+                    Anchor::from_bytes([0; 32]).unwrap(),
+                    cv_net,
+                    Nullifier::dummy(&mut rng),
+                    VerificationKey::dummy(),
+                    ExtractedNoteCommitment::from_bytes(&[0; 32]).unwrap(),
+                    Flags::ENABLED,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        assert!(Instance::natives(&[]).is_empty());
+        for len in 0..=instances.len() {
+            let statements = Instance::natives(&instances[..len]);
+            assert_eq!(statements.len(), len);
+            for (instance, statement) in instances.iter().zip(&statements) {
+                assert_eq!(statement.cv_net, (instance.cv_net.x(), instance.cv_net.y()));
+                assert_eq!(statement.rk, instance.rk.native().raw_coordinates());
+                assert_eq!(statement.anchor, instance.anchor.inner());
+                assert_eq!(statement.nf_old, instance.nf_old.inner());
+                assert_eq!(statement.cmx, instance.cmx.inner());
+            }
         }
     }
 }

@@ -133,6 +133,18 @@ impl From<VerificationKey<crate::sapling::SpendAuth>> for jubjub::AffinePoint {
     }
 }
 
+#[cfg(feature = "pallas-pasta")]
+impl From<VerificationKey<crate::orchard::SpendAuth>> for pasta_curves::pallas::Point {
+    /// Returns the stored spend authorization point without decoding it.
+    ///
+    /// This preserves all accepted points, including the identity.
+    /// Protocol-specific restrictions must still be checked by the caller.
+    fn from(key: VerificationKey<crate::orchard::SpendAuth>) -> Self {
+        debug_assert_eq!(key.point.to_bytes(), key.bytes.bytes);
+        key.point
+    }
+}
+
 impl<T: SigType> From<VerificationKey<T>> for VerificationKeyBytes<T> {
     fn from(pk: VerificationKey<T>) -> VerificationKeyBytes<T> {
         pk.bytes
