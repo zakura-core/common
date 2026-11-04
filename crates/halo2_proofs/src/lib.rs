@@ -102,6 +102,12 @@ trait PreparedLookupCommitments<C: pasta_curves::arithmetic::CurveAffine> {
 // Selector families smaller than this are cheaper to evaluate directly.
 const MIN_SELECTOR_FAMILY_LEN: usize = 4;
 
+/// Maximum contiguous point runs recorded or retained for one proof layout.
+/// Orchard uses three runs regardless of its action count. Capping each layout
+/// bounds the 256-slot cache's range data to 128 KiB on 64-bit targets.
+#[cfg(feature = "batch")]
+const MAX_CACHED_PROOF_POINT_RUNS: usize = 32;
+
 // Signed width nine needs one more cached multiple than unsigned width eight.
 #[cfg(feature = "batch")]
 const INSTANCE_WINDOW_BITS: usize = 9;
