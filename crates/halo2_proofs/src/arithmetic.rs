@@ -6,10 +6,9 @@ use group::{
     Group as _, GroupOpsOwned, ScalarMulOwned,
     ff::{BatchInvert, PrimeField},
 };
-use maybe_rayon::prelude::*;
 pub use pasta_curves::arithmetic::*;
 
-use crate::multicore::{self, TheBestReduce};
+use crate::multicore;
 
 /// This represents an element of a group with basic operations that can be
 /// performed. This allows an FFT implementation (for example) to operate
@@ -87,146 +86,6 @@ where
     }
 }
 
-#[derive(Clone, Copy)]
-enum Bucket<C: CurveAffine> {
-    None,
-    Affine(C),
-    Projective(C::Curve),
-}
-
-impl<C: CurveAffine> Bucket<C> {
-    fn add_assign(&mut self, other: C) {
-        *self = match *self {
-            Bucket::None => Bucket::Affine(other),
-            Bucket::Affine(a) => Bucket::Projective(a + other),
-            Bucket::Projective(mut a) => {
-                a += other;
-                Bucket::Projective(a)
-            }
-        }
-    }
-
-    fn add(self, mut other: C::Curve) -> C::Curve {
-        match self {
-            Bucket::None => other,
-            Bucket::Affine(a) => {
-                other += a;
-                other
-            }
-            Bucket::Projective(a) => other + &a,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct BoothDigit {
-    magnitude: usize,
-    negative: bool,
-}
-
-fn booth_digit(bytes: &[u8], window_bits: usize, window: usize) -> BoothDigit {
-    debug_assert!(window_bits > 0);
-    debug_assert!(window_bits < u64::BITS as usize);
-
-    let window_start = window * window_bits;
-    let byte_start = window_start / 8;
-    let mut encoded = [0; 8];
-    if byte_start < bytes.len() {
-        for (slot, byte) in encoded.iter_mut().zip(&bytes[byte_start..]) {
-            *slot = *byte;
-        }
-    }
-
-    let bit_offset = window_start - byte_start * 8;
-    let radix = 1usize << window_bits;
-    let value = ((u64::from_le_bytes(encoded) >> bit_offset) as usize) & (radix - 1);
-    let overlap = if window_start == 0 {
-        0
-    } else {
-        let bit = window_start - 1;
-        bytes
-            .get(bit / 8)
-            .map_or(0, |byte| usize::from((byte >> (bit % 8)) & 1))
-    };
-
-    // The bit below each window is its carry-in, while the window's high bit
-    // is its carry-out. These terms cancel between adjacent windows, leaving
-    // a signed digit whose magnitude is at most half the radix.
-    if value < radix / 2 {
-        BoothDigit {
-            magnitude: value + overlap,
-            negative: false,
-        }
-    } else {
-        let magnitude = radix - value - overlap;
-        BoothDigit {
-            magnitude,
-            negative: magnitude != 0,
-        }
-    }
-}
-
-fn booth_window_count<R: AsRef<[u8]>>(reprs: &[R], window_bits: usize) -> usize {
-    debug_assert!(window_bits > 0);
-
-    let repr_bytes = reprs
-        .iter()
-        .map(|repr| repr.as_ref().len())
-        .max()
-        .unwrap_or(0);
-    let repr_bits = repr_bytes
-        .checked_mul(u8::BITS as usize)
-        .expect("scalar representation is too large");
-
-    // Integer division reserves an additional carry window exactly when the
-    // representation ends on a window boundary. Otherwise, the last partial
-    // window cannot produce a carry.
-    repr_bits / window_bits + 1
-}
-
-#[derive(Clone)]
-struct BoothBuckets<C: CurveAffine> {
-    c: usize,
-    coeffs: Vec<Bucket<C>>,
-}
-
-impl<C: CurveAffine> BoothBuckets<C> {
-    fn new(c: usize) -> Self {
-        Self {
-            c,
-            coeffs: vec![Bucket::None; 1 << (c - 1)],
-        }
-    }
-
-    fn sum(
-        &mut self,
-        coeffs: &[<C::Scalar as PrimeField>::Repr],
-        bases: &[C],
-        i: usize,
-    ) -> C::Curve {
-        // Recode each scalar window into a signed digit and add its base to
-        // the bucket for the digit's magnitude.
-        for (coeff, base) in coeffs.iter().zip(bases.iter()) {
-            let digit = booth_digit(coeff.as_ref(), self.c, i);
-            if digit.magnitude != 0 {
-                let base = if digit.negative { -*base } else { *base };
-                self.coeffs[digit.magnitude - 1].add_assign(base);
-            }
-        }
-        // Summation by parts
-        // e.g. 3a + 2b + 1c = a +
-        //                    (a) + b +
-        //                    ((a) + b) + c
-        let mut acc = C::Curve::identity();
-        let mut sum = C::Curve::identity();
-        self.coeffs.iter().rev().for_each(|b| {
-            sum = b.add(sum);
-            acc += sum;
-        });
-        acc
-    }
-}
-
 /// Performs a small multi-exponentiation operation.
 /// Uses the double-and-add algorithm with doublings shared across points.
 ///
@@ -261,7 +120,9 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 ///
 /// This function will panic if coeffs and bases have a different length.
 ///
-/// This will use multithreading if beneficial.
+/// This will use multithreading if beneficial. It forwards to
+/// [`pasta_curves::arithmetic::best_multiexp_vartime`], which halo2 shares
+/// with RedPallas batch verification.
 ///
 /// # Timing
 ///
@@ -270,55 +131,7 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 /// blinding-derived coefficients and explicitly accepts that timing leakage.
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     assert_eq!(coeffs.len(), bases.len());
-
-    let num_threads = multicore::current_num_threads();
-    if let Some(result) = C::Curve::try_multiexp_vartime(coeffs, bases) {
-        return result;
-    }
-
-    let c = if bases.len() < 4 {
-        1
-    } else if bases.len() < 32 {
-        3
-    } else {
-        (f64::from(bases.len() as u32)).ln().ceil() as usize
-    };
-
-    // Convert to canonical representations once instead of once per window.
-    let coeffs = coeffs.iter().map(PrimeField::to_repr).collect::<Vec<_>>();
-
-    let mut multi_buckets: Vec<BoothBuckets<C>> =
-        vec![BoothBuckets::new(c); booth_window_count(&coeffs, c)];
-    if should_parallelize_multiexp(coeffs.len(), num_threads) {
-        multi_buckets
-            .par_iter_mut()
-            .enumerate()
-            .rev()
-            .map(|(i, buckets)| {
-                let mut acc = buckets.sum(&coeffs, bases, i);
-                (0..c * i).for_each(|_| acc = acc.double());
-                acc
-            })
-            .the_best_reduce(C::Curve::identity, |a, b| a + b)
-            .expect("multi_buckets always contains at least 1 bucket")
-    } else {
-        multi_buckets
-            .iter_mut()
-            .enumerate()
-            .rev()
-            .map(|(i, buckets)| buckets.sum(&coeffs, bases, i))
-            .fold(C::Curve::identity(), |mut sum, bucket| {
-                // restore original evaluation point
-                (0..c).for_each(|_| sum = sum.double());
-                sum + bucket
-            })
-    }
-}
-
-fn should_parallelize_multiexp(num_coeffs: usize, num_threads: usize) -> bool {
-    // The parallel algorithm shifts each window result independently. With a
-    // single worker, this only adds doublings compared to serial evaluation.
-    num_threads > 1 && num_coeffs > num_threads
+    pasta_curves::arithmetic::best_multiexp_vartime(coeffs, bases)
 }
 
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size
@@ -780,39 +593,6 @@ fn assert_multiexp_matches_naive<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[
     assert_eq!(best_multiexp(coeffs, bases), expected);
 }
 
-#[cfg(test)]
-fn evaluate_le_bytes(bytes: &[u8]) -> Fp {
-    bytes.iter().rev().fold(Fp::ZERO, |mut acc, byte| {
-        for bit in (0..u8::BITS).rev() {
-            acc = acc.double();
-            if (byte >> bit) & 1 != 0 {
-                acc += Fp::ONE;
-            }
-        }
-        acc
-    })
-}
-
-#[cfg(test)]
-fn evaluate_booth_digits(bytes: &[u8], window_bits: usize) -> Fp {
-    (0..booth_window_count(&[bytes], window_bits))
-        .rev()
-        .fold(Fp::ZERO, |mut acc, window| {
-            for _ in 0..window_bits {
-                acc = acc.double();
-            }
-
-            let digit = booth_digit(bytes, window_bits, window);
-            let magnitude = Fp::from(digit.magnitude as u64);
-            if digit.negative {
-                acc -= magnitude;
-            } else {
-                acc += magnitude;
-            }
-            acc
-        })
-}
-
 #[test]
 fn test_multiexp() {
     let mut rng = rng();
@@ -830,106 +610,6 @@ fn test_multiexp() {
             .collect::<Vec<_>>();
 
         assert_multiexp_matches_naive(&coeffs, &bases);
-    }
-}
-
-#[test]
-fn test_booth_digit_boundaries() {
-    let assert_digit = |bytes: &[u8], window_bits, window, magnitude, negative| {
-        assert_eq!(
-            booth_digit(bytes, window_bits, window),
-            BoothDigit {
-                magnitude,
-                negative,
-            }
-        );
-    };
-
-    let repr_bytes = <Fp as PrimeField>::Repr::default().as_ref().len();
-    let mut bytes = vec![0; repr_bytes];
-    assert_digit(&bytes, 3, 0, 0, false);
-
-    bytes[0] = 3;
-    assert_digit(&bytes, 3, 0, 3, false);
-
-    bytes[0] = 4;
-    assert_digit(&bytes, 3, 0, 4, true);
-    assert_digit(&bytes, 3, 1, 1, false);
-
-    bytes[0] = 7;
-    assert_digit(&bytes, 3, 0, 1, true);
-    assert_digit(&bytes, 3, 1, 1, false);
-
-    let bytes = vec![u8::MAX; repr_bytes];
-    assert_digit(&bytes, 8, 31, 0, false);
-    assert_digit(&bytes, 8, 32, 1, false);
-}
-
-#[test]
-fn test_booth_digit_wide_representation() {
-    const WIDE_REPR_BYTES: usize = 40;
-    const FIRST_WIDE_BYTE: usize = 32;
-    const WINDOW_BITS: usize = 8;
-    const HALF_RADIX: usize = 1 << (WINDOW_BITS - 1);
-
-    // A high-half value in the first byte above 256 bits produces a negative
-    // digit whose carry must be consumed by the following window.
-    let mut bytes = [0; WIDE_REPR_BYTES];
-    let short_bytes = [0; FIRST_WIDE_BYTE];
-    assert_eq!(
-        booth_window_count(&[short_bytes.as_slice(), bytes.as_slice()], WINDOW_BITS),
-        WIDE_REPR_BYTES + 1
-    );
-
-    bytes[FIRST_WIDE_BYTE] = HALF_RADIX as u8;
-    assert_eq!(
-        booth_digit(&bytes, WINDOW_BITS, FIRST_WIDE_BYTE),
-        BoothDigit {
-            magnitude: HALF_RADIX,
-            negative: true,
-        }
-    );
-    assert_eq!(
-        booth_digit(&bytes, WINDOW_BITS, FIRST_WIDE_BYTE + 1),
-        BoothDigit {
-            magnitude: 1,
-            negative: false,
-        }
-    );
-
-    // The final data window likewise has a following carry-only window.
-    bytes = [0; WIDE_REPR_BYTES];
-    bytes[WIDE_REPR_BYTES - 1] = HALF_RADIX as u8;
-    assert_eq!(
-        booth_digit(&bytes, WINDOW_BITS, WIDE_REPR_BYTES - 1),
-        BoothDigit {
-            magnitude: HALF_RADIX,
-            negative: true,
-        }
-    );
-    assert_eq!(
-        booth_digit(&bytes, WINDOW_BITS, WIDE_REPR_BYTES),
-        BoothDigit {
-            magnitude: 1,
-            negative: false,
-        }
-    );
-
-    let first_high_bit = {
-        let mut bytes = [0; WIDE_REPR_BYTES];
-        bytes[FIRST_WIDE_BYTE + 1] = 1;
-        bytes
-    };
-    let all_ones = [u8::MAX; WIDE_REPR_BYTES];
-    // Folding into `Fp` avoids a big-integer test dependency while exercising
-    // the complete 320-bit recoding schedule.
-    for bytes in [&bytes, &first_high_bit, &all_ones] {
-        for window_bits in [1, 3, 5, 8, 9] {
-            assert_eq!(
-                evaluate_booth_digits(bytes, window_bits),
-                evaluate_le_bytes(bytes)
-            );
-        }
     }
 }
 
@@ -1030,13 +710,6 @@ fn test_multiexp_parallel_glv_matches_naive() {
         check::<EqAffine>(len);
         check::<EpAffine>(len);
     }
-}
-
-#[test]
-fn test_multiexp_algorithm_selection() {
-    assert!(!should_parallelize_multiexp(usize::MAX, 1));
-    assert!(!should_parallelize_multiexp(2, 2));
-    assert!(should_parallelize_multiexp(3, 2));
 }
 
 #[test]

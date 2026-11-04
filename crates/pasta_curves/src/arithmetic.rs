@@ -6,9 +6,16 @@
 
 mod curves;
 mod fields;
+#[cfg(feature = "alloc")]
+mod multiexp;
 
 pub use curves::*;
 pub(crate) use fields::*;
+#[cfg(feature = "glv")]
+pub(crate) use multiexp::default_multiexp_window_bits;
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub use multiexp::{best_multiexp_vartime, best_multiexp_vartime_with_threads};
 
 /// Multiplies an [`Fp`](crate::Fp) element by `2^-exponent`.
 ///

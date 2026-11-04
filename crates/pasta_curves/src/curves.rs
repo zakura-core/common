@@ -107,6 +107,15 @@ macro_rules! impl_multiexp_vartime {
         }
 
         #[cfg(feature = "glv")]
+        fn try_multiexp_vartime_with_threads(
+            scalars: &[Self::ScalarExt],
+            bases: &[Self::AffineExt],
+            num_threads: usize,
+        ) -> Option<Self> {
+            crate::glv::try_multiexp_with_threads::<$name>(scalars, bases, num_threads)
+        }
+
+        #[cfg(feature = "glv")]
         fn try_multiexp_full_width_is_identity_vartime(
             scalars: &[Self::ScalarExt],
             bases: &[Self::AffineExt],

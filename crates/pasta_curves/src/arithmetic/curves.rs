@@ -166,6 +166,24 @@ pub trait CurveExt:
         None
     }
 
+    /// Like [`Self::try_multiexp_vartime`], but plans and runs on at most
+    /// `num_threads` workers of the current Rayon pool (at least one). Small
+    /// multiscalar multiplications can be cheaper on one thread than split
+    /// across a wide pool, and only the caller knows its batch shape.
+    ///
+    /// The default ignores the cap and calls [`Self::try_multiexp_vartime`].
+    ///
+    /// # Security
+    ///
+    /// Same as [`Self::try_multiexp_vartime`].
+    fn try_multiexp_vartime_with_threads(
+        scalars: &[Self::ScalarExt],
+        bases: &[Self::AffineExt],
+        _num_threads: usize,
+    ) -> Option<Self> {
+        Self::try_multiexp_vartime(scalars, bases)
+    }
+
     /// Attempts an optimized variable-time identity test for a multiscalar
     /// multiplication whose nonzero scalars are expected to be random-like
     /// and full-width.
