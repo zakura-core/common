@@ -168,3 +168,49 @@ fn pasta_multiscalar_mul_matches_wnaf() {
         None
     );
 }
+
+/// Parallel batch decoding must agree with decoding each encoding on its own,
+/// including non-canonical and off-curve encodings, at every batch size
+/// around the parallel cutoff.
+#[cfg(all(feature = "pallas-pasta", feature = "multicore"))]
+#[test]
+fn parallel_batch_decode_matches_serial() {
+    let mut rng = thread_rng();
+    for len in [0usize, 1, 15, 16, 17, 64, 385] {
+        let encodings = (0..len)
+            .map(|i| match i % 6 {
+                // Non-canonical x-coordinate.
+                3 => [0xff; 32],
+                // Canonical x with no point on the curve, or a sign-bit
+                // variant; either way decoding decides.
+                5 => {
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = i as u8;
+                    bytes[31] = 0x80;
+                    bytes
+                }
+                _ => pallas::Point::random(&mut rng).to_bytes(),
+            })
+            .collect::<Vec<_>>();
+        let serial = encodings
+            .iter()
+            .map(|bytes| Option::<pallas::Point>::from(pallas::Point::from_bytes(bytes)))
+            .collect::<Vec<_>>();
+        for threads in [1usize, 2, 8] {
+            let pool = maybe_rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool");
+            let decoded =
+                pool.install(|| super::batch_decode_pallas_points(encodings.iter().copied()));
+            let parallel = threads > 1 && len >= super::MIN_PARALLEL_DECODE_POINTS;
+            match decoded {
+                Some(decoded) => {
+                    assert!(parallel, "len {len}, {threads} threads");
+                    assert_eq!(decoded, serial, "len {len}, {threads} threads");
+                }
+                None => assert!(!parallel, "len {len}, {threads} threads"),
+            }
+        }
+    }
+}

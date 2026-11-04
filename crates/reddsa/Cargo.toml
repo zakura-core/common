@@ -26,6 +26,7 @@ jubjub = { workspace = true }
 once_cell = { version = "1", features = ["race", "alloc"], optional = true, default-features = false }
 sensei = { workspace = true, optional = true }
 pasta_curves = { workspace = true, optional = true, features = ["alloc"] }
+maybe-rayon = { version = "0.1.0", optional = true, default-features = false }
 rand_core = { version = "0.10", default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
 
@@ -43,7 +44,7 @@ rand_chacha = "0.10"
 pallas-pasta = ["dep:pasta_curves", "pasta_curves/glv", "dep:once_cell"]
 pallas-sensei = ["dep:sensei"]
 # Lets the Pallas batch-verification MSM use the Rayon pool.
-multicore = ["pasta_curves?/multicore"]
+multicore = ["pasta_curves?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
 alloc = ["hex", "jubjub/alloc"]
 default = ["std", "pallas-pasta"]
 nightly = []

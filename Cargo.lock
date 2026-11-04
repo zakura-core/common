@@ -3571,6 +3571,7 @@ dependencies = [
  "criterion 0.6.0",
  "group",
  "hex",
+ "maybe-rayon",
  "num-bigint 0.4.8",
  "num-traits",
  "once_cell",

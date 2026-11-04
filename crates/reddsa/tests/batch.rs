@@ -356,3 +356,73 @@ fn retained_keys_preserve_malformed_encoding_errors() {
         }
     }
 }
+
+/// Orchard batches large enough for parallel point decoding (under the
+/// `multicore` feature) must report the same errors as per-item decoding,
+/// wherever the malformed item sits in the batch.
+#[test]
+fn orchard_large_batches_preserve_malformed_encoding_errors() {
+    let mut rng = thread_rng();
+    let msg = b"OrchardLargeBatchTest";
+    let spend_sk = SigningKey::<orchard::SpendAuth>::new(&mut rng);
+    let spend_vk = VerificationKey::from(&spend_sk);
+    let spend_sig = spend_sk.sign(&mut rng, msg);
+    let binding_sk = SigningKey::<orchard::Binding>::new(&mut rng);
+    let binding_vk = VerificationKey::from(&binding_sk);
+    let binding_sig = binding_sk.sign(&mut rng, msg);
+    let valid = [
+        batch::Item::from_spendauth_key(spend_vk, spend_sig, msg),
+        batch::Item::from_spendauth(spend_vk.into(), spend_sig, msg),
+        batch::Item::from_binding_key(binding_vk, binding_sig, msg),
+    ];
+
+    let malformed_vk = VerificationKeyBytes::from([0xff; 32]);
+    let mut bad_r: [u8; 64] = spend_sig.into();
+    bad_r[..32].fill(0xff);
+    let mut bad_s: [u8; 64] = spend_sig.into();
+    bad_s[32..].fill(0xff);
+    let cases = [
+        (
+            batch::Item::from_spendauth_key(spend_vk, bad_r.into(), msg),
+            Error::InvalidSignature,
+        ),
+        (
+            batch::Item::from_spendauth_key(spend_vk, bad_s.into(), msg),
+            Error::InvalidSignature,
+        ),
+        (
+            batch::Item::from_spendauth(malformed_vk, spend_sig, msg),
+            Error::MalformedVerificationKey,
+        ),
+        (
+            batch::Item::from_spendauth(malformed_vk, bad_r.into(), msg),
+            Error::InvalidSignature,
+        ),
+        (
+            batch::Item::from_spendauth_key(spend_vk, spend_sig, b"wrong"),
+            Error::InvalidSignature,
+        ),
+    ];
+
+    // 64 items: 85 point encodings, well above the parallel-decode cutoff.
+    const LEN: usize = 64;
+    let mut batch = batch::Verifier::<orchard::SpendAuth, orchard::Binding>::new();
+    for i in 0..LEN {
+        batch.queue(valid[i % valid.len()].clone());
+    }
+    assert_eq!(batch.verify(&mut rng), Ok(()));
+
+    for (bad, error) in cases {
+        for index in [0, 1, 17, LEN - 1] {
+            let mut batch = batch::Verifier::<orchard::SpendAuth, orchard::Binding>::new();
+            for i in 0..LEN {
+                batch.queue(if i == index {
+                    bad.clone()
+                } else {
+                    valid[i % valid.len()].clone()
+                });
+            }
+            assert_eq!(batch.verify(&mut rng), Err(error), "bad item at {index}");
+        }
+    }
+}
