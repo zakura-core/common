@@ -15,7 +15,8 @@ pub use curves::*;
 pub(crate) use fields::*;
 #[cfg(feature = "glv")]
 pub(crate) use multiexp::default_multiexp_window_bits;
-#[cfg(test)]
+// The timing grid in `glv` compares against the generic MSM directly.
+#[cfg(all(test, feature = "multicore"))]
 pub(crate) use multiexp::signed_booth_multiexp;
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
