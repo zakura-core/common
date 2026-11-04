@@ -113,6 +113,15 @@ fn canonicalize_other<C: CurveAffine>(mut terms: Vec<ArbitraryTerm<C>>) -> Vec<A
     // the evaluated sum: `(scalar, P)` and `(-scalar, -P)` are the same term,
     // and the coalescing below negates the scalar exactly when the stored
     // orientation differs.
+    //
+    // A batch's final MSM holds thousands of terms, so the sort runs in
+    // parallel; Rayon's `par_sort_by` is stable too.
+    #[cfg(feature = "multicore")]
+    {
+        use maybe_rayon::slice::ParallelSliceMut;
+        terms.par_sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    #[cfg(not(feature = "multicore"))]
     terms.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut canonical = Vec::with_capacity(terms.len());
