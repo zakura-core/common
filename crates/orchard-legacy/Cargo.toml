@@ -25,7 +25,7 @@ halo2_gadgets = { workspace = true, optional = true }
 [features]
 std = ["reddsa/std"]
 circuit = ["std", "dep:halo2_proofs", "dep:halo2_gadgets"]
-multicore = ["halo2_proofs?/multicore"]
+multicore = ["halo2_proofs?/multicore", "reddsa/multicore"]
 aarch64-asm = ["pasta_curves/aarch64-asm"]
 portable = ["pasta_curves/portable", "halo2_proofs?/portable"]
 x86_64-asm = ["pasta_curves/x86_64-asm", "halo2_proofs?/x86_64-asm"]
