@@ -833,6 +833,81 @@ fn estimated_signed_booth_costs(
     ))
 }
 
+/// Relative cost weights for the planner's Signed-Booth work estimates, in
+/// units of one fifth of a doubling.
+///
+/// The two backends add points differently. The GLV ladder gathers each
+/// window's points into buckets with batched affine additions (one shared
+/// inversion per reduction level), the cheapest addition available, while the
+/// generic ladder adds each point into a projective bucket. Both then sum
+/// their buckets with projective additions. Counting every addition alike
+/// overprices the GLV ladder, so the planner chose the generic MSM in cells
+/// where GLV measured up to 1.8x faster (e.g. 7,150 terms on 6, 10, or 12
+/// workers). The weights below were fitted to timing grids on Apple M4 (asm
+/// backend) and two AMD Zen 4 hosts (portable and `-C target-cpu=native`
+/// builds), 256 to 65,536 terms on 1 to 16 workers.
+#[derive(Clone, Copy)]
+struct PlannerWeights {
+    point_visit: usize,
+    bucket_addition: usize,
+    doubling: usize,
+}
+
+/// The GLV ladder: affine batched point visits, projective bucket sums.
+const GLV_PLANNER_WEIGHTS: PlannerWeights = PlannerWeights {
+    point_visit: 5,
+    bucket_addition: 10,
+    doubling: 5,
+};
+
+/// The generic ladder: projective (mixed) point visits and bucket sums.
+const GENERIC_PLANNER_WEIGHTS: PlannerWeights = PlannerWeights {
+    point_visit: 7,
+    bucket_addition: 5,
+    doubling: 5,
+};
+
+/// [`estimated_signed_booth_costs`]'s work component, with each operation
+/// weighted by its backend's cost (see [`PlannerWeights`]).
+fn estimated_weighted_work(
+    terms: usize,
+    scalar_bits: usize,
+    window_bits: usize,
+    num_threads: usize,
+    weights: PlannerWeights,
+) -> Option<usize> {
+    let windows = scalar_bits.checked_div(window_bits)?.checked_add(1)?;
+    let bucket_shift = u32::try_from(window_bits.checked_sub(1)?).ok()?;
+    let buckets = 1usize.checked_shl(bucket_shift)?;
+    let visit = |count: usize| count.checked_mul(weights.point_visit);
+    let bucket_adds = |count: usize| count.checked_mul(weights.bucket_addition);
+    let doublings = |count: usize| count.checked_mul(weights.doubling);
+
+    if num_threads <= 1 {
+        return visit(terms.checked_mul(windows)?)?
+            .checked_add(bucket_adds(buckets.checked_mul(windows)?.checked_mul(2)?)?)?
+            .checked_add(doublings(
+                window_bits.checked_mul(windows.checked_sub(1)?)?,
+            )?);
+    }
+
+    let workers = num_threads.min(windows);
+    let waves = windows.div_ceil(workers);
+    let per_window = visit(terms)?.checked_add(bucket_adds(buckets.checked_mul(2)?)?)?;
+    let mut shift_doublings = 0usize;
+    let mut window = windows.checked_sub(1)?;
+    for _ in 0..waves {
+        shift_doublings = shift_doublings.checked_add(window_bits.checked_mul(window)?)?;
+        match window.checked_sub(workers) {
+            Some(next) => window = next,
+            None => break,
+        }
+    }
+    per_window
+        .checked_mul(waves)?
+        .checked_add(doublings(shift_doublings)?)
+}
+
 /// Test convenience: the work component of [`estimated_signed_booth_costs`].
 #[cfg(test)]
 fn estimated_signed_booth_work(
@@ -907,10 +982,37 @@ fn glv_multiexp_window_bits<C: GlvParams>(terms: usize, num_threads: usize) -> O
     if terms < MIN_GLV_MULTIEXP_TERMS {
         return None;
     }
-    let (generic, _) = estimated_generic_costs::<C>(terms, num_threads)?;
-    let (glv, glv_window_bits) = booth_multiexp_estimate::<C>(terms, num_threads)?;
-    (glv < generic).then_some(glv_window_bits)
+    let window_bits = multiexp_window_bits::<C>(terms, num_threads)?;
+    let generic = estimated_weighted_work(
+        terms,
+        scalar_repr_bits::<C>()?,
+        window_bits,
+        num_threads,
+        GENERIC_PLANNER_WEIGHTS,
+    )?;
+    let glv_terms = terms.checked_mul(2)?;
+    let mut best: Option<(usize, usize)> = None;
+    for candidate in window_bits..=window_bits.checked_add(GLV_EXTRA_WINDOW_BITS)? {
+        if let Some(work) = estimated_weighted_work(
+            glv_terms,
+            GLV_COMPONENT_BITS,
+            candidate,
+            num_threads,
+            GLV_PLANNER_WEIGHTS,
+        ) && best.is_none_or(|(best_work, _)| work < best_work)
+        {
+            best = Some((work, candidate));
+        }
+    }
+    let (glv, glv_window_bits) = best?;
+    (glv <= generic).then_some(glv_window_bits)
 }
+
+/// How far past the generic default width the GLV ladder may widen. Its
+/// components are half as long, so wider windows (fewer of them) often pay
+/// off; the timing grids put the best width at most two bits above the
+/// default in nearly every cell.
+const GLV_EXTRA_WINDOW_BITS: usize = 2;
 
 /// The generic Signed-Booth MSM's estimated `(work, traffic)` costs at its
 /// default width (see [`estimated_signed_booth_costs`]).
@@ -5158,8 +5260,8 @@ mod tests {
         assert_eq!(multiexp_window_bits::<pallas::Point>(5_678, 8), Some(9));
 
         assert_eq!(glv_multiexp_window_bits::<pallas::Point>(255, 1), None);
-        assert_eq!(glv_multiexp_window_bits::<pallas::Point>(2_150, 1), Some(9));
-        assert_eq!(glv_multiexp_window_bits::<vesta::Point>(5_678, 1), Some(11));
+        assert_eq!(glv_multiexp_window_bits::<pallas::Point>(2_150, 1), Some(8));
+        assert_eq!(glv_multiexp_window_bits::<vesta::Point>(5_678, 1), Some(10));
 
         assert_eq!(estimated_signed_booth_work(2_150, 256, 8, 8), Some(12_670));
         assert_eq!(
@@ -5174,24 +5276,24 @@ mod tests {
         assert_eq!(glv_multiexp_window_bits::<pallas::Point>(2_150, 8), Some(8));
         assert_eq!(glv_multiexp_window_bits::<vesta::Point>(5_678, 8), Some(9));
 
-        // At sufficiently large sizes with whole waves on every worker,
-        // doubling the term count outweighs the shorter components at both
-        // candidate widths, and an overflowing term count is never planned.
-        assert_eq!(
-            glv_multiexp_window_bits::<pallas::Point>(1_000_000, 8),
-            None
-        );
+        // Beyond the measured grids the weighted model extrapolates to GLV at
+        // a width within its candidate range; an overflowing term count is
+        // never planned.
+        let default = multiexp_window_bits::<pallas::Point>(1_000_000, 8).unwrap();
+        let width = glv_multiexp_window_bits::<pallas::Point>(1_000_000, 8).unwrap();
+        assert!((default..=default + GLV_EXTRA_WINDOW_BITS).contains(&width));
         assert_eq!(
             glv_multiexp_window_bits::<pallas::Point>(usize::MAX, 8),
             None
         );
     }
 
-    /// The planner's decisions at cells measured on Apple M4 (asm backend)
-    /// and EPYC (portable) with explicit Rayon pools. Each expected value is
-    /// the backend (and for GLV, the width) that measured fastest; every
-    /// `None` is a cell where the generic ladder measured at least as fast as
-    /// GLV at every candidate width.
+    /// The planner's decisions at cells of the timing grids
+    /// (`glv_vs_generic_timing_grid`): Apple M4 with the asm backend on 1-16
+    /// workers, and two AMD Zen 4 hosts with portable and
+    /// `-C target-cpu=native` builds on 1-8 workers. Unless noted, every
+    /// pinned decision measured within 3% of the fastest backend and width on
+    /// every grid that ran the cell.
     #[test]
     fn glv_multiexp_plan_matches_measured_cells() {
         fn plan(terms: usize, threads: usize) -> Option<usize> {
@@ -5201,46 +5303,155 @@ mod tests {
         assert_eq!(plan(255, 1), None);
         assert_eq!(plan(255, 8), None);
 
-        // Cells the single-width comparison rejected although GLV measured
-        // 4–27% faster. Widening to `w + 1` turns a partial final wave into
-        // whole waves for the 127-bit components.
-        assert_eq!(plan(2_600, 3), Some(9));
-        assert_eq!(plan(8_192, 2), Some(11));
-        assert_eq!(plan(8_192, 3), Some(11));
-        assert_eq!(plan(8_192, 4), Some(11));
-        assert_eq!(plan(16_384, 2), Some(11));
-        assert_eq!(plan(16_384, 3), Some(11));
-        assert_eq!(plan(16_384, 4), Some(11));
-        assert_eq!(plan(65_536, 2), Some(13));
+        // Cells where the unweighted model chose the generic ladder although
+        // GLV measured 1.3-1.8x faster: the weights price GLV's batched affine
+        // point visits below the generic ladder's projective ones. The 7,150-
+        // term cells are the final MSM of a 64-bundle Orchard batch.
+        assert_eq!(plan(7_150, 6), Some(11));
+        assert_eq!(plan(7_150, 12), Some(11));
+        assert_eq!(plan(2_049, 12), Some(8));
+        assert_eq!(plan(4_096, 6), Some(11));
+        // GLV at w = 10 beats the generic ladder 1.3x here, though w = 13
+        // measured faster still: the model's wave count does not capture it.
+        assert_eq!(plan(16_384, 10), Some(10));
+        assert_eq!(plan(32_768, 10), Some(13));
 
-        // Cells where both widths agree with the previous selection.
-        assert_eq!(plan(2_150, 1), Some(9));
-        assert_eq!(plan(2_600, 8), Some(8));
-        assert_eq!(plan(4_300, 1), Some(10));
-        assert_eq!(plan(8_192, 1), Some(11));
-        assert_eq!(plan(8_192, 8), Some(10));
-        assert_eq!(plan(16_384, 8), Some(10));
-        assert_eq!(plan(32_768, 1), Some(12));
-        assert_eq!(plan(32_768, 4), Some(11));
+        // Cells measured within 3% of the best on all five grids.
+        for (terms, threads, width) in [
+            (256, 1, 6),
+            (256, 4, 7),
+            (512, 4, 8),
+            (1_024, 1, 8),
+            (1_024, 6, 8),
+            (4_096, 1, 10),
+            (7_150, 2, 11),
+            (8_192, 4, 11),
+            (8_192, 6, 11),
+            (16_384, 3, 11),
+            (32_768, 2, 13),
+            (32_768, 4, 11),
+            (65_536, 2, 13),
+        ] {
+            assert_eq!(
+                plan(terms, threads),
+                Some(width),
+                "{terms} terms on {threads}"
+            );
+        }
 
-        // Cells where the generic ladder measured faster on both machines:
-        // the GLV ladder's doubled term count costs more than the halved
-        // window count saves once every worker already has whole waves.
-        assert_eq!(plan(32_768, 8), None);
-        assert_eq!(plan(65_536, 8), None);
+        // The grids disagree at the largest sizes on eight workers: GLV
+        // measured 1.3x faster on M4, the generic ladder 2-9% faster on Zen 4.
+        // The planner keeps GLV there.
+        assert_eq!(plan(32_768, 8), Some(11));
+        assert_eq!(plan(65_536, 8), Some(12));
 
-        // The planner never asks for a width the generic default would not
-        // reach within one bit, and both curves plan identically.
+        // The planner widens at most GLV_EXTRA_WINDOW_BITS past the generic
+        // default, and both curves plan identically.
         for terms in [2_600usize, 8_192, 65_536] {
             for threads in [1usize, 3, 8] {
                 let default = multiexp_window_bits::<pallas::Point>(terms, threads).unwrap();
                 if let Some(width) = plan(terms, threads) {
-                    assert!(width == default || width == default + 1);
+                    assert!((default..=default + GLV_EXTRA_WINDOW_BITS).contains(&width));
                 }
                 assert_eq!(
                     plan(terms, threads),
                     glv_multiexp_window_bits::<vesta::Point>(terms, threads)
                 );
+            }
+        }
+    }
+
+    /// Timing grid behind the GLV-versus-generic planner: the generic
+    /// Signed-Booth MSM against the GLV ladder at several widths, with the
+    /// planner's pick. `GRID_SIZES` and `GRID_THREADS` override the grid.
+    #[cfg(feature = "multicore")]
+    #[test]
+    #[ignore = "manual timing grid"]
+    fn glv_vs_generic_timing_grid() {
+        use group::{Curve, Group};
+        use rand::SeedableRng;
+        use std::time::Instant;
+        type C = pallas::Point;
+        let list = |key: &str, default: &[usize]| -> Vec<usize> {
+            std::env::var(key)
+                .ok()
+                .map(|v| v.split(',').map(|x| x.trim().parse().unwrap()).collect())
+                .unwrap_or_else(|| default.to_vec())
+        };
+        let sizes = list(
+            "GRID_SIZES",
+            &[
+                256, 512, 1_024, 2_049, 4_096, 7_150, 8_192, 16_384, 32_768, 65_536,
+            ],
+        );
+        let threads_list = list("GRID_THREADS", &[1, 2, 3, 4, 6, 8]);
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([0x42; 16]);
+        let max = *sizes.iter().max().unwrap();
+        let projective = (0..max).map(|_| C::random(&mut rng)).collect::<Vec<_>>();
+        let mut all_bases = alloc::vec![pallas::Affine::identity(); max];
+        C::batch_normalize(&projective, &mut all_bases);
+        let all_scalars = (0..max)
+            .map(|_| pallas::Scalar::random(&mut rng))
+            .collect::<Vec<_>>();
+
+        fn median_ms(mut f: impl FnMut()) -> f64 {
+            for _ in 0..2 {
+                f();
+            }
+            let mut samples = Vec::new();
+            let start = Instant::now();
+            while samples.len() < 5 || (start.elapsed().as_secs_f64() < 0.4 && samples.len() < 201)
+            {
+                let t = Instant::now();
+                f();
+                samples.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        }
+
+        for &n in &sizes {
+            let bases = &all_bases[..n];
+            let scalars = &all_scalars[..n];
+            for &threads in &threads_list {
+                let pool = maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                pool.install(|| {
+                    let w0 = multiexp_window_bits::<C>(n, threads).unwrap();
+                    let plan = glv_multiexp_window_bits::<C>(n, threads);
+                    let booth = median_ms(|| {
+                        core::hint::black_box(crate::arithmetic::signed_booth_multiexp(
+                            scalars, bases, threads,
+                        ));
+                    });
+                    let mut row = std::format!("GRID n={n} t={threads} w0={w0} booth={booth:.4}");
+                    let mut best = (std::string::String::from("booth"), booth);
+                    for w in w0.saturating_sub(1).max(4)..=w0 + 3 {
+                        let glv = median_ms(|| {
+                            let components = scalars
+                                .iter()
+                                .map(|k| checked_signed_magnitudes(decompose::<C>(k)).unwrap())
+                                .collect::<Vec<_>>();
+                            let prepared = multiexp_bases::<C>(bases);
+                            core::hint::black_box(multiexp::<C>(
+                                &components,
+                                &prepared,
+                                w,
+                                threads,
+                            ));
+                        });
+                        row += &std::format!(" glv{w}={glv:.4}");
+                        if glv < best.1 {
+                            best = (std::format!("glv{w}"), glv);
+                        }
+                    }
+                    let pick = plan.map_or(std::string::String::from("booth"), |w| {
+                        std::format!("glv{w}")
+                    });
+                    std::eprintln!("{row} plan={pick} best={}", best.0);
+                });
             }
         }
     }

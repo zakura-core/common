@@ -119,7 +119,7 @@ fn current_num_threads() -> usize {
 
 /// The generic Signed-Booth bucket method (formerly the body of
 /// `halo2_proofs::arithmetic::best_multiexp`).
-fn signed_booth_multiexp<C: CurveAffine>(
+pub(crate) fn signed_booth_multiexp<C: CurveAffine>(
     coeffs: &[C::ScalarExt],
     bases: &[C],
     num_threads: usize,
