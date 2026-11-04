@@ -163,10 +163,12 @@ fn batch_decode_pallas_points(
 
         let threads = maybe_rayon::current_num_threads();
         if threads >= 2 && encodings.len() >= MIN_PARALLEL_DECODE_POINTS {
-            // Give every worker a share, batching up to the decoder's lanes:
-            // a full batch when there are enough encodings per worker, and
-            // smaller ones otherwise, so no worker idles behind a large batch.
-            let chunk = encodings.len().div_ceil(threads).clamp(1, DECODE_LANES);
+            // Split each worker's share evenly into tasks of at most the
+            // decoder's lanes, so no worker idles behind an extra full batch
+            // (66 encodings on eight threads: 14 tasks of five, not nine of
+            // eight).
+            let per_thread = encodings.len().div_ceil(threads);
+            let chunk = per_thread.div_ceil(per_thread.div_ceil(DECODE_LANES));
             return Some(
                 encodings
                     .par_chunks(chunk)
