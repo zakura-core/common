@@ -14,7 +14,7 @@ use group::GroupEncoding as _;
 #[cfg(all(feature = "pallas-pasta", feature = "alloc"))]
 use group::{Group as _, ff::PrimeField as _};
 #[cfg(feature = "pallas-pasta")]
-use pasta_curves::pallas;
+use pasta_curves::{glv::Table, pallas};
 #[cfg(feature = "pallas-sensei")]
 use sensei::primitives::pallas;
 
@@ -74,6 +74,18 @@ impl private::Sealed<SpendAuth> for SpendAuth {
     fn basepoint() -> pallas::Point {
         pallas::Point::from_bytes(&ORCHARD_SPENDAUTHSIG_BASEPOINT_BYTES).unwrap()
     }
+
+    #[cfg(feature = "pallas-pasta")]
+    fn basepoint_mul_vartime(scalar: pallas::Scalar) -> pallas::Point {
+        #[cfg(target_has_atomic = "ptr")]
+        static TABLE: once_cell::race::OnceBox<Table<pallas::Point>> =
+            once_cell::race::OnceBox::new();
+        basepoint_mul_vartime::<SpendAuth>(
+            #[cfg(target_has_atomic = "ptr")]
+            &TABLE,
+            &scalar,
+        )
+    }
 }
 impl private::Sealed<Binding> for Binding {
     const H_STAR_PERSONALIZATION: &'static [u8; 16] = b"Zcash_RedPallasH";
@@ -83,6 +95,35 @@ impl private::Sealed<Binding> for Binding {
     fn basepoint() -> pallas::Point {
         pallas::Point::from_bytes(&ORCHARD_BINDINGSIG_BASEPOINT_BYTES).unwrap()
     }
+
+    #[cfg(feature = "pallas-pasta")]
+    fn basepoint_mul_vartime(scalar: pallas::Scalar) -> pallas::Point {
+        #[cfg(target_has_atomic = "ptr")]
+        static TABLE: once_cell::race::OnceBox<Table<pallas::Point>> =
+            once_cell::race::OnceBox::new();
+        basepoint_mul_vartime::<Binding>(
+            #[cfg(target_has_atomic = "ptr")]
+            &TABLE,
+            &scalar,
+        )
+    }
+}
+
+/// Variable-time `[scalar]B` through a GLV table for `T`'s basepoint.
+///
+/// With pointer atomics the table is built once and cached in `table`;
+/// racing first uses may each build one, and all but one are discarded.
+/// Without them it is rebuilt on each call.
+#[cfg(feature = "pallas-pasta")]
+fn basepoint_mul_vartime<T: SigType + private::Sealed<T, Point = pallas::Point>>(
+    #[cfg(target_has_atomic = "ptr")] table: &once_cell::race::OnceBox<Table<pallas::Point>>,
+    scalar: &pallas::Scalar,
+) -> pallas::Point {
+    #[cfg(target_has_atomic = "ptr")]
+    let table = table.get_or_init(|| alloc::boxed::Box::new(Table::new(&T::basepoint())));
+    #[cfg(not(target_has_atomic = "ptr"))]
+    let table = &Table::new(&T::basepoint());
+    table.mul(scalar)
 }
 
 #[cfg(feature = "alloc")]
