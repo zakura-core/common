@@ -197,4 +197,24 @@ proptest! {
         prop_assert_eq!(actual.verify(b"message", &sig), Ok(()));
         prop_assert_eq!(actual.verify(b"wrong", &sig), Err(Error::InvalidSignature));
     }
+
+    #[test]
+    fn orchard_tweak_signature(
+        tweaks in prop::collection::vec(tweak_strategy(), (0,5)),
+        rng_seed in prop::array::uniform32(any::<u8>()),
+    ) {
+        let mut rng = ChaChaRng::from_seed(rng_seed);
+
+        let msg = b"test message for proptests";
+        let mut binding = SignatureCase::<orchard::Binding>::new(&mut rng, msg.to_vec());
+        let mut spendauth = SignatureCase::<orchard::SpendAuth>::new(&mut rng, msg.to_vec());
+
+        for t in &tweaks {
+            binding.apply_tweak(t);
+            spendauth.apply_tweak(t);
+        }
+
+        assert!(binding.check());
+        assert!(spendauth.check());
+    }
 }

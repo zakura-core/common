@@ -39,7 +39,7 @@ rand = "0.10"
 rand_chacha = "0.10"
 
 [features]
-pallas-pasta = ["dep:pasta_curves"]
+pallas-pasta = ["dep:pasta_curves", "pasta_curves/glv"]
 pallas-sensei = ["dep:sensei"]
 alloc = ["hex", "jubjub/alloc"]
 default = ["std", "pallas-pasta"]
