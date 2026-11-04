@@ -180,8 +180,12 @@ impl<T: SpendAuth> VerificationKey<T> {
     /// Randomize this verification key with the given `randomizer`.
     ///
     /// Randomization is only supported for `SpendAuth` keys.
+    ///
+    /// For RedPallas, the multiplication by `randomizer` is variable-time:
+    /// its running time and memory access pattern may depend on the
+    /// randomizer's value. RedJubjub randomization remains constant-time.
     pub fn randomize(&self, randomizer: &Randomizer<T>) -> VerificationKey<T> {
-        let point = self.point + (T::basepoint() * *randomizer);
+        let point = self.point + T::basepoint().mul_vartime(*randomizer);
         let bytes = VerificationKeyBytes {
             bytes: point.to_bytes().as_ref().try_into().unwrap(),
             _marker: PhantomData,

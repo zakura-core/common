@@ -410,6 +410,9 @@ impl Note {
     }
 
     /// Derives the nullifier for this note.
+    ///
+    /// This uses variable-time arithmetic: running time and memory access
+    /// patterns may depend on the note and the viewing key.
     pub fn nullifier(&self, fvk: &FullViewingKey) -> Nullifier {
         Nullifier::derive(fvk.nk(), self.rho.0, self.psi(), self.commitment())
     }

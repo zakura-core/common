@@ -82,12 +82,21 @@ impl Nullifier {
         psi: pallas::Base,
         cm: NoteCommitment,
     ) -> Self {
-        // K^Orchard = GroupHash("z.cash:Orchard", "K"), pinned by the
-        // `nullifier_k::generator` test.
-        let k = pallas::Point::from(crate::constants::fixed_bases::nullifier_k::generator());
+        use crate::backend::pasta_curves::glv::Table;
+
+        // GLV window for K^Orchard = GroupHash("z.cash:Orchard", "K"), pinned
+        // by the `nullifier_k::generator` test. The multiplication is
+        // variable-time.
+        static K_TABLE: crate::once::OnceTable<Table<pallas::Point>> =
+            crate::once::OnceTable::new();
+        let k = K_TABLE.get_or_init(|| {
+            Table::new(&pallas::Point::from(
+                crate::constants::fixed_bases::nullifier_k::generator(),
+            ))
+        });
 
         Nullifier(extract_p(
-            &(k * crate::spec::mod_r_p(nk.prf_nf(rho) + psi) + cm.0),
+            &(k.mul(&crate::spec::mod_r_p(nk.prf_nf(rho) + psi)) + cm.0),
         ))
     }
 }
