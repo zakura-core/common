@@ -322,6 +322,9 @@ impl VerificationKey<SpendAuth> {
         )))
     }
     /// Randomizes this spend authorization verification key.
+    ///
+    /// The multiplication by the randomizer is variable-time: its running
+    /// time and memory access pattern may depend on the randomizer's value.
     pub fn randomize(&self, randomizer: &SpendAuthRandomizer) -> Self {
         let VerificationKeyInner::SpendAuth(key) = &self.0 else {
             unreachable!("domain is fixed at construction")
