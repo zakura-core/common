@@ -133,6 +133,31 @@ mod private {
         /// The raw affine coordinates of `p` (`(0, 0)` for the identity).
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base);
 
+        /// `x` in radix 2^29, for the AVX2 chord additions.
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn to29(x: &Self::Base, token: CrateToken) -> crate::arithmetic::avx2_chord::Limbs29;
+
+        /// The inverse of [`Sealed::to29`].
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn from29(x: &crate::arithmetic::avx2_chord::Limbs29, token: CrateToken) -> Self::Base;
+
+        /// `-x` in radix 2^29.
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn neg29(
+            x: &crate::arithmetic::avx2_chord::Limbs29,
+            token: CrateToken,
+        ) -> crate::arithmetic::avx2_chord::Limbs29;
+
+        /// One level of AVX2 chord additions (`avx2_chord::chord_level`).
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn chord_level29(
+            n: usize,
+            pair: impl Fn(usize) -> (usize, usize, usize),
+            points: &[crate::arithmetic::avx2_chord::Point29],
+            next: &mut [crate::arithmetic::avx2_chord::Point29],
+            token: CrateToken,
+        ) -> Option<()>;
+
         /// Constructs a projective (Jacobian) point directly from raw
         /// coordinates, with no on-curve check in release builds; `z = 0`
         /// is the identity. The effective-affine machinery uses this to
@@ -162,6 +187,39 @@ mod private {
             <crate::pallas::Affine as crate::arithmetic::CurveAffine>::from_xy_unchecked(x, y)
         }
 
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn to29(x: &Self::Base, _: CrateToken) -> crate::arithmetic::avx2_chord::Limbs29 {
+            use crate::arithmetic::avx2_chord::Avx2ChordField;
+            crate::arithmetic::avx2_chord::Limbs29::from_limbs(&x.chord_limbs())
+        }
+
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn from29(x: &crate::arithmetic::avx2_chord::Limbs29, _: CrateToken) -> Self::Base {
+            use crate::arithmetic::avx2_chord::Avx2ChordField;
+            Self::Base::from_chord_limbs(x.to_limbs())
+        }
+
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn neg29(
+            x: &crate::arithmetic::avx2_chord::Limbs29,
+            _: CrateToken,
+        ) -> crate::arithmetic::avx2_chord::Limbs29 {
+            use crate::arithmetic::avx2_chord::Avx2ChordField;
+            x.neg(&Self::Base::modulus29())
+        }
+
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn chord_level29(
+            n: usize,
+            pair: impl Fn(usize) -> (usize, usize, usize),
+            points: &[crate::arithmetic::avx2_chord::Point29],
+            next: &mut [crate::arithmetic::avx2_chord::Point29],
+            _: CrateToken,
+        ) -> Option<()> {
+            use crate::arithmetic::avx2_chord::Avx2ChordField;
+            Self::Base::chord_level(n, pair, points, next)
+        }
+
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
             p.raw_xy()
         }
@@ -184,6 +242,39 @@ mod private {
     impl Sealed for crate::vesta::Point {
         fn affine_unchecked(x: Self::Base, y: Self::Base, _: CrateToken) -> Self::AffineExt {
             <crate::vesta::Affine as crate::arithmetic::CurveAffine>::from_xy_unchecked(x, y)
+        }
+
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn to29(x: &Self::Base, _: CrateToken) -> crate::arithmetic::avx2_chord::Limbs29 {
+            use crate::arithmetic::avx2_chord::Avx2ChordField;
+            crate::arithmetic::avx2_chord::Limbs29::from_limbs(&x.chord_limbs())
+        }
+
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn from29(x: &crate::arithmetic::avx2_chord::Limbs29, _: CrateToken) -> Self::Base {
+            use crate::arithmetic::avx2_chord::Avx2ChordField;
+            Self::Base::from_chord_limbs(x.to_limbs())
+        }
+
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn neg29(
+            x: &crate::arithmetic::avx2_chord::Limbs29,
+            _: CrateToken,
+        ) -> crate::arithmetic::avx2_chord::Limbs29 {
+            use crate::arithmetic::avx2_chord::Avx2ChordField;
+            x.neg(&Self::Base::modulus29())
+        }
+
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn chord_level29(
+            n: usize,
+            pair: impl Fn(usize) -> (usize, usize, usize),
+            points: &[crate::arithmetic::avx2_chord::Point29],
+            next: &mut [crate::arithmetic::avx2_chord::Point29],
+            _: CrateToken,
+        ) -> Option<()> {
+            use crate::arithmetic::avx2_chord::Avx2ChordField;
+            Self::Base::chord_level(n, pair, points, next)
         }
 
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
@@ -1663,10 +1754,20 @@ struct WindowAssignment {
 
 #[derive(Clone, Copy)]
 struct MultiexpBase<F> {
+    // The AVX2 bucket reduction reads `xy29` instead.
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
     x: F,
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
     endo_x: F,
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
     y: F,
     identity: bool,
+    /// `x`, `endo_x` and `y` in radix 2^29, converted once per MSM for the
+    /// AVX2 bucket reduction.
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    xy29: [crate::arithmetic::avx2_chord::Limbs29; 3],
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    field: PhantomData<F>,
 }
 
 impl WindowAssignment {
@@ -1715,6 +1816,7 @@ struct AffinePoint<F> {
 // The left operand lives in its `points[output]` result slot. The prefix pass
 // scales `numerator` in place, so the backward pass can recover the slope
 // directly without keeping a separate inversion scratch field.
+#[cfg_attr(test, derive(Clone))]
 struct PendingAffineAddition<F> {
     output: usize,
     x_sum: F,
@@ -2113,6 +2215,98 @@ fn reduce_affine_buckets_reusing<F: Field, const COMPLETE: bool>(
     Some(buckets)
 }
 
+/// Below this many additions, a tree level's batch inversion dominates the
+/// AVX2 work, and the rest of the reduction runs on the scalar path.
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+const AVX2_MIN_LEVEL_ADDITIONS: usize = 32;
+
+/// [`reduce_affine_buckets`] over radix-2^29 points, one AVX2 level at a time.
+///
+/// Levels with at least [`AVX2_MIN_LEVEL_ADDITIONS`] additions run in AVX2;
+/// the remaining levels finish on [`reduce_affine_buckets`]. A level whose
+/// pairs include equal x-coordinates writes nothing (see `chord_level`), and
+/// its unchanged inputs finish on the complete formulas, as the scalar path
+/// would. Same invariants as [`reduce_affine_buckets`].
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+#[cfg(test)]
+fn reduce_affine_buckets29<C: GlvParams>(
+    mut points: Vec<crate::arithmetic::avx2_chord::Point29>,
+    mut offsets: Vec<usize>,
+) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
+    reduce_affine_buckets29_reusing::<C>(
+        &mut points,
+        &mut offsets,
+        &mut ReduceScratch29::default(),
+        &mut Vec::new(),
+        &mut ReduceScratch::default(),
+    )
+}
+
+/// [`reduce_affine_buckets29`] on caller-owned buffers, as
+/// [`reduce_affine_buckets_reusing`]: `points` and `offsets` are consumed as
+/// scratch, `affine` stages the levels that finish on the scalar path, and
+/// every buffer keeps its capacity for the next call.
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+fn reduce_affine_buckets29_reusing<C: GlvParams>(
+    points: &mut Vec<crate::arithmetic::avx2_chord::Point29>,
+    offsets: &mut Vec<usize>,
+    scratch: &mut ReduceScratch29,
+    affine: &mut Vec<AffinePoint<C::Base>>,
+    reduce: &mut ReduceScratch<C::Base>,
+) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
+    use crate::arithmetic::avx2_chord::Point29;
+    debug_assert!(!offsets.is_empty());
+    let ReduceScratch29 {
+        next,
+        next_offsets,
+        pairs,
+    } = scratch;
+    let exceptional = loop {
+        pairs.clear();
+        next.clear();
+        next_offsets.clear();
+        next_offsets.push(0);
+        for range in offsets.windows(2) {
+            let mut input = range[0];
+            while input + 1 < range[1] {
+                pairs.push((input, input + 1, next.len()));
+                next.push(Point29::default());
+                input += 2;
+            }
+            if input < range[1] {
+                next.push(points[input]);
+            }
+            next_offsets.push(next.len());
+        }
+        if pairs.len() < AVX2_MIN_LEVEL_ADDITIONS {
+            break false;
+        }
+        if C::chord_level29(
+            pairs.len(),
+            |i| pairs[i],
+            points,
+            next,
+            private::CrateToken(()),
+        )
+        .is_none()
+        {
+            break true;
+        }
+        core::mem::swap(points, next);
+        core::mem::swap(offsets, next_offsets);
+    };
+    affine.clear();
+    affine.extend(points.iter().map(|p| AffinePoint {
+        x: C::from29(&p.x, private::CrateToken(())),
+        y: C::from29(&p.y, private::CrateToken(())),
+    }));
+    if exceptional {
+        reduce_affine_buckets_reusing::<C::Base, true>(affine, offsets, reduce)
+    } else {
+        reduce_affine_buckets_reusing::<C::Base, false>(affine, offsets, reduce)
+    }
+}
+
 fn sum_buckets<C: GlvParams>(buckets: &[Option<AffinePoint<C::Base>>]) -> C {
     let mut running = C::identity();
     let mut sum = C::identity();
@@ -2134,6 +2328,9 @@ struct WindowScratch<F> {
     positions: Vec<usize>,
     points: Vec<AffinePoint<F>>,
     reduce: ReduceScratch<F>,
+    /// The AVX2 reducer's radix-2^29 buffers.
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    avx2: WindowScratch29,
 }
 
 impl<F> Default for WindowScratch<F> {
@@ -2145,8 +2342,28 @@ impl<F> Default for WindowScratch<F> {
             positions: Vec::new(),
             points: Vec::new(),
             reduce: ReduceScratch::default(),
+            #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+            avx2: WindowScratch29::default(),
         }
     }
+}
+
+/// A window's radix-2^29 bucket points, and the buffers of
+/// [`reduce_affine_buckets29_reusing`].
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+#[derive(Default)]
+struct WindowScratch29 {
+    points: Vec<crate::arithmetic::avx2_chord::Point29>,
+    reduce: ReduceScratch29,
+}
+
+/// Buffers of [`reduce_affine_buckets29_reusing`], reusable across calls.
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+#[derive(Default)]
+struct ReduceScratch29 {
+    next: Vec<crate::arithmetic::avx2_chord::Point29>,
+    next_offsets: Vec<usize>,
+    pairs: Vec<(usize, usize, usize)>,
 }
 
 #[cfg(feature = "multicore")]
@@ -2161,6 +2378,22 @@ impl<F> WindowScratch<F> {
                 * size_of::<AffinePoint<F>>()
             + self.reduce.next_offsets.capacity() * size_of::<usize>()
             + self.reduce.pending.capacity() * size_of::<PendingAffineAddition<F>>()
+            + self.avx2_capacity_bytes()
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn avx2_capacity_bytes(&self) -> usize {
+        use crate::arithmetic::avx2_chord::Point29;
+        use core::mem::size_of;
+        let avx2 = &self.avx2;
+        (avx2.points.capacity() + avx2.reduce.next.capacity()) * size_of::<Point29>()
+            + avx2.reduce.next_offsets.capacity() * size_of::<usize>()
+            + avx2.reduce.pairs.capacity() * size_of::<(usize, usize, usize)>()
+    }
+
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
+    fn avx2_capacity_bytes(&self) -> usize {
+        0
     }
 }
 
@@ -2221,6 +2454,8 @@ fn fill_window<C: GlvParams>(
         positions,
         points,
         reduce,
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        avx2: scratch_avx2,
     } = scratch;
     window_assignments::<C>(components, bases, window_bits, window, assignments, counts);
 
@@ -2233,36 +2468,70 @@ fn fill_window<C: GlvParams>(
 
     positions.clear();
     positions.extend_from_slice(&offsets[..bucket_count]);
-    points.clear();
-    points.resize(
-        *offsets.last().unwrap(),
-        AffinePoint {
-            x: C::Base::ZERO,
-            y: C::Base::ZERO,
-        },
-    );
-    for &assignment in assignments.iter() {
-        let base_index = assignment.component / 2;
-        let base = bases[base_index];
-        let x = if assignment.component & 1 == 0 {
-            base.x
-        } else {
-            base.endo_x
-        };
-        let bucket = assignment.bucket();
-        let position = positions[bucket];
-        points[position] = AffinePoint {
-            x,
-            y: if assignment.negative() {
-                -base.y
-            } else {
-                base.y
-            },
-        };
-        positions[bucket] += 1;
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    {
+        use crate::arithmetic::avx2_chord::Point29;
+        let points29 = &mut scratch_avx2.points;
+        points29.clear();
+        points29.resize(*offsets.last().unwrap(), Point29::default());
+        for &assignment in assignments.iter() {
+            let base = &bases[assignment.component / 2];
+            let [x, endo_x, y] = &base.xy29;
+            let bucket = assignment.bucket();
+            points29[positions[bucket]] = Point29 {
+                x: if assignment.component & 1 == 0 {
+                    *x
+                } else {
+                    *endo_x
+                },
+                y: if assignment.negative() {
+                    C::neg29(y, private::CrateToken(()))
+                } else {
+                    *y
+                },
+            };
+            positions[bucket] += 1;
+        }
+        reduce_affine_buckets29_reusing::<C>(
+            points29,
+            offsets,
+            &mut scratch_avx2.reduce,
+            points,
+            reduce,
+        )
     }
-
-    reduce_affine_buckets_reusing::<C::Base, false>(points, offsets, reduce)
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
+    {
+        points.clear();
+        points.resize(
+            *offsets.last().unwrap(),
+            AffinePoint {
+                x: C::Base::ZERO,
+                y: C::Base::ZERO,
+            },
+        );
+        for &assignment in assignments.iter() {
+            let base_index = assignment.component / 2;
+            let base = bases[base_index];
+            let x = if assignment.component & 1 == 0 {
+                base.x
+            } else {
+                base.endo_x
+            };
+            let bucket = assignment.bucket();
+            let position = positions[bucket];
+            points[position] = AffinePoint {
+                x,
+                y: if assignment.negative() {
+                    -base.y
+                } else {
+                    base.y
+                },
+            };
+            positions[bucket] += 1;
+        }
+        reduce_affine_buckets_reusing::<C::Base, false>(points, offsets, reduce)
+    }
 }
 
 fn multiexp_serial<C: GlvParams>(
@@ -2509,11 +2778,23 @@ fn multiexp_bases<C: GlvParams>(bases: &[C::AffineExt]) -> Vec<MultiexpBase<C::B
 
 fn multiexp_base<C: GlvParams>(base: &C::AffineExt) -> MultiexpBase<C::Base> {
     let (x, y) = C::affine_xy(base);
+    let endo_x = x * C::Base::ZETA;
     MultiexpBase {
+        #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
         x,
-        endo_x: x * C::Base::ZETA,
+        #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
+        endo_x,
+        #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
         y,
         identity: bool::from(base.is_identity()),
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        xy29: [
+            C::to29(&x, private::CrateToken(())),
+            C::to29(&endo_x, private::CrateToken(())),
+            C::to29(&y, private::CrateToken(())),
+        ],
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        field: PhantomData,
     }
 }
 
@@ -5155,6 +5436,182 @@ mod tests {
         }
     }
 
+    /// Random chord additions `P_i + Q_i` (distinct x-coordinates with
+    /// overwhelming probability) on the curve of affine type `A`.
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn random_chords<A: crate::arithmetic::CurveAffine>(
+        n: usize,
+        seed: u8,
+    ) -> (
+        Vec<PendingAffineAddition<A::Base>>,
+        Vec<AffinePoint<A::Base>>,
+    ) {
+        use rand::SeedableRng;
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([seed; 16]);
+        let mut additions = Vec::with_capacity(n);
+        let mut points = Vec::with_capacity(n);
+        for output in 0..n {
+            let [left, right] = [0; 2].map(|_| {
+                use group::{Curve as _, Group as _};
+                let xy = A::CurveExt::random(&mut rng)
+                    .to_affine()
+                    .coordinates()
+                    .unwrap();
+                AffinePoint {
+                    x: *xy.x(),
+                    y: *xy.y(),
+                }
+            });
+            points.push(left);
+            additions.push(PendingAffineAddition {
+                output,
+                x_sum: left.x + right.x,
+                numerator: right.y - left.y,
+                denominator: right.x - left.x,
+            });
+        }
+        (additions, points)
+    }
+
+    /// One reduction level over `2n` random points: scalar (pending records
+    /// plus `batch_invert_and_add`) against the radix-2^29 `chord_level`.
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn chord_level_inputs<A: crate::arithmetic::CurveAffine>(
+        n: usize,
+        seed: u8,
+    ) -> (
+        Vec<AffinePoint<A::Base>>,
+        Vec<crate::arithmetic::avx2_chord::Point29>,
+    )
+    where
+        A::Base: crate::arithmetic::avx2_chord::Avx2ChordField,
+    {
+        use crate::arithmetic::avx2_chord::{Avx2ChordField, Limbs29, Point29};
+        let (additions, points) = random_chords::<A>(n, seed);
+        let mut flat = Vec::with_capacity(2 * n);
+        for (a, left) in additions.iter().zip(&points) {
+            // Recover the right operand from the pending record.
+            let right = AffinePoint {
+                x: a.x_sum - left.x,
+                y: a.numerator + left.y,
+            };
+            flat.push(*left);
+            flat.push(right);
+        }
+        let flat29 = flat
+            .iter()
+            .map(|p| Point29 {
+                x: Limbs29::from_limbs(&p.x.chord_limbs()),
+                y: Limbs29::from_limbs(&p.y.chord_limbs()),
+            })
+            .collect();
+        (flat, flat29)
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn scalar_level<F: Field>(flat: &[AffinePoint<F>]) -> Vec<AffinePoint<F>> {
+        let n = flat.len() / 2;
+        let mut next: Vec<AffinePoint<F>> = (0..n).map(|i| flat[2 * i]).collect();
+        let mut pending: Vec<PendingAffineAddition<F>> = (0..n)
+            .map(|i| {
+                let (l, r) = (flat[2 * i], flat[2 * i + 1]);
+                PendingAffineAddition {
+                    output: i,
+                    x_sum: l.x + r.x,
+                    numerator: r.y - l.y,
+                    denominator: r.x - l.x,
+                }
+            })
+            .collect();
+        batch_invert_and_add(&mut pending, &mut next).unwrap();
+        next
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn chord_level_matches_scalar<A: crate::arithmetic::CurveAffine>()
+    where
+        A::Base: crate::arithmetic::avx2_chord::Avx2ChordField,
+    {
+        use crate::arithmetic::avx2_chord::{Avx2ChordField, Point29};
+        for n in (0..=40).chain([255, 1_000]) {
+            let (flat, flat29) = chord_level_inputs::<A>(n, n as u8 ^ 0x55);
+            let want = scalar_level(&flat);
+            let mut next = alloc::vec![Point29::default(); n];
+            A::Base::chord_level(n, |i| (2 * i, 2 * i + 1, i), &flat29, &mut next).unwrap();
+            for (i, (w, g)) in want.iter().zip(&next).enumerate() {
+                assert!(
+                    w.x.chord_limbs() == g.x.to_limbs() && w.y.chord_limbs() == g.y.to_limbs(),
+                    "level addition {i} of {n} differs"
+                );
+            }
+            if n > 0 {
+                let mut bad = flat29.clone();
+                bad[2 * (n / 2) + 1].x = bad[2 * (n / 2)].x;
+                let mut untouched = alloc::vec![Point29::default(); n];
+                assert!(
+                    A::Base::chord_level(n, |i| (2 * i, 2 * i + 1, i), &bad, &mut untouched)
+                        .is_none()
+                );
+                assert!(untouched.iter().all(|p| *p == Point29::default()));
+            }
+        }
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    #[test]
+    fn chord_level_matches_scalar_pallas() {
+        chord_level_matches_scalar::<pallas::Affine>();
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    #[test]
+    fn chord_level_matches_scalar_vesta() {
+        chord_level_matches_scalar::<vesta::Affine>();
+    }
+
+    /// Times one reduction level: `CHORD_SIZES` additions.
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    #[test]
+    #[ignore]
+    fn chord_level_timing() {
+        extern crate std;
+        use crate::arithmetic::avx2_chord::{Avx2ChordField, Point29};
+        use std::time::Instant;
+        let sizes = std::env::var("CHORD_SIZES")
+            .unwrap_or_else(|_| alloc::string::String::from("64,512,4096"));
+        for n in sizes.split(',').map(|n| n.parse::<usize>().unwrap()) {
+            let (flat, flat29) = chord_level_inputs::<pallas::Affine>(n, 9);
+            let reps = (2_000_000 / n.max(1)).max(20);
+            let mut best = [f64::MAX; 2];
+            let mut next = alloc::vec![Point29::default(); n];
+            for _round in 0..5 {
+                let start = Instant::now();
+                for _ in 0..reps {
+                    core::hint::black_box(scalar_level(core::hint::black_box(&flat)));
+                }
+                best[0] = best[0].min(start.elapsed().as_nanos() as f64 / (reps * n) as f64);
+                let start = Instant::now();
+                for _ in 0..reps {
+                    crate::pallas::Base::chord_level(
+                        n,
+                        |i| (2 * i, 2 * i + 1, i),
+                        core::hint::black_box(&flat29),
+                        &mut next,
+                    )
+                    .unwrap();
+                    core::hint::black_box(&next);
+                }
+                best[1] = best[1].min(start.elapsed().as_nanos() as f64 / (reps * n) as f64);
+            }
+            std::eprintln!(
+                "LEVEL n={n} scalar={:.1}ns avx2={:.1}ns ratio={:.3}",
+                best[0],
+                best[1],
+                best[1] / best[0]
+            );
+        }
+    }
+
     #[test]
     fn batch_invert_and_add_two_lanes() {
         batch_invert_and_add_two_lanes_matches_individual::<crate::Fp>();
@@ -7255,6 +7712,71 @@ mod tests {
         for reduced in [reduced, in_place] {
             assert_affine_bucket_results_match_native::<C>(case, reduced, source);
         }
+    }
+
+    /// The radix-2^29 reducer against projective sums, with the scalar
+    /// reducer's exceptional pairs (doublings, inverse pairs, at the first
+    /// and second level) among enough random buckets that the first levels
+    /// run in AVX2.
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn avx2_buckets_match_native<C: GlvParams>() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([0x29; 16]);
+        let g = C::generator();
+        let (two, three) = (g.double(), g.double() + g);
+        let exceptional: [Vec<C>; 5] = [
+            alloc::vec![g, g],
+            alloc::vec![g, -g],
+            alloc::vec![g, two, three],
+            alloc::vec![g, two, -three],
+            alloc::vec![three, three, three, three],
+        ];
+        for injected in 0..=exceptional.len() {
+            // About 520, 260, 120 and 50 additions in the first four levels, all
+            // above AVX2_MIN_LEVEL_ADDITIONS.
+            let mut buckets: Vec<Vec<C>> = (0..200)
+                .map(|_| {
+                    let len = (rng.next_u32() % 12) as usize;
+                    (0..len).map(|_| C::random(&mut rng)).collect()
+                })
+                .collect();
+            if let Some(case) = exceptional.get(injected) {
+                buckets[17] = case.clone();
+            }
+            let mut points = Vec::new();
+            let mut offsets = alloc::vec![0];
+            for bucket in &buckets {
+                for point in bucket {
+                    let (x, y) = C::affine_xy(&point.to_affine());
+                    points.push(crate::arithmetic::avx2_chord::Point29 {
+                        x: C::to29(&x, private::CrateToken(())),
+                        y: C::to29(&y, private::CrateToken(())),
+                    });
+                }
+                offsets.push(points.len());
+            }
+            let reduced =
+                reduce_affine_buckets29::<C>(points, offsets).expect("valid points always reduce");
+            for (index, (bucket, sum)) in buckets.iter().zip(reduced).enumerate() {
+                let want = bucket.iter().fold(C::identity(), |acc, p| acc + p);
+                let got = sum.map_or(C::identity(), |p| {
+                    C::from(C::affine_unchecked(p.x, p.y, private::CrateToken(())))
+                });
+                assert_eq!(got, want, "bucket {index} with exceptional case {injected}");
+            }
+        }
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    #[test]
+    fn avx2_buckets_match_native_pallas() {
+        avx2_buckets_match_native::<pallas::Point>();
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    #[test]
+    fn avx2_buckets_match_native_vesta() {
+        avx2_buckets_match_native::<vesta::Point>();
     }
 
     fn batch_affine_buckets_match_native<C: GlvParams>() {

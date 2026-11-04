@@ -1,0 +1,689 @@
+//! Four-way AVX2 affine chord additions for the GLV bucket reduction.
+//!
+//! The GLV MSM and the fixed-base sums reduce lists of affine points pairwise,
+//! one tree level at a time, sharing one inversion per level (Montgomery's
+//! trick). Each addition costs six field multiplications, independent across
+//! the additions of a level, so [`chord_level`] runs eight at a time: two
+//! vectors of four lanes, in the radix-2^29 arithmetic of
+//! [`super::avx2_sqrt`] (availability and the AVX2 guarantee are documented
+//! there). Only AVX2 is used.
+//!
+//! Points stay in radix 2^29 ([`Point29`], canonical Montgomery limbs below
+//! `p`) for the whole reduction, so a level loads and stores limbs without
+//! base conversion, and fixed tables can be stored in this form once.
+//!
+//! # Domain
+//!
+//! [`mul`] computes `a b / 2^261`, while the scalar fields store `x 2^256`.
+//! Scaling one operand of each product by `2^5` (a shift, [`shl5`]) makes it
+//! the scalar Montgomery product, so values never leave the scalar fields'
+//! Montgomery domain and need no conversion multiplications. Each value
+//! carries a scale `s`: it is held as `s x 2^256 mod p`, lazily reduced, and
+//! [`mul`] of scales `s1` and `s2` has scale `s1 s2 / 32`.
+//!
+//! # Bounds
+//!
+//! [`mul`] is exact whenever limbs 0 to 7 of both inputs are below 2^29 and
+//! both values are below 2^261; its result is below `a b / 2^261 + p`, where
+//! `2^261 > 128 p` because `p > 2^254`. [`chord_level`] states the bound of
+//! each step. All values stay below `96 p < 2^261`. Subtractions add a
+//! multiple of `p` whose limbs dominate the subtrahend's ([`kp`]), and every
+//! level's outputs are reduced to canonical form ([`canonical`]). The tests
+//! exercise each helper at these limits.
+#![allow(unsafe_code)]
+
+use core::arch::x86_64::*;
+
+use super::avx2_sqrt::{BITS, L, MASK, V, mul, pack, pasta_limbs29};
+use alloc::vec::Vec;
+
+/// Additions in flight: two vectors of four lanes.
+const G: usize = 2;
+/// Lanes per chunk.
+pub(crate) const LANES: usize = 4 * G;
+
+/// `c p` in radix 2^29, with limbs 0 to 7 raised to at least `2^30 - 2` by
+/// borrowing from the next limb, so it limb-wise dominates any normalized
+/// subtrahend whose limb 8 is at most `c 2^22 - 2`.
+const fn kp(p: &[u64; L], c: u64) -> [u64; L] {
+    let mut k = [0u64; L];
+    let mut i = 0;
+    while i < L {
+        k[i] = c * p[i];
+        i += 1;
+    }
+    let mut i = 0;
+    while i < L - 1 {
+        k[i] += 1 << (BITS + 1);
+        k[i + 1] -= 2;
+        i += 1;
+    }
+    k
+}
+
+/// Propagates carries so limbs 0 to 7 are below 2^29.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn normalize(mut v: [__m256i; L]) -> V {
+    let mask = _mm256_set1_epi64x(MASK as i64);
+    for i in 0..L - 1 {
+        let carry = _mm256_srli_epi64::<BITS>(v[i]);
+        v[i] = _mm256_and_si256(v[i], mask);
+        v[i + 1] = _mm256_add_epi64(v[i + 1], carry);
+    }
+    V(v)
+}
+
+/// `32 a`.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn shl5(a: &V) -> V {
+    normalize(core::array::from_fn(|i| _mm256_slli_epi64::<5>(a.0[i])))
+}
+
+/// `a + k - b`, for `k` from [`kp`] dominating `b`.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn sub(a: &V, b: &V, k: &[u64; L]) -> V {
+    normalize(core::array::from_fn(|i| {
+        _mm256_sub_epi64(
+            _mm256_add_epi64(a.0[i], _mm256_set1_epi64x(k[i] as i64)),
+            b.0[i],
+        )
+    }))
+}
+
+/// The four 64-bit lanes of each limb vector.
+///
+/// A bit-cast rather than `_mm256_storeu_si256`: when AVX2 is enabled only
+/// per function (the forced x86-64 backend), the store intrinsic was left as
+/// an out-of-line call.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn lanes_of(v: &V) -> [[u64; 4]; L] {
+    // SAFETY: `__m256i` and `[u64; 4]` are both 32 bytes of plain data with
+    // no invalid bit patterns.
+    v.0.map(|limb| unsafe { core::mem::transmute::<__m256i, [u64; 4]>(limb) })
+}
+
+/// Unpacks four values below 2^261 to 320-bit integers.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn unpack_wide(v: &V) -> [[u64; 5]; 4] {
+    let limbs = lanes_of(v);
+    let mut out = [[0u64; 5]; 4];
+    for (lane, out) in out.iter_mut().enumerate() {
+        for (i, limb) in limbs.iter().enumerate() {
+            let bit = i * BITS as usize;
+            let (w, s) = (bit / 64, bit % 64);
+            let x = limb[lane];
+            out[w] |= x << s;
+            if s > 0 && w + 1 < 5 {
+                out[w + 1] |= x >> (64 - s);
+            }
+        }
+    }
+    out
+}
+
+/// Reduces `x < 2^260` modulo `p` (for `2^254 < p < 2^254 + 2^128`):
+/// `q = floor(x / 2^254)` is `floor(x / p)` or one more.
+#[inline]
+fn reduce_wide(x: &[u64; 5], p: &[u64; 4]) -> [u64; 4] {
+    let q = (x[4] << 2) | (x[3] >> 62);
+    // x - q p, with q p = q (p0 + p1 2^64) + q 2^254.
+    let mut out = [0u64; 4];
+    let mut borrow = 0i128;
+    let qp = [
+        u128::from(q) * u128::from(p[0]),
+        u128::from(q) * u128::from(p[1]),
+        u128::from(q) * u128::from(p[2]),
+        u128::from(q) * u128::from(p[3]),
+    ];
+    let mut carry = 0u128;
+    let mut qpw = [0u64; 5];
+    for i in 0..4 {
+        let t = qp[i] + carry;
+        qpw[i] = t as u64;
+        carry = t >> 64;
+    }
+    qpw[4] = carry as u64;
+    let mut word4 = 0i128;
+    for i in 0..5 {
+        let t = i128::from(x[i]) - i128::from(qpw[i]) + borrow;
+        if i < 4 {
+            out[i] = t as u64;
+        } else {
+            word4 = t;
+        }
+        borrow = t >> 64;
+    }
+    if word4 < 0 {
+        // One subtraction too many: add `p` back.
+        let mut carry = 0u128;
+        for i in 0..4 {
+            let t = u128::from(out[i]) + u128::from(p[i]) + carry;
+            out[i] = t as u64;
+            carry = t >> 64;
+        }
+    }
+    out
+}
+
+/// A Pasta base field whose batched chord additions run in AVX2.
+pub(crate) trait Avx2ChordField: ff::Field {
+    /// Canonical Montgomery limbs.
+    fn chord_limbs(&self) -> [u64; 4];
+    /// The element with canonical Montgomery limbs `limbs`.
+    fn from_chord_limbs(limbs: [u64; 4]) -> Self;
+    /// [`chord_level`] for this field.
+    fn chord_level(
+        n: usize,
+        pair: impl Fn(usize) -> (usize, usize, usize),
+        points: &[Point29],
+        next: &mut [Point29],
+    ) -> Option<()>;
+    /// The modulus in radix 2^29.
+    fn modulus29() -> [u64; L];
+}
+
+/// Replaces eight Montgomery values (below 2^256) with `32` times their
+/// inverses, sharing one inversion; `None` if any is zero.
+pub(crate) fn invert_lanes<F: Avx2ChordField>(
+    lanes: &mut [[u64; 4]; LANES],
+    modulus: &[u64; 4],
+) -> Option<()> {
+    let values: [F; LANES] = core::array::from_fn(|i| {
+        F::from_chord_limbs(reduce_wide(
+            &[lanes[i][0], lanes[i][1], lanes[i][2], lanes[i][3], 0],
+            modulus,
+        ))
+    });
+    let mut prefix = [F::ONE; LANES];
+    let mut acc = F::ONE;
+    for (prefix, value) in prefix.iter_mut().zip(&values) {
+        *prefix = acc;
+        acc *= value;
+    }
+    let mut inverse = Option::<F>::from(acc.invert())?;
+    let scale = F::ONE.double().double().double().double().double();
+    for i in (0..LANES).rev() {
+        lanes[i] = (inverse * prefix[i] * scale).chord_limbs();
+        inverse *= values[i];
+    }
+    Some(())
+}
+
+/// A canonical field element (Montgomery form, below `p`) in radix 2^29.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Limbs29(pub(crate) [u32; L]);
+
+/// An affine point with [`Limbs29`] coordinates.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Point29 {
+    pub(crate) x: Limbs29,
+    pub(crate) y: Limbs29,
+}
+
+impl Limbs29 {
+    /// Converts canonical Montgomery limbs.
+    #[inline]
+    pub(crate) fn from_limbs(x: &[u64; 4]) -> Self {
+        let mut out = [0u32; L];
+        for (i, limb) in out.iter_mut().enumerate() {
+            let bit = i * BITS as usize;
+            let (w, s) = (bit / 64, bit % 64);
+            let mut v = x[w] >> s;
+            if s + BITS as usize > 64 && w + 1 < 4 {
+                v |= x[w + 1] << (64 - s);
+            }
+            *limb = (v & MASK) as u32;
+        }
+        Limbs29(out)
+    }
+
+    /// The canonical Montgomery limbs.
+    #[inline]
+    pub(crate) fn to_limbs(&self) -> [u64; 4] {
+        let mut out = [0u64; 4];
+        for (i, &limb) in self.0.iter().enumerate() {
+            let bit = i * BITS as usize;
+            let (w, s) = (bit / 64, bit % 64);
+            let x = u64::from(limb);
+            out[w] |= x << s;
+            if s + BITS as usize > 64 && w + 1 < 4 {
+                out[w + 1] |= x >> (64 - s);
+            }
+        }
+        out
+    }
+
+    /// `p - self` for nonzero `self`, and zero for zero.
+    #[inline]
+    pub(crate) fn neg(&self, p: &[u64; L]) -> Self {
+        if self.0.iter().all(|&l| l == 0) {
+            return *self;
+        }
+        let mut out = [0u32; L];
+        let mut borrow = 0i64;
+        for i in 0..L {
+            let t = p[i] as i64 - i64::from(self.0[i]) + borrow;
+            out[i] = (t & MASK as i64) as u32;
+            borrow = t >> BITS;
+        }
+        Limbs29(out)
+    }
+}
+
+/// `p` in radix 2^29.
+pub(crate) const fn modulus29(p: &[u64; 4]) -> [u64; L] {
+    pasta_limbs29(p)
+}
+
+/// Loads one coordinate of four points.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn load4(a: [&Limbs29; 4]) -> V {
+    V(core::array::from_fn(|i| {
+        _mm256_set_epi64x(
+            i64::from(a[3].0[i]),
+            i64::from(a[2].0[i]),
+            i64::from(a[1].0[i]),
+            i64::from(a[0].0[i]),
+        )
+    }))
+}
+
+/// Stores four canonical values (as [`canonical`] leaves them).
+#[target_feature(enable = "avx2")]
+#[inline]
+fn store4(v: &V) -> [Limbs29; 4] {
+    let limbs = lanes_of(v);
+    core::array::from_fn(|lane| Limbs29(core::array::from_fn(|i| limbs[i][lane] as u32)))
+}
+
+/// `a + b`, for normalized `a`, `b`.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn add(a: &V, b: &V) -> V {
+    normalize(core::array::from_fn(|i| _mm256_add_epi64(a.0[i], b.0[i])))
+}
+
+/// Reduces a normalized value below `8p` (limb 8 below `2^25`) to `[0, p)`.
+///
+/// `q = floor(v / 2^254)` is `limb 8 >> 22`; `v - q p` lies in `[-p, p)`
+/// because `2^254 < p < 2^254 + 2^128`, so at most one `p` is added back.
+/// Limbs 0 to 7 get `2^32` added (borrowed as 8 from the next limb), so they
+/// stay non-negative for the logical carry shifts; only limb 8 carries the
+/// sign.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn canonical(v: &V, p: &[u64; L]) -> V {
+    let q = _mm256_srli_epi64::<22>(v.0[8]);
+    let mut t: [__m256i; L] = core::array::from_fn(|i| {
+        let qp = match i {
+            0 => q,
+            8 => _mm256_slli_epi64::<22>(q),
+            _ => _mm256_mul_epu32(q, _mm256_set1_epi64x(p[i] as i64)),
+        };
+        let offset: i64 = match i {
+            0 => 1 << 32,
+            8 => -8,
+            _ => (1 << 32) - 8,
+        };
+        _mm256_sub_epi64(_mm256_add_epi64(v.0[i], _mm256_set1_epi64x(offset)), qp)
+    });
+    t = normalize(t).0;
+    let negative = _mm256_cmpgt_epi64(_mm256_setzero_si256(), t[8]);
+    for (i, t) in t.iter_mut().enumerate() {
+        *t = _mm256_add_epi64(
+            *t,
+            _mm256_and_si256(negative, _mm256_set1_epi64x(p[i] as i64)),
+        );
+    }
+    normalize(t)
+}
+
+/// One level of chord additions over radix-2^29 points: for each `i < n`,
+/// `pair(i) = (left, right, output)` and `next[output] = points[left] +
+/// points[right]`. The x-coordinates of each pair must differ; otherwise
+/// returns `None` without writing `next`.
+///
+/// Bounds (scales as in the module docs): differences below `3p`, their
+/// 32-scaled forms below `96p`; lane products, scaled numerators and running
+/// inverses stay below `4p` (`x <= 96 x / 128 + p`); slope below `1.13p`;
+/// `x3` below `4.4p`, `x - x3` below `6p`, `y3` below `4.7p`; outputs are
+/// reduced to canonical.
+#[target_feature(enable = "avx2")]
+pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3: u64>(
+    n: usize,
+    pair: impl Fn(usize) -> (usize, usize, usize),
+    points: &[Point29],
+    next: &mut [Point29],
+    one: &Limbs29,
+    thirty_two: &Limbs29,
+    invert: impl FnOnce(&mut [[u64; 4]; LANES]) -> Option<()>,
+) -> Option<()> {
+    let p = const { pasta_limbs29(&[P0, P1, P2, P3]) };
+    let k2 = const { kp(&pasta_limbs29(&[P0, P1, P2, P3]), 2) };
+    let k3 = const { kp(&pasta_limbs29(&[P0, P1, P2, P3]), 3) };
+    let k5 = const { kp(&pasta_limbs29(&[P0, P1, P2, P3]), 5) };
+    macro_rules! mul {
+        ($a:expr, $b:expr) => {
+            mul::<P0, P1, P2, P3>($a, $b)
+        };
+    }
+    let chunks = n.div_ceil(LANES);
+    let pad = Point29 {
+        x: *one,
+        y: Limbs29::default(),
+    };
+    let zero = Point29::default();
+    // Lane `l` of vector `g` in chunk `c` is addition `c * LANES + 4 g + l`;
+    // padding pairs `(one, 0) + (0, 0)` have difference `-1`, a unit.
+    let operands = |i: usize| -> (&Point29, &Point29) {
+        if i < n {
+            let (left, right, _) = pair(i);
+            (&points[left], &points[right])
+        } else {
+            (&pad, &zero)
+        }
+    };
+
+    let mut lane_products = [load4([thirty_two; 4]); G];
+    let mut scaled: Vec<[V; G]> = Vec::with_capacity(chunks);
+    let mut denominators: Vec<[V; G]> = Vec::with_capacity(chunks);
+    for chunk in 0..chunks {
+        let base = chunk * LANES;
+        let mut s = lane_products;
+        let mut d = lane_products;
+        for g in 0..G {
+            let first = base + 4 * g;
+            let ops = [
+                operands(first),
+                operands(first + 1),
+                operands(first + 2),
+                operands(first + 3),
+            ];
+            let lx = load4([&ops[0].0.x, &ops[1].0.x, &ops[2].0.x, &ops[3].0.x]);
+            let ly = load4([&ops[0].0.y, &ops[1].0.y, &ops[2].0.y, &ops[3].0.y]);
+            let rx = load4([&ops[0].1.x, &ops[1].1.x, &ops[2].1.x, &ops[3].1.x]);
+            let ry = load4([&ops[0].1.y, &ops[1].1.y, &ops[2].1.y, &ops[3].1.y]);
+            let num32 = shl5(&sub(&ry, &ly, &k2));
+            d[g] = shl5(&sub(&rx, &lx, &k2));
+            s[g] = mul!(&num32, &lane_products[g]);
+            lane_products[g] = mul!(&lane_products[g], &d[g]);
+        }
+        scaled.push(s);
+        denominators.push(d);
+    }
+
+    let mut inverses = [[0u64; 4]; LANES];
+    let modulus = [P0, P1, P2, P3];
+    for g in 0..G {
+        let u = unpack_wide(&lane_products[g]);
+        for l in 0..4 {
+            inverses[4 * g + l] = reduce_wide(&u[l], &modulus);
+        }
+    }
+    invert(&mut inverses)?;
+    let mut j: [V; G] =
+        core::array::from_fn(|g| pack(&core::array::from_fn(|l| inverses[4 * g + l])));
+
+    for chunk in (0..chunks).rev() {
+        let base = chunk * LANES;
+        for g in 0..G {
+            let slope = mul!(&scaled[chunk][g], &j[g]);
+            j[g] = mul!(&j[g], &denominators[chunk][g]);
+            let slope32 = shl5(&slope);
+            let first = base + 4 * g;
+            let ops = [
+                operands(first),
+                operands(first + 1),
+                operands(first + 2),
+                operands(first + 3),
+            ];
+            let lx = load4([&ops[0].0.x, &ops[1].0.x, &ops[2].0.x, &ops[3].0.x]);
+            let ly = load4([&ops[0].0.y, &ops[1].0.y, &ops[2].0.y, &ops[3].0.y]);
+            let rx = load4([&ops[0].1.x, &ops[1].1.x, &ops[2].1.x, &ops[3].1.x]);
+            let x_sum = add(&lx, &rx);
+            let x3 = sub(&mul!(&slope, &slope32), &x_sum, &k3);
+            let y3 = sub(&mul!(&slope32, &sub(&lx, &x3, &k5)), &ly, &k2);
+            let xs = store4(&canonical(&x3, &p));
+            let ys = store4(&canonical(&y3, &p));
+            for l in 0..4 {
+                let i = base + 4 * g + l;
+                if i < n {
+                    next[pair(i).2] = Point29 { x: xs[l], y: ys[l] };
+                }
+            }
+        }
+    }
+    Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Fp;
+    use ff::Field;
+    use rand::SeedableRng;
+
+    const P: [u64; 4] = [0x992d30ed00000001, 0x224698fc094cf91b, 0, 1 << 62];
+
+    fn lanes(v: [Fp; 4]) -> [[u64; 4]; 4] {
+        v.map(|x| x.0)
+    }
+
+    #[test]
+    fn building_blocks_match_scalar() {
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([3; 16]);
+        for _ in 0..200 {
+            let a: [Fp; 4] = core::array::from_fn(|_| Fp::random(&mut rng));
+            let b: [Fp; 4] = core::array::from_fn(|_| Fp::random(&mut rng));
+            // SAFETY: test runs only where pasta_curves_avx2 guarantees AVX2.
+            unsafe {
+                let m = mul::<{ P[0] }, { P[1] }, { P[2] }, { P[3] }>(
+                    &shl5(&pack(&lanes(a))),
+                    &pack(&lanes(b)),
+                );
+                let got = unpack_wide(&m);
+                for l in 0..4 {
+                    assert_eq!(reduce_wide(&got[l], &P), (a[l] * b[l]).0, "mul lane {l}");
+                }
+                let k2 = kp(&pasta_limbs29(&P), 2);
+                let s = sub(&pack(&lanes(a)), &pack(&lanes(b)), &k2);
+                let got = unpack_wide(&s);
+                for l in 0..4 {
+                    assert_eq!(reduce_wide(&got[l], &P), (a[l] - b[l]).0, "sub lane {l}");
+                }
+                let got = unpack_wide(&shl5(&pack(&lanes(a))));
+                for l in 0..4 {
+                    let thirty_two = Fp::ONE.double().double().double().double().double();
+                    assert_eq!(
+                        reduce_wide(&got[l], &P),
+                        (a[l] * thirty_two).0,
+                        "shl5 lane {l}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `k p + r` as a 320-bit integer.
+    fn k_p_plus(k: u64, p: &[u64; 4], r: &[u64; 4]) -> [u64; 5] {
+        let mut out = [0u64; 5];
+        let mut carry = 0u128;
+        for i in 0..4 {
+            let t = u128::from(k) * u128::from(p[i]) + u128::from(r[i]) + carry;
+            out[i] = t as u64;
+            carry = t >> 64;
+        }
+        out[4] = carry as u64;
+        out
+    }
+
+    /// Normalized radix-2^29 limbs of `x < 2^261`.
+    fn limbs29(x: &[u64; 5]) -> [u64; L] {
+        core::array::from_fn(|i| {
+            let bit = i * BITS as usize;
+            let (w, s) = (bit / 64, bit % 64);
+            let mut v = x[w] >> s;
+            if s + BITS as usize > 64 && w + 1 < 5 {
+                v |= x[w + 1] << (64 - s);
+            }
+            v & MASK
+        })
+    }
+
+    fn vector(lanes: [[u64; L]; 4]) -> V {
+        // SAFETY: tests run only where `pasta_curves_avx2` guarantees AVX2.
+        V(core::array::from_fn(|i| unsafe {
+            _mm256_set_epi64x(
+                lanes[3][i] as i64,
+                lanes[2][i] as i64,
+                lanes[1][i] as i64,
+                lanes[0][i] as i64,
+            )
+        }))
+    }
+
+    /// The largest normalized radix-2^29 value below `bound`: every limb at
+    /// its maximum except limb 8, which is as large as the bound allows.
+    fn max_limbs_below(bound: &[u64; 5]) -> [u64; L] {
+        let top = limbs29(bound)[8];
+        let mut limbs = [MASK; L];
+        limbs[8] = top - 1;
+        limbs
+    }
+
+    fn integer(limbs: &[u64; L]) -> [u64; 5] {
+        let mut out = [0u64; 5];
+        for (i, &limb) in limbs.iter().enumerate() {
+            let bit = i * BITS as usize;
+            let (w, s) = (bit / 64, bit % 64);
+            out[w] |= limb << s;
+            if s > 0 && w + 1 < 5 {
+                out[w + 1] |= limb >> (64 - s);
+            }
+        }
+        out
+    }
+
+    macro_rules! boundary_tests {
+        ($name:ident, $field:ty, $modulus:expr) => {
+            mod $name {
+                use super::*;
+
+                const P: [u64; 4] = $modulus;
+
+                fn reduce(x: &[u64; 5]) -> $field {
+                    <$field>::from_chord_limbs(reduce_wide(x, &P))
+                }
+
+                /// [`canonical`] across its whole input range: every multiple
+                /// of `p` up to `7p` plus residues at both ends, and the
+                /// all-maximum limb pattern just below `8p`.
+                #[test]
+                fn canonical_up_to_8p() {
+                    let p29 = pasta_limbs29(&P);
+                    let mut minus = P;
+                    minus[0] -= 1;
+                    let mut minus2 = P;
+                    minus2[0] -= 2;
+                    let residues = [[0, 0, 0, 0], [1, 0, 0, 0], [2, 0, 0, 0], minus, minus2];
+                    for k in 0..8 {
+                        for r in &residues {
+                            let v = limbs29(&k_p_plus(k, &P, r));
+                            // SAFETY: AVX2 is guaranteed (see `vector`).
+                            let got = unsafe { store4(&canonical(&vector([v; 4]), &p29)) };
+                            let want = limbs29(&[r[0], r[1], r[2], r[3], 0]);
+                            for lane in got {
+                                assert_eq!(lane.0.map(u64::from), want, "{k} p + r");
+                            }
+                        }
+                    }
+                    let top = max_limbs_below(&k_p_plus(8, &P, &[0; 4]));
+                    // SAFETY: AVX2 is guaranteed (see `vector`).
+                    let got = unsafe { store4(&canonical(&vector([top; 4]), &p29)) };
+                    let want = reduce_wide(&integer(&top), &P);
+                    assert_eq!(got[0].to_limbs(), want);
+                }
+
+                /// [`sub`] with the largest subtrahend each multiple of `p`
+                /// must dominate, from zero and from a large minuend: the
+                /// result is exactly `a + c p - b`, normalized.
+                #[test]
+                fn sub_at_dominance_limit() {
+                    let p29 = pasta_limbs29(&P);
+                    for c in [2u64, 3, 4, 5] {
+                        let k = kp(&p29, c);
+                        let mut b = [MASK; L];
+                        b[8] = c * (1 << 22) - 2;
+                        for a in [[0u64; L], max_limbs_below(&k_p_plus(96, &P, &[0; 4]))] {
+                            // SAFETY: AVX2 is guaranteed (see `vector`).
+                            let got =
+                                unsafe { lanes_of(&sub(&vector([a; 4]), &vector([b; 4]), &k)) };
+                            let got: [u64; L] = core::array::from_fn(|i| got[i][0]);
+                            assert!(got[..8].iter().all(|&limb| limb <= MASK), "c = {c}");
+                            // a + c p - b, as integers.
+                            let (a, b) = (integer(&a), integer(&b));
+                            let cp = k_p_plus(c, &P, &[0; 4]);
+                            let mut want = [0u64; 5];
+                            let mut carry = 0i128;
+                            for i in 0..5 {
+                                let t =
+                                    i128::from(a[i]) + i128::from(cp[i]) - i128::from(b[i]) + carry;
+                                want[i] = t as u64;
+                                carry = t >> 64;
+                            }
+                            assert_eq!(carry, 0, "c p dominates b");
+                            assert_eq!(integer(&got), want, "c = {c}");
+                        }
+                    }
+                }
+
+                /// [`mul`] at the largest operands `chord_level` feeds it
+                /// (scaled differences below `96p` times products below `4p`,
+                /// and the all-maximum limb pattern of each bound) is the
+                /// exact Montgomery product `a b / 2^261 mod p`.
+                #[test]
+                fn mul_at_kernel_bounds() {
+                    let inv32 = <$field>::from(32).invert().unwrap();
+                    let mut minus = P;
+                    minus[0] -= 1;
+                    let operands = |k: u64| {
+                        [
+                            limbs29(&k_p_plus(k - 1, &P, &minus)),
+                            max_limbs_below(&k_p_plus(k, &P, &[0; 4])),
+                        ]
+                    };
+                    for a in operands(96) {
+                        for b in operands(4).into_iter().chain(operands(36)) {
+                            // SAFETY: AVX2 is guaranteed (see `vector`).
+                            let got = unsafe {
+                                unpack_wide(&mul::<{ P[0] }, { P[1] }, { P[2] }, { P[3] }>(
+                                    &vector([a; 4]),
+                                    &vector([b; 4]),
+                                ))
+                            };
+                            let want = reduce(&integer(&a)) * reduce(&integer(&b)) * inv32;
+                            assert_eq!(reduce(&got[0]), want);
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    boundary_tests!(
+        pallas_bounds,
+        crate::Fp,
+        [0x992d30ed00000001, 0x224698fc094cf91b, 0, 1 << 62]
+    );
+    boundary_tests!(
+        vesta_bounds,
+        crate::Fq,
+        [0x8c46eb2100000001, 0x224698fc0994a8dd, 0, 1 << 62]
+    );
+}

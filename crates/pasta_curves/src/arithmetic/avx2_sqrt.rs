@@ -53,13 +53,13 @@ use core::arch::x86_64::*;
 
 use super::fields::SqrtTableHelpers;
 
-const L: usize = 9;
-const BITS: i32 = 29;
-const MASK: u64 = (1 << BITS) - 1;
+pub(super) const L: usize = 9;
+pub(super) const BITS: i32 = 29;
+pub(super) const MASK: u64 = (1 << BITS) - 1;
 
 /// Four field elements, limb-major.
 #[derive(Clone, Copy)]
-struct V([__m256i; L]);
+pub(super) struct V(pub(super) [__m256i; L]);
 
 /// Little-endian 256-bit integers, four per vector, `G` vectors.
 pub(crate) type Lanes<const G: usize> = [[[u64; 4]; 4]; G];
@@ -83,7 +83,7 @@ const fn to29(x: &[u64; 4]) -> [u64; L] {
 
 /// Converts a Pasta modulus to radix 2^29, checking the sparse shape that the
 /// generated `mul` and `sqr` assume.
-const fn pasta_limbs29(p: &[u64; 4]) -> [u64; L] {
+pub(super) const fn pasta_limbs29(p: &[u64; 4]) -> [u64; L] {
     let l = to29(p);
     assert!(l[0] == 1 && l[5] == 0 && l[6] == 0 && l[7] == 0 && l[8] == 1 << 22);
     l
@@ -93,7 +93,7 @@ const fn pasta_limbs29(p: &[u64; 4]) -> [u64; L] {
 /// Lane-wise Montgomery product.
 #[target_feature(enable = "avx2")]
 #[inline]
-fn mul<const P0: u64, const P1: u64, const P2: u64, const P3: u64>(a: &V, b: &V) -> V {
+pub(super) fn mul<const P0: u64, const P1: u64, const P2: u64, const P3: u64>(a: &V, b: &V) -> V {
     let p = const { pasta_limbs29(&[P0, P1, P2, P3]) };
     {
         let mask = _mm256_set1_epi64x(MASK as i64);
@@ -534,7 +534,7 @@ fn sqr<const P0: u64, const P1: u64, const P2: u64, const P3: u64>(a: &V) -> V {
 /// Packs four little-endian 256-bit integers (each below 2^261).
 #[target_feature(enable = "avx2")]
 #[inline]
-fn pack(x: &[[u64; 4]; 4]) -> V {
+pub(super) fn pack(x: &[[u64; 4]; 4]) -> V {
     let l = [to29(&x[0]), to29(&x[1]), to29(&x[2]), to29(&x[3])];
     let mut v = [_mm256_setzero_si256(); L];
     for (i, limb) in v.iter_mut().enumerate() {
@@ -552,7 +552,7 @@ fn pack(x: &[[u64; 4]; 4]) -> V {
 /// leave them).
 #[target_feature(enable = "avx2")]
 #[inline]
-fn unpack(v: &V) -> [[u64; 4]; 4] {
+pub(super) fn unpack(v: &V) -> [[u64; 4]; 4] {
     let mut limbs = [[0u64; 4]; L];
     for (dst, src) in limbs.iter_mut().zip(&v.0) {
         // SAFETY: stores exactly the 32 bytes of the `[u64; 4]` behind `dst`.
