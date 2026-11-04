@@ -1073,6 +1073,11 @@ macro_rules! new_curve_impl {
             fn b() -> Self::Base {
                 $name::curve_constant_b()
             }
+
+            #[cfg(feature = "sqrt-table")]
+            fn batch_decode(encodings: &[[u8; 32]]) -> alloc::vec::Vec<CtOption<Self>> {
+                Self::batch_from_bytes(encodings.iter().copied())
+            }
         }
 
         impl Default for $name_affine {

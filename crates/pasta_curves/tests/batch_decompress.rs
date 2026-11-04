@@ -123,3 +123,34 @@ fn batch_from_bytes_matches_from_bytes_sweep() {
     sweep!(pallas::Affine, pallas::Point, Fp, &mut rng);
     sweep!(vesta::Affine, vesta::Point, Fq, &mut rng);
 }
+
+/// `CurveAffine::batch_decode`, the generic entry point the verifiers use,
+/// agrees with `from_bytes` too.
+#[test]
+fn curve_affine_batch_decode_matches_from_bytes() {
+    use pasta_curves::arithmetic::CurveAffine;
+
+    let mut rng = XorShiftRng::from_seed([9; 16]);
+    let pallas_inputs = inputs::<pallas::Point>(&mut rng);
+    for (got, bytes) in pallas::Affine::batch_decode(&pallas_inputs)
+        .iter()
+        .zip(&pallas_inputs)
+    {
+        let want = pallas::Affine::from_bytes(bytes);
+        assert_eq!(bool::from(got.is_some()), bool::from(want.is_some()));
+        if bool::from(want.is_some()) {
+            assert_eq!(got.unwrap(), want.unwrap());
+        }
+    }
+    let vesta_inputs = inputs::<vesta::Point>(&mut rng);
+    for (got, bytes) in vesta::Affine::batch_decode(&vesta_inputs)
+        .iter()
+        .zip(&vesta_inputs)
+    {
+        let want = vesta::Affine::from_bytes(bytes);
+        assert_eq!(bool::from(got.is_some()), bool::from(want.is_some()));
+        if bool::from(want.is_some()) {
+            assert_eq!(got.unwrap(), want.unwrap());
+        }
+    }
+}
