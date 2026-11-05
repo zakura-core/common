@@ -8,6 +8,11 @@
 //! Only the push-only input has larger items. The spending program uses the existing
 //! opcode parser and shared execution loop. These provisional harness limits are not proposed
 //! consensus limits; transaction/block work and relay qualification remain separate.
+//!
+//! Unlike the legacy evaluator, this one requires a canonical input: every pushed item uses
+//! its shortest encoding, and execution must end with exactly one item on the stack. Both
+//! rules deny a third party cheap, identifier-preserving edits to someone else's spend,
+//! because ZIP 244 leaves the serialized input out of the transaction identifier.
 
 use alloc::vec::Vec;
 
@@ -16,9 +21,9 @@ use crate::{
     script,
 };
 
-/// Provisional serialized authorization bound, including pushes and the P2SH redeem
-/// script. Accommodates 20 full signatures and multiple checking instructions; it
-/// is a byte bound, not a signature-count limit or a final consensus parameter.
+/// Provisional serialized authorization bound, including every push and the final
+/// pushed script. Accommodates 20 full signatures and multiple checking instructions;
+/// it is a byte bound, not a signature-count limit or a final consensus parameter.
 pub const MAX_INPUT_BYTES: usize = 512 * 1024;
 /// One SLH-DSA-SHA2-128f signature and its one-byte signing-mode selector.
 pub const MAX_PUSH_BYTES: usize = 17_089;
@@ -36,6 +41,9 @@ pub enum Error {
     /// A declared pushed item exceeds the bound, before allocating its payload.
     #[error("PQ push exceeds {MAX_PUSH_BYTES} bytes")]
     PushSize,
+    /// A pushed item is encoded with a longer push than its payload needs.
+    #[error("PQ input push is not minimally encoded")]
+    PushEncoding,
     /// A push length or payload runs past the end of the input.
     #[error("truncated PQ input push")]
     TruncatedPush,
@@ -98,11 +106,30 @@ fn read_push(mut bytes: &[u8], limit: usize) -> Result<(PushedValue<'_>, &[u8]),
             }
             let (value, rest) = bytes.split_at_checked(length).ok_or(Error::TruncatedPush)?;
             bytes = rest;
+            if !is_minimal_push(opcode, value) {
+                return Err(Error::PushEncoding);
+            }
             PushedValue::Bytes(value)
         }
         _ => return Err(Error::NotPushOnly),
     };
     Ok((value, bytes))
+}
+
+/// Whether this payload has no shorter encoding, mirroring `LargeValue::is_minimal_push`
+/// and the legacy `MinimalData` rule: a wider length prefix than the payload needs, or a
+/// one-byte payload that `OP_1NEGATE` or `OP_1`..`OP_16` would have pushed, is not minimal.
+fn is_minimal_push(opcode: u8, value: &[u8]) -> bool {
+    match opcode {
+        0x4c => 0x4c <= value.len(),
+        0x4d => 0x100 <= value.len(),
+        0x4e => 0x10000 <= value.len(),
+        // A direct push. Note that a single zero byte is minimal: `OP_0` pushes no bytes.
+        _ => match value {
+            [byte] => *byte != 0x81 && (*byte < 1 || 16 < *byte),
+            _ => true,
+        },
+    }
 }
 
 fn arguments(mut bytes: &[u8]) -> Result<Stack<Vec<u8>>, Error> {
@@ -187,7 +214,9 @@ impl<'a> SpendingInput<'a> {
 /// The caller selects the verifier; no script bytes can select or downgrade it.
 /// This executes the supplied program directly, without an outer P2SH evaluation.
 /// A false final stack item returns `Ok(false)`; parsing/encoding errors and failed
-/// VERIFY operations abort. Empty final stacks return false, like the legacy evaluator.
+/// VERIFY operations abort. Unlike the legacy evaluator, a final stack holding anything
+/// other than exactly one item aborts, so leftover or prepended arguments are rejected
+/// rather than ignored. Non-minimal pushes in the input abort before execution.
 /// Absolute locktime checks use the caller's checker. No relay-policy flags are added.
 pub fn eval_script(
     input: &[u8],
@@ -211,6 +240,11 @@ pub fn eval_script(
         checker,
         script::iter::AdditionalStackByteLimit::Limited(MAX_STACK_BYTES),
     )?;
+    // Exactly one item, so neither an extra argument nor an unconsumed result can be
+    // ignored. The legacy evaluator applies this only as the optional `CleanStack` policy.
+    if stack.len() != 1 {
+        return Err(script::Error::CleanStack.into());
+    }
     Ok(stack
         .last()
         .is_ok_and(|item| interpreter::cast_to_bool(item)))
@@ -221,11 +255,40 @@ mod tests {
     use super::*;
     use crate::interpreter::NullSignatureChecker;
 
+    /// The shortest encoding of a `length`-byte payload, as the PQ rules require.
     fn push(length: usize) -> Vec<u8> {
-        let mut input = vec![0x4e];
-        input.extend_from_slice(&(length as u32).to_le_bytes());
-        input.resize(5 + length, 1);
+        let mut input = if length < 0x4c {
+            vec![length as u8]
+        } else if length < 0x100 {
+            vec![0x4c, length as u8]
+        } else if length < 0x10000 {
+            let mut bytes = vec![0x4d];
+            bytes.extend_from_slice(&(length as u16).to_le_bytes());
+            bytes
+        } else {
+            let mut bytes = vec![0x4e];
+            bytes.extend_from_slice(&(length as u32).to_le_bytes());
+            bytes
+        };
+        let prefix = input.len();
+        input.resize(prefix + length, 1);
         input
+    }
+
+    /// The number of items an ordinary legacy run of this program would leave behind.
+    fn final_items(input: &[u8], program: &script::Code) -> Option<usize> {
+        script::iter::eval(
+            program
+                .parse()
+                .map(|instruction| instruction.map_err(script::Error::Opcode)),
+            Flags::CHECKLOCKTIMEVERIFY,
+            program,
+            arguments(input).ok()?,
+            &NullSignatureChecker(),
+            script::iter::AdditionalStackByteLimit::None,
+        )
+        .ok()
+        .map(|stack| stack.len())
     }
 
     #[test]
@@ -274,6 +337,64 @@ mod tests {
     }
 
     #[test]
+    fn longer_than_necessary_push_encodings_are_rejected() {
+        let drop_then_true = script::Code(vec![0x75, 0x51]);
+        let check = |input: &[u8]| eval_script(input, &drop_then_true, &NullSignatureChecker());
+        // The same single payload byte, encoded four ways. Only the direct push is minimal.
+        assert_eq!(check(&[0x01, 0x20]), Ok(true));
+        for wider in [
+            vec![0x4c, 1, 0x20],
+            vec![0x4d, 1, 0, 0x20],
+            vec![0x4e, 1, 0, 0, 0, 0x20],
+        ] {
+            assert_eq!(check(&wider), Err(Error::PushEncoding));
+            assert_eq!(
+                SpendingInput::scan(&wider).map(|_| ()),
+                Err(Error::PushEncoding),
+                "a non-minimal push must not even reach commitment authentication"
+            );
+        }
+        // A one-byte payload that a small-integer opcode would have pushed.
+        for value in [0x01, 0x10, 0x81] {
+            assert_eq!(check(&[0x01, value]), Err(Error::PushEncoding));
+        }
+        // A single zero byte is minimal: OP_0 pushes an empty item, not a zero byte.
+        assert_eq!(check(&[0x01, 0x00]), Ok(true));
+        // Boundaries: each wider prefix becomes minimal exactly at its own length.
+        assert_eq!(check(&push(0x4b)), Ok(true));
+        assert_eq!(check(&push(0x4c)), Ok(true));
+        assert_eq!(check(&push(0xff)), Ok(true));
+        assert_eq!(check(&push(0x100)), Ok(true));
+        let mut barely_short = vec![0x4c, 0x4b];
+        barely_short.resize(2 + 0x4b, 1);
+        assert_eq!(check(&barely_short), Err(Error::PushEncoding));
+        let mut two_byte_prefix = vec![0x4d, 0xff, 0x00];
+        two_byte_prefix.resize(3 + 0xff, 1);
+        assert_eq!(check(&two_byte_prefix), Err(Error::PushEncoding));
+    }
+
+    #[test]
+    fn extra_and_leftover_stack_items_are_rejected() {
+        let true_script = script::Code(vec![0x51]);
+        let check = |input: &[u8], program: &script::Code| {
+            eval_script(input, program, &NullSignatureChecker())
+        };
+        let clean_stack = Err(Error::Script(script::Error::CleanStack));
+        assert_eq!(check(&[], &true_script), Ok(true));
+        // An argument the program never consumes, which the legacy evaluator would ignore.
+        assert_eq!(check(&[0x51], &true_script), clean_stack);
+        assert_eq!(check(&[0x00], &true_script), clean_stack);
+        // Prepending a junk push to someone else's otherwise valid input.
+        assert_eq!(check(&[0x51], &script::Code(vec![])), Ok(true));
+        assert_eq!(check(&[0x51, 0x51], &script::Code(vec![])), clean_stack);
+        // An empty final stack is rejected, where the legacy evaluator returns false.
+        assert_eq!(check(&[], &script::Code(vec![])), clean_stack);
+        assert_eq!(check(&[0x51], &script::Code(vec![0x75])), clean_stack);
+        // A result left beside a consumed argument.
+        assert_eq!(check(&[0x51, 0x51], &script::Code(vec![0x75])), Ok(true));
+    }
+
+    #[test]
     fn ordinary_programs_keep_legacy_results_and_errors() {
         let mut programs = vec![
             vec![],
@@ -297,13 +418,20 @@ mod tests {
                 let legacy = script::Raw::from_raw_parts(input.clone(), program.clone())
                     .eval(Flags::CHECKLOCKTIMEVERIFY, &NullSignatureChecker())
                     .map_err(|(_, error)| Error::Script(error));
+                // Identical results and errors, except that the PQ rules additionally
+                // require a single final item where the legacy evaluator ignores the rest.
+                let expected = match final_items(&input, &script::Code(program.clone())) {
+                    Some(1) => legacy,
+                    Some(_) => Err(Error::Script(script::Error::CleanStack)),
+                    None => legacy,
+                };
                 assert_eq!(
                     eval_script(
                         &input,
                         &script::Code(program.clone()),
                         &NullSignatureChecker()
                     ),
-                    legacy,
+                    expected,
                     "input {input:?}, program {program:?}",
                 );
             }
@@ -336,7 +464,9 @@ mod tests {
             let code = script::Code([0, 0, 0xac].repeat(count));
             let result = eval_script(&[], &code, &checker);
             if count == 201 {
-                assert_eq!(result, Ok(true));
+                // Each check leaves its own result behind, which the clean-stack rule
+                // rejects only after the budget has allowed exactly 201 operations.
+                assert_eq!(result, Err(Error::Script(script::Error::CleanStack)));
             } else {
                 assert!(matches!(
                     result,
@@ -357,18 +487,22 @@ mod tests {
         while input.len() + MAX_PUSH_BYTES + 10 < MAX_INPUT_BYTES {
             input.extend(push(MAX_PUSH_BYTES));
         }
-        input.extend(push(MAX_INPUT_BYTES - input.len() - 10));
+        // One filler push, then the one-byte empty push that ends the input exactly.
+        input.extend(push(MAX_INPUT_BYTES - input.len() - 1 - 3));
         input.extend(push(0));
         assert_eq!(input.len(), MAX_INPUT_BYTES);
-        assert!(SpendingInput::scan(&input).unwrap().pq_arguments().is_ok());
+        let scanned = SpendingInput::scan(&input).unwrap();
+        assert!(scanned.pq_arguments().is_ok());
+        // Drop down to a single item, since every pushed argument stays on the stack.
+        let program = script::Code(vec![0x75; scanned.pushes - 1]);
         assert_eq!(
-            eval_script(&input, &script::Code(vec![0x51]), &NullSignatureChecker()),
+            eval_script(&input, &program, &NullSignatureChecker()),
             Ok(true)
         );
         input.push(0);
         assert!(matches!(SpendingInput::scan(&input), Err(Error::InputSize)));
         assert_eq!(
-            eval_script(&input, &script::Code(vec![0x51]), &NullSignatureChecker()),
+            eval_script(&input, &program, &NullSignatureChecker()),
             Err(Error::InputSize)
         );
     }
@@ -377,15 +511,14 @@ mod tests {
     fn additional_stack_byte_limit_counts_main_and_alternate_payloads() {
         let input = push(MAX_PUSH_BYTES);
         let copies = MAX_STACK_BYTES / MAX_PUSH_BYTES;
-        let mut program = vec![0x76; copies - 1]; // DUP up to the byte bound.
+        let duplicates = vec![0x76; copies - 1]; // DUP up to the byte bound.
+        let mut program = duplicates.clone();
+        program.extend(vec![0x75; copies - 1]); // DROP back down to a single item.
         assert_eq!(
-            eval_script(
-                &input,
-                &script::Code(program.clone()),
-                &NullSignatureChecker()
-            ),
+            eval_script(&input, &script::Code(program), &NullSignatureChecker()),
             Ok(true)
         );
+        let mut program = duplicates;
         program.push(0x6b); // TOALTSTACK must not free the payload budget.
         program.extend_from_slice(&[0x76, 0x6a]); // DUP crosses the bound before RETURN.
         assert!(matches!(

@@ -1,5 +1,6 @@
-// Library integration for supplied programs and authenticated P2SH redeem scripts.
-// These tests do not activate PQ validation or establish node acceptance.
+// Library integration for supplied programs and for scripts authenticated against the
+// versioned output that commits to them. These tests do not activate PQ validation or
+// establish node acceptance.
 
 use alloc::vec::Vec;
 
@@ -34,11 +35,27 @@ fn program(key: &[u8]) -> Code {
     Code(bytes)
 }
 
+/// The shortest encoding of this payload. PQ inputs must use it, and a script body
+/// means the same thing either way.
 fn pushed(value: &[u8]) -> Vec<u8> {
-    let mut input = vec![0x4d]; // PUSHDATA2 uses a fixed-width unsigned length.
-    input.extend_from_slice(&u16::try_from(value.len()).unwrap().to_le_bytes());
-    input.extend_from_slice(value);
-    input
+    match value {
+        [] => vec![0x00],                                       // OP_0
+        [0x81] => vec![0x4f],                                   // OP_1NEGATE
+        [byte] if (1..=16).contains(byte) => vec![0x50 + byte], // OP_1 ..= OP_16
+        _ => {
+            let mut input = if value.len() < 0x4c {
+                vec![value.len() as u8]
+            } else if value.len() < 0x100 {
+                vec![0x4c, value.len() as u8]
+            } else {
+                let mut prefix = vec![0x4d];
+                prefix.extend_from_slice(&u16::try_from(value.len()).unwrap().to_le_bytes());
+                prefix
+            };
+            input.extend_from_slice(value);
+            input
+        }
+    }
 }
 
 fn transaction(key: &[u8]) -> TransactionData<TestUnauthorized> {
@@ -112,21 +129,28 @@ fn digest_with_script(
     )
 }
 
-mod p2sh_spends {
+mod output_spends {
     use super::*;
-    use transparent::{address::TransparentAddress, bundle::Authorized, pq::p2sh, util::hash160};
+    use transparent::{bundle::Authorized, pq::output};
+    use zcash_protocol::consensus::NetworkType;
 
-    fn transaction(redeem: &Code) -> TransactionData<TestUnauthorized> {
+    const NETWORK: NetworkType = NetworkType::Main;
+
+    fn context() -> &'static [u8] {
+        output::signing_context(NETWORK, PARAMETERS)
+    }
+
+    fn transaction(body: &Code) -> TransactionData<TestUnauthorized> {
         let output = TxOut::new(
             Zatoshis::const_from_u64(100),
-            TransparentAddress::ScriptHash(hash160::hash(&redeem.0))
-                .script()
-                .into(),
+            Script(output::output_script(PARAMETERS, body).unwrap()),
         );
         let mut wire = Vec::new();
         output.write(&mut wire).unwrap();
         let decoded = TxOut::read(&mut &wire[..]).unwrap();
         assert_eq!(decoded, output);
+        // The spent output carries the version on chain, and no address type encodes it.
+        assert_eq!(decoded.recipient_address(), None);
         transaction_with_program(&decoded.script_pubkey().0)
     }
 
@@ -152,46 +176,47 @@ mod p2sh_spends {
     fn signed_input(
         key: &SigningKey,
         tx: &TransactionData<TestUnauthorized>,
-        redeem: &Code,
+        body: &Code,
         selector: u8,
         context: &[u8],
     ) -> Vec<u8> {
         let mut signature = key
             .sign(
-                &digest_with_script(tx, selector, &Script(redeem.clone())).unwrap(),
+                &digest_with_script(tx, selector, &Script(body.clone())).unwrap(),
                 context,
             )
             .unwrap();
         signature.push(selector);
         let mut input = pushed(&signature);
-        input.extend_from_slice(&pushed(&redeem.0));
+        input.extend_from_slice(&pushed(&body.0));
         input
     }
 
-    fn check(tx: &TransactionData<TestUnauthorized>, redeem: &Code) -> Result<bool, p2sh::Error> {
+    fn check(
+        tx: &TransactionData<TestUnauthorized>,
+        body: &Code,
+    ) -> Result<bool, output::Error> {
         let bundle = tx.transparent_bundle().unwrap();
-        let spend = script::Raw::from_raw_parts(
-            bundle.vin[0].script_sig().0.0.clone(),
-            bundle.authorization.input_scriptpubkeys[0].0.0.clone(),
-        );
         let sighash = |script_code: &Code, hash_type: &HashType| {
-            // The execution header is authenticated even though only the body executes.
-            assert_eq!(script_code.0, redeem.0);
+            // The digest is taken over the body script, which is all that executes.
+            assert_eq!(script_code.0, body.0);
             digest_with_script(tx, hash_type.raw_bits() as u8, &Script(script_code.clone()))
         };
-        p2sh::verify_spend(
-            &spend,
-            Flags::P2SH | Flags::CHECKLOCKTIMEVERIFY,
-            &CallbackTransactionSignatureChecker {
-                sighash: &sighash,
-                lock_time: i64::from(tx.lock_time()),
-                is_final: bundle.vin[0].sequence() == u32::MAX,
-            },
-        )
+        output::parse_output(&bundle.authorization.input_scriptpubkeys[0].0)?
+            .expect("these tests spend PQ outputs")
+            .verify_spend(
+                NETWORK,
+                &bundle.vin[0].script_sig().0.0,
+                &CallbackTransactionSignatureChecker {
+                    sighash: &sighash,
+                    lock_time: i64::from(tx.lock_time()),
+                    is_final: bundle.vin[0].sequence() == u32::MAX,
+                },
+            )
     }
 
     #[test]
-    fn serialized_p2sh_multisig_authenticates_distinct_signers_and_order() {
+    fn serialized_multisig_authenticates_distinct_signers_and_order() {
         let keys: Vec<_> = (3..=5)
             .map(|seed| SigningKey::from_seed(&[seed; crypto::SEED_BYTES]))
             .collect();
@@ -200,19 +225,13 @@ mod p2sh_spends {
             &keys.iter().map(SigningKey::public_key).collect::<Vec<_>>(),
             false,
         );
-        let redeem = p2sh::redeem_script(PARAMETERS, &body).unwrap();
-        let mut tx = transaction(&redeem);
+        let mut tx = transaction(&body);
         let arguments: Vec<_> = keys
             .iter()
             .map(|key| {
-                let mut input = signed_input(
-                    key,
-                    &tx,
-                    &redeem,
-                    sighash::SIGHASH_ALL,
-                    p2sh::signing_context(PARAMETERS),
-                );
-                input.truncate(input.len() - pushed(&redeem.0).len());
+                let mut input =
+                    signed_input(key, &tx, &body, sighash::SIGHASH_ALL, context());
+                input.truncate(input.len() - pushed(&body.0).len());
                 input
             })
             .collect();
@@ -221,38 +240,31 @@ mod p2sh_spends {
                 vec![0],
                 arguments[pair[0]].clone(),
                 arguments[pair[1]].clone(),
-                pushed(&redeem.0),
+                pushed(&body.0),
             ]
             .concat();
             install_input(&mut tx, &input);
             assert_eq!(
-                check(&tx, &redeem),
+                check(&tx, &body),
                 Ok(pair != [2, 0]),
                 "signer order {pair:?}"
             );
         }
         let mut forged = arguments[0].clone();
         forged[3] ^= 1; // Alter signature payload after its PUSHDATA2 prefix.
-        let input = [vec![0], forged, arguments[2].clone(), pushed(&redeem.0)].concat();
+        let input = [vec![0], forged, arguments[2].clone(), pushed(&body.0)].concat();
         install_input(&mut tx, &input);
-        assert_eq!(check(&tx, &redeem), Ok(false));
+        assert_eq!(check(&tx, &body), Ok(false));
     }
 
     #[test]
-    fn serialized_p2sh_spend_authenticates_script_and_v5_transaction() {
+    fn serialized_spend_authenticates_the_committed_script_and_v5_transaction() {
         let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
         let body = program(&key.public_key());
-        let redeem = p2sh::redeem_script(PARAMETERS, &body).unwrap();
-        let mut tx = transaction(&redeem);
-        let input = signed_input(
-            &key,
-            &tx,
-            &redeem,
-            sighash::SIGHASH_ALL,
-            p2sh::signing_context(PARAMETERS),
-        );
+        let mut tx = transaction(&body);
+        let input = signed_input(&key, &tx, &body, sighash::SIGHASH_ALL, context());
         install_input(&mut tx, &input);
-        assert_eq!(check(&tx, &redeem), Ok(true));
+        assert_eq!(check(&tx, &body), Ok(true));
 
         for mutate in [
             |tx: &mut TransactionData<TestUnauthorized>| tx.lock_time += 1,
@@ -278,70 +290,104 @@ mod p2sh_spends {
                     TxIn::from_parts(OutPoint::new([7; 32], 0), Script::default(), 1);
             },
         ] {
-            let mut changed = transaction(&redeem);
+            let mut changed = transaction(&body);
             mutate(&mut changed);
             install_input(&mut changed, &input);
-            assert_eq!(check(&changed, &redeem), Ok(false));
+            assert_eq!(check(&changed, &body), Ok(false));
         }
 
         let mut forged = input.clone();
         forged[3] ^= 1;
         install_input(&mut tx, &forged);
-        assert_eq!(check(&tx, &redeem), Ok(false));
+        assert_eq!(check(&tx, &body), Ok(false));
 
         // Equivalent execution with different bytes still needs a different output/signature.
         let mut changed_body = vec![0x61]; // NOP
         changed_body.extend_from_slice(&body.0);
-        let changed_redeem =
-            p2sh::redeem_script(PARAMETERS, &Code(changed_body)).unwrap();
-        let mut substituted = input[..input.len() - pushed(&redeem.0).len()].to_vec();
-        substituted.extend_from_slice(&pushed(&changed_redeem.0));
+        let changed_body = Code(changed_body);
+        let mut substituted = input[..input.len() - pushed(&body.0).len()].to_vec();
+        substituted.extend_from_slice(&pushed(&changed_body.0));
         install_input(&mut tx, &substituted);
         assert_eq!(
-            check(&tx, &changed_redeem),
-            Err(p2sh::Error::CommitmentMismatch)
+            check(&tx, &changed_body),
+            Err(output::Error::CommitmentMismatch)
         );
-        let mut changed_tx = transaction(&changed_redeem);
+        let mut changed_tx = transaction(&changed_body);
         install_input(&mut changed_tx, &substituted);
-        assert_eq!(check(&changed_tx, &changed_redeem), Ok(false));
+        assert_eq!(check(&changed_tx, &changed_body), Ok(false));
 
-        let wrong_context = signed_input(&key, &tx, &redeem, sighash::SIGHASH_ALL, CONTEXT);
+        let wrong_context = signed_input(&key, &tx, &body, sighash::SIGHASH_ALL, CONTEXT);
         install_input(&mut tx, &wrong_context);
-        assert_eq!(check(&tx, &redeem), Ok(false));
+        assert_eq!(check(&tx, &body), Ok(false));
     }
 
     #[test]
-    fn p2sh_retains_six_signing_modes_and_absolute_locktime() {
+    fn the_output_version_is_bound_by_the_v5_digest() {
+        let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
+        let body = program(&key.public_key());
+        let mut tx = transaction(&body);
+        let input = signed_input(&key, &tx, &body, sighash::SIGHASH_ALL, context());
+        install_input(&mut tx, &input);
+        assert_eq!(check(&tx, &body), Ok(true));
+        let signed_digest = digest(&tx, sighash::SIGHASH_ALL);
+
+        // The version now sits in the previous output, which the v5 digest commits to
+        // directly; under the P2SH form it reached the digest only through the hash.
+        let other = match PARAMETERS {
+            pq::ParameterSet::Sha2_128f => pq::ParameterSet::Sha2_192s,
+            pq::ParameterSet::Sha2_192s => pq::ParameterSet::Sha2_128f,
+        };
+        let mut flipped = tx
+            .transparent_bundle()
+            .unwrap()
+            .authorization
+            .input_scriptpubkeys[0]
+            .0
+            .clone();
+        flipped.0[2] = other.version();
+        tx.transparent_bundle
+            .as_mut()
+            .unwrap()
+            .authorization
+            .input_scriptpubkeys[0] = Script(flipped);
+        assert_ne!(digest(&tx, sighash::SIGHASH_ALL), signed_digest);
+        // The same commitment still authenticates the same script, because the commitment
+        // covers the body alone. The output's version is what selects the rules, so this
+        // spend is now rejected for presenting a key of the wrong length for them.
+        assert!(matches!(
+            check(&tx, &body),
+            Err(output::Error::Pq(pq_script::Error::Script(
+                script::Error::Interpreter(_, InterpreterError::PubKeyType)
+            )))
+        ));
+    }
+
+    #[test]
+    fn output_spends_retain_six_signing_modes_and_absolute_locktime() {
         let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
         let mut body = vec![0x01, 100, 0xb1, 0x75]; // 100 CLTV DROP
         body.extend_from_slice(&program(&key.public_key()).0);
-        let redeem = p2sh::redeem_script(PARAMETERS, &Code(body)).unwrap();
+        let body = Code(body);
         for selector in [1, 2, 3, 0x81, 0x82, 0x83] {
-            let mut tx = transaction(&redeem);
+            let mut tx = transaction(&body);
             tx.lock_time = 100;
-            let input = signed_input(
-                &key,
-                &tx,
-                &redeem,
-                selector,
-                p2sh::signing_context(PARAMETERS),
-            );
+            let input = signed_input(&key, &tx, &body, selector, context());
             install_input(&mut tx, &input);
-            assert_eq!(check(&tx, &redeem), Ok(true));
+            assert_eq!(check(&tx, &body), Ok(true));
             tx.transparent_bundle.as_mut().unwrap().vout[0] =
                 TxOut::new(Zatoshis::const_from_u64(89), Script(Code(vec![0x51])));
             assert_eq!(
-                check(&tx, &redeem),
+                check(&tx, &body),
                 Ok(selector & sighash::SIGHASH_MASK == sighash::SIGHASH_NONE)
             );
             if selector & sighash::SIGHASH_MASK == sighash::SIGHASH_SINGLE {
                 tx.transparent_bundle.as_mut().unwrap().vout.clear();
-                assert_eq!(check(&tx, &redeem), Ok(false));
+                assert_eq!(check(&tx, &body), Ok(false));
             }
             tx.lock_time = 99;
             assert!(matches!(
-                check(&tx, &redeem),
-                Err(p2sh::Error::Pq(pq_script::Error::Script(
+                check(&tx, &body),
+                Err(output::Error::Pq(pq_script::Error::Script(
                     script::Error::Interpreter(_, InterpreterError::UnsatisfiedLockTime)
                 )))
             ));
@@ -349,8 +395,8 @@ mod p2sh_spends {
             tx.transparent_bundle.as_mut().unwrap().vin[0] =
                 TxIn::from_parts(OutPoint::new([7; 32], 0), Script(Code(input)), u32::MAX);
             assert!(matches!(
-                check(&tx, &redeem),
-                Err(p2sh::Error::Pq(pq_script::Error::Script(
+                check(&tx, &body),
+                Err(output::Error::Pq(pq_script::Error::Script(
                     script::Error::Interpreter(_, InterpreterError::UnsatisfiedLockTime)
                 )))
             ));

@@ -5,8 +5,9 @@
 //! this module deliberately does not freeze a protocol context, marker, or address.
 //! All current strict signing-mode selectors are decoded; transaction-dependent rules
 //! (including SINGLE's corresponding output) remain the digest callback's responsibility.
-//! Use [`super::p2sh::verify_spend`] to authenticate a P2SH redeem script before
-//! selecting PQ execution and its fixed context.
+//! Use [`super::output::parse_output`] and [`super::output::PqOutput::verify_spend`] to
+//! authenticate a script against the output that commits to it before selecting PQ
+//! execution and its fixed context.
 
 use zcash_script::{
     interpreter::{CallbackTransactionSignatureChecker, Error, Flags, SignatureChecker},
@@ -35,6 +36,8 @@ impl SignatureChecker for Checker<'_, '_> {
     ) -> Result<bool, Error> {
         // Encoding errors abort even when the signature is empty. An empty signature
         // with a well-formed key deliberately pushes false without doing cryptography.
+        // A key of any other length aborts, so no body can mix algorithms: an ECDSA
+        // branch parses, then kills the spend if it is ever taken.
         if public_key.len() != self.parameters.public_key_bytes() {
             return Err(Error::PubKeyType);
         }

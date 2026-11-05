@@ -4,20 +4,21 @@
 //! [FIPS 205](https://doi.org/10.6028/NIST.FIPS.205). The message and context are supplied
 //! by the caller; no transaction digest, wallet derivation, authorization encoding,
 //! or address format is defined by these primitives. The separate [`script`] module
-//! provides a library-only script harness, and [`p2sh`] authenticates a proposed PQ
-//! execution identifier inside an existing P2SH redeem script. This is not HashSLH-DSA.
+//! provides a library-only script harness, and [`output`] defines a versioned PQ output
+//! and authenticates the script it commits to. This is not HashSLH-DSA.
 //!
 //! Verification authenticates the message only relative to the supplied public key.
 //! The caller must authenticate that key and choose the message and context that bind
 //! the signature to its intended use. Contexts may contain at most 255 bytes.
 
-pub mod p2sh;
+pub mod output;
 pub mod script;
 
 /// A malformed encoding, overlong context, or invalid signature.
 pub use slh_dsa::signature::Error;
 
-/// Explicit SLH-DSA parameter selection. Script arguments never select this value.
+/// Explicit SLH-DSA parameter selection. Script arguments never select this value;
+/// an authenticated output version does, through [`ParameterSet::from_version`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParameterSet {
     /// NIST Category 1, optimized for signing speed.
@@ -27,6 +28,33 @@ pub enum ParameterSet {
 }
 
 impl ParameterSet {
+    /// The output version that selects this parameter set.
+    ///
+    /// Versions and parameter sets are one to one today, so a parameter set stands in for
+    /// a version wherever that is convenient: [`output::output_script`] writes the version
+    /// this returns, and [`output::signing_context`] is keyed on the parameter set rather
+    /// than on the version byte. A later version may well break that, since the version
+    /// exists so the commitment can change while the signature scheme stays: a version
+    /// reusing a parameter set leaves this function with no single answer. It would need
+    /// the version byte carried in [`output::PqOutput`] and the signing context keyed on
+    /// it, so that two versions sharing a parameter set still get distinct contexts.
+    pub const fn version(self) -> u8 {
+        match self {
+            Self::Sha2_128f => 1,
+            Self::Sha2_192s => 2,
+        }
+    }
+    /// The parameter set an output version selects, if any version does.
+    ///
+    /// This direction stays correct however the table grows; only [`Self::version`] relies
+    /// on the mapping being one to one.
+    pub const fn from_version(version: u8) -> Option<Self> {
+        match version {
+            1 => Some(Self::Sha2_128f),
+            2 => Some(Self::Sha2_192s),
+            _ => None,
+        }
+    }
     /// Exact public-key encoding length.
     pub const fn public_key_bytes(self) -> usize {
         match self {
