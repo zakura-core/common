@@ -5223,9 +5223,6 @@ mod tests {
         full_width_identity_multiexp_at_boundary::<vesta::Point>();
     }
 
-    /// A scalar whose internal limbs are congruent but not reduced declines
-    /// the Montgomery-limb path, so the caller falls back to the canonical
-    /// MSM rather than trusting a GLV split outside its input range.
     /// The parallel scalar decomposition and base preparation, forced onto a
     /// 4-worker pool: results match the serial path, and one undecomposable
     /// scalar anywhere declines the whole MSM.
@@ -5281,6 +5278,9 @@ mod tests {
         parallel_preparation_matches_and_declines::<vesta::Point>();
     }
 
+    /// A scalar whose internal limbs are congruent but not reduced declines
+    /// the Montgomery-limb path, so the caller falls back to the canonical
+    /// MSM rather than trusting a GLV split outside its input range.
     fn full_width_identity_declines_noncanonical_scalar<C: GlvParams>(
         from_limbs: fn([u64; 4]) -> C::ScalarExt,
     ) {
