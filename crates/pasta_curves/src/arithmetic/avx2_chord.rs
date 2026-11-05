@@ -67,7 +67,7 @@ const fn kp(p: &[u64; L], c: u64) -> [u64; L] {
 /// Propagates carries so limbs 0 to 7 are below 2^29.
 #[target_feature(enable = "avx2")]
 #[inline]
-fn normalize(mut v: [__m256i; L]) -> V {
+pub(super) fn normalize(mut v: [__m256i; L]) -> V {
     let mask = _mm256_set1_epi64x(MASK as i64);
     for i in 0..L - 1 {
         let carry = _mm256_srli_epi64::<BITS>(v[i]);
@@ -80,7 +80,7 @@ fn normalize(mut v: [__m256i; L]) -> V {
 /// `32 a`.
 #[target_feature(enable = "avx2")]
 #[inline]
-fn shl5(a: &V) -> V {
+pub(super) fn shl5(a: &V) -> V {
     normalize(core::array::from_fn(|i| _mm256_slli_epi64::<5>(a.0[i])))
 }
 
@@ -112,7 +112,7 @@ fn lanes_of(v: &V) -> [[u64; 4]; L] {
 /// Unpacks four values below 2^261 to 320-bit integers.
 #[target_feature(enable = "avx2")]
 #[inline]
-fn unpack_wide(v: &V) -> [[u64; 5]; 4] {
+pub(super) fn unpack_wide(v: &V) -> [[u64; 5]; 4] {
     let limbs = lanes_of(v);
     let mut out = [[0u64; 5]; 4];
     for (lane, out) in out.iter_mut().enumerate() {
