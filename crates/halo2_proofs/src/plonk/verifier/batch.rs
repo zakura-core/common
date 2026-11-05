@@ -383,27 +383,33 @@ fn commit_glv_instances<C: CurveAffine>(
                 let columns = &instances[start..end];
                 let (shared, shared_values) = shared_first_rows(columns);
                 // A column whose first row is shared leaves it out of its own
-                // sum; the shared term is added below.
-                let rows = columns
+                // sum (the shared term is added below), so only those columns'
+                // dense rows are copied, with the first row zeroed. The other
+                // columns are read in place.
+                let zeroed = columns
                     .iter()
                     .zip(&shared)
-                    .map(|(column, shared)| {
+                    .filter(|(_, shared)| shared.is_some())
+                    .map(|(column, _)| {
                         let mut rows: [C::Scalar; PREPARED_INSTANCE_DENSE_ROWS] = column
                             [..PREPARED_INSTANCE_DENSE_ROWS]
                             .try_into()
                             .expect("checked column length");
-                        if shared.is_some() {
-                            rows[0] = C::Scalar::ZERO;
-                        }
+                        rows[0] = C::Scalar::ZERO;
                         rows
                     })
                     .collect::<Vec<_>>();
+                let mut zeroed = zeroed.iter();
                 // One batched call per chunk: the dense sums and the shared
                 // first-row terms share their affine reduction and its
                 // inversions. A one-scalar sum touches only the first base.
-                let dense = rows
+                let dense = columns
                     .iter()
-                    .map(|rows| &rows[..])
+                    .zip(&shared)
+                    .map(|(column, shared)| match shared {
+                        Some(_) => &zeroed.next().expect("one copy per shared column")[..],
+                        None => &column[..PREPARED_INSTANCE_DENSE_ROWS],
+                    })
                     .chain(shared_values.iter().map(core::slice::from_ref))
                     .collect::<Vec<_>>();
                 let sums = table.dense.sum_batch_vartime(&dense);
