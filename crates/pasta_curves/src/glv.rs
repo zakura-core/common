@@ -2504,18 +2504,30 @@ fn multiexp<C: GlvParams>(
 }
 
 fn multiexp_bases<C: GlvParams>(bases: &[C::AffineExt]) -> Vec<MultiexpBase<C::Base>> {
-    bases
-        .iter()
-        .map(|base| {
-            let (x, y) = C::affine_xy(base);
-            MultiexpBase {
-                x,
-                endo_x: x * C::Base::ZETA,
-                y,
-                identity: bool::from(base.is_identity()),
-            }
-        })
-        .collect()
+    bases.iter().map(multiexp_base::<C>).collect()
+}
+
+fn multiexp_base<C: GlvParams>(base: &C::AffineExt) -> MultiexpBase<C::Base> {
+    let (x, y) = C::affine_xy(base);
+    MultiexpBase {
+        x,
+        endo_x: x * C::Base::ZETA,
+        y,
+        identity: bool::from(base.is_identity()),
+    }
+}
+
+/// [`multiexp_bases`], on the pool when `num_threads > 1`.
+fn multiexp_bases_with_threads<C: GlvParams>(
+    bases: &[C::AffineExt],
+    num_threads: usize,
+) -> Vec<MultiexpBase<C::Base>> {
+    #[cfg(feature = "multicore")]
+    if num_threads > 1 {
+        return par_map_indices(bases.len(), &|i| multiexp_base::<C>(&bases[i]));
+    }
+    let _ = num_threads;
+    multiexp_bases::<C>(bases)
 }
 
 /// Attempts a GLV bucket multiscalar multiplication for a large Pasta MSM,
@@ -2560,7 +2572,7 @@ fn try_large_multiexp<C, D>(
 ) -> Option<C>
 where
     C: GlvParams,
-    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))>,
+    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))> + Sync,
 {
     if scalars.len() < MIN_GLV_MULTIEXP_TERMS {
         return None;
@@ -2571,10 +2583,19 @@ where
 
     // Decompose once for the selected backend. With `orbits`, the planner
     // also prices these exact component magnitudes.
-    let components = scalars
-        .iter()
-        .map(|scalar| decompose_scalar(scalar).and_then(checked_signed_magnitudes))
-        .collect::<Option<Vec<_>>>()?;
+    let component = |scalar| decompose_scalar(scalar).and_then(checked_signed_magnitudes);
+    // The decomposition and the base preparation below run before any window
+    // and cost about a tenth of an 8-worker MSM, so they run on the pool too.
+    #[cfg(feature = "multicore")]
+    let components = if num_threads > 1 {
+        par_map_indices(scalars.len(), &|i| component(&scalars[i]))
+            .into_iter()
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        scalars.iter().map(component).collect::<Option<Vec<_>>>()?
+    };
+    #[cfg(not(feature = "multicore"))]
+    let components = scalars.iter().map(component).collect::<Option<Vec<_>>>()?;
 
     #[cfg(feature = "orbits")]
     {
@@ -2582,7 +2603,7 @@ where
         let plan = plan_multiexp::<C>(&profile, num_threads)?;
         match plan {
             MultiexpPlan::Booth { window_bits } => {
-                let bases = multiexp_bases::<C>(bases);
+                let bases = multiexp_bases_with_threads::<C>(bases, num_threads);
                 multiexp(&components, &bases, window_bits, num_threads)
             }
             MultiexpPlan::Orbit { window_bits } => {
@@ -2593,7 +2614,7 @@ where
 
     #[cfg(not(feature = "orbits"))]
     {
-        let bases = multiexp_bases::<C>(bases);
+        let bases = multiexp_bases_with_threads::<C>(bases, num_threads);
         multiexp(&components, &bases, window_bits, num_threads)
     }
 }
