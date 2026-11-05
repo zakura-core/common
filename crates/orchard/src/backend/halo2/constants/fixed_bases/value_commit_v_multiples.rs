@@ -13,15 +13,28 @@ pub const PUBLIC_VALUE_MAGNITUDES: usize = 1 << (PUBLIC_VALUE_WINDOW_BITS - 1);
 /// digit is at most 16.
 pub const PUBLIC_VALUE_WINDOWS: usize = 11;
 
+// Eleven 6-bit windows hold 66 bits, and the top window's digit plus carry
+// stays at most 16, below the 32 magnitudes stored per window, so a 64-bit
+// magnitude never carries out of the table.
+const _: () = {
+    assert!(PUBLIC_VALUE_WINDOWS * PUBLIC_VALUE_WINDOW_BITS > 64);
+    assert!(
+        u64::MAX >> (PUBLIC_VALUE_WINDOW_BITS * (PUBLIC_VALUE_WINDOWS - 1))
+            < PUBLIC_VALUE_MAGNITUDES as u64 / 2
+    );
+};
+
 /// Affine coordinates of $m \cdot 2^{6w} \cdot \mathcal{V}^{\mathsf{Orchard}}$,
 /// indexed as `[w][m - 1]` for windows $w \in 0..11$ and digit magnitudes
 /// $m \in 1..=32$.
 ///
 /// `ValueCommitment::derive_public` sums at most one entry per window, with
-/// no doublings. These can be reproduced with the `value_multiples` test
+/// no doublings. A `static` rather than a `const`, so each use reads the one
+/// table instead of copying it; the coordinates are still evaluated at
+/// compile time. These can be reproduced with the `value_multiples` test
 /// helper, and the `public_value_multiples` test pins them.
 #[rustfmt::skip]
-pub const PUBLIC_VALUE_MULTIPLES: [[(pallas::Base, pallas::Base); PUBLIC_VALUE_MAGNITUDES]; PUBLIC_VALUE_WINDOWS] = [
+pub static PUBLIC_VALUE_MULTIPLES: [[(pallas::Base, pallas::Base); PUBLIC_VALUE_MAGNITUDES]; PUBLIC_VALUE_WINDOWS] = [
     // Window 0: m * 2^0 * V for m in 1..=32.
     [
         (pallas::Base::from_raw([0x2aa7bd6e3af94367, 0xfe04a37f2b5a7c8c, 0xf7a86a704f9bb232, 0x2f70597a8e3d0f42]), pallas::Base::from_raw([0xa413c47eaf5af28e, 0x1d9ea766a7ffe3db, 0x1e917f63136d6c42, 0x2d0e5169311919af])),
@@ -445,15 +458,5 @@ mod tests {
             .map(|&(x, y)| pallas::Affine::from_xy(x, y).expect("embedded point is on the curve"))
             .collect();
         assert_eq!(embedded, value_multiples());
-    }
-
-    #[test]
-    fn public_value_windows_cover_u64() {
-        // Eleven 6-bit windows hold 66 bits, and the top window's digit plus
-        // carry stays at most 16, below the 32 magnitudes stored per window.
-        assert!(PUBLIC_VALUE_WINDOWS * PUBLIC_VALUE_WINDOW_BITS >= 64 + 1);
-        assert!(
-            (u64::MAX >> (PUBLIC_VALUE_WINDOW_BITS * 10)) + 1 <= PUBLIC_VALUE_MAGNITUDES as u64 / 2
-        );
     }
 }
