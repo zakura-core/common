@@ -2447,21 +2447,24 @@ fn multiexp_parallel<C: GlvParams>(
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
-    // One task per worker, each evaluating every `tasks`-th window with one
-    // set of buffers, rather than one task (and one set of fresh buffers) per
-    // window. Window costs are nearly equal, so the strided split keeps the
-    // same makespan as one task per window.
+    // One task per worker, each reusing one set of buffers across windows,
+    // rather than one task (and one set of fresh buffers) per window. Tasks
+    // claim windows one at a time instead of taking a fixed stride: with
+    // cores of unequal speed (Apple's performance and efficiency cores), a
+    // fixed stride gives slow cores as many windows as fast ones.
     let tasks = maybe_rayon::current_num_threads().clamp(1, window_count);
-    let sums = par_map_indices(tasks, &|task| {
+    let next_window = core::sync::atomic::AtomicUsize::new(0);
+    let sums = par_map_indices(tasks, &|_| {
         with_window_scratch(|scratch| {
-            (task..window_count)
-                .step_by(tasks)
-                .map(|window| {
-                    let buckets =
-                        fill_window::<C>(components, bases, window_bits, window, scratch)?;
-                    Some((window, sum_buckets::<C>(&buckets)))
-                })
-                .collect::<Option<Vec<_>>>()
+            core::iter::from_fn(|| {
+                let window = next_window.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                (window < window_count).then_some(window)
+            })
+            .map(|window| {
+                let buckets = fill_window::<C>(components, bases, window_bits, window, scratch)?;
+                Some((window, sum_buckets::<C>(&buckets)))
+            })
+            .collect::<Option<Vec<_>>>()
         })
     });
     let mut window_sums = alloc::vec![C::identity(); window_count];
