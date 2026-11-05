@@ -38,7 +38,9 @@ def gen(name, square):
     out.append(f"/// {doc}")
     out.append('#[target_feature(enable = "avx2")]')
     out.append("#[inline]")
-    out.append(f"fn {name}<const P0: u64, const P1: u64, const P2: u64, const P3: u64>({args}) -> V {{")
+    # `mul` is shared with the batched chord additions in `avx2_chord`.
+    vis = "pub(super) " if name == "mul" else ""
+    out.append(f"{vis}fn {name}<const P0: u64, const P1: u64, const P2: u64, const P3: u64>({args}) -> V {{")
     out.append("    let p = const { pasta_limbs29(&[P0, P1, P2, P3]) };")
     out.append("    {")
     out.append("        let mask = _mm256_set1_epi64x(MASK as i64);")

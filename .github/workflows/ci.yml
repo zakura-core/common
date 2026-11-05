@@ -960,6 +960,11 @@ jobs:
               --verbose --release --features=multicore --no-run \
               --target x86_64-unknown-linux-gnu
           fi
+          # Release builds turn off overflow checks, including in `const`
+          # evaluation of the AVX2 constants; build once in debug as well.
+          cargo +stable test -p zakura-pasta-curves \
+            --verbose --features=multicore --no-run \
+            --target x86_64-unknown-linux-gnu
       - name: Verify working directory is clean
         run: git diff --exit-code
 

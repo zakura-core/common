@@ -4,6 +4,8 @@
 //! This module is temporary, and the extension traits defined here are expected to be
 //! upstreamed into the `ff` and `group` crates after some refactoring.
 
+#[cfg(all(feature = "sqrt-table", feature = "glv", pasta_curves_avx2))]
+pub(crate) mod avx2_chord;
 #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
 pub(crate) mod avx2_sqrt;
 mod curves;
