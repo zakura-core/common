@@ -380,24 +380,93 @@ fn commit_glv_instances<C: CurveAffine>(
             .map(|chunk| {
                 let start = chunk * chunk_len;
                 let end = (start + chunk_len).min(instances.len());
-                // One batched call per chunk: the dense sums share their
-                // affine reduction and its inversions.
-                let dense = instances[start..end]
+                let columns = &instances[start..end];
+                let (shared, shared_values) = shared_first_rows(columns);
+                // A column whose first row is shared leaves it out of its own
+                // sum (the shared term is added below), so only those columns'
+                // dense rows are copied, with the first row zeroed. The other
+                // columns are read in place.
+                let zeroed = columns
                     .iter()
-                    .map(|column| &column[..PREPARED_INSTANCE_DENSE_ROWS])
+                    .zip(&shared)
+                    .filter(|(_, shared)| shared.is_some())
+                    .map(|(column, _)| {
+                        let mut rows: [C::Scalar; PREPARED_INSTANCE_DENSE_ROWS] = column
+                            [..PREPARED_INSTANCE_DENSE_ROWS]
+                            .try_into()
+                            .expect("checked column length");
+                        rows[0] = C::Scalar::ZERO;
+                        rows
+                    })
+                    .collect::<Vec<_>>();
+                let mut zeroed = zeroed.iter();
+                // One batched call per chunk: the dense sums and the shared
+                // first-row terms share their affine reduction and its
+                // inversions. A one-scalar sum touches only the first base.
+                let dense = columns
+                    .iter()
+                    .zip(&shared)
+                    .map(|(column, shared)| match shared {
+                        Some(_) => &zeroed.next().expect("one copy per shared column")[..],
+                        None => &column[..PREPARED_INSTANCE_DENSE_ROWS],
+                    })
+                    .chain(shared_values.iter().map(core::slice::from_ref))
                     .collect::<Vec<_>>();
                 let sums = table.dense.sum_batch_vartime(&dense);
                 // `zip` would silently drop columns if an implementation
                 // returned fewer sums than it was given.
                 debug_assert_eq!(sums.len(), dense.len(), "one sum per column");
-                sums.into_iter()
+                let (sums, shared_terms) = sums.split_at(columns.len());
+                sums.iter()
                     .zip(&masks[start..end])
-                    .map(|(sum, &mask)| table.offsets[mask] + sum)
+                    .zip(&shared)
+                    .map(|((sum, &mask), shared)| {
+                        let commitment = table.offsets[mask] + sum;
+                        match shared {
+                            Some(index) => commitment + shared_terms[*index],
+                            None => commitment,
+                        }
+                    })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>()
             .concat(),
     )
+}
+
+/// Finds the first-row values that two or more of `columns` repeat.
+///
+/// In Orchard's instance shape the first row is the anchor: every Action of a
+/// bundle commits the same one, and bundles built against the same tree state
+/// share it too, so its term $[v] L_0$ is evaluated once per repeated value.
+/// Returns, per column, the index of its value in the returned repeated
+/// values, or `None` for a value that appears only once (which stays in that
+/// column's own sum).
+///
+/// Each worker groups only its own chunk of columns. Grouping the whole batch
+/// first would put a serial pass and a second parallel stage ahead of the
+/// column sums, which costs more than a pair of columns saves on a wide pool.
+fn shared_first_rows<F: PrimeField>(columns: &[&[F]]) -> (Vec<Option<usize>>, Vec<F>) {
+    let mut shared = vec![None; columns.len()];
+    let mut values = Vec::new();
+    if columns.len() < 2 {
+        return (shared, values);
+    }
+    let reprs = columns
+        .iter()
+        .map(|column| column[0].to_repr())
+        .collect::<Vec<_>>();
+    let mut order = (0..columns.len()).collect::<Vec<_>>();
+    order.sort_unstable_by(|&a, &b| reprs[a].as_ref().cmp(reprs[b].as_ref()));
+    for run in order.chunk_by(|&a, &b| reprs[a].as_ref() == reprs[b].as_ref()) {
+        if let [first, _, ..] = run {
+            for &column in run {
+                shared[column] = Some(values.len());
+            }
+            values.push(columns[*first][0]);
+        }
+    }
+    (shared, values)
 }
 
 /// Decodes the point runs of `proof` at `ranges` together, ahead of reading it.
@@ -561,7 +630,7 @@ mod tests {
 
     use super::{
         InstanceFixedWindowTable, commit_glv_instances, commit_instance_with_table,
-        signed_fixed_window_digit, signed_instance_window_count,
+        shared_first_rows, signed_fixed_window_digit, signed_instance_window_count,
     };
     use crate::{
         INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE, MAX_CACHED_INSTANCE_ROWS,
@@ -779,6 +848,145 @@ mod tests {
                     Some(&serial[..count]),
                     "threads {threads}, columns {count}"
                 );
+            }
+        }
+    }
+
+    /// Columns that repeat a first-row value (Orchard's anchor) share its
+    /// term. Covers no repeats, consecutive pairs (two-Action bundles), one
+    /// value for every column, singletons mixed with groups, non-adjacent
+    /// repeats, and a repeated zero, each against the generic commitment.
+    #[test]
+    fn glv_instance_commitments_share_repeated_first_rows() {
+        let params = Params::<EqAffine>::new(7);
+        let columns = orchard_shaped_columns(24);
+        let anchors = |pattern: &dyn Fn(usize) -> usize| {
+            let mut columns = columns.clone();
+            for (index, column) in columns.iter_mut().enumerate() {
+                let group = pattern(index);
+                column[0] = if group == usize::MAX {
+                    Fp::ZERO
+                } else {
+                    columns_value(group)
+                };
+            }
+            columns
+        };
+        fn columns_value(group: usize) -> Fp {
+            let mut bytes = [0x5a; 64];
+            bytes[..8].copy_from_slice(&(group as u64).to_le_bytes());
+            Fp::from_uniform_bytes(&bytes)
+        }
+        let patterns: [(&str, &dyn Fn(usize) -> usize); 6] = [
+            ("distinct", &|index| index),
+            ("pairs", &|index| index / 2),
+            ("one anchor", &|_| 0),
+            ("singletons and groups", &|index| {
+                if index % 3 == 0 {
+                    index
+                } else {
+                    1000 + index / 5
+                }
+            }),
+            ("interleaved", &|index| index % 4),
+            ("zero", &|index| {
+                if index % 2 == 0 { usize::MAX } else { index }
+            }),
+        ];
+        for (name, pattern) in patterns {
+            let columns = anchors(pattern);
+            let slices = columns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let expected = slices
+                .iter()
+                .map(|column| commit_instance(&params, column))
+                .collect::<Vec<_>>();
+            let check = |label: &str| {
+                for count in [1, 2, 3, 7, slices.len()] {
+                    assert_eq!(
+                        commit_glv_instances(&params, &slices[..count]).as_deref(),
+                        Some(&expected[..count]),
+                        "{name}, {label}, {count} columns",
+                    );
+                }
+            };
+            check("current pool");
+            #[cfg(feature = "multicore")]
+            for threads in [1, 2, 3, 8] {
+                let pool = maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("test thread pool builds");
+                pool.install(|| check(&format!("{threads} threads")));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_first_rows_groups_only_repeated_values() {
+        let column = |value: u64| [Fp::from(value), Fp::ONE];
+        let columns = [7, 3, 7, 5, 3, 3, 9].map(column);
+        let slices = columns.iter().map(|c| &c[..]).collect::<Vec<_>>();
+        let (shared, values) = shared_first_rows(&slices);
+        assert_eq!(values.len(), 2, "3 and 7 repeat; 5 and 9 do not");
+        for (column, shared) in columns.iter().zip(&shared) {
+            match shared {
+                Some(index) => assert_eq!(values[*index], column[0]),
+                None => assert!([Fp::from(5), Fp::from(9)].contains(&column[0])),
+            }
+        }
+        assert_eq!(shared[0], shared[2]);
+        assert_eq!(shared[1], shared[4]);
+        assert_eq!(shared[1], shared[5]);
+        assert_ne!(shared[0], shared[1]);
+
+        for len in [0, 1] {
+            let (shared, values) = shared_first_rows(&slices[..len]);
+            assert_eq!(shared, std::vec![None; len]);
+            assert!(values.is_empty());
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// Random first-row groupings, from a few large groups to mostly
+        /// singletons, over rotated base columns (so flag masks vary), match
+        /// the generic commitment on several pool widths, where groups fall
+        /// on chunk boundaries.
+        #[test]
+        fn glv_instance_commitments_match_with_random_shared_first_rows(
+            groups in proptest::collection::vec(0u64..64, 1..=40),
+            spread in 1u64..=64,
+            rotation in 0usize..40,
+        ) {
+            let params = Params::<EqAffine>::new(7);
+            let base = orchard_shaped_columns(40);
+            let columns = groups
+                .iter()
+                .enumerate()
+                .map(|(index, group)| {
+                    let mut column = base[(index + rotation) % base.len()].clone();
+                    let mut bytes = [0xa5; 64];
+                    bytes[..8].copy_from_slice(&(group % spread).to_le_bytes());
+                    column[0] = Fp::from_uniform_bytes(&bytes);
+                    column
+                })
+                .collect::<Vec<_>>();
+            let slices = columns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let expected = slices
+                .iter()
+                .map(|column| commit_instance(&params, column))
+                .collect::<Vec<_>>();
+            let glv = commit_glv_instances(&params, &slices);
+            proptest::prop_assert_eq!(glv.as_deref(), Some(&expected[..]));
+            #[cfg(feature = "multicore")]
+            for threads in [1, 3, 8] {
+                let pool = maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("test thread pool builds");
+                let glv = pool.install(|| commit_glv_instances(&params, &slices));
+                proptest::prop_assert_eq!(glv.as_deref(), Some(&expected[..]), "{} threads", threads);
             }
         }
     }

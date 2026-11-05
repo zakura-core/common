@@ -24,7 +24,9 @@ use orchard::{
 #[path = "../benches/support/mod.rs"]
 mod payment_support;
 
-use payment_support::payment_fixture_with_index;
+use payment_support::{
+    PaymentFixture, payment_fixture_with_index, payment_fixtures_with_shared_anchor,
+};
 
 const BATCH_SIZES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 const THREADS: [usize; 3] = [1, 8, 32];
@@ -79,10 +81,18 @@ fn ironwood_bundle_with_actions(
     action_count: usize,
     index: u64,
 ) -> (Bundle<orchard::bundle::Authorized, i64>, [u8; 32]) {
+    authorize(pk, payment_fixture_with_index(action_count, index), index)
+}
+
+/// Proves and signs `fixture` with seeds and a sighash derived from `index`.
+fn authorize(
+    pk: &ProvingKey,
+    fixture: PaymentFixture,
+    index: u64,
+) -> (Bundle<orchard::bundle::Authorized, i64>, [u8; 32]) {
     let mut sighash = [SIGHASH_DOMAIN; 32];
     sighash[..8].copy_from_slice(&index.to_le_bytes());
 
-    let fixture = payment_fixture_with_index(action_count, index);
     assert_eq!(
         fixture.bundle().circuit_version(),
         OrchardCircuitVersion::PostNu6_3,
@@ -178,6 +188,58 @@ fn batch_validation_keeps_each_bundles_points() {
                             // The only donor is the bundle itself.
                             continue;
                         }
+                        assert!(
+                            !validate_batch(&vk, batch, Some((bad, corruption))),
+                            "threads {threads}, {len} bundles, {corruption:?} at {bad}",
+                        );
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Bundles built against one note commitment tree commit the same anchor, so
+/// batch validation shares its instance term across bundles as well as across
+/// each bundle's Actions. The batch mixes those bundles (with 1, 2 and 4
+/// Actions) with bundles anchored to their own trees, and a corrupted bundle
+/// anywhere in it must still be rejected.
+#[test]
+fn batch_validation_with_a_shared_anchor() {
+    let version = OrchardCircuitVersion::PostNu6_3;
+    let vk = VerifyingKey::build(version);
+    let pk = ProvingKey::build(version).expect("current circuit supports proving");
+    let shared = payment_fixtures_with_shared_anchor(&[2, 1, 2, 4, 2, 1], 200);
+    let anchor = *shared[0].bundle().anchor();
+    assert!(
+        shared
+            .iter()
+            .all(|fixture| *fixture.bundle().anchor() == anchor)
+    );
+    let mut corpus: Vec<_> = shared
+        .into_iter()
+        .zip(200u64..)
+        .map(|(fixture, index)| authorize(&pk, fixture, index))
+        .collect();
+    // Bundles with their own anchors, inside and at the end of the batch.
+    corpus.insert(3, ironwood_bundle_with_actions(&pk, 2, 300));
+    corpus.push(ironwood_bundle_with_actions(&pk, 2, 301));
+    assert_ne!(*corpus[3].0.anchor(), anchor);
+
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test thread pool must build");
+        pool.install(|| {
+            for len in [2, 5, corpus.len()] {
+                let batch = &corpus[..len];
+                assert!(
+                    validate_batch(&vk, batch, None),
+                    "threads {threads}, {len} bundles"
+                );
+                for bad in [0, 1, len - 1] {
+                    for corruption in [Corruption::Sighash, Corruption::BindingSignature] {
                         assert!(
                             !validate_batch(&vk, batch, Some((bad, corruption))),
                             "threads {threads}, {len} bundles, {corruption:?} at {bad}",

@@ -382,10 +382,67 @@ pub(super) fn payment_fixture_with_index(
     )
 }
 
+/// Payments whose spent notes all sit in one note commitment tree, so every
+/// bundle commits the same anchor. `action_counts[i]` is the Action count of
+/// the payment with fixture index `first_index + i`; each payment otherwise
+/// matches [`payment_fixture_with_index`] apart from its anchor and paths.
+#[allow(
+    dead_code,
+    reason = "shared-anchor fixtures are used directly by some test targets"
+)]
+pub(super) fn payment_fixtures_with_shared_anchor(
+    action_counts: &[usize],
+    first_index: u64,
+) -> Vec<PaymentFixture> {
+    let payer_fvk = FullViewingKey::from(&SpendingKey::from_bytes(PAYER_SPENDING_KEY).unwrap());
+    let notes = action_counts
+        .iter()
+        .zip(first_index..)
+        .map(|(&action_count, fixture_index)| {
+            let (spend_values, _, _) = payment_values(action_count, fixture_index);
+            funding_notes(&spend_values, fixture_index, &payer_fvk)
+        })
+        .collect::<Vec<_>>();
+    let mut merkle_rng = fixture_rng(MERKLE_SEED_DOMAIN, 0, first_index);
+    let (anchor, witnesses) = shared_anchor_witnesses(notes.concat(), &mut merkle_rng);
+    let mut witnesses = witnesses.into_iter();
+    notes
+        .into_iter()
+        .zip(action_counts)
+        .zip(first_index..)
+        .map(|((notes, &action_count), fixture_index)| {
+            let own = witnesses.by_ref().take(notes.len()).collect::<Vec<_>>();
+            payment_fixture_with_witnesses(
+                action_count,
+                fixture_index,
+                PaymentShape::AllRealSingleRecipient,
+                |requested| {
+                    assert_eq!(requested, notes, "the payment spends its own funding notes");
+                    (anchor, own)
+                },
+            )
+        })
+        .collect()
+}
+
 fn payment_fixture_with_shape(
     action_count: usize,
     fixture_index: u64,
     shape: PaymentShape,
+) -> PaymentFixture {
+    payment_fixture_with_witnesses(action_count, fixture_index, shape, |notes| {
+        let mut merkle_rng = fixture_rng(MERKLE_SEED_DOMAIN, action_count, fixture_index);
+        shared_anchor_witnesses(notes, &mut merkle_rng)
+    })
+}
+
+/// Builds a payment whose funding notes `witness` places in a note commitment
+/// tree, returning the anchor and each note's path in order.
+fn payment_fixture_with_witnesses(
+    action_count: usize,
+    fixture_index: u64,
+    shape: PaymentShape,
+    witness: impl FnOnce(Vec<Note>) -> (Anchor, Vec<(Note, MerklePath)>),
 ) -> PaymentFixture {
     assert_ne!(action_count, 0, "a payment has at least one Action");
     if matches!(shape, PaymentShape::PaddedRecipientAndChange) {
@@ -436,8 +493,7 @@ fn payment_fixture_with_shape(
             .collect(),
     };
     let notes = funding_notes(&spend_values, fixture_index, &payer_fvk);
-    let mut merkle_rng = fixture_rng(MERKLE_SEED_DOMAIN, action_count, fixture_index);
-    let (anchor, spend_notes) = shared_anchor_witnesses(notes, &mut merkle_rng);
+    let (anchor, spend_notes) = witness(notes);
     let mut builder = Builder::new(
         fixture_bundle_type(action_count),
         bundle_version,
