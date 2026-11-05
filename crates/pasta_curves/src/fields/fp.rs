@@ -2263,6 +2263,7 @@ impl crate::arithmetic::avx2_chord::Avx2ChordField for Fp {
         pair: impl Fn(usize) -> (usize, usize, usize),
         points: &[crate::arithmetic::avx2_chord::Point29],
         next: &mut [crate::arithmetic::avx2_chord::Point29],
+        scratch: &mut crate::arithmetic::avx2_chord::ChordScratch,
     ) -> Option<()> {
         use crate::arithmetic::avx2_chord::Limbs29;
         // SAFETY: as for `sqrt_chain`: `pasta_curves_avx2` guarantees AVX2.
@@ -2277,6 +2278,7 @@ impl crate::arithmetic::avx2_chord::Avx2ChordField for Fp {
                 pair,
                 points,
                 next,
+                scratch,
                 &Limbs29::from_limbs(&R.0),
                 &Limbs29::from_limbs(&Fp::from(32).0),
                 |lanes| crate::arithmetic::avx2_chord::invert_lanes::<Fp>(lanes, &MODULUS.0),

@@ -185,6 +185,7 @@ pub(crate) trait Avx2ChordField: ff::Field {
         pair: impl Fn(usize) -> (usize, usize, usize),
         points: &[Point29],
         next: &mut [Point29],
+        scratch: &mut ChordScratch,
     ) -> Option<()>;
     /// The modulus in radix 2^29.
     fn modulus29() -> [u64; L];
@@ -215,6 +216,31 @@ pub(crate) fn invert_lanes<F: Avx2ChordField>(
         inverse *= values[i];
     }
     Some(())
+}
+
+/// Per-chunk buffers of [`chord_level`] (about 144 bytes per addition),
+/// reusable across levels, windows and MSMs like the scalar reducer's
+/// staging vectors.
+#[derive(Default)]
+pub struct ChordScratch {
+    scaled: Vec<[V; G]>,
+    denominators: Vec<[V; G]>,
+}
+
+impl ChordScratch {
+    /// Bytes held by the buffers' capacities.
+    #[cfg(feature = "multicore")]
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        (self.scaled.capacity() + self.denominators.capacity()) * core::mem::size_of::<[V; G]>()
+    }
+}
+
+impl core::fmt::Debug for ChordScratch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ChordScratch")
+            .field("chunks", &self.scaled.capacity())
+            .finish()
+    }
 }
 
 /// A canonical field element (Montgomery form, below `p`) in radix 2^29.
@@ -364,6 +390,7 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
     pair: impl Fn(usize) -> (usize, usize, usize),
     points: &[Point29],
     next: &mut [Point29],
+    scratch: &mut ChordScratch,
     one: &Limbs29,
     thirty_two: &Limbs29,
     invert: impl FnOnce(&mut [[u64; 4]; LANES]) -> Option<()>,
@@ -395,8 +422,14 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
     };
 
     let mut lane_products = [load4([thirty_two; 4]); G];
-    let mut scaled: Vec<[V; G]> = Vec::with_capacity(chunks);
-    let mut denominators: Vec<[V; G]> = Vec::with_capacity(chunks);
+    let ChordScratch {
+        scaled,
+        denominators,
+    } = scratch;
+    scaled.clear();
+    denominators.clear();
+    scaled.reserve(chunks);
+    denominators.reserve(chunks);
     for chunk in 0..chunks {
         let base = chunk * LANES;
         let mut s = lane_products;
@@ -603,6 +636,9 @@ mod tests {
                         <$field>::from_chord_limbs(minus1),
                         <$field>::from_chord_limbs(minus2),
                     ];
+                    // One scratch across every call, as the reducer reuses
+                    // it across levels: stale chunks must not leak.
+                    let mut scratch = ChordScratch::default();
                     for n in [
                         1usize, 7, 8, 9, 31, 32, 33, 255, 256, 257,
                         LONG_PREFIX_ADDITIONS,
@@ -639,6 +675,7 @@ mod tests {
                                 |i| (2 * i, 2 * i + 1, n - 1 - i),
                                 &flat,
                                 &mut actual,
+                                &mut scratch,
                             )
                             .unwrap();
                             for i in 0..n {
@@ -662,6 +699,7 @@ mod tests {
                                             |i| (2 * i, 2 * i + 1, n - 1 - i),
                                             &bad,
                                             &mut untouched,
+                                            &mut scratch,
                                         )
                                         .is_none(),
                                     );

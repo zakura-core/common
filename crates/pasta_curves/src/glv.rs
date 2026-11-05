@@ -155,6 +155,7 @@ mod private {
             pair: impl Fn(usize) -> (usize, usize, usize),
             points: &[crate::arithmetic::avx2_chord::Point29],
             next: &mut [crate::arithmetic::avx2_chord::Point29],
+            scratch: &mut crate::arithmetic::avx2_chord::ChordScratch,
             token: CrateToken,
         ) -> Option<()>;
 
@@ -214,10 +215,11 @@ mod private {
             pair: impl Fn(usize) -> (usize, usize, usize),
             points: &[crate::arithmetic::avx2_chord::Point29],
             next: &mut [crate::arithmetic::avx2_chord::Point29],
+            scratch: &mut crate::arithmetic::avx2_chord::ChordScratch,
             _: CrateToken,
         ) -> Option<()> {
             use crate::arithmetic::avx2_chord::Avx2ChordField;
-            Self::Base::chord_level(n, pair, points, next)
+            Self::Base::chord_level(n, pair, points, next, scratch)
         }
 
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
@@ -271,10 +273,11 @@ mod private {
             pair: impl Fn(usize) -> (usize, usize, usize),
             points: &[crate::arithmetic::avx2_chord::Point29],
             next: &mut [crate::arithmetic::avx2_chord::Point29],
+            scratch: &mut crate::arithmetic::avx2_chord::ChordScratch,
             _: CrateToken,
         ) -> Option<()> {
             use crate::arithmetic::avx2_chord::Avx2ChordField;
-            Self::Base::chord_level(n, pair, points, next)
+            Self::Base::chord_level(n, pair, points, next, scratch)
         }
 
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
@@ -2260,6 +2263,7 @@ fn reduce_affine_buckets29_reusing<C: GlvParams>(
         next,
         next_offsets,
         pairs,
+        chord,
     } = scratch;
     let exceptional = loop {
         pairs.clear();
@@ -2286,6 +2290,7 @@ fn reduce_affine_buckets29_reusing<C: GlvParams>(
             |i| pairs[i],
             points,
             next,
+            chord,
             private::CrateToken(()),
         )
         .is_none()
@@ -2364,6 +2369,7 @@ struct ReduceScratch29 {
     next: Vec<crate::arithmetic::avx2_chord::Point29>,
     next_offsets: Vec<usize>,
     pairs: Vec<(usize, usize, usize)>,
+    chord: crate::arithmetic::avx2_chord::ChordScratch,
 }
 
 #[cfg(feature = "multicore")]
@@ -2389,6 +2395,7 @@ impl<F> WindowScratch<F> {
         (avx2.points.capacity() + avx2.reduce.next.capacity()) * size_of::<Point29>()
             + avx2.reduce.next_offsets.capacity() * size_of::<usize>()
             + avx2.reduce.pairs.capacity() * size_of::<(usize, usize, usize)>()
+            + avx2.reduce.chord.capacity_bytes()
     }
 
     #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
@@ -2455,7 +2462,7 @@ fn fill_window<C: GlvParams>(
         points,
         reduce,
         #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
-        avx2: scratch_avx2,
+            avx2: scratch_avx2,
     } = scratch;
     window_assignments::<C>(components, bases, window_bits, window, assignments, counts);
 
@@ -5537,7 +5544,14 @@ mod tests {
             let (flat, flat29) = chord_level_inputs::<A>(n, n as u8 ^ 0x55);
             let want = scalar_level(&flat);
             let mut next = alloc::vec![Point29::default(); n];
-            A::Base::chord_level(n, |i| (2 * i, 2 * i + 1, i), &flat29, &mut next).unwrap();
+            A::Base::chord_level(
+                n,
+                |i| (2 * i, 2 * i + 1, i),
+                &flat29,
+                &mut next,
+                &mut Default::default(),
+            )
+            .unwrap();
             for (i, (w, g)) in want.iter().zip(&next).enumerate() {
                 assert!(
                     w.x.chord_limbs() == g.x.to_limbs() && w.y.chord_limbs() == g.y.to_limbs(),
@@ -5549,8 +5563,14 @@ mod tests {
                 bad[2 * (n / 2) + 1].x = bad[2 * (n / 2)].x;
                 let mut untouched = alloc::vec![Point29::default(); n];
                 assert!(
-                    A::Base::chord_level(n, |i| (2 * i, 2 * i + 1, i), &bad, &mut untouched)
-                        .is_none()
+                    A::Base::chord_level(
+                        n,
+                        |i| (2 * i, 2 * i + 1, i),
+                        &bad,
+                        &mut untouched,
+                        &mut Default::default(),
+                    )
+                    .is_none()
                 );
                 assert!(untouched.iter().all(|p| *p == Point29::default()));
             }
@@ -5584,6 +5604,7 @@ mod tests {
             let reps = (2_000_000 / n.max(1)).max(20);
             let mut best = [f64::MAX; 2];
             let mut next = alloc::vec![Point29::default(); n];
+            let mut scratch = Default::default();
             for _round in 0..5 {
                 let start = Instant::now();
                 for _ in 0..reps {
@@ -5597,6 +5618,7 @@ mod tests {
                         |i| (2 * i, 2 * i + 1, i),
                         core::hint::black_box(&flat29),
                         &mut next,
+                        &mut scratch,
                     )
                     .unwrap();
                     core::hint::black_box(&next);
