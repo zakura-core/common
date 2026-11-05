@@ -2,7 +2,7 @@ use group::{
     Curve, Group,
     ff::{Field, FromUniformBytes, PrimeField},
 };
-use pasta_curves::arithmetic::CurveAffine;
+use pasta_curves::arithmetic::{CoefficientProducts, CurveAffine};
 use rand::rngs::SysRng;
 use std::sync::Arc;
 
@@ -45,8 +45,11 @@ impl<'params, C: CurveAffine> BatchStrategy<'params, C> {
     }
 }
 
-impl<'params, C: CurveAffine> VerificationStrategy<'params, C> for BatchStrategy<'params, C> {
-    type Output = MSM<'params, C>;
+impl<'params, C: CurveAffine> VerificationStrategy<'params, C> for BatchStrategy<'params, C>
+where
+    C::Scalar: CoefficientProducts,
+{
+    type Output = BatchPart<'params, C>;
 
     fn process<E: EncodedChallenge<C>>(
         self,
@@ -56,8 +59,66 @@ impl<'params, C: CurveAffine> VerificationStrategy<'params, C> for BatchStrategy
             msm,
             batching_scalar,
         } = self;
-        let guard = f(msm)?;
-        Ok(guard.use_challenges_with_scale(batching_scalar))
+        let (msm, u, seed, g_0) = f(msm)?.into_scaled_batch_terms(batching_scalar);
+        Ok(BatchPart {
+            msm,
+            pending: vec![(u, seed)],
+            g_0,
+        })
+    }
+}
+
+/// One proof's verifier terms, or the sum of several, while a batch is
+/// folded together.
+///
+/// The generator coefficients are not expanded per proof: each proof
+/// contributes its round challenges and seed (`pending`), and the batch sums
+/// all of their coefficient vectors at once when it is checked
+/// ([`CoefficientProducts::sum_coefficient_products`]).
+#[derive(Debug)]
+struct BatchPart<'params, C: CurveAffine>
+where
+    C::Scalar: CoefficientProducts,
+{
+    msm: MSM<'params, C>,
+    pending: Vec<(Vec<C::Scalar>, C::Scalar)>,
+    /// The extra coefficient of `G_0`, summed over the folded proofs.
+    g_0: C::Scalar,
+}
+
+impl<'params, C: CurveAffine> BatchPart<'params, C>
+where
+    C::Scalar: CoefficientProducts,
+{
+    fn empty(params: &'params Params<C>) -> Self {
+        BatchPart {
+            msm: params.empty_msm(),
+            pending: Vec::new(),
+            g_0: C::Scalar::ZERO,
+        }
+    }
+
+    fn absorb(mut self, other: Self) -> Self {
+        let BatchPart { msm, pending, g_0 } = other;
+        self.msm.add_msm_batch(msm);
+        self.g_0 += g_0;
+        self.pending.extend(pending);
+        self
+    }
+
+    /// The batch MSM, with the summed generator coefficients.
+    fn into_msm(self) -> MSM<'params, C> {
+        let BatchPart {
+            mut msm,
+            pending,
+            g_0,
+        } = self;
+        let mut g = C::Scalar::sum_coefficient_products(&pending);
+        if let Some(g_0_coefficient) = g.first_mut() {
+            *g_0_coefficient += g_0;
+            msm.add_to_g_scalars(&g);
+        }
+        msm
     }
 }
 
@@ -455,7 +516,7 @@ impl<C: CurveAffine> BatchVerifier<C> {
 
 impl<C: CurveAffine> BatchVerifier<C>
 where
-    C::Scalar: FromUniformBytes<64>,
+    C::Scalar: FromUniformBytes<64> + CoefficientProducts,
 {
     /// Finalizes the batch and checks its validity.
     ///
@@ -466,14 +527,6 @@ where
     /// the internal parallelization requires access to a RNG that is guaranteed to not
     /// clone its internal state when shared between threads.
     pub fn finalize(self, params: &Params<C>, vk: &VerifyingKey<C>) -> bool {
-        fn accumulate_msm<'params, C: CurveAffine>(
-            mut acc: MSM<'params, C>,
-            msm: MSM<'params, C>,
-        ) -> MSM<'params, C> {
-            acc.add_msm_batch(msm);
-            acc
-        }
-
         let items = self.items;
         let instance_commitments = match compute_batch_instance_commitments(params, vk, &items) {
             Ok(instance_commitments) => instance_commitments,
@@ -537,8 +590,8 @@ where
                 })
             })
             .try_fold_and_reduce(
-                || params.empty_msm(),
-                |acc, res| res.map(|proof_msm| accumulate_msm(acc, proof_msm)),
+                || BatchPart::empty(params),
+                |acc, res| res.map(|part| acc.absorb(part)),
             );
 
         match final_msm {
@@ -548,7 +601,7 @@ where
             // fresh, sampled after every proof equation is fixed, and discarded
             // after this check, so batch verification explicitly accepts the
             // variable-time MSM's timing leakage.
-            Ok(msm) => msm.eval_full_width(),
+            Ok(part) => part.into_msm().eval_full_width(),
             Err(_) => false,
         }
     }

@@ -2529,7 +2529,7 @@ fn par_for_each_index(jobs: usize, job: &(dyn Fn(usize) + Sync)) {
 /// leaked, never dropped twice or read uninitialized.
 #[cfg(feature = "multicore")]
 #[allow(unsafe_code)]
-fn par_map_indices<T: Send>(jobs: usize, job: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+pub(crate) fn par_map_indices<T: Send>(jobs: usize, job: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
     /// The output buffer's base pointer, shared by every job.
     struct Slots<T>(*mut T);
     // SAFETY: jobs only move `T` values into distinct slots (see the write
