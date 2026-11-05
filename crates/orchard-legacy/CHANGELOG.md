@@ -4,6 +4,13 @@ All notable public API changes to this support crate will be documented here.
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-11-04
+
+### Changed
+
+- The `multicore` feature also enables `zakura-reddsa/multicore`
+  ([#688](https://github.com/zakura-core/common/pull/688)).
+
 ## [4.0.0] - 2026-10-20
 
 ### Added

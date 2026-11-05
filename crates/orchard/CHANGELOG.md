@@ -10,6 +10,24 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-11-04
+
+### Changed
+
+- Sped up spend authorizing key derivation by about a third on average,
+  Orchard bundle signing by about half per spend, `append_signatures` by one
+  scalar multiplication per action, and nullifier derivation with the
+  `backend-halo2` feature by about 7%
+  ([#680](https://github.com/zakura-core/common/pull/680)).
+- With the `backend-halo2` feature, `Note::nullifier` and spend
+  authorization key randomization are now variable-time, making them about
+  33% and 3.4× faster respectively
+  ([#681](https://github.com/zakura-core/common/pull/681)).
+- Sped up encoding proof public inputs for proving and verification by reusing
+  the stored `rk` and `cv_net` points and normalizing them together, instead of
+  decoding each `rk` from bytes
+  ([#683](https://github.com/zakura-core/common/pull/683)).
+
 ## [5.1.0] - 2026-11-03
 
 ### Added

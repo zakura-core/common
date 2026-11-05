@@ -10,6 +10,55 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-11-04
+
+### Added
+
+- Added `CurveExt::try_prepare_fixed_base_sum` and the `PreparedFixedBaseSum`
+  trait, behind the `glv` feature: a doubling-free table for sums over a few
+  fixed bases, with `sum_batch_vartime` to evaluate many sums together. The
+  Pasta curves implement it with signed 7-bit windows over GLV half-scalars,
+  about 76 KiB per base, and batch sums through shared affine reductions. It
+  runs in variable time, so its scalars must be public
+  ([#687](https://github.com/zakura-core/common/pull/687)).
+- Added `arithmetic::best_multiexp_vartime` and
+  `arithmetic::best_multiexp_vartime_with_parallelism`, a variable-time
+  multiscalar multiplication that uses the GLV backends where they are
+  selected and a Signed-Booth bucket method otherwise, and
+  `CurveExt::try_multiexp_vartime_with_parallelism` to run the GLV backends
+  on the calling thread
+  ([#688](https://github.com/zakura-core/common/pull/688)).
+- Added `pallas::Affine::batch_from_bytes` and `vesta::Affine::batch_from_bytes`,
+  which decode many compressed points with the same per-point result as
+  `from_bytes`. For batches of eight or more they take about half the time on
+  x86-64 when the x86-64 field backend is selected or the target enables AVX2,
+  and about two thirds on Apple silicon
+  ([#690](https://github.com/zakura-core/common/pull/690)).
+- Added `CurveAffine::batch_decode`, which decodes many encodings with the
+  same per-encoding result as `from_bytes`; Pallas and Vesta decode them
+  together through `batch_from_bytes`
+  ([#693](https://github.com/zakura-core/common/pull/693)).
+- Added `CurveAffine::from_xy_unchecked`, which builds a point from
+  coordinates the caller knows are on the curve; Pallas and Vesta check only
+  in debug builds ([#696](https://github.com/zakura-core/common/pull/696)).
+
+### Changed
+
+- Enabling the `x86_64-asm` feature now also requires AVX2, which it uses for
+  batch decoding. Every Intel and AMD CPU with BMI2 and ADX, which the feature
+  already required, implements AVX2. Automatic backend selection uses AVX2
+  only when the target enables it
+  ([#690](https://github.com/zakura-core/common/pull/690)).
+- The large-MSM planner prices the GLV ladder's batched affine additions
+  below the generic ladder's projective ones, so it picks GLV (and wider
+  GLV windows) where that measures faster
+  ([#697](https://github.com/zakura-core/common/pull/697)).
+- Large GLV multiscalar multiplications reuse their window buffers, and with
+  `multicore` keep them per thread (up to 8 MiB each) across calls, instead
+  of reallocating them for every window; on Linux this avoids page faults
+  that cost 25-30% of the MSM
+  ([#703](https://github.com/zakura-core/common/pull/703)).
+
 ## [5.0.0] - 2026-11-02
 
 ### Added

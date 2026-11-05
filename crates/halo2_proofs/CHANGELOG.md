@@ -10,6 +10,47 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-11-04
+
+### Changed
+
+- With the `multicore` feature, `BatchVerifier::finalize` splits the batch's
+  instance commitments across the thread pool instead of computing them in one
+  serial pass. Results are unchanged. On a 4-thread pool this made 8- to
+  64-proof Orchard batches about 13–15% faster
+  ([#684](https://github.com/zakura-core/common/pull/684)).
+- `BatchVerifier::finalize` commits Orchard-shaped instance columns (seven
+  full-width rows, then three Boolean flags) through a doubling-free GLV table
+  with batched affine sums, making that step about 2× faster. The table, about
+  0.53 MiB, is built on first use and shared by clones of the `Params`. Other
+  instance shapes keep the existing path, and results are unchanged
+  ([#687](https://github.com/zakura-core/common/pull/687)).
+- `arithmetic::best_multiexp` forwards to
+  `pasta_curves::arithmetic::best_multiexp_vartime`. Its parallel
+  Signed-Booth path combines window sums serially, cutting its doubling work
+  ([#688](https://github.com/zakura-core/common/pull/688)).
+- `arithmetic::best_fft` and `arithmetic::recursive_butterfly_arithmetic` now
+  run the two halves in parallel only for the first `ceil(log2(threads))`
+  levels of recursion and recurse serially below that, rather than joining at
+  every level down to single butterflies
+  ([#689](https://github.com/zakura-core/common/pull/689)).
+- `BatchVerifier::finalize` decodes each proof's points together before
+  reading its transcript, at offsets learned from the first proof of each
+  shape and cached on the `VerifyingKey`. Results are unchanged
+  ([#694](https://github.com/zakura-core/common/pull/694)).
+- The final multiscalar multiplication rebuilds its bases without re-checking
+  the curve equation, which their coordinates already satisfy
+  ([#696](https://github.com/zakura-core/common/pull/696)).
+- Batch verification with `multicore` sorts the final MSM's terms in
+  parallel, about 2% faster for a 64-bundle Orchard batch
+  ([#699](https://github.com/zakura-core/common/pull/699)).
+
+### Fixed
+
+- Bounded the memory retained for batch-verification proof layouts and allowed
+  new proof shapes to replace old cache entries
+  ([#698](https://github.com/zakura-core/common/pull/698)).
+
 ## [5.0.0] - 2026-11-02
 
 ### Changed

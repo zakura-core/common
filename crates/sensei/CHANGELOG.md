@@ -10,6 +10,15 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-04
+
+### Added
+
+- Added `redpallas::SigningKey::negate` and
+  `redpallas::SigningKey::randomize_with_verification_key`, which reuse the
+  stored verification key instead of recomputing it
+  ([#680](https://github.com/zakura-core/common/pull/680)).
+
 ## [0.1.0] - 2026-10-31
 
 ### Added
