@@ -12,8 +12,7 @@ use crate::backend::halo2_proofs::transcript::Blake2bWrite;
 use crate::backend::halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value, floor_planner},
     plonk::{
-        self, Advice, BatchVerifier, Column, Constraints, Expression, Fixed,
-        Instance as InstanceColumn, Selector,
+        self, Advice, Column, Constraints, Expression, Fixed, Instance as InstanceColumn, Selector,
     },
     poly::{Rotation, commitment::Params},
 };
@@ -1483,7 +1482,7 @@ impl ProvingKey {
 
 use super::ExtractedNoteCommitment;
 use super::Instance;
-type Halo2Instance = [[vesta::Scalar; INSTANCE_ROWS]; INSTANCE_COLUMNS];
+pub(crate) type Halo2Instance = [[vesta::Scalar; INSTANCE_ROWS]; INSTANCE_COLUMNS];
 
 impl Instance {
     #[cfg(test)]
@@ -1509,7 +1508,19 @@ impl Instance {
         let mut affine = alloc::vec![pallas::Affine::default(); points.len()];
         pallas::Point::batch_normalize(&points, &mut affine);
         let (cv_nets, rks) = affine.split_at(instances.len());
+        Self::to_halo2_instances_with_affine(instances, cv_nets, rks)
+    }
 
+    /// Encodes each instance as circuit public inputs, given each instance's `cv_net`
+    /// and `rk` already normalized to affine form (`cv_nets[i]` and `rks[i]` belong to
+    /// `instances[i]`). Batch validation normalizes the points of every bundle together.
+    pub(crate) fn to_halo2_instances_with_affine(
+        instances: &[Self],
+        cv_nets: &[pallas::Affine],
+        rks: &[pallas::Affine],
+    ) -> Vec<Halo2Instance> {
+        debug_assert_eq!(cv_nets.len(), instances.len());
+        debug_assert_eq!(rks.len(), instances.len());
         instances
             .iter()
             .zip(cv_nets.iter().zip(rks))
@@ -1679,17 +1690,29 @@ impl Proof {
     ///
     /// [`BatchValidator`]: crate::bundle::BatchValidator
     /// [`add_bundle`]: crate::bundle::BatchValidator::add_bundle
+    #[cfg(test)]
     pub(crate) fn add_to_batch(
         &self,
-        batch: &mut BatchVerifier<vesta::Affine>,
+        batch: &mut plonk::BatchVerifier<vesta::Affine>,
         instances: Vec<Instance>,
     ) {
-        let instances = Instance::to_halo2_instances(&instances)
+        let (instances, proof) = self
+            .clone()
+            .into_batch_input(Instance::to_halo2_instances(&instances));
+        batch.add_proof(instances, proof);
+    }
+
+    /// Splits this proof into the instance columns and proof bytes that
+    /// [`BatchVerifier::add_proof`] takes, given its encoded instances.
+    pub(crate) fn into_batch_input(
+        self,
+        instances: Vec<Halo2Instance>,
+    ) -> (Vec<Vec<Vec<vesta::Scalar>>>, Vec<u8>) {
+        let instances = instances
             .into_iter()
             .map(|i| i.into_iter().map(|c| c.into_iter().collect()).collect())
             .collect();
-
-        batch.add_proof(instances, self.0.clone());
+        (instances, self.0)
     }
 }
 
@@ -2336,7 +2359,7 @@ mod tests {
                 proof.verify(vk, core::slice::from_ref(&instance)).is_ok(),
                 proving_version == verifying_version
             );
-            let mut batch = super::BatchVerifier::new();
+            let mut batch = super::plonk::BatchVerifier::new();
             proof.add_to_batch(&mut batch, vec![instance.clone()]);
             assert_eq!(
                 batch.finalize(&vk.params, &vk.vk),

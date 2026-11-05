@@ -292,6 +292,40 @@ fn orchard_retained_binding_keys_verify() {
     retained_keys::<orchard::SpendAuth, orchard::Binding>();
 }
 
+/// A binding key built from an affine point matches the one built from the
+/// same projective point, including the identity, and verifies in a batch.
+#[test]
+#[cfg(feature = "pallas-pasta")]
+fn orchard_affine_binding_keys_match_projective() {
+    use group::{Curve, Group, GroupEncoding};
+    use pasta_curves::pallas;
+
+    let mut rng = thread_rng();
+    let msg = b"AffineBindingKeyTest";
+    let mut batch = batch::Verifier::<orchard::SpendAuth, orchard::Binding>::new();
+    for _ in 0..4 {
+        let sk = SigningKey::<orchard::Binding>::new(&mut rng);
+        let bytes = <[u8; 32]>::from(VerificationKey::from(&sk));
+        let point = pallas::Point::from_bytes(&bytes).expect("a verification key encodes a point");
+        let from_point = VerificationKey::<orchard::Binding>::from(point);
+        let from_affine = VerificationKey::<orchard::Binding>::from(point.to_affine());
+        assert_eq!(from_affine, from_point);
+        assert_eq!(<[u8; 32]>::from(from_affine), bytes);
+        batch.queue(batch::Item::from_binding_key(
+            from_affine,
+            sk.sign(&mut rng, msg),
+            msg,
+        ));
+    }
+    assert!(batch.verify(&mut rng).is_ok());
+
+    let identity = pallas::Point::identity();
+    assert_eq!(
+        VerificationKey::<orchard::Binding>::from(identity.to_affine()),
+        VerificationKey::<orchard::Binding>::from(identity),
+    );
+}
+
 #[test]
 fn retained_keys_preserve_malformed_encoding_errors() {
     let mut rng = thread_rng();

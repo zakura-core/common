@@ -121,6 +121,28 @@ impl From<pasta_curves::pallas::Point> for VerificationKey<crate::orchard::Bindi
     }
 }
 
+#[cfg(feature = "pallas-pasta")]
+impl From<pasta_curves::pallas::Affine> for VerificationKey<crate::orchard::Binding> {
+    /// Constructs an Orchard binding key from an existing valid affine Pallas point.
+    ///
+    /// Equivalent to converting the corresponding projective point, but encodes
+    /// from the affine coordinates without another field inversion, so callers
+    /// holding many keys can normalize them together first.
+    fn from(affine: pasta_curves::pallas::Affine) -> Self {
+        let point = pasta_curves::pallas::Point::from(affine);
+        let bytes = VerificationKeyBytes {
+            bytes: group::GroupEncoding::to_bytes(&affine),
+            _marker: PhantomData,
+        };
+        debug_assert_eq!(
+            pasta_curves::pallas::Point::from_bytes(&bytes.bytes),
+            Some(point),
+            "binding verification key point must match its encoding",
+        );
+        Self { point, bytes }
+    }
+}
+
 impl From<VerificationKey<crate::sapling::SpendAuth>> for jubjub::AffinePoint {
     /// Normalizes the stored spend authorization point without decoding it.
     ///
