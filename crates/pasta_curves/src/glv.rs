@@ -1765,10 +1765,12 @@ struct MultiexpBase<F> {
     #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
     y: F,
     identity: bool,
-    /// `x`, `endo_x` and `y` in radix 2^29, converted once per MSM for the
-    /// AVX2 bucket reduction.
+    /// `x`, `endo_x`, `y` and `-y` in radix 2^29, converted once per MSM for
+    /// the AVX2 bucket reduction. Storing `-y` makes filling a bucket a plain
+    /// copy: negating per assignment (a 9-limb borrow chain) made
+    /// `fill_window` the AVX2 MSM's most memory-stalled step.
     #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
-    xy29: [crate::arithmetic::avx2_chord::Limbs29; 3],
+    xy29: [crate::arithmetic::avx2_chord::Limbs29; 4],
     #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
     field: PhantomData<F>,
 }
@@ -2483,7 +2485,7 @@ fn fill_window<C: GlvParams>(
         points29.resize(*offsets.last().unwrap(), Point29::default());
         for &assignment in assignments.iter() {
             let base = &bases[assignment.component / 2];
-            let [x, endo_x, y] = &base.xy29;
+            let [x, endo_x, y, neg_y] = &base.xy29;
             let bucket = assignment.bucket();
             points29[positions[bucket]] = Point29 {
                 x: if assignment.component & 1 == 0 {
@@ -2491,11 +2493,7 @@ fn fill_window<C: GlvParams>(
                 } else {
                     *endo_x
                 },
-                y: if assignment.negative() {
-                    C::neg29(y, private::CrateToken(()))
-                } else {
-                    *y
-                },
+                y: if assignment.negative() { *neg_y } else { *y },
             };
             positions[bucket] += 1;
         }
@@ -2795,11 +2793,15 @@ fn multiexp_base<C: GlvParams>(base: &C::AffineExt) -> MultiexpBase<C::Base> {
         y,
         identity: bool::from(base.is_identity()),
         #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
-        xy29: [
-            C::to29(&x, private::CrateToken(())),
-            C::to29(&endo_x, private::CrateToken(())),
-            C::to29(&y, private::CrateToken(())),
-        ],
+        xy29: {
+            let y29 = C::to29(&y, private::CrateToken(()));
+            [
+                C::to29(&x, private::CrateToken(())),
+                C::to29(&endo_x, private::CrateToken(())),
+                y29,
+                C::neg29(&y29, private::CrateToken(())),
+            ]
+        },
         #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
         field: PhantomData,
     }
