@@ -24,9 +24,11 @@
 //! # Bounds
 //!
 //! [`mul`] is exact whenever limbs 0 to 7 of both inputs are below 2^29 and
-//! both values are below 2^261; its result is below `a b / 2^261 + p`, where
-//! `2^261 > 128 p` because `p > 2^254`. [`chord_level`] states the bound of
-//! each step. All values stay below `96 p < 2^261`. Subtractions add a
+//! both values are below 2^261; its result is below `a b / 2^261 + p`. Both
+//! moduli are `2^254 + d` with `d < 2^126`, so `p / 2^261` exceeds `1/128` by
+//! a factor below `1 + 2^-128`, which the stated bounds absorb.
+//! [`chord_level`] states the bound of each step. All values stay below
+//! `96 p < 2^261`. Subtractions add a
 //! multiple of `p` whose limbs dominate the subtrahend's ([`kp`]), and every
 //! level's outputs are reduced to canonical form ([`canonical`]). The tests
 //! exercise each helper at these limits.
@@ -45,17 +47,18 @@ pub(crate) const LANES: usize = 4 * G;
 /// `c p` in radix 2^29, with limbs 0 to 7 raised to at least `2^30 - 2` by
 /// borrowing from the next limb, so it limb-wise dominates any normalized
 /// subtrahend whose limb 8 is at most `c 2^22 - 2`.
+///
+/// Each limb is computed in one expression, adding the `2^30` it receives
+/// before subtracting the `2` it lends: limbs 5 to 7 of both Pasta moduli are
+/// zero, so borrowing first would underflow (a compile error in `const`
+/// evaluation with overflow checks on, as in debug builds).
 const fn kp(p: &[u64; L], c: u64) -> [u64; L] {
     let mut k = [0u64; L];
     let mut i = 0;
     while i < L {
-        k[i] = c * p[i];
-        i += 1;
-    }
-    let mut i = 0;
-    while i < L - 1 {
-        k[i] += 1 << (BITS + 1);
-        k[i + 1] -= 2;
+        let received = if i < L - 1 { 1 << (BITS + 1) } else { 0 };
+        let lent = if i > 0 { 2 } else { 0 };
+        k[i] = c * p[i] + received - lent;
         i += 1;
     }
     k
@@ -351,9 +354,10 @@ fn canonical(v: &V, p: &[u64; L]) -> V {
 ///
 /// Bounds (scales as in the module docs): differences below `3p`, their
 /// 32-scaled forms below `96p`; lane products, scaled numerators and running
-/// inverses stay below `4p` (`x <= 96 x / 128 + p`); slope below `1.13p`;
-/// `x3` below `4.4p`, `x - x3` below `6p`, `y3` below `4.7p`; outputs are
-/// reduced to canonical.
+/// inverses stay below `4.01p` (a bound `Bp` becomes at most
+/// `96 B p^2 / 2^261 + p`, whose fixed point exceeds `4p` by less than
+/// `2^-120 p`); slope below `1.126p`; `x3` below `4.32p`, `x - x3` below `6p`,
+/// `y3` below `4.69p`; outputs are reduced to canonical.
 #[target_feature(enable = "avx2")]
 pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3: u64>(
     n: usize,
@@ -644,8 +648,9 @@ mod tests {
                 }
 
                 /// [`mul`] at the largest operands `chord_level` feeds it
-                /// (scaled differences below `96p` times products below `4p`,
-                /// and the all-maximum limb pattern of each bound) is the
+                /// (scaled differences below `96p` times products below
+                /// `4.01p`, checked up to `5p`, and the all-maximum limb
+                /// pattern of each bound) is the
                 /// exact Montgomery product `a b / 2^261 mod p`.
                 #[test]
                 fn mul_at_kernel_bounds() {
@@ -659,7 +664,7 @@ mod tests {
                         ]
                     };
                     for a in operands(96) {
-                        for b in operands(4).into_iter().chain(operands(36)) {
+                        for b in operands(5).into_iter().chain(operands(36)) {
                             // SAFETY: AVX2 is guaranteed (see `vector`).
                             let got = unsafe {
                                 unpack_wide(&mul::<{ P[0] }, { P[1] }, { P[2] }, { P[3] }>(
