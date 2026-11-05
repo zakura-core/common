@@ -196,18 +196,11 @@ macro_rules! new_curve_impl {
 
         /// Raw-coordinate plumbing for the GLV module, reached through the
         /// private trait sealing `crate::glv::GlvParams`, which needs to
-        /// move between affine points and their coordinates without per-use
-        /// on-curve checks; its table and ladder arithmetic stays on the
-        /// curve by construction.
+        /// read affine coordinates without going through `CtOption`. The
+        /// matching constructor is [`CurveAffine::from_xy_unchecked`], which
+        /// skips the on-curve check outside debug builds.
         #[cfg(feature = "glv")]
         impl $name_affine {
-            /// Constructs a point from raw affine coordinates with no
-            /// on-curve check; `(0, 0)` is the affine identity encoding.
-            #[allow(dead_code)] // used only for the curves with GLV parameters
-            pub(crate) const fn from_xy_unchecked(x: $base, y: $base) -> Self {
-                Self { x, y }
-            }
-
             /// The raw affine coordinates (`(0, 0)` for the identity).
             #[allow(dead_code)]
             pub(crate) const fn raw_xy(&self) -> ($base, $base) {
@@ -1731,8 +1724,6 @@ mod curve_op_tests {
                 let point = <$curve>::random(&mut rng).to_affine();
                 let xy = point.coordinates().unwrap();
                 let (x, y) = (*xy.x(), *xy.y());
-                // Fully qualified: with `glv`, the affine types also have a
-                // crate-private inherent `from_xy_unchecked` without the check.
                 let rebuilt = <$affine as CurveAffine>::from_xy_unchecked(x, y);
                 assert_eq!(rebuilt, point);
                 assert_eq!(rebuilt, <$affine>::from_xy(x, y).unwrap());
@@ -1756,7 +1747,6 @@ mod curve_op_tests {
     #[should_panic(expected = "the point must be on the curve")]
     fn from_xy_unchecked_rejects_off_curve_points_in_debug() {
         use crate::arithmetic::CurveAffine;
-        // Fully qualified, as in `check_from_xy_unchecked`.
         let _ = <EpAffine as CurveAffine>::from_xy_unchecked(Fp::one(), Fp::one());
     }
 }

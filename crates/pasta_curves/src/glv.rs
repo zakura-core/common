@@ -119,12 +119,15 @@ mod private {
     /// Also hosts the raw-coordinate plumbing for the digit tables and the
     /// batch-affine ladder, which move between affine points and their
     /// coordinates without per-use on-curve checks (the table and ladder
-    /// arithmetic stays on the curve by construction). Keeping the unchecked
-    /// constructor here, behind a [`CrateToken`], keeps it out of the
-    /// crate's externally callable surface.
+    /// arithmetic stays on the curve by construction). The affine
+    /// constructor delegates to the public
+    /// [`CurveAffine::from_xy_unchecked`](crate::arithmetic::CurveAffine::from_xy_unchecked);
+    /// the [`CrateToken`] still keeps these trait methods out of reach of
+    /// downstream `GlvParams` callers.
     pub trait Sealed: CurveExt {
-        /// Constructs an affine point directly from raw coordinates, with no
-        /// on-curve check; `(0, 0)` is the affine identity encoding.
+        /// Constructs an affine point directly from raw coordinates, with the
+        /// on-curve check only in debug builds; `(0, 0)` is the affine
+        /// identity encoding.
         fn affine_unchecked(x: Self::Base, y: Self::Base, token: CrateToken) -> Self::AffineExt;
 
         /// The raw affine coordinates of `p` (`(0, 0)` for the identity).
@@ -156,7 +159,7 @@ mod private {
 
     impl Sealed for crate::pallas::Point {
         fn affine_unchecked(x: Self::Base, y: Self::Base, _: CrateToken) -> Self::AffineExt {
-            crate::pallas::Affine::from_xy_unchecked(x, y)
+            <crate::pallas::Affine as crate::arithmetic::CurveAffine>::from_xy_unchecked(x, y)
         }
 
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
@@ -180,7 +183,7 @@ mod private {
 
     impl Sealed for crate::vesta::Point {
         fn affine_unchecked(x: Self::Base, y: Self::Base, _: CrateToken) -> Self::AffineExt {
-            crate::vesta::Affine::from_xy_unchecked(x, y)
+            <crate::vesta::Affine as crate::arithmetic::CurveAffine>::from_xy_unchecked(x, y)
         }
 
         fn affine_xy(p: &Self::AffineExt) -> (Self::Base, Self::Base) {
