@@ -2504,18 +2504,30 @@ fn multiexp<C: GlvParams>(
 }
 
 fn multiexp_bases<C: GlvParams>(bases: &[C::AffineExt]) -> Vec<MultiexpBase<C::Base>> {
-    bases
-        .iter()
-        .map(|base| {
-            let (x, y) = C::affine_xy(base);
-            MultiexpBase {
-                x,
-                endo_x: x * C::Base::ZETA,
-                y,
-                identity: bool::from(base.is_identity()),
-            }
-        })
-        .collect()
+    bases.iter().map(multiexp_base::<C>).collect()
+}
+
+fn multiexp_base<C: GlvParams>(base: &C::AffineExt) -> MultiexpBase<C::Base> {
+    let (x, y) = C::affine_xy(base);
+    MultiexpBase {
+        x,
+        endo_x: x * C::Base::ZETA,
+        y,
+        identity: bool::from(base.is_identity()),
+    }
+}
+
+/// [`multiexp_bases`], on the pool when `num_threads > 1`.
+fn multiexp_bases_with_threads<C: GlvParams>(
+    bases: &[C::AffineExt],
+    num_threads: usize,
+) -> Vec<MultiexpBase<C::Base>> {
+    #[cfg(feature = "multicore")]
+    if num_threads > 1 {
+        return par_map_indices(bases.len(), &|i| multiexp_base::<C>(&bases[i]));
+    }
+    let _ = num_threads;
+    multiexp_bases::<C>(bases)
 }
 
 /// Attempts a GLV bucket multiscalar multiplication for a large Pasta MSM,
@@ -2560,7 +2572,7 @@ fn try_large_multiexp<C, D>(
 ) -> Option<C>
 where
     C: GlvParams,
-    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))>,
+    D: Fn(&C::ScalarExt) -> Option<((bool, u128), (bool, u128))> + Sync,
 {
     if scalars.len() < MIN_GLV_MULTIEXP_TERMS {
         return None;
@@ -2571,10 +2583,38 @@ where
 
     // Decompose once for the selected backend. With `orbits`, the planner
     // also prices these exact component magnitudes.
-    let components = scalars
-        .iter()
-        .map(|scalar| decompose_scalar(scalar).and_then(checked_signed_magnitudes))
-        .collect::<Option<Vec<_>>>()?;
+    let component = |scalar| decompose_scalar(scalar).and_then(checked_signed_magnitudes);
+    // The decomposition and the base preparation below run before any window
+    // and cost about a tenth of an 8-worker MSM, so they run on the pool too.
+    #[cfg(feature = "multicore")]
+    let components = if num_threads > 1 {
+        // Write each component straight into the result, so no serial pass
+        // copies it out of a `Vec<Option<_>>` afterwards. A scalar that does
+        // not decompose (only for invalid inputs) gets a placeholder and
+        // declines the whole MSM below.
+        use core::sync::atomic::{AtomicBool, Ordering};
+        let declined = AtomicBool::new(false);
+        let placeholder = SignedMagnitude {
+            negative: false,
+            magnitude: 0,
+        };
+        let components = par_map_indices(scalars.len(), &|i| {
+            component(&scalars[i]).unwrap_or_else(|| {
+                declined.store(true, Ordering::Relaxed);
+                (placeholder, placeholder)
+            })
+        });
+        // `par_map_indices` returns after every job has finished, and Rayon's
+        // join orders their stores before this load.
+        if declined.load(Ordering::Relaxed) {
+            return None;
+        }
+        components
+    } else {
+        scalars.iter().map(component).collect::<Option<Vec<_>>>()?
+    };
+    #[cfg(not(feature = "multicore"))]
+    let components = scalars.iter().map(component).collect::<Option<Vec<_>>>()?;
 
     #[cfg(feature = "orbits")]
     {
@@ -2582,7 +2622,7 @@ where
         let plan = plan_multiexp::<C>(&profile, num_threads)?;
         match plan {
             MultiexpPlan::Booth { window_bits } => {
-                let bases = multiexp_bases::<C>(bases);
+                let bases = multiexp_bases_with_threads::<C>(bases, num_threads);
                 multiexp(&components, &bases, window_bits, num_threads)
             }
             MultiexpPlan::Orbit { window_bits } => {
@@ -2593,7 +2633,7 @@ where
 
     #[cfg(not(feature = "orbits"))]
     {
-        let bases = multiexp_bases::<C>(bases);
+        let bases = multiexp_bases_with_threads::<C>(bases, num_threads);
         multiexp(&components, &bases, window_bits, num_threads)
     }
 }
@@ -5181,6 +5221,61 @@ mod tests {
     #[test]
     fn full_width_identity_multiexp_at_boundary_vesta() {
         full_width_identity_multiexp_at_boundary::<vesta::Point>();
+    }
+
+    /// The parallel scalar decomposition and base preparation, forced onto a
+    /// 4-worker pool: results match the serial path, and one undecomposable
+    /// scalar anywhere declines the whole MSM.
+    #[cfg(feature = "multicore")]
+    fn parallel_preparation_matches_and_declines<C: GlvParams>() {
+        let pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for terms in [MIN_GLV_MULTIEXP_TERMS, VERIFIER_MULTIEXP_SIZES[0]] {
+                let (scalars, bases, expected) = verifier_multiexp_inputs::<C>(terms);
+                let decompose_all = |k: &C::ScalarExt| Some(decompose::<C>(k));
+                let parallel = try_large_multiexp::<C, _>(&scalars, &bases, 4, decompose_all);
+                let serial = try_large_multiexp::<C, _>(&scalars, &bases, 1, decompose_all);
+                assert_eq!(parallel, serial, "{terms} terms");
+                assert_eq!(parallel, Some(expected), "{terms} terms");
+
+                for position in [0, terms / 2, terms - 1] {
+                    let marked = scalars[position];
+                    // A decomposition that fails, and one whose component does
+                    // not fit `checked_signed_magnitudes`.
+                    let missing = |k: &C::ScalarExt| (*k != marked).then(|| decompose::<C>(k));
+                    let too_wide = |k: &C::ScalarExt| {
+                        Some(if *k == marked {
+                            ((false, u128::MAX), (false, 0))
+                        } else {
+                            decompose::<C>(k)
+                        })
+                    };
+                    assert_eq!(
+                        try_large_multiexp::<C, _>(&scalars, &bases, 4, missing),
+                        None
+                    );
+                    assert_eq!(
+                        try_large_multiexp::<C, _>(&scalars, &bases, 4, too_wide),
+                        None
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn parallel_preparation_matches_and_declines_pallas() {
+        parallel_preparation_matches_and_declines::<pallas::Point>();
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn parallel_preparation_matches_and_declines_vesta() {
+        parallel_preparation_matches_and_declines::<vesta::Point>();
     }
 
     /// A scalar whose internal limbs are congruent but not reduced declines
