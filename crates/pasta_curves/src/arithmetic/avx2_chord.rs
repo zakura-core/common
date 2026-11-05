@@ -264,7 +264,7 @@ impl Limbs29 {
 
     /// The canonical Montgomery limbs.
     #[inline]
-    pub(crate) fn to_limbs(&self) -> [u64; 4] {
+    pub(crate) fn to_limbs(self) -> [u64; 4] {
         let mut out = [0u64; 4];
         for (i, &limb) in self.0.iter().enumerate() {
             let bit = i * BITS as usize;
@@ -377,6 +377,7 @@ fn canonical(v: &V, p: &[u64; L]) -> V {
 /// `2^-120 p`); slope below `1.126p`; `x3` below `4.32p`, `x - x3` below `6p`,
 /// `y3` below `4.69p`; outputs are reduced to canonical.
 #[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3: u64>(
     n: usize,
     pair: impl Fn(usize) -> (usize, usize, usize),
