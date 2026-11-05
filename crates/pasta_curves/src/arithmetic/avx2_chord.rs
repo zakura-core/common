@@ -338,7 +338,8 @@ fn add(a: &V, b: &V) -> V {
     normalize(core::array::from_fn(|i| _mm256_add_epi64(a.0[i], b.0[i])))
 }
 
-/// Reduces a normalized value below `8p` (limb 8 below `2^25`) to `[0, p)`.
+/// Reduces a normalized value below `8p` (limb 8 at most `2^25`: `8p` exceeds
+/// `2^257`) to `[0, p)`.
 ///
 /// `q = floor(v / 2^254)` is `limb 8 >> 22`; `v - q p` lies in `[-p, p)`
 /// because `2^254 < p < 2^254 + 2^128`, so at most one `p` is added back.
