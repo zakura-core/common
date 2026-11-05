@@ -395,22 +395,44 @@ impl ValueCommitment {
     /// Use [`ValueCommitment::derive`] for a note's value.
     #[cfg(feature = "backend-halo2")]
     pub fn derive_public(value: ValueSum) -> Self {
+        use crate::backend::pasta_curves::arithmetic::CurveAffine;
+        use crate::constants::fixed_bases::value_commit_v::{
+            PUBLIC_VALUE_MAGNITUDES, PUBLIC_VALUE_MULTIPLES, PUBLIC_VALUE_WINDOW_BITS,
+        };
+
         let magnitude = u64::try_from(value.0.abs()).expect("value must be in valid range");
-        let generator = crate::constants::fixed_bases::value_commit_v::generator();
-        // Double-and-add over only the magnitude's significant bits, adding the
-        // generator only at set bits. A negative value negates the product rather
-        // than multiplying by a full-width negated scalar.
-        let commitment = (0..u64::BITS - magnitude.leading_zeros()).rev().fold(
-            pallas::Point::identity(),
-            |acc, bit| {
-                let acc = acc.double();
-                if (magnitude >> bit) & 1 == 1 {
-                    acc + generator
-                } else {
-                    acc
-                }
-            },
-        );
+        // Recode the magnitude into signed 6-bit digits and add the embedded
+        // multiple of `V` for each nonzero digit: no doublings, and a fee-sized
+        // value balance touches about three windows.
+        let mut commitment = pallas::Point::identity();
+        let mut carry = 0;
+        for (window, multiples) in PUBLIC_VALUE_MULTIPLES.iter().enumerate() {
+            let shift = window * PUBLIC_VALUE_WINDOW_BITS;
+            let mut digit = ((magnitude >> shift) & ((1 << PUBLIC_VALUE_WINDOW_BITS) - 1)) + carry;
+            // Digits above the midpoint borrow from the next window.
+            let negative = digit > PUBLIC_VALUE_MAGNITUDES as u64;
+            if negative {
+                digit = (1 << PUBLIC_VALUE_WINDOW_BITS) - digit;
+                carry = 1;
+            } else {
+                carry = 0;
+            }
+            if digit == 0 {
+                continue;
+            }
+            // `digit` is at most `PUBLIC_VALUE_MAGNITUDES`, and the embedded
+            // coordinates are pinned on-curve by the table's test.
+            let (x, y) = multiples[digit as usize - 1];
+            let multiple = <pallas::Affine as CurveAffine>::from_xy_unchecked(x, y);
+            if negative {
+                commitment -= multiple;
+            } else {
+                commitment += multiple;
+            }
+        }
+        debug_assert_eq!(carry, 0, "a 64-bit magnitude fits in the embedded windows");
+        // A negative value negates the product rather than multiplying by a
+        // full-width negated scalar.
         ValueCommitment(if value.0.is_negative() {
             -commitment
         } else {
@@ -596,6 +618,31 @@ mod tests {
                 ValueCommitment::derive(value, ValueCommitTrapdoor::zero()).to_bytes(),
                 "value {raw}",
             );
+        }
+    }
+
+    /// Small and fee-sized balances, and magnitudes around every 6-bit window
+    /// boundary of the embedded multiples, where signed digits carry into the
+    /// next window.
+    #[test]
+    fn derive_public_matches_derive_at_window_boundaries() {
+        let small = 0..=300u64;
+        let fees = [1_000, 10_000, 50_000, 100_000, 2_100_000_000_000_000];
+        let boundaries = (1..=10).flat_map(|window| {
+            let shift = 6 * window;
+            let top = 1u64 << shift;
+            let half = 1u64 << (shift - 1);
+            [top - 1, top, top + 1, half - 1, half, half + 1, top | half]
+        });
+        for magnitude in small.chain(fees).chain(boundaries) {
+            for raw in [i128::from(magnitude), -i128::from(magnitude)] {
+                let value = ValueSum(raw);
+                assert_eq!(
+                    ValueCommitment::derive_public(value).to_bytes(),
+                    ValueCommitment::derive(value, ValueCommitTrapdoor::zero()).to_bytes(),
+                    "value {raw}",
+                );
+            }
         }
     }
 }

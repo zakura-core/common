@@ -783,6 +783,10 @@ pub fn generator() -> pallas::Affine {
     .unwrap()
 }
 
+#[path = "value_commit_v_multiples.rs"]
+mod multiples;
+pub use multiples::{PUBLIC_VALUE_MAGNITUDES, PUBLIC_VALUE_MULTIPLES, PUBLIC_VALUE_WINDOW_BITS};
+
 #[cfg(all(test, feature = "test-dependencies"))]
 mod tests {
     use super::super::{NUM_WINDOWS_SHORT, VALUE_COMMITMENT_PERSONALIZATION};
