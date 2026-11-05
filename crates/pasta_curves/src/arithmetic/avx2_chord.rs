@@ -585,6 +585,93 @@ mod tests {
                     <$field>::from_chord_limbs(reduce_wide(x, &P))
                 }
 
+                #[test]
+                fn extreme_coordinates_long_prefixes_and_output_order() {
+                    // Exercise 512 full lane groups followed by a short tail.
+                    const LONG_PREFIX_ADDITIONS: usize = LANES * 512 + 1;
+
+                    let mut minus1 = P;
+                    minus1[0] -= 1;
+                    let mut minus2 = P;
+                    minus2[0] -= 2;
+                    let edges = [
+                        <$field>::ZERO,
+                        <$field>::ONE,
+                        -<$field>::ONE,
+                        <$field>::from_chord_limbs([1, 0, 0, 0]),
+                        <$field>::from_chord_limbs([2, 0, 0, 0]),
+                        <$field>::from_chord_limbs(minus1),
+                        <$field>::from_chord_limbs(minus2),
+                    ];
+                    for n in [
+                        1usize, 7, 8, 9, 31, 32, 33, 255, 256, 257,
+                        LONG_PREFIX_ADDITIONS,
+                    ] {
+                        for seed in [0usize, 1, 6] {
+                            let mut flat = Vec::new();
+                            let mut expected = Vec::new();
+                            for i in 0..n {
+                                let lx = edges[(i * 5 + seed) % edges.len()];
+                                let mut rx = edges[(i * 3 + seed + 1) % edges.len()];
+                                if lx == rx {
+                                    rx += <$field>::ONE;
+                                }
+                                let ly = edges[(i * 11 + seed) % edges.len()];
+                                let ry = edges[(i * 13 + 2) % edges.len()];
+                                let slope = (ry - ly) * (rx - lx).invert().unwrap();
+                                let x = slope.square() - lx - rx;
+                                let y = slope * (lx - x) - ly;
+                                expected.push(Point29 {
+                                    x: Limbs29::from_limbs(&x.chord_limbs()),
+                                    y: Limbs29::from_limbs(&y.chord_limbs()),
+                                });
+                                for (x, y) in [(lx, ly), (rx, ry)] {
+                                    flat.push(Point29 {
+                                        x: Limbs29::from_limbs(&x.chord_limbs()),
+                                        y: Limbs29::from_limbs(&y.chord_limbs()),
+                                    });
+                                }
+                            }
+                            let sentinel = flat[0];
+                            let mut actual = alloc::vec![sentinel; n + 3];
+                            <$field>::chord_level(
+                                n,
+                                |i| (2 * i, 2 * i + 1, n - 1 - i),
+                                &flat,
+                                &mut actual,
+                            )
+                            .unwrap();
+                            for i in 0..n {
+                                assert_eq!(
+                                    actual[n - 1 - i], expected[i],
+                                    "n={n}, seed={seed}, i={i}",
+                                );
+                            }
+                            assert!(actual[n..].iter().all(|v| *v == sentinel));
+                            // Put an exceptional pair in each lane near the
+                            // end, after long prefix chains have been built.
+                            if n == LONG_PREFIX_ADDITIONS {
+                                for lane in 0..LANES {
+                                    let mut bad = flat.clone();
+                                    let i = n - 1 - lane;
+                                    bad[2 * i + 1].x = bad[2 * i].x;
+                                    let mut untouched = alloc::vec![sentinel; n + 3];
+                                    assert!(
+                                        <$field>::chord_level(
+                                            n,
+                                            |i| (2 * i, 2 * i + 1, n - 1 - i),
+                                            &bad,
+                                            &mut untouched,
+                                        )
+                                        .is_none(),
+                                    );
+                                    assert!(untouched.iter().all(|v| *v == sentinel));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 /// [`canonical`] across its whole input range: every multiple
                 /// of `p` up to `7p` plus residues at both ends, and the
                 /// all-maximum limb pattern just below `8p`.
