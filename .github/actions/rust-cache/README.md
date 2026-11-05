@@ -22,6 +22,8 @@ The compiler-cache action reports hit, miss, and non-cacheable counts at job
 completion. Compare those statistics with Cargo's `Finished` timings when
 evaluating reuse; a dependency-cache hit alone does not imply a compiler hit.
 Build-script execution can still rerun even when its dependencies are cached.
+If compiler-cache installation fails, checks continue with the ordinary compiler
+and the dependency-cache layer.
 
 Start with the repository's existing cache quota. Inspect cache usage and
 evictions after the `main` caches have warmed before increasing it. Keep buckets
