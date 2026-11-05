@@ -2588,9 +2588,28 @@ where
     // and cost about a tenth of an 8-worker MSM, so they run on the pool too.
     #[cfg(feature = "multicore")]
     let components = if num_threads > 1 {
-        par_map_indices(scalars.len(), &|i| component(&scalars[i]))
-            .into_iter()
-            .collect::<Option<Vec<_>>>()?
+        // Write each component straight into the result, so no serial pass
+        // copies it out of a `Vec<Option<_>>` afterwards. A scalar that does
+        // not decompose (only for invalid inputs) gets a placeholder and
+        // declines the whole MSM below.
+        use core::sync::atomic::{AtomicBool, Ordering};
+        let declined = AtomicBool::new(false);
+        let placeholder = SignedMagnitude {
+            negative: false,
+            magnitude: 0,
+        };
+        let components = par_map_indices(scalars.len(), &|i| {
+            component(&scalars[i]).unwrap_or_else(|| {
+                declined.store(true, Ordering::Relaxed);
+                (placeholder, placeholder)
+            })
+        });
+        // `par_map_indices` returns after every job has finished, and Rayon's
+        // join orders their stores before this load.
+        if declined.load(Ordering::Relaxed) {
+            return None;
+        }
+        components
     } else {
         scalars.iter().map(component).collect::<Option<Vec<_>>>()?
     };
@@ -5207,6 +5226,61 @@ mod tests {
     /// A scalar whose internal limbs are congruent but not reduced declines
     /// the Montgomery-limb path, so the caller falls back to the canonical
     /// MSM rather than trusting a GLV split outside its input range.
+    /// The parallel scalar decomposition and base preparation, forced onto a
+    /// 4-worker pool: results match the serial path, and one undecomposable
+    /// scalar anywhere declines the whole MSM.
+    #[cfg(feature = "multicore")]
+    fn parallel_preparation_matches_and_declines<C: GlvParams>() {
+        let pool = maybe_rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for terms in [MIN_GLV_MULTIEXP_TERMS, VERIFIER_MULTIEXP_SIZES[0]] {
+                let (scalars, bases, expected) = verifier_multiexp_inputs::<C>(terms);
+                let decompose_all = |k: &C::ScalarExt| Some(decompose::<C>(k));
+                let parallel = try_large_multiexp::<C, _>(&scalars, &bases, 4, decompose_all);
+                let serial = try_large_multiexp::<C, _>(&scalars, &bases, 1, decompose_all);
+                assert_eq!(parallel, serial, "{terms} terms");
+                assert_eq!(parallel, Some(expected), "{terms} terms");
+
+                for position in [0, terms / 2, terms - 1] {
+                    let marked = scalars[position];
+                    // A decomposition that fails, and one whose component does
+                    // not fit `checked_signed_magnitudes`.
+                    let missing = |k: &C::ScalarExt| (*k != marked).then(|| decompose::<C>(k));
+                    let too_wide = |k: &C::ScalarExt| {
+                        Some(if *k == marked {
+                            ((false, u128::MAX), (false, 0))
+                        } else {
+                            decompose::<C>(k)
+                        })
+                    };
+                    assert_eq!(
+                        try_large_multiexp::<C, _>(&scalars, &bases, 4, missing),
+                        None
+                    );
+                    assert_eq!(
+                        try_large_multiexp::<C, _>(&scalars, &bases, 4, too_wide),
+                        None
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn parallel_preparation_matches_and_declines_pallas() {
+        parallel_preparation_matches_and_declines::<pallas::Point>();
+    }
+
+    #[cfg(feature = "multicore")]
+    #[test]
+    fn parallel_preparation_matches_and_declines_vesta() {
+        parallel_preparation_matches_and_declines::<vesta::Point>();
+    }
+
     fn full_width_identity_declines_noncanonical_scalar<C: GlvParams>(
         from_limbs: fn([u64; 4]) -> C::ScalarExt,
     ) {
