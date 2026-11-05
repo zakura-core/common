@@ -7753,6 +7753,9 @@ mod tests {
             alloc::vec![g, two, -three],
             alloc::vec![three, three, three, three],
         ];
+        let mut scratch = ReduceScratch29::default();
+        let mut affine = Vec::new();
+        let mut scalar_scratch = ReduceScratch::default();
         for injected in 0..=exceptional.len() {
             // About 520, 260, 120 and 50 additions in the first four levels, all
             // above AVX2_MIN_LEVEL_ADDITIONS.
@@ -7777,14 +7780,25 @@ mod tests {
                 }
                 offsets.push(points.len());
             }
-            let reduced =
-                reduce_affine_buckets29::<C>(points, offsets).expect("valid points always reduce");
-            for (index, (bucket, sum)) in buckets.iter().zip(reduced).enumerate() {
-                let want = bucket.iter().fold(C::identity(), |acc, p| acc + p);
-                let got = sum.map_or(C::identity(), |p| {
-                    C::from(C::affine_unchecked(p.x, p.y, private::CrateToken(())))
-                });
-                assert_eq!(got, want, "bucket {index} with exceptional case {injected}");
+            let fresh = reduce_affine_buckets29::<C>(points.clone(), offsets.clone())
+                .expect("valid points always reduce");
+            // Keep both reducers' scratch across exceptional and clean calls.
+            let reused = reduce_affine_buckets29_reusing::<C>(
+                &mut points,
+                &mut offsets,
+                &mut scratch,
+                &mut affine,
+                &mut scalar_scratch,
+            )
+            .expect("valid points always reduce with reused scratch");
+            for reduced in [fresh, reused] {
+                for (index, (bucket, sum)) in buckets.iter().zip(reduced).enumerate() {
+                    let want = bucket.iter().fold(C::identity(), |acc, p| acc + p);
+                    let got = sum.map_or(C::identity(), |p| {
+                        C::from(C::affine_unchecked(p.x, p.y, private::CrateToken(())))
+                    });
+                    assert_eq!(got, want, "bucket {index} with exceptional case {injected}");
+                }
             }
         }
     }

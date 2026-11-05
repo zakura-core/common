@@ -618,10 +618,107 @@ mod tests {
                     <$field>::from_chord_limbs(reduce_wide(x, &P))
                 }
 
+                // Interpret an integer independently of the AVX2 reducers.
+                fn integer_as_field(x: &[u64; 5]) -> $field {
+                    let mut acc = <$field>::ZERO;
+                    for word in x.iter().rev() {
+                        for bit in (0..64).rev() {
+                            acc = acc.double();
+                            if word >> bit & 1 != 0 {
+                                acc += <$field>::ONE;
+                            }
+                        }
+                    }
+                    acc
+                }
+
+                #[test]
+                fn canonical_accepts_top_limb_equal_to_2_pow_25() {
+                    // 2^257 is below 8p, but its top limb equals 2^25.
+                    let input = [0u64, 0, 0, 0, 2];
+                    let v = limbs29(&input);
+                    assert_eq!(v[L - 1], 1 << 25);
+                    // SAFETY: AVX2 is guaranteed (see `vector`).
+                    let got = unsafe {
+                        store4(&canonical(&vector([v; 4]), &pasta_limbs29(&P)))
+                    };
+                    for lane in got {
+                        let raw = lane.to_limbs();
+                        assert!(raw.iter().rev().cmp(P.iter().rev()).is_lt());
+                        assert_eq!(
+                            integer_as_field(&[raw[0], raw[1], raw[2], raw[3], 0]),
+                            integer_as_field(&input),
+                        );
+                    }
+                }
+
+                #[test]
+                fn full_radix_mul_and_reducers_match_independent_oracle() {
+                    use rand::Rng;
+                    let mut rng = rand_xorshift::XorShiftRng::from_seed([0xa7; 16]);
+                    let exponent = L as u64 * BITS as u64;
+                    let inv_r = <$field>::from(2).pow_vartime([exponent]).invert().unwrap();
+                    let p29 = pasta_limbs29(&P);
+                    for sample in 0..1024 {
+                        let inputs: [[[u64; L]; 4]; 2] = core::array::from_fn(|side| {
+                            core::array::from_fn(|lane| {
+                                core::array::from_fn(|limb| match sample {
+                                    0 => MASK,
+                                    1 => 0,
+                                    2 => u64::from(limb == (lane + side) % L),
+                                    3 => if (limb + lane + side) % 2 == 0 { MASK } else { 0 },
+                                    _ => rng.next_u64() & MASK,
+                                })
+                            })
+                        });
+                        // SAFETY: AVX2 is guaranteed (see `vector`).
+                        let product = unsafe {
+                            unpack_wide(&mul::<{ P[0] }, { P[1] }, { P[2] }, { P[3] }>(
+                                &vector(inputs[0]), &vector(inputs[1]),
+                            ))
+                        };
+                        for (lane, got) in product.iter().enumerate() {
+                            let a = integer_as_field(&integer(&inputs[0][lane]));
+                            let b = integer_as_field(&integer(&inputs[1][lane]));
+                            assert_eq!(integer_as_field(got), a * b * inv_r);
+                        }
+
+                        let wide: [[u64; 5]; 4] = core::array::from_fn(|_| {
+                            let mut x = core::array::from_fn(|_| rng.next_u64());
+                            x[4] &= 15;
+                            x
+                        });
+                        for x in wide {
+                            let got = reduce_wide(&x, &P);
+                            assert!(got.iter().rev().cmp(P.iter().rev()).is_lt());
+                            assert_eq!(
+                                integer_as_field(&[got[0], got[1], got[2], got[3], 0]),
+                                integer_as_field(&x),
+                            );
+                        }
+                        let wide: [[u64; 5]; 4] = core::array::from_fn(|lane| {
+                            let r = <$field>::random(&mut rng).chord_limbs();
+                            k_p_plus(((sample + lane) % 8) as u64, &P, &r)
+                        });
+                        // SAFETY: AVX2 is guaranteed (see `vector`).
+                        let got = unsafe {
+                            store4(&canonical(&vector(wide.map(|x| limbs29(&x))), &p29))
+                        };
+                        for (got, x) in got.into_iter().zip(wide) {
+                            let got = got.to_limbs();
+                            assert!(got.iter().rev().cmp(P.iter().rev()).is_lt());
+                            assert_eq!(
+                                integer_as_field(&[got[0], got[1], got[2], got[3], 0]),
+                                integer_as_field(&x),
+                            );
+                        }
+                    }
+                }
+
                 #[test]
                 fn extreme_coordinates_long_prefixes_and_output_order() {
-                    // Exercise 512 full lane groups followed by a short tail.
-                    const LONG_PREFIX_ADDITIONS: usize = LANES * 512 + 1;
+                    // Exercise 8192 full lane groups followed by a short tail.
+                    const LONG_PREFIX_ADDITIONS: usize = LANES * 8192 + 1;
 
                     let mut minus1 = P;
                     minus1[0] -= 1;
@@ -640,8 +737,9 @@ mod tests {
                     // it across levels: stale chunks must not leak.
                     let mut scratch = ChordScratch::default();
                     for n in [
-                        1usize, 7, 8, 9, 31, 32, 33, 255, 256, 257,
+                        0usize, 1, 7, 8, 9, 31, 32, 33, 255, 256, 257,
                         LONG_PREFIX_ADDITIONS,
+                        257, 33, 9, 8, 7, 1, 0,
                     ] {
                         for seed in [0usize, 1, 6] {
                             let mut flat = Vec::new();
@@ -668,7 +766,7 @@ mod tests {
                                     });
                                 }
                             }
-                            let sentinel = flat[0];
+                            let sentinel = flat.first().copied().unwrap_or_default();
                             let mut actual = alloc::vec![sentinel; n + 3];
                             <$field>::chord_level(
                                 n,
