@@ -10,6 +10,44 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-11-04
+
+### Added
+
+- Added `SigningKey::negate` and
+  `SigningKey::randomize_with_verification_key`, which reuse the stored
+  verification key instead of recomputing it
+  ([#680](https://github.com/zakura-core/common/pull/680)).
+- Added `From<VerificationKey<orchard::SpendAuth>> for pallas::Point`, which
+  returns the stored point without decoding the key's bytes
+  ([#683](https://github.com/zakura-core/common/pull/683)).
+- Added a `multicore` feature that lets RedPallas batch verification use the
+  Rayon thread pool
+  ([#688](https://github.com/zakura-core/common/pull/688)).
+
+### Changed
+
+- Sped up RedPallas signature verification without the `alloc` feature by
+  roughly 2.2×; the `pallas-pasta` feature now enables `pasta_curves/glv`
+  ([#679](https://github.com/zakura-core/common/pull/679)).
+- `VerificationKey::randomize` is now variable-time for RedPallas, making it
+  about 3.4× faster. RedJubjub randomization remains constant-time
+  ([#681](https://github.com/zakura-core/common/pull/681)).
+- Sped up RedPallas `VerificationKey::randomize` by about 25% by reusing a
+  cached basepoint table. The `pallas-pasta` feature now depends on
+  `once_cell` ([#682](https://github.com/zakura-core/common/pull/682)).
+- RedPallas batch verification evaluates its multiscalar multiplication with
+  pasta's shared MSM instead of a serial wNAF, making Orchard-sized batches
+  faster ([#688](https://github.com/zakura-core/common/pull/688)).
+- With the `multicore` feature, RedPallas batch verification decodes the
+  batch's signature points on the Rayon thread pool, making large batches
+  faster on multi-core machines
+  ([#691](https://github.com/zakura-core/common/pull/691)).
+- RedPallas batch verification decodes signature points together with
+  batched square roots, on the calling thread for small batches and across the
+  thread pool for larger ones
+  ([#693](https://github.com/zakura-core/common/pull/693)).
+
 ## [5.1.0] - 2026-11-03
 
 ### Added

@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-11-04
+
+### Changed
+
+- Sped up fixed-base window-table and Lagrange-coefficient generation
+  (`compute_lagrange_coeffs`, `find_zs_and_us`) by roughly 15×
+  ([#679](https://github.com/zakura-core/common/pull/679)).
+
 ## [5.0.0] - 2026-11-02
 
 ### Changed
