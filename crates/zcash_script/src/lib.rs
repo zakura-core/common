@@ -20,6 +20,8 @@ pub mod num;
 pub mod op;
 pub mod opcode;
 pub mod pattern;
+#[cfg(feature = "pq")]
+pub mod pq;
 pub mod pv;
 pub mod script;
 pub mod signature;

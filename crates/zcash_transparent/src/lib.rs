@@ -9,6 +9,9 @@
 //!   [`keys::NonHardenedChildIndex`] and `bip32::ChildNumber`.
 //! - `transparent-inputs`: Transparent key derivation and spending. Implies `pczt`.
 //! - `test-dependencies`: Exposes APIs useful for testing.
+//! - `pq`: SLH-DSA-SHA2-128f and SLH-DSA-SHA2-192s primitives and an explicit
+//!   bounded script evaluator, with a proposed PQ identifier inside existing
+//!   P2SH redeem scripts. Does not activate PQ transaction validation.
 //!
 //! Disabling `pczt` (by turning off default features) removes the `bip32` dependency,
 //! which a consumer that only parses, validates, or builds coinbase transparent bundles
@@ -32,6 +35,8 @@ pub mod coinbase;
 pub mod keys;
 #[cfg(feature = "pczt")]
 pub mod pczt;
+#[cfg(feature = "pq")]
+pub mod pq;
 pub mod sighash;
 pub mod util;
 #[cfg(feature = "transparent-inputs")]
