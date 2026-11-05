@@ -266,6 +266,18 @@ impl<T: SigType> Ord for VerificationKey<T> {
         <[u8; 32]>::from(self).cmp(&<[u8; 32]>::from(other))
     }
 }
+impl VerificationKey<Binding> {
+    /// Constructs a binding key from a point already in affine form, so batch
+    /// validation can normalize every bundle's key with one shared inversion.
+    #[cfg(feature = "std")]
+    pub(crate) fn from_affine(point: pallas::Affine) -> Self {
+        #[cfg(feature = "backend-sensei")]
+        let key = raw::VerificationKey::from_native(point);
+        #[cfg(feature = "backend-halo2")]
+        let key = raw::VerificationKey::from(point);
+        Self(VerificationKeyInner::Binding(key), PhantomData)
+    }
+}
 impl<T: SigType> VerificationKey<T> {
     pub(crate) fn from_point(point: pallas::Point) -> Self {
         #[cfg(feature = "backend-sensei")]

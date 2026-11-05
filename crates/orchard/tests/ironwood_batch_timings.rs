@@ -70,10 +70,19 @@ fn ironwood_bundle(
     pk: &ProvingKey,
     index: u64,
 ) -> (Bundle<orchard::bundle::Authorized, i64>, [u8; 32]) {
+    ironwood_bundle_with_actions(pk, PAYMENT_ACTIONS, index)
+}
+
+/// Like [`ironwood_bundle`], with `action_count` Actions.
+fn ironwood_bundle_with_actions(
+    pk: &ProvingKey,
+    action_count: usize,
+    index: u64,
+) -> (Bundle<orchard::bundle::Authorized, i64>, [u8; 32]) {
     let mut sighash = [SIGHASH_DOMAIN; 32];
     sighash[..8].copy_from_slice(&index.to_le_bytes());
 
-    let fixture = payment_fixture_with_index(PAYMENT_ACTIONS, index);
+    let fixture = payment_fixture_with_index(action_count, index);
     assert_eq!(
         fixture.bundle().circuit_version(),
         OrchardCircuitVersion::PostNu6_3,
@@ -90,6 +99,94 @@ fn ironwood_bundle(
         )
         .expect("the payment spend is authorized");
     (authorized, sighash)
+}
+
+/// How [`validate_batch`] corrupts the bundle at the chosen index.
+#[derive(Clone, Copy, Debug)]
+enum Corruption {
+    /// Validate against a different sighash, invalidating every signature.
+    Sighash,
+    /// Replace only the binding signature with another bundle's.
+    BindingSignature,
+}
+
+fn validate_batch(
+    vk: &VerifyingKey,
+    corpus: &[(Bundle<orchard::bundle::Authorized, i64>, [u8; 32])],
+    corrupt: Option<(usize, Corruption)>,
+) -> bool {
+    let mut validator = BatchValidator::new(vk);
+    for (index, (bundle, sighash)) in corpus.iter().enumerate() {
+        let mut sighash = *sighash;
+        let mut bundle = bundle.clone();
+        match corrupt {
+            Some((bad, Corruption::Sighash)) if bad == index => sighash[31] ^= 1,
+            Some((bad, Corruption::BindingSignature)) if bad == index => {
+                let donor = corpus[(index + 1) % corpus.len()]
+                    .0
+                    .authorization()
+                    .binding_signature()
+                    .clone();
+                bundle = bundle.map_authorization(
+                    &mut (),
+                    |_, _, signature| signature,
+                    |_, authorized| {
+                        orchard::bundle::Authorized::from_parts(authorized.proof().clone(), donor)
+                    },
+                );
+            }
+            _ => {}
+        }
+        validator
+            .add_bundle(&bundle, sighash)
+            .expect("the key supports ironwood bundles");
+    }
+    validator.validate(StdRng::from_seed([7; 32]))
+}
+
+/// Batch validation derives every bundle's binding key and normalizes all
+/// bundles' points together, across the pool once the batch is large enough.
+/// Mixed Action counts give each bundle a differently sized run of points, so
+/// a valid batch only validates if every bundle reads its own points, and a
+/// corrupted bundle anywhere in the batch must be rejected.
+#[test]
+fn batch_validation_keeps_each_bundles_points() {
+    let version = OrchardCircuitVersion::PostNu6_3;
+    let vk = VerifyingKey::build(version);
+    let pk = ProvingKey::build(version).expect("current circuit supports proving");
+    let corpus: Vec<_> = [1, 2, 4, 2, 1, 4]
+        .into_iter()
+        .zip(100u64..)
+        .map(|(actions, index)| ironwood_bundle_with_actions(&pk, actions, index))
+        .collect();
+
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test thread pool must build");
+        pool.install(|| {
+            for len in [1, 3, corpus.len()] {
+                let batch = &corpus[..len];
+                assert!(
+                    validate_batch(&vk, batch, None),
+                    "threads {threads}, {len} bundles"
+                );
+                for bad in [0, len - 1] {
+                    for corruption in [Corruption::Sighash, Corruption::BindingSignature] {
+                        if len == 1 && matches!(corruption, Corruption::BindingSignature) {
+                            // The only donor is the bundle itself.
+                            continue;
+                        }
+                        assert!(
+                            !validate_batch(&vk, batch, Some((bad, corruption))),
+                            "threads {threads}, {len} bundles, {corruption:?} at {bad}",
+                        );
+                    }
+                }
+            }
+        });
+    }
 }
 
 #[test]
