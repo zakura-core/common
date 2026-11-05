@@ -658,6 +658,18 @@ jobs:
         run: >-
           cargo +stable test -p zakura-orchard --locked
           --no-default-features --features backend-halo2 --features circuit,multicore,wallet
+      - name: Test the forced x86-64 backend, as Zakura builds it
+        # Zakura's Orchard features (`backend-halo2`, `circuit`, `multicore`)
+        # with `x86_64-asm`; see the `pasta-test` step of that name.
+        run: |
+          if grep -qw adx /proc/cpuinfo && grep -qw bmi2 /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then
+            cargo +stable test -p zakura-orchard --locked --release \
+              --features x86_64-asm
+          else
+            echo "::warning::Runner lacks ADX, BMI2 or AVX2; compiled the forced x86-64 backend without testing it."
+            cargo +stable test -p zakura-orchard --locked --release \
+              --features x86_64-asm --no-run
+          fi
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -856,6 +868,18 @@ jobs:
           --no-default-features
           --features batch,dev-graph,gadget-traces,multicore
           -- prepared_
+      - name: Test the forced x86-64 backend, as Zakura builds it
+        # Instance commitments in batch verification run on Pasta's AVX2
+        # code under `x86_64-asm`; see the `pasta-test` step of that name.
+        run: |
+          if grep -qw adx /proc/cpuinfo && grep -qw bmi2 /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then
+            cargo +stable test --verbose --release -p zakura-halo2-proofs \
+              --features x86_64-asm --lib
+          else
+            echo "::warning::Runner lacks ADX, BMI2 or AVX2; compiled the forced x86-64 backend without testing it."
+            cargo +stable test --verbose --release -p zakura-halo2-proofs \
+              --features x86_64-asm --lib --no-run
+          fi
 
   sinsemilla-weighted-test:
     name: sinsemilla / Test weighted Merkle evaluator on Linux
@@ -981,6 +1005,24 @@ jobs:
           cargo +stable test -p zakura-pasta-curves \
             --verbose --features=multicore --no-run \
             --target x86_64-unknown-linux-gnu
+      - name: Test the forced x86-64 backend, as Zakura builds it
+        if: matrix.features == '--features=multicore'
+        # Zakura enables `x86_64-asm` without CPU-specific compiler flags, so
+        # the AVX2 code is compiled with per-function target features. That
+        # codegen differs from the global `+avx2` build above, and
+        # `--all-features` also enables `portable`, which disables the forced
+        # backend. Test it in debug as well, where overflow checks are on.
+        run: |
+          if grep -qw adx /proc/cpuinfo && grep -qw bmi2 /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then
+            cargo +stable test -p zakura-pasta-curves --verbose --release \
+              --features=multicore,x86_64-asm
+            cargo +stable test -p zakura-pasta-curves --verbose \
+              --features=multicore,x86_64-asm
+          else
+            echo "::warning::Runner lacks ADX, BMI2 or AVX2; compiled the forced x86-64 backend without testing it."
+            cargo +stable test -p zakura-pasta-curves --verbose --release \
+              --features=multicore,x86_64-asm --no-run
+          fi
       - name: Verify working directory is clean
         run: git diff --exit-code
 
