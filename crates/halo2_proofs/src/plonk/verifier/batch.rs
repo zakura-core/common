@@ -62,8 +62,7 @@ where
         let (msm, u, seed, g_0) = f(msm)?.into_scaled_batch_terms(batching_scalar);
         Ok(BatchPart {
             msm,
-            pending: Some((u, seed)),
-            sums: None,
+            pending: vec![(u, seed)],
             g_0,
         })
     }
@@ -72,19 +71,17 @@ where
 /// One proof's verifier terms, or the sum of several, while a batch is
 /// folded together.
 ///
-/// The generator coefficients are not expanded per proof: a proof carries its
-/// round challenges and seed (`pending`) until it is folded into an
-/// accumulator (`sums`), which keeps the sum of coefficient vectors without
-/// reducing each addition. Accumulators are allocated only by folds that add
-/// a proof, not for every proof.
+/// The generator coefficients are not expanded per proof: each proof
+/// contributes its round challenges and seed (`pending`), and the batch sums
+/// all of their coefficient vectors at once when it is checked
+/// ([`CoefficientProducts::sum_coefficient_products`]).
 #[derive(Debug)]
 struct BatchPart<'params, C: CurveAffine>
 where
     C::Scalar: CoefficientProducts,
 {
     msm: MSM<'params, C>,
-    pending: Option<(Vec<C::Scalar>, C::Scalar)>,
-    sums: Option<<C::Scalar as CoefficientProducts>::ProductSums>,
+    pending: Vec<(Vec<C::Scalar>, C::Scalar)>,
     /// The extra coefficient of `G_0`, summed over the folded proofs.
     g_0: C::Scalar,
 }
@@ -96,32 +93,16 @@ where
     fn empty(params: &'params Params<C>) -> Self {
         BatchPart {
             msm: params.empty_msm(),
-            pending: None,
-            sums: None,
+            pending: Vec::new(),
             g_0: C::Scalar::ZERO,
         }
     }
 
     fn absorb(mut self, other: Self) -> Self {
-        let BatchPart {
-            msm,
-            pending,
-            sums,
-            g_0,
-        } = other;
+        let BatchPart { msm, pending, g_0 } = other;
         self.msm.add_msm_batch(msm);
         self.g_0 += g_0;
-        match (&mut self.sums, sums) {
-            (Some(ours), Some(theirs)) => C::Scalar::merge_product_sums(ours, theirs),
-            (ours @ None, Some(theirs)) => *ours = Some(theirs),
-            (_, None) => {}
-        }
-        for (u, seed) in self.pending.take().into_iter().chain(pending) {
-            let sums = self
-                .sums
-                .get_or_insert_with(|| C::Scalar::product_sums(u.len()));
-            C::Scalar::add_coefficient_products(sums, &u, seed);
-        }
+        self.pending.extend(pending);
         self
     }
 
@@ -130,16 +111,11 @@ where
         let BatchPart {
             mut msm,
             pending,
-            mut sums,
             g_0,
         } = self;
-        if let Some((u, seed)) = pending {
-            let sums = sums.get_or_insert_with(|| C::Scalar::product_sums(u.len()));
-            C::Scalar::add_coefficient_products(sums, &u, seed);
-        }
-        if let Some(sums) = sums {
-            let mut g = C::Scalar::finish_product_sums(sums);
-            g[0] += g_0;
+        let mut g = C::Scalar::sum_coefficient_products(&pending);
+        if let Some(g_0_coefficient) = g.first_mut() {
+            *g_0_coefficient += g_0;
             msm.add_to_g_scalars(&g);
         }
         msm

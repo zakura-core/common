@@ -7,24 +7,21 @@
 #[cfg(all(feature = "sqrt-table", feature = "glv", pasta_curves_avx2))]
 pub(crate) mod avx2_chord;
 #[cfg(all(feature = "sqrt-table", feature = "glv", pasta_curves_avx2))]
-mod avx2_products;
+pub(crate) mod avx2_products;
 #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
 pub(crate) mod avx2_sqrt;
 #[cfg(feature = "alloc")]
-mod coefficient_products;
+pub(crate) mod coefficient_products;
 mod curves;
 mod fields;
 #[cfg(feature = "alloc")]
 mod multiexp;
 
-#[cfg(all(feature = "sqrt-table", feature = "glv", pasta_curves_avx2))]
-#[cfg_attr(docsrs, doc(cfg(target_arch = "x86_64")))]
-pub use avx2_products::Avx2ProductSums;
-#[cfg(feature = "alloc")]
-pub(crate) use coefficient_products::impl_coefficient_products;
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
-pub use coefficient_products::{CoefficientProducts, FieldProductSums};
+pub use coefficient_products::CoefficientProducts;
+#[cfg(feature = "alloc")]
+pub(crate) use coefficient_products::impl_coefficient_products;
 pub use curves::*;
 pub(crate) use fields::*;
 #[cfg(feature = "glv")]
