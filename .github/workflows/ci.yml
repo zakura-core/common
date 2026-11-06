@@ -1640,6 +1640,26 @@ jobs:
           -p zakura-zip321
           --all-targets
           --features "$(python3 .github/scripts/supported_features.py zakura-address zakura-keys zakura-primitives zakura-protocol zakura-proofs zakura-transparent zakura-zcash-script zakura-zip321)"
+
+  librustzcash-clippy:
+    # Runs in parallel with the configuration checks above, which used to
+    # run these same Clippy steps after their own.
+    name: librustzcash subset / Clippy
+    needs: changes
+    if: needs.changes.outputs.librustzcash == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ca36e3307eb02aaffd8a9268ae90e586fd4f461e # zizmor: ignore[impostor-commit,ref-version-mismatch] -- pinned 1.97.0; action uses orphan commits
+        with:
+          components: clippy
+      - name: Restore Rust build caches
+        uses: ./.github/actions/rust-cache
+        with:
+          key: librustzcash-clippy
       - name: Clippy each feature of each imported crate
         if: ${{ !cancelled() }}
         shell: bash
@@ -2135,6 +2155,7 @@ jobs:
       - equihash-test
       - librustzcash-test
       - librustzcash-configurations
+      - librustzcash-clippy
       - librustzcash-no-std
       - sensei-features
       - sensei-test
@@ -2187,6 +2208,7 @@ jobs:
             equihash-test,
             librustzcash-test,
             librustzcash-configurations,
+            librustzcash-clippy,
             librustzcash-no-std,
             sensei-features,
             sensei-test,
