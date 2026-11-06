@@ -1,0 +1,45 @@
+name: Install apt packages
+description: Install Ubuntu packages, reusing package archives downloaded on main
+
+inputs:
+  packages:
+    description: Space-separated Ubuntu package names
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Select the package archive cache key
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        # Runner image updates can change the resolved package versions, so the
+        # key covers the image as well as the requested packages.
+        hash=$(printf '%s' "$PACKAGES" | sha256sum | cut -c1-16)
+        echo "key=apt-archives-$ImageOS-$ImageVersion-$hash" >> "$GITHUB_OUTPUT"
+    - name: Restore package archives
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.key.outputs.key }}
+    - name: Install packages
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        mkdir -p ~/apt-archives/partial
+        sudo apt-get update
+        # apt verifies cached archives against the package lists and downloads
+        # anything missing or changed.
+        sudo apt-get install -y -o Dir::Cache::Archives="$HOME/apt-archives" $PACKAGES
+        sudo rm -f ~/apt-archives/lock
+        sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+    - name: Save package archives
+      if: steps.restore.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.key.outputs.key }}

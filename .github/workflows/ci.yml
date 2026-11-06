@@ -204,7 +204,7 @@ jobs:
               crates/zcash_address/*|crates/zcash_keys/*|crates/zcash_primitives/*|crates/zcash_protocol/*|crates/zcash_proofs/*|crates/zcash_script/*|crates/zcash_transparent/*|crates/zip321/*)
                 librustzcash=true
                 ;;
-              Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|.github/scripts/check_rust_group.sh|.github/scripts/workspace_packages.py|.github/actions/rust-cache/*|.github/workflows/ci.yml|.github/workflows/maintenance.yml)
+              Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|.github/scripts/check_rust_group.sh|.github/scripts/workspace_packages.py|.github/actions/rust-cache/*|.github/actions/apt-install/*|.github/workflows/ci.yml|.github/workflows/maintenance.yml)
                 shared=true
                 ;;
             esac
@@ -322,7 +322,9 @@ jobs:
         with:
           key: checks-${{ matrix.group }}
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libfontconfig1-dev
       # One package per invocation: a grouped invocation lets Cargo unify
       # features across the group, masking a package that cannot build
       # against its own manifest alone.
@@ -536,7 +538,9 @@ jobs:
         with:
           targets: i686-unknown-linux-gnu
       - name: Install cross-platform support dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-multilib
       - name: Run tests
         shell: bash
         env:
@@ -616,7 +620,9 @@ jobs:
       - name: Install build dependencies
         # --all-features enables plotters' TTF text rendering, which links the
         # system fontconfig (same as the rust-checks all-feature check).
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libfontconfig1-dev
       - name: Build API documentation
         # Use supported default backend features and --cfg docsrs, which
         # several crates use for doc_cfg feature badges, so that a
@@ -1090,7 +1096,9 @@ jobs:
         with:
           targets: aarch64-unknown-linux-gnu
       - name: Install AArch64 cross linker
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-aarch64-linux-gnu
       - name: Compile and link Pasta tests
         run: >-
           cargo +stable test -p zakura-pasta-curves
@@ -1134,7 +1142,9 @@ jobs:
         with:
           targets: aarch64-unknown-none
       - name: Install AArch64 assembler
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-aarch64-linux-gnu
       - name: Build Pasta with the assembly backend
         run: >-
           cargo +stable build -p zakura-pasta-curves
@@ -1175,7 +1185,9 @@ jobs:
         with:
           targets: i686-unknown-linux-gnu
       - name: Install cross-platform support dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-multilib
       - name: Run tests
         run: >-
           cargo +1.97.0 test -p zakura-pasta-curves
@@ -1651,7 +1663,9 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install cross-platform support dependencies
         if: matrix.build-deps != ''
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.build-deps }}
+        uses: ./.github/actions/apt-install
+        with:
+          packages: ${{ matrix.build-deps }}
       - name: Build target
         shell: bash
         env:
