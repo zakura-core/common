@@ -8,6 +8,8 @@
 pub(crate) mod avx2_chord;
 #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
 pub(crate) mod avx2_fft;
+#[cfg(all(feature = "deferred", feature = "sqrt-table", pasta_curves_avx2))]
+pub(crate) mod avx2_fold;
 #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
 pub(crate) mod avx2_sqrt;
 mod curves;
