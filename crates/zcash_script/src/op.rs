@@ -101,3 +101,12 @@ pub const NOP7: Opcode = Operation(OP_NOP7);
 pub const NOP8: Opcode = Operation(OP_NOP8);
 pub const NOP9: Opcode = Operation(OP_NOP9);
 pub const NOP10: Opcode = Operation(OP_NOP10);
+
+#[cfg(feature = "pq")]
+pub const CHECKSIG_PQ: Opcode = Operation(OP_CHECKSIG_PQ);
+#[cfg(feature = "pq")]
+pub const CHECKSIGVERIFY_PQ: Opcode = Operation(OP_CHECKSIGVERIFY_PQ);
+#[cfg(feature = "pq")]
+pub const CHECKMULTISIG_PQ: Opcode = Operation(OP_CHECKMULTISIG_PQ);
+#[cfg(feature = "pq")]
+pub const CHECKMULTISIGVERIFY_PQ: Opcode = Operation(OP_CHECKMULTISIGVERIFY_PQ);

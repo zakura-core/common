@@ -1,5 +1,8 @@
 use proptest::prelude::*;
 
+#[cfg(feature = "pq")]
+mod native_pq;
+
 #[cfg(test)]
 use {
     crate::transaction::{
