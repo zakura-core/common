@@ -71,7 +71,21 @@ mod aarch64_asm;
 mod x86_64_asm;
 
 pub use fp::*;
+#[cfg(all(
+    feature = "alloc",
+    feature = "deferred",
+    feature = "sqrt-table",
+    pasta_curves_avx2
+))]
+pub(crate) use fp::{fp_fold_reduce, fp_limbs};
 pub use fq::*;
+#[cfg(all(
+    feature = "alloc",
+    feature = "deferred",
+    feature = "sqrt-table",
+    pasta_curves_avx2
+))]
+pub(crate) use fq::{fq_fold_reduce, fq_limbs};
 
 #[cfg(test)]
 fn check_equality<F: core::fmt::Debug + PartialEq + subtle::ConstantTimeEq>(values: &[F]) {

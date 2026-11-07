@@ -114,7 +114,7 @@ fn store(v: &V, b: &mut Block) {
 /// Propagates carries so limbs 0 to 7 are below 2^29.
 #[target_feature(enable = "avx2")]
 #[inline]
-fn normalize(mut v: [__m256i; L]) -> V {
+pub(super) fn normalize(mut v: [__m256i; L]) -> V {
     let mask = _mm256_set1_epi64x(MASK as i64);
     for i in 0..L - 1 {
         let carry = _mm256_srli_epi64::<BITS>(v[i]);
@@ -162,7 +162,7 @@ fn sub(a: &V, b: &V, k: &[__m256i; L]) -> V {
 /// carries the sign.
 #[target_feature(enable = "avx2")]
 #[inline]
-fn reduce64(v: &V, p: &[u64; L]) -> V {
+pub(super) fn reduce64(v: &V, p: &[u64; L]) -> V {
     let q = _mm256_srli_epi64::<22>(v.0[8]);
     let mut t = [_mm256_setzero_si256(); L];
     for i in 0..L {
@@ -208,7 +208,7 @@ fn transpose(r: [__m256i; 4]) -> [__m256i; 4] {
 /// Loads four consecutive canonical elements (little-endian 64-bit words).
 #[target_feature(enable = "avx2")]
 #[inline]
-fn from_words(x: &[[u64; 4]]) -> V {
+pub(super) fn from_words(x: &[[u64; 4]]) -> V {
     debug_assert_eq!(x.len(), 4);
     let mut r = [_mm256_setzero_si256(); 4];
     for (r, src) in r.iter_mut().zip(x) {
@@ -243,7 +243,7 @@ fn from_words(x: &[[u64; 4]]) -> V {
 /// as little-endian 64-bit words.
 #[target_feature(enable = "avx2")]
 #[inline]
-fn to_words(v: &V, x: &mut [[u64; 4]]) {
+pub(super) fn to_words(v: &V, x: &mut [[u64; 4]]) {
     debug_assert_eq!(x.len(), 4);
     let l = &v.0;
     let w = [
