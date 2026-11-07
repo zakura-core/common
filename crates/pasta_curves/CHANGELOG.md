@@ -10,6 +10,25 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-11-06
+
+### Changed
+
+- On x86-64 builds with AVX2 (a target that enables it, or the `x86_64-asm`
+  backend), prepared fixed-base sums, used for halo2 instance commitments,
+  reduce their points with eight-way AVX2 affine additions over a table
+  stored in AVX2 form ([#702](https://github.com/zakura-core/common/pull/702)).
+- Large GLV multiscalar multiplications now decompose their scalars and
+  prepare their bases on the Rayon pool when more than one worker is
+  available, cutting about 3% from 64-bundle Orchard batch validation at
+  7–8 workers ([#706](https://github.com/zakura-core/common/pull/706)).
+
+### Fixed
+
+- Fixed a slowdown of large multithreaded MSMs on CPUs with performance and
+  efficiency cores, such as Apple M-series, introduced by the window buffer reuse
+  ([#707](https://github.com/zakura-core/common/pull/707)).
+
 ## [5.2.0] - 2026-11-04
 
 ### Added
