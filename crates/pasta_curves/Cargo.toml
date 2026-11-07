@@ -53,7 +53,8 @@ portable = []
 # BMI2 and ADX, e.g. with `-C target-cpu=native` on a supporting CPU.
 # This forces the backend on; unsupported CPUs will fault unless `portable`
 # is also enabled. Forcing the backend also enables the AVX2 batch square root
-# used by `Affine::batch_from_bytes`, so the CPU must also support AVX2: every
+# used by `Affine::batch_from_bytes` and the AVX2 FFT butterflies used by
+# `halo2_proofs`, so the CPU must also support AVX2: every
 # Intel and AMD CPU with BMI2 and ADX does. Automatic selection uses AVX2 only
 # when the target enables it.
 x86_64-asm = []
