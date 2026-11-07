@@ -2337,3 +2337,42 @@ impl crate::arithmetic::avx2_fft::Avx2FftField for Fq {
         }
     }
 }
+
+/// Canonical Montgomery limbs of a slice (the type is `repr(transparent)`).
+#[cfg(all(
+    feature = "alloc",
+    feature = "deferred",
+    feature = "sqrt-table",
+    pasta_curves_avx2
+))]
+#[allow(unsafe_code)]
+pub(crate) fn fq_limbs(values: &[Fq]) -> &[[u64; 4]] {
+    // SAFETY: `Fq` is `repr(transparent)` over `[u64; 4]`.
+    unsafe { &*(values as *const [Fq] as *const [[u64; 4]]) }
+}
+
+/// Reduces AVX2 fold lanes into canonical elements.
+///
+/// # Safety
+///
+/// The CPU must support AVX2 (guaranteed by `pasta_curves_avx2`).
+#[cfg(all(
+    feature = "alloc",
+    feature = "deferred",
+    feature = "sqrt-table",
+    pasta_curves_avx2
+))]
+#[allow(unsafe_code)]
+pub(crate) unsafe fn fq_fold_reduce(lanes: &crate::arithmetic::avx2_fold::Lanes, out: &mut [Fq]) {
+    // SAFETY: `Fq` is `repr(transparent)` over `[u64; 4]`; AVX2 per the
+    // caller's contract.
+    unsafe {
+        let out = &mut *(out as *mut [Fq] as *mut [[u64; 4]]);
+        crate::arithmetic::avx2_fold::reduce::<
+            { MODULUS.0[0] },
+            { MODULUS.0[1] },
+            { MODULUS.0[2] },
+            { MODULUS.0[3] },
+        >(lanes, out)
+    }
+}
