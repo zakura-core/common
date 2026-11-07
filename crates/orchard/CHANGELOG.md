@@ -10,6 +10,18 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-11-06
+
+### Changed
+
+- Sped up `BatchValidator::validate` for large batches on multi-threaded
+  verifiers by preparing queued bundles across the thread pool
+  ([#708](https://github.com/zakura-core/common/pull/708)).
+- Sped up `ValueCommitment::derive_public` and binding validating key
+  derivation in the Halo 2 backend using precomputed multiples of the value
+  commitment base
+  ([#712](https://github.com/zakura-core/common/pull/712)).
+
 ## [5.2.0] - 2026-11-04
 
 ### Changed

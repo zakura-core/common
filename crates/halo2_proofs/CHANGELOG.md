@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-11-06
+
+### Changed
+
+- Sped up batch verification of Orchard-shaped proofs whose instance columns
+  repeat a first-row value, such as the anchor shared by a bundle's Actions
+  ([#713](https://github.com/zakura-core/common/pull/713)).
+
 ## [5.2.0] - 2026-11-04
 
 ### Changed
