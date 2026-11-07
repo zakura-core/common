@@ -11,6 +11,9 @@ use super::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation};
 
 use ff::WithSmallOrderMulGroup;
 use group::ff::{BatchInvert, Field};
+use pasta_curves::arithmetic::{
+    FftScratch29, FftTwiddles29, fft_butterflies_avx2, fft_zero_padded_avx2,
+};
 
 use std::{any::Any, fmt, marker::PhantomData, sync::Arc};
 
@@ -48,6 +51,8 @@ pub(crate) struct ProvingKeyTwiddles<F> {
     extended_forward: Arc<[F]>,
     base_inverse_tables: Arc<[Vec<F>]>,
     extended_forward_tables: Arc<[Vec<F>]>,
+    base_inverse_avx2: Arc<FftTwiddles29>,
+    extended_forward_avx2: Arc<FftTwiddles29>,
 }
 
 impl<F> fmt::Debug for ProvingKeyTwiddles<F> {
@@ -327,6 +332,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         let extended_forward_tables =
             butterfly_twiddle_tables(&extended_forward, self.extended_len());
         ProvingKeyTwiddles {
+            base_inverse_avx2: Arc::new(FftTwiddles29::new(&base_inverse)),
+            extended_forward_avx2: Arc::new(FftTwiddles29::new(&extended_forward)),
             base_inverse: Arc::from(base_inverse),
             extended_forward: Arc::from(extended_forward),
             base_inverse_tables: Arc::from(base_inverse_tables),
@@ -351,6 +358,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             1,
             &twiddles.base_inverse,
             &twiddles.base_inverse_tables,
+            &twiddles.base_inverse_avx2,
             0,
             ButterflyParallelism::new(parallel_depth(), false),
         );
@@ -428,6 +436,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             self.extended_k,
             &twiddles.extended_forward,
             &twiddles.extended_forward_tables,
+            &twiddles.extended_forward_avx2,
             parallel_depth(),
             false,
         );
@@ -465,6 +474,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             self.extended_k,
             &twiddles.extended_forward,
             &twiddles.extended_forward_tables,
+            &twiddles.extended_forward_avx2,
             parallel_depth(),
             true,
         );
@@ -524,6 +534,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 1,
                 &twiddles.base_inverse,
                 &twiddles.base_inverse_tables,
+                &twiddles.base_inverse_avx2,
                 0,
                 ButterflyParallelism::new(INNER_PARALLEL_DEPTH, false),
             );
@@ -541,6 +552,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 self.extended_k,
                 &twiddles.extended_forward,
                 &twiddles.extended_forward_tables,
+                &twiddles.extended_forward_avx2,
                 INNER_PARALLEL_DEPTH,
                 false,
             );
@@ -645,6 +657,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             1,
             &twiddles.extended_forward,
             &twiddles.extended_forward_tables,
+            &twiddles.extended_forward_avx2,
             0,
             ButterflyParallelism::new(parallel_depth(), false),
         );
@@ -706,6 +719,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             1,
             &twiddles.extended_forward,
             &twiddles.extended_forward_tables,
+            &twiddles.extended_forward_avx2,
             0,
             ButterflyParallelism::new(parallel_depth(), false),
         );
@@ -824,17 +838,20 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             extended_log_n,
             &twiddles,
             &tables,
+            &FftTwiddles29::default(),
             parallel_depth(),
             false,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fft_zero_padded_with_twiddles(
         coefficients: &mut Vec<F>,
         log_n: u32,
         extended_log_n: u32,
         twiddles: &[F],
         tables: &[Vec<F>],
+        tables_avx2: &FftTwiddles29,
         parallel_depth: u32,
         avoid_waiter_stealing: bool,
     ) {
@@ -850,6 +867,13 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         // A constant polynomial needs no butterfly arithmetic.
         if n == 1 {
             coefficients.resize(extended_n, coefficients[0]);
+            return;
+        }
+
+        // A serial transform runs entirely in the AVX2 kernel when it applies
+        // (Pasta fields on AVX2 builds), including the first retained stage
+        // below, converting its values once.
+        if parallel_depth == 0 && fft_zero_padded_avx2_serial(coefficients, log_n, tables_avx2) {
             return;
         }
 
@@ -900,6 +924,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             1,
             twiddles,
             tables,
+            tables_avx2,
             0,
             ButterflyParallelism {
                 depth: parallel_depth,
@@ -1217,6 +1242,47 @@ impl ButterflyParallelism {
     }
 }
 
+/// Runs a serial butterfly subtree in `pasta_curves`' AVX2 kernel, reusing a
+/// per-thread radix-2^29 buffer; `false` when the kernel does not apply.
+fn fft_butterflies_avx2_serial<F: Field>(
+    values: &mut [F],
+    completed_chunk_len: usize,
+    level: usize,
+    tables_avx2: &FftTwiddles29,
+) -> bool {
+    FFT29_SCRATCH.with(|scratch| {
+        let Ok(mut scratch) = scratch.try_borrow_mut() else {
+            return false;
+        };
+        fft_butterflies_avx2(
+            values,
+            completed_chunk_len,
+            level,
+            tables_avx2,
+            &mut scratch,
+        )
+    })
+}
+
+std::thread_local! {
+    static FFT29_SCRATCH: std::cell::RefCell<FftScratch29> =
+        std::cell::RefCell::new(FftScratch29::default());
+}
+
+/// Runs a whole zero-padded forward FFT in `pasta_curves`' AVX2 kernel.
+fn fft_zero_padded_avx2_serial<F: Field>(
+    coefficients: &mut Vec<F>,
+    log_n: u32,
+    tables_avx2: &FftTwiddles29,
+) -> bool {
+    FFT29_SCRATCH.with(|scratch| {
+        let Ok(mut scratch) = scratch.try_borrow_mut() else {
+            return false;
+        };
+        fft_zero_padded_avx2(coefficients, log_n, tables_avx2, &mut scratch)
+    })
+}
+
 /// Builds contiguous per-level twiddle tables for the butterfly combine step.
 fn butterfly_twiddle_tables<F: Field>(twiddles: &[F], len: usize) -> Vec<Vec<F>> {
     let mut tables = Vec::new();
@@ -1230,17 +1296,27 @@ fn butterfly_twiddle_tables<F: Field>(twiddles: &[F], len: usize) -> Vec<Vec<F>>
     tables
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recursive_butterfly_after_prefix<F: Field>(
     values: &mut [F],
     completed_chunk_len: usize,
     twiddle_chunk: usize,
     twiddles: &[F],
     tables: &[Vec<F>],
+    tables_avx2: &FftTwiddles29,
     level: usize,
     parallelism: ButterflyParallelism,
 ) {
     let len = values.len();
     if len == completed_chunk_len {
+        return;
+    }
+
+    // A serial subtree runs entirely in the AVX2 kernel when it applies
+    // (Pasta fields on AVX2 builds), converting its values once.
+    if parallelism.depth == 0
+        && fft_butterflies_avx2_serial(values, completed_chunk_len, level, tables_avx2)
+    {
         return;
     }
 
@@ -1256,6 +1332,7 @@ fn recursive_butterfly_after_prefix<F: Field>(
                         twiddle_chunk * 2,
                         twiddles,
                         tables,
+                        tables_avx2,
                         level + 1,
                         parallelism.descend(),
                     )
@@ -1267,6 +1344,7 @@ fn recursive_butterfly_after_prefix<F: Field>(
                         twiddle_chunk * 2,
                         twiddles,
                         tables,
+                        tables_avx2,
                         level + 1,
                         parallelism.descend(),
                     )
@@ -2046,6 +2124,14 @@ fn test_orchard_proving_key_twiddle_cache_size_and_sharing() {
     assert!(Arc::ptr_eq(
         &twiddles.extended_forward_tables,
         &cloned.extended_forward_tables
+    ));
+    assert!(Arc::ptr_eq(
+        &twiddles.base_inverse_avx2,
+        &cloned.base_inverse_avx2
+    ));
+    assert!(Arc::ptr_eq(
+        &twiddles.extended_forward_avx2,
+        &cloned.extended_forward_avx2
     ));
 }
 

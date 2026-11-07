@@ -2290,3 +2290,51 @@ impl crate::arithmetic::avx2_chord::Avx2ChordField for Fp {
         crate::arithmetic::avx2_chord::modulus29(&MODULUS.0)
     }
 }
+
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+impl crate::arithmetic::avx2_fft::Avx2FftField for Fp {
+    fn fft_limbs(&self) -> [u64; 4] {
+        self.0
+    }
+
+    #[allow(unsafe_code, unused_unsafe)]
+    fn fft_butterflies(
+        values: &mut [Self],
+        completed: usize,
+        level: usize,
+        tw: &crate::arithmetic::avx2_fft::Twiddles,
+        scratch: &mut crate::arithmetic::avx2_fft::Scratch,
+    ) -> bool {
+        // SAFETY: `Fp` is `repr(transparent)` over `[u64; 4]`.
+        let limbs = unsafe { &mut *(values as *mut [Self] as *mut [[u64; 4]]) };
+        // SAFETY: as for `sqrt_chain`: `pasta_curves_avx2` guarantees AVX2.
+        unsafe {
+            crate::arithmetic::avx2_fft::butterflies::<
+                { MODULUS.0[0] },
+                { MODULUS.0[1] },
+                { MODULUS.0[2] },
+                { MODULUS.0[3] },
+            >(limbs, completed, level, tw, scratch)
+        }
+    }
+
+    #[allow(unsafe_code, unused_unsafe)]
+    fn fft_zero_padded(
+        values: &mut [Self],
+        log_n: u32,
+        tw: &crate::arithmetic::avx2_fft::Twiddles,
+        scratch: &mut crate::arithmetic::avx2_fft::Scratch,
+    ) {
+        // SAFETY: `Self` is `repr(transparent)` over `[u64; 4]`.
+        let limbs = unsafe { &mut *(values as *mut [Self] as *mut [[u64; 4]]) };
+        // SAFETY: as for `sqrt_chain`: `pasta_curves_avx2` guarantees AVX2.
+        unsafe {
+            crate::arithmetic::avx2_fft::zero_padded::<
+                { MODULUS.0[0] },
+                { MODULUS.0[1] },
+                { MODULUS.0[2] },
+                { MODULUS.0[3] },
+            >(limbs, log_n, tw, scratch)
+        }
+    }
+}
