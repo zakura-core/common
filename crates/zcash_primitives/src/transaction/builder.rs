@@ -1316,15 +1316,18 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
         self.transparent_builder.add_output(to, value)
     }
 
-    /// Adds an output paying a `scriptPubKey` directly, for a recipient whose output format
-    /// has no transparent address encoding.
-    pub fn add_transparent_output_script(
+    /// Adds a post-quantum output committing to `commitment` under `parameters`.
+    ///
+    /// See [`transparent::builder::TransparentBuilder::add_pq_output`].
+    #[cfg(feature = "pq")]
+    pub fn add_transparent_pq_output(
         &mut self,
-        script_pubkey: zcash_script::script::Code,
+        parameters: transparent::pq::ParameterSet,
+        commitment: &[u8; 32],
         value: Zatoshis,
     ) -> Result<(), transparent::builder::Error> {
         self.transparent_builder
-            .add_output_script(script_pubkey, value)
+            .add_pq_output(parameters, commitment, value)
     }
 
     /// Adds a transparent "null data" (OP_RETURN) output with the given data payload.

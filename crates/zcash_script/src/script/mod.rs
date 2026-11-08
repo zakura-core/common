@@ -53,6 +53,13 @@ pub enum Error {
 
     #[error("clean stack requirement not met")]
     CleanStack,
+
+    /// The script is in the post-quantum output namespace, which the legacy evaluator
+    /// refuses to run when [`interpreter::Flags::PqOutputs`] is set. Evaluating it would
+    /// satisfy it with an empty scriptSig; it is spendable only under the post-quantum
+    /// rules, which this evaluator does not implement.
+    #[error("post-quantum namespace script cannot be spent under legacy script rules")]
+    PqNamespace,
 }
 
 impl Error {
@@ -397,6 +404,34 @@ impl Code {
         self.parse().next() == Some(Ok(opcode::PossiblyBad::Good(op::RETURN)))
             || self.0.len() > Self::MAX_SIZE
     }
+
+    /// Whether this script is in the post-quantum output namespace.
+    ///
+    /// A convenience forwarder to [`is_pq_namespace`], which is the definition.
+    pub fn is_pq_namespace(&self) -> bool {
+        is_pq_namespace(&self.0)
+    }
+}
+
+/// The exact byte length of a script in the post-quantum output namespace: `OP_0`, the
+/// one-byte version opcode, the thirty-two-byte push opcode, and the commitment.
+pub const PQ_NAMESPACE_BYTES: usize = 35;
+
+/// Whether `script` is in the post-quantum output namespace, which is exactly
+/// [`PQ_NAMESPACE_BYTES`] bytes of `OP_0 <OP_1..OP_16> 0x20 <32 bytes>`.
+///
+/// This is the *namespace*, not the set of versions anything defines: every version opcode
+/// from `OP_1` to `OP_16` matches, including those no parameter set claims, so that an
+/// undefined version is restricted rather than left spendable under the legacy rules.
+///
+/// The test is on bytes rather than on parsed opcodes on purpose. An output has to be
+/// byte-exact to be recognized by the post-quantum rules, so a non-minimal push of the
+/// commitment (`OP_0 OP_1 OP_PUSHDATA1 0x20 <32 bytes>`, thirty-six bytes) is correctly not
+/// in the namespace, and neither is any other near miss. Keeping one byte-level definition
+/// also means the rule that refuses to evaluate these scripts and the rule that recognizes
+/// them cannot disagree.
+pub fn is_pq_namespace(script: &[u8]) -> bool {
+    script.len() == PQ_NAMESPACE_BYTES && matches!(script, [0x00, 0x51..=0x60, 0x20, ..])
 }
 
 impl Evaluable for Code {

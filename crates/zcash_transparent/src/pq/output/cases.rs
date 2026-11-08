@@ -4,6 +4,9 @@
 use crate::{
     address::{Script, TransparentAddress},
     bundle::TxOut,
+    // `hash160` is still what a P2SH comparison output needs; the PQ commitment is
+    // `sha256`, which `output.rs` already brings into scope for this file.
+    util::{hash160, sha256},
 };
 use zcash_protocol::{consensus::NetworkType, value::Zatoshis};
 use zcash_script::interpreter::{Error as InterpreterError, Flags};
@@ -39,11 +42,10 @@ fn push(value: &[u8]) -> Vec<u8> {
 fn output(body: &[u8]) -> Script {
     let mut bytes = vec![
         MARKER,
-        VERSION_PUSH,
-        PARAMETERS.version(),
+        PARAMETERS.version_opcode(),
         COMMITMENT_BYTES as u8,
     ];
-    bytes.extend_from_slice(&hash160::hash(body));
+    bytes.extend_from_slice(&sha256::hash(body));
     Script(Code(bytes))
 }
 
@@ -98,19 +100,20 @@ fn clean_stack() -> Error {
 fn output_carries_the_version_and_commits_the_exact_body() {
     let body = Code(vec![0x51]);
     let script = output_script(PARAMETERS, &body).unwrap();
-    // The output carries the version, then pushes the hash of the body alone.
-    assert_eq!(script.0.len(), 24);
-    assert_eq!(script.0[..2], [MARKER, VERSION_PUSH]);
-    assert_eq!(script.0[2], PARAMETERS.version());
-    assert_eq!(script.0[HEADER_BYTES], COMMITMENT_BYTES as u8);
-    assert_eq!(script.0[HEADER_BYTES + 1..], hash160::hash(&body.0));
-    // Independently computed using hashlib SHA-256 followed by RIPEMD-160.
+    // The marker, the version as its own opcode, then the push of the body's hash alone.
+    assert_eq!(script.0.len(), OUTPUT_BYTES);
+    assert_eq!(script.0.len(), 35);
+    assert_eq!(script.0[0], MARKER);
+    assert_eq!(script.0[1], PARAMETERS.version_opcode());
+    assert_eq!(script.0[2], COMMITMENT_BYTES as u8);
+    assert_eq!(script.0[HEADER_BYTES..], sha256::hash(&body.0));
+    // Independently computed using hashlib SHA-256.
     assert_eq!(
         hex::encode(&script.0),
         if PARAMETERS == ParameterSet::Sha2_128f {
-            "50010114da1745e9b549bd0bfa1a569971c77eba30cd5a4b"
+            "0051204ae81572f06e1b88fd5ced7a1a000945432e83e1551e6f721ee9c00b8cc33260"
         } else {
-            "50010214da1745e9b549bd0bfa1a569971c77eba30cd5a4b"
+            "0052204ae81572f06e1b88fd5ced7a1a000945432e83e1551e6f721ee9c00b8cc33260"
         }
     );
     // The commitment covers the body alone, so the other version's output for the same
@@ -121,7 +124,7 @@ fn output_carries_the_version_and_commits_the_exact_body() {
         ParameterSet::Sha2_192s => ParameterSet::Sha2_128f,
     };
     let other_script = output_script(other, &body).unwrap();
-    assert_eq!(other_script.0[2], other.version());
+    assert_eq!(other_script.0[1], other.version_opcode());
     assert_eq!(other_script.0[HEADER_BYTES..], script.0[HEADER_BYTES..]);
     assert_ne!(other_script.0, script.0);
 
@@ -135,7 +138,7 @@ fn output_carries_the_version_and_commits_the_exact_body() {
 
     let parsed = parse_output(&script).unwrap().unwrap();
     assert_eq!(parsed.parameters(), PARAMETERS);
-    assert_eq!(parsed.commitment(), &hash160::hash(&body.0));
+    assert_eq!(parsed.commitment(), &sha256::hash(&body.0));
     assert_eq!(classify_created_output(&script), CreatedOutput::Pq(PARAMETERS));
     assert_eq!(check(&[], &body.0), Ok(true));
 
@@ -148,17 +151,32 @@ fn output_carries_the_version_and_commits_the_exact_body() {
     // Committing to those bytes in the output authenticates them instead.
     assert_eq!(check(&[], &equivalent.0), Ok(true));
 
-    // The output itself fails under the unchanged legacy evaluator, so it is never
-    // claimable where these rules are not active.
-    let under_legacy = script::Raw::from_raw_parts(input(&[], &body.0), script.0.clone())
-        .eval(flags(), &checker());
-    assert!(matches!(
-        under_legacy,
-        Err((
-            script::ComponentType::PubKey,
-            script::Error::Interpreter(_, InterpreterError::BadOpcode)
-        ))
-    ));
+    // Under the unchanged legacy rules this output is three pushes that leave the truthy
+    // commitment on top, so it is satisfied by an *empty* scriptSig: the format is
+    // claimable, not unspendable, wherever the PQ rules are not active. That is the whole
+    // reason the guard exists, so it is asserted here rather than left implicit, and this
+    // test fails loudly if the shape ever stops being anyone-can-spend by accident.
+    assert_eq!(
+        script::Raw::from_raw_parts(Vec::new(), script.0.clone()).eval(flags(), &checker()),
+        Ok(true)
+    );
+    assert_eq!(
+        script::Raw::from_raw_parts(input(&[], &body.0), script.0.clone())
+            .eval(flags(), &checker()),
+        Ok(true)
+    );
+    // Setting the guard's flag makes the legacy evaluator refuse it instead of running it,
+    // whatever the input pushes.
+    for sig in [Vec::new(), input(&[], &body.0), vec![0x51]] {
+        assert_eq!(
+            script::Raw::from_raw_parts(sig, script.0.clone())
+                .eval(flags() | Flags::PqOutputs, &checker()),
+            Err((
+                script::ComponentType::PubKey,
+                script::Error::PqNamespace
+            ))
+        );
+    }
     assert_eq!(
         signing_context(NETWORK, PARAMETERS),
         if PARAMETERS == ParameterSet::Sha2_128f {
@@ -170,14 +188,16 @@ fn output_carries_the_version_and_commits_the_exact_body() {
 }
 
 #[test]
-fn unknown_versions_and_non_canonical_outputs_are_rejected_at_creation() {
+fn every_undefined_version_is_restricted_at_creation_and_cannot_be_spent() {
     let body = Code(vec![0x51]);
     let script = output_script(PARAMETERS, &body).unwrap();
 
-    // An unknown version yields no output to spend, whatever an input pushes for it.
-    for version in [0, 3, 255] {
+    // Versions 3 through 16 are in the namespace and define nothing, so an output naming
+    // one is rejected when it is created and yields no output to spend. All fourteen are
+    // checked, not a sample, because each is a separate opcode in the namespace.
+    for version in 3..=16u8 {
         let mut changed = script.clone();
-        changed.0[2] = version;
+        changed.0[1] = 0x50 + version;
         assert_eq!(
             parse_output(&changed),
             Err(Error::UnsupportedVersion(version))
@@ -186,35 +206,121 @@ fn unknown_versions_and_non_canonical_outputs_are_rejected_at_creation() {
             classify_created_output(&changed),
             CreatedOutput::Malformed(Error::UnsupportedVersion(version))
         );
-    }
-
-    let mut trailing = script.0.clone();
-    trailing.push(0);
-    let mut wide_push = script.0.clone();
-    wide_push[HEADER_BYTES] = 0x4c;
-    // The version must be pushed by the one-byte push opcode, not OP_1 and not a wider one.
-    let mut wide_version = script.0.clone();
-    wide_version[1] = 0x02;
-    let mut small_version = script.0.clone();
-    small_version[1] = 0x50 + PARAMETERS.version();
-    for malformed in [
-        vec![MARKER],
-        vec![MARKER, VERSION_PUSH],
-        vec![MARKER, VERSION_PUSH, PARAMETERS.version()],
-        script.0[..OUTPUT_BYTES - 1].to_vec(),
-        trailing,
-        wide_push,
-        wide_version,
-        small_version,
-    ] {
-        assert_eq!(parse_output(&Code(malformed.clone())), Err(Error::OutputEncoding));
+        // The guard covers undefined versions too, so one cannot be swept through the
+        // legacy evaluator either, even though nothing will ever define how to spend it.
         assert_eq!(
-            classify_created_output(&Code(malformed)),
-            CreatedOutput::Malformed(Error::OutputEncoding)
+            script::Raw::from_raw_parts(Vec::new(), changed.0.clone())
+                .eval(flags() | Flags::PqOutputs, &checker()),
+            Err((
+                script::ComponentType::PubKey,
+                script::Error::PqNamespace
+            ))
         );
     }
 
-    // Every other output shape is legacy, and a creation rule may ban it by height.
+    // The namespace is exactly the sixteen version opcodes: every one is recognized as
+    // being in it, while only the two defined ones parse into an output.
+    for version in 1..=16u8 {
+        let mut changed = script.clone();
+        changed.0[1] = 0x50 + version;
+        assert!(script::is_pq_namespace(&changed.0));
+        assert_eq!(
+            parse_output(&changed).is_ok(),
+            ParameterSet::from_version(version).is_some()
+        );
+    }
+}
+
+#[test]
+fn the_builder_writes_a_recognized_output_of_a_defined_version() {
+    let body = Code(vec![0x51]);
+    let commitment = sha256::hash(&body.0);
+    let value = Zatoshis::const_from_u64(100);
+
+    let mut builder = crate::builder::TransparentBuilder::empty();
+    builder
+        .add_pq_output(PARAMETERS, &commitment, value)
+        .unwrap();
+
+    let outputs = builder.outputs();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].value(), value);
+    assert_eq!(
+        outputs[0].script_pubkey().0.0,
+        output_script(PARAMETERS, &body).unwrap().0
+    );
+    // The builder takes a parameter set rather than a script, so there is no way through it
+    // to create an output in a version nothing defines, and what it writes parses back as
+    // a PQ output of this version.
+    assert_eq!(
+        classify_created_output(&outputs[0].script_pubkey().0),
+        CreatedOutput::Pq(PARAMETERS)
+    );
+}
+
+#[test]
+fn near_misses_of_the_namespace_are_legacy_outputs() {
+    let body = Code(vec![0x51]);
+    let script = output_script(PARAMETERS, &body).unwrap();
+    let commitment = sha256::hash(&body.0);
+
+    // A script that is not byte-exact is not in the namespace, and unlike under the
+    // previous marker it keeps the legacy rules rather than becoming a malformed PQ
+    // output: these shapes really are spendable under those rules and may already have an
+    // owner, so claiming them here would stop whoever holds one from spending it.
+    let mut trailing = script.0.clone();
+    trailing.push(0);
+    let mut wide_push = script.0.clone();
+    wide_push[2] = 0x4c;
+    let mut non_minimal_push = vec![MARKER, PARAMETERS.version_opcode(), 0x4c, 0x20];
+    non_minimal_push.extend_from_slice(&commitment);
+    let mut p2wsh = vec![0x00, 0x20];
+    p2wsh.extend_from_slice(&commitment);
+    let mut taproot = vec![0x51, 0x20];
+    taproot.extend_from_slice(&commitment);
+    let mut wrong_marker = script.0.clone();
+    wrong_marker[0] = 0x51;
+    let mut version_is_op_0 = script.0.clone();
+    version_is_op_0[1] = 0x00;
+    let mut version_is_reserved = script.0.clone();
+    version_is_reserved[1] = 0x50;
+    let mut short_commitment = vec![MARKER, PARAMETERS.version_opcode(), 0x14];
+    short_commitment.extend_from_slice(&commitment[..20]);
+    let mut long_commitment = vec![MARKER, PARAMETERS.version_opcode(), 0x21];
+    long_commitment.extend_from_slice(&commitment);
+    long_commitment.push(0);
+    for near_miss in [
+        vec![MARKER],
+        vec![MARKER, PARAMETERS.version_opcode()],
+        vec![MARKER, PARAMETERS.version_opcode(), COMMITMENT_BYTES as u8],
+        script.0[..OUTPUT_BYTES - 1].to_vec(),
+        trailing,
+        wide_push,
+        non_minimal_push,
+        p2wsh,
+        taproot,
+        wrong_marker,
+        version_is_op_0,
+        version_is_reserved,
+        short_commitment,
+        long_commitment,
+    ] {
+        let near_miss = Code(near_miss);
+        assert!(
+            !script::is_pq_namespace(&near_miss.0),
+            "unexpectedly in the namespace: {}",
+            hex::encode(&near_miss.0)
+        );
+        assert_eq!(parse_output(&near_miss), Ok(None));
+        assert_eq!(classify_created_output(&near_miss), CreatedOutput::Legacy);
+    }
+}
+
+#[test]
+fn other_output_shapes_stay_legacy() {
+    let body = Code(vec![0x51]);
+
+    // Every other output shape is legacy, and stays spendable under the legacy rules.
     for legacy_output in [
         p2sh_output(&body.0).0,
         Script::from(TransparentAddress::PublicKeyHash([1; 20]).script()).0,
@@ -374,15 +480,20 @@ fn callback_receives_the_committed_body_for_each_failed_check() {
         check_output(&changed, &serialized),
         Err(Error::CommitmentMismatch)
     );
+    // Naming a version nothing defines leaves an output in the namespace with no rules,
+    // which is restricted rather than spendable. Set rather than flipped, so the version
+    // is undefined for either parameter set.
     let mut reversioned = previous_output.clone();
-    reversioned.0[2] ^= 1;
-    assert!(matches!(
+    reversioned.0[1] = 0x50 + 5;
+    assert_eq!(
         parse_output(&reversioned),
-        Err(Error::UnsupportedVersion(_))
-    ));
+        Err(Error::UnsupportedVersion(5))
+    );
+    // Changing the commitment's push opcode takes the script out of the namespace
+    // altogether, so it is a legacy output and not a malformed PQ one.
     let mut reframed = previous_output;
-    reframed.0[1] ^= 1;
-    assert_eq!(parse_output(&reframed), Err(Error::OutputEncoding));
+    reframed.0[2] ^= 1;
+    assert_eq!(parse_output(&reframed), Ok(None));
 }
 
 #[test]

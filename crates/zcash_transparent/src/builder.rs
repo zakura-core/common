@@ -549,13 +549,26 @@ impl TransparentBuilder {
         }
     }
 
-    /// Adds an output paying the given `scriptPubKey`, for a recipient whose output format
-    /// has no [`TransparentAddress`] encoding.
+    /// Adds a post-quantum output committing to `commitment` under `parameters`.
     ///
-    /// The caller owns the whole script, so the script decides what the output means and what
-    /// can spend it. Nothing here checks that anything can: use [`Self::add_output`] wherever
-    /// an address exists.
-    pub fn add_output_script(&mut self, script_pubkey: Code, value: Zatoshis) -> Result<(), Error> {
+    /// The commitment is `SHA-256` of the script the recipient will spend with, which the
+    /// recipient publishes in place of an address; the body itself stays with whoever will
+    /// spend the output. Nothing here can check that a body exists for this commitment, so
+    /// a wrong commitment makes an output nobody can spend, exactly as a wrong address does.
+    ///
+    /// This takes a parameter set rather than a script, so the version written is always one
+    /// that is defined: there is no way through this builder to create an output in a
+    /// version nothing implements. Whether these outputs may be created at all at a given
+    /// height is the caller's to enforce; see [`crate::pq::output`].
+    #[cfg(feature = "pq")]
+    pub fn add_pq_output(
+        &mut self,
+        parameters: crate::pq::ParameterSet,
+        commitment: &[u8; 32],
+        value: Zatoshis,
+    ) -> Result<(), Error> {
+        let script_pubkey =
+            crate::pq::output::output_script_from_commitment(parameters, commitment);
         self.vout.push(TxOut::new(value, Script(script_pubkey)));
 
         Ok(())

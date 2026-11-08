@@ -10,9 +10,10 @@
 //! consensus limits; transaction/block work and relay qualification remain separate.
 //!
 //! Unlike the legacy evaluator, this one requires a canonical input: every pushed item uses
-//! its shortest encoding, and execution must end with exactly one item on the stack. Both
-//! rules deny a third party cheap, identifier-preserving edits to someone else's spend,
-//! because ZIP 244 leaves the serialized input out of the transaction identifier.
+//! its shortest encoding, the argument `CHECKMULTISIG` consumes without examining must be
+//! empty, and execution must end with exactly one item on the stack. All three deny a third
+//! party cheap, identifier-preserving edits to someone else's spend, because ZIP 244 leaves
+//! the serialized input out of the transaction identifier.
 
 use alloc::vec::Vec;
 
@@ -234,7 +235,14 @@ pub fn eval_script(
         program
             .parse()
             .map(|instruction| instruction.map_err(script::Error::Opcode)),
-        Flags::CHECKLOCKTIMEVERIFY,
+        // Locktimes have to mean what they say, and the argument `CHECKMULTISIG` consumes
+        // without examining has to be empty. Requiring shortest-form pushes does not reach
+        // that argument, because every padding it would admit is itself the shortest
+        // encoding of its own payload; without this rule a third party could inflate
+        // someone else's multisig spend and leave it valid. Every other legacy flag is
+        // either specific to ECDSA, relay policy, or a rule this evaluator already applies
+        // unconditionally.
+        Flags::CHECKLOCKTIMEVERIFY | Flags::NullDummy,
         program,
         arguments(input)?,
         checker,
@@ -392,6 +400,52 @@ mod tests {
         assert_eq!(check(&[0x51], &script::Code(vec![0x75])), clean_stack);
         // A result left beside a consumed argument.
         assert_eq!(check(&[0x51, 0x51], &script::Code(vec![0x75])), Ok(true));
+    }
+
+    #[test]
+    fn the_multisig_dummy_argument_cannot_be_padded() {
+        // A zero-of-zero multisig, so the dummy is the only argument and no signature is
+        // involved: `OP_0 OP_0 OP_CHECKMULTISIG` succeeds and leaves one item behind.
+        let multisig = script::Code(vec![0x00, 0x00, 0xae]);
+        // The opcode the refusal is reported against is not what this pins down.
+        let padded = |program: &script::Code, input: &[u8]| {
+            matches!(
+                eval_script(input, program, &NullSignatureChecker()),
+                Err(Error::Script(script::Error::Interpreter(
+                    _,
+                    interpreter::Error::SigNullDummy
+                )))
+            )
+        };
+        // The dummy CHECKMULTISIG consumes is never examined, so only an empty one leaves a
+        // spend with a single serialization.
+        assert_eq!(
+            eval_script(&[0x00], &multisig, &NullSignatureChecker()),
+            Ok(true)
+        );
+        // Anything else is a third party's free edit. Requiring shortest-form pushes does
+        // not reach it: each of these is the shortest encoding of its own payload, and the
+        // item is popped unexamined, so the spend would stay valid however large it grows.
+        for input in [
+            vec![0x01, 0x00],
+            vec![0x02, 0x00, 0x00],
+            push(1000),
+            push(MAX_PUSH_BYTES),
+        ] {
+            assert!(padded(&multisig, &input), "input {:?}", &input[..2]);
+        }
+        // The two rules compose rather than overlap: a one-byte payload a small-integer
+        // opcode would have pushed never reaches the dummy check, because the input is
+        // refused for its encoding first.
+        assert_eq!(
+            eval_script(&[0x01, 0x01], &multisig, &NullSignatureChecker()),
+            Err(Error::PushEncoding)
+        );
+        // CHECKMULTISIGVERIFY consumes the same argument, so the same rule binds it.
+        assert!(padded(
+            &script::Code(vec![0x00, 0x00, 0xaf, 0x51]),
+            &[0x01, 0x00]
+        ));
     }
 
     #[test]

@@ -17,6 +17,13 @@ pub mod script;
 /// A malformed encoding, overlong context, or invalid signature.
 pub use slh_dsa::signature::Error;
 
+/// One below `OP_1`, so that adding a version in 1..=16 gives the opcode that denotes it.
+const VERSION_OPCODE_BASE: u8 = 0x50;
+/// `OP_1`, the opcode for the lowest version the namespace can express.
+const VERSION_OPCODE_FIRST: u8 = VERSION_OPCODE_BASE + 1;
+/// `OP_16`, the opcode for the highest version the namespace can express.
+const VERSION_OPCODE_LAST: u8 = VERSION_OPCODE_BASE + 16;
+
 /// Explicit SLH-DSA parameter selection. Script arguments never select this value;
 /// an authenticated output version does, through [`ParameterSet::from_version`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,8 +38,9 @@ impl ParameterSet {
     /// The output version that selects this parameter set.
     ///
     /// Versions and parameter sets are one to one today, so a parameter set stands in for
-    /// a version wherever that is convenient: [`output::output_script`] writes the version
-    /// this returns, and [`output::signing_context`] is keyed on the parameter set rather
+    /// a version wherever that is convenient: [`output::output_script`] writes the opcode
+    /// for the version this returns, through [`Self::version_opcode`], and
+    /// [`output::signing_context`] is keyed on the parameter set rather
     /// than on the version byte. A later version may well break that, since the version
     /// exists so the commitment can change while the signature scheme stays: a version
     /// reusing a parameter set leaves this function with no single answer. It would need
@@ -52,6 +60,27 @@ impl ParameterSet {
         match version {
             1 => Some(Self::Sha2_128f),
             2 => Some(Self::Sha2_192s),
+            _ => None,
+        }
+    }
+    /// The opcode an output writes to carry this version.
+    ///
+    /// An output spells its version as the small-integer opcode for that number, so the
+    /// version costs one byte and the output stays a well-formed script. `OP_1` through
+    /// `OP_16` are the only single bytes that denote 1 through 16 without consuming what
+    /// follows them, which is what caps the namespace at sixteen versions.
+    pub const fn version_opcode(self) -> u8 {
+        VERSION_OPCODE_BASE + self.version()
+    }
+    /// The version an output's opcode names, for `OP_1` through `OP_16` alone.
+    ///
+    /// This is the namespace's version range, not the set of versions any parameter set
+    /// claims: it answers for all sixteen, so a version no parameter set defines is still
+    /// recognized as being in the namespace and can be restricted rather than left to the
+    /// legacy rules. [`Self::from_version`] is what then decides whether it is defined.
+    pub const fn version_from_opcode(opcode: u8) -> Option<u8> {
+        match opcode {
+            VERSION_OPCODE_FIRST..=VERSION_OPCODE_LAST => Some(opcode - VERSION_OPCODE_BASE),
             _ => None,
         }
     }

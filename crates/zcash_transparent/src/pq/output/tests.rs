@@ -88,11 +88,8 @@ fn versions_bind_parameters_context_and_exact_encodings() {
         let body = Code(key_body);
         let previous_output = output_of(set, &body);
         // The version is in the output and only there; the body is the committed script.
-        assert_eq!(previous_output.0[2], set.version());
-        assert_eq!(
-            previous_output.0[HEADER_BYTES + 1..],
-            hash160::hash(&body.0)
-        );
+        assert_eq!(previous_output.0[1], set.version_opcode());
+        assert_eq!(previous_output.0[HEADER_BYTES..], sha256::hash(&body.0));
         let sighash = |program: &Code, _: &zcash_script::signature::HashType| {
             assert_eq!(program.0, body.0);
             Some([42; 32])
@@ -134,11 +131,8 @@ fn versions_bind_parameters_context_and_exact_encodings() {
         // the wrong length for it, and the context and digest bind the version besides.
         let other_set = [ParameterSet::Sha2_128f, ParameterSet::Sha2_192s][other];
         let crossed = output_of(other_set, &body);
-        assert_eq!(
-            crossed.0[HEADER_BYTES + 1..],
-            previous_output.0[HEADER_BYTES + 1..]
-        );
-        assert_ne!(crossed.0[2], previous_output.0[2]);
+        assert_eq!(crossed.0[HEADER_BYTES..], previous_output.0[HEADER_BYTES..]);
+        assert_ne!(crossed.0[1], previous_output.0[1]);
         assert!(verify(NETWORK, other_set, &body, signature, &checker).is_err());
         // A different body is a different commitment, whatever its contents.
         let mut other_key_body = push(&signatures[other].0);

@@ -7,34 +7,50 @@ activate no consensus rule and define no address format.
 
 ## Encoding
 
-An output is exactly `50 01 vv 14 <commitment>`, 24 bytes:
-`OP_RESERVED PUSH1(version) PUSH20(commitment)`. The commitment is `HASH160(body)`, where
-the body is an ordinary transparent script and carries no header of its own. A spending
-input is push-only, pushes the body last, and pushes the body's arguments before it. All of
-the body executes, and every signature operation receives those same bytes as its signing
-script.
+An output is exactly `00 vv 20 <commitment>`, 35 bytes:
+`OP_0 OP_<version> PUSH32(commitment)`. The commitment is `SHA-256(body)`, where the body is
+an ordinary transparent script and carries no header of its own. A spending input is
+push-only, pushes the body last, and pushes the body's arguments before it. All of the body
+executes, and every signature operation receives those same bytes as its signing script.
+
+`OP_0` marks the namespace and the opcode after it is the version, so the version costs one
+byte. That is not economy for its own sake. A version byte sitting loose in a script is not
+a field: the bytes `0x01` through `0x4b` are push opcodes, and one in that position would
+swallow the commitment behind it and leave the hash to be read as opcodes — which would also
+make the output's signature-operation count depend on its hash bytes, since that count walks
+output scripts opcode by opcode. `OP_1` through `OP_16` are the only single bytes that denote
+1 through 16 without consuming what follows, which is why SegWit spells witness versions this
+way too, and which caps this namespace at sixteen versions.
+
+The **namespace** is every script that is exactly 35 bytes with first byte `0x00`, second
+byte in `0x51`..`0x60` and third byte `0x20`. It deliberately spans all sixteen versions
+rather than only the two that are defined, so an undefined version can be restricted instead
+of falling through to the legacy rules. Anything else — a different length, a second byte
+that is not a version opcode, a non-minimal push of the commitment — is a legacy output and
+keeps the legacy rules. It is not a malformed PQ output, because unlike under the previous
+marker those scripts really are spendable under those rules and may already have an owner.
+
+The format collides with nothing: Bitcoin's P2WSH is `OP_0 0x20 <32>` and Taproot is
+`OP_1 0x20 <32>`, both 34 bytes with `0x20` as the second byte, so a 35-byte script whose
+second byte is `0x51` matches no Bitcoin template and is shown as unknown rather than
+mislabelled. Zcash has no witness programs, so no `OP_0`-led script is a standard template
+here either. Keeping the marker at `OP_0` also leaves `OP_1`..`OP_16` free as leading opcodes
+for any future namespace.
 
 The version appears once, in the output. An earlier draft repeated it inside the committed
 script so the commitment would cover it too; that cost three bytes in every spend and a
 rule that the two copies agree, to bind something the signing context and the v5 digest
-already bind. What it gave up by removing it: the committed bytes no longer begin with
-`OP_RESERVED`, so they are not self-describing, and the same twenty bytes can appear in an
-output of either version or as an ordinary P2SH script hash. Those are separate outputs,
-separately funded, and each is spent only by the rules its own output selects, so nothing
-crosses between them — a signature made for one cannot authorize another, because the
-context names the version and the v5 digest covers the whole previous output.
-
-`OP_RESERVED` is the namespace and the version is the discriminator; there is no separate
-tag, because nothing in validation would read one. Every other script template in this
-layer is terse in the same way — P2SH is `a9 14 <hash> 87` — and a human-readable marker
-belongs in the address encoding, where people see it, rather than in `scriptPubKey` bytes.
-Writing the version as a push rather than a bare byte keeps the whole output a well-formed
-sequence of pushes, so existing tools that walk a script read it cleanly.
+already bind. What it gave up by removing it: the committed bytes are not self-describing,
+and the same thirty-two bytes can appear in an output of either version. Those are separate
+outputs, separately funded, and each is spent only by the rules its own output selects, so
+nothing crosses between them — a signature made for one cannot authorize another, because
+the context names the version and the v5 digest covers the whole previous output.
 
 | Version | Parameter set | Public key | Signature | Commitment | Pure signing context |
 | --- | --- | --- | --- | --- | --- |
-| 1 | SLH-DSA-SHA2-128f | 32 bytes | 17,088 bytes | `HASH160(body)` | `ZCASH/PQ/OUT/<network>` + `01` |
-| 2 | SLH-DSA-SHA2-192s | 48 bytes | 16,224 bytes | `HASH160(body)` | `ZCASH/PQ/OUT/<network>` + `02` |
+| 1 | SLH-DSA-SHA2-128f | 32 bytes | 17,088 bytes | `SHA-256(body)` | `ZCASH/PQ/OUT/<network>` + `01` |
+| 2 | SLH-DSA-SHA2-192s | 48 bytes | 16,224 bytes | `SHA-256(body)` | `ZCASH/PQ/OUT/<network>` + `02` |
+| 3–16 | undefined | — | — | — | — |
 
 `<network>` is `main`, `test` or `regtest`. Consensus branch identifiers are scoped to a
 network upgrade rather than to a network, so no transaction digest separates mainnet from
@@ -44,15 +60,13 @@ existing transaction signature digest; Pure SLH-DSA signs those 32 bytes with th
 version's context, and there is no additional application hash.
 
 The version is the lever for replacing any of this: it selects the parameter set, the
-signing context and the commitment, so a later version can use a 32-byte hash by adding a
+signing context and the commitment, so a later version can change the commitment by adding a
 row to this table and the length it implies. Versions and parameter sets are one to one in
 the table as it stands, and the code relies on that: a parameter set stands in for a version
-where that is convenient. Adding the row above is exactly the change that ends it, since a
-new commitment with an existing signature scheme means two versions sharing one parameter
-set. That row must also carry the version byte through `PqOutput` and key the signing
-context on it, or the two versions would share a context. HASH160 is kept for now, and is the weakest
-part of the format: it offers roughly 80-bit collision resistance, well below the signature
-scheme's category, and an alternative script with the same hash spends the output.
+where that is convenient. Adding such a row is exactly the change that ends it, since a new
+commitment with an existing signature scheme means two versions sharing one parameter set.
+That row must also carry the version byte through `PqOutput` and key the signing context on
+it, or the two versions would share a context.
 
 Because the body carries no version, nothing in it says which parameter set may spend it.
 The output decides, and the two parameter sets have different key lengths, so a body
@@ -62,32 +76,32 @@ written for one is unspendable under the other.
 
 Two rules apply at different times, and both are the caller's to enforce.
 
-**When an output is created.** `output::classify_created_output` returns `Pq` for a
-canonical output of a defined version, `Malformed` for anything else whose first byte is
-`OP_RESERVED`, and `Legacy` for every other output. A node activating this format rejects
-a transaction containing a `Malformed` output, so a wallet that applies the rules
-incorrectly has its payment rejected while the sender still holds the coins. Unknown
-versions are rejected at creation too: this format is deliberately not forward-compatible
-in the way an anyone-can-spend reserved program would be.
+**When an output is created.** `output::classify_created_output` returns `Pq` for an
+output of a defined version, `Malformed` for an output in the namespace naming a version
+nothing defines, and `Legacy` for every other output, near misses of the namespace
+included. A node activating this format rejects a transaction containing a `Malformed`
+output, so neither a wallet nor a miner can mint an output in an undefined version, and no
+such output can appear after activation. This format is deliberately not
+forward-compatible in the way an anyone-can-spend reserved program would be.
 
-Because the version is in the output, a node can also reject transactions that create
-`Legacy` outputs from a chosen height, which is the whole reason the version lives here.
-Choosing that height and its exemptions is a consensus decision outside this crate. At
-minimum, coinbase outputs, whose recipients consensus fixes, and null-data outputs, which
-are unspendable by design, need exempting; ZIP 320 (TEX) addresses are P2PKH hashes and
-become unpayable, so that rule cannot ship before recipients accept a PQ output.
+Legacy outputs stay creatable and spendable, for good. This format adds a namespace beside
+them and bans nothing: an earlier draft used the version's presence in the output to let a
+node refuse to create legacy outputs from a chosen height, and that is no longer part of
+it. Coins paid to a legacy output stay spendable under exactly the rules that spend them
+today.
 
-That ban applies to the outputs a transaction creates, never to outputs already in the
-UTXO set. Coins paid to a legacy output before the ban stay spendable afterwards, under
-exactly the rules that spend them today; the only consequence for their owner is that the
-transaction spending them must pay to a PQ output.
+Versions 3 through 16 are restricted in four places, so none of them is a way in: a
+transaction creating one is rejected, such an output cannot be spent, the legacy guard
+below covers the whole namespace rather than only the defined versions, and `ParameterSet`
+has no variant for an undefined version — the builder takes a parameter set, not a script,
+so this library cannot construct one at all.
 
 **When an output is spent.** `output::parse_output` recognizes a PQ output, and
 `PqOutput::verify_spend` requires the last pushed script to match that output's commitment,
 then executes it under the version's parameter set and context.
-Unknown versions, non-canonical outputs and failed authentication reject; nothing falls
-back to ECDSA, and no script argument can select or weaken the verifier. Spendability does
-not depend on the height at which the output was created.
+Undefined versions and failed authentication reject; nothing falls back to ECDSA, and no
+script argument can select or weaken the verifier. Spendability does not depend on the
+height at which the output was created.
 
 Every signature check in a PQ body is SLH-DSA. The checker requires a public key of
 exactly the version's length and aborts on anything else, so one body cannot mix
@@ -101,9 +115,12 @@ which would be stronger than either alone; that one falls out of the rule rather
 having been weighed on its own.
 
 PQ execution rules are fixed rather than flag-driven: `CHECKLOCKTIMEVERIFY` is always
-enforced, every input push must use its shortest encoding, and execution must end with
-exactly one stack item. The last two deny a third party cheap edits to someone else's
-spend, since ZIP 244 leaves the serialized input out of the transaction identifier. There
+enforced, every input push must use its shortest encoding, the argument multisig consumes
+without examining must be empty, and execution must end with exactly one stack item. The
+last three deny a third party cheap edits to someone else's spend, since ZIP 244 leaves the
+serialized input out of the transaction identifier. The shortest-encoding rule does not
+cover the multisig argument on its own, because any padding put there is the shortest
+encoding of its own payload and the item is discarded unexamined. There
 are no interpreter flags to pass: this module verifies PQ outputs and nothing else, so
 every other output keeps the evaluator, flags and limits the caller already applies to it.
 
@@ -136,9 +153,30 @@ protocols, versions and networks. Malformed nonempty signatures, public keys and
 abort; an empty signature with a correctly sized key, and a cryptographically incorrect
 signature, evaluate false.
 
-`OP_RESERVED` makes the output fail under legacy execution, so a PQ output is unspendable,
-never claimable, wherever these rules are not active — including before activation and on
-a node that has not upgraded.
+**A PQ output is claimable, not unspendable, wherever these rules are not active.** The
+script is three pushes, so under legacy execution it leaves the truthy commitment on top of
+the stack and is satisfied by an *empty* scriptSig: anyone takes the coins. This is the same
+property that let SegWit ship as a soft fork, and it was accepted knowingly. `OP_RESERVED`,
+which aborts legacy execution and would have made the output unspendable to any validator
+lacking these rules, was considered and rejected for the marker: `OP_0` was chosen for the
+SegWit idiom and because `OP_RESERVED` renders these outputs as invalid or burned in
+script-aware tooling.
+
+Three things carry the weight that marker would have carried, and none of them is optional:
+
+1. `zcash_script`'s `Flags::PqOutputs`, which makes the legacy evaluator return
+   `Error::PqNamespace` instead of running any script in the namespace — as a
+   `scriptPubKey` and as a P2SH redeem script, for all sixteen versions. It must be set
+   uniformly once these rules activate; setting it for some inputs and not others makes the
+   same output spendable or not depending on the verifier. It does not protect an
+   implementation that does not use this crate, nor code that evaluates a script component
+   directly rather than through a two-component entry point.
+2. The restriction on undefined versions, described under Rules.
+3. Policy before activation: a wallet built on this library must not create a PQ output
+   until the rules are active, and relay policy should treat the whole namespace as
+   nonstandard. Before activation there is no node anywhere with these rules, so a PQ
+   output created early is claimable by anyone until then, and policy is all that stands in
+   the way.
 
 What the marker does not do: it says nothing about the body, which stays hidden behind the
 commitment until the spend. A body of `OP_TRUE` is anyone-can-spend, a body whose key is
@@ -149,7 +187,7 @@ the receiver's responsibility.
 
 The standardized signature's security category is not a claim about the whole transaction
 system. Existing transaction hashes, alternative branches, ordinary ECDSA operations, the
-HASH160 commitment, caller validation and private-key custody all still constrain the
+`SHA-256` commitment, caller validation and private-key custody all still constrain the
 composed system, and a branch that permits a weaker authorization remains weaker. The
 digest callback is a security boundary: a valid signature authorizes the digest it returns,
 so the caller must supply the authentic previous output and amount and must reject invalid

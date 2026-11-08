@@ -188,6 +188,34 @@ bitflags::bitflags! {
         ///
         /// See [BIP65](https://github.com/bitcoin/bips/blob/master/bip-0065.mediawiki) for details.
         const CHECKLOCKTIMEVERIFY = 1 << 9;
+
+        /// Refuse to evaluate a script in the post-quantum output namespace, which is
+        /// exactly thirty-five bytes of `OP_0 <OP_1..OP_16> 0x20 <32 bytes>`; see
+        /// [`crate::script::is_pq_namespace`].
+        ///
+        /// Such a script is three pushes, so under legacy rules it leaves the truthy
+        /// thirty-two-byte commitment on top of the stack and is satisfied by an *empty*
+        /// scriptSig. It is spendable only under the post-quantum rules, which this
+        /// evaluator does not implement, so evaluating it here would hand the output to
+        /// anyone. With this flag set the evaluator returns
+        /// [`crate::script::Error::PqNamespace`] instead, both for a `scriptPubKey` and for
+        /// a P2SH redeem script, and for every version in the namespace whether or not
+        /// anything defines it.
+        ///
+        /// Note: this must be set uniformly once the post-quantum rules activate. Setting
+        /// it for some inputs and not others makes the same output spendable or not
+        /// depending on the verifier. `CleanStack` happens to reject these scripts too, but
+        /// it is a policy flag with no guarantee of being set and is not a substitute. This
+        /// flag also only covers the two-component entry points; code that evaluates a
+        /// script component directly is not protected by it.
+        ///
+        /// Note: this bit is `SCRIPT_VERIFY_CHECKSEQUENCEVERIFY` in Bitcoin Core, which
+        /// Zcash does not implement. Where it was previously unknown and rejected by
+        /// [`Flags::from_bits`], a caller forwarding a Bitcoin-derived flag integer will now
+        /// set this rule instead of erroring. The direction is safe — it refuses to
+        /// evaluate rather than accepting — but a boundary that forwards raw script flags
+        /// should mask the bits it does not mean.
+        const PqOutputs = 1 << 10;
     }
 }
 

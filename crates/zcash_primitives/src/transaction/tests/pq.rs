@@ -344,7 +344,7 @@ mod output_spends {
             .input_scriptpubkeys[0]
             .0
             .clone();
-        flipped.0[2] = other.version();
+        flipped.0[1] = other.version_opcode();
         tx.transparent_bundle
             .as_mut()
             .unwrap()
@@ -360,6 +360,57 @@ mod output_spends {
                 script::Error::Interpreter(_, InterpreterError::PubKeyType)
             )))
         ));
+    }
+
+    #[test]
+    fn a_pq_output_is_claimable_under_legacy_rules_and_only_the_flag_refuses_it() {
+        let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
+        let body = program(&key.public_key());
+        let mut tx = transaction(&body);
+        let script_pubkey = tx
+            .transparent_bundle()
+            .unwrap()
+            .authorization
+            .input_scriptpubkeys[0]
+            .0
+            .clone();
+
+        // No signature check runs in any of this; the output is three pushes.
+        let sighash = |_: &Code, _: &HashType| None;
+        let checker = CallbackTransactionSignatureChecker {
+            sighash: &sighash,
+            lock_time: 0,
+            is_final: false,
+        };
+
+        // This is what the legacy evaluator does with a real PQ output: the truthy
+        // commitment is left on top of the stack, so an *empty* scriptSig satisfies it and
+        // anyone takes the coins. The output is claimable wherever the PQ rules are not
+        // active, which is the cost of an `OP_0` marker over `OP_RESERVED`, and the flag is
+        // the whole of what replaces that protection. Asserted rather than assumed, so it
+        // cannot change without this failing.
+        for sig in [Vec::new(), vec![0x51], pushed(&body.0)] {
+            assert_eq!(
+                script::Raw::from_raw_parts(sig.clone(), script_pubkey.0.clone())
+                    .eval(Flags::P2SH, &checker),
+                Ok(true)
+            );
+            assert_eq!(
+                script::Raw::from_raw_parts(sig, script_pubkey.0.clone())
+                    .eval(Flags::P2SH | Flags::PqOutputs, &checker),
+                Err((script::ComponentType::PubKey, script::Error::PqNamespace))
+            );
+        }
+
+        // Nothing about that legacy acceptance carries into the PQ rules: the same inputs
+        // are rejected there, and only a real signature over the committed body spends it.
+        for sig in [Vec::new(), vec![0x51]] {
+            install_input(&mut tx, &sig);
+            assert!(check(&tx, &body).is_err());
+        }
+        let input = signed_input(&key, &tx, &body, sighash::SIGHASH_ALL, context());
+        install_input(&mut tx, &input);
+        assert_eq!(check(&tx, &body), Ok(true));
     }
 
     #[test]
@@ -617,9 +668,15 @@ fn pq_script_multisig_one_of_one_checks_signatures_and_consumes_dummy() {
         input.extend_from_slice(&pushed(&argument));
         assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(true));
 
-        // No NULLDUMMY policy flag is enabled: a nonempty dummy is consumed too.
+        // The dummy CHECKMULTISIG consumes without examining has to be empty. It is
+        // otherwise a third party's free edit to this spend: the item never reaches the
+        // final stack, and shortest-form pushes do not constrain it, so without the rule
+        // the spend would stay valid at any size.
         input[0] = 0x51;
-        assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(true));
+        assert_eq!(
+            interpreter_error(check(&tx, &input, &code, CONTEXT)),
+            InterpreterError::SigNullDummy
+        );
         assert!(matches!(
             interpreter_error(check(&tx, &pushed(&argument), &code, CONTEXT)),
             InterpreterError::InvalidStackOperation(_)
