@@ -60,9 +60,13 @@ pub(crate) struct Lanes {
 }
 
 impl Lanes {
+    /// Resizes to `len` rows and forgets the previous fold's term counts;
+    /// the columns stay unspecified until the next initialization.
     pub(crate) fn resize(&mut self, len: usize) {
         self.cols.resize(len.div_ceil(4), Cols::default());
         self.len = len;
+        self.pending = 0;
+        self.terms = 0;
     }
 
     pub(crate) fn len(&self) -> usize {

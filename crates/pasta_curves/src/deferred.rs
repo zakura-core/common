@@ -920,6 +920,8 @@ mod buffer {
                     lanes: Lanes::default(),
                     partial: None,
                 });
+                // A previous fold's partials have the old length.
+                state.partial = None;
                 state.lanes.resize(len);
                 return;
             }
@@ -1080,12 +1082,14 @@ mod buffer_tests {
     use super::{DeferredBuffer, DeferredField};
     use crate::{Fp, Fq};
     use alloc::vec::Vec;
+    use ff::Field;
     use rand::SeedableRng;
     use rand_xorshift::XorShiftRng;
 
-    fn check<F: DeferredField + 'static>(len: usize, terms: usize, maximal: bool) {
+    /// Folds `terms` random terms over `len` rows, or every input `fixed`.
+    fn check<F: DeferredField + 'static>(len: usize, terms: usize, fixed: Option<F>) {
         let mut rng = XorShiftRng::from_seed([5; 16]);
-        let value = |rng: &mut XorShiftRng| if maximal { -F::ONE } else { F::random(rng) };
+        let value = |rng: &mut XorShiftRng| fixed.unwrap_or_else(|| F::random(&mut *rng));
         let mut buffer = DeferredBuffer::<F>::default();
         buffer.resize(len);
         let mut expected = alloc::vec![F::ZERO; len];
@@ -1115,7 +1119,7 @@ mod buffer_tests {
         }
         let mut out = alloc::vec![F::ZERO; len];
         buffer.reduce_into(&mut out);
-        assert!(out == expected, "len {len} terms {terms} maximal {maximal}");
+        assert!(out == expected, "len {len} terms {terms} fixed {fixed:?}");
 
         // Reinitializing discards the previous sum, including partials.
         let t: Vec<F> = (0..len).map(|_| value(&mut rng)).collect();
@@ -1128,14 +1132,19 @@ mod buffer_tests {
     fn deferred_buffer_matches_field_arithmetic() {
         for len in [1, 2, 3, 4, 5, 7, 8, 9, 64] {
             for terms in [1, 2, 6, 7, 13, 247, 248, 249, 700] {
-                check::<Fp>(len, terms, false);
-                check::<Fq>(len, terms, false);
+                check::<Fp>(len, terms, None);
+                check::<Fq>(len, terms, None);
             }
         }
+        // -1 has a zero bottom limb; 2^254 - 1 (as the Montgomery form) sets
+        // every radix-2^29 limb, the worst case for column growth.
+        let full = [u64::MAX, u64::MAX, u64::MAX, (1 << 62) - 1];
         for terms in [1, 6, 7, 248, 249, 700] {
-            check::<Fp>(5, terms, true);
-            check::<Fq>(5, terms, true);
+            check::<Fp>(5, terms, Some(-Fp::ONE));
+            check::<Fq>(5, terms, Some(-Fq::ONE));
+            check::<Fp>(5, terms, Some(Fp(full)));
+            check::<Fq>(5, terms, Some(Fq(full)));
         }
-        check::<Fp>(2048, 40, false);
+        check::<Fp>(2048, 40, None);
     }
 }
