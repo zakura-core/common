@@ -815,7 +815,7 @@ fn sqrt_reference(a: &Fp2) -> CtOption<Fp2> {
                 c0: -x0.c1,
                 c1: x0.c0,
             },
-            alpha.ct_eq(&(&Fp2::one()).neg()),
+            alpha.ct_eq(&-Fp2::one()),
         )
         .or_else(|| {
             CtOption::new(
