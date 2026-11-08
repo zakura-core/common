@@ -22,14 +22,17 @@ fn refuse_pq_namespace(flags: interpreter::Flags, script: &[u8]) -> Result<(), s
 /// [`refuse_pq_namespace`] for a typed component, whose bytes have to be materialized.
 ///
 /// The flag is tested first so that nothing allocates while the rule is inactive, and the
-/// length before `to_bytes`, so that only a script which could be in the namespace pays for
-/// it.
+/// length before `to_bytes`, so that only a script whose length could put it in the
+/// namespace pays for it. The namespace spans a range of lengths rather than one, since a
+/// format fixes its own commitment length, so this is a cheap bound rather than an exact
+/// test; [`script::is_pq_namespace`] remains the only decision.
 fn refuse_pq_namespace_component<T: script::Evaluable>(
     flags: interpreter::Flags,
     component: &T,
 ) -> Result<(), script::Error> {
     if flags.contains(interpreter::Flags::PqOutputs)
-        && component.byte_len() == script::PQ_NAMESPACE_BYTES
+        && (script::PQ_NAMESPACE_MIN_BYTES..=script::PQ_NAMESPACE_MAX_BYTES)
+            .contains(&component.byte_len())
     {
         return refuse_pq_namespace(flags, &component.to_bytes());
     }
@@ -290,16 +293,35 @@ mod pq_namespace_tests {
         assert_eq!(eval(Vec::new(), namespace_script(1), Flags::P2SH), Ok(true));
     }
 
-    /// Every version in the namespace is refused, the undefined ones included, so no
-    /// version can be swept through this evaluator while it waits to be defined.
+    /// Everything the namespace claims is refused, not only the shapes some format
+    /// defines, so nothing inside it can be swept through this evaluator while it waits to
+    /// be defined. That is the whole point of claiming more than is defined: a shape left
+    /// out here would be spendable under the legacy rules and could no longer be taken
+    /// back.
     #[test]
-    fn the_flag_refuses_every_version_in_the_namespace() {
+    fn the_flag_refuses_everything_the_namespace_claims() {
         for version in 1..=16u8 {
             assert_eq!(
                 eval_full(Vec::new(), namespace_script(version), Flags::PqOutputs),
                 Err((script::ComponentType::PubKey, script::Error::PqNamespace)),
                 "version {version} was not refused"
             );
+        }
+        // Every format opcode, every scheme opcode, and every commitment length a single
+        // direct push can carry, including both ends of that range.
+        for format in [0x00u8, 0x51, 0x59, 0x60] {
+            for scheme in [0x51u8, 0x52, 0x5f, 0x60] {
+                for commitment in [1usize, 20, 32, 48, 0x4b] {
+                    let mut script = Vec::from([format, scheme, commitment as u8]);
+                    script.resize(3 + commitment, 7);
+                    assert_eq!(
+                        eval_full(Vec::new(), script, Flags::PqOutputs),
+                        Err((script::ComponentType::PubKey, script::Error::PqNamespace)),
+                        "format {format:#04x} scheme {scheme:#04x} \
+                         commitment {commitment} was not refused"
+                    );
+                }
+            }
         }
     }
 
@@ -346,8 +368,6 @@ mod pq_namespace_tests {
         non_minimal.extend_from_slice(&COMMITMENT);
         let mut trailing = canonical.clone();
         trailing.push(0x00);
-        let mut wrong_marker = canonical.clone();
-        wrong_marker[0] = 0x51;
         let mut version_is_op_0 = canonical.clone();
         version_is_op_0[1] = 0x00;
         let mut version_is_reserved = canonical.clone();
@@ -363,7 +383,6 @@ mod pq_namespace_tests {
             shorter,
             non_minimal,
             trailing,
-            wrong_marker,
             version_is_op_0,
             version_is_reserved,
             version_is_nop,
@@ -426,27 +445,65 @@ mod pq_namespace_tests {
         );
     }
 
+    /// A namespace script in any format, with any commitment length.
+    fn shaped(format: u8, scheme: u8, commitment: usize) -> Vec<u8> {
+        let mut script = vec![format, scheme, commitment as u8];
+        script.resize(3 + commitment, 7);
+        script
+    }
+
     /// The predicate itself, independent of any evaluation.
     #[test]
     fn is_pq_namespace_accepts_exactly_the_namespace() {
-        assert_eq!(script::PQ_NAMESPACE_BYTES, 35);
-        for version in 1..=16u8 {
-            let script = namespace_script(version);
-            assert_eq!(script.len(), script::PQ_NAMESPACE_BYTES);
+        assert_eq!(script::PQ_NAMESPACE_MIN_BYTES, 4);
+        assert_eq!(script::PQ_NAMESPACE_MAX_BYTES, 78);
+        // Format 0's defined schemes, the shape an output actually takes today.
+        for scheme in 1..=16u8 {
+            let script = namespace_script(scheme);
+            assert_eq!(script.len(), 35);
             assert!(script::is_pq_namespace(&script));
             assert!(Code(script).is_pq_namespace());
         }
-        assert!(!script::is_pq_namespace(&[]));
-        // A thirty-five-byte script whose version byte is `OP_0` is the marker twice over,
-        // not a version, so it is outside the namespace.
-        let mut version_is_op_0 = namespace_script(1);
-        version_is_op_0[1] = 0x00;
-        assert!(!script::is_pq_namespace(&version_is_op_0));
-        // One byte either side of the version range.
-        for opcode in [0x50u8, 0x61] {
-            let mut script = namespace_script(1);
-            script[1] = opcode;
+        // Every format and scheme pair, at every commitment length a direct push can carry.
+        // The namespace answers for all of them so that one nothing defines is restricted
+        // rather than spendable, including the formats this code has no rules for at all.
+        for format in [0x00u8, 0x51, 0x58, 0x60] {
+            for scheme in [0x51u8, 0x52, 0x53, 0x60] {
+                for commitment in [1usize, 20, 32, 48, 0x4b] {
+                    let script = shaped(format, scheme, commitment);
+                    assert_eq!(script.len(), 3 + commitment);
+                    assert!(
+                        script::is_pq_namespace(&script),
+                        "format {format:#04x} scheme {scheme:#04x} commitment {commitment}"
+                    );
+                }
+            }
+        }
+        // The boundaries of each byte's range.
+        for format in [0x01u8, 0x4f, 0x50, 0x61] {
+            assert!(!script::is_pq_namespace(&shaped(format, 0x51, 32)));
+        }
+        // A format byte is a valid scheme byte but not the reverse: `OP_0` names format 0,
+        // and in byte 1 it would be the format twice over rather than a scheme.
+        for scheme in [0x00u8, 0x4f, 0x50, 0x61] {
+            assert!(!script::is_pq_namespace(&shaped(0x00, scheme, 32)));
+        }
+        // Only a direct push carries the commitment. `OP_0`, `OP_1NEGATE`, the small
+        // integers and the `OP_PUSHDATA` opcodes are all outside byte 2's range.
+        for push in [0x00u8, 0x4c, 0x4d, 0x4e, 0x4f, 0x51, 0x60] {
+            let mut script = shaped(0x00, 0x51, 32);
+            script[2] = push;
             assert!(!script::is_pq_namespace(&script));
+        }
+        // The push has to run exactly to the end: nothing after it, and nothing missing.
+        let canonical = shaped(0x00, 0x51, 32);
+        let mut trailing = canonical.clone();
+        trailing.push(7);
+        assert!(!script::is_pq_namespace(&trailing));
+        assert!(!script::is_pq_namespace(&canonical[..canonical.len() - 1]));
+        // Too short to hold a header, let alone a commitment.
+        for length in 0..script::PQ_NAMESPACE_MIN_BYTES {
+            assert!(!script::is_pq_namespace(&shaped(0x00, 0x51, 1)[..length]));
         }
     }
 }

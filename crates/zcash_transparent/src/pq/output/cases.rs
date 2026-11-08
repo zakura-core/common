@@ -41,7 +41,7 @@ fn push(value: &[u8]) -> Vec<u8> {
 /// The PQ output committing to this body, taken apart byte by byte in the first test.
 fn output(body: &[u8]) -> Script {
     let mut bytes = vec![
-        MARKER,
+        FORMAT,
         PARAMETERS.version_opcode(),
         COMMITMENT_BYTES as u8,
     ];
@@ -103,7 +103,7 @@ fn output_carries_the_version_and_commits_the_exact_body() {
     // The marker, the version as its own opcode, then the push of the body's hash alone.
     assert_eq!(script.0.len(), OUTPUT_BYTES);
     assert_eq!(script.0.len(), 35);
-    assert_eq!(script.0[0], MARKER);
+    assert_eq!(script.0[0], FORMAT);
     assert_eq!(script.0[1], PARAMETERS.version_opcode());
     assert_eq!(script.0[2], COMMITMENT_BYTES as u8);
     assert_eq!(script.0[HEADER_BYTES..], sha256::hash(&body.0));
@@ -180,9 +180,9 @@ fn output_carries_the_version_and_commits_the_exact_body() {
     assert_eq!(
         signing_context(NETWORK, PARAMETERS),
         if PARAMETERS == ParameterSet::Sha2_128f {
-            &b"ZCASH/PQ/OUT/main\x01"[..]
+            &b"ZCASH/PQ/OUT/main\x00\x01"[..]
         } else {
-            &b"ZCASH/PQ/OUT/main\x02"[..]
+            &b"ZCASH/PQ/OUT/main\x00\x02"[..]
         }
     );
 }
@@ -272,38 +272,28 @@ fn near_misses_of_the_namespace_are_legacy_outputs() {
     trailing.push(0);
     let mut wide_push = script.0.clone();
     wide_push[2] = 0x4c;
-    let mut non_minimal_push = vec![MARKER, PARAMETERS.version_opcode(), 0x4c, 0x20];
+    let mut non_minimal_push = vec![FORMAT, PARAMETERS.version_opcode(), 0x4c, 0x20];
     non_minimal_push.extend_from_slice(&commitment);
     let mut p2wsh = vec![0x00, 0x20];
     p2wsh.extend_from_slice(&commitment);
     let mut taproot = vec![0x51, 0x20];
     taproot.extend_from_slice(&commitment);
-    let mut wrong_marker = script.0.clone();
-    wrong_marker[0] = 0x51;
     let mut version_is_op_0 = script.0.clone();
     version_is_op_0[1] = 0x00;
     let mut version_is_reserved = script.0.clone();
     version_is_reserved[1] = 0x50;
-    let mut short_commitment = vec![MARKER, PARAMETERS.version_opcode(), 0x14];
-    short_commitment.extend_from_slice(&commitment[..20]);
-    let mut long_commitment = vec![MARKER, PARAMETERS.version_opcode(), 0x21];
-    long_commitment.extend_from_slice(&commitment);
-    long_commitment.push(0);
     for near_miss in [
-        vec![MARKER],
-        vec![MARKER, PARAMETERS.version_opcode()],
-        vec![MARKER, PARAMETERS.version_opcode(), COMMITMENT_BYTES as u8],
+        vec![FORMAT],
+        vec![FORMAT, PARAMETERS.version_opcode()],
+        vec![FORMAT, PARAMETERS.version_opcode(), COMMITMENT_BYTES as u8],
         script.0[..OUTPUT_BYTES - 1].to_vec(),
         trailing,
         wide_push,
         non_minimal_push,
         p2wsh,
         taproot,
-        wrong_marker,
         version_is_op_0,
         version_is_reserved,
-        short_commitment,
-        long_commitment,
     ] {
         let near_miss = Code(near_miss);
         assert!(
@@ -313,6 +303,54 @@ fn near_misses_of_the_namespace_are_legacy_outputs() {
         );
         assert_eq!(parse_output(&near_miss), Ok(None));
         assert_eq!(classify_created_output(&near_miss), CreatedOutput::Legacy);
+    }
+}
+
+#[test]
+fn shapes_the_namespace_claims_but_this_format_does_not_define_are_restricted() {
+    let body = Code(vec![0x51]);
+    let script = output_script(PARAMETERS, &body).unwrap();
+
+    // The namespace is wider than the one format defined here: byte 0 names the format,
+    // byte 1 the signature scheme, and byte 2 is any direct push running to the end of the
+    // script. Claiming that whole shape now is what lets a later format be defined inside
+    // it, because a shape left unclaimed cannot be taken back without a second consensus
+    // change. Until a format is defined, every shape the namespace holds and this format
+    // does not define has to be refused rather than fall through to the legacy rules.
+    let mut restricted = Vec::new();
+    // Formats other than 0, none of which is defined yet.
+    for format in 0x51..=0x60u8 {
+        let mut other_format = script.0.clone();
+        other_format[0] = format;
+        restricted.push((other_format, Error::UnsupportedFormat(format)));
+    }
+    // Commitment lengths other than the 32 bytes format 0 fixes, including both ends of
+    // what a single direct push can carry.
+    for length in [1usize, 20, 31, 33, 0x4b] {
+        let mut wrong_length = vec![FORMAT, PARAMETERS.version_opcode(), length as u8];
+        wrong_length.resize(HEADER_BYTES + length, 7);
+        restricted.push((wrong_length, Error::UnsupportedCommitmentLength(length)));
+    }
+
+    for (shape, expected) in restricted {
+        let shape = Code(shape);
+        assert!(
+            script::is_pq_namespace(&shape.0),
+            "unexpectedly outside the namespace: {}",
+            hex::encode(&shape.0)
+        );
+        assert_eq!(parse_output(&shape), Err(expected.clone()));
+        assert_eq!(
+            classify_created_output(&shape),
+            CreatedOutput::Malformed(expected)
+        );
+        // The guard keys on the namespace alone, so the legacy evaluator refuses these
+        // too rather than accepting the empty scriptSig that would otherwise satisfy them.
+        assert_eq!(
+            script::Raw::from_raw_parts(Vec::new(), shape.0.clone())
+                .eval(flags() | Flags::PqOutputs, &checker()),
+            Err((script::ComponentType::PubKey, script::Error::PqNamespace))
+        );
     }
 }
 

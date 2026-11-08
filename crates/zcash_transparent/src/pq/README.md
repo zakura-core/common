@@ -1,41 +1,57 @@
 # Versioned PQ transparent outputs
 
 The optional `pq` feature provides SLH-DSA transparent spends behind a versioned output
-type. The version is a byte of the output itself, so an output's format is visible on
-chain when the payment is made rather than when the receiver spends. These library APIs
+type. The version is a byte of the output itself, so an output's format is visible on chain
+when the payment is made rather than when the receiver spends. These library APIs
 activate no consensus rule and define no address format.
 
 ## Encoding
 
-An output is exactly `00 vv 20 <commitment>`, 35 bytes:
+An output of the one format defined here is exactly `00 vv 20 <commitment>`, 35 bytes:
 `OP_0 OP_<version> PUSH32(commitment)`. The commitment is `SHA-256(body)`, where the body is
 an ordinary transparent script and carries no header of its own. A spending input is
 push-only, pushes the body last, and pushes the body's arguments before it. All of the body
 executes, and every signature operation receives those same bytes as its signing script.
 
-`OP_0` marks the namespace and the opcode after it is the version, so the version costs one
-byte. That is not economy for its own sake. A version byte sitting loose in a script is not
-a field: the bytes `0x01` through `0x4b` are push opcodes, and one in that position would
-swallow the commitment behind it and leave the hash to be read as opcodes — which would also
-make the output's signature-operation count depend on its hash bytes, since that count walks
-output scripts opcode by opcode. `OP_1` through `OP_16` are the only single bytes that denote
-1 through 16 without consuming what follows, which is why SegWit spells witness versions this
-way too, and which caps this namespace at sixteen versions.
+The first two bytes are both opcodes rather than pushed data, so each costs one byte. That
+is not economy for its own sake. A byte sitting loose in a script is not a field: the bytes
+`0x01` through `0x4b` are push opcodes, and one in that position would swallow what follows
+it and leave the commitment to be read as opcodes — which would also make the output's
+signature-operation count depend on its hash bytes, since that count walks output scripts
+opcode by opcode. `OP_0` and `OP_1` through `OP_16` are the only single bytes that denote a
+small number without consuming what comes after, which is why SegWit spells witness versions
+this way too, and which caps each of these bytes at seventeen or sixteen values.
 
-The **namespace** is every script that is exactly 35 bytes with first byte `0x00`, second
-byte in `0x51`..`0x60` and third byte `0x20`. It deliberately spans all sixteen versions
-rather than only the two that are defined, so an undefined version can be restricted instead
-of falling through to the legacy rules. Anything else — a different length, a second byte
-that is not a version opcode, a non-minimal push of the commitment — is a legacy output and
-keeps the legacy rules. It is not a malformed PQ output, because unlike under the previous
-marker those scripts really are spendable under those rules and may already have an owner.
+Byte 0 names the **format** and byte 1 the **signature scheme** within it. Format 0 is the
+only one defined here, and it fixes the commitment at a 32-byte `SHA-256`, so every output
+defined by this document is 35 bytes. The two bytes are separate because they change for
+different reasons: adding a signature scheme should not need a new format, and a format can
+later change what the commitment *is* — a different hash, a different length — without
+needing a second namespace.
+
+The **namespace** is every script whose first byte is `0x00` or in `0x51`..`0x60`, whose
+second byte is in `0x51`..`0x60`, and whose third byte is a direct push opcode
+(`0x01`..`0x4b`) followed by exactly that many bytes and nothing more — so 4 to 78 bytes in
+all. It deliberately claims far more than is defined, because a shape left outside it would
+be spendable under the legacy rules and so could not be taken back later without a second
+consensus change, while a shape inside it is refused from the start and stays available to
+define. Everything inside it that format 0 does not define is **restricted**: a transaction
+creating one is rejected and no spend of one is ever evaluated.
+
+Anything outside the namespace — a second byte that is not a scheme opcode, a commitment
+push that is not the shortest encoding of its payload, a trailing byte after the commitment —
+is a legacy output and keeps the legacy rules. It is not a malformed PQ output, because
+unlike under the previous marker those scripts really are spendable under those rules and may
+already have an owner. A commitment *length* that format 0 does not fix is not one of those:
+it is inside the namespace and restricted.
 
 The format collides with nothing: Bitcoin's P2WSH is `OP_0 0x20 <32>` and Taproot is
 `OP_1 0x20 <32>`, both 34 bytes with `0x20` as the second byte, so a 35-byte script whose
 second byte is `0x51` matches no Bitcoin template and is shown as unknown rather than
 mislabelled. Zcash has no witness programs, so no `OP_0`-led script is a standard template
-here either. Keeping the marker at `OP_0` also leaves `OP_1`..`OP_16` free as leading opcodes
-for any future namespace.
+here either. The other leading opcodes `OP_1`..`OP_16` are claimed as formats of this same
+namespace rather than left free, which is what keeps a future format inside one set of rules
+instead of needing a namespace of its own.
 
 The version appears once, in the output. An earlier draft repeated it inside the committed
 script so the commitment would cover it too; that cost three bytes in every spend and a
@@ -46,11 +62,17 @@ outputs, separately funded, and each is spent only by the rules its own output s
 nothing crosses between them — a signature made for one cannot authorize another, because
 the context names the version and the v5 digest covers the whole previous output.
 
-| Version | Parameter set | Public key | Signature | Commitment | Pure signing context |
+Format 0, whose commitment is `SHA-256(body)`:
+
+| Scheme | Parameter set | Public key | Signature | Commitment | Pure signing context |
 | --- | --- | --- | --- | --- | --- |
-| 1 | SLH-DSA-SHA2-128f | 32 bytes | 17,088 bytes | `SHA-256(body)` | `ZCASH/PQ/OUT/<network>` + `01` |
-| 2 | SLH-DSA-SHA2-192s | 48 bytes | 16,224 bytes | `SHA-256(body)` | `ZCASH/PQ/OUT/<network>` + `02` |
+| 1 | SLH-DSA-SHA2-128f | 32 bytes | 17,088 bytes | `SHA-256(body)` | `ZCASH/PQ/OUT/<network>` + `00 01` |
+| 2 | SLH-DSA-SHA2-192s | 48 bytes | 16,224 bytes | `SHA-256(body)` | `ZCASH/PQ/OUT/<network>` + `00 02` |
 | 3–16 | undefined | — | — | — | — |
+
+The context's last two bytes are the format and the scheme. Both are there because scheme
+numbering restarts in each format, so two formats will reuse scheme numbers; a context naming
+only the scheme would let a signature made under one format verify under another.
 
 `<network>` is `main`, `test` or `regtest`. Consensus branch identifiers are scoped to a
 network upgrade rather than to a network, so no transaction digest separates mainnet from
@@ -59,14 +81,13 @@ selector: ALL, NONE, SINGLE, or any of those with ANYONECANPAY. The caller suppl
 existing transaction signature digest; Pure SLH-DSA signs those 32 bytes with the
 version's context, and there is no additional application hash.
 
-The version is the lever for replacing any of this: it selects the parameter set, the
-signing context and the commitment, so a later version can change the commitment by adding a
-row to this table and the length it implies. Versions and parameter sets are one to one in
-the table as it stands, and the code relies on that: a parameter set stands in for a version
-where that is convenient. Adding such a row is exactly the change that ends it, since a new
-commitment with an existing signature scheme means two versions sharing one parameter set.
-That row must also carry the version byte through `PqOutput` and key the signing context on
-it, or the two versions would share a context.
+These two bytes are the lever for replacing any of this: the scheme selects the parameter
+set and the signing context, and the format selects the commitment and the lengths it
+implies. Within format 0, schemes and parameter sets are one to one, and the code relies on
+that: a parameter set stands in for a scheme where that is convenient. A second format, or a
+scheme that reuses an existing parameter set under a new commitment, is exactly the change
+that ends it. Such a row must carry both bytes through `PqOutput` and key the signing context
+on both, or two schemes would share a context.
 
 Because the body carries no version, nothing in it says which parameter set may spend it.
 The output decides, and the two parameter sets have different key lengths, so a body
@@ -76,12 +97,13 @@ written for one is unspendable under the other.
 
 Two rules apply at different times, and both are the caller's to enforce.
 
-**When an output is created.** `output::classify_created_output` returns `Pq` for an
-output of a defined version, `Malformed` for an output in the namespace naming a version
-nothing defines, and `Legacy` for every other output, near misses of the namespace
+**When an output is created.** `output::classify_created_output` returns `Pq` for an output
+of a defined format and scheme, `Malformed` for a script in the namespace that format 0 does
+not define — an undefined format, a commitment length format 0 does not fix, or an undefined
+scheme within it — and `Legacy` for every other output, near misses of the namespace
 included. A node activating this format rejects a transaction containing a `Malformed`
-output, so neither a wallet nor a miner can mint an output in an undefined version, and no
-such output can appear after activation. This format is deliberately not
+output, so neither a wallet nor a miner can mint one, and no such output can appear after
+activation. This format is deliberately not
 forward-compatible in the way an anyone-can-spend reserved program would be.
 
 Legacy outputs stay creatable and spendable, for good. This format adds a namespace beside
@@ -90,11 +112,12 @@ node refuse to create legacy outputs from a chosen height, and that is no longer
 it. Coins paid to a legacy output stay spendable under exactly the rules that spend them
 today.
 
-Versions 3 through 16 are restricted in four places, so none of them is a way in: a
-transaction creating one is rejected, such an output cannot be spent, the legacy guard
-below covers the whole namespace rather than only the defined versions, and `ParameterSet`
-has no variant for an undefined version — the builder takes a parameter set, not a script,
-so this library cannot construct one at all.
+Everything the namespace claims and format 0 does not define — the other sixteen formats,
+schemes 3 through 16, and every commitment length but 32 — is restricted in four places, so
+none of them is a way in: a transaction creating one is rejected, such an output cannot be
+spent, the legacy guard below covers the whole claimed shape rather than only what is
+defined, and `ParameterSet` has no variant for an undefined scheme — the builder takes a
+parameter set, not a script, so this library cannot construct one at all.
 
 **When an output is spent.** `output::parse_output` recognizes a PQ output, and
 `PqOutput::verify_spend` requires the last pushed script to match that output's commitment,
@@ -166,12 +189,14 @@ Three things carry the weight that marker would have carried, and none of them i
 
 1. `zcash_script`'s `Flags::PqOutputs`, which makes the legacy evaluator return
    `Error::PqNamespace` instead of running any script in the namespace — as a
-   `scriptPubKey` and as a P2SH redeem script, for all sixteen versions. It must be set
+   `scriptPubKey` and as a P2SH redeem script, for every shape it claims and not only the
+   defined ones. It must be set
    uniformly once these rules activate; setting it for some inputs and not others makes the
    same output spendable or not depending on the verifier. It does not protect an
    implementation that does not use this crate, nor code that evaluates a script component
    directly rather than through a two-component entry point.
-2. The restriction on undefined versions, described under Rules.
+2. The restriction on everything in the namespace that format 0 does not define, described
+   under Rules.
 3. Policy before activation: a wallet built on this library must not create a PQ output
    until the rules are active, and relay policy should treat the whole namespace as
    nonstandard. Before activation there is no node anywhere with these rules, so a PQ
