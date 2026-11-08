@@ -1316,6 +1316,17 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
         self.transparent_builder.add_output(to, value)
     }
 
+    /// Adds an output paying a `scriptPubKey` directly, for a recipient whose output format
+    /// has no transparent address encoding.
+    pub fn add_transparent_output_script(
+        &mut self,
+        script_pubkey: zcash_script::script::Code,
+        value: Zatoshis,
+    ) -> Result<(), transparent::builder::Error> {
+        self.transparent_builder
+            .add_output_script(script_pubkey, value)
+    }
+
     /// Adds a transparent "null data" (OP_RETURN) output with the given data payload.
     pub fn add_transparent_null_data_output<FE>(&mut self, data: &[u8]) -> Result<(), Error<FE>> {
         self.transparent_builder

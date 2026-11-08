@@ -549,6 +549,18 @@ impl TransparentBuilder {
         }
     }
 
+    /// Adds an output paying the given `scriptPubKey`, for a recipient whose output format
+    /// has no [`TransparentAddress`] encoding.
+    ///
+    /// The caller owns the whole script, so the script decides what the output means and what
+    /// can spend it. Nothing here checks that anything can: use [`Self::add_output`] wherever
+    /// an address exists.
+    pub fn add_output_script(&mut self, script_pubkey: Code, value: Zatoshis) -> Result<(), Error> {
+        self.vout.push(TxOut::new(value, Script(script_pubkey)));
+
+        Ok(())
+    }
+
     /// Adds a zero-value "null data" (OP_RETURN) output containing the given data.
     pub fn add_null_data_output(&mut self, data: &[u8]) -> Result<(), Error> {
         // Check 80 bytes limit.

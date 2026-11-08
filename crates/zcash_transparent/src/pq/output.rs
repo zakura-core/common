@@ -148,6 +148,22 @@ pub fn output_script(parameters: ParameterSet, body: &Code) -> Result<Code, Erro
     if body.0.len() > pq::MAX_SCRIPT_BYTES {
         return Err(pq::Error::from(script::Error::ScriptSize(None)).into());
     }
+    Ok(output_script_from_commitment(
+        parameters,
+        &hash160::hash(&body.0),
+    ))
+}
+
+/// Builds the output that commits to `commitment` under the selected parameter set.
+///
+/// This is [`output_script`] for a payer that was given the commitment rather than the body,
+/// which is what a recipient publishes: the body stays with whoever will spend the output.
+/// Nothing here can check that a body exists for this commitment, so a wrong commitment makes
+/// an output nobody can spend, exactly as a wrong address does today.
+pub fn output_script_from_commitment(
+    parameters: ParameterSet,
+    commitment: &[u8; COMMITMENT_BYTES],
+) -> Code {
     let mut bytes = Vec::with_capacity(OUTPUT_BYTES);
     bytes.extend_from_slice(&[
         MARKER,
@@ -155,8 +171,8 @@ pub fn output_script(parameters: ParameterSet, body: &Code) -> Result<Code, Erro
         parameters.version(),
         COMMITMENT_BYTES as u8,
     ]);
-    bytes.extend_from_slice(&hash160::hash(&body.0));
-    Ok(Code(bytes))
+    bytes.extend_from_slice(commitment);
+    Code(bytes)
 }
 
 /// A structurally valid PQ output. Its source must be authenticated by the caller.
