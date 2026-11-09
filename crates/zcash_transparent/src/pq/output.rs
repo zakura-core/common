@@ -1,10 +1,10 @@
-//! A versioned PQ transparent output and the spends that satisfy it.
+//! A PQ transparent output, carrying a format and a scheme, and the spends that satisfy it.
 //!
 //! The output is exactly `00 vv 20 <commitment>`, thirty-five bytes: `OP_0`, the
 //! small-integer opcode naming the signature scheme, and a thirty-two-byte push of
 //! `SHA-256(body)`. The body is the script the spending input pushes last, and all of it
-//! executes. The version lives in the output and nowhere else, so the committed bytes
-//! carry no header of their own, and nothing reads a separate namespace tag.
+//! executes. The format and the scheme live in the output and nowhere else, so the
+//! committed bytes carry no header of their own, and nothing reads a separate namespace tag.
 //!
 //! The first two bytes are both opcodes rather than pushed data, so each costs one byte
 //! rather than the two a pushed byte would. That is not a saving for its own sake: a loose
@@ -21,13 +21,13 @@
 //! later change what the commitment is — a different hash, a different length — without
 //! needing a second namespace.
 //!
-//! Putting the version in the output is what lets validation reject a payment when it is
+//! Putting both bytes in the output is what lets validation reject a payment when it is
 //! made: a PQ output is distinguishable from a legacy one on chain, so
-//! [`classify_created_output`] can reject an undefined-version output while the sender
-//! still holds the coins. The version selects the parameter set, the signing context and
-//! the commitment, so a later version can replace SHA-256 without revisiting the output
-//! format. Version 1 selects SHA2-128f and version 2 SHA2-192s, each with the
-//! [`signing_context`] for its version and network.
+//! [`classify_created_output`] can reject an output whose pair no rules define while the
+//! sender still holds the coins. Within format 0 the scheme selects the parameter set and
+//! the signing context, and the format fixes the commitment, so a later format can replace
+//! SHA-256 while 128f and 192s keep their scheme numbers inside it. Each pair has its own
+//! [`signing_context`], which also names the network.
 //!
 //! The namespace [`script::is_pq_namespace`] claims is wider than what this module
 //! defines: any format opcode, any scheme opcode, and a commitment of any length a single
@@ -37,7 +37,7 @@
 //! So every shape the namespace holds and this module does not define is *restricted*
 //! rather than left to the legacy rules: [`parse_output`] returns
 //! [`Error::UnsupportedFormat`], [`Error::UnsupportedCommitmentLength`] or
-//! [`Error::UnsupportedVersion`] for it and no spend of it is ever evaluated. Legacy
+//! [`Error::UnsupportedScheme`] for it and no spend of it is ever evaluated. Legacy
 //! outputs stay creatable and spendable; these rules add a format beside them rather than
 //! replacing one, and nothing falls back from PQ to ECDSA.
 //!
@@ -54,9 +54,9 @@
 //! the legacy evaluator by some path of its own, accepts any spend of a PQ output.
 //!
 //! Because the commitment covers the body alone, the same thirty-two bytes can appear in
-//! an output of either version. Those are separate outputs, separately funded, and the
+//! an output of either scheme. Those are separate outputs, separately funded, and the
 //! output alone decides which rules spend it, while the signing context and the v5 digest
-//! both bind the version a signature was made for. What committing to the body alone gives
+//! both bind the pair a signature was made for. What committing to the body alone gives
 //! up is that the committed bytes are not self-describing, and do not fail by construction
 //! if some other output commits to them.
 //!
@@ -74,7 +74,7 @@
 //! that same output, amount and transaction, and must invoke these rules only for
 //! network/transaction versions where they have been activated. No existing validation
 //! entry point calls this adapter. These spends assume a v5 or later transaction, whose
-//! digest binds the previous output and therefore the version and the commitment; v4
+//! digest binds the previous output and therefore both header bytes and the commitment; v4
 //! binds only the script code it is handed. This is a proposed library integration, not
 //! node activation or relay policy.
 //!
@@ -114,21 +114,21 @@ const _: () = assert!(COMMITMENT_BYTES <= 0x4b);
 const _: () = assert!(OUTPUT_BYTES >= script::PQ_NAMESPACE_MIN_BYTES);
 const _: () = assert!(OUTPUT_BYTES <= script::PQ_NAMESPACE_MAX_BYTES);
 
-/// Fixed Pure SLH-DSA context, bound to the output format, its version, and the network.
+/// Fixed Pure SLH-DSA context, bound to the output format, its scheme, and the network.
 ///
 /// Consensus branch identifiers are scoped to a network upgrade rather than to a network,
 /// so no transaction digest separates mainnet from testnet; this context does.
 ///
-/// The last two bytes are the format and the version within it. Both are here because the
-/// version numbering restarts in each format, so two formats will reuse version numbers,
-/// and a context that named only the version would let a signature made under one format
+/// The last two bytes are the format and the scheme within it. Both are here because the
+/// scheme numbering restarts in each format, so two formats will reuse scheme numbers,
+/// and a context that named only the scheme would let a signature made under one format
 /// verify under another.
 ///
-/// The version is what the context's last byte names, but the parameter set is what selects
-/// it, which is sound only while the two are one to one, as [`ParameterSet::version`]
-/// describes. A version reusing a parameter set must take the version byte here instead,
-/// or two versions would share a context and the v5 digest would be left as the only thing
-/// binding a signature to the version it was made for.
+/// The scheme is what the context's last byte names, but the parameter set is what selects
+/// it, which is sound only while the two are one to one, as [`ParameterSet::scheme`]
+/// describes. A later format reusing a parameter set must take both header bytes here
+/// instead, or two pairs would share a context and the v5 digest would be left as the only
+/// thing binding a signature to the pair it was made for.
 pub const fn signing_context(network: NetworkType, parameters: ParameterSet) -> &'static [u8] {
     match (network, parameters) {
         (NetworkType::Main, ParameterSet::Sha2_128f) => b"ZCASH/PQ/OUT/main\x00\x01",
@@ -140,13 +140,13 @@ pub const fn signing_context(network: NetworkType, parameters: ParameterSet) -> 
     }
 }
 
-/// A rejected output format, version, commitment, or script evaluation.
+/// A rejected output format, scheme, commitment, or script evaluation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// No rules are defined here for this output format.
     UnsupportedFormat(u8),
-    /// No rules are defined here for this output version within format 0.
-    UnsupportedVersion(u8),
+    /// No rules are defined here for this output's scheme within format 0.
+    UnsupportedScheme(u8),
     /// The commitment is not the length this output's format fixes.
     UnsupportedCommitmentLength(usize),
     /// The pushed script does not match the previous output's commitment.
@@ -161,8 +161,8 @@ impl fmt::Display for Error {
             Self::UnsupportedFormat(format) => {
                 write!(f, "unsupported PQ output format opcode {format:#04x}")
             }
-            Self::UnsupportedVersion(version) => {
-                write!(f, "unsupported PQ output version {version}")
+            Self::UnsupportedScheme(scheme) => {
+                write!(f, "unsupported PQ output scheme {scheme}")
             }
             Self::UnsupportedCommitmentLength(length) => {
                 write!(
@@ -198,8 +198,8 @@ impl From<pq::Error> for Error {
 /// wallet derivation rules, and defines no address encoding: the returned bytes are the
 /// whole `scriptPubKey`.
 ///
-/// The version written is the one this parameter set selects, so this cannot build an
-/// output for a version that reuses a parameter set; see [`ParameterSet::version`].
+/// The scheme written is the one this parameter set selects, so this cannot build an
+/// output for a later format that reuses a parameter set; see [`ParameterSet::scheme`].
 pub fn output_script(parameters: ParameterSet, body: &Code) -> Result<Code, Error> {
     if body.0.len() > pq::MAX_SCRIPT_BYTES {
         return Err(pq::Error::from(script::Error::ScriptSize(None)).into());
@@ -222,7 +222,7 @@ pub fn output_script_from_commitment(
 ) -> Code {
     let mut bytes = Vec::with_capacity(OUTPUT_BYTES);
     // The commitment's length is also its minimal push opcode, as twenty was before.
-    bytes.extend_from_slice(&[FORMAT, parameters.version_opcode(), COMMITMENT_BYTES as u8]);
+    bytes.extend_from_slice(&[FORMAT, parameters.scheme_opcode(), COMMITMENT_BYTES as u8]);
     bytes.extend_from_slice(commitment);
     Code(bytes)
 }
@@ -235,12 +235,12 @@ pub struct PqOutput {
 }
 
 impl PqOutput {
-    /// The parameter set this output's version selects.
+    /// The parameter set this output's scheme selects.
     pub fn parameters(&self) -> ParameterSet {
         self.parameters
     }
 
-    /// The committed script's hash, under the algorithm this output's version selects.
+    /// The committed script's hash, under the algorithm this output's format fixes.
     pub fn commitment(&self) -> &[u8; COMMITMENT_BYTES] {
         &self.commitment
     }
@@ -274,7 +274,7 @@ impl PqOutput {
     ///
     /// The digest callback receives the executed script, which is exactly the script this
     /// output commits to. For v5 the retained digest also commits to the previous output,
-    /// hence directly to the version and commitment, and through the commitment to the
+    /// hence directly to the header bytes and commitment, and through the commitment to the
     /// body.
     pub fn verify_spend(
         &self,
@@ -297,7 +297,7 @@ impl PqOutput {
     }
 }
 
-/// Recognizes an output in the PQ namespace, then checks that its version is defined.
+/// Recognizes an output in the PQ namespace, then checks that its pair is defined.
 ///
 /// An output outside the namespace returns `Ok(None)` and keeps whatever rules the caller
 /// already applies to it. Unlike under the previous marker, a near miss is one of those: an
@@ -309,8 +309,8 @@ impl PqOutput {
 /// than a legacy output, which is what restricts those shapes instead of leaving them to be
 /// claimed: a format other than 0 gives [`Error::UnsupportedFormat`], a commitment that is
 /// not the length format 0 fixes gives [`Error::UnsupportedCommitmentLength`], and a
-/// version within format 0 that no parameter set defines gives
-/// [`Error::UnsupportedVersion`]. The order matters only for which error a caller sees,
+/// scheme within format 0 that no parameter set defines gives
+/// [`Error::UnsupportedScheme`]. The order matters only for which error a caller sees,
 /// since all three are restricted: the format decides everything else, so it is read first.
 ///
 /// Parsing is not authentication, ownership, or activation.
@@ -331,12 +331,11 @@ pub fn parse_output(script: &Code) -> Result<Option<PqOutput>, Error> {
             bytes.len() - HEADER_BYTES,
         ));
     }
-    // `is_pq_namespace` has already accepted byte 1 as a version opcode, so this maps; going
+    // `is_pq_namespace` has already accepted byte 1 as a scheme opcode, so this maps; going
     // back through the conversion keeps the opcode arithmetic in one place.
-    let version = ParameterSet::version_from_opcode(bytes[1])
-        .expect("the namespace accepts byte 1 only as a version opcode");
-    let parameters =
-        ParameterSet::from_version(version).ok_or(Error::UnsupportedVersion(version))?;
+    let scheme = ParameterSet::scheme_from_opcode(bytes[1])
+        .expect("the namespace accepts byte 1 only as a scheme opcode");
+    let parameters = ParameterSet::from_scheme(scheme).ok_or(Error::UnsupportedScheme(scheme))?;
     let mut commitment = [0; COMMITMENT_BYTES];
     commitment.copy_from_slice(&bytes[HEADER_BYTES..]);
     Ok(Some(PqOutput {
@@ -348,13 +347,13 @@ pub fn parse_output(script: &Code) -> Result<Option<PqOutput>, Error> {
 /// What an output being created is, for the rules that apply when a payment is made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CreatedOutput {
-    /// A canonical PQ output of a defined version.
+    /// A canonical PQ output of a defined format and scheme.
     Pq(ParameterSet),
     /// Any other output, including every ECDSA-spendable legacy template, and every near
     /// miss of the PQ namespace.
     Legacy,
     /// An output in the PQ namespace that this module has no rules for: an undefined
-    /// format, a commitment of the wrong length for its format, or a version within format
+    /// format, a commitment of the wrong length for its format, or a scheme within format
     /// 0 that no parameter set defines. Those three are the only things [`Error`] can be
     /// here.
     Malformed(Error),
@@ -364,7 +363,7 @@ pub enum CreatedOutput {
 ///
 /// A node activating this format rejects a transaction containing a
 /// [`CreatedOutput::Malformed`] output, so neither a wallet nor a miner can mint an output
-/// in an undefined version, and no such output can appear after activation. Legacy outputs
+/// in an undefined pair, and no such output can appear after activation. Legacy outputs
 /// stay valid: this format adds a namespace beside them and bans nothing.
 pub fn classify_created_output(script: &Code) -> CreatedOutput {
     match parse_output(script) {
@@ -382,7 +381,7 @@ pub struct PqSpend<'a> {
 }
 
 impl PqSpend<'_> {
-    /// Parameter set selected by the authenticated output version.
+    /// Parameter set selected by the authenticated output's scheme.
     pub fn parameters(&self) -> ParameterSet {
         self.parameters
     }

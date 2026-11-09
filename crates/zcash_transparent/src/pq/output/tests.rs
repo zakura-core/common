@@ -12,7 +12,7 @@ mod sha2_192s {
 }
 
 #[test]
-fn versions_bind_parameters_context_and_exact_encodings() {
+fn schemes_bind_parameters_context_and_exact_encodings() {
     use super::*;
     use crate::pq::{ParameterSet, sha2_128f, sha2_192s};
     use zcash_protocol::consensus::NetworkType;
@@ -51,7 +51,7 @@ fn versions_bind_parameters_context_and_exact_encodings() {
         bytes.extend(value);
         bytes
     }
-    /// The canonical output of this version committing to this body.
+    /// The canonical output of this scheme committing to this body.
     fn output_of(set: ParameterSet, body: &Code) -> Code {
         output_script(set, body).unwrap()
     }
@@ -61,7 +61,7 @@ fn versions_bind_parameters_context_and_exact_encodings() {
         input.extend(push(&body.0));
         input
     }
-    /// Verifies a spend of this version's output for this body.
+    /// Verifies a spend of this scheme's output for this body.
     fn verify(
         network: NetworkType,
         set: ParameterSet,
@@ -87,8 +87,8 @@ fn versions_bind_parameters_context_and_exact_encodings() {
         key_body.push(0xac);
         let body = Code(key_body);
         let previous_output = output_of(set, &body);
-        // The version is in the output and only there; the body is the committed script.
-        assert_eq!(previous_output.0[1], set.version_opcode());
+        // The scheme is in the output and only there; the body is the committed script.
+        assert_eq!(previous_output.0[1], set.scheme_opcode());
         assert_eq!(previous_output.0[HEADER_BYTES..], sha256::hash(&body.0));
         let sighash = |program: &Code, _: &zcash_script::signature::HashType| {
             assert_eq!(program.0, body.0);
@@ -125,10 +125,10 @@ fn versions_bind_parameters_context_and_exact_encodings() {
                 "a signature for one network must not verify on another"
             );
         }
-        // Nothing in the body says which version committed to it, so the output's version
+        // Nothing in the body says which scheme committed to it, so the output's scheme
         // is the only thing separating the parameter sets. Committing to this body under
-        // the other version produces an output nothing here can spend, since this key is
-        // the wrong length for it, and the context and digest bind the version besides.
+        // the other scheme produces an output nothing here can spend, since this key is
+        // the wrong length for it, and the context and digest bind the scheme besides.
         let other_set = [ParameterSet::Sha2_128f, ParameterSet::Sha2_192s][other];
         let crossed = output_of(other_set, &body);
         assert_eq!(crossed.0[HEADER_BYTES..], previous_output.0[HEADER_BYTES..]);

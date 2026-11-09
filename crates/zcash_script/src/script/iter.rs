@@ -260,9 +260,9 @@ mod pq_namespace_tests {
     /// A commitment that is not all zeroes, so it is truthy on the stack.
     const COMMITMENT: [u8; 32] = [7; 32];
 
-    /// The canonical namespace script for `version`: `OP_0 OP_<version> 0x20 <32 bytes>`.
-    fn namespace_script(version: u8) -> Vec<u8> {
-        let mut bytes = Vec::from([0x00, 0x50 + version, 0x20]);
+    /// The canonical namespace script for `scheme`: `OP_0 OP_<scheme> 0x20 <32 bytes>`.
+    fn namespace_script(scheme: u8) -> Vec<u8> {
+        let mut bytes = Vec::from([0x00, 0x50 + scheme, 0x20]);
         bytes.extend_from_slice(&COMMITMENT);
         bytes
     }
@@ -300,11 +300,11 @@ mod pq_namespace_tests {
     /// back.
     #[test]
     fn the_flag_refuses_everything_the_namespace_claims() {
-        for version in 1..=16u8 {
+        for scheme in 1..=16u8 {
             assert_eq!(
-                eval_full(Vec::new(), namespace_script(version), Flags::PqOutputs),
+                eval_full(Vec::new(), namespace_script(scheme), Flags::PqOutputs),
                 Err((script::ComponentType::PubKey, script::Error::PqNamespace)),
-                "version {version} was not refused"
+                "scheme {scheme} was not refused"
             );
         }
         // Every format opcode, every scheme opcode, and every commitment length a single
@@ -368,12 +368,12 @@ mod pq_namespace_tests {
         non_minimal.extend_from_slice(&COMMITMENT);
         let mut trailing = canonical.clone();
         trailing.push(0x00);
-        let mut version_is_op_0 = canonical.clone();
-        version_is_op_0[1] = 0x00;
-        let mut version_is_reserved = canonical.clone();
-        version_is_reserved[1] = 0x50;
-        let mut version_is_nop = canonical.clone();
-        version_is_nop[1] = 0x61;
+        let mut scheme_is_op_0 = canonical.clone();
+        scheme_is_op_0[1] = 0x00;
+        let mut scheme_is_reserved = canonical.clone();
+        scheme_is_reserved[1] = 0x50;
+        let mut scheme_is_nop = canonical.clone();
+        scheme_is_nop[1] = 0x61;
         let mut short_push = canonical.clone();
         short_push[2] = 0x1f;
         let mut long_push_opcode = canonical.clone();
@@ -383,9 +383,9 @@ mod pq_namespace_tests {
             shorter,
             non_minimal,
             trailing,
-            version_is_op_0,
-            version_is_reserved,
-            version_is_nop,
+            scheme_is_op_0,
+            scheme_is_reserved,
+            scheme_is_nop,
             short_push,
             long_push_opcode,
             Vec::new(),

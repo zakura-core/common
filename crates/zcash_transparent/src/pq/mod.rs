@@ -4,8 +4,9 @@
 //! [FIPS 205](https://doi.org/10.6028/NIST.FIPS.205). The message and context are supplied
 //! by the caller; no transaction digest, wallet derivation, authorization encoding,
 //! or address format is defined by these primitives. The separate [`script`] module
-//! provides a library-only script harness, and [`output`] defines a versioned PQ output
-//! and authenticates the script it commits to. This is not HashSLH-DSA.
+//! provides a library-only script harness, and [`output`] defines a PQ output carrying a
+//! format and a signature scheme, and authenticates the script it commits to. This is not
+//! HashSLH-DSA.
 //!
 //! Verification authenticates the message only relative to the supplied public key.
 //! The caller must authenticate that key and choose the message and context that bind
@@ -20,15 +21,15 @@ use zcash_address::unified::PqScheme;
 /// A malformed encoding, overlong context, or invalid signature.
 pub use slh_dsa::signature::Error;
 
-/// One below `OP_1`, so that adding a version in 1..=16 gives the opcode that denotes it.
-const VERSION_OPCODE_BASE: u8 = 0x50;
-/// `OP_1`, the opcode for the lowest version the namespace can express.
-const VERSION_OPCODE_FIRST: u8 = VERSION_OPCODE_BASE + 1;
-/// `OP_16`, the opcode for the highest version the namespace can express.
-const VERSION_OPCODE_LAST: u8 = VERSION_OPCODE_BASE + 16;
+/// One below `OP_1`, so that adding a scheme in 1..=16 gives the opcode that denotes it.
+const SCHEME_OPCODE_BASE: u8 = 0x50;
+/// `OP_1`, the opcode for the lowest scheme number the namespace can express.
+const SCHEME_OPCODE_FIRST: u8 = SCHEME_OPCODE_BASE + 1;
+/// `OP_16`, the opcode for the highest scheme number the namespace can express.
+const SCHEME_OPCODE_LAST: u8 = SCHEME_OPCODE_BASE + 16;
 
 /// Explicit SLH-DSA parameter selection. Script arguments never select this value;
-/// an authenticated output version does, through [`ParameterSet::from_version`].
+/// an authenticated output's scheme does, through [`ParameterSet::from_scheme`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParameterSet {
     /// NIST Category 1, optimized for signing speed.
@@ -38,52 +39,53 @@ pub enum ParameterSet {
 }
 
 impl ParameterSet {
-    /// The output version that selects this parameter set.
+    /// The scheme number, within format 0, that selects this parameter set.
     ///
-    /// Versions and parameter sets are one to one today, so a parameter set stands in for
-    /// a version wherever that is convenient: [`output::output_script`] writes the opcode
-    /// for the version this returns, through [`Self::version_opcode`], and
-    /// [`output::signing_context`] is keyed on the parameter set rather
-    /// than on the version byte. A later version may well break that, since the version
-    /// exists so the commitment can change while the signature scheme stays: a version
-    /// reusing a parameter set leaves this function with no single answer. It would need
-    /// the version byte carried in [`output::PqOutput`] and the signing context keyed on
-    /// it, so that two versions sharing a parameter set still get distinct contexts.
-    pub const fn version(self) -> u8 {
+    /// Inside format 0 schemes and parameter sets are one to one, so a parameter set
+    /// stands in for a scheme wherever that is convenient: [`output::output_script`] writes
+    /// the opcode for the scheme this returns, through [`Self::scheme_opcode`], and
+    /// [`output::signing_context`] is keyed on the parameter set rather than on the two
+    /// header bytes. A second format ends that, which is the point of having two layers:
+    /// the format exists so the commitment can change while the signature schemes stay, so
+    /// a later format reusing a parameter set leaves this function with no single answer.
+    /// It would need both header bytes carried in [`output::PqOutput`] and the signing
+    /// context keyed on both, so that two formats sharing a scheme still get distinct
+    /// contexts.
+    pub const fn scheme(self) -> u8 {
         match self {
             Self::Sha2_128f => 1,
             Self::Sha2_192s => 2,
         }
     }
-    /// The parameter set an output version selects, if any version does.
+    /// The parameter set a format-0 scheme selects, if any scheme does.
     ///
-    /// This direction stays correct however the table grows; only [`Self::version`] relies
+    /// This direction stays correct however the table grows; only [`Self::scheme`] relies
     /// on the mapping being one to one.
-    pub const fn from_version(version: u8) -> Option<Self> {
-        match version {
+    pub const fn from_scheme(scheme: u8) -> Option<Self> {
+        match scheme {
             1 => Some(Self::Sha2_128f),
             2 => Some(Self::Sha2_192s),
             _ => None,
         }
     }
-    /// The opcode an output writes to carry this version.
+    /// The opcode an output writes to carry this scheme.
     ///
-    /// An output spells its version as the small-integer opcode for that number, so the
-    /// version costs one byte and the output stays a well-formed script. `OP_1` through
+    /// An output spells its scheme as the small-integer opcode for that number, so the
+    /// scheme costs one byte and the output stays a well-formed script. `OP_1` through
     /// `OP_16` are the only single bytes that denote 1 through 16 without consuming what
-    /// follows them, which is what caps the namespace at sixteen versions.
-    pub const fn version_opcode(self) -> u8 {
-        VERSION_OPCODE_BASE + self.version()
+    /// follows them, which is what caps each format at sixteen schemes.
+    pub const fn scheme_opcode(self) -> u8 {
+        SCHEME_OPCODE_BASE + self.scheme()
     }
-    /// The version an output's opcode names, for `OP_1` through `OP_16` alone.
+    /// The scheme number an output's opcode names, for `OP_1` through `OP_16` alone.
     ///
-    /// This is the namespace's version range, not the set of versions any parameter set
-    /// claims: it answers for all sixteen, so a version no parameter set defines is still
+    /// This is the namespace's scheme range, not the set of schemes any parameter set
+    /// claims: it answers for all sixteen, so a scheme no parameter set defines is still
     /// recognized as being in the namespace and can be restricted rather than left to the
-    /// legacy rules. [`Self::from_version`] is what then decides whether it is defined.
-    pub const fn version_from_opcode(opcode: u8) -> Option<u8> {
+    /// legacy rules. [`Self::from_scheme`] is what then decides whether it is defined.
+    pub const fn scheme_from_opcode(opcode: u8) -> Option<u8> {
         match opcode {
-            VERSION_OPCODE_FIRST..=VERSION_OPCODE_LAST => Some(opcode - VERSION_OPCODE_BASE),
+            SCHEME_OPCODE_FIRST..=SCHEME_OPCODE_LAST => Some(opcode - SCHEME_OPCODE_BASE),
             _ => None,
         }
     }

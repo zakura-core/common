@@ -199,7 +199,7 @@ bitflags::bitflags! {
         /// evaluator does not implement, so evaluating it here would hand the output to
         /// anyone. With this flag set the evaluator returns
         /// [`crate::script::Error::PqNamespace`] instead, both for a `scriptPubKey` and for
-        /// a P2SH redeem script, and for every version in the namespace whether or not
+        /// a P2SH redeem script, and for every shape in the namespace whether or not
         /// anything defines it.
         ///
         /// Note: this must be set uniformly once the post-quantum rules activate. Setting

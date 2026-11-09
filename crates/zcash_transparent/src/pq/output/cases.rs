@@ -42,7 +42,7 @@ fn push(value: &[u8]) -> Vec<u8> {
 fn output(body: &[u8]) -> Script {
     let mut bytes = vec![
         FORMAT,
-        PARAMETERS.version_opcode(),
+        PARAMETERS.scheme_opcode(),
         COMMITMENT_BYTES as u8,
     ];
     bytes.extend_from_slice(&sha256::hash(body));
@@ -97,14 +97,14 @@ fn clean_stack() -> Error {
 }
 
 #[test]
-fn output_carries_the_version_and_commits_the_exact_body() {
+fn output_carries_the_scheme_and_commits_the_exact_body() {
     let body = Code(vec![0x51]);
     let script = output_script(PARAMETERS, &body).unwrap();
-    // The marker, the version as its own opcode, then the push of the body's hash alone.
+    // The marker, the scheme as its own opcode, then the push of the body's hash alone.
     assert_eq!(script.0.len(), OUTPUT_BYTES);
     assert_eq!(script.0.len(), 35);
     assert_eq!(script.0[0], FORMAT);
-    assert_eq!(script.0[1], PARAMETERS.version_opcode());
+    assert_eq!(script.0[1], PARAMETERS.scheme_opcode());
     assert_eq!(script.0[2], COMMITMENT_BYTES as u8);
     assert_eq!(script.0[HEADER_BYTES..], sha256::hash(&body.0));
     // Independently computed using hashlib SHA-256.
@@ -116,15 +116,15 @@ fn output_carries_the_version_and_commits_the_exact_body() {
             "0052204ae81572f06e1b88fd5ced7a1a000945432e83e1551e6f721ee9c00b8cc33260"
         }
     );
-    // The commitment covers the body alone, so the other version's output for the same
-    // body differs in exactly the version byte. Both are spendable only by a key of
-    // their own version's length, which is what keeps them apart.
+    // The commitment covers the body alone, so the other scheme's output for the same
+    // body differs in exactly the scheme byte. Both are spendable only by a key of
+    // their own scheme's length, which is what keeps them apart.
     let other = match PARAMETERS {
         ParameterSet::Sha2_128f => ParameterSet::Sha2_192s,
         ParameterSet::Sha2_192s => ParameterSet::Sha2_128f,
     };
     let other_script = output_script(other, &body).unwrap();
-    assert_eq!(other_script.0[1], other.version_opcode());
+    assert_eq!(other_script.0[1], other.scheme_opcode());
     assert_eq!(other_script.0[HEADER_BYTES..], script.0[HEADER_BYTES..]);
     assert_ne!(other_script.0, script.0);
 
@@ -188,25 +188,25 @@ fn output_carries_the_version_and_commits_the_exact_body() {
 }
 
 #[test]
-fn every_undefined_version_is_restricted_at_creation_and_cannot_be_spent() {
+fn every_undefined_scheme_is_restricted_at_creation_and_cannot_be_spent() {
     let body = Code(vec![0x51]);
     let script = output_script(PARAMETERS, &body).unwrap();
 
-    // Versions 3 through 16 are in the namespace and define nothing, so an output naming
+    // Schemes 3 through 16 are in the namespace and define nothing, so an output naming
     // one is rejected when it is created and yields no output to spend. All fourteen are
     // checked, not a sample, because each is a separate opcode in the namespace.
-    for version in 3..=16u8 {
+    for scheme in 3..=16u8 {
         let mut changed = script.clone();
-        changed.0[1] = 0x50 + version;
+        changed.0[1] = 0x50 + scheme;
         assert_eq!(
             parse_output(&changed),
-            Err(Error::UnsupportedVersion(version))
+            Err(Error::UnsupportedScheme(scheme))
         );
         assert_eq!(
             classify_created_output(&changed),
-            CreatedOutput::Malformed(Error::UnsupportedVersion(version))
+            CreatedOutput::Malformed(Error::UnsupportedScheme(scheme))
         );
-        // The guard covers undefined versions too, so one cannot be swept through the
+        // The guard covers undefined schemes too, so one cannot be swept through the
         // legacy evaluator either, even though nothing will ever define how to spend it.
         assert_eq!(
             script::Raw::from_raw_parts(Vec::new(), changed.0.clone())
@@ -218,21 +218,21 @@ fn every_undefined_version_is_restricted_at_creation_and_cannot_be_spent() {
         );
     }
 
-    // The namespace is exactly the sixteen version opcodes: every one is recognized as
+    // The namespace is exactly the sixteen scheme opcodes: every one is recognized as
     // being in it, while only the two defined ones parse into an output.
-    for version in 1..=16u8 {
+    for scheme in 1..=16u8 {
         let mut changed = script.clone();
-        changed.0[1] = 0x50 + version;
+        changed.0[1] = 0x50 + scheme;
         assert!(script::is_pq_namespace(&changed.0));
         assert_eq!(
             parse_output(&changed).is_ok(),
-            ParameterSet::from_version(version).is_some()
+            ParameterSet::from_scheme(scheme).is_some()
         );
     }
 }
 
 #[test]
-fn the_builder_writes_a_recognized_output_of_a_defined_version() {
+fn the_builder_writes_a_recognized_output_of_a_defined_scheme() {
     let body = Code(vec![0x51]);
     let commitment = sha256::hash(&body.0);
     let value = Zatoshis::const_from_u64(100);
@@ -250,8 +250,8 @@ fn the_builder_writes_a_recognized_output_of_a_defined_version() {
         output_script(PARAMETERS, &body).unwrap().0
     );
     // The builder takes a parameter set rather than a script, so there is no way through it
-    // to create an output in a version nothing defines, and what it writes parses back as
-    // a PQ output of this version.
+    // to create an output in a scheme nothing defines, and what it writes parses back as
+    // a PQ output of this scheme.
     assert_eq!(
         classify_created_output(&outputs[0].script_pubkey().0),
         CreatedOutput::Pq(PARAMETERS)
@@ -272,28 +272,28 @@ fn near_misses_of_the_namespace_are_legacy_outputs() {
     trailing.push(0);
     let mut wide_push = script.0.clone();
     wide_push[2] = 0x4c;
-    let mut non_minimal_push = vec![FORMAT, PARAMETERS.version_opcode(), 0x4c, 0x20];
+    let mut non_minimal_push = vec![FORMAT, PARAMETERS.scheme_opcode(), 0x4c, 0x20];
     non_minimal_push.extend_from_slice(&commitment);
     let mut p2wsh = vec![0x00, 0x20];
     p2wsh.extend_from_slice(&commitment);
     let mut taproot = vec![0x51, 0x20];
     taproot.extend_from_slice(&commitment);
-    let mut version_is_op_0 = script.0.clone();
-    version_is_op_0[1] = 0x00;
-    let mut version_is_reserved = script.0.clone();
-    version_is_reserved[1] = 0x50;
+    let mut scheme_is_op_0 = script.0.clone();
+    scheme_is_op_0[1] = 0x00;
+    let mut scheme_is_reserved = script.0.clone();
+    scheme_is_reserved[1] = 0x50;
     for near_miss in [
         vec![FORMAT],
-        vec![FORMAT, PARAMETERS.version_opcode()],
-        vec![FORMAT, PARAMETERS.version_opcode(), COMMITMENT_BYTES as u8],
+        vec![FORMAT, PARAMETERS.scheme_opcode()],
+        vec![FORMAT, PARAMETERS.scheme_opcode(), COMMITMENT_BYTES as u8],
         script.0[..OUTPUT_BYTES - 1].to_vec(),
         trailing,
         wide_push,
         non_minimal_push,
         p2wsh,
         taproot,
-        version_is_op_0,
-        version_is_reserved,
+        scheme_is_op_0,
+        scheme_is_reserved,
     ] {
         let near_miss = Code(near_miss);
         assert!(
@@ -327,7 +327,7 @@ fn shapes_the_namespace_claims_but_this_format_does_not_define_are_restricted() 
     // Commitment lengths other than the 32 bytes format 0 fixes, including both ends of
     // what a single direct push can carry.
     for length in [1usize, 20, 31, 33, 0x4b] {
-        let mut wrong_length = vec![FORMAT, PARAMETERS.version_opcode(), length as u8];
+        let mut wrong_length = vec![FORMAT, PARAMETERS.scheme_opcode(), length as u8];
         wrong_length.resize(HEADER_BYTES + length, 7);
         restricted.push((wrong_length, Error::UnsupportedCommitmentLength(length)));
     }
@@ -510,22 +510,22 @@ fn callback_receives_the_committed_body_for_each_failed_check() {
     let selected = parsed.authenticate_spend(&serialized).unwrap();
     assert_eq!(selected.sig_op_count(true), 2);
     assert_eq!(selected.body(), body);
-    // A changed commitment no longer authenticates the same script, a changed version
-    // selects rules that do not exist, and a changed version push is not an encoding.
+    // A changed commitment no longer authenticates the same script, a changed scheme
+    // selects rules that do not exist, and a changed scheme push is not an encoding.
     let mut changed = previous_output.clone();
     changed.0[HEADER_BYTES + 2] ^= 1;
     assert_eq!(
         check_output(&changed, &serialized),
         Err(Error::CommitmentMismatch)
     );
-    // Naming a version nothing defines leaves an output in the namespace with no rules,
-    // which is restricted rather than spendable. Set rather than flipped, so the version
+    // Naming a scheme nothing defines leaves an output in the namespace with no rules,
+    // which is restricted rather than spendable. Set rather than flipped, so the scheme
     // is undefined for either parameter set.
-    let mut reversioned = previous_output.clone();
-    reversioned.0[1] = 0x50 + 5;
+    let mut rescheme = previous_output.clone();
+    rescheme.0[1] = 0x50 + 5;
     assert_eq!(
-        parse_output(&reversioned),
-        Err(Error::UnsupportedVersion(5))
+        parse_output(&rescheme),
+        Err(Error::UnsupportedScheme(5))
     );
     // Changing the commitment's push opcode takes the script out of the namespace
     // altogether, so it is a legacy output and not a malformed PQ one.

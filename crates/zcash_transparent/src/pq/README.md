@@ -1,14 +1,14 @@
-# Versioned PQ transparent outputs
+# PQ transparent outputs
 
-The optional `pq` feature provides SLH-DSA transparent spends behind a versioned output
-type. The version is a byte of the output itself, so an output's format is visible on chain
-when the payment is made rather than when the receiver spends. These library APIs
+The optional `pq` feature provides SLH-DSA transparent spends behind a dedicated output
+type. Its format and signature scheme are bytes of the output itself, so both are visible on
+chain when the payment is made rather than when the receiver spends. These library APIs
 activate no consensus rule and define no address format.
 
 ## Encoding
 
 An output of the one format defined here is exactly `00 vv 20 <commitment>`, 35 bytes:
-`OP_0 OP_<version> PUSH32(commitment)`. The commitment is `SHA-256(body)`, where the body is
+`OP_0 OP_<scheme> PUSH32(commitment)`. The commitment is `SHA-256(body)`, where the body is
 an ordinary transparent script and carries no header of its own. A spending input is
 push-only, pushes the body last, and pushes the body's arguments before it. All of the body
 executes, and every signature operation receives those same bytes as its signing script.
@@ -53,14 +53,14 @@ here either. The other leading opcodes `OP_1`..`OP_16` are claimed as formats of
 namespace rather than left free, which is what keeps a future format inside one set of rules
 instead of needing a namespace of its own.
 
-The version appears once, in the output. An earlier draft repeated it inside the committed
-script so the commitment would cover it too; that cost three bytes in every spend and a
+The two header bytes appear once, in the output. An earlier draft repeated them inside the
+committed script so the commitment would cover them too; that cost three bytes in every spend and a
 rule that the two copies agree, to bind something the signing context and the v5 digest
 already bind. What it gave up by removing it: the committed bytes are not self-describing,
-and the same thirty-two bytes can appear in an output of either version. Those are separate
+and the same thirty-two bytes can appear in an output of either scheme. Those are separate
 outputs, separately funded, and each is spent only by the rules its own output selects, so
 nothing crosses between them — a signature made for one cannot authorize another, because
-the context names the version and the v5 digest covers the whole previous output.
+the context names both bytes and the v5 digest covers the whole previous output.
 
 Format 0, whose commitment is `SHA-256(body)`:
 
@@ -79,7 +79,7 @@ network upgrade rather than to a network, so no transaction digest separates mai
 testnet; the context does. A signature argument appends one strict transparent sighash
 selector: ALL, NONE, SINGLE, or any of those with ANYONECANPAY. The caller supplies the
 existing transaction signature digest; Pure SLH-DSA signs those 32 bytes with the
-version's context, and there is no additional application hash.
+scheme's context, and there is no additional application hash.
 
 These two bytes are the lever for replacing any of this: the scheme selects the parameter
 set and the signing context, and the format selects the commitment and the lengths it
@@ -89,7 +89,7 @@ scheme that reuses an existing parameter set under a new commitment, is exactly 
 that ends it. Such a row must carry both bytes through `PqOutput` and key the signing context
 on both, or two schemes would share a context.
 
-Because the body carries no version, nothing in it says which parameter set may spend it.
+Because the body carries no header, nothing in it says which parameter set may spend it.
 The output decides, and the two parameter sets have different key lengths, so a body
 written for one is unspendable under the other.
 
@@ -107,7 +107,7 @@ activation. This format is deliberately not
 forward-compatible in the way an anyone-can-spend reserved program would be.
 
 Legacy outputs stay creatable and spendable, for good. This format adds a namespace beside
-them and bans nothing: an earlier draft used the version's presence in the output to let a
+them and bans nothing: an earlier draft used the marker's presence in the output to let a
 node refuse to create legacy outputs from a chosen height, and that is no longer part of
 it. Coins paid to a legacy output stay spendable under exactly the rules that spend them
 today.
@@ -121,13 +121,13 @@ parameter set, not a script, so this library cannot construct one at all.
 
 **When an output is spent.** `output::parse_output` recognizes a PQ output, and
 `PqOutput::verify_spend` requires the last pushed script to match that output's commitment,
-then executes it under the version's parameter set and context.
-Undefined versions and failed authentication reject; nothing falls back to ECDSA, and no
+then executes it under the scheme's parameter set and context.
+Undefined pairs and failed authentication reject; nothing falls back to ECDSA, and no
 script argument can select or weaken the verifier. Spendability does not depend on the
 height at which the output was created.
 
 Every signature check in a PQ body is SLH-DSA. The checker requires a public key of
-exactly the version's length and aborts on anything else, so one body cannot mix
+exactly the scheme's length and aborts on anything else, so one body cannot mix
 algorithms: "my PQ key, or my existing ECDSA key after a timelock" is a script that parses
 and then kills the spend when that branch is taken. That is the intent — an adversary who
 can forge ECDSA must have no path to the coins, which is also why no script argument can
@@ -148,7 +148,8 @@ are no interpreter flags to pass: this module verifies PQ outputs and nothing el
 every other output keeps the evaluator, flags and limits the caller already applies to it.
 
 Transaction version: these spends assume v5 or later, whose digest commits to the previous
-output and therefore directly to the version and the commitment. A v4 digest commits only
+output and therefore directly to both header bytes and the commitment. A v4 digest commits
+only
 to the script code it is handed, and not to the other inputs' outputs and amounts.
 
 ## Resource rules
@@ -171,8 +172,8 @@ fees still need qualification, and ZIP 317 currently has no rule that fits a 17 
 ## Security argument and limits
 
 The output commits to the algorithm, the exact key and signature encodings, and the
-committed body. Per-version, per-network contexts separate these signatures from other
-protocols, versions and networks. Malformed nonempty signatures, public keys and selectors
+committed body. Per-scheme, per-network contexts separate these signatures from other
+protocols, formats and networks. Malformed nonempty signatures, public keys and selectors
 abort; an empty signature with a correctly sized key, and a cryptographically incorrect
 signature, evaluate false.
 

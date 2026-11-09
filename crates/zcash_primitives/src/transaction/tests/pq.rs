@@ -1,5 +1,5 @@
 // Library integration for supplied programs and for scripts authenticated against the
-// versioned output that commits to them. These tests do not activate PQ validation or
+// PQ output that commits to them. These tests do not activate PQ validation or
 // establish node acceptance.
 
 use alloc::vec::Vec;
@@ -149,7 +149,8 @@ mod output_spends {
         output.write(&mut wire).unwrap();
         let decoded = TxOut::read(&mut &wire[..]).unwrap();
         assert_eq!(decoded, output);
-        // The spent output carries the version on chain, and no address type encodes it.
+        // The spent output carries the format and scheme on chain, and no address type
+        // encodes them.
         assert_eq!(decoded.recipient_address(), None);
         transaction_with_program(&decoded.script_pubkey().0)
     }
@@ -322,7 +323,7 @@ mod output_spends {
     }
 
     #[test]
-    fn the_output_version_is_bound_by_the_v5_digest() {
+    fn the_output_scheme_is_bound_by_the_v5_digest() {
         let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
         let body = program(&key.public_key());
         let mut tx = transaction(&body);
@@ -331,7 +332,7 @@ mod output_spends {
         assert_eq!(check(&tx, &body), Ok(true));
         let signed_digest = digest(&tx, sighash::SIGHASH_ALL);
 
-        // The version now sits in the previous output, which the v5 digest commits to
+        // The scheme now sits in the previous output, which the v5 digest commits to
         // directly; under the P2SH form it reached the digest only through the hash.
         let other = match PARAMETERS {
             pq::ParameterSet::Sha2_128f => pq::ParameterSet::Sha2_192s,
@@ -344,7 +345,7 @@ mod output_spends {
             .input_scriptpubkeys[0]
             .0
             .clone();
-        flipped.0[1] = other.version_opcode();
+        flipped.0[1] = other.scheme_opcode();
         tx.transparent_bundle
             .as_mut()
             .unwrap()
@@ -352,7 +353,7 @@ mod output_spends {
             .input_scriptpubkeys[0] = Script(flipped);
         assert_ne!(digest(&tx, sighash::SIGHASH_ALL), signed_digest);
         // The same commitment still authenticates the same script, because the commitment
-        // covers the body alone. The output's version is what selects the rules, so this
+        // covers the body alone. The output's scheme is what selects the rules, so this
         // spend is now rejected for presenting a key of the wrong length for them.
         assert!(matches!(
             check(&tx, &body),
