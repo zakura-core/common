@@ -363,6 +363,10 @@ impl Receiver {
 }
 
 /// An address that funds can be sent to.
+// A unified address holds a receiver per pool, so this variant is several times the size of
+// the single-pool ones, and more so now that it can also carry a post-quantum receiver.
+// Boxing it would change this public enum's shape for every caller to save moving an address.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Address {
     /// A Sapling payment address.
@@ -630,7 +634,7 @@ mod tests {
     #[test]
     #[cfg(feature = "orchard")]
     fn pq_transparent_receiver_survives_a_unified_address() {
-        use zcash_address::unified::{self, Container, Encoding, PqScheme, Typecode};
+        use zcash_address::unified::{self, Encoding, PqScheme, Typecode};
 
         use super::UnifiedAddress;
         use zcash_protocol::PoolType;
@@ -697,7 +701,11 @@ mod tests {
         let orchard = Option::from(orchard::Address::from_raw_address_bytes(&orchard_bytes))
             .expect("the vector's Orchard receiver is valid");
 
+        #[cfg(feature = "sapling")]
         let ua = UnifiedAddress::from_receivers(Some(orchard), None, None)
+            .expect("an Orchard receiver is a shielded receiver");
+        #[cfg(not(feature = "sapling"))]
+        let ua = UnifiedAddress::from_receivers(Some(orchard), None)
             .expect("an Orchard receiver is a shielded receiver");
         assert!(!ua.has_pq_transparent());
 
