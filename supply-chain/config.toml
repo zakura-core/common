@@ -633,6 +633,10 @@ criteria = "safe-to-deploy"
 version = "0.1.6"
 criteria = "safe-to-run"
 
+[[exemptions.keccak]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.known-folders]]
 version = "1.4.2"
 criteria = "safe-to-deploy"
