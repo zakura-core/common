@@ -87,16 +87,56 @@ impl Executor for PoolContext {
         B: Send,
     {
         #[cfg(feature = "multicore")]
-        if self.parallel {
-            return rayon::join(left, right);
-        }
-        SerialExecutor.join(left, right)
+        let parallel = self.parallel;
+        #[cfg(not(feature = "multicore"))]
+        let parallel = false;
+        let (mut left, mut right) = (Some(left), Some(right));
+        let (mut left_result, mut right_result) = (None, None);
+        join_dyn(
+            parallel,
+            &mut || left_result = Some(left.take().expect("left job runs once")()),
+            &mut || right_result = Some(right.take().expect("right job runs once")()),
+        );
+        (
+            left_result.expect("left job ran"),
+            right_result.expect("right job ran"),
+        )
     }
+}
+
+// The only join the backends instantiate: every generic `Executor::join` call
+// funnels through these two closure types, so Rayon's work-splitting machinery
+// is compiled once instead of once per call site and closure pair.
+fn join_dyn(parallel: bool, left: &mut (dyn FnMut() + Send), right: &mut (dyn FnMut() + Send)) {
+    #[cfg(feature = "multicore")]
+    if parallel {
+        rayon::join(|| left(), || right());
+        return;
+    }
+    let _ = parallel;
+    // Delegating keeps the serial contract: the right job runs even when the
+    // left one unwinds.
+    SerialExecutor.join(|| left(), || right());
 }
 
 #[cfg(all(test, feature = "multicore"))]
 mod tests {
     use super::*;
+    #[test]
+    fn join_runs_the_right_job_when_the_left_unwinds() {
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PoolExecutor { pool: None }.run(|context| {
+                context.join(
+                    || panic!("left job"),
+                    || ran.store(true, std::sync::atomic::Ordering::Relaxed),
+                );
+            });
+        }));
+        assert!(unwound.is_err());
+        assert!(ran.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
     #[test]
     fn pool_context_uses_selected_workers_and_serial_fallback() {
         let caller = std::thread::current().id();
