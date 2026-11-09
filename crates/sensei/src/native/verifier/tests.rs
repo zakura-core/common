@@ -75,8 +75,7 @@ fn prefetch_decodes_every_point_of_an_archived_proof() {
         points.len(),
         FIXED_POINTS + ACTION_POINTS * statements.len()
     );
-    // A truncated proof or a corrupted encoding declines, deferring to the
-    // serial reader's error reporting.
+    // Truncated proofs and corrupted encodings fail prefetch.
     assert!(prefetch_points(&proof[..proof.len() - 1], statements.len()).is_none());
     let mut corrupted = proof.clone();
     corrupted[..32].fill(0xff);
@@ -86,6 +85,34 @@ fn prefetch_decodes_every_point_of_an_archived_proof() {
     let request =
         VerificationRequest::new(crate::CircuitVersion::PostNu6_3, &statements, &proof).unwrap();
     assert_eq!(crate::verify_proofs(&[request], &mut no_rng), Ok(()));
+}
+
+#[test]
+fn malformed_points_are_rejected_before_equation_assembly() {
+    use super::super::protocol::transcript_encoding::{POINT_BYTES, point_runs};
+    let runtime = VerifierRuntime::get();
+    for version in corpus::VERSIONS {
+        let fixture = corpus::small(version, 2);
+        for (offset, count) in point_runs(fixture.statements.len()).unwrap() {
+            // A bad point at the end of each run must not cause the preceding
+            // points to be read again into the verification equation.
+            let offset = offset + (count - 1) * POINT_BYTES;
+            for encoding in [[0; POINT_BYTES], [0xff; POINT_BYTES]] {
+                let mut proof = fixture.proof.to_vec();
+                proof[offset..offset + POINT_BYTES].copy_from_slice(&encoding);
+                let request =
+                    VerificationRequest::new(version, &fixture.statements, &proof).unwrap();
+                let mut equation = Equation::new();
+                assert_eq!(
+                    equation.proof(&request, <Fp>::ONE, &runtime.instance_generators),
+                    Err(Error::InvalidProof)
+                );
+                assert_eq!(equation.versions, 0);
+                assert!(equation.points.is_empty());
+                assert!(equation.scalars.is_empty());
+            }
+        }
+    }
 }
 
 #[test]

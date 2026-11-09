@@ -287,8 +287,8 @@ pub(crate) fn warm_up_verifier() {
 /// encodings can be gathered and decoded together — sharing interleaved
 /// square-root chains — before Blake2b absorption consumes the transcript
 /// serially. Returns `None` for an unexpected length, an invalid encoding, or
-/// an identity point; the caller then reads serially, which reports the failure
-/// at the same position with the same error as before.
+/// an identity point. Every supported version uses this layout, so failure
+/// rejects the proof without decoding its points again.
 fn prefetch_points(proof: &[u8], actions: usize) -> Option<Vec<VestaAffine>> {
     use super::protocol::transcript_encoding::{POINT_BYTES, point_runs, proof_capacity};
     if proof.len() != proof_capacity(actions)? {
@@ -299,15 +299,18 @@ fn prefetch_points(proof: &[u8], actions: usize) -> Option<Vec<VestaAffine>> {
     let mut encodings = Vec::with_capacity(total);
     for &(offset, count) in &runs {
         let bytes = proof.get(offset..offset + count * POINT_BYTES)?;
-        encodings.extend(
-            bytes
-                .chunks_exact(POINT_BYTES)
-                .map(|chunk| <[u8; 32]>::try_from(chunk).expect("fixed encoding width")),
-        );
+        for chunk in bytes.chunks_exact(POINT_BYTES) {
+            let encoding = <[u8; 32]>::try_from(chunk).expect("fixed encoding width");
+            // Identity is valid for the curve decoder but forbidden in proofs.
+            // Reject it before doing any square-root work for this proof.
+            if encoding == [0; POINT_BYTES] {
+                return None;
+            }
+            encodings.push(encoding);
+        }
     }
     let mut points = vec![VestaPoint::IDENTITY; total];
     VestaPoint::batch_from_bytes(&encodings, &mut points)?;
-    // The transcript rejects identity points, so leave one to the serial path.
     points
         .into_iter()
         .map(|point| point.as_affine().copied())
@@ -411,11 +414,9 @@ impl Equation {
         weight: Fp,
         generators: &[FixedGenerator],
     ) -> Result<(), Error> {
-        let decoded = prefetch_points(request.proof, request.statements.len());
-        let mut reader = match &decoded {
-            Some(points) => Reader::with_decoded(request.proof, points),
-            None => Reader::new(request.proof),
-        };
+        let decoded =
+            prefetch_points(request.proof, request.statements.len()).ok_or(Error::InvalidProof)?;
+        let mut reader = Reader::with_decoded(request.proof, &decoded);
         let version = request.version;
         self.versions |= 1 << version.index();
         let columns = &VK_DATA.columns[version.index()];
