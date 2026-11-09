@@ -235,9 +235,22 @@ impl Instance {
         let cv_nets: Vec<pallas::Point> = instances.iter().map(|i| i.cv_net.point()).collect();
         let mut affine = alloc::vec![pallas::Affine::default(); cv_nets.len()];
         pallas::Point::batch_normalize(&cv_nets, &mut affine);
+        Self::natives_with_affine(instances, &affine)
+    }
+
+    /// Encodes each instance as a Sensei public statement, with `cv_net`s the
+    /// caller has already normalized (the batch validator normalizes every
+    /// bundle's points together with one shared, pool-chunked inversion).
+    ///
+    /// `rk` is already held in affine form.
+    pub(crate) fn natives_with_affine(
+        instances: &[Self],
+        cv_nets: &[pallas::Affine],
+    ) -> Vec<sensei::PublicStatement> {
+        assert_eq!(instances.len(), cv_nets.len());
         instances
             .iter()
-            .zip(affine)
+            .zip(cv_nets)
             .map(|(i, cv_net)| sensei::PublicStatement {
                 anchor: i.anchor.inner(),
                 // An identity cv_net is encoded as (0, 0).

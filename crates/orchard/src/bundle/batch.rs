@@ -54,8 +54,8 @@ impl QueuedBundle {
     }
 
     /// The number of points this bundle contributes to the shared normalization:
-    /// its binding validating key and, for Halo 2 instances, each Action's `cv_net`
-    /// and `rk`.
+    /// its binding validating key, each Action's `cv_net`, and, for Halo 2
+    /// instances, each Action's `rk` (Sensei already holds `rk` in affine form).
     fn normalized_points(&self) -> usize {
         #[cfg(feature = "backend-halo2")]
         {
@@ -63,7 +63,7 @@ impl QueuedBundle {
         }
         #[cfg(feature = "backend-sensei")]
         {
-            1
+            1 + self.instances.len()
         }
     }
 }
@@ -203,8 +203,9 @@ impl<'a> BatchValidator<'a> {
         let count = bundles.len();
 
         // Every bundle's binding validating key, then one shared normalization of
-        // those keys and (for Halo 2) each Action's `cv_net` and `rk`. Each bundle
-        // owns a contiguous run: its key, then its `cv_net`s, then its `rk`s.
+        // those keys, each Action's `cv_net`, and (for Halo 2) each Action's `rk`.
+        // Each bundle owns a contiguous run: its key, then its `cv_net`s, then
+        // its `rk`s.
         let bvks = map_bundles(
             bundles.iter().collect(),
             QueuedBundle::binding_validating_key_point,
@@ -215,13 +216,9 @@ impl<'a> BatchValidator<'a> {
         for (bundle, bvk) in bundles.iter().zip(bvks) {
             starts.push(points.len());
             points.push(bvk);
+            points.extend(bundle.instances.iter().map(|i| i.cv_net().point()));
             #[cfg(feature = "backend-halo2")]
-            {
-                points.extend(bundle.instances.iter().map(|i| i.cv_net().point()));
-                points.extend(bundle.instances.iter().map(|i| i.rk().point()));
-            }
-            #[cfg(feature = "backend-sensei")]
-            let _ = bundle;
+            points.extend(bundle.instances.iter().map(|i| i.rk().point()));
         }
         let affine = normalize(&points, count);
         drop(points);
@@ -259,7 +256,13 @@ impl<'a> BatchValidator<'a> {
                     ))
                 };
                 #[cfg(feature = "backend-sensei")]
-                let proof = (proof, instances);
+                let proof = {
+                    let cv_nets = &affine[start + 1..start + 1 + instances.len()];
+                    (
+                        proof,
+                        Instance::natives_with_affine(&instances, cv_nets),
+                    )
+                };
                 (signatures, proof)
             },
         );
@@ -285,14 +288,9 @@ impl<'a> BatchValidator<'a> {
         }
         #[cfg(feature = "backend-sensei")]
         {
-            let statements: Vec<Vec<_>> = proofs
-                .iter()
-                .map(|(_, instances)| Instance::natives(instances))
-                .collect();
             let requests = proofs
                 .iter()
-                .zip(&statements)
-                .map(|((proof, _), statements)| {
+                .map(|(proof, statements)| {
                     sensei::VerificationRequest::new(
                         self.vk.circuit_version().native(),
                         statements,
