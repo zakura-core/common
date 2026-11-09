@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-11-06
+
+### Added
+
+- Added a `From<pasta_curves::pallas::Affine>` conversion for
+  `VerificationKey<orchard::Binding>`
+  ([#708](https://github.com/zakura-core/common/pull/708)).
+
 ## [5.2.0] - 2026-11-04
 
 ### Added

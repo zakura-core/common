@@ -13,8 +13,12 @@ import tempfile
 from itertools import permutations
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--interop-only", action="store_true")
-parser.add_argument("--composition-api-only", action="store_true")
+modes = parser.add_mutually_exclusive_group()
+modes.add_argument("--interop-only", action="store_true",
+                   help="run only the proof interop and compatibility fixture checks")
+modes.add_argument("--checks-only", action="store_true",
+                   help="run only the composition API and backend feature checks")
+modes.add_argument("--composition-api-only", action="store_true")
 args = parser.parse_args()
 
 def run(*arguments, **kwargs):
@@ -125,6 +129,9 @@ if not args.interop_only:
         # Require the actionable guard even when rustc also reports unresolved
         # backend-dependent items in an invalid configuration.
         assert result.returncode and any(error.startswith(expected) for error in errors), f"missing backend selection diagnostic: {errors}\n{result.stderr}"
+
+if args.checks_only:
+    raise SystemExit(0)
 
 def test(backend, capabilities, selection, *extra, **kwargs):
     """Run one lib test selection and require that it ran: a filter matching nothing passes vacuously."""

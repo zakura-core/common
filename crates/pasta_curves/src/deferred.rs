@@ -829,3 +829,322 @@ mod tests {
         ])
     );
 }
+
+#[cfg(feature = "alloc")]
+pub use buffer::DeferredBuffer;
+
+#[cfg(feature = "alloc")]
+mod buffer {
+    use alloc::vec::Vec;
+    use core::any::TypeId;
+
+    use super::DeferredField;
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    use crate::arithmetic::avx2_fold::{self, Lanes};
+
+    /// Casts a slice whose element type was checked to be `T`.
+    #[allow(unsafe_code)]
+    fn cast<G: 'static, T: 'static>(values: &[G]) -> &[T] {
+        assert_eq!(TypeId::of::<G>(), TypeId::of::<T>());
+        // SAFETY: `G` and `T` are the same type.
+        unsafe { &*(values as *const [G] as *const [T]) }
+    }
+
+    #[allow(unsafe_code)]
+    fn cast_mut<G: 'static, T: 'static>(values: &mut [G]) -> &mut [T] {
+        assert_eq!(TypeId::of::<G>(), TypeId::of::<T>());
+        // SAFETY: `G` and `T` are the same type.
+        unsafe { &mut *(values as *mut [G] as *mut [T]) }
+    }
+
+    /// Per-row deferred accumulators for weighted sums `sum_k t_k s_k`.
+    ///
+    /// For the Pasta fields on builds with the AVX2 kernels, rows are
+    /// accumulated four at a time in AVX2; otherwise each row holds a
+    /// [`DeferredField::Accumulator`]. Callers pass rows as slices of a type
+    /// `G` that must be `F` (checked at run time), so generic code can use the
+    /// buffer after selecting `F` by `TypeId`.
+    ///
+    /// This is an internal cross-crate bridge for `halo2_proofs`.
+    #[doc(hidden)]
+    #[derive(Clone, Debug, Default)]
+    pub struct DeferredBuffer<F: DeferredField> {
+        scalar: Vec<F::Accumulator>,
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        lanes: Option<LanesState<F>>,
+        len: usize,
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    #[derive(Clone, Debug)]
+    struct LanesState<F> {
+        lanes: Lanes,
+        /// Canonical partial sums of earlier term runs (see `MAX_TERMS`).
+        partial: Option<Vec<F>>,
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    impl core::fmt::Debug for Lanes {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("Lanes").field("len", &self.len()).finish()
+        }
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn is_pasta<F: 'static>() -> bool {
+        TypeId::of::<F>() == TypeId::of::<crate::Fp>()
+            || TypeId::of::<F>() == TypeId::of::<crate::Fq>()
+    }
+
+    /// Canonical Montgomery limbs of a Pasta element (checked type).
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn limbs<F: 'static>(values: &[F]) -> &[[u64; 4]] {
+        if TypeId::of::<F>() == TypeId::of::<crate::Fp>() {
+            let v: &[crate::Fp] = cast(values);
+            crate::fields::fp_limbs(v)
+        } else {
+            let v: &[crate::Fq] = cast(values);
+            crate::fields::fq_limbs(v)
+        }
+    }
+
+    impl<F: DeferredField + 'static> DeferredBuffer<F> {
+        /// Resizes the buffer to `len` rows. Contents become unspecified until
+        /// the next `initialize*` call.
+        pub fn resize(&mut self, len: usize) {
+            self.len = len;
+            #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+            if is_pasta::<F>() {
+                let state = self.lanes.get_or_insert_with(|| LanesState {
+                    lanes: Lanes::default(),
+                    partial: None,
+                });
+                // A previous fold's partials have the old length.
+                state.partial = None;
+                state.lanes.resize(len);
+                return;
+            }
+            self.scalar.resize(len, F::Accumulator::default());
+        }
+
+        /// The number of rows.
+        pub fn len(&self) -> usize {
+            self.len
+        }
+
+        /// Whether the buffer has no rows.
+        pub fn is_empty(&self) -> bool {
+            self.len == 0
+        }
+
+        /// Starts each row's sum at `terms[i] * power`.
+        pub fn initialize<G: 'static>(&mut self, terms: &[G], power: &G) {
+            self.power_term(terms, power, true);
+        }
+
+        /// Adds `terms[i] * power` to each row.
+        pub fn accumulate<G: 'static>(&mut self, terms: &[G], power: &G) {
+            self.power_term(terms, power, false);
+        }
+
+        /// Starts each row's sum at `terms[i] * factors[i]`.
+        pub fn initialize_products<G: 'static>(&mut self, terms: &[G], factors: &[G]) {
+            self.product_term(terms, factors, true);
+        }
+
+        /// Adds `terms[i] * factors[i]` to each row.
+        pub fn accumulate_products<G: 'static>(&mut self, terms: &[G], factors: &[G]) {
+            self.product_term(terms, factors, false);
+        }
+
+        #[allow(unsafe_code)]
+        fn power_term<G: 'static>(&mut self, terms: &[G], power: &G, init: bool) {
+            let terms: &[F] = cast(terms);
+            let power: &F = &cast(core::slice::from_ref(power))[0];
+            assert_eq!(terms.len(), self.len);
+            #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+            if let Some(state) = self.lanes.as_mut() {
+                let restart = Self::spill_if_full(state, init);
+                let power32 = power.double().double().double().double().double();
+                let power32 = limbs(core::slice::from_ref(&power32))[0];
+                // SAFETY: `pasta_curves_avx2` guarantees AVX2 (see
+                // `avx2_sqrt`).
+                unsafe {
+                    avx2_fold::accumulate_power(
+                        &mut state.lanes,
+                        limbs(terms),
+                        power32,
+                        init || restart,
+                    )
+                };
+                if init {
+                    state.partial = None;
+                }
+                return;
+            }
+            for (acc, term) in self.scalar.iter_mut().zip(terms) {
+                if init {
+                    *acc = F::Accumulator::default();
+                }
+                F::mul_accumulate(acc, term, power);
+            }
+        }
+
+        #[allow(unsafe_code)]
+        fn product_term<G: 'static>(&mut self, terms: &[G], factors: &[G], init: bool) {
+            let terms: &[F] = cast(terms);
+            let factors: &[F] = cast(factors);
+            assert_eq!(terms.len(), self.len);
+            assert_eq!(factors.len(), self.len);
+            #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+            if let Some(state) = self.lanes.as_mut() {
+                let restart = Self::spill_if_full(state, init);
+                // SAFETY: as in `power_term`.
+                unsafe {
+                    avx2_fold::accumulate_products(
+                        &mut state.lanes,
+                        limbs(terms),
+                        limbs(factors),
+                        init || restart,
+                    )
+                };
+                if init {
+                    state.partial = None;
+                }
+                return;
+            }
+            for ((acc, term), factor) in self.scalar.iter_mut().zip(terms).zip(factors) {
+                if init {
+                    *acc = F::Accumulator::default();
+                }
+                F::mul_accumulate(acc, term, factor);
+            }
+        }
+
+        /// Before a term that would exceed the lane bound, moves the current
+        /// sums into canonical partials; returns whether the lanes must
+        /// restart with this term.
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        fn spill_if_full(state: &mut LanesState<F>, init: bool) -> bool {
+            if init || state.lanes.terms() < avx2_fold::MAX_TERMS {
+                return false;
+            }
+            let mut sums = alloc::vec![F::ZERO; state.lanes.len()];
+            Self::reduce_lanes(&state.lanes, &mut sums);
+            match state.partial.as_mut() {
+                Some(partial) => {
+                    for (partial, sum) in partial.iter_mut().zip(&sums) {
+                        *partial += sum;
+                    }
+                }
+                None => state.partial = Some(sums),
+            }
+            true
+        }
+
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        #[allow(unsafe_code)]
+        fn reduce_lanes(lanes: &Lanes, out: &mut [F]) {
+            // SAFETY: as in `power_term`; `F` is a Pasta field here.
+            unsafe {
+                if TypeId::of::<F>() == TypeId::of::<crate::Fp>() {
+                    crate::fields::fp_fold_reduce(lanes, cast_mut(out));
+                } else {
+                    crate::fields::fq_fold_reduce(lanes, cast_mut(out));
+                }
+            }
+        }
+
+        /// Writes each row's sum to `out` (canonical).
+        pub fn reduce_into<G: 'static>(&self, out: &mut [G]) {
+            let out: &mut [F] = cast_mut(out);
+            assert_eq!(out.len(), self.len);
+            #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+            if let Some(state) = self.lanes.as_ref() {
+                Self::reduce_lanes(&state.lanes, out);
+                if let Some(partial) = state.partial.as_ref() {
+                    for (out, partial) in out.iter_mut().zip(partial) {
+                        *out += partial;
+                    }
+                }
+                return;
+            }
+            for (out, acc) in out.iter_mut().zip(&self.scalar) {
+                *out = F::reduce(*acc);
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod buffer_tests {
+    use super::{DeferredBuffer, DeferredField};
+    use crate::{Fp, Fq};
+    use alloc::vec::Vec;
+    use ff::Field;
+    use rand::SeedableRng;
+    use rand_xorshift::XorShiftRng;
+
+    /// Folds `terms` random terms over `len` rows, or every input `fixed`.
+    fn check<F: DeferredField + 'static>(len: usize, terms: usize, fixed: Option<F>) {
+        let mut rng = XorShiftRng::from_seed([5; 16]);
+        let value = |rng: &mut XorShiftRng| fixed.unwrap_or_else(|| F::random(&mut *rng));
+        let mut buffer = DeferredBuffer::<F>::default();
+        buffer.resize(len);
+        let mut expected = alloc::vec![F::ZERO; len];
+        for k in 0..terms {
+            let t: Vec<F> = (0..len).map(|_| value(&mut rng)).collect();
+            if k % 3 == 2 {
+                let f: Vec<F> = (0..len).map(|_| value(&mut rng)).collect();
+                for ((e, t), f) in expected.iter_mut().zip(&t).zip(&f) {
+                    *e += *t * f;
+                }
+                if k == 0 {
+                    buffer.initialize_products(&t, &f);
+                } else {
+                    buffer.accumulate_products(&t, &f);
+                }
+            } else {
+                let s = value(&mut rng);
+                for (e, t) in expected.iter_mut().zip(&t) {
+                    *e += *t * s;
+                }
+                if k == 0 {
+                    buffer.initialize(&t, &s);
+                } else {
+                    buffer.accumulate(&t, &s);
+                }
+            }
+        }
+        let mut out = alloc::vec![F::ZERO; len];
+        buffer.reduce_into(&mut out);
+        assert!(out == expected, "len {len} terms {terms} fixed {fixed:?}");
+
+        // Reinitializing discards the previous sum, including partials.
+        let t: Vec<F> = (0..len).map(|_| value(&mut rng)).collect();
+        buffer.initialize(&t, &F::ONE);
+        buffer.reduce_into(&mut out);
+        assert!(out == t);
+    }
+
+    #[test]
+    fn deferred_buffer_matches_field_arithmetic() {
+        for len in [1, 2, 3, 4, 5, 7, 8, 9, 64] {
+            for terms in [1, 2, 6, 7, 13, 247, 248, 249, 700] {
+                check::<Fp>(len, terms, None);
+                check::<Fq>(len, terms, None);
+            }
+        }
+        // -1 has a zero bottom limb; 2^254 - 1 (as the Montgomery form) sets
+        // every radix-2^29 limb, the worst case for column growth.
+        let full = [u64::MAX, u64::MAX, u64::MAX, (1 << 62) - 1];
+        for terms in [1, 6, 7, 248, 249, 700] {
+            check::<Fp>(5, terms, Some(-Fp::ONE));
+            check::<Fq>(5, terms, Some(-Fq::ONE));
+            check::<Fp>(5, terms, Some(Fp(full)));
+            check::<Fq>(5, terms, Some(Fq(full)));
+        }
+        check::<Fp>(2048, 40, None);
+    }
+}

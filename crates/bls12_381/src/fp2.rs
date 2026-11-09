@@ -7,6 +7,36 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 
 use crate::fp::Fp;
 
+/// (p + 1) / 4
+const P_PLUS_1_DIV_4: [u64; 6] = [
+    0xee7f_bfff_ffff_eaab,
+    0x07aa_ffff_ac54_ffff,
+    0xd9cc_34a8_3dac_3d89,
+    0xd91d_d2e1_3ce1_44af,
+    0x92c6_e9ed_90d2_eb35,
+    0x0680_447a_8e5f_f9a6,
+];
+
+/// (p - 3) / 4
+const P_MINUS_3_DIV_4: [u64; 6] = [
+    0xee7f_bfff_ffff_eaaa,
+    0x07aa_ffff_ac54_ffff,
+    0xd9cc_34a8_3dac_3d89,
+    0xd91d_d2e1_3ce1_44af,
+    0x92c6_e9ed_90d2_eb35,
+    0x0680_447a_8e5f_f9a6,
+];
+
+/// 1 / 2 in Montgomery form, (2^-1 * R) mod p
+const TWO_INV: Fp = Fp::from_raw_unchecked([
+    0x1804_0000_0001_5554,
+    0x8550_0005_3ab0_0001,
+    0x633c_b57c_253c_276f,
+    0x6e22_d1ec_31eb_b502,
+    0xd391_6126_f2d1_4ca2,
+    0x17fb_b857_1a00_6596,
+]);
+
 #[derive(Copy, Clone)]
 pub struct Fp2 {
     pub c0: Fp,
@@ -242,56 +272,52 @@ impl Fp2 {
         }
     }
 
+    /// Computes a square root of this element, returning `None` when it is
+    /// not a square. Runs in constant time.
     pub fn sqrt(&self) -> CtOption<Self> {
-        // Algorithm 9, https://eprint.iacr.org/2012/685.pdf
-        // with constant time modifications.
+        // The "complex method" for p = 3 (mod 4) and u^2 = -1 (see
+        // https://eprint.iacr.org/2012/685.pdf), arranged so it needs two
+        // exponentiations in Fp, no inversion, and no secret-dependent branch.
+        // It replaces two exponentiations in Fp2.
+        //
+        // Write self = a0 + a1 u and look for x0 + x1 u with
+        //   x0^2 - x1^2 = a0,  2 x0 x1 = a1.
+        // The norm n = a0^2 + a1^2 is a square in Fp exactly when self is a
+        // square in Fp2. With t^2 = n, let z = (a0 + t) / 2. When a1 != 0,
+        // z is nonzero and z (a0 - t) / 2 = -a1^2 / 4 is a nonsquare (-1 is
+        // a nonsquare in Fp), so exactly one of z and (a0 - t) / 2 is a square.
+        //
+        // Let s = z^((p - 3) / 4) and c = s z, so s c = z^((p - 1) / 2):
+        // - z is a square (s c = 1): c^2 = z and s = 1 / c, so
+        //   x0 = c, x1 = a1 s / 2.
+        // - z is a nonsquare (s c = -1): c^2 = -z = x1^2 for the other
+        //   choice of t, and s = -1 / c, so x0 = -a1 s / 2, x1 = c.
+        //
+        // When a1 = 0, (a0 + t) / 2 may be zero, so take z = a0 instead: the
+        // same formulas give c or c u, the root of a0 or of -a0 = (c u)^2.
+        // Zero maps to zero. A nonsquare yields some unrelated value, which
+        // the final check rejects.
+        let a0 = self.c0;
+        let a1 = self.c1;
 
-        CtOption::new(Fp2::zero(), self.is_zero()).or_else(|| {
-            // a1 = self^((p - 3) / 4)
-            let a1 = self.pow_vartime(&[
-                0xee7f_bfff_ffff_eaaa,
-                0x07aa_ffff_ac54_ffff,
-                0xd9cc_34a8_3dac_3d89,
-                0xd91d_d2e1_3ce1_44af,
-                0x92c6_e9ed_90d2_eb35,
-                0x0680_447a_8e5f_f9a6,
-            ]);
+        // t = n^((p + 1) / 4)
+        let t = (a0.square() + a1.square()).pow_vartime(&P_PLUS_1_DIV_4);
+        let z = Fp::conditional_select(&((a0 + t) * TWO_INV), &a0, a1.is_zero());
 
-            // alpha = a1^2 * self = self^((p - 3) / 2 + 1) = self^((p - 1) / 2)
-            let alpha = a1.square() * self;
+        let s = z.pow_vartime(&P_MINUS_3_DIV_4);
+        let c = s * z;
+        let z_is_square = (s * c).ct_eq(&Fp::one());
+        let other = a1 * s * TWO_INV;
 
-            // x0 = self^((p + 1) / 4)
-            let x0 = a1 * self;
+        let sqrt = Fp2::conditional_select(
+            &Fp2 { c0: -other, c1: c },
+            &Fp2 { c0: c, c1: other },
+            z_is_square,
+        );
 
-            // In the event that alpha = -1, the element is order p - 1 and so
-            // we're just trying to get the square of an element of the subfield
-            // Fp. This is given by x0 * u, since u = sqrt(-1). Since the element
-            // x0 = a + bu has b = 0, the solution is therefore au.
-            CtOption::new(
-                Fp2 {
-                    c0: -x0.c1,
-                    c1: x0.c0,
-                },
-                alpha.ct_eq(&(&Fp2::one()).neg()),
-            )
-            // Otherwise, the correct solution is (1 + alpha)^((q - 1) // 2) * x0
-            .or_else(|| {
-                CtOption::new(
-                    (alpha + Fp2::one()).pow_vartime(&[
-                        0xdcff_7fff_ffff_d555,
-                        0x0f55_ffff_58a9_ffff,
-                        0xb398_6950_7b58_7b12,
-                        0xb23b_a5c2_79c2_895f,
-                        0x258d_d3db_21a5_d66b,
-                        0x0d00_88f5_1cbf_f34d,
-                    ]) * x0,
-                    Choice::from(1),
-                )
-            })
-            // Only return the result if it's really the square root (and so
-            // self is actually quadratic nonresidue)
-            .and_then(|sqrt| CtOption::new(sqrt, sqrt.square().ct_eq(self)))
-        })
+        // Only return the result if it's really the square root (and so self
+        // is actually a quadratic residue).
+        CtOption::new(sqrt, sqrt.square().ct_eq(self))
     }
 
     /// Computes the multiplicative inverse of this field
@@ -774,6 +800,113 @@ fn test_sqrt() {
         .sqrt()
         .is_none()
     ));
+}
+
+/// The previous Fp2 square root (Algorithm 9 of
+/// https://eprint.iacr.org/2012/685.pdf), kept as a reference.
+#[cfg(test)]
+fn sqrt_reference(a: &Fp2) -> CtOption<Fp2> {
+    CtOption::new(Fp2::zero(), a.is_zero()).or_else(|| {
+        let a1 = a.pow_vartime(&P_MINUS_3_DIV_4);
+        let alpha = a1.square() * a;
+        let x0 = a1 * a;
+        CtOption::new(
+            Fp2 {
+                c0: -x0.c1,
+                c1: x0.c0,
+            },
+            alpha.ct_eq(&-Fp2::one()),
+        )
+        .or_else(|| {
+            CtOption::new(
+                (alpha + Fp2::one()).pow_vartime(&[
+                    0xdcff_7fff_ffff_d555,
+                    0x0f55_ffff_58a9_ffff,
+                    0xb398_6950_7b58_7b12,
+                    0xb23b_a5c2_79c2_895f,
+                    0x258d_d3db_21a5_d66b,
+                    0x0d00_88f5_1cbf_f34d,
+                ]) * x0,
+                Choice::from(1),
+            )
+        })
+        .and_then(|sqrt| CtOption::new(sqrt, sqrt.square().ct_eq(a)))
+    })
+}
+
+#[test]
+fn test_two_inv() {
+    assert_eq!(TWO_INV + TWO_INV, Fp::one());
+}
+
+#[test]
+fn test_sqrt_matches_reference() {
+    use rand_core::SeedableRng;
+
+    fn check(a: Fp2) {
+        let sqrt = a.sqrt();
+        let reference = sqrt_reference(&a);
+        assert_eq!(bool::from(sqrt.is_some()), bool::from(reference.is_some()));
+        if let Some(sqrt) = Option::<Fp2>::from(sqrt) {
+            let reference = reference.unwrap();
+            assert_eq!(sqrt.square(), a);
+            assert!(sqrt == reference || sqrt == -reference);
+        }
+    }
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x2f; 16]);
+    let mut squares = 0;
+    for _ in 0..1000 {
+        let a = Fp2::try_from_rng(&mut rng).unwrap();
+        check(a);
+        check(a.square());
+        squares += usize::from(bool::from(a.sqrt().is_some()));
+
+        // Elements of the base field, and multiples of u. Every element of
+        // Fp is a square in Fp2: a nonsquare a0 has root sqrt(-a0) u.
+        let b = Fp::try_from_rng(&mut rng).unwrap();
+        for value in [b, b.square(), -b.square()] {
+            for a in [
+                Fp2 {
+                    c0: value,
+                    c1: Fp::zero(),
+                },
+                Fp2 {
+                    c0: Fp::zero(),
+                    c1: value,
+                },
+            ] {
+                check(a);
+            }
+            assert!(bool::from(
+                Fp2 {
+                    c0: value,
+                    c1: Fp::zero()
+                }
+                .sqrt()
+                .is_some()
+            ));
+        }
+    }
+    // Roughly half of all random elements are squares.
+    assert!((400..600).contains(&squares), "{squares}");
+
+    for a in [
+        Fp2::zero(),
+        Fp2::one(),
+        -Fp2::one(),
+        Fp2 {
+            c0: Fp::zero(),
+            c1: Fp::one(),
+        },
+        Fp2 {
+            c0: Fp::zero(),
+            c1: -Fp::one(),
+        },
+    ] {
+        check(a);
+    }
+    assert_eq!(Fp2::zero().sqrt().unwrap(), Fp2::zero());
 }
 
 #[test]

@@ -2289,3 +2289,90 @@ impl crate::arithmetic::avx2_chord::Avx2ChordField for Fq {
         crate::arithmetic::avx2_chord::modulus29(&MODULUS.0)
     }
 }
+
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+impl crate::arithmetic::avx2_fft::Avx2FftField for Fq {
+    fn fft_limbs(&self) -> [u64; 4] {
+        self.0
+    }
+
+    #[allow(unsafe_code, unused_unsafe)]
+    fn fft_butterflies(
+        values: &mut [Self],
+        completed: usize,
+        level: usize,
+        tw: &crate::arithmetic::avx2_fft::Twiddles,
+        scratch: &mut crate::arithmetic::avx2_fft::Scratch,
+    ) -> bool {
+        // SAFETY: `Fq` is `repr(transparent)` over `[u64; 4]`.
+        let limbs = unsafe { &mut *(values as *mut [Self] as *mut [[u64; 4]]) };
+        // SAFETY: as for `sqrt_chain`: `pasta_curves_avx2` guarantees AVX2.
+        unsafe {
+            crate::arithmetic::avx2_fft::butterflies::<
+                { MODULUS.0[0] },
+                { MODULUS.0[1] },
+                { MODULUS.0[2] },
+                { MODULUS.0[3] },
+            >(limbs, completed, level, tw, scratch)
+        }
+    }
+
+    #[allow(unsafe_code, unused_unsafe)]
+    fn fft_zero_padded(
+        values: &mut [Self],
+        log_n: u32,
+        tw: &crate::arithmetic::avx2_fft::Twiddles,
+        scratch: &mut crate::arithmetic::avx2_fft::Scratch,
+    ) {
+        // SAFETY: `Self` is `repr(transparent)` over `[u64; 4]`.
+        let limbs = unsafe { &mut *(values as *mut [Self] as *mut [[u64; 4]]) };
+        // SAFETY: as for `sqrt_chain`: `pasta_curves_avx2` guarantees AVX2.
+        unsafe {
+            crate::arithmetic::avx2_fft::zero_padded::<
+                { MODULUS.0[0] },
+                { MODULUS.0[1] },
+                { MODULUS.0[2] },
+                { MODULUS.0[3] },
+            >(limbs, log_n, tw, scratch)
+        }
+    }
+}
+
+/// Canonical Montgomery limbs of a slice (the type is `repr(transparent)`).
+#[cfg(all(
+    feature = "alloc",
+    feature = "deferred",
+    feature = "sqrt-table",
+    pasta_curves_avx2
+))]
+#[allow(unsafe_code)]
+pub(crate) fn fq_limbs(values: &[Fq]) -> &[[u64; 4]] {
+    // SAFETY: `Fq` is `repr(transparent)` over `[u64; 4]`.
+    unsafe { &*(values as *const [Fq] as *const [[u64; 4]]) }
+}
+
+/// Reduces AVX2 fold lanes into canonical elements.
+///
+/// # Safety
+///
+/// The CPU must support AVX2 (guaranteed by `pasta_curves_avx2`).
+#[cfg(all(
+    feature = "alloc",
+    feature = "deferred",
+    feature = "sqrt-table",
+    pasta_curves_avx2
+))]
+#[allow(unsafe_code)]
+pub(crate) unsafe fn fq_fold_reduce(lanes: &crate::arithmetic::avx2_fold::Lanes, out: &mut [Fq]) {
+    // SAFETY: `Fq` is `repr(transparent)` over `[u64; 4]`; AVX2 per the
+    // caller's contract.
+    unsafe {
+        let out = &mut *(out as *mut [Fq] as *mut [[u64; 4]]);
+        crate::arithmetic::avx2_fold::reduce::<
+            { MODULUS.0[0] },
+            { MODULUS.0[1] },
+            { MODULUS.0[2] },
+            { MODULUS.0[3] },
+        >(lanes, out)
+    }
+}

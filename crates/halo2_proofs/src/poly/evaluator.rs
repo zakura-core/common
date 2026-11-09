@@ -12,7 +12,10 @@ use std::{
 
 use ff::WithSmallOrderMulGroup;
 use group::ff::Field;
-use pasta_curves::{deferred::DeferredField, pallas, vesta};
+use pasta_curves::{
+    deferred::{DeferredBuffer, DeferredField},
+    pallas, vesta,
+};
 
 use super::{
     Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
@@ -1529,15 +1532,15 @@ fn expanded_polynomial<E: Copy, F: Field, B: Basis>(
     })
 }
 
-type PallasAccumulator = <pallas::Base as DeferredField>::Accumulator;
-type VestaAccumulator = <vesta::Base as DeferredField>::Accumulator;
+type PallasAccumulator = DeferredBuffer<pallas::Base>;
+type VestaAccumulator = DeferredBuffer<vesta::Base>;
 
 struct FoldWorkspace<F: Field> {
     // Live folds own their buffers, so nested folds can take another buffer
     // without borrowing this workspace across recursive evaluation.
     values: Vec<Vec<F>>,
-    pallas_accumulators: Vec<Vec<PallasAccumulator>>,
-    vesta_accumulators: Vec<Vec<VestaAccumulator>>,
+    pallas_accumulators: Vec<PallasAccumulator>,
+    vesta_accumulators: Vec<VestaAccumulator>,
 }
 
 impl<F: Field> Default for FoldWorkspace<F> {
@@ -1563,23 +1566,28 @@ impl<F: Field> FoldWorkspace<F> {
         take_buffer(&mut self.values, len, F::ZERO)
     }
 
-    fn take_pallas_accumulators(&mut self, len: usize) -> Vec<PallasAccumulator> {
-        take_buffer(&mut self.pallas_accumulators, len, Default::default())
+    fn take_pallas_accumulators(&mut self, len: usize) -> PallasAccumulator {
+        // Reused accumulators remain stale; the `has_products` flags guard them.
+        let mut buffer = self.pallas_accumulators.pop().unwrap_or_default();
+        buffer.resize(len);
+        buffer
     }
 
-    fn take_vesta_accumulators(&mut self, len: usize) -> Vec<VestaAccumulator> {
-        take_buffer(&mut self.vesta_accumulators, len, Default::default())
+    fn take_vesta_accumulators(&mut self, len: usize) -> VestaAccumulator {
+        let mut buffer = self.vesta_accumulators.pop().unwrap_or_default();
+        buffer.resize(len);
+        buffer
     }
 
     fn return_values(&mut self, values: Vec<F>) {
         self.values.push(values);
     }
 
-    fn return_pallas_accumulators(&mut self, accumulators: Vec<PallasAccumulator>) {
+    fn return_pallas_accumulators(&mut self, accumulators: PallasAccumulator) {
         self.pallas_accumulators.push(accumulators);
     }
 
-    fn return_vesta_accumulators(&mut self, accumulators: Vec<VestaAccumulator>) {
+    fn return_vesta_accumulators(&mut self, accumulators: VestaAccumulator) {
         self.vesta_accumulators.push(accumulators);
     }
 }
@@ -1608,7 +1616,7 @@ enum PowerFold<'a, F: Field> {
         factors: Option<Vec<F>>,
     },
     Pallas {
-        accumulators: Vec<PallasAccumulator>,
+        accumulators: PallasAccumulator,
         terms: Vec<F>,
         factors: Option<Vec<F>>,
         addends: Option<Vec<F>>,
@@ -1617,7 +1625,7 @@ enum PowerFold<'a, F: Field> {
         output: &'a mut [F],
     },
     Vesta {
-        accumulators: Vec<VestaAccumulator>,
+        accumulators: VestaAccumulator,
         terms: Vec<F>,
         factors: Option<Vec<F>>,
         addends: Option<Vec<F>>,
@@ -1875,8 +1883,8 @@ impl<'a, F: Field> PowerFold<'a, F> {
 // and one Rayon chunk. A reset makes prior contents unreachable: terms are
 // overwritten before accumulation, and the flags guard addends and products
 // until their buffers have been initialized for the current fold.
-struct DeferredPowerFold<T: DeferredField, F: Field> {
-    accumulators: Vec<T::Accumulator>,
+struct DeferredPowerFold<T: DeferredField + 'static, F: Field> {
+    accumulators: DeferredBuffer<T>,
     terms: Vec<F>,
     addends: Option<Vec<F>>,
     has_products: bool,
@@ -1884,7 +1892,7 @@ struct DeferredPowerFold<T: DeferredField, F: Field> {
 }
 
 impl<T: DeferredField + 'static, F: Field> DeferredPowerFold<T, F> {
-    fn new(accumulators: Vec<T::Accumulator>, terms: Vec<F>) -> Self {
+    fn new(accumulators: DeferredBuffer<T>, terms: Vec<F>) -> Self {
         debug_assert_eq!(accumulators.len(), terms.len());
         Self {
             accumulators,
@@ -2087,80 +2095,54 @@ impl<F: Field> ReusablePowerFold<F> {
 }
 
 fn initialize_deferred<T: DeferredField + 'static>(
-    accumulators: &mut [T::Accumulator],
+    accumulators: &mut DeferredBuffer<T>,
     terms: &dyn Any,
     power: &dyn Any,
 ) {
     let terms = terms
         .downcast_ref::<Vec<T>>()
-        .expect("term buffer matches the deferred field")
-        .as_slice();
+        .expect("term buffer matches the deferred field");
     let power = power
         .downcast_ref::<T>()
         .expect("power matches the deferred field");
-    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
-        let mut initialized = T::Accumulator::default();
-        T::mul_accumulate(&mut initialized, term, power);
-        *accumulator = initialized;
-    }
+    accumulators.initialize(terms, power);
 }
 
 fn initialize_deferred_values<T: DeferredField + 'static, F: Field>(
-    accumulators: &mut [T::Accumulator],
+    accumulators: &mut DeferredBuffer<T>,
     terms: &[F],
     power: &F,
 ) {
-    // `ReusablePowerFold` selects `T` by `TypeId`, so these checked casts
-    // cannot fail. Per-element casts let us keep the cache slice borrowed.
-    let power = (power as &dyn Any)
-        .downcast_ref::<T>()
-        .expect("power matches the deferred field");
-    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
-        let term = (term as &dyn Any)
-            .downcast_ref::<T>()
-            .expect("term matches the deferred field");
-        let mut initialized = T::Accumulator::default();
-        T::mul_accumulate(&mut initialized, term, power);
-        *accumulator = initialized;
-    }
+    // `ReusablePowerFold` selects `T` by `TypeId`; the buffer checks that
+    // `F` is `T` before reinterpreting the rows.
+    accumulators.initialize(terms, power);
 }
 
 fn accumulate_deferred<T: DeferredField + 'static>(
-    accumulators: &mut [T::Accumulator],
+    accumulators: &mut DeferredBuffer<T>,
     terms: &dyn Any,
     power: &dyn Any,
 ) {
     let terms = terms
         .downcast_ref::<Vec<T>>()
-        .expect("term buffer matches the deferred field")
-        .as_slice();
+        .expect("term buffer matches the deferred field");
     let power = power
         .downcast_ref::<T>()
         .expect("power matches the deferred field");
-    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
-        T::mul_accumulate(accumulator, term, power);
-    }
+    accumulators.accumulate(terms, power);
 }
 
 fn accumulate_deferred_values<T: DeferredField + 'static, F: Field>(
-    accumulators: &mut [T::Accumulator],
+    accumulators: &mut DeferredBuffer<T>,
     terms: &[F],
     power: &F,
 ) {
     // See `initialize_deferred_values` for the runtime type invariant.
-    let power = (power as &dyn Any)
-        .downcast_ref::<T>()
-        .expect("power matches the deferred field");
-    for (accumulator, term) in accumulators.iter_mut().zip(terms) {
-        let term = (term as &dyn Any)
-            .downcast_ref::<T>()
-            .expect("term matches the deferred field");
-        T::mul_accumulate(accumulator, term, power);
-    }
+    accumulators.accumulate(terms, power);
 }
 
 fn accumulate_deferred_products<T: DeferredField + 'static>(
-    accumulators: &mut [T::Accumulator],
+    accumulators: &mut DeferredBuffer<T>,
     terms: &dyn Any,
     factors: &dyn Any,
 ) {
@@ -2170,13 +2152,11 @@ fn accumulate_deferred_products<T: DeferredField + 'static>(
     let factors = factors
         .downcast_ref::<Vec<T>>()
         .expect("factor buffer matches the deferred field");
-    for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
-        T::mul_accumulate(accumulator, term, factor);
-    }
+    accumulators.accumulate_products(terms, factors);
 }
 
 fn initialize_deferred_products<T: DeferredField + 'static>(
-    accumulators: &mut [T::Accumulator],
+    accumulators: &mut DeferredBuffer<T>,
     terms: &dyn Any,
     factors: &dyn Any,
 ) {
@@ -2186,25 +2166,15 @@ fn initialize_deferred_products<T: DeferredField + 'static>(
     let factors = factors
         .downcast_ref::<Vec<T>>()
         .expect("factor buffer matches the deferred field");
-    for ((accumulator, term), factor) in accumulators.iter_mut().zip(terms).zip(factors) {
-        let mut initialized = T::Accumulator::default();
-        T::mul_accumulate(&mut initialized, term, factor);
-        *accumulator = initialized;
-    }
+    accumulators.initialize_products(terms, factors);
 }
 
 fn reduce_deferred_into<T: DeferredField + 'static, F: Field>(
-    accumulators: &[T::Accumulator],
+    accumulators: &DeferredBuffer<T>,
     values: &mut [F],
 ) {
-    for (value, accumulator) in values.iter_mut().zip(accumulators) {
-        // The caller selected `T` by `TypeId`, so this checked cast cannot
-        // fail. Casting each element lets reduction target a borrowed slice.
-        let value = (value as &mut dyn Any)
-            .downcast_mut::<T>()
-            .expect("output element matches the deferred field");
-        *value = T::reduce(*accumulator);
-    }
+    // The caller selected `T` by `TypeId`; the buffer checks that `F` is `T`.
+    accumulators.reduce_into(values);
 }
 
 #[derive(Clone, Copy)]

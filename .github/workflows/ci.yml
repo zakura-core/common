@@ -2136,11 +2136,17 @@ jobs:
             udon-portability
 
   orchard-backends:
-    name: Orchard / Capabilities and proof compatibility
+    # These parts are independent, so they run in parallel. Together they run
+    # the same commands the single serial job used to run.
+    name: Orchard / Capabilities and proof compatibility (${{ matrix.part }})
     needs: changes
     if: needs.changes.outputs.orchard == 'true' || needs.changes.outputs.reddsa == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [feature-checks, proof-interop, backend-tests]
     env:
       PROPTEST_CASES: "16"
       RAYON_NUM_THREADS: "2"
@@ -2152,11 +2158,19 @@ jobs:
       - name: Restore Rust build caches
         uses: ./.github/actions/rust-cache
         with:
-          key: orchard-backends
+          key: orchard-backends-${{ matrix.part }}
       - run: cargo fetch --locked
-      - run: python3 .github/scripts/test_supported_features.py
-      - run: python3 .github/scripts/check_native_backend.py
-      - run: python3 .github/scripts/check_orchard_backends.py
-      - run: cargo test --release --locked -p zakura-orchard --features test-dependencies
-      - run: cargo test --release --locked -p zakura-orchard --no-default-features --features backend-sensei,circuit,multicore,zip32-addresses,test-dependencies,weighted-merkle
-      - run: cargo test --release --locked -p zakura-reddsa -p zakura-reddsa-frost --no-default-features --features pallas-sensei,std
+      - if: matrix.part == 'feature-checks'
+        run: python3 .github/scripts/test_supported_features.py
+      - if: matrix.part == 'feature-checks'
+        run: python3 .github/scripts/check_native_backend.py
+      - if: matrix.part == 'feature-checks'
+        run: python3 .github/scripts/check_orchard_backends.py --checks-only
+      - if: matrix.part == 'proof-interop'
+        run: python3 .github/scripts/check_orchard_backends.py --interop-only
+      - if: matrix.part == 'backend-tests'
+        run: cargo test --release --locked -p zakura-orchard --features test-dependencies
+      - if: matrix.part == 'backend-tests'
+        run: cargo test --release --locked -p zakura-orchard --no-default-features --features backend-sensei,circuit,multicore,zip32-addresses,test-dependencies,weighted-merkle
+      - if: matrix.part == 'backend-tests'
+        run: cargo test --release --locked -p zakura-reddsa -p zakura-reddsa-frost --no-default-features --features pallas-sensei,std
