@@ -9,8 +9,8 @@
 //! Historical instances populate nine rows; post-NU6.3 adds
 //! `disable_cross_address` as the tenth. [`VerificationRequest::new`] requires
 //! that flag to be false for historical keys. All remaining rows are zero,
-//! allowing [`absorb_instances`] and the final equation to use prefixes of one
-//! shared Lagrange bank.
+//! allowing [`absorb_instances`] and the final equation to use prefixes of the
+//! instance generator bank and the shared Lagrange bank.
 //!
 //! The `pinned_keys_and_instance_prefixes_match_reference` test checks the
 //! shared constraint system, commitments, transcript representatives, and
@@ -47,11 +47,12 @@
 //! weights on the calling thread before runtime initialization, scratch
 //! acquisition, or pool entry; a singleton needs no draws. The borrowed
 //! [`RandomSource`] stays on that thread, allowing reentrant callbacks, and only
-//! the weights reach workers. Each worker chunk creates its own [`Equation`]
-//! and [`MsmWorkspace`]; that scratch is dropped after folding the chunk. After
-//! merging successful equations, [`VerifierRuntime::check`] borrows a separate
-//! workspace for the final MSM. Only this last workspace participates in the
-//! runtime's idle-slot retention policy.
+//! the weights reach workers. Each worker chunk creates its own [`Equation`],
+//! dropped after folding the chunk; instance commitments walk the runtime's
+//! fixed-base generator bank, so chunk folding runs no MSM. After merging
+//! successful equations, [`VerifierRuntime::check`] borrows a workspace for
+//! the final MSM. Only that workspace participates in the runtime's idle-slot
+//! retention policy.
 
 use super::{
     commitment::{FixedGenerator, MsmWorkspace},
@@ -126,6 +127,9 @@ struct VerifierRuntime {
     srs: Arc<PreparedSrs>,
     vk_bases: Vec<PreparedAffinePoint<Vesta>>,
     vk_indices: [Vec<u32>; VERSION_MASKS],
+    // Doubling-free tables over the first ten Lagrange bases, used by
+    // absorb_instances; the final equation keeps using the shared SRS bank.
+    instance_generators: Vec<FixedGenerator>,
     codebook: Arc<Codebook>,
     executor: &'static PoolExecutor,
     idle: Mutex<Option<MsmWorkspace>>,
@@ -163,9 +167,14 @@ impl VerifierRuntime {
                 context,
             );
         });
+        let instance_generators = PREPARED_POINTS.lagrange_bases[..INSTANCE_VALUE_COUNT]
+            .iter()
+            .map(|base| FixedGenerator::warmed(base, tuning::INSTANCE_FIXED_WIDTH))
+            .collect();
         Self {
             srs,
             vk_bases,
+            instance_generators,
             vk_indices: core::array::from_fn(|mask| {
                 let mut used = [false; VERIFIER_POINT_COUNT];
                 for (version, columns) in VK_DATA.columns.iter().enumerate() {
@@ -336,11 +345,10 @@ pub(crate) fn verify(
         let chunk = requests.len().div_ceil(workers);
         execution.map(
             requests.chunks(chunk).zip(weights.chunks(chunk)),
-            |(requests, weights), execution| {
+            |(requests, weights), _| {
                 let mut equation = Equation::new();
-                let mut msm = MsmWorkspace::new();
                 for (request, &weight) in requests.iter().zip(weights) {
-                    equation.proof(request, weight, &runtime.srs, &mut msm, execution.serial())?;
+                    equation.proof(request, weight, &runtime.instance_generators)?;
                 }
                 Ok::<_, Error>(equation)
             },
@@ -401,9 +409,7 @@ impl Equation {
         &mut self,
         request: &VerificationRequest<'_>,
         weight: Fp,
-        srs: &PreparedSrs,
-        msm: &mut MsmWorkspace,
-        execution: Execution<'_>,
+        generators: &[FixedGenerator],
     ) -> Result<(), Error> {
         let decoded = prefetch_points(request.proof, request.statements.len());
         let mut reader = match &decoded {
@@ -416,7 +422,7 @@ impl Equation {
         let instance_len = version.instance_len();
         reader.common_scalar(&version.vk_representative());
         let statements: Vec<_> = request.statements.iter().map(|s| s.native()).collect();
-        absorb_instances(&mut reader, &statements, instance_len, srs, msm, execution)?;
+        absorb_instances(&mut reader, &statements, instance_len, generators)?;
         let mut actions: Vec<_> = (0..statements.len())
             .map(|_| ActionData::default())
             .collect();
@@ -621,24 +627,36 @@ fn absorb_instances(
     reader: &mut Reader<'_>,
     statements: &[NativeStatement],
     instance_len: usize,
-    srs: &PreparedSrs,
-    msm: &mut MsmWorkspace,
-    execution: Execution<'_>,
+    generators: &[FixedGenerator],
 ) -> Result<(), Error> {
-    let bases = srs.lagrange_bases().range(0..instance_len);
-    let inputs: Vec<_> = statements
+    // The version selects a prefix of NativeStatement and of the generator
+    // bank. Each commitment walks the statement's values through the
+    // doubling-free fixed-base tables instead of a general MSM. An Orchard
+    // bundle's Actions share one anchor (slot zero), so its term is computed
+    // once; statements with distinct anchors fall back to per-statement terms.
+    let tables: Vec<_> = generators[..instance_len]
         .iter()
-        .map(|s| Input::new(bases, &s[..instance_len]))
+        .map(FixedGenerator::table)
         .collect();
+    use crate::public_input::ANCHOR;
+    let shared_anchor = match statements {
+        [first, rest @ ..]
+            if rest
+                .iter()
+                .all(|s| s[ANCHOR].reduce() == first[ANCHOR].reduce()) =>
+        {
+            Some(FixedGenerator::sum_tables(&tables[..1], &first[..1]))
+        }
+        _ => None,
+    };
     let mut projective = vec![VestaProjective::IDENTITY; statements.len()];
-    // The version selects a prefix of NativeStatement and the same SRS bank;
-    // one output was allocated per input. Failure is an internal MSM contract.
-    msm.prepare(&inputs, execution.budget)
-        .map_err(|_| Error::InternalInvariant)?
-        .execute(&mut projective, &execution)
-        .map_err(|_| Error::InternalInvariant)?;
-    for point in &mut projective {
-        *point = point.add_mixed(&PREPARED_POINTS.blind_generator);
+    for (statement, point) in statements.iter().zip(&mut projective) {
+        let anchor = shared_anchor
+            .unwrap_or_else(|| FixedGenerator::sum_tables(&tables[..1], &statement[..1]));
+        let rest = FixedGenerator::sum_tables(&tables[1..], &statement[1..instance_len]);
+        *point = anchor
+            .add(&rest)
+            .add_mixed(&PREPARED_POINTS.blind_generator);
     }
     let mut points = vec![VestaPoint::IDENTITY; statements.len()];
     let mut scratch = vec![Fq::ZERO; statements.len()];

@@ -27,6 +27,41 @@ fn no_rng() -> Result<u64, crate::RandomnessError> {
 }
 
 #[test]
+fn instance_commitments_match_a_lagrange_msm_reference() {
+    let runtime = VerifierRuntime::get();
+    let (statements, _) = fixture();
+    // The archived statements share one anchor (the shared-term path); flip
+    // the second anchor for the per-statement fallback.
+    let mut distinct = statements.clone();
+    let mut anchor = [0; 32];
+    anchor[0] = 99;
+    distinct[1].anchor = crate::primitives::Fp::from_bytes(anchor).unwrap();
+    for statements in [statements, distinct] {
+        let natives: Vec<_> = statements.iter().map(|s| s.native()).collect();
+        for instance_len in [9, 10] {
+            let mut reader = Reader::new(&[]);
+            absorb_instances(&mut reader, &natives, instance_len, &runtime.instance_generators)
+                .unwrap();
+            let got = reader.challenge();
+            // The fixed-base path must absorb exactly what per-statement
+            // multiplications over the same Lagrange prefix produce.
+            let mut reference = Reader::new(&[]);
+            for s in &natives {
+                let mut sum = PREPARED_POINTS.blind_generator.to_projective();
+                for (base, value) in PREPARED_POINTS.lagrange_bases[..instance_len]
+                    .iter()
+                    .zip(&s[..instance_len])
+                {
+                    sum = sum.add(&base.to_point().mul_projective(value));
+                }
+                reference.common_point(&sum.to_point()).unwrap();
+            }
+            assert_eq!(got.to_bytes(), reference.challenge().to_bytes());
+        }
+    }
+}
+
+#[test]
 fn prefetch_decodes_every_point_of_an_archived_proof() {
     use super::super::protocol::transcript_encoding::{ACTION_POINTS, FIXED_POINTS};
     let (statements, proof) = fixture();
@@ -157,17 +192,12 @@ fn compare_equation_with_instances(
         .unwrap_or_else(|| panic!("missing independent equation {}", hex::encode(key)));
     let mut equation = Equation::new();
     let runtime = VerifierRuntime::get();
-    runtime
-        .executor
-        .run(|executor| {
-            equation.proof(
-                &VerificationRequest::new(version, statements, proof).unwrap(),
-                weight,
-                &runtime.srs,
-                &mut MsmWorkspace::new(),
-                Execution::new(executor, runtime.executor.budget()).serial(),
-            )
-        })
+    equation
+        .proof(
+            &VerificationRequest::new(version, statements, proof).unwrap(),
+            weight,
+            &runtime.instance_generators,
+        )
         .unwrap();
     let challenge_count = u32::from_le_bytes(expected[32..36].try_into().unwrap()) as usize;
     assert_eq!(expected.len(), 36 + challenge_count * 32);

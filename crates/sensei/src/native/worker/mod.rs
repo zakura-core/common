@@ -64,6 +64,7 @@ impl<'a> Execution<'a> {
         buffer.copy_from_slice(values);
         buffer
     }
+    #[cfg(feature = "prover")]
     pub(crate) fn serial(self) -> Self {
         Self {
             budget: TaskBudget::SERIAL,
