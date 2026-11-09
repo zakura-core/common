@@ -9,8 +9,8 @@
 //! Historical instances populate nine rows; post-NU6.3 adds
 //! `disable_cross_address` as the tenth. [`VerificationRequest::new`] requires
 //! that flag to be false for historical keys. All remaining rows are zero,
-//! allowing [`absorb_instances`] and the final equation to use prefixes of one
-//! shared Lagrange bank.
+//! allowing [`absorb_instances`] and the final equation to use prefixes of the
+//! instance generator bank and the shared Lagrange bank.
 //!
 //! The `pinned_keys_and_instance_prefixes_match_reference` test checks the
 //! shared constraint system, commitments, transcript representatives, and
@@ -47,11 +47,12 @@
 //! weights on the calling thread before runtime initialization, scratch
 //! acquisition, or pool entry; a singleton needs no draws. The borrowed
 //! [`RandomSource`] stays on that thread, allowing reentrant callbacks, and only
-//! the weights reach workers. Each worker chunk creates its own [`Equation`]
-//! and [`MsmWorkspace`]; that scratch is dropped after folding the chunk. After
-//! merging successful equations, [`VerifierRuntime::check`] borrows a separate
-//! workspace for the final MSM. Only this last workspace participates in the
-//! runtime's idle-slot retention policy.
+//! the weights reach workers. Each worker chunk creates its own [`Equation`],
+//! dropped after folding the chunk; instance commitments walk the runtime's
+//! fixed-base generator bank, so chunk folding runs no MSM. After merging
+//! successful equations, [`VerifierRuntime::check`] borrows a workspace for
+//! the final MSM. Only that workspace participates in the runtime's idle-slot
+//! retention policy.
 
 use super::{
     commitment::{FixedGenerator, MsmWorkspace},
@@ -126,6 +127,9 @@ struct VerifierRuntime {
     srs: Arc<PreparedSrs>,
     vk_bases: Vec<PreparedAffinePoint<Vesta>>,
     vk_indices: [Vec<u32>; VERSION_MASKS],
+    // Doubling-free tables over the first ten Lagrange bases, used by
+    // absorb_instances; the final equation keeps using the shared SRS bank.
+    instance_generators: Vec<FixedGenerator>,
     codebook: Arc<Codebook>,
     executor: &'static PoolExecutor,
     idle: Mutex<Option<MsmWorkspace>>,
@@ -163,9 +167,14 @@ impl VerifierRuntime {
                 context,
             );
         });
+        let instance_generators = PREPARED_POINTS.lagrange_bases[..INSTANCE_VALUE_COUNT]
+            .iter()
+            .map(|base| FixedGenerator::warmed(base, tuning::INSTANCE_FIXED_WIDTH))
+            .collect();
         Self {
             srs,
             vk_bases,
+            instance_generators,
             vk_indices: core::array::from_fn(|mask| {
                 let mut used = [false; VERIFIER_POINT_COUNT];
                 for (version, columns) in VK_DATA.columns.iter().enumerate() {
@@ -249,7 +258,7 @@ impl VerifierRuntime {
                             self.srs.lagrange_bases().range(0..INSTANCE_VALUE_COUNT),
                             &equation.fixed[INSTANCE_OFFSET..BLIND_GENERATOR_SLOT],
                         ),
-                        Input::new(Bases::Affine(&equation.points), &equation.scalars),
+                        Input::new(Bases::Prepared(&equation.points), &equation.scalars),
                     ],
                     self.executor.budget(),
                 )
@@ -270,6 +279,42 @@ impl VerifierRuntime {
 
 pub(crate) fn warm_up_verifier() {
     let _ = VerifierRuntime::get();
+}
+
+/// Decodes every point in a proof ahead of transcript reading.
+///
+/// A canonical proof's point offsets depend only on its Action count, so the
+/// encodings can be gathered and decoded together — sharing interleaved
+/// square-root chains — before Blake2b absorption consumes the transcript
+/// serially. Returns `None` for an unexpected length, an invalid encoding, or
+/// an identity point. Every supported version uses this layout, so failure
+/// rejects the proof without decoding its points again.
+fn prefetch_points(proof: &[u8], actions: usize) -> Option<Vec<VestaAffine>> {
+    use super::protocol::transcript_encoding::{POINT_BYTES, point_runs, proof_capacity};
+    if proof.len() != proof_capacity(actions)? {
+        return None;
+    }
+    let runs = point_runs(actions)?;
+    let total = runs.iter().map(|(_, count)| count).sum();
+    let mut encodings = Vec::with_capacity(total);
+    for &(offset, count) in &runs {
+        let bytes = proof.get(offset..offset + count * POINT_BYTES)?;
+        for chunk in bytes.chunks_exact(POINT_BYTES) {
+            let encoding = <[u8; 32]>::try_from(chunk).expect("fixed encoding width");
+            // Identity is valid for the curve decoder but forbidden in proofs.
+            // Reject it before doing any square-root work for this proof.
+            if encoding == [0; POINT_BYTES] {
+                return None;
+            }
+            encodings.push(encoding);
+        }
+    }
+    let mut points = vec![VestaPoint::IDENTITY; total];
+    VestaPoint::batch_from_bytes(&encodings, &mut points)?;
+    points
+        .into_iter()
+        .map(|point| point.as_affine().copied())
+        .collect()
 }
 
 #[cfg(all(test, feature = "prover"))]
@@ -303,11 +348,10 @@ pub(crate) fn verify(
         let chunk = requests.len().div_ceil(workers);
         execution.map(
             requests.chunks(chunk).zip(weights.chunks(chunk)),
-            |(requests, weights), execution| {
+            |(requests, weights), _| {
                 let mut equation = Equation::new();
-                let mut msm = MsmWorkspace::new();
                 for (request, &weight) in requests.iter().zip(weights) {
-                    equation.proof(request, weight, &runtime.srs, &mut msm, execution.serial())?;
+                    equation.proof(request, weight, &runtime.instance_generators)?;
                 }
                 Ok::<_, Error>(equation)
             },
@@ -324,7 +368,9 @@ pub(crate) fn verify(
 struct Equation {
     versions: u8,
     fixed: Vec<Fp>,
-    points: Vec<VestaAffine>,
+    // Prepared entries cache each point's endomorphism coordinate, saving the
+    // MSM one base-field multiplication per nonzero rotated digit per window.
+    points: Vec<PreparedAffinePoint<Vesta>>,
     scalars: Vec<Fp>,
     #[cfg(test)]
     challenges: Vec<[u8; 32]>,
@@ -350,7 +396,8 @@ impl Equation {
     }
     fn point(&mut self, reader: &mut Reader<'_>) -> Result<usize, Error> {
         let index = self.points.len();
-        self.points.push(reader.point()?);
+        self.points
+            .push(PreparedAffinePoint::from_affine(&reader.point()?));
         self.scalars.push(<Fp>::ZERO);
         Ok(index)
     }
@@ -365,18 +412,18 @@ impl Equation {
         &mut self,
         request: &VerificationRequest<'_>,
         weight: Fp,
-        srs: &PreparedSrs,
-        msm: &mut MsmWorkspace,
-        execution: Execution<'_>,
+        generators: &[FixedGenerator],
     ) -> Result<(), Error> {
-        let mut reader = Reader::new(request.proof);
+        let decoded =
+            prefetch_points(request.proof, request.statements.len()).ok_or(Error::InvalidProof)?;
+        let mut reader = Reader::with_decoded(request.proof, &decoded);
         let version = request.version;
         self.versions |= 1 << version.index();
         let columns = &VK_DATA.columns[version.index()];
         let instance_len = version.instance_len();
         reader.common_scalar(&version.vk_representative());
         let statements: Vec<_> = request.statements.iter().map(|s| s.native()).collect();
-        absorb_instances(&mut reader, &statements, instance_len, srs, msm, execution)?;
+        absorb_instances(&mut reader, &statements, instance_len, generators)?;
         let mut actions: Vec<_> = (0..statements.len())
             .map(|_| ActionData::default())
             .collect();
@@ -581,24 +628,36 @@ fn absorb_instances(
     reader: &mut Reader<'_>,
     statements: &[NativeStatement],
     instance_len: usize,
-    srs: &PreparedSrs,
-    msm: &mut MsmWorkspace,
-    execution: Execution<'_>,
+    generators: &[FixedGenerator],
 ) -> Result<(), Error> {
-    let bases = srs.lagrange_bases().range(0..instance_len);
-    let inputs: Vec<_> = statements
+    // The version selects a prefix of NativeStatement and of the generator
+    // bank. Each commitment walks the statement's values through the
+    // doubling-free fixed-base tables instead of a general MSM. An Orchard
+    // bundle's Actions share one anchor (slot zero), so its term is computed
+    // once; statements with distinct anchors fall back to per-statement terms.
+    let tables: Vec<_> = generators[..instance_len]
         .iter()
-        .map(|s| Input::new(bases, &s[..instance_len]))
+        .map(FixedGenerator::table)
         .collect();
+    use crate::public_input::ANCHOR;
+    let shared_anchor = match statements {
+        [first, rest @ ..]
+            if rest
+                .iter()
+                .all(|s| s[ANCHOR].reduce() == first[ANCHOR].reduce()) =>
+        {
+            Some(FixedGenerator::sum_tables(&tables[..1], &first[..1]))
+        }
+        _ => None,
+    };
     let mut projective = vec![VestaProjective::IDENTITY; statements.len()];
-    // The version selects a prefix of NativeStatement and the same SRS bank;
-    // one output was allocated per input. Failure is an internal MSM contract.
-    msm.prepare(&inputs, execution.budget)
-        .map_err(|_| Error::InternalInvariant)?
-        .execute(&mut projective, &execution)
-        .map_err(|_| Error::InternalInvariant)?;
-    for point in &mut projective {
-        *point = point.add_mixed(&PREPARED_POINTS.blind_generator);
+    for (statement, point) in statements.iter().zip(&mut projective) {
+        let anchor = shared_anchor
+            .unwrap_or_else(|| FixedGenerator::sum_tables(&tables[..1], &statement[..1]));
+        let rest = FixedGenerator::sum_tables(&tables[1..], &statement[1..instance_len]);
+        *point = anchor
+            .add(&rest)
+            .add_mixed(&PREPARED_POINTS.blind_generator);
     }
     let mut points = vec![VestaPoint::IDENTITY; statements.len()];
     let mut scratch = vec![Fq::ZERO; statements.len()];

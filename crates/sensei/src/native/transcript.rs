@@ -155,8 +155,16 @@ impl Transcript {
 pub(crate) struct Reader<'a> {
     transcript: Transcript,
     remaining: &'a [u8],
+    decoded: Option<Decoded<'a>>,
     #[cfg(test)]
     pub(crate) challenges: Vec<[u8; 32]>,
+}
+/// Points pre-decoded from a proof's statically known point offsets, consumed
+/// in transcript order.
+#[cfg(feature = "verifier")]
+struct Decoded<'a> {
+    points: &'a [super::curve::VestaAffine],
+    cursor: usize,
 }
 #[cfg(feature = "verifier")]
 impl<'a> Reader<'a> {
@@ -164,8 +172,19 @@ impl<'a> Reader<'a> {
         Self {
             transcript: Transcript::with_proof_capacity(0),
             remaining: proof,
+            decoded: None,
             #[cfg(test)]
             challenges: Vec::new(),
+        }
+    }
+    /// A reader whose point reads take `points`, pre-decoded from this proof's
+    /// statically known point offsets in transcript order. Byte consumption and
+    /// absorption are identical to [`Self::new`]; only each point's decoding
+    /// work is already done.
+    pub(crate) fn with_decoded(proof: &'a [u8], points: &'a [super::curve::VestaAffine]) -> Self {
+        Self {
+            decoded: Some(Decoded { points, cursor: 0 }),
+            ..Self::new(proof)
         }
     }
     pub(crate) fn common_scalar(&mut self, scalar: &Fp) {
@@ -187,7 +206,21 @@ impl<'a> Reader<'a> {
         Ok(bytes.try_into().expect("fixed encoding width"))
     }
     pub(crate) fn point(&mut self) -> Result<super::curve::VestaAffine, crate::Error> {
-        let point = VestaPoint::from_bytes(self.encoding()?).ok_or(crate::Error::InvalidProof)?;
+        let encoding = self.encoding()?;
+        if let Some(decoded) = &mut self.decoded {
+            let affine = *decoded
+                .points
+                .get(decoded.cursor)
+                .ok_or(crate::Error::InvalidProof)?;
+            decoded.cursor += 1;
+            let point = affine.to_point();
+            // The pre-decoded point came from exactly these proof bytes, so
+            // the absorbed coordinates match the decode-on-read path's.
+            debug_assert_eq!(point.to_bytes(), encoding);
+            self.common_point(&point)?;
+            return Ok(affine);
+        }
+        let point = VestaPoint::from_bytes(encoding).ok_or(crate::Error::InvalidProof)?;
         self.common_point(&point)?;
         point.as_affine().copied().ok_or(crate::Error::InvalidProof)
     }

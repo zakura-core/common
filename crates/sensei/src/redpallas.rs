@@ -492,14 +492,25 @@ pub fn verify_batch(items: &[BatchItem], rng: &mut dyn RandomSource) -> Result<(
     if terms > isize::MAX as usize / core::mem::size_of::<PallasPoint>() {
         return Err(Error::InvalidInput);
     }
-    let decoded = items
+    // Validate every encoding before drawing any randomness. Check the cheap
+    // response scalars first so a noncanonical response rejects the batch
+    // before allocating point buffers or doing square-root work.
+    let responses = items
         .iter()
-        .map(BatchItem::components)
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|item| {
+            Fq::from_bytes(item.signature[32..].try_into().unwrap()).ok_or(Error::InvalidSignature)
+        })
+        .collect::<Result<Vec<Fq>, _>>()?;
+    let encodings: Vec<[u8; 32]> = items
+        .iter()
+        .map(|item| item.signature[..32].try_into().unwrap())
+        .collect();
+    let mut points = vec![PallasPoint::IDENTITY; items.len()];
+    PallasPoint::batch_from_bytes(&encodings, &mut points).ok_or(Error::InvalidSignature)?;
     let mut bases = Vec::with_capacity(terms);
     let mut scalars = Vec::with_capacity(terms);
     let mut sums = [Fq::ZERO; 2];
-    for (item, (r, s)) in items.iter().zip(decoded) {
+    for ((item, r), s) in items.iter().zip(points).zip(responses) {
         let bytes = random_bytes::<16>(rng)?;
         let weight: Fq = Fq::from_bytes_reduced(&bytes);
         if weight.is_zero() {
@@ -512,7 +523,39 @@ pub fn verify_batch(items: &[BatchItem], rng: &mut dyn RandomSource) -> Result<(
     bases.extend([base(0).to_point(), base(1).to_point()]);
     scalars.extend(sums);
     let input = Input::new(Bases::Points(&bases), &scalars);
-    let options = ExecutionOptions::default();
+    if execute(input, terms)? {
+        Ok(())
+    } else {
+        Err(Error::InvalidSignature)
+    }
+}
+
+// Runs the batch equation's MSM. With worker support compiled in, batches with
+// enough terms run on the shared pool; smaller batches and primitives-only
+// builds stay on the calling thread.
+fn execute(input: Input<'_, Pallas>, terms: usize) -> Result<bool, Error> {
+    #[cfg(all(feature = "multicore", any(feature = "prover", feature = "verifier")))]
+    {
+        // Below this size, distributing windows costs more than it saves.
+        const POOL_TERMS: usize = 16;
+        if terms >= POOL_TERMS {
+            let pool = crate::native::executor::PoolExecutor::get();
+            let budget = pool.budget();
+            if budget != udon::exec::TaskBudget::SERIAL {
+                let options = ExecutionOptions::default().with_task_budget(budget);
+                return pool.run(move |context| execute_with(input, options, context));
+            }
+        }
+    }
+    let _ = terms;
+    execute_with(input, ExecutionOptions::default(), &SerialExecutor)
+}
+
+fn execute_with(
+    input: Input<'_, Pallas>,
+    options: ExecutionOptions,
+    executor: &impl udon::exec::Executor,
+) -> Result<bool, Error> {
     let sizes = input
         .requirements(options)
         .map_err(|_| Error::InvalidInput)?;
@@ -525,7 +568,7 @@ pub fn verify_batch(items: &[BatchItem], rng: &mut dyn RandomSource) -> Result<(
     let result = input
         .execute(
             options,
-            &SerialExecutor,
+            executor,
             Scratch::new(
                 &mut records,
                 &mut digits,
@@ -536,9 +579,5 @@ pub fn verify_batch(items: &[BatchItem], rng: &mut dyn RandomSource) -> Result<(
             ),
         )
         .map_err(|_| Error::InvalidInput)?;
-    if result.is_identity() {
-        Ok(())
-    } else {
-        Err(Error::InvalidSignature)
-    }
+    Ok(result.is_identity())
 }

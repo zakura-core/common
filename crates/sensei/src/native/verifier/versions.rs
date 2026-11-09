@@ -89,17 +89,7 @@ fn pinned_keys_and_instance_prefixes_match_reference() {
             .collect();
         let absorb = |len| {
             let mut reader = Reader::new(&[]);
-            runtime.executor.run(|executor| {
-                absorb_instances(
-                    &mut reader,
-                    &native,
-                    len,
-                    &runtime.srs,
-                    &mut MsmWorkspace::new(),
-                    Execution::new(executor, runtime.executor.budget()),
-                )
-                .unwrap();
-            });
+            absorb_instances(&mut reader, &native, len, &runtime.instance_generators).unwrap();
             reader.challenge()
         };
         // A legacy nine-row column and the same column padded with a zero

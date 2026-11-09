@@ -75,6 +75,10 @@ pub(crate) const FIXED_PREPARATION: [Preparation; 4] = [Preparation::WarmUp; 4];
 pub(crate) const SPARSE_MASK: bool = true;
 pub(crate) const SPARSE_MASK_WIDTH: u32 = 4;
 pub(crate) const SPARSE_MASK_PREPARATION: Preparation = Preparation::WarmUp;
+/// The verifier's doubling-free instance commitment bank: ten Lagrange
+/// generators at width 4 cost about 245 KiB, prepared at warmup outside the
+/// embedded-section layout (and outside COMMITMENT_TABLES' byte accounting).
+pub(crate) const INSTANCE_FIXED_WIDTH: u32 = 4;
 pub(crate) const JOINT_FIXED_SUM: bool = false;
 /// Reuses coefficient α6 odd layers; zero disables the shared wNAF fold.
 pub(crate) const IPA_FOLDING_WIDTH: u8 = 6;

@@ -1,7 +1,11 @@
 //! Canonical compressed encodings, independent of stored Montgomery layout.
 
 use super::{AffinePoint, PastaCurve, Point, curve_rhs};
+use crate::checks::assert_length;
 use crate::field::PastaField;
+
+/// Encodings decoded together by [`Point::batch_from_bytes`].
+const DECODE_LANES: usize = 4;
 
 impl<C: PastaCurve> AffinePoint<C> {
     /// Encodes this point in 32 canonical compressed bytes.
@@ -70,4 +74,93 @@ impl<C: PastaCurve> Point<C> {
             .to_point(),
         )
     }
+
+    /// Decodes a batch of encodings together, interleaving square-root chains.
+    ///
+    /// `output` must have exactly `encodings.len()` elements; a mismatch panics
+    /// before either buffer changes. Accepts and rejects exactly the encodings
+    /// [`Self::from_bytes`] does, writing the same points in order. Returns
+    /// `None` when any encoding is rejected, leaving `output` unspecified.
+    ///
+    /// Full lanes of ordinary encodings run their square-root exponentiations
+    /// as interleaved chains so the serial multiplication chains overlap.
+    /// Identity encodings, zero radicands, and the remainder decode one at a
+    /// time through [`Self::from_bytes`].
+    ///
+    /// ```
+    /// use zakura_udon::curve::{PallasPoint, PallasProjective};
+    ///
+    /// let g = PallasProjective::GENERATOR.to_point();
+    /// let encodings = [g.to_bytes(), g.neg().to_bytes(), [0; 32]];
+    /// let mut output = [PallasPoint::IDENTITY; 3];
+    /// PallasPoint::batch_from_bytes(&encodings, &mut output).unwrap();
+    /// assert_eq!(output, [g, g.neg(), PallasPoint::IDENTITY]);
+    /// assert_eq!(PallasPoint::batch_from_bytes(&[[0xff; 32]], &mut [g]), None);
+    /// ```
+    pub fn batch_from_bytes(encodings: &[[u8; 32]], output: &mut [Self]) -> Option<()> {
+        assert_length("output", encodings.len(), output.len());
+        let mut chunks = encodings.chunks_exact(DECODE_LANES);
+        let mut decoded = output.chunks_exact_mut(DECODE_LANES);
+        for (chunk, decoded) in (&mut chunks).zip(&mut decoded) {
+            let chunk = chunk.try_into().expect("chunks are lane sized");
+            let decoded = decoded.try_into().expect("chunks are lane sized");
+            decode_lanes::<C>(chunk, decoded)?;
+        }
+        for (encoding, decoded) in chunks.remainder().iter().zip(decoded.into_remainder()) {
+            *decoded = Self::from_bytes(*encoding)?;
+        }
+        Some(())
+    }
+}
+
+// One full lane group. Any identity encoding or zero radicand routes the group
+// through the scalar decoder: sqrt's zero short-circuit never enters the lane
+// exponentiation, and such encodings are rare in honest batches.
+fn decode_lanes<C: PastaCurve>(
+    encodings: &[[u8; 32]; DECODE_LANES],
+    output: &mut [Point<C>; DECODE_LANES],
+) -> Option<()> {
+    let mut xs = [PastaField::ZERO; DECODE_LANES];
+    let mut radicands = [PastaField::ZERO; DECODE_LANES];
+    let mut odd = [false; DECODE_LANES];
+    for lane in 0..DECODE_LANES {
+        let mut bytes = encodings[lane];
+        if bytes == [0; 32] {
+            return decode_each(encodings, output);
+        }
+        odd[lane] = bytes[31] >> 7 != 0;
+        bytes[31] &= 0x7f;
+        xs[lane] = PastaField::from_bytes(bytes)?;
+        radicands[lane] = curve_rhs::<C>(&xs[lane]).reduce();
+        if radicands[lane].is_zero() {
+            return decode_each(encodings, output);
+        }
+    }
+    let roots = PastaField::sqrt_lanes(&radicands);
+    for lane in 0..DECODE_LANES {
+        let mut y = roots[lane]?;
+        // Nonzero radicands have nonzero roots, so the zero-parity rejection in
+        // from_bytes cannot trigger; correcting the parity suffices.
+        if y.is_odd() != odd[lane] {
+            y = y.neg().reduce();
+        }
+        debug_assert_eq!(y.square().reduce(), radicands[lane]);
+        output[lane] = AffinePoint {
+            x: xs[lane],
+            y,
+            marker: core::marker::PhantomData,
+        }
+        .to_point();
+    }
+    Some(())
+}
+
+fn decode_each<C: PastaCurve, const N: usize>(
+    encodings: &[[u8; 32]; N],
+    output: &mut [Point<C>; N],
+) -> Option<()> {
+    for (encoding, output) in encodings.iter().zip(output.iter_mut()) {
+        *output = Point::from_bytes(*encoding)?;
+    }
+    Some(())
 }
