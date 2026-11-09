@@ -538,11 +538,13 @@ fn execute(input: Input<'_, Pallas>, terms: usize) -> Result<bool, Error> {
     {
         // Below this size, distributing windows costs more than it saves.
         const POOL_TERMS: usize = 16;
-        let pool = crate::native::executor::PoolExecutor::get();
-        let budget = pool.budget();
-        if terms >= POOL_TERMS && budget != udon::exec::TaskBudget::SERIAL {
-            let options = ExecutionOptions::default().with_task_budget(budget);
-            return pool.run(move |context| execute_with(input, options, context));
+        if terms >= POOL_TERMS {
+            let pool = crate::native::executor::PoolExecutor::get();
+            let budget = pool.budget();
+            if budget != udon::exec::TaskBudget::SERIAL {
+                let options = ExecutionOptions::default().with_task_budget(budget);
+                return pool.run(move |context| execute_with(input, options, context));
+            }
         }
     }
     let _ = terms;
