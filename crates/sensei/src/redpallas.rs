@@ -492,21 +492,21 @@ pub fn verify_batch(items: &[BatchItem], rng: &mut dyn RandomSource) -> Result<(
     if terms > isize::MAX as usize / core::mem::size_of::<PallasPoint>() {
         return Err(Error::InvalidInput);
     }
-    // Validate every encoding before drawing any randomness. The R points
-    // decode together, sharing interleaved square-root chains; the response
-    // scalars decode inline.
-    let encodings: Vec<[u8; 32]> = items
-        .iter()
-        .map(|item| item.signature[..32].try_into().unwrap())
-        .collect();
-    let mut points = vec![PallasPoint::IDENTITY; items.len()];
-    PallasPoint::batch_from_bytes(&encodings, &mut points).ok_or(Error::InvalidSignature)?;
+    // Validate every encoding before drawing any randomness. Check the cheap
+    // response scalars first so a noncanonical response rejects the batch
+    // before allocating point buffers or doing square-root work.
     let responses = items
         .iter()
         .map(|item| {
             Fq::from_bytes(item.signature[32..].try_into().unwrap()).ok_or(Error::InvalidSignature)
         })
         .collect::<Result<Vec<Fq>, _>>()?;
+    let encodings: Vec<[u8; 32]> = items
+        .iter()
+        .map(|item| item.signature[..32].try_into().unwrap())
+        .collect();
+    let mut points = vec![PallasPoint::IDENTITY; items.len()];
+    PallasPoint::batch_from_bytes(&encodings, &mut points).ok_or(Error::InvalidSignature)?;
     let mut bases = Vec::with_capacity(terms);
     let mut scalars = Vec::with_capacity(terms);
     let mut sums = [Fq::ZERO; 2];
