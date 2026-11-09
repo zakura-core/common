@@ -15,6 +15,8 @@ use bech32::{Bech32m, Checksum, Hrp, primitives::decode::CheckedHrpstring};
 use zcash_protocol::consensus::NetworkType;
 
 mod f4jumble;
+#[cfg(test)]
+mod pq_test_vectors;
 
 pub(crate) mod address;
 pub(crate) mod fvk;

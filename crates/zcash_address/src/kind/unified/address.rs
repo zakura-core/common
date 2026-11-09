@@ -666,4 +666,67 @@ mod tests {
         // Unknown receiver is NOT counted as transparent
         assert!(!with_unknown.has_receiver_of_type(PoolType::TRANSPARENT));
     }
+
+    /// The vectors come from `scripts/generate_pq_ua_test_vectors.py`, which encodes them
+    /// without this crate, so this is a check against an independent implementation rather
+    /// than a snapshot of our own output. Both directions are asserted, because a mistake
+    /// that is symmetric would survive a round-trip test on its own.
+    #[test]
+    fn pq_addresses_match_the_generated_vectors() {
+        use alloc::vec::Vec;
+
+        use crate::kind::unified::{f4jumble, pq_test_vectors::TEST_VECTORS};
+
+        for vector in TEST_VECTORS {
+            let receivers = vector
+                .receivers
+                .iter()
+                .map(|(typecode, data)| {
+                    Receiver::try_from((*typecode, *data)).unwrap_or_else(|e| {
+                        panic!(
+                            "{}: the vector's receivers are well formed: {e}",
+                            vector.name
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let ua = Address::try_from_items(receivers.clone()).unwrap_or_else(|e| {
+                panic!("{}: the vector's address is well formed: {e}", vector.name)
+            });
+
+            // The item encoding, independent of Bech32m: F4Jumble is injective, so equal
+            // jumbled bytes mean the generator and this crate wrote the same items and
+            // padding in the same order.
+            assert_eq!(
+                ua.to_jumbled_bytes(Address::MAINNET),
+                f4jumble::f4jumble(vector.padded).expect("the vector's length is valid"),
+                "{}: raw item encoding",
+                vector.name
+            );
+
+            for (hrp, encoded) in vector.encoded {
+                let network = match *hrp {
+                    Address::MAINNET => NetworkType::Main,
+                    Address::TESTNET => NetworkType::Test,
+                    Address::REGTEST => NetworkType::Regtest,
+                    other => panic!("{}: unexpected HRP {other}", vector.name),
+                };
+
+                assert_eq!(&ua.encode(&network), encoded, "{}: encoding", vector.name);
+
+                let (decoded_network, decoded) = Address::decode(encoded)
+                    .unwrap_or_else(|e| panic!("{}: decoding: {e}", vector.name));
+                assert_eq!(decoded_network, network, "{}: network", vector.name);
+                // Encoding order, which is what the vector lists, rather than preference
+                // order.
+                assert_eq!(
+                    decoded.items_as_parsed(),
+                    &receivers[..],
+                    "{}: receivers",
+                    vector.name
+                );
+            }
+        }
+    }
 }
