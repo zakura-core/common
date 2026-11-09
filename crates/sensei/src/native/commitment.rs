@@ -38,6 +38,7 @@ impl FixedGenerator {
         Self::with_policy(base, policy, embedded(section))
     }
     /// A warmup-prepared table outside the embedded-section layout.
+    #[cfg(feature = "verifier")]
     pub(crate) fn warmed(base: &VestaAffine, width: u32) -> Self {
         Self::with_policy(
             base,
