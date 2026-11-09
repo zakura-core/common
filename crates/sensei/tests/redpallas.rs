@@ -79,6 +79,59 @@ fn legacy_signatures_are_byte_exact_in_both_domains() {
 }
 
 #[test]
+fn batches_agree_across_the_pool_threshold() {
+    fn item<T: SigType>(seed: u8, message: &[u8]) -> BatchItem {
+        let mut bytes = [0; 32];
+        bytes[0] = seed;
+        let key = SigningKey::<T>::from_bytes(bytes).unwrap();
+        let mut nonce = 1000 + u64::from(seed);
+        let signature = key
+            .sign(
+                &mut || {
+                    nonce += 1;
+                    Ok(nonce)
+                },
+                message,
+            )
+            .unwrap();
+        BatchItem::new(&key.verification_key(), &signature, MESSAGE)
+    }
+    let items: Vec<BatchItem> = (1u8..=10)
+        .map(|seed| {
+            if seed % 2 == 0 {
+                item::<Binding>(seed, MESSAGE)
+            } else {
+                item::<SpendAuth>(seed, MESSAGE)
+            }
+        })
+        .collect();
+    // Batch sizes straddling the pool threshold (2n + 2 >= 16 at n = 7); the
+    // serial and pooled arms must accept the same batches and draw the same
+    // two randomness words per item.
+    for len in [2, 6, 7, 8, 10] {
+        let mut draws = 0;
+        verify_batch(&items[..len], &mut || {
+            draws += 1;
+            Ok(draws)
+        })
+        .unwrap();
+        assert_eq!(draws, 2 * len as u64);
+    }
+    // A signature over another message fails the equation itself, exercising
+    // the above-threshold MSM with a nonidentity result.
+    let mut corrupted = items.clone();
+    corrupted[9] = item::<Binding>(10, b"another message");
+    let mut draws = 100;
+    assert_eq!(
+        verify_batch(&corrupted, &mut || {
+            draws += 1;
+            Ok(draws)
+        }),
+        Err(Error::InvalidSignature)
+    );
+}
+
+#[test]
 fn canonical_boundaries_randomization_and_randomness_errors() {
     assert_eq!(
         SigningKey::<SpendAuth>::from_bytes([255; 32]).unwrap_err(),

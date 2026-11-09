@@ -13,14 +13,14 @@
 //! thread before entering it for proof work.
 use std::sync::OnceLock;
 use udon::exec::{Executor, SerialExecutor, TaskBudget};
-pub(super) struct PoolExecutor {
+pub(crate) struct PoolExecutor {
     #[cfg(feature = "multicore")]
     pool: Option<rayon::ThreadPool>,
 }
 
 impl PoolExecutor {
     /// Shared workers without initializing either the prover or verifier state.
-    pub(super) fn get() -> &'static Self {
+    pub(crate) fn get() -> &'static Self {
         static EXECUTOR: OnceLock<PoolExecutor> = OnceLock::new();
         EXECUTOR.get_or_init(Self::new)
     }
@@ -50,7 +50,7 @@ impl PoolExecutor {
         Self {}
     }
 
-    pub(super) fn budget(&self) -> TaskBudget {
+    pub(crate) fn budget(&self) -> TaskBudget {
         #[cfg(feature = "multicore")]
         if let Some(pool) = &self.pool {
             return TaskBudget::new(pool.current_num_threads()).expect("nonempty pool");
@@ -60,7 +60,7 @@ impl PoolExecutor {
 }
 
 impl PoolExecutor {
-    pub(super) fn run<R: Send>(&self, work: impl FnOnce(&PoolContext) -> R + Send) -> R {
+    pub(crate) fn run<R: Send>(&self, work: impl FnOnce(&PoolContext) -> R + Send) -> R {
         #[cfg(feature = "multicore")]
         if let Some(pool) = &self.pool {
             return pool.install(|| work(&PoolContext { parallel: true }));
@@ -74,7 +74,7 @@ impl PoolExecutor {
 
 // Only constructed inside the selected pool (or for the serial fallback).
 // Nested joins never re-enter a pool or select Rayon's global pool.
-pub(super) struct PoolContext {
+pub(crate) struct PoolContext {
     #[cfg(feature = "multicore")]
     parallel: bool,
 }
@@ -110,13 +110,13 @@ impl Executor for PoolContext {
 fn join_dyn(parallel: bool, left: &mut (dyn FnMut() + Send), right: &mut (dyn FnMut() + Send)) {
     #[cfg(feature = "multicore")]
     if parallel {
-        rayon::join(|| left(), || right());
+        rayon::join(left, right);
         return;
     }
     let _ = parallel;
     // Delegating keeps the serial contract: the right job runs even when the
     // left one unwinds.
-    SerialExecutor.join(|| left(), || right());
+    SerialExecutor.join(left, right);
 }
 
 #[cfg(all(test, feature = "multicore"))]

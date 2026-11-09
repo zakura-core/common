@@ -86,7 +86,7 @@ mod compiled_expressions;
 mod compiled_gates;
 #[cfg(feature = "prover")]
 mod evaluation;
-mod executor;
+pub(crate) mod executor;
 mod expression_layout;
 #[cfg(all(test, feature = "prover"))]
 mod expressions;
