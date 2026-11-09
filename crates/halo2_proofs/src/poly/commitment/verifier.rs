@@ -46,11 +46,33 @@ impl<'a, C: CurveAffine, E: EncodedChallenge<C>> Guard<'a, C, E> {
         self.msm
     }
 
+    /// Like [`Self::use_challenges_with_scale`], but leaves the generator
+    /// coefficients unexpanded for a batch to sum lazily: returns the scaled
+    /// MSM, the round challenges, the expansion seed `-c * scale`, and the
+    /// extra coefficient `-v * scale` of `G_0`.
+    ///
+    /// The generator coefficients of this proof are the coefficients of
+    /// `seed * prod_i (1 + u_{k-1-i} X^{2^i})`, plus the extra term on `G_0`.
+    #[cfg(feature = "batch")]
+    pub(crate) fn into_scaled_batch_terms(
+        mut self,
+        scale: C::Scalar,
+    ) -> (MSM<'a, C>, Vec<C::Scalar>, C::Scalar, C::Scalar) {
+        self.msm.scale(scale);
+        self.append_round_terms_with_scale(scale);
+        (
+            self.msm,
+            self.u,
+            self.neg_c * scale,
+            self.g_0_scalar * scale,
+        )
+    }
+
     /// Applies `scale` to every term of this IPA verifier equation.
     ///
     /// The existing MSM terms, the deferred round terms, and the generator
     /// coefficients must all receive the same scale exactly once.
-    #[cfg(any(test, feature = "batch"))]
+    #[cfg(test)]
     pub(crate) fn use_challenges_with_scale(mut self, scale: C::Scalar) -> MSM<'a, C> {
         // Scale P', U, W, and every commitment term assembled before the IPA
         // round terms.

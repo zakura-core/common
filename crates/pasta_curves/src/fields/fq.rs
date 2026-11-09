@@ -113,6 +113,9 @@ const MODULUS: Fq = Fq([
     0x4000000000000000,
 ]);
 
+#[cfg(feature = "alloc")]
+crate::arithmetic::impl_coefficient_products!(Fq, MODULUS);
+
 /// The modulus as u32 limbs.
 #[cfg(not(target_pointer_width = "64"))]
 const MODULUS_LIMBS_32: [u32; 8] = [
