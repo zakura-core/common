@@ -292,3 +292,73 @@ fn compressed_encodings_are_canonical() {
     encodings::<Pallas>("00000000ed302d991bf94c09fc98462200000000000000000000000000000040");
     encodings::<Vesta>("0000000021eb468cdda89409fc98462200000000000000000000000000000040");
 }
+
+fn batch_decoding<C: PastaCurve>() {
+    let generator = Point::<C>::GENERATOR;
+    let mut encodings: Vec<[u8; 32]> = scalar_corpus::<C>()
+        .iter()
+        .step_by(3)
+        .take(9)
+        .map(|scalar| generator.mul_projective(scalar).to_point().to_bytes())
+        .collect();
+    // Identity routes a full lane group through the scalar fallback, and the
+    // negated generator pins parity selection inside a lane group. Eleven
+    // encodings cover two full lane groups plus a remainder.
+    encodings.insert(2, [0; 32]);
+    encodings.insert(5, generator.neg().to_bytes());
+    assert_eq!(encodings.len(), 11);
+    for len in 0..=encodings.len() {
+        let expected: Vec<_> = encodings[..len]
+            .iter()
+            .map(|bytes| Point::<C>::from_bytes(*bytes).unwrap())
+            .collect();
+        let mut output = vec![Point::<C>::IDENTITY; len];
+        assert_eq!(
+            Point::<C>::batch_from_bytes(&encodings[..len], &mut output),
+            Some(())
+        );
+        assert_eq!(output, expected);
+    }
+    // Every encoding from_bytes rejects must abort the batch: a nonsquare
+    // radicand, a noncanonical x, identity with its sign bit set, and an
+    // out-of-range pattern, at a lane-group start and end, in a later group,
+    // and in the remainder.
+    let p = modulus::<C::Base>();
+    let mut nonsquare = [0; 32];
+    for x in 1_u64..100 {
+        let rhs = (BigUint::from(x).pow(3) + 5_u32) % &p;
+        if rhs.modpow(&((&p - 1_u32) >> 1), &p) == &p - 1_u32 {
+            nonsquare[..8].copy_from_slice(&x.to_le_bytes());
+            break;
+        }
+    }
+    assert_ne!(nonsquare, [0; 32]);
+    let noncanonical = CanonicalUint::from_limbs(C::Base::MODULUS).to_le_bytes();
+    let mut signed_zero = [0; 32];
+    signed_zero[31] = 0x80;
+    for invalid in [nonsquare, noncanonical, signed_zero, [0xff; 32]] {
+        assert_eq!(Point::<C>::from_bytes(invalid), None);
+        for position in [0, 3, 4, 10] {
+            let mut batch = encodings.clone();
+            batch[position] = invalid;
+            let mut output = vec![Point::<C>::IDENTITY; batch.len()];
+            assert_eq!(Point::<C>::batch_from_bytes(&batch, &mut output), None);
+        }
+    }
+}
+
+#[test]
+fn pallas_batch_decoding_matches_from_bytes() {
+    batch_decoding::<Pallas>();
+}
+#[test]
+fn vesta_batch_decoding_matches_from_bytes() {
+    batch_decoding::<Vesta>();
+}
+
+#[test]
+#[should_panic(expected = "output length")]
+fn batch_decoding_rejects_mismatched_output_length() {
+    let mut output = [Point::<Pallas>::IDENTITY; 2];
+    let _ = Point::<Pallas>::batch_from_bytes(&[[0; 32]; 3], &mut output);
+}

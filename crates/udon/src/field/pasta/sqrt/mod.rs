@@ -57,7 +57,11 @@ impl<M: PrimeModulus> PastaField<M, Reduced> {
 
         // With p - 1 = t * 2^32, one fixed exponentiation initializes both
         // self^((t + 1)/2) and self^t. Both algorithms share this schedule.
-        let w = M::pow_sqrt_exponent(&self.into_loose());
+        self.sqrt_with_exponent(M::pow_sqrt_exponent(&self.into_loose()))
+    }
+
+    // Completes `sqrt` for a nonzero input and `w = pow_sqrt_exponent(self)`.
+    pub(crate) fn sqrt_with_exponent(&self, w: PastaField<M>) -> Option<Self> {
         #[cfg(feature = "sqrt-table-large")]
         {
             M::sqrt_large(self, w)
@@ -72,6 +76,17 @@ impl<M: PrimeModulus> PastaField<M, Reduced> {
             )
             .map(PastaField::reduce)
         }
+    }
+
+    /// Square roots of nonzero lanes with one interleaved exponentiation pass.
+    ///
+    /// Every lane's result matches [`Self::sqrt`] on the same input, including
+    /// the choice of root. Lanes must be nonzero; zero inputs take `sqrt`'s
+    /// short-circuit instead.
+    pub(crate) fn sqrt_lanes<const L: usize>(values: &[Self; L]) -> [Option<Self>; L] {
+        debug_assert!(values.iter().all(|value| !value.is_zero()));
+        let w = M::pow_sqrt_exponent_lanes(&values.map(Self::into_loose));
+        core::array::from_fn(|lane| values[lane].sqrt_with_exponent(w[lane]))
     }
 
     /// Returns `(is_square, root)` for this value or a fixed nonsquare multiple.

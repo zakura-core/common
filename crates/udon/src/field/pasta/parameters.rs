@@ -62,6 +62,14 @@ mod sealed {
         /// compile time; only powers of the base are computed at runtime.
         fn pow_sqrt_exponent(value: &PastaField<M>) -> PastaField<M>;
 
+        /// Raises every lane to `(t - 1) / 2`, where `p - 1 = t * 2^32`.
+        ///
+        /// Runs [`Self::pow_sqrt_exponent`]'s schedule on all lanes together,
+        /// interleaving the otherwise serial per-lane multiplication chains.
+        fn pow_sqrt_exponent_lanes<const L: usize>(
+            values: &[PastaField<M>; L],
+        ) -> [PastaField<M>; L];
+
         /// Computes a square root using this modulus's larger table.
         ///
         /// Requires a nonzero `value` and `w = pow_sqrt_exponent(value)`.
@@ -180,6 +188,13 @@ macro_rules! pasta_field_parameters {
 
             fn pow_sqrt_exponent(value: &PastaField<Self>) -> PastaField<Self> {
                 bento::addition_chain!(Power(*value), tonelli_shanks($modulus, 32),
+                    emission = batched).0
+            }
+
+            fn pow_sqrt_exponent_lanes<const L: usize>(
+                values: &[PastaField<Self>; L],
+            ) -> [PastaField<Self>; L] {
+                bento::addition_chain!(PowerLanes(*values), tonelli_shanks($modulus, 32),
                     emission = batched).0
             }
 
@@ -326,6 +341,27 @@ impl<M: PrimeModulus> Power<M> {
             super::montgomery::square_run::<M>(&self.0.limbs, count, factor),
         ))
     }
+}
+
+// Lane-interleaved multiplicative chain. The planner's schedule runs on every
+// lane together so the lanes' independent dependency chains overlap.
+#[derive(Clone)]
+struct PowerLanes<M: PrimeModulus, const L: usize>([PastaField<M>; L]);
+
+impl<M: PrimeModulus, const L: usize> bento::addchain::AdditionChain for PowerLanes<M, L> {
+    #[inline]
+    fn double(&self) -> Self {
+        Self(core::array::from_fn(|lane| self.0[lane].square()))
+    }
+
+    #[inline]
+    fn add(&self, rhs: &Self) -> Self {
+        Self(core::array::from_fn(|lane| self.0[lane].mul(&rhs.0[lane])))
+    }
+
+    // Keep the default double_n and double_n_add: they double all lanes per
+    // step, preserving the interleaving that Power's fused square_run would
+    // serialize lane by lane.
 }
 
 const fn add_wide(a: [u64; 8], b: [u64; 8]) -> [u64; 8] {
