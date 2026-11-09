@@ -1,6 +1,6 @@
 use zcash_protocol::{PoolType, constants};
 
-use super::{ParseError, Typecode, private::SealedItem};
+use super::{ParseError, PqScheme, Typecode, private::SealedItem};
 
 use alloc::vec::Vec;
 use core::convert::{TryFrom, TryInto};
@@ -14,7 +14,22 @@ pub enum Receiver {
     Sapling([u8; 43]),
     P2pkh([u8; 20]),
     P2sh([u8; 20]),
-    Unknown { typecode: u32, data: Vec<u8> },
+    /// A post-quantum transparent receiver: the commitment that the output paying it carries.
+    ///
+    /// A sender turns this into the output `OP_<format> OP_<scheme> PUSH<n> <commitment>`. What
+    /// the commitment covers is a spending script that stays off chain until the spend, so
+    /// nothing here says what it commits to.
+    PqTransparent {
+        /// The signature scheme that may spend the output, which also fixes the commitment's
+        /// length.
+        scheme: PqScheme,
+        /// The commitment the output carries.
+        commitment: [u8; 32],
+    },
+    Unknown {
+        typecode: u32,
+        data: Vec<u8>,
+    },
 }
 
 impl TryFrom<(u32, &[u8])> for Receiver {
@@ -26,6 +41,11 @@ impl TryFrom<(u32, &[u8])> for Receiver {
             Typecode::P2sh => addr.try_into().map(Receiver::P2sh),
             Typecode::Sapling => addr.try_into().map(Receiver::Sapling),
             Typecode::Orchard => addr.try_into().map(Receiver::Orchard),
+            // The array conversion is the length check: a commitment of any other length is
+            // not a receiver for this scheme.
+            Typecode::PqTransparent(scheme) => addr
+                .try_into()
+                .map(|commitment| Receiver::PqTransparent { scheme, commitment }),
             // Preserve unknown typecodes for forward compatibility.
             Typecode::Unknown(_) => Ok(Receiver::Unknown {
                 typecode,
@@ -45,6 +65,7 @@ impl SealedItem for Receiver {
             Receiver::P2sh(_) => Typecode::P2sh,
             Receiver::Sapling(_) => Typecode::Sapling,
             Receiver::Orchard(_) => Typecode::Orchard,
+            Receiver::PqTransparent { scheme, .. } => Typecode::PqTransparent(*scheme),
             Receiver::Unknown { typecode, .. } => Typecode::Unknown(*typecode),
         }
     }
@@ -55,6 +76,7 @@ impl SealedItem for Receiver {
             Receiver::P2sh(data) => data,
             Receiver::Sapling(data) => data,
             Receiver::Orchard(data) => data,
+            Receiver::PqTransparent { commitment, .. } => commitment,
             Receiver::Unknown { data, .. } => data,
         }
     }
@@ -119,7 +141,9 @@ impl Address {
         self.0.iter().any(|r| match r {
             Receiver::Orchard(_) => pool_type == PoolType::ORCHARD,
             Receiver::Sapling(_) => pool_type == PoolType::SAPLING,
-            Receiver::P2pkh(_) | Receiver::P2sh(_) => pool_type == PoolType::TRANSPARENT,
+            Receiver::P2pkh(_) | Receiver::P2sh(_) | Receiver::PqTransparent { .. } => {
+                pool_type == PoolType::TRANSPARENT
+            }
             Receiver::Unknown { .. } => false,
         })
     }
@@ -183,7 +207,7 @@ pub mod testing {
     use zcash_protocol::encoding::MAX_COMPACT_SIZE;
 
     use super::{Address, Receiver};
-    use crate::unified::Typecode;
+    use crate::unified::{PqScheme, Typecode};
 
     prop_compose! {
         fn uniform43()(a in uniform11(0u8..), b in uniform32(0u8..)) -> [u8; 43] {
@@ -199,26 +223,50 @@ pub mod testing {
         select(vec![Typecode::P2pkh, Typecode::P2sh])
     }
 
+    /// A strategy to generate an arbitrary PQ transparent typecode.
+    pub fn arb_pq_typecode() -> impl Strategy<Value = Typecode> {
+        select(vec![
+            Typecode::PqTransparent(PqScheme::Sha2_128f),
+            Typecode::PqTransparent(PqScheme::Sha2_192s),
+        ])
+    }
+
     /// A strategy to generate an arbitrary shielded (Sapling, Orchard, or unknown) typecode.
+    ///
+    /// The unknown arm must exclude the PQ typecodes: a `Typecode::Unknown` holding one of them
+    /// parses back as `Typecode::PqTransparent`, which would fail an encoding round-trip rather than
+    /// exercise one.
     pub fn arb_shielded_typecode() -> impl Strategy<Value = Typecode> {
         prop_oneof![
             Just(Typecode::Sapling),
             Just(Typecode::Orchard),
-            ((<u32>::from(Typecode::Orchard) + 1)..MAX_COMPACT_SIZE).prop_map(Typecode::Unknown)
+            ((<u32>::from(Typecode::Orchard) + 1)..MAX_COMPACT_SIZE)
+                .prop_filter("PQ typecodes are known", |typecode| {
+                    PqScheme::from_typecode(*typecode).is_none()
+                })
+                .prop_map(Typecode::Unknown)
         ]
     }
 
     /// A strategy to generate an arbitrary valid set of typecodes without
     /// duplication and containing only one of P2sh and P2pkh transparent
     /// typecodes. The resulting vector will be sorted in encoding order.
+    ///
+    /// A PQ typecode may appear beside a legacy transparent one, which is what makes the PQ
+    /// rollout additive, so it is drawn independently of the legacy transparent typecode.
     pub fn arb_typecodes() -> impl Strategy<Value = Vec<Typecode>> {
-        prop::option::of(arb_transparent_typecode()).prop_flat_map(|transparent| {
-            prop::collection::hash_set(arb_shielded_typecode(), 1..4).prop_map(move |xs| {
-                let mut typecodes: Vec<_> = xs.into_iter().chain(transparent).collect();
-                typecodes.sort_unstable_by(Typecode::encoding_order);
-                typecodes
+        (
+            prop::option::of(arb_transparent_typecode()),
+            prop::option::of(arb_pq_typecode()),
+        )
+            .prop_flat_map(|(transparent, pq)| {
+                prop::collection::hash_set(arb_shielded_typecode(), 1..4).prop_map(move |xs| {
+                    let mut typecodes: Vec<_> =
+                        xs.into_iter().chain(transparent).chain(pq).collect();
+                    typecodes.sort_unstable_by(Typecode::encoding_order);
+                    typecodes
+                })
             })
-        })
     }
 
     /// Generates an arbitrary Unified address containing receivers corresponding to the provided
@@ -235,6 +283,9 @@ pub mod testing {
                 Typecode::P2sh => uniform20(0u8..).prop_map(Receiver::P2sh).boxed(),
                 Typecode::Sapling => uniform43().prop_map(Receiver::Sapling).boxed(),
                 Typecode::Orchard => uniform43().prop_map(Receiver::Orchard).boxed(),
+                Typecode::PqTransparent(scheme) => uniform32(0u8..)
+                    .prop_map(move |commitment| Receiver::PqTransparent { scheme, commitment })
+                    .boxed(),
                 Typecode::Unknown(typecode) => vec(any::<u8>(), 32..256)
                     .prop_map(move |data| Receiver::Unknown { typecode, data })
                     .boxed(),
@@ -270,7 +321,9 @@ mod tests {
 
     use proptest::{prelude::*, sample::select};
 
-    use super::{Address, ParseError, Receiver, Typecode};
+    use zcash_protocol::PoolType;
+
+    use super::{Address, ParseError, PqScheme, Receiver, Typecode};
 
     proptest! {
         #[test]
@@ -404,14 +457,143 @@ mod tests {
             0xea, 0xdb, 0xc5, 0x20, 0x62, 0xf9, 0x6f, 0xa9, 0x86, 0xcc,
         ];
 
-        // We can't actually exercise this error, because at present the only transparent
-        // receivers we can use are P2PKH and P2SH (which cannot be used together), and
-        // with only one of them we don't have sufficient data for F4Jumble (so we hit a
-        // different error).
+        // A single legacy transparent receiver does not reach this error: P2PKH and P2SH
+        // cannot be used together, and one of them alone is too little data for F4Jumble, so
+        // that failure comes first. A PQ-only address is the case that reaches it, below.
         assert_matches!(
             Address::parse_internal(Address::MAINNET, &encoded[..]),
             Err(ParseError::InvalidEncoding(_))
         );
+    }
+
+    #[test]
+    fn pq_only_address_is_rejected() {
+        // A PQ receiver is transparent, so an address offering nothing else is a
+        // transparent-only address. Unlike a lone legacy receiver it is long enough for
+        // F4Jumble, so this is the first case that reaches the error at all.
+        let pq = Receiver::PqTransparent {
+            scheme: PqScheme::Sha2_128f,
+            commitment: [1; 32],
+        };
+        assert_matches!(
+            Address::try_from_items(vec![pq.clone()]),
+            Err(ParseError::OnlyTransparent)
+        );
+
+        let encoded = Address(vec![pq]).to_jumbled_bytes(Address::MAINNET);
+        assert_matches!(
+            Address::parse_internal(Address::MAINNET, &encoded[..]),
+            Err(ParseError::OnlyTransparent)
+        );
+    }
+
+    #[test]
+    fn pq_accompanies_either_legacy_transparent_receiver() {
+        // The rule barring P2PKH beside P2SH must not extend to PQ: an address offering a PQ
+        // receiver beside a legacy one is what lets a sender that does not know PQ keep paying.
+        for legacy in [Receiver::P2pkh([0; 20]), Receiver::P2sh([0; 20])] {
+            let ua = Address::try_from_items(vec![
+                Receiver::Orchard([0; 43]),
+                legacy.clone(),
+                Receiver::PqTransparent {
+                    scheme: PqScheme::Sha2_192s,
+                    commitment: [2; 32],
+                },
+            ])
+            .expect("a PQ receiver may accompany one legacy transparent receiver");
+
+            assert!(ua.has_receiver_of_type(PoolType::TRANSPARENT));
+            assert!(!ua.can_receive_memo() || ua.has_receiver_of_type(PoolType::ORCHARD));
+        }
+    }
+
+    #[test]
+    fn two_receivers_of_one_pq_scheme_are_rejected() {
+        assert_matches!(
+            Address::try_from_items(vec![
+                Receiver::Orchard([0; 43]),
+                Receiver::PqTransparent {
+                    scheme: PqScheme::Sha2_128f,
+                    commitment: [3; 32],
+                },
+                Receiver::PqTransparent {
+                    scheme: PqScheme::Sha2_128f,
+                    commitment: [4; 32],
+                },
+            ]),
+            Err(ParseError::DuplicateTypecode(Typecode::PqTransparent(
+                PqScheme::Sha2_128f
+            )))
+        );
+    }
+
+    #[test]
+    fn a_pq_commitment_has_one_length() {
+        for scheme in [PqScheme::Sha2_128f, PqScheme::Sha2_192s] {
+            assert_eq!(scheme.commitment_bytes(), 32);
+            assert_matches!(
+                Receiver::try_from((scheme.typecode(), &[0; 32][..])),
+                Ok(Receiver::PqTransparent { .. })
+            );
+            for wrong in [31usize, 33, 20, 0] {
+                assert_matches!(
+                    Receiver::try_from((scheme.typecode(), &vec![0; wrong][..])),
+                    Err(ParseError::InvalidEncoding(_))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preference_order_is_the_documented_one() {
+        // `Typecode::preference_order` matches on wildcards, so a missing rung compiles and
+        // silently mis-sorts. This pins the whole order instead.
+        let mut typecodes = vec![
+            Typecode::Unknown(0xff),
+            Typecode::P2pkh,
+            Typecode::P2sh,
+            Typecode::PqTransparent(PqScheme::Sha2_128f),
+            Typecode::PqTransparent(PqScheme::Sha2_192s),
+            Typecode::Sapling,
+            Typecode::Orchard,
+        ];
+        typecodes.sort_by(Typecode::preference_order);
+
+        assert_eq!(
+            typecodes,
+            vec![
+                Typecode::Orchard,
+                Typecode::Sapling,
+                Typecode::PqTransparent(PqScheme::Sha2_192s),
+                Typecode::PqTransparent(PqScheme::Sha2_128f),
+                Typecode::P2sh,
+                Typecode::P2pkh,
+                Typecode::Unknown(0xff),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pq_receiver_round_trips_through_an_address() {
+        let receivers = vec![
+            Receiver::Orchard([7; 43]),
+            Receiver::PqTransparent {
+                scheme: PqScheme::Sha2_192s,
+                commitment: [9; 32],
+            },
+        ];
+        let ua = Address::try_from_items(receivers.clone()).expect("the address is well formed");
+
+        for network in [NetworkType::Main, NetworkType::Test, NetworkType::Regtest] {
+            let encoded = ua.encode(&network);
+            let (decoded_network, decoded) =
+                Address::decode(&encoded).expect("the address decodes");
+            assert_eq!(decoded_network, network);
+            assert_eq!(decoded, ua);
+            // The PQ receiver is preferred over neither shielded receiver, and survives
+            // encoding with its scheme and commitment intact.
+            assert_eq!(decoded.items(), receivers);
+        }
     }
 
     #[test]
