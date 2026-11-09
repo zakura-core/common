@@ -1,8 +1,9 @@
-//! Four-way AVX2 affine chord additions for the fixed-base sums.
+//! Four-way AVX2 affine chord additions for the GLV MSM buckets and the
+//! fixed-base sums.
 //!
-//! The fixed-base sums (`glv::fixed_base`) reduce lists of affine points pairwise,
-//! one tree level at a time, sharing one inversion per level (Montgomery's
-//! trick). Each addition costs six field multiplications, independent across
+//! The GLV MSM and the fixed-base sums (`glv::fixed_base`) reduce lists of
+//! affine points pairwise, one tree level at a time, sharing one inversion
+//! per level (Montgomery's trick). Each addition costs six field multiplications, independent across
 //! the additions of a level, so [`chord_level`] runs eight at a time: two
 //! vectors of four lanes, in the radix-2^29 arithmetic of
 //! [`super::avx2_sqrt`] (availability and the AVX2 guarantee are documented
@@ -219,11 +220,20 @@ pub(crate) fn invert_lanes<F: Avx2ChordField>(
 }
 
 /// Per-chunk buffers of [`chord_level`] (about 144 bytes per addition),
-/// reused across the levels of one reduction.
+/// reusable across levels, windows and MSMs like the scalar reducer's
+/// staging vectors.
 #[derive(Default)]
 pub struct ChordScratch {
     scaled: Vec<[V; G]>,
     denominators: Vec<[V; G]>,
+}
+
+impl ChordScratch {
+    /// Bytes held by the buffers' capacities.
+    #[cfg(feature = "multicore")]
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        (self.scaled.capacity() + self.denominators.capacity()) * core::mem::size_of::<[V; G]>()
+    }
 }
 
 impl core::fmt::Debug for ChordScratch {

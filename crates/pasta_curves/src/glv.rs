@@ -1757,10 +1757,22 @@ struct WindowAssignment {
 
 #[derive(Clone, Copy)]
 struct MultiexpBase<F> {
+    // The AVX2 bucket reduction reads `xy29` instead.
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
     x: F,
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
     endo_x: F,
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
     y: F,
     identity: bool,
+    /// `x`, `endo_x`, `y` and `-y` in radix 2^29, converted once per MSM for
+    /// the AVX2 bucket reduction. Storing `-y` makes filling a bucket a plain
+    /// copy: negating per assignment (a 9-limb borrow chain) made
+    /// `fill_window` the AVX2 MSM's most memory-stalled step.
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    xy29: [crate::arithmetic::avx2_chord::Limbs29; 4],
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    field: PhantomData<F>,
 }
 
 impl WindowAssignment {
@@ -2352,6 +2364,9 @@ struct WindowScratch<F> {
     positions: Vec<usize>,
     points: Vec<AffinePoint<F>>,
     reduce: ReduceScratch<F>,
+    /// The AVX2 reducer's radix-2^29 buffers.
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    avx2: WindowScratch29,
 }
 
 impl<F> Default for WindowScratch<F> {
@@ -2363,8 +2378,19 @@ impl<F> Default for WindowScratch<F> {
             positions: Vec::new(),
             points: Vec::new(),
             reduce: ReduceScratch::default(),
+            #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+            avx2: WindowScratch29::default(),
         }
     }
+}
+
+/// A window's radix-2^29 bucket points, and the buffers of
+/// [`reduce_affine_buckets29_reusing`].
+#[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+#[derive(Default)]
+struct WindowScratch29 {
+    points: Vec<crate::arithmetic::avx2_chord::Point29>,
+    reduce: ReduceScratch29,
 }
 
 #[cfg(feature = "multicore")]
@@ -2379,6 +2405,23 @@ impl<F> WindowScratch<F> {
                 * size_of::<AffinePoint<F>>()
             + self.reduce.next_offsets.capacity() * size_of::<usize>()
             + self.reduce.pending.capacity() * size_of::<PendingAffineAddition<F>>()
+            + self.avx2_capacity_bytes()
+    }
+
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    fn avx2_capacity_bytes(&self) -> usize {
+        use crate::arithmetic::avx2_chord::Point29;
+        use core::mem::size_of;
+        let avx2 = &self.avx2;
+        (avx2.points.capacity() + avx2.reduce.next.capacity()) * size_of::<Point29>()
+            + avx2.reduce.next_offsets.capacity() * size_of::<usize>()
+            + avx2.reduce.pairs.capacity() * size_of::<(usize, usize, usize)>()
+            + avx2.reduce.chord.capacity_bytes()
+    }
+
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
+    fn avx2_capacity_bytes(&self) -> usize {
+        0
     }
 }
 
@@ -2439,6 +2482,8 @@ fn fill_window<C: GlvParams>(
         positions,
         points,
         reduce,
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+            avx2: scratch_avx2,
     } = scratch;
     window_assignments::<C>(components, bases, window_bits, window, assignments, counts);
 
@@ -2451,36 +2496,66 @@ fn fill_window<C: GlvParams>(
 
     positions.clear();
     positions.extend_from_slice(&offsets[..bucket_count]);
-    points.clear();
-    points.resize(
-        *offsets.last().unwrap(),
-        AffinePoint {
-            x: C::Base::ZERO,
-            y: C::Base::ZERO,
-        },
-    );
-    for &assignment in assignments.iter() {
-        let base_index = assignment.component / 2;
-        let base = bases[base_index];
-        let x = if assignment.component & 1 == 0 {
-            base.x
-        } else {
-            base.endo_x
-        };
-        let bucket = assignment.bucket();
-        let position = positions[bucket];
-        points[position] = AffinePoint {
-            x,
-            y: if assignment.negative() {
-                -base.y
-            } else {
-                base.y
-            },
-        };
-        positions[bucket] += 1;
+    #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+    {
+        use crate::arithmetic::avx2_chord::Point29;
+        let points29 = &mut scratch_avx2.points;
+        points29.clear();
+        points29.resize(*offsets.last().unwrap(), Point29::default());
+        for &assignment in assignments.iter() {
+            let base = &bases[assignment.component / 2];
+            let [x, endo_x, y, neg_y] = &base.xy29;
+            let bucket = assignment.bucket();
+            points29[positions[bucket]] = Point29 {
+                x: if assignment.component & 1 == 0 {
+                    *x
+                } else {
+                    *endo_x
+                },
+                y: if assignment.negative() { *neg_y } else { *y },
+            };
+            positions[bucket] += 1;
+        }
+        reduce_affine_buckets29_reusing::<C>(
+            points29,
+            offsets,
+            &mut scratch_avx2.reduce,
+            points,
+            reduce,
+        )
     }
-
-    reduce_affine_buckets_reusing::<C::Base, false>(points, offsets, reduce)
+    #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
+    {
+        points.clear();
+        points.resize(
+            *offsets.last().unwrap(),
+            AffinePoint {
+                x: C::Base::ZERO,
+                y: C::Base::ZERO,
+            },
+        );
+        for &assignment in assignments.iter() {
+            let base_index = assignment.component / 2;
+            let base = bases[base_index];
+            let x = if assignment.component & 1 == 0 {
+                base.x
+            } else {
+                base.endo_x
+            };
+            let bucket = assignment.bucket();
+            let position = positions[bucket];
+            points[position] = AffinePoint {
+                x,
+                y: if assignment.negative() {
+                    -base.y
+                } else {
+                    base.y
+                },
+            };
+            positions[bucket] += 1;
+        }
+        reduce_affine_buckets_reusing::<C::Base, false>(points, offsets, reduce)
+    }
 }
 
 fn multiexp_serial<C: GlvParams>(
@@ -2730,11 +2805,27 @@ fn multiexp_bases<C: GlvParams>(bases: &[C::AffineExt]) -> Vec<MultiexpBase<C::B
 
 fn multiexp_base<C: GlvParams>(base: &C::AffineExt) -> MultiexpBase<C::Base> {
     let (x, y) = C::affine_xy(base);
+    let endo_x = x * C::Base::ZETA;
     MultiexpBase {
+        #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
         x,
-        endo_x: x * C::Base::ZETA,
+        #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
+        endo_x,
+        #[cfg(not(all(feature = "sqrt-table", pasta_curves_avx2)))]
         y,
         identity: bool::from(base.is_identity()),
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        xy29: {
+            let y29 = C::to29(&y, private::CrateToken(()));
+            [
+                C::to29(&x, private::CrateToken(())),
+                C::to29(&endo_x, private::CrateToken(())),
+                y29,
+                C::neg29(&y29, private::CrateToken(())),
+            ]
+        },
+        #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
+        field: PhantomData,
     }
 }
 
