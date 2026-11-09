@@ -181,10 +181,7 @@ impl<'a> Reader<'a> {
     /// statically known point offsets in transcript order. Byte consumption and
     /// absorption are identical to [`Self::new`]; only each point's decoding
     /// work is already done.
-    pub(crate) fn with_decoded(
-        proof: &'a [u8],
-        points: &'a [super::curve::VestaAffine],
-    ) -> Self {
+    pub(crate) fn with_decoded(proof: &'a [u8], points: &'a [super::curve::VestaAffine]) -> Self {
         Self {
             decoded: Some(Decoded { points, cursor: 0 }),
             ..Self::new(proof)

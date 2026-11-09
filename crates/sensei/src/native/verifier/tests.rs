@@ -40,8 +40,13 @@ fn instance_commitments_match_a_lagrange_msm_reference() {
         let natives: Vec<_> = statements.iter().map(|s| s.native()).collect();
         for instance_len in [9, 10] {
             let mut reader = Reader::new(&[]);
-            absorb_instances(&mut reader, &natives, instance_len, &runtime.instance_generators)
-                .unwrap();
+            absorb_instances(
+                &mut reader,
+                &natives,
+                instance_len,
+                &runtime.instance_generators,
+            )
+            .unwrap();
             let got = reader.challenge();
             // The fixed-base path must absorb exactly what per-statement
             // multiplications over the same Lagrange prefix produce.
@@ -66,7 +71,10 @@ fn prefetch_decodes_every_point_of_an_archived_proof() {
     use super::super::protocol::transcript_encoding::{ACTION_POINTS, FIXED_POINTS};
     let (statements, proof) = fixture();
     let points = prefetch_points(&proof, statements.len()).expect("canonical proof prefetches");
-    assert_eq!(points.len(), FIXED_POINTS + ACTION_POINTS * statements.len());
+    assert_eq!(
+        points.len(),
+        FIXED_POINTS + ACTION_POINTS * statements.len()
+    );
     // A truncated proof or a corrupted encoding declines, deferring to the
     // serial reader's error reporting.
     assert!(prefetch_points(&proof[..proof.len() - 1], statements.len()).is_none());

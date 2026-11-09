@@ -126,11 +126,7 @@ pub(crate) mod transcript_encoding {
             .checked_add(evaluations)?
             .checked_mul(POINT_BYTES)?;
         let ipa = q_prime.checked_add((1 + super::POINT_SETS) * SCALAR_BYTES)?;
-        Some([
-            (0, commitments),
-            (q_prime, 1),
-            (ipa, 1 + 2 * K as usize),
-        ])
+        Some([(0, commitments), (q_prime, 1), (ipa, 1 + 2 * K as usize)])
     }
     #[cfg(feature = "verifier")]
     #[test]

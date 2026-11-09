@@ -258,10 +258,7 @@ impl<'a> BatchValidator<'a> {
                 #[cfg(feature = "backend-sensei")]
                 let proof = {
                     let cv_nets = &affine[start + 1..start + 1 + instances.len()];
-                    (
-                        proof,
-                        Instance::natives_with_affine(&instances, cv_nets),
-                    )
+                    (proof, Instance::natives_with_affine(&instances, cv_nets))
                 };
                 (signatures, proof)
             },
