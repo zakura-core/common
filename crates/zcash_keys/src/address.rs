@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use transparent::address::TransparentAddress;
 use zcash_address::{
     ConversionError, ToAddress, TryFromAddress, ZcashAddress,
-    unified::{self, Container, Encoding, Typecode},
+    unified::{self, Container, Encoding, PqScheme, Typecode},
 };
 use zcash_protocol::consensus::{self, NetworkType};
 
@@ -22,6 +22,12 @@ pub struct UnifiedAddress {
     #[cfg(feature = "sapling")]
     sapling: Option<PaymentAddress>,
     transparent: Option<TransparentAddress>,
+    /// A post-quantum transparent receiver: its scheme and the commitment an output carries.
+    ///
+    /// This is not derived from a viewing key the way the others are, because a hash-based
+    /// public key cannot be computed without the secret that generates it. A caller holding a
+    /// commitment from its key pool attaches one with [`UnifiedAddress::with_pq_transparent_receiver`].
+    pq_transparent: Option<(PqScheme, [u8; 32])>,
     unknown: Vec<(u32, Vec<u8>)>,
 }
 
@@ -34,6 +40,7 @@ impl TryFrom<unified::Address> for UnifiedAddress {
         #[cfg(feature = "sapling")]
         let mut sapling = None;
         let mut transparent = None;
+        let mut pq_transparent = None;
 
         let mut unknown: Vec<(u32, Vec<u8>)> = vec![];
 
@@ -77,6 +84,10 @@ impl TryFrom<unified::Address> for UnifiedAddress {
                     transparent = Some(TransparentAddress::ScriptHash(*data));
                 }
 
+                unified::Receiver::PqTransparent { scheme, commitment } => {
+                    pq_transparent = Some((*scheme, *commitment));
+                }
+
                 unified::Receiver::Unknown { typecode, data } => {
                     unknown.push((*typecode, data.clone()));
                 }
@@ -89,6 +100,7 @@ impl TryFrom<unified::Address> for UnifiedAddress {
             #[cfg(feature = "sapling")]
             sapling,
             transparent,
+            pq_transparent,
             unknown,
         })
     }
@@ -122,6 +134,7 @@ impl UnifiedAddress {
                 #[cfg(feature = "sapling")]
                 sapling,
                 transparent,
+                pq_transparent: None,
                 unknown: vec![],
             })
         } else {
@@ -171,6 +184,36 @@ impl UnifiedAddress {
         self.transparent.as_ref()
     }
 
+    /// Returns whether this address has a post-quantum transparent receiver.
+    pub fn has_pq_transparent(&self) -> bool {
+        self.pq_transparent.is_some()
+    }
+
+    /// Returns this address's post-quantum transparent receiver, if it has one.
+    pub fn pq_transparent(&self) -> Option<(PqScheme, &[u8; 32])> {
+        self.pq_transparent
+            .as_ref()
+            .map(|(scheme, commitment)| (*scheme, commitment))
+    }
+
+    /// Returns this address with a post-quantum transparent receiver attached, replacing any
+    /// the address already carried.
+    ///
+    /// This is a separate step rather than an argument to [`Self::from_receivers`] because a PQ
+    /// receiver is not derivable: there is no extended public key for a hash-based signature
+    /// scheme, so the commitment comes from a signer-generated key pool rather than from a
+    /// viewing key and a diversifier index. The caller is responsible for the commitment being
+    /// one it can still spend: an address offering a receiver nobody can sign for is a way to
+    /// lose money.
+    ///
+    /// A wallet attaches at most one, for the parameter set its account holds. The encoding can
+    /// carry one receiver per scheme, but offering two would let the sender decide which signing
+    /// key has to be present when the funds are spent.
+    pub fn with_pq_transparent_receiver(mut self, scheme: PqScheme, commitment: [u8; 32]) -> Self {
+        self.pq_transparent = Some((scheme, commitment));
+        self
+    }
+
     /// Returns the set of unknown receivers of the unified address.
     pub fn unknown(&self) -> &[(u32, Vec<u8>)] {
         &self.unknown
@@ -207,6 +250,11 @@ impl UnifiedAddress {
             TransparentAddress::ScriptHash(data) => unified::Receiver::P2sh(*data),
         }));
 
+        let items =
+            items.chain(self.pq_transparent.map(|(scheme, commitment)| {
+                unified::Receiver::PqTransparent { scheme, commitment }
+            }));
+
         let ua = unified::Address::try_from_items(items.collect())
             .expect("UnifiedAddress should only be constructed safely");
         ZcashAddress::from_unified(net, ua)
@@ -229,6 +277,10 @@ impl UnifiedAddress {
             TransparentAddress::ScriptHash(_) => Typecode::P2sh,
         }));
         let result = result.chain(
+            self.pq_transparent
+                .map(|(scheme, _)| Typecode::PqTransparent(scheme)),
+        );
+        let result = result.chain(
             self.unknown()
                 .iter()
                 .map(|(typecode, _)| Typecode::Unknown(*typecode)),
@@ -237,6 +289,11 @@ impl UnifiedAddress {
     }
 
     /// Returns the set of receivers in the unified address, excluding unknown receiver types.
+    ///
+    /// A post-quantum transparent receiver is left out, because [`Receiver`] renders each
+    /// receiver as the least-capable address that can carry it and no such address exists yet
+    /// for a PQ commitment: a unified address must hold a shielded receiver, and the standalone
+    /// encoding is specified but not built. Use [`Self::pq_transparent`] to read one.
     pub fn as_understood_receivers(&self) -> Vec<Receiver> {
         let result = core::iter::empty();
         #[cfg(feature = "orchard")]
@@ -442,7 +499,7 @@ impl Address {
                 matches!(pool_type, PoolType::Transparent)
             }
             Address::Unified(ua) => match pool_type {
-                PoolType::Transparent => ua.has_transparent(),
+                PoolType::Transparent => ua.has_transparent() || ua.has_pq_transparent(),
                 PoolType::Shielded(ShieldedPool::Sapling) => ua.has_sapling(),
                 // Ironwood shares the Orchard receiver.
                 PoolType::Shielded(ShieldedPool::Orchard | ShieldedPool::Ironwood) => {
@@ -569,6 +626,87 @@ mod tests {
         any(feature = "orchard", feature = "sapling")
     ))]
     use zip32::AccountId;
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn pq_transparent_receiver_survives_a_unified_address() {
+        use zcash_address::unified::{self, Container, Encoding, PqScheme, Typecode};
+
+        use super::UnifiedAddress;
+        use zcash_protocol::PoolType;
+
+        let orchard = test_vectors::UNIFIED
+            .iter()
+            .find_map(|tv| tv.orchard_raw_addr)
+            .expect("a test vector carries an Orchard receiver");
+        let commitment = [0x5a; 32];
+
+        // A PQ receiver arrives from an encoded address, is understood, and is rendered back.
+        let parsed = unified::Address::try_from_items(vec![
+            unified::Receiver::Orchard(orchard),
+            unified::Receiver::PqTransparent {
+                scheme: PqScheme::Sha2_192s,
+                commitment,
+            },
+        ])
+        .expect("a PQ receiver beside a shielded one is well formed");
+        let ua = UnifiedAddress::try_from(parsed.clone()).expect("the receivers are valid");
+
+        assert!(ua.has_pq_transparent());
+        assert_eq!(
+            ua.pq_transparent(),
+            Some((PqScheme::Sha2_192s, &commitment))
+        );
+        assert!(
+            ua.receiver_types()
+                .contains(&Typecode::PqTransparent(PqScheme::Sha2_192s))
+        );
+        // A PQ receiver pays through the transparent pool, so an address carrying one can
+        // receive transparent funds even with no legacy transparent receiver.
+        assert!(!ua.has_transparent());
+        assert!(Address::Unified(ua.clone()).can_receive_as(PoolType::TRANSPARENT));
+        // It has no standalone address encoding yet, so it is not an understood receiver.
+        assert!(
+            ua.as_understood_receivers()
+                .iter()
+                .all(|receiver| !matches!(receiver, super::Receiver::Transparent(_)))
+        );
+
+        let encoded = ua.encode(&MAIN_NETWORK);
+        let reparsed = unified::Address::decode(&encoded)
+            .map(|(_, address)| address)
+            .expect("the rendered address decodes");
+        assert_eq!(reparsed, parsed);
+        assert_eq!(
+            UnifiedAddress::try_from(reparsed).expect("the receivers are valid"),
+            ua
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn attaching_a_pq_transparent_receiver_replaces_the_previous_one() {
+        use zcash_address::unified::PqScheme;
+
+        use super::UnifiedAddress;
+
+        let orchard_bytes = test_vectors::UNIFIED
+            .iter()
+            .find_map(|tv| tv.orchard_raw_addr)
+            .expect("a test vector carries an Orchard receiver");
+        let orchard = Option::from(orchard::Address::from_raw_address_bytes(&orchard_bytes))
+            .expect("the vector's Orchard receiver is valid");
+
+        let ua = UnifiedAddress::from_receivers(Some(orchard), None, None)
+            .expect("an Orchard receiver is a shielded receiver");
+        assert!(!ua.has_pq_transparent());
+
+        let ua = ua
+            .with_pq_transparent_receiver(PqScheme::Sha2_128f, [1; 32])
+            .with_pq_transparent_receiver(PqScheme::Sha2_192s, [2; 32]);
+        assert_eq!(ua.pq_transparent(), Some((PqScheme::Sha2_192s, &[2; 32])));
+        assert_eq!(ua.receiver_types().len(), 2);
+    }
 
     #[test]
     #[cfg(any(feature = "orchard", feature = "sapling"))]
