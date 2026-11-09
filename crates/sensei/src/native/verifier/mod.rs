@@ -249,7 +249,7 @@ impl VerifierRuntime {
                             self.srs.lagrange_bases().range(0..INSTANCE_VALUE_COUNT),
                             &equation.fixed[INSTANCE_OFFSET..BLIND_GENERATOR_SLOT],
                         ),
-                        Input::new(Bases::Affine(&equation.points), &equation.scalars),
+                        Input::new(Bases::Prepared(&equation.points), &equation.scalars),
                     ],
                     self.executor.budget(),
                 )
@@ -270,6 +270,39 @@ impl VerifierRuntime {
 
 pub(crate) fn warm_up_verifier() {
     let _ = VerifierRuntime::get();
+}
+
+/// Decodes every point in a proof ahead of transcript reading.
+///
+/// A canonical proof's point offsets depend only on its Action count, so the
+/// encodings can be gathered and decoded together — sharing interleaved
+/// square-root chains — before Blake2b absorption consumes the transcript
+/// serially. Returns `None` for an unexpected length, an invalid encoding, or
+/// an identity point; the caller then reads serially, which reports the failure
+/// at the same position with the same error as before.
+fn prefetch_points(proof: &[u8], actions: usize) -> Option<Vec<VestaAffine>> {
+    use super::protocol::transcript_encoding::{POINT_BYTES, point_runs, proof_capacity};
+    if proof.len() != proof_capacity(actions)? {
+        return None;
+    }
+    let runs = point_runs(actions)?;
+    let total = runs.iter().map(|(_, count)| count).sum();
+    let mut encodings = Vec::with_capacity(total);
+    for &(offset, count) in &runs {
+        let bytes = proof.get(offset..offset + count * POINT_BYTES)?;
+        encodings.extend(
+            bytes
+                .chunks_exact(POINT_BYTES)
+                .map(|chunk| <[u8; 32]>::try_from(chunk).expect("fixed encoding width")),
+        );
+    }
+    let mut points = vec![VestaPoint::IDENTITY; total];
+    VestaPoint::batch_from_bytes(&encodings, &mut points)?;
+    // The transcript rejects identity points, so leave one to the serial path.
+    points
+        .into_iter()
+        .map(|point| point.as_affine().copied())
+        .collect()
 }
 
 #[cfg(all(test, feature = "prover"))]
@@ -324,7 +357,9 @@ pub(crate) fn verify(
 struct Equation {
     versions: u8,
     fixed: Vec<Fp>,
-    points: Vec<VestaAffine>,
+    // Prepared entries cache each point's endomorphism coordinate, saving the
+    // MSM one base-field multiplication per nonzero rotated digit per window.
+    points: Vec<PreparedAffinePoint<Vesta>>,
     scalars: Vec<Fp>,
     #[cfg(test)]
     challenges: Vec<[u8; 32]>,
@@ -350,7 +385,8 @@ impl Equation {
     }
     fn point(&mut self, reader: &mut Reader<'_>) -> Result<usize, Error> {
         let index = self.points.len();
-        self.points.push(reader.point()?);
+        self.points
+            .push(PreparedAffinePoint::from_affine(&reader.point()?));
         self.scalars.push(<Fp>::ZERO);
         Ok(index)
     }
@@ -369,7 +405,11 @@ impl Equation {
         msm: &mut MsmWorkspace,
         execution: Execution<'_>,
     ) -> Result<(), Error> {
-        let mut reader = Reader::new(request.proof);
+        let decoded = prefetch_points(request.proof, request.statements.len());
+        let mut reader = match &decoded {
+            Some(points) => Reader::with_decoded(request.proof, points),
+            None => Reader::new(request.proof),
+        };
         let version = request.version;
         self.versions |= 1 << version.index();
         let columns = &VK_DATA.columns[version.index()];

@@ -107,6 +107,51 @@ pub(crate) mod transcript_encoding {
             None => None,
         }
     }
+    /// Byte offsets and counts of the proof's three contiguous point runs, in
+    /// transcript order: the per-Action commitments with the vanishing mask and
+    /// quotient pieces, the multi-opening Q′, and the IPA mask with its L/R
+    /// rounds. Challenges consume no proof bytes, so a canonical proof's point
+    /// positions depend only on its Action count. Overflow returns `None`.
+    #[cfg(feature = "verifier")]
+    pub(crate) fn point_runs(actions: usize) -> Option<[(usize, usize); 3]> {
+        let commitments = ACTION_POINTS
+            .checked_mul(actions)?
+            .checked_add(1 + QUOTIENT_PIECES)?;
+        // The evaluations between the quotient pieces and Q′: everything in
+        // FIXED_SCALARS except the later u values and the closing c and f.
+        let evaluations = ACTION_SCALARS
+            .checked_mul(actions)?
+            .checked_add(FIXED_SCALARS - super::POINT_SETS - 2)?;
+        let q_prime = commitments
+            .checked_add(evaluations)?
+            .checked_mul(POINT_BYTES)?;
+        let ipa = q_prime.checked_add((1 + super::POINT_SETS) * SCALAR_BYTES)?;
+        Some([
+            (0, commitments),
+            (q_prime, 1),
+            (ipa, 1 + 2 * K as usize),
+        ])
+    }
+    #[cfg(feature = "verifier")]
+    #[test]
+    fn point_runs_account_for_every_point_and_byte() {
+        for actions in [1, 2, 64, 65] {
+            let runs = point_runs(actions).unwrap();
+            let points: usize = runs.iter().map(|(_, count)| count).sum();
+            assert_eq!(points, FIXED_POINTS + ACTION_POINTS * actions);
+            // Runs are ordered and disjoint, and the last is followed by
+            // exactly the closing c and f scalars of the canonical extent.
+            assert!(
+                runs.windows(2)
+                    .all(|pair| pair[0].0 + pair[0].1 * POINT_BYTES <= pair[1].0)
+            );
+            assert_eq!(
+                runs[2].0 + runs[2].1 * POINT_BYTES + 2 * SCALAR_BYTES,
+                proof_capacity(actions).unwrap()
+            );
+        }
+        assert_eq!(point_runs(usize::MAX), None);
+    }
     #[test]
     fn arbitrary_action_counts_and_overflow() {
         for n in [1, 2, 64, 65, 128, 1024, 1_000_000] {

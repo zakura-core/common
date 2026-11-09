@@ -27,6 +27,25 @@ fn no_rng() -> Result<u64, crate::RandomnessError> {
 }
 
 #[test]
+fn prefetch_decodes_every_point_of_an_archived_proof() {
+    use super::super::protocol::transcript_encoding::{ACTION_POINTS, FIXED_POINTS};
+    let (statements, proof) = fixture();
+    let points = prefetch_points(&proof, statements.len()).expect("canonical proof prefetches");
+    assert_eq!(points.len(), FIXED_POINTS + ACTION_POINTS * statements.len());
+    // A truncated proof or a corrupted encoding declines, deferring to the
+    // serial reader's error reporting.
+    assert!(prefetch_points(&proof[..proof.len() - 1], statements.len()).is_none());
+    let mut corrupted = proof.clone();
+    corrupted[..32].fill(0xff);
+    assert!(prefetch_points(&corrupted, statements.len()).is_none());
+    // Full verification runs through the prefetched reader (whose debug
+    // assertion checks every point against its proof bytes).
+    let request =
+        VerificationRequest::new(crate::CircuitVersion::PostNu6_3, &statements, &proof).unwrap();
+    assert_eq!(crate::verify_proofs(&[request], &mut no_rng), Ok(()));
+}
+
+#[test]
 fn split_equation_matches_an_affine_msm() {
     let runtime = VerifierRuntime::get();
     assert!(Arc::ptr_eq(&runtime.srs, &PreparedSrs::shared()));
@@ -57,13 +76,18 @@ fn split_equation_matches_an_affine_msm() {
         *scalar = step.mul(&<Fp>::from_u64(index as u64 + 1));
     }
     dense.points = vec![
-        PREPARED_POINTS.coefficient_bases[17],
-        VK_COMMITMENTS[3],
-        PREPARED_POINTS.lagrange_bases[5],
+        PreparedAffinePoint::from_affine(&PREPARED_POINTS.coefficient_bases[17]),
+        PreparedAffinePoint::from_affine(&VK_COMMITMENTS[3]),
+        PreparedAffinePoint::from_affine(&PREPARED_POINTS.lagrange_bases[5]),
     ];
     dense.scalars = vec![<Fp>::ZERO, <Fp>::ONE.neg(), step];
 
     for equation in [Equation::new(), boundaries, dense] {
+        let equation_affine: Vec<_> = equation
+            .points
+            .iter()
+            .map(PreparedAffinePoint::to_affine)
+            .collect();
         let bases: Vec<_> = PREPARED_POINTS
             .coefficient_bases
             .iter()
@@ -73,7 +97,7 @@ fn split_equation_matches_an_affine_msm() {
                 &PREPARED_POINTS.blind_generator,
                 &PREPARED_POINTS.ipa_generator,
             ])
-            .chain(&equation.points)
+            .chain(&equation_affine)
             .copied()
             .collect();
         let scalars: Vec<_> = equation
