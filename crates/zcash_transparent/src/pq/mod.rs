@@ -14,7 +14,7 @@
 
 pub mod output;
 pub mod script;
-pub mod template;
+pub mod single_key;
 
 use zcash_address::unified::PqScheme;
 

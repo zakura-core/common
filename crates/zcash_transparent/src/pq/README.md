@@ -93,6 +93,26 @@ Because the body carries no header, nothing in it says which parameter set may s
 The output decides, and the two parameter sets have different key lengths, so a body
 written for one is unspendable under the other.
 
+## The body
+
+A body is an ordinary transparent script, and the output commits to it and to nothing else.
+It is also the whole of what a spend runs: the input pushes the body last, the evaluator
+checks it hashes to the output's commitment, and then that script decides what the spend
+must supply. So the output says which rules apply, and the body says who may spend. Multiple
+signers, timelocks and recovery branches are all just bodies, indistinguishable from one
+another in an output.
+
+Whoever will spend the output keeps its body; the payer never needs it, and is given only
+the commitment. That is the same bargain as pay-to-script-hash, with the same consequence: a
+body nobody kept is a coin nobody can spend.
+
+An address is the one case where that bargain is not enough, because an address a wallet
+hands out should be reproducible from the wallet's seed alone, so that restoring the seed
+finds the funds. `single_key` fixes the body shape that makes that true — one public key and
+one signature check — so the chain runs from the seed to the address with nothing kept beside
+it, and a wallet that hands out addresses should commit to that body. Nothing in the
+consensus rules requires it: a wallet that commits to any other body simply owns its backup.
+
 ## Rules
 
 Two rules apply at different times, and both are the caller's to enforce.

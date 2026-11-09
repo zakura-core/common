@@ -74,7 +74,7 @@ impl core::error::Error for Error {}
 /// rejected here rather than committed to, because the evaluator aborts a spend whose key is
 /// the wrong length for the output's parameter set: committing to one would make an output that
 /// looks ordinary and can never be spent.
-pub fn single_key_body(parameters: ParameterSet, public_key: &[u8]) -> Result<Code, Error> {
+pub fn body(parameters: ParameterSet, public_key: &[u8]) -> Result<Code, Error> {
     let expected = parameters.public_key_bytes();
     if public_key.len() != expected {
         return Err(Error::PublicKeyLength {
@@ -92,24 +92,18 @@ pub fn single_key_body(parameters: ParameterSet, public_key: &[u8]) -> Result<Co
 }
 
 /// The commitment an output carries for a single signer holding `public_key`.
-pub fn single_key_commitment(
-    parameters: ParameterSet,
-    public_key: &[u8],
-) -> Result<[u8; 32], Error> {
-    single_key_body(parameters, public_key).map(|body| sha256::hash(&body.0))
+pub fn commitment(parameters: ParameterSet, public_key: &[u8]) -> Result<[u8; 32], Error> {
+    body(parameters, public_key).map(|body| sha256::hash(&body.0))
 }
 
 /// The complete output script paying a single signer holding `public_key`.
 ///
 /// This is what a sender writes for an address that carries this key's commitment, and it is
-/// byte-identical to passing [`single_key_commitment`] to
+/// byte-identical to passing [`commitment`] to
 /// [`output::output_script_from_commitment`] — which is the path a sender actually takes, since
 /// a sender is given the commitment and never sees the key.
-pub fn single_key_output_script(
-    parameters: ParameterSet,
-    public_key: &[u8],
-) -> Result<Code, Error> {
-    single_key_commitment(parameters, public_key)
+pub fn output_script(parameters: ParameterSet, public_key: &[u8]) -> Result<Code, Error> {
+    commitment(parameters, public_key)
         .map(|commitment| output::output_script_from_commitment(parameters, &commitment))
 }
 
@@ -134,7 +128,7 @@ mod tests {
             (ParameterSet::Sha2_128f, key_128f().to_vec()),
             (ParameterSet::Sha2_192s, key_192s().to_vec()),
         ] {
-            let body = single_key_body(parameters, &key).expect("key length matches");
+            let body = body(parameters, &key).expect("key length matches");
             assert_eq!(body.0.len(), key.len() + 2);
             assert_eq!(usize::from(body.0[0]), key.len());
             assert_eq!(&body.0[1..body.0.len() - 1], &key[..]);
@@ -145,14 +139,14 @@ mod tests {
     #[test]
     fn body_lengths_are_the_documented_ones() {
         assert_eq!(
-            single_key_body(ParameterSet::Sha2_128f, &key_128f())
+            body(ParameterSet::Sha2_128f, &key_128f())
                 .expect("key length matches")
                 .0
                 .len(),
             34
         );
         assert_eq!(
-            single_key_body(ParameterSet::Sha2_192s, &key_192s())
+            body(ParameterSet::Sha2_192s, &key_192s())
                 .expect("key length matches")
                 .0
                 .len(),
@@ -163,9 +157,9 @@ mod tests {
     #[test]
     fn commitment_hashes_the_body_alone() {
         let key = key_128f();
-        let body = single_key_body(ParameterSet::Sha2_128f, &key).expect("key length matches");
+        let body = body(ParameterSet::Sha2_128f, &key).expect("key length matches");
         assert_eq!(
-            single_key_commitment(ParameterSet::Sha2_128f, &key).expect("key length matches"),
+            commitment(ParameterSet::Sha2_128f, &key).expect("key length matches"),
             sha256::hash(&body.0)
         );
     }
@@ -176,9 +170,9 @@ mod tests {
             (ParameterSet::Sha2_128f, key_128f().to_vec()),
             (ParameterSet::Sha2_192s, key_192s().to_vec()),
         ] {
-            let commitment = single_key_commitment(parameters, &key).expect("key length matches");
+            let commitment = commitment(parameters, &key).expect("key length matches");
             assert_eq!(
-                single_key_output_script(parameters, &key)
+                output_script(parameters, &key)
                     .expect("key length matches")
                     .0,
                 output::output_script_from_commitment(parameters, &commitment).0
@@ -192,14 +186,14 @@ mod tests {
             (ParameterSet::Sha2_128f, key_128f().to_vec()),
             (ParameterSet::Sha2_192s, key_192s().to_vec()),
         ] {
-            let script = single_key_output_script(parameters, &key).expect("key length matches");
+            let script = output_script(parameters, &key).expect("key length matches");
             let parsed = output::parse_output(&script)
                 .expect("the script is a well-formed PQ output")
                 .expect("the script is in the PQ namespace");
             assert_eq!(parsed.parameters(), parameters);
             assert_eq!(
                 parsed.commitment(),
-                &single_key_commitment(parameters, &key).expect("key length matches")
+                &commitment(parameters, &key).expect("key length matches")
             );
         }
     }
@@ -207,14 +201,14 @@ mod tests {
     #[test]
     fn the_other_parameter_set_s_key_is_rejected() {
         assert_eq!(
-            single_key_body(ParameterSet::Sha2_128f, &key_192s()).unwrap_err(),
+            body(ParameterSet::Sha2_128f, &key_192s()).unwrap_err(),
             Error::PublicKeyLength {
                 expected: sha2_128f::PUBLIC_KEY_BYTES,
                 actual: sha2_192s::PUBLIC_KEY_BYTES,
             }
         );
         assert_eq!(
-            single_key_body(ParameterSet::Sha2_192s, &key_128f()).unwrap_err(),
+            body(ParameterSet::Sha2_192s, &key_128f()).unwrap_err(),
             Error::PublicKeyLength {
                 expected: sha2_192s::PUBLIC_KEY_BYTES,
                 actual: sha2_128f::PUBLIC_KEY_BYTES,
@@ -249,7 +243,7 @@ mod tests {
             (ParameterSet::Sha2_128f, key_128f().to_vec()),
             (ParameterSet::Sha2_192s, key_192s().to_vec()),
         ] {
-            let commitment = single_key_commitment(parameters, &key).expect("key length matches");
+            let commitment = commitment(parameters, &key).expect("key length matches");
 
             let ua = Address::try_from_items(vec![
                 // A shielded receiver, which every Revision 0 unified address must carry. Its
@@ -282,7 +276,7 @@ mod tests {
 
             assert_eq!(
                 paid.0,
-                single_key_output_script(parameters, &key)
+                output_script(parameters, &key)
                     .expect("key length matches")
                     .0
             );
@@ -292,7 +286,7 @@ mod tests {
     #[test]
     fn an_empty_key_is_rejected() {
         assert_eq!(
-            single_key_body(ParameterSet::Sha2_128f, &[]).unwrap_err(),
+            body(ParameterSet::Sha2_128f, &[]).unwrap_err(),
             Error::PublicKeyLength {
                 expected: sha2_128f::PUBLIC_KEY_BYTES,
                 actual: 0,
