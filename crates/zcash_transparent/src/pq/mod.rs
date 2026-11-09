@@ -13,6 +13,9 @@
 
 pub mod output;
 pub mod script;
+pub mod template;
+
+use zcash_address::unified::PqScheme;
 
 /// A malformed encoding, overlong context, or invalid signature.
 pub use slh_dsa::signature::Error;
@@ -96,6 +99,27 @@ impl ParameterSet {
         match self {
             Self::Sha2_128f => sha2_128f::SIGNATURE_BYTES,
             Self::Sha2_192s => sha2_192s::SIGNATURE_BYTES,
+        }
+    }
+
+    /// The unified-address receiver scheme that names this parameter set.
+    ///
+    /// The address layer carries its own enumeration, because address encodings live in a crate
+    /// that knows nothing about signatures. These two functions are the whole join between
+    /// them, and the tests check that it is total in both directions, so neither enumeration can
+    /// grow a member the other cannot name.
+    pub const fn address_scheme(self) -> PqScheme {
+        match self {
+            Self::Sha2_128f => PqScheme::Sha2_128f,
+            Self::Sha2_192s => PqScheme::Sha2_192s,
+        }
+    }
+
+    /// The parameter set a unified-address receiver scheme names.
+    pub const fn from_address_scheme(scheme: PqScheme) -> Self {
+        match scheme {
+            PqScheme::Sha2_128f => Self::Sha2_128f,
+            PqScheme::Sha2_192s => Self::Sha2_192s,
         }
     }
 }
