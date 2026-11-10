@@ -177,8 +177,6 @@ use core::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ProofError {
-    /// Proof construction was cancelled by the caller.
-    Cancelled,
     /// The request is malformed: it is empty, its circuits and statements disagree in
     /// number or circuit version, it selects a circuit version that does not support the
     /// operation, or a statement disables cross-address transfers under a key whose
@@ -193,6 +191,8 @@ pub enum ProofError {
     /// of the caller's input or proof; it indicates a bug in the backend or its
     /// configuration and should be reported rather than retried.
     InternalInvariant,
+    /// Proof construction was cancelled by the caller.
+    Cancelled,
 }
 
 impl fmt::Display for ProofError {

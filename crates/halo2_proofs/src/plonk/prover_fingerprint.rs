@@ -416,7 +416,8 @@ pub fn record_error(error: &super::Error) {
         // formatters, which could panic or have other observable side effects.
         let payload = match error {
             Error::Transcript(error) => format!("Transcript({:?})", error.kind()),
-            Error::Synthesis
+            Error::Cancelled
+            | Error::Synthesis
             | Error::InvalidInstances
             | Error::InvalidParameters
             | Error::ConstraintSystemFailure

@@ -862,6 +862,7 @@ pub struct PcztParts<P: consensus::Parameters> {
 
 /// Generates a [`Transaction`] from its inputs and outputs.
 pub struct Builder<P, U> {
+    #[cfg(feature = "circuits")]
     proof_cancellation: orchard::circuit::ProofCancellation,
     params: P,
     tx_version: TxVersion,
@@ -1051,6 +1052,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         };
 
         Builder {
+            #[cfg(feature = "circuits")]
             proof_cancellation: Default::default(),
             params,
             tx_version,
@@ -1069,6 +1071,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
 
     /// Sets a cooperative cancellation signal for Orchard and Ironwood proofs.
     /// Cancellation does not interrupt shared proving-key initialization.
+    #[cfg(feature = "circuits")]
     pub fn with_proof_cancellation(
         mut self,
         cancellation: orchard::circuit::ProofCancellation,
@@ -1089,6 +1092,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         _progress_notifier: Sender<Progress>,
     ) -> Builder<P, Sender<Progress>> {
         Builder {
+            #[cfg(feature = "circuits")]
             proof_cancellation: self.proof_cancellation,
             params: self.params,
             tx_version: self.tx_version,
@@ -2994,6 +2998,7 @@ mod tests {
         // Create a builder with 0 fee, so we can construct t outputs
         let consensus_branch_id = BranchId::for_height(&TEST_NETWORK, sapling_activation_height);
         let mut builder = builder::Builder {
+            #[cfg(feature = "circuits")]
             proof_cancellation: Default::default(),
             params: TEST_NETWORK,
             tx_version: TxVersion::suggested_for_branch(consensus_branch_id),
