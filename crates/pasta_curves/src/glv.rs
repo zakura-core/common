@@ -3029,7 +3029,7 @@ fn multiexp_parallel<C: GlvParams>(
     let workers = maybe_rayon::current_num_threads().max(1);
     // Recoding every window's digits up front is a separate parallel pass.
     // With more workers than windows, each window's own recoding is cheaper
-    // than that extra pass (Ice Lake, 16 workers: rows cost 2-5% of the MSM;
+    // than that extra pass (Ice Lake, 16 workers: rows cost 2-13% of the MSM;
     // Zen 4 at 4-8 workers and Ice Lake at 4 gain 1-5% from the rows).
     let rows = (window_bits <= MAX_DIGIT_ROW_BITS
         && window_count >= MIN_WINDOWS_PER_WORKER_FOR_ROWS * workers)
