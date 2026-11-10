@@ -111,7 +111,10 @@ pub struct MSM<'a, C: CurveAffine> {
 }
 
 /// A batch's [`KnownTerms`] and one accumulated scalar per known point.
-type KnownScalars<C> = (std::sync::Arc<KnownTerms<C>>, Vec<<C as CurveAffine>::ScalarExt>);
+type KnownScalars<C> = (
+    std::sync::Arc<KnownTerms<C>>,
+    Vec<<C as CurveAffine>::ScalarExt>,
+);
 
 /// Below this many proof-specific terms, a batch with [`KnownTerms`] still
 /// sorts its terms by x-coordinate before the MSM.
