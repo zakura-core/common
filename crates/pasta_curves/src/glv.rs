@@ -1952,6 +1952,98 @@ fn batch_invert_and_add<F: Field>(
     Some(())
 }
 
+/// The widest window whose signed digits [`booth_digit_rows`] stores.
+const MAX_DIGIT_ROW_BITS: usize = 15;
+
+/// Every window's signed Booth digit of every component, window-major:
+/// `rows[window * 2n + 2 * base + half]`, as [`booth_digit`] computes it
+/// (0 for an identity base). One pass per component recodes all of its
+/// windows incrementally, instead of re-extracting each window's bits from
+/// the 128-bit magnitude.
+fn booth_digit_rows<F: Sync>(
+    components: &[(SignedMagnitude, SignedMagnitude)],
+    bases: &[MultiexpBase<F>],
+    window_bits: usize,
+    window_count: usize,
+) -> Vec<i16> {
+    debug_assert!(window_bits <= MAX_DIGIT_ROW_BITS);
+    let width = components.len() * 2;
+    let mut rows = alloc::vec![0i16; width * window_count];
+    let fill = |rows: &mut [&mut [i16]], start: usize| {
+        let len = rows.first().map_or(0, |row| row.len());
+        let radix = 1u128 << window_bits;
+        for column in 0..len {
+            let index = start + column;
+            let (base, half) = (index / 2, index % 2);
+            if bases[base].identity {
+                continue;
+            }
+            let component = if half == 0 {
+                components[base].0
+            } else {
+                components[base].1
+            };
+            let mut previous_top = 0i32;
+            let mut magnitude = component.magnitude;
+            for row in rows.iter_mut() {
+                let value = (magnitude & (radix - 1)) as i32;
+                magnitude >>= window_bits;
+                let top = value >> (window_bits - 1);
+                let digit = value + previous_top - (top << window_bits);
+                previous_top = top;
+                row[column] = if component.negative { -digit } else { digit } as i16;
+            }
+        }
+    };
+    #[cfg(feature = "multicore")]
+    {
+        let threads = maybe_rayon::current_num_threads();
+        let chunk = width.div_ceil(threads).max(1024);
+        let mut per_chunk: Vec<Vec<&mut [i16]>> = Vec::new();
+        for row in rows.chunks_mut(width) {
+            for (c, part) in row.chunks_mut(chunk).enumerate() {
+                if per_chunk.len() <= c {
+                    per_chunk.push(Vec::new());
+                }
+                per_chunk[c].push(part);
+            }
+        }
+        use maybe_rayon::prelude::*;
+        per_chunk
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(c, mut rows)| fill(&mut rows, c * chunk));
+    }
+    #[cfg(not(feature = "multicore"))]
+    {
+        let mut all: Vec<&mut [i16]> = rows.chunks_mut(width).collect();
+        fill(&mut all, 0);
+    }
+    rows
+}
+
+/// [`window_assignments`] from a row of [`booth_digit_rows`].
+fn row_assignments(
+    row: &[i16],
+    bucket_count: usize,
+    assignments: &mut Vec<WindowAssignment>,
+    counts: &mut Vec<usize>,
+) {
+    assignments.clear();
+    assignments.reserve(row.len());
+    counts.clear();
+    counts.resize(bucket_count, 0);
+    for (component, &digit) in row.iter().enumerate() {
+        if digit != 0 {
+            counts[digit.unsigned_abs() as usize - 1] += 1;
+            assignments.push(WindowAssignment {
+                component,
+                signed_bucket: digit as isize,
+            });
+        }
+    }
+}
+
 /// Collects the nonzero signed points assigned to one Booth window.
 fn window_assignments<C>(
     components: &[(SignedMagnitude, SignedMagnitude)],
@@ -2618,11 +2710,14 @@ fn with_window_scratch<F: Field, R>(f: impl FnOnce(&mut WindowScratch<F>) -> R) 
     }
 }
 
-fn fill_window<C: GlvParams>(
+/// Fills and reduces one window's buckets, reading the window's digits from
+/// `row` (a row of [`booth_digit_rows`]) when given.
+fn fill_window_from<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
     bases: &[MultiexpBase<C::Base>],
     window_bits: usize,
     window: usize,
+    row: Option<&[i16]>,
     scratch: &mut WindowScratch<C::Base>,
 ) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
     let bucket_count = 1 << (window_bits - 1);
@@ -2636,7 +2731,12 @@ fn fill_window<C: GlvParams>(
         #[cfg(all(feature = "sqrt-table", pasta_curves_avx2))]
             avx2: scratch_avx2,
     } = scratch;
-    window_assignments::<C>(components, bases, window_bits, window, assignments, counts);
+    match row {
+        Some(row) => row_assignments(row, bucket_count, assignments, counts),
+        None => {
+            window_assignments::<C>(components, bases, window_bits, window, assignments, counts)
+        }
+    }
 
     offsets.clear();
     offsets.reserve(bucket_count + 1);
@@ -2715,10 +2815,23 @@ fn multiexp_serial<C: GlvParams>(
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
+    let rows = (window_bits <= MAX_DIGIT_ROW_BITS)
+        .then(|| booth_digit_rows(components, bases, window_bits, window_count));
+    let width = components.len() * 2;
     with_window_scratch(|scratch| {
         let mut all = Vec::with_capacity(window_count);
         for window in 0..window_count {
-            all.push(fill_window::<C>(components, bases, window_bits, window, scratch)?);
+            let row = rows
+                .as_deref()
+                .map(|rows| &rows[window * width..(window + 1) * width]);
+            all.push(fill_window_from::<C>(
+                components,
+                bases,
+                window_bits,
+                window,
+                row,
+                scratch,
+            )?);
         }
         let sums = sum_buckets_batch::<C>(&all)
             .unwrap_or_else(|| all.iter().map(|b| sum_buckets::<C>(b)).collect());
@@ -2901,6 +3014,9 @@ fn multiexp_parallel<C: GlvParams>(
     // cores of unequal speed (Apple's performance and efficiency cores), a
     // fixed stride gives slow cores as many windows as fast ones.
     let tasks = maybe_rayon::current_num_threads().clamp(1, window_count);
+    let rows = (window_bits <= MAX_DIGIT_ROW_BITS)
+        .then(|| booth_digit_rows(components, bases, window_bits, window_count));
+    let width = components.len() * 2;
     let next_window = core::sync::atomic::AtomicUsize::new(0);
     let sums = par_map_indices(tasks, &|_| {
         with_window_scratch(|scratch| {
@@ -2911,7 +3027,17 @@ fn multiexp_parallel<C: GlvParams>(
                 (window < window_count).then_some(window)
             }) {
                 indices.push(window);
-                all.push(fill_window::<C>(components, bases, window_bits, window, scratch)?);
+                let row = rows
+                    .as_deref()
+                    .map(|rows| &rows[window * width..(window + 1) * width]);
+                all.push(fill_window_from::<C>(
+                    components,
+                    bases,
+                    window_bits,
+                    window,
+                    row,
+                    scratch,
+                )?);
             }
             let sums = sum_buckets_batch::<C>(&all)
                 .unwrap_or_else(|| all.iter().map(|b| sum_buckets::<C>(b)).collect());
@@ -8923,6 +9049,70 @@ mod bucket_sum_batch_tests {
             let all = vec![buckets];
             let batched = sum_buckets_batch::<Ep>(&all).unwrap();
             assert_eq!(batched[0], sum_buckets::<Ep>(&all[0]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod digit_row_tests {
+    use super::*;
+    use crate::Ep;
+    use rand::{Rng, SeedableRng};
+
+    #[test]
+    fn digit_rows_match_booth_digits() {
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([13u8; 16]);
+        let n = 300;
+        let components: Vec<(SignedMagnitude, SignedMagnitude)> = (0..n)
+            .map(|i| {
+                let m = |r: &mut rand_xorshift::XorShiftRng| {
+                    let v = (u128::from(r.next_u64()) << 64 | u128::from(r.next_u64()))
+                        >> (128 - GLV_COMPONENT_BITS);
+                    // Exercise the extremes too.
+                    match i % 7 {
+                        0 => 0,
+                        1 => (1u128 << GLV_COMPONENT_BITS) - 1,
+                        _ => v,
+                    }
+                };
+                (
+                    SignedMagnitude {
+                        negative: i % 3 == 0,
+                        magnitude: m(&mut rng),
+                    },
+                    SignedMagnitude {
+                        negative: i % 5 == 0,
+                        magnitude: m(&mut rng),
+                    },
+                )
+            })
+            .collect();
+        let point = <Ep as group::Group>::generator();
+        let mut bases = multiexp_bases::<Ep>(&vec![group::Curve::to_affine(&point); n]);
+        bases[7].identity = true;
+        for window_bits in 2..=MAX_DIGIT_ROW_BITS {
+            let window_count = GLV_COMPONENT_BITS / window_bits + 1;
+            let rows = booth_digit_rows(&components, &bases, window_bits, window_count);
+            for window in 0..window_count {
+                for (base, (first, second)) in components.iter().enumerate() {
+                    for (half, component) in [*first, *second].into_iter().enumerate() {
+                        let digit = booth_digit(component, window_bits, window);
+                        let expected = if bases[base].identity {
+                            0
+                        } else if digit.negative {
+                            -(digit.magnitude as i32)
+                        } else {
+                            digit.magnitude as i32
+                        };
+                        let got = rows[window * 2 * n + 2 * base + half];
+                        assert_eq!(
+                            i32::from(got),
+                            expected,
+                            "w={window_bits} window={window} base={base} half={half}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
