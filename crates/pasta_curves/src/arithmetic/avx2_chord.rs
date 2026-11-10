@@ -37,7 +37,9 @@
 
 use core::arch::x86_64::*;
 
-use super::avx2_sqrt::{BITS, L, MASK, V, mul, pack, pasta_limbs29};
+#[cfg(test)]
+use super::avx2_sqrt::mul;
+use super::avx2_sqrt::{BITS, L, MASK, V, pack, pasta_limbs29};
 use alloc::vec::Vec;
 
 /// Additions in flight: two vectors of four lanes.
@@ -404,7 +406,7 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
     let k5 = const { kp(&pasta_limbs29(&[P0, P1, P2, P3]), 5) };
     macro_rules! mul {
         ($a:expr, $b:expr) => {
-            mul::<P0, P1, P2, P3>($a, $b)
+            crate::arithmetic::avx2_sqrt::mul29!($a, $b, P0, P1, P2, P3)
         };
     }
     let chunks = n.div_ceil(LANES);
