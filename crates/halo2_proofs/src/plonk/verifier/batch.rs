@@ -503,6 +503,52 @@ fn prefetch_points<C: CurveAffine>(
         .collect()
 }
 
+/// How many workers' shares of a large batch's point bytes (as a fraction
+/// `num / den`) a proof needs before [`up_front_shapes`] decodes it up front.
+/// Just over one share, moving its decode out of the proofs' overlap costs
+/// about what it saves (Zen 4, 4 workers, one 75-Action bundle with 63
+/// 2-Action ones: +1.6%); at 1.5 shares and above it saves 10-30%.
+const UP_FRONT_WORKER_SHARES: (usize, usize) = (3, 2);
+
+/// A proof's recorded point layout (its point runs' byte ranges), if any.
+type PointLayout = Option<Arc<[std::ops::Range<usize>]>>;
+
+/// One proof's decoded points, as `(offset, decoding)` pairs.
+type PrefetchedPoints<C> = Vec<(usize, Option<C>)>;
+
+/// Chooses the proofs whose points [`prefetch_batch_points`] decodes up
+/// front, split across the pool; the others decode inside their own task,
+/// next to their transcript. `layouts` holds each proof's recorded point
+/// layout, if any.
+///
+/// A batch with no more proofs than workers decodes every proof up front.
+/// In a larger batch, a proof with more than [`UP_FRONT_WORKER_SHARES`]
+/// workers' shares of the batch's point bytes (such as one many-Action
+/// Orchard bundle among 2-Action ones) is decoded up front too; decoding it
+/// in its own task would leave it on one worker after the others finish.
+fn up_front_shapes(layouts: Vec<PointLayout>, workers: usize) -> Vec<PointLayout> {
+    if layouts.len() <= workers {
+        return layouts;
+    }
+    let bytes = |layout: &PointLayout| {
+        layout
+            .as_ref()
+            .map_or(0, |ranges| ranges.iter().map(|r| r.len()).sum::<usize>())
+    };
+    let total: usize = layouts.iter().map(bytes).sum();
+    layouts
+        .into_iter()
+        .map(|layout| {
+            let (num, den) = UP_FRONT_WORKER_SHARES;
+            if bytes(&layout) * workers * den > total * num {
+                layout
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Point encodings (each `C::Repr` long) decoded per parallel task by
 /// [`prefetch_batch_points`]: a multiple of the eight-lane batch decoder.
 #[cfg(feature = "multicore")]
@@ -517,8 +563,8 @@ const MIN_PREFETCH_CHUNK_POINTS: usize = 32;
 /// layout yet, so the item records one while it is verified.
 fn prefetch_batch_points<C: CurveAffine>(
     items: &[BatchItem<C>],
-    layouts: &[Option<Arc<[std::ops::Range<usize>]>>],
-) -> Vec<Option<Vec<(usize, Option<C>)>>> {
+    layouts: &[PointLayout],
+) -> Vec<Option<PrefetchedPoints<C>>> {
     let len = C::Repr::default().as_ref().len();
     let mut offsets = Vec::new();
     let mut encodings: Vec<C::Repr> = Vec::new();
@@ -627,19 +673,13 @@ where
                 .copied(),
         ));
         let layouts = vk.proof_point_layouts();
-        // A batch with no more proofs than workers decodes all of its proofs'
-        // points up front, split across the pool. Larger batches keep each
-        // proof's decoding inside its own task, next to its transcript.
-        let shapes = items
-            .iter()
-            .map(|item| {
-                if items.len() <= crate::multicore::current_num_threads() {
-                    layouts.get(item.instances.len())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
+        let shapes = up_front_shapes(
+            items
+                .iter()
+                .map(|item| layouts.get(item.instances.len()))
+                .collect(),
+            crate::multicore::current_num_threads(),
+        );
         // Decoding the proofs' points needs only their bytes, so it runs
         // alongside the instance commitments that start each transcript.
         let (instance_commitments, prefetched) = crate::multicore::join(
@@ -745,6 +785,42 @@ mod tests {
         INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE, MAX_CACHED_INSTANCE_ROWS,
         plonk::commit_instance, poly::commitment::Params,
     };
+
+    #[test]
+    fn up_front_shapes_pick_small_batches_and_dominant_proofs() {
+        use super::{PointLayout, up_front_shapes};
+
+        let layout = |bytes: usize| -> PointLayout { Some(std::iter::once(0..bytes).collect()) };
+        let picked = |layouts: Vec<PointLayout>, workers| {
+            up_front_shapes(layouts, workers)
+                .iter()
+                .map(Option::is_some)
+                .collect::<Vec<_>>()
+        };
+
+        // No more proofs than workers: every proof with a layout.
+        assert_eq!(
+            picked(vec![layout(64), None, layout(64)], 4),
+            [true, false, true]
+        );
+        // One 75-Action proof among 2-Action ones: only the large proof.
+        let mut mixed = vec![layout(2 * 64); 15];
+        mixed.insert(7, layout(75 * 64));
+        let expected: Vec<bool> = (0..16).map(|i| i == 7).collect();
+        assert_eq!(picked(mixed, 8), expected);
+        // A large proof with under 1.5 workers' shares stays in its task:
+        // 75 / (75 + 63 * 2) of the bytes is 1.49 shares at 4 workers.
+        let mut near_share = vec![layout(2 * 64); 63];
+        near_share.insert(30, layout(75 * 64));
+        assert_eq!(picked(near_share.clone(), 4), [false; 64]);
+        assert!(picked(near_share, 8)[30]);
+        // Equal proofs beyond the worker count: none.
+        assert_eq!(picked(vec![layout(128); 16], 8), [false; 16]);
+        // A proof without a recorded layout is never picked.
+        let mut unrecorded = vec![layout(64); 9];
+        unrecorded.push(None);
+        assert!(!picked(unrecorded, 2).iter().any(|&p| p));
+    }
 
     #[test]
     fn point_run_prefetch_skips_missing_and_partial_encodings() {
